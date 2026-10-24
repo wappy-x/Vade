@@ -1,0 +1,283 @@
+{
+  "schema": "vade.historical-import-manifest.v1",
+  "scope": "Historical source import provenance",
+  "source_anchor_note": "Source SHA256 values identify private original artifacts; destination hashes describe historical imported bytes, not current edited files.",
+  "files": [
+    {
+      "destination": null,
+      "destination_bytes": 33560,
+      "destination_sha256": "69fe1dc0f32bc61454f71b16a555bcc9fa7355234eb2273f2a1f4dd47144c7ca",
+      "rationale": "First-party reusable host tool/specification; tiny existing tests retained for meaningful mechanics and signed-zero identity. Spec commands adapted to monorepo; historical policy explicitly scoped.",
+      "source_locator": "sha256:69fe1dc0f32bc61454f71b16a555bcc9fa7355234eb2273f2a1f4dd47144c7ca",
+      "source_bytes": 33560,
+      "source_sha256": "69fe1dc0f32bc61454f71b16a555bcc9fa7355234eb2273f2a1f4dd47144c7ca",
+      "retired_artifact": "historical long-context evaluator",
+      "replacement": "vade test longctx",
+      "status": "retired from product repository; original and parity evidence retained privately",
+      "destination_hash_scope": "historical imported destination bytes; no current destination"
+    },
+    {
+      "destination": null,
+      "destination_bytes": 19879,
+      "destination_sha256": "2e815dfd30da24e583146f85ca5f150fe1392168c4bcf3dbea6f520473239704",
+      "rationale": "First-party reusable host tool/specification; tiny existing tests retained for meaningful mechanics and signed-zero identity. Spec commands adapted to monorepo; historical policy explicitly scoped.",
+      "source_locator": "sha256:2e815dfd30da24e583146f85ca5f150fe1392168c4bcf3dbea6f520473239704",
+      "source_bytes": 19879,
+      "source_sha256": "2e815dfd30da24e583146f85ca5f150fe1392168c4bcf3dbea6f520473239704",
+      "retired_artifact": "historical recurrent-state comparator",
+      "replacement": "vade test gdn-state",
+      "status": "retired from product repository; original and parity evidence retained privately",
+      "destination_hash_scope": "historical imported destination bytes; no current destination"
+    },
+    {
+      "destination": null,
+      "destination_bytes": 2036,
+      "destination_sha256": "2120f2c4aa52579bbb0bba8c6bb5767e4e30c71879a80bcb1beb1710068295ec",
+      "rationale": "First-party reusable host tool/specification; tiny existing tests retained for meaningful mechanics and signed-zero identity. Spec commands adapted to monorepo; historical policy explicitly scoped.",
+      "source_locator": "sha256:2120f2c4aa52579bbb0bba8c6bb5767e4e30c71879a80bcb1beb1710068295ec",
+      "source_bytes": 2036,
+      "source_sha256": "2120f2c4aa52579bbb0bba8c6bb5767e4e30c71879a80bcb1beb1710068295ec",
+      "retired_artifact": "historical long-context host tests",
+      "replacement": "cargo test --offline --manifest-path cli/Cargo.toml",
+      "status": "retired from product repository; original and parity evidence retained privately",
+      "destination_hash_scope": "historical imported destination bytes; no current destination"
+    },
+    {
+      "destination": null,
+      "destination_bytes": 447,
+      "destination_sha256": "b64616e3d375aaba43a97ff970f84a55c440b0881a59097627480795feae2a19",
+      "rationale": "First-party reusable host tool/specification; tiny existing tests retained for meaningful mechanics and signed-zero identity. Spec commands adapted to monorepo; historical policy explicitly scoped.",
+      "source_locator": "sha256:b64616e3d375aaba43a97ff970f84a55c440b0881a59097627480795feae2a19",
+      "source_bytes": 447,
+      "source_sha256": "b64616e3d375aaba43a97ff970f84a55c440b0881a59097627480795feae2a19",
+      "retired_artifact": "historical recurrent-state host tests",
+      "replacement": "cargo test --offline --manifest-path cli/Cargo.toml",
+      "status": "retired from product repository; original and parity evidence retained privately",
+      "destination_hash_scope": "historical imported destination bytes; no current destination"
+    },
+    {
+      "destination": "ops/scripts/tools/longctx_eval.md",
+      "destination_bytes": 14600,
+      "destination_sha256": "9d38298d32434f16a1a07620a09f665ac827ecf16c6fd9c02092d909370fe6bb",
+      "rationale": "First-party reusable host tool/specification; tiny existing tests retained for meaningful mechanics and signed-zero identity. Spec commands adapted to monorepo; historical policy explicitly scoped.",
+      "source_locator": "sha256:94c10ffb7077cbf90d7a9c8e19f4af7d88179fb3c78b8402db3bc93c4e23dbb1",
+      "source_bytes": 14322,
+      "source_sha256": "94c10ffb7077cbf90d7a9c8e19f4af7d88179fb3c78b8402db3bc93c4e23dbb1"
+    },
+    {
+      "destination": null,
+      "destination_bytes": 337,
+      "destination_sha256": "44a3f81f936e825d7b3ac3afe1d27ab8efd96aa06dee2687c839f8cb9c9fc5d5",
+      "rationale": "Historical dispatch wrapper to the canonical timing client, preventing duplicate implementation drift.",
+      "source_anchor": "generated during historical import",
+      "source_locator": null,
+      "source_bytes": 0,
+      "source_sha256": null,
+      "retired_artifact": "historical timing dispatch wrapper",
+      "replacement": "vade bench",
+      "status": "retired from product repository; original and parity evidence retained privately",
+      "destination_hash_scope": "historical imported destination bytes; no current destination"
+    },
+    {
+      "destination": "ops/scripts/tools/README.md",
+      "destination_bytes": 2550,
+      "destination_sha256": "eac4c11a901683d1af12275e0abf80165477d078ab1b190c3ebad1828d4b94b5",
+      "rationale": "Generated index, privacy and operational instructions for imported tools.",
+      "source_anchor": "generated during historical import",
+      "source_locator": null,
+      "source_bytes": 0,
+      "source_sha256": null
+    },
+    {
+      "destination": null,
+      "destination_bytes": 218,
+      "destination_sha256": "d39044e2a1ef49bff47e4bdc03ef3e15e02b7bd4b168011f16f594ee788d14d3",
+      "rationale": "Generated shared-config dispatch wrapper; original engine gate unchanged. No GPU invocation.",
+      "source_locator": "sha256:dd577bea5720db9277be650ddbd82558e9375ba61bb136ddd2d42eda40f3a34a",
+      "source_bytes": 4311,
+      "source_sha256": "dd577bea5720db9277be650ddbd82558e9375ba61bb136ddd2d42eda40f3a34a",
+      "source_commit": "38c7b47",
+      "retired_artifact": "historical build gate wrapper",
+      "replacement": "vade test build",
+      "status": "retired from product repository; original and parity evidence retained privately",
+      "destination_hash_scope": "historical imported destination bytes; no current destination"
+    },
+    {
+      "destination": null,
+      "destination_bytes": 224,
+      "destination_sha256": "bea76175b183703c3c75680b49628cfa7aa1dddf9134603d30b232ddee35dbcb",
+      "rationale": "Generated shared-config dispatch wrapper; original engine gate unchanged. No GPU invocation.",
+      "source_locator": "sha256:519aab9e5db6471cc83b542a952ddd6f66ca6a63570b15ef5af9708ce3b4aa45",
+      "source_bytes": 15625,
+      "source_sha256": "519aab9e5db6471cc83b542a952ddd6f66ca6a63570b15ef5af9708ce3b4aa45",
+      "source_commit": "38c7b47",
+      "retired_artifact": "historical determinism gate wrapper",
+      "replacement": "vade test determinism",
+      "status": "retired from product repository; original and parity evidence retained privately",
+      "destination_hash_scope": "historical imported destination bytes; no current destination"
+    },
+    {
+      "destination": null,
+      "destination_bytes": 1130,
+      "destination_sha256": "80d17109335d0a8375330f778a429cead26e210711cd4264a32a22da10d2106d",
+      "rationale": "Generated entry-point index; records inherited monorepo export qualification as separate scoped work.",
+      "source_anchor": "generated during historical import",
+      "source_locator": null,
+      "source_bytes": 0,
+      "source_sha256": null,
+      "retired_artifact": "historical operational gate index",
+      "replacement": "cli/docs/test.md",
+      "status": "retired from product repository; original and parity evidence retained privately",
+      "destination_hash_scope": "historical imported destination bytes; no current destination"
+    },
+    {
+      "destination": null,
+      "destination_bytes": 63240,
+      "destination_sha256": "bd5f88afc26e531ece1cd77986ccbd2878d279b783eb03868f5fda6897edd664",
+      "rationale": "Retained existing canonical implementation (baseline 38c7b47 SHA256 3596be6858b71a8b48a19678afb26435b8650ab5334ba4baf89df3bfef58b137); compared live source but retained existing portability/self-test corrections. Resolve optional shared configuration only for needed output defaults after argument validation; explicit output/environment roots and shell-free ignored defaults preserve standalone use.",
+      "source_locator": "sha256:b593e59b45d1f1669157990e37733b5fc6a8bf6867195604c021af4adbc10aa1",
+      "source_bytes": 61395,
+      "source_sha256": "b593e59b45d1f1669157990e37733b5fc6a8bf6867195604c021af4adbc10aa1",
+      "retained_canonical_source": {
+        "source_commit": "38c7b47",
+        "source_locator": "historical canonical timing client; original locator retained privately",
+        "source_bytes": 61487,
+        "source_sha256": "3596be6858b71a8b48a19678afb26435b8650ab5334ba4baf89df3bfef58b137",
+        "reason": "Keep already-landed portability and self-test corrections; change only configured ignored output defaults."
+      },
+      "retired_artifact": "historical canonical timing client",
+      "replacement": "vade bench",
+      "status": "retired from product repository; original and parity evidence retained privately",
+      "destination_hash_scope": "historical imported destination bytes; no current destination"
+    },
+    {
+      "destination": "tools/README.md",
+      "destination_bytes": 4237,
+      "destination_sha256": "9cf77f6174a4df5c3d6171d2f71ed9475f891cd90cad5d1aee50b9e10387f4d3",
+      "rationale": "Extended existing README with canonical dispatcher, config roots, output privacy and comparator/gate links.",
+      "source_anchor": "generated during historical import",
+      "source_locator": null,
+      "source_bytes": 0,
+      "source_sha256": null
+    },
+    {
+      "destination": "bench/receipts/README.md",
+      "destination_bytes": 3064,
+      "destination_sha256": "171bac054571a17429a5a6b2d8c5d153206a497b12cb836239afd8b77c392dc1",
+      "rationale": "Generated receipt policy, qualifications, baseline source mapping and evidence locator instructions.",
+      "source_anchor": "generated during historical import",
+      "source_locator": null,
+      "source_bytes": 0,
+      "source_sha256": null
+    },
+    {
+      "destination": "bench/receipts/determinism.json",
+      "destination_bytes": 3237,
+      "destination_sha256": "d7acbb999a6c1ba29f2fa128ce034b9664611a311e109d9abae3ee6abbf5e115",
+      "rationale": "Reviewed allowlist summary; raw source report/JSON hashes and sizes retained as references, raw evidence stays local. Claims and independent import verification explicitly separated.",
+      "source_locator": "sha256:b9384a842bb243ae87272082fa258d9e972903eb7a19162547a004a5a4b7cd78",
+      "source_bytes": 17137,
+      "source_sha256": "b9384a842bb243ae87272082fa258d9e972903eb7a19162547a004a5a4b7cd78"
+    },
+    {
+      "destination": null,
+      "destination_bytes": 714,
+      "destination_sha256": "b9912d344dac5e29c73f9bb8ca0099f407d063f5c1c4bb847945f3c2afea7463",
+      "rationale": "First three reviewed report lines only, plus summary pointer; no raw full report imported.",
+      "source_locator": "sha256:b9384a842bb243ae87272082fa258d9e972903eb7a19162547a004a5a4b7cd78",
+      "source_bytes": 17137,
+      "source_sha256": "b9384a842bb243ae87272082fa258d9e972903eb7a19162547a004a5a4b7cd78",
+      "status": "removed from the repository; archived privately",
+      "destination_hash_scope": "historical imported destination bytes; no current destination"
+    },
+    {
+      "destination": "bench/receipts/context-candidate.json",
+      "destination_bytes": 3103,
+      "destination_sha256": "4254b113e1c1b48cc03f33593fa3c7281b108b789e7d88bf8a37056d5a65b320",
+      "rationale": "Reviewed allowlist summary; raw source report/JSON hashes and sizes retained as references, raw evidence stays local. Claims and independent import verification explicitly separated.",
+      "source_locator": "sha256:811deff11ffc79d2b29e26a47c909253e4e474cf81e718f0a2f7e39199be5ea0",
+      "source_bytes": 19082,
+      "source_sha256": "811deff11ffc79d2b29e26a47c909253e4e474cf81e718f0a2f7e39199be5ea0"
+    },
+    {
+      "destination": null,
+      "destination_bytes": 391,
+      "destination_sha256": "697d9cc8dcc78a0dd35f7054d533b311fcd1e1a5d1ccd66d33ba012be4a73340",
+      "rationale": "First three reviewed report lines only, plus summary pointer; no raw full report imported.",
+      "source_locator": "sha256:811deff11ffc79d2b29e26a47c909253e4e474cf81e718f0a2f7e39199be5ea0",
+      "source_bytes": 19082,
+      "source_sha256": "811deff11ffc79d2b29e26a47c909253e4e474cf81e718f0a2f7e39199be5ea0",
+      "status": "removed from the repository; archived privately",
+      "destination_hash_scope": "historical imported destination bytes; no current destination"
+    },
+    {
+      "destination": "bench/receipts/exact-path-abba.json",
+      "destination_bytes": 23519,
+      "destination_sha256": "1ddfa79aed3660fd74694129c5fcc7faa7981b7df1467bef69575c535be30ee4",
+      "rationale": "Reviewed allowlist summary; raw source report/JSON hashes and sizes retained as references, raw evidence stays local. Claims and independent import verification explicitly separated.",
+      "source_locator": "sha256:be11604227aa511c6741ce6bf45fabd96acdfef15f2f4bd23abf07b2e2c7c44c",
+      "source_bytes": 27387,
+      "source_sha256": "be11604227aa511c6741ce6bf45fabd96acdfef15f2f4bd23abf07b2e2c7c44c"
+    },
+    {
+      "destination": null,
+      "destination_bytes": 593,
+      "destination_sha256": "7ba391ea9b485477e5a26e336dbd5752053dd06893e6ca03851d213e2ca425bd",
+      "rationale": "First three reviewed report lines only, plus summary pointer; no raw full report imported.",
+      "source_locator": "sha256:be11604227aa511c6741ce6bf45fabd96acdfef15f2f4bd23abf07b2e2c7c44c",
+      "source_bytes": 27387,
+      "source_sha256": "be11604227aa511c6741ce6bf45fabd96acdfef15f2f4bd23abf07b2e2c7c44c",
+      "status": "removed from the repository; archived privately",
+      "destination_hash_scope": "historical imported destination bytes; no current destination"
+    },
+    {
+      "destination": "bench/receipts/exact-path-gate.json",
+      "destination_bytes": 11153,
+      "destination_sha256": "d045947ccd6ed91e39e91729652c694b1cf70edfbaee97850d74de22802022d1",
+      "rationale": "Reviewed allowlist summary; raw source report/JSON hashes and sizes retained as references, raw evidence stays local. Claims and independent import verification explicitly separated.",
+      "source_locator": "sha256:aa76185984a948fad1dbcc2f5e8247937cca7ecf8b6b3461aed316973fa6265f",
+      "source_bytes": 21288,
+      "source_sha256": "aa76185984a948fad1dbcc2f5e8247937cca7ecf8b6b3461aed316973fa6265f"
+    },
+    {
+      "destination": null,
+      "destination_bytes": 545,
+      "destination_sha256": "0c8525ebe67594ca049a5a3ee766e996cb5ebf93c4d3883bb0a4c4f44a82b022",
+      "rationale": "First three reviewed report lines only, plus summary pointer; no raw full report imported.",
+      "source_locator": "sha256:aa76185984a948fad1dbcc2f5e8247937cca7ecf8b6b3461aed316973fa6265f",
+      "source_bytes": 21288,
+      "source_sha256": "aa76185984a948fad1dbcc2f5e8247937cca7ecf8b6b3461aed316973fa6265f",
+      "status": "removed from the repository; archived privately",
+      "destination_hash_scope": "historical imported destination bytes; no current destination"
+    },
+    {
+      "destination": "engine/tools/export/src/main.rs",
+      "destination_bytes": 15951,
+      "destination_sha256": "688371e5e8c9312b352e10e9255d18d7f5b8725b13fa940df171b6226292754b",
+      "source_commit": "38c7b47",
+      "source_locator": "sha256:e5e7d14f99bb117009d394f197575d32d80b16018e51f293fc5da9083f5bfe97",
+      "source_bytes": 14088,
+      "source_sha256": "e5e7d14f99bb117009d394f197575d32d80b16018e51f293fc5da9083f5bfe97",
+      "rationale": "Historical gate portability: Git object lookup uses source prefix; standalone engine snapshots read the same repository committed shared root compiler pin only when local pin is absent. Original path, symlink, privacy and revision checks retained."
+    }
+  ],
+  "totals": {
+    "files": 22,
+    "destination_bytes": 202353,
+    "source_bytes_before_selection": 321363
+  },
+  "excluded": [
+    "historical timing backup excluded; locator retained privately",
+    "historical timing backup excluded; locator retained privately",
+    "generated Python bytecode caches",
+    "full raw reports, request/response captures, logits, profiles and ownership/session state"
+  ],
+  "checks": {
+    "python_compile": "PASS 6 Python files",
+    "existing_host_tests": "PASS 3 tests",
+    "timing_mock_selftest": "PASS canonical stdlib self-test; temporary artifacts under worktree .local/tmp only",
+    "zsh_syntax": "PASS generated gate wrappers",
+    "endpoint_access": "local mock only; no fleet SSH or live service requests",
+    "exporter_portability": "Pinned check/build/existing boundary test, standalone/prefix/shared-pin fixtures, independent review and full current-engine preview passed; clean-commit host gate follows."
+  }
+}

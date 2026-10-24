@@ -1,0 +1,145 @@
+//! Bind a built PTX artifact to its build variant, kernel sources and launch ABI.
+use std::{env, fs, io, path::{Path, PathBuf}};
+#[path = "../../tools/export/src/sha256.rs"]
+mod sha256;
+
+const PTX_VERSION: &str = "8.8";
+#[derive(Clone, Copy)]
+pub enum Variant { Production, Fp4 }
+impl Variant {
+    pub fn features(self) -> &'static str {
+        match self { Self::Production => "tensor-cores", Self::Fp4 => "fp4,tensor-cores" }
+    }
+    fn target_cpu(self) -> &'static str {
+        match self { Self::Production => "sm_121", Self::Fp4 => "sm_121a" }
+    }
+    pub fn flags(self) -> &'static str {
+        match self {
+            Self::Production => "-C target-cpu=sm_121 -C overflow-checks=off",
+            Self::Fp4 => "-C target-cpu=sm_121a -C target-feature=+ptx88 -C overflow-checks=off",
+        }
+    }
+    pub fn target_dir(self) -> &'static str {
+        match self { Self::Production => "../../target", Self::Fp4 => "../../target/fp4" }
+    }
+    pub fn ptx_path(self, root: &Path, layer: bool) -> PathBuf {
+        let name = match (self, layer) {
+            (Self::Production, false) => "spark_rust_kernels.ptx",
+            (Self::Production, true) => "spark_layer_kernels.ptx",
+            (Self::Fp4, false) => "spark_rust_kernels_fp4.ptx",
+            (Self::Fp4, true) => "spark_layer_kernels_fp4.ptx",
+        };
+        root.join(self.target_dir()).join("nvptx64-nvidia-cuda/release").join(name)
+    }
+    pub fn build_command(self) -> &'static str {
+        match self { Self::Production => "cargo kernels", Self::Fp4 => "cargo kernels --fp4" }
+    }
+    fn identity(self) -> String {
+        format!("features={}\ntarget-cpu={}\nptx-version={PTX_VERSION}\nrustflags={}\n", self.features(), self.target_cpu(), self.flags())
+    }
+}
+pub fn host_variant() -> io::Result<Variant> {
+    println!("cargo:rerun-if-env-changed=SPARK_PTX_VARIANT");
+    match env::var("SPARK_PTX_VARIANT") {
+        Err(env::VarError::NotPresent) => Ok(Variant::Production),
+        Ok(value) if value == "production" => Ok(Variant::Production),
+        Ok(value) if value == "fp4" => Ok(Variant::Fp4),
+        _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "SPARK_PTX_VARIANT must be production or fp4")),
+    }
+}
+fn validate_variant(bytes: &[u8], variant: Variant) -> io::Result<()> {
+    let text = std::str::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    for (directive, expected) in [(".version ", PTX_VERSION), (".target ", variant.target_cpu())] {
+        let actual = text.lines().find_map(|line| line.trim().strip_prefix(directive))
+            .and_then(|value| value.split(|c: char| c.is_whitespace() || c == ',').next());
+        if actual != Some(expected) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData,
+                format!("PTX variant mismatch: expected {directive}{expected}, got {actual:?}")));
+        }
+    }
+    Ok(())
+}
+
+fn source_files(root: &Path) -> io::Result<Vec<PathBuf>> {
+    fn visit(dir: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() { visit(&path, files)?; }
+            else if path.extension().is_some_and(|e| e == "rs") { files.push(path); }
+        }
+        Ok(())
+    }
+    let mut files = vec![root.join("kernels/Cargo.toml"), root.join("kernel_params.rs"), root.join("src/fp8_abi.rs"), root.join("src/fp4_abi.rs"),
+        root.join("src/projection_params.rs"), root.join("src/gdn_params.rs"), root.join("src/next_params.rs"),
+        root.join("build-kernels/src/main.rs"), root.join("ptx_stamp.rs")];
+    visit(&root.join("kernels/src"), &mut files)?;
+    files.sort();
+    Ok(files)
+}
+fn digest(root: &Path, files: &[PathBuf], ptx: &[u8], variant: Variant) -> io::Result<String> {
+    let mut input = variant.identity().into_bytes();
+    for path in files {
+        let name = path.strip_prefix(root).unwrap().to_string_lossy();
+        let bytes = fs::read(path)?;
+        input.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        input.extend_from_slice(name.as_bytes());
+        input.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        input.extend_from_slice(&bytes);
+    }
+    input.extend_from_slice(&(ptx.len() as u64).to_le_bytes());
+    input.extend_from_slice(ptx);
+    Ok(sha256::digest(&input))
+}
+#[allow(dead_code)] // Used by `cargo kernels`; shared by the host build scripts.
+pub fn stamp(root: &Path, ptx: &Path, variant: Variant) -> io::Result<()> {
+    let bytes = fs::read(ptx)?;
+    if bytes.is_empty() { return Err(io::Error::new(io::ErrorKind::InvalidData, "empty PTX")); }
+    validate_variant(&bytes, variant)?;
+    let bytes = cap_registers(bytes)?;
+    fs::write(ptx, &bytes)?;
+    fs::write(ptx.with_extension("ptx.sha256"),
+        format!("{}sha256={}\n", variant.identity(), digest(root, &source_files(root)?, &bytes, variant)?))
+}
+/// Four-warp, 32 KiB flash-prefill tiles fit three per SM (12 warps) only at
+/// <= 168 registers; unbounded ptxas takes 170-174, which leaves two per SM.
+/// Rust has no launch-bounds attribute, so the stamp adds `.maxnreg`.
+/// flash_bf16_mma_latency: 128 threads x 128 registers = four CTAs (16 warps) per SM, so the
+/// 192-CTA persistent grid is one wave (unbounded ptxas takes 134-136 -> three per SM).
+/// fp4_prefill_tc_down (256 threads): 128 keeps two CTAs (16 warps) per SM.
+#[allow(dead_code)]
+const REGISTER_CAPS: [(&str, u32); 18] = [("flash_bf16_mma_latency", 128), ("flash_bf16_mma_latency_group", 128), ("gemm_fp8_block128", 128), ("fp8_routed_gate", 128), ("fp8_routed_up", 128),
+    ("fp8_routed_down", 128), ("fp4_prefill_tc_down", 128), ("prefill_attention_swizzled_packed_bf16", 168),
+    ("prefill_attention_swizzled_bf16", 168), ("prefill_attention_gqa4_fragments", 168), ("prefill_attention_gqa4_bf16", 168),
+    // Chunk scan: one 512-thread CTA per value head needs <= 128 registers.
+    ("flash_next_gdn_chunk_scan", 128), ("flash_next_gdn_chunk_scan_cv", 128),
+    // Tensor-core index scores (VADE_QSA_TC): 128 registers fit four 24 KB CTAs per SM.
+    ("flash_qsa_scores_tc", 128), ("flash_qsa_scores_tc_m", 128), ("flash_qsa_scores_tc_batch", 128),
+    // Warp-slot TC attention scores: 24 KB Q planes, four CTAs per SM.
+    ("flash_qsa_attention_scores_tc_w", 128),
+    // Fused TC prompt attention: three CTAs per SM at <= 168.
+    ("flash_qsa_attention_fused_tc", 168)];
+#[allow(dead_code)]
+fn cap_registers(bytes: Vec<u8>) -> io::Result<Vec<u8>> {
+    let invalid = |e: String| io::Error::new(io::ErrorKind::InvalidData, e);
+    let mut text = String::from_utf8(bytes).map_err(|_| invalid("PTX is not UTF-8".into()))?;
+    for (name, registers) in REGISTER_CAPS {
+        let entry = text.find(&format!(".entry {name}(")).ok_or_else(|| invalid(format!("missing entry {name}")))?;
+        // Performance directives go between the parameter list and the body.
+        let body = entry + text[entry..].find("\n{").ok_or_else(|| invalid(format!("no body for {name}")))?;
+        if !text[entry..body].contains(".maxnreg") { text.insert_str(body + 1, &format!(".maxnreg {registers}\n")); }
+    }
+    Ok(text.into_bytes())
+}
+pub fn verify(root: &Path, ptx: &Path, bytes: &[u8], variant: Variant) -> io::Result<()> {
+    validate_variant(bytes, variant)?;
+    let files = source_files(root)?;
+    println!("cargo:rerun-if-changed={}", root.join("kernels/src").display());
+    for file in &files { println!("cargo:rerun-if-changed={}", file.display()); }
+    let stamp = ptx.with_extension("ptx.sha256");
+    println!("cargo:rerun-if-changed={}", stamp.display());
+    let expected = format!("{}sha256={}\n", variant.identity(), digest(root, &files, bytes, variant)?);
+    if fs::read_to_string(stamp)? != expected {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "stale PTX, kernel ABI or build variant"));
+    }
+    Ok(())
+}

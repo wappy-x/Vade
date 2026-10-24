@@ -1,0 +1,30 @@
+# Public agent instructions are tracked; private session status is not.
+!/AGENTS.md
+!/CLAUDE.md
+/STATUS.md
+
+target/
+.DS_Store
+models/
+results/timed-load/
+__pycache__/
+/.local/
+
+# Nested private agent notes and status stay outside the repository.
+engine/AGENTS.md
+engine/CLAUDE.md
+engine/STATUS.md
+harness/AGENTS.md
+harness/STATUS.md
+cli/STATUS.md
+
+# Local credentials, logs, model weights and generated artifacts.
+.env
+.env.*
+*.pem
+*.key
+*.log
+*.safetensors
+*.ptx
+results/
+.vade/

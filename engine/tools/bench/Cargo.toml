@@ -1,0 +1,22 @@
+[package]
+name = "vade-bench"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/wappy-x/vade"
+rust-version = "1.99"
+autobins = false
+
+[dependencies]
+engine-model = { path = "../../crates/model" }
+engine-tokenizer = { path = "../../crates/tokenizer" }
+
+[workspace]
+
+[lints.rust]
+unsafe_code = "deny"
+
+[[bin]]
+name = "kernel-bench"
+path = "src/kernel_bench.rs"

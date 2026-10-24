@@ -1,0 +1,643 @@
+# spark-serve
+
+**Vade's chat server. The program `spark-serve` serves one model on one
+Spark through an OpenAI-compatible HTTP API, so ordinary chat apps and coding
+tools can use it.** It uses only Vade's own crates and the Rust standard
+library.
+
+This page is for people reading or changing the server code. To run it,
+follow [Install](../../docs/install.md). Every flag, request field and limit
+is in [Server and API](../../docs/server.md).
+
+## API authentication
+
+Both `spark-serve` and `flash-serve` accept `--api-key-file PATH`. The file
+contains one key, trimmed and at least 16 bytes, using visible ASCII `0x21-0x7E`;
+the entire file is limited to 4096 bytes. Prefer 32 random bytes encoded as hex. Send `Authorization: Bearer <key>` or `x-api-key: <key>`; if both
+are supplied, both must match. An existing owner Bearer key is checked separately
+in constant time and retains priority 255; it works alone or with the API key in
+`x-api-key`. API and owner cache scopes contain no credentials. Missing or incorrect credentials return HTTP 401
+with a generic OpenAI error. Only `GET /health` stays open; OPTIONS requires the key. Loopback authentication is
+optional until a key file is given; `--allow-remote` always requires the file
+and refuses startup with `--allow-remote requires --api-key-file PATH` if absent.
+Startup warns once if the file is group- or world-readable, without changing
+permissions or logging its contents. Remote HTTP still needs a trusted tunnel
+or TLS termination. The file is read once; restart to rotate the key.
+
+<details>
+<summary><b>Terms on this page</b>: prefill, decode, KV cache, prefix reuse, SSE, draft decoding, slot</summary>
+
+<dl>
+<dt>Prefill</dt>
+<dd>Reading the prompt, before the first answer token.</dd>
+<dt>Decode</dt>
+<dd>Producing the answer, one token per step.</dd>
+<dt>KV cache</dt>
+<dd>The model's memory of the tokens it has read.</dd>
+<dt>Prefix reuse</dt>
+<dd>Skipping the part of a prompt the server has already read, by reusing its KV
+cache.</dd>
+<dt>SSE</dt>
+<dd>Server-sent events: the answer streams back as a series of
+<code>data:</code> lines.</dd>
+<dt>Draft decoding</dt>
+<dd>Guessing several next tokens cheaply, then letting the model check them all
+in one pass. Also called speculative decoding.</dd>
+<dt>Slot</dt>
+<dd>One place for an active chat. Slots share one memory pool.</dd>
+</dl>
+
+</details>
+
+## What it serves today
+
+**Six official models, each at its maker's precision. Whether it drafts
+(guesses tokens ahead) depends on the model.**
+
+| Model | Weights | Drafting |
+| --- | --- | --- |
+| Qwen3-8B, Qwen3-32B | BF16 | Qwen3-0.6B |
+| Qwen3-30B-A3B | BF16 | Off |
+| Qwen3.8-27B | BF16 | Sibling or MTP |
+| Qwen3.8-27B-FP8 | Official FP8 | Sibling |
+| Gemma 4 31B | BF16, text only | Assistant |
+
+- **Qwen3-8B and Qwen3-32B** draft with the official Qwen3-0.6B draft model,
+  when it is installed.
+- **Qwen3-30B-A3B does not draft:** checking guesses on the expert model was
+  slower.
+- **Qwen3.8-27B** drafts with the official sibling draft or the built-in MTP
+  head, for one active chat. The FP8 release, official FP8 with BF16 parts,
+  drafts with the sibling for one active chat; its built-in FP8 draft does
+  not start yet.
+- **Gemma 4 31B** drafts with Google's official assistant, for one active
+  chat.
+
+[Models](../../docs/models.md) has the supported scope and download steps.
+
+## The promise this code keeps
+
+**Same answer every time, checked against the official model.**
+
+- **Same answer every time.** A prompt gives exactly the same tokens alone or
+  batched with other chats, and cached or read fresh.
+- **Checked against the official model.** Agreement is measured and not
+  perfect; [Validation](../../docs/validation.md) has every figure.
+- **Draft decoding never changes the answer** in `auto` and `strict`. The
+  experimental `fast` policy can, and is off by default.
+
+## Where it fits
+
+**The server schedules the work; the engine runs the model.**
+
+<dl>
+<dt><a href="../engine/README.md">spark-engine</a></dt>
+<dd>Runs the model. The server schedules work onto it.</dd>
+<dt><a href="../tokenizer/README.md">engine-tokenizer</a></dt>
+<dd>Turns chats into token IDs and back.</dd>
+<dt><a href="../model/README.md">engine-model</a></dt>
+<dd>Reads model folders and configs.</dd>
+<dt><a href="../gpu/README.md">spark-gpu-probe</a>,
+<a href="../seqpar/README.md">spark-seqpar</a></dt>
+<dd>Linux-only dependencies for the GPU and long-prompt helpers.</dd>
+<dt><a href="../tp/README.md">spark-tp</a></dt>
+<dd><code>tp-serve</code> builds on this crate's library, with its own
+multi-Spark engine and smaller feature set.</dd>
+</dl>
+
+## Build and start
+
+**Build the kernels, then the server, then wait for the `ready` line.**
+
+### Do it yourself
+
+1. Build the GPU kernels, then the server. The server carries its own copy
+   of the kernels.
+
+   ```sh
+   # Run from the checkout root.
+   cargo kernels
+   cargo +1.99.0 build --release -p spark-serve
+   ```
+
+2. Start it with a model folder.
+
+   ```sh
+   ./target/release/spark-serve models/Qwen/Qwen3-8B
+   ```
+
+3. Wait for the line starting with `ready`. It lists every limit the server
+   chose and the address it listens on, after `bind=`. The default is
+   loopback, port 8080.
+
+4. In another terminal, check that it answers.
+
+   ```sh
+   curl -s http://localhost:8080/health
+   ```
+
+### Ask your coding agent
+
+```text
+In the Vade checkout on this DGX Spark, run `cargo kernels`, then
+`cargo +1.99.0 build --release -p spark-serve`. Start
+`./target/release/spark-serve models/Qwen/Qwen3-8B` and wait for the line
+starting with "ready". Then run `curl -s http://localhost:8080/health` and
+report the ready line and the health reply. Never use sudo, change the
+network or listen beyond loopback. Do not commit or push.
+```
+
+## Engine contract v1
+
+OpenAI Completions accepts `prompt` as text or one array of token IDs, as well
+as the existing `prompt_token_ids`. `POST /tokenize` returns `tokens`, `count`
+and `max_model_len` for `{model,prompt,add_special_tokens:false}`. Token IDs
+pass through unchanged. `ignore_eos:true` continues to the token limit;
+`cache_salt` isolates exact cache reuse without changing model inputs.
+Streaming output limits count decoded content rather than SSE overhead, and
+normal streams end with usage and `[DONE]`.
+
+Chat, Completions, Responses and Messages clamp omitted or oversized output
+limits to the smaller of the service cap and context minus the complete
+tokenized prompt. Zero or malformed limits still fail, and prompts must leave
+room for at least one output token. Capabilities' `output_limit` and health's
+`caps.output_limit` report the ceiling for a nonempty prompt on the loaded engine.
+Admission probes retain the exact `output_tokens` reservation for their fit check.
+
+Chat and Responses preserve Qwen3.8's official effort instructions: low is
+brief, medium omits the effort preamble, and high aliases xhigh. Chat accepts
+`reasoning_effort` at the top level or in `chat_template_kwargs` (which wins).
+The terminal `vade.reasoning_effort` echoes the effective instruction level.
+`tool_choice:"none"` hides callable definitions and tool events while retaining
+thinking and earlier tool history.
+
+Both `spark-serve` and `flash-serve` expose `GET /v1/capabilities` and
+`POST /v1/admission`. They use the same Host, Origin and caller scope rules
+as generation. Existing Chat Completions and Responses requests remain valid.
+
+Capabilities advertise `contract_version: "vade.engine.v1"`, model identity,
+context/input/output limits, tool/thinking support, the default thinking mode,
+cache scope and an opaque `cache_domain`. The domain changes on each serving
+load epoch and differs between authorization scopes by default. An explicitly
+shared cache advertises `cache_scope: "shared"`; anonymous callers share their
+own namespace. A domain is an identifier, never a credential or proof of a hit.
+
+Identity includes SHA-256 fingerprints of checkpoint metadata, tokenizer and
+template/renderer. The weights fingerprint has
+`fingerprint_kind:"safetensors_header_metadata"`: it covers config, optional index,
+and sorted shard names, file sizes and hashes of each 8-byte header length plus
+JSON header. It is a metadata fingerprint, not a weight content digest;
+same-size payload changes are not detected. `artifact_bytes` counts files, not
+resident GPU memory. The tokenizer fingerprint hashes `tokenizer.json`;
+the template fingerprint covers canonical tokenizer config with the effective
+template text and authored rendering/translation sources. Trailing CR/LF is
+normalized as in Flash's template equality check; an optional duplicate template
+file does not change identity. Startup and swaps read only headers and metadata,
+using 65,536 bytes of hash scratch; no weight payload is read or retained for
+identity. Peer payload agreement still requires model-manifest verification.
+Checkpoint files must remain immutable while loaded. Engines embedded without
+checkpoint identity report `identity`, `tools` and `thinking` as null (unknown).
+
+Admission takes the complete candidate request, preserving schema key order:
+
+```json
+{"contract_version":"vade.engine.v1","endpoint":"/v1/chat/completions","request":{"messages":[{"role":"user","content":"Hello"}],"tools":[]},"output_tokens":128}
+```
+
+`endpoint` also accepts `/v1/responses` and `/v1/completions`. `output_tokens`
+overrides the candidate's output limit for this check; use that reservation when
+sending it for generation. The reply gives exact rendered `prompt_tokens`,
+`context_limit`, `input_limit`, `output_limit`, `admitted` and a nullable `reason`.
+It uses generation's rendering, tools, thinking and token validation, including
+hidden template framing. Cached input still occupies the full context. A valid
+but oversized request returns HTTP 200 with `admitted:false`; malformed requests
+return HTTP 400. `admission_kind:"context_fit"` and `reserves_resources:false`
+mean this does not reserve a slot or guarantee immediate memory admission. No
+model session is created. Admission uses the same connection cap as generation;
+an overloaded server returns HTTP 503. Unsupported contract versions are rejected.
+
+Every terminal usage object includes `prompt_tokens_details.cached_tokens`;
+Responses also retains its standard `input_tokens_details.cached_tokens`.
+Streaming and nonstreaming share the same accounting. Counts describe actual
+reused prompt work, excluding recurrent checkpoint tails replayed for exactness.
+The older opt-in `X-Prefix-Reused-Tokens` header describes the matched snapshot
+at admission and can be larger than final usage when a backend replays a tail.
+
+Every admitted request also echoes always-on engine prefill timing and counters
+in the top-level `vade` sampling object: `prefill_ms`, `prefill_prompt_tokens`,
+`prefill_chunks`, `prefill_rows_per_chunk`, `prefill_cache_restored_tokens`,
+`prefill_cache_reuse_pct` (restored / prompt tokens in percent, one decimal: the one
+field a client prints as "cache reuse"), `prefill_cache_restore_ms` (wall ms from
+cache lookup to the restored session; null without a hit) and
+`admission_to_first_logits_ms`. Terminal server logs carry the same object.
+Chunk timing spans successful commit, including layer yields; admission timing
+also includes restore/allocation and waits before first predictions. No device
+synchronization is added. See `docs/server.md` for batch, cache-hit and partial
+request semantics. Client TTFT remains a separate measurement.
+
+Set `include_usage_timing:true` to add `usage.vade` with `prefill_ms`, `decode_ms`
+and `timing:"admitted_wall"`. Timing starts at cache selection/session admission,
+splits when prompt logits are ready, and ends at terminal generation. It includes
+scheduler waits and streaming backpressure, excludes request parsing, tokenization
+and queue time, and is not GPU kernel time. A request ending before admission
+reports zero times and zero processed tokens.
+
+`prompt_cache_key` uses a nonempty string of at most 256 UTF-8 bytes on both
+APIs; empty, oversized and non-string values are ignored without rejecting the
+request. It favors eligible backfill work alongside the same caller's active
+key. Priority and an eligible queue head take precedence; among other candidates
+affinity precedes age, within the existing slot/byte bounds.
+Changing the key does not prevent an exact token-prefix hit; keeping it does not
+create one. `cache:false` disables reuse and this hint.
+
+### Scoped KV checkpoints
+
+Dense Qwen and hybrid `spark-serve` advertise `kv_branch_handles:true` when the
+retention budget is nonzero. Other cartridges, including Flash-Next, advertise
+false. `kv_checkpoints` in capabilities gives the authorization-specific cache
+domain, count/byte quotas, TTL in milliseconds and release endpoint. Handles
+remain authorization-scoped even if ordinary prefix caching is explicitly shared.
+Anonymous callers belong to one anonymous scope.
+
+Add `kv_checkpoint:true` to a complete Chat, Responses or Completions request to
+retain its canonical **prompt** boundary, including the prompt's next-token logits.
+Terminal JSON/SSE usage includes `usage.vade.kv` independently of timing opt-in:
+
+```json
+{"cache_domain":"DOMAIN","reuse":"not_requested","reused_tokens":0,"retention":"retained","checkpoint":{"handle":"HANDLE","prompt_tokens":4096,"reusable_prefix_tokens":4096,"expires_at_ms":1790000000000,"retained_bytes":123456789,"scope_retained_bytes":123456789}}
+```
+
+The example numbers are illustrative. `handle` is an OS-random 256-bit lowercase
+hex capability. Keep it private. The domain binds it to this loaded model,
+tokenizer/template, position/KV semantics and authorization scope; restart or
+model replacement invalidates it. No weights or raw KV leave the engine.
+
+A branch sends `kv_handle:"HANDLE"` **and the complete prompt**. The same rendering,
+token validation and context/memory admission still apply. Every saved prompt
+token must match the beginning of the new rendered prompt. An exact repeat reuses
+the saved logits; an append forks independent writable state. Full immutable
+attention pages are reference counted; incomplete pages and hybrid recurrence
+are private. Hybrid appends replay their incomplete canonical tile, so
+`reusable_prefix_tokens` excludes that tail, while `prompt_tokens` names the
+complete saved boundary. Exact repeats can reuse all `prompt_tokens`.
+
+`reuse` reports `hit`, `replayed` (matched, but all inherited rows were replayed),
+`prompt_mismatch`, `invalid_handle`, `unavailable`, `unsupported`, `cache_disabled`,
+`not_attempted` (cancelled before admission), or `not_requested`. Unknown, expired,
+evicted and foreign handles all return the same `unavailable` result. Misses use
+ordinary prefix matching and prefill. `reused_tokens` counts work actually reused
+through the named handle; normal cached-token usage can additionally report a
+fallback prefix hit. Neither affinity nor a handle bypasses token comparison.
+
+`retention` is `retained`, `capacity`, `unavailable`, `randomness_unavailable`,
+`unsupported`, `cache_disabled`, `prompt_incomplete`, or `not_requested`.
+Checkpoint issuance failure does not fail generation. A request can both use a
+handle and request a new checkpoint. Generated tails are never published by this
+API. `cache:true` is unnecessary for explicit checkpoints; `cache:false` disables
+both their use and issuance. The legacy `session` capability remains separate.
+
+Each scope may retain at most 16 handles (or the configured cache entry limit,
+if smaller) and half the configured retained-byte budget. The existing global
+cache/pool limits also apply. `retained_bytes` is a standalone accounted bound
+for one checkpoint, including tokens/logits, private state/scratch and referenced
+pages. Do not sum it across handles: `scope_retained_bytes` is the scope's total
+at issuance, counting shared allocations once. Active forks fund common pages
+once as well. Byte/count pressure evicts least-recently-used references; reads
+refresh LRU order but do not extend the fixed expiry. Expiry is an upper bound on
+retention: pressure can evict earlier, even during a long response.
+
+`POST /v1/kv/release` with `{"kv_handle":"HANDLE"}` drops that scope's reference.
+It returns `{"released":true}` idempotently, including for unknown/foreign handles.
+Existing children and other handles keep their own references. Cancelling a child
+does not release its parent. Persist the transcript for fallback, not raw KV.
+
+## Checks
+
+**Unit tests need no GPU. Live checks run against a started server:
+branching, prefix reuse and drafting must match fresh runs, and cancellation
+must work.**
+
+### Do it yourself
+
+1. Run the unit tests. They use real local sockets with stand-in engines
+   (the shipped program always runs the real GPU engine), so they check the
+   HTTP and scheduling code, not GPU speed. On the Spark, build the kernels
+   first.
+
+   ```sh
+   cargo +1.99.0 test --workspace --exclude spark-rust-kernels --offline
+   ```
+
+2. Start `spark-serve`. Set `BIND` to the address shown after `bind=` on its
+   `ready` line.
+
+3. Run the live checks. Each comment says what the command proves.
+
+   ```sh
+   # Branching matches fresh runs, a main chat stays fast during
+   # background prefill, and cancellation works.
+   ./target/release/serve-http-check "$BIND" 512
+
+   # The same, with draft decoding.
+   VADE_CHECK_DRAFT=strict ./target/release/serve-http-check "$BIND" 512
+
+   # Automatic prefix reuse gives the same tokens as "cache": false.
+   # Start the server with --report-prefix-reuse for this one.
+   VADE_CHECK_AUTOMATIC=1 ./target/release/serve-http-check "$BIND" 32 \
+     fixtures/qwen3/short.json
+
+   # plain, strict and fast stream the same text.
+   ./target/release/serve-draft-check "$BIND" PROMPT_DIR
+   ```
+
+`serve-draft-check` reads `code.ids`, `json.ids`, `quotes.ids` and
+`prose.ids` from `PROMPT_DIR`. Each holds token IDs separated by spaces or
+line breaks. The `tokenize` example in the
+[tokenizer README](../tokenizer/README.md#test-it) prints the IDs for any
+text; copy them into each file without the brackets and commas.
+
+**Reference check, with the server stopped.**
+`qwen-reference-check PTX MODEL FIXTURE.json...` compares chat tokenization
+and logits with the [Hugging Face reference fixtures](../../fixtures/qwen3/README.md).
+It needs the GPU to itself, so
+[stop the server](../../docs/server.md#stopping) first.
+
+To test a kernel file without rebuilding the server, pass it before the model
+folder: `spark-serve KERNELS.ptx MODEL_FOLDER`.
+
+### Ask your coding agent
+
+```text
+In the Vade checkout on this DGX Spark, with spark-serve already running on
+loopback, read the address after bind= on its ready line and use it as BIND.
+Run `./target/release/serve-http-check "$BIND" 512`, then the same with
+`VADE_CHECK_DRAFT=strict`, as listed in crates/serve/README.md. Report each
+command's final lines and any failure. Do not restart services, change
+settings, commit or push.
+```
+
+## How the code works
+
+**One GPU thread does all model work. Each turn, many chats get their next
+token in one pass.**
+
+- **Sharing the GPU.** Long prompts are read in slices between turns, so
+  other chats keep streaming.
+- **Reusing earlier work.** On by default: a prompt's already-read beginning
+  is skipped. Matches are checked token by token, never by hash alone.
+- **Draft decoding.** The model checks every guess and keeps only the ones it
+  agrees with, so in `auto` and `strict` the answer equals `plain`.
+- **Memory.** Planned once, at start. Each request reserves its prompt plus
+  `max_tokens`, or waits. [BUDGETS.md](BUDGETS.md) explains admission.
+
+<details>
+<summary><b>Sharing the GPU</b>: priority, batching, fairness and row budgets</summary>
+
+All model work runs on one GPU thread. Sockets never block it.
+
+1. **Priority.** Higher runs first. Ordinary clients are capped at 0 by
+   default; `--client-priority-cap` can raise their cap to 254. An owner key
+   grants priority 255. With that key and at least three active slots, one
+   slot and memory for a short request are kept for the owner.
+2. **Batching.** Each turn, the next token for many chats is computed in one
+   pass. Their output is sent before any long prompt continues.
+3. **Fairness.** The most urgent chat decodes every turn. Others decode every
+   one to four turns, depending on how long their conversation is.
+4. **Long prompts in slices.** A long prompt is read in short slices between
+   turns, so other chats keep streaming. While other work waits, a
+   high-priority prompt uses slices of about 15 ms and a background prompt
+   about 100 ms.
+5. **Short prompts together.** For Qwen3, prompts of up to 256 new tokens
+   that arrive within 2 ms are read in one shared pass: up to 2,048 rows, or
+   256 while a foreground chat decodes. Cached suffixes use the same window.
+   A long prompt's short tail can join once its current chunk commits.
+6. **Shared beginnings.** Requests waiting for the same prefix let its owner
+   finish wide chunks without pausing between layers, until unrelated work
+   needs a turn.
+
+Row budgets per step:
+
+| Setting | Default | Range |
+| --- | ---: | --- |
+| `--foreground-rows` | 8 | 1 to 512 |
+| `--background-rows` | 32, 48 or 64 | 1 to 512 |
+
+- `--background-rows` defaults to 48 for Qwen3-8B with a draft model and 64
+  for Qwen3-32B with a draft model; otherwise 32, including expert targets.
+- Automatic background rows are capped by active slots times `K+1`, where
+  `K` is the number of guesses per step.
+
+`--owner-key-file` reads a file with permissions 0600 containing 64 lowercase
+hex digits. Requests sending that key as `Authorization: Bearer KEY` get owner
+priority. It adds no login checks for ordinary clients.
+
+</details>
+
+<details>
+<summary><b>Reusing earlier work</b>, and shared memory</summary>
+
+The flags, request fields and per-key scope are in
+[Server and API](../../docs/server.md#prompt-caching).
+
+- Requests that share a beginning while it is still being read wait for it,
+  then share it.
+- Tokens the model generated are read again on the next turn. Their cached
+  form can differ slightly from a fresh read, so the server does not reuse
+  it.
+- The cache holds at most 128 entries. Entries expire after five idle
+  minutes, or sooner when memory runs short. A model swap clears them all.
+
+Shared memory:
+
+- Shared decode reads the original prefix and allocates only private tails.
+- Chats sharing a KV head read its tiles together, while keeping each chat's
+  attention sums in the same order as ordinary decode.
+- Short BF16 suffixes can share one attention pass.
+- Ordinary session calls restore contiguous cache views when needed.
+- Expert suffixes use the same softmax arithmetic as their cold BF16 prefill,
+  including when the original prefix is read directly instead of swizzled.
+
+The bounded KV reserve also keeps wholly private mapped ranges, which avoids
+tearing down page tables between turns.
+
+- A new session starts at length zero and overwrites its prompt.
+- Cached-prefix reuse still requires the same API key.
+- Memory pressure, 30 idle seconds, model swaps and shutdown release the
+  reserve.
+
+Completed sessions delay their teardown, to leave room for a client that
+continues right away.
+
+- Their CUDA teardown yields to pending first tokens.
+- Their resident KV and scratch stay charged to admission.
+- Shared pages are counted once.
+- Admission blocked on memory, swaps and shutdown reclaim completed sessions
+  before going ahead.
+
+</details>
+
+<details>
+<summary><b>Draft decoding</b>: how guesses are picked, and when it does not draft</summary>
+
+The policies (`auto`, `strict`, `plain`, `fast`), the draft model and
+`--draft-global-bank` are described in
+[Server and API](../../docs/server.md#speculative-decoding).
+
+- Qwen3 `auto` uses adaptive strict verification at every chat count. Target
+  and draft costs, and each request's acceptance, choose how many guesses to
+  make. When guessing costs more than plain decode, it uses one canonical row
+  and occasionally probes another guess.
+- Requests sharing at least 1,024 prompt tokens in the same cache scope use
+  plain decode until they finish. Explicit modes override that choice.
+- `--draft-k` accepts 1 to 8. Dense targets default to 2 guesses, or 3 when a
+  pass reads at least 32 GiB of weights, which includes Qwen3-32B. Explicit
+  values survive model swaps; automatic defaults are recalculated for the new
+  model.
+- The draft model is picked once, at start, in `select_draft_model` in
+  `src/bin/spark-serve.rs`. Its tokenizer files must match byte for byte.
+- Expert models always decode plainly. Their sessions return no draft target
+  (`draft_target` in `src/qwen.rs`), so `--draft strict` and `--draft-model`
+  do not change that.
+
+Single-row decode, shared decode and verification share four fixed ranges of
+16-column BF16 multiply tiles. Their FP32 sums merge as
+`(range0 + range1) + (range2 + range3)`, whatever the batch width.
+
+</details>
+
+<details>
+<summary><b>Memory</b>: the prefix cache, context limits and the per-token formula</summary>
+
+[Server and API](../../docs/server.md#how-it-sizes-itself) walks through the plan.
+
+- The Qwen3 prefix cache borrows idle capacity and evicts least recently used
+  entries under pressure.
+- A larger memory budget does not raise the model's native context limit.
+
+For Qwen3, the KV cache size per token in BF16 is:
+
+```text
+bytes per token = layers × KV heads × head dimension × 2 (keys and values)
+                  × 2 bytes
+```
+
+[Server and API](../../docs/server.md#how-it-sizes-itself) has the result for each
+model. This formula covers Qwen3 only. Hybrid Qwen3.8 also holds FP32
+recurrent state, and Gemma holds local and global KV caches.
+
+</details>
+
+<details>
+<summary><b>What is in the crate</b>: files, endpoints and request details</summary>
+
+<dl>
+<dt><code>src/bin/spark-serve.rs</code></dt>
+<dd>Reads the flags, sizes memory, loads the model and starts serving.</dd>
+<dt><code>src/bin/spark-serve/</code></dt>
+<dd>Model-folder detection (<code>cartridges.rs</code>), Gemma start-up
+(<code>gemma4.rs</code>) and process lifetime (<code>lifecycle.rs</code>).</dd>
+<dt><code>src/http.rs</code></dt>
+<dd>Reads and writes HTTP/1.1.</dd>
+<dt><code>src/protocol.rs</code></dt>
+<dd>Parses requests and writes JSON and SSE replies.</dd>
+<dt><code>src/scheduler.rs</code></dt>
+<dd>Runs every chat on one GPU thread, in turns, by priority.</dd>
+<dt><code>src/cache.rs</code></dt>
+<dd>Reuses the KV cache of prompts it has already read.</dd>
+<dt><code>src/budget.rs</code></dt>
+<dd>Decides how much memory each request may reserve.</dd>
+<dt><code>src/generation.rs</code></dt>
+<dd>Steps one request forward and samples its next token.</dd>
+<dt><code>src/chat_output.rs</code></dt>
+<dd>Splits model output into answer text, thinking and tool calls.</dd>
+<dt><code>src/tokenizer.rs</code></dt>
+<dd>Connects to the tokenizer and the chat template.</dd>
+<dt><code>src/qwen.rs</code></dt>
+<dd>Connects the scheduler to the Qwen3 engine.</dd>
+<dt><code>src/hybrid.rs</code></dt>
+<dd>Connects the scheduler to Qwen3.8-27B.</dd>
+<dt><code>src/gemma4.rs</code></dt>
+<dd>Connects the scheduler to Gemma 4.</dd>
+</dl>
+
+Request fields, defaults, errors and limits are in
+[Server and API](../../docs/server.md#use-it-from-an-app).
+
+<dl>
+<dt><code>POST /v1/chat/completions</code></dt>
+<dd>Chat</dd>
+<dt><code>POST /v1/completions</code></dt>
+<dd>Plain completion from <code>prompt</code> or
+<code>prompt_token_ids</code>.</dd>
+<dt><code>GET /v1/models</code>, <code>GET /health</code></dt>
+<dd>Model name, state and memory in use.</dd>
+<dt><code>POST /v1/cancel</code></dt>
+<dd>Cancel a request.</dd>
+<dt><code>POST /v1/admin/swap</code></dt>
+<dd>Load another model, on the admin socket only.</dd>
+</dl>
+
+- `POST /v1/admin/swap` goes through the private socket enabled by
+  `--admin-socket`. It is disabled by default and never on the HTTP port.
+- Time spent in the queue does not use up a request's generation budget.
+- Only complete, valid tool calls become tool events. Malformed or
+  incomplete ones come back as ordinary content with HTTP 200.
+
+</details>
+
+## Safety and known limits
+
+**No login and no TLS. It listens on loopback unless told otherwise.**
+
+- It listens on loopback by default. Any other address needs
+  `--allow-remote`.
+- **There is no login and no TLS.** To share the server, put a
+  login-checking proxy in front of it.
+- The server never runs a tool. Tool calls are returned to the client.
+- **Swapping the model is unfinished.** Restarting the server is the reliable
+  way to change models today.
+- **The long-prompt helper flags (`--seqpar-*`) have no effect today.** To
+  spread one model over several Sparks, use `tp-serve` from
+  [spark-tp](../tp/README.md).
+
+<details>
+<summary><b>The admin socket, secrets and GPU faults</b></summary>
+
+[Server and API](../../docs/server.md#limits-on-every-request) lists the HTTP rules
+and limits.
+
+- Model administration uses a separate private Unix socket, disabled unless
+  `--admin-socket` is set. The HTTP port rejects that endpoint.
+- Cancellation and session secrets work like passwords. Keep them private.
+- Invalid numerical rows fail only their own request. A sticky GPU fault
+  makes `/health` report `poisoned` with HTTP 503 briefly, then the process
+  exits with an error.
+
+</details>
+
+<details>
+<summary><b>How the swap works</b>, and why the helpers are unused</summary>
+
+`POST /v1/admin/swap` on the private admin socket loads another Qwen3 model
+from under `--models-root` without restarting.
+[Server and API](../../docs/server.md#the-swap-endpoint-unfinished) has the command
+and the known failures. In the code:
+
+1. The new model's files are checked before the old model is touched.
+2. New requests stop, and active ones get one second to finish.
+3. The old model is freed completely, then the new one loads.
+4. If loading fails, the old model reloads. If that fails too, the server
+   stays up without a model and accepts another swap.
+
+Gemma and hybrid models need a fresh launch. The Qwen3 swap keeps the memory
+plan from start-up, so a larger model can fail to fit.
+
+The flags `--seqpar-peer`, `--seqpar-listen` and `--seqpar-threshold` connect
+helper processes from [spark-seqpar](../seqpar/README.md) that read part of a
+long prompt. The helpers need an FP32 KV cache, and the server keeps a BF16
+one, so every prompt is read locally.
+
+</details>
+
+**Where next:** [Server and API](../../docs/server.md) · [spark-engine](../engine/README.md) ·
+[Budgets](BUDGETS.md)

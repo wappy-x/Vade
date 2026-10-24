@@ -1,0 +1,759 @@
+//! Source synchronization, immutable builds, activation and updates.
+use super::*;
+impl<R: Runner> App<R> {
+    fn source_revision(&mut self, path: &Path, label: &str) -> Result<String, String> {
+        let folder = path.to_string_lossy().into_owned();
+        let status=self.checked(Exec::new(&format!("{label} clean source"),"git",vec!["-C".into(),folder.clone(),"status".into(),"--porcelain".into(),"--untracked-files=normal".into()]),
+            &format!("Cannot inspect {label} source. Set its local source path to a Git checkout in config."))?;
+        if !self.dry && !status.stdout.trim().is_empty() {
+            return Err(format!(
+                "{label} source has local changes. Commit or preserve them before install/update; nothing was overwritten."
+            ));
+        }
+        let output = self.checked(
+            Exec::new(
+                &format!("{label} revision"),
+                "git",
+                vec!["-C".into(), folder, "rev-parse".into(), "HEAD".into()],
+            ),
+            &format!("Cannot read {label} revision. Check its source path in config."),
+        )?;
+        if self.dry {
+            return Ok("0".repeat(40));
+        }
+        let revision = output.stdout.trim();
+        if !text::hex(revision, 40) {
+            return Err(format!(
+                "{label} source revision is invalid. Use a Git checkout with a full revision."
+            ));
+        }
+        Ok(revision.into())
+    }
+
+    fn sync_source(
+        &mut self,
+        source: &Path,
+        machine: &Machine,
+        destination: &str,
+        label: &str,
+    ) -> Result<(), String> {
+        self.checked(
+            runner::ssh(
+                &machine.ssh,
+                format!("{REMOTE_STORAGE_GUARD}\nvade_private_dir {} new\n", remote_path(destination)),
+                &format!("{} source directory", machine.name),
+            ),
+            "Cannot create a fresh private machine source directory. Check its ownership, permissions, and symlink-free ancestors.",
+        )?;
+        // No deletion: source checkouts and immutable staged builds are never removed.
+        let ssh = std::iter::once("ssh".into())
+            .chain(runner::ssh_options())
+            .map(|s| quote(&s))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let tracked = self.checked(
+            Exec::new(
+                &format!("{label} tracked files"),
+                "git",
+                vec![
+                    "-C".into(),
+                    source.to_string_lossy().into_owned(),
+                    "ls-files".into(),
+                    "-z".into(),
+                    "--cached".into(),
+                ],
+            ),
+            "Cannot list tracked source files. Check the configured Git checkout.",
+        )?;
+        let mut exec = Exec::new(
+            &format!("{} {label} source copy", machine.name),
+            "rsync",
+            vec![
+                "-a".into(),
+                // Archive mode otherwise reapplies shared source permissions.
+                "--chmod=go-rwx".into(),
+                "--from0".into(),
+                "--files-from=-".into(),
+                "--exclude=target".into(),
+                "--exclude=.git".into(),
+                "--exclude=*.local".into(),
+                // Enter exactly the directory prepared above. Neither old
+                // rsync nor protected-argument rsync has to expand a tilde.
+                // Implied parent directories use the receiver's umask.
+                format!("--rsync-path=umask 077 && cd {} && exec rsync", remote_path(destination)),
+                "-e".into(),
+                ssh,
+                format!("{}/", source.display()),
+                format!("{}:./", machine.ssh),
+            ],
+        );
+        exec.stdin = tracked.stdout.into_bytes();
+        exec.timeout = Duration::from_secs(600);
+        self.checked(exec,"Source copy did not finish. Check SSH, disk space, and the local source path; run vade install again.")?;
+        Ok(())
+    }
+
+    pub(super) fn install(&mut self) -> Result<(), String> {
+        self.config.validate_model_revision()?;
+        self.config.validate_control_socket()?;
+        rdma_enabled()?;
+        if !self.dry {
+            text::private_dir(&self.config.stage_root)?;
+            text::private_dir(
+                self.config
+                    .activation
+                    .parent()
+                    .ok_or("Activation record needs a directory.")?,
+            )?;
+        }
+        let existing = Session::load(&self.config.state_dir)?;
+        let has_running_record = existing.is_some();
+        let install_id = if self.dry {
+            "preview".into()
+        } else {
+            text::random_hex(12)?
+        };
+        let engine_source = self.config.engine_source.clone();
+        let harness_source = self.config.harness_source.clone();
+        let cli_source = self.config.cli_source.clone();
+        let engine_sha = self.source_revision(&engine_source, "engine")?;
+        let harness_sha = self.source_revision(&harness_source, "harness")?;
+        let cli_sha = self.source_revision(&cli_source, "CLI")?;
+        let selected = crate::prebuilt::Bundle::find(self.config.prebuilt_dir.as_deref(), &engine_sha, &cli_sha)
+            .and_then(|bundle| {
+                let host = bundle.as_ref().map(|bundle| bundle.host(&harness_sha)).transpose()?.flatten();
+                Ok((bundle, host))
+            });
+        let (bundle, host_bundle) = match selected {
+            Ok(bundle) => bundle,
+            Err(error) => {
+                crate::output::line(format_args!("Prebuilt bundle rejected: {}; building from source.", text::terminal_text(&error)))?;
+                (None, None)
+            }
+        };
+        self.local_checks_for_build(host_bundle.is_none())?;
+        let previous = if bundle.is_some() {
+            let mut config = self.config.clone();
+            config.resolve_generation().ok().and_then(|_| {
+                text::reject_symlinks(&config.build_manifest).ok()?;
+                let data = fs::read_to_string(&config.build_manifest).ok()?;
+                Some((Manifest::parse(&data).ok()?, text::parse(&data).ok()?))
+            }).filter(|(m, _)| m.engine_sha == engine_sha && m.cli_sha == cli_sha)
+        } else { None };
+        let machines = self.config.machines.clone();
+        let mut weights_present = true;
+        for machine in &machines {
+            weights_present &= self.machine_checks_for_build(machine, bundle.is_none())?;
+        }
+        self.network_checks(&machines)?;
+        let supports_output =
+            self.dry || source_contains(&engine_source, "FLASH_SERVE_OUTPUT_TOKENS")?;
+        // Record the startup contract from the same checked source revision
+        // used for every staged engine. Older manifests conservatively omit it.
+        let supports_fp4_chain = self.dry
+            || source_contains(&engine_source, "next_service::run_pp(rank, world,")?;
+        let supports_warm_ptx = self.dry || source_contains(&engine_source, "warm_ptx_arg")?;
+        let supports_prepare_model = self.dry || source_contains(&engine_source, "prepare_model_for_install")?;
+        let mut manifest = Manifest {
+            engine_sha: engine_sha.clone(),
+            cli_sha: cli_sha.clone(),
+            harness_sha256: None,
+            supports_output,
+            supports_fp4_chain,
+            artifacts: BTreeMap::new(),
+        };
+        for machine in &machines {
+            let borrowed = existing.as_ref().is_some_and(|session| {
+                session.ranks.iter().any(|rank| {
+                    rank.machine.name == machine.name && rank.machine.ssh == machine.ssh
+                })
+            });
+            if !borrowed {
+                let gpu_check = "set -eu\napplications=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)\nutilization=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits)\ntest -z \"$applications\" && test -n \"$utilization\"\nprintf '%s\\n' \"$utilization\" | awk 'NF && $1 != 0 {exit 1}'\n";
+                self.checked(runner::ssh(&machine.ssh,gpu_check.into(),&format!("{} build GPU check",machine.name)),
+                    &format!("{} GPU is in use or unavailable. Finish its current job with its original launcher before install; nothing was stopped.",machine.name))?;
+            }
+            if let Some(bundle) = &bundle {
+                let reusable = previous.as_ref()
+                    .filter(|(_, fields)| {
+                        fields.get(&format!("machine.{}.install_ssh", machine.name)) == Some(&machine.ssh)
+                            && fields.get(&format!("machine.{}.install_stage_dir", machine.name)) == Some(&machine.stage_dir)
+                    })
+                    .and_then(|(m, _)| m.artifacts.get(&machine.name))
+                    .filter(|a| [&a.binary_sha256, &a.ptx_sha256, &a.worker_sha256] == bundle.hashes.each_ref());
+                let installed = if let Some(artifact) = reusable {
+                    self.reuse_prebuilt(machine, bundle, artifact).map(|present| (artifact.clone(), present))
+                } else {
+                    let build = format!("{}/builds/{engine_sha}-{cli_sha}-{install_id}-prebuilt", machine.stage_dir);
+                    self.install_prebuilt(machine, bundle, &build)
+                };
+                match installed {
+                    Ok((artifact, present)) => {
+                        weights_present &= present;
+                        if supports_warm_ptx && !borrowed {
+                            self.prepare_install(machine, &artifact, supports_prepare_model && present)?;
+                        }
+                        manifest.artifacts.insert(machine.name.clone(), artifact);
+                        continue;
+                    }
+                    Err(error) if error.starts_with("Prebuilt artifact rejected:") => {
+                        crate::output::line(format_args!("{}: {}; building from source.", machine.name, text::terminal_text(&error)))?;
+                        weights_present &= self.machine_checks_for_build(machine, true)?;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            // Preserve the monorepo layout for CLI path dependencies while
+            // keeping each install's source pair and published builds immutable.
+            let remote_revision = format!(
+                "{}/revisions/{engine_sha}-{cli_sha}-{install_id}",
+                machine.engine_source
+            );
+            let remote_engine = format!("{remote_revision}/engine");
+            let remote_cli = format!("{remote_revision}/cli");
+            let storage = remote_build_storage(machine);
+            self.checked(
+                runner::ssh(
+                    &machine.ssh,
+                    format!("{storage}\nvade_private_dir {} new\n", remote_path(&remote_revision)),
+                    &format!("{} build directories", machine.name),
+                ),
+                "Cannot prepare build folders on this machine. Use folders owned by your account, with no symlinks or access for other users, then run vade install again.",
+            )?;
+            self.sync_source(&engine_source, machine, &remote_engine, "engine")?;
+            self.sync_source(&cli_source, machine, &remote_cli, "CLI")?;
+            let build = format!(
+                "{}/builds/{engine_sha}-{cli_sha}-{install_id}",
+                machine.stage_dir
+            );
+            let artifact = Artifact {
+                worker: format!("{build}/vade"),
+                binary: format!("{build}/flash-serve"),
+                ptx: format!("{build}/flash.ptx"),
+                binary_sha256: "0".repeat(64),
+                ptx_sha256: "0".repeat(64),
+                worker_sha256: "0".repeat(64),
+            };
+            let mut helper = runner::ssh(&machine.ssh, format!(r#"{storage}
+export PATH="$HOME/.cargo/bin:$PATH"
+unset CARGO_TARGET_DIR RUSTC_WRAPPER RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_TARGET RUSTUP_TOOLCHAIN RUSTC RUSTDOC
+export RUSTUP_TOOLCHAIN=1.99.0
+cd {cli}
+cli_cache=$(cd {cli_cache} && pwd -P)
+ln -s "$cli_cache" target
+CARGO_TARGET_DIR="$cli_cache" cargo build --release --offline --bin vade
+vade_private_tree "$cli_cache"
+vade_private_dir {destination} new
+cp "$cli_cache/release/vade" {worker}
+chmod 700 {worker}
+"#, cli=remote_path(&remote_cli), cli_cache=remote_path(&format!("{}/build-cache/cli",machine.cli_source)),
+                destination=remote_path(&build), worker=remote_path(&artifact.worker)), &format!("{} helper build", machine.name));
+            helper.timeout = Duration::from_secs(900);
+            self.checked(helper, "Helper build failed; check the pinned Rust toolchain and retained logs.")?;
+            // Reuse compiler outputs, then copy into a fresh immutable build.
+            // The target link also supports kernel scripts with relative paths.
+            let script = format!(
+                r#"{storage}
+export PATH="$HOME/.cargo/bin:$PATH"
+unset CARGO_TARGET_DIR SPARK_LAYER_PTX SPARK_CUBIN RUSTC_WRAPPER RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_TARGET RUSTUP_TOOLCHAIN RUSTC RUSTDOC
+export RUSTUP_TOOLCHAIN=1.99.0
+vade_private_dir {engine} existing
+engine_cache=$(cd {engine_cache} && pwd -P)
+cd {engine}
+printf '%s\n' {engine_revision} > REVISION
+ln -s "$engine_cache" target
+export CARGO_TARGET_DIR="$engine_cache"
+cargo kernels
+cargo build --release --offline --workspace --exclude spark-rust-kernels
+vade_private_tree "$engine_cache"
+destination={destination}
+vade_private_dir "$destination" existing
+cp "$engine_cache/release/flash-serve" "$destination/flash-serve"
+cp "$engine_cache/nvptx64-nvidia-cuda/release/spark_layer_kernels.ptx" "$destination/flash.ptx"
+chmod 700 "$destination/flash-serve" "$destination/vade"
+chmod 600 "$destination/flash.ptx"
+sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade"
+"#,
+                engine = remote_path(&remote_engine),
+                engine_revision = quote(&engine_sha),
+                engine_cache =
+                    remote_path(&format!("{}/build-cache/engine", machine.engine_source)),
+                destination = remote_path(&build)
+            );
+            let mut exec = runner::ssh(
+                &machine.ssh,
+                script,
+                &format!("{} build and stage", machine.name),
+            );
+            exec.timeout = Duration::from_secs(3600);
+            crate::output::line(format_args!(
+                "{}: {} engine and helper.",
+                machine.name,
+                if self.dry {
+                    "plan to build"
+                } else {
+                    "building"
+                }
+            ))?;
+            let model_check = self.model_check(machine, &artifact.worker);
+            let (output, checked) = self.runner.parallel(&exec, &model_check)?;
+            if !output.success { return Err("Machine build did not finish. Inspect retained logs and the pinned Rust/CUDA toolchain; run vade install again.".into()); }
+            let mut artifact = artifact;
+            if !self.dry {
+                let hashes = artifact_hashes(&output.stdout)?;
+                artifact.binary_sha256 = hashes[0].clone();
+                artifact.ptx_sha256 = hashes[1].clone();
+                artifact.worker_sha256 = hashes[2].clone();
+            }
+            let present = self.model_result(machine, checked)?;
+            weights_present &= present;
+            if supports_warm_ptx && !borrowed {
+                self.prepare_install(machine, &artifact, supports_prepare_model && present)?;
+            }
+            manifest.artifacts.insert(machine.name.clone(), artifact);
+        }
+        // A machine that rejected the bundle may have rebuilt different bytes.
+        // Validate the complete generation before publishing any local state.
+        if !self.dry {
+            if let Some((first_name, first)) = manifest.artifacts.iter().next() {
+                for (name, artifact) in &manifest.artifacts {
+                    if artifact.binary_sha256 != first.binary_sha256
+                        || artifact.ptx_sha256 != first.ptx_sha256
+                        || artifact.worker_sha256 != first.worker_sha256
+                    {
+                        return Err(format!(
+                            "{first_name} and {name} have different artifact hashes (engine, PTX, or helper). The active generation is unchanged. Remove prebuilt_dir to rebuild every machine from source, or repair the prebuilt bundle and retry vade install."
+                        ));
+                    }
+                }
+            }
+        }
+        if host_bundle.is_some() {
+            crate::output::line(format_args!("Local tools: copying verified prebuilt harness and CLI."))?;
+        }
+        let mut build = Exec::new(
+            "harness build",
+            &rust_tool("cargo"),
+            vec![
+                "build".into(),
+                "--release".into(),
+                "--offline".into(),
+                "--manifest-path".into(),
+                harness_source
+                    .join("Cargo.toml")
+                    .to_string_lossy()
+                    .into_owned(),
+                "--bin".into(),
+                "vade-harness".into(),
+                "--target-dir".into(),
+                harness_source.join("target").to_string_lossy().into_owned(),
+            ],
+        );
+        build.unset.extend(
+            [
+                "CARGO_TARGET_DIR",
+                "SPARK_LAYER_PTX",
+                "RUSTC_WRAPPER",
+                "RUSTFLAGS",
+                "CARGO_ENCODED_RUSTFLAGS",
+                "CARGO_BUILD_TARGET",
+                "RUSTUP_TOOLCHAIN",
+                "RUSTC",
+                "RUSTDOC",
+            ]
+            .iter()
+            .map(|s| s.to_string()),
+        );
+        build.cwd = Some(harness_source.clone());
+        build.timeout = Duration::from_secs(900);
+        if host_bundle.is_none() {
+            self.checked(build,"Harness build failed. Check its local source and Rust toolchain, then run vade install.")?;
+        }
+        let built = host_bundle.as_ref().map(|host| host.harness.clone())
+            .unwrap_or_else(|| harness_source.join("target/release/vade-harness"));
+        let mut cli_build = Exec::new(
+            "controller CLI build",
+            &rust_tool("cargo"),
+            vec![
+                "build".into(),
+                "--release".into(),
+                "--offline".into(),
+                "--manifest-path".into(),
+                cli_source.join("Cargo.toml").to_string_lossy().into_owned(),
+                "--bin".into(),
+                "vade".into(),
+                "--target-dir".into(),
+                cli_source.join("target").to_string_lossy().into_owned(),
+            ],
+        );
+        cli_build.cwd = Some(cli_source.clone());
+        cli_build.timeout = Duration::from_secs(900);
+        cli_build.unset.extend(
+            [
+                "CARGO_TARGET_DIR",
+                "RUSTC_WRAPPER",
+                "RUSTFLAGS",
+                "CARGO_ENCODED_RUSTFLAGS",
+                "CARGO_BUILD_TARGET",
+                "RUSTUP_TOOLCHAIN",
+                "RUSTC",
+                "RUSTDOC",
+            ]
+            .iter()
+            .map(|s| s.to_string()),
+        );
+        if host_bundle.is_none() {
+            self.checked(cli_build,"The controller CLI build failed. Check cli_source and the Rust toolchain, then run vade install.")?;
+        }
+        let cli_built = host_bundle.as_ref().map(|host| host.cli.clone())
+            .unwrap_or_else(|| cli_source.join("target/release/vade"));
+        if self.dry {
+            crate::output::line(format_args!(
+                "# atomically stage {} at {}; save mode-0600 SHA256 build manifest at {}",
+                built.display(),
+                self.config.stage_dir.join("vade-harness").display(),
+                self.config.build_manifest.display()
+            ))?;
+            crate::output::line(format_args!(
+                "# atomically stage {} at {}",
+                cli_built.display(),
+                self.config.stage_dir.join("vade").display()
+            ))?;
+        } else {
+            let generation = self.config.stage_root.join("builds").join(&install_id);
+            text::private_dir(&generation)?;
+            stage_local(&built, &generation.join("vade-harness"))?;
+            stage_local(&cli_built, &generation.join("vade"))?;
+            self.config.stage_dir = generation.clone();
+            self.config.build_manifest = generation.join("build.conf");
+            let local_hashes = self.checked(
+                Exec::new(
+                    "controller binary hashes",
+                    "shasum",
+                    vec![
+                        "-a".into(),
+                        "256".into(),
+                        self.config
+                            .stage_dir
+                            .join("vade-harness")
+                            .to_string_lossy()
+                            .into_owned(),
+                        self.config
+                            .stage_dir
+                            .join("vade")
+                            .to_string_lossy()
+                            .into_owned(),
+                    ],
+                ),
+                "Cannot hash the controller binaries. Install shasum, then run vade install.",
+            )?;
+            let hashes = local_hashes
+                .stdout
+                .lines()
+                .filter_map(|l| l.split_whitespace().next())
+                .filter(|h| text::hex(h, 64))
+                .collect::<Vec<_>>();
+            if hashes.len() != 2 {
+                return Err(
+                    "Controller binaries did not return two SHA256 hashes. Run vade install again.".into(),
+                );
+            }
+            if host_bundle.as_ref().is_some_and(|host| hashes != host.hashes.each_ref().map(String::as_str)) {
+                return Err("Staged host artifact SHA256 mismatch; activation was not changed.".into());
+            }
+            let mut fields = text::parse(&manifest.encode())?;
+            // A machine name alone does not identify where its bytes were installed.
+            // Older manifests lack these fields and safely take the fresh-copy path.
+            for machine in &machines {
+                fields.insert(format!("machine.{}.install_ssh", machine.name), machine.ssh.clone());
+                fields.insert(format!("machine.{}.install_stage_dir", machine.name), machine.stage_dir.clone());
+            }
+            fields.insert("harness_source_sha".into(), harness_sha);
+            fields.insert("harness_sha256".into(), hashes[0].into());
+            fields.insert("local_cli_sha256".into(), hashes[1].into());
+            text::atomic_write(&self.config.build_manifest, &text::encode(&fields))?;
+            Manifest::load(&self.config.build_manifest)?;
+            // A failure before this single write preserves the active generation.
+            text::atomic_write(
+                &self.config.activation,
+                &text::encode(&Fields::from([
+                    ("activation_version".into(), "1".into()),
+                    ("generation".into(), install_id.clone()),
+                ])),
+            )?;
+            crate::output::line(format_args!(
+                "CLI for this generation: {}",
+                self.config.stage_dir.join("vade").display()
+            ))?;
+        }
+        crate::output::line(format_args!(
+            "{} {}. Models {}.",
+            if self.dry {
+                "Install planned for build"
+            } else {
+                "Installed build"
+            },
+            engine_sha,
+            if weights_present {
+                "were already present"
+            } else {
+                "need the verified-copy and SHA256 checks above"
+            }
+        ))?;
+        match self.harness_doctor(true) {
+            Err(error) if has_running_record => {
+                crate::output::line(format_args!("Build staged. Current engine doctor: {error}"))?;
+                Ok(())
+            }
+            result => result,
+        }
+    }
+
+    pub(super) fn update(&mut self) -> Result<(), String> {
+        let sources = [
+            ("engine", self.config.engine_source.clone()),
+            ("harness", self.config.harness_source.clone()),
+            ("CLI", self.config.cli_source.clone()),
+        ];
+        // Check every checkout before the first pull so one dirty source stops the whole update.
+        for (label, path) in &sources {
+            self.source_revision(path, label)?;
+        }
+        for (label, path) in &sources {
+            let folder = path.to_string_lossy().into_owned();
+            let remotes = self.checked(
+                Exec::new(
+                    &format!("{label} remotes"),
+                    "git",
+                    vec!["-C".into(), folder.clone(), "remote".into()],
+                ),
+                "Cannot inspect source remotes. Check the configured checkout.",
+            )?;
+            if !self.dry && remotes.stdout.trim().is_empty() {
+                crate::output::line(format_args!("{label}: local source, no remote to pull."))?;
+                continue;
+            }
+            let mut exec = Exec::new(
+                &format!("{label} update"),
+                "git",
+                vec!["-C".into(), folder, "pull".into(), "--ff-only".into()],
+            );
+            exec.timeout = Duration::from_secs(600);
+            self.checked(exec,&format!("{label} could not update without a conflict. Resolve its branch or upstream, then run vade update; local changes are preserved."))?;
+        }
+        self.install()?;
+        if let Some(session) = Session::load(&self.config.state_dir)? {
+            let options = UpOptions {
+                supplied_options: Default::default(),
+                hosts: session
+                    .ranks
+                    .iter()
+                    .map(|r| r.machine.name.clone())
+                    .collect(),
+                sparks: None,
+                replicas: session.replicas,
+                mtp: session.mtp,
+                mtp_explicit: session.mtp_explicit,
+                fp4_local: session.fp4_local,
+                context: session.context,
+                output: session.output,
+                output_explicit: true,
+                chats: session.chats,
+                fast_prompts: session.fast_prompts,
+                memory_bytes: session.memory_bytes,
+                cache_bytes: session.cache_bytes,
+            };
+            if !self.dry && self.runner.confirm_restart()? {
+                self.down()?;
+                return self.up(&options);
+            }
+            crate::output::line(format_args!(
+                "Running engine kept. Restart when ready:\n  vade down\n  vade up --hosts {}{}{} --context {} --output {}{}{}{}{}{}",
+                options.hosts.join(","),
+                if options.replicas { format!(" --replicas {}", options.hosts.len()) } else { String::new() },
+                if options.mtp_explicit { format!(" --mtp {}", options.mtp) } else { String::new() },
+                options.context,
+                options.output,
+                options.chats
+                    .map(|chats| format!(" --chats {chats}"))
+                    .unwrap_or_default(),
+                if options.fast_prompts {
+                    " --fast-prompts"
+                } else {
+                    ""
+                },
+                options.memory_bytes.map(|bytes| format!(" --memory-bytes {bytes}")).unwrap_or_default(),
+                options.cache_bytes.map(|bytes| format!(" --cache-bytes {bytes}")).unwrap_or_default(),
+                if options.fp4_local { " --fp4-local" } else { " --fp8-legacy" }
+            ))?;
+        } else {
+            crate::output::line(format_args!("Start the new build: {}", self.start_command()))?;
+        }
+        Ok(())
+    }
+
+}
+
+// This bootstrap runs before a trusted remote helper exists. Fixed system tools
+// keep the checks independent of PATH. Every descent starts at a checked parent;
+// only root or this account can rename it or change its permissions thereafter.
+// A private leaf alone is insufficient when an ancestor belongs to another user.
+pub(super) const REMOTE_STORAGE_GUARD: &str = r#"set -eu
+umask 077
+vade_uid=$(/usr/bin/id -u)
+vade_storage_fail() {
+  printf 'VADE_STORAGE_ERROR %s %s\n' "${1:-invalid}" "${vade_location:-${vade_path:-unknown}}"
+  exit 1
+}
+vade_check_directory() {
+  vade_location=$(/bin/pwd -P)
+  if test "$1" != .; then vade_location=${vade_location%/}/${1#./}; fi
+  test ! -L "$1" && test -d "$1" || vade_storage_fail
+  vade_metadata=$(/usr/bin/stat -c '%u %a' -- "$1") || vade_storage_fail
+  vade_owner=${vade_metadata%% *}
+  vade_mode=${vade_metadata#* }
+  case "$vade_owner" in ''|*[!0-9]*) vade_storage_fail ;; esac
+  case "$vade_mode" in ''|*[!0-7]*) vade_storage_fail ;; esac
+  test "$vade_owner" = 0 || test "$vade_owner" = "$vade_uid" || vade_storage_fail
+  test $((0$vade_mode & 0022)) -eq 0 || vade_storage_fail
+  if test "$2" = private; then
+    test "$vade_owner" = "$vade_uid" || vade_storage_fail
+    test $((0$vade_mode & 0077)) -eq 0 || vade_storage_fail private
+  fi
+}
+vade_private_dir() (
+  vade_path=$1
+  vade_action=$2
+  case "$vade_action" in create|existing|new) ;; *) vade_storage_fail ;; esac
+  case "$vade_path" in /*) ;; *) vade_storage_fail ;; esac
+  while test "${vade_path%/}" != "$vade_path"; do vade_path=${vade_path%/}; done
+  test -n "$vade_path" || vade_storage_fail
+  cd /
+  vade_check_directory . ancestor
+  vade_remaining=${vade_path#/}
+  while test -n "$vade_remaining"; do
+    vade_component=${vade_remaining%%/*}
+    if test "$vade_component" = "$vade_remaining"; then
+      vade_remaining=
+    else
+      vade_remaining=${vade_remaining#*/}
+    fi
+    case "$vade_component" in '') continue ;; .|..) vade_storage_fail ;; esac
+    vade_location=$(/bin/pwd -P)
+    vade_location=${vade_location%/}/$vade_component
+    if test "$vade_action" = new && test -z "$vade_remaining"; then
+      /bin/mkdir -m 700 -- "./$vade_component" || vade_storage_fail
+    elif test ! -e "./$vade_component" && test ! -L "./$vade_component"; then
+      test "$vade_action" = create || vade_storage_fail
+      /bin/mkdir -m 700 -- "./$vade_component" || vade_storage_fail
+    fi
+    vade_check_directory "./$vade_component" ancestor
+    cd -P "./$vade_component"
+  done
+  vade_check_directory . private
+)
+vade_private_tree() (
+  vade_private_dir "$1" existing
+  # Cargo may hard-link its own regular artifacts, but no cache entry may
+  # redirect a build outside this protected tree or allow another user to write.
+  vade_unsafe=$(/usr/bin/find "$1" \( \( ! -type d -a ! -type f \) -o ! -user "$vade_uid" -o -perm -0020 -o -perm -0002 \) -print -quit) || vade_storage_fail
+  test -z "$vade_unsafe" || vade_storage_fail
+)
+"#;
+
+fn remote_build_storage(machine: &Machine) -> String {
+    let mut script = String::from(REMOTE_STORAGE_GUARD);
+    for root in [&machine.engine_source, &machine.cli_source, &machine.stage_dir] {
+        script.push_str(&format!("vade_private_dir {} create\n", remote_path(root)));
+    }
+    for directory in [
+        format!("{}/revisions", machine.engine_source),
+        format!("{}/build-cache", machine.engine_source),
+        format!("{}/build-cache/engine", machine.engine_source),
+        format!("{}/build-cache", machine.cli_source),
+        format!("{}/build-cache/cli", machine.cli_source),
+        format!("{}/builds", machine.stage_dir),
+    ] {
+        script.push_str(&format!("vade_private_dir {} create\n", remote_path(&directory)));
+    }
+    for cache in [
+        format!("{}/build-cache/engine", machine.engine_source),
+        format!("{}/build-cache/cli", machine.cli_source),
+    ] {
+        script.push_str(&format!("vade_private_tree {}\n", remote_path(&cache)));
+    }
+    script
+}
+
+fn artifact_hashes(output: &str) -> Result<[String; 3], String> {
+    let hashes = output
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|value| text::hex(value, 64))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    hashes.try_into().map_err(|_| "Build did not return all three artifact SHA256s. Run vade install again; no manifest was changed.".into())
+}
+fn source_contains(root: &Path, needle: &str) -> Result<bool, String> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir)
+            .map_err(|_| "Cannot inspect engine source. Check engine_source in config.")?
+        {
+            let entry = entry.map_err(|_| "Cannot read engine source directory.")?;
+            let file_type = entry
+                .file_type()
+                .map_err(|_| "Cannot inspect engine source file.")?;
+            if file_type.is_dir() {
+                if !["target", ".git"].contains(&entry.file_name().to_string_lossy().as_ref()) {
+                    pending.push(entry.path());
+                }
+            } else if file_type.is_file() && entry.file_name() == "flash-serve.rs" {
+                if fs::read_to_string(entry.path())
+                    .map_err(|_| "Cannot read engine source. Check permissions.")?
+                    .contains(needle)
+                {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(test)]
+#[test]
+fn chain_capability_marker_matches_the_real_engine_startup_contract() {
+    let engine = Path::new(env!("CARGO_MANIFEST_DIR")).join("../engine");
+    assert!(source_contains(&engine, "next_service::run_pp(rank, world,").unwrap());
+}
+
+fn stage_local(source: &Path, destination: &Path) -> Result<(), String> {
+    let parent = destination
+        .parent()
+        .ok_or("Staged harness needs a parent directory. Check stage_dir in config.")?;
+    text::private_dir(parent)?;
+    text::reject_symlinks(destination)?;
+    let temp = parent.join(format!(".harness-{}", text::random_hex(12)?));
+    let result = (|| {
+        fs::copy(source, &temp).map_err(
+            |_| "Cannot stage harness. Check target output, disk, and stage_dir permissions.",
+        )?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&temp, fs::Permissions::from_mode(0o700))
+                .map_err(|_| "Cannot protect staged harness.")?;
+        }
+        fs::File::open(&temp)
+            .and_then(|f| f.sync_all())
+            .map_err(|_| "Cannot sync staged harness. Check disk space.")?;
+        fs::rename(&temp, destination)
+            .map_err(|_| "Cannot publish staged harness. Check stage_dir permissions.")?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    result
+}

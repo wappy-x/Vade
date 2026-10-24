@@ -1,0 +1,230 @@
+mod output;
+mod prebuilt;
+mod repository;
+mod sha256;
+mod app;
+mod auth;
+mod bench;
+mod build_job;
+mod catalog;
+mod cli;
+mod config;
+mod detect;
+mod launch;
+mod control_socket;
+mod evals;
+mod endpoint;
+mod json;
+mod run;
+mod runner;
+mod state;
+mod status;
+mod test_gate;
+mod text;
+mod unix_file;
+mod unix_flags;
+mod worker;
+mod verify;
+
+fn main() {
+    run_main(std::env::args().skip(1).collect());
+}
+
+fn run_main(mut args: Vec<String>) {
+    if args.first().is_some_and(|arg| arg == "__socket-probe") {
+        std::process::exit(if args.len() == 2 { control_socket::probe(&args[1]) } else { 1 });
+    }
+    if args.first().is_some_and(|arg| arg == "test") {
+        let code = if args
+            .get(1)
+            .is_some_and(|arg| matches!(arg.as_str(), "build" | "determinism"))
+        {
+            test_gate::run(&args[1..])
+        } else {
+            evals::run(&args[1..])
+        };
+        if args.len() == 1
+            || args
+                .get(1)
+                .is_some_and(|arg| matches!(arg.as_str(), "--help" | "-h"))
+        {
+            public_output(test_gate::HELP);
+        }
+        std::process::exit(output::exit_code(code));
+    }
+    if args
+        .first()
+        .is_some_and(|arg| matches!(arg.as_str(), "help" | "--help" | "-h"))
+        && args.get(1).is_some_and(|arg| arg == "test")
+    {
+        public_output(&format!("{}{}", evals::help(), test_gate::HELP));
+        return;
+    }
+    if args.first().is_some_and(|arg| arg == "bench") {
+        let _interruptions = if args.get(1).is_some_and(|arg| arg == "--suite") {
+            None
+        } else {
+            Some(runner::Interruptions::install())
+        };
+        let arguments = endpoint::bench_arguments(&args[1..]).unwrap_or_else(|error| fail(&error));
+        match bench::run(&arguments, runner::interrupted) {
+            Ok(code) => std::process::exit(if runner::interrupted() { 130 } else { code }),
+            Err(error) => fail(&error),
+        }
+    }
+    if args.len() == 2 && args[0] == "help" && args[1] == "bench" {
+        match bench::run(&["--help".into()], || false) {
+            Ok(code) => std::process::exit(code),
+            Err(error) => fail(&error),
+        }
+    }
+    if args
+        .first()
+        .is_some_and(|arg| matches!(arg.as_str(), "__build-supervisor" | "__build-anchor"))
+    {
+        if args.len() != 2 {
+            fail("Invalid private build request.");
+        }
+        if let Err(error) = build_job::helper(&args[0], std::path::Path::new(&args[1])) {
+            fail(&error);
+        }
+        return;
+    }
+    if args.first().is_some_and(|arg| arg == "__engine") {
+        if args.len() != 1 {
+            std::process::exit(2);
+        }
+        if let Err(error) = worker::engine() {
+            fail(&error);
+        }
+        return;
+    }
+    if args.first().is_some_and(|arg| arg == "__worker") {
+        if args.len() != 1 {
+            fail("The private helper takes no arguments. Use vade --help.");
+        }
+        match worker::run() {
+            Ok(true) => {}
+            Ok(false) => std::process::exit(1),
+            Err(error) => {
+                output::report(format_args!(
+                    "{}",
+                    text::encode(&text::Fields::from([("error".into(), error)]))
+                ), false);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    auth::configure(&mut args).unwrap_or_else(|error| fail(&error));
+    if args.len() == 2 && matches!(args[0].as_str(), "help" | "--help" | "-h") && args[1] == "verify" {
+        public_output(verify::HELP);
+        return;
+    }
+    if args.first().is_some_and(|arg| arg == "verify") {
+        std::process::exit(verify::run(&args[1..]));
+    }
+    let parsed = cli::parse(&args).unwrap_or_else(|error| fail(&error));
+    if let cli::Command::Help(command) = parsed.command {
+        public_output(&cli::help(command.as_deref()));
+        return;
+    }
+    if parsed.command == cli::Command::Version {
+        public_output(concat!("vade ", env!("CARGO_PKG_VERSION"), "\n"));
+        return;
+    }
+    // Keep every JSON status outcome (including owner-config errors) inside
+    // the versioned schema; status::run uses the same owner selector below.
+    if parsed.command == cli::Command::StatusJson {
+        let (output, code) = status::run(parsed.dry_run);
+        output::report(format_args!("{output}"), true);
+        std::process::exit(output::exit_code(code));
+    }
+    run::validate_start(&parsed.command).unwrap_or_else(|error| fail(&error));
+    // Validate invocation credentials before any lifecycle dispatch, so an
+    // unreadable key file fails identically on the controller, local-run and
+    // owner-launch selections (dry runs never read the file).
+    if matches!(
+        parsed.command,
+        cli::Command::Run(_) | cli::Command::Chat | cli::Command::Doctor
+    ) {
+        auth::validate(parsed.dry_run).unwrap_or_else(|error| fail(&error));
+    }
+    if launch::handles(&parsed.command) {
+        let _interruptions = if matches!(parsed.command, cli::Command::Launch(_) | cli::Command::Install | cli::Command::Update | cli::Command::Up(_) | cli::Command::Down) {
+            Some(runner::Interruptions::install())
+        } else { None };
+        if let Err(error) = launch::run(parsed.command, parsed.dry_run) { fail(&error); }
+        return;
+    }
+    let _interruptions = if matches!(
+        parsed.command,
+        cli::Command::Run(_) | cli::Command::Up(_) | cli::Command::Down
+    ) {
+        Some(runner::Interruptions::install())
+    } else {
+        None
+    };
+    let local_home = run::home().unwrap_or_else(|error| fail(&error));
+    if run::handles(&parsed.command, &local_home) {
+        let _lock = if !parsed.dry_run
+            && matches!(parsed.command, cli::Command::Run(_) | cli::Command::Down)
+        {
+            Some(state::Lock::acquire(&local_home).unwrap_or_else(|error| fail(&error)))
+        } else {
+            None
+        };
+        let mut local = run::Local {
+            root: local_home,
+            runner: runner::SystemRunner {
+                dry: parsed.dry_run,
+            },
+            dry: parsed.dry_run,
+        };
+        if let Err(error) = local.execute(parsed.command) {
+            fail(&error);
+        }
+        return;
+    }
+    let config = match config::Config::load() {
+        Ok(config) => config,
+        Err(error) if matches!(parsed.command, cli::Command::Menu) => {
+            let error = text::terminal_text(&error);
+            public_output(&format!(
+                "Vade: setup needed.\n{error}\nStart: vade up   Chat: vade chat\nStop:  vade down Check: vade doctor\n"
+            ));
+            return;
+        }
+        Err(error) => fail(&error),
+    };
+    let _lock = if parsed.dry_run
+        || !matches!(
+            parsed.command,
+            cli::Command::Up(_) | cli::Command::Down | cli::Command::Install | cli::Command::Update
+        ) {
+        None
+    } else {
+        Some(state::Lock::acquire(&config.state_dir).unwrap_or_else(|error| fail(&error)))
+    };
+    let mut app = app::App {
+        config,
+        runner: runner::SystemRunner {
+            dry: parsed.dry_run,
+        },
+        dry: parsed.dry_run,
+    };
+    if let Err(error) = app.execute(parsed.command) {
+        fail(&error);
+    }
+}
+
+fn public_output(message: &str) {
+    if let Err(error) = output::text(format_args!("{message}")) { fail(&error); }
+}
+
+fn fail(message: &str) -> ! {
+    if !output::broken_pipe_success() {
+        output::stderr_line(format_args!("{}", text::terminal_text(message)));
+    }
+    std::process::exit(if output::broken_pipe_success() { 0 } else { 1 })
+}

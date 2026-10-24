@@ -1,0 +1,92 @@
+//! Bounded target head: automatic only when removed scratch funds all its state.
+use std::sync::OnceLock;
+static ENABLED: OnceLock<Result<Option<bool>, String>> = OnceLock::new();
+fn parse(value: Result<String, std::env::VarError>) -> Result<Option<bool>, String> {
+    match value.as_deref() {
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Ok("0") => Ok(Some(false)),
+        Ok("1") => Ok(Some(true)),
+        _ => Err("VADE_HEAD_BOUNDS must be unset, 0 or 1".into()),
+    }
+}
+/// Validate once and report explicit opt-in before a model's funding is known.
+pub fn load() -> Result<bool, String> {
+    configured().map(|enabled| enabled.unwrap_or(false))
+}
+fn configured() -> Result<Option<bool>, String> {
+    ENABLED.get_or_init(|| parse(std::env::var("VADE_HEAD_BOUNDS"))).clone()
+}
+/// Existing explicit switches keep their meaning; automatic mode must fund the
+/// full twin, norms and retained inputs for every possible session, not just C1.
+pub fn load_funded(saved: usize, twin: usize, vocabulary: usize, sessions: usize, mtp: bool) -> Result<bool, String> {
+    configured().map(|enabled| enabled.unwrap_or(funded(saved, twin, vocabulary, sessions, mtp)))
+}
+fn funded(saved: usize, twin: usize, vocabulary: usize, sessions: usize, mtp: bool) -> bool {
+    if !mtp || twin == 0 { return false; }
+    let needed = vocabulary.checked_mul(8).and_then(|n| n.checked_add(63)).map(|n| n / 64 * 64)
+        .and_then(|norms| twin.checked_add(norms))
+        .and_then(|n| sessions.checked_mul(RETAINED_INPUT_BYTES).and_then(|retained| n.checked_add(retained)));
+    needed.is_some_and(|n| n <= saved)
+}
+/// Model-wide optional storage is forbidden on either pipeline rank.
+/// No callback (and thus no allocation or log) runs when disabled or unused.
+pub fn load_local<T>(enabled: bool, pipeline: bool, load: impl FnOnce() -> Result<T, String>) -> Result<Option<T>, String> {
+    if enabled && !pipeline { load().map(Some) } else { Ok(None) }
+}
+pub const RETAINED_ROWS: usize = 4;
+pub const RETAINED_INPUT_BYTES: usize = RETAINED_ROWS * 2560 * 4;
+pub fn retained_input_bytes(enabled: bool) -> usize { if enabled { RETAINED_INPUT_BYTES } else { 0 } }
+#[cfg(test)]
+mod tests {
+    use super::{parse, load_local, retained_input_bytes, funded};
+    #[test]
+    fn disabled_and_pipeline_models_never_allocate_optional_head_state() {
+        for (enabled, pipeline) in [(false,false),(false,true),(true,true)] {
+            let value: Option<()> = load_local(enabled,pipeline,|| panic!("unused head allocator called")).unwrap();
+            assert!(value.is_none());
+            assert_eq!(retained_input_bytes(value.is_some()),0);
+        }
+        let calls=std::cell::Cell::new(0);
+        let value=load_local(true,false,|| { calls.set(calls.get()+1); Ok(17) }).unwrap();
+        assert_eq!(value,Some(17)); assert_eq!(calls.get(),1);
+        assert_eq!(retained_input_bytes(value.is_some()),40960);
+    }
+    #[test]
+    fn bounded_head_switch_is_strict_and_default_depends_on_funding() {
+        assert_eq!(parse(Err(std::env::VarError::NotPresent)), Ok(None));
+        assert_eq!(parse(Ok("0".into())), Ok(Some(false)));
+        assert_eq!(parse(Ok("1".into())), Ok(Some(true)));
+        for value in ["", "check", "true", "yes", "2", " 1", "1 "] {
+            assert_eq!(parse(Ok(value.into())).unwrap_err(), "VADE_HEAD_BOUNDS must be unset, 0 or 1");
+        }
+        assert!(parse(Err(std::env::VarError::NotUnicode("bad".into()))).is_err());
+    }
+    #[test]
+    fn automatic_head_never_adds_to_total_admission_for_any_eligible_tile() {
+        let (twin, vocab, slots) = (655_564_800, 248_320, 16);
+        let extra = twin + vocab * 8 + slots * super::RETAINED_INPUT_BYTES;
+        for rows in [1, 63, 64, 65, 128, 2048, 4096, 8192] {
+            let saved = crate::flash_next_workspace::saved_bytes(2560, 48, 16, rows);
+            let enabled = funded(saved, twin, vocab, slots, true);
+            assert_eq!(enabled, rows == 8192);
+            assert!(saved >= if enabled { extra } else { 0 });
+            if enabled { assert_eq!(saved - extra, 96_767_872); }
+        }
+        assert!(!funded(extra - 1, twin, vocab, slots, true));
+        assert!(funded(extra, twin, vocab, slots, true));
+        assert!(!funded(usize::MAX, twin, vocab, slots, false));
+        assert!(!funded(usize::MAX, 0, vocab, slots, true));
+        assert!(!funded(usize::MAX, twin, usize::MAX, slots, true));
+        assert!(!funded(usize::MAX, twin, vocab, usize::MAX, true));
+    }
+    #[test]
+    fn unfunded_or_unused_automatic_head_does_not_allocate() {
+        for (saved, mtp, pipeline) in [(0, true, false), (usize::MAX, false, false), (usize::MAX, true, true)] {
+            let enabled = parse(Err(std::env::VarError::NotPresent)).unwrap()
+                .unwrap_or(funded(saved, 1024, 64, 16, mtp));
+            let state: Option<()> = load_local(enabled, pipeline, || panic!("unfunded or unused head allocated")).unwrap();
+            assert!(state.is_none());
+            assert_eq!(retained_input_bytes(state.is_some()), 0);
+        }
+    }
+}

@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 615" width="880" height="615" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title id="t">Vade decode speed on 2026-10-24 receipts, home release build 73f7a9d, cloud main 4681d8b</title>
+<desc id="d">Home DGX Spark, release build 73f7a9d, drafting OFF to ON: code 27.7 to 76.7 tok/s, prose 27.7 to 42.0, C8 135.9 to 172.6. Cloud GB10, main 4681d8b, drafting OFF: one VM code 24.7, prose 23.4, C8 43.0; two VMs code 25.4, prose 23.2, C8 70.0. Cloud drafting ON timing runs, not cards: one VM code 64.0, prose 33.6; two VMs code 56.5, prose 32.0.</desc>
+<defs><pattern id="timing" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#d95926" fill-opacity="0.28"/><rect width="2.5" height="6" fill="#d95926"/></pattern></defs>
+<rect x="0.5" y="0.5" width="879" height="614" rx="8" fill="#1a1a19" stroke="rgba(255,255,255,0.10)"/>
+<text x="24.0" y="38.0" font-size="17" fill="#f0efec" text-anchor="start" font-weight="600">Decode speed, tok/s (higher = faster)</text>
+<text x="24.0" y="60.0" font-size="12" fill="#c3c2b7" text-anchor="start">Qwen3.8-Flash-Next-FP4-Local; home: release build 73f7a9d, cloud: main 4681d8b. Each label is the value its receipt prints.</text>
+<rect x="24" y="75" width="12" height="12" rx="2" fill="#3987e5"/>
+<text x="42.0" y="85.5" font-size="12" fill="#f0efec" text-anchor="start">Drafting OFF, card</text>
+<rect x="174.88" y="75" width="12" height="12" rx="2" fill="#d95926"/>
+<text x="192.9" y="85.5" font-size="12" fill="#f0efec" text-anchor="start">Drafting ON, card</text>
+<rect x="318.79999999999995" y="75" width="12" height="12" rx="2" fill="url(#timing)"/>
+<text x="336.8" y="85.5" font-size="12" fill="#f0efec" text-anchor="start">Drafting ON, timing run, not a card</text>
+<text x="24.0" y="124.0" font-size="13" fill="#f0efec" text-anchor="start" font-weight="600">Home DGX Spark, one Spark</text>
+<text x="24.0" y="141.0" font-size="11" fill="#c3c2b7" text-anchor="start">OFF card 1444, ON card 1438</text>
+<rect x="24.0" y="370.0" width="266.7" height="1" fill="#383835"/>
+<path d="M43.4 370.0V343.8Q43.4 339.8 47.4 339.8H63.4Q67.4 339.8 67.4 343.8V370.0Z" fill="#3987e5"/>
+<text x="55.4" y="333.8" font-size="11" fill="#f0efec" text-anchor="middle" font-variant-numeric="tabular-nums">27.7</text>
+<path d="M69.4 370.0V290.5Q69.4 286.5 73.4 286.5H89.4Q93.4 286.5 93.4 290.5V370.0Z" fill="#d95926"/>
+<text x="81.4" y="280.5" font-size="11" fill="#f0efec" text-anchor="middle" font-variant-numeric="tabular-nums">76.7</text>
+<text x="68.4" y="388.0" font-size="11.5" fill="#f0efec" text-anchor="middle" font-weight="600">Code</text>
+<text x="68.4" y="402.0" font-size="10.5" fill="#c3c2b7" text-anchor="middle">1 stream</text>
+<path d="M132.3 370.0V343.8Q132.3 339.8 136.3 339.8H152.3Q156.3 339.8 156.3 343.8V370.0Z" fill="#3987e5"/>
+<text x="144.3" y="333.8" font-size="11" fill="#f0efec" text-anchor="middle" font-variant-numeric="tabular-nums">27.7</text>
+<path d="M158.3 370.0V328.3Q158.3 324.3 162.3 324.3H178.3Q182.3 324.3 182.3 328.3V370.0Z" fill="#d95926"/>
+<text x="170.3" y="318.3" font-size="11" fill="#f0efec" text-anchor="middle" font-variant-numeric="tabular-nums">42.0</text>
+<text x="157.3" y="388.0" font-size="11.5" fill="#f0efec" text-anchor="middle" font-weight="600">Prose</text>
+<text x="157.3" y="402.0" font-size="10.5" fill="#c3c2b7" text-anchor="middle">1 stream</text>
+<path d="M221.2 370.0V226.0Q221.2 222.0 225.2 222.0H241.2Q245.2 222.0 245.2 226.0V370.0Z" fill="#3987e5"/>
+<text x="245.2" y="216.0" font-size="11" fill="#f0efec" text-anchor="end" font-variant-numeric="tabular-nums">135.9</text>
+<path d="M247.2 370.0V186.1Q247.2 182.1 251.2 182.1H267.2Q271.2 182.1 271.2 186.1V370.0Z" fill="#d95926"/>
+<text x="259.2" y="176.1" font-size="11" fill="#f0efec" text-anchor="middle" font-variant-numeric="tabular-nums">172.6</text>
+<text x="246.2" y="388.0" font-size="11.5" fill="#f0efec" text-anchor="middle" font-weight="600">C8</text>
+<text x="246.2" y="402.0" font-size="10.5" fill="#c3c2b7" text-anchor="middle">8 streams, sum</text>
+<text x="306.7" y="124.0" font-size="13" fill="#f0efec" text-anchor="start" font-weight="600">Cloud GB10, one VM</text>
+<text x="306.7" y="141.0" font-size="11" fill="#c3c2b7" text-anchor="start">OFF card 1046, ON timing run 1042</text>
+<rect x="306.7" y="370.0" width="266.7" height="1" fill="#383835"/>
+<path d="M326.1 370.0V347.1Q326.1 343.1 330.1 343.1H346.1Q350.1 343.1 350.1 347.1V370.0Z" fill="#3987e5"/>
+<text x="338.1" y="337.1" font-size="11" fill="#f0efec" text-anchor="middle" font-variant-numeric="tabular-nums">24.7</text>
+<path d="M352.1 370.0V304.3Q352.1 300.3 356.1 300.3H372.1Q376.1 300.3 376.1 304.3V370.0Z" fill="url(#timing)"/>
+<text x="364.1" y="294.3" font-size="11" fill="#f0efec" text-anchor="middle" font-variant-numeric="tabular-nums">64.0</text>
+<text x="351.1" y="388.0" font-size="11.5" fill="#f0efec" text-anchor="middle" font-weight="600">Code</text>
+<text x="351.1" y="402.0" font-size="10.5" fill="#c3c2b7" text-anchor="middle">1 stream</text>
+<path d="M415.0 370.0V348.5Q415.0 344.5 419.0 344.5H435.0Q439.0 344.5 439.0 348.5V370.0Z" fill="#3987e5"/>
+<text x="427.0" y="338.5" font-size="11" fill="#f0efec" text-anchor="middle" font-variant-numeric="tabular-nums">23.4</text>
+<path d="M441.0 370.0V337.4Q441.0 333.4 445.0 333.4H461.0Q465.0 333.4 465.0 337.4V370.0Z" fill="url(#timing)"/>
+<text x="453.0" y="327.4" font-size="11" fill="#f0efec" text-anchor="middle" font-variant-numeric="tabular-nums">33.6</text>
+<text x="440.0" y="388.0" font-size="11.5" fill="#f0efec" text-anchor="middle" font-weight="600">Prose</text>
+<text x="440.0" y="402.0" font-size="10.5" fill="#c3c2b7" text-anchor="middle">1 stream</text>
+<path d="M503.9 370.0V327.2Q503.9 323.2 507.9 323.2H523.9Q527.9 323.2 527.9 327.2V370.0Z" fill="#3987e5"/>
+<text x="515.9" y="317.2" font-size="11" fill="#f0efec" text-anchor="middle" font-variant-numeric="tabular-nums">43.0</text>
+<text x="528.9" y="388.0" font-size="11.5" fill="#f0efec" text-anchor="middle" font-weight="600">C8</text>
+<text x="528.9" y="402.0" font-size="10.5" fill="#c3c2b7" text-anchor="middle">8 streams, sum</text>
+<text x="589.3" y="124.0" font-size="13" fill="#f0efec" text-anchor="start" font-weight="600">Cloud GB10, two VMs</text>
+<text x="589.3" y="141.0" font-size="11" fill="#c3c2b7" text-anchor="start">OFF card 1006, ON timing run 1114</text>
+<rect x="589.3" y="370.0" width="266.7" height="1" fill="#383835"/>
+<path d="M608.8 370.0V346.3Q608.8 342.3 612.8 342.3H628.8Q632.8 342.3 632.8 346.3V370.0Z" fill="#3987e5"/>
+<text x="620.8" y="336.3" font-size="11" fill="#f0efec" text-anchor="middle" font-variant-numeric="tabular-nums">25.4</text>
+<path d="M634.8 370.0V312.5Q634.8 308.5 638.8 308.5H654.8Q658.8 308.5 658.8 312.5V370.0Z" fill="url(#timing)"/>
+<text x="646.8" y="302.5" font-size="11" fill="#f0efec" text-anchor="middle" font-variant-numeric="tabular-nums">56.5</text>
+<text x="633.8" y="388.0" font-size="11.5" fill="#f0efec" text-anchor="middle" font-weight="600">Code</text>
+<text x="633.8" y="402.0" font-size="10.5" fill="#c3c2b7" text-anchor="middle">1 stream</text>
+<path d="M697.7 370.0V348.7Q697.7 344.7 701.7 344.7H717.7Q721.7 344.7 721.7 348.7V370.0Z" fill="#3987e5"/>
+<text x="709.7" y="338.7" font-size="11" fill="#f0efec" text-anchor="middle" font-variant-numeric="tabular-nums">23.2</text>
+<path d="M723.7 370.0V339.2Q723.7 335.2 727.7 335.2H743.7Q747.7 335.2 747.7 339.2V370.0Z" fill="url(#timing)"/>
+<text x="735.7" y="329.2" font-size="11" fill="#f0efec" text-anchor="middle" font-variant-numeric="tabular-nums">32.0</text>
+<text x="722.7" y="388.0" font-size="11.5" fill="#f0efec" text-anchor="middle" font-weight="600">Prose</text>
+<text x="722.7" y="402.0" font-size="10.5" fill="#c3c2b7" text-anchor="middle">1 stream</text>
+<path d="M786.6 370.0V297.8Q786.6 293.8 790.6 293.8H806.6Q810.6 293.8 810.6 297.8V370.0Z" fill="#3987e5"/>
+<text x="798.6" y="287.8" font-size="11" fill="#f0efec" text-anchor="middle" font-variant-numeric="tabular-nums">70.0</text>
+<text x="811.6" y="388.0" font-size="11.5" fill="#f0efec" text-anchor="middle" font-weight="600">C8</text>
+<text x="811.6" y="402.0" font-size="10.5" fill="#c3c2b7" text-anchor="middle">8 streams, sum</text>
+<text x="24.0" y="432.0" font-size="11" fill="#c3c2b7" text-anchor="start">Cloud C8 with drafting ON is left out: no card, and the timing run’s later ON rounds failed on build 4681d8b.</text>
+<text x="24.0" y="449.0" font-size="11" fill="#c3c2b7" text-anchor="start">Home OFF and ON cards ran on different home Sparks with the same build.</text>
+<text x="24.0" y="466.0" font-size="11" fill="#c3c2b7" text-anchor="start">Timing runs time whole requests; cards print decode estimates, so textured and solid bars are not the same estimator.</text>
+<text x="24.0" y="483.0" font-size="11" fill="#c3c2b7" text-anchor="start">tok/s = completion tokens per wall second; C8 = 8 concurrent streams; cards thinking OFF, context 32768, greedy</text>
+<text x="24.0" y="500.0" font-size="11" fill="#c3c2b7" text-anchor="start">Sources, bench/receipts/2026-10-24/ (home: release build 73f7a9d; cloud: main 4681d8b); one scale for all panels:</text>
+<text x="36.0" y="517.0" font-size="10.5" fill="#c3c2b7" text-anchor="start">2026-10-24_1444_qwen3.8-flash-next-nvfp4_local-1spark_73f7a9d-thinking-off</text>
+<text x="36.0" y="532.0" font-size="10.5" fill="#c3c2b7" text-anchor="start">2026-10-24_1438_qwen3.8-flash-next-nvfp4_local-1spark_73f7a9d-drafting-on-thinking-off</text>
+<text x="36.0" y="547.0" font-size="10.5" fill="#c3c2b7" text-anchor="start">2026-10-24_1046_qwen3.8-flash-next-nvfp4_local-1spark_4681d8b-drafting-off-thinking-off</text>
+<text x="36.0" y="562.0" font-size="10.5" fill="#c3c2b7" text-anchor="start">2026-10-24_1042_qwen3.8-flash-next-nvfp4_local-cloud-1vm-drafting-timing-not-a-card</text>
+<text x="36.0" y="577.0" font-size="10.5" fill="#c3c2b7" text-anchor="start">2026-10-24_1006_qwen3.8-flash-next-nvfp4_local-2spark_4681d8b-drafting-off-thinking-off</text>
+<text x="36.0" y="592.0" font-size="10.5" fill="#c3c2b7" text-anchor="start">2026-10-24_1114_qwen3.8-flash-next-nvfp4_local-cloud-2spark-drafting-on-timing-not-a-card</text>
+</svg>

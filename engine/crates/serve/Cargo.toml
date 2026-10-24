@@ -1,0 +1,27 @@
+[package]
+name = "spark-serve"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/wappy-x/vade"
+rust-version = "1.99"
+
+[features]
+default = ["flash-routing-per-row"]
+flash-routing-per-row = ["spark-engine/flash-routing-per-row"]
+
+[dependencies]
+engine-model = { path = "../model" }
+engine-tokenizer = { path = "../tokenizer" }
+spark-engine = { path = "../engine", default-features = false }
+spark-gpu-probe = { path = "../gpu" }
+
+[build-dependencies]
+engine-model = { path = "../model" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+spark-seqpar = { path = "../seqpar", default-features = false }
+
+[lints.rust]
+unsafe_code = "deny"

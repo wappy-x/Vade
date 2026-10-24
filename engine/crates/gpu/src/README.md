@@ -1,0 +1,28 @@
+# engine/crates/gpu/src
+
+**The Rust source of the `spark-gpu-probe` crate.**
+
+| File | What it does (from its own summary comment) |
+| --- | --- |
+| [`backend.rs`](backend.rs) | Scoped GB10 backend. |
+| [`batch.rs`](batch.rs) | Batched forward launches; weight loading remains in backend.rs. |
+| [`driver.rs`](driver.rs) | Minimal, manually declared NVIDIA CUDA Driver API ABI (not CUDA Runtime API). |
+| [`fp4.rs`](fp4.rs) | Explicit W4A16 dispatch; the default FP8 path never selects these kernels. |
+| [`fp4_abi.rs`](fp4_abi.rs) | Opt-in NVFP4 weights with BF16 operands. |
+| [`fp8.rs`](fp8.rs) | Resident E4M3 projections use checkpoint-declared dynamic W8A8 math. |
+| [`fp8_abi.rs`](fp8_abi.rs) | No summary comment yet; read the file. |
+| [`gdn_params.rs`](gdn_params.rs) | Shared host/NVPTX row descriptor for canonical cached recurrence. |
+| [`lib.rs`](lib.rs) | GB10 CUDA driver ownership, packed-weight loading and kernel dispatch. |
+| [`load.rs`](load.rs) | Batched shard loading. |
+| [`moe.rs`](moe.rs) | Device-resident expert selection over the model's existing weight arena. |
+| [`multi.rs`](multi.rs) | Arena row views and queued reductions for independent-session batches. |
+| [`projection_params.rs`](projection_params.rs) | Shared host/NVPTX ABI for independent BF16 decode projections. |
+| [`segments.rs`](segments.rs) | Fixed virtual KV addresses, append-only physical pages and shared prefixes. |
+| [`teardown.rs`](teardown.rs) | Serving processes bound fatal cleanup even when the driver stops responding. |
+| [`bin/`](bin/README.md) | Folder: see its README. |
+
+**Why a folder:** Cargo looks for a crate's code in `src/`.
+
+**How it fits:** see the [`spark-gpu-probe` README](../README.md) for what the crate does and how it connects to the rest.
+
+**Back:** [Up one folder](../README.md) · **Docs:** [index](../../../../docs/README.md)

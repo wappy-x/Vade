@@ -1,0 +1,749 @@
+//! Local, first-party gateway conformance fixtures.
+use super::*;
+use std::sync::{Mutex, mpsc};
+
+fn receive(reader: &mut BufReader<DeadlineStream<'_>>) -> (transport::Head, Vec<u8>) {
+    let head = transport::read_head(reader).unwrap();
+    let mut body = BodyReader::new(reader, &head, true, json::MAX_INPUT_BYTES).unwrap();
+    let mut bytes = Vec::new();
+    body.read_to_end(&mut bytes).unwrap();
+    (head, bytes)
+}
+
+// Exercise the plain relay, standalone relay, and opt-in standalone policies.
+fn call_gateway(
+    endpoint: Endpoint, lane: u8, method: &str, path: &str, payload: &[u8], record_dir: Option<String>,
+) -> (transport::Head, Vec<u8>) {
+    let gateway = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = gateway.local_addr().unwrap();
+    let relay = thread::spawn(move || {
+        let socket = gateway.accept().unwrap().0;
+        let result = if lane == 0 { handle(socket, &endpoint) } else {
+            invisible::handle_conformance(socket, &format!("http://{}", endpoint.authority), lane == 2, record_dir.as_deref())
+        };
+        match result {
+            Ok(()) => {},
+            Err(e) if e.kind() == io::ErrorKind::ConnectionAborted => {},
+            Err(e) => panic!("relay failed: {e}"),
+        }
+    });
+    let mut socket = DeadlineStream::new(TcpStream::connect(address).unwrap(), None).unwrap();
+    write!(socket, "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", payload.len()).unwrap();
+    socket.write_all(payload).unwrap();
+    let mut reader = BufReader::new(socket);
+    let head = transport::read_head(&mut reader).unwrap();
+    let mut body = BodyReader::new(reader, &head, false, transport::MAX_BODY).unwrap();
+    let mut bytes = Vec::new();
+    body.read_to_end(&mut bytes).unwrap();
+    relay.join().unwrap();
+    (head, bytes)
+}
+
+#[test]
+fn identical_unsampled_requests_forward_byte_identical_bodies_on_both_paths() {
+    for lane in 0..3 {
+        for path in ["/v1/completions", "/completions", "/v1/chat/completions", "/chat/completions", "/v1/responses?client=1", "/responses", "/v1/messages"] {
+            let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint = Endpoint::parse(&format!("http://{}", upstream.local_addr().unwrap())).unwrap();
+            let server = thread::spawn(move || {
+                let mut bodies = Vec::new();
+                for _ in 0..2 {
+                    let mut reader = BufReader::new(DeadlineStream::new(upstream.accept().unwrap().0, None).unwrap());
+                    bodies.push(receive(&mut reader).1);
+                    reader.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+                }
+                assert_eq!(bodies[0], bodies[1]);
+                let body = json::view(std::str::from_utf8(&bodies[0]).unwrap()).unwrap();
+                assert_eq!(body.get("temperature").unwrap().raw(), "0");
+                assert_eq!(body.get("seed").unwrap().raw(), "20260905");
+                assert_eq!(body.get("top_p").unwrap().raw(), "1.0");
+                assert_eq!(body.get("messages").unwrap().raw(), r#"[{"role":"user", "content":"exact\u0020雪"}]"#);
+                assert_eq!(body.get("extension").unwrap().raw(), "1.20e0");
+            });
+            let payload = r#"{ "messages":[{"role":"user", "content":"exact\u0020雪"}], "extension":1.20e0 }"#.as_bytes();
+            for _ in 0..2 {
+                assert!(call_gateway(endpoint.clone(), lane, "POST", path, payload, None).0.first.starts_with("HTTP/1.1 200 "));
+            }
+            server.join().unwrap();
+        }
+    }
+}
+
+#[test]
+fn capabilities_advertise_exact_sampling_defaults_on_both_paths() {
+    for lane in 0..3 {
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = Endpoint::parse(&format!("http://{}", upstream.local_addr().unwrap())).unwrap();
+        let payload = include_bytes!("../tests/fixtures/engine-capabilities-v1.json");
+        let server = thread::spawn(move || {
+            let mut reader = BufReader::new(DeadlineStream::new(upstream.accept().unwrap().0, None).unwrap());
+            assert!(receive(&mut reader).1.is_empty());
+            write!(reader.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", payload.len()).unwrap();
+            reader.get_mut().write_all(payload).unwrap();
+        });
+        let (head, bytes) = call_gateway(endpoint, lane, "GET", "/v1/capabilities?client=1", b"", None);
+        assert_eq!(head.get("x-vade-sampling-defaults"), Some(sampling::DEFAULTS_JSON));
+        assert_eq!(head.get("x-vade-sampling-defaults-when"), Some("no sampling fields present; otherwise unchanged (engine defaults)"));
+        assert_eq!(head.get("x-vade-sampling-fields"), Some(sampling::SAMPLING_FIELDS));
+        assert_eq!(bytes, payload);
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn recorded_defaults_replay_the_effective_upstream_body() {
+    let dir = std::env::temp_dir().join(format!("vade-replay-{}-{}", std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", upstream.local_addr().unwrap());
+    let endpoint = Endpoint::parse(&url).unwrap();
+    let server = thread::spawn(move || {
+        let mut bodies = Vec::new();
+        for _ in 0..2 {
+            let mut reader = BufReader::new(DeadlineStream::new(upstream.accept().unwrap().0, None).unwrap());
+            bodies.push(receive(&mut reader).1);
+            reader.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+        }
+        assert_eq!(bodies[0], bodies[1]);
+        bodies.remove(0)
+    });
+    let original = br#"{"input":"exact"}"#;
+    call_gateway(endpoint, 2, "POST", "/v1/responses", original, Some(dir.to_str().unwrap().into()));
+    let folder = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+    assert_eq!(std::fs::read(folder.join("request.body")).unwrap(), original);
+    let effective = std::fs::read(folder.join("upstream-request.body")).unwrap();
+    let value = json::view(std::str::from_utf8(&effective).unwrap()).unwrap();
+    assert_eq!(value.get("seed").unwrap().raw(), "20260905");
+    assert_eq!(value.get("temperature").unwrap().raw(), "0");
+    assert_eq!(value.get("top_p").unwrap().raw(), "1.0");
+    invisible::cli(vec!["replay".into(), dir.to_str().unwrap().into(), "--upstream".into(), url].into_iter()).unwrap();
+    assert_eq!(server.join().unwrap(), effective);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn body_limits_reject_declared_and_cumulative_overflow_without_truncation() {
+    for limit in [json::MAX_INPUT_BYTES, transport::MAX_BODY] {
+        let head = transport::Head { first: String::new(), fields: vec![("content-length".into(), limit.to_string())] };
+        assert!(BodyReader::new(io::Cursor::new(b""), &head, true, limit).is_ok());
+        let over = transport::Head { fields: vec![("content-length".into(), (limit + 1).to_string())], ..head };
+        let error = BodyReader::new(io::Cursor::new(b""), &over, true, limit).err().unwrap();
+        assert!(transport::body_limit_exceeded(&error));
+        assert_eq!(request_body_error(&error).0, 413);
+        let overflow = transport::Head { first: String::new(), fields: vec![("content-length".into(), "9".repeat(100))] };
+        assert!(transport::body_limit_exceeded(&BodyReader::new(io::Cursor::new(b""), &overflow, true, limit).err().unwrap()));
+        let head = transport::Head { first: String::new(), fields: vec![("transfer-encoding".into(), "chunked".into())] };
+        for wire in [format!("{:x}\r\n", limit + 1), format!("1\r\nx\r\n{limit:x}\r\n"), format!("{}\r\n", "f".repeat(100))] {
+            let mut body = BodyReader::new(io::Cursor::new(wire), &head, true, limit).unwrap();
+            let mut bytes = Vec::new();
+            assert!(transport::body_limit_exceeded(&body.read_to_end(&mut bytes).unwrap_err()));
+            assert!(bytes.len() <= 1);
+        }
+    }
+    assert_eq!(json::MAX_INPUT_BYTES, 8 * 1024 * 1024);
+    assert_eq!(transport::MAX_BODY, 64 * 1024 * 1024);
+}
+
+#[test]
+fn oversized_bodies_return_413_on_every_route_without_upstream_dispatch() {
+    for lane in 0..4 {
+        let mut routes = vec![
+            ("POST", "/v1/completions"), ("POST", "/completions"),
+            ("POST", "/v1/chat/completions"), ("POST", "/chat/completions"),
+            ("POST", "/v1/responses"), ("POST", "/responses"),
+            ("POST", "/v1/messages?beta=true"), ("POST", "/v1/messages/count_tokens"),
+            ("POST", "/v1/admission"), ("GET", "/v1/capabilities"),
+        ];
+        if matches!(lane, 1 | 2) { routes.extend([("POST", "/custom"), ("POST", "/v1/models"), ("POST", "/messages")]); }
+        if lane == 3 { routes.push(("GET", STATS_PATH)); }
+        for (method, path) in routes {
+            for framing in [
+                format!("Content-Length: {}\r\n\r\n", json::MAX_INPUT_BYTES + 1),
+                format!("Transfer-Encoding: chunked\r\n\r\n{:x}\r\n", json::MAX_INPUT_BYTES + 1),
+                format!("Transfer-Encoding: chunked\r\n\r\n1\r\nx\r\n{:x}\r\n", json::MAX_INPUT_BYTES),
+            ] {
+                let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+                let url = format!("http://{}", upstream.local_addr().unwrap());
+                let endpoint = Endpoint::parse(&url).unwrap();
+                let gateway = TcpListener::bind("127.0.0.1:0").unwrap();
+                let address = gateway.local_addr().unwrap();
+                let relay = thread::spawn(move || {
+                    let socket = gateway.accept().unwrap().0;
+                    if lane == 0 { handle(socket, &endpoint) } else if lane == 3 {
+                        let cluster = Cluster::new(&[url], RoutingConfig::default()).unwrap();
+                        handle_target(socket, &Upstream::Cluster(cluster), None, &ConnectionPool::default(), &Access::default())
+                    } else {
+                        invisible::handle_conformance(socket, &url, lane == 2, None)
+                    }.unwrap();
+                });
+                let mut socket = DeadlineStream::new(TcpStream::connect(address).unwrap(), None).unwrap();
+                write!(socket, "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n{framing}").unwrap();
+                let mut reader = BufReader::new(socket);
+                let head = transport::read_head(&mut reader).unwrap();
+                assert!(head.first.starts_with("HTTP/1.1 413 "), "{lane} {path}: {}", head.first);
+                let mut body = BodyReader::new(reader, &head, false, 8192).unwrap();
+                let mut bytes = String::new();
+                body.read_to_string(&mut bytes).unwrap();
+                assert!(bytes.contains("8388608 byte limit"));
+                let value = json::view(&bytes).unwrap();
+                assert!(value.get("error").unwrap().get("message").is_some());
+                if path.starts_with("/v1/messages") || path == "/messages" {
+                    assert_eq!(value.get("type").unwrap().as_str().as_deref(), Some("error"));
+                    assert_eq!(value.get("error").unwrap().get("type").unwrap().as_str().as_deref(), Some("request_too_large"));
+                }
+                relay.join().unwrap();
+                upstream.set_nonblocking(true).unwrap();
+                assert_eq!(upstream.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+            }
+        }
+    }
+}
+
+#[test]
+fn full_size_requests_still_forward_all_bytes_and_sampling_defaults() {
+    for lane in 0..3 {
+        let mut original = br#"{"input":""#.to_vec();
+        original.resize(json::MAX_INPUT_BYTES - 2, b'x');
+        original.extend_from_slice(b"\"}");
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = Endpoint::parse(&format!("http://{}", upstream.local_addr().unwrap())).unwrap();
+        let expected = original.clone();
+        let server = thread::spawn(move || {
+            let mut reader = BufReader::new(DeadlineStream::new(upstream.accept().unwrap().0, None).unwrap());
+            let head = transport::read_head(&mut reader).unwrap();
+            let mut input = BodyReader::new(reader, &head, true, transport::MAX_BODY).unwrap();
+            let mut bytes = Vec::new();
+            input.read_to_end(&mut bytes).unwrap();
+            assert!(bytes.starts_with(&expected[..expected.len() - 1]));
+            let suffix = &bytes[expected.len() - 1..];
+            if lane == 2 {
+                let object = format!("{{{}", std::str::from_utf8(&suffix[1..]).unwrap());
+                let fields = json::view(&object).unwrap();
+                assert!(fields.get("prompt_cache_key").unwrap().as_str().unwrap().starts_with("vade-"));
+                assert_eq!(fields.get("cache").unwrap().raw(), "true");
+                assert_eq!(fields.get("temperature").unwrap().raw(), "0");
+                assert_eq!(fields.get("seed").unwrap().raw(), "20260905");
+                assert_eq!(fields.get("top_p").unwrap().raw(), "1.0");
+            } else {
+                assert_eq!(suffix, br#","temperature":0,"seed":20260905,"top_p":1.0,"top_k":0,"repetition_penalty":1.0,"presence_penalty":0.0,"frequency_penalty":0.0}"#);
+            }
+            input.reader.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+        });
+        assert!(call_gateway(endpoint, lane, "POST", "/v1/responses", &original, None).0.first.starts_with("HTTP/1.1 200 "));
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn backpressure_stops_upstream_reads_and_failed_write_never_completes_stream() {
+    struct Body {
+        data: Vec<u8>,
+        at: usize,
+        reads: Arc<AtomicUsize>,
+        consumed: Arc<AtomicUsize>,
+    }
+    impl Read for Body {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            let bytes = self.fill_buf()?;
+            let n = out.len().min(bytes.len());
+            out[..n].copy_from_slice(&bytes[..n]);
+            self.consume(n);
+            Ok(n)
+        }
+    }
+    impl BufRead for Body {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Ok(&self.data[self.at..(self.at + 8192).min(self.data.len())])
+        }
+        fn consume(&mut self, n: usize) {
+            self.at += n;
+            self.consumed.fetch_add(n, Ordering::SeqCst);
+        }
+    }
+    struct Writer {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        blocked: mpsc::Sender<()>,
+        resume: mpsc::Receiver<bool>,
+    }
+    impl Write for Writer {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.bytes.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.blocked.send(()).unwrap();
+            if self.resume.recv_timeout(Duration::from_secs(3)).unwrap() {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "mock downstream disconnected",
+                ))
+            }
+        }
+    }
+    let reads = Arc::new(AtomicUsize::new(0));
+    let consumed = Arc::new(AtomicUsize::new(0));
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let (blocked, waiting) = mpsc::channel();
+    let (resume, resumed) = mpsc::channel();
+    let mut body = Body {
+        data: vec![b'x'; 1024 * 1024],
+        at: 0,
+        reads: reads.clone(),
+        consumed: consumed.clone(),
+    };
+    let mut writer = Writer {
+        bytes: bytes.clone(),
+        blocked,
+        resume: resumed,
+    };
+    let relay = thread::spawn(move || relay_body(&mut body, &mut writer));
+    waiting.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    assert_eq!(consumed.load(Ordering::SeqCst), 0);
+    resume.send(true).unwrap();
+    waiting.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert_eq!(reads.load(Ordering::SeqCst), 2);
+    assert_eq!(consumed.load(Ordering::SeqCst), 8192);
+    resume.send(false).unwrap();
+    assert_eq!(
+        relay.join().unwrap().unwrap_err().kind(),
+        io::ErrorKind::BrokenPipe
+    );
+    assert_eq!(reads.load(Ordering::SeqCst), 2);
+    assert!(!bytes.lock().unwrap().ends_with(b"0\r\n\r\n"));
+}
+
+#[test]
+fn opaque_contract_routes_unknown_fields_and_wrong_dialect_errors() {
+    let cases: Vec<(&str, &str, &[u8], u16, &str, &[u8])> = vec![
+        ("POST", "/v1/chat/completions", br#"{"temperature":0,"seed":42,"top_p":1}"#, 200, "application/json", b"{\"choices\":[],\"complete\":true}"),
+        ("GET", "/v1/capabilities", b"", 200, "application/json", include_bytes!("../tests/fixtures/engine-capabilities-v1.json")),
+        ("POST", "/v1/admission", br#"{ "contract_version":"vade.engine.v1", "endpoint":"/v1/responses", "output_tokens":17, "request":{"input":[], "future":9.00100e-3, "prompt_cache_key":"caller-affinity"} }"#, 200, "application/json", br#"{ "object":"engine.admission", "admitted":false, "future_metadata": [null, "exact\u0020"] }"#),
+        ("POST", "/v1/chat/completions", br#"{ "temperature":0,"seed":42,"top_p":1,"model":"unchanged", "input":[{"type":"future"}], "future":9007199254740993, "prompt_cache_key":"caller-only" }"#, 422, "application/json", br#"{ "error":{"message":"Responses body on chat endpoint", "vendor":42}, "future":1.00 }"#),
+        ("POST", "/responses", br#"{"temperature":0,"seed":42,"top_p":1,"model":"unchanged","messages":[],"tools":null,"opaque":{"x":-0.00e9}}"#, 400, "application/octet-stream", b"not JSON\x00\xff\nprovider refusal\r\n"),
+        // The relay does not reinterpret even an unfamiliar SSE dialect.
+        ("POST", "/chat/completions", br#"{"temperature":0,"seed":42,"top_p":1,"messages":[],"stream":true,"reasoning":{"unknown":true}}"#, 200, "text/event-stream", b": heartbeat\r\nid: opaque-7\r\nevent: vendor.unknown\r\ndata: {\"error\":true}\r\ndata: non-json payload\r\n\r\nretry: 250\n\n"),
+    ];
+    for (method, path, payload, status, kind, output) in cases {
+        let payload = payload.to_vec();
+        let output = output.to_vec();
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = Endpoint::parse(&format!(
+            "http://{}/v1/responses",
+            upstream.local_addr().unwrap()
+        ))
+        .unwrap();
+        let expected = payload.clone();
+        let reply = output.clone();
+        let server = thread::spawn(move || {
+            let (socket, _) = upstream.accept().unwrap();
+            let mut reader = BufReader::new(DeadlineStream::new(socket, None).unwrap());
+            let (head, bytes) = receive(&mut reader);
+            let route = if path.starts_with("/v1/") {
+                path.to_owned()
+            } else {
+                format!("/v1{path}")
+            };
+            assert_eq!(head.first, format!("{method} {route} HTTP/1.1"));
+            assert_eq!(
+                head.get("authorization"),
+                Some("Bearer mock-client-supplied")
+            );
+            assert_eq!(head.get("x-provider-extension"), Some("opaque"));
+            assert_eq!(bytes, expected);
+            let socket = reader.get_mut();
+            write!(socket, "HTTP/1.1 {status} Mock\r\nContent-Type: {kind}\r\nTransfer-Encoding: chunked\r\nX-Provider-Error: opaque\r\n\r\n").unwrap();
+            // Every byte can cross a transfer chunk boundary.
+            for byte in reply {
+                socket
+                    .write_all(&[b'1', b'\r', b'\n', byte, b'\r', b'\n'])
+                    .unwrap();
+            }
+            socket.write_all(b"0\r\n\r\n").unwrap();
+        });
+        let gateway = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = gateway.local_addr().unwrap();
+        let relay = thread::spawn(move || {
+            let (socket, _) = gateway.accept().unwrap();
+            handle(socket, &endpoint).unwrap();
+        });
+        let sending = TcpStream::connect(address).unwrap();
+        let mut socket = DeadlineStream::new(sending.try_clone().unwrap(), None).unwrap();
+        write!(socket, "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nContent-Type: application/json\r\nAuthorization: Bearer mock-client-supplied\r\nX-Provider-Extension: opaque\r\n\r\n", payload.len()).unwrap();
+        socket.write_all(&payload).unwrap();
+        let mut reader = BufReader::new(socket);
+        let head = transport::read_head(&mut reader).unwrap();
+        assert!(head.first.starts_with(&format!("HTTP/1.1 {status} ")));
+        assert_eq!(head.get("x-provider-error"), Some("opaque"));
+        let mut body = BodyReader::new(reader, &head, false, transport::MAX_BODY).unwrap();
+        let mut actual = Vec::new();
+        body.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, output);
+        relay.join().unwrap();
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn truncated_upstream_is_observable_as_incomplete_downstream_framing() {
+    for wire in [
+        b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\npartial".as_slice(),
+        b"HTTP/1.1 503 Error\r\nTransfer-Encoding: chunked\r\n\r\n7\r\npartial\r\n".as_slice(),
+    ] {
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint =
+            Endpoint::parse(&format!("http://{}", upstream.local_addr().unwrap())).unwrap();
+        let server = thread::spawn(move || {
+            let (socket, _) = upstream.accept().unwrap();
+            let mut reader = BufReader::new(DeadlineStream::new(socket, None).unwrap());
+            receive(&mut reader);
+            reader.get_mut().write_all(wire).unwrap();
+        });
+        let gateway = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = gateway.local_addr().unwrap();
+        let relay = thread::spawn(move || {
+            let (socket, _) = gateway.accept().unwrap();
+            assert!(handle(socket, &endpoint).is_err());
+        });
+        let mut socket = DeadlineStream::new(TcpStream::connect(address).unwrap(), None).unwrap();
+        socket
+            .write_all(
+                b"POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+            )
+            .unwrap();
+        let mut reader = BufReader::new(socket);
+        let head = transport::read_head(&mut reader).unwrap();
+        let mut body = BodyReader::new(reader, &head, false, transport::MAX_BODY).unwrap();
+        let mut actual = Vec::new();
+        assert_eq!(
+            body.read_to_end(&mut actual).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        assert_eq!(actual, b"partial");
+        relay.join().unwrap();
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn uncertain_post_on_reused_connection_is_never_replayed() {
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = Endpoint::parse(&format!("http://{}", upstream.local_addr().unwrap())).unwrap();
+    let server = thread::spawn(move || {
+        let (socket, _) = upstream.accept().unwrap();
+        let mut reader = BufReader::new(DeadlineStream::new(socket, None).unwrap());
+        for i in 0..2 {
+            let (_, bytes) = receive(&mut reader);
+            assert_eq!(bytes, br#"{"temperature":0,"seed":20260905,"top_p":1.0,"top_k":0,"repetition_penalty":1.0,"presence_penalty":0.0,"frequency_penalty":0.0}"#);
+            if i == 0 {
+                reader
+                    .get_mut()
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                    .unwrap();
+            }
+            // Second POST was completely accepted, then its outcome is lost.
+        }
+        upstream
+    });
+    let gateway = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = gateway.local_addr().unwrap();
+    let relay = thread::spawn(move || {
+        let pool = ConnectionPool::default();
+        for _ in 0..2 {
+            let (socket, _) = gateway.accept().unwrap();
+            // The client closes as soon as it has its complete reply; on a slow host that close can
+            // reach the relay before it returns, which is not a relay failure (flaky on CI otherwise).
+            match handle_pooled(socket, &endpoint, None, &pool) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::ConnectionAborted => {}
+                Err(error) => panic!("relay failed: {error}"),
+            }
+        }
+    });
+    for status in [200, 502] {
+        let mut socket = DeadlineStream::new(TcpStream::connect(address).unwrap(), None).unwrap();
+        socket
+            .write_all(
+                b"POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+            )
+            .unwrap();
+        let mut reader = BufReader::new(socket);
+        let head = transport::read_head(&mut reader).unwrap();
+        assert!(head.first.starts_with(&format!("HTTP/1.1 {status} ")));
+        let mut body = BodyReader::new(reader, &head, false, transport::MAX_BODY).unwrap();
+        let mut bytes = Vec::new();
+        body.read_to_end(&mut bytes).unwrap();
+        if status == 502 {
+            assert!(
+                String::from_utf8(bytes)
+                    .unwrap()
+                    .contains("outcome may be unknown; request was not replayed")
+            );
+        }
+    }
+    relay.join().unwrap();
+    let listener = server.join().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn downstream_disconnect_closes_active_upstream_response() {
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = Endpoint::parse(&format!("http://{}", upstream.local_addr().unwrap())).unwrap();
+    let (release, released) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (socket, _) = upstream.accept().unwrap();
+        let mut peer = socket.try_clone().unwrap();
+        let mut reader = BufReader::new(DeadlineStream::new(socket, None).unwrap());
+        receive(&mut reader);
+        // Configure before disconnect: Darwin can reject socket options after
+        // a reset. Observe closure with recv, without DeadlineStream's options.
+        peer.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        let socket = reader.get_mut();
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 67108864\r\n\r\n")
+            .unwrap();
+        socket.write_all(&[b'x'; 65536]).unwrap();
+        released.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert_eq!(
+            peer.read(&mut [0; 1]).unwrap_or_else(|e| {
+                assert_eq!(e.kind(), io::ErrorKind::ConnectionReset);
+                0
+            }),
+            0
+        );
+    });
+    let gateway = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = gateway.local_addr().unwrap();
+    let relay = thread::spawn(move || {
+        let (socket, _) = gateway.accept().unwrap();
+        assert!(handle(socket, &endpoint).is_err());
+    });
+    let mut socket = DeadlineStream::new(TcpStream::connect(address).unwrap(), None).unwrap();
+    socket
+        .write_all(b"POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}")
+        .unwrap();
+    let mut reader = BufReader::new(socket);
+    transport::read_head(&mut reader).unwrap();
+    reader.get_mut().write_all(b"POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}").unwrap();
+    reader.fill_buf().unwrap();
+    drop(reader);
+    release.send(()).unwrap();
+    relay.join().unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+fn unsupported_routes_methods_encodings_and_ambiguous_framing_are_explicit() {
+    for (request, status) in [
+        (b"GET /v1/responses HTTP/1.1\r\nHost: localhost\r\n\r\n".as_slice(), 405),
+        (b"POST /v1/embeddings HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 404),
+        (b"POST /v1/capabilities HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 405),
+        (b"GET /v1/capabilities HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 400),
+        (b"POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Encoding: gzip\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 415),
+        (b"POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Encoding: identity\r\nContent-Encoding: gzip\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 400),
+        (b"POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n{}".as_slice(), 400),
+        (b"POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 400),
+        (b"POST /v1/responses HTTP/1.1\r\nHost: hostile.invalid\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 421),
+        (b"POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nOrigin: http://hostile.invalid\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 403),
+        (b"POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nOrigin: null\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 403),
+        (b"POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nOrigin: http://localhost\r\nOrigin: http://localhost\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 400),
+        (b"POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 415),
+        (b"POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 415),
+        (b"POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 9\r\n\r\n{\"a\":1}{}".as_slice(), 400),
+        (b"POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"a\":1,\"a\":2}".as_slice(), 400),
+        (b"POST /v1/responses HTTP/1.1\r\nHost: localhost:1\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 421),
+        (b"POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n[]".as_slice(), 400),
+        (b"POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1\r\n\r\n\xff".as_slice(), 400),
+    ] {
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = Endpoint::parse(&format!("http://{}", upstream.local_addr().unwrap())).unwrap();
+        let gateway = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = gateway.local_addr().unwrap();
+        let relay = thread::spawn(move || { let (socket, _) = gateway.accept().unwrap(); handle(socket, &endpoint).unwrap(); });
+        let mut socket = DeadlineStream::new(TcpStream::connect(address).unwrap(), None).unwrap();
+        socket.write_all(request).unwrap();
+        let mut reader = BufReader::new(socket);
+        let head = transport::read_head(&mut reader).unwrap();
+        assert!(head.first.starts_with(&format!("HTTP/1.1 {status} ")));
+        relay.join().unwrap();
+        upstream.set_nonblocking(true).unwrap();
+        assert_eq!(upstream.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    }
+}
+
+#[test]
+fn explicit_sampling_bodies_are_byte_identical_in_plain_dispatch_preparation() {
+    let upstream = Upstream::Single(Endpoint::parse("http://127.0.0.1:1").unwrap());
+    let head = transport::Head {
+        first: String::new(),
+        fields: Vec::new(),
+    };
+    for path in [
+        "/v1/completions",
+        "/completions",
+        "/v1/chat/completions",
+        "/chat/completions",
+        "/v1/responses",
+        "/responses",
+        "/v1/messages",
+    ] {
+        for &(field, explicit) in sampling::EXPLICIT_SAMPLING_EXAMPLES {
+            let original = format!(r#" {{ "{field}":{explicit}, "extension":1.20e0 }} "#);
+            let (lease, effective) =
+                prepare_dispatch(&upstream, "POST", path, None, &head, original.as_bytes())
+                    .ok()
+                    .unwrap();
+            assert!(lease.is_none());
+            assert_eq!(effective.as_ref(), original.as_bytes(), "{path}: {field}");
+        }
+        let (_, effective) = prepare_dispatch(&upstream, "POST", path, None, &head, b"{}")
+            .ok()
+            .unwrap();
+        assert_eq!(effective.as_ref(), sampling::DEFAULTS_JSON.as_bytes());
+    }
+}
+
+#[test]
+fn individually_explicit_sampling_bodies_forward_unchanged_on_both_paths() {
+    for lane in 0..3 {
+        for path in ["/v1/completions", "/completions", "/v1/chat/completions", "/v1/responses", "/v1/messages"] {
+            for &(field, explicit) in sampling::EXPLICIT_SAMPLING_EXAMPLES {
+                let payload = format!(r#" {{ "{field}":{explicit}, "prompt_cache_key":"client", "cache":false, "extension":1.20e0 }} "#).into_bytes();
+                let expected = payload.clone();
+                let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+                let endpoint =
+                    Endpoint::parse(&format!("http://{}", upstream.local_addr().unwrap())).unwrap();
+                let server = thread::spawn(move || {
+                    let mut reader = BufReader::new(
+                        DeadlineStream::new(upstream.accept().unwrap().0, None).unwrap(),
+                    );
+                    assert_eq!(receive(&mut reader).1, expected);
+                    reader
+                        .get_mut()
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                        )
+                        .unwrap();
+                });
+                assert!(
+                    call_gateway(endpoint, lane, "POST", path, &payload, None)
+                        .0
+                        .first
+                        .starts_with("HTTP/1.1 200 ")
+                );
+                server.join().unwrap();
+            }
+        }
+    }
+}
+
+// These responses were captured from the real direct engine route. The
+// recording pins build/checkpoint/date and the independently compared live IDs.
+// This host test replays those bytes; it does not run model arithmetic.
+fn completions_recording() -> json::Value {
+    let value = json::parse(include_str!("../tests/fixtures/completions-engine-2026-10-23.json")).unwrap();
+    assert_eq!(value.get("schema").unwrap().as_str(), Some("vade.completions.recording.v1"));
+    assert_eq!(value.get("engine_sha").unwrap().as_str().unwrap().len(), 40);
+    assert_eq!(value.get("checkpoint").unwrap().get("hash_state").unwrap().as_str(), Some("ready"));
+    value
+}
+fn completion_ids(body: &str) -> Vec<u32> {
+    body.lines().filter_map(|line| line.strip_prefix("data: ")).filter(|line| *line != "[DONE]")
+        .flat_map(|line| {
+            let value = json::parse(line).unwrap();
+            value.get("choices").unwrap().as_array().unwrap().iter()
+                .filter_map(|choice| choice.get("token_id"))
+                .map(|id| json::stringify(id).unwrap().parse().unwrap()).collect::<Vec<_>>()
+        }).collect()
+}
+
+#[test]
+fn recorded_engine_completions_pass_through_both_gateways_exactly() {
+    let recording = completions_recording();
+    for case in recording.get("cases").unwrap().as_array().unwrap() {
+        let ids: Vec<u32> = case.get("direct_ids").unwrap().as_array().unwrap().iter()
+            .map(|id| json::stringify(id).unwrap().parse().unwrap()).collect();
+        assert_eq!(ids.len(), 32);
+        assert_eq!(completion_ids(case.get("direct_sse").unwrap().as_str().unwrap()), ids);
+        for name in ["direct-repeat_ids", "gateway_ids", "gateway-alias_ids"] {
+            assert_eq!(case.get("live_comparisons").unwrap().get(name), case.get("direct_ids"));
+        }
+        for lane in 0..3 {
+            for path in ["/v1/completions?client=1", "/completions?client=1"] {
+                for stream in [false, true] {
+                    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+                    let endpoint = Endpoint::parse(&format!("http://{}/v1/chat/completions", upstream.local_addr().unwrap())).unwrap();
+                    let payload = case.get(if stream { "stream_request" } else { "nonstream_request" }).unwrap().as_str().unwrap().as_bytes().to_vec();
+                    let expected = case.get(if stream { "direct_sse" } else { "direct_json" }).unwrap().as_str().unwrap().as_bytes().to_vec();
+                    let original = payload.clone(); let reply = expected.clone();
+                    let defaults = case.get("name").unwrap().as_str() == Some("no-fields");
+                    let server = thread::spawn(move || {
+                        let mut reader = BufReader::new(DeadlineStream::new(upstream.accept().unwrap().0, None).unwrap());
+                        let (head, body) = receive(&mut reader);
+                        assert_eq!(head.first, "POST /v1/completions?client=1 HTTP/1.1");
+                        if defaults {
+                            let original = std::str::from_utf8(&original).unwrap();
+                            let end = original.rfind('}').unwrap();
+                            let effective = format!("{},{}{}", &original[..end],
+                                &sampling::DEFAULTS_JSON[1..sampling::DEFAULTS_JSON.len()-1], &original[end..]);
+                            assert_eq!(body, effective.as_bytes());
+                        } else { assert_eq!(body, original); }
+                        write!(reader.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            if stream { "text/event-stream" } else { "application/json" }, reply.len()).unwrap();
+                        reader.get_mut().write_all(&reply).unwrap();
+                    });
+                    let (head, forwarded) = call_gateway(endpoint, lane, "POST", path, &payload, None);
+                    assert!(head.first.starts_with("HTTP/1.1 200 "));
+                    assert_eq!(forwarded, expected, "lane={lane} path={path} stream={stream}");
+                    if stream { assert_eq!(completion_ids(std::str::from_utf8(&forwarded).unwrap()), ids); }
+                    server.join().unwrap();
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn opaque_completions_sse_survives_bytewise_http_chunks_on_both_gateways() {
+    // This intentionally includes unfamiliar events, multiline non-JSON data,
+    // CRLF, Unicode and an opaque token ID. Relays must not parse or repair it.
+    let recording = completions_recording();
+    let case = &recording.get("cases").unwrap().as_array().unwrap()[0];
+    let sse = format!(": heartbeat\r\nid: completion-fixture\r\nevent: vendor.unknown\r\ndata: {{\"note\":\"雪 café\",\"future\":1.00}}\r\ndata: opaque non-JSON continuation\r\n\r\nretry: 250\n\n{}",
+        case.get("direct_sse").unwrap().as_str().unwrap());
+    for lane in 0..3 {
+        for path in ["/v1/completions?client=1", "/completions?client=1"] {
+            let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint = Endpoint::parse(&format!("http://{}/v1/responses", upstream.local_addr().unwrap())).unwrap();
+            let payload = br#"{ "model":"mock", "prompt":"exact\u0020", "stream":true, "temperature":0, "cache":false, "prompt_cache_key":"caller", "future":9007199254740993 }"#;
+            let reply = sse.clone();
+            let server = thread::spawn(move || {
+                let mut reader = BufReader::new(DeadlineStream::new(upstream.accept().unwrap().0, None).unwrap());
+                let (head, body) = receive(&mut reader);
+                let routed = "/v1/completions?client=1";
+                assert_eq!(head.first, format!("POST {routed} HTTP/1.1"));
+                assert_eq!(body, payload);
+                reader.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nX-Provider-Extension: opaque\r\nConnection: close\r\n\r\n").unwrap();
+                for byte in reply.as_bytes() {
+                    // HTTP chunks split every multibyte character and frame.
+                    reader.get_mut().write_all(&[b'1', b'\r', b'\n', *byte, b'\r', b'\n']).unwrap();
+                }
+                reader.get_mut().write_all(b"0\r\n\r\n").unwrap();
+            });
+            let (head, body) = call_gateway(endpoint, lane, "POST", path, payload, None);
+            assert!(head.first.starts_with("HTTP/1.1 200 "));
+            assert_eq!(head.get("x-provider-extension"), Some("opaque"));
+            assert_eq!(head.get("content-type"), Some("text/event-stream"));
+            assert_eq!(body, sse.as_bytes(), "lane={lane} path={path}");
+            server.join().unwrap();
+        }
+    }
+}

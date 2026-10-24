@@ -1,0 +1,108 @@
+Vade
+Copyright 2026 the Vade authors
+
+The Vade engine (engine/), harness (harness/) and CLI (cli/) are licensed
+under the Apache License, Version 2.0. See LICENSE. Third-party files
+retain the licenses listed below.
+
+The harness includes no third-party code. Its sources studied are listed
+in harness/CREDITS-NOTES.md.
+
+Third-party material included in this repository
+------------------------------------------------
+
+Paths in the numbered inventory below are relative to engine/.
+The same inventory is maintained in engine/NOTICE.
+
+1. Qwen3-8B configuration, weight index and chat template
+   By:       Alibaba Cloud (Qwen team)
+   License:  Apache License 2.0
+   Files:    crates/model/evidence/qwen3-8b-config.json
+             crates/model/evidence/qwen3-8b-index.json
+             crates/tokenizer/templates/qwen3.jinja
+   Notices:  licenses/Qwen3-8B-APACHE-2.0.txt
+             crates/tokenizer/QWEN-NOTICE.txt
+
+2. Unicode character data
+   By:       Unicode, Inc.
+   License:  Unicode License V3
+   Files:    crates/tokenizer/src/unicode_data.rs (generated tables)
+   Notice:   crates/tokenizer/UNICODE-NOTICE.txt (full license text)
+
+3. Gemma 4 canonical chat template
+   By:       Google DeepMind
+   Use:      Kept as model configuration, to validate model folders
+   Files:    crates/tokenizer/templates/gemma4.jinja
+   License:  The recorded official model source identifies Apache-2.0.
+   Text:     LICENSE
+   Source:   https://huggingface.co/google/gemma-4-31B-it
+   Record:   docs/provenance.md
+
+4. Meta Llama 3.1/3.2 chat-format data (Built with Llama)
+   Files:    crates/tokenizer/templates/llama3.jinja
+             crates/tokenizer/templates/llama31.jinja
+   llama3.jinja: tokenizer_config.json from https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct
+   SHA256: 5816fce10444e03c2e9ee1ef8a4a1ea61ae7e69e438613f3b17b69d0426223a4
+   llama31.jinja: tokenizer_config.json from https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct
+   SHA256: e10ca381b1ccc5cf9db52e371f3b6651576caee0a630b452e2816b2d404d4b65
+   Llama 3.2 is licensed under the Llama 3.2 Community License, Copyright © Meta Platforms, Inc. All Rights Reserved.
+   Llama 3.1 is licensed under the Llama 3.1 Community License, Copyright © Meta Platforms, Inc. All Rights Reserved.
+   Llama 3.2 license text: licenses/Llama-3.2-COMMUNITY.txt
+   License source: https://raw.githubusercontent.com/meta-llama/llama-models/main/models/llama3_2/LICENSE
+   License SHA256: 8cc15535a8a34b41888f644b339a1a9eb428af793a4f5e24df58a3e5b1487d74
+   Llama 3.1 license text: licenses/Llama-3.1-COMMUNITY.txt
+   License source: https://raw.githubusercontent.com/meta-llama/llama-models/main/models/llama3_1/LICENSE
+   License SHA256: bf2eac60b81e5c5f779fc3b4849d3bfacfd63f97f3eb68b44e9c6868c5801712
+   These template data files are not covered by Vade's Apache-2.0 license.
+
+5. Phi-4 chat template
+   Files:    crates/tokenizer/templates/phi4.jinja
+   Source: https://huggingface.co/microsoft/phi-4 (tokenizer_config.json)
+   SHA256: fe4120415a3858b873955c92ce3a103a95bc97c2cb00b72e62659aaf0f891ee5
+   Copyright (c) Microsoft Corporation. MIT License.
+   Text:     licenses/Phi-4-MIT.txt
+   License source: https://huggingface.co/microsoft/phi-4/raw/main/LICENSE
+   License SHA256: c49419617a6070bcb197cfe272f7007fdec3e790dbb529cb995473bd69c0bd51
+
+6. Qwen3.6 chat template (test fixture)
+   Files:    crates/tokenizer/tests/qwen3.6.jinja
+   Source: https://huggingface.co/Qwen/Qwen3.6-35B-A3B (chat_template.jinja,
+           revision 995ad96eacd98c81ed38be0c5b274b04031597b0)
+   SHA256: e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259
+   By:       Alibaba Cloud (Qwen team)
+   License:  Apache License 2.0
+   Text:     licenses/Qwen3-8B-APACHE-2.0.txt
+   Notice:   crates/tokenizer/QWEN-NOTICE.txt
+
+7. Qwen3.5-122B-A10B-FP8 configuration and tensor-header fixtures
+   By:       Alibaba Cloud (Qwen team)
+   License:  Apache License 2.0
+   Files:    crates/model/tests/fixtures/qwen/Qwen3.5-122B-A10B-FP8.config.json
+             crates/model/tests/fixtures/qwen/Qwen3.5-122B-A10B-FP8.headers.json
+   Source:   https://huggingface.co/Qwen/Qwen3.5-122B-A10B-FP8
+   Changes:  Config minified without changing values; tensor headers grouped
+             by name, shape and dtype. No model weights are included.
+   Record:   crates/model/tests/fixtures/qwen/README.md; source hashes are
+             recorded in the headers fixture.
+   Text:     licenses/Qwen3-8B-APACHE-2.0.txt
+
+8. Qwen3.6-35B-A3B-FP8 configuration and tensor-header fixtures
+   By:       Alibaba Cloud (Qwen team)
+   License:  Apache License 2.0
+   Files:    crates/model/tests/fixtures/qwen/Qwen3.6-35B-A3B-FP8.config.json
+             crates/model/tests/fixtures/qwen/Qwen3.6-35B-A3B-FP8.headers.json
+   Source:   https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8
+   Changes:  Config minified without changing values; tensor headers grouped
+             by name, shape and dtype. No model weights are included.
+   Record:   crates/model/tests/fixtures/qwen/README.md; source hashes are
+             recorded in the headers fixture.
+   Text:     licenses/Qwen3-8B-APACHE-2.0.txt
+
+9. Contributor Covenant 2.1 Code of Conduct
+   By:       Contributor Covenant contributors
+   License:  Creative Commons Attribution 4.0 International (CC BY 4.0)
+   Files:    ../CODE_OF_CONDUCT.md
+   Changes:  Enforcement contact set to the maintainers via GitHub private
+             reporting for this repository.
+   Text:     licenses/Contributor-Covenant-CC-BY-4.0.txt
+   Source:   https://www.contributor-covenant.org/version/2/1/code_of_conduct.html

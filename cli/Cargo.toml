@@ -1,0 +1,18 @@
+[package]
+name = "vade-cli"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/wappy-x/vade"
+rust-version = "1.99"
+description = "A calm command line for a local Vade engine and harness"
+
+[[bin]]
+name = "vade"
+path = "src/main.rs"
+
+[dependencies]
+engine-model = { path = "../engine/crates/model" }
+engine-tokenizer = { path = "../engine/crates/tokenizer" }
+vade-bench = { path = "../engine/tools/bench" }

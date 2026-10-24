@@ -1,0 +1,4 @@
+# Repository ratchet ceilings; lower these when cargo test prints reductions.
+box_count_branches=97
+large_rs_files=3
+third_party_dependencies=0

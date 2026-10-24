@@ -1,0 +1,54 @@
+name: Release bundle
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  bundle:
+    name: Linux aarch64 launcher bundle
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --no-self-update
+          rustup target add --toolchain 1.99.0 aarch64-unknown-linux-gnu
+          rustup toolchain install nightly-2026-10-01 --profile minimal --no-self-update --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda
+          cargo +1.99.0 --version
+      - name: Build the release bundle
+        # The producer owns every build and packaging command, including the
+        # link-only CUDA stub on runners without a driver. PTX needs no GPU.
+        run: sh scripts/make-bundle.sh
+      - name: Check the archive and every manifest hash
+        run: python3 tools/check-bundle.py .local/bundles "$GITHUB_WORKSPACE" "$HOME" bundle-build.
+      - name: Attach the bundle and checksum to the tag release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          assets=(.local/bundles/vade-launch-bundle-v1-*-aarch64.tar.zst .local/bundles/SHA256SUMS)
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            # Refuse to replace assets from a previously published build.
+            gh release upload "$RELEASE_TAG" "${assets[@]}"
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" --verify-tag --generate-notes
+          fi
