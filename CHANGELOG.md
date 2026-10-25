@@ -62,6 +62,18 @@ Changes that are merged but not yet released are under Unreleased.
 - `vade test` help lists world 1, which the determinism test accepts, and
   `vade help` puts a blank line between the evaluation commands and the
   gate usage.
+- Every `vade` help page has the same layout: a summary, usage, an aligned
+  options table, examples and notes. `vade --help bench` and `vade -h bench`
+  now print the bench help, as `vade help bench` does.
+- Errors print as `error:` with what happened, then `hint:` with the next
+  step. Launch, install, up, down and chat print their steps in one aligned
+  column, and `vade status`, the bare `vade` menu and the launch plan print
+  aligned rows with the next commands. Colour appears only on a terminal;
+  `NO_COLOR` or `TERM=dumb` turns it off, and JSON output and receipts never
+  use it.
+- `vade up --dry-run` and `vade launch --dry-run` name the context and output
+  limits they would use, and whether each one is explicit, saved or the
+  default, instead of printing values such as `explicit context: None`.
 
 ### Harness
 
@@ -142,6 +154,17 @@ Changes that are merged but not yet released are under Unreleased.
 - The README and the [benchmarks page](docs/benchmarks.md) show measured
   v0.1.0 results, and the receipts behind them are published under
   [bench/receipts/2026-10-24](bench/receipts/2026-10-24/README.md).
+- The 2026-10-25 cards ran on main `6cb46bf` and `80ac2d4`. Each row names
+  its result folder; those folders are not in the repository yet.
+- The [architecture page](docs/architecture.md) follows one request from
+  the gateway through the scheduler to the model, and explains the storage
+  formats, the kernels, drafting, the layer pipeline and the prefix cache.
+- A new [examples folder](examples/README.md) has short scripts, each shown
+  with the output it printed on a Spark: curl against the OpenAI and
+  Anthropic endpoints, a standard-library Python client, Claude Code and the
+  Codex CLI pointed at Vade, a `vade bench` run that reproduces the published
+  one-Spark number, and a two-Spark launch from a controller that is a dry
+  run by default.
 - The results figure compares one Spark with two, with drafting on. In the
   2026-10-24 runs, a second Spark answered a long prompt sooner but didn't make
   a single chat write faster. Eight chats at once vary from run to run, and the
@@ -213,6 +236,9 @@ Changes that are merged but not yet released are under Unreleased.
   and the full error, plus `vade verify` output when answers are wrong.
 - The security policy explains how to report a vulnerability privately, what
   it covers, and what Vade exposes on the network by default.
+- [CONTRIBUTING](CONTRIBUTING.md) says how a pull request lands: CI, a
+  maintainer's review (requested through CODEOWNERS), the device gate for
+  engine changes, and the published update that carries it.
 - Every public item in the CLI crate and the harness library has a doc
   comment (140 harness items had none), the CLI's `main.rs` maps its
   modules by area, and rustdoc builds without warnings.

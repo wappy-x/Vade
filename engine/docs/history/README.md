@@ -16,6 +16,10 @@ how a result came about.
   and decode speed at 8,192 to 38,912 prompt tokens, with an FP32 KV cache.
   Main `67127c8`, 2 October 2026. Current information:
   [Benchmarks](../benchmarks.md), [Validation](../validation.md).
+- **[Qwen3-8B integration record](integration-2026-10-02.md).** The gates,
+  memory and speed of one past merge of two branches, with an FP32 KV cache.
+  2 October 2026. Current information: [Benchmarks](../benchmarks.md),
+  [Validation](../validation.md).
 
 **Both measurement pages ran with an FP32 KV cache by default.** BF16 was
 only an option then. Current main keeps it in BF16, a 16-bit format, so their

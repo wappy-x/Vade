@@ -176,6 +176,22 @@ from `vade verify` and `vade test determinism`.
 If users would notice the change, add one plain line about it to the
 Unreleased section of [CHANGELOG.md](CHANGELOG.md).
 
+### How a pull request lands
+
+1. **CI passes.** [CI](.github/workflows/ci.yml) runs the host checks above
+   on every pull request against `main`. A red run blocks the change.
+2. **A maintainer reviews it.** [CODEOWNERS](.github/CODEOWNERS) requests
+   the review automatically. Expect questions about exactness, the house
+   rules and anything the PR says it didn't check.
+3. **Engine changes pass the device gate.** A change to engine arithmetic,
+   scheduling, caching or transport also needs the runs on real Sparks
+   described under [exactness](#exactness-and-evidence) before it can land.
+4. **The maintainer applies it.** `main` here is published from the
+   maintainers' development tree, one commit per update, so the merge
+   button isn't used. The maintainer applies the accepted change there, CI
+   runs again on the result, and the change reaches `main` in the next
+   published update. The PR is then closed, not merged.
+
 If you haven't measured performance, don't make a speed claim. A performance
 claim needs reproducible receipts that record:
 

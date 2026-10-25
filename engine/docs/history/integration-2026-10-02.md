@@ -3,8 +3,8 @@
 > **Historical record, 2026-10-02.** This page records one past integration.
 > Its launch settings, FP32 KV cache figures and older benchmark client are not
 > today's serving defaults, and the page is not a scoreboard against other
-> engines. For current results, see [Benchmarks](docs/benchmarks.md) and
-> [Validation](docs/validation.md).
+> engines. For current results, see [Benchmarks](../benchmarks.md) and
+> [Validation](../validation.md).
 
 ## In short
 
@@ -148,8 +148,8 @@ copy of the weights. No distributed speed-up is claimed.
 ## Reproduce
 
 This is a historical record, not a current procedure. To check today's
-build, follow [Validation](docs/validation.md) and
-[Benchmarks](docs/benchmarks.md), which have numbered steps and a block to
+build, follow [Validation](../validation.md) and
+[Benchmarks](../benchmarks.md), which have numbered steps and a block to
 give your coding agent.
 
 These are the commands used at the time. Set `P` to the built kernel file,
