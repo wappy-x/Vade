@@ -476,6 +476,20 @@ about five minutes, not counting the first JIT compile. The main options:
 For GPU identity testing, pass the same PTX to both arms and repeat in three
 separate processes.
 
+The `fp8_w2_*` cases cover grouped FP8 decode gate and down projections.
+The `fp8_prompt_gate-*` cases cover prompt row boundaries, rank-sliced widths
+and larger synthetic routes. Their larger route counts are derived from an
+FP4 capture; they are not a measured FP8 prompt distribution. Inputs and
+weights vary by row and scale block. Each run checks every owned output and
+poisoned padding or guard byte before timing; the reported floor counts
+unique bytes and is a bandwidth bound, not a compute-throughput estimate.
+
+For a paired gate/up candidate that halves the prompt gate grid, set
+`KBENCH_FP8_PAIRED=x` (or `1`) for X, `a` for A, or `both` for both arms.
+Leave it unset for the ordinary grid. Decode grids stay unchanged. Receipts
+record both effective grids and the pairing flags so reversed A/X runs can
+be reproduced.
+
 ### What the cases cover
 
 - The dense attention projections (Q and O) and the GDN input and output

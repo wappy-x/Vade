@@ -29,6 +29,7 @@ mod prompt;
 mod frontend;
 #[path = "kernel_fp4_prompt.rs"]
 mod fp4_prompt;
+#[path = "kernel_fp8.rs"] pub(super) mod fp8group;
 #[path = "kernel_mxgroup.rs"]
 mod mxgroup;
 use mxgroup::{all_mx, group_mx, mxgroup_fixture, mxgroup_weight, mxrows_a, mxrows_entries, mxrows_shared, mxrows_x};
@@ -445,6 +446,7 @@ fn fixture(g: &mut Gpu, c: &Case, order: bool) -> Result<Fixture> {
     if routed(c.kind) {
         return routed_fixture(g, c);
     }
+    if matches!(c.kind,71..=73) { return fp8group::fixture(g,c); }
     let (m, n, k) = (c.m, c.n, c.k);
     if c.kind == 8 {
         return group_fixture(g, c);
@@ -1081,6 +1083,7 @@ fn launch(g: &Gpu, f: H, merge: H, c: &Case, v: &mut Fixture, i: usize, arm: usi
         if arm == 1 && (routed(c.kind) || matches!(c.kind, 5 | 6)) {
             if let Some(x) = std::env::var("KBENCH_XGRIDX").ok().and_then(|x| x.parse().ok()) { grid[0] = x; }
         }
+        if fp8group::paired(c,arm) { grid[0]/=2; }
         g.launch(f, grid, threads.unwrap_or(v.threads), shared.unwrap_or(v.shared), &mut [ptr(p)])
     } else {
         v.rows.weight = v.ring[i];
@@ -1158,6 +1161,7 @@ fn sample(graph: &Graph<'_>, times: u64) -> Result<(f64, f64)> {
     Ok((ms as f64 * 1000., (b - a) as f64 / 1000.))
 }
 fn output_hash(g: &Gpu, v: &Fixture, c: &Case) -> Result<String> {
+    if matches!(c.kind,71..=73) { return fp8group::output_hash(g,v); }
     if prompt::hcup_a16(c) {let raw=g.read(v.out,v.out_bytes)?;return Ok(sha256::digest(&prompt::hc_a16_logical_rows(&raw,c.m,c.n)?));}
     if v.down_slots > 0 {
         let all = g.read(v.out, v.out_bytes)?;
@@ -1201,7 +1205,7 @@ pub(super) fn run(o: &Options, cases: &[Case]) -> Result<()> {
     let a = std::fs::read(&o.a).map_err(|e| e.to_string())?;
     let x = std::fs::read(&o.x).map_err(|e| e.to_string())?;
     let hashes = [sha256::digest(&a), sha256::digest(&x)];
-    let source = sha256::digest(&[include_bytes!("kernel_bench.rs").as_slice(), include_bytes!("kernel_prompt.rs").as_slice(), include_bytes!("kernel_frontend.rs").as_slice(), include_bytes!("kernel_qsa.rs").as_slice(), include_bytes!("kernel_cuda.rs").as_slice(), include_bytes!("kernel_gdn.rs").as_slice(), include_bytes!("kernel_floor.rs").as_slice(),include_bytes!("kernel_routed.rs").as_slice(),include_bytes!("kernel_fp4_prompt.rs").as_slice()].concat());
+    let source = sha256::digest(&[include_bytes!("kernel_bench.rs").as_slice(), include_bytes!("kernel_prompt.rs").as_slice(), include_bytes!("kernel_frontend.rs").as_slice(), include_bytes!("kernel_qsa.rs").as_slice(), include_bytes!("kernel_cuda.rs").as_slice(), include_bytes!("kernel_gdn.rs").as_slice(), include_bytes!("kernel_floor.rs").as_slice(),include_bytes!("kernel_routed.rs").as_slice(),include_bytes!("kernel_fp4_prompt.rs").as_slice(),include_bytes!("kernel_fp8.rs").as_slice()].concat());
     let mut g = Gpu::new()?;
     let modules = [g.module(&a).map_err(|e| format!("A PTX: {e}"))?, g.module(&x).map_err(|e| format!("X PTX: {e}"))?];
     let tm = g.module(TIMER.as_bytes()).map_err(|e| format!("timer PTX: {e}"))?;
@@ -1234,7 +1238,7 @@ pub(super) fn run(o: &Options, cases: &[Case]) -> Result<()> {
         // overrides X's down entry in the down and layer cases (fp4_bw_down_pdl / _x2 / _x4).
         let xover = if prompt::hcup_a16(c) {Some("flash_next_hc_up_tiled_a16".into())} else if c.name.starts_with("proute-") {std::env::var("KBENCH_ROUTE_PREFILL_X").ok()} else if c.name.starts_with("hc_up_prod-") && std::env::var("KBENCH_HCUP_M32").is_ok_and(|v|v=="1") {Some("flash_next_hc_up_m32".to_string())} else if c.name.starts_with("pgprod-") { std::env::var("KBENCH_PGPROD_X").ok().filter(|x|matches!(x.as_str(),"w16"|"u32"|"plan")).map(|x|format!("flash_bf16_mma_prefill_tiled_{x}")) } else if super::fold_x(c) { Some("flash_bf16_mma_latency_fold".to_string()) } else if (c.kind == 31 || c.kind == 32) && o.order && c.m < 64 && qsa::small_x().is_some() { qsa::small_x() }
             else if c.kind == 21 || c.kind == 22 { std::env::var("KBENCH_XDOWN").ok() } else if c.kind == 27 { Some("flash_next_compact_route_ids".into()) } else if c.kind == 29 || c.kind == 28 { Some(format!("{}{}", if c.kind == 29 { "flash_next_compact_route" } else { "flash_next_route_compact1" }, if c.name.contains("pack") && c.name.contains("mask") { "_pack_mask" } else if c.name.contains("pack") { "_pack" } else if c.name.contains("mask") { "_silu_mask" } else { "_silu" })) } else if c.kind == 24 && c.name.contains("fast") { Some(if c.name.contains("silu") { "flash_moe_silu_fast" } else { "flash_moe_route_fast" }.into()) }
-            else { std::env::var("KBENCH_XKERNEL").ok().filter(|_| c.kind == 1 || (30..=32).contains(&c.kind) || c.kind == 20 || c.kind == 34 || c.kind >= 37 && c.kind <= 38) };
+            else { std::env::var("KBENCH_XKERNEL").ok().filter(|_| c.kind == 1 || (30..=32).contains(&c.kind) || c.kind == 20 || matches!(c.kind,71..=73) || c.kind == 34 || c.kind >= 37 && c.kind <= 38) };
         let xname: &str = match &xover { Some(n) => n.as_str(), None if o.order && !c.xkernel.is_empty() => c.xkernel, None => c.kernel };
         let mut rows_entries = [String::new(), String::new()]; // KBENCH_MXROWS_X: printed as "entry"
         let functions = if let Some(f) = prompt_functions {
@@ -1354,7 +1358,7 @@ pub(super) fn run(o: &Options, cases: &[Case]) -> Result<()> {
             return Err(format!("{} bytes A==X: no A={} X={}", c.name, digest[0], digest[1]));
         }
         // QSA score cases: FP64 error on sampled rows and alone == chunked bytes per arm.
-        let mut extra = String::new();
+        let mut extra = if matches!(c.kind,71..=73) {fp8group::metadata(c,&v,[0,1].map(|a|pxs[a].2.unwrap_or(v.threads)))} else {String::new()};
         if c.kind == 30 && qsa::prod_launch(c).is_none() {
             let host = v.qsa.as_ref().and_then(|q| q.host.as_ref()).ok_or("QSA host data")?;
             extra = format!(",{}", qsa::score_errors(host, qsa::MAXPOS, &outputs[0], &outputs[1]));
@@ -1422,7 +1426,7 @@ pub(super) fn run(o: &Options, cases: &[Case]) -> Result<()> {
             let mid = median(&e);
             let avg = e.iter().sum::<f64>() / e.len() as f64;
             let cv = (e.iter().map(|v| (v - avg).powi(2)).sum::<f64>() / e.len() as f64).sqrt() / avg * 100.;
-            let (stored, basis) = super::floor::account(c, arm, v.stored);
+            let (stored, basis) = if matches!(c.kind,71..=73) {(v.stored,fp8group::basis())} else {super::floor::account(c, arm, v.stored)};
             let bw = stored as f64 / mid / 1000.;
             let floor = (stored as f64 / (std::env::var("KBENCH_READ_GBPS").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(230.) * 1000.)).max(if prefill(c.kind) || (60..=69).contains(&c.kind) { v.flops as f64 / 90e6 } else { 0. });
             let pct = floor / mid * 100.;

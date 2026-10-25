@@ -3,6 +3,10 @@
 #[allow(unsafe_code)]
 #[path = "kernel_cuda.rs"]
 mod cuda;
+#[cfg(target_os = "linux")] use cuda::fp8group;
+#[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
+#[path = "kernel_fp8.rs"] mod fp8group;
 #[allow(dead_code)]
 #[path = "../../export/src/sha256.rs"]
 mod sha256;
@@ -95,7 +99,7 @@ struct Options {
     order: bool,
 }
 fn cases() -> Vec<Case> {
-    let mut out = Vec::new();
+    let mut out = fp8group::cases();
     if std::env::var("KBENCH_FRONTEND").is_ok_and(|v|v=="1") {
         for m in [1,65,2048,8191,8192] {out.push(Case {name:format!("prompt-frontend-m{m}"),kernel:"flash_next_prompt_frontend",m,n:2560,k:0,kind:70,..Default::default()});}
     }
@@ -874,6 +878,7 @@ fn run() -> Result<()> {
                 + 15
                 // mxg- at M5/M6: 4 groups x 2.
                 + 8
+                + 39 // FP8 grouped decode and prompt gate fixtures.
                 ;
             assert_eq!(cases().len(), expect);
             println!("PASS host SHA/statistics/shape self-test; GPU A==A requires --a PTX --x SAME_PTX");

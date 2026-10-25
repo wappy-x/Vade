@@ -519,16 +519,22 @@ unsafe fn grouped_project_impl<const PREFILL: bool, const GENERAL: bool>(p: crat
     if task >= *tasks as usize { return; }
     let expert = *tasks.add(1 + task * 2) as usize;
     let m = *(p.route.counts as *const u32).add(expert) as usize;
-    let tile_rows = if PREFILL && m >= 32 { 32 } else { 16 };
+    let mut tile_rows = if PREFILL && m >= 32 { 32 } else { 16 };
     // The host folds the old Z plane into X's low index: neighboring CTAs
     // visit the same expert/output weight tile. Row ownership stays unchanged.
     let planes = crate::fp8_abi::grouped_planes(p.route.tokens, PREFILL);
     let block = _block_idx_x();
     let tile = (block / planes) as usize;
-    let plane = (block % planes) as usize * tile_rows;
+    let plane_index = (block % planes) as usize;
+    let plane = plane_index * tile_rows;
     if plane >= 128 { return; }
     let mb = *tasks.add(2 + task * 2) as usize + plane;
     if mb >= m { return; }
+    if PREFILL && !down && tile_rows == 32 {
+        // Pair only complete adjacent M32 planes; retain the original tail tile.
+        if plane_index % 2 != 0 && mb + 32 <= m { return; }
+        if plane_index % 2 == 0 && mb + 64 <= m { tile_rows = 64; }
+    }
     let start = *(p.route.starts as *const u32).add(expert) as usize;
     let table = (p.weights as *const u64).add(expert * 7);
     let width = *table.add(6) as usize;
@@ -552,7 +558,10 @@ unsafe fn grouped_project_impl<const PREFILL: bool, const GENERAL: bool>(p: crat
     // Down partials stay FP32 until rank reduction, then round once to BF16.
     // Counts are device-resident. One uniform decision per CTA keeps the
     // complete tile's staging, scale loads and stores free of row guards.
-    if PREFILL && tile_rows == 32 {
+    if PREFILL && !down && tile_rows == 64 {
+        // Four canonical M16 fragments reuse one weight tile; all 64 rows are live.
+        project_tile::<64, 64, 128, true, GENERAL>(params, mb, nb, output_stride, map, output_map, shared, split_k, params.cols as usize, [0; 2]);
+    } else if PREFILL && tile_rows == 32 {
         if mb + 32 <= m {
             project_tile::<32, 64, 128, true, GENERAL>(params, mb, nb, output_stride, map, output_map, shared, split_k, params.cols as usize, [0; 2]);
         } else {
@@ -568,9 +577,10 @@ unsafe fn grouped_project_impl<const PREFILL: bool, const GENERAL: bool>(p: crat
 /// Separate prompt entry points keep the larger tile's registers out of decode.
 /// Block128, grid(20*planes,tasks,1), planes=min(ceil(tokens/16),4).
 /// Each task covers up to 128 routed rows; plane is the fastest block index.
+/// Shared33280 supports complete M64 pairs without increasing padded row work.
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn fp8_grouped_gate_prefill(p: crate::fp8_abi::GroupedParams) {
-    grouped_project::<true>(p, false, ptx::shared::<24832>());
+    grouped_project::<true>(p, false, ptx::shared::<33280>());
 }
 
 /// Block128, grid(40*planes,tasks,1); output-owned down uses 20*planes.

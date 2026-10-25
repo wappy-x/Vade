@@ -323,6 +323,9 @@ pub(crate) fn error_body(messages: bool, status: u16, message: &str) -> String {
     }
 }
 
+/// Like every whole reply below, this ends without a flush: the downstream
+/// socket is unbuffered, and a client may close on the last byte, which a
+/// checked flush would report as a failed delivery (see `relay_observed`).
 fn write_error(
     writer: &mut dyn Write,
     messages: bool,
@@ -335,8 +338,7 @@ fn write_error(
         "HTTP/1.1 {status} Error\r\nX-Vade-Gateway: v1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body
-    )?;
-    writer.flush()
+    )
 }
 
 fn reject(
@@ -621,7 +623,7 @@ fn handle_target(
                 let delay = admission_delay(refusal.head.get("retry-after"), waits)
                     .filter(|delay| admission_refusal(&bytes) && Instant::now() + *delay < limit);
                 let Some(delay) = delay else {
-                    return relay_whole(&mut reader, messages, (refusal.status, &refusal.head, &bytes), method, path, origin.as_deref());
+                    return relay_whole(reader.get_mut(), messages, (refusal.status, &refusal.head, &bytes), method, path, origin.as_deref());
                 };
                 let until = Instant::now() + delay;
                 while Instant::now() < until && !cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
@@ -629,7 +631,7 @@ fn handle_target(
                     thread::sleep(until.saturating_duration_since(Instant::now()).min(ADMISSION_POLL));
                 }
                 if Instant::now() >= limit {
-                    return relay_whole(&mut reader, messages, (refusal.status, &refusal.head, &bytes), method, path, origin.as_deref());
+                    return relay_whole(reader.get_mut(), messages, (refusal.status, &refusal.head, &bytes), method, path, origin.as_deref());
                 }
                 // Keep the refusal: if the upstream cannot be reached again, the
                 // client still gets this answer rather than a gateway error.
@@ -643,7 +645,7 @@ fn handle_target(
         // later failure leaves its outcome unknown, reported below as such.
         if let (Err(failure), Some((status, refusal, bytes))) = (&attempt, held.take()) {
             if failure.connect_failed {
-                return relay_whole(&mut reader, messages, (status, &refusal, &bytes), method, path, origin.as_deref());
+                return relay_whole(reader.get_mut(), messages, (status, &refusal, &bytes), method, path, origin.as_deref());
             }
         }
         match attempt {
@@ -682,7 +684,6 @@ fn handle_target(
     }
     headers.push_str("\r\n");
     writer.write_all(headers.as_bytes())?;
-    writer.flush()?;
     if no_body {
         if let Some(lease) = &mut lease {
             lease.finish(response.status, None);
@@ -690,6 +691,7 @@ fn handle_target(
         response.recycle();
         return Ok(());
     }
+    writer.flush()?;
     let mut usage = usage::UsageTap::new(
         response.head.get("content-type"),
         lease.is_some()
@@ -707,17 +709,15 @@ fn handle_target(
 }
 
 /// Forward an upstream reply already read in full, with its own length.
-fn relay_whole(reader: &mut BufReader<DeadlineStream<'_>>, messages: bool, (status, head, bytes): (u16, &transport::Head, &[u8]),
+fn relay_whole(writer: &mut dyn Write, messages: bool, (status, head, bytes): (u16, &transport::Head, &[u8]),
     method: &str, path: &str, origin: Option<&str>) -> io::Result<()> {
-    let writer = reader.get_mut();
     let mut headers = response_head(status, head, method, path, origin, &format!("Content-Length: {}\r\n", bytes.len()));
     if headers.len() + 2 > transport::MAX_HEADERS {
         return write_error(writer, messages, 502, "upstream response headers exceed limit");
     }
     headers.push_str("\r\n");
     writer.write_all(headers.as_bytes())?;
-    writer.write_all(bytes)?;
-    writer.flush()
+    writer.write_all(bytes)
 }
 
 /// The gateway's status line and headers for an upstream reply, without the
@@ -838,7 +838,7 @@ fn broadcast(
     if !no_body {
         writer.write_all(&body)?;
     }
-    writer.flush()
+    Ok(())
 }
 
 /// No read-ahead queue: downstream write/flush completes before the next body
@@ -1109,6 +1109,25 @@ mod tests {
         assert!(first.starts_with("HTTP/1.1 502 "), "{first}");
         assert!(String::from_utf8_lossy(&body).contains("outcome may be unknown"));
         assert_eq!(bodies.len(), 2);
+    }
+
+    /// The downstream once its client has read a whole reply and closed: the
+    /// written bytes were delivered, and a checked flush reports the close.
+    struct ClosedOnLastByte(Vec<u8>);
+    impl Write for ClosedOnLastByte {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> { self.0.extend_from_slice(bytes); Ok(bytes.len()) }
+        fn flush(&mut self) -> io::Result<()> { Err(io::Error::new(io::ErrorKind::ConnectionAborted, "downstream closed")) }
+    }
+
+    #[test]
+    fn a_client_closing_on_the_last_byte_got_a_whole_reply_not_a_failure() {
+        let mut client = ClosedOnLastByte(Vec::new());
+        write_error(&mut client, false, 502, "HTTP upstream request failed").unwrap();
+        assert!(client.0.starts_with(b"HTTP/1.1 502 ") && client.0.ends_with(b"}"));
+        let head = transport::Head { first: "HTTP/1.1 503 Mock".into(), fields: Vec::new() };
+        let mut client = ClosedOnLastByte(Vec::new());
+        relay_whole(&mut client, false, (503, &head, b"busy"), "POST", "/v1/chat/completions", None).unwrap();
+        assert!(client.0.starts_with(b"HTTP/1.1 503 ") && client.0.ends_with(b"\r\n\r\nbusy"));
     }
 
     #[test]

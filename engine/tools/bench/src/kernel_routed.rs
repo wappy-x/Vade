@@ -14,7 +14,7 @@ const C1_ROUTE: [(u32, u32); 10] =
     [(13, 1), (56, 1), (106, 1), (168, 1), (252, 1), (309, 1), (349, 1), (418, 1), (462, 1), (506, 1)];
 /// Ten distinct experts per token for c.m tokens (C1 route, or C8's deal; C5 = its
 /// first five tokens): (expert per pair, the source route).
-fn dealt_pairs(c: &Case) -> Result<(Vec<u32>, &'static [(u32, u32)])> {
+pub(super) fn dealt_pairs(c: &Case) -> Result<(Vec<u32>, &'static [(u32, u32)])> {
     let (tokens, pairs) = (c.m, c.m * 10);
     // C2..C7 = the first tokens of the C8 deal (C5: 39 distinct experts, 50 pairs).
     let (route, dealt): (&'static [(u32, u32)], usize) = match tokens {
