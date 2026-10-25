@@ -1,8 +1,8 @@
 # Other clients through the gateway
 
 This page is for when you bring your own coding client. Setup can write a
-complete dedicated home for Codex, Hermes, OpenCode and Pi, and it generates the
-configuration offline. The gateway relays the API you pick and keeps request
+complete dedicated home for Claude Code, Codex, Hermes, OpenCode and Pi, and it
+generates the configuration offline. The gateway relays the API you pick and keeps request
 bodies, tools, cache identity, response usage, SSE and errors as they are. The
 separate engine owns inference and KV caching.
 
@@ -84,6 +84,7 @@ final prompt.
 
 | Client version checked locally | Files written | Environment and normal launch arguments | API |
 | --- | --- | --- | --- |
+| Claude Code 2.1.310 | `settings.json`, `.claude.json`, `CLAUDE.md`, `launch.sh` | `CLAUDE_CONFIG_DIR` plus the gateway variables below; one-shot: `-p PROMPT --output-format json`; interactive: no extra arguments | Messages at the API root; no Anthropic account or key |
 | Codex 0.160.1 | `config.toml`, first-party `models.json`, `AGENTS.md`, `launch.sh` | `CODEX_HOME`; interactive: no extra arguments; one-shot: `exec --skip-git-repo-check --json PROMPT` | Responses HTTP/SSE; no OpenAI authentication, WebSockets or shared daemon |
 | Hermes 781334eea4b | `config.yaml`, `SOUL.md`, `launch.sh` | `HERMES_HOME`, `HERMES_WRITE_SAFE_ROOT`; one-shot: `-z PROMPT`; interactive: `chat` | Chat Completions with API streaming enabled |
 | OpenCode 1.18.18 | `opencode.json`, `AGENTS.md`, `launch.sh` | `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, private XDG state; one-shot: `run --format json PROMPT`; interactive: no extra arguments | `@ai-sdk/openai-compatible`, Chat Completions |
@@ -186,36 +187,69 @@ cargo test --offline --test passthrough_clients -- --nocapture
 cargo test --offline --lib recorded_engine_completions
 ```
 
-## Claude Code recipe (not live-qualified)
+## Claude Code
 
-With the standalone gateway running, use the `MODEL` and `CONTEXT_WINDOW` you
-read above. For a local engine without a key, this literal placeholder is
-enough:
+`vade-harness setup claude` prints, or with `--dedicated-home` writes, the
+settings from Claude Code's [gateway
+protocol](https://code.claude.com/docs/en/llm-gateway-protocol) page. Use the
+`MODEL`, `CONTEXT_WINDOW` and `MAX_OUTPUT_TOKENS` you read above:
 
 ```sh
-ANTHROPIC_BASE_URL=http://127.0.0.1:8787 \
-ANTHROPIC_AUTH_TOKEN=no-key-required \
-ANTHROPIC_MODEL="$MODEL" \
-CLAUDE_CODE_MAX_CONTEXT_TOKENS="$CONTEXT_WINDOW" \
-CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 \
-CLAUDE_CODE_ATTRIBUTION_HEADER=0 ENABLE_TOOL_SEARCH=false \
-claude
+vade-harness setup claude --endpoint "$UPSTREAM" --model "$MODEL" \
+  --target gateway --dedicated-home --write ./vade-scratch/claude \
+  --context-window "$CONTEXT_WINDOW" --max-output-tokens "$MAX_OUTPUT_TOKENS"
 ```
 
-- The [context
-  override](https://code.claude.com/docs/en/model-config#correct-the-window-for-a-gateway-or-custom-model-id)
-  works directly for a model ID Claude Code does not recognize (no `claude-`
-  prefix or `[1m]` suffix), such as Vade's Qwen ID.
-- Messages uses the API root, without `/v1`.
-- The [gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol)
-  page documents the beta controls above.
-- System messages in the middle of a conversation can still fail until the
-  engine's fix for them lands.
+- `ANTHROPIC_BASE_URL` is the API root: setup drops the `/v1` that the other
+  clients use, and keeps any proxy prefix in front of it.
+- `ANTHROPIC_AUTH_TOKEN=no-key-required` is a dummy bearer value, so Claude
+  Code never asks for an Anthropic login. The launcher's private
+  `CLAUDE_CONFIG_DIR` and `HOME` keep your real `~/.claude` untouched.
+- `ANTHROPIC_MODEL`, the `opus`/`sonnet`/`haiku` aliases and
+  `CLAUDE_CODE_SUBAGENT_MODEL` all name the one loaded model, so background
+  tasks and subagents don't ask for a Claude model the engine doesn't have.
+- `CLAUDE_CODE_MAX_CONTEXT_TOKENS` and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` carry the
+  verified limits. Without the output cap, Claude Code assumes 32000 output
+  tokens for a model it doesn't know and compacts a 32768-token window early.
+- `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`, `ENABLE_TOOL_SEARCH=false` and
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` keep pre-release request fields,
+  MCP tool search, telemetry and update checks out of the session.
+- The home's `settings.json` allows Read, Grep and Glob and denies shell, edit,
+  write and web tools, like the other homes' read-only defaults. Edit it to
+  give Claude Code more.
+- Claude Code 2.1.310 sends its environment notes as a `role: "system"` entry
+  inside `messages`. The engine accepts only user and assistant turns there
+  and answers 400, and Claude Code does not retry. Both gateways relabel just
+  those role values as `"user"` on Messages and token-count requests, which is
+  the recovery Claude Code documents, so use `--target gateway`. Direct to
+  the engine, only `claude --bare` works until the engine accepts them.
 - Images are not supported yet.
 - Sampling works as for the other APIs: with no sampling fields the gateway
-  adds greedy defaults, and any field the client sends stays as is. This
-  recipe does not show which fields Claude Code sends, and it is not a live
-  compatibility test.
+  adds greedy defaults, and any field the client sends stays as is.
+
+## aider, Continue and Open WebUI
+
+`vade-harness setup aider|continue|open-webui` prints each client's documented
+OpenAI-compatible settings for the engine or the gateway. They have no
+dedicated home: aider and Open WebUI read environment variables, and Continue
+reads the `config.yaml` you paste into its settings.
+
+- **aider** gets `OPENAI_API_BASE`, a dummy key and `--model openai/MODEL`.
+  aider warns that it does not know the model's limits; that warning is
+  expected.
+- **Continue** gets one model for chat, edit and apply. Pass
+  `--context-window` and `--max-output-tokens` to add
+  `defaultCompletionOptions`. Tab autocomplete is left out on purpose: the
+  engine ignores the fill-in-the-middle `suffix` field, so autocomplete would
+  only continue the text before the cursor.
+- **Open WebUI** gets `OPENAI_API_BASE_URL` and lists models from
+  `/v1/models`, which both gateways serve. In Docker, use
+  `http://host.docker.internal:8787/v1`, run the container with
+  `--add-host=host.docker.internal:host-gateway`, and start the gateway with
+  `--allow-host host.docker.internal`; otherwise the gateway's Host guard
+  answers 421.
+
+None of these three has been run live yet.
 
 ## dsh recipe (not live-qualified)
 
@@ -243,6 +277,14 @@ implementation or prompt text from these or other competing clients is copied
 into the harness. The pinned clients' local help and documentation establish
 their command and configuration contracts.
 
+- [Claude Code gateway
+  protocol](https://code.claude.com/docs/en/llm-gateway-protocol) and
+  [environment variables](https://code.claude.com/docs/en/env-vars): base URL,
+  bearer token, model aliases, context/output limits and beta controls.
+- [aider OpenAI-compatible
+  APIs](https://aider.chat/docs/llms/openai-compat.html), [Continue
+  config.yaml reference](https://docs.continue.dev/reference) and [Open WebUI
+  quick start](https://docs.openwebui.com/getting-started/quick-start/).
 - [Codex configuration
   schema](https://learn.chatgpt.com/docs/config-file/config-reference):
   provider, Responses, local model catalog and instruction settings.

@@ -37,6 +37,7 @@ pub(super) fn capabilities_header(method: &str, path: &str) -> String {
     }
 }
 
+#[cfg(test)]
 pub(super) fn apply<'a>(method: &str, path: &str, head: &Head, body: &'a [u8]) -> Cow<'a, [u8]> {
     apply_to(method, path, head, body, Cow::Borrowed(body)).0
 }

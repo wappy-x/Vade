@@ -104,6 +104,7 @@ impl Endpoint {
                 | "/messages"
                 | "/messages/count_tokens"
                 | "/capabilities"
+                | "/models"
                 | "/admission"
                 | "/cancel"
                 | "/kv/release"

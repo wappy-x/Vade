@@ -58,7 +58,7 @@ fn stderr(output: &Output) -> String {
 }
 
 #[test]
-fn all_five_setups_print_both_exact_endpoints_offline_without_writes() {
+fn every_openai_base_setup_prints_both_exact_endpoints_offline_without_writes() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let endpoint = format!(
@@ -67,7 +67,7 @@ fn all_five_setups_print_both_exact_endpoints_offline_without_writes() {
     );
     let expected = endpoint.strip_suffix("/responses").unwrap();
     let temp = Temp::new();
-    for client in ["codex", "hermes", "opencode", "pi", "generic"] {
+    for client in ["codex", "hermes", "opencode", "pi", "aider", "continue", "open-webui", "generic"] {
         let output = cli::Cli::start(command().current_dir(&temp.0).args([
             "setup",
             client,
@@ -187,9 +187,82 @@ fn selected_templates_have_documented_provider_settings_and_clean_stdout() {
 }
 
 #[test]
+fn claude_code_gets_the_messages_root_every_alias_and_verified_limits() {
+    // Messages lives at the API root: /v1 (and any proxy prefix before it) is kept without /v1.
+    for (target, base) in [("direct", "http://127.0.0.1:18080/proxy"), ("gateway", "http://127.0.0.1:8787")] {
+        let output = invoke(&["setup", "claude", "--endpoint", "http://127.0.0.1:18080/proxy/v1/chat/completions", "--model", "org/mock", "--target", target]);
+        assert!(output.status.success(), "{}", stderr(&output));
+        let text = stdout(&output);
+        assert!(stderr(&output).contains("Source: https://code.claude.com/docs/en/llm-gateway-protocol"));
+        let mut expected = vec![format!("export ANTHROPIC_BASE_URL='{base}'"), "export ANTHROPIC_AUTH_TOKEN='no-key-required'".into()];
+        for key in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"] {
+            expected.push(format!("export {key}='org/mock'"));
+        }
+        expected.extend(["export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS='1'".into(), "export ENABLE_TOOL_SEARCH='false'".into(), "export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1'".into()]);
+        assert_eq!(text.lines().collect::<Vec<_>>(), expected);
+        assert!(!text.contains("/v1") && !text.contains("ANTHROPIC_API_KEY"));
+    }
+    let temp = Temp::new();
+    let home = fs::canonicalize(&temp.0).unwrap().join("claude");
+    let output = invoke(&["setup", "claude", "--endpoint", "http://127.0.0.1:18080", "--model", "org/mock", "--target", "direct", "--dedicated-home",
+        "--context-window", "32768", "--max-output-tokens", "8192", "--write", home.to_str().unwrap()]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let launcher = fs::read_to_string(home.join("launch.sh")).unwrap();
+    for setting in ["CLAUDE_CONFIG_DIR=\"$VADE_CLIENT_HOME\"", "ANTHROPIC_BASE_URL='http://127.0.0.1:18080' ", "ANTHROPIC_DEFAULT_HAIKU_MODEL='org/mock'",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS='32768'", "CLAUDE_CODE_MAX_OUTPUT_TOKENS='8192'", "set -- 'claude'"] {
+        assert!(launcher.contains(setting), "{setting}");
+    }
+    let settings = json::parse(&fs::read_to_string(home.join("settings.json")).unwrap()).unwrap();
+    let permissions = settings.get("permissions").unwrap();
+    let names = |key: &str| permissions.get(key).unwrap().as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    assert_eq!(names("allow"), ["Read", "Grep", "Glob"]);
+    for tool in ["Bash", "Edit", "Write", "WebFetch"] {
+        assert!(names("deny").iter().any(|name| name == tool), "{tool}");
+    }
+    let state = json::parse(&fs::read_to_string(home.join(".claude.json")).unwrap()).unwrap();
+    assert_eq!(state.get("hasCompletedOnboarding"), Some(&json::Value::Bool(true)));
+    let reserved = fs::canonicalize(&temp.0).unwrap().join(".claude");
+    let refused = invoke(&["setup", "claude", "--endpoint", "http://127.0.0.1:18080", "--model", "org/mock", "--target", "direct", "--dedicated-home",
+        "--context-window", "32768", "--max-output-tokens", "8192", "--write", reserved.to_str().unwrap()]);
+    assert!(!refused.status.success() && !reserved.exists());
+}
+
+#[test]
+fn aider_continue_and_open_webui_get_their_documented_openai_settings() {
+    let base = "http://127.0.0.1:8787/v1";
+    let setup = |client: &str, extra: &[&str]| {
+        let mut args = vec!["setup", client, "--endpoint", "http://127.0.0.1:18080", "--model", "org/mock", "--target", "gateway"];
+        args.extend(extra);
+        let output = invoke(&args);
+        assert!(output.status.success(), "{client}: {}", stderr(&output));
+        assert!(stderr(&output).contains("Source: https://"));
+        stdout(&output)
+    };
+    assert_eq!(setup("aider", &[]), format!("export OPENAI_API_BASE='{base}'\nexport OPENAI_API_KEY='no-key-required'\naider --model 'openai/org/mock'\n"));
+    assert_eq!(setup("open-webui", &[]), format!("# Then choose org/mock in the chat's model menu.\nexport OPENAI_API_BASE_URL='{base}'\nexport OPENAI_API_KEY='no-key-required'\nopen-webui serve\n"));
+    let plain = setup("continue", &[]);
+    assert!(plain.starts_with("name: Vade\nversion: 0.0.1\nschema: v1\nmodels:\n  - name: Vade\n    provider: openai\n    model: \"org/mock\"\n"));
+    assert!(plain.contains(&format!("    apiBase: \"{base}\"\n")) && plain.ends_with("    roles: [chat, edit, apply]\n"));
+    assert!(!plain.contains("autocomplete"), "the engine ignores fill-in-the-middle suffixes");
+    let limited = setup("continue", &["--context-window", "32768", "--max-output-tokens", "8192"]);
+    assert_eq!(limited, format!("{plain}    defaultCompletionOptions:\n      contextLength: 32768\n      maxTokens: 8192\n"));
+    for client in ["aider", "open-webui"] {
+        let output = invoke(&["setup", client, "--endpoint", "http://127.0.0.1:18080", "--model", "org/mock", "--context-window", "32768"]);
+        assert_eq!(output.status.code(), Some(2), "{client}");
+    }
+    let temp = Temp::new();
+    for client in ["aider", "continue", "open-webui"] {
+        let home = fs::canonicalize(&temp.0).unwrap().join(client);
+        let output = invoke(&["setup", client, "--endpoint", "http://127.0.0.1:18080", "--model", "org/mock", "--target", "direct", "--dedicated-home",
+            "--context-window", "32768", "--max-output-tokens", "8192", "--write", home.to_str().unwrap()]);
+        assert!(!output.status.success() && !home.exists(), "{client}");
+    }
+}
+
+#[test]
 fn writes_only_explicit_new_private_file_and_refuses_overwrite_or_symlink() {
     let temp = Temp::new();
-    for client in ["codex", "hermes", "opencode", "pi", "generic"] {
+    for client in ["claude", "codex", "hermes", "opencode", "pi", "aider", "continue", "open-webui", "generic"] {
         let path = temp.0.join(client);
         let args = [
             "setup",
@@ -258,7 +331,7 @@ fn dedicated_homes_create_client_files_and_refuse_existing_state() {
     let temp = Temp::new();
     let parent = fs::canonicalize(&temp.0).unwrap();
     const OPTIONS: &str = "--endpoint http://example.invalid --model mock --target gateway --dedicated-home --context-window 32768 --max-output-tokens 1024 --write";
-    for client in ["codex", "hermes", "opencode", "pi"] {
+    for client in ["claude", "codex", "hermes", "opencode", "pi"] {
         let home = parent.join(client);
         let mut cmd = command();
         cmd.args(["setup", client])
@@ -266,10 +339,10 @@ fn dedicated_homes_create_client_files_and_refuse_existing_state() {
             .arg(&home);
         let output = cli::Cli::start(&mut cmd).finish();
         assert!(output.status.success(), "{}", stderr(&output));
-        let instructions = if client == "hermes" {
-            "SOUL.md"
-        } else {
-            "AGENTS.md"
+        let instructions = match client {
+            "hermes" => "SOUL.md",
+            "claude" => "CLAUDE.md",
+            _ => "AGENTS.md",
         };
         assert!(
             fs::read_to_string(home.join(instructions))

@@ -11,7 +11,7 @@ pub mod json;
 mod longctx;
 mod prepare;
 mod unix_flags;
-pub use crate::sha256::{Sha256, sha};
+pub use crate::sha256::sha;
 use std::path::PathBuf;
 
 /// The `checkpoint_sha256` of the FP8 checkpoint the frozen long-context
@@ -58,9 +58,6 @@ pub struct LongArgs {
     pub a_dumps: PathBuf,
     pub b_dumps: PathBuf,
     pub c_dumps: Option<PathBuf>,
-}
-fn decimal_integer(value: &str) -> Result<String, String> {
-    json::integer_input(value)
 }
 
 impl LongArgs {
@@ -179,7 +176,7 @@ impl LongArgs {
                 }
             };
             let integer = || {
-                decimal_integer(s)
+                json::integer_input(s)
                     .and_then(|s| {
                         s.parse::<i64>()
                             .map_err(|_| "invalid int value".to_string())
@@ -197,11 +194,11 @@ impl LongArgs {
                 "--ifeval-inputs" => value.ifeval_inputs = s.into(),
                 "--output" => value.output = s.into(),
                 "--documents" => value.documents = unsigned()?,
-                "--seed" => value.seed = decimal_integer(s)?,
+                "--seed" => value.seed = json::integer_input(s)?,
                 "--keys-per-depth" => value.keys_per_depth = integer()?.max(0) as usize,
                 "--checkpoint-hash" => value.checkpoint_hash = s.into(),
                 "--max-tokens" => {
-                    let number = decimal_integer(s)?;
+                    let number = json::integer_input(s)?;
                     value.max_tokens =
                         number
                             .parse::<usize>()

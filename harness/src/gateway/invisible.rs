@@ -224,8 +224,10 @@ fn busy(socket: TcpStream, log: Option<&StatsLog>) -> io::Result<()> {
     reader
         .get_mut()
         .bound_deadline(Instant::now() + Duration::from_millis(100));
+    let mut messages = false;
     if let Ok(head) = WireHead::read(&mut reader) {
         metrics.path = head.parsed.first.split(' ').nth(1).unwrap_or("").to_owned();
+        messages = super::messages_route(&head.parsed.first);
     }
     metrics.response(
         &Head {
@@ -234,7 +236,7 @@ fn busy(socket: TcpStream, log: Option<&StatsLog>) -> io::Result<()> {
         },
         503,
     );
-    let result = local_error(reader.get_mut(), 503, "gateway busy");
+    let result = local_error(reader.get_mut(), messages, 503, "gateway busy");
     metrics.finish(result.is_ok());
     if let Some(log) = log {
         log.write(&metrics.json())?;
@@ -361,17 +363,18 @@ fn forward(
     let local = socket.local_addr()?;
     let mut client = BufReader::new(DeadlineStream::new(socket, None)?);
     let mut request = WireHead::read(&mut client)?;
+    let messages = super::messages_route(&request.parsed.first);
     let parts: Vec<_> = request.parsed.first.split(' ').collect();
     if parts.len() != 3
         || parts[2] != "HTTP/1.1"
         || !parts[1].starts_with('/')
         || parts[1].contains(['#', '\\'])
     {
-        return local_error(client.get_mut(), 400, "invalid HTTP request target");
+        return local_error(client.get_mut(), messages, 400, "invalid HTTP request target");
     }
     let cors = match access.check(&request.parsed, local) {
         Ok(origin) => access::cors(origin.as_deref()),
-        Err(Refusal::Status(code, message)) => return local_error(client.get_mut(), code, message),
+        Err(Refusal::Status(code, message)) => return local_error(client.get_mut(), messages, code, message),
         Err(Refusal::Preflight(headers)) => return access::write_preflight(client.get_mut(), "", &headers),
     };
     if access.consumes_authorization() {
@@ -384,10 +387,9 @@ fn forward(
         });
     }
     if request.parsed.get("upgrade").is_some() {
-        return local_error(client.get_mut(), 400, "protocol upgrades unsupported");
+        return local_error(client.get_mut(), messages, 400, "protocol upgrades unsupported");
     }
     let body_head = request.body_head();
-    let messages = super::messages_route(&request.parsed.first);
     if let Err(error) = BodyReader::new(io::Cursor::new(&[]), &body_head, true, crate::json::MAX_INPUT_BYTES) {
         let (status, message) = super::request_body_error(&error);
         return super::write_error(client.get_mut(), messages, status, &message);
@@ -455,6 +457,7 @@ fn forward(
                 }
                 return local_error(
                     client.get_mut(),
+                    messages,
                     502,
                     "upstream connection failed; request not replayed",
                 );
@@ -485,7 +488,7 @@ fn forward(
         drop(lease.take());
         match alternate() {
             Some(next) => (index, lease) = (next.index, Some(next)),
-            None => return local_error(client.get_mut(), 502, "upstream failed before replying"),
+            None => return local_error(client.get_mut(), messages, 502, "upstream failed before replying"),
         }
     }
 }
@@ -531,7 +534,7 @@ fn fan_out(
         }
     }
     let Some((reply, attempt, _)) = chosen else {
-        return local_error(client.get_mut(), 502, "no upstream answered; request not replayed");
+        return local_error(client.get_mut(), false, 502, "no upstream answered; request not replayed");
     };
     *metrics = attempt;
     if let Some((_, body)) = buffered(&reply) {
@@ -630,7 +633,7 @@ fn exchange(
     }
     metrics.response(&response.parsed, code);
     if code == 101 {
-        return local_error(writer, 502, "upstream upgrade unsupported").map(|_| true);
+        return local_error(writer, super::messages_route(&request.parsed.first), 502, "upstream upgrade unsupported").map(|_| true);
     }
     let no_body = method == "HEAD" || matches!(code, 204 | 304);
     let chunked = response.parsed.first.starts_with("HTTP/1.1 ");
@@ -711,11 +714,8 @@ fn status(head: &Head) -> io::Result<u16> {
         .filter(|n| (100..600).contains(n))
         .ok_or_else(|| transport::invalid("invalid upstream status"))
 }
-fn local_error(writer: &mut impl Write, code: u16, message: &str) -> io::Result<()> {
-    let body = format!(
-        "{{\"error\":{{\"message\":{}}}}}",
-        crate::json::quote(message)
-    );
+fn local_error(writer: &mut impl Write, messages: bool, code: u16, message: &str) -> io::Result<()> {
+    let body = super::error_body(messages, code, message);
     write!(
         writer,
         "HTTP/1.1 {code} Gateway Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

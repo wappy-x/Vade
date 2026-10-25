@@ -845,15 +845,12 @@ fn observed_launcher_failure_exit_probe() {
 }
 #[test]
 fn observed_failed_launcher_survives_closed_stdout() {
-    let mut codes = Vec::new();
     for case in ["doctor_open", "doctor_closed", "status_open", "status_closed"] {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "app::tests::observed_launcher_failure_exit_probe", "--nocapture"])
             .env("VADE_TEST_LAUNCHER_CASE", case).output().unwrap();
-        eprintln!("case={case} exit={:?} stderr={:?}", output.status.code(), String::from_utf8_lossy(&output.stderr));
-        codes.push(output.status.code());
+        assert_eq!(output.status.code(), Some(1), "{case}: observed doctor/status failures must stay failures when stdout closes; stderr={}", String::from_utf8_lossy(&output.stderr));
     }
-    assert_eq!(codes, vec![Some(1),Some(1),Some(1),Some(1)], "observed doctor/status failures must stay failures when stdout closes");
 }
 
 #[test]

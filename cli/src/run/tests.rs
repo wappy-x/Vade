@@ -315,13 +315,10 @@
     }
     #[test]
     fn observed_failed_answer_survives_closed_stdout() {
-        let mut codes = Vec::new();
         for case in ["unauthorized_open", "unauthorized_closed", "incomplete_open", "incomplete_closed", "wrong_model_open", "wrong_model_closed"] {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "run::tests::observed_answer_failure_exit_probe", "--nocapture"])
                 .env("VADE_TEST_ANSWER_CASE", case).output().unwrap();
-            eprintln!("case={case} exit={:?} stderr={:?}", output.status.code(), String::from_utf8_lossy(&output.stderr));
-            codes.push(output.status.code());
+            assert_eq!(output.status.code(), Some(1), "{case}: failed HTTP answers must stay failures when stdout closes; stderr={}", String::from_utf8_lossy(&output.stderr));
         }
-        assert_eq!(codes, vec![Some(1); 6], "failed HTTP answers must stay failures when stdout closes");
     }

@@ -321,6 +321,9 @@ fn opaque_contract_routes_unknown_fields_and_wrong_dialect_errors() {
     let cases: Vec<(&str, &str, &[u8], u16, &str, &[u8])> = vec![
         ("POST", "/v1/chat/completions", br#"{"temperature":0,"seed":42,"top_p":1}"#, 200, "application/json", b"{\"choices\":[],\"complete\":true}"),
         ("GET", "/v1/capabilities", b"", 200, "application/json", include_bytes!("../tests/fixtures/engine-capabilities-v1.json")),
+        // Model-listing clients (Open WebUI, Continue, OpenAI SDKs) read this first.
+        ("GET", "/v1/models?limit=1000", b"", 200, "application/json", br#"{"object":"list","data":[{"id":"mock","object":"model","context_length":32768}]}"#),
+        ("GET", "/models", b"", 200, "application/json", br#"{"object":"list","data":[]}"#),
         ("POST", "/v1/admission", br#"{ "contract_version":"vade.engine.v1", "endpoint":"/v1/responses", "output_tokens":17, "request":{"input":[], "future":9.00100e-3, "prompt_cache_key":"caller-affinity"} }"#, 200, "application/json", br#"{ "object":"engine.admission", "admitted":false, "future_metadata": [null, "exact\u0020"] }"#),
         ("POST", "/v1/chat/completions", br#"{ "temperature":0,"seed":42,"top_p":1,"model":"unchanged", "input":[{"type":"future"}], "future":9007199254740993, "prompt_cache_key":"caller-only" }"#, 422, "application/json", br#"{ "error":{"message":"Responses body on chat endpoint", "vendor":42}, "future":1.00 }"#),
         ("POST", "/responses", br#"{"temperature":0,"seed":42,"top_p":1,"model":"unchanged","messages":[],"tools":null,"opaque":{"x":-0.00e9}}"#, 400, "application/octet-stream", b"not JSON\x00\xff\nprovider refusal\r\n"),
@@ -376,7 +379,7 @@ fn opaque_contract_routes_unknown_fields_and_wrong_dialect_errors() {
         socket.write_all(&payload).unwrap();
         let mut reader = BufReader::new(socket);
         let head = transport::read_head(&mut reader).unwrap();
-        assert!(head.first.starts_with(&format!("HTTP/1.1 {status} ")));
+        assert!(head.first.starts_with(&format!("HTTP/1.1 {status} ")), "{method} {path}: {}", head.first);
         assert_eq!(head.get("x-provider-error"), Some("opaque"));
         let mut body = BodyReader::new(reader, &head, false, transport::MAX_BODY).unwrap();
         let mut actual = Vec::new();
@@ -541,11 +544,26 @@ fn downstream_disconnect_closes_active_upstream_response() {
 }
 
 #[test]
+fn gateway_errors_carry_a_type_in_both_dialects() {
+    for (status, openai, anthropic) in [
+        (400, "invalid_request_error", "invalid_request_error"), (401, "authentication_error", "authentication_error"),
+        (403, "permission_error", "permission_error"), (404, "not_found_error", "not_found_error"),
+        (413, "request_too_large", "request_too_large"), (429, "rate_limit_error", "rate_limit_error"),
+        (502, "server_error", "api_error"), (503, "overloaded", "overloaded_error"),
+    ] {
+        assert_eq!(error_body(false, status, "m\"x"), format!(r#"{{"error":{{"type":"{openai}","message":"m\"x"}}}}"#));
+        assert_eq!(error_body(true, status, "m"), format!(r#"{{"type":"error","error":{{"type":"{anthropic}","message":"m"}}}}"#));
+    }
+}
+
+#[test]
 fn unsupported_routes_methods_encodings_and_ambiguous_framing_are_explicit() {
     for (request, status) in [
         (b"GET /v1/responses HTTP/1.1\r\nHost: localhost\r\n\r\n".as_slice(), 405),
         (b"POST /v1/embeddings HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 404),
         (b"POST /v1/capabilities HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 405),
+        (b"POST /v1/models HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 405),
+        (b"GET /v1/models/mock HTTP/1.1\r\nHost: localhost\r\n\r\n".as_slice(), 404),
         (b"GET /v1/capabilities HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 400),
         (b"POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Encoding: gzip\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 415),
         (b"POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Encoding: identity\r\nContent-Encoding: gzip\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 400),

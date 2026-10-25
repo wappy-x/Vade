@@ -201,6 +201,25 @@ fn browser_guards_answer_before_any_upstream_contact() {
 }
 
 #[test]
+fn local_errors_speak_the_dialect_of_the_route() {
+    // Claude Code reads Anthropic error bodies; OpenAI SDKs read error.type.
+    let runtime = Runtime::single(Origin::parse("http://127.0.0.1:1").unwrap());
+    let mut locked = Access::default();
+    locked.require_token("t0k").unwrap();
+    let post = |path: &str| format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}");
+    for (access, path, body) in [
+        (&locked, "/v1/messages?beta=true", r#"{"type":"error","error":{"type":"authentication_error","message":"#),
+        (&locked, "/v1/chat/completions", r#"{"error":{"type":"authentication_error","message":"#),
+        (&Access::default(), "/v1/messages", r#"{"type":"error","error":{"type":"api_error","message":"upstream connection failed; request not replayed"}}"#),
+        (&Access::default(), "/v1/responses", r#"{"error":{"type":"server_error","message":"upstream connection failed; request not replayed"}}"#),
+    ] {
+        let reply = guarded(&runtime, access, &post(path));
+        let (_, actual) = reply.split_once("\r\n\r\n").unwrap();
+        assert!(actual.starts_with(body), "{path} -> {actual}");
+    }
+}
+
+#[test]
 fn allowed_browser_gets_one_cors_answer_and_the_token_stays_local() {
     let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
     let runtime = Runtime::single(Origin::parse(&format!("http://{}/v1", upstream.local_addr().unwrap())).unwrap());

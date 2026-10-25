@@ -110,8 +110,9 @@ Pick the way that fits how you work:
    The harness also has a built-in gateway,
    `vade-harness gateway --upstream http://127.0.0.1:18080`. It serves only the
    API routes listed under [Gateway relay, Codex and Hermes in
-   detail](#gateway-relay-codex-and-hermes-in-detail) and answers 404 to
-   `/v1/models`, so clients that list models need `vade-gateway`.
+   detail](#gateway-relay-codex-and-hermes-in-detail), including the model
+   list that Open WebUI, Continue and the OpenAI SDKs read first, and answers
+   404 to any other path.
 
 3. **Hand turns to Codex or Hermes (Vade UI + installed agent).** You keep the
    Vade UI, and the installed agent owns each turn.
@@ -757,7 +758,8 @@ unchanged:
 - `/v1/responses` and `/responses`;
 - `/v1/completions` and `/completions`;
 - both chat-completions paths;
-- `/v1/messages` and `/v1/messages/count_tokens`.
+- `/v1/messages` and `/v1/messages/count_tokens`;
+- `GET /v1/models` and `GET /models`, plus `GET /v1/capabilities`.
 
 Bodies up to 8 MiB are accepted. A larger one gets HTTP 413 before anything is
 sent upstream. Full rules: [engine contract](docs/engine-contract.md#opaque-gateway).
@@ -832,6 +834,18 @@ reach the engine through them. To allow a browser client on purpose:
   headers and preflight answers, and `--allow-host` admits another Host name;
 - set `--token TOKEN` or `VADE_GATEWAY_TOKEN`, so that every request needs
   `Authorization: Bearer TOKEN`. That header is not forwarded upstream.
+
+**Claude Code system turns.** On `/v1/messages` and its token count, both
+gateways relabel `role: "system"` entries inside `messages` as `"user"`. The
+engine refuses such entries, and Claude Code sends one with every request.
+Only those role strings change; every other byte is forwarded as sent.
+
+**Errors the gateway answers itself.** Refusals such as these, a busy
+gateway or an unreachable upstream come back in the route's own dialect:
+`{"type":"error","error":{"type":"authentication_error","message":...}}` on
+Messages routes, and `{"error":{"type":"authentication_error","message":...}}`
+everywhere else, so Anthropic and OpenAI SDKs can tell a rate limit from a
+server failure. Upstream errors are relayed unchanged.
 
 **Listener and transport.** The gateway listens on `127.0.0.1:8787` by default.
 The core handles HTTP routing, forwarding, response parsing and upstream

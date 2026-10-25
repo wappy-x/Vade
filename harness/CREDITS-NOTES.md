@@ -1,8 +1,8 @@
 # Sources studied
 
-Dedicated client setup uses the pinned Codex, Hermes, OpenCode and Pi command-line
-help and local configuration documentation to determine their configuration and
-instruction contracts. The Hermes context exception and file-write boundary are
+Dedicated client setup uses the pinned Claude Code, Codex, Hermes, OpenCode and
+Pi command-line help and local configuration documentation to determine their
+configuration and instruction contracts. The Hermes context exception and file-write boundary are
 documented in its pinned initialization and file-safety modules. The templates,
 model catalog prompt and immediate-tool instruction are original Rust output;
 no client implementation or prompt was copied. Source links and pins are listed

@@ -1,6 +1,6 @@
 //! Frozen long-context inputs. Integer seeding and draws follow Python's
 //! `random.Random` MT19937 sequence so existing prompt archives remain reusable.
-use super::json::{Value, io_error, packed, parse, write_json};
+use super::json::{Value, io_error, object, packed, parse, write_json};
 use super::{LongArgs, sha};
 use std::collections::HashSet;
 use std::fs;
@@ -12,9 +12,6 @@ const LENGTHS: [usize; 2] = [32768, 131072];
 const DEPTHS: [usize; 5] = [10, 25, 50, 75, 90];
 use super::MODEL;
 
-fn object(fields: Vec<(&str, Value)>) -> Value {
-    Value::Object(fields.into_iter().map(|(k, v)| (k.into(), v)).collect())
-}
 fn string(value: impl Into<String>) -> Value {
     Value::Str(value.into())
 }

@@ -1,5 +1,5 @@
 //! Opt-in homes: never merge into, overwrite, or discover installed client state.
-use super::{Client, Config, Target, quoted, shell_quote};
+use super::{Client, Config, Target, claude_environment, quoted, shell_quote};
 use std::{
     fs::{self, DirBuilder, OpenOptions},
     io::Write,
@@ -23,7 +23,7 @@ fn destination(path: &Path) -> Result<PathBuf, &'static str> {
             Component::CurDir => {}
             Component::Normal(name)
                 if name.to_str().is_some_and(|name| {
-                    [".codex", ".hermes", ".pi", ".config"]
+                    [".claude", ".codex", ".hermes", ".pi", ".config"]
                         .iter()
                         .any(|reserved| name.eq_ignore_ascii_case(reserved))
                 }) =>
@@ -78,6 +78,12 @@ fn configuration(config: &Config, home: &Path) -> Vec<(&'static str, String)> {
     let model = quoted(&config.model);
     let base = quoted(endpoint);
     match config.client {
+        // Read and search only, like the other homes; Claude Code denies other tools in print mode.
+        Client::Claude => vec![
+            ("settings.json", "{\"permissions\":{\"allow\":[\"Read\",\"Grep\",\"Glob\"],\"deny\":[\"Bash\",\"Edit\",\"Write\",\"NotebookEdit\",\"WebFetch\",\"WebSearch\"]}}\n".into()),
+            (".claude.json", "{\"hasCompletedOnboarding\":true}\n".into()),
+            ("CLAUDE.md", TOOL_RULE.into()),
+        ],
         Client::Codex => vec![
             (
                 "config.toml",
@@ -140,20 +146,31 @@ fn configuration(config: &Config, home: &Path) -> Vec<(&'static str, String)> {
             ),
             ("AGENTS.md", TOOL_RULE.into()),
         ],
-        Client::Generic => unreachable!(),
+        Client::Aider | Client::Continue | Client::OpenWebUi | Client::Generic => unreachable!(),
     }
 }
 
 fn launcher(config: &Config) -> String {
     let default = match config.client {
+        Client::Claude => "claude",
         Client::Codex => "codex",
         Client::Hermes => "hermes",
         Client::OpenCode => "opencode",
         Client::Pi => "pi",
-        Client::Generic => unreachable!(),
+        Client::Aider | Client::Continue | Client::OpenWebUi | Client::Generic => unreachable!(),
     };
     let binary = config.client_bin.as_deref().unwrap_or(default);
+    let claude = if config.client == Client::Claude {
+        let endpoint = if config.target == Target::Direct { &config.endpoint } else { &config.gateway };
+        let mut environment = claude_environment(endpoint, &config.model);
+        environment.push(("CLAUDE_CODE_MAX_CONTEXT_TOKENS", config.context_window.unwrap().to_string()));
+        environment.push(("CLAUDE_CODE_MAX_OUTPUT_TOKENS", config.max_output_tokens.unwrap().to_string()));
+        environment.iter().fold("CLAUDE_CONFIG_DIR=\"$VADE_CLIENT_HOME\"".to_owned(), |line, (key, value)| format!("{line} {key}={}", shell_quote(value)))
+    } else {
+        String::new()
+    };
     let (environment, flags) = match config.client {
+        Client::Claude => (claude.as_str(), ""),
         Client::Codex => ("CODEX_HOME=\"$VADE_CLIENT_HOME\"", "--no-daemon"),
         Client::Hermes => (
             "HERMES_HOME=\"$VADE_CLIENT_HOME\" HERMES_WRITE_SAFE_ROOT=\"$VADE_CLIENT_WORKSPACE\" PYTHONDONTWRITEBYTECODE=1",
@@ -167,7 +184,7 @@ fn launcher(config: &Config) -> String {
             "PI_CODING_AGENT_DIR=\"$VADE_CLIENT_HOME\" PI_OFFLINE=1 PI_TELEMETRY=0",
             "--offline --no-extensions --no-skills --no-prompt-templates --tools read,grep,find,ls",
         ),
-        Client::Generic => unreachable!(),
+        Client::Aider | Client::Continue | Client::OpenWebUi | Client::Generic => unreachable!(),
     };
     format!(
         "#!/bin/sh\nset -eu\nVADE_CLIENT_HOME=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd -P)\nVADE_CLIENT_WORKSPACE=$(pwd -P)\nset -- {} {flags} \"$@\"\nif [ \"${{NO_COLOR+x}}\" = x ]; then set -- \"NO_COLOR=$NO_COLOR\" \"$@\"; fi\nexec env -i PATH=\"${{PATH:-/usr/bin:/bin}}\" HOME=\"$VADE_CLIENT_HOME/user\" TMPDIR=\"$VADE_CLIENT_HOME/tmp\" XDG_CONFIG_HOME=\"$VADE_CLIENT_HOME/xdg/config\" XDG_CACHE_HOME=\"$VADE_CLIENT_HOME/xdg/cache\" XDG_DATA_HOME=\"$VADE_CLIENT_HOME/xdg/data\" XDG_STATE_HOME=\"$VADE_CLIENT_HOME/xdg/state\" TERM=\"${{TERM:-dumb}}\" {environment} \"$@\"\n",

@@ -1,6 +1,7 @@
+//! Resident reuse rejects changed configuration and preserves owned state.
 use super::*;
 
-fn assert_refused_without_touching_resident(f: &mut Fixture, options: &UpOptions) {
+fn assert_refused_without_touching_resident(f: &mut Fixture, options: &UpOptions, change: &str) {
     let saved = fs::read(f.app.config.state_dir.join("session.conf")).unwrap();
     for command in [
         Command::Up(options.clone()),
@@ -9,16 +10,16 @@ fn assert_refused_without_touching_resident(f: &mut Fixture, options: &UpOptions
     ] {
         f.app.runner.calls.clear();
         let error = f.app.execute(command).unwrap_err();
-        assert!(error.contains("different launch"), "{error}");
+        assert!(error.contains("different launch"), "{change}: {error}");
         assert!(
             f.app.runner.calls.is_empty(),
-            "mismatched launch performed remote work"
+            "{change}: mismatched launch performed remote work"
         );
         assert_eq!(
             fs::read(f.app.config.state_dir.join("session.conf")).unwrap(),
-            saved
+            saved, "{change}: ownership record changed"
         );
-        assert_eq!(f.app.runner.started.len(), 2);
+        assert_eq!(f.app.runner.started.len(), 2, "{change}: resident server count changed");
     }
 }
 
@@ -63,8 +64,7 @@ fn resident_reuse_compares_current_configuration_on_every_rank() {
         let mut f = Fixture::fp4(2, false);
         f.app.up(&options).unwrap();
         change(&mut f.app.config);
-        eprintln!("changed {name}");
-        assert_refused_without_touching_resident(&mut f, &options);
+        assert_refused_without_touching_resident(&mut f, &options, name);
     }
 }
 
@@ -104,8 +104,7 @@ fn resident_reuse_checks_the_current_build_and_all_artifact_identities() {
         let mut manifest = f.app.manifest().unwrap();
         change(&mut manifest);
         text::atomic_write(&f.app.config.build_manifest, &manifest.encode()).unwrap();
-        eprintln!("changed {name}");
-        assert_refused_without_touching_resident(&mut f, &options);
+        assert_refused_without_touching_resident(&mut f, &options, name);
     }
 }
 
@@ -118,7 +117,7 @@ fn activating_a_new_install_refuses_the_old_resident_even_for_the_same_source() 
     let previous = f.app.config.build_manifest.clone();
     f.app.execute(Command::Install).unwrap();
     assert_ne!(f.app.config.build_manifest, previous);
-    assert_refused_without_touching_resident(&mut f, &options);
+    assert_refused_without_touching_resident(&mut f, &options, "new installation");
 }
 
 #[test]
@@ -129,7 +128,7 @@ fn copied_ownership_record_cannot_reuse_a_different_local_state_directory() {
     let session = Session::load(&f.app.config.state_dir).unwrap().unwrap();
     f.app.config.state_dir = f.dir.join("other-state");
     session.save(&f.app.config.state_dir).unwrap();
-    assert_refused_without_touching_resident(&mut f, &options);
+    assert_refused_without_touching_resident(&mut f, &options, "copied state directory");
 }
 
 #[test]
@@ -197,7 +196,7 @@ fn legacy_ownership_records_refuse_reuse_but_still_allow_owned_cleanup() {
     let mut session = Session::load(&f.app.config.state_dir).unwrap().unwrap();
     session.launch_fingerprint = None;
     session.save(&f.app.config.state_dir).unwrap();
-    assert_refused_without_touching_resident(&mut f, &options);
+    assert_refused_without_touching_resident(&mut f, &options, "legacy ownership record");
     f.app.down().unwrap();
     assert!(!f.recorded() && f.app.runner.started.is_empty());
 }
@@ -222,7 +221,7 @@ fn changed_transport_refuses_reuse_after_loading_the_saved_record() {
             f.app.runner.started.insert(rank.machine.name.clone());
         }
         session.save(&f.app.config.state_dir).unwrap();
-        assert_refused_without_touching_resident(&mut f, &options);
+        assert_refused_without_touching_resident(&mut f, &options, "changed transport");
         return;
     }
     for (previous, current) in [("0", "1"), ("1", "0")] {

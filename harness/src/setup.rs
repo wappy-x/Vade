@@ -12,7 +12,7 @@ mod home;
 
 pub const HELP: &str = "Vade client setup (offline; prints configuration only)
 
-Usage: vade-harness setup <codex|hermes|opencode|pi|generic>
+Usage: vade-harness setup <claude|codex|hermes|opencode|pi|aider|continue|open-webui|generic>
          --endpoint URL --model NAME [OPTIONS]
 
   --endpoint URL       Engine HTTP origin or API base (required)
@@ -23,8 +23,11 @@ Usage: vade-harness setup <codex|hermes|opencode|pi|generic>
                        requires --target direct or gateway; never overwrites
   --dedicated-home     With --write DIR, create a new private client home,
                        instructions and launch.sh; refuses existing directories
-  --context-window N   Verified total context tokens (home mode; required)
-  --max-output-tokens N Verified output reservation (home mode; required)
+                       (claude, codex, hermes, opencode and pi)
+  --context-window N   Verified total context tokens (home mode: required;
+                       also accepted by continue)
+  --max-output-tokens N Verified output reservation (home mode: required;
+                       also accepted by continue)
   --client-bin PATH    Client executable for launch.sh (home mode only)
   -h, --help           Show this help
 
@@ -35,39 +38,56 @@ Home mode creates only the requested new directory below an existing parent.
 No client is launched and no real client config or credentials are read.
 HTTP only; no credentials, query strings, fragments, or TLS support.
 Codex requires upstream Responses support; the gateway does not convert APIs.
+Claude Code uses Messages at the API root (the /v1 suffix is removed for it).
 ";
 
+const CLAUDE_SOURCE: &str = "https://code.claude.com/docs/en/llm-gateway-protocol";
 const CODEX_SOURCE: &str = "https://learn.chatgpt.com/docs/config-file/config-reference";
 const HERMES_SOURCE: &str = "https://github.com/NousResearch/hermes-agent/blob/25a71a744cb9ef06950a91638e6229b4f808d461/website/docs/integrations/providers.md#custom--self-hosted-llm-providers";
 const OPENCODE_SOURCE: &str = "https://github.com/anomalyco/opencode/blob/5a8c1d81b7ba527e580191e1d9638c09c6f79419/packages/web/src/content/docs/providers.mdx#custom-provider";
 const PI_SOURCE: &str = "https://github.com/earendil-works/pi/blob/ce950d78f424dcaf9f5d6a03ce80ab141130eb1d/packages/coding-agent/docs/models.md#configure-a-compatible-endpoint";
+const AIDER_SOURCE: &str = "https://aider.chat/docs/llms/openai-compat.html";
+const CONTINUE_SOURCE: &str = "https://docs.continue.dev/reference";
+const OPEN_WEBUI_SOURCE: &str = "https://docs.openwebui.com/getting-started/quick-start/";
 const GENERIC_SOURCE: &str = "https://platform.openai.com/docs/api-reference/chat/create";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Client {
+    Claude,
     Codex,
     Hermes,
     OpenCode,
     Pi,
+    Aider,
+    Continue,
+    OpenWebUi,
     Generic,
 }
 impl Client {
     fn parse(value: &str) -> Result<Self, &'static str> {
         match value {
+            "claude" => Ok(Self::Claude),
             "codex" => Ok(Self::Codex),
             "hermes" => Ok(Self::Hermes),
             "opencode" => Ok(Self::OpenCode),
             "pi" => Ok(Self::Pi),
+            "aider" => Ok(Self::Aider),
+            "continue" => Ok(Self::Continue),
+            "open-webui" => Ok(Self::OpenWebUi),
             "generic" => Ok(Self::Generic),
-            _ => Err("setup client must be codex, hermes, opencode, pi, or generic"),
+            _ => Err("setup client must be claude, codex, hermes, opencode, pi, aider, continue, open-webui, or generic"),
         }
     }
     fn source(self) -> &'static str {
         match self {
+            Self::Claude => CLAUDE_SOURCE,
             Self::Codex => CODEX_SOURCE,
             Self::Hermes => HERMES_SOURCE,
             Self::OpenCode => OPENCODE_SOURCE,
             Self::Pi => PI_SOURCE,
+            Self::Aider => AIDER_SOURCE,
+            Self::Continue => CONTINUE_SOURCE,
+            Self::OpenWebUi => OPEN_WEBUI_SOURCE,
             Self::Generic => GENERIC_SOURCE,
         }
     }
@@ -76,15 +96,20 @@ impl Client {
             Self::Codex => "toml",
             Self::Hermes => "yaml",
             Self::OpenCode | Self::Pi => "json",
-            Self::Generic => "sh",
+            Self::Claude | Self::Aider | Self::OpenWebUi | Self::Generic => "sh",
+            Self::Continue => "yaml",
         }
     }
     fn instructions(self, model: &str) -> String {
         match self {
+            Self::Claude => "Claude Code environment for a custom Messages base URL. The literal no-key-required is a dummy bearer value for a keyless endpoint, not a credential. Every model alias (opus, sonnet, haiku, subagents) maps to the one loaded model; pre-release betas and MCP tool search stay off.".into(),
             Self::Codex => "Codex config.toml provider settings. Requires /v1/responses on the upstream. HTTP/SSE only; OpenAI authentication and WebSockets are disabled for this provider.".into(),
             Self::Hermes => "Hermes config.yaml model settings. Uses the documented custom provider over Chat Completions. The literal no-key-required is a dummy value for a keyless endpoint, not a credential.".into(),
             Self::OpenCode => "OpenCode opencode.json provider settings. Uses @ai-sdk/openai-compatible (Chat Completions); the model is selected in this file. The literal no-key-required is a dummy value for a keyless endpoint.".into(),
             Self::Pi => format!("Pi models.json provider settings. Select with: pi --provider vade --model {}. Uses openai-completions (Chat Completions). The dummy apiKey makes this keyless provider available to Pi; it is not a credential.", shell_quote(model)),
+            Self::Aider => "aider through its OpenAI-compatible provider (litellm openai/ prefix, Chat Completions). Run from your project. The literal no-key-required is a dummy value for a keyless endpoint; aider warns that it does not know this model's limits.".into(),
+            Self::Continue => "Continue config.yaml with an OpenAI-compatible model for chat, edit and apply. Autocomplete is left out: the engine does not implement fill-in-the-middle suffixes. The literal no-key-required is a dummy value for a keyless endpoint.".into(),
+            Self::OpenWebUi => "Open WebUI started with one OpenAI-compatible connection; it lists models from /v1/models. The literal no-key-required is a dummy value. In Docker, use http://host.docker.internal:PORT/v1 with --add-host=host.docker.internal:host-gateway, and start the Vade gateway with --allow-host host.docker.internal.".into(),
             Self::Generic => "A POSIX-shell curl request using Chat Completions; no SDK or configuration file required. Running the printed command sends one synthetic request. curl -q ignores curl's configuration files.".into(),
         }
     }
@@ -252,7 +277,7 @@ impl Config {
             );
         }
         if dedicated_home {
-            if write.is_none() || client == Client::Generic {
+            if write.is_none() || matches!(client, Client::Aider | Client::Continue | Client::OpenWebUi | Client::Generic) {
                 return Err("--dedicated-home requires --write DIR and a supported client");
             }
             if context_window.is_none() || max_output_tokens.is_none() {
@@ -260,7 +285,7 @@ impl Config {
                     "dedicated home requires verified --context-window and --max-output-tokens",
                 );
             }
-        } else if client_bin.is_some() || context_window.is_some() || max_output_tokens.is_some() {
+        } else if client_bin.is_some() || (client != Client::Continue && (context_window.is_some() || max_output_tokens.is_some())) {
             return Err("client executable and token limits require --dedicated-home");
         }
         if context_window
@@ -287,6 +312,10 @@ impl Config {
         let model = quoted(&self.model);
         let base = quoted(endpoint);
         match self.client {
+            Client::Claude => claude_environment(endpoint, &self.model)
+                .iter()
+                .map(|(key, value)| format!("export {key}={}\n", shell_quote(value)))
+                .collect(),
             Client::Codex => format!(
                 "model = {model}\nmodel_provider = \"vade\"\n\n[model_providers.vade]\nname = \"Vade\"\nbase_url = {base}\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n"
             ),
@@ -299,6 +328,29 @@ impl Config {
             ),
             Client::Pi => format!(
                 "{{\n  \"providers\": {{\n    \"vade\": {{\n      \"baseUrl\": {base},\n      \"api\": \"openai-completions\",\n      \"apiKey\": \"no-key-required\",\n      \"models\": [{{\"id\": {model}}}]\n    }}\n  }}\n}}\n"
+            ),
+            Client::Aider => format!(
+                "export OPENAI_API_BASE={}\nexport OPENAI_API_KEY='no-key-required'\naider --model {}\n",
+                shell_quote(endpoint),
+                shell_quote(&format!("openai/{}", self.model))
+            ),
+            Client::Continue => {
+                let limits = match (self.context_window, self.max_output_tokens) {
+                    (None, None) => String::new(),
+                    (context, output) => format!(
+                        "    defaultCompletionOptions:\n{}{}",
+                        context.map_or(String::new(), |n| format!("      contextLength: {n}\n")),
+                        output.map_or(String::new(), |n| format!("      maxTokens: {n}\n"))
+                    ),
+                };
+                format!(
+                    "name: Vade\nversion: 0.0.1\nschema: v1\nmodels:\n  - name: Vade\n    provider: openai\n    model: {model}\n    apiBase: {base}\n    apiKey: \"no-key-required\"\n    roles: [chat, edit, apply]\n{limits}"
+                )
+            }
+            Client::OpenWebUi => format!(
+                "# Then choose {} in the chat's model menu.\nexport OPENAI_API_BASE_URL={}\nexport OPENAI_API_KEY='no-key-required'\nopen-webui serve\n",
+                self.model,
+                shell_quote(endpoint)
             ),
             Client::Generic => {
                 let body = format!(
@@ -335,6 +387,19 @@ impl Config {
             ),
         }
     }
+}
+
+/// Claude Code's documented gateway settings. Messages lives at the API root,
+/// so a `/v1` base becomes its origin (or proxy prefix).
+fn claude_environment(endpoint: &str, model: &str) -> Vec<(&'static str, String)> {
+    let base = endpoint.strip_suffix("/v1").unwrap_or(endpoint).to_owned();
+    let mut environment = vec![("ANTHROPIC_BASE_URL", base), ("ANTHROPIC_AUTH_TOKEN", "no-key-required".into())];
+    for key in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"] {
+        environment.push((key, model.to_owned()));
+    }
+    environment.extend([("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1".into()), ("ENABLE_TOOL_SEARCH", "false".into()),
+        ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1".into())]);
+    environment
 }
 
 fn quoted(value: &str) -> String {

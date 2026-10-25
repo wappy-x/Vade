@@ -337,9 +337,12 @@ fn boundary_dispatch_preserves_model_group_affinity_and_fallback() {
     use crate::transport::BodyReader;
     use std::io::Read;
 
+    // Each pass relays 8 MiB bodies; under a loaded debug build that can outlast
+    // the default 30 s capability lifetime and expire the probes mid-test.
+    let config = RoutingConfig { capability_ttl: Duration::from_secs(300), ..RoutingConfig::default() };
     for path in ["/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/completions"] {
         for explicit_key in [false, true] {
-            let cluster = cluster(RoutingConfig::default());
+            let cluster = cluster(config.clone());
             cluster.apply_probe(
                 2,
                 0,

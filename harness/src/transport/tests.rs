@@ -44,7 +44,7 @@
     fn completions_routes_preserve_prefixes_queries_and_sibling_api_names() {
         for source in ["/v1", "/v1/chat/completions", "/v1/responses", "/v1/messages"] {
             let endpoint = Endpoint::parse(&format!("http://localhost:8080/proxy{source}?configured=1")).unwrap();
-            for suffix in ["/completions", "/chat/completions", "/responses", "/messages", "/capabilities", "/admission"] {
+            for suffix in ["/completions", "/chat/completions", "/responses", "/messages", "/capabilities", "/models", "/admission"] {
                 assert_eq!(endpoint.gateway_route(suffix, Some("client=2")).unwrap().path,
                     format!("/proxy/v1{suffix}?configured=1&client=2"), "{source} -> {suffix}");
             }

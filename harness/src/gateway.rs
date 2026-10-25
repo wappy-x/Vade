@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 mod access;
 mod routing;
 mod sampling;
+mod system_turns;
 mod usage;
 pub mod invisible;
 pub use access::{Access, TOKEN_ENV};
@@ -40,10 +41,14 @@ pub const ROUTES: &[&str] = &[
     "/v1/messages",
     "/v1/messages/count_tokens",
     "/v1/capabilities",
+    "/v1/models",
+    "/models",
     "/v1/admission",
     "/v1/cancel",
     "/v1/kv/release",
 ];
+/// The read-only routes; every other accepted route takes POST.
+const GET_ROUTES: &[&str] = &["/v1/capabilities", "/v1/models", "/models"];
 /// `vade-gateway --help`; `vade-harness gateway --help` states the same rules.
 const BROWSER_GUARD_HELP: &str = "Browser guard: Host must be 127.0.0.1, localhost or [::1] (with the listener port) or an --allow-host value, else 421.\nAny request with an Origin header gets 403 unless --allow-origin names that exact origin (repeatable); allowed origins get CORS headers.\n--token TOKEN (or VADE_GATEWAY_TOKEN) requires Authorization: Bearer TOKEN, else 401; that header is not forwarded upstream.\n";
 pub(crate) const MARKER_HEADER: &str = "x-vade-gateway";
@@ -67,7 +72,8 @@ fn prepare_dispatch<'a>(
         Upstream::Single(_) => None,
         Upstream::Cluster(cluster) => Some(cluster.select(path, query, client_body, head)?),
     };
-    Ok((lease, sampling::apply(method, path, head, client_body)))
+    let body = system_turns::fold(method, path, std::borrow::Cow::Borrowed(client_body));
+    Ok((lease, sampling::apply_to(method, path, head, client_body, body).0))
 }
 
 /// Serve the core gateway on `bind` in front of one upstream until the process
@@ -266,30 +272,36 @@ fn reject_busy(socket: TcpStream) -> io::Result<()> {
     write_error(&mut &socket, messages, 503, "gateway is busy")
 }
 
+/// The body of an error the gateway answers itself. Messages routes get the
+/// Anthropic shape; every other route gets the OpenAI shape with a `type`, as
+/// the engine's own errors carry, so SDKs can tell throttling from failure.
+pub(crate) fn error_body(messages: bool, status: u16, message: &str) -> String {
+    let kind = match status {
+        401 => "authentication_error",
+        403 => "permission_error",
+        404 => "not_found_error",
+        413 => "request_too_large",
+        429 => "rate_limit_error",
+        503 | 529 if messages => "overloaded_error",
+        503 | 529 => "overloaded",
+        500..=599 if messages => "api_error",
+        500..=599 => "server_error",
+        _ => "invalid_request_error",
+    };
+    if messages {
+        format!("{{\"type\":\"error\",\"error\":{{\"type\":\"{kind}\",\"message\":{}}}}}", json::quote(message))
+    } else {
+        format!("{{\"error\":{{\"type\":\"{kind}\",\"message\":{}}}}}", json::quote(message))
+    }
+}
+
 fn write_error(
     writer: &mut dyn Write,
     messages: bool,
     status: u16,
     message: &str,
 ) -> io::Result<()> {
-    let body = if messages {
-        let kind = match status {
-            401 => "authentication_error",
-            403 => "permission_error",
-            404 => "not_found_error",
-            413 => "request_too_large",
-            429 => "rate_limit_error",
-            503 | 529 => "overloaded_error",
-            500..=599 => "api_error",
-            _ => "invalid_request_error",
-        };
-        format!(
-            "{{\"type\":\"error\",\"error\":{{\"type\":\"{kind}\",\"message\":{}}}}}",
-            json::quote(message)
-        )
-    } else {
-        format!("{{\"error\":{{\"message\":{}}}}}", json::quote(message))
-    };
+    let body = error_body(messages, status, message);
     write!(
         writer,
         "HTTP/1.1 {status} Error\r\nX-Vade-Gateway: v1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -394,11 +406,11 @@ fn handle_target(
             &mut reader,
             messages,
             404,
-            "gateway supports completions, chat, Responses, Messages, token count, capabilities, admission, cancel and checkpoint release routes",
+            "gateway supports completions, chat, Responses, Messages, token count, capabilities, models, admission, cancel and checkpoint release routes",
         );
     }
     if method
-        != if path == "/v1/capabilities" || local_stats {
+        != if GET_ROUTES.contains(&path) || local_stats {
             "GET"
         } else {
             "POST"

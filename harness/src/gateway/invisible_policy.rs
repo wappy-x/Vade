@@ -135,6 +135,7 @@ impl Runtime {
         let lease = self.route(path, head, body, &[]);
         let index = lease.as_ref().map_or(0, |lease| lease.index);
         let (patched, mut report) = self.prepare_policy(index, method, path, head, body, &mut admit);
+        let patched = super::super::system_turns::fold(method, path, patched);
         // Finalize telemetry after sampling, keeping routing and admission on client bytes.
         let (body, defaults_added) =
             super::super::sampling::apply_to(method, path, head, body, patched);

@@ -107,6 +107,10 @@ fn mock_request(
     let mut body = Vec::new();
     incoming.read_to_end(&mut body)?;
     let writer = incoming.reader.get_mut();
+    if head.first.starts_with("GET ") && path.split('?').next().is_some_and(|p| p.ends_with("/models")) {
+        shared.lock().unwrap().requests.push(Seen { path, body, headers: head.fields });
+        return respond(writer, 200, "application/json", br#"{"object":"list","data":[{"id":"mock","object":"model"}]}"#);
+    }
     if head.first.starts_with("GET ") {
         assert!(path.ends_with("/capabilities"));
         assert!(
@@ -579,6 +583,20 @@ fn responses_admission_and_opaque_unparseable_payloads_keep_original_bytes() {
     assert!(response.complete);
     assert_eq!(cluster.stats().endpoints[0].usage_responses, 2);
     assert_eq!(cluster.stats().endpoints[0].failures, 0);
+}
+
+#[test]
+fn model_list_reaches_one_verified_endpoint_with_its_query() {
+    let (mocks, cluster) = setup(RoutingConfig::default());
+    for path in ["/v1/models?limit=1000", "/models"] {
+        let response = exchange(&cluster, path, b"");
+        assert_eq!(response.status, 200, "{path}");
+        assert!(response.complete);
+        assert_eq!(response.body, br#"{"object":"list","data":[{"id":"mock","object":"model"}]}"#);
+    }
+    let seen: Vec<String> = mocks.iter().flat_map(|m| m.state.lock().unwrap().requests.iter().map(|r| r.path.clone()).collect::<Vec<_>>()).collect();
+    assert_eq!(seen, ["/v1/models?limit=1000", "/v1/models"]);
+    assert_eq!(cluster.stats().endpoints.iter().map(|e| e.usage_responses).sum::<u64>(), 0);
 }
 
 #[test]

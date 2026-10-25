@@ -4,13 +4,14 @@
 //!
 //! - `process`: process identity, safe signalling and failed-launch rollback.
 //! - `model`: shard presence checks and their inventory cache.
+//! - `logs`: bounded engine-log tails and credential redaction.
 //! - `gpu`: idle-GPU checks before start and after stop.
 //! - `prepare`: install preparation without a resident owner.
 use crate::unix_file::{AnchoredPath, OpenMode, same_regular_file};
 use crate::unix_flags::{LOCK_EX, LOCK_NB};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
@@ -19,6 +20,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 mod gpu;
+mod logs;
+use logs::{read_log, sensitive_environment_name};
 mod model;
 use model::check_model;
 mod prepare;
@@ -28,7 +31,6 @@ use process::*;
 
 type Fields = BTreeMap<String, String>;
 const MAX_REQUEST: u64 = 1024 * 1024;
-const MAX_LOG: u64 = 64 * 1024;
 const TERM: i32 = 15;
 const KILL: i32 = 9;
 
@@ -101,7 +103,7 @@ pub fn engine() -> Result<(), String> {
     }
     let request = crate::text::parse(&input)?;
     let token = required(&request, "token")?;
-    if !is_hash(token) {
+    if !crate::text::hex(token, 64) {
         return Err("Invalid launch token.".into());
     }
     let root = expanded_path(required(&request, "state_dir")?)?;
@@ -148,7 +150,7 @@ impl Store {
 
     fn lock(request: &Fields) -> Result<Self, String> {
         let token = required(request, "token")?;
-        if !is_hash(token) {
+        if !crate::text::hex(token, 64) {
             return Err("Ownership token is invalid. Run vade status.".into());
         }
         let root = expanded_path(required(request, "state_dir")?)?;
@@ -226,7 +228,7 @@ impl Store {
             let Some(name) = name.to_str() else {
                 continue;
             };
-            if is_hash(name) {
+            if crate::text::hex(name, 64) {
                 let kind = entry
                     .file_type()
                     .map_err(|_| "Cannot inspect saved run files. Leave these files in place; see README Recovery.".to_string())?;
@@ -670,7 +672,7 @@ impl Drop for IgnoreDisconnect {
 // CUDA keys entries by device/driver internally. Keep the directory across
 // launches and installs with identical PTX; never put it in a disposable run.
 fn persistent_cuda_cache(root: &Path, ptx_hash: &str, environment: &mut Fields) -> Result<(), String> {
-    if !is_hash(ptx_hash) { return Err("Invalid PTX cache identity; run vade install.".into()); }
+    if !crate::text::hex(ptx_hash, 64) { return Err("Invalid PTX cache identity; run vade install.".into()); }
     let path = root.join("cuda-cache").join(ptx_hash);
     crate::text::private_dir(&path)?;
     environment.insert("env.CUDA_CACHE_PATH".into(), path.to_string_lossy().into_owned());
@@ -684,7 +686,7 @@ fn persistent_cuda_cache(root: &Path, ptx_hash: &str, environment: &mut Fields) 
 }
 
 fn check_hash(path: &Path, expected: &str) -> Result<(), String> {
-    if !is_hash(expected) {
+    if !crate::text::hex(expected, 64) {
         return Err("Artifact manifest needs SHA-256 hashes. Run vade install.".into());
     }
     let path = path
@@ -747,101 +749,6 @@ fn query(program: &str, arguments: &[&str], timeout: Duration) -> Result<String,
             }
         }
     }
-}
-
-fn read_log(store: &Store) -> Result<String, String> {
-    let secrets = read_fields(&store.env())?.unwrap_or_default();
-    let mut log = match private_open(&store.log(), false, false) {
-        Ok(file) => file,
-        Err(_) if !store.log().exists() => return Ok(String::new()),
-        Err(error) => return Err(error),
-    };
-    let length = log
-        .metadata()
-        .map_err(|_| "Cannot inspect the private engine log.".to_string())?
-        .len();
-    log.seek(SeekFrom::Start(length.saturating_sub(MAX_LOG)))
-        .map_err(|_| "Cannot read the private engine log.".to_string())?;
-    let mut bytes = Vec::new();
-    log.take(MAX_LOG)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "Cannot read the private engine log.".to_string())?;
-    let text = String::from_utf8_lossy(&bytes);
-    // A tail can begin halfway through a secret-bearing line: discard its
-    // partial first line before applying complete-line redaction.
-    let text = if length > MAX_LOG {
-        text.split_once('\n').map(|(_, rest)| rest).unwrap_or("")
-    } else {
-        &text
-    };
-    Ok(redact_log(text, &secrets))
-}
-
-fn redact_log(text: &str, environment: &Fields) -> String {
-    let mut result = String::new();
-    for line in text.lines() {
-        // These exact server diagnostics contain neither paths nor credentials.
-        let auth_diagnostic = matches!(line,
-            "FAIL --allow-remote requires --api-key-file PATH"
-            | "WARNING: --api-key-file is group- or world-readable");
-        if sensitive_name(line) && !auth_diagnostic {
-            result.push_str("[private environment line omitted]\n");
-            continue;
-        }
-        let mut line = line.to_owned();
-        for (key, value) in environment {
-            if sensitive_environment_name(key) && !value.is_empty() {
-                line = line.replace(value, "[redacted]");
-            }
-        }
-        for character in line.chars() {
-            if !character.is_control() || character == '\t' {
-                result.push(character);
-            }
-        }
-        result.push('\n');
-    }
-    result
-}
-
-fn sensitive_name(value: &str) -> bool {
-    let value = value.to_ascii_lowercase();
-    [
-        "secret",
-        "password",
-        "credential",
-        "private_key",
-        "api_key",
-        "api-key",
-        "authorization",
-        "auth_token",
-        "access_token",
-        "bearer ",
-    ]
-    .iter()
-    .any(|needle| value.contains(needle))
-}
-
-fn sensitive_environment_name(value: &str) -> bool {
-    let name = value
-        .strip_prefix("env.")
-        .or_else(|| value.strip_prefix("env_unset."))
-        .unwrap_or(value)
-        .to_ascii_uppercase();
-    // This is a file path, not the credential; serving receives the path in argv.
-    if name == "VADE_API_KEY_FILE" { return false; }
-    sensitive_name(&name)
-        || [
-            "_TOKEN",
-            "_KEY",
-            "_PASSWORD",
-            "_SECRET",
-            "_CREDENTIAL",
-            "_CREDENTIALS",
-        ]
-        .iter()
-        .any(|suffix| name.ends_with(suffix))
-        || matches!(name.as_str(), "TOKEN" | "KEY" | "PASSWORD" | "SECRET")
 }
 
 fn arguments(request: &Fields) -> Result<Vec<String>, String> {
@@ -1028,12 +935,6 @@ fn reply(record: &Fields, alive: bool) -> Fields {
         response.insert("pid".into(), pid.clone());
     }
     response
-}
-fn is_hash(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
