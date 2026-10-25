@@ -127,6 +127,8 @@ fn cli_routes_repeated_upstreams_and_exposes_local_stats_without_logging_payload
     drop(reservation);
     let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
     command.args(["gateway", "--bind", &address.to_string()]);
+    // An inherited client token would answer these unauthenticated calls with 401.
+    command.env_remove("VADE_GATEWAY_TOKEN");
     for mock in &mocks {
         command.args(["--upstream", &format!("http://{}", mock.address)]);
     }

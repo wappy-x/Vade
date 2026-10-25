@@ -37,12 +37,14 @@ JSON workload, not a measure of general agent performance.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks-2026-10-24-dark.svg">
-  <img src="assets/benchmarks-2026-10-24-light.svg" width="100%" alt="Grouped bar chart of decode speed in tokens per second for the v0.1.0 release, drafting OFF and then ON. One DGX Spark: code 27.8 to 76.7, prose 27.8 to 41.7, 8 chats 136.1 to 173.9. Two DGX Sparks: code 27.9 to 65.1, prose 27.9 to 38.3, 8 chats 135.1 to 168.6. One cloud GB10 VM: code 24.4 to 61.1, prose 22.5 to 31.6, 8 chats 73.3 to 97.5. Two cloud GB10 VMs: code 24.4 to 54.7, prose 22.9 to 30.5, 8 chats 112.2 to 138.3. Four cloud GB10 VMs: code 21.9 to 51.6, prose 20.7 to 29.0, 8 chats 104.2 either way.">
+  <img src="assets/benchmarks-2026-10-24-light.svg" width="100%" alt="Bar chart comparing one DGX Spark with two, drafting ON (the default). In the 2026-10-24 runs, a second Spark answered a long prompt faster, but one chat did not write faster. Code, one chat: 76.7 tok/s on 1 Spark, 65.1 on 2 Sparks. Prose, one chat: 41.7 and 38.3. Eight chats together: 173.9 and 168.6. First reply after an 8K-token prompt: 3.86 s on 1 Spark, 2.79 s on 2 Sparks. Across all our runs, eight chats gave 130.6 to 173.9 tok/s on six single Sparks and 167.6 to 168.7 on three pairs.">
 </picture>
 
-The figure draws the ten cards in the two tables below. To redraw it, run
-`python3 -I tools/benchmarks-chart.py`; it reads the receipts and rewrites both
-SVG files in [docs/assets](assets/README.md).
+The figure compares one of our Sparks with two, both with drafting ON, the
+default. It draws two cards from the home table below: one Spark ON and two
+Sparks ON. Drafting OFF and the cloud VMs are in the tables only. To redraw
+it, run `python3 -I tools/benchmarks-chart.py`; it reads the receipts and
+rewrites both SVG files in [docs/assets](assets/README.md).
 
 ### Home
 
@@ -82,18 +84,20 @@ the model's layers.
 tok/s and prose from 27.8 to 41.7, and it makes one chat faster on every
 setup we measured.
 
-**A second Spark reads prompts faster but does not write faster.** The first
-token after a cold 8K prompt comes in 2.80 s on two Sparks instead of 3.82 s
-on one. One chat is no faster: with drafting ON, code is 65.1 tok/s on the
-pair against 76.7 on one Spark, and eight chats together land close to one
-Spark's rate.
+**In the 2026-10-24 runs, a second Spark read prompts faster but did not write
+faster.** The first token after a cold 8K prompt came in 2.80 s on two Sparks
+instead of 3.82 s on one. One chat was no faster: with drafting ON, code was
+65.1 tok/s on the pair against 76.7 on one Spark, and eight chats together
+landed close to one Spark's rate. A change to the layer pipeline, merged on
+2026-10-25 after those runs, targets one-chat speed on two Sparks; the next
+published cards will show its effect.
 
 **In the cloud, a second VM serves more chats; four do not.** Eight chats
 together went from 73.3 tok/s on one VM to 112.2 on two with drafting OFF, and
-from 97.5 to 138.3 with drafting ON. Four VMs gave 104.2 either way. They do
-read a cold 8K prompt fastest (2.38 s), but one chat is slower there than on
-one VM. A chain is for models too large for a single machine, not for making
-one chat faster.
+from 97.5 to 138.3 with drafting ON. Four VMs gave 104.2 either way. They did
+read a cold 8K prompt fastest (2.38 s), but one chat was slower there than on
+one VM. A chain is for models too large for a single machine; in these runs it
+did not make one chat faster.
 
 These are separate runs on the machines named above, not a controlled
 comparison on one machine.
@@ -109,8 +113,9 @@ comparison on one machine.
   six Sparks, the drafting-ON 8-chat rate ranged from 130.6 to 173.9 tok/s, and
   one drafting-OFF run (home-6) landed at 86.6, a drop its receipt does not
   explain. The three home pairs agreed closely: 134.3 to 135.2 with drafting
-  OFF and 167.6 to 168.7 with drafting ON. Across the single-VM cards on cloud A
-  (six per setting), the rate ranged from 97.5 to 109.6 with drafting ON and
+  OFF and 167.6 to 168.7 with drafting ON.
+- **The cloud 8-chat rate varies too.** Across the single-VM cards on cloud A
+  (six per setting), it ranged from 97.5 to 109.6 tok/s with drafting ON and
   from 69.0 to 74.9 with drafting OFF. In the four-VM drafting-ON run the
   engine served all eight chats without drafting, which is why both four-VM
   rows show 104.2.
@@ -300,12 +305,12 @@ one of our Sparks, code goes from **27.7** to **76.7 tok/s** and C8 from
 **135.9** to **172.6 tok/s**; in the one-VM cloud timing run, code goes from
 **25.8** to **64.0 tok/s**.
 
-A second Spark does not substantially raise single-stream speed in the OFF
-cards. It does improve prefill and can raise batched throughput: cloud C8 goes
-from **43.0** to **70.0 tok/s**. On our own pair with drafting OFF, C8 is
-effectively the same as on one Spark (**133.877** versus **135.9 tok/s**);
-with drafting ON the release-build pair reaches **162.558 tok/s**, below one
-Spark's **172.6 tok/s**.
+In the 2026-10-24 OFF cards, a second Spark did not substantially raise
+single-stream speed. It did improve prefill and could raise batched
+throughput: cloud C8 went from **43.0** to **70.0 tok/s**. On our own pair with
+drafting OFF, C8 was effectively the same as on one Spark (**133.877** versus
+**135.9 tok/s**); with drafting ON the release-build pair reached
+**162.558 tok/s**, below one Spark's **172.6 tok/s**.
 
 The rented VMs are broadly similar to our Sparks on single-stream speed and
 prefill, but their batched decode levels off: one VM's C2/C4/C8 rates are
@@ -362,6 +367,26 @@ same `VADE_HOME` / `VADE_CONFIG` and it finds the endpoint, reads the model ID
 from `/health`, and measures the server's default drafting policy with a
 bundled offline prompt. Receipts go to `./vade-bench.json`, with a text table
 next to it.
+
+A zero-flag run uses a different recipe from a card, so its numbers don't line
+up with the tables:
+
+- It sends one bundled writing prompt. RigMark uses its own prose, code and
+  structured prompts.
+- It runs C1, C2, C4, C8 and C16 once each, with no warmup. A card runs C1 to
+  C8 for 3 rounds of code.
+- Like the card's group rounds, it stops each reply at 256 tokens, but it also
+  asks the server to keep going past the end-of-answer token, so every reply is
+  exactly 256 tokens long.
+- It has no single-stream cells with the 8192-token cap. It reads a cold 8K
+  prompt only when you add `--prefill-body` and `--checkpoint-hash` (see
+  [Run vade bench](#run-vade-bench)).
+
+Both keep greedy decoding, the cache off and thinking off. On the server behind
+the one-Spark v0.1.0 cards, a zero-flag `vade bench` with drafting as served
+gave C1 45.466 and C8 185.144 tok/s. The drafting-ON card from that same
+server shows C1 61.4 and C8 173.9. Both are recorded in the
+[ON card's receipt folder](../bench/receipts/2026-10-24/2026-10-24_1943_qwen3.8-flash-next-nvfp4_local-1spark_5a22651-drafting-on-thinking-off/).
 
 To compare runs with the same saved prompts and plain decoding (drafting off),
 use `--draft plain`; it works on a drafting-enabled server without a restart.

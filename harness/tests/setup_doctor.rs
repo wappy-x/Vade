@@ -704,11 +704,7 @@ fn admission_refusal_and_invalid_admission_stop_generation() {
         });
         let output = doctor(&mock, &[]);
         assert_eq!(output.status.code(), Some(1));
-        assert!(stdout(&output).contains(if invalid {
-            "sizing admission: FAILED or REFUSED"
-        } else {
-            "sizing admission: FAILED or REFUSED"
-        }));
+        assert!(stdout(&output).contains("sizing admission: FAILED or REFUSED"));
         assert!(mock.seen().iter().all(|r| r.path != "/v1/chat/completions"));
     }
 }

@@ -1,3 +1,4 @@
+//! The frozen parent prefix a child starts from: rules and tool schemas, no transcript.
 use crate::agent::{Conversation, Limits};
 use crate::json::{self, Value};
 use std::io;

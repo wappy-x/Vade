@@ -10,11 +10,15 @@ pub const MAX_HISTORY_TURNS: usize = 32;
 pub const MAX_INPUT_HISTORY_BYTES: usize = 512 * 1024;
 pub const MAX_INPUT_HISTORY_ENTRIES: usize = 500;
 
+/// The only thing a direct-chat session saves: its completed-turn count, never
+/// the conversation.
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct Metadata {
     pub completed_turns: u64,
 }
 
+/// A direct-chat conversation kept in memory within byte and turn limits,
+/// with optional private metadata on disk.
 pub struct Session {
     history: Vec<Message>,
     bytes: usize,
@@ -195,6 +199,13 @@ fn parse_metadata(text: &str) -> io::Result<Metadata> {
     })
 }
 
+/// The model line appended to the native system prompt: the configured served
+/// model ID and, when recognized, its family name.
+pub fn model_identity(model: &str) -> String {
+    let family = if model.starts_with("qwen3.8-flash-next-") { "Qwen3.8 Flash Next" } else { "not specified" };
+    format!("Served model id (configured): {model:?}; family: {family}.")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,9 +349,4 @@ mod tests {
         let final_session = Session::new(&workspace, Some("example")).unwrap();
         assert_eq!(final_session.metadata.completed_turns, 2);
     }
-}
-
-pub fn model_identity(model: &str) -> String {
-    let family = if model.starts_with("qwen3.8-flash-next-") { "Qwen3.8 Flash Next" } else { "not specified" };
-    format!("Served model id (configured): {model:?}; family: {family}.")
 }

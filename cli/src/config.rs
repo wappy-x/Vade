@@ -1,3 +1,6 @@
+//! The controller config file: a `[global]` section and one `[machine NAME]`
+//! section per Spark. [`Config::load`] reads `VADE_CONFIG` or the user config
+//! directory and validates every path, SSH alias, fabric address and port.
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
@@ -5,10 +8,13 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::cli::{UpOptions, identifier};
 
+/// The most Sparks one FP4-Local launch may chain.
 pub const MAX_FP4_SPARKS: usize = 24;
 /// Independent one-Spark servers behind one local gateway.
 pub const MAX_REPLICAS: usize = 16;
 
+/// The parsed controller config: source checkouts, staging and state folders,
+/// the model, ports and the machines.
 #[derive(Clone, Debug)]
 pub struct Config {
     pub engine_source: PathBuf,
@@ -30,6 +36,7 @@ pub struct Config {
     pub machines: Vec<Machine>,
 }
 
+/// One `[machine NAME]` section: how to reach the Spark and where its files are.
 #[derive(Clone, Debug)]
 pub struct Machine {
     pub name: String,
@@ -44,6 +51,8 @@ pub struct Machine {
     pub state_dir: String,
 }
 
+/// `VADE_CONFIG`, or `config` in the user config directory (`$XDG_CONFIG_HOME/vade`,
+/// else `~/Library/Application Support/vade` on macOS and `~/.config/vade`).
 pub fn config_path() -> Result<PathBuf, String> {
     if let Some(path) = env::var_os("VADE_CONFIG") {
         if path.is_empty() {
@@ -77,6 +86,7 @@ fn home() -> Result<PathBuf, String> {
 }
 
 impl Config {
+    /// Refuse a generated SSH control socket name that would not fit in `sockaddr_un`.
     pub fn validate_control_socket(&self) -> Result<(), String> {
         // OpenSSH runs inside state_dir; only the basename enters sockaddr_un.
         // Reserve 17 bytes for its temporary suffix and one for the NUL.
@@ -87,6 +97,8 @@ impl Config {
         Ok(())
     }
 
+    /// Read and parse the file at [`config_path`]; a missing file names the examples
+    /// to copy.
     pub fn load() -> Result<Self, String> {
         let path = config_path()?;
         let text = fs::read_to_string(&path).map_err(|error| {
@@ -103,6 +115,7 @@ impl Config {
         Ok(config)
     }
 
+    /// Require a pinned model revision: a 40-digit commit or `local-sha256-<64 hex>`.
     pub fn validate_model_revision(&self) -> Result<(), String> {
         if crate::text::hex(&self.model_revision, 40)
             || self.model_revision.strip_prefix("local-sha256-").is_some_and(|hash| crate::text::hex(hash, 64))
@@ -113,6 +126,7 @@ impl Config {
         Err(format!("Set model_revision to a verified immutable 40-hex publisher revision or local-sha256-<64-hex manifest digest>; missing values, placeholders such as REPLACE_WITH_VERIFIED_IMMUTABLE_REVISION, and mutable tags are refused for installation and startup. See INSTALL.md, then run {start}."))
     }
 
+    /// Parse config text; relative local paths resolve against `path`'s folder.
     pub fn parse(text: &str, path: &Path) -> Result<Self, String> {
         let base = path
             .parent()
@@ -283,7 +297,7 @@ impl Config {
         Ok(config)
     }
 
-    // Resolve the activation record once per command. All reads use this generation.
+    /// Resolve the activation record once per command. All reads use this generation.
     pub fn resolve_generation(&mut self) -> Result<(), String> {
         crate::text::reject_symlinks(&self.activation)?;
         let data = match fs::read_to_string(&self.activation) {
@@ -309,6 +323,8 @@ impl Config {
         Ok(())
     }
 
+    /// The machines `vade up` uses for these options, with their fabric links
+    /// checked unless they are independent replicas.
     pub fn selected(&self, options: &UpOptions) -> Result<Vec<Machine>, String> {
         let selected = self.selected_machines(options)?;
         // Independent replicas never talk to each other, so they need no fabric links.
@@ -527,6 +543,8 @@ fn absolute_local(path: PathBuf) -> Result<PathBuf, String> {
     Ok(normalized)
 }
 
+/// Accept a plain absolute or `~/` path for a machine setting: no shell
+/// symbols and no `..`.
 pub fn remote_path(value: String, machine: &str, key: &str) -> Result<String, String> {
     if value.is_empty()
         || value == "/"
@@ -567,6 +585,7 @@ pub fn ssh_destination(value: &str) -> bool {
     }) && safe_alias(host)
 }
 
+/// Whether `value` is an IP address or a safe host alias for the fabric.
 pub fn fabric_address(value: &str) -> bool {
     value.parse::<std::net::IpAddr>().is_ok() || (!value.contains(':') && safe_alias(value))
 }

@@ -1,9 +1,12 @@
+//! `vade status --dry-run` and `vade status --json` for a local launch home.
+//! Dry runs read only the saved records and never probe the engine.
 use super::*;
 use crate::{
     evals::json::{self, Value},
     status::Snapshot,
 };
 
+/// `vade status --json` for the local home at `root`.
 pub(crate) fn snapshot<R: Runner>(
     root: PathBuf,
     runner: R,
@@ -20,6 +23,7 @@ pub(crate) fn snapshot<R: Runner>(
 }
 
 impl<R: Runner, D: Detector> Launcher<R, D> {
+    /// `vade status --dry-run`: the recorded phase or "stopped", from files only.
     pub(super) fn status_preview(&self) -> Result<(), String> {
         let record = self.record()?;
         let config = Config::load(&self.root)?;
@@ -34,10 +38,11 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                 "An owned engine has no saved config; preserve the state folder and run vade down."
                     .into(),
             ),
-            (_, None) => output::line(format_args!("Vade is stopped. Start: vade launch")),
+            (_, None) => output::line(format_args!("Vade is stopped. Start: {}", text::command("launch"))),
         }
     }
 
+    /// Fill a status report; dry runs record every live check as unchecked.
     pub(super) fn status_snapshot(
         &mut self,
         report: &mut Snapshot,

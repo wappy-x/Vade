@@ -346,6 +346,8 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+/// `vade-harness setup`: parse its arguments and print or write the client
+/// configuration it generates.
 pub fn cli(args: impl IntoIterator<Item = String>) -> ExitCode {
     let args: Vec<_> = args.into_iter().collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {

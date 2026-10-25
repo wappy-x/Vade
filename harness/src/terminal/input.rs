@@ -1,6 +1,7 @@
 //! Terminal input channels and incremental key decoding.
 use super::*;
 
+/// One decoded key press or pasted text from the terminal.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Key {
     Text(String),
@@ -37,6 +38,8 @@ pub enum Key {
     CtrlO,
     Search,
 }
+/// What the standard-input reader thread delivers: raw bytes in a raw
+/// terminal, whole lines otherwise, or end of input and its failures.
 #[derive(Debug)]
 pub enum Input {
     Bytes(Vec<u8>),
@@ -47,6 +50,8 @@ pub enum Input {
     Error,
 }
 
+/// Start the thread that reads standard input, in raw byte mode or line mode,
+/// and return its channel.
 pub fn input_channel(raw: bool) -> Receiver<Input> {
     let (tx, rx) = wake::channel(16);
     std::thread::spawn(move || {
@@ -110,6 +115,8 @@ fn send_line(tx: &Sender<Input>, line: &mut Vec<u8>, overflow: bool) -> bool {
     tx.send(Input::Line(value)).is_ok()
 }
 
+/// Turns raw terminal bytes into [`Key`]s: escape sequences, bracketed paste,
+/// Meta chords and split UTF-8.
 #[derive(Default)]
 pub struct Decoder {
     escape: Vec<u8>,
@@ -454,6 +461,7 @@ fn modified_key(sequence: &[u8]) -> Option<Key> {
     Some(Key::Text(sanitize(&text)))
 }
 
+/// True once the terminal's interrupt signal (Ctrl+C) has arrived.
 pub fn interrupted() -> bool {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {

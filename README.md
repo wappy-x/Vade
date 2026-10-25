@@ -59,12 +59,16 @@ Sparks together, see [two and more Sparks](INSTALL.md#two-and-more-sparks).
 
 - **Chat in the terminal.** `vade chat` (or `vade launch`) opens Vade's coding
   agent. It can read, search and edit files in the folder you started it from.
-  If your context is set below 8192 tokens, you get plain chat instead.
-  On macOS, the agent's shell sees only system and Homebrew tools; if you
-  installed Rust with rustup, see [the controller notes in INSTALL](INSTALL.md#route-b-from-a-controller).
-- **An OpenAI-compatible API** at `http://127.0.0.1:18080/v1`. If that port was
-  busy when you first set up, `vade status` prints the address in use instead,
-  and the API is under its `/v1`. By default the model thinks before it
+  On Linux, and so on the Spark, it can't run shell commands; see
+  [what doesn't work yet](#supported-systems). The agent needs a context of at
+  least 8192 tokens: below that, chat on the Spark falls back to plain chat,
+  and chat from a controller stops with an error. On macOS, the agent's shell
+  sees only system and Homebrew tools; if you installed Rust with rustup, see
+  [the controller notes in INSTALL](INSTALL.md#route-b-from-a-controller).
+- **An OpenAI-compatible API** at `http://127.0.0.1:18080/v1`. On the Spark, if
+  that port was busy when you first set up, `vade status` prints the address
+  in use instead, and the API is under its `/v1`. From a controller, the API is
+  on the `local_port` in your config (18080 unless you changed it). By default the model thinks before it
   answers, and the thinking counts against the same `max_tokens` as the answer.
   If you want only the answer, send `"enable_thinking": false` (or `"reasoning_effort": "none"`).
 - **An exactness check.** `vade verify` sends the same requests several times
@@ -84,7 +88,13 @@ every default and how to change it. These are the ones you meet first:
   few tokens ahead, and the full model checks each guess, so greedy answers
   stay the same.
 - **Greedy decoding.** A request that sets no sampling options is decoded
-  greedily: the engine always picks the most likely next token.
+  greedily: the engine always picks the most likely next token. Setting even
+  one option, such as `"temperature": 0` alone, makes the engine take the rest
+  from the checkpoint's own settings, which may include penalties that change
+  the answer. For greedy
+  answers, send no sampling options, or send all of `temperature: 0`,
+  `top_p: 1`, `top_k: 0`, `repetition_penalty: 1`, `presence_penalty: 0` and
+  `frequency_penalty: 0`.
 - **Context and output.** Whether you work on the Spark or from a controller,
   Vade starts by asking for a context of 32768 tokens and output of up to 8192
   tokens. On the Spark, Vade lowers the context (to 16384, then 8192, then
@@ -102,8 +112,12 @@ every default and how to change it. These are the ones you meet first:
 ## What works today, and what doesn't yet
 
 - **One model.** `nvidia/Qwen3.8-Flash-Next-FP4-Local` at its pinned publisher
-  revision, text only. The older FP8 setups still have their own
-  [legacy guides](docs/install-legacy-fp8.md). Other checkpoints do not run.
+  revision, text only. Two older routes are still in the tree, each with its
+  own guide: Flash-Next FP8 on two Sparks
+  ([legacy installation](docs/install-legacy-fp8.md)) and the small Qwen3-8B
+  BF16 model (`vade run qwen3-8b`, in the
+  [legacy one-Spark quickstart](docs/quickstart-one-spark.md#qwen3-8b-bf16-ubuntu-to-a-first-answer)).
+  Neither is a supported route in v0.1.0.
   [Adding a model](docs/adding-a-model.md) is our design note on what a new
   model must pass before we support it.
 - **DGX Spark only.** The engine runs on DGX Spark (NVIDIA GB10) with Linux
@@ -118,11 +132,14 @@ every default and how to change it. These are the ones you meet first:
   the macOS sandbox, so they are not available in chat on the Spark or on any
   other Linux computer. Reading, searching, line edits and patches work
   everywhere.
-- **A second Spark reads prompts faster, but one chat does not write faster.**
-  In the published runs, a second Spark cut the time to read a cold prompt
+- **In the 2026-10-24 runs, a second Spark read prompts faster, but one chat
+  did not write faster.** A second Spark cut the time to read a cold prompt
   (one the engine has not seen before), and on rented cloud machines it also
   raised throughput when many chats ran at once. A single chat did not get
   faster; see [what the measurements mean](docs/benchmarks.md#what-this-means).
+  A change to the layer pipeline, merged on 2026-10-25 after those runs,
+  targets one-chat speed on two Sparks; the next published cards will show its
+  effect.
   The [FP4-Local guide](cli/docs/fp4-local.md) describes chains of up to 24
   Sparks, each holding a run of the model's layers and passing its work to the
   next. Our published measurements cover one and two Sparks, and one, two and
@@ -171,6 +188,17 @@ the OFF rows, every request sent `"draft":"plain"`. Code and prose are one
 chat at a time, and the 8-chat rate covers all eight chats together. Tok/s
 means completion tokens per second of wall-clock time.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmarks-2026-10-24-dark.svg">
+  <img src="docs/assets/benchmarks-2026-10-24-light.svg" width="100%" alt="Bar chart comparing one DGX Spark with two, drafting ON (the default). In the 2026-10-24 runs, a second Spark answered a long prompt faster, but one chat did not write faster. Code, one chat: 76.7 tok/s on 1 Spark, 65.1 on 2 Sparks. Prose, one chat: 41.7 and 38.3. Eight chats together: 173.9 and 168.6. First reply after an 8K-token prompt: 3.86 s on 1 Spark, 2.79 s on 2 Sparks. Across all our runs, eight chats gave 130.6 to 173.9 tok/s on six single Sparks and 167.6 to 168.7 on three pairs.">
+</picture>
+
+The chart compares one of our Sparks with two, both with drafting ON, the
+default. Every number is printed in a
+[2026-10-24 receipt](bench/receipts/2026-10-24/README.md), and
+`python3 -I tools/benchmarks-chart.py` redraws the chart. The table below adds
+drafting OFF and the cloud VMs.
+
 | Setup | Drafting | Code tok/s | Prose tok/s | 8 chats tok/s | First token, 8K prompt (s) |
 | --- | --- | ---: | ---: | ---: | ---: |
 | One DGX Spark | OFF | 27.8 | 27.8 | 136.1 | 3.82 |
@@ -196,9 +224,10 @@ above is the top of that range. One drafting-OFF run, on our Spark home-6,
 landed at 86.6, and its receipt does not say why.
 
 The four cloud VMs run as one engine, each VM holding a slice of the model's
-layers. That chain is for models too big for one machine; it does not make one
-chat faster than one Spark. In its drafting-ON run the engine served all eight
-chats without drafting, so both four-VM rows show the same 8-chat rate.
+layers. That chain is for models too big for one machine; in the 2026-10-24
+runs it did not make one chat faster than one Spark. In its drafting-ON run the
+engine served all eight chats without drafting, so both four-VM rows show the
+same 8-chat rate.
 
 Each row has its own receipt, named by the time of its run:
 
@@ -210,15 +239,6 @@ Each row has its own receipt, named by the time of its run:
 
 The [benchmarks page](docs/benchmarks.md) has the other receipts and the
 recipes for reproducing each run.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmarks-2026-10-24-dark.svg">
-  <img src="docs/assets/benchmarks-2026-10-24-light.svg" width="100%" alt="Grouped bar chart of decode speed in tokens per second for the v0.1.0 release, drafting OFF and then ON. One DGX Spark: code 27.8 to 76.7, prose 27.8 to 41.7, 8 chats 136.1 to 173.9. Two DGX Sparks: code 27.9 to 65.1, prose 27.9 to 38.3, 8 chats 135.1 to 168.6. One cloud GB10 VM: code 24.4 to 61.1, prose 22.5 to 31.6, 8 chats 73.3 to 97.5. Two cloud GB10 VMs: code 24.4 to 54.7, prose 22.9 to 30.5, 8 chats 112.2 to 138.3. Four cloud GB10 VMs: code 21.9 to 51.6, prose 20.7 to 29.0, 8 chats 104.2 either way.">
-</picture>
-
-The chart draws the same ten cards as the table. Every label is the value
-printed in a [2026-10-24 receipt](bench/receipts/2026-10-24/README.md).
-To redraw the chart, run `python3 -I tools/benchmarks-chart.py`.
 
 ## Licence
 

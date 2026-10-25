@@ -7,6 +7,8 @@ use std::collections::{BTreeMap, VecDeque};
 const MAX_BRANCHES: usize = 128;
 const RELEASE_BUDGET: Duration = Duration::from_secs(2);
 
+/// How many checkpoint releases were attempted and how many the engine
+/// confirmed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReleaseSummary {
     pub attempted: usize,

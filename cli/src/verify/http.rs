@@ -10,11 +10,14 @@ use std::{
 const MAX_BODY: usize = 8 * 1024 * 1024;
 const MAX_LINE: usize = 1024 * 1024;
 
+/// A parsed `http://host:port` engine root.
 pub struct Endpoint {
     authority: String,
     address: String,
 }
 
+/// One verified streaming completion: every token ID and text, the usage
+/// counts, and whether the engine reports drafting was used.
 #[derive(Debug)]
 pub struct Reply {
     pub token_ids: Vec<u32>,
@@ -29,6 +32,7 @@ pub struct Reply {
 }
 
 impl Endpoint {
+    /// Parse an engine root URL; credentials, queries and other schemes are refused.
     pub fn parse(url: &str) -> Result<Self, String> {
         let rest = url
             .strip_prefix("http://")
@@ -80,6 +84,8 @@ impl Endpoint {
         self.address == other.address
     }
 
+    /// Stream one greedy completion with drafting ON or OFF and check the stream is
+    /// complete, consistent and echoes the requested settings.
     pub fn completion(
         &self,
         prompt: &str,

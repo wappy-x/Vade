@@ -1,13 +1,15 @@
 //! Minimal OpenAI-compatible text chat wire types.
-use crate::json::{self, Value};
+use crate::json::{self, Value, invalid};
 use std::io;
 
+/// One chat message: a role and its exact text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Message {
     pub role: String,
     pub content: String,
 }
 
+/// A finished text reply and its `finish_reason`, if the server sent one.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Completion {
     pub text: String,
@@ -85,9 +87,6 @@ pub(crate) fn apply_event(
     completion: &mut Completion,
     on_delta: &mut dyn FnMut(&str),
 ) -> io::Result<()> {
-    fn invalid(message: &'static str) -> io::Error {
-        io::Error::new(io::ErrorKind::InvalidData, message)
-    }
     if let Some(error) = value.get("error") {
         return Err(response_error(error, "upstream returned a chat error"));
     }
@@ -155,9 +154,6 @@ pub(crate) fn apply_event_data<'a>(
     completion: &mut Completion,
     on_delta: &mut dyn FnMut(&str),
 ) -> io::Result<json::View<'a>> {
-    fn invalid(message: &'static str) -> io::Error {
-        io::Error::new(io::ErrorKind::InvalidData, message)
-    }
     let value = json::view(data)?;
     if let Some(error) = value.get("error") {
         return Err(response_error_view(error, "upstream returned a chat error"));

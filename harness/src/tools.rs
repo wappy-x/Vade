@@ -51,6 +51,8 @@ impl FileStamp {
     }
 }
 
+/// The folder the agent may read and edit, opened once and anchored so paths
+/// cannot escape it, plus where its private chat state lives.
 pub struct Workspace {
     root: PathBuf,
     state: StateLocation,

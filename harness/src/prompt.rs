@@ -1,6 +1,8 @@
 //! Stable message ordering and exact contents; no hidden prompt rewriting.
 use crate::protocol::Message;
 
+/// The request messages in fixed order: the system prompt, the history as
+/// given, then the new user message. Contents stay exact.
 pub fn build_messages(system: &str, history: &[Message], user: &str) -> Vec<Message> {
     let mut messages = Vec::with_capacity(history.len() + 2);
     messages.push(Message {
@@ -25,6 +27,8 @@ pub struct PrefixMetadata {
     pub total_content_bytes: usize,
 }
 
+/// How many leading messages (and content bytes) `current` shares exactly
+/// with `previous`.
 pub fn prefix_metadata(previous: &[Message], current: &[Message]) -> PrefixMetadata {
     let mut metadata = PrefixMetadata {
         total_messages: current.len(),

@@ -2,11 +2,14 @@
 use std::sync::mpsc::{self, Receiver, SendError, SyncSender, TrySendError};
 use std::thread::{self, Thread};
 
+/// The sending half of a [`channel`]; each send also wakes the receiving thread.
 pub struct Sender<T> {
     tx: SyncSender<T>,
     receiver: Thread,
 }
 
+/// A bounded channel whose receiver is the calling thread, which each send
+/// unparks.
 pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     let (tx, rx) = mpsc::sync_channel(capacity);
     (

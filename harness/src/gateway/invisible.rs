@@ -1,7 +1,9 @@
 //! Standalone opaque HTTP relay. Observers and optional policies never own replies.
 use crate::transport::{self, BodyReader, DeadlineStream, Endpoint, Head};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{TcpStream, ToSocketAddrs};
+#[cfg(test)]
+use std::net::TcpListener;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -99,6 +101,7 @@ pub fn exit(args: impl Iterator<Item = String>) -> std::process::ExitCode {
     }
 }
 
+/// `vade-gateway`: parse its arguments, then serve or replay until stopped.
 pub fn cli(args: impl Iterator<Item = String>) -> io::Result<()> {
     let args: Vec<_> = args.collect();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
@@ -154,7 +157,7 @@ pub fn cli(args: impl Iterator<Item = String>) -> io::Result<()> {
         "Vade gateway: listening on http://{}/v1 ({} upstream{}). Ctrl-C stops the gateway.",
         listener.local_addr()?, upstreams.len(), if upstreams.len() == 1 { "" } else { "s" }
     ));
-    serve(listener, runtime, stats, recorder, Arc::new(access))
+    serve(listener.incoming(), runtime, stats, recorder, Arc::new(access))
 }
 
 fn print_help(replay: bool) -> io::Result<()> {
@@ -176,16 +179,23 @@ fn argument(args: &mut impl Iterator<Item = String>, option: &str) -> io::Result
 }
 
 fn serve(
-    listener: TcpListener,
+    incoming: impl Iterator<Item = io::Result<TcpStream>>,
     runtime: Arc<Runtime>,
     stats: Option<Arc<StatsLog>>,
     recorder: Option<Arc<Recorder>>,
     access: Arc<Access>,
 ) -> io::Result<()> {
     let active = Arc::new(AtomicUsize::new(0));
-    for socket in listener.incoming() {
-        let socket = socket?;
-        if !socket.peer_addr()?.ip().is_loopback() {
+    for socket in incoming {
+        let socket = match socket {
+            Ok(socket) => socket,
+            Err(error) => {
+                super::accept_failed(&error);
+                continue;
+            }
+        };
+        // A peer that reset before this point has no address; drop only it.
+        if !socket.peer_addr().is_ok_and(|peer| peer.ip().is_loopback()) {
             continue;
         }
         if active.load(Ordering::Relaxed) >= super::MAX_CONNECTIONS {
@@ -321,7 +331,7 @@ fn handle_guarded(
     let mut recording = recorder.and_then(|r| match r.start() {
         Ok(recording) => Some(recording),
         Err(_) => {
-            crate::diagnostics::stderr_line(format_args!("vade-gateway: recorder start failed"));
+            crate::diagnostics::stderr_line(format_args!("vade-gateway: recorder start failed; this request is forwarded but not recorded. Check the --record folder's permissions and free space."));
             None
         }
     });
@@ -331,12 +341,12 @@ fn handle_guarded(
     if let Some(log) = log
         && log.write(&line).is_err()
     {
-        crate::diagnostics::stderr_line(format_args!("vade-gateway: stats write failed"));
+        crate::diagnostics::stderr_line(format_args!("vade-gateway: stats write failed; the request was served without its statistics line. Check the --stats file's permissions and free space."));
     }
     if let Some(recording) = recording
         && recording.finish(&line).is_err()
     {
-        crate::diagnostics::stderr_line(format_args!("vade-gateway: recorder finish failed"));
+        crate::diagnostics::stderr_line(format_args!("vade-gateway: recorder finish failed; this request's recording is incomplete. Check the --record folder's permissions and free space."));
     }
     result
 }

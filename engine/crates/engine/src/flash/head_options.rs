@@ -13,6 +13,11 @@ fn parse(value: Result<String, std::env::VarError>) -> Result<Option<bool>, Stri
 pub fn load() -> Result<bool, String> {
     configured().map(|enabled| enabled.unwrap_or(false))
 }
+/// Refuse a malformed value at startup without fixing the switch: a pipeline rank pins it
+/// (tp settings::PIPELINE_DEFAULTS) after argument parsing and before the model reads it.
+pub fn validate() -> Result<(), String> {
+    parse(std::env::var("VADE_HEAD_BOUNDS")).map(|_| ())
+}
 fn configured() -> Result<Option<bool>, String> {
     ENABLED.get_or_init(|| parse(std::env::var("VADE_HEAD_BOUNDS"))).clone()
 }
@@ -28,10 +33,11 @@ fn funded(saved: usize, twin: usize, vocabulary: usize, sessions: usize, mtp: bo
         .and_then(|n| sessions.checked_mul(RETAINED_INPUT_BYTES).and_then(|retained| n.checked_add(retained)));
     needed.is_some_and(|n| n <= saved)
 }
-/// Model-wide optional storage is forbidden on either pipeline rank.
+/// Model-wide optional storage is forbidden on a pipeline rank that projects no head (the
+/// VADE_W2_PP back and middle ranks); the front projects it as one Spark does.
 /// No callback (and thus no allocation or log) runs when disabled or unused.
-pub fn load_local<T>(enabled: bool, pipeline: bool, load: impl FnOnce() -> Result<T, String>) -> Result<Option<T>, String> {
-    if enabled && !pipeline { load().map(Some) } else { Ok(None) }
+pub fn load_local<T>(enabled: bool, headless: bool, load: impl FnOnce() -> Result<T, String>) -> Result<Option<T>, String> {
+    if enabled && !headless { load().map(Some) } else { Ok(None) }
 }
 pub const RETAINED_ROWS: usize = 4;
 pub const RETAINED_INPUT_BYTES: usize = RETAINED_ROWS * 2560 * 4;
@@ -40,9 +46,9 @@ pub fn retained_input_bytes(enabled: bool) -> usize { if enabled { RETAINED_INPU
 mod tests {
     use super::{parse, load_local, retained_input_bytes, funded};
     #[test]
-    fn disabled_and_pipeline_models_never_allocate_optional_head_state() {
-        for (enabled, pipeline) in [(false,false),(false,true),(true,true)] {
-            let value: Option<()> = load_local(enabled,pipeline,|| panic!("unused head allocator called")).unwrap();
+    fn disabled_and_headless_models_never_allocate_optional_head_state() {
+        for (enabled, headless) in [(false,false),(false,true),(true,true)] {
+            let value: Option<()> = load_local(enabled,headless,|| panic!("unused head allocator called")).unwrap();
             assert!(value.is_none());
             assert_eq!(retained_input_bytes(value.is_some()),0);
         }
@@ -81,10 +87,10 @@ mod tests {
     }
     #[test]
     fn unfunded_or_unused_automatic_head_does_not_allocate() {
-        for (saved, mtp, pipeline) in [(0, true, false), (usize::MAX, false, false), (usize::MAX, true, true)] {
+        for (saved, mtp, headless) in [(0, true, false), (usize::MAX, false, false), (usize::MAX, true, true)] {
             let enabled = parse(Err(std::env::VarError::NotPresent)).unwrap()
                 .unwrap_or(funded(saved, 1024, 64, 16, mtp));
-            let state: Option<()> = load_local(enabled, pipeline, || panic!("unfunded or unused head allocated")).unwrap();
+            let state: Option<()> = load_local(enabled, headless, || panic!("unfunded or unused head allocated")).unwrap();
             assert!(state.is_none());
             assert_eq!(retained_input_bytes(state.is_some()), 0);
         }

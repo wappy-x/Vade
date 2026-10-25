@@ -1,3 +1,6 @@
+//! Every subprocess the CLI starts. [`Exec`] describes one command, the
+//! [`Runner`] trait runs it (tests substitute fakes), and [`SystemRunner`] owns
+//! the real process group, timeouts, cancellation and retained logs.
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::os::unix::process::CommandExt;
@@ -5,8 +8,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-// A pre_exec fork can briefly inherit another test's flock descriptor even
-// with CLOEXEC. Serialize process-spawning tests with the worker lock test.
+/// A pre_exec fork can briefly inherit another test's flock descriptor even
+/// with CLOEXEC. Serialize process-spawning tests with the worker lock test.
 #[cfg(test)]
 pub(crate) static PROCESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -19,6 +22,9 @@ pub(crate) fn process_test_lock() -> std::sync::MutexGuard<'static, ()> {
     PROCESS_TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner())
 }
 
+/// One subprocess to run: what to start, with which input and environment, and
+/// how long it may take. `label` names it in progress lines and errors; argv and
+/// the environment are never printed.
 #[derive(Clone, Debug)]
 pub struct Exec {
     pub label: String,
@@ -29,13 +35,20 @@ pub struct Exec {
     pub unset: Vec<String>,
     pub cwd: Option<PathBuf>,
     pub timeout: Duration,
+    /// A durable build job directory; when set, `build_job` runs it instead.
     pub job: Option<PathBuf>,
+    /// Whether Ctrl-C stops it; cleanup commands always run to completion.
     pub cancellable: bool,
+    /// A readiness probe whose failure is expected while waiting, so its logs are
+    /// not retained.
     pub transient_probe: bool,
+    /// Overwrite this private file with the latest probe's output instead.
     pub probe_log: Option<PathBuf>,
 }
 
 impl Exec {
+    /// A cancellable command with no input, the current environment and a 60 s
+    /// timeout.
     pub fn new(label: &str, program: &str, args: Vec<String>) -> Self {
         Self {
             label: label.into(),
@@ -52,6 +65,7 @@ impl Exec {
             probe_log: None,
         }
     }
+    /// The [`Command`] with these arguments, environment changes and folder.
     pub(crate) fn command(&self) -> Command {
         let mut command = Command::new(&self.program);
         command.args(&self.args).envs(&self.env);
@@ -63,6 +77,7 @@ impl Exec {
         }
         command
     }
+    /// Print the shell-quoted command line that `--dry-run` would run.
     pub fn preview(&self) -> Result<(), String> {
         if let Some(cwd) = &self.cwd {
             crate::output::line(format_args!("# folder: {}", crate::text::terminal_text(&cwd.to_string_lossy())))?;
@@ -87,23 +102,32 @@ impl Exec {
     }
 }
 
+/// Whether a command succeeded, and its standard output.
 #[derive(Clone, Debug, Default)]
 pub struct Output {
     pub success: bool,
     pub stdout: String,
 }
 
+/// Runs every [`Exec`]. [`SystemRunner`] starts real processes (or previews them
+/// on `--dry-run`); tests supply scripted runners.
 pub trait Runner {
+    /// Whether the user pressed Ctrl-C since the lifecycle command started.
     fn interrupted(&self) -> bool {
         interrupted()
     }
+    /// Settle build jobs a previous, interrupted command left under `root`.
     fn recover_jobs(&mut self, root: &std::path::Path) -> Result<(), String> {
         crate::build_job::recover(root)
     }
+    /// Run a cleanup step, which Ctrl-C does not cancel.
     fn cleanup(&mut self, exec: &Exec) -> Result<Output, String> {
         self.run(exec)
     }
+    /// Run to completion and capture standard output.
     fn run(&mut self, exec: &Exec) -> Result<Output, String>;
+    /// Run and hand each output line to `line`; an error from `line` stops the
+    /// command.
     fn stream(&mut self, exec: &Exec, line: &mut dyn FnMut(&str) -> Result<(), String>) -> Result<Output, String> {
         let output = self.run(exec)?;
         for value in output.stdout.lines() {
@@ -117,7 +141,9 @@ pub trait Runner {
         let second = self.run(second);
         Ok((first?, second?))
     }
+    /// Run attached to this terminal (chat); returns whether it exited successfully.
     fn interactive(&mut self, exec: &Exec) -> Result<bool, String>;
+    /// Fail unless `port` on the loopback interface is free.
     fn port_free(&mut self, port: u16) -> Result<(), String>;
     /// Start a detached local process appending output to `log`; returns its PID.
     /// Scripted runners record the command and may answer a PID on stdout.
@@ -125,12 +151,41 @@ pub trait Runner {
         let _ = log;
         Ok(self.run(exec)?.stdout.trim().parse().unwrap_or(0))
     }
+    /// Wait between polls; a real runner wakes early on Ctrl-C.
     fn pause(&mut self, duration: Duration);
+    /// Ask before restarting a running engine on a new build; `false` without a
+    /// terminal.
     fn confirm_restart(&mut self) -> Result<bool, String> {
         Ok(false)
     }
+    /// An independent runner for one worker thread, or None to keep the work
+    /// on this thread. The default keeps scripted runners deterministic.
+    fn worker(&self) -> Option<Box<dyn Runner + Send>> {
+        None
+    }
+    /// Whether standard input is a terminal a chat can use. Scripted runners act interactive.
+    fn terminal(&self) -> bool {
+        true
+    }
 }
 
+impl<T: Runner + ?Sized> Runner for Box<T> {
+    fn interrupted(&self) -> bool { (**self).interrupted() }
+    fn recover_jobs(&mut self, root: &std::path::Path) -> Result<(), String> { (**self).recover_jobs(root) }
+    fn cleanup(&mut self, exec: &Exec) -> Result<Output, String> { (**self).cleanup(exec) }
+    fn run(&mut self, exec: &Exec) -> Result<Output, String> { (**self).run(exec) }
+    fn stream(&mut self, exec: &Exec, line: &mut dyn FnMut(&str) -> Result<(), String>) -> Result<Output, String> { (**self).stream(exec, line) }
+    fn parallel(&mut self, first: &Exec, second: &Exec) -> Result<(Output, Output), String> { (**self).parallel(first, second) }
+    fn interactive(&mut self, exec: &Exec) -> Result<bool, String> { (**self).interactive(exec) }
+    fn port_free(&mut self, port: u16) -> Result<(), String> { (**self).port_free(port) }
+    fn spawn(&mut self, exec: &Exec, log: &std::path::Path) -> Result<u32, String> { (**self).spawn(exec, log) }
+    fn pause(&mut self, duration: Duration) { (**self).pause(duration) }
+    fn confirm_restart(&mut self) -> Result<bool, String> { (**self).confirm_restart() }
+    fn worker(&self) -> Option<Box<dyn Runner + Send>> { (**self).worker() }
+    fn terminal(&self) -> bool { (**self).terminal() }
+}
+
+/// The real runner. With `dry`, commands are printed instead of started.
 pub struct SystemRunner {
     pub dry: bool,
 }
@@ -141,6 +196,7 @@ pub(crate) struct Progress<'a> {
     next: Duration,
 }
 impl<'a> Progress<'a> {
+    /// Progress for `label`, first reported after 30 s.
     pub(crate) fn new(label: &'a str) -> Self {
         Self { label, next: Duration::from_secs(30) }
     }
@@ -149,6 +205,7 @@ impl<'a> Progress<'a> {
         self.next = elapsed + Duration::from_secs(30);
         Some(format!("Vade: {} still running ({}s elapsed).", crate::text::argument(self.label), elapsed.as_secs()))
     }
+    /// Print a "still running" line on stderr at most every 30 s.
     pub(crate) fn report(&mut self, elapsed: Duration) {
         if let Some(line) = self.line(elapsed) {
             crate::output::stderr_line(format_args!("{line}"));
@@ -157,6 +214,14 @@ impl<'a> Progress<'a> {
 }
 
 impl Runner for SystemRunner {
+    // A dry run previews every command in order on this thread.
+    fn worker(&self) -> Option<Box<dyn Runner + Send>> {
+        (!self.dry).then(|| Box::new(SystemRunner { dry: false }) as Box<dyn Runner + Send>)
+    }
+    fn terminal(&self) -> bool {
+        use std::io::IsTerminal;
+        std::io::stdin().is_terminal()
+    }
     fn parallel(&mut self, first: &Exec, second: &Exec) -> Result<(Output, Output), String> {
         if self.dry { return Ok((self.run(first)?, self.run(second)?)); }
         std::thread::scope(|scope| {
@@ -459,6 +524,7 @@ fn private_file(path: &std::path::Path) -> Result<std::fs::File, String> {
         .map_err(|_| "Cannot create private command output. Check the temporary directory.".into())
 }
 
+/// Quote one word for a POSIX shell; safe words stay bare.
 pub fn quote(value: &str) -> String {
     if !value.is_empty()
         && value
@@ -470,6 +536,8 @@ pub fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+/// A shell word for a remote path, expanding a leading `~/` or `{home}/` to
+/// `"$HOME"/`.
 pub fn remote_path(value: &str) -> String {
     if let Some(relative) = value
         .strip_prefix("~/")
@@ -481,12 +549,16 @@ pub fn remote_path(value: &str) -> String {
     }
 }
 
+/// Run `command` on the SSH host `alias` with [`ssh_options`].
 pub fn ssh(alias: &str, command: String, label: &str) -> Exec {
     let mut args = ssh_options();
     args.extend([alias.into(), command]);
     Exec::new(label, "ssh", args)
 }
 
+/// Non-interactive SSH options: batch mode, a 10 s connect timeout, a
+/// keepalive that drops a dead peer after about 20 s, and no local commands
+/// or shared control connections.
 pub fn ssh_options() -> Vec<String> {
     [
         "-o",
@@ -513,11 +585,15 @@ static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 extern "C" fn interrupt(_number: i32) {
     INTERRUPTED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
+/// Whether SIGINT or SIGTERM arrived while [`Interruptions`] was installed.
 pub(crate) fn interrupted() -> bool {
     INTERRUPTED.load(std::sync::atomic::Ordering::Relaxed)
 }
+/// Records SIGINT and SIGTERM instead of exiting, so owned work can unwind;
+/// dropping it restores the previous handlers.
 pub struct Interruptions(Vec<(i32, usize)>);
 impl Interruptions {
+    /// Clear the interrupted flag and install the handlers.
     pub fn install() -> Self {
         INTERRUPTED.store(false, std::sync::atomic::Ordering::Relaxed);
         Self(

@@ -29,6 +29,8 @@ fn path(candidate: &str) -> io::Result<String> {
         parts.join("/")
     })
 }
+/// The workspace file revisions a conversation touched, captured so a resume
+/// or fork can tell which files changed since.
 #[derive(Clone, Debug)]
 pub struct Checkpoint {
     workspace_id: String,
@@ -203,10 +205,7 @@ impl Checkpoint {
         for (path, revision) in &self.files {
             match workspace.stamp(path) {
                 Ok(current)
-                    if current.as_ref().map(|s| s.identity.as_str()) == revision.as_deref() =>
-                {
-                    ()
-                }
+                    if current.as_ref().map(|s| s.identity.as_str()) == revision.as_deref() => {}
                 _ => changed.push(path.as_str()),
             }
         }

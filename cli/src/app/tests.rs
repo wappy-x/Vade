@@ -3,6 +3,8 @@
 mod install_tests;
 #[path = "tests/owner_dispatch.rs"]
 mod owner_dispatch;
+#[path = "tests/chat_guards.rs"]
+mod chat_guards;
 use super::*;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -881,7 +883,7 @@ fn prebuilt_install_verifies_before_execution_and_reuses_warm_artifacts() {
     for name in crate::prebuilt::FILES {
         let mut bytes = vec![0; 32]; bytes[..6].copy_from_slice(b"\x7fELF\x02\x01"); bytes[18] = 183;
         fs::write(dir.join(name), &bytes).unwrap();
-        manifest.push_str(&format!("{name}.sha256={}\n", crate::sha256::digest_reader(&bytes[..]).unwrap()));
+        manifest.push_str(&format!("{name}.sha256={}\n", crate::sha256::sha(&bytes)));
     }
     fs::write(dir.join("manifest.conf"), manifest).unwrap();
     f.app.config.prebuilt_dir = Some(root);

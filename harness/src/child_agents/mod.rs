@@ -38,6 +38,7 @@ const MAX_GOAL_BYTES: usize = 16 * 1024;
 const MAX_SUMMARY_BYTES: usize = 4096;
 static NEXT_SCHEDULER: AtomicU64 = AtomicU64::new(1);
 
+/// A child task's identity, unique per scheduler; displayed as `child-S-N`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TaskId {
     scheduler: u64,
@@ -104,6 +105,8 @@ impl Quota {
     }
 }
 
+/// A child task request: its goal, an optional host-declared grant and its
+/// quota.
 #[derive(Clone, Debug)]
 pub struct Task {
     pub goal: String,
@@ -122,6 +125,8 @@ impl Task {
     }
 }
 
+/// Scheduler limits: concurrency, task count, totals shared by all children,
+/// wall time, the default per-task quota and the tool policy.
 #[derive(Clone, Debug)]
 pub struct Config {
     pub max_concurrent: usize,
@@ -173,6 +178,8 @@ pub trait ChildModel: Send {
     }
 }
 
+/// What a [`Factory`] builds for one child: its model, tool executor and an
+/// optional separate journal.
 pub struct ChildWorker {
     pub model: Box<dyn ChildModel>,
     pub tools: Box<dyn ToolExecutor + Send>,
@@ -181,14 +188,19 @@ pub struct ChildWorker {
     pub journal_name: Option<String>,
 }
 
+/// What a [`Factory`] receives about the child it builds: identity, granted
+/// scope and quota.
 pub struct ChildContext {
     pub id: TaskId,
     pub scope: Scope,
     pub quota: Quota,
 }
 
+/// Builds the worker for one child task; it may stop early when the flag is set.
 pub type Factory = dyn Fn(&ChildContext, &AtomicBool) -> io::Result<ChildWorker> + Send + Sync;
 
+/// Charges a child's exact token reservations against its quota and stops
+/// the child once the quota is spent.
 pub struct TokenMeter {
     limit: u64,
     output: u64,
@@ -238,6 +250,7 @@ impl TokenMeter {
     }
 }
 
+/// Why a child was asked to stop. A request is not an acknowledgment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StopRequest {
     ParentCancelled,
@@ -247,6 +260,7 @@ pub enum StopRequest {
     Shutdown,
 }
 
+/// How a child task ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Completed,
@@ -260,6 +274,8 @@ pub enum Outcome {
     Panicked,
 }
 
+/// A child task's lifecycle: running, stopping, finished, then collected by
+/// the parent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TaskState {
     Running,
@@ -268,6 +284,8 @@ pub enum TaskState {
     Collected(Outcome),
 }
 
+/// A bounded progress view of one child for the parent and the UI: state,
+/// leases, time, reservations and usage, never task prose.
 #[derive(Clone, Debug)]
 pub struct TaskSnapshot {
     pub id: TaskId,
@@ -283,6 +301,8 @@ pub struct TaskSnapshot {
     pub usage: ChildUsage,
 }
 
+/// Usage the child's validated responses reported, including cached tokens
+/// when the engine said so.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ChildUsage {
     pub last: Option<Usage>,
@@ -291,6 +311,7 @@ pub struct ChildUsage {
     pub reported_cached_tokens: u64,
 }
 
+/// What happened to one child tool call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolStatus {
     Started,
@@ -304,6 +325,8 @@ pub enum ToolStatus {
     OutputLimit,
 }
 
+/// One child tool call as the parent sees it: call ID, tool, whether it
+/// writes, and its status.
 #[derive(Clone, Debug)]
 pub struct ToolReceipt {
     pub call_id: String,
@@ -312,6 +335,8 @@ pub struct ToolReceipt {
     pub status: ToolStatus,
 }
 
+/// Everything a collected child returns to the parent: outcome, report,
+/// transcript, bounded summary, tool receipts and usage.
 pub struct TaskResult {
     pub id: TaskId,
     pub outcome: Outcome,
@@ -339,6 +364,7 @@ impl TaskResult {
     }
 }
 
+/// Why the scheduler refused a spawn, wait, cancel or collect request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScheduleError {
     Closed,
@@ -474,6 +500,8 @@ impl ChildControl {
     }
 }
 
+/// Runs child tasks on worker threads within shared limits, tracks their
+/// leases and quotas, and hands their results to the parent.
 pub struct Scheduler {
     id: u64,
     config: Config,

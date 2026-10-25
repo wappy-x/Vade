@@ -222,20 +222,19 @@ fn launch_and_lifecycle_resolve_the_same_generated_config() {
         let f = Fixture::new(override_home);
         f.configure_owner();
         let config = fs::read(f.owner.join("config")).unwrap();
-        for exported_config in [false] {
-            for command in ["launch", "down", "chat", "logs", "install", "up"] {
-                let text = stdout(
-                    f.command(exported_config)
-                        .arg(command)
-                        .bounded_output()
-                        .unwrap(),
-                );
-                assert!(
-                    text.contains(f.owner.join("config").to_str().unwrap()),
-                    "{command}, VADE_CONFIG={exported_config}: {text}"
-                );
-                assert!(!text.contains("fixture-no-network"), "{command}: {text}");
-            }
+        let exported_config = false;
+        for command in ["launch", "down", "chat", "logs", "install", "up"] {
+            let text = stdout(
+                f.command(exported_config)
+                    .arg(command)
+                    .bounded_output()
+                    .unwrap(),
+            );
+            assert!(
+                text.contains(f.owner.join("config").to_str().unwrap()),
+                "{command}, VADE_CONFIG={exported_config}: {text}"
+            );
+            assert!(!text.contains("fixture-no-network"), "{command}: {text}");
         }
         assert_eq!(fs::read(f.owner.join("config")).unwrap(), config);
         f.no_runtime_writes();
@@ -403,48 +402,47 @@ fn plain_and_json_status_use_the_selected_owner_record() {
         };
         fs::create_dir_all(&legacy).unwrap();
         fs::write(legacy.join("setup.conf"), "").unwrap();
-        for exported_config in [false] {
-            let plain = stdout(
-                f.command(exported_config)
-                    .arg("status")
-                    .bounded_output()
-                    .unwrap(),
-            );
-            let text = stdout(
-                f.command(exported_config)
-                    .args(["status", "--json"])
-                    .bounded_output()
-                    .unwrap(),
-            );
-            assert_eq!(text.lines().count(), 1, "JSON must be one object: {text}");
-            let value = json::parse(&text).unwrap();
-            assert_eq!(value["schema"].as_str(), Some("vade.status.v1"));
-            assert_eq!(value["phase"].as_str(), Some("running"));
-            assert_eq!(value["mode"].as_str(), Some("local"));
-            assert_eq!(value["model"].as_str(), Some(MODEL));
-            assert_eq!(
-                value["endpoint"].as_str(),
-                Some(format!("http://127.0.0.1:{PORT}/v1").as_str())
-            );
-            assert_eq!(
-                value["ready"],
-                json::Value::Null,
-                "dry status must not invent readiness"
-            );
-            assert!(
-                value["checks"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .all(|check| check["ok"] == json::Value::Null)
-            );
-            assert!(value["errors"].as_array().unwrap().is_empty());
-            assert!(value.get("token").is_none());
-            assert!(!text.contains(&"a".repeat(64)));
-            assert!(plain.contains("running"), "{plain}");
-            assert!(plain.contains(&format!("127.0.0.1:{PORT}")), "{plain}");
-            assert!(!plain.contains("stopped"), "{plain}");
-        }
+        let exported_config = false;
+        let plain = stdout(
+            f.command(exported_config)
+                .arg("status")
+                .bounded_output()
+                .unwrap(),
+        );
+        let text = stdout(
+            f.command(exported_config)
+                .args(["status", "--json"])
+                .bounded_output()
+                .unwrap(),
+        );
+        assert_eq!(text.lines().count(), 1, "JSON must be one object: {text}");
+        let value = json::parse(&text).unwrap();
+        assert_eq!(value["schema"].as_str(), Some("vade.status.v1"));
+        assert_eq!(value["phase"].as_str(), Some("running"));
+        assert_eq!(value["mode"].as_str(), Some("local"));
+        assert_eq!(value["model"].as_str(), Some(MODEL));
+        assert_eq!(
+            value["endpoint"].as_str(),
+            Some(format!("http://127.0.0.1:{PORT}/v1").as_str())
+        );
+        assert_eq!(
+            value["ready"],
+            json::Value::Null,
+            "dry status must not invent readiness"
+        );
+        assert!(
+            value["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|check| check["ok"] == json::Value::Null)
+        );
+        assert!(value["errors"].as_array().unwrap().is_empty());
+        assert!(value.get("token").is_none());
+        assert!(!text.contains(&"a".repeat(64)));
+        assert!(plain.contains("running"), "{plain}");
+        assert!(plain.contains(&format!("127.0.0.1:{PORT}")), "{plain}");
+        assert!(!plain.contains("stopped"), "{plain}");
         assert_eq!(
             fs::read_to_string(f.owner.join("state/run.conf")).unwrap(),
             record
@@ -457,34 +455,33 @@ fn plain_and_json_status_use_the_selected_owner_record() {
 fn missing_owner_config_preserves_running_ownership_for_status_and_shutdown() {
     let f = Fixture::new(true);
     let record = f.record_owner();
-    for exported_config in [false] {
-        let output = f
-            .command(exported_config)
-            .args(["status", "--json"])
+    let exported_config = false;
+    let output = f
+        .command(exported_config)
+        .args(["status", "--json"])
+        .bounded_output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(text.lines().count(), 1, "{text}");
+    let value = json::parse(&text).unwrap();
+    assert_eq!(value["schema"].as_str(), Some("vade.status.v1"));
+    assert_eq!(value["mode"].as_str(), Some("local"));
+    assert_eq!(value["phase"].as_str(), Some("running"));
+    assert_eq!(value["ready"], json::Value::Null);
+    assert!(!value["errors"].as_array().unwrap().is_empty());
+    let down = stdout(
+        f.command(exported_config)
+            .arg("down")
             .bounded_output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(1), "{output:?}");
-        assert!(output.stderr.is_empty(), "{output:?}");
-        let text = String::from_utf8(output.stdout).unwrap();
-        assert_eq!(text.lines().count(), 1, "{text}");
-        let value = json::parse(&text).unwrap();
-        assert_eq!(value["schema"].as_str(), Some("vade.status.v1"));
-        assert_eq!(value["mode"].as_str(), Some("local"));
-        assert_eq!(value["phase"].as_str(), Some("running"));
-        assert_eq!(value["ready"], json::Value::Null);
-        assert!(!value["errors"].as_array().unwrap().is_empty());
-        let down = stdout(
-            f.command(exported_config)
-                .arg("down")
-                .bounded_output()
-                .unwrap(),
-        );
-        assert!(
-            down.contains(f.owner.join("config").to_str().unwrap()),
-            "{down}"
-        );
-        assert!(!down.contains("fixture-no-network"), "{down}");
-    }
+            .unwrap(),
+    );
+    assert!(
+        down.contains(f.owner.join("config").to_str().unwrap()),
+        "{down}"
+    );
+    assert!(!down.contains("fixture-no-network"), "{down}");
     assert_eq!(
         fs::read_to_string(f.owner.join("state/run.conf")).unwrap(),
         record

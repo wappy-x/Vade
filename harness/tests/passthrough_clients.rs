@@ -319,6 +319,8 @@ impl Gateway {
         if !standalone {
             command.arg("gateway");
         }
+        // An inherited client token would answer these unauthenticated calls with 401.
+        command.env_remove("VADE_GATEWAY_TOKEN");
         if let Some(path) = stats { command.arg("--stats").arg(path); }
         let child = command
             .args([

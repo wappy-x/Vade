@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest something Vade could do, or do better.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. Vade keeps a few fixed rules: Rust's standard library only, no third-party dependencies, and the same request on the same setup must return the same token IDs. Ideas that fit those rules are much easier to take on.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you're trying to do
+      description: The task or situation, and where Vade gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like Vade to do
+      description: The command, flag, API field or behavior you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do today instead
+      description: Any workaround you use, or other approaches you considered.
+  - type: input
+    id: setup
+    attributes:
+      label: Your setup
+      description: How many Sparks, and whether you run on the Spark or from a controller, if that matters here.

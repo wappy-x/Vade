@@ -1,21 +1,34 @@
-## Change
+## What this changes
 
-Describe the problem and the resulting behavior.
+Say what was wrong or missing, and what Vade does now. Link the issue if there
+is one.
 
-## Validation
+## Tests you ran
 
-List the commands run and their results. Attach receipt paths and relevant
-output, including an exactness receipt for engine changes.
+List the commands and what they printed. For engine changes, also say which
+Sparks you ran on and attach or link the receipts.
+
+```sh
+# for example, from engine/
+cargo +1.99.0 test --offline --manifest-path ../cli/Cargo.toml --test ratchet -- --nocapture
+python3 ../tools/check-doc-links.py
+```
 
 ## Checklist
 
-- [ ] Rust changes are std-only.
-- [ ] No third-party dependencies were added (including registry, Git or vendored dependencies).
-- [ ] No new `unsafe` code was added.
-- [ ] `cargo fmt --check` results are recorded when Rust changes; pre-existing failures are identified and no bulk formatting sweep is included.
-- [ ] Relevant tests and CI checks are green.
-- [ ] Engine changes include an exactness receipt identifying the build, model, settings and token comparison; otherwise this is marked not applicable with a reason.
+- [ ] **Tests:** the checks under "Check your change" in CONTRIBUTING.md that
+  apply to this change pass, and I listed them above.
+- [ ] **Docs:** pages, help text and the Unreleased section of CHANGELOG.md
+  are updated for anything a user would notice, or nothing user-visible
+  changed.
+- [ ] **Standard library only:** no new third-party dependencies of any kind
+  (registry, Git, path or vendored).
+- [ ] **No new unsafe:** no new `unsafe` blocks, functions, impls or `extern`
+  declarations, and existing SAFETY comments still hold.
+- [ ] **Exactness kept:** the same request on the same setup still returns the
+  same token IDs, alone, batched, cached, chunked, and with drafting on or off.
+  For engine changes I attached the receipts that show it. For host-only or
+  docs changes, write "not applicable" here.
 
-Existing Rust uses deliberate dense formatting, so a formatting check may report
-pre-existing differences. Keep formatting changes confined to the code being
-changed.
+The Rust is formatted densely on purpose. Please match the code around your
+change by hand and don't include a `cargo fmt` sweep.

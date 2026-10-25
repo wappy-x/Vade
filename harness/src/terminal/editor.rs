@@ -6,6 +6,8 @@ use std::io::{self, Read, Seek, Write};
 use crate::tools::Workspace;
 use std::sync::Arc;
 
+/// The chat input line: UTF-8 text, a cursor on scalar boundaries, and the
+/// private, bounded recall history.
 #[derive(Default, Debug)]
 pub struct Editor {
     text: String,

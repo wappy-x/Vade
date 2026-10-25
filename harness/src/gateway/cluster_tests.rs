@@ -470,7 +470,7 @@ fn second_refusal_is_forwarded_and_no_third_endpoint_is_tried() {
         assert!(cluster.stats().endpoints.iter().all(|e| e.in_flight == 0));
     }
     let mock = Mock::start(0);
-    let cluster = Cluster::new(&[mock.url.clone()], RoutingConfig::default()).unwrap();
+    let cluster = Cluster::new(std::slice::from_ref(&mock.url), RoutingConfig::default()).unwrap();
     cluster.refresh(0, &AtomicBool::new(false));
     mock.reply(Reply::Status(503));
     assert_eq!(
@@ -669,4 +669,128 @@ fn foreign_initial_endpoint_never_receives_requests_and_healthy_replicas_still_w
     assert_eq!(mocks[2].count(), 2);
     assert_eq!(cluster.stats().endpoints[0].group, None);
     assert_eq!(cluster.stats().endpoints[0].probe_failures, 1);
+    // Cancel and release keys go only to verified endpoints.
+    mocks[1].reply(Reply::Raw("application/json", br#"{"cancelled":true}"#.to_vec()));
+    assert_eq!(exchange(&cluster, "/v1/cancel", br#"{"id":"key"}"#).status, 200);
+    assert_eq!(mocks[0].count(), 0);
+    assert_eq!((mocks[1].count(), mocks[2].count()), (3, 3));
+}
+
+#[test]
+fn an_endpoint_that_turns_foreign_or_changes_contract_stops_getting_keys() {
+    let (mocks, cluster) = setup(RoutingConfig::default());
+    let cancel = |cluster: &Cluster| {
+        for mock in &mocks {
+            mock.reply(Reply::Raw("application/json", br#"{"cancelled":false}"#.to_vec()));
+        }
+        assert_eq!(exchange(cluster, "/v1/cancel", br#"{"id":"key"}"#).status, 200);
+        mocks.iter().map(|mock| seen_at(mock, "/v1/cancel").len()).collect::<Vec<_>>()
+    };
+    assert_eq!(cancel(&cluster), [1, 1, 1]);
+    // Verified once, then something else answers: foreign, or a changed contract.
+    mocks[0].state.lock().unwrap().capabilities = Some(CAPS.replace("vade.engine.v1", "foreign.v1"));
+    mocks[1].state.lock().unwrap().capabilities = Some(CAPS.replace("mock-weights", "changed-weights"));
+    // Merely unreachable or restarting (503 here): its keys may still be good.
+    mocks[2].state.lock().unwrap().capabilities = None;
+    for i in 0..3 {
+        cluster.refresh(i, &AtomicBool::new(false));
+    }
+    assert!(cluster.stats().endpoints.iter().all(|e| !e.healthy));
+    assert_eq!(cancel(&cluster), [1, 1, 2]);
+    // The verified contract answers again: eligible again.
+    mocks[0].state.lock().unwrap().capabilities = Some(CAPS.replace("mock-load-epoch", "mock-epoch-0"));
+    cluster.refresh(0, &AtomicBool::new(false));
+    assert_eq!(cancel(&cluster), [2, 1, 3]);
+}
+
+fn seen_at(mock: &Mock, path: &str) -> Vec<Vec<u8>> {
+    mock.state.lock().unwrap().requests.iter().filter(|r| r.path == path).map(|r| r.body.clone()).collect()
+}
+
+#[test]
+fn cancel_and_release_reach_every_endpoint_and_answer_with_the_first_success() {
+    for (path, field) in [("/v1/cancel", "cancelled"), ("/v1/kv/release", "released")] {
+        let (mocks, cluster) = setup(RoutingConfig::default());
+        let body = br#"{ "id":"opaque-key", "vendor":1.00e+0 }"#;
+        let replies = [format!(r#"{{"{field}":false,"from":0}}"#), format!(r#"{{"{field}":true,"from":1}}"#), format!(r#"{{"{field}":true,"from":2}}"#)];
+        for (mock, reply) in mocks.iter().zip(&replies) {
+            mock.reply(Reply::Raw("application/json", reply.clone().into_bytes()));
+        }
+        let answer = exchange(&cluster, path, body);
+        assert_eq!((answer.status, answer.complete), (200, true), "{path}");
+        assert_eq!(answer.body, replies[1].as_bytes(), "{path}: the first reply that reports success");
+        for mock in &mocks {
+            assert_eq!(seen_at(mock, path), vec![body.to_vec()], "{path}: every endpoint gets the exact bytes once");
+        }
+        // No success anywhere: the first reply comes back as it is.
+        for mock in &mocks {
+            mock.reply(Reply::Raw("application/json", format!(r#"{{"{field}":false}}"#).into_bytes()));
+        }
+        let answer = exchange(&cluster, path, body);
+        assert_eq!((answer.status, answer.body), (200, format!(r#"{{"{field}":false}}"#).into_bytes()));
+        // An endpoint that drops the connection is skipped, never retried.
+        mocks[0].reply(Reply::Drop);
+        mocks[1].reply(Reply::Status(503));
+        mocks[2].reply(Reply::Raw("application/json", format!(r#"{{"{field}":true}}"#).into_bytes()));
+        let answer = exchange(&cluster, path, body);
+        assert_eq!((answer.status, answer.body), (200, format!(r#"{{"{field}":true}}"#).into_bytes()));
+        for mock in &mocks {
+            assert_eq!(seen_at(mock, path).len(), 3, "{path}: one attempt per endpoint per call");
+        }
+        // Nobody answers: a local 502 that says nothing was replayed.
+        for mock in &mocks {
+            mock.reply(Reply::Drop);
+        }
+        let answer = exchange(&cluster, path, body);
+        assert_eq!(answer.status, 502);
+        assert!(String::from_utf8_lossy(&answer.body).contains("no upstream answered; request was not replayed"));
+    }
+}
+
+#[test]
+fn a_stalled_endpoint_cannot_hold_cancel_past_the_client_deadline() {
+    // The native cancel client gives up after two seconds in total.
+    for stalled in [0, 2] {
+        let (mocks, cluster) = setup(RoutingConfig::default());
+        let (started, ready) = mpsc::channel();
+        let (resume, resumed) = mpsc::channel();
+        let mut resumed = Some(resumed);
+        for (index, mock) in mocks.iter().enumerate() {
+            mock.reply(if index == stalled {
+                Reply::Wait(started.clone(), resumed.take().unwrap())
+            } else {
+                Reply::Raw("application/json", format!(r#"{{"cancelled":true,"from":{index}}}"#).into_bytes())
+            });
+        }
+        let begun = Instant::now();
+        let answer = exchange(&cluster, "/v1/cancel", br#"{"id":"opaque-key"}"#);
+        ready.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(begun.elapsed() < Duration::from_millis(1900), "stalled endpoint {stalled}: {:?}", begun.elapsed());
+        let first_live = usize::from(stalled == 0);
+        assert_eq!((answer.status, answer.complete), (200, true));
+        assert_eq!(answer.body, format!(r#"{{"cancelled":true,"from":{first_live}}}"#).into_bytes());
+        for mock in &mocks {
+            assert_eq!(seen_at(mock, "/v1/cancel").len(), 1, "every endpoint still gets the call once");
+        }
+        resume.send(()).unwrap();
+    }
+}
+
+#[test]
+fn one_upstream_relays_checkpoint_release_unchanged() {
+    let mock = Mock::start(0);
+    let endpoint = Endpoint::parse(&format!("{}/v1", mock.url)).unwrap();
+    mock.reply(Reply::Raw("application/json", br#"{"released":true,"handle":"h1"}"#.to_vec()));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let worker = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        handle_target(socket, &Upstream::Single(endpoint), None, &ConnectionPool::default(), &Access::default())
+    });
+    let body = br#"{ "handle":"h1" }"#;
+    let answer = exchange_at(address, "/v1/kv/release", body);
+    worker.join().unwrap().unwrap();
+    assert_eq!((answer.status, answer.complete), (200, true));
+    assert_eq!(answer.body, br#"{"released":true,"handle":"h1"}"#);
+    assert_eq!(seen_at(&mock, "/v1/kv/release"), vec![body.to_vec()]);
 }

@@ -1,29 +1,52 @@
+//! Argument parsing and per-command help. [`parse`] turns arguments into a
+//! [`Cli`] without reading config, files or the network; [`help`] returns the
+//! usage text for `vade help <command>`.
+/// A parsed command line: the command and the global `--dry-run` flag.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cli {
     pub command: Command,
     pub dry_run: bool,
 }
 
+/// One `vade` command, with its parsed options.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
+    /// Bare `vade`: a one-screen summary of what is running.
     Menu,
+    /// `vade up`: start or attach to an engine.
     Up(UpOptions),
+    /// `vade run qwen3-8b`: the separate Qwen3-8B BF16 bootstrap.
     Run(RunOptions),
+    /// `vade down`: stop what vade started.
     Down,
+    /// `vade status`.
     Status,
+    /// `vade status --json`.
     StatusJson,
+    /// `vade logs`.
     Logs,
+    /// `vade chat`.
     Chat,
+    /// `vade doctor`.
     Doctor,
+    /// `vade install`.
     Install,
+    /// `vade detect`.
     Detect,
+    /// `vade launch`: install if needed, start on this Spark, then chat.
     Launch(UpOptions),
+    /// `vade update`.
     Update,
+    /// `vade help [command]` or `<command> --help`.
     Help(Option<String>),
+    /// `vade --version`.
     Version,
+    /// The private `__worker` helper, with its arguments.
     Worker(Vec<String>),
 }
 
+/// Options for `vade run qwen3-8b`: source checkouts or a release, local
+/// weights and the local port.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunOptions {
     pub engine_source: Option<std::path::PathBuf>,
@@ -44,6 +67,7 @@ impl Default for RunOptions {
     }
 }
 
+/// Options for `vade up` and `vade launch`, after defaults are applied.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpOptions {
     /// Launch flags supplied on the command line, independent of defaults or environment.
@@ -59,6 +83,8 @@ pub struct UpOptions {
     pub output: u32,
     pub output_explicit: bool,
     pub chats: Option<usize>,
+    /// The legacy `--fast-prompts` flag: accepted and recorded, with no effect on
+    /// arithmetic.
     pub fast_prompts: bool,
     pub memory_bytes: Option<u64>,
     pub cache_bytes: Option<u64>,
@@ -85,6 +111,8 @@ impl Default for UpOptions {
     }
 }
 
+/// Parse the arguments after the program name. Errors name the fix and the
+/// help command to read.
 pub fn parse(args: &[String]) -> Result<Cli, String> {
     if args.first().is_some_and(|arg| arg == "__worker") {
         return Ok(Cli {
@@ -356,6 +384,8 @@ fn number(value: &str, flag: &str, min: u32, max: u32) -> Result<u32, String> {
     Err(format!("Set {flag} to a whole number from {min} to {max}."))
 }
 
+/// A machine or host name: 1 to 64 ASCII letters, digits, `-` or `_`, starting
+/// with a letter or digit.
 pub fn identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -365,6 +395,7 @@ pub fn identifier(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
 }
 
+/// The top-level help, or the help for one command.
 pub fn help(command: Option<&str>) -> String {
     let mut text: String = match command {
         Some("verify") => crate::verify::HELP.into(),
@@ -473,5 +504,27 @@ mod tests {
             supplied_options: ["--hosts".into(), "--chats".into(), "--fast-prompts".into()].into(),
             hosts: vec!["a".into(), "b".into()], chats: Some(3), fast_prompts: true, context: 32768, ..UpOptions::default()
         }));
+    }
+    #[test]
+    fn argument_errors_name_the_command_to_run_instead() {
+        for (args, expected) in [
+            ("help up down", "Use vade help, or vade help <command>."),
+            ("help nonsense", "Use vade help, or vade help <command>."),
+            ("version --json", "Use vade --version without additional arguments."),
+            ("run", "Use vade launch for Flash-Next FP4-Local, or vade run qwen3-8b for the separate official Qwen3-8B BF16 catalog."),
+            ("run qwen3-8b --release r --engine-source e", "Choose --release or source checkouts."),
+            ("up --memory-bytes 0", "Set --memory-bytes above zero and --cache-bytes below the memory budget. Use --cache-bytes 0 to disable retained prompt cache."),
+            ("up --memory-bytes 100 --cache-bytes 100", "Set --memory-bytes above zero and --cache-bytes below the memory budget. Use --cache-bytes 0 to disable retained prompt cache."),
+            ("up --memory-bytes 1e9", "Set --memory-bytes to a whole number of bytes that fits in 64 bits."),
+            ("up --cache-bytes 18446744073709551616", "Set --cache-bytes to a whole number of bytes that fits in 64 bits."),
+        ] {
+            assert_eq!(cli(args).unwrap_err(), expected, "{args}");
+        }
+        assert_eq!(cli("help up").unwrap().command, Command::Help(Some("up".into())));
+        assert_eq!(cli("-V").unwrap().command, Command::Version);
+        let Command::Run(options) = cli("run qwen3-8b --release r --port 9000").unwrap().command else { panic!() };
+        assert_eq!((options.release.as_deref(), options.port), (Some(std::path::Path::new("r")), 9000));
+        let Command::Up(options) = cli("up --memory-bytes 100 --cache-bytes 0").unwrap().command else { panic!() };
+        assert_eq!((options.memory_bytes, options.cache_bytes), (Some(100), Some(0)));
     }
 }

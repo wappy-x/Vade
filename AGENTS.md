@@ -184,7 +184,7 @@ and [cli/ratchet-baseline.txt](cli/ratchet-baseline.txt) holds the ceilings.
 Today they are:
 
 - `third_party_dependencies=0`
-- `large_rs_files=3`: existing files over 1,500 lines
+- `large_rs_files=1`: existing files over 1,500 lines
 - `box_count_branches=97`: integer comparisons and match arms on world, rank
   or box counts (code that checks for a fixed number of Sparks)
 

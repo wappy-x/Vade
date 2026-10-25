@@ -1,5 +1,5 @@
 //! Frozen long-context scoring and retrieval comparison.
-use super::json::{self, Value};
+use super::json::{self, Value, io_error};
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -15,19 +15,6 @@ const BUCKETS: [(usize, usize); 6] = [
     (32768, 65536),
     (65536, 131072),
 ];
-
-fn io_error(error: std::io::Error) -> String {
-    use std::io::ErrorKind;
-    match error.kind() {
-        ErrorKind::NotFound => "FileNotFoundError",
-        ErrorKind::PermissionDenied => "PermissionError",
-        ErrorKind::AlreadyExists => "FileExistsError",
-        ErrorKind::IsADirectory => "IsADirectoryError",
-        ErrorKind::NotADirectory => "NotADirectoryError",
-        _ => "OSError",
-    }
-    .to_owned()
-}
 
 fn obj(items: Vec<(&str, Value)>) -> Value {
     Value::Object(items.into_iter().map(|(k, v)| (k.to_owned(), v)).collect())
@@ -70,6 +57,7 @@ fn is_null(value: Option<&Value>) -> bool {
     value.is_none_or(|v| matches!(v, Value::Null))
 }
 
+/// The index of the context-depth bucket holding `position` (0..128k).
 pub fn bucket(position: usize) -> Result<usize, String> {
     BUCKETS
         .iter()
@@ -77,6 +65,7 @@ pub fn bucket(position: usize) -> Result<usize, String> {
         .ok_or_else(|| "position outside 0..128k".to_owned())
 }
 
+/// A token ID as decoded from a capture; huge IDs keep their exact digits.
 #[derive(Clone, Eq, PartialEq)]
 pub enum TokenId {
     Small(i64),
@@ -195,6 +184,7 @@ fn integer_float(value: &str) -> Result<f64, String> {
     }
 }
 
+/// A logit as decoded from a capture: an exact integer or a finite float.
 #[derive(Clone)]
 pub enum Logit {
     Int(i64),
@@ -256,6 +246,8 @@ impl Logit {
     }
 }
 
+/// One scored position of a capture: the input token, the top-1 and top-k
+/// pairs, the scored pairs and, for native dumps, every logit.
 pub struct ScoreRow {
     pub position: usize,
     pub input_id: u32,
@@ -302,6 +294,8 @@ enum ScoreInput {
     },
 }
 
+/// Streams a case's score rows from NDJSON or a native dump, checking the input
+/// IDs against the frozen hash when the stream ends.
 pub struct ScoreRows {
     input: ScoreInput,
     position: usize,
@@ -338,6 +332,8 @@ fn read_record(stream: &mut BufReader<File>) -> Result<Value, String> {
     json::parse(std::str::from_utf8(&line).map_err(|_| "UnicodeDecodeError")?)
 }
 
+/// A case's capture metadata: the first NDJSON record, or the native dump's
+/// `metadata.json`.
 pub fn score_meta(directory: &Path, case: &Value) -> Result<Value, String> {
     let id = string(case, "id")?;
     let path = directory.join(format!("{id}.score.jsonl"));
@@ -348,6 +344,7 @@ pub fn score_meta(directory: &Path, case: &Value) -> Result<Value, String> {
     }
 }
 
+/// Open a case's score rows with top-k width `k`.
 pub fn score_rows(directory: &Path, case: &Value, k: usize) -> Result<ScoreRows, String> {
     let id = string(case, "id")?;
     let length = integer(case, "length")?;
@@ -452,8 +449,10 @@ impl ScoreRows {
                     return Err("truncated native dump".to_owned());
                 }
                 let values: Vec<f64> = raw
-                    .chunks_exact(4)
-                    .map(|v| f32::from_le_bytes(v.try_into().unwrap()) as f64)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|&v| f32::from_le_bytes(v) as f64)
                     .collect();
                 if values.iter().any(|v| !v.is_finite()) {
                     return Err("nonfinite native logits".to_owned());
@@ -838,6 +837,7 @@ fn splitlines(text: &str) -> Vec<&str> {
     lines
 }
 
+/// Score the retrieval cases of a capture directory.
 pub fn retrieval(directory: &Path, cases: &[Value]) -> Result<Value, String> {
     let mut rows = Vec::new();
     let mut groups: Vec<(String, i64, i64)> = Vec::new();
@@ -989,6 +989,8 @@ fn decision(
     Ok(("PASS", Vec::new()))
 }
 
+/// `vade test longctx compare`: compare the captures against the manifest and
+/// return the exit code.
 pub fn compare(args: &super::LongArgs, manifest: &Value) -> Result<i32, String> {
     let cases = array(manifest, "cases")?;
     let ids = cases
@@ -1137,110 +1139,5 @@ pub fn compare(args: &super::LongArgs, manifest: &Value) -> Result<i32, String> 
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    fn native_fixture(vocab: usize) -> (crate::test_gate::TempDir, Value, Vec<u8>, Vec<u8>) {
-        let dir = crate::test_gate::TempDir::new("vade-native-capture-test").unwrap();
-        let inputs: Vec<u8> = [7u32, 11].into_iter().flat_map(u32::to_le_bytes).collect();
-        let logits: Vec<u8> = (0..2 * vocab).flat_map(|i| ((i % vocab) as f32).to_le_bytes()).collect();
-        let case = json::parse(&format!(r#"{{"id":"sample","length":2,"prompt_sha256":"frozen","input_ids_sha256":"{}"}}"#, super::super::sha(&inputs))).unwrap();
-        let path = dir.path.join("sample");
-        std::fs::create_dir(&path).unwrap();
-        std::fs::write(path.join("metadata.json"), format!(r#"{{"path":"prefill_all","prompt_tokens":2,"prompt_sha256":"frozen","vocab_size":{vocab}}}"#)).unwrap();
-        std::fs::write(path.join("logits.f32"), &logits).unwrap();
-        std::fs::write(path.join("input_ids.u32"), &inputs).unwrap();
-        (dir, case, logits, inputs)
-    }
-    #[test]
-    fn native_capture_row_bytes_follow_declared_vocab() {
-        for vocab in [3, 129] {
-            let (dir, case, logits, _) = native_fixture(vocab);
-            assert_eq!(logits.len(), 2 * vocab * 4);
-            let rows = score_rows(&dir.path, &case, 2).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-            assert_eq!(rows.len(), 2);
-            for (position, row) in rows.iter().enumerate() {
-                assert_eq!(row.position, position);
-                assert_eq!(row.input_id, [7, 11][position]);
-                assert_eq!(row.top1_id.to_string(), (vocab - 1).to_string());
-                assert_eq!(row.full_logits.as_ref().unwrap(), &(0..vocab).map(|i| i as f64).collect::<Vec<_>>());
-            }
-        }
-    }
-    #[test]
-    fn native_capture_refuses_truncated_missing_or_excess_bytes() {
-        let (dir, case, logits, inputs) = native_fixture(3);
-        let path = dir.path.join("sample");
-        for (name, original) in [("logits.f32", &logits), ("input_ids.u32", &inputs)] {
-            std::fs::write(path.join(name), &original[..original.len() - 1]).unwrap();
-            let result = score_rows(&dir.path, &case, 2).unwrap().collect::<Result<Vec<_>, _>>();
-            assert_eq!(result.err().as_deref(), Some("truncated native dump"));
-            let mut extra = original.clone();
-            extra.push(0);
-            std::fs::write(path.join(name), extra).unwrap();
-            let result = score_rows(&dir.path, &case, 2).unwrap().collect::<Result<Vec<_>, _>>();
-            assert_eq!(result.err().as_deref(), Some("native dump size or input IDs differ"));
-            std::fs::remove_file(path.join(name)).unwrap();
-            assert_eq!(score_rows(&dir.path, &case, 2).err().as_deref(), Some("FileNotFoundError"));
-            std::fs::write(path.join(name), original).unwrap();
-        }
-        std::fs::remove_file(path.join("metadata.json")).unwrap();
-        assert_eq!(score_rows(&dir.path, &case, 2).err().as_deref(), Some("FileNotFoundError"));
-    }
-    #[test]
-    fn native_capture_refuses_nonfinite_logits_and_changed_input_ids() {
-        let (dir, case, logits, mut inputs) = native_fixture(3);
-        let path = dir.path.join("sample");
-        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            let mut bad = logits.clone();
-            bad[..4].copy_from_slice(&value.to_le_bytes());
-            std::fs::write(path.join("logits.f32"), bad).unwrap();
-            let result = score_rows(&dir.path, &case, 2).unwrap().collect::<Result<Vec<_>, _>>();
-            assert_eq!(result.err().as_deref(), Some("nonfinite native logits"));
-        }
-        std::fs::write(path.join("logits.f32"), logits).unwrap();
-        inputs[0] ^= 1;
-        std::fs::write(path.join("input_ids.u32"), inputs).unwrap();
-        let result = score_rows(&dir.path, &case, 2).unwrap().collect::<Result<Vec<_>, _>>();
-        assert_eq!(result.err().as_deref(), Some("native dump size or input IDs differ"));
-    }
-    #[test]
-    fn bucket_boundaries_and_summation() {
-        for (i, (lo, hi)) in BUCKETS.iter().copied().enumerate() {
-            assert_eq!(bucket(lo), Ok(i));
-            assert_eq!(bucket(hi - 1), Ok(i));
-        }
-        assert!(bucket(131072).is_err());
-        assert_eq!(fsum([1e100, 1.0, 1e-100]).unwrap(), 1e100);
-        assert_eq!(
-            fsum([1.0, 2f64.powi(-53), 2f64.powi(-54)]).unwrap(),
-            f64::from_bits(1.0f64.to_bits() + 1)
-        );
-        assert_eq!(splitlines("a\r\nb\u{85}c\n"), vec!["a", "b", "c"]);
-        assert_eq!(
-            Logit::Int(9_007_199_254_740_993)
-                .difference(&Logit::Int(9_007_199_254_740_992))
-                .unwrap(),
-            1.0
-        );
-        assert_eq!(
-            Logit::Int(9_007_199_254_740_993).compare(&Logit::Float(9_007_199_254_740_992.0)),
-            std::cmp::Ordering::Greater
-        );
-        assert_eq!(
-            Logit::Float(-0.0).compare(&Logit::Float(0.0)),
-            std::cmp::Ordering::Equal
-        );
-        let big = "18446744073709551616";
-        let next = "18446744073709551617";
-        assert_eq!(integer_difference(next, big), "1");
-        let a = Logit::Big(big.into());
-        let b = Logit::Big(next.into());
-        assert_eq!(b.difference(&a).unwrap(), 1.0);
-        assert!(
-            b.compare(&Logit::Float(18_446_744_073_709_551_616.0))
-                .is_gt()
-        );
-        assert_eq!(TokenId::Big(big.into()).to_string(), big);
-        assert!(TokenId::Big(big.into()) > TokenId::Small(i64::MAX));
-    }
-}
+#[path = "longctx_tests.rs"]
+mod tests;

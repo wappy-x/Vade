@@ -103,13 +103,16 @@ pub fn pipeline_recipe(
 
 /// The pipeline's companions and their defaults, the measured 2-Spark recipe: MTP verify rows
 /// cross the pipeline, non-final prompt tiles are queued, decode steps ride the RDMA wire,
-/// 2048-row prompt tiles. A pipeline rank pins every unset one at startup (before anything
-/// reads them); a set one ("0", another tile) stays as given.
-pub const PIPELINE_DEFAULTS: [(&str, &str); 4] = [
+/// 2048-row prompt tiles, and the front projects the bounded head (one Spark funds it from
+/// 8192-row tile scratch; the front's 2048-row tiles already leave it more pool than one
+/// Spark keeps; ranks without the head never load it). A pipeline rank pins every unset one
+/// at startup (before anything reads them); a set one ("0", another tile) stays as given.
+pub const PIPELINE_DEFAULTS: [(&str, &str); 5] = [
     ("VADE_W2_PP_MTP", "1"),
     ("VADE_W2_PP_ASYNC", "1"),
     ("VADE_W2_PP_RDMA", "1"),
     ("VADE_PROMPT_TILE", "2048"),
+    ("VADE_HEAD_BOUNDS", "1"),
 ];
 
 /// The companions a pipeline rank pins: those `set` reports unset, at their defaults.
@@ -525,10 +528,12 @@ fn world_two_defaults_to_the_pipeline_with_mtp() {
     assert!(pipeline_mtp(Some(true)));
     assert!(!pipeline_mtp(Some(false)));
     // Every unset companion is pinned at the measured recipe; a set one is kept as given.
-    let all = [("VADE_W2_PP_MTP", "1"), ("VADE_W2_PP_ASYNC", "1"), ("VADE_W2_PP_RDMA", "1"), ("VADE_PROMPT_TILE", "2048")];
+    let all = [("VADE_W2_PP_MTP", "1"), ("VADE_W2_PP_ASYNC", "1"), ("VADE_W2_PP_RDMA", "1"), ("VADE_PROMPT_TILE", "2048"),
+        ("VADE_HEAD_BOUNDS", "1")];
     assert_eq!(pipeline_pins(|_| false), all);
     assert_eq!(pipeline_pins(|name| name == "VADE_W2_PP_MTP"), all[1..]);
-    assert_eq!(pipeline_pins(|name| name == "VADE_PROMPT_TILE"), all[..3]);
+    assert_eq!(pipeline_pins(|name| name == "VADE_PROMPT_TILE"), [&all[..3], &all[4..]].concat());
+    assert_eq!(pipeline_pins(|name| name == "VADE_HEAD_BOUNDS"), all[..4]);
     assert!(pipeline_pins(|_| true).is_empty());
     // The pinned MTP companion agrees with pipeline_mtp's default.
     assert_eq!(pipeline_mtp(None), all.contains(&("VADE_W2_PP_MTP", "1")));

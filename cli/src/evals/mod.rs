@@ -1,18 +1,25 @@
 //! Local evaluation tools. No lifecycle configuration or GPU ownership is needed.
+//!
+//! - `prepare`: build the frozen long-context inputs; `capture`: replay them
+//!   against a server; `longctx`: score and compare the captures.
+//! - `gdn`: recurrent-state comparisons; `unix_flags`: the raw flag ABI check.
+//! - `json`: ordered JSON that keeps receipt bytes; `help`: option help.
 mod capture;
 mod gdn;
-mod hash;
 mod help;
 pub mod json;
 mod longctx;
 mod prepare;
 mod unix_flags;
-pub use hash::{Sha256, sha};
+pub use crate::sha256::{Sha256, sha};
 use std::path::PathBuf;
 
+/// The `checkpoint_sha256` of the FP8 checkpoint the frozen long-context
+/// suite is pinned to.
 pub const CHECKPOINT: &str = "8f69659fb459c65ab2729022c87080c3eca51643db40288f9854632c4f0d0f03";
-// The frozen long-context suite is pinned to the FP8 checkpoint above.
+/// The model name the frozen suite requests from that checkpoint's server.
 pub const MODEL: &str = "qwen3.8-flash-next-fp8";
+/// The greedy sampling fields every frozen request sends.
 pub fn sampling() -> Vec<(&'static str, json::Value)> {
     vec![
         ("temperature", 0i64.into()),
@@ -23,6 +30,7 @@ pub fn sampling() -> Vec<(&'static str, json::Value)> {
         ("frequency_penalty", 0i64.into()),
     ]
 }
+/// Parsed options for `vade test longctx`.
 pub struct LongArgs {
     pub command: String,
     pub tokenizer_command: Vec<String>,
@@ -257,9 +265,11 @@ impl LongArgs {
         Ok(value)
     }
 }
+/// Usage for the `vade test` evaluation commands.
 pub fn help() -> &'static str {
     "vade test longctx prepare|run|compare [OPTIONS]\nvade test gdn-state REFERENCE CANDIDATE [SPLIT] [--identity] [--legacy-prefill-group N]\nvade test unix-flags-abi [--target TARGET]\nFreeze long-context prompts, compare teacher-forced logits and retrieval or GDN states, or compile Unix flag ABI assertions.\nSee cli/evals.md for every option, default, bound and receipt.\n"
 }
+/// Run one `vade test` evaluation command and return its exit code.
 pub fn run(args: &[String]) -> i32 {
     if args.is_empty() || matches!(args[0].as_str(), "--help" | "-h") {
         crate::public_output(help());

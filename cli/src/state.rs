@@ -1,3 +1,6 @@
+//! Controller records: the build [`Manifest`], the running [`Session`] with one
+//! [`Rank`] per Spark, and the operation [`Lock`] that serializes lifecycle
+//! commands.
 use crate::cli::UpOptions;
 use crate::config::{Config, Machine};
 use crate::text::{self, Fields, required};
@@ -8,6 +11,8 @@ use std::fs::{self, File, OpenOptions};
 use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
+/// The staged files one machine runs: worker helper, engine binary and PTX,
+/// with the SHA-256 recorded when they were built.
 #[derive(Clone, Debug)]
 pub struct Artifact {
     pub worker: String,
@@ -18,6 +23,8 @@ pub struct Artifact {
     pub worker_sha256: String,
 }
 
+/// The activated build manifest (`version=1`): source revisions, per-machine
+/// artifacts and the engine features the CLI may rely on.
 #[derive(Clone, Debug)]
 pub struct Manifest {
     pub engine_sha: String,
@@ -29,12 +36,14 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// Read the manifest at `path`; a missing file asks for `vade install`.
     pub fn load(path: &Path) -> Result<Self, String> {
         text::reject_symlinks(path)?;
         let data = fs::read_to_string(path)
             .map_err(|_| "Build manifest is missing. Run vade install first.")?;
         Self::parse(&data)
     }
+    /// Parse and validate a manifest record; unknown versions are refused.
     pub fn parse(data: &str) -> Result<Self, String> {
         let fields = text::parse(data)?;
         if required(&fields, "version")? != "1" {
@@ -76,6 +85,7 @@ impl Manifest {
             artifacts,
         })
     }
+    /// The `key=value` record that [`Manifest::parse`] reads back.
     pub fn encode(&self) -> String {
         let mut fields = Fields::from([
             ("version".into(), "1".into()),
@@ -135,6 +145,8 @@ impl Artifact {
     }
 }
 
+/// One machine in a session: its config, staged artifacts, fabric endpoints and
+/// whether a start was attempted there.
 #[derive(Clone, Debug)]
 pub struct Rank {
     pub machine: Machine,
@@ -144,6 +156,8 @@ pub struct Rank {
     pub attempted: bool,
 }
 
+/// The controller's ownership record (`session.conf`): the token that proves
+/// ownership, the phase, the launch settings and every rank.
 #[derive(Clone, Debug)]
 pub struct Session {
     pub token: String,
@@ -174,6 +188,8 @@ pub struct Session {
 }
 
 impl Session {
+    /// A new session for `vade up` from the config, options and build manifest.
+    /// `token` must be 64 hex digits; limits are checked here.
     pub fn new(
         config: &Config,
         options: &UpOptions,
@@ -311,12 +327,15 @@ impl Session {
     pub fn tunnel_port(&self, index: usize) -> u16 {
         if self.replicas { self.local_port + 1 + index as u16 } else { self.local_port }
     }
+    /// The SSH control socket for a serving rank's tunnel; replicas get one each.
     pub fn tunnel_socket(&self, dir: &Path, index: usize) -> PathBuf {
         if self.replicas { dir.join(format!("tunnel-{}-{index}.sock", &self.token[..16])) } else { self.socket(dir) }
     }
+    /// The drafting depth for display: the explicit MTP value or "engine default".
     pub fn mtp_label(&self) -> String {
         if self.mtp_explicit { self.mtp.to_string() } else { "engine default".into() }
     }
+    /// The engine's positional arguments for the rank at `index`.
     pub fn engine_args(&self, index: usize) -> Vec<String> {
         let rank = &self.ranks[index];
         let (engine_rank, size) = self.engine_slot(index);
@@ -328,6 +347,7 @@ impl Session {
         if self.mtp_explicit { args.extend(["--mtp".into(), self.mtp.to_string()]); }
         args
     }
+    /// `TP_TOPOLOGY` for this session: "ring" for a two-Spark chain, else "path".
     pub fn topology(&self) -> &'static str {
         if self.ranks.len() == 2 && !self.replicas {
             "ring"
@@ -335,18 +355,23 @@ impl Session {
             "path"
         }
     }
+    /// The local URL that chat and status use.
     pub fn endpoint(&self) -> String {
         format!("http://localhost:{}", self.local_port)
     }
+    /// The SSH control socket for the controller tunnel.
     pub fn socket(&self, dir: &Path) -> PathBuf {
         Self::socket_path(dir, &self.token)
     }
+    /// The control socket name derived from an ownership token.
     pub fn socket_path(dir: &Path, token: &str) -> PathBuf {
         dir.join(format!("tunnel-{}.sock", &token[..16]))
     }
+    /// Atomically write `session.conf` in `dir`.
     pub fn save(&self, dir: &Path) -> Result<(), String> {
         text::atomic_write(&dir.join("session.conf"), &self.encode())
     }
+    /// Read `session.conf` from `dir`, or `None` when no engine is owned.
     pub fn load(dir: &Path) -> Result<Option<Self>, String> {
         let path = dir.join("session.conf");
         text::reject_symlinks(&path)?;
@@ -358,6 +383,7 @@ impl Session {
             }
         }
     }
+    /// The `key=value` record that [`Session::load`] reads back.
     pub fn encode(&self) -> String {
         let mut fields = Fields::new();
         for (key, value) in [
@@ -549,6 +575,7 @@ fn environment_bytes(name: &str) -> Result<Option<u64>, String> {
     }
 }
 
+/// A required numeric field of a saved record.
 pub fn number<T: std::str::FromStr>(f: &Fields, key: &str) -> Result<T, String> {
     required(f, key)?
         .parse()
@@ -561,6 +588,8 @@ fn boolean(value: &str) -> Result<bool, String> {
         _ => Err("Invalid boolean in record. Keep it for manual review.".into()),
     }
 }
+/// Accept an absolute, `~/` or `{home}/` remote path with no `..` component and
+/// no control characters.
 pub fn validate_remote_path(value: &str) -> Result<(), String> {
     let rest = value
         .strip_prefix("~/")
@@ -581,10 +610,12 @@ fn address(host: &str, port: u16) -> String {
     }
 }
 
+/// The exclusive operation lock on a state directory, held until dropped.
 pub struct Lock {
     _file: File,
 }
 impl Lock {
+    /// Take the lock without waiting; another running lifecycle command is an error.
     pub fn acquire(dir: &Path) -> Result<Self, String> {
         text::private_dir(dir)?;
         let path = dir.join(".lock");

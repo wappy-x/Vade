@@ -29,7 +29,7 @@ Current defaults are defined by the
 
 - Context defaults to 32768 and output is capped at 16384, subject to admission.
 - Startup/request MTP depth defaults to 3. The resident draft ceiling is 5 on
-  one Spark and 3 on the pipeline. The adaptive chooser is enabled by default;
+  one Spark and 7 on the pipeline. The adaptive chooser is enabled by default;
   request depth and resident ceiling are distinct. `--mtp 0` selects plain decoding.
 - Automatic cohort drafting covers up to five active chats; larger cohorts use
   pooled plain steps. `VADE_MTP_BATCH` and `VADE_MTP_C8` are explicit overrides.

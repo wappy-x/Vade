@@ -1,4 +1,5 @@
 //! Option help for the long-context evaluation command.
+/// Help for `vade test longctx` or one of its subcommands.
 pub fn longctx(command: Option<&str>) -> &'static str {
     match command {
         Some("prepare") => {

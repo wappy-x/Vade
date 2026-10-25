@@ -5,12 +5,16 @@
 use std::fs;
 use std::path::Path;
 
+/// The archive build-id file at a source tree's root.
 pub const FILE: &str = ".vade-build-id";
+/// The revision recorded when no build identity is available.
 pub const UNKNOWN: &str = "unknown";
+/// Shown when a source tree builds as [`UNKNOWN`].
 pub const NOTICE: &str = "This Vade tree came from an archive without a build id (or was edited after download), so it builds as 'unknown'; use git clone for a reproducible build id.";
 // The same generated output the engine's archive provenance ignores.
 const SKIP_DIRS: [&str; 5] = ["target", "artifacts", "provenance", "__pycache__", ".git"];
 
+/// Where a tree's build identity comes from.
 #[derive(Debug, PartialEq)]
 pub enum Probe { Git, Archive(String), Unknown }
 

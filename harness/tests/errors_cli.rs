@@ -185,6 +185,27 @@ fn argument_errors_name_options_and_mode_help_without_echoing_values() {
     let text = failure(&["direct", "--greedy", "--temperature", "0.5", "--plain"]);
     assert!(text.starts_with("vade: choose --greedy or --temperature"), "{text}");
     assert!(!text.contains("--plain:"), "cross-option error blamed final flag: {text}");
+    let text = failure(&["demo-compaction", "PRIVATE_VALUE"]);
+    assert_eq!(text.trim_end(), "vade: demo-compaction takes no arguments; run vade-harness demo-compaction on its own.");
+}
+
+#[test]
+fn child_shell_is_refused_where_the_shell_is_not_offered() {
+    // VADE_HARNESS_SHELL=off gives macOS the Linux shape; on Linux it changes nothing.
+    let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+    command
+        .args(["agent", "--children", "--child-shell", "checks", "--endpoint",
+            "http://127.0.0.1:9/v1/chat/completions", "--model", "mock", "--prompt", "x"])
+        .env("VADE_HARNESS_SHELL", "off");
+    let output = cli::Cli::start(&mut command).finish();
+    assert_eq!(output.status.code(), Some(2));
+    let text = String::from_utf8(output.stderr).unwrap();
+    let expected = if vade_harness::coding_tools::SHELL_AVAILABLE {
+        "vade: --child-shell: VADE_HARNESS_SHELL=off hides workspace_shell; unset it or drop --child-shell."
+    } else {
+        "vade: --child-shell needs the macOS sandbox; workspace_shell is not offered on this platform."
+    };
+    assert!(text.starts_with(expected), "{text}");
 }
 
 #[test]

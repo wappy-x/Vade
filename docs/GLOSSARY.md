@@ -1,13 +1,15 @@
 # Glossary
 
-This page explains the terms used across this repository, in plain words and
-in A-to-Z order. A link to a term on this page takes you to the letter section
-that holds it.
+Plain-word definitions of the terms used across this repository, from A to Z.
+A link to a term lands on the letter section that holds it; scan down for the
+bold name.
 
 Missing a term? Each page in [`engine/docs/`](../engine/docs/README.md) starts
 with a box that explains its own engine terms.
 
-**New to model serving? Start with these:** [Token](#sz) · [Prefill and decode](#pr) · [KV cache](#ho) · [Tensor parallelism](#sz) · [RDMA and RoCE](#pr) · [QSFP and rails](#pr) · [MTU](#ho)
+**New to model serving? Start with these:** [Token](#sz) · [Prefill](#pr) and [decode](#dg) · [KV cache](#ho) · [Drafting](#dg)
+
+**Joining two or more Sparks? Then these:** [Layer pipeline](#ho) · [Tensor parallelism](#sz) · [RDMA and RoCE](#pr) · [QSFP and rails](#pr) · [MTU](#ho)
 
 <br>
 
@@ -27,7 +29,7 @@ with a box that explains its own engine terms.
 
 **BF16 (bfloat16).** A 16-bit number format for model weights. It keeps the range of 32-bit numbers but has less precision.
 
-**Bundle.** A ready-made set of engine, GPU kernel and harness artifacts, with a manifest and checksums. You use it instead of rebuilding locally. The launcher reads `launcher-bundle.conf`; see [bundle loading](../cli/src/launch/install.rs) and [controller prebuilt bundles](../cli/docs/prebuilt.md).
+**Bundle.** A ready-made set of engine, GPU kernel and harness artifacts, with a manifest and checksums. You use it instead of rebuilding locally. There are two formats. The launcher bundle (`vade-launch-bundle-v1`, with `launcher-bundle.conf`) is for running on one Spark; see [bundle loading](../cli/src/launch/install.rs). A controller's `vade install` reads only the separate `vade-prebuilt-v1` format; see [controller prebuilt bundles](../cli/docs/prebuilt.md#prebuilt-binaries-for-a-controller-install).
 
 **Byte-identical.** Exactly the same, down to every byte of the answer text.
 
@@ -35,7 +37,7 @@ with a box that explains its own engine terms.
 
 **Cargo.** Rust's build tool and package manager. `cargo build` compiles; `cargo run` compiles and runs.
 
-**Chain.** A layer pipeline across N Sparks. Each Spark owns a block of consecutive layers and passes the intermediate state on to the next. Groups of more than two Sparks need the `VADE_W2_PP=1` opt-in, which the controller sets for you when you run `vade up --fp4-local --sparks N`. See [architecture](architecture.md#ranks-memory-and-ownership) and [controller selection](../cli/src/app.rs).
+**Chain.** A [layer pipeline](#ho) stretched across more than two Sparks. Each Spark owns a block of consecutive layers and passes the intermediate state on to the next. Groups of more than two Sparks need the `VADE_W2_PP=1` opt-in, which the controller sets for you when you run `vade up --fp4-local --sparks N`. See [architecture](architecture.md#ranks-memory-and-ownership) and [controller selection](../cli/src/app.rs).
 
 **Checkpoint.** One published set of a model's files (weights, configuration and tokenizer) at one exact revision.
 
@@ -47,7 +49,7 @@ with a box that explains its own engine terms.
 
 **Cohort, C1..C16.** A group of request streams running at the same time in a benchmark. C1 means one stream, C8 means eight and C16 means sixteen. These are the concurrency levels requested. They do not promise that every stream holds a GPU slot at once; see [benchmark definitions](benchmarks.md).
 
-**Cohort drafting.** How the engine manages [drafting](#dg) for chats that run at the same time. It is on by default on one Spark and on the two-Spark layer pipeline; see the [cohort policy](../engine/crates/serve/src/mtp_batch.rs).
+**Cohort drafting.** [Drafting](#dg) for several chats at once. The engine drafts for up to eight chats together and checks all their guesses in one shared pass, and each chat still gets the same bytes it would get running alone. It is on by default on one Spark and on the two-Spark layer pipeline; see the [cohort policy](../engine/crates/serve/src/mtp_batch.rs).
 
 **ConnectX-7 (CX7).** NVIDIA's high-speed network chip inside each Spark. It provides the two QSFP ports and RDMA.
 
@@ -95,11 +97,11 @@ with a box that explains its own engine terms.
 
 **flash-serve, next-http, next-tp.** Three engine programs:
 
-- `flash-serve` is today's HTTP server for FP4-Local, on one Spark and on the layer pipeline. See its [serving](../engine/crates/tp/src/bin/flash-serve.rs) entry point.
-- `next-http` is a compatibility launcher for the older [tensor-map rank path](#sz). See its [compatibility](../engine/crates/tp/src/bin/next-http.rs) entry point.
-- `next-tp` runs the test cases that qualify the native rank code. It does not serve chat. See its [qualification](../engine/crates/tp/src/bin/next-tp.rs) entry point.
+- `flash-serve` is the HTTP server FP4-Local uses today, on one Spark and on the layer pipeline ([source](../engine/crates/tp/src/bin/flash-serve.rs)).
+- `next-http` is a compatibility launcher for the older [tensor-map rank path](#sz) ([source](../engine/crates/tp/src/bin/next-http.rs)).
+- `next-tp` runs the test cases that qualify the rank code behind that older path. It does not serve chat ([source](../engine/crates/tp/src/bin/next-tp.rs)).
 
-**FP4-Local.** The current one-Spark release profile. It runs the model `nvidia/Qwen3.8-Flash-Next-FP4-Local`, whose checkpoint declares a mix of NVFP4, MXFP8 and plain tensor storage. Despite the name, “Local” does not rule out running the layer pipeline across several Sparks; see [architecture](architecture.md#what-the-current-flash-next-path-runs).
+**FP4-Local.** The current one-Spark release profile. It runs the model `nvidia/Qwen3.8-Flash-Next-FP4-Local`, whose checkpoint declares a mix of NVFP4, MXFP8 and plain tensor storage (see [FP8, FP4](#dg)). Despite the name, “Local” does not rule out running the layer pipeline across several Sparks; see [architecture](architecture.md#what-the-current-flash-next-path-runs).
 
 **FP8, FP4 (NVFP4).** 8-bit and 4-bit number formats. Smaller weights need less memory and move faster, at some cost in precision.
 
@@ -139,7 +141,7 @@ with a box that explains its own engine terms.
 
 **Launcher.** The `vade launch` workflow you run on the Spark. It finds an existing checkpoint, prepares local artifacts, starts or attaches to the engine it owns, and opens chat. See [first run](../harness/docs/first-run.md) and the [launcher implementation](../cli/src/launch.rs).
 
-**Layer pipeline.** FP4-Local's default way of running on two Sparks: each Spark runs its own block of layers. A layer pipeline across more Sparks is a [chain](#ac). The switch behind it is [VADE_W2_PP](#sz).
+**Layer pipeline.** FP4-Local's default way of running on two Sparks. The model's layers are split into two blocks, and each Spark runs its own block with the same arithmetic as the one-Spark engine, passing its result on to the other. Drafted tokens are checked across both stages. The same idea across more Sparks is a [chain](#ac), and the switch behind both is [VADE_W2_PP](#sz).
 
 **LLM (large language model).** A model trained on large amounts of text to predict the next token. Chat assistants are built on them.
 
@@ -156,7 +158,7 @@ with a box that explains its own engine terms.
 **MTP (multi-token prediction), drafting ON.** An extra head in the model guesses a few tokens ahead, and the main model checks them. On FP4-Local:
 
 - **Default:** drafting is on, three tokens ahead (request depth 3). A request can also ask for it with `"draft":"strict"`.
-- **One chat alone:** the engine adjusts the depth as it goes, up to a ceiling called the resident depth. The ceiling is 5 on one Spark and 3 on the layer pipeline.
+- **One chat alone:** the engine adjusts the depth as it goes, up to a ceiling called the resident depth. The ceiling is 5 on one Spark and 7 on the layer pipeline.
 - **Prompt lookup:** also on by default, on one Spark and on the pipeline. It copies guesses from matching earlier text in the same chat. It runs only for greedy requests that draft, and `VADE_MTP_LOOKUP=0` turns it off.
 - **Several chats:** [cohort drafting](#ac) is on too.
 
@@ -184,7 +186,7 @@ Under greedy decoding, ON and OFF must return the same token IDs; see [request c
 
 **Path (topology).** Ranks connected in a line with two open ends, rather than a closed ring. An FP4-Local chain relays work through its stages in order; see [pipeline stage geometry](../engine/crates/engine/src/flash/next_pp.rs).
 
-**Poison.** Marking execution state as unusable after a partial failure, so later work cannot quietly carry on from incomplete state. The [native rank session](../engine/crates/tp/src/next.rs) stays failed until a collective reset (one across all ranks) succeeds.
+**Poison.** Marking execution state as unusable after a step fails halfway, so later work cannot quietly carry on from half-updated state. On the older [tensor-map rank path](#sz), a poisoned [rank session](../engine/crates/tp/src/next.rs) stays failed until a reset across all ranks succeeds.
 
 **Prefill.** Reading the whole prompt once, before the first answer token. It sets the time to first token.
 
@@ -200,17 +202,17 @@ Under greedy decoding, ON and OFF must return the same token IDs; see [request c
 
 **Rank.** One process in a group that shares a job, one per Spark. **Rank 0** is the one that answers HTTP.
 
-**Ratchet.** A repository check that fails when the code grows beyond recorded limits. The limits cover external dependencies, large Rust files, and branches tied to specific Spark counts. See the [ratchet test](../cli/tests/ratchet.rs) and its [baseline](../cli/ratchet-baseline.txt).
+**Ratchet.** A repository check that fails when the code grows beyond recorded limits. The limits cover external dependencies, large Rust files, and code that branches on a fixed Spark count (such as comparing the number of ranks to a literal 2). See the [ratchet test](../cli/tests/ratchet.rs) and its [baseline](../cli/ratchet-baseline.txt).
 
 **RDMA (remote direct memory access).** One computer writes straight into another's memory over the network, without going through the operating system.
 
-**Receipt.** A saved record of a run: its inputs, identity, result and measured evidence. It covers only the checks that run performed. See the [`vade verify` receipt writer](../cli/src/verify/mod.rs) and [benchmark definitions](benchmarks.md).
+**Receipt.** A saved record of a run: its inputs, which engine build and checkpoint answered, the result and the measured evidence. It covers only the checks that run performed. See the [`vade verify` receipt writer](../cli/src/verify/mod.rs) and [benchmark definitions](benchmarks.md).
 
 **Replica.** A complete, independent copy of the model serving its own requests, on one Spark or a group of Sparks. A router can spread users across several replicas.
 
 **RigMark.** Our name for a benchmark run and its recorded results. A published card is the write-up of one such run: its recipe, measurements and qualification. Timing-only runs are not cards. See [Benchmarks](benchmarks.md).
 
-**Ring (topology).** Ranks connected in a loop, each passing data to the next. Rings remain part of the legacy rank transport, but the current FP4-Local pair defaults to a layer pipeline.
+**Ring (topology).** Ranks connected in a loop, each passing data to the next. Rings belong to the transport of the older [tensor-map rank path](#sz); a current FP4-Local pair runs as a [layer pipeline](#ho) by default.
 
 **RoCE (RDMA over Converged Ethernet).** RDMA carried over ordinary Ethernet. The Spark's QSFP links use RoCE v2, which travels inside UDP on port 4791.
 
@@ -224,7 +226,7 @@ Under greedy decoding, ON and OFF must return the same token IDs; see [request c
 
 **Safetensors.** The file format of the model's weights: plain tensors with a small header, safe to load.
 
-**Same-setup exact.** A label on measured numbers. It means one machine setup, one set of model files and one set of settings, with answers checked byte-identical across the runs being compared.
+**Same-setup exact.** A label you will see next to measured numbers. It means one machine setup, one set of model files and one set of settings, with answers checked byte-identical across the runs being compared.
 
 **Sampling.** Picking the next token with some randomness, controlled by settings like temperature. Turning it off gives greedy decoding.
 
@@ -262,9 +264,9 @@ Under greedy decoding, ON and OFF must return the same token IDs; see [request c
 
 **Tool calls.** The model asks the harness to run a tool, such as reading a file, and gets the result back.
 
-**VADE_W2_PP (layer pipeline).** The switch behind FP4-Local's default way of running on two Sparks, the [layer pipeline](#ho):
+**VADE_W2_PP (layer pipeline).** The environment switch that picks how FP4-Local spreads over several Sparks:
 
-- Each Spark runs its own block of layers with the same arithmetic as the one-Spark engine. Drafted tokens are checked across both stages.
+- Unset on two Sparks: the [layer pipeline](#ho), the default.
 - `VADE_W2_PP=0` picks the older [tensor-map rank path](#sz) instead.
 - For more than two Sparks, `VADE_W2_PP=1` turns on a [chain](#ac), and `vade up --sparks N` sets it for you.
 

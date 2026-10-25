@@ -69,6 +69,8 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
+/// The OSC 52 escape sequence that asks the terminal to copy `text`, wrapped
+/// for tmux passthrough when `tmux` is true.
 pub fn osc52(text: &str, tmux: bool) -> io::Result<String> {
     within_cap(text)?;
     let sequence = format!("\x1b]52;c;{}\x07", base64(text.as_bytes()));
@@ -79,6 +81,8 @@ pub fn osc52(text: &str, tmux: bool) -> io::Result<String> {
     })
 }
 
+/// Copy `text`: with pbcopy on a local Mac, otherwise through OSC 52 when the
+/// terminal is interactive. Returns the method used.
 pub fn copy(text: &str, interactive: bool) -> io::Result<&'static str> {
     within_cap(text)?;
     if std::env::var_os("SSH_TTY").is_none() && std::env::var_os("SSH_CONNECTION").is_none() {

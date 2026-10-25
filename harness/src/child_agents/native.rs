@@ -39,6 +39,8 @@ pub fn read_only_http_factory(
     }))
 }
 
+/// A child's model over HTTP: its own append-only request, contract
+/// negotiation and exact admission against the engine.
 pub struct HttpChildModel {
     endpoint: Endpoint,
     pool: ConnectionPool,
@@ -186,7 +188,7 @@ impl ChildModel for HttpChildModel {
     }
 
     fn usage(&self) -> Option<Usage> {
-        self.contract.context.turns.back().map(|t| t.usage.clone())
+        self.contract.context.turns.back().map(|t| t.usage)
     }
 }
 

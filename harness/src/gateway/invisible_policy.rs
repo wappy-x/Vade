@@ -328,7 +328,8 @@ fn view(bytes: &[u8]) -> Option<View<'_>> {
 fn text(v: View<'_>, key: &str) -> Option<String> {
     v.get(key).and_then(View::as_str).map(|s| s.into_owned())
 }
-fn integer(v: Option<View<'_>>) -> Option<u64> {
+/// A plain unsigned JSON integer (digits only, no sign, fraction or exponent).
+pub(super) fn integer(v: Option<View<'_>>) -> Option<u64> {
     v.filter(|v| !v.raw().is_empty() && v.raw().bytes().all(|b| b.is_ascii_digit()))?
         .raw()
         .parse()

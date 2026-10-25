@@ -5,10 +5,10 @@
 //! result, including skipped/cancelled calls. Failed streams are discarded;
 //! completed calls are never replayed when `run` is explicitly resumed.
 use crate::agent_wire::{
-    AssistantTurn, FinishReason, MAX_HISTORY_NODES, Message, ToolCall, WireLimits, invalid,
-    json_nodes, required_string,
+    AssistantTurn, FinishReason, MAX_HISTORY_NODES, Message, ToolCall, WireLimits, json_nodes,
+    required_string,
 };
-use crate::json::{self, Value};
+use crate::json::{self, Value, invalid};
 use std::collections::HashSet;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,7 +16,9 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 mod execution;
-pub use execution::{has_visible_answer, run, run_observed, run_observed_with_budget};
+mod recovery;
+pub use execution::{run, run_observed, run_observed_with_budget};
+pub use recovery::has_visible_answer;
 
 /// Shared with the interactive `/continue` command. Keep recorded user messages
 /// identical whether the host or the user requests continuation. Plain chat
@@ -45,6 +47,8 @@ pub const CHECK_CALL_PREFIX: &str = "vade-check-";
 /// One reminder per no-edit discovery stretch, retained across resume.
 pub const DISCOVERY_RECOVERY_PROMPT: &str = "The same discovery call succeeded three times in a row. Use its existing results instead of repeating it. Read the relevant lines or narrow the query, then make the requested change or create the requested output file. For a read-only question, give the answer once the evidence is sufficient. Keep the existing time and tool budgets. This is the single automatic discovery recovery; another repeated discovery loop ends this activation.";
 
+/// Budgets for one user request: model and tool turns, tool calls, active
+/// work time, output and history bytes, context tokens and wire bounds.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     pub max_model_turns: usize,
@@ -605,6 +609,8 @@ fn validate_history(messages: &[Message]) -> io::Result<HashSet<String>> {
     Ok(seen)
 }
 
+/// What a [`Model`] sends for one turn: request options, the message history
+/// and the wire bounds its response must respect.
 #[derive(Clone, Copy)]
 pub struct ModelRequest<'a> {
     pub options: &'a Value,
@@ -698,6 +704,7 @@ pub trait Model {
     ) -> io::Result<AssistantTurn>;
 }
 
+/// One validated tool call handed to a [`ToolExecutor`].
 pub struct ToolInvocation<'a> {
     pub call: &'a ToolCall,
     /// Parsed JSON object. Invalid/oversized arguments never reach an executor.
@@ -705,6 +712,8 @@ pub struct ToolInvocation<'a> {
     pub max_output_bytes: usize,
 }
 
+/// Why a tool call produced no result; each kind becomes a tool message the
+/// model sees.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolError {
     UnknownTool,
@@ -762,6 +771,7 @@ pub trait ToolExecutor {
     }
 }
 
+/// Which budget in [`Limits`] ended a run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LimitKind {
     ModelTurns,
@@ -776,6 +786,7 @@ pub enum LimitKind {
     EmptyReplies,
 }
 
+/// Why a run ended. Only error kinds escape, never upstream text or paths.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StopReason {
     Finished(FinishReason),
@@ -792,6 +803,8 @@ pub enum StopReason {
     JournalError,
 }
 
+/// What one run did: why it stopped, turn, tool and output counts, and
+/// whether the last answer can be continued.
 #[derive(Clone, Debug)]
 pub struct RunReport {
     pub reason: StopReason,

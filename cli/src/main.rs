@@ -1,3 +1,27 @@
+//! The `vade` command line: start, chat with, stop and check a Vade engine.
+//!
+//! `main` dispatches every command to one of three lifecycle owners, chosen by
+//! what is configured (see `vade --help`):
+//!
+//! - [`launch`]: the owner flow on this Spark (`vade launch`, local defaults in
+//!   `~/.vade` or `VADE_HOME`).
+//! - [`app`]: the controller, which drives one or more Sparks over SSH from a
+//!   config file (`VADE_CONFIG` or the user config directory).
+//! - [`run`]: the separate legacy bootstrap for the official Qwen3-8B BF16
+//!   catalog (`vade run qwen3-8b`).
+//!
+//! Module map:
+//!
+//! | Area | Modules |
+//! | --- | --- |
+//! | Arguments and help | [`cli`], [`auth`] (credential files), [`endpoint`] (which server a client command talks to) |
+//! | Lifecycle owners | [`launch`], [`app`], [`run`], [`worker`] (the private helper that owns engine processes on a Spark) |
+//! | Configuration and records | [`config`] (controller config), [`state`] (controller ownership records and locks), [`catalog`], [`repository`] |
+//! | Machine and artifacts | [`detect`], [`prebuilt`], [`build_job`], [`sha256`] |
+//! | Processes and files | [`runner`] (every subprocess), [`control_socket`], [`unix_file`], [`unix_flags`] |
+//! | Output | [`output`] (fallible stdout), [`status`] (`status --json` schema), [`text`] (terminal-safe text and `key=value` records), [`json`] (health replies) |
+//! | Client tools | [`bench`](mod@bench), [`verify`] (exact token IDs, drafting ON and OFF) |
+//! | Local checks | [`test_gate`] (`vade test build` and `determinism`), [`evals`] (long-context, GDN and ABI checks) |
 mod output;
 mod prebuilt;
 mod repository;

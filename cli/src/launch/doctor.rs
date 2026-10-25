@@ -58,7 +58,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                 check(&mut failures, "Owned endpoint and health", self.ready(config, record),
                     "Run vade logs, then vade down and vade launch.")?;
             }
-            (_, Some(None)) => output::line(format_args!("Engine: stopped. Start: vade launch"))?,
+            (_, Some(None)) => output::line(format_args!("Engine: stopped. Start: {}", text::command("launch")))?,
             _ => output::line(format_args!("Engine health: unavailable until the config and ownership checks pass; run vade down before repair."))?,
         }
         if failures.is_empty() {

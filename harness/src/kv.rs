@@ -37,6 +37,8 @@ fn count(v: json::View<'_>, key: &str) -> io::Result<u64> {
     raw.parse().map_err(|_| invalid("invalid KV count"))
 }
 
+/// The engine's advertised checkpoint support: its cache domain, per-scope
+/// handle and byte limits, and handle lifetime.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Capabilities {
     /// Authorization-specific; may differ from the ordinary shared cache domain.
@@ -220,6 +222,7 @@ pub(crate) fn parse_hints(value: &Value, messages: usize) -> Vec<Hint> {
     }
 }
 
+/// Whether a request reused a checkpoint handle, as the engine reported it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reuse {
     Hit,
@@ -269,6 +272,7 @@ impl Reuse {
         )
     }
 }
+/// Whether the engine kept a new checkpoint after a request, and if not, why.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Retention {
     Retained,
@@ -309,6 +313,8 @@ impl Retention {
         }
     }
 }
+/// The engine's checkpoint report for one response: reuse, reused tokens,
+/// retention and any new checkpoint handle.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Report {
     pub cache_domain: String,

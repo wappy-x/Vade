@@ -1,9 +1,67 @@
 # Changelog
 
+This file lists the changes you would notice when you use Vade, newest first.
+Changes that are merged but not yet released are under Unreleased.
+
+## Unreleased
+
+### Engine
+
+- On the layer pipeline, the check of drafted tokens now replays each
+  Spark's layers as captured GPU work, and when one chat runs alone the
+  drafting depth can rise to 7 instead of 3 (the resident depth in the
+  [glossary](docs/GLOSSARY.md)). One Spark is unchanged, and
+  `VADE_FLASHNEXT_MTP_DEPTH=3` restores the previous ceiling. The change
+  targets one-chat speed on two Sparks. The published cards were measured
+  before it; the next cards will show its effect.
+
+### CLI
+
+- `vade install` from a controller now builds every Spark at the same time
+  instead of one after another. It still prints each machine's output in
+  order, and if a machine fails it stops with that machine's error, as before.
+- `vade launch` no longer opens a chat when its input isn't a terminal, for
+  example under `script` or with input from `/dev/null`. It prints the ready
+  line and the chat command, exits successfully and leaves the engine running,
+  so you can connect later with `vade chat`.
+- When you run Vade by a path, such as `./vade` from the launcher bundle
+  folder, the next-step hints from `vade launch` and `vade status` repeat that
+  path (for example `./vade chat`) instead of a bare `vade` that your shell
+  may not find.
+
+### Documentation
+
+- The README and the [benchmarks page](docs/benchmarks.md) show measured
+  v0.1.0 results, and the receipts behind them are published under
+  [bench/receipts/2026-10-24](bench/receipts/2026-10-24/README.md).
+- The results figure compares one Spark with two, with drafting on. In the
+  2026-10-24 runs, a second Spark answered a long prompt sooner but didn't make
+  a single chat write faster. Eight chats at once vary from run to run, and the
+  figure shows the range we measured.
+- [INSTALL](INSTALL.md) covers more situations: an engine that turns away an
+  extra chat with HTTP 503, checking each replica with `vade verify --url`,
+  keeping the launcher bundle outside your checkout, and what to do when
+  `vade install` refuses a checkout with local changes.
+- The guides were rewritten in plainer language. Commands, numbers and links
+  didn't change.
+
+### Project
+
+- Bug reports and feature requests now use issue forms. The bug form asks for
+  the version, model, number of Sparks, how you run Vade, the exact command
+  and the full error, plus `vade verify` output when answers are wrong.
+- The security policy explains how to report a vulnerability privately, what
+  it covers, and what Vade exposes on the network by default.
+
 ## v0.1.0 - 2026-10-24
 
-The first public release brings together the Vade engine, the CLI and the
-harness.
+The first public release. Vade runs a large language model on your own NVIDIA
+DGX Spark and gives you three things: a coding agent in your terminal, a plain
+chat, and an OpenAI-compatible API. It serves one model,
+`nvidia/Qwen3.8-Flash-Next-FP4-Local` (text only), on one Spark or on linked
+Sparks. It is written in Rust using only the standard library, and it is built
+so that the same request on the same setup returns the same token IDs on every
+run; `vade verify` lets you check that on your own machine.
 
 ### Engine and serving
 

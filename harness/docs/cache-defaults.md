@@ -78,7 +78,7 @@ produce identical requests apart from `cache` and the per-session
 
 ```sh
 cd harness
-cargo test --offline --test contract_mock both_cli_modes_negotiate_cache_permission
+cargo test --offline --test contract_cli both_cli_modes_negotiate_cache_permission
 ```
 
 ## Recommended defaults

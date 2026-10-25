@@ -2,6 +2,7 @@
 //! untrusted Markdown, input and tool text are sanitized before styling.
 use super::{cell_width, sanitize};
 
+/// `text` wrapped in the SGR color code `sgr` when `color` is on.
 pub fn style(text: &str, sgr: &str, color: bool) -> String {
     if color && !text.is_empty() {
         format!("\x1b[{sgr}m{text}\x1b[0m")
@@ -65,6 +66,7 @@ fn units(text: &str) -> impl Iterator<Item = (&str, usize)> {
     })
 }
 
+/// `text` without its escape sequences.
 pub fn plain(text: &str) -> String {
     units(text)
         .filter(|(s, _)| !s.starts_with('\x1b'))
@@ -72,10 +74,12 @@ pub fn plain(text: &str) -> String {
         .collect()
 }
 
+/// The terminal cells `text` occupies, ignoring escape sequences.
 pub fn width(text: &str) -> usize {
     units(text).map(|(_, n)| n).sum()
 }
 
+/// The longest prefix of `text` that fits in `columns` cells.
 pub fn clip(text: &str, columns: usize) -> String {
     let mut out = String::new();
     let mut cells = 0;
@@ -92,6 +96,8 @@ pub fn clip(text: &str, columns: usize) -> String {
     out
 }
 
+/// `text` split into rows of at most `columns` cells, carrying active styles
+/// across row breaks.
 pub fn wrap(text: &str, columns: usize) -> Vec<String> {
     let columns = columns.max(1);
     let mut rows = vec![String::new()];
@@ -125,6 +131,9 @@ pub fn wrap(text: &str, columns: usize) -> Vec<String> {
     rows
 }
 
+/// A reply rendered for the terminal: sanitized, fenced code kept verbatim
+/// (dimmed), headings, rules, quotes and bullets drawn, and inline styling
+/// when `color` is on.
 pub fn markdown(text: &str, color: bool) -> String {
     let text = sanitize(text).replace('\t', "    ");
     let mut out = Vec::new();
@@ -205,10 +214,12 @@ pub fn user(text: &str, color: bool) -> String {
     format!("{}\n{}", header("You", &super::clock::now().0, "1;36", color), sanitize(text))
 }
 
+/// A `── label · time ──` rule in the given style.
 pub fn header(label: &str, time: &str, sgr: &str, color: bool) -> String {
     style(&format!("── {label} · {time} ──"), sgr, color)
 }
 
+/// A complete answer block: the Answer header and the rendered reply.
 pub fn reply(text: &str, time: &str, color: bool) -> String {
     format!("{}\n{}", header("Answer", time, "1", color), markdown(text, color))
 }
@@ -379,6 +390,7 @@ pub fn menu(
     out.join("\n")
 }
 
+/// The input dock's rows and where its cursor sits among them.
 pub struct EditorRows {
     pub lines: Vec<String>,
     pub cursor_row: usize,
@@ -482,6 +494,7 @@ pub fn editor(
     }
 }
 
+/// The approval prompt line: approve with y, deny with n.
 pub fn approval(color: bool) -> String {
     format!(
         "{}  {} approve · {} deny · or /approve /deny",

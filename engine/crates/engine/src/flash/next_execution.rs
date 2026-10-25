@@ -745,7 +745,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         let capacity = sessions[owner].capacity;
         let mut work = model.take_work(b, capacity, count)?;
         work.bound_head = greedy_head && verify && sessions.len() == 1 && (2..=4).contains(&count)
-            && model.head_bounds.is_some() && model.pp_front_split().is_none()
+            && model.head_bounds.is_some()
             && sessions.iter().all(|s| s.dump.is_none() && s.layer_bytes.is_none());
         if let Err(error) = work.status.clear(b, count, 0) {
             model.return_work(work);
@@ -757,8 +757,8 @@ impl<'a, 'w> NextSession<'a, 'w> {
             if let Some(d) = s.draft.as_ref() { d.bound_at.set(None); }
         }
         // VADE_MTP_GRAPH=0: the eager build of `execute`, which holds no segment code.
-        // A captured verify segment cannot hold the pipeline exchange: VADE_W2_PP verifies eagerly.
-        let result = if verify && mtp_graph() && matches!(part, Part::Whole) {
+        // VADE_W2_PP stages capture their own layers' segments; each closes before the exchange.
+        let result = if verify && mtp_graph() {
             Self::execute::<true>(b, &mut work, sessions, tokens, &spans, output, verify, part).inspect_err(|_| b.abort_segment())
         } else {
             Self::execute::<false>(b, &mut work, sessions, tokens, &spans, output, verify, part)
@@ -890,10 +890,10 @@ impl<'a, 'w> NextSession<'a, 'w> {
         // that combine then runs inside the mix's norm (combine_mix_tiled).
         let unobserved = !sessions.iter().any(|s| s.layer_bytes.is_some() || s.dump.is_some());
         let mut pending_moe: Option<usize> = None;
-        // VADE_MTP_GRAPH (default on): a verify pass whose shape was seen before captures layers 1-47 as
-        // four segments and launches each (updated in place when its topology holds) while the
-        // host captures the next; layer 0 runs eagerly meanwhile. The captured work is the eager
-        // work in the same order. A shape's first pass runs eagerly; the oldest shape retires.
+        // VADE_MTP_GRAPH (default on): a verify pass whose shape was seen before captures its stage's layers after
+        // the first as segments (one Spark: 1-47 in four; VADE_W2_PP: clipped at the split, 24 eager on the back),
+        // launching each (updated in place when its topology holds) while the host captures the next. The captured
+        // work is the eager work in the same order. A shape's first pass runs eagerly; the oldest shape retires.
         let graphed = if GRAPH && verify && unobserved {
             let shape = VerifyShape {
                 rows: count,
@@ -931,7 +931,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                     let updated = unsafe { b.end_segment(&mut work.verify_graphs[entry].1[slot])? };
                     work.verify_counts[if updated { 1 } else { 2 }] += 1;
                 }
-                if b.begin_segment(VERIFY_SEGMENT.min(LAYERS - li), count)? {
+                if b.begin_segment(VERIFY_SEGMENT.min(end - li), count)? {
                     open = Some(li / VERIFY_SEGMENT);
                 }
             }
@@ -1307,6 +1307,19 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 }
             }
         }
+        // A captured segment closes before a pipeline stage hands its rows on (exchange, return).
+        if let (Some(entry), Some(slot)) = (graphed, open.take()) {
+            let updated = unsafe { b.end_segment(&mut work.verify_graphs[entry].1[slot])? };
+            work.verify_counts[if updated { 1 } else { 2 }] += 1;
+        }
+        if graphed.is_some() {
+            work.verify_counts[0] += 1;
+            let passes = work.verify_counts[0];
+            if passes.is_power_of_two() || passes % 256 == 0 {
+                let [_, updated, instantiated, eager] = work.verify_counts;
+                eprintln!("flash_next mtp_graph passes={passes} eager_passes={eager} segments_updated={updated} segments_instantiated={instantiated} shapes={} deferred_frees={} rows={count} chats={}", work.verify_graphs.len(), b.deferred_frees(), sessions.len());
+            }
+        }
         match part {
             Part::Back(..) => return Ok(()),
             Part::Front(_) => {
@@ -1335,18 +1348,6 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 Self::pp_return_and_observe(b, model, sessions, work, output, verify, &meta, count)?;
             }
             Part::Whole => (),
-        }
-        if let (Some(entry), Some(slot)) = (graphed, open.take()) {
-            let updated = unsafe { b.end_segment(&mut work.verify_graphs[entry].1[slot])? };
-            work.verify_counts[if updated { 1 } else { 2 }] += 1;
-        }
-        if graphed.is_some() {
-            work.verify_counts[0] += 1;
-            let passes = work.verify_counts[0];
-            if passes.is_power_of_two() || passes % 256 == 0 {
-                let [_, updated, instantiated, eager] = work.verify_counts;
-                eprintln!("flash_next mtp_graph passes={passes} eager_passes={eager} segments_updated={updated} segments_instantiated={instantiated} shapes={} deferred_frees={} rows={count} chats={}", work.verify_graphs.len(), b.deferred_frees(), sessions.len());
-            }
         }
         for ((s, input), span) in sessions.iter_mut().zip(tokens).zip(spans) {
             if verify {

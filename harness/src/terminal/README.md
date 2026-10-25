@@ -6,6 +6,7 @@
 | --- | --- |
 | [`editor.rs`](editor.rs) | UTF-8 scalar-boundary editor. |
 | [`render.rs`](render.rs) | First-party terminal presentation. |
+| [`transcript.rs`](transcript.rs) | The bounded, width-aware transcript rows behind the terminal view. |
 
 **Why a folder:** Rust keeps one module per file; this folder groups the modules that belong to `terminal`.
 

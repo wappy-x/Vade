@@ -1,6 +1,9 @@
-// Official Qwen3-8B BF16 payload inventory retained from the official-file audit.
-// Completion markers are never evidence: acquisition and reuse hash every byte.
+//! Official Qwen3-8B BF16 payload inventory retained from the official-file
+//! audit, used by `vade run qwen3-8b`. Completion markers are never evidence:
+//! acquisition and reuse hash every byte.
+/// The pinned Hugging Face revision of the catalog.
 pub const MODEL_REVISION: &str = "b968826d9c46dd6066d109eabc6255188de91218";
+/// Every catalog file with its SHA-256.
 pub const MODEL_FILES: &[(&str, &str)] = &[
     (
         "config.json",

@@ -10,6 +10,8 @@ pub const MAX_CHUNK_BYTES: usize = 4096;
 pub const INLINE_BYTES: usize = 4096;
 pub const LIFETIME_SECONDS: u64 = 24 * 60 * 60;
 
+/// Session-scoped storage for tool output too large to send inline: a
+/// capacity check before a tool runs, retention, and bounded reads by ID.
 pub trait Access {
     /// Called before a tool may execute. Single-writer ownership makes this a
     /// reservation check; no other worker may consume capacity in between.
@@ -105,6 +107,8 @@ pub fn chunk(text: &str, id: &str, offset: usize, length: usize, cap: usize) -> 
         }
     }
 }
+/// The inline part of a large tool result: its first chunk plus a note that
+/// the rest stays readable as artifact `id` for 24 hours.
 pub fn excerpt(text: &str, id: &str, cap: usize) -> io::Result<String> {
     let range = chunk(text, id, 0, INLINE_BYTES, cap.saturating_sub(360))?;
     Ok(format!(

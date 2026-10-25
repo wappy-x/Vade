@@ -819,6 +819,8 @@ fn run(config: &Config) -> Report {
     })
 }
 
+/// `vade-harness doctor`: parse its arguments, run the checks against the
+/// configured engine and print the report.
 pub fn cli(args: impl IntoIterator<Item = String>) -> ExitCode {
     let args: Vec<_> = args.into_iter().collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {

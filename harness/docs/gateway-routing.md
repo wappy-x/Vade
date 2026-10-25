@@ -163,6 +163,22 @@ trigger a replay. No request is replayed after any response byte has been
 forwarded. The external harness owns any further explicit follow-up or retry
 decision.
 
+**Cancel and checkpoint release go to every verified endpoint.** Routing does
+not record which endpoint holds a request's cancel key or checkpoint handle, so
+`POST /v1/cancel` and `POST /v1/kv/release` skip selection and go at once to
+every endpoint whose capability contract discovery has verified, healthy or
+unreachable. Foreign and never-probed endpoints never see the key, and neither
+does a verified endpoint whose latest probe answered with a foreign or changed
+contract, until the verified contract answers there again. Each reply is read in
+full (within the response bound), all within 1.5 seconds for the whole call, so
+one stalled endpoint cannot hold the answer past the native cancel client's
+two-second limit. The client gets one answer: the first 2xx reply, in
+configuration order, that reports `"cancelled":true` or `"released":true`,
+otherwise the first reply, or HTTP 502 when no endpoint answers. An endpoint
+that fails or stalls is skipped and nothing is retried. Keys are
+random capabilities, so an unknown key changes nothing on the other endpoints.
+These calls take no reservation and are not counted in the endpoint stats.
+
 Stateful provider continuation handles stay opaque: matching model metadata does
 not mean a `previous_response_id` or a server-side session is shared between
 replicas. Use full-history, stateless requests for failover that works across

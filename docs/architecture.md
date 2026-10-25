@@ -25,9 +25,10 @@ The engine and the harness are separate programs, each in its own Cargo
 workspace inside this repository. You can use the engine from another
 compatible client, or point the harness at another supported HTTP endpoint.
 
-All three parts are first-party Rust and use the standard library. The engine
-also uses the CUDA driver and Vade's own GPU kernels. The parts share protocols
-and development rules, but they are not one combined executable.
+All three parts are first-party Rust, built on the standard library alone.
+Beyond that, the engine talks to the CUDA driver and runs Vade's own GPU
+kernels. The parts share protocols and development rules, but they are not one
+combined executable.
 
 ## Follow one coding request
 
@@ -45,37 +46,36 @@ harness ── HTTP request ──► engine controller ──► GPU ranks
    └─ send the recorded tool result back to the engine for the next reply
 ```
 
-A *rank* is one engine process, one per Spark. The engine controller in the
-diagram is rank zero: it owns the HTTP listener and coordinates the model
-commands that the ranks carry out on their GPUs. On one Spark there is a single
-rank, which does both jobs.
+A *[rank](GLOSSARY.md#pr)* is one engine process, one per Spark. The engine
+controller in the diagram is rank zero: it owns the HTTP listener and
+coordinates the model commands that the ranks carry out on their GPUs. On one
+Spark there is a single rank, which does both jobs.
 
 1. **The harness prepares the conversation.** The request carries the task,
    the messages the harness has kept, the tool definitions and fixed request
    options. The engine never runs a tool itself. A tool's result becomes part
    of the next request.
-2. **The client checks what the engine supports.** The optional
-   `vade.engine.v1` contract advertises the model, context limits, tools,
-   thinking and cache features. *Exact admission* is the check that a request
-   will fit. It renders and tokenizes the complete final request, then checks
-   whether its prompt plus the reserved output fits. This check reserves no
-   GPU memory or queue slot, so generation can still be refused.
+2. **The harness asks what the engine supports.** An engine can advertise
+   the optional `vade.engine.v1` contract: its model, context limits, tools,
+   thinking and cache features. The harness can then ask whether a request
+   will fit before sending it (*exact admission*). This is a check, not a
+   reservation, so the engine can still refuse the request later.
 3. **The engine accepts and schedules generation.** It checks limits, accounts
    for the execution memory available and looks for a prompt prefix it can
-   reuse. An *affinity key* helps it choose: a label that ties a request to
-   earlier cached state. The key alone does not prove that any tokens were
-   reused.
+   reuse. An *affinity key*, a label that ties a request to earlier cached
+   state, steers it toward reusable work. The key is a hint; the usage
+   figures show whether reuse actually happened.
 4. **The tokenizer turns the conversation into model input.** A *token* is a
    small piece of text, represented by an integer. The model's chat template
    supplies the framing for roles and tools. The checkpoint, tokenizer,
    template, tool order and thinking settings all affect the input.
-5. **The engine reads, then writes.** Reading the input is called *prefill*.
-   Producing the reply is called *decode*. Decode updates the chat's model
+5. **The engine reads, then writes.** Reading the input is called *prefill*;
+   producing the reply is called *decode*. Decode updates the chat's model
    state, picks the next token under the sampling settings in effect, and
    turns tokens back into text. The server streams text, reasoning or
-   tool-call data as soon as it is ready. Completion and usage fields let the
-   client check the result. A number the server does not report is one the
-   client cannot know.
+   tool-call data as soon as each piece is ready. At the end, the server
+   reports completion and usage figures; those are the only numbers the
+   client sees.
 6. **The harness checks the finished reply before going on.** Text shown while
    it streams is provisional. A complete tool proposal runs only after it
    passes the workspace rules and the approval policy. An incomplete tool
@@ -97,24 +97,24 @@ For the details:
 ## What the current Flash-Next path runs
 
 The current release runs `nvidia/Qwen3.8-Flash-Next-FP4-Local` on one Spark.
-In engine terms that is *world 1*: a group of one rank. The server is
-`flash-serve`. The checkpoint's own metadata selects the code that runs it,
-the mixed-weight `NextModel`, and the `--fp4-local` flag explicitly requires
-that checkpoint format.
+In engine terms that is *world 1*: a group of one rank. The server program is
+[`flash-serve`](../engine/crates/tp/src/bin/flash-serve.rs). It reads the
+checkpoint's own metadata to pick the code that runs the model, the
+mixed-weight `NextModel`. The `--fp4-local` flag goes one step further: with
+it, the server refuses to start unless the checkpoint is in that format.
 
 There are two ways to start it:
 
 - `vade launch`, run on the Spark itself.
-- `vade up --fp4-local`, through the configured
-  [controller route](../INSTALL.md#route-b-from-a-controller), where `vade`
-  drives the Spark over SSH.
+- `vade up`, run from a
+  [controller](../INSTALL.md#route-b-from-a-controller) that drives the Spark
+  over SSH. FP4-Local is its default profile.
 
-See [INSTALL.md](../INSTALL.md) for both, and the dated measurements in
-[Benchmarks](benchmarks.md).
+[INSTALL.md](../INSTALL.md) walks through both, and
+[Benchmarks](benchmarks.md) has the dated measurements.
 
-The [serving entry point](../engine/crates/tp/src/bin/flash-serve.rs) is
-`flash-serve`. Two other programs cover special cases. Neither changes the
-one-Spark default.
+Two other programs sit next to `flash-serve` and cover special cases. Neither
+changes the one-Spark default.
 
 | Program | What it does |
 | --- | --- |
@@ -130,10 +130,11 @@ Flash-Next combines three kinds of layer:
 - **Routed experts**: a router picks expert networks for each token, so a
   decode step does not read every expert's weights.
 
-FP4-Local describes how the checkpoint stores its tensors, in a mix of
-formats. It does not claim that every tensor or operation uses four-bit
-arithmetic. The loader reads each module's NVFP4, MXFP8 or plain storage from
-the checkpoint's quantization map and checks its tensor inventory. See the
+The name FP4-Local describes how the checkpoint stores its tensors, which is
+a mix of formats. It does not mean that every tensor or operation uses
+four-bit arithmetic. The loader reads each module's NVFP4, MXFP8 or plain
+storage from the checkpoint's quantization map and checks its tensor
+inventory. See the
 [mixed-storage loader](../engine/crates/model/src/flash/mixed.rs).
 
 The older two-Spark Flash-Next FP8 route remains as a legacy configuration. It
@@ -147,16 +148,19 @@ the model always takes its single most likely next token. Naming any sampling
 field loads the checkpoint's base sampling settings first, then applies the
 overrides you named.
 
-Prefix caching is OFF by default. `VADE_FLASHNEXT_PREFIX_CACHE=1` turns it on,
-and is supported only at world 1. See the
-[sampling parser](../engine/crates/serve/src/protocol.rs) and
+Prefix caching saves the work of reading the start of a prompt, so a later
+request that begins the same way can skip it. It is OFF by default.
+`VADE_FLASHNEXT_PREFIX_CACHE=1` turns it on, and is supported only at world 1.
+See the [sampling parser](../engine/crates/serve/src/protocol.rs) and
 [cache switch](../engine/crates/serve/src/prefix_switch.rs).
 
 ### Drafting
 
-Multi-token prediction (*MTP*) proposes tokens for the target model to verify.
-We call this drafting. The default FP4-Local service uses strict drafting with
-request depth 3. A request can choose:
+Multi-token prediction (*MTP*) guesses a few tokens ahead, and the target
+model then verifies those guesses. We call this drafting. By default, the
+FP4-Local service drafts three tokens ahead and keeps only the guesses the
+model confirms, so the answer is the same as without drafting. That default is
+the `strict` mode. A request can change it:
 
 | In the request | Effect |
 | --- | --- |
@@ -164,21 +168,23 @@ request depth 3. A request can choose:
 | `"draft":"plain"` | Drafting OFF |
 | `"mtp_depth":0` | Plain decoding, when no `draft` mode is named |
 
-Around that default, the engine has these behaviors. The layer pipeline
-mentioned here is the two-Spark setup described in the next section.
+On top of that default, the engine has three drafting behaviors of its own.
+Each applies on one Spark and on the two-Spark layer pipeline, which is
+described under [Two or more Sparks](#two-or-more-sparks).
 
 - **Adaptive depth.** When one chat runs alone, the engine adjusts how far
-  ahead it drafts, up to a ceiling: 5 tokens on one Spark and 3 on the layer
+  ahead it drafts, up to a ceiling: 5 tokens on one Spark and 7 on the layer
   pipeline.
-- **Prompt lookup.** This copies guesses from matching earlier text in the
-  same chat. It is on by default on both, and runs only for greedy requests
-  that draft. `VADE_MTP_LOOKUP=0` turns it off.
-- **Cohort drafting.** On one Spark and on the two-Spark pipeline, the engine
-  also manages drafting across chats running at the same time.
-- **Tensor-map rank path.** It never drafts.
+- **Prompt lookup.** The engine copies guesses from matching earlier text in
+  the same chat. It is on by default, and runs only for greedy requests that
+  draft. `VADE_MTP_LOOKUP=0` turns it off.
+- **[Cohort drafting](GLOSSARY.md#ac).** The engine can also draft for
+  several chats running at the same time, up to eight.
 
-The server settings say only what is allowed. Whether a request actually
-drafted depends on the request and the scheduler. See
+The older tensor-map rank path never drafts.
+
+The server's settings only say what is allowed. Whether a given request
+actually drafted depends on the request and on the scheduler. See
 [drafting defaults](../engine/crates/engine/src/flash/draft_stack.rs),
 [request handling](../engine/crates/serve/src/protocol.rs),
 [prompt lookup](../engine/crates/engine/src/flash/next_lookup.rs) and
@@ -186,50 +192,60 @@ drafted depends on the request and the scheduler. See
 
 ## Ranks, memory and ownership
 
-When several Sparks serve one model, each runs one rank. Rank zero owns the
-HTTP listener and coordinates model commands. The other ranks carry out those
-commands with their local weights and state. Together they compute one answer;
-they are not independent model replicas.
+When several Sparks serve one model, each Spark runs one rank, and rank zero
+owns the HTTP listener, as in the diagram above. The other ranks carry out its
+model commands with their own local weights and state. Together they compute
+one answer; they are not independent model [replicas](GLOSSARY.md#pr), each
+answering on its own.
 
 ### Two or more Sparks
 
-At world 2 (two ranks), FP4-Local defaults to the `VADE_W2_PP` layer
-pipeline:
+With two Sparks (*world 2*, two ranks), FP4-Local runs as a layer pipeline by
+default:
 
 - Each rank runs the block of consecutive layers assigned to it, using
   world-one arithmetic (the same arithmetic as on one Spark). It then passes
   the intermediate state to the next stage.
 - The front stage owns HTTP and scheduling. The workers run their layers and
   relay results downstream.
-- Draft verification crosses the pipeline.
+- Draft verification crosses the pipeline, so drafting stays available.
 
-`VADE_W2_PP=0` explicitly selects the older tensor-map rank path instead. For
-more than two Sparks, `VADE_W2_PP=1` opts into an N-stage chain. The
-controller sets this when `vade up --fp4-local --sparks N` selects a larger
-group. Supported counts and memory admission still apply. See
+The `VADE_W2_PP` switch picks the layout:
+
+| `VADE_W2_PP` | Two Sparks | More than two Sparks |
+| --- | --- | --- |
+| unset | Layer pipeline | Older tensor-map rank path |
+| `0` | Older tensor-map rank path | Older tensor-map rank path |
+| `1` | Layer pipeline | N-stage chain; `vade up --sparks N` sets this for you |
+
+Supported Spark counts and the memory check described in
+[What the engine keeps in memory](#what-the-engine-keeps-in-memory) still
+apply. See
 [pipeline selection](../engine/crates/tp/src/flash/settings.rs),
 [stage geometry](../engine/crates/engine/src/flash/next_pp.rs) and
 [controller selection](../cli/src/app.rs).
 
-The pipeline uses RDMA by default, which moves data between machines through
-registered memory; TCP is the other option. Before serving, startup checks the
-artifacts and the ranks' numerical settings. The order of arithmetic and
-communication is fixed, because changing the order of floating-point
-additions can change the answer. See
+The stages talk over [RDMA](GLOSSARY.md#pr) (remote direct memory access,
+a direct memory-to-memory transfer between Sparks) by default; TCP also works.
+
+Before serving, the ranks confirm that they share the same artifacts and
+numerical settings. The order of arithmetic and communication is fixed,
+because adding floating-point numbers in a different order can change the
+answer. See
 [pipeline startup](../engine/crates/tp/src/flash/next_batched_service.rs) and
 [settings agreement](../engine/crates/tp/src/pipeline_settings.rs).
 
 ### What the engine keeps in memory
 
-The engine keeps these lifetimes separate:
+The engine splits a rank's memory into five kinds and keeps them apart:
 
-| Memory | Who owns it, and for how long |
-| --- | --- |
-| Resident weights | One copy of the rank's share of model weights, shared by its chats until engine shutdown |
-| Active chat state | The session's attention cache, recurrent state and execution buffers |
-| Retained prompt state | Engine-owned prefix cache and scoped checkpoints, subject to budgets and eviction |
-| Shared scratch | Model/decode workspaces reused in the engine's execution order |
-| Host staging and transport | Loading and registered communication buffers, accounted for separately from model state |
+| Memory | What it holds | How long it lasts |
+| --- | --- | --- |
+| Resident weights | One copy of this rank's share of the model, shared by all its chats | Until the engine shuts down |
+| Active chat state | One chat's attention cache, recurrent state and execution buffers | Until the chat ends |
+| Retained prompt state | The engine's prefix cache and saved checkpoints | Until evicted under its memory budget |
+| Shared scratch | Working space that every model step reuses | Reserved at startup, reused step after step |
+| Host staging and transport | Buffers for loading and for network transfers, counted apart from model state | Kept for reuse |
 
 *Memory admission* is the check that a request fits in memory. Every rank
 agrees on the same limits before serving starts, so a request that rank zero
@@ -238,16 +254,17 @@ accepts also fits on the other ranks.
 A few rules follow from these lifetimes:
 
 - Idle cache can be reclaimed to make room for active sessions.
-- Closing a chat does not necessarily evict a prefix that is retained on its
-  own.
+- Closing a chat does not necessarily evict a prefix that the engine has
+  retained separately.
 - Cached tokens still count toward the logical context length. Reuse saves
   work; it does not raise the model's context limit.
 
 On a Spark, CPU and GPU allocations both draw from the same unified memory.
-Tracked device-allocation bytes are useful for comparing engine builds. They do
-not include every driver allocation, though, and do not show total physical
-memory use. Benchmark receipts, the saved record of each benchmark run, state
-which memory measure they report.
+The engine tracks the bytes it allocates on the device, and that figure is
+useful for comparing one engine build with another. It leaves out some driver
+allocations, though, and it is not the Spark's total physical memory use. Each
+benchmark [receipt](GLOSSARY.md#pr), the saved record of a benchmark run,
+states which memory measure it reports.
 
 ## Exactness and model quality
 
@@ -261,7 +278,7 @@ Within one setup, the output must be byte-identical in each of these cases:
 
 - whether a request runs alone or batched with other requests;
 - whether its prefix is cached or read fresh;
-- whatever chunks the prompt is read in.
+- however the prompt is split into chunks for reading.
 
 Under greedy decoding, drafting ON and OFF must produce the same answer.
 Request IDs and timestamps in HTTP envelopes are not part of the model answer.
@@ -278,15 +295,15 @@ Three checks answer three different questions:
 - **Repeatability:** does this build keep the same-setup rule across all its
   execution paths? Nondeterminism from run to run is forbidden, and so are
   reductions that depend on which other requests share the batch.
-- **Previous-build preservation:** do the tested outputs match frozen outputs
-  from an older Vade build? That tells you about regressions in those saved
-  test cases (fixtures). The exactness rule allows answers to change across
-  builds or Spark counts when the required quality checks pass.
+- **Previous-build preservation:** do the saved test cases (fixtures) still
+  match an older Vade build? A new build or a different Spark count is a
+  different setup, so its answers may change, but only if the quality checks
+  below pass.
 - **Model quality:** does a change keep task accuracy, instruction following
-  and long-context retrieval? Matching an older build byte for byte does not,
-  by itself, show agreement with an outside reference runtime.
+  and long-context retrieval? Matching an older Vade build is a separate
+  question from matching an outside reference runtime.
 
-Arithmetic changes need all of the following:
+A change to the arithmetic needs all of the following:
 
 - repeatability;
 - layer-difference checks against the measured numerical noise floor;
@@ -307,30 +324,35 @@ patches stay within that workspace and its tool policy. With the default
 [read-only allowlist](../harness/docs/agent-tools.md#commands-and-approvals)
 wait for your approval. Allowlisted commands run without asking.
 
-If you hand work to an outside agent, that agent's own confirmed policy
-governs any permission you grant it. Handing work to it does not make it a
-native Vade tool.
+You can also hand work to an outside agent. That agent does not become a
+native Vade tool: it follows the permission policy you confirmed for it, not
+Vade's.
 
-Native shell commands currently run in the macOS sandbox, with a cleared
-environment, private build storage and no network. Other platforms refuse
-native command execution. Under this policy, existing dependency and build
-trees can be out of reach. A successful model response therefore does not mean
-an arbitrary coding project's build will work. The
+Native shell commands run only on macOS for now, inside its sandbox: a
+cleared environment, private build storage and no network. Tools run on the
+computer where you start the harness. On Linux, including the Spark itself,
+the harness can read and patch files but will not run commands. To let the
+agent run commands, start the harness on a Mac and point it at the Spark.
+
+Inside the sandbox, a command may not reach a project's existing dependency
+and build trees, so a good model reply does not mean an arbitrary coding
+project will build. The
 [harness README](../harness/README.md#native-coding-agent) gives the current
 restrictions and what has been verified.
 
 ### Gateway mode
 
-The harness can also relay another client's requests through a gateway. It
-keeps request and response payloads as they are, and does not translate
-between the Chat and Responses APIs. When it routes across several upstreams,
-it can keep each conversation on the same upstream and use the cache telemetry
-the upstreams report.
+In gateway mode, the harness relays another client's requests to one or more
+upstream servers. It passes request and response payloads through as they
+are, and does not translate between the Chat and Responses APIs. When it
+routes across several upstreams, it can keep each conversation on the same
+upstream and use the cache telemetry the upstreams report.
 
-A compatible relay and a cleanly closed connection do not confirm that the
-remote GPU work has stopped. The harness's HTTP transport has no built-in TLS;
-the configured controller route uses an
-[SSH tunnel](../engine/docs/flash-server.md#connect-your-mac). See the
+Two cautions. First, a cleanly closed connection does not mean the remote
+GPU has stopped working on that request. Second, the harness speaks plain HTTP
+with no built-in TLS, so between machines use the
+[SSH tunnel](../engine/docs/flash-server.md#connect-your-mac) that the
+controller route sets up. See the
 [gateway contract](../harness/docs/engine-contract.md#opaque-gateway) and
 [routing guide](../harness/docs/gateway-routing.md).
 
@@ -339,40 +361,43 @@ the configured controller route uses an
 The one-Spark launcher `vade launch` finds an existing checkpoint, builds or
 uses local artifacts, starts the resident engine and opens chat.
 
-With a controller configuration selected, `vade install` stages the configured
-installation, and `vade up` starts its selected ranks and a tunnel it owns.
-Controller `vade up` picks the FP4-Local release profile by default.
-`--fp4-local` is still accepted, and `--fp8-legacy` selects the legacy
-two-Spark FP8 profile. The separate `vade run qwen3-8b` route is legacy. See
+On the controller route, a [controller](GLOSSARY.md#ac) (a second computer,
+or one of the Sparks acting as its own controller) drives the Sparks over SSH. There,
+`vade install` stages the configured installation, and `vade up` starts the
+selected ranks plus a tunnel that it owns. By default, `vade up` picks the
+FP4-Local release profile. `--fp4-local` is still accepted, and
+`--fp8-legacy` selects the legacy two-Spark FP8 profile. The separate
+`vade run qwen3-8b` route is also legacy. See
 [INSTALL.md](../INSTALL.md) and the [launcher implementation](../cli/src/launch.rs).
 
-`vade status` and `vade logs` inspect the selected installation. `vade down`
-stops the processes it recorded. Process identity and artifact checks decide
-which processes the CLI may stop. Configuration, ownership records and model
-files stay private.
+`vade status` and `vade logs` inspect the selected installation, and
+`vade down` stops the processes the CLI recorded. Before it stops anything,
+the CLI checks each process's identity and artifacts, so it stops only
+processes it owns. Its configuration, ownership records and model files stay
+private.
 
-Installation receipts and benchmark receipts vouch for different behavior. See
-the recorded scope of each in [INSTALL.md](../INSTALL.md) and
-[Benchmarks](benchmarks.md).
+`vade install` keeps a record of what it staged, with a SHA256 hash for each
+build, and later commands check against it. A benchmark receipt records one
+measured run. The two prove different things; [INSTALL.md](../INSTALL.md) and
+[Benchmarks](benchmarks.md) spell out each.
 
 ## Current limits
 
 Vade is a research alpha. The release default is FP4-Local on one Spark. The
-benchmark page also has results from cabled pairs and rented cloud VMs. Other
-model parsers, Spark counts and protocol routes in the source are not
-qualified to the same level.
+benchmark page also has results from cabled pairs of Sparks and from rented
+cloud VMs. The other model parsers, Spark counts and protocol routes in the
+source are not qualified to the same level.
 
 Known limits:
 
 - Cancelling can wait for the current chunk of GPU work to finish.
 - Replaying or compacting a prompt can add time between turns.
 
-A speed result alone does not show any of the following. Each needs its own
-evidence:
+Speed numbers don't cover the following; each needs its own test:
 
 - how cache use is counted;
-- whether a request the expert router rejects fails alone, without disturbing
-  the rest of its batch;
+- whether one failed request in a batch leaves the other requests unharmed,
+  for example when the model's expert router rejects it;
 - long sessions;
 - complete native coding workflows.
 

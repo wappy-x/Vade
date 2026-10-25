@@ -170,10 +170,12 @@ should use this combined API. Join all child workers before explicit
 `release_checkpoints()` on owner shutdown; last shared-owner drop also runs it.
 Resume/fork alone never connects, admits a request, generates, or replays a tool.
 
-The gateway currently does not route the release endpoint or provide KV-handle
-cluster affinity. Use a directly configured Engine endpoint for this native
-lifecycle. Gateway routing of releases and handle affinity is separate work;
-an unconfirmed release still has Engine TTL as fallback.
+Both gateways relay the release endpoint; with several upstreams they send it
+to every upstream and report the first confirmation. Neither offers KV-handle
+cluster affinity, so a request that names a handle can reach an endpoint that
+does not hold it. For this native lifecycle, use a directly configured Engine
+endpoint or a gateway with one upstream. An unconfirmed release still has
+Engine TTL as fallback.
 
 ## Local evidence and design credits
 

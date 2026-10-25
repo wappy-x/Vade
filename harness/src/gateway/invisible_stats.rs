@@ -1,4 +1,5 @@
 //! Best-effort bounded observation. Never changes or rejects engine bytes.
+use super::policy::integer;
 use crate::{
     json::{self, View},
     transport::{Head, SseDecoder},
@@ -146,12 +147,6 @@ impl Observed {
             self.generated_events += 1;
         }
     }
-}
-fn integer(v: Option<View<'_>>) -> Option<u64> {
-    v.filter(|v| !v.raw().is_empty() && v.raw().bytes().all(|b| b.is_ascii_digit()))?
-        .raw()
-        .parse()
-        .ok()
 }
 fn number(v: Option<View<'_>>) -> Option<f64> {
     v?.raw()

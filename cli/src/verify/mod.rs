@@ -1,4 +1,5 @@
 //! Compare complete generated token IDs, including across drafting modes.
+//! `http` is the bounded HTTP/SSE client it uses.
 mod http;
 
 use crate::evals::json::{self, Value};
@@ -9,6 +10,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+/// Usage for `vade verify`.
 pub const HELP: &str = "vade verify [-n 20] [--prompt short|2k|8k] [--url URL]\n            [--machine NAME] [--max-tokens 128] [--timeout 120] [--receipt PATH]\nCompare token IDs byte for byte across repeated greedy runs, drafting OFF and ON.\nUses --url, then VADE_API_URL, then the selected installation's recorded endpoint.\nKeep the same VADE_CONFIG and VADE_HOME as up/run; explicit VADE_CONFIG selects the controller's local_port.\nWithout a running installation, start vade launch or supply --url.\n--machine adds an independent running engine from that machine's verify_url in VADE_CONFIG.\nPrompts are bundled offline; 2k/8k sizes are approximate and tokenizer-dependent.\nGenerates a fixed token count (ignores EOS) to check every ID, with cache and thinking off.\nON requests strict drafting and must actually draft; unavailable drafting fails the check.\nPrints one result line; exit 0 means identical, 1 means different or incomplete.\nWrites vade-verify.json in the current directory, or --receipt PATH.\n--timeout is the deadline in seconds for each request. Run and token numbers start at 1.\n";
 
 struct Options {
@@ -138,9 +140,6 @@ fn targets(options: &Options) -> Result<Vec<Target>, String> {
         .collect()
 }
 
-fn hash(bytes: &[u8]) -> String {
-    crate::sha256::digest_reader(bytes).expect("byte slice read")
-}
 fn id_bytes(ids: &[u32]) -> Vec<u8> {
     ids.iter().flat_map(|id| id.to_le_bytes()).collect()
 }
@@ -172,7 +171,7 @@ impl Receipt {
                 ("prompt", options.prompt.clone().into()),
                 (
                     "prompt_sha256",
-                    hash(prompt(&options.prompt).as_bytes()).into(),
+                    crate::sha256::sha(prompt(&options.prompt).as_bytes()).into(),
                 ),
                 ("runs_requested", options.n.into()),
                 ("runs_completed", 0usize.into()),
@@ -342,7 +341,7 @@ fn verify(options: &Options, receipt: &mut Receipt) -> Result<(String, bool), St
                             .insert("prompt_tokens", reply.prompt_tokens.into());
                         receipt
                             .value
-                            .insert("reference_ids_sha256", hash(&bytes).into());
+                            .insert("reference_ids_sha256", crate::sha256::sha(&bytes).into());
                         receipt
                             .value
                             .insert("finish_reason", reply.finish_reason.clone().into());
@@ -412,6 +411,8 @@ fn write_receipt(path: &std::path::Path, receipt: &Value) -> Result<(), String> 
     result
 }
 
+/// `vade verify`: run each prompt with drafting ON and OFF, compare the token
+/// IDs and write the receipt; returns the exit code.
 pub fn run(args: &[String]) -> i32 {
     if args
         .iter()

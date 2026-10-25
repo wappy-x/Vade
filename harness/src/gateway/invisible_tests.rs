@@ -287,3 +287,28 @@ fn replica_cancel_and_release_reach_every_upstream_and_prefer_a_success() {
     assert!(answer.starts_with("HTTP/1.1 200 ") && answer.contains(r#"{"cancelled":true}"#), "{answer}");
     assert_eq!(live.1.join().unwrap(), 1);
 }
+
+#[test]
+fn accept_errors_are_logged_and_the_relay_keeps_serving() {
+    // Before this, one failed accept (or a peer gone before peer_addr) ended the relay.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut client = TcpStream::connect(address).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    client.write_all(format!("POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Length: 2\r\n\r\n{{}}", address.port()).as_bytes()).unwrap();
+    let incoming = vec![
+        Err(io::Error::from(io::ErrorKind::ConnectionAborted)),
+        Err(io::Error::from(io::ErrorKind::Interrupted)),
+        Err(io::Error::other("too many open files")),
+        Ok(listener.accept().unwrap().0),
+    ];
+    // An owned upstream with a fixed reply: the request served after the
+    // failed accepts arrives there and its answer comes back.
+    let fixture = upstream(vec!["HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{\"ok\":true}"]);
+    let runtime = Arc::new(Runtime::single(Origin::parse(&fixture.0).unwrap()));
+    serve(incoming.into_iter(), runtime, None, None, Arc::new(Access::default())).unwrap();
+    let mut reply = String::new();
+    client.read_to_string(&mut reply).unwrap();
+    assert!(reply.starts_with("HTTP/1.1 200 ") && reply.contains(r#"{"ok":true}"#), "{reply}");
+    assert_eq!(fixture.1.join().unwrap(), 1);
+}

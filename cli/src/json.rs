@@ -1,4 +1,6 @@
-// Validate the complete health JSON before using its top-level fields.
+//! A small, bounded JSON reader for engine health replies: validate the
+//! complete document before using its top-level fields. Evaluation receipts,
+//! which must keep their key order and bytes, use `evals::json` instead.
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug)]
@@ -14,14 +16,17 @@ struct Parser<'a> {
     offset: usize,
 }
 
+/// Whether `input` is one complete JSON object.
 pub fn valid(input: &str) -> bool {
     fields(input).is_some()
 }
 
+/// Whether the nested key `path` exists; array elements are named by index.
 pub fn path_exists(input: &str, path: &[&str]) -> bool {
     path_value(input, path).is_some()
 }
 
+/// A top-level string field.
 pub fn string(input: &str, key: &str) -> Option<String> {
     match fields(input)?.get(key) {
         Some(Value::String(value)) => Some(value.clone()),
@@ -29,6 +34,7 @@ pub fn string(input: &str, key: &str) -> Option<String> {
     }
 }
 
+/// A top-level number field.
 pub fn number(input: &str, key: &str) -> Option<f64> {
     match fields(input)?.get(key) {
         Some(Value::Number(value)) => Some(*value),
@@ -36,6 +42,7 @@ pub fn number(input: &str, key: &str) -> Option<f64> {
     }
 }
 
+/// A string at the nested key `path`.
 pub fn path_string(input: &str, path: &[&str]) -> Option<String> {
     if let Value::String(value) = path_value(input, path)? {
         Some(value)
@@ -44,6 +51,7 @@ pub fn path_string(input: &str, path: &[&str]) -> Option<String> {
     }
 }
 
+/// A number at the nested key `path`.
 pub fn path_number(input: &str, path: &[&str]) -> Option<f64> {
     if let Value::Number(value) = path_value(input, path)? {
         Some(value)

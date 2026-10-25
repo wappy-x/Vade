@@ -67,11 +67,12 @@ pub fn run(
                 "flashnext startup cache_files={files} cache_bytes_advised={bytes} cache_errors={errors} budget_bytes={budget}"
             );
             let load_start = std::time::Instant::now();
-            // VADE_FLASHNEXT_MTP_DEPTH=1..=15 (unset = 5 on one Spark, 3 on the VADE_W2_PP
+            // VADE_FLASHNEXT_MTP_DEPTH=1..=15 (unset = 5 on one Spark, 7 on the VADE_W2_PP
             // pipeline; spark_engine::flash_draft_stack): resident MTP depth. Requests keep
             // mtp_depth 0..=3; deeper drafts serve only VADE_MTP_ADAPT's default-depth requests.
             let depth = spark_engine::flash_draft_stack::resident_mtp_depth(pp.is_some())?;
-            let model = NextModel::load_with_checkpoint_role(backend, root, Some(checkpoint), options, depth, pp.is_some())?;
+            // Rank 0 projects the head on every world (VADE_W2_PP front too): it funds the bounded head.
+            let model = NextModel::load_with_checkpoint_role(backend, root, Some(checkpoint), options, depth, false)?;
             // VADE_FLASHNEXT_KV_RESERVE (default on; =0 off): freed session KV arenas stay in
             // the backend reserve (released on demand or under host memory pressure).
             let kv_reserve = match std::env::var("VADE_FLASHNEXT_KV_RESERVE").as_deref() {
@@ -240,7 +241,7 @@ pub fn run_back(
         let budget = ceiling.min(available.saturating_sub(reserve));
         backend.set_allocation_budget(budget)?;
         eprintln!("flashnext pp back startup cache_files={files} cache_bytes_advised={bytes} cache_errors={errors} budget_bytes={budget}");
-        // The pipeline back keeps the pipeline's resident depth (unset = 3), as its front does.
+        // The pipeline back keeps the pipeline's resident depth (unset = 7), as its front does.
         let depth = spark_engine::flash_draft_stack::resident_mtp_depth(true)?;
         let mut model = NextModel::load_with_checkpoint_role(backend, root, Some(checkpoint), options, depth, true)?;
         model.disable_prompt_frontend()?;

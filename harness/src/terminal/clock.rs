@@ -1,11 +1,14 @@
 //! Display-only wall clock; journals and model messages keep their original bytes.
 use std::time::{SystemTime, UNIX_EPOCH};
+/// The current local time as (`HH:MM:SS`, `Day D Mon YYYY`), for display.
 pub fn now() -> (String, String) {
     at(SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64)
 }
+/// [`now`] for a Unix time in seconds; a `Z` suffix marks UTC when the local
+/// zone is unavailable.
 pub fn at(epoch: i64) -> (String, String) {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {

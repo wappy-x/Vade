@@ -127,8 +127,13 @@ impl<'a, 'w> NextSession<'a, 'w> {
             s.logits_ready = false;
             if let Some(d) = s.draft.as_ref() { d.bound_at.set(None); }
         }
-        let mut result =
-            Self::execute::<false>(b, &mut work, sessions, &tokens, &spans, false, verify, Part::Back(split, &*residual));
+        // Verify rows run the same captured segments as world one (VADE_MTP_GRAPH).
+        let mut result = if verify && super::mtp_graph() {
+            Self::execute::<true>(b, &mut work, sessions, &tokens, &spans, false, verify, Part::Back(split, &*residual))
+                .inspect_err(|_| b.abort_segment())
+        } else {
+            Self::execute::<false>(b, &mut work, sessions, &tokens, &spans, false, verify, Part::Back(split, &*residual))
+        };
         if result.is_ok() {
             result = b.synchronize().and_then(|()| match work.status.failed_after_readback() {
                 Ok(true) => Err("Flash-Next device routing rejected a row; reset cohort".into()),

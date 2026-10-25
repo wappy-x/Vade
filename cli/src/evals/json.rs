@@ -1,7 +1,11 @@
 //! Ordered JSON for preserving evaluation receipt bytes.
 use std::path::Path;
+/// The longest integer accepted, matching Python's default string-conversion
+/// limit.
 pub const MAX_INTEGER_DIGITS: usize = 4300;
 
+/// A JSON value. Objects keep their key order, and integers too large for `i64`
+/// keep their exact digits, so receipts round-trip byte for byte.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Null,
@@ -14,6 +18,7 @@ pub enum Value {
     Object(Vec<(String, Value)>),
 }
 impl Value {
+    /// An object's field.
     pub fn get(&self, key: &str) -> Option<&Self> {
         if let Self::Object(fields) = self {
             fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
@@ -21,6 +26,7 @@ impl Value {
             None
         }
     }
+    /// The string, if this is one.
     pub fn as_str(&self) -> Option<&str> {
         if let Self::Str(v) = self {
             Some(v)
@@ -28,6 +34,7 @@ impl Value {
             None
         }
     }
+    /// The integer, if this is one that fits in `i64`.
     pub fn as_i64(&self) -> Option<i64> {
         if let Self::Int(v) = self {
             Some(*v)
@@ -35,6 +42,7 @@ impl Value {
             None
         }
     }
+    /// Any number as `f64`.
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             Self::Int(v) => Some(*v as f64),
@@ -43,6 +51,7 @@ impl Value {
             _ => None,
         }
     }
+    /// The elements, if this is an array.
     pub fn as_array(&self) -> Option<&Vec<Self>> {
         if let Self::Array(v) = self {
             Some(v)
@@ -50,6 +59,7 @@ impl Value {
             None
         }
     }
+    /// Set an object field in place, or append it; does nothing on non-objects.
     pub fn insert(&mut self, key: impl Into<String>, value: Self) {
         let key = key.into();
         if let Self::Object(fields) = self {
@@ -105,9 +115,12 @@ impl From<bool> for Value {
         Self::Bool(v)
     }
 }
+/// An object with these fields in this order.
 pub fn object(fields: Vec<(&str, Value)>) -> Value {
     Value::Object(fields.into_iter().map(|(k, v)| (k.into(), v)).collect())
 }
+/// Python `==` on decoded JSON: object key order is ignored, and numbers
+/// (including booleans) compare by value.
 pub fn equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Object(a), Value::Object(b)) => {
@@ -169,6 +182,8 @@ fn decimal_digit(c: char) -> Option<u32> {
         }
     })
 }
+/// Python `int(str)` for a command-line value: optional sign, Unicode decimal
+/// digits and single underscores between digits. Returns canonical digits.
 pub fn integer_input(value: &str) -> Result<String, String> {
     let value = value.trim();
     let (negative, value) = if let Some(value) = value.strip_prefix('-') {
@@ -201,6 +216,8 @@ pub fn integer_input(value: &str) -> Result<String, String> {
         if negative && digits != "0" { "-" } else { "" }
     ))
 }
+/// Python `float(str)` for a command-line value, including underscores between
+/// digits and Unicode decimal digits.
 pub fn float_input(value: &str) -> Result<f64, String> {
     let chars: Vec<_> = value.trim().chars().collect();
     let mut normalized = String::new();
@@ -221,12 +238,14 @@ pub fn float_input(value: &str) -> Result<f64, String> {
     }
     normalized.parse().map_err(|_| "invalid float value".into())
 }
+/// A number or boolean as `f64`.
 pub fn numeric(value: &Value) -> Option<f64> {
     match value {
         Value::Bool(v) => Some(if *v { 1.0 } else { 0.0 }),
         _ => value.as_f64(),
     }
 }
+/// Python truthiness of a decoded value.
 pub fn truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -239,6 +258,7 @@ pub fn truthy(value: &Value) -> bool {
         Value::Object(v) => !v.is_empty(),
     }
 }
+/// The Python exception name for an I/O error, as receipts record it.
 pub fn io_error(error: std::io::Error) -> String {
     match error.kind() {
         std::io::ErrorKind::NotFound => "FileNotFoundError",
@@ -256,9 +276,11 @@ pub fn io_error(error: std::io::Error) -> String {
     }
     .into()
 }
+/// Read and parse a JSON file.
 pub fn read(path: &Path) -> Result<Value, String> {
     parse(&std::fs::read_to_string(path).map_err(io_error)?)
 }
+/// Create a new file (never overwrite) holding one packed JSON line.
 pub fn write_json(path: &Path, value: &Value) -> Result<(), String> {
     use std::io::Write;
     let mut out = std::fs::OpenOptions::new()
@@ -269,6 +291,7 @@ pub fn write_json(path: &Path, value: &Value) -> Result<(), String> {
     validate(value)?;
     writeln!(out, "{}", packed(value)).map_err(io_error)
 }
+/// Refuse NaN and infinities, which JSON cannot represent.
 pub fn validate(value: &Value) -> Result<(), String> {
     match value {
         Value::Float(v) if !v.is_finite() => Err(format!(
@@ -296,6 +319,8 @@ pub fn validate(value: &Value) -> Result<(), String> {
         _ => Ok(()),
     }
 }
+/// Python's `repr(float)`: shortest round-trip digits, exponent form below 1e-4
+/// and from 1e16.
 pub fn float(v: f64) -> String {
     // Rust and Python use shortest-roundtrip decimal formatting. Python switches
     // to exponent notation below 1e-4 or at 1e16 and pads the signed exponent.
@@ -402,6 +427,7 @@ fn half_even_decimal(value: f64, raw: String) -> String {
     }
     String::from_utf8(bytes).unwrap()
 }
+/// Compact JSON with no spaces and non-ASCII text kept as is.
 pub fn packed(value: &Value) -> String {
     let mut out = String::new();
     encode(value, &mut out);
@@ -459,6 +485,8 @@ fn encode(value: &Value, out: &mut String) {
         }
     }
 }
+/// Parse one JSON document with Python's `json.loads` rules and error text;
+/// a repeated key keeps the last value in the first key's position.
 pub fn parse(input: &str) -> Result<Value, String> {
     let mut parser = Parser {
         bytes: input.as_bytes(),
@@ -695,6 +723,8 @@ mod tests {
             packed(&parse(source).unwrap()),
             "{\"z\":2,\"a\":\"😀\\n\",\"big\":18446744073709551616}"
         );
+        // The exact binary value, whose shortest round-trip text is shorter.
+        #[allow(clippy::excessive_precision)]
         for (v, text) in [
             (-887777373534812.25, "-887777373534812.2"),
             (1e-5, "1e-05"),

@@ -6,6 +6,8 @@ pub const MAX_INPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DEPTH: usize = 64;
 const MAX_VALUES: usize = 100_000;
 
+/// A parsed JSON value. Numbers keep their original spelling and objects keep
+/// their member order.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Null,
@@ -39,10 +41,12 @@ impl Value {
     }
 }
 
-fn invalid(message: &'static str) -> io::Error {
+/// The crate's one constructor for an `InvalidData` error with a fixed message.
+pub(crate) fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
+/// Parse one complete JSON document within the size, depth and value limits.
 pub fn parse(input: &str) -> io::Result<Value> {
     if input.len() > MAX_INPUT_BYTES {
         return Err(invalid("JSON exceeds size limit"));
@@ -60,6 +64,7 @@ pub fn parse(input: &str) -> io::Result<Value> {
     Ok(value)
 }
 
+/// [`parse`] for UTF-8 bytes.
 pub fn parse_bytes(input: &[u8]) -> io::Result<Value> {
     let input = std::str::from_utf8(input).map_err(|_| invalid("JSON is not UTF-8"))?;
     parse(input)
@@ -70,6 +75,7 @@ pub fn parse_bytes(input: &[u8]) -> io::Result<Value> {
 #[derive(Clone, Copy, Debug)]
 pub struct View<'a>(&'a str);
 
+/// Validate one JSON document and return a borrowed [`View`] of it.
 pub fn view(input: &str) -> io::Result<View<'_>> {
     if input.len() > MAX_INPUT_BYTES {
         return Err(invalid("JSON exceeds size limit"));
@@ -103,28 +109,25 @@ impl<'a> View<'a> {
         .ok()
     }
     pub fn fields(self) -> Option<Fields<'a>> {
-        self.0.starts_with('{').then(|| {
-            Fields(Parser {
-                input: self.0.as_bytes(),
-                pos: 1,
-                values: 0,
-            })
-        })
+        self.0.starts_with('{').then_some(Fields(Parser {
+            input: self.0.as_bytes(),
+            pos: 1,
+            values: 0,
+        }))
     }
     pub fn get(self, key: &str) -> Option<Self> {
         self.fields()?
             .find_map(|(name, value)| (name == key).then_some(value))
     }
     pub fn array(self) -> Option<Elements<'a>> {
-        self.0.starts_with('[').then(|| {
-            Elements(Parser {
-                input: self.0.as_bytes(),
-                pos: 1,
-                values: 0,
-            })
-        })
+        self.0.starts_with('[').then_some(Elements(Parser {
+            input: self.0.as_bytes(),
+            pos: 1,
+            values: 0,
+        }))
     }
 }
+/// The members of a JSON object [`View`], in order.
 pub struct Fields<'a>(Parser<'a>);
 impl<'a> Iterator for Fields<'a> {
     type Item = (Cow<'a, str>, View<'a>);
@@ -144,6 +147,7 @@ impl<'a> Iterator for Fields<'a> {
         Some((name, value))
     }
 }
+/// The elements of a JSON array [`View`], in order.
 pub struct Elements<'a>(Parser<'a>);
 impl<'a> Iterator for Elements<'a> {
     type Item = View<'a>;
@@ -174,6 +178,7 @@ pub fn quote(input: &str) -> String {
     out
 }
 
+/// Serialize a value compactly, keeping number spellings and member order.
 pub fn stringify(value: &Value) -> io::Result<String> {
     let mut values = 0;
     let len = serialized_len(value, 0, &mut values)?;

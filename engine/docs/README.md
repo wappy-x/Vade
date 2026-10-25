@@ -69,6 +69,13 @@ For maintainers and writers:
 
 **Each crate and tool has its own README for people reading or changing it.**
 
+Start with two maps:
+
+- [Module map](module-map.md). Which file to open for each step of a
+  request, and the main modules of each package.
+- [Unsafe code](unsafe.md). Where the engine uses `unsafe`, why, what
+  checks it, and how to write a SAFETY note.
+
 Serving on one Spark:
 
 - `crates/serve`: [spark-serve](../crates/serve/README.md), the HTTP server,

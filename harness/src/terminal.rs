@@ -11,6 +11,8 @@ pub mod editor;
 pub mod render;
 mod frame;
 mod input;
+mod transcript;
+use transcript::{Thought, Transcript};
 use frame::fit_status;
 pub use input::{Decoder, Input, Key, input_channel, interrupted};
 
@@ -55,6 +57,8 @@ impl AnswerPrefix {
     }
 }
 
+/// The chat display: a bounded transcript above a fixed input dock in a raw
+/// terminal, or plain line output when the terminal is not interactive.
 pub struct Terminal {
     raw: bool,
     fullscreen: bool,
@@ -885,268 +889,6 @@ struct Pager {
     indexed: Option<(usize, usize, bool)>,
 }
 
-#[derive(Clone, Default)]
-struct Transcript {
-    lines: VecDeque<TranscriptLine>,
-    rows: VecDeque<String>,
-    bytes: usize,
-    logical_lines: usize,
-    width: usize,
-    cells: usize,
-    protected: bool,
-    review_start: usize,
-    incomplete: bool,
-    row_limit: bool,
-    history_rows: usize,
-    last_line_rows: usize,
-    output_hidden: bool,
-    thinking_expanded: bool,
-}
-#[derive(Clone, Default)]
-struct TranscriptLine {
-    text: String,
-    thinking: Option<Thought>,
-}
-#[derive(Clone)]
-struct Thought {
-    tokens: Option<u64>,
-    elapsed: Option<Duration>,
-    start: String,
-    end: String,
-    limited: bool,
-    color: bool,
-}
-impl From<String> for TranscriptLine {
-    fn from(text: String) -> Self {
-        Self {
-            text,
-            thinking: None,
-        }
-    }
-}
-impl std::ops::Deref for TranscriptLine {
-    type Target = String;
-    fn deref(&self) -> &String {
-        &self.text
-    }
-}
-impl std::ops::DerefMut for TranscriptLine {
-    fn deref_mut(&mut self) -> &mut String {
-        &mut self.text
-    }
-}
-impl Transcript {
-    fn push_thinking(
-        &mut self,
-        mut text: String,
-        mut thought: Thought,
-        width: usize,
-    ) {
-        // Thoughts share the transcript's byte and logical-line budgets. Keep a
-        // visible summary even when one thought fills all retained history.
-        let cap = MAX_TRANSCRIPT_BYTES - 128 * 1024 - 1;
-        let mut end = text.len().min(cap);
-        if let Some((at, _)) = text.match_indices('\n').nth(4096 - 512 - 2) {
-            end = end.min(at);
-        }
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        thought.limited |= end < text.len();
-        text.truncate(end);
-        if self.lines.back().is_some_and(|line| line.is_empty()) {
-            self.lines.pop_back();
-            self.logical_lines = self.logical_lines.saturating_sub(1);
-        } else if !self.lines.is_empty() {
-            self.bytes += 1;
-        }
-        self.bytes = self.bytes.saturating_add(text.len() + 1);
-        self.logical_lines += 2 + text.bytes().filter(|b| *b == b'\n').count();
-        self.lines.push_back(TranscriptLine {
-            text,
-            thinking: Some(thought),
-        });
-        self.lines.push_back(String::new().into());
-        self.width = 0;
-        self.push("", width);
-    }
-    fn append_review(&mut self, text: &str, width: usize) {
-        self.reflow(width);
-        let start = self.lines.len().saturating_sub(1);
-        if self.lines.is_empty() {
-            self.lines.push_back(String::new().into());
-            self.logical_lines += 1;
-        }
-        self.bytes += text.len();
-        for c in text.chars() {
-            if c == '\n' {
-                self.lines.push_back(String::new().into());
-                self.logical_lines += 1;
-            } else {
-                self.lines.back_mut().unwrap().push(c);
-            }
-        }
-        // An incomplete view stays paused until a resize reflows it. Otherwise
-        // only the unfinished last line and new lines need wrapping.
-        if self.incomplete {
-            return;
-        }
-        self.rows
-            .truncate(self.rows.len().saturating_sub(self.last_line_rows));
-        for index in start..self.lines.len() {
-            let line = &self.lines[index];
-            let rows = render::wrap(&line.replace('\t', "    "), width);
-            let too_wide = line.chars().any(|c| cell_width(c) > width);
-            if !self.extend_review(rows, too_wide, width) {
-                break;
-            }
-        }
-        self.cells = self.rows.back().map_or(0, |r| render::width(r));
-    }
-    fn extend_review(&mut self, rows: Vec<String>, too_wide: bool, width: usize) -> bool {
-        while self.history_rows > 0 && self.rows.len() + rows.len() > MAX_APPROVAL_ROWS {
-            self.rows.pop_front();
-            self.history_rows -= 1;
-        }
-        self.row_limit = self.rows.len() + rows.len() > MAX_APPROVAL_ROWS;
-        if self.row_limit || too_wide {
-            self.incomplete = true;
-            self.rows = render::wrap(APPROVAL_VIEW_ERROR, width).into();
-            self.last_line_rows = 0;
-            return false;
-        }
-        self.last_line_rows = rows.len();
-        self.rows.extend(rows);
-        true
-    }
-    fn push(&mut self, text: &str, width: usize) {
-        self.reflow(width);
-        if self.lines.is_empty() {
-            self.lines.push_back(String::new().into());
-            self.logical_lines += 1;
-        }
-        for c in text.chars() {
-            self.bytes += c.len_utf8();
-            if c == '\n' {
-                self.lines.push_back(String::new().into());
-                self.logical_lines += 1;
-            } else {
-                self.lines.back_mut().unwrap().push(c);
-            }
-            self.wrap(c);
-        }
-        // Leave headroom so streaming a newline does not repeatedly reflow the
-        // entire retained transcript once either limit is reached.
-        let line_target = if self.logical_lines > 4096 {
-            4096 - 512
-        } else {
-            4096
-        };
-        let byte_target = if self.bytes > MAX_TRANSCRIPT_BYTES {
-            MAX_TRANSCRIPT_BYTES - 128 * 1024
-        } else {
-            MAX_TRANSCRIPT_BYTES
-        };
-        let mut trimmed = false;
-        while self.lines.len() > 1 && (self.logical_lines > line_target || self.bytes > byte_target)
-        {
-            let line = self.lines.pop_front().unwrap();
-            self.logical_lines = self
-                .logical_lines
-                .saturating_sub(1 + line.bytes().filter(|b| *b == b'\n').count());
-            self.bytes = self.bytes.saturating_sub(line.len() + 1);
-            trimmed = true;
-        }
-        if self.bytes > byte_target {
-            let line = self.lines.front_mut().unwrap();
-            let mut at = self.bytes - byte_target;
-            while !line.is_char_boundary(at) {
-                at += 1;
-            }
-            line.drain(..at);
-            self.bytes -= at;
-            trimmed = true;
-        }
-        if trimmed {
-            self.width = 0;
-            self.reflow(width);
-        }
-    }
-    fn push_styled(&mut self, text: &str, width: usize) {
-        // Reuse bounded retention, then reflow the trusted SGR at cell width.
-        self.push(text, width);
-        self.width = 0;
-        self.reflow(width);
-    }
-    fn reflow(&mut self, width: usize) {
-        if self.width == width {
-            return;
-        }
-        self.width = width;
-        self.rows.clear();
-        self.incomplete = false;
-        self.row_limit = false;
-        self.history_rows = 0;
-        self.last_line_rows = 0;
-        for index in 0..self.lines.len() {
-            let line = &self.lines[index];
-            let rows = if let Some(thought) = &line.thinking {
-                render::thinking(line, thought.tokens, thought.elapsed, (&thought.start, Some(&thought.end)), self.thinking_expanded, thought.limited, width, thought.color)
-            } else {
-                render::wrap(&line.replace('\t', "    "), width)
-            };
-            if self.protected && index < self.review_start {
-                // Only unrelated history may be discarded. A long old answer
-                // must not prevent a small patch from being reviewed on resize.
-                self.rows.extend(rows);
-                while self.rows.len() > 16 * 1024 {
-                    self.rows.pop_front();
-                }
-                self.history_rows = self.rows.len();
-                continue;
-            }
-            if self.protected {
-                let too_wide = line.chars().any(|c| cell_width(c) > width);
-                if !self.extend_review(rows, too_wide, width) {
-                    break;
-                }
-            } else {
-                self.rows.extend(rows);
-            }
-        }
-        while !self.protected && self.rows.len() > 16 * 1024 {
-            self.rows.pop_front();
-        }
-        self.cells = self.rows.back().map_or(0, |r| render::width(r));
-    }
-    fn wrap(&mut self, c: char) {
-        if self.rows.is_empty() {
-            self.rows.push_back(String::new());
-        }
-        if c == '\n' {
-            self.rows.push_back(String::new());
-            self.cells = 0;
-        } else if c == '\t' {
-            for _ in 0..4 {
-                self.wrap(' ');
-            }
-        } else {
-            let size = cell_width(c);
-            if size > self.width {
-                return;
-            }
-            if self.cells + size > self.width {
-                self.rows.push_back(String::new());
-                self.cells = 0;
-            }
-            self.rows.back_mut().unwrap().push(c);
-            self.cells += size;
-        }
-        if self.rows.len() > 16 * 1024 {
-            self.rows.pop_front();
-        }
-    }
-}
 
 /// Prevent terminal escape/control injection from model output, filenames and
 /// pasted input. Keep only text, newline and tab; remove directional overrides.
@@ -1207,6 +949,8 @@ pub fn escape_preview(text: &str, max_bytes: usize) -> io::Result<String> {
     Ok(shown)
 }
 
+/// The last three lines of a reply, sanitized for display and clipped to its
+/// last 600 characters.
 pub fn reply_tail(text: &str) -> String {
     let mut lines: Vec<_> = text.trim().lines().rev().take(3).collect();
     lines.reverse();

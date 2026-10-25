@@ -2,6 +2,8 @@
 use super::*;
 use super::native::{ProgressObserver, ThinkingObserver, ThinkingProjection, generated_phase, notify_progress};
 
+/// Send one chat request and stream the reply text to `on_delta`; returns the
+/// finished reply.
 pub fn stream_chat(
     endpoint: &str,
     model: &str,

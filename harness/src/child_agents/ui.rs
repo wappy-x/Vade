@@ -1,6 +1,7 @@
 //! Bounded plain/TUI child list. No task prose, paths, model errors or secrets.
 use super::{Outcome, StopRequest, TaskSnapshot, TaskState};
 
+/// A short label for a child's state in the plain and TUI child lists.
 pub fn state_label(state: &TaskState) -> &'static str {
     match state {
         TaskState::Running => "running",

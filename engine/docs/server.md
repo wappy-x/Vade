@@ -391,7 +391,7 @@ Message and output fields:
 
 <dl>
 <dt><code>messages</code></dt>
-<dd>1 to 256 messages. Roles <code>system</code>, <code>user</code>,
+<dd>1 to 4,096 messages. Roles <code>system</code>, <code>user</code>,
 <code>assistant</code>, <code>tool</code>. Content is a string; assistant
 messages with tool calls may leave it out or use <code>null</code>.</dd>
 <dt><code>model</code></dt>
@@ -1337,7 +1337,7 @@ helper Sparks, but this server cannot use them yet; see
 
 ## Limits on every request
 
-**Fixed limits protect the server: 256 messages, 64 tools and 32 connections, among others.**
+**Fixed limits protect the server: 4,096 messages, 64 tools and 32 connections, among others.**
 
 <details>
 <summary><b>Every limit</b>, and the HTTP rules</summary>
@@ -1345,7 +1345,7 @@ helper Sparks, but this server cannot use them yet; see
 | Limit | Value |
 | --- | --- |
 | Request headers | 16 KiB |
-| Messages | 256 |
+| Messages | 4,096 |
 | Tools | 64 |
 | Stop strings | 4 |
 | Bytes per stop string | 1,024 |
@@ -1353,7 +1353,7 @@ helper Sparks, but this server cannot use them yet; see
 | Time per generation | 3,600 s |
 | Idle read or write | 15 s |
 | Request connections | 32 |
-| Control connections | 1 |
+| Spare connections for health and cancel, once requests fill the 32 | 8 |
 
 - **Request body:** the larger of 256 KiB and 16 bytes per allowed input
   token, capped at 4 MiB.

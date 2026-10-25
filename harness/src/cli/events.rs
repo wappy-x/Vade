@@ -113,10 +113,9 @@ impl Pending {
             );
         let context = progress.context.map_or_else(|| "ctx —".into(), |(used, limit)| {
             let limit = limit.min(progress.limits.max_context_tokens as u64);
-            if limit == 0 {
-                "ctx —".into()
-            } else {
-                format!("ctx {}%", used.saturating_mul(100) / limit)
+            match used.saturating_mul(100).checked_div(limit) {
+                Some(percent) => format!("ctx {percent}%"),
+                None => "ctx —".into(),
             }
         });
         format!(
@@ -207,8 +206,8 @@ impl App {
                         pending.received = false;
                         if label.is_empty() { pending.round_displayed = true; }
                     }
-                    if !self.quiet && !terminal::answer_text(&prose).is_empty() && self.terminal.raw() {
-                        self.terminal.answer(&prose)?;
+                    if !self.quiet && !terminal::answer_text(prose).is_empty() && self.terminal.raw() {
+                        self.terminal.answer(prose)?;
                         self.terminal.answer_status(&format!("╰ {}", terminal::clock::now().0))?;
                     } else if !self.quiet && !self.terminal.raw() && shown < prose.len() {
                         self.terminal.stream_text(&prose[shown..])?;
@@ -462,13 +461,7 @@ impl App {
                             // Warming is optional acceleration, never a failed
                             // user activation or a reason to hold the queue.
                             self.queue_paused = false;
-                            self.last_state = Some(if pending.canceled {
-                                RunState::LocalCancelled
-                            } else if success {
-                                RunState::Completed
-                            } else {
-                                RunState::Completed
-                            });
+                            self.last_state = Some(if pending.canceled { RunState::LocalCancelled } else { RunState::Completed });
                             if success {
                                 self.run_notice("Compacted context pre-warmed; discarded reply, no tools or user turn recorded. Cache retention remains Engine-owned.")?;
                                 if self.config.verbose {

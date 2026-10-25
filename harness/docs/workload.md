@@ -373,7 +373,7 @@ To run the tests and checks:
 
 ```sh
 cargo test --offline --all-targets
-cargo test --offline --test contract_mock workload_ -- --nocapture
+cargo test --offline --test workload_mock workload_ -- --nocapture
 RUSTFLAGS='-D warnings' cargo check --offline --all-targets
 cargo build --release --offline
 ```

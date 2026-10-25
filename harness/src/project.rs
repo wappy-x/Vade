@@ -54,6 +54,8 @@ struct Skill {
     path: String,
     stamp: FileStamp,
 }
+/// The project rules and skill catalog discovered for a session's scopes,
+/// frozen into the stable prompt prefix when the session starts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Snapshot {
     scopes: Vec<String>,
@@ -492,6 +494,8 @@ pub fn manifest(workspace: &Workspace, path: &str, depth: usize) -> io::Result<S
     }
     Ok(out)
 }
+/// Up to 64 lexical declaration hints from one workspace file, with line
+/// numbers; a string scan, not a parser.
 pub fn symbols(workspace: &Workspace, path: &str) -> io::Result<String> {
     let text = workspace.read(path)?;
     let mut out = String::from(

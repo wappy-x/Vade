@@ -56,7 +56,7 @@ fn run_main(mut arguments: Vec<String>) -> ExitCode {
         Some("vade-gateway") => return vade_harness::gateway::invisible::exit(args),
         Some("demo-compaction") => {
             if args.next().is_some() {
-                vade_harness::diagnostics::stderr_line(format_args!("vade: demo-compaction takes no arguments"));
+                vade_harness::diagnostics::stderr_line(format_args!("vade: demo-compaction takes no arguments; run vade-harness demo-compaction on its own."));
                 return ExitCode::from(2);
             }
             return match vade_harness::context::offline_compaction_demo() {

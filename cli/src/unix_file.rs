@@ -14,18 +14,22 @@ unsafe extern "C" {
     fn openat(dirfd: i32, path: *const std::ffi::c_char, flags: i32, ...) -> i32;
 }
 
+/// How [`AnchoredPath::open`] opens the final component.
 pub enum OpenMode {
     Read,
     Create,
     CreateNew,
 }
 
+/// A path whose parent directories were opened one component at a time without
+/// following symlinks; the final name opens relative to that descriptor.
 pub struct AnchoredPath {
     parent: File,
     name: CString,
 }
 
 impl AnchoredPath {
+    /// Walk to `path`'s parent with `O_NOFOLLOW` on every component.
     pub fn new(path: &Path) -> io::Result<Self> {
         let name = path
             .file_name()
@@ -55,6 +59,7 @@ impl AnchoredPath {
         })
     }
 
+    /// Open the final component without following a symlink.
     pub fn open(&self, mode: OpenMode) -> io::Result<File> {
         let access = match mode {
             OpenMode::Read => O_RDONLY,
@@ -86,6 +91,8 @@ fn open_relative(parent: &File, name: &CStr, flags: i32) -> io::Result<File> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
+/// Whether both metadata describe the same single-link regular file (device
+/// and inode), so a path was not swapped between check and open.
 pub fn same_regular_file(expected: &Metadata, opened: &Metadata) -> bool {
     expected.is_file()
         && opened.is_file()

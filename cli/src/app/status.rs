@@ -1,3 +1,5 @@
+//! `vade status --json` for a controller record: phase, settings and one
+//! observation per rank, tunnel and health check.
 use super::*;
 use crate::{
     evals::json::{self, Value},
@@ -5,6 +7,7 @@ use crate::{
 };
 
 impl<R: Runner> App<R> {
+    /// Fill a status report from the controller's session and live checks.
     pub(crate) fn status_snapshot(&mut self, report: &mut Snapshot) -> Result<(), String> {
         report.set("model", self.config.model.clone());
         let Some(session) = Session::load(&self.config.state_dir)? else {

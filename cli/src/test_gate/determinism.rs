@@ -609,22 +609,16 @@ fn manifest(dump: &Path, rank: &str, width: usize) -> Result<usize, String> {
         .map_err(|e| e.to_string())?;
     if paths.is_empty() {
         // xargs without -r invokes sha256sum once on empty stdin.
-        writeln!(
-            out,
-            "{}  -",
-            sha256::digest_reader(&b""[..]).map_err(|e| e.to_string())?
-        )
-        .map_err(|e| e.to_string())?;
+        writeln!(out, "{}  -", sha256::sha(b"")).map_err(|e| e.to_string())?;
         return Ok(1);
     }
     for path in &paths {
         if fs::metadata(path).map_err(|e| e.to_string())?.len() != width as u64 { return Err("FAIL reference manifest: vocabulary size differs".into()); }
         let bytes = fs::read(path).map_err(|e| e.to_string())?;
-        if bytes.len() != width || bytes.chunks_exact(4).any(|v| !f32::from_le_bytes(v.try_into().unwrap()).is_finite()) {
+        if bytes.len() != width || bytes.as_chunks::<4>().0.iter().any(|&v| !f32::from_le_bytes(v).is_finite()) {
             return Err("FAIL reference manifest: incomplete or nonfinite vocabulary row".into());
         }
-        let hash = sha256::digest_reader(&bytes[..])
-            .map_err(|e| e.to_string())?;
+        let hash = sha256::sha(&bytes);
         let name = path
             .strip_prefix(dump)
             .map_err(|e| e.to_string())?
@@ -646,34 +640,6 @@ fn manifest(dump: &Path, rank: &str, width: usize) -> Result<usize, String> {
         out.write_all(b"\n").map_err(|e| e.to_string())?;
     }
     Ok(paths.len())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn poison_evidence_must_be_present_unique_and_exact() {
-        let expected = "batch-mixed-16-poison 720 715161600 0 PASS";
-        let good = format!("logits-rank-0-{expected}\n");
-        assert!(exact_row(&good, "0", expected));
-        for log in [String::new(), good.repeat(2), good.replace("720", "719"),
-            good.replace("PASS", "SKIP"), good.replace("rank-0", "rank-1")] {
-            assert!(!exact_row(&log, "0", expected));
-        }
-        for (world, rank, valid) in [("1","0",true),("1","1",false),("2","1",true),("4","3",true),("3","0",false)] {
-            let args = ["--","model","fixtures","listen","next",rank,"--world",world].map(str::to_owned);
-            assert_eq!(parse(&args).is_ok(),valid);
-        }
-        assert!(seal("registrations sealed before weights rank=0 world=1 rdma=false\n","0",1));
-        assert!(!seal("registrations sealed before weights rank=0 world=2 rdma=false\n","0",2));
-    }
-    #[test]
-    fn poison_cannot_be_certified_by_comparator_selftest() {
-        let args = vec!["--bench".into(), std::env::current_exe().unwrap().to_string_lossy().into_owned(),
-            "--selftest".into(), "--require-poison".into()];
-        assert!(parse(&args).unwrap().unwrap().require_poison);
-        assert_eq!(run(&args), 2);
-    }
 }
 
 const HELP: &str = r#"Usage: vade test determinism --bench BIN --ptx PTX --dump-dir DIR \
@@ -772,3 +738,31 @@ target without failing on that target. A timeout fails. --help does no work.
 --selftest needs no GPU: copy a full dump, flip one byte, and require the same
 native comparator to exit 1 with FAIL and prompt/row/position/vocabulary detail.
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn poison_evidence_must_be_present_unique_and_exact() {
+        let expected = "batch-mixed-16-poison 720 715161600 0 PASS";
+        let good = format!("logits-rank-0-{expected}\n");
+        assert!(exact_row(&good, "0", expected));
+        for log in [String::new(), good.repeat(2), good.replace("720", "719"),
+            good.replace("PASS", "SKIP"), good.replace("rank-0", "rank-1")] {
+            assert!(!exact_row(&log, "0", expected));
+        }
+        for (world, rank, valid) in [("1","0",true),("1","1",false),("2","1",true),("4","3",true),("3","0",false)] {
+            let args = ["--","model","fixtures","listen","next",rank,"--world",world].map(str::to_owned);
+            assert_eq!(parse(&args).is_ok(),valid);
+        }
+        assert!(seal("registrations sealed before weights rank=0 world=1 rdma=false\n","0",1));
+        assert!(!seal("registrations sealed before weights rank=0 world=2 rdma=false\n","0",2));
+    }
+    #[test]
+    fn poison_cannot_be_certified_by_comparator_selftest() {
+        let args = vec!["--bench".into(), std::env::current_exe().unwrap().to_string_lossy().into_owned(),
+            "--selftest".into(), "--require-poison".into()];
+        assert!(parse(&args).unwrap().unwrap().require_poison);
+        assert_eq!(run(&args), 2);
+    }
+}

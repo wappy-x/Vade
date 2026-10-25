@@ -40,13 +40,14 @@ pub(crate) fn resolve(
     };
     let url = match explicit_url {
         Some(url) => url,
-        None if owner_root.is_some() => owner_endpoint(owner_root.as_deref().unwrap())?,
+        None if let Some(root) = owner_root.as_deref() => owner_endpoint(root)?,
         None => {
-            let port = if local_root.is_some() || config.is_none() {
-                let record = local_root.unwrap_or(crate::run::home()?).join("run.conf");
-                recorded_port(&record)?.ok_or("No recorded local server endpoint; run vade launch (or vade run qwen3-8b for legacy setup) or supply --url URL.")?
-            } else {
-                config.as_ref().unwrap().local_port
+            let port = match (&local_root, &config) {
+                (None, Some(config)) => config.local_port,
+                _ => {
+                    let record = local_root.unwrap_or(crate::run::home()?).join("run.conf");
+                    recorded_port(&record)?.ok_or("No recorded local server endpoint; run vade launch (or vade run qwen3-8b for legacy setup) or supply --url URL.")?
+                }
             };
             format!("http://127.0.0.1:{port}")
         }

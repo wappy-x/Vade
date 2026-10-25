@@ -367,6 +367,8 @@ impl Fixture {
     }
     fn command(&self, enabled: bool) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+        // These macOS-only scenarios grant and expect workspace_shell.
+        command.env_remove("VADE_HARNESS_SHELL");
         command
             .args([
                 "agent",

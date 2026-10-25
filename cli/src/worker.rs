@@ -1,4 +1,11 @@
 //! Private Linux helper. Its request arrives over SSH stdin, never shell argv.
+//! The controller and the local launcher both start, inspect and stop engines
+//! through it.
+//!
+//! - `process`: process identity, safe signalling and failed-launch rollback.
+//! - `model`: shard presence checks and their inventory cache.
+//! - `gpu`: idle-GPU checks before start and after stop.
+//! - `prepare`: install preparation without a resident owner.
 use crate::unix_file::{AnchoredPath, OpenMode, same_regular_file};
 use crate::unix_flags::{LOCK_EX, LOCK_NB};
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,6 +20,7 @@ use std::time::{Duration, Instant};
 
 mod gpu;
 mod model;
+use model::check_model;
 mod prepare;
 use gpu::{gpu_empty, gpu_settled};
 mod process;
@@ -689,156 +697,6 @@ fn check_hash(path: &Path, expected: &str) -> Result<(), String> {
     Ok(())
 }
 
-// The official FP4-Local index is about 45 MiB (many expert tensors).
-// Bound reads at 64 MiB while accepting the complete current weight map.
-const MAX_MODEL_INDEX_BYTES: u64 = 64 * 1024 * 1024;
-
-fn check_model(path: &Path) -> Result<(), String> {
-    let entries = fs::read_dir(path).map_err(|_| {
-        "Model weights are missing. Check the configured model directory; for Flash-Next, follow INSTALL.md step 3 for verified weights.".to_string()
-    })?;
-    if !path.join("config.json").is_file() || !path.join("tokenizer.json").is_file() {
-        return Err("Model configuration or tokenizer is missing. Check the configured model directory; for Flash-Next, follow INSTALL.md step 3 for verified weights.".into());
-    }
-    let index_path = path.join("model.safetensors.index.json");
-    match File::open(&index_path) {
-        Ok(index) => {
-            let mut text = String::new();
-            index
-                .take(MAX_MODEL_INDEX_BYTES + 1)
-                .read_to_string(&mut text)
-                .map_err(|_| {
-                    "Cannot read the model shard index. Check model permissions.".to_string()
-                })?;
-            if text.len() as u64 > MAX_MODEL_INDEX_BYTES {
-                return Err(
-                    "Model shard index exceeds 64 MiB. Check the configured model directory and INSTALL.md step 3.".into(),
-                );
-            }
-            for shard in indexed_shards(&text)? {
-                let metadata = fs::metadata(path.join(shard)).map_err(|_| {
-                    "A model shard is missing. Check the configured model directory; for Flash-Next, follow INSTALL.md step 3 for verified weights.".to_string()
-                })?;
-                if !metadata.is_file() || metadata.len() == 0 {
-                    return Err("A model shard is empty or invalid. Check the configured model directory; for Flash-Next, follow INSTALL.md step 3 for verified weights.".into());
-                }
-            }
-            return Ok(());
-        }
-        Err(error)
-            if error.kind() == std::io::ErrorKind::NotFound
-                && fs::symlink_metadata(&index_path)
-                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
-        Err(_) => return Err("Cannot read the model shard index. Check model permissions.".into()),
-    }
-    let mut weights = false;
-    for entry in entries {
-        let entry = entry
-            .map_err(|_| "Cannot read the model directory. Check its permissions.".to_string())?;
-        if entry
-            .path()
-            .extension()
-            .is_some_and(|suffix| suffix == "safetensors")
-            && entry
-                .metadata()
-                .is_ok_and(|metadata| metadata.is_file() && metadata.len() != 0)
-        {
-            weights = true;
-        }
-    }
-    if !weights {
-        return Err(
-            "Model weights are missing. Check the configured model directory; for Flash-Next, follow INSTALL.md step 3 for verified weights.".into(),
-        );
-    }
-    Ok(())
-}
-
-// Official safetensors indexes name every shard in JSON string values. This
-// small scanner decodes those strings, including escapes, without a JSON crate.
-fn indexed_shards(index: &str) -> Result<BTreeSet<String>, String> {
-    let invalid = || {
-        "Model shard index is invalid. Check the configured model directory; for Flash-Next, follow INSTALL.md step 3 for verified weights."
-            .to_string()
-    };
-    let mut characters = index.trim().chars().peekable();
-    if characters.peek() != Some(&'{') {
-        return Err(invalid());
-    }
-    let mut structure = Vec::new();
-    let mut shards = BTreeSet::new();
-    let mut weight_map = false;
-    while let Some(character) = characters.next() {
-        match character {
-            '{' | '[' => structure.push(character),
-            '}' | ']' => {
-                if structure.pop() != Some(if character == '}' { '{' } else { '[' }) {
-                    return Err(invalid());
-                }
-            }
-            '"' => {
-                let mut value = String::new();
-                loop {
-                    let character = characters.next().ok_or_else(invalid)?;
-                    match character {
-                        '"' => break,
-                        '\\' => {
-                            let escaped = characters.next().ok_or_else(invalid)?;
-                            value.push(match escaped {
-                                '"' | '\\' | '/' => escaped,
-                                'b' => '\u{8}',
-                                'f' => '\u{c}',
-                                'n' => '\n',
-                                'r' => '\r',
-                                't' => '\t',
-                                'u' => {
-                                    let mut code = 0;
-                                    for _ in 0..4 {
-                                        code = code * 16
-                                            + characters
-                                                .next()
-                                                .and_then(|c| c.to_digit(16))
-                                                .ok_or_else(invalid)?;
-                                    }
-                                    char::from_u32(code).ok_or_else(invalid)?
-                                }
-                                _ => return Err(invalid()),
-                            });
-                        }
-                        character if character <= '\u{1f}' => return Err(invalid()),
-                        character => value.push(character),
-                    }
-                }
-                let mut following = characters.clone();
-                while following
-                    .peek()
-                    .is_some_and(|character| character.is_whitespace())
-                {
-                    following.next();
-                }
-                let is_key = following.peek() == Some(&':');
-                weight_map |= is_key && value == "weight_map";
-                if !is_key && value.ends_with(".safetensors") {
-                    if !Path::new(&value)
-                        .components()
-                        .all(|part| matches!(part, std::path::Component::Normal(_)))
-                        || value.contains('\\')
-                        || value.contains('\0')
-                    {
-                        return Err(invalid());
-                    }
-                    shards.insert(value);
-                }
-            }
-            _ => {}
-        }
-    }
-    if !structure.is_empty() || !weight_map || shards.is_empty() {
-        return Err(invalid());
-    }
-    Ok(shards)
-}
-
 fn command_bytes(engine: &Path, arguments: &[String]) -> Vec<u8> {
     let mut command = engine.as_os_str().as_encoded_bytes().to_vec();
     command.push(0);
@@ -1181,13 +1039,15 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 fn unhex(value: &str) -> Result<Vec<u8>, String> {
-    if value.len() % 2 != 0 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !value.len().is_multiple_of(2) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("The saved process identity is invalid. Leave these files in place; see README Recovery.".into());
     }
     value
         .as_bytes()
-        .chunks_exact(2)
-        .map(|bytes| {
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&[high, low]| {
             let digit = |byte: u8| {
                 if byte.is_ascii_digit() {
                     byte - b'0'
@@ -1195,275 +1055,10 @@ fn unhex(value: &str) -> Result<Vec<u8>, String> {
                     byte.to_ascii_lowercase() - b'a' + 10
                 }
             };
-            Ok((digit(bytes[0]) << 4) | digit(bytes[1]))
+            Ok((digit(high) << 4) | digit(low))
         })
         .collect()
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn private_open_accepts_regular_files_and_refuses_nonregular_or_linked_files() {
-        let root = fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!(
-                "vade-private-open-{}",
-                crate::text::random_hex(12).unwrap()
-            ));
-        crate::text::private_dir(&root).unwrap();
-        let target = root.join("state");
-        private_open(&target, true, false).unwrap();
-        private_open(&target, false, false).unwrap();
-        private_open(&target, false, true).unwrap();
-        assert!(private_open(&target, true, false).is_err());
-        let error = private_open(&root, false, false).unwrap_err();
-        assert_eq!(
-            error,
-            "Machine state file is not private. Restore mode 600 before continuing."
-        );
-        std::os::unix::fs::symlink(&target, root.join("link")).unwrap();
-        assert!(private_open(&root.join("link"), false, false).is_err());
-        std::os::unix::fs::symlink(&root, root.join("parent-link")).unwrap();
-        assert!(private_open(&root.join("parent-link/state"), false, false).is_err());
-        fs::hard_link(&target, root.join("alias")).unwrap();
-        assert!(private_open(&target, false, false).is_err());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn stat_handles_parentheses_and_zombies() {
-        let mut columns = vec!["0"; 20];
-        columns[0] = "S";
-        columns[19] = "12345";
-        assert_eq!(
-            stat_start(&format!("42 (engine (rank)) {}", columns.join(" "))).unwrap(),
-            Some("12345".into())
-        );
-        columns[0] = "Z";
-        assert_eq!(
-            stat_start(&format!("42 (engine) {}", columns.join(" "))).unwrap(),
-            None
-        );
-    }
-    #[test]
-    fn logs_hide_environment_and_terminal_controls() {
-        let env = fields(&[("env.SEQPAR_CONTROL_SECRET", "private-value")]);
-        assert_eq!(
-            redact_log(
-                "ready private-value\nSEQPAR_CONTROL_SECRET=x\nrate \u{1b}[2J\n",
-                &env
-            ),
-            "ready [redacted]\n[private environment line omitted]\nrate [2J\n"
-        );
-        let warning = "WARNING: --api-key-file is group- or world-readable";
-        let refusal = "FAIL --allow-remote requires --api-key-file PATH";
-        assert_eq!(redact_log(&format!("{warning}\n{refusal}\n{warning} private-value"), &env), format!("{warning}\n{refusal}\n[private environment line omitted]\n"));
-        for name in [
-            "HF_TOKEN",
-            "GITHUB_TOKEN",
-            "AWS_SESSION_TOKEN",
-            "VADE_API_TOKEN",
-            "OTHER_KEY",
-        ] {
-            let env = fields(&[(&format!("env.{name}"), "private-value")]);
-            assert_eq!(
-                redact_log("completion_tokens=42 private-value", &env),
-                "completion_tokens=42 [redacted]\n"
-            );
-        }
-    }
-    #[test]
-    fn arguments_are_numeric_contiguous_and_binary_identity_roundtrips() {
-        assert!(arguments(&fields(&[("arg.1", "missing zero")])).is_err());
-        let bytes = b"engine\0arg\xff";
-        assert_eq!(unhex(&hex(bytes)).unwrap(), bytes);
-        assert!(unhex("a").is_err());
-        assert!(environment(&fields(&[("env.KEY", "one"), ("env_unset.KEY", "1")])).is_err());
-    }
-    #[test]
-    fn shard_index_and_mocked_identity_fail_closed() {
-        let shards = indexed_shards(r#"{"metadata":{},"weight_map":{"a":"shard-1.safetensors","b":"shard-2\u002esafetensors"}}"#).unwrap();
-        assert_eq!(shards.len(), 2);
-        assert!(shards.contains("shard-2.safetensors"));
-        assert!(indexed_shards(r#"{"weight_map":{"a":"../outside.safetensors"}}"#).is_err());
-        assert!(indexed_shards(r#"{"weight_map":{"a":"missing.safetensors"}"#).is_err());
-        let original = Identity {
-            pid: 42,
-            start: "100".into(),
-            boot: "boot-a".into(),
-            exe: PathBuf::from("/engine"),
-            command: b"engine\0".to_vec(),
-        };
-        assert!(verify_snapshot(&original, "boot-a", Some(&original)).unwrap());
-        assert!(!verify_snapshot(&original, "boot-a", None).unwrap());
-        let reboot = verify_snapshot(&original, "boot-b", None).unwrap_err();
-        assert!(reboot.contains("README Recovery") && !reboot.contains("Preserve"));
-        let mut replacement = original.clone();
-        replacement.start = "101".into();
-        let changed = verify_snapshot(&original, "boot-a", Some(&replacement)).unwrap_err();
-        assert!(changed.contains("Nothing was signalled") && changed.contains("README Recovery"));
-    }
-    #[test]
-    fn stopped_recovery_is_idempotent_and_foreign_owner_is_preserved() {
-        let _process_guard = crate::runner::process_test_lock();
-        let base = fs::canonicalize(std::env::temp_dir()).unwrap();
-        let root = base.join(format!(
-            "vade-worker-{}",
-            crate::text::random_hex(12).unwrap()
-        ));
-        let token = "a".repeat(64);
-        let mut request = fields(&[
-            ("op", "inspect"),
-            ("token", &token),
-            ("state_dir", root.to_str().unwrap()),
-        ]);
-        let store = Store::open(&request).unwrap();
-        crate::text::private_dir(&store.run).unwrap();
-        store
-            .save(&fields(&[("token", &token), ("phase", "stopped")]))
-            .unwrap();
-        crate::text::atomic_write(
-            &store.active(),
-            &crate::text::encode(&fields(&[("token", &token)])),
-        )
-        .unwrap();
-        crate::text::atomic_write(
-            &store.env(),
-            &crate::text::encode(&fields(&[("env.API_KEY", "hidden")])),
-        )
-        .unwrap();
-        private_open(&store.log(), true, false)
-            .unwrap()
-            .write_all(b"ready hidden\n")
-            .unwrap();
-        drop(store);
-        assert_eq!(handle(&request).unwrap()["alive"], "false");
-        request.insert("op".into(), "stop".into());
-        assert_eq!(handle(&request).unwrap()["phase"], "stopped");
-        request.insert("op".into(), "clean".into());
-        assert_eq!(handle(&request).unwrap()["log"], "ready [redacted]\n");
-        assert_eq!(handle(&request).unwrap()["phase"], "absent");
-        let foreign = fields(&[("token", &"b".repeat(64))]);
-        crate::text::atomic_write(&root.join("active.conf"), &crate::text::encode(&foreign))
-            .unwrap();
-        assert!(handle(&request).is_err());
-        assert_eq!(
-            read_fields(&root.join("active.conf")).unwrap(),
-            Some(foreign.clone())
-        );
-        request.insert("op".into(), "start".into());
-        let refused = handle(&request).unwrap();
-        assert_eq!(refused["error_code"], "start_not_written");
-        assert_eq!(refused["phase"], "absent");
-        assert!(!root.join(&token).exists());
-        assert_eq!(
-            read_fields(&root.join("active.conf")).unwrap(),
-            Some(foreign)
-        );
-        crate::text::private_dir(&root.join(&token)).unwrap();
-        let interrupted = crate::text::encode(&fields(&[("token", &token), ("phase", "starting")]));
-        crate::text::atomic_write(&root.join(&token).join("journal.conf"), &interrupted).unwrap();
-        assert!(handle(&request).is_err());
-        assert_eq!(
-            fs::read_to_string(root.join(&token).join("journal.conf")).unwrap(),
-            interrupted
-        );
-        // With our original owner restored, incomplete startup still refuses
-        // both inspect and stop, and tells the operator where the steps are.
-        crate::text::atomic_write(
-            &root.join("active.conf"),
-            &crate::text::encode(&fields(&[("token", &token)])),
-        )
-        .unwrap();
-        for operation in ["inspect", "stop"] {
-            request.insert("op".into(), operation.into());
-            let error = handle(&request).unwrap_err();
-            assert!(
-                error.contains("README Recovery")
-                    && !error.contains("journal")
-                    && !error.contains("Preserve")
-            );
-        }
-        let model = root.join("model");
-        fs::create_dir(&model).unwrap();
-        for name in ["config.json", "tokenizer.json", "shard-1.safetensors"] {
-            fs::write(model.join(name), "{}").unwrap();
-        }
-        fs::write(
-            model.join("model.safetensors.index.json"),
-            r#"{"weight_map":{"a":"shard-1.safetensors","b":"shard-2.safetensors"}}"#,
-        )
-        .unwrap();
-        let request = fields(&[("op", "model"), ("model_path", model.to_str().unwrap())]);
-        assert!(handle(&request).is_err());
-        fs::write(model.join("shard-2.safetensors"), "{}").unwrap();
-        assert_eq!(handle(&request).unwrap()["weights"], "present");
-        fs::remove_dir_all(root).unwrap();
-    }
-    #[test]
-    fn large_fp4_index_is_bounded_and_still_checks_every_shard() {
-        let root = fs::canonicalize(std::env::temp_dir()).unwrap()
-            .join(format!("vade-large-index-{}", crate::text::random_hex(12).unwrap()));
-        fs::create_dir(&root).unwrap();
-        for name in ["config.json", "tokenizer.json", "one.safetensors"] {
-            fs::write(root.join(name), "{}").unwrap();
-        }
-        let index = root.join("model.safetensors.index.json");
-        let mut file = File::create(&index).unwrap();
-        file.write_all(b"{").unwrap();
-        let padding = vec![b' '; 1024 * 1024];
-        for _ in 0..33 { file.write_all(&padding).unwrap(); }
-        file.write_all(br#""weight_map":{"a":"one.safetensors","b":"two.safetensors"}}"#).unwrap();
-        drop(file);
-        assert!(check_model(&root).unwrap_err().contains("shard is missing"));
-        fs::write(root.join("two.safetensors"), "{}").unwrap();
-        check_model(&root).unwrap();
-        File::options().write(true).open(&index).unwrap().set_len(MAX_MODEL_INDEX_BYTES + 1).unwrap();
-        assert!(check_model(&root).unwrap_err().contains("exceeds 64 MiB"));
-        fs::remove_dir_all(root).unwrap();
-    }
-    #[test]
-    fn shared_machine_state_is_refused_without_any_writes() {
-        let root = fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!(
-                "vade-shared-{}",
-                crate::text::random_hex(12).unwrap()
-            ));
-        fs::create_dir(&root).unwrap();
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::write(root.join("keep"), "Other job.").unwrap();
-        let request = fields(&[
-            ("op", "start"),
-            ("token", &"a".repeat(64)),
-            ("state_dir", root.to_str().unwrap()),
-        ]);
-        assert!(handle(&request).unwrap_err().contains("shared"));
-        assert_eq!(
-            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
-            0o755
-        );
-        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
-        assert_eq!(fs::read_to_string(root.join("keep")).unwrap(), "Other job.");
-        fs::remove_dir_all(root).unwrap();
-    }
-}
-
-#[cfg(test)]
-#[test]
-fn cuda_cache_survives_runs_and_is_keyed_by_ptx() {
-    let root = fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("vade-cuda-cache-{}", crate::text::random_hex(8).unwrap()));
-    let mut env = Fields::new();
-    persistent_cuda_cache(&root, &"a".repeat(64), &mut env).unwrap();
-    let first = env["env.CUDA_CACHE_PATH"].clone();
-    fs::write(Path::new(&first).join("cached-cubin"), "cache").unwrap();
-    persistent_cuda_cache(&root, &"a".repeat(64), &mut env).unwrap();
-    assert_eq!(env["env.CUDA_CACHE_PATH"], first);
-    assert!(Path::new(&first).join("cached-cubin").is_file());
-    assert_eq!(env["env.CUDA_CACHE_DISABLE"], "0");
-    persistent_cuda_cache(&root, &"b".repeat(64), &mut env).unwrap();
-    assert_ne!(env["env.CUDA_CACHE_PATH"], first);
-    fs::remove_dir_all(root).unwrap();
-}
+mod tests;

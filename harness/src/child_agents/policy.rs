@@ -4,6 +4,7 @@ use crate::json::Value;
 use std::collections::BTreeMap;
 use std::io;
 
+/// What a tool may do, as the child tool policy classifies it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Access {
     Read,
@@ -202,6 +203,7 @@ pub(crate) enum Targets<'a> {
     Workspace,
 }
 
+/// The tools and exact write paths a child may use.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scope {
     pub tools: Vec<String>,

@@ -4,6 +4,12 @@
 DGX Spark. You start the engine, chat with it, and stop it when you are done. It
 is one binary, written in Rust 2024 with only the standard library.
 
+With one Spark, the first few sections are all you need:
+[Install](#install), [Start the engine on your Spark](#start-the-engine-on-your-spark)
+and [Chat, check and stop](#chat-check-and-stop). Later sections cover checking
+and measuring the engine, driving several Sparks from a controller, the legacy
+Qwen3-8B workflow, gate commands and recovery.
+
 This page explains new terms where they first come up. The
 [glossary](../docs/GLOSSARY.md) covers the rest.
 
@@ -29,14 +35,15 @@ This page explains new terms where they first come up. The
 records of what it starts, called ownership records, and it stops only what
 those records name.
 
-A controller is a computer that runs `vade` with a config file against one or
-more Sparks. It can be a separate Linux or macOS computer, or a Spark acting as
-its own controller. If you work on the Spark itself without a config file, you
-don't need one. [Multi-Spark source setup](#multi-spark-source-setup) covers
-controller setup.
+Some commands behave differently on a controller: a computer that drives one or
+more Sparks from a config file. It can be a separate Linux or macOS computer, or
+a Spark acting as its own controller. When you work on the Spark itself without
+a config file, you don't need a controller at all.
+[Multi-Spark source setup](#multi-spark-source-setup) explains how to set one
+up.
 
-See the [gate guide](docs/test.md) and the [evaluation guide](evals.md) for
-`vade test`.
+`vade test` has its own [gate guide](docs/test.md) and
+[evaluation guide](evals.md).
 
 ## Install
 
@@ -49,71 +56,69 @@ bundle](#install-from-source-or-a-bundle).
 On the Spark itself, with no `VADE_CONFIG` set, run `vade launch` (or
 `vade up`). It finds the checkpoint under `~/models`, installs, and serves it
 locally. The [on-Spark first-run guide](../harness/docs/first-run.md) walks
-through it.
+through it. Add `--dry-run` to see what it would do, the default limits and
+any limits you passed, without changing any files, processes or connections.
 
-Before it checks any machine, the launcher prints its plan: the selected model,
-machine names, context and output limits, the drafting and concurrency policy
-you asked for, the transport, and the local endpoint. Run `vade up --dry-run` to
-review that plan and the commands without connecting or writing launch state.
+FP4-Local is the default, so you don't need a flag for it (`--fp4-local` names
+it explicitly if you like). The legacy FP8 model needs `--fp8-legacy` and a
+controller (see [Multi-Spark source setup](#multi-spark-source-setup)).
 
-FP4-Local is the default profile, and `--fp4-local` still works. The legacy FP8
-model needs `--fp8-legacy`.
+MTP (multi-token prediction) is the model's built-in drafting: the model
+proposes a few tokens ahead, and the engine checks each one before keeping it.
+The engine picks its own MTP setting unless you override it.
 
-The engine picks its own MTP setting unless you override it. MTP (multi-token
-prediction) is the model's built-in drafting: the model proposes a few tokens
-ahead, and the engine checks each one before keeping it.
-
-To run the current FP4-Local model on 1–24 ranks, use `vade up` and follow the
-[FP4-Local launcher guide](docs/fp4-local.md). A rank is one engine process, and
-there is one rank per Spark.
+One Spark is enough for FP4-Local, but Vade can also spread the model across
+several. Each Spark then runs one engine process, called a rank, and FP4-Local
+supports 1–24 ranks. To do that, run `vade up` from a controller and follow
+the [FP4-Local launcher guide](docs/fp4-local.md).
 
 ### Context and output limits
 
 The context is the most tokens the model considers at once: the prompt plus the
-answer so far. The local defaults match what a controller asks for: context
-32768 and output up to 8192. They only go lower in two cases:
+answer so far. By default the context is 32768 tokens and each answer can be up
+to 8192. Those go lower only when the model requires it, or when the engine's
+memory check refuses the default or saved context. In that case startup tries
+16384, 8192 and 4096, saves the first one that starts, and tells you.
 
-- the model requires it, or
-- the engine's memory check refuses the default or saved context.
+You can raise the limits with `--context` and `--output`; stop the engine first
+with `vade down`. `--context 262144` picks the single-chat long-context preset.
+Output is capped at 16384 tokens and at the configured context. If the engine
+refuses a `--context` you passed, you get an error with its memory message.
 
-In the second case, startup retries 16384, 8192 and 4096, saves the first one
-that starts, and prints it.
+### Chats at once and the prompt cache
 
-You can raise the limits with `--context` and `--output`. `--context 262144`
-picks the single-chat long-context preset. Output is capped at 16384 tokens and
-at the configured context. If you pass `--context` and the engine refuses it,
-you get an error with the engine's memory message.
+On the Spark itself, the engine works out from the context and its memory how
+many chats it can run at once.
 
-Local `up` and `launch` accept `--fp4-local`, `--context` and `--output`. Stop
-the engine you own before you change its limits.
+The prompt cache is off by default. To keep the start of earlier prompts cached
+between turns, set `VADE_FLASHNEXT_PREFIX_CACHE=1` before `vade launch` (unset
+or `0` keeps it off).
 
-### Sessions and the prompt cache
-
-On the Spark itself, the FP4 service works out from memory how many sessions it
-can hold.
-
-Prefix retention (keeping the start of earlier prompts cached) is opt-in:
-
-- Set `VADE_FLASHNEXT_PREFIX_CACHE=1` before you start the engine, and local
-  startup passes it on.
-- Unset or `0` keeps retention off.
-- Locally, `--cache-bytes 0` is saved and turns retention off, even if
-  `VADE_FLASHNEXT_PREFIX_CACHE=1` is already set in your environment.
-
-There is no local setting for a fixed number of chat slots or for a cache size
-above zero, so the local launcher refuses `--chats` and any positive
-`--cache-bytes` value before it saves anything.
+The local launcher sizes both for you, so it refuses `--chats` and any
+`--cache-bytes` above zero before it saves anything. `--cache-bytes 0` is
+accepted: it is saved and keeps the cache off even when the variable is set.
+The controller's sizing flags are under
+[Replies, memory and cache](#replies-memory-and-cache).
 
 ## Chat, check and stop
 
-Once the engine is running:
+`vade launch` opens chat as soon as the engine is ready (`vade up` starts the
+engine and returns). Type `/exit` to leave chat; the engine keeps running. From
+any terminal on the Spark, `vade chat` talks to the model, `vade status` shows
+what is running, and `vade down` stops it when you are done.
 
-- `vade chat` and `vade verify` use the saved launcher port, normally 18080.
-- Locally, `vade doctor` checks the driver, resources, model, installation and
-  engine health.
-- `vade update` restages the current bundle or rebuilds the current source, then
-  tells you the restart command.
-- `vade down` stops the engine you own.
+If something looks wrong, run `vade doctor`. It checks the driver, resources,
+model, installation and engine health. `vade chat` and `vade verify` find the
+engine on the saved launcher port, normally 18080.
+
+Chat opens the coding agent in the current folder. When the context is below
+8192 (say, after startup fell back to 4096), `vade chat` opens plain text chat
+instead. On Linux the agent tells you its automatic workspace checks are off,
+because those checks need the macOS sandbox.
+
+To pick up a new bundle or source build, run `vade update`. It restages the
+current bundle or rebuilds the current source, then tells you the restart
+command.
 
 `vade --version` (also `vade version` or `vade -V`) prints the CLI package
 version. It doesn't load your configuration or connect to a machine. Please
@@ -122,21 +127,16 @@ include it when you report an installation or launcher problem.
 Launcher errors name the command or option to fix. Invalid commands or options
 fail before Vade reads your config or touches the network.
 
-On screen, Vade escapes terminal control characters and text-direction tricks in
-errors, command previews and server logs, so a log line can't take over your
-terminal. Normal Unicode and line breaks still show. Saved logs, ownership
-records, command arguments and network requests keep their original bytes.
-
 ## Where Vade keeps your files
 
 Local state lives in `~/.vade`, or in `VADE_HOME` when that is set.
 
 Chat history never lands in your project. `vade chat` and `vade launch` (and the
-`vade run qwen3-8b` chat) keep agent session journals and typed-input recall in
-private folders under `~/.vade/projects/NAME-HASH/` (or `$VADE_HOME/projects/`).
-There is one such folder per project folder, keyed by a hash of its absolute
-path. Each one has a `workspace` file naming the project folder. So git, in the
-folder where you run `vade chat`, never sees a conversation.
+`vade run qwen3-8b` chat) save your chat history and the input you typed in a
+private folder under `~/.vade/projects/NAME-HASH/` (or `$VADE_HOME/projects/`).
+Each project folder gets its own, named with a hash of the project's absolute
+path, and a `workspace` file inside names the project folder. Because of this,
+git never sees your conversations in the folder where you run `vade chat`.
 
 If you want the old in-project location back, set `VADE_CHAT_IN_PROJECT=1`:
 
@@ -155,9 +155,13 @@ commit as the build id in `.vade-build-id`. An archive without that id, or one
 edited after download, builds as `unknown` and prints a notice.
 
 A source archive is not a launcher bundle, which holds ready-made programs. To
-stage those instead, set `VADE_BUNDLE` to an existing local launcher bundle,
-then run `vade install`. The release bundle and its `SHA256SUMS` are on the
-GitHub release page, and [INSTALL.md](../INSTALL.md) shows the download.
+stage those instead on the Spark itself, set `VADE_BUNDLE` to an existing local
+launcher bundle, then run `vade install` with no controller config selected
+(no `VADE_CONFIG`, and no default controller config file). The release
+bundle and its `SHA256SUMS` are on the GitHub release page, and
+[INSTALL.md](../INSTALL.md) shows the download. A controller install can't use
+a launcher bundle; it reads only the `vade-prebuilt-v1` format described in
+[Prebuilt bundles](#prebuilt-bundles).
 
 ## Verify exactness
 
@@ -230,6 +234,9 @@ vade bench --self-test
 vade bench --help
 ```
 
+`--self-test` checks the client's local streams and arithmetic, not GPU
+performance.
+
 ### Drafting and what the receipt records
 
 By default it measures the server as it is served, including the FP4-Local
@@ -239,11 +246,8 @@ default of drafting on. Each receipt records:
 - the build SHA from `/health`, and
 - the MTP depth the server reports, verbatim.
 
-Since v0.1.0, the FP4-Local server reports the depth it actually uses. The
-receipt's label for this field is out of date: it still says "server-reported
-(known to read 0 on the FP4-Local path until the health fix lands)". A zero on
-its own still does not prove drafting was off. Separately, `draft_observations`
-keeps the modes and depths that responses report.
+To see what each response actually did, check `draft_observations`, which keeps
+the draft modes and MTP depths the responses report.
 
 You can override the draft mode, and neither override needs a server restart:
 
@@ -274,10 +278,8 @@ The client speaks plain HTTP. TLS is out of scope for a client built on the
 standard library alone, so reach a remote server through an existing local SSH
 tunnel.
 
-The older Rust development workloads run through `vade bench --suite`; see [the
-suite guide](../engine/tools/bench/README.md). There is no separate `vade-bench`
-executable; its crate is linked into `vade`. A self-test checks local streams
-and arithmetic, not GPU performance.
+The older Rust development workloads run through `vade bench --suite`, which is
+built into `vade` itself; see [the suite guide](../engine/tools/bench/README.md).
 
 ## Status for scripts
 
@@ -319,8 +321,8 @@ random bytes written as hex. For a remote server, use an SSH tunnel or TLS.
 The CLI notes the path without opening the file. It reads and checks the file
 once, when `run`, `chat` or `doctor` starts, before anything else happens:
 
-- The open `/health` requests from `up`, `status` and the menu never read the
-  key.
+- `up`, `status` and the menu never send the key (their health and capabilities
+  checks go without one), so they never read it.
 - Help, local file operations and dry runs work even if the file is missing or
   unreadable.
 
@@ -336,10 +338,10 @@ Keep it pointed at the same file for controller `up`, `chat`, `status`,
 `doctor`, `logs` and `down`, even if a local installation exists. Unset it for
 the local lifecycle.
 
-The local defaults that Vade generates keep you on one installation: the default
-setup uses plain `up`/`launch`, and the Qwen3-8B setup uses `run qwen3-8b`.
-Conflicting starts are refused before launch. Use a fresh `VADE_HOME` if you
-want to keep both local installations.
+One `VADE_HOME` holds one local installation: either the default one (started
+with plain `up` or `launch`) or the Qwen3-8B one (started with `run qwen3-8b`).
+If you try to start the other kind, Vade refuses before it launches anything.
+Use a fresh `VADE_HOME` if you want to keep both local installations.
 
 ## Multi-Spark source setup
 
@@ -347,7 +349,7 @@ This section is for a controller setup (a controller is described at the top
 of this page). If you work on the Spark itself, follow
 [INSTALL.md](../INSTALL.md) and the sections above instead.
 
-Pick the checkpoint profile on purpose:
+Choose the checkpoint profile deliberately:
 
 | Profile | Example config | How to start |
 | --- | --- | --- |
@@ -358,11 +360,13 @@ A chain is several Sparks linked one after another, serving one model together.
 With `--replicas`, each replica is a full, separate copy of the model on its own
 Spark.
 
-Start with [INSTALL.md](../INSTALL.md). With a controller config, FP4-Local asks
-for the same defaults as `vade launch` on the Spark, whatever the Spark count and
-with or without `--chats`: context 32768 and output `min(context, 8192)`. The
-one difference is that only `vade launch` lowers the context, and only when the
-engine refuses it for memory.
+Start with [INSTALL.md](../INSTALL.md).
+
+With a controller config, FP4-Local asks for the same defaults as `vade launch`
+on the Spark, whatever the Spark count and with or without `--chats`: context
+32768 and output `min(context, 8192)`. The one difference is that only
+`vade launch` lowers the context, and only when the engine refuses it for
+memory.
 
 The engine decides from context and memory how many chats can run at once. It
 reports that count when it starts, and the controller's `vade status` prints it.
@@ -373,12 +377,18 @@ reaches 16384. MTP stays engine-selected unless you override it. A request
 longer than the configured context is refused, and the refusal names
 `--context`.
 
+Before it touches any machine, `vade up` prints its plan: which model and
+machines it will use, the context and output limits, your drafting and
+concurrency choices, how the machines connect (the transport), and the local
+endpoint it will serve on. Run `vade up --dry-run` to review that plan and the
+commands without connecting or writing launch state.
+
 Chains of 3–24 Sparks need an engine staged from current source. With an older
 staged engine, Vade refuses those counts before it runs anything on the Sparks.
 Testing so far covers this much:
 
 - On one Spark, a live test on real hardware covers the launcher, direct chat,
-  the gateway and cancelling a reply.
+  the gateway (the harness's HTTP relay to the engine) and cancelling a reply.
 - For larger chains, starting and recovering are covered only by host tests
   (tests that run without a Spark), and so is picking TCP on two Sparks. None of
   those has passed its checks on real Sparks yet.
@@ -477,13 +487,10 @@ checks the actual transport and health.
 
 Offline builds need the source toolchains already installed.
 
-To save time, Vade remembers when it last found the model complete. It stores a
-stamp in the machine's state folder, keyed by a fingerprint of the model
-folder's file list (each file's path, device, inode, size, permissions and
-modification and change times). If nothing has changed, it skips reading the
-index and checking the shards; a changed or missing file triggers a full check.
-Startup uses the same stamp. This shortcut doesn't replace the full checksum
-check of the checkpoint.
+To save time, Vade remembers when it last found the model complete, so a repeat
+install or startup skips the shard check unless a file in the model folder
+changed or went missing. This shortcut doesn't replace the full checksum check
+of the checkpoint.
 
 The Flash-Next weights stay under your control. If weights are missing or
 incomplete, Vade tells you the checkpoint, revision and destination it needs.
@@ -530,23 +537,31 @@ runs. Shard inventory checks then run alongside the engine and PTX copy (or the
 engine compile). A repeat install rechecks the remote hashes and reuses staged
 artifacts that have not changed. No release service or daemon is added.
 
-### Commands
+### Controller commands
+
+With `VADE_CONFIG` set, the lifecycle commands work like this:
 
 | Command | What happens |
 | --- | --- |
 | `vade` | Short status and four choices: start, chat, stop, doctor. |
 | `vade up` (also `--fp4-local`) | Starts FP4-Local on one configured Spark. Add `--sparks N` for 2–24 or ordered `--hosts` for a chain. Larger chains need a current staged build, and each must still pass its own live checks on real Sparks. |
-| `vade up --replicas N` | FP4-Local only, N = 2–16: one independent one-Spark server on each of the first N configured machines (or the N `--hosts`), each behind its own tunnel on the N local ports after `local_port`, with a local gateway on `local_port`. Needs no `fabric.*` entries; not combinable with `--sparks` or `--fp8-legacy`. `vade down` stops the gateway, the tunnels and every replica. See [Replicas](../INSTALL.md#replicas). |
+| `vade up --replicas N` | FP4-Local only, N = 2–16: one independent one-Spark server on each of the first N configured machines (or the N `--hosts`), behind a local gateway. Details below the table. |
 | `vade up --fp8-legacy` | Legacy FP8: starts on the first two configured machines. |
 | `vade up --fp8-legacy --sparks 4` | Legacy FP8: builds a four-machine path in config order. This path still has to pass its own checks on real machines. |
 | `vade up --hosts machine-a,machine-b` | Selects connected machines in the given order. |
 | `vade status` | Machines, model, source build, MTP, context, output limit, how many chats the engine allows at once, memory/cache bytes per rank, ranks, tunnel, health, and speed when health reports it. |
 | `vade down` | Stops only the ranks Vade recorded and the SSH control connection it opened. |
 | `vade logs` | Recent redacted engine logs, including saved logs after shutdown. |
-| `vade chat` | Runs `vade-harness agent` against the endpoint of the engine you own, in the current folder, with the recorded context. For local launches, contexts below 8192 tokens use direct text chat, and Linux agent mode disables automatic workspace checks with a notice. The harness negotiates each reply's output reservation. |
+| `vade chat` | Opens the coding agent (`vade-harness agent`) in the current folder, connected to the engine you own, with the recorded context. Details below the table. |
 | `vade doctor` | Machine checks plus the harness doctor and its two small cache test turns. |
 | `vade install` | Checks, builds, stages, and runs doctor. Without a running engine, it verifies that doctor is available and explains the remaining engine check. |
 | `vade update` | Updates clean checkouts with `git pull --ff-only`, rebuilds, restages, and offers a restart. A checkout with no remote stays local. |
+
+With `--replicas N`, each replica sits behind its own tunnel on the N local
+ports after `local_port`, and the local gateway listens on `local_port`. It needs
+no `fabric.*` entries and can't be combined with `--sparks` or `--fp8-legacy`.
+`vade down` stops the gateway, the tunnels and every replica. See
+[Replicas](../INSTALL.md#replicas).
 
 Every lifecycle command accepts `--dry-run`, in any position. A dry run prints
 every remote command it would run, including worker operations and the stdin
@@ -638,9 +653,10 @@ settable output limit. Older builds accept only their fixed `min(context,8192)`
 limit.
 
 In the legacy FP8 profile, the model proposes up to two tokens ahead and checks
-each one against ordinary decoding before keeping it. Chats that overlap stay
-plain until they finish, even after the other chats are done. Cached
-continuations without saved draft history also stay plain.
+each one against ordinary decoding before keeping it. When chats overlap, they
+run without drafting (plain) until they finish, even if the other chats end
+first. A chat continued from the cache without its saved draft history also runs
+plain.
 
 To control drafting depth:
 
@@ -668,10 +684,10 @@ manual `/continue` starts a fresh work budget. See the [harness generation
 options](../harness/README.md) for direct launches with `--max-output-tokens` or
 `--no-auto-continue`.
 
-The engine and harness agree on each turn's output size through an API
-extension added in commit `824ab96f`, and its [dated compatibility
-note](../harness/docs/engine-contract.md#output-extension-provenance-824ab96f)
-compares the sources. These limits haven't been checked on real Sparks yet.
+The harness and engine agree on each reply's output size automatically
+([details](../harness/docs/engine-contract.md#output-extension-provenance-824ab96f)).
+That agreement has host tests only so far; the one-Spark live test above didn't
+check these limits.
 
 For the legacy FP8 profile, the engine sizes its session pool from the context
 and the lowest safe capacity across ranks, after shared workspaces and a safety
@@ -702,11 +718,12 @@ Two optional flags set memory and cache sizes:
   supports only `--cache-bytes 0`, which it translates to its own prefix-cache
   switch; a positive capacity is refused.
 
-FP4-Local retained prefix caching stays off by engine default, and sending
-`cache:true` does not turn it on. The harness still sends negotiated cache
-hints. For legacy FP8, leaving memory and retention unset means automatic
-sizing. The engine still checks that the model, shared workspaces and
-full-context live reservations fit before it reports ready.
+For FP4-Local, the retained prefix cache stays off unless it was switched on at
+startup (see [the prompt cache](#chats-at-once-and-the-prompt-cache)); a request
+that sends `cache:true` doesn't turn it on by itself. The harness still sends
+negotiated cache hints. For legacy FP8, leaving memory and retention unset
+means automatic sizing. The engine still checks that the model, shared
+workspaces and full-context live reservations fit before it reports ready.
 
 ### Ownership, logs and stopping
 
@@ -781,14 +798,16 @@ Try `vade status`, `vade logs`, then `vade down` first. If the controller
 crashed or the SSH master died, `vade down` is all you need: it reports
 `controller tunnel already closed.` and carries on stopping the ranks you own.
 
-Just before it starts the engine process (exec), the launch helper writes that
-process's exact identity to a journal, `journal.conf` (see step 1 below). A
-rebooted machine or an unfinished launch request still needs the manual steps
-below. Do them at a time when nobody else is using that machine.
+The launch helper saves the engine process's exact identity in a journal,
+`journal.conf` (see step 1 below), just before it starts that process (exec).
+With that record, `vade down` can usually clean up on its own. A rebooted
+machine or a launch request that never finished needs the manual steps below.
+Do them at a time when nobody else is using that machine.
 
 The local FP4 launcher records its engine in `VADE_HOME/state/run.conf`; the
-Qwen3-8B catalog uses `VADE_HOME/run.conf` and `VADE_HOME/worker/`. The same
-boot, start, executable and argv checks apply.
+Qwen3-8B catalog uses `VADE_HOME/run.conf` and `VADE_HOME/worker/`. The identity
+checks in step 2 (boot, start time, executable and argv) apply to these files
+too.
 
 1. Stop any launch, install or cleanup commands running at the same time. Keep a
    private backup of the controller's `state_dir/session.conf` and of the
@@ -881,7 +900,9 @@ vade run qwen3-8b --weights-source /path/to/Qwen3-8B
 
 Vade only reads the directory you supply. Every pinned payload must be there and
 match its SHA-256. Missing or altered files fail, and Vade does not download
-replacements. The path is saved in the control home.
+replacements. The path is saved in the control home, the private directory
+described under [Where the Qwen3-8B workflow keeps
+state](#where-the-qwen3-8b-workflow-keeps-state).
 
 - A directory named `Qwen3-8B` is read in place and needs 1 GiB of disk
   headroom.
@@ -891,12 +912,14 @@ replacements. The path is saved in the control home.
 
 Later runs rehash every payload in the directory the engine uses.
 
-### Where it keeps state
+### Where the Qwen3-8B workflow keeps state
 
+This workflow keeps its state apart from the FP4-Local launcher, which uses
+`~/.vade` (see [Where Vade keeps your files](#where-vade-keeps-your-files)).
 For `run qwen3-8b`, `VADE_HOME` picks a dedicated private directory. The default
-is `XDG_DATA_HOME/vade` or the user's `.local/share/vade` (the FP4-Local
-launcher uses `~/.vade`). Source snapshots, generations, revision-specific
-models, logs and ownership records all stay there.
+is `XDG_DATA_HOME/vade` or the user's `.local/share/vade`. Source snapshots,
+generations, revision-specific models, logs and ownership records all stay
+there.
 
 Run the same command again to resume a download, build or doctor check. A
 running server you own is reused once its process identity, listener, artifacts
@@ -916,8 +939,12 @@ group has really stopped before it marks the job done.
 A failure, a timeout, Ctrl-C or losing the CLI that started the build all
 trigger this cleanup, and a retry or `vade down` finishes it through the
 supervisor. If Vade can't confirm which process it started, or the supervisor is
-gone, it sends no signals and keeps the records. Keep those job folders so you
-can look at them.
+gone, it sends no signals. A supervisor that crashed or was killed, or a reboot,
+leaves a stale record: once the supervisor and every recorded build process
+have stopped, the next `vade install`, `launch`, `up`, `update` or `down` marks
+the job stopped, prints one line naming its folder and carries on. While any of
+them may still run, Vade keeps the records and stops with an error. Keep those
+job folders so you can look at them.
 
 Pressing Ctrl-C while you wait for readiness stops a server that this invocation
 started, and releases the operation lock after cleanup. A server that was
@@ -1018,14 +1045,18 @@ Saved long-context and recurrent-state evaluations use
 [evaluation guide](evals.md) covers the options, outputs and frozen formats.
 These commands work on saved local inputs and need no lifecycle config.
 
-## Local validation
+## Safety details
 
-Follow the house rules in [AGENTS.md](../AGENTS.md). From `engine/`, with the
-pinned Rust toolchains installed and rustup's bin directory on PATH, set
-RUSTFLAGS to `-D warnings`. For cached, offline builds, set CARGO_NET_OFFLINE to
-`true` and RUSTUP_AUTO_INSTALL to `0`. Build the kernels first on every OS,
-macOS included, because stale PTX fails the host checks. This block is identical
-to AGENTS.md:
+On screen, Vade escapes terminal control characters and text-direction tricks in
+errors, command previews and server logs, so a log line can't take over your
+terminal. Normal Unicode and line breaks still show. Saved logs, ownership
+records, command arguments and network requests keep their original bytes.
+
+## Working on Vade itself
+
+To build and check a change, see [CONTRIBUTING.md](../CONTRIBUTING.md) and the
+house rules in [AGENTS.md](../AGENTS.md). From `engine/`, this block is
+identical to AGENTS.md:
 
 ```sh
 cargo +1.99.0 kernels
@@ -1036,11 +1067,7 @@ cargo +1.99.0 test --offline --manifest-path ../cli/Cargo.toml --test ratchet --
 python3 ../tools/check-doc-links.py
 ```
 
-Keep the existing dense source formatting by hand; do not run cargo fmt or
-clippy's automatic fixes. CI does not gate on formatting or clippy. AGENTS.md
-also lists the full workspace tests and the Linux cross-target checks.
-
-Tests use fake SSH and local temporary files. Live installation, CUDA, pidfd
-signalling, RDMA topology, health, tunnel recovery, harness cache checks and
-restart all need an authorized session on a Spark. Host tests make no claim
-about live performance or GPU exactness.
+The CLI's tests use fake SSH and local temporary files. Live installation, CUDA,
+pidfd signalling, RDMA topology, health, tunnel recovery, harness cache checks
+and restart all need an authorized session on a Spark, so host tests make no
+claim about live performance or GPU exactness.

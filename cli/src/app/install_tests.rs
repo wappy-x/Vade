@@ -13,7 +13,7 @@ fn with_bundle_machines(count: usize) -> Fixture {
     for name in crate::prebuilt::FILES {
         let mut bytes = vec![0; 32]; bytes[..6].copy_from_slice(b"\x7fELF\x02\x01"); bytes[18] = 183;
         fs::write(dir.join(name), &bytes).unwrap();
-        manifest.push_str(&format!("{name}.sha256={}\n", crate::sha256::digest_reader(&bytes[..]).unwrap()));
+        manifest.push_str(&format!("{name}.sha256={}\n", crate::sha256::sha(&bytes)));
     }
     fs::write(dir.join("manifest.conf"), manifest).unwrap();
     f.app.config.prebuilt_dir = Some(root);
@@ -211,7 +211,7 @@ fn with_host_bundle() -> Fixture {
     manifest.push_str(&format!("host_target={}\nharness_sha={}\n", crate::prebuilt::host_target(), "c".repeat(40)));
     for name in ["host-vade", "host-vade-harness"] {
         fs::write(dir.join(name), &bytes).unwrap();
-        manifest.push_str(&format!("{name}.sha256={}\n", crate::sha256::digest_reader(&bytes[..]).unwrap()));
+        manifest.push_str(&format!("{name}.sha256={}\n", crate::sha256::sha(&bytes)));
     }
     fs::write(path, manifest).unwrap();
     f
@@ -274,7 +274,7 @@ fn host_payload_checks_target_revision_digest_and_executable_before_copying() {
                 let mut bytes = fs::read(&path).unwrap(); bytes[0] ^= 1;
                 fs::write(path, &bytes).unwrap();
                 if changed == "executable" {
-                    fields.insert("host-vade-harness.sha256".into(), crate::sha256::digest_reader(&bytes[..]).unwrap());
+                    fields.insert("host-vade-harness.sha256".into(), crate::sha256::sha(&bytes));
                 }
             }
         }
@@ -436,5 +436,63 @@ fn preparation_failure_names_the_helper_cause_first() {
             assert_eq!(error, format!("a: {busy} Install cache preparation failed; the previous activation was kept."));
         }
         assert_eq!(fs::read(&app.config.activation).unwrap(), before);
+    }
+}
+
+/// Shares one scripted runner between install's per-machine worker threads.
+#[derive(Clone)]
+struct ThreadedRunner { inner: std::sync::Arc<std::sync::Mutex<FakeRunner>>, fail: Option<&'static str> }
+impl Runner for ThreadedRunner {
+    fn run(&mut self, exec: &Exec) -> Result<Output, String> {
+        let result = self.inner.lock().unwrap().run(exec);
+        if exec.label.ends_with("helper build") {
+            // Each helper build waits for the other machine's: a sequential install never gets past this.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while self.inner.lock().unwrap().calls.iter().filter(|e| e.label.ends_with("helper build")).count() < 2 {
+                assert!(Instant::now() < deadline, "machine builds ran one after another");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        if self.fail == Some(exec.label.as_str()) { return Ok(Output { success: false, stdout: String::new() }); }
+        result
+    }
+    fn interactive(&mut self, exec: &Exec) -> Result<bool, String> { self.inner.lock().unwrap().interactive(exec) }
+    fn port_free(&mut self, port: u16) -> Result<(), String> { self.inner.lock().unwrap().port_free(port) }
+    fn pause(&mut self, _: Duration) {}
+    fn worker(&self) -> Option<Box<dyn Runner + Send>> { Some(Box::new(self.clone())) }
+}
+
+#[test]
+fn machines_build_concurrently_and_report_in_machine_order() {
+    let cases = [(None, ""), (Some("b build and stage"), "Machine build did not finish. Inspect retained logs and the pinned Rust/CUDA toolchain; run vade install again."),
+        (Some("a helper build"), "Helper build failed; check the pinned Rust toolchain and retained logs.")];
+    for (fail, message) in cases {
+        let mut f = Fixture::new(2, false);
+        let before = fs::read(&f.app.config.activation).unwrap();
+        let mut app = App { config: f.app.config.clone(), dry: false,
+            runner: ThreadedRunner { inner: std::sync::Arc::new(std::sync::Mutex::new(std::mem::take(&mut f.app.runner))), fail } };
+        let capture = crate::output::testing::Capture::default();
+        let result = crate::output::with_writer(capture.clone(), || app.execute(Command::Install));
+        let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+        let at = |needle: &str| printed.find(needle).unwrap_or_else(|| panic!("{needle} missing from {printed}"));
+        assert!(at("a: building engine and helper.") < at("b: building engine and helper."));
+        let calls = app.runner.inner.lock().unwrap().calls.clone();
+        // Every source copy is staged before any machine compiles.
+        let first_build = calls.iter().position(|e| e.label.ends_with("helper build")).unwrap();
+        assert!(calls.iter().enumerate().filter(|(_, e)| e.label.ends_with("source copy")).all(|(i, _)| i < first_build));
+        assert_eq!(calls.iter().filter(|e| e.label.ends_with("source copy")).count(), 4);
+        if fail.is_none() {
+            result.unwrap();
+            assert!(at("b: building engine and helper.") < at("a: all model shards present.") && at("a: all model shards present.") < at("b: all model shards present."));
+            let manifest = Manifest::load(&app.config.build_manifest).unwrap();
+            assert_eq!(manifest.artifacts.keys().cloned().collect::<Vec<_>>(), ["a", "b"]);
+            assert!(manifest.artifacts.values().all(|artifact| artifact.binary_sha256 == "1".repeat(64)));
+        } else {
+            assert_eq!(result.unwrap_err(), message);
+            assert_eq!(fs::read(&app.config.activation).unwrap(), before);
+            // Output stops at the first failing machine, as a one-by-one install would.
+            if fail == Some("a helper build") { assert!(!printed.contains("b: all model shards present.")); }
+            else { assert!(printed.contains("a: all model shards present.") && !printed.contains("b: all model shards present.")); }
+        }
     }
 }

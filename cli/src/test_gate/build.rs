@@ -35,6 +35,7 @@ enum Host {
     Spark,
 }
 
+/// `vade test build`: run the four build-gate steps; returns the exit code.
 pub fn run(args: &[String]) -> i32 {
     let mut denylist = std::env::var_os("PRIVATE_DENYLIST").unwrap_or_default();
     let mut dry = false;

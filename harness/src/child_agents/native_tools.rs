@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex, atomic::AtomicBool};
 pub type ChildPreview =
     dyn Fn(TaskId, coding_tools::Preview<'_>, &AtomicBool) -> bool + Send + Sync;
 
+/// The parent's workspace, approval policy, project snapshot and shell
+/// settings, shared with the tool executors it builds for children.
 #[derive(Clone)]
 pub struct NativeToolHost {
     pub workspace: Arc<Workspace>,

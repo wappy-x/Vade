@@ -1,3 +1,6 @@
+//! Shared text and file helpers: terminal-safe display of untrusted text, the
+//! `key=value` record format ([`parse`] and [`encode`]), private directories,
+//! atomic writes and random hex.
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -5,6 +8,7 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+/// A `key=value` record, as saved in state files and sent to the worker.
 pub type Fields = BTreeMap<String, String>;
 
 /// Display untrusted text without allowing it to control the terminal. Keep
@@ -31,8 +35,33 @@ pub fn argument(value: &str) -> String {
     format!("{}{}", quoted(&short), if short.len() < value.len() { "…" } else { "" })
 }
 
+/// `value` as a Rust-style quoted string, safe to print on a terminal.
 pub fn quoted(value: &str) -> String {
     terminal_text(&format!("{value:?}")).into_owned()
+}
+
+/// A follow-up command spelled the way the user started this program, such as
+/// `vade chat` or `./vade chat` from a bundle folder that is not on PATH.
+pub fn command(subcommand: &str) -> String {
+    let program = std::env::args_os().next();
+    format!("{} {subcommand}", invocation(program.as_deref(), std::env::var_os("PATH").as_deref()))
+}
+
+/// The bare name when it was typed bare or PATH finds this same program first;
+/// otherwise the path as typed, shell-quoted and safe to print.
+pub fn invocation(program: Option<&std::ffi::OsStr>, path: Option<&std::ffi::OsStr>) -> String {
+    let Some(typed) = program.map(Path::new) else { return "vade".into() };
+    let Some(name) = typed.file_name() else { return "vade".into() };
+    let bare = || terminal_text(&crate::runner::quote(&name.to_string_lossy())).into_owned();
+    if typed.parent().is_none_or(|parent| parent.as_os_str().is_empty()) {
+        return bare();
+    }
+    let executable = |candidate: &Path| fs::metadata(candidate).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+    let found = path.into_iter().flat_map(std::env::split_paths).map(|dir| dir.join(name)).find(|candidate| executable(candidate));
+    match (found.and_then(|found| fs::canonicalize(found).ok()), fs::canonicalize(typed).ok()) {
+        (Some(found), Some(this)) if found == this => bare(),
+        _ => terminal_text(&crate::runner::quote(&typed.to_string_lossy())).into_owned(),
+    }
 }
 
 /// Keep filesystem failures specific without echoing file contents or arbitrary
@@ -52,6 +81,9 @@ pub fn file_error(operation: &str, path: &Path, error: &std::io::Error) -> Strin
     format!("{operation} {}: {detail}.", quoted(&path.to_string_lossy()))
 }
 
+/// Read a `key=value` record: one field per line, keys of ASCII letters, digits
+/// and `._-`, values with `\n`, `\r` and `\\` escapes. Duplicate keys, NUL and
+/// unknown escapes are errors.
 pub fn parse(input: &str) -> Result<Fields, String> {
     let mut result = Fields::new();
     for line in input.lines() {
@@ -95,6 +127,7 @@ pub fn parse(input: &str) -> Result<Fields, String> {
     Ok(result)
 }
 
+/// Write a record that [`parse`] reads back unchanged.
 pub fn encode(fields: &Fields) -> String {
     let mut result = String::new();
     for (key, value) in fields {
@@ -113,6 +146,8 @@ pub fn encode(fields: &Fields) -> String {
     result
 }
 
+/// Create `path` (mode 0700) if needed and require a directory that no symlink
+/// leads to and only its owner can access.
 pub fn private_dir(path: &Path) -> Result<(), String> {
     reject_symlinks(path)?;
     let mut builder = fs::DirBuilder::new();
@@ -140,6 +175,7 @@ pub fn private_dir(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Fail if any existing component of `path` is a symlink.
 pub fn reject_symlinks(path: &Path) -> Result<(), String> {
     let mut current = PathBuf::new();
     for component in path.components() {
@@ -153,6 +189,8 @@ pub fn reject_symlinks(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Replace `path` with `value` through a synced temporary file and rename, then
+/// sync the directory, so readers see the old or the new contents in full.
 pub fn atomic_write(path: &Path, value: &str) -> Result<(), String> {
     reject_symlinks(path)?;
     let parent = path
@@ -184,6 +222,7 @@ pub fn atomic_write(path: &Path, value: &str) -> Result<(), String> {
     outcome
 }
 
+/// `bytes` random bytes from `/dev/urandom`, as lowercase hex.
 pub fn random_hex(bytes: usize) -> Result<String, String> {
     let mut value = vec![0; bytes];
     fs::File::open("/dev/urandom")
@@ -194,6 +233,7 @@ pub fn random_hex(bytes: usize) -> Result<String, String> {
     Ok(value.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// A field that a saved record must have.
 pub fn required<'a>(fields: &'a Fields, key: &str) -> Result<&'a str, String> {
     fields
         .get(key)
@@ -201,6 +241,7 @@ pub fn required<'a>(fields: &'a Fields, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("Record is missing {key}. Keep it and run vade doctor."))
 }
 
+/// Whether `value` is exactly `length` lowercase hex digits.
 pub fn hex(value: &str, length: usize) -> bool {
     value.len() == length
         && value
@@ -241,6 +282,37 @@ mod tests {
             fs::metadata(&root).unwrap().permissions().mode() & 0o777,
             0o755
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod invocation_tests {
+    use super::*;
+    use std::ffi::OsStr;
+    #[test]
+    fn hints_use_the_bare_name_only_when_path_finds_this_program() {
+        let root = PathBuf::from("target").join(format!("vade-invocation-{}", random_hex(6).unwrap()));
+        for dir in ["bundle", "other", "plain", "my folder"] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+            fs::write(root.join(dir).join("vade"), "#!/bin/sh\n").unwrap();
+            fs::set_permissions(root.join(dir).join("vade"), fs::Permissions::from_mode(if dir == "plain" { 0o600 } else { 0o700 })).unwrap();
+        }
+        let bundle = root.join("bundle/vade");
+        let typed = bundle.to_str().unwrap();
+        let path = |dirs: &[&str]| std::env::join_paths(dirs.iter().map(|dir| root.join(dir))).unwrap();
+        assert_eq!(invocation(Some(OsStr::new("vade")), None), "vade");
+        assert_eq!(invocation(None, None), "vade");
+        assert_eq!(invocation(Some(bundle.as_os_str()), None), typed);
+        assert_eq!(invocation(Some(bundle.as_os_str()), Some(&path(&["other"]))), typed);
+        assert_eq!(invocation(Some(bundle.as_os_str()), Some(&path(&["bundle"]))), "vade");
+        // PATH would run a different vade first; a non-executable file is skipped.
+        assert_eq!(invocation(Some(bundle.as_os_str()), Some(&path(&["other", "bundle"]))), typed);
+        assert_eq!(invocation(Some(bundle.as_os_str()), Some(&path(&["plain", "bundle"]))), "vade");
+        let spaced = root.join("my folder/vade");
+        assert_eq!(invocation(Some(spaced.as_os_str()), None), format!("'{}'", spaced.display()));
+        assert_eq!(invocation(Some(OsStr::new("./vade\x1b[2J")), None), "'./vade\\u{1b}[2J'");
+        assert!(command("chat").ends_with(" chat"));
         fs::remove_dir_all(root).unwrap();
     }
 }

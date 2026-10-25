@@ -96,7 +96,7 @@ fn endpoint(url: &str, path: &str) -> Result<Endpoint, String> {
     }
     Ok(Endpoint {
         secure: scheme == "https",
-        host: host.into(),
+        host,
         port,
         authority,
         target,
@@ -470,6 +470,8 @@ fn greedy(value: &Value) -> bool {
         .iter()
         .all(|(k, v)| value.get(k).is_some_and(|found| numeric_eq(found, v)))
 }
+/// `vade test longctx run`: send every frozen request to each server and save
+/// the validated captures.
 pub fn run(args: &mut LongArgs, manifest: &Value) -> Result<(), String> {
     let mut urls = vec![
         ("A", args.a_url.clone(), args.a_build.clone()),

@@ -1,4 +1,6 @@
 //! The existing gate protocol, driven directly by Rust without shell dispatch.
+//! `build` runs the build gate; `determinism` drives flash-bench's logit
+//! determinism gate and keeps its receipts.
 mod build;
 mod determinism;
 use crate::sha256;
@@ -45,10 +47,12 @@ impl Drop for Signals {
         }
     }
 }
+/// The signal number that interrupted the gate, or 0.
 pub(super) fn interrupted() -> i32 {
     INTERRUPTED.load(Ordering::Relaxed)
 }
 
+/// `vade test build` or `vade test determinism`; returns the exit code.
 pub fn run(args: &[String]) -> i32 {
     let _signals = Signals::install();
     match args.first().map(String::as_str) {
@@ -64,7 +68,9 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
 }
-pub const HELP: &str = "Usage: vade test build [OPTIONS]\n       vade test determinism [OPTIONS] -- MODEL FIXTURES ADDR0 ADDR1 RANK [--world 2|4]\n\nBuild checks the current engine checkout and a private release snapshot.\nDeterminism drives the existing flash-bench byte comparisons and receipts.\nUse vade test build --help or vade test determinism --help for exact inputs.\nNative Spark qualification remains separate from host checks.\n";
+/// Usage for the gate commands, printed after the evaluation commands' usage
+/// (hence the leading blank line).
+pub const HELP: &str = "\nUsage: vade test build [OPTIONS]\n       vade test determinism [OPTIONS] -- MODEL FIXTURES ADDR0 ADDR1 RANK [--world 1|2|4]\n\nBuild checks the current engine checkout and a private release snapshot.\nDeterminism drives the existing flash-bench byte comparisons and receipts.\nUse vade test build --help or vade test determinism --help for exact inputs.\nNative Spark qualification remains separate from host checks.\n";
 
 fn engine_root() -> Result<Option<PathBuf>, &'static str> {
     if let Some(selected) = std::env::var_os("VADE_ROOT") {
@@ -99,10 +105,12 @@ fn engine_root() -> Result<Option<PathBuf>, &'static str> {
     Ok(None)
 }
 
+/// A private temporary directory, removed when dropped.
 pub(super) struct TempDir {
     pub path: PathBuf,
 }
 impl TempDir {
+    /// Create `<prefix>.<random>` (mode 0700) in the system temporary directory.
     pub fn new(prefix: &str) -> Result<Self, String> {
         let root = fs::canonicalize(std::env::temp_dir())
             .map_err(|_| "Cannot open temporary directory. Check TMPDIR.".to_string())?;
@@ -188,6 +196,8 @@ fn spawn_code(error: &std::io::Error) -> i32 {
         126
     }
 }
+/// Run `command` with stdout and stderr appended to `log`; returns its exit
+/// code (128 + signal when interrupted).
 pub(super) fn exec_logged(
     command: &mut Command,
     log: &Path,
@@ -216,6 +226,7 @@ pub(super) fn exec_logged(
         }
     }
 }
+/// Run `command` on this terminal's stdout and stderr; returns its exit code.
 pub(super) fn exec_inherited(
     command: &mut Command,
     deadline: Option<Instant>,
@@ -232,6 +243,7 @@ pub(super) fn exec_inherited(
         }
     }
 }
+/// Run `command` with stdout written to `path`; returns its exit code.
 pub(super) fn exec_stdout(
     command: &mut Command,
     path: &Path,
@@ -251,6 +263,7 @@ pub(super) fn exec_stdout(
         }
     }
 }
+/// Whether this user may execute `path`.
 pub(super) fn executable(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
     CString::new(path.as_os_str().as_bytes()).is_ok_and(|p| unsafe { access(p.as_ptr(), 1) } == 0)

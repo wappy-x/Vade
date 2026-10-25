@@ -579,8 +579,11 @@ impl Config {
                 workspace_check(&config.workspace)?.map(|command| (command, ".vade/check"));
         }
         if config.check.is_some() {
-            if !cfg!(target_os = "macos") {
+            if !vade_harness::coding_tools::SHELL_AVAILABLE {
                 return Err("Check not run: --check and .vade/check require the macOS sandbox; use --no-check on this platform.");
+            }
+            if !vade_harness::coding_tools::shell_offered() {
+                return Err("Check not run: VADE_HARNESS_SHELL=off hides workspace_shell; unset it or use --no-check.");
             }
             if config.approval == ApprovalPolicy::Never {
                 return Err("Check not run: --approval never denies commands; use --approval auto or --no-check.");
@@ -636,6 +639,15 @@ impl Config {
         }
         if !config.child_grants.is_empty() && !config.children {
             return Err("--child-edit and --child-shell require --children");
+        }
+        if !vade_harness::coding_tools::shell_offered()
+            && config.child_grants.values().any(|scope| scope.tools.iter().any(|tool| tool == "workspace_shell"))
+        {
+            return Err(if vade_harness::coding_tools::SHELL_AVAILABLE {
+                "--child-shell: VADE_HARNESS_SHELL=off hides workspace_shell; unset it or drop --child-shell."
+            } else {
+                "--child-shell needs the macOS sandbox; workspace_shell is not offered on this platform."
+            });
         }
         if config.children && config.mode != Mode::Agent {
             return Err("--children requires native agent mode");

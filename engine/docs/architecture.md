@@ -8,8 +8,11 @@ This page follows one request from the HTTP socket to the GPU and back. It is
 for developers and agents changing the code, and for anyone curious;
 [Design principles](concepts.md) explains *why* the engine works this way.
 
-Main serves Qwen3-8B, Qwen3-32B, Qwen3-30B-A3B, Qwen3.8-27B (BF16 and official
-FP8) and Gemma 4 31B. [Models](models.md) lists them.
+The server on this page, `spark-serve`, serves Qwen3-8B, Qwen3-32B, Qwen3-30B-A3B,
+Qwen3.8-27B (BF16 and official FP8) and Gemma 4 31B. [Models](models.md) lists
+them. The v0.1.0 release model, Qwen3.8-Flash-Next-FP4-Local, runs in a
+separate server, `flash-serve`, which `vade launch` and `vade up` start on one
+Spark or across several; see [FP4-Local](../../cli/docs/fp4-local.md).
 
 <details>
 <summary><b>Terms on this page</b>: token, tokenizer, prefill, decode, KV cache, BF16, kernel, tensor cores, PTX, unified and pinned memory, rank, RDMA</summary>
@@ -151,8 +154,8 @@ layer.</dd>
 <dd>Generates official reference data with Transformers outside this repository.</dd>
 </dl>
 
-- `crates/engine` also holds the separate Flash Next research engine, in
-  `src/flash/`.
+- `crates/engine` also holds the Flash Next engine, in `src/flash/`. Its
+  server, `flash-serve`, lives in `crates/tp`.
 - `tools/export` is described on [Export](export.md).
 - The official reference oracle uses Hugging Face Transformers and is kept
   privately outside this repository. [Reference provenance](../tools/truth/README.md)
@@ -231,7 +234,7 @@ count the same bytes, so adding them together overstates use.
 <dt>Gemma 4 31B</dt>
 <dd>One text-weight copy.</dd>
 <dt>Qwen3.8-Flash-Next-FP8</dt>
-<dd>Separate research engine; not in the chat server.</dd>
+<dd>Runs in the separate Flash server, not in this one.</dd>
 </dl>
 
 Gemma 4 31B's optional assistant is a separate official model.
@@ -419,8 +422,8 @@ revision, hash and notice.
   [Validation](validation.md#qwen3-cuda-acceptance-suite).
 - **Larger groups.** Each small exchange between Sparks still goes through
   the CPU side, which limits how much more Sparks help.
-- **Flash Next in the chat server.** It runs on a pair of Sparks in a separate
-  research engine.
+- **Flash Next in this server.** Flash Next models run in their own server,
+  `flash-serve`, on one Spark or across several.
 
 **Where next:** [Design principles](concepts.md) ·
 [Speculative decoding](speculative-decoding.md) · [Credits](CREDITS.md)

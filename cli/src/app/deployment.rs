@@ -93,6 +93,112 @@ impl<R: Runner> App<R> {
         Ok(())
     }
 
+    /// Build every staged machine: one worker thread per machine when the
+    /// runner allows it, otherwise in machine order. Each worker's output is
+    /// printed in machine order, and the first failing machine fails install.
+    fn build_machines(&mut self, builds: &[SourceBuild], engine_sha: &str, warm_ptx: bool, prepare_model: bool) -> Result<Vec<(Artifact, bool)>, String> {
+        for job in builds {
+            crate::output::line(format_args!("{}: {} engine and helper.", job.machine.name, if self.dry { "plan to build" } else { "building" }))?;
+        }
+        let workers = if builds.len() > 1 { builds.iter().map(|_| self.runner.worker()).collect::<Option<Vec<_>>>() } else { None };
+        let Some(workers) = workers else {
+            return builds.iter().map(|job| self.build_machine(job, engine_sha, warm_ptx, prepare_model)).collect();
+        };
+        let results = std::thread::scope(|scope| {
+            let handles = builds.iter().zip(workers).map(|(job, runner)| {
+                let (config, dry) = (self.config.clone(), self.dry);
+                scope.spawn(move || crate::output::buffered(|| App { config, runner, dry }.build_machine(job, engine_sha, warm_ptx, prepare_model)))
+            }).collect::<Vec<_>>();
+            handles.into_iter().map(|handle| handle.join()).collect::<Vec<_>>()
+        });
+        let mut built = Vec::new();
+        for result in results {
+            let (result, printed) = result.map_err(|_| "Install worker stopped unexpectedly; inspect retained logs.")?;
+            crate::output::text(format_args!("{printed}"))?;
+            built.push(result?);
+        }
+        Ok(built)
+    }
+
+    fn build_machine(&mut self, job: &SourceBuild, engine_sha: &str, warm_ptx: bool, prepare_model: bool) -> Result<(Artifact, bool), String> {
+        let SourceBuild { machine, borrowed, storage, remote_engine, remote_cli, build } = job;
+        let artifact = Artifact {
+            worker: format!("{build}/vade"),
+            binary: format!("{build}/flash-serve"),
+            ptx: format!("{build}/flash.ptx"),
+            binary_sha256: "0".repeat(64),
+            ptx_sha256: "0".repeat(64),
+            worker_sha256: "0".repeat(64),
+        };
+        let mut helper = runner::ssh(&machine.ssh, format!(r#"{storage}
+export PATH="$HOME/.cargo/bin:$PATH"
+unset CARGO_TARGET_DIR RUSTC_WRAPPER RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_TARGET RUSTUP_TOOLCHAIN RUSTC RUSTDOC
+export RUSTUP_TOOLCHAIN=1.99.0
+cd {cli}
+cli_cache=$(cd {cli_cache} && pwd -P)
+ln -s "$cli_cache" target
+CARGO_TARGET_DIR="$cli_cache" cargo build --release --offline --bin vade
+vade_private_tree "$cli_cache"
+vade_private_dir {destination} new
+cp "$cli_cache/release/vade" {worker}
+chmod 700 {worker}
+"#, cli=remote_path(remote_cli), cli_cache=remote_path(&format!("{}/build-cache/cli",machine.cli_source)),
+            destination=remote_path(build), worker=remote_path(&artifact.worker)), &format!("{} helper build", machine.name));
+        helper.timeout = Duration::from_secs(900);
+        self.checked(helper, "Helper build failed; check the pinned Rust toolchain and retained logs.")?;
+        // Reuse compiler outputs, then copy into a fresh immutable build.
+        // The target link also supports kernel scripts with relative paths.
+        let script = format!(
+            r#"{storage}
+export PATH="$HOME/.cargo/bin:$PATH"
+unset CARGO_TARGET_DIR SPARK_LAYER_PTX SPARK_CUBIN RUSTC_WRAPPER RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_TARGET RUSTUP_TOOLCHAIN RUSTC RUSTDOC
+export RUSTUP_TOOLCHAIN=1.99.0
+vade_private_dir {engine} existing
+engine_cache=$(cd {engine_cache} && pwd -P)
+cd {engine}
+printf '%s\n' {engine_revision} > REVISION
+ln -s "$engine_cache" target
+export CARGO_TARGET_DIR="$engine_cache"
+cargo kernels
+cargo build --release --offline --workspace --exclude spark-rust-kernels
+vade_private_tree "$engine_cache"
+destination={destination}
+vade_private_dir "$destination" existing
+cp "$engine_cache/release/flash-serve" "$destination/flash-serve"
+cp "$engine_cache/nvptx64-nvidia-cuda/release/spark_layer_kernels.ptx" "$destination/flash.ptx"
+chmod 700 "$destination/flash-serve" "$destination/vade"
+chmod 600 "$destination/flash.ptx"
+sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade"
+"#,
+            engine = remote_path(remote_engine),
+            engine_revision = quote(engine_sha),
+            engine_cache =
+                remote_path(&format!("{}/build-cache/engine", machine.engine_source)),
+            destination = remote_path(build)
+        );
+        let mut exec = runner::ssh(
+            &machine.ssh,
+            script,
+            &format!("{} build and stage", machine.name),
+        );
+        exec.timeout = Duration::from_secs(3600);
+        let model_check = self.model_check(machine, &artifact.worker);
+        let (output, checked) = self.runner.parallel(&exec, &model_check)?;
+        if !output.success { return Err("Machine build did not finish. Inspect retained logs and the pinned Rust/CUDA toolchain; run vade install again.".into()); }
+        let mut artifact = artifact;
+        if !self.dry {
+            let hashes = artifact_hashes(&output.stdout)?;
+            artifact.binary_sha256 = hashes[0].clone();
+            artifact.ptx_sha256 = hashes[1].clone();
+            artifact.worker_sha256 = hashes[2].clone();
+        }
+        let present = self.model_result(machine, checked)?;
+        if warm_ptx && !*borrowed {
+            self.prepare_install(machine, &artifact, prepare_model && present)?;
+        }
+        Ok((artifact, present))
+    }
+
     pub(super) fn install(&mut self) -> Result<(), String> {
         self.config.validate_model_revision()?;
         self.config.validate_control_socket()?;
@@ -162,6 +268,7 @@ impl<R: Runner> App<R> {
             supports_fp4_chain,
             artifacts: BTreeMap::new(),
         };
+        let mut builds = Vec::new();
         for machine in &machines {
             let borrowed = existing.as_ref().is_some_and(|session| {
                 session.ranks.iter().any(|rank| {
@@ -222,95 +329,13 @@ impl<R: Runner> App<R> {
             )?;
             self.sync_source(&engine_source, machine, &remote_engine, "engine")?;
             self.sync_source(&cli_source, machine, &remote_cli, "CLI")?;
-            let build = format!(
-                "{}/builds/{engine_sha}-{cli_sha}-{install_id}",
-                machine.stage_dir
-            );
-            let artifact = Artifact {
-                worker: format!("{build}/vade"),
-                binary: format!("{build}/flash-serve"),
-                ptx: format!("{build}/flash.ptx"),
-                binary_sha256: "0".repeat(64),
-                ptx_sha256: "0".repeat(64),
-                worker_sha256: "0".repeat(64),
-            };
-            let mut helper = runner::ssh(&machine.ssh, format!(r#"{storage}
-export PATH="$HOME/.cargo/bin:$PATH"
-unset CARGO_TARGET_DIR RUSTC_WRAPPER RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_TARGET RUSTUP_TOOLCHAIN RUSTC RUSTDOC
-export RUSTUP_TOOLCHAIN=1.99.0
-cd {cli}
-cli_cache=$(cd {cli_cache} && pwd -P)
-ln -s "$cli_cache" target
-CARGO_TARGET_DIR="$cli_cache" cargo build --release --offline --bin vade
-vade_private_tree "$cli_cache"
-vade_private_dir {destination} new
-cp "$cli_cache/release/vade" {worker}
-chmod 700 {worker}
-"#, cli=remote_path(&remote_cli), cli_cache=remote_path(&format!("{}/build-cache/cli",machine.cli_source)),
-                destination=remote_path(&build), worker=remote_path(&artifact.worker)), &format!("{} helper build", machine.name));
-            helper.timeout = Duration::from_secs(900);
-            self.checked(helper, "Helper build failed; check the pinned Rust toolchain and retained logs.")?;
-            // Reuse compiler outputs, then copy into a fresh immutable build.
-            // The target link also supports kernel scripts with relative paths.
-            let script = format!(
-                r#"{storage}
-export PATH="$HOME/.cargo/bin:$PATH"
-unset CARGO_TARGET_DIR SPARK_LAYER_PTX SPARK_CUBIN RUSTC_WRAPPER RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_TARGET RUSTUP_TOOLCHAIN RUSTC RUSTDOC
-export RUSTUP_TOOLCHAIN=1.99.0
-vade_private_dir {engine} existing
-engine_cache=$(cd {engine_cache} && pwd -P)
-cd {engine}
-printf '%s\n' {engine_revision} > REVISION
-ln -s "$engine_cache" target
-export CARGO_TARGET_DIR="$engine_cache"
-cargo kernels
-cargo build --release --offline --workspace --exclude spark-rust-kernels
-vade_private_tree "$engine_cache"
-destination={destination}
-vade_private_dir "$destination" existing
-cp "$engine_cache/release/flash-serve" "$destination/flash-serve"
-cp "$engine_cache/nvptx64-nvidia-cuda/release/spark_layer_kernels.ptx" "$destination/flash.ptx"
-chmod 700 "$destination/flash-serve" "$destination/vade"
-chmod 600 "$destination/flash.ptx"
-sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade"
-"#,
-                engine = remote_path(&remote_engine),
-                engine_revision = quote(&engine_sha),
-                engine_cache =
-                    remote_path(&format!("{}/build-cache/engine", machine.engine_source)),
-                destination = remote_path(&build)
-            );
-            let mut exec = runner::ssh(
-                &machine.ssh,
-                script,
-                &format!("{} build and stage", machine.name),
-            );
-            exec.timeout = Duration::from_secs(3600);
-            crate::output::line(format_args!(
-                "{}: {} engine and helper.",
-                machine.name,
-                if self.dry {
-                    "plan to build"
-                } else {
-                    "building"
-                }
-            ))?;
-            let model_check = self.model_check(machine, &artifact.worker);
-            let (output, checked) = self.runner.parallel(&exec, &model_check)?;
-            if !output.success { return Err("Machine build did not finish. Inspect retained logs and the pinned Rust/CUDA toolchain; run vade install again.".into()); }
-            let mut artifact = artifact;
-            if !self.dry {
-                let hashes = artifact_hashes(&output.stdout)?;
-                artifact.binary_sha256 = hashes[0].clone();
-                artifact.ptx_sha256 = hashes[1].clone();
-                artifact.worker_sha256 = hashes[2].clone();
-            }
-            let present = self.model_result(machine, checked)?;
+            builds.push(SourceBuild { machine: machine.clone(), borrowed, storage,
+                remote_engine, remote_cli, build: format!("{}/builds/{engine_sha}-{cli_sha}-{install_id}", machine.stage_dir) });
+        }
+        // Every source copy is staged; the machines now compile at once.
+        for (job, (artifact, present)) in builds.iter().zip(self.build_machines(&builds, &engine_sha, supports_warm_ptx, supports_prepare_model)?) {
             weights_present &= present;
-            if supports_warm_ptx && !borrowed {
-                self.prepare_install(machine, &artifact, supports_prepare_model && present)?;
-            }
-            manifest.artifacts.insert(machine.name.clone(), artifact);
+            manifest.artifacts.insert(job.machine.name.clone(), artifact);
         }
         // A machine that rejected the bundle may have rebuilt different bytes.
         // Validate the complete generation before publishing any local state.
@@ -594,10 +619,10 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
 
 }
 
-// This bootstrap runs before a trusted remote helper exists. Fixed system tools
-// keep the checks independent of PATH. Every descent starts at a checked parent;
-// only root or this account can rename it or change its permissions thereafter.
-// A private leaf alone is insufficient when an ancestor belongs to another user.
+/// This bootstrap runs before a trusted remote helper exists. Fixed system tools
+/// keep the checks independent of PATH. Every descent starts at a checked parent;
+/// only root or this account can rename it or change its permissions thereafter.
+/// A private leaf alone is insufficient when an ancestor belongs to another user.
 pub(super) const REMOTE_STORAGE_GUARD: &str = r#"set -eu
 umask 077
 vade_uid=$(/usr/bin/id -u)
@@ -757,3 +782,6 @@ fn stage_local(source: &Path, destination: &Path) -> Result<(), String> {
     }
     result
 }
+
+/// One machine whose engine and CLI sources are staged and ready to compile.
+struct SourceBuild { machine: Machine, borrowed: bool, storage: String, remote_engine: String, remote_cli: String, build: String }

@@ -1,5 +1,7 @@
 //! Benchmark receipts belong in the working directory, not the installation.
 
+/// `vade bench`: run vade-bench, writing to `./vade-bench.json` unless
+/// `--output` (or `--out`) is given.
 pub fn run(arguments: &[String], interrupted: fn() -> bool) -> Result<i32, String> {
     // Discovery and the development suite have their own argument handling.
     if arguments.first().is_some_and(|arg| arg == "--suite")

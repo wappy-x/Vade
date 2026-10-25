@@ -160,7 +160,7 @@ mod tests {
         assert_eq!(complete(&workspace, "@input.", 7).unwrap().0, "txt");
         assert_eq!(complete(&workspace, "@dir", 4).unwrap().0, "/");
         let (suffix, candidates) = complete(&workspace, "@input", 6).unwrap(); assert!(suffix.is_empty()); assert!(candidates.contains("input-two.txt") && candidates.contains("input.txt"));
-        let super::super::args::Parsed::Run(config) = super::super::args::Config::parse(["demo".to_owned(), "--workspace".into(), root.display().to_string()].into_iter()).unwrap() else { panic!() };
+        let super::super::args::Parsed::Run(config) = super::super::args::Config::parse(["demo".to_owned(), "--workspace".into(), root.display().to_string()]).unwrap() else { panic!() };
         let mut app = super::super::App::new(config).unwrap(); app.input.load_history(&std::sync::Arc::new(Workspace::new(&root).unwrap())).unwrap();
         app.input.set("@inp".into()); app.key(vade_harness::terminal::Key::Tab).unwrap(); assert_eq!(app.input.text(), "@input"); assert!(app.attachment_completion.1.is_empty()); app.key(vade_harness::terminal::Key::Tab).unwrap(); assert!(app.attachment_completion.1.contains("input-two.txt"));
         app.input.set("@inp ".into()); app.key(vade_harness::terminal::Key::Tab).unwrap(); assert_eq!(app.input.text(), "@inp     ");

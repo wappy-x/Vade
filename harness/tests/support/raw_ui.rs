@@ -105,7 +105,9 @@ impl Ui {
         // Model a terminal emulator keeping its slave open: Darwin can discard
         // unread output on the last slave close, even after a successful flush.
         let keep_slave = slave.try_clone().unwrap();
+        // The PTY fixtures run only on macOS and keep its shell-capable shape.
         let child = Command::new(env!("CARGO_BIN_EXE_vade-harness"))
+            .env_remove("VADE_HARNESS_SHELL")
             .args([
                 mode,
                 "--state-in-project",

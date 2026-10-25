@@ -1,3 +1,4 @@
+//! `vade status --json` for the legacy `vade run qwen3-8b` bootstrap.
 use super::*;
 use crate::{
     evals::json::{self, Value},
@@ -5,6 +6,7 @@ use crate::{
 };
 
 impl<R: Runner> Local<R> {
+    /// Fill a status report from this bootstrap's run record and live checks.
     pub(crate) fn status_snapshot(&mut self, report: &mut Snapshot) -> Result<(), String> {
         report.set("model", ENDPOINT_MODEL);
         let Some(record) = self.record()? else {

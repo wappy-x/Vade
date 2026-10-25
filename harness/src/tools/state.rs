@@ -13,6 +13,7 @@ use std::path::{Component, Path, PathBuf};
 /// stays visible: `.vade/check` is a user-written project setting, not state.
 pub(crate) const GITIGNORE: &[u8] = b"# Private Vade chat state; git ignores it.\n*\n!check\n";
 
+/// Where a workspace keeps its private chat state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StateLocation {
     /// `<vade home>/projects/<key>`, outside the project tree (the default).

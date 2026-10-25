@@ -1,21 +1,22 @@
 # Legacy FP8 fresh install: from zero to a first answer
 
-**For a new install, start with [INSTALL.md](../INSTALL.md).** The current
-FP4-Local model runs directly on one Spark with `vade launch`, no second
-computer needed, and [First run](../harness/docs/first-run.md) explains that
-local launcher. Driving Sparks from another computer (the controller route)
-comes after that.
+**Installing Vade for the first time? Start with [INSTALL.md](../INSTALL.md).**
+The current model, [FP4-Local](GLOSSARY.md#dg), runs on a single Spark: you
+start it on the Spark itself with `vade launch`, and you need no second
+computer. [First run](../harness/docs/first-run.md) walks you through that
+launcher. Driving Sparks from another computer, the
+[controller](GLOSSARY.md#ac) route, comes after that.
 
-This page keeps the older FP8 checklist. It takes two DGX Sparks, yours or
-rented, to a working Vade server that you run with the `vade` command. It uses
-the controller route, and FP8 needs the explicit `--fp8-legacy` flag. The
-historical FP8 evidence is in [Legacy FP8 installation](install-legacy-fp8.md).
+This page keeps the older checklist for the FP8 model. It needs **two** DGX
+Sparks, yours or rented: the FP8 checkpoint does not fit on one. It takes them
+to a working Vade server that you drive with the `vade` command from a Mac
+(or a Linux computer; see step 0), which acts as the controller. FP8 is no
+longer the default, so every start needs the explicit `--fp8-legacy` flag. The
+history and evidence behind FP8 are in
+[Legacy FP8 installation](install-legacy-fp8.md).
 
-An earlier test install covered the user-level steps on machines whose OS
-and network were already set up and whose weights were already verified. Its
-result file was outdated and has been [removed](../bench/receipts/README.md),
-and that run does not prove that the current CLI route works from a blank
-machine.
+> **Heads-up:** nobody has yet run this legacy route end to end from a blank
+> machine. If a step doesn't match what you see, please open an issue.
 
 <br>
 
@@ -45,10 +46,14 @@ machine.
 - [ ] **Administrator (sudo) access** on both, for the one-time OS setup
 - [ ] **The same home folder on both Sparks** (`echo $HOME` prints the same path), so `~/models/...` means the same place on both. If they differ, use absolute paths in the config instead of `~/`.
 - [ ] **The standard 128 GB of unified memory on each Spark**, with no other GPU jobs
-- [ ] **Enough free disk for the complete checkpoint, build output and download state**; we publish no measured minimum
+- [ ] **Plenty of free disk on each Spark** for the checkpoint (see its size on the model page) plus room for the build
 - [ ] **The basic programs and download tools**: `cc`, `curl`, `git`, `rsync`, `ping`, `sha256sum`, `python3`, **`python3-venv`**. Have them ready before step 5.
 - [ ] **A Mac** with Git and network access to both Sparks
 - [ ] **Network access to GitHub**, where the Vade repository is public
+
+**No Mac?** A Linux computer works as the controller for install, start, stop
+and chat. The coding assistant's shell tool and automatic checks need the
+macOS sandbox, so they're off on Linux.
 
 <br>
 
@@ -57,12 +62,11 @@ machine.
 ## 1. Renting? Ask for these
 
 Cloud and hosting providers rent Sparks as single machines or as cabled pairs.
-**A cabled pair is fastest.** A rented pair usually comes as two Sparks and
-one direct cable, with no ring (no cable that closes the Sparks into a loop),
-and that is all Vade needs. Two Sparks on an ordinary network also work, more
-slowly, in [TCP mode](#no-qsfp-link-use-tcp-mode).
+**A cabled pair is fastest.** A rented pair usually comes as two Sparks joined
+by one direct cable, and that's all Vade needs. Two Sparks on an ordinary
+network also work, more slowly, in [TCP mode](#no-qsfp-link-use-tcp-mode).
 
-Terms used below:
+Three terms come up in the questions below:
 
 - **RDMA**: direct memory-to-memory transfers between Sparks.
 - **RoCE switch**: a network switch that carries RDMA.
@@ -79,7 +83,7 @@ Ask the provider before you pay:
 | "Which **kernel** is installed?" | `7.0.0-1019-nvidia` needs NVIDIA's `kho=off` fix for multi-Spark RDMA. |
 | "Are the **QSFP interfaces unconfigured**, or what addresses did you assign?" | You either set them up yourself or reuse theirs. |
 
-**What changes on rented machines**
+**What is different on rented machines**
 
 - You will not see the cable. Trust `ibdev2netdev`, `ethtool` and the
   [link checks](network-setup.md#7-check-every-link), not a diagram.
@@ -92,15 +96,13 @@ Ask the provider before you pay:
 - **Only one Spark?** This guide's Flash-Next FP8 checkpoint does not fit on one.
   Use the current FP4-Local [on-Spark install](../INSTALL.md#route-a-on-this-spark)
   and [first-run guide](../harness/docs/first-run.md).
-- **Different home folders on the two rentals?** Both ranks must get the exact
+- **Different home folders on the two rentals?** Both Sparks must see the exact
   same absolute model and build paths. Write absolute paths (for example
   `/data/vade/models/...`) in the config instead of `~/`.
 - **Ping blocked?** With RDMA, `vade install` and `vade doctor` check each link
   with ICMP ping; ask the provider to allow ping between the two Sparks. TCP
   mode does not use ping.
-- **No Mac?** A Linux controller can run the SSH lifecycle and use chat, but
-  the agent's shell tool and automatic checks require the macOS sandbox. The
-  current one-Spark route needs neither a controller nor an SSH tunnel.
+- **No Mac?** See the note under [step 0](#0-check-what-you-have).
 
 ### No QSFP link? Use TCP mode
 
@@ -136,12 +138,18 @@ Follow **[Hardware and network setup](network-setup.md)** until every link check
 passes. In short:
 
 1. Cable port 0 of spark-1 to port 1 of spark-2.
-2. Give each cable link (rail) its own `/24` subnet with MTU 9000 (example: `10.77.0.1` ↔ `10.77.0.2`, `10.77.1.1` ↔ `10.77.1.2`).
-3. Clone Vade on **each Spark** (the OS-setup scripts run from the repository root), then run the setup scripts: packages, network, RDMA access and unlimited locked memory (`memlock`), the kernel note, and SSH keys between the Sparks.
+2. Give each cable link (a [rail](GLOSSARY.md#pr)) its own `/24` subnet with MTU 9000 (example: `10.77.0.1` ↔ `10.77.0.2`, `10.77.1.1` ↔ `10.77.1.2`).
+3. Clone Vade on **each Spark** and run the OS-setup scripts from the repository root, in the order given in [Spark system setup](spark-setup.md). Together they install the RDMA packages, configure the network, set unlimited locked memory (`memlock`) for RDMA, apply NVIDIA's `kho=off` fix if your kernel is `7.0.0-1019-nvidia`, and create SSH keys between the Sparks.
 4. Check: jumbo ping, `ib_write_bw` in both directions, `ulimit -l` = `unlimited`.
 
-Before the user-level install, an administrator installs any missing Ubuntu
-packages. **Refresh the package lists before installing**, even on a fresh VM:
+**Using [TCP mode](#no-qsfp-link-use-tcp-mode)?** Skip the QSFP, RDMA and memlock
+steps. All you need is for the two Sparks to reach each other on TCP ports
+29960 and 29961, plus SSH from spark-1 to spark-2 to copy the weights in step 5.
+
+**Install the base packages too.** The setup scripts add only the RDMA and
+network packages; building Vade and downloading the model need these as well.
+An administrator runs this once on each Spark. Refresh the package lists first,
+even on a fresh VM:
 
 ```sh
 set -euo pipefail
@@ -150,12 +158,15 @@ sudo apt-get install -y build-essential ca-certificates curl git openssh-client 
   rsync iputils-ping python3 python3-venv
 ```
 
-Expected: exit 0 from both commands. Without the `python3-venv` package,
-`python3 -m venv` cannot supply ensurepip. If “no installation candidate”
-remains after refreshing lists, stop and have the administrator check package
-sources; on Ubuntu 24.04 the dependency is `python3.12-venv`.
+Expected: exit 0 from both commands. The `python3-venv` package matters
+because the model download in step 5 runs inside a private Python environment
+(a venv), and without this package Python cannot set one up with pip. If “no
+installation candidate” remains after refreshing the lists, stop and have the
+administrator check the package sources; on Ubuntu 24.04 the package is
+`python3.12-venv`.
 
-Before any model download, check that Python can create a virtual environment:
+**Check that Python can create a virtual environment**, before any model
+download:
 
 ```sh
 VADE_VENV_CHECK=$(mktemp -d)
@@ -163,12 +174,8 @@ python3 -m venv "$VADE_VENV_CHECK/check"
 "$VADE_VENV_CHECK/check/bin/python" -m pip --version
 ```
 
-Expected: a pip version and exit 0, normally in under a minute (an estimate).
+Expected: a pip version and exit 0, normally in under a minute.
 Do not continue until these prerequisites and the link checks pass.
-
-**Using [TCP mode](#no-qsfp-link-use-tcp-mode)?** Skip the QSFP, RDMA and memlock
-steps. All you need is for the two Sparks to reach each other on TCP ports
-29960 and 29961, plus SSH from spark-1 to spark-2 to copy the weights in step 5.
 
 <br>
 
@@ -208,7 +215,8 @@ unlimited
 ```
 
 Anything else (often `8192`) means the RDMA setup step has not taken effect for
-that login path. Fix it before you go on.
+that login path. Fix it before you go on. In TCP mode the locked-memory limit
+does not matter, but the logins must still work without prompts.
 
 <br>
 
@@ -253,10 +261,10 @@ For full details, including a safe way to read the installer first, see
 revision `236dfdf285828023ca3bcd3f37366c58a3469b13`. No conversion, no
 re-quantizing. Read its license on the model page first.
 
-The complete snapshot includes weights, configuration, tokenizer and
-supporting files. Check your free disk space against that snapshot plus the
-build output. How long the download takes depends on your connection and the
-service; we give no estimate here.
+The complete snapshot includes the weights, configuration, tokenizer and
+supporting files. Make sure your free disk space covers that snapshot plus the
+build output. How long the download takes depends on your connection and on
+Hugging Face.
 
 > `vade` does **not** download Flash-Next. You fetch it once with the
 > repository's helper, `ops/fetch-model.sh`. The helper runs Hugging Face's own
@@ -273,26 +281,22 @@ sh ops/fetch-model.sh Qwen/Qwen3.8-Flash-Next-FP8 236dfdf285828023ca3bcd3f37366c
 
 Expected final line: `verified <file-count> files`.
 
-The [helper](../ops/fetch-model.sh) installs its own copy of the `hf` tool
-(`huggingface_hub` 2.2.0) in a private Python environment (venv) at
-`MODEL_DIR.fetch/venv`, where
-`MODEL_DIR` is the folder you passed. It checks the official checksums and
-looks for missing or extra files, then writes and checks the trusted
-`MODEL_DIR.sha256` manifest next to the model folder. While it verifies, the
-helper moves the download's own metadata folder, `.cache/huggingface`, aside
-so it is not counted as an extra file, and always puts it back, even on
-failure or Ctrl-C. If `HF_TOKEN` is already set, the helper uses it without printing
-it.
-
 If the helper fails, stop, do what its one-line reason says and rerun the same
-command; finished downloads are reused. Continue only after it succeeds. The
-earlier test install mentioned at the top of this page used weights that were
-already verified, so it does not show this helper fetching a full snapshot.
+command; finished downloads are reused. Continue only after it succeeds.
 
-**Copy to spark-2** over the QSFP link (usually faster than downloading again;
-in TCP mode use spark-2's ordinary address), then verify the copy. The key
-`~/.ssh/vade-cluster` in the comment below is the peer key from step 6 of
-[Spark system setup](spark-setup.md).
+**What the [helper](../ops/fetch-model.sh) does.** Below, `MODEL_DIR` is the
+folder you passed to it.
+
+- It installs its own `hf` tool in a private venv beside the model folder, at
+  `MODEL_DIR.fetch/venv`.
+- It checks every file against the official checksums and writes
+  `MODEL_DIR.sha256`, which you use on spark-2 below.
+
+**Copy to spark-2** over the QSFP link, which is usually faster than
+downloading again (in TCP mode, use spark-2's ordinary address). Then verify
+the copy. The key `~/.ssh/vade-cluster` below is the Spark-to-Spark key you
+created in the SSH step of
+[Spark system setup](spark-setup.md#6-establish-ssh-between-the-sparks).
 
 ```sh
 # on spark-1; 10.77.0.2 is spark-2's example fabric address
@@ -307,9 +311,6 @@ scp -i $K ~/models/Qwen/Qwen3.8-Flash-Next-FP8.sha256 10.77.0.2:models/
 cd ~/models/Qwen/Qwen3.8-Flash-Next-FP8
 sha256sum -c ~/models/Qwen3.8-Flash-Next-FP8.sha256   # every file must report OK
 ```
-
-For the current FP4-Local checkpoint, follow
-[INSTALL.md model acquisition](../INSTALL.md#step-3-get-the-model) instead.
 
 <br>
 
@@ -339,7 +340,11 @@ config is missing.
 
 `.local/` is ignored by Git, so your addresses never get committed.
 
-**Edit `.local/vade.conf`.** Here is a filled-in example for two Sparks (the addresses are examples):
+**Edit `.local/vade.conf`.** The `[global]` part applies to the whole setup,
+and each `[machine ...]` part describes one Spark. In each machine part,
+`fabric.<peer>` is that Spark's own address on its cable to the peer (in TCP
+mode, its ordinary address; see the [TCP table](#no-qsfp-link-use-tcp-mode)).
+Here is a filled-in example for two Sparks (the addresses are examples):
 
 ```ini
 [global]
@@ -385,8 +390,9 @@ stage_dir = ~/vade-stage
 state_dir = ~/.local/state/vade
 ```
 
-Each Spark in the engine is a rank, and the first machine listed becomes
-**rank 0**, the one that answers HTTP. More detail is in the
+The engine runs one process on each Spark, called a
+[rank](GLOSSARY.md#pr). The first machine listed becomes **rank 0**, the one
+that answers HTTP. More detail is in the
 [CLI guide](../cli/README.md#multi-spark-source-setup).
 
 <br>
@@ -433,19 +439,8 @@ Chat here: vade chat
 ```
 
 Loading the weights takes minutes. `vade up --fp8-legacy` waits up to
-`health_timeout_secs` (360 s by default).
-
-**`vade up --fp8-legacy` stops with "Requested size does not fit."?** Read
-`Asked`, `Available`, `Gap` and `Next`: they show the reservation per rank, the
-budget left after reserves, the shortfall in GiB and bytes, and the supported
-next steps. Lower `--context` or `--chats`, then run `vade up --fp8-legacy`
-again.
-
-After copying or downloading files, you may also see `Reclaimable cache
-estimate:` in GiB and bytes, followed by `this is not a guarantee that CUDA can
-allocate it.` On a Spark, Linux file cache shares memory with the GPU. Vade
-already asks Linux to drop the model's own file cache; the estimate does not
-promise that the context or chat count you asked for will fit.
+`health_timeout_secs` (360 s by default). If it stops with "Requested size
+does not fit.", see the note at the end of step 8.
 
 **Check everything.**
 
@@ -464,16 +459,15 @@ Fabric: 2 directed link checks passed. Transport ports are checked by engine sta
 Harness doctor: passed.
 ```
 
-Without a server, `vade doctor` checks the machines and exits with code 1.
-Start the server with `vade up --fp8-legacy` first, then run `vade doctor`
-again.
+Run `vade doctor` while the server is up. Without a server it still checks
+the machines, but exits with code 1; start the server with
+`vade up --fp8-legacy`, then run `vade doctor` again.
 
-In TCP mode the doctor lines say `transport: TCP`; with one Spark they say
-`transport: local (one Spark; no fabric)`.
+In TCP mode the doctor lines say `transport: TCP`.
 
 Right after `vade up --fp8-legacy`, look for `rdma=true` (or `rdma=false` in
-TCP mode) in `vade logs`. It shows only the last 64 KiB of each rank's log, so
-startup lines scroll away later.
+TCP mode) in `vade logs`. Check soon: `vade logs` shows only the last 64 KiB of
+each rank's log, so the startup lines scroll away later.
 
 <br>
 
@@ -500,12 +494,16 @@ curl -s http://localhost:18080/v1/chat/completions \
   -d '{"model":"qwen3.8-flash-next-fp8","messages":[{"role":"user","content":"Say hello in one sentence."}],"max_tokens":64,"temperature":0,"top_p":1,"top_k":0,"repetition_penalty":1,"presence_penalty":0,"frequency_penalty":0,"enable_thinking":false}'
 ```
 
-You get JSON with the answer in `choices[0].message.content` and token counts
-in `usage`. Send every sampling field, as above. On this legacy FP8 server,
-any field you leave out falls back to the checkpoint's own sampled settings
-(top_k 20, top_p 0.95, from its `generation_config.json`), even when you send
-none at all, so the answer can change from run to run. FP4-Local is different:
-a request that names no sampling fields at all gets greedy decoding.
+You get JSON back, with the answer in `choices[0].message.content` and token
+counts in `usage`.
+
+**Send every sampling field, as above.** On this legacy FP8 server, any
+sampling field you leave out falls back to the checkpoint's own sampled
+settings (top_k 20, top_p 0.95, from its `generation_config.json`). That holds
+even when you send no sampling fields at all, so the answer can change from run
+to run. FP4-Local is different: a request that names no sampling fields at all
+gets [greedy decoding](GLOSSARY.md#dg), the single most likely token at each
+step.
 
 **Chat with the coding assistant** in the current folder:
 
@@ -522,6 +520,12 @@ vade down
 ```text
 Vade: stopped. Its owned ranks and tunnel are closed.
 ```
+
+> **If it doesn't fit.** Does `vade up --fp8-legacy` stop with "Requested
+> size does not fit."? Lower `--context` or `--chats` and run it again. If it
+> still fails, something else is holding memory: check `free -g` and
+> `nvidia-smi` and stop what you find. Dropping the page cache won't help, because the
+> free-memory figure Vade reads (MemAvailable) already counts it as free.
 
 Something stuck? Run `vade status`, then `vade logs`, then `vade down`. Never
 kill processes by name. See [CLI recovery](../cli/README.md#recovery) and the

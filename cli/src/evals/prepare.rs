@@ -571,6 +571,7 @@ fn frozen_sources(
     Ok(sources)
 }
 
+/// `vade test longctx prepare`: build the frozen inputs and return the manifest.
 pub fn run(args: &LongArgs) -> Result<Value, String> {
     if !(1..=8).contains(&args.keys_per_depth) || args.max_tokens < 64 * args.keys_per_depth {
         return Err("K must be 1..8 with at least 64*K output tokens".into());

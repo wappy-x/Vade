@@ -72,7 +72,7 @@ fn resumed_sessions_accept_previous_write_guidance() {
         Value::Object(vec![
             ("model".into(), Value::String("mock".into())),
             ("stream".into(), Value::Bool(true)),
-            ("tools".into(), native_definitions_with(false, vade_harness::contract::AUTOMATIC_OUTPUT_TOKENS as usize)),
+            ("tools".into(), native_definitions_with(false, vade_harness::contract::AUTOMATIC_OUTPUT_TOKENS as usize, vade_harness::coding_tools::SHELL_AVAILABLE)),
             ("messages".into(), Value::Array(vec![
                 native_message("system", &legacy_prompt),
                 current.messages()[1].value().clone(),

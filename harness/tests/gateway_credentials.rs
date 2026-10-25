@@ -113,7 +113,8 @@ fn free_address() -> SocketAddr { TcpListener::bind("127.0.0.1:0").unwrap().loca
 fn command(standalone: bool) -> Command {
     let mut command = Command::new(if standalone { env!("CARGO_BIN_EXE_vade-gateway") } else { env!("CARGO_BIN_EXE_vade-harness") });
     if !standalone { command.arg("gateway"); }
-    command.env_remove("VADE_API_KEY_FILE").env_remove("VADE_GATEWAY_UPSTREAM");
+    // An inherited client token would answer these unauthenticated calls with 401.
+    command.env_remove("VADE_API_KEY_FILE").env_remove("VADE_GATEWAY_UPSTREAM").env_remove("VADE_GATEWAY_TOKEN");
     command
 }
 fn call(process: &mut Gateway, address: SocketAddr) -> Vec<u8> {

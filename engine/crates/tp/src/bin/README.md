@@ -21,9 +21,10 @@ file and the checkpoint directory. `--fp4-local` asserts the checkpoint type;
 the mixed storage metadata also selects the Next backend automatically.
 World 1 keeps the rows/MTP service. World 2 serves the same engine as a two-rank
 layer pipeline by default (rank 0: HTTP, layers [0, 24) and the head; rank 1: the
-rest), with world 1's MTP default, queued prompt tiles, the RDMA wire and
-2048-row prompt tiles (`VADE_W2_PP`, `VADE_W2_PP_MTP`, `VADE_W2_PP_ASYNC`,
-`VADE_W2_PP_RDMA`, `VADE_PROMPT_TILE`; `0` turns one off). `VADE_W2_PP=0` at
+rest), with world 1's MTP default, queued prompt tiles, the RDMA wire,
+2048-row prompt tiles and the bounded head on rank 0 (`VADE_W2_PP`, `VADE_W2_PP_MTP`,
+`VADE_W2_PP_ASYNC`, `VADE_W2_PP_RDMA`, `VADE_PROMPT_TILE`, `VADE_HEAD_BOUNDS`; `0` turns
+one off). `VADE_W2_PP=0` at
 world 2, and world 4, select the pinned native rank backend with
 `--tensor-map PATH`; each rank uses the same invocation and only rank zero binds
 HTTP. Other worlds require the explicit pipeline opt-in below.

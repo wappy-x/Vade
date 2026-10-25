@@ -98,6 +98,8 @@ fn ascii_case_pattern(pattern: &str) -> String {
     result
 }
 
+/// Which edits and commands need the user's approval: `ask` (all but the
+/// read-only allowlist), `auto` (none, still sandboxed) or `never` (all denied).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApprovalPolicy {
     Ask,
@@ -121,6 +123,7 @@ impl ApprovalPolicy {
         }
     }
 }
+/// One command to run: explicit argv, no implicit shell, and a timeout.
 #[derive(Clone, Debug)]
 pub struct CommandSpec {
     pub argv: Vec<String>,
@@ -301,6 +304,7 @@ impl CommandSpec {
         )
     }
 }
+/// How a command ended.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
     Exited(Option<i32>),
@@ -308,6 +312,8 @@ pub enum Outcome {
     Cancelled,
     BuildLimit,
 }
+/// A finished command: its outcome, bounded stdout and stderr, byte counts
+/// (including omitted middles) and elapsed time.
 #[derive(Debug)]
 pub struct CommandOutput {
     pub outcome: Outcome,

@@ -5,6 +5,7 @@
 | File | What it does (from its own summary comment) |
 | --- | --- |
 | [`kv.rs`](kv.rs) | Native checkpoint lifecycle. |
+| [`request.rs`](request.rs) | Pooled HTTP requests: the engine, native and gateway entry points over one policy. |
 
 **Why a folder:** Rust keeps one module per file; this folder groups the modules that belong to `transport`.
 

@@ -1,7 +1,10 @@
+//! Harness arguments for `vade chat` on a local launch: the native agent at
+//! 8192 context tokens or more, direct text chat below, and where chat
+//! journals are kept.
 use std::{ffi::OsString, path::{Path, PathBuf}};
 
-// The native agent reserves at least this much context; direct text chat
-// negotiates its budget from the server and supports smaller launches.
+/// The native agent reserves at least this much context; direct text chat
+/// negotiates its budget from the server and supports smaller launches.
 pub(super) const AGENT_MIN_CONTEXT: u32 = 8192;
 
 pub(super) fn arguments(endpoint: &str, model: &str, workspace: &Path, context: u32, state: Vec<String>) -> Vec<String> {
@@ -21,7 +24,7 @@ pub(super) fn arguments(endpoint: &str, model: &str, workspace: &Path, context: 
 }
 
 /// Chat journals and input recall stay out of the project: the harness keeps
-/// them in <Vade home>/projects/<name>-<hash>. VADE_CHAT_IN_PROJECT=1 opts into
+/// them in `<Vade home>/projects/<name>-<hash>`. VADE_CHAT_IN_PROJECT=1 opts into
 /// the project's own git-ignored .vade folder instead.
 pub(crate) fn state_arguments() -> Result<Vec<String>, String> {
     state_arguments_for(std::env::var_os("VADE_CHAT_IN_PROJECT"), super::root)

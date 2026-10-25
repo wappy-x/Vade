@@ -47,6 +47,8 @@ fn read(job: &Path, name: &str) -> Result<Option<Fields>, String> {
     text::parse(&value).map(Some)
 }
 
+/// Record `exec` as a durable job under `root/build-jobs` and point `exec.job`
+/// at it, so a later command can find and settle an interrupted build.
 pub fn prepare(root: &Path, exec: &mut Exec) -> Result<(), String> {
     let job = root.join("build-jobs").join(text::random_hex(16)?);
     text::private_dir(&job)?;
@@ -102,6 +104,8 @@ fn helper_command(mode: &str, job: &Path) -> Result<Command, String> {
     Ok(command)
 }
 
+/// Run a prepared job under its own supervisor process and wait for it,
+/// reporting progress.
 pub fn run(job: &Path) -> Result<Output, String> {
     let began = Instant::now();
     let mut progress = crate::runner::Progress::new("local source build");
@@ -176,6 +180,8 @@ fn lock(job: &Path) -> Result<Option<File>, String> {
     }
 }
 
+/// Cancel and wait for any job under `root` that an earlier command did not
+/// finish.
 pub fn recover(root: &Path) -> Result<(), String> {
     let jobs = root.join("build-jobs");
     text::reject_symlinks(&jobs)?;
@@ -205,11 +211,24 @@ pub fn recover(root: &Path) -> Result<(), String> {
                 if read(&job, "stopped.conf")?.is_some() {
                     break;
                 }
-                if read(&job, "supervisor.conf")?.is_some() {
-                    return Err(format!(
-                        "Build supervisor was lost; cleanup is uncertain. Nothing signalled. Keep {}.",
-                        job.display()
+                if let Some(supervisor) = read(&job, "supervisor.conf")? {
+                    if !lost_and_stopped(&job, &supervisor)? {
+                        return Err(format!(
+                            "Build supervisor was lost; cleanup is uncertain. Nothing signalled. Keep {}.",
+                            job.display()
+                        ));
+                    }
+                    // A tombstone, like below: the evidence stays and a late helper refuses.
+                    save(
+                        &job,
+                        "stopped.conf",
+                        &Fields::from([("error".into(), "Build supervisor was lost after its processes stopped.".into())]),
+                    )?;
+                    crate::output::stderr_line(format_args!(
+                        "Vade: cleared a stale build record; its supervisor and build processes are gone ({}).",
+                        text::terminal_text(&job.to_string_lossy())
                     ));
+                    break;
                 }
                 // No registered supervisor can have spawned an anchor. Retain a
                 // cancellation tombstone so a late helper cannot start this job.
@@ -231,6 +250,28 @@ pub fn recover(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Called with the supervisor lock held, which the supervisor keeps until it
+/// exits. The record is stale only when no recorded process can still run: the
+/// supervisor identity is not alive, and the anchor's process group (the anchor
+/// leads it) has no live member or belongs to an earlier boot. Nothing is
+/// signalled here.
+fn lost_and_stopped(job: &Path, supervisor: &Fields) -> Result<bool, String> {
+    let alive = supervisor.get("pid").and_then(|pid| pid.parse::<u32>().ok()).is_none_or(|pid| {
+        snapshot(pid).is_ok_and(|now| ["boot", "birth"].iter().all(|k| supervisor.get(*k) == now.get(*k)))
+    });
+    if alive {
+        return Ok(false);
+    }
+    // Without anchor.conf no compiler ran: the anchor records itself before it
+    // checks cancel.conf, which recovery wrote before this read.
+    let Some(anchor) = read(job, "anchor.conf")? else { return Ok(true) };
+    if anchor.get("boot") != snapshot(std::process::id())?.get("boot") {
+        return Ok(true);
+    }
+    Ok(!group_active(required(&anchor, "pid")?.parse().map_err(|_| "Invalid build anchor identity.")?)?)
+}
+
+/// The private `__build-supervisor` and `__build-anchor` processes.
 pub fn helper(mode: &str, job: &Path) -> Result<(), String> {
     text::private_dir(job)?;
     let intent = read(job, "intent.conf")?.ok_or("No durable build intent; nothing executed.")?;
@@ -347,10 +388,13 @@ fn anchor(job: &Path, intent: &Fields) -> Result<(), String> {
     })();
     let result = result.unwrap_or_else(|error| Fields::from([("error".into(), error)]));
     save(job, "result.conf", &result)?;
-    // Compiler completion (including failure) leaves the group anchor alive.
-    loop {
-        std::thread::sleep(Duration::from_secs(60));
+    // Compiler completion (including failure) leaves the group anchor alive for
+    // its supervisor's signal. A lost supervisor cannot signal, so the anchor
+    // exits instead of holding the record open forever.
+    while std::os::unix::process::parent_id() == parent {
+        std::thread::sleep(Duration::from_millis(250));
     }
+    Ok(())
 }
 fn log(job: &Path, name: &str) -> Result<File, String> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -635,6 +679,77 @@ mod tests {
                 .contains("cancelled before execution")
         );
         assert!(read(&job, "anchor.conf").unwrap().is_none());
+    }
+    #[test]
+    fn recovery_clears_a_lost_supervisor_record_only_when_its_processes_are_gone() {
+        let _process_guard = crate::runner::process_test_lock();
+        // A supervisor that failed or was killed after registering, with no anchor.
+        let f = Fixture::new();
+        let job = f.job(false, Duration::from_secs(30));
+        let intent = read(&job, "intent.conf").unwrap().unwrap();
+        let mut gone = Command::new("sleep").arg("30").spawn().unwrap();
+        let mut record = snapshot(gone.id()).unwrap();
+        record.insert("token".into(), intent["token"].clone());
+        save(&job, "supervisor.conf", &record).unwrap();
+        gone.kill().unwrap();
+        gone.wait().unwrap();
+        recover(&f.0).unwrap();
+        assert!(read(&job, "stopped.conf").unwrap().unwrap()["error"].contains("supervisor was lost"));
+        recover(&f.0).unwrap();
+        assert!(run(&job).unwrap_err().contains("cancelled before execution"));
+        assert!(!f.0.join("descendant").exists());
+        // A free lock with a live recorded identity is not proof; keep the record.
+        let live = Fixture::new();
+        let job = live.job(false, Duration::from_secs(30));
+        let mut record = snapshot(std::process::id()).unwrap();
+        record.insert("token".into(), intent["token"].clone());
+        save(&job, "supervisor.conf", &record).unwrap();
+        assert!(recover(&live.0).unwrap_err().contains("supervisor was lost"));
+        assert!(read(&job, "stopped.conf").unwrap().is_none());
+        // A recorded anchor from an earlier boot cannot still run.
+        save(&job, "anchor.conf", &Fields::from([
+            ("pid".into(), std::process::id().to_string()),
+            ("boot".into(), "an-earlier-boot".into()),
+            ("birth".into(), "0".into()),
+        ])).unwrap();
+        record.insert("boot".into(), "an-earlier-boot".into());
+        save(&job, "supervisor.conf", &record).unwrap();
+        recover(&live.0).unwrap();
+        assert!(read(&job, "stopped.conf").unwrap().is_some());
+    }
+    #[test]
+    fn recovery_waits_for_a_killed_supervisors_build_then_clears_it() {
+        let _process_guard = crate::runner::process_test_lock();
+        let f = Fixture::new();
+        // The mock compiler waits for its `sleep 30` descendant.
+        let job = f.job(false, Duration::from_secs(30));
+        let mut supervisor = Foreign(helper_command("__build-supervisor", &job)
+            .unwrap()
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !f.0.join("descendant").exists() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        supervisor.0.kill().unwrap();
+        supervisor.0.wait().unwrap();
+        // The compiler still runs under its anchor: keep the record.
+        let anchor: u32 = read(&job, "anchor.conf").unwrap().unwrap()["pid"].parse().unwrap();
+        assert!(recover(&f.0).unwrap_err().contains("supervisor was lost"));
+        assert!(read(&job, "stopped.conf").unwrap().is_none());
+        // Once the build ends, the orphaned anchor exits and recovery clears the record.
+        let descendant = fs::read_to_string(f.0.join("descendant")).unwrap();
+        assert!(Command::new("kill").args(["-9", descendant.trim()]).status().unwrap().success());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while group_active(anchor).unwrap() {
+            assert!(Instant::now() < deadline, "orphaned anchor kept running");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(read(&job, "result.conf").unwrap().is_some());
+        recover(&f.0).unwrap();
+        assert!(read(&job, "stopped.conf").unwrap().unwrap()["error"].contains("supervisor was lost"));
     }
     #[test]
     fn recovery_rejects_fifo_records_and_lock_within_bounded_subprocesses() {

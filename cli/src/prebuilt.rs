@@ -2,10 +2,16 @@
 //! a corrupt matching bundle is rejected before falling back to source.
 use std::{fs::{self, File}, io::Read, path::{Path, PathBuf}};
 use crate::{sha256, text};
+/// A verified prebuilt Linux bundle for one engine and CLI revision, with the
+/// SHA-256 of each file in [`FILES`] order.
 pub struct Bundle { pub dir: PathBuf, pub hashes: [String; 3], fields: text::Fields }
+/// The bundle's verified host-side CLI and harness for this computer.
 pub struct HostBundle { pub cli: PathBuf, pub harness: PathBuf, pub hashes: [String; 2] }
+/// The Spark files every bundle carries.
 pub const FILES: [&str; 3] = ["flash-serve", "flash.ptx", "vade"];
 impl Bundle {
+    /// The bundle in `root/<engine>-<cli>` after checking its manifest and hashes;
+    /// `None` when there is none, an error when a matching one is corrupt.
     pub fn find(root: Option<&Path>, engine: &str, cli: &str) -> Result<Option<Self>, String> {
         let Some(root) = root else { return Ok(None); };
         let dir = root.join(format!("{engine}-{cli}"));
@@ -42,6 +48,8 @@ impl Bundle {
         }
         Ok(Some(Self { dir, hashes: hashes.try_into().unwrap(), fields }))
     }
+    /// The host executables for this platform and harness revision, if the bundle
+    /// has any; mismatched or corrupt ones are errors.
     pub fn host(&self, harness: &str) -> Result<Option<HostBundle>, String> {
         if !self.fields.keys().any(|key| key.starts_with("host-") || key == "host_target") {
             return Ok(None);
@@ -70,6 +78,7 @@ impl Bundle {
             hashes: hashes.try_into().unwrap() }))
     }
 }
+/// This computer's Rust target triple, or "unsupported".
 pub(crate) fn host_target() -> &'static str {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => "aarch64-apple-darwin",
@@ -101,7 +110,7 @@ mod tests {
         for name in FILES {
             let mut bytes = vec![0; 32]; bytes[..6].copy_from_slice(b"\x7fELF\x02\x01"); bytes[18] = 183;
             fs::write(dir.join(name), &bytes).unwrap();
-            manifest.push_str(&format!("{name}.sha256={}\n", sha256::digest_reader(&bytes[..]).unwrap()));
+            manifest.push_str(&format!("{name}.sha256={}\n", sha256::sha(&bytes)));
         }
         fs::write(dir.join("manifest.conf"), &manifest).unwrap();
         assert!(Bundle::find(Some(&root), &engine, &cli).unwrap().is_some());

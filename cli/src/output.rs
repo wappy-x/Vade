@@ -6,12 +6,16 @@ thread_local! {
     static OPERATION_FAILED: Cell<bool> = const { Cell::new(false) };
 }
 
+/// The error kind of the first failed write to standard output, if any.
 pub fn failure() -> Option<io::ErrorKind> { FAILURE.get() }
+/// Mark the command as failed, so a closed pipe cannot turn it into success.
 pub fn operation_failed() { OPERATION_FAILED.set(true); }
+/// Whether the only problem was a reader closing the pipe (as `| head` does),
+/// which exits 0.
 pub fn broken_pipe_success() -> bool {
     failure() == Some(io::ErrorKind::BrokenPipe) && !OPERATION_FAILED.get()
 }
-// A cleanup failure must remain a failing command even if stdout closed first.
+/// A cleanup failure must remain a failing command even if stdout closed first.
 pub fn cleanup_failed() { operation_failed(); FAILURE.set(None); }
 
 fn write_to(output: &mut dyn Write, args: fmt::Arguments<'_>, newline: bool) -> io::Result<()> {
@@ -20,7 +24,21 @@ fn write_to(output: &mut dyn Write, args: fmt::Arguments<'_>, newline: bool) -> 
     output.flush()
 }
 
+thread_local! { static BUFFER: std::cell::RefCell<Option<Vec<u8>>> = const { std::cell::RefCell::new(None) }; }
+
+/// Collect this thread's standard output instead of printing it, so concurrent
+/// workers can be printed afterwards in a fixed order.
+pub fn buffered<T>(run: impl FnOnce() -> T) -> (T, String) {
+    BUFFER.set(Some(Vec::new()));
+    let value = run();
+    let bytes = BUFFER.take().unwrap_or_default();
+    (value, String::from_utf8_lossy(&bytes).into_owned())
+}
+
 fn write(args: fmt::Arguments<'_>, newline: bool) -> Result<(), String> {
+    if let Some(result) = BUFFER.with_borrow_mut(|buffer| buffer.as_mut().map(|bytes| write_to(bytes, args, newline))) {
+        return result.map_err(|_| "Cannot buffer standard output.".into());
+    }
     #[cfg(test)]
     let result = TEST_WRITER.with_borrow_mut(|writer| match writer {
         Some(writer) => write_to(writer.as_mut(), args, newline),
@@ -34,12 +52,16 @@ fn write(args: fmt::Arguments<'_>, newline: bool) -> Result<(), String> {
     })
 }
 
+/// Write to standard output and flush; a failed write is an error to unwind.
 pub fn text(args: fmt::Arguments<'_>) -> Result<(), String> { write(args, false) }
+/// [`text`] followed by a newline.
 pub fn line(args: fmt::Arguments<'_>) -> Result<(), String> { write(args, true) }
 
 /// Legacy test/report commands own their exit codes and no launcher resources.
 /// Preserve command failures; output errors can only turn success into failure.
 pub fn report(args: fmt::Arguments<'_>, newline: bool) { let _ = write(args, newline); }
+/// The process exit code for a command that returned `code`, after any output
+/// failure.
 pub fn exit_code(code: i32) -> i32 {
     if code != 0 { return code; }
     match failure() {
@@ -49,7 +71,9 @@ pub fn exit_code(code: i32) -> i32 {
     }
 }
 
+/// Best-effort write to standard error.
 pub fn stderr(args: fmt::Arguments<'_>) { let _ = io::stderr().lock().write_fmt(args); }
+/// Best-effort line on standard error.
 pub fn stderr_line(args: fmt::Arguments<'_>) {
     let _ = writeln!(io::stderr().lock(), "{args}");
 }
@@ -57,6 +81,7 @@ pub fn stderr_line(args: fmt::Arguments<'_>) {
 #[cfg(test)]
 thread_local! { static TEST_WRITER: std::cell::RefCell<Option<Box<dyn Write>>> = const { std::cell::RefCell::new(None) }; }
 
+/// Send this thread's standard output to `writer` while `run` runs (tests only).
 #[cfg(test)]
 pub fn with_writer<T>(writer: impl Write + 'static, run: impl FnOnce() -> T) -> T {
     struct Reset;
@@ -68,10 +93,12 @@ pub fn with_writer<T>(writer: impl Write + 'static, run: impl FnOnce() -> T) -> 
     run()
 }
 
+/// Test writers for [`with_writer`].
 #[cfg(test)]
 pub mod testing {
     use super::*;
     use std::{cell::RefCell, rc::Rc};
+    /// Collects output and can inject a write or flush failure.
     #[derive(Clone, Default)]
     pub struct Capture {
         pub bytes: Rc<RefCell<Vec<u8>>>,

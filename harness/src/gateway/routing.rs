@@ -18,6 +18,8 @@ pub const MAX_ENDPOINTS: usize = 64;
 const MAX_METADATA: usize = 64 * 1024;
 const PREFIX_BYTES: usize = 16 * 1024;
 
+/// Cluster routing settings: affinity table size and lifetime, per-endpoint
+/// concurrency, capability lifetime, probe interval and failure cooldown.
 #[derive(Clone, Debug)]
 pub struct RoutingConfig {
     pub affinity_capacity: usize,
@@ -81,6 +83,7 @@ impl EndpointStats {
         (self.prompt_tokens > 0).then(|| self.cached_tokens as f64 / self.prompt_tokens as f64)
     }
 }
+/// A snapshot of cluster routing for `GET /_vade/gateway/stats`.
 #[derive(Clone, Debug)]
 pub struct RoutingStats {
     pub affinity_entries: usize,
@@ -178,6 +181,9 @@ impl Signature {
 struct Node {
     probed: bool,
     group: Option<usize>,
+    /// The latest probe answered with a foreign or changed contract: whatever
+    /// answers there now is not the verified engine, so it gets no keys.
+    revoked: bool,
     domain: Option<String>,
     epoch: u64,
     health_serial: u64,
@@ -186,6 +192,12 @@ struct Node {
     stats: EndpointStats,
 }
 impl Node {
+    fn probe_failed(&mut self) {
+        self.probed = true;
+        self.healthy_until = None;
+        self.epoch = self.epoch.wrapping_add(1);
+        self.stats.probe_failures = self.stats.probe_failures.saturating_add(1);
+    }
     fn healthy(&self, now: Instant) -> bool {
         self.healthy_until.is_some_and(|at| now < at)
     }
@@ -259,6 +271,7 @@ impl Cluster {
             .map(|endpoint| Node {
                 probed: false,
                 group: None,
+                revoked: false,
                 domain: None,
                 epoch: 0,
                 health_serial: 0,
@@ -313,12 +326,23 @@ impl Cluster {
     pub(super) fn len(&self) -> usize {
         self.0.endpoints.len()
     }
+    /// Endpoints whose capability contract discovery has verified at least
+    /// once, in configuration order, healthy or unreachable: any of them may
+    /// hold a request's key. Foreign and never-probed endpoints are left out,
+    /// and so is one whose latest probe answered with a foreign or changed
+    /// contract.
+    pub(super) fn verified_endpoints(&self) -> Vec<Endpoint> {
+        let state = self.state();
+        self.0.endpoints.iter().zip(&state.nodes)
+            .filter(|(_, node)| node.group.is_some() && !node.revoked)
+            .map(|(endpoint, _)| endpoint.clone()).collect()
+    }
     pub(super) fn probe_interval(&self) -> Duration {
         self.0.config.probe_interval
     }
     pub(super) fn refresh(&self, index: usize, cancel: &AtomicBool) {
         let serial = self.state().nodes[index].health_serial;
-        let result = (|| {
+        let answer = (|| {
             let endpoint = self.0.endpoints[index].gateway_route("/capabilities", None)?;
             // Probes use the configured upstream credential, without client requests or affinity keys.
             let mut response = transport::request_method_pooled_deadline(
@@ -342,11 +366,23 @@ impl Cluster {
             if bytes.len() > MAX_METADATA {
                 return Err(invalid("capability probe too large"));
             }
-            Signature::parse(
-                std::str::from_utf8(&bytes).map_err(|_| invalid("capabilities not UTF-8"))?,
-            )
+            Ok(bytes)
         })();
-        self.apply_probe(index, serial, result, Instant::now());
+        match answer {
+            // A 200 answer says who is there now, even when it is not us.
+            Ok(bytes) => {
+                let result = std::str::from_utf8(&bytes)
+                    .map_err(|_| invalid("capabilities not UTF-8"))
+                    .and_then(Signature::parse);
+                self.apply_probe(index, serial, result, Instant::now());
+            }
+            // Unreachable or refusing (say, restarting): keys it holds may
+            // still be good once it is back, so it stays eligible for them.
+            Err(_) => self.mark_unreachable(index),
+        }
+    }
+    fn mark_unreachable(&self, index: usize) {
+        self.state().nodes[index].probe_failed();
     }
     fn apply_probe(
         &self,
@@ -382,6 +418,7 @@ impl Cluster {
                     node.epoch = node.epoch.wrapping_add(1);
                 }
                 node.group = Some(group);
+                node.revoked = false;
                 node.domain = domain;
                 // A successful probe cannot undo a later dispatch failure.
                 if node.health_serial == serial {
@@ -389,9 +426,8 @@ impl Cluster {
                 }
             }
             Err(_) => {
-                node.healthy_until = None;
-                node.epoch = node.epoch.wrapping_add(1);
-                node.stats.probe_failures = node.stats.probe_failures.saturating_add(1);
+                node.revoked = true;
+                node.probe_failed();
             }
         }
     }

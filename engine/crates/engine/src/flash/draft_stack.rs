@@ -9,7 +9,7 @@
 //! | VADE_MTP_CONF | 0.4: a proposal stops at drafter p < 0.4 | off (p in [0, 1) sets another threshold) |
 //! | VADE_FLASHNEXT_DRAFT_VOCAB | 65536: drafter argmax over ids below 65536 (the full head when the vocabulary is smaller) | 0: full head |
 //! | VADE_VERIFY_MX4, VADE_VERIFY_MX4_PART, VADE_VERIFY_MX4_MIXED, VADE_VERIFY_MX_SOLO97 | 1: exact direct-input / solo entries | 0 |
-//! | VADE_FLASHNEXT_MTP_DEPTH | 5 on one Spark, 3 on the VADE_W2_PP pipeline | 3 |
+//! | VADE_FLASHNEXT_MTP_DEPTH | 5 on one Spark, 7 on the VADE_W2_PP pipeline | 3 |
 //!
 //! Old default in one line: VADE_FLASHNEXT_DRAFT_FP4=0 VADE_FLASHNEXT_DRAFT_MX8_LAYER=0
 //! VADE_MTP_CONF=off VADE_FLASHNEXT_DRAFT_VOCAB=0 VADE_VERIFY_MX4=0 VADE_VERIFY_MX4_PART=0
@@ -24,9 +24,10 @@ use std::sync::OnceLock;
 pub const DRAFT_FP4: u8 = 2;
 pub const DRAFT_VOCAB: u32 = 65536;
 pub const MTP_CONF: f32 = 0.4;
-/// Resident MTP depth on one Spark; the two-Spark pipeline keeps PIPELINE_MTP_DEPTH.
+/// Resident MTP depth on one Spark. A pipeline verify pays every stage's fixed cost once per
+/// cycle (~37 ms of a ~53 ms 6-row verify on two Sparks), so its chooser gets a deeper ceiling.
 pub const RESIDENT_MTP_DEPTH: usize = 5;
-pub const PIPELINE_MTP_DEPTH: usize = 3;
+pub const PIPELINE_MTP_DEPTH: usize = 7;
 /// On/off switches whose unset value is on.
 pub const ON_SWITCHES: [&str; 5] = [
     "VADE_FLASHNEXT_DRAFT_MX8_LAYER",
@@ -72,7 +73,7 @@ pub fn parse_mtp_conf(value: Option<&str>) -> Result<Option<f32>, String> {
             .ok_or(format!("VADE_MTP_CONF must be unset, off or a number in [0, 1) (got {v:?})")),
     }
 }
-/// VADE_FLASHNEXT_MTP_DEPTH: unset = 5 on one Spark, 3 on the pipeline; explicit 1..=15.
+/// VADE_FLASHNEXT_MTP_DEPTH: unset = 5 on one Spark, 7 on the pipeline; explicit 1..=15.
 pub fn parse_resident_depth(value: Option<&str>, pipeline: bool) -> Result<usize, String> {
     match value {
         None => Ok(if pipeline { PIPELINE_MTP_DEPTH } else { RESIDENT_MTP_DEPTH }),
@@ -138,11 +139,11 @@ fn unset_switches_select_the_stack_and_explicit_values_restore_the_old_default()
     assert_eq!(parse_mtp_conf(Some("0")), Ok(Some(0.0)));
     assert!(parse_mtp_conf(Some("1")).is_err());
     assert_eq!(parse_resident_depth(None, false), Ok(5));
-    assert_eq!(parse_resident_depth(None, true), Ok(3));
+    assert_eq!(parse_resident_depth(None, true), Ok(7));
     assert_eq!(parse_resident_depth(Some("3"), false), Ok(3));
     assert!(parse_resident_depth(Some("0"), false).is_err());
     assert!(parse_resident_depth(Some("16"), true).is_err());
     // Requests default to depth 3; at or above it the adaptive chooser may draft up to resident 5.
     assert!(crate::flash_next_lookup::DEFAULT_MTP_DEPTH <= RESIDENT_MTP_DEPTH);
-    assert_eq!(crate::flash_next_lookup::DEFAULT_MTP_DEPTH, PIPELINE_MTP_DEPTH);
+    assert!(crate::flash_next_lookup::DEFAULT_MTP_DEPTH <= PIPELINE_MTP_DEPTH);
 }

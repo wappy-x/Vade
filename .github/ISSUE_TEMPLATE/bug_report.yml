@@ -1,0 +1,81 @@
+name: Bug report
+description: Something in Vade doesn't work the way the docs say it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. If it's a security problem, please don't file it here: use **Security → Report a vulnerability** instead (see SECURITY.md).
+
+        Before you paste anything, remove API keys, private prompts, machine addresses and user names.
+  - type: input
+    id: version
+    attributes:
+      label: Vade version
+      description: The output of `vade --version`. If you built from source, add the commit (`git rev-parse --short HEAD`).
+      placeholder: vade 0.1.0, commit abc1234
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      description: The model the engine was serving, as `vade status` shows it.
+      placeholder: nvidia/Qwen3.8-Flash-Next-FP4-Local
+    validations:
+      required: true
+  - type: dropdown
+    id: sparks
+    attributes:
+      label: Number of Sparks
+      options:
+        - "1"
+        - "2"
+        - "3 or more"
+        - None, the problem happens on the controller alone
+    validations:
+      required: true
+  - type: dropdown
+    id: route
+    attributes:
+      label: How you run Vade
+      options:
+        - On the Spark itself (vade launch)
+        - From a controller computer (vade install, vade up)
+        - Something else (say what below)
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command you ran
+      description: The exact command, with every flag. Include any `VADE_` environment variables you set.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what you expected
+      description: A sentence or two is fine.
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: Full error text
+      description: Paste the whole message as text, not a screenshot. `vade logs` shows the engine's side.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: verify
+    attributes:
+      label: vade verify output
+      description: Needed when the problem is about wrong answers, or answers that change from run to run. Run `vade verify` against the same engine and paste everything it prints.
+      render: text
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Whether you used the prebuilt launcher bundle, your controller's operating system, changes to the default config, or a receipt that shows the problem.

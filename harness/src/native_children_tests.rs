@@ -32,24 +32,24 @@ fn fact(rx: &interaction::Inbox<WorkerEvent, WorkerResult>) -> WorkerEvent {
 #[test]
 fn native_child_grants_require_host_opt_in_and_exact_bounded_paths() {
     assert!(config(&[]).unwrap().child_grants.is_empty());
-    let config = config(&[
-        "--children",
-        "--child-edit",
-        "edits=src/a.rs",
-        "--child-edit",
-        "edits=src/b.rs",
-        "--child-shell",
-        "checks",
-    ])
-    .unwrap();
+    let edit_grants = ["--children", "--child-edit", "edits=src/a.rs", "--child-edit", "edits=src/b.rs"];
+    let all_grants = [&edit_grants[..], &["--child-shell", "checks"]].concat();
+    let shell = vade_harness::coding_tools::shell_offered();
+    if !shell {
+        // Linux, or VADE_HARNESS_SHELL=off: there is no shell to grant.
+        assert!(config(&all_grants).err().unwrap().starts_with("--child-shell"));
+    }
+    let config = config(if shell { &all_grants } else { &edit_grants }).unwrap();
     assert_eq!(config.approval, ApprovalPolicy::Ask);
     let edits = &config.child_grants["edits"];
     assert_eq!(edits.write_paths, ["src/a.rs", "src/b.rs"]);
     assert!(edits.tools.iter().any(|name| name == "apply_patch"));
     assert!(!edits.tools.iter().any(|name| name == "workspace_shell"));
-    let checks = &config.child_grants["checks"];
-    assert!(checks.tools.iter().any(|name| name == "workspace_shell"));
-    assert!(checks.write_paths.is_empty());
+    if shell {
+        let checks = &config.child_grants["checks"];
+        assert!(checks.tools.iter().any(|name| name == "workspace_shell"));
+        assert!(checks.write_paths.is_empty());
+    }
     for args in [
         vec!["--child-edit", "edits=a"],
         vec!["--child-shell", "checks"],

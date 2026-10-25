@@ -1,5 +1,10 @@
 //! The owner flow on one Spark. Configuration is generated once; process
 //! ownership and cleanup use the same Linux worker as the remote launcher.
+//!
+//! - `config`: the saved local defaults; `model`: find and check an existing
+//!   checkpoint; `install`: publish the engine, kernels and chat together.
+//! - `doctor`, `status` and `chat`: the read-mostly commands.
+//! - `build_id`: the build identity of a local source tree.
 use crate::{
     cli::{Command, UpOptions},
     detect, output,
@@ -26,6 +31,8 @@ pub(crate) use chat::state_arguments as chat_state_arguments;
 
 const INSTALL_SPACE: u64 = 8 * 1024 * 1024 * 1024;
 
+/// The local Vade home: `VADE_HOME`, else `~/.vade`. It must be absolute and
+/// private.
 pub fn root() -> Result<PathBuf, String> {
     let path = std::env::var_os("VADE_HOME")
         .map(PathBuf::from)
@@ -48,10 +55,12 @@ fn owner_home() -> Result<PathBuf, String> {
         .ok_or_else(|| "Cannot find your home folder.".into())
 }
 
+/// Whether the local home has saved defaults or an owned engine.
 pub(crate) fn owner_configured() -> bool {
     root().is_ok_and(|p| p.join("config").exists() || p.join("state/run.conf").exists())
 }
 
+/// Whether the legacy `vade run qwen3-8b` home has a setup or a running server.
 pub(crate) fn legacy_configured() -> bool {
     crate::run::home().is_ok_and(|p| p.join("setup.conf").exists() || p.join("run.conf").exists())
 }
@@ -82,6 +91,8 @@ pub(crate) fn check_default_controller_record() -> Result<(), String> {
     }
 }
 
+/// Whether the local owner flow runs `command`. An explicit `VADE_CONFIG` always
+/// selects the controller instead.
 pub fn handles(command: &Command) -> bool {
     if matches!(command, Command::Detect | Command::Launch(_)) {
         return true;
@@ -110,6 +121,8 @@ pub fn handles(command: &Command) -> bool {
     }
 }
 
+/// Run a local lifecycle command after refusing conflicting selections. Without
+/// `--dry-run` it needs a Linux aarch64 Spark.
 pub fn run(command: Command, dry: bool) -> Result<(), String> {
     if matches!(command, Command::Launch(_)) && std::env::var_os("VADE_CONFIG").is_some() {
         return Err("VADE_CONFIG selects the controller installation; use vade up, or unset VADE_CONFIG before local vade launch and its lifecycle commands.".into());
@@ -292,13 +305,13 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                         "Launch ready in {:.3} s.",
                         began.elapsed().as_secs_f64()
                     ))?;
-                    self.chat(
-                        &config,
-                        &artifacts,
-                        record
-                            .as_ref()
-                            .ok_or("Launch did not produce an engine record.")?,
-                    )?;
+                    let record = record.as_ref().ok_or("Launch did not produce an engine record.")?;
+                    if self.runner.terminal() {
+                        self.chat(&config, &artifacts, record)?;
+                    } else {
+                        // Unattended (script, pipe, /dev/null): finish cleanly and leave the engine running.
+                        output::line(format_args!("Standard input is not a terminal, so chat was not opened. Chat: {}", text::command("chat")))?;
+                    }
                 }
                 Ok(())
             }
@@ -358,19 +371,20 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                 let (model, identity) = self.detection(Some(&config), INSTALL_SPACE)?;
                 config.check_resources(&model, &identity)?;
                 install::refresh(&self.root, &mut self.runner)?;
-                output::line(format_args!("Local engine and chat updated. Start: vade up"))
+                output::line(format_args!("Local engine and chat updated. Start: {}", text::command("up")))
             }
             Command::Status | Command::Menu => {
                 match (Config::load(&self.root)?, self.record()?) {
                     (Some(config), Some(record)) => {
                         self.ready(&config, &record)?;
                         output::line(format_args!(
-                            "Vade is ready at {}. Chat: vade chat",
-                            config.endpoint()
+                            "Vade is ready at {}. Chat: {}",
+                            config.endpoint(),
+                            text::command("chat")
                         ))
                     }
                     (None, Some(_)) => Err("An owned engine has no saved config; preserve the state folder and run vade down.".into()),
-                    (_, None) => output::line(format_args!("Vade is stopped. Start: vade launch")),
+                    (_, None) => output::line(format_args!("Vade is stopped. Start: {}", text::command("launch"))),
                 }
             }
             _ => Err("Use vade install, vade launch or vade chat.".into()),

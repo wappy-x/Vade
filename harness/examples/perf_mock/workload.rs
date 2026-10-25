@@ -8,7 +8,7 @@ use std::{
 };
 
 /// Exercise the product workload CLI against the same first-party v1
-/// capabilities fixture as contract_mock. Counts are invented fixture tokens,
+/// capabilities fixture as the workload_mock tests. Counts are invented fixture tokens,
 /// not an Engine/tokenizer/performance measurement. Never opens a live URL.
 pub fn run(
     binary: &std::path::Path,

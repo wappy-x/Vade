@@ -5,6 +5,8 @@ use std::path::Path;
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
 
+/// Private per-session build storage (Cargo target, home and temporary
+/// directories) shared by the commands one session runs.
 #[derive(Default)]
 pub struct BuildSession {
     #[cfg(target_os = "macos")]

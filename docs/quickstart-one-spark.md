@@ -55,8 +55,9 @@ real command does:
 From the controller, `vade up` asks for a context of 32768 tokens and up to
 min(context, 8192) output tokens, the same defaults as `vade launch` on the
 Spark. A controller never lowers that context for you: if the Spark lacks the
-memory, the engine refuses it, and you choose a smaller `--context`. (Only
-`vade launch`, run on the Spark itself, lowers it automatically.) See
+memory, the engine refuses it, and you choose a smaller `--context`; keep it
+at 8192 or more if you want `vade chat`. (On the Spark itself, `vade launch`
+and `vade up` lower it automatically.) See
 [Defaults on a controller](../INSTALL.md#defaults-on-a-controller).
 
 If startup fails, see [launcher recovery](../cli/README.md#recovery).
@@ -275,8 +276,8 @@ minimum for free disk.
 The required programs are `cc`, `curl`, `git`, `sha256sum`, `cmp`, `less`,
 `jq`, `python3` and `python3-venv`. Vade itself needs neither Python nor the
 CUDA toolkit; this guide checks for Python and venv only so that the official
-Hugging Face tool is ready if you want it. Rust is pinned to **1.99.0** and the GPU kernels to
-**nightly-2026-10-01**; keep both versions.
+Hugging Face tool is ready if you want it. Rust is pinned to **1.99.0** and the
+GPU kernels to **nightly-2026-10-01**; keep both versions.
 
 An administrator installs any missing Ubuntu packages **before** you start the
 user-level install. Refresh the package lists first, even on a fresh image:
@@ -338,7 +339,9 @@ so you can inspect it. Keep this Bash session for steps 1–4.
 
 ### 1. Install the pinned Rust tools
 
-If `rustup` is missing, fetch its official installer and read it first:
+If `~/.cargo/bin/rustup` does not exist, fetch the official installer and
+read it first. (A shell that has not loaded `~/.cargo/env` may not find an
+installed `rustup`, so check for the file rather than the command.)
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf -o /tmp/vade-rustup-init.sh https://sh.rustup.rs
@@ -628,6 +631,11 @@ nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader
 After step 6, go back to the first terminal. This flow also needs `tar` and
 clean Git source checkouts (no uncommitted changes). Our timed install
 run-throughs did not cover it.
+
+`vade run` needs its own installation. If you already set up FP4-Local on this
+Spark with `vade launch`, it refuses to start and tells you to unset
+`VADE_CONFIG` and choose a fresh `VADE_HOME`. Do that, and keep the same
+`VADE_HOME` for `chat` and `down`.
 
 ```sh
 cd "$VADE_ROOT"

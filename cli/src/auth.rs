@@ -5,6 +5,8 @@ use crate::runner::Exec;
 struct Credential { path: PathBuf, key: OnceLock<Result<String, String>> }
 static CREDENTIAL: OnceLock<Option<Credential>> = OnceLock::new();
 
+/// Take `--api-key-file PATH` out of `args` (or use `VADE_API_KEY_FILE`) and
+/// remember the path for this process. The file is not opened yet.
 pub fn configure(args: &mut Vec<String>) -> Result<(), String> {
     let path = select_file(args, std::env::var_os("VADE_API_KEY_FILE").map(PathBuf::from))?;
     CREDENTIAL.set(path.map(Credential::new)).map_err(|_| "API credential is already configured. Start a new vade command.".into())
@@ -43,9 +45,11 @@ impl Credential {
     }
 }
 
+/// The configured key file, if any.
 pub fn file() -> Option<&'static Path> {
     CREDENTIAL.get().and_then(Option::as_ref).map(|c| c.path.as_path())
 }
+/// Pass the key file's path, never the key, to a child command.
 pub fn forward(exec: &mut Exec) {
     if let Some(path) = file() {
         exec.env.insert("VADE_API_KEY_FILE".into(), path.to_string_lossy().into_owned());
@@ -59,20 +63,23 @@ fn credential(dry: bool) -> Result<Option<&'static Credential>, String> {
     Ok(credential)
 }
 
-// Commands that send or forward the key validate at entry, before side effects.
-// Open health requests never load or attach credentials.
+/// Commands that send or forward the key validate at entry, before side effects.
+/// Open health requests never load or attach credentials.
 pub fn validate(dry: bool) -> Result<(), String> { credential(dry).map(|_| ()) }
 
+/// The validated key for an `Authorization: Bearer` header, if configured.
 pub(crate) fn bearer_key() -> Result<Option<&'static str>, String> {
     credential(false)?.map(Credential::key).transpose()
 }
 
-// curl reads a private header file, so the key never appears in previews/argv.
-// The guard removes only the temporary file we created, on success or error.
+/// curl reads a private header file, so the key never appears in previews/argv.
+/// The guard removes only the temporary file we created, on success or error.
 pub struct HeaderFile(PathBuf);
 impl Drop for HeaderFile {
     fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
 }
+/// Add the key to a curl command through a private header file; keep the
+/// returned guard alive until curl exits.
 pub fn curl_headers(exec: &mut Exec, dry: bool) -> Result<Option<HeaderFile>, String> {
     let Some(credential) = credential(dry)? else { return Ok(None); };
     let guard = HeaderFile::write(credential)?;
@@ -86,7 +93,7 @@ impl HeaderFile {
         let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
             .open(&path).map_err(|error| crate::text::file_error("Cannot create private auth header", &path, &error))?;
         let guard = HeaderFile(path);
-        write!(file, "Authorization: Bearer {}\n", credential.key()?).map_err(|error| crate::text::file_error("Cannot write private auth header", &guard.0, &error))?;
+        writeln!(file, "Authorization: Bearer {}", credential.key()?).map_err(|error| crate::text::file_error("Cannot write private auth header", &guard.0, &error))?;
         Ok(guard)
     }
 }

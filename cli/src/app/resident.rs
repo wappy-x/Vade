@@ -1,3 +1,6 @@
+//! Reuse of a running engine: rebuild the request from today's config and
+//! build manifest, then compare it with the saved session so an unchanged
+//! `vade up` or `vade chat` attaches instead of restarting.
 use super::*;
 
 impl<R: Runner> App<R> {
@@ -74,10 +77,7 @@ impl<R: Runner> App<R> {
         ] {
             fields.insert(key.into(), value);
         }
-        session.launch_fingerprint = Some(
-            crate::sha256::digest_reader(text::encode(&fields).as_bytes())
-                .map_err(|_| "Cannot compare the requested launch. Run vade doctor.")?,
-        );
+        session.launch_fingerprint = Some(crate::sha256::sha(text::encode(&fields).as_bytes()));
         Ok(session)
     }
 }

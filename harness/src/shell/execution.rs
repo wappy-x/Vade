@@ -111,6 +111,7 @@ pub fn run(
     run_with_exclusions(workspace, spec, cap, cancel, &Exclusions::default())
 }
 
+/// [`run`], with extra workspace paths the sandbox keeps unreadable.
 pub fn run_with_exclusions(
     workspace: &Workspace,
     spec: &CommandSpec,

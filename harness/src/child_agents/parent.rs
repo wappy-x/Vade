@@ -1,3 +1,5 @@
+//! Running a parent with children: the child_* tool schemas, their dispatch
+//! and joining uncollected children.
 use super::*;
 use crate::json::{self, Value};
 
@@ -13,6 +15,7 @@ pub fn definitions() -> Value {
     ]"#).expect("static child tool definitions")
 }
 
+/// A parent run's report together with every child result it produced.
 pub struct ParentRun {
     pub report: RunReport,
     /// Authoritative child transcripts/receipts, owned only by the parent. They

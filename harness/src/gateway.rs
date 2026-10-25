@@ -42,6 +42,7 @@ pub const ROUTES: &[&str] = &[
     "/v1/capabilities",
     "/v1/admission",
     "/v1/cancel",
+    "/v1/kv/release",
 ];
 /// `vade-gateway --help`; `vade-harness gateway --help` states the same rules.
 const BROWSER_GUARD_HELP: &str = "Browser guard: Host must be 127.0.0.1, localhost or [::1] (with the listener port) or an --allow-host value, else 421.\nAny request with an Origin header gets 403 unless --allow-origin names that exact origin (repeatable); allowed origins get CORS headers.\n--token TOKEN (or VADE_GATEWAY_TOKEN) requires Authorization: Bearer TOKEN, else 401; that header is not forwarded upstream.\n";
@@ -62,9 +63,6 @@ fn prepare_dispatch<'a>(
     head: &transport::Head,
     client_body: &'a [u8],
 ) -> Result<(Option<routing::Lease>, std::borrow::Cow<'a, [u8]>), routing::RouteError> {
-    if path == "/v1/cancel" && matches!(upstream, Upstream::Cluster(_)) {
-        return Err(routing::RouteError(503, "Cancel through the selected engine endpoint; cluster cancellation affinity is unavailable".into()));
-    }
     let lease = match upstream {
         Upstream::Single(_) => None,
         Upstream::Cluster(cluster) => Some(cluster.select(path, query, client_body, head)?),
@@ -72,6 +70,8 @@ fn prepare_dispatch<'a>(
     Ok((lease, sampling::apply(method, path, head, client_body)))
 }
 
+/// Serve the core gateway on `bind` in front of one upstream until the process
+/// ends. See [`run_with_access`] for browser and token checks.
 pub fn run(bind: &str, upstream: &str) -> io::Result<()> {
     run_with_access(bind, upstream, Access::default())
 }
@@ -97,10 +97,12 @@ pub fn run_cluster(bind: &str, cluster: Cluster) -> io::Result<()> {
     run_cluster_with_access(bind, cluster, Access::default())
 }
 
+/// [`run_cluster`] with browser allow-lists and an optional client token.
 pub fn run_cluster_with_access(bind: &str, cluster: Cluster, access: Access) -> io::Result<()> {
     serve(bind, Upstream::Cluster(cluster), None, access)
 }
 
+/// [`run_cluster`] until the owner sets `stop`, like [`run_until`].
 pub fn run_cluster_until(bind: &str, cluster: Cluster, stop: &AtomicBool) -> io::Result<()> {
     serve(bind, Upstream::Cluster(cluster), Some(stop), Access::default())
 }
@@ -156,8 +158,7 @@ fn serve(bind: &str, upstream: Upstream, stop: Option<&AtomicBool>, access: Acce
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(25))
             }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
+            Err(e) => accept_failed(&e),
         }
     }
 }
@@ -201,6 +202,15 @@ impl Drop for ProbeWorkers {
         for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
+    }
+}
+
+/// A failed accept belongs to one connection (an aborted handshake, a full
+/// descriptor table), not to the listener: log it, back off briefly, keep serving.
+fn accept_failed(error: &io::Error) {
+    if error.kind() != io::ErrorKind::Interrupted {
+        crate::diagnostics::stderr_line(format_args!("vade-gateway: accept failed ({}); still listening.", error.kind()));
+        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -384,7 +394,7 @@ fn handle_target(
             &mut reader,
             messages,
             404,
-            "gateway supports completions, chat, Responses, Messages, token count, capabilities, and admission routes",
+            "gateway supports completions, chat, Responses, Messages, token count, capabilities, admission, cancel and checkpoint release routes",
         );
     }
     if method
@@ -481,6 +491,10 @@ fn handle_target(
     // The downstream socket also waits silently during a non-stream cold prefill.
     reader.get_mut().gateway_response(method, path);
     reader.get_mut().watch_downstream()?;
+    if let (Upstream::Cluster(cluster), Some(field)) = (upstream, broadcast_field(path)) {
+        let request = Request { method, path, query, head: &head, body: &client_body, origin: origin.as_deref() };
+        return broadcast(&mut reader, cluster, request, field, cancel, pool, messages);
+    }
     let (mut lease, body) = match prepare_dispatch(upstream, method, path, query, &head, &client_body) {
         Ok(prepared) => prepared,
         Err(routing::RouteError(status, message)) => {
@@ -566,26 +580,8 @@ fn handle_target(
     };
     let writer = reader.get_mut();
     let no_body = matches!(response.status, 204 | 304);
-    let mut headers = format!(
-        "HTTP/1.1 {} Upstream\r\nX-Vade-Gateway: v1\r\nConnection: close\r\n",
-        response.status
-    );
-    headers.push_str(&sampling::capabilities_header(method, path));
-    headers.push_str(&access::cors(origin.as_deref()));
-    if !no_body {
-        headers.push_str("Transfer-Encoding: chunked\r\n");
-    }
-    for (name, value) in &response.head.fields {
-        // An allowed browser gets exactly one CORS answer: the gateway's.
-        if !transport::hop_header(name, &response.head) && !name.eq_ignore_ascii_case(MARKER_HEADER)
-            && !(origin.is_some() && name.starts_with("access-control-"))
-        {
-            headers.push_str(name);
-            headers.push_str(": ");
-            headers.push_str(value);
-            headers.push_str("\r\n");
-        }
-    }
+    let framing = if no_body { "" } else { "Transfer-Encoding: chunked\r\n" };
+    let mut headers = response_head(response.status, &response.head, method, path, origin.as_deref(), framing);
     if headers.len() + 2 > transport::MAX_HEADERS {
         return write_error(
             writer,
@@ -618,6 +614,123 @@ fn handle_target(
     }
     response.recycle();
     Ok(())
+}
+
+/// The gateway's status line and headers for an upstream reply, without the
+/// blank line that ends them. Hop-by-hop and marker headers stay upstream, and
+/// an allowed browser gets exactly one CORS answer: the gateway's.
+fn response_head(status: u16, upstream: &transport::Head, method: &str, path: &str, origin: Option<&str>, framing: &str) -> String {
+    let mut headers = format!("HTTP/1.1 {status} Upstream\r\nX-Vade-Gateway: v1\r\nConnection: close\r\n");
+    headers.push_str(&sampling::capabilities_header(method, path));
+    headers.push_str(&access::cors(origin));
+    headers.push_str(framing);
+    for (name, value) in &upstream.fields {
+        if !transport::hop_header(name, upstream) && !name.eq_ignore_ascii_case(MARKER_HEADER)
+            && !(origin.is_some() && name.starts_with("access-control-"))
+        {
+            headers.push_str(name);
+            headers.push_str(": ");
+            headers.push_str(value);
+            headers.push_str("\r\n");
+        }
+    }
+    headers
+}
+
+/// Cancel and checkpoint-release keys belong to the endpoint that ran the
+/// request, which cluster routing does not record. With several upstreams
+/// these calls go to every verified endpoint; keys are random capabilities, so
+/// an unknown key changes nothing there. Returns the JSON field that reports
+/// success.
+fn broadcast_field(path: &str) -> Option<&'static str> {
+    match path {
+        "/v1/cancel" => Some("cancelled"),
+        "/v1/kv/release" => Some("released"),
+        _ => None,
+    }
+}
+
+/// One validated client request, as the broadcast forwards it.
+struct Request<'a> {
+    method: &'a str,
+    path: &'a str,
+    query: Option<&'a str>,
+    head: &'a transport::Head,
+    body: &'a [u8],
+    origin: Option<&'a str>,
+}
+
+/// How long a cancel or checkpoint release may take across all endpoints. The
+/// native cancel client waits two seconds in total, so one stalled endpoint must
+/// not hold the answer past that.
+const CONTROL_BUDGET: Duration = Duration::from_millis(1500);
+
+/// One endpoint's control reply: status, head, body, and whether it reported success.
+type ControlReply = (u16, transport::Head, Vec<u8>, bool);
+
+/// Send one request to every verified endpoint at once, reading each bounded
+/// reply within [`CONTROL_BUDGET`], and answer once: the first 2xx reply (in
+/// endpoint order) whose `field` is true, otherwise the first reply. Endpoints
+/// that fail or stall are skipped; nothing is replayed, and a foreign endpoint
+/// never sees the key.
+fn broadcast(
+    reader: &mut BufReader<DeadlineStream<'_>>,
+    cluster: &Cluster,
+    request: Request<'_>,
+    field: &str,
+    cancel: Option<&AtomicBool>,
+    pool: &ConnectionPool,
+    messages: bool,
+) -> io::Result<()> {
+    let suffix = request.path.strip_prefix("/v1").unwrap_or(request.path);
+    let fanout = transport::ControlFanout::new(reader.get_ref(), CONTROL_BUDGET)?;
+    let endpoints = cluster.verified_endpoints();
+    let replies: Vec<Option<ControlReply>> = thread::scope(|scope| {
+        let calls: Vec<_> = endpoints
+            .iter()
+            .map(|endpoint| {
+                let (fanout, request) = (&fanout, &request);
+                scope.spawn(move || {
+                    let target = endpoint.gateway_route(suffix, request.query).ok()?;
+                    let mut response = fanout
+                        .request(request.method, &target, request.body, request.head, cancel, pool)
+                        .ok()?;
+                    let mut body = Vec::new();
+                    response.body.read_to_end(&mut body).ok()?;
+                    let succeeded = (200..300).contains(&response.status)
+                        && std::str::from_utf8(&body).ok().and_then(|text| json::view(text).ok())
+                            .and_then(|value| value.get(field)).is_some_and(|value| value.raw() == "true");
+                    let (status, head) = (response.status, response.head.clone());
+                    response.recycle();
+                    Some((status, head, body, succeeded))
+                })
+            })
+            .collect();
+        calls.into_iter().map(|call| call.join().ok().flatten()).collect()
+    });
+    let mut chosen: Option<ControlReply> = None;
+    for (status, head, body, succeeded) in replies.into_iter().flatten() {
+        if chosen.as_ref().is_none_or(|(_, _, _, done)| succeeded && !done) {
+            chosen = Some((status, head, body, succeeded));
+        }
+    }
+    reader.get_ref().check()?;
+    let Some((status, head, body, _)) = chosen else {
+        return reject(reader, messages, 502, "no upstream answered; request was not replayed");
+    };
+    let no_body = matches!(status, 204 | 304);
+    let framing = if no_body { String::new() } else { format!("Content-Length: {}\r\n", body.len()) };
+    let mut headers = response_head(status, &head, request.method, request.path, request.origin, &framing);
+    let writer = reader.get_mut();
+    if headers.len() + 2 > transport::MAX_HEADERS {
+        return write_error(writer, messages, 502, "upstream response headers exceed limit");
+    }
+    headers.push_str("\r\n");
+    writer.write_all(headers.as_bytes())?;
+    if !no_body {
+        writer.write_all(&body)?;
+    }
+    writer.flush()
 }
 
 /// No read-ahead queue: downstream write/flush completes before the next body

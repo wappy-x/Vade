@@ -26,6 +26,7 @@ impl Drop for Scratch {
     }
 }
 
+/// `vade test unix-flags-abi`: compile the flag assertions for one target.
 pub fn run(args: &[String]) -> Result<i32, String> {
     if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") {
         crate::public_output(HELP);

@@ -317,10 +317,17 @@ with background capability probes and passive usage metrics; there, a request
 the engine refused before any reply byte can be retried once on another
 endpoint, and a request with an uncertain outcome is never replayed.
 
-The gateway does not yet route `/v1/kv/release` or offer handle-based cluster
-affinity. Use a direct engine endpoint for checkpoint work; through the
-gateway, release attempts are unconfirmed and the engine's expiry (TTL) is the
-fallback.
+Both modes relay `POST /v1/cancel` and `POST /v1/kv/release`. With one
+upstream they are plain relays. With several, the gateway does not record which
+endpoint holds a key, so it sends each call to every upstream (the core
+gateway at once, within 1.5 seconds; `vade-gateway` one after another) and
+answers with the first 2xx reply, in configuration order, that reports
+`"cancelled":true` or `"released":true`, otherwise the first reply, or HTTP 502
+when no upstream answers. Keys are random capabilities, so an unknown key changes nothing on the
+other endpoints. Cluster mode still has no handle-based affinity: a request
+that names a checkpoint handle is routed like any other and can reach an
+endpoint that does not hold it, so use one upstream or a direct engine endpoint
+for checkpoint work.
 
 ### Gateway buffers and timeouts
 

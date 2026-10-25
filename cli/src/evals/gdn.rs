@@ -25,6 +25,7 @@ struct Args {
     legacy: Option<Value>,
 }
 
+/// `vade test gdn-state`: compare two recurrent-state captures.
 pub fn run(args: &[String]) -> Result<i32, String> {
     let args = match parse_args(args) {
         Ok(Some(args)) => args,
@@ -581,8 +582,10 @@ fn read_block(file: &mut File, path: &Path) -> Result<Vec<u8>, String> {
 }
 fn float_values(block: &[u8]) -> impl Iterator<Item = f64> + '_ {
     block
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes(b.try_into().unwrap()) as f64)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&b| f32::from_le_bytes(b) as f64)
 }
 fn trailing(file: &mut File, path: &Path) -> Result<bool, String> {
     let mut byte = [0];

@@ -9,6 +9,8 @@ use crate::{
 };
 use std::time::{Duration, Instant};
 
+/// One `vade.status.v1` JSON report under construction: fields, checks and
+/// errors. Any failed check makes the command exit 1.
 pub(crate) struct Snapshot {
     value: Value,
     checks: Vec<Value>,
@@ -16,6 +18,7 @@ pub(crate) struct Snapshot {
     failed: bool,
 }
 impl Snapshot {
+    /// An empty report whose phase is "unknown" until a lifecycle owner sets it.
     pub(crate) fn new(mode: &str, dry: bool) -> Self {
         Self {
             value: json::object(vec![
@@ -37,13 +40,17 @@ impl Snapshot {
             failed: false,
         }
     }
+    /// Set one top-level field.
     pub(crate) fn set(&mut self, key: &str, value: impl Into<Value>) {
         self.value.insert(key, value.into());
     }
+    /// Record an error; the report then fails.
     pub(crate) fn error(&mut self, error: String) {
         self.failed = true;
         self.errors.push(error.into());
     }
+    /// Record a check's result: `Ok(false)` fails the report, and an error is also
+    /// listed under `errors`. Returns the observed state.
     pub(crate) fn observe(
         &mut self,
         name: &str,
@@ -68,6 +75,7 @@ impl Snapshot {
         ]));
         state
     }
+    /// Record a check that was not run (dry runs, or after an earlier failure).
     pub(crate) fn unchecked(&mut self, name: &str, target: &str) {
         self.checks.push(json::object(vec![
             ("name", name.into()),
@@ -76,6 +84,7 @@ impl Snapshot {
             ("error", Value::Null),
         ]));
     }
+    /// Set `ready`; not ready fails the report with a next step if no error says why.
     pub(crate) fn readiness(&mut self, ready: bool) {
         self.set("ready", ready);
         if !ready {
@@ -85,6 +94,7 @@ impl Snapshot {
             }
         }
     }
+    /// The JSON line, with C1 and direction controls escaped, and the exit code.
     pub(crate) fn finish(mut self, elapsed: Duration) -> (String, i32) {
         self.set("checks", Value::Array(self.checks.clone()));
         self.set("errors", Value::Array(self.errors.clone()));
@@ -131,6 +141,8 @@ impl<R: Runner> Runner for Bounded<R> {
     fn pause(&mut self, _: Duration) {}
 }
 
+/// `vade status --json`: select the lifecycle owner and report within a 15 s
+/// deadline, always as one JSON object.
 pub(crate) fn run(dry: bool) -> (String, i32) {
     let start = Instant::now();
     let mut report = Snapshot::new("unknown", dry);

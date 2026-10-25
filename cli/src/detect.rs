@@ -31,6 +31,8 @@ pub(crate) fn memory_summary(total: u64, available: u64) -> String {
     )
 }
 
+/// What `vade detect` reads about this Spark: names, memory, free disk on the
+/// install and model volumes, and the NVIDIA driver and GPU.
 #[derive(Clone, Debug)]
 pub struct Identity {
     pub vendor: String,
@@ -49,6 +51,7 @@ pub struct Identity {
 }
 
 impl Identity {
+    /// The report `vade detect` and `vade doctor` print.
     pub fn display(&self, models: &Path) -> String {
         format!(
             "Machine: {} / {}\nOS: {} ({})\nMemory: {}\nDisk free: {:.1} GiB install, {:.1} GiB models{}\nGPU: {}\nDriver: {}   CUDA supported: {}\nModels: {}\n",
@@ -109,6 +112,7 @@ impl Identity {
     }
 }
 
+/// Read this machine, with free space measured for `install` and `models`.
 pub fn detect(install: &Path, models: &Path) -> Result<Identity, String> {
     detect_at(Path::new("/"), install, models, command)
 }

@@ -4,6 +4,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// Whether no SSH master is listening on the control socket `path`. A path too
+/// long to connect to directly is probed from its folder by a child process.
 pub fn closed(path: &Path) -> bool {
     match connect(path) {
         Some(closed) => closed,

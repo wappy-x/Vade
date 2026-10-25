@@ -1,10 +1,13 @@
+//! Local launch defaults saved in the Vade home's `config` file: model, port,
+//! context and output limits, and the context step-down after an engine
+//! memory refusal.
 use super::*;
 
 /// Smaller contexts tried, in order, after an engine memory refusal.
 const STEP_DOWN: [u32; 4] = [32768, 16384, 8192, 4096];
 
 /// The engine's context refusal ("Requested size does not fit." whose Asked:
-/// line names CONTEXT=<n>), or None for any other stop. Weight and allocator
+/// line names `CONTEXT=<n>`), or None for any other stop. Weight and allocator
 /// refusals say "CONTEXT and OUTPUT not supplied"; a smaller context cannot help.
 pub(super) fn memory_refusal(log: &str) -> Option<String> {
     let lines: Vec<&str> = log.lines().collect();
@@ -15,6 +18,8 @@ pub(super) fn memory_refusal(log: &str) -> Option<String> {
     refusal.contains("Available").then_some(refusal)
 }
 
+/// The saved local defaults (`format=vade-owner-v1`): checkpoint, limits, port
+/// and the optional engine controls a later `vade up` must reuse.
 #[derive(Clone)]
 pub(super) struct Config {
     pub model: PathBuf,
@@ -31,6 +36,8 @@ pub(super) struct Config {
 }
 
 impl Config {
+    /// First-run defaults for `model`: the standard FP4-Local context (capped by the
+    /// checkpoint) and its default output.
     pub fn new(
         root: &Path,
         model: &model::Model,
@@ -58,6 +65,8 @@ impl Config {
         })
     }
 
+    /// Read `root/config`, or `None` before the first launch; unknown formats and
+    /// out-of-range values are refused.
     pub fn load(root: &Path) -> Result<Option<Self>, String> {
         let Some(fields) = read_fields(&root.join("config"))? else {
             return Ok(None);
@@ -108,6 +117,8 @@ impl Config {
         }))
     }
 
+    /// Refuse options a local launch cannot honour: FP8, more than one Spark,
+    /// `--chats` or a nonzero `--cache-bytes`.
     pub fn validate_options(options: &UpOptions) -> Result<(), String> {
         if !options.fp4_local || options.sparks.is_some_and(|n| n != 1) || !options.hosts.is_empty() {
             return Err("Local launch serves FP4-Local on one Spark; set VADE_CONFIG and use vade up for multiple Sparks, or vade up --fp8-legacy for FP8.".into());
@@ -136,6 +147,8 @@ impl Config {
         if let Some(bytes) = options.cache_bytes { self.cache_bytes = Some(bytes); }
     }
 
+    /// The configuration these options request, if the running engine already
+    /// uses exactly those limits.
     pub fn check_running_options(&self, options: &UpOptions, record: &Fields) -> Result<Self, String> {
         Self::validate_options(options)?;
         Self::supported_controls(self.chats, self.cache_bytes)?;
@@ -145,6 +158,7 @@ impl Config {
         Ok(requested)
     }
 
+    /// The limits recorded with an owned engine, compared before reuse.
     pub fn launch_limits(&self) -> Fields {
         Fields::from([
             ("context_tokens".into(), self.context.to_string()),
@@ -156,6 +170,7 @@ impl Config {
         ])
     }
 
+    /// Fail unless the owned engine's record has these exact limits.
     pub fn check_running_limits(&self, record: &Fields) -> Result<(), String> {
         if self.launch_limits().iter().any(|(key, value)| record.get(key) != Some(value)) {
             return Err("The owned engine has different or unrecorded launch limits; run vade down, then repeat vade up with the requested flags.".into());
@@ -163,6 +178,8 @@ impl Config {
         Ok(())
     }
 
+    /// Apply explicit options for this start, then check them against the
+    /// checkpoint and this Spark.
     pub fn apply(&mut self, options: &UpOptions, model: &model::Model, identity: &detect::Identity) -> Result<(), String> {
         Self::validate_options(options)?;
         self.overrides(options);
@@ -170,6 +187,8 @@ impl Config {
         self.check_resources(model, identity)
     }
 
+    /// Check the context and output limits against the checkpoint, and the model
+    /// against this Spark's memory.
     pub fn check_resources(&self, model: &model::Model, identity: &detect::Identity) -> Result<(), String> {
         Self::supported_controls(self.chats, self.cache_bytes)?;
         if self.context > model.context_limit {
@@ -196,6 +215,8 @@ impl Config {
         Some(next)
     }
 
+    /// Add the engine environment for MTP, the memory budget and disabled prefix
+    /// retention to a worker start request.
     pub fn engine_env(&self, fields: &mut Fields) {
         for (key, value) in [("MTP", self.mtp.map(u64::from)), ("SEQPAR_MEMORY_BYTES", self.memory_bytes)] {
             if let Some(value) = value { fields.insert(format!("env.{key}"), value.to_string()); }
@@ -207,6 +228,8 @@ impl Config {
         }
     }
 
+    /// The prefix-retention switch to record: "0" when disabled by `--cache-bytes 0`,
+    /// else `VADE_FLASHNEXT_PREFIX_CACHE` if set to 0 or 1.
     pub fn prefix_cache(&self) -> Result<Option<String>, String> {
         if self.cache_bytes == Some(0) { return Ok(Some("0".into())); }
         match std::env::var("VADE_FLASHNEXT_PREFIX_CACHE") {
@@ -216,6 +239,7 @@ impl Config {
         }
     }
 
+    /// Fail when disabled retention is saved but the owned engine does not record it.
     pub fn check_running_cache(&self, record: &Fields) -> Result<(), String> {
         if self.cache_bytes == Some(0) && record.get("prefix_cache").map(String::as_str) != Some("0") {
             return Err("The owned engine has no record of disabled prefix retention; run vade down, then vade up --cache-bytes 0 to apply the saved limit.".into());
@@ -223,6 +247,7 @@ impl Config {
         Ok(())
     }
 
+    /// Save first-run defaults; existing defaults are never overwritten.
     pub fn save(&self, root: &Path) -> Result<(), String> {
         if root.join("config").exists() {
             return Err("Vade defaults already exist; they were left unchanged.".into());
@@ -230,6 +255,7 @@ impl Config {
         text::atomic_write(&root.join("config"), &self.display())
     }
 
+    /// The saved `key=value` form of these defaults.
     pub fn display(&self) -> String {
         let mut fields = Fields::from([
             ("format".into(), "vade-owner-v1".into()),
@@ -256,6 +282,7 @@ impl Config {
         }
         text::encode(&fields)
     }
+    /// The loopback URL of the local engine.
     pub fn endpoint(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }

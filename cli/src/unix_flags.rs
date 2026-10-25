@@ -1,19 +1,22 @@
 //! Raw file flags for the CLI's supported targets; no guessed Unix fallback.
 //!
 //! ABI table (hex for O_*; decimal for the remaining constants):
+//!
+//! ```text
 //! target          O_NOFOLLOW O_DIRECTORY O_CLOEXEC O_NONBLOCK O_CREAT O_EXCL
 //! Linux aarch64   0x8000     0x4000      0x80000   0x800      0x40    0x80
 //! Linux x86_64    0x20000    0x10000     0x80000   0x800      0x40    0x80
-//! macOS          0x100      0x100000    0x1000000 0x4        0x200   0x800
+//! macOS           0x100      0x100000    0x1000000 0x4        0x200   0x800
 //! All targets: O_RDONLY = 0, O_RDWR = 2, F_GETFL = 3, F_SETFL = 4,
 //! LOCK_EX = 2, LOCK_NB = 4.
+//! ```
 //!
 //! Linux ARM64 overrides O_NOFOLLOW and O_DIRECTORY (0x20000 is O_LARGEFILE):
-//! https://github.com/torvalds/linux/blob/v6.12/arch/arm64/include/uapi/asm/fcntl.h
+//! <https://github.com/torvalds/linux/blob/v6.12/arch/arm64/include/uapi/asm/fcntl.h>
 //! Linux x86_64 uses the generic file flags, as do ARM64's other flags here:
-//! https://github.com/torvalds/linux/blob/v6.12/include/uapi/asm-generic/fcntl.h
+//! <https://github.com/torvalds/linux/blob/v6.12/include/uapi/asm-generic/fcntl.h>
 //! macOS (both architectures):
-//! https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/fcntl.h
+//! <https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/fcntl.h>
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub const O_NOFOLLOW: i32 = 0x8000;

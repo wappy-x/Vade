@@ -141,10 +141,11 @@ impl<'a> NextModel<'a> {
     ) -> Result<Self> {
         Self::load_with_checkpoint_role(b, root, checkpoint, options, mtp_depth, false)
     }
-    /// Pipeline ranks do not execute the local bounded head and must not fund its twin.
+    /// `headless`: a pipeline rank without the head (back, middle ranks) does not execute the
+    /// local bounded head and must not fund its twin; the front funds it as one Spark does.
     pub fn load_with_checkpoint_role(
         b: &Backend<'a>, root: &Path, checkpoint: Option<Checkpoint>,
-        options: crate::flash_next_options::Options, mtp_depth: usize, pipeline: bool,
+        options: crate::flash_next_options::Options, mtp_depth: usize, headless: bool,
     ) -> Result<Self> {
         if mtp_depth > 15 {
             return Err("MTP depth must be 0..=15".into());
@@ -361,7 +362,7 @@ impl<'a> NextModel<'a> {
         let scratch_savings = crate::flash_next_workspace::saved_bytes(H, 48, 16, crate::flash_next_rows::prompt_tile());
         let head_bounds = crate::flash_head_options::load_local(
             crate::flash_head_options::load_funded(scratch_savings, Head::mx8_draft_bytes(vocab), vocab,
-                POOL_SIZE, mtp_depth != 0)?, pipeline, || Head::load_bounds(b, head, vocab))?;
+                POOL_SIZE, mtp_depth != 0)?, headless, || Head::load_bounds(b, head, vocab))?;
         // Capture draft configuration once; all sessions borrow this immutable twin.
         let draft_head_rows = Head::draft_rows(checkpoint.config.vocab as usize,
             crate::flash_draft_stack::draft_vocab()?);

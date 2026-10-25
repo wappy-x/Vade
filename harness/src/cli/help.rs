@@ -98,8 +98,10 @@ authorizes commands outside the sandbox; no unsandboxed fallback exists.
 never denies edits and commands. Noninteractive runs deny approval requests.
 Commands use explicit argv, cleared environment, macOS sandbox, no network,
 120-second maximum timeout, capped output, and process-group cancellation.
-On Linux, workspace_shell returns a clear unsupported-platform tool result;
-workspace reads and patches remain available. No TLS or permission escalation.
+On Linux the agent is not offered workspace_shell and is told it cannot run
+commands; workspace reads and patches remain available, and --check and
+--child-shell are refused. VADE_HARNESS_SHELL=off gives macOS the same shape.
+No TLS or permission escalation.
 
 /context shows per-message estimates plus the last request's contract admission
 and reported usage. The runtime warns at 80% and stops above the local budget.
@@ -243,10 +245,11 @@ Usage: vade-harness gateway --upstream URL [--upstream URL ...] [OPTIONS]
   --version             Print version
 
 Routes: POST /v1/completions /completions /v1/chat/completions /chat/completions
-  /v1/responses /responses /v1/messages /v1/messages/count_tokens /v1/admission /v1/cancel;
-  GET /v1/capabilities. Other paths receive 404 before any upstream contact,
+  /v1/responses /responses /v1/messages /v1/messages/count_tokens /v1/admission /v1/cancel
+  /v1/kv/release; GET /v1/capabilities. Other paths receive 404 before any upstream contact,
 except that cluster mode (multiple upstreams) also exposes GET /_vade/gateway/stats.
-One upstream uses the plain relay. Explicit caller fields retain their bytes.
+One upstream uses the plain relay. In cluster mode /v1/cancel and /v1/kv/release go to
+every upstream; the reply is the first that reports success, else the first reply. Explicit caller fields retain their bytes.
 Generation defaults: temperature=0 (greedy), seed=20260905, top_p=1.0, top_k=0,
 repetition_penalty=1.0, presence_penalty=0.0, frequency_penalty=0.0, only when
 none of temperature, top_p, top_k, min_p, typical_p, seed, frequency_penalty,

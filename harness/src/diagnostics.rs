@@ -46,6 +46,8 @@ pub fn write_stdout(text: &str) -> io::Result<()> {
     }
 }
 
+/// [`write_stdout`], turned into an exit code; a failed write prints one
+/// actionable line on standard error.
 pub fn print_stdout(text: &str) -> ExitCode {
     match write_stdout(text) {
         Ok(()) => ExitCode::SUCCESS,
@@ -105,6 +107,8 @@ pub fn error_hint(error: &io::Error) -> &'static str {
         _ => " Check vade status and the engine logs before retrying.",
     }
 }
+/// A short, trusted name for an error (an HTTP status or an I/O category),
+/// safe to show without the untrusted upstream text.
 pub fn error_category(error: &io::Error) -> &'static str {
     if let Some(status) = crate::transport::http_status(error) {
         return match status {
@@ -177,6 +181,7 @@ mod tests {
 
 /// Diagnostics must not panic when a consumer also closes standard error.
 pub fn stderr(args: std::fmt::Arguments<'_>) { let _ = io::stderr().lock().write_fmt(args); }
+/// [`stderr`] followed by a newline.
 pub fn stderr_line(args: std::fmt::Arguments<'_>) { let _ = writeln!(io::stderr().lock(), "{args}"); }
 
 #[cfg(test)]

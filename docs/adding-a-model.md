@@ -17,11 +17,11 @@ The source pointers below were verified on main at
 
 ## 1. Identify the entry path and checkpoint inventory
 
-The CLI catalog is [cli/src/catalog.rs:3](../cli/src/catalog.rs#L3): a pinned
+The CLI catalog is [cli/src/catalog.rs:5](../cli/src/catalog.rs#L5): a pinned
 revision and SHA-256 inventory for the legacy official Qwen3-8B BF16 download.
 It is not a general model registry. Its command name is restricted in
-[cli/src/cli.rs:126](../cli/src/cli.rs#L126), and acquisition consumes that
-inventory in [cli/src/run.rs:2](../cli/src/run.rs#L2). Adding another downloadable
+[cli/src/cli.rs:158](../cli/src/cli.rs#L158), and acquisition consumes that
+inventory in [cli/src/run.rs:6](../cli/src/run.rs#L6). Adding another downloadable
 catalog entry would also require updating command selection and acquisition;
 changing the inventory alone does not add engine support.
 
