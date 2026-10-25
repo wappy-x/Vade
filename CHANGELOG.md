@@ -7,6 +7,13 @@ Changes that are merged but not yet released are under Unreleased.
 
 ### Engine
 
+- On four Sparks, the layer pipeline now drafts for six to eight chats at
+  once, under the same rules as two Sparks: each tick checks up to 16 drafted
+  rows, and the engine switches a cohort to ordinary decoding when that is
+  cheaper. Before, eight chats on four Sparks were always decoded plainly.
+  Measured on four Sparks with eight code chats: 138.93 to 180.95 tokens per
+  second, with the same tokens. `VADE_W2_PP_C8=0` on every Spark restores the
+  previous policy.
 - On one Spark, when one chat runs alone, the drafting depth can now rise to 7
   instead of 5, as on the layer pipeline. Measured on one Spark: code 75.6 to
   81.6 tokens per second, structured output 88.3 to 99.7, prose unchanged, with
@@ -42,6 +49,10 @@ Changes that are merged but not yet released are under Unreleased.
 
 ### CLI
 
+- `sh scripts/install.sh` sets up the pinned Rust tools and source build on
+  one Spark, checks an existing checkpoint, and prints recovery steps on failure.
+- On a Spark, `vade install` now compiles the GPU code into Vade's private
+  startup cache before you run `vade up`. It leaves checkpoint files alone.
 - `vade install` from a controller now builds every Spark at the same time
   instead of one after another. It still prints each machine's output in
   order, and if a machine fails it stops with that machine's error, as before.

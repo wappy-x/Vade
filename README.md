@@ -26,39 +26,40 @@ Unreleased.
 <a id="pick-your-path"></a>
 ## Install
 
-[INSTALL.md](INSTALL.md) is the full guide. In short, on the Spark you:
-
-1. install a few Ubuntu packages and the pinned Rust toolchains;
-2. clone this repository and run one GPU kernel build while you are online;
-3. download and check the 102.26 GB checkpoint.
-
-Most of the install time goes to the download and the first build. We have
-not timed a whole install.
+[INSTALL.md](INSTALL.md) is the full guide.
 
 ### One Spark
 
-With steps 1 to 3 done, run this from the checkout:
+With the complete 102.26 GB checkpoint already under `~/models`, open a
+terminal on an idle DGX Spark and paste this block. You need Git, a C linker
+(`cc`), curl and a working NVIDIA driver; INSTALL.md covers missing
+prerequisites and downloading the model.
 
 ```sh
-export PATH="$HOME/.cargo/bin:$PATH"
-unset VADE_CONFIG
-cargo +1.99.0 build --release --offline --manifest-path cli/Cargo.toml
-export PATH="$PWD/cli/target/release:$PATH"
-vade launch
+git clone --branch main https://github.com/wappy-x/vade.git "$HOME/vade" &&
+  sh "$HOME/vade/scripts/install.sh" --launch
 ```
 
-`vade launch` builds and starts the engine, waits until it is ready, then
-opens chat in the current folder. Chat can edit files there, so in the
-checkout, ask it only to say hello. Type `/exit` to leave; the engine keeps
-running until `vade down`. (`unset VADE_CONFIG` makes sure no controller config
-is used. On the Spark, Vade keeps its settings in `~/.vade/config`.)
+The script installs missing pinned Rust tools, builds Vade, checks this Spark
+and the model, and prepares the private GPU startup cache. If setup fails, it
+prints the next step. It needs no sudo and leaves shell profiles and model
+files alone. For a checkpoint elsewhere, set `VADE_MODELS` to its folder
+first. If `~/vade` already exists, use the
+[existing-checkout instructions](INSTALL.md#quick-start-with-an-existing-model).
 
-In each new shell, put `cargo` and `vade` back on your `PATH` first. This line
-assumes the checkout is `~/vade`, as in INSTALL.md:
+With `--launch`, the script then starts the engine, waits until it is ready,
+and opens chat in the current folder. Chat can edit files there, so ask it
+only to say hello. Type `/exit` to leave; the engine keeps running until
+`vade down`. For `chat`, `status`, `doctor`, `logs`, `up` and `down`, use
+the full path `"$HOME/vade/cli/target/release/vade"`, or, in each new
+shell, put `cargo` and `vade` on your `PATH` first:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$HOME/vade/cli/target/release:$PATH"
 ```
+
+Most of the setup time goes to the first build and the checkpoint download.
+We have not timed fresh toolchain and model downloads.
 
 To skip the Rust builds, take the prebuilt launcher bundle and its
 `SHA256SUMS` from the
@@ -70,7 +71,8 @@ To skip the Rust builds, take the prebuilt launcher bundle and its
 Linked Sparks are driven from a controller: a Linux or macOS computer (or one
 of the Sparks) that reaches each Spark over SSH.
 
-1. Do steps 1 to 3 on every Spark.
+1. On every Spark, do INSTALL.md
+   [steps 1 to 3](INSTALL.md#step-1-prerequisites).
 2. Cable the Sparks and give each link an address; see
    [hardware and network setup](docs/network-setup.md).
 3. Set up the controller with [Route B](INSTALL.md#route-b-from-a-controller),

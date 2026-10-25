@@ -2,10 +2,13 @@
 use super::query;
 use std::time::{Duration, Instant};
 
-fn idle(timeout: Duration, maximum_utilization: u32) -> Result<bool, String> {
+/// `departing`: after a stop, the driver may list the stopped server for a
+/// moment, so a listed compute process is a busy sample, not someone else's job.
+fn idle(timeout: Duration, maximum_utilization: u32, departing: bool) -> Result<bool, String> {
     let began = Instant::now();
     let apps = query("nvidia-smi", &["--query-compute-apps=pid,process_name,used_gpu_memory", "--format=csv,noheader"], timeout)?;
     if !apps.trim().is_empty() {
+        if departing { return Ok(false); }
         return Err("This machine's GPU is in use. Stop the compute application with its original launcher, then retry; run vade doctor to check this machine.".into());
     }
     let remaining = timeout.saturating_sub(began.elapsed());
@@ -24,17 +27,17 @@ fn utilization_idle(value: &str, maximum: u32) -> Result<bool, String> {
 }
 
 pub(super) fn gpu_empty() -> Result<(), String> {
-    if wait_idle(Duration::from_secs(3), |budget| idle(budget, 5))? { return Ok(()); }
+    if wait_idle(Duration::from_secs(3), |budget| idle(budget, 5, false))? { return Ok(()); }
     Err("This machine's GPU is busy or unavailable. Run vade doctor before starting.".into())
 }
 
 pub(super) fn gpu_settled() -> Result<(), String> {
-    settle(Duration::from_secs(5), |budget| idle(budget, 0))
+    settle(Duration::from_secs(10), |budget| idle(budget, 0, true))
 }
 
 fn settle(budget: Duration, sample: impl FnMut(Duration) -> Result<bool, String>) -> Result<(), String> {
     if wait_idle(budget, sample)? { return Ok(()); }
-    Err("The owned server stopped, but GPU utilization has not settled to zero. Keep the ownership record and retry vade down.".into())
+    Err("The owned server stopped, but the GPU still lists a compute process or shows activity. Keep the ownership record, wait a moment and retry vade down; vade doctor shows what is running.".into())
 }
 
 fn wait_idle(budget: Duration, mut sample: impl FnMut(Duration) -> Result<bool, String>) -> Result<bool, String> {

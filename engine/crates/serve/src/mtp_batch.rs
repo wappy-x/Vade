@@ -1,6 +1,6 @@
 //! VADE_MTP_BATCH: embedded AUTO drafts at 1..=5 chats; world-one executable
 //! startup resolves its default to guarded Auto8 and passes that mode explicitly.
-//! VADE_W2_PP_C8 extends that guard to the two-stage pipeline (unset/1 on, 0 old policy).
+//! VADE_W2_PP_C8 extends that guard to two- and four-stage pipelines (unset/1 on, 0 old policy).
 //! Off keeps main's table: one drafting chat, the scheduler's row budget and
 //! the trait's automatic limit. On drafts for cohorts of up to eight chats and
 //! caps a tick's verify rows at the decode width (16, blocks::DECODE_ROWS):
@@ -14,7 +14,7 @@ use std::ops::Range;
 /// Widest verify tile that keeps the decode row kernels (blocks::DECODE_ROWS).
 pub const VERIFY_ROWS: usize = 16;
 const COHORT_WORLDS: &[usize] = &[1];
-const PIPELINE_COHORT_WORLDS: &[usize] = &[2];
+const PIPELINE_COHORT_WORLDS: &[usize] = &[2, 4];
 
 /// Execution experiment controls, parsed once by the executable and passed
 /// through service construction; constructors never reread their environment.
@@ -44,7 +44,7 @@ impl Experiments {
         Self::startup_pipeline(world, false)
     }
     /// The executable resolves its route before reading the cohort switches.
-    /// Native rank serving and larger pipelines retain their previous policy.
+    /// Native rank serving and unlisted pipelines retain their previous policy.
     pub fn startup_pipeline(world: usize, pipeline: bool) -> Result<Self, String> {
         Self::startup_with(world, pipeline, |name| match std::env::var(name) {
             Ok(value) => Ok(Some(value)), Err(std::env::VarError::NotPresent) => Ok(None),
@@ -136,11 +136,24 @@ fn pipeline_c8_defaults_and_rollback_follow_the_actual_route() {
         result
     };
     let old=Experiments { batch_mode:Some(Mode::Auto),guard_robust:true,..Experiments::default() };
-    let enabled=resolve(2,true,&[]).unwrap();
-    assert_eq!(enabled,Experiments { pipeline_c8:true,cohort_cost:true,batch_mode:Some(Mode::Auto8),graph_fallback:false,guard_robust:true });
-    assert_eq!(resolve(2,true,&[("VADE_W2_PP_C8","1")]),Ok(enabled));
-    assert_eq!(resolve(2,true,&[("VADE_W2_PP_C8","0")]),Ok(old));
-    for (world,pipeline) in [(2,false),(4,false),(4,true)] {
+    let enabled=Experiments { pipeline_c8:true,cohort_cost:true,batch_mode:Some(Mode::Auto8),graph_fallback:false,guard_robust:true };
+    for world in [2,4] {
+        assert_eq!(resolve(world,true,&[]),Ok(enabled));
+        assert_eq!(resolve(world,true,&[("VADE_W2_PP_C8","1")]),Ok(enabled));
+        assert_eq!(resolve(world,true,&[("VADE_W2_PP_C8","0")]),Ok(old));
+        assert_eq!(resolve(world,true,&[("VADE_MTP_C8","1"),("VADE_MTP_COHORT_ADAPT","1")]),Ok(enabled));
+        for value in ["0","1"] {
+            let explicit=resolve(world,true,&[("VADE_MTP_BATCH",value)]).unwrap();
+            assert!(!explicit.cohort_cost);
+            assert_eq!(explicit.batch_mode,Some(parse(Some(value)).unwrap()));
+        }
+        assert_eq!(resolve(world,true,&[("VADE_MTP_C8","0")]),Ok(Experiments { pipeline_c8:true,..old }));
+        assert!(!resolve(world,true,&[("VADE_MTP_COHORT_ADAPT","0")]).unwrap().cohort_cost);
+        for value in ["", "true", "2", " 1"] {
+            assert!(resolve(world,true,&[("VADE_W2_PP_C8",value)]).unwrap_err().contains("VADE_W2_PP_C8"));
+        }
+    }
+    for (world,pipeline) in [(2,false),(3,false),(3,true),(4,false)] {
         for value in ["0","1"] {
             assert_eq!(resolve(world,pipeline,&[("VADE_W2_PP_C8",value)]),Ok(old));
         }
@@ -148,16 +161,8 @@ fn pipeline_c8_defaults_and_rollback_follow_the_actual_route() {
     }
     for value in ["0","1"] {
         assert_eq!(resolve(1,false,&[("VADE_W2_PP_C8",value)]),resolve(1,false,&[]));
-        let explicit=resolve(2,true,&[("VADE_MTP_BATCH",value)]).unwrap();
-        assert!(!explicit.cohort_cost);
-        assert_eq!(explicit.batch_mode,Some(parse(Some(value)).unwrap()));
     }
-    assert_eq!(resolve(2,true,&[("VADE_MTP_C8","0")]),Ok(Experiments { pipeline_c8:true,..old }));
-    assert!(!resolve(2,true,&[("VADE_MTP_COHORT_ADAPT","0")]).unwrap().cohort_cost);
-    for value in ["", "true", "2", " 1"] {
-        assert!(resolve(2,true,&[("VADE_W2_PP_C8",value)]).unwrap_err().contains("VADE_W2_PP_C8"));
-    }
-    // OFF keeps the pre-C8 world-two formulas, including explicit legacy overrides
+    // OFF keeps the pre-C8 pipeline formulas, including explicit legacy overrides
     // and invalid combinations, rather than just matching the default tuple.
     for batch in [None, Some("0"), Some("1")] {
         for c8 in [None, Some("0"), Some("1")] {
@@ -170,10 +175,53 @@ fn pipeline_c8_defaults_and_rollback_follow_the_actual_route() {
                             ("VADE_C8_GUARD_ROBUST", guard)] {
                             if let Some(value) = value { values.push((name, value)); }
                         }
-                        assert_eq!(resolve(2,true,&values),resolve(2,false,&values), "{values:?}");
+                        for world in [2,4] {
+                            assert_eq!(resolve(world,true,&values),resolve(world,false,&values), "world={world} {values:?}");
+                        }
                     }
                 }
             }
+        }
+    }
+}
+#[cfg(test)]
+#[test]
+fn world_four_resolves_pipeline_cohort_and_world_one_three_keep_their_defaults() {
+    let resolve=|world,pipeline| Experiments::startup_with(world,pipeline,|_| Ok(None)).unwrap();
+    let old=Experiments { batch_mode:Some(Mode::Auto),guard_robust:true,..Experiments::default() };
+    let pipeline=resolve(4,true);
+    assert_eq!(pipeline,Experiments { pipeline_c8:true,cohort_cost:true,batch_mode:Some(Mode::Auto8),graph_fallback:false,guard_robust:true });
+    let mode=pipeline.batch_mode.unwrap();
+    assert_eq!(mode.feed(8,false),(true,false));
+    assert_eq!(mode.policy(8),Policy { draft_chats:8,automatic_chats:8,tick_rows:Some(VERIFY_ROWS) });
+    assert!(!mode.enabled(9));
+    assert_eq!(resolve(4,false),old);
+    for pipeline in [false,true] {
+        assert_eq!(resolve(1,pipeline),Experiments { graph_fallback:true,cohort_cost:true,batch_mode:Some(Mode::Auto8),guard_robust:true,..Experiments::default() });
+        assert_eq!(resolve(3,pipeline),old);
+        assert_eq!(resolve(3,pipeline).batch_mode.unwrap().feed(8,false),(false,true));
+    }
+}
+#[cfg(test)]
+#[test]
+fn world_four_pipeline_admits_eight_chats_under_the_world_two_rules() {
+    // Every switch combination, rollback and refusal included, resolves as on two stages.
+    let names=["VADE_MTP_BATCH","VADE_MTP_C8","VADE_POOL_GRAPH_FALLBACK","VADE_MTP_COHORT_ADAPT","VADE_C8_GUARD_ROBUST","VADE_W2_PP_C8"];
+    for combo in 0..3usize.pow(6) {
+        let value=|i: usize| [None,Some("0"),Some("1")][combo/3usize.pow(i as u32)%3];
+        let resolve=|world| Experiments::startup_with(world,true,|key| Ok(value(names.iter().position(|n| *n==key).unwrap()).map(str::to_owned)));
+        assert_eq!(resolve(4),resolve(2),"combo {combo}");
+    }
+    // Default C8 tick: eight drafting chats share one 16-row verify pass, two rows each.
+    let mode=Experiments::startup_with(4,true,|_| Ok(None)).unwrap().batch_mode.unwrap();
+    for chats in 1..=16 {
+        let policy=mode.policy(chats);
+        assert_eq!(policy,Policy::new(chats<=8),"C{chats}");
+        if let Some(rows)=policy.tick_rows {
+            let even=rows/chats;
+            let groups=verify_groups(&vec![even.min(2);chats],rows);
+            assert!(groups.len()==1 && groups[0]==(0..chats),"C{chats}: {groups:?}");
+            if chats==8 { assert_eq!((even,policy.draft_chats),(2,8)); }
         }
     }
 }

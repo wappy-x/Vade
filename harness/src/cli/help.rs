@@ -249,9 +249,10 @@ Usage: vade-harness gateway --upstream URL [--upstream URL ...] [OPTIONS]
 
 Routes: POST /v1/completions /completions /v1/chat/completions /chat/completions
   /v1/responses /responses /v1/messages /v1/messages/count_tokens /v1/admission /v1/cancel
-  /v1/kv/release; GET /v1/capabilities /v1/models /models.
+  /v1/kv/release; GET /v1/capabilities /v1/models /models /health.
 Other paths receive 404 before any upstream contact, except that cluster mode
-(multiple upstreams) also exposes GET /_vade/gateway/stats.
+(multiple upstreams) also exposes GET /_vade/gateway/stats and answers 404 to
+/health, which is per endpoint.
 One upstream uses the plain relay. In cluster mode /v1/cancel and /v1/kv/release go to
 every upstream; the reply is the first that reports success, else the first reply. Explicit caller fields retain their bytes.
 Generation defaults: temperature=0 (greedy), seed=20260905, top_p=1.0, top_k=0,

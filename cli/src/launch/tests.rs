@@ -44,6 +44,7 @@ struct MockRunner {
     health_ready: bool,
     listener_owned: bool,
     fail_start: bool,
+    fail_prepare: bool,
     // The engine's memory admission refuses contexts above this many tokens.
     refuse_above: Option<u32>,
     // The engine refuses the weights themselves, at any context.
@@ -69,6 +70,7 @@ impl MockRunner {
             health_ready: true,
             listener_owned: true,
             fail_start: false,
+            fail_prepare: false,
             refuse_above: None,
             refuse_weights: false,
             refused: false,
@@ -121,6 +123,28 @@ impl Runner for MockRunner {
                 self.root.join("state/worker").to_string_lossy()
             );
             return match request["op"].as_str() {
+                "warm-ptx" => {
+                    // With a staged manifest the helper hashes the checkpoint
+                    // itself, into private paths only; without one it compiles.
+                    let manifest = self.root.join("state/model-manifest.sha256");
+                    assert!(!request.contains_key("model_path"));
+                    assert!(!request.keys().any(|key| key.starts_with("env.")));
+                    if manifest.exists() {
+                        assert_eq!(exec.timeout, Duration::from_secs(900));
+                        assert!(Path::new(&request["verify_model"]).ends_with("models/checkpoint"));
+                        // Check what the child receives: removals apply after overrides.
+                        let command = exec.command();
+                        let effective = command.get_envs().filter_map(|(name, value)| Some((name.to_str()?, value?)))
+                            .collect::<std::collections::BTreeMap<_, _>>();
+                        assert_eq!(effective["FLASH_NVFP4_MANIFEST"], manifest.as_os_str());
+                        assert_eq!(effective["XDG_CACHE_HOME"], self.root.join("state/cache").as_os_str());
+                    } else {
+                        assert_eq!(exec.timeout, Duration::from_secs(330));
+                        assert!(!request.contains_key("verify_model") && !exec.env.contains_key("FLASH_NVFP4_MANIFEST"));
+                    }
+                    if self.fail_prepare { Err("This machine's GPU is in use.".into()) }
+                    else { reply("ptx_cache=warm\nmodel_hashed_bytes=0\nmodel_reused_files=1\n") }
+                }
                 "probe" => reply("phase=absent\n"),
                 "start" => {
                     // Startup may execute only after durable ownership was saved.
@@ -516,9 +540,10 @@ fn source_install_fixture_child() {
             .count(),
         3
     );
+    // The first launch prepares both startup caches before the engine starts.
     assert_eq!(
         launch.runner.worker_ops(),
-        ["probe", "start", "inspect", "listener"]
+        ["warm-ptx", "probe", "start", "inspect", "listener"]
     );
     let config = fs::read(f.root.join("config")).unwrap();
     let install = fs::read(f.root.join("stage/install.conf")).unwrap();
@@ -573,6 +598,11 @@ fn source_install_fixture_child() {
 // Run the engine's actual CPU receipt planner in its own environment. The
 // fixture lock prevents fork/flock overlap; SystemRunner enforces the deadline.
 fn run_cpu_receipt(model: &Path, manifest: &Path, cache: &Path, format: &str) {
+    cpu_receipt(model, manifest, cache, format, None);
+}
+
+// `refusal`: the planner must fail with this text instead of writing a receipt.
+fn cpu_receipt(model: &Path, manifest: &Path, cache: &Path, format: &str, refusal: Option<&str>) {
     assert!(matches!(
         crate::runner::PROCESS_TEST_LOCK.try_lock(),
         Err(std::sync::TryLockError::WouldBlock)
@@ -597,12 +627,15 @@ fn run_cpu_receipt(model: &Path, manifest: &Path, cache: &Path, format: &str) {
     ] {
         exec.env.insert(name.into(), value);
     }
+    if let Some(refusal) = refusal {
+        exec.env.insert("VADE_TEST_RECEIPT_REFUSE".into(), refusal.into());
+    }
     exec.timeout = Duration::from_secs(30);
     exec.cancellable = false;
     let output = crate::runner::SystemRunner { dry: false }.run(&exec).unwrap();
     assert!(output.success, "{}", output.stdout);
     assert!(
-        output.stdout.contains("CPU checkpoint receipt complete"),
+        output.stdout.contains(if refusal.is_some() { "CPU checkpoint receipt refused" } else { "CPU checkpoint receipt complete" }),
         "{}", output.stdout
     );
     assert!(!fallback_home.join(".cache").exists());
@@ -620,6 +653,12 @@ fn cpu_receipt_helper() {
         other => panic!("unexpected receipt fixture format {other}"),
     };
     assert_eq!(plan.format, expected);
+    if let Ok(refusal) = std::env::var("VADE_TEST_RECEIPT_REFUSE") {
+        let error = plan.finish().unwrap_err().to_string();
+        assert!(error.contains(&refusal), "{error}");
+        println!("CPU checkpoint receipt refused: {error}");
+        return;
+    }
     let receipt = plan.finish().unwrap();
     assert!(receipt.bytes > 0);
     println!("CPU checkpoint receipt complete: {receipt:?}");
@@ -663,7 +702,7 @@ fn install_is_idempotent_and_does_not_start_or_chat() {
     let artifacts = fs::read(f.root.join("stage/install.conf")).unwrap();
     launch.execute(Command::Install, false).unwrap();
     assert_eq!(launch.detector.calls, 2);
-    assert!(launch.runner.calls.is_empty());
+    assert_eq!(launch.runner.worker_ops(), ["warm-ptx", "warm-ptx"]);
     assert_eq!((launch.runner.starts, launch.runner.chats), (0, 0));
     assert!(!f.root.join("state/run.conf").exists());
     assert_eq!(fs::read(f.root.join("config")).unwrap(), config);
@@ -671,6 +710,27 @@ fn install_is_idempotent_and_does_not_start_or_chat() {
         fs::read(f.root.join("stage/install.conf")).unwrap(),
         artifacts
     );
+}
+
+#[test]
+fn install_preparation_failure_keeps_artifacts_and_names_the_next_step() {
+    let f = Fixture::new();
+    f.installed();
+    let artifacts = fs::read(f.root.join("stage/install.conf")).unwrap();
+    let mut launch = f.launcher();
+    launch.runner.fail_prepare = true;
+    let error = launch.execute(Command::Install, false).unwrap_err();
+    assert!(error.starts_with("This machine's GPU is in use."), "{error}");
+    assert!(error.contains(&format!("retry {}", text::command("install"))), "{error}");
+    assert_eq!(fs::read(f.root.join("stage/install.conf")).unwrap(), artifacts);
+    assert!(!f.root.join("state/run.conf").exists());
+    launch.runner.fail_prepare = false;
+    launch.execute(Command::Up(Default::default()), false).unwrap();
+    launch.runner.calls.clear();
+    // Installing again while serving must not compile against a busy GPU.
+    launch.execute(Command::Install, false).unwrap();
+    assert!(launch.runner.calls.is_empty());
+    assert_eq!(launch.runner.starts, 1);
 }
 
 #[test]

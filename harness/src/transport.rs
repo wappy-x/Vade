@@ -108,8 +108,14 @@ impl Endpoint {
                 | "/admission"
                 | "/cancel"
                 | "/kv/release"
+                | "/health"
         ) {
             return Err(invalid("unsupported gateway route"));
+        }
+        if suffix == "/health" {
+            // Engines answer health at the server root, outside the API base.
+            endpoint.path = suffix.into();
+            return Ok(endpoint);
         }
         endpoint.path = if let Some(base) = path
             .strip_suffix("/chat/completions")

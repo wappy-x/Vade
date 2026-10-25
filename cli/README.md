@@ -516,8 +516,11 @@ For a prebuilt installation, add a single optional key under `[global]`:
 prebuilt_dir = /path/to/prebuilt-bundles
 ```
 
-A bundle is a directory named `<engine-sha40>-<cli-sha40>` inside that root. It
-holds `flash-serve`, `flash.ptx`, `vade` (the remote helper) and
+`prebuilt_dir` may also be an unpacked release launcher bundle, used when its
+`launcher-bundle.conf` names this checkout's engine and CLI commits; see
+[prebuilt installation](docs/prebuilt.md#prebuilt-binaries-for-a-controller-install).
+Otherwise a bundle is a directory named `<engine-sha40>-<cli-sha40>` inside that
+root. It holds `flash-serve`, `flash.ptx`, `vade` (the remote helper) and
 `manifest.conf`:
 
 ```ini

@@ -148,6 +148,9 @@ fn fp4_single_spark_launch_has_no_fabric_or_rdma_and_persists_the_profile() {
     assert_eq!(args[0..4], ["0", "1", "127.0.0.1:0", "127.0.0.1:0"]);
     assert_eq!(args[6], "32768");
     assert!(args.iter().any(|s| s == "--fp4-local"));
+    let start = f.app.runner.calls.iter().find(|call| call.label.ends_with(" start") && call.label != "controller tunnel start").unwrap();
+    // One Spark keeps its checkpoint receipt private across starts.
+    assert_eq!(text::parse(std::str::from_utf8(&start.stdin).unwrap()).unwrap()["model_receipt"], "private");
     assert_eq!(args.iter().any(|s| s == "--mtp"), options.mtp_explicit);
     assert!(!f.app.runner.calls.iter().any(|c| c.label == "fabric address resolution"));
     let start = f.app.runner.calls.iter().find(|c| c.label.ends_with(" start")).unwrap();
@@ -292,6 +295,7 @@ fn fp4_chain_transport_launch_and_failed_start_cleanup_cover_every_rank() {
             for start in starts {
                 let request = text::parse(std::str::from_utf8(&start.stdin).unwrap()).unwrap();
                 assert_eq!(request["env.VADE_W2_PP"], "1");
+                assert_eq!(request["model_receipt"], "pipeline");
                 assert_eq!(request["env.VADE_W2_PP_RDMA"], expected);
                 assert_eq!(request["env_unset.VADE_W2_PP_SPLIT"], "1");
                 assert_eq!(request["arg.1"], count.to_string());
@@ -666,6 +670,7 @@ fn fp4_transport_selection_controls_both_pipeline_ranks_and_prerequisites() {
             assert_eq!(request["env.SEQPAR_RDMA"], expected);
             assert_eq!(request["env.TP_RDMA"], expected);
             assert_eq!(request["env.VADE_W2_PP_RDMA"], expected);
+            assert_eq!(request["model_receipt"], "pipeline");
         }
         for probe in fixture.app.runner.calls.iter().filter(|c| c.label.ends_with(" probe")) {
             assert_eq!(text::parse(std::str::from_utf8(&probe.stdin).unwrap()).unwrap()["rdma"], expected);

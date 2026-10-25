@@ -239,8 +239,15 @@ format, `vade-prebuilt-v1`. The `make-bundle.sh` script above builds only the
 launcher bundle (`vade-launch-bundle-v1`). It doesn't build a controller
 bundle.
 
-The v0.1.0 release doesn't include a `vade-prebuilt-v1` bundle. Unless you
-assemble one yourself, a controller install builds from source on each Spark.
+The release's launcher bundle also serves a controller. Unpack it on the
+controller and set `prebuilt_dir` to that folder (or unpack it into
+`<prebuilt_dir>/<engine-sha40>-<cli-sha40>`). `vade install` then reads its
+`launcher-bundle.conf`, checks the same three Spark files against their
+SHA-256 hashes and copies them, when the bundle's `engine_sha` and `cli_sha`
+equal the controller checkout's commit. A bundle from another commit is
+ignored and the Sparks build from source. The launcher bundle has no host pair,
+so the controller builds its own CLI and chat program. Otherwise, assemble a
+`vade-prebuilt-v1` bundle as described below.
 
 ### What a controller bundle contains
 

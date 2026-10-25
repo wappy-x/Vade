@@ -227,3 +227,83 @@ fn oversized_manifest_refuses_before_engine_start_without_copying_it() {
     assert!(!f.root.join("state/run.conf").exists());
     assert_eq!(fs::read(f.model.join("manifest.sha256")).unwrap(), manifest);
 }
+
+#[test]
+fn fetch_helper_list_beside_the_checkpoint_seeds_the_private_manifest() {
+    let f = Fixture::new();
+    text::private_dir(&f.root.join("state")).unwrap();
+    let launch = f.launcher();
+    let private = f.root.join("state/model-manifest.sha256");
+    // Nothing published: the engine writes its own receipt there later.
+    assert_eq!(launch.stage_manifest(&f.model).unwrap(), Some(private.clone()));
+    assert!(!private.exists());
+    let mut sibling = f.model.as_os_str().to_owned();
+    sibling.push(".sha256");
+    let hash = "a".repeat(64);
+    fs::write(&sibling, format!("{hash}  ./tensors/model-1.safetensors\n{hash} *./config.json\n{hash}  README.md\n")).unwrap();
+    launch.stage_manifest(&f.model).unwrap();
+    assert_eq!(fs::read_to_string(&private).unwrap(),
+        format!("{hash}  tensors/model-1.safetensors\n{hash} *config.json\n{hash}  README.md\n"));
+    // A manifest inside the checkpoint still comes first, byte for byte.
+    fs::write(f.model.join("manifest.sha256"), format!("{hash}  model.safetensors\n")).unwrap();
+    launch.stage_manifest(&f.model).unwrap();
+    assert_eq!(fs::read_to_string(&private).unwrap(), format!("{hash}  model.safetensors\n"));
+    fs::remove_file(sibling).unwrap();
+}
+
+#[test]
+fn controller_receipts_keep_supplied_hashes_in_both_modes() {
+    let f = Fixture::new();
+    let supplied = fixture_manifest(&f.model);
+    fs::write(f.model.join("manifest.sha256"), &supplied).unwrap();
+    let cache = f.root.join("state/cache");
+    let start = |mode: &str| {
+        let state = f.root.join(format!("spark-{mode}"));
+        text::private_dir(&state).unwrap();
+        let mut environment = Fields::from([("env_unset.FLASH_NVFP4_MANIFEST".into(), "1".into())]);
+        crate::worker::receipt(&state, &f.model, &Fields::from([("model_receipt".into(), mode.into())]), &mut environment).unwrap();
+        let receipt = PathBuf::from(&environment["env.FLASH_NVFP4_MANIFEST"]);
+        // Every rank expects the publisher's hashes, so a chain compares them.
+        assert_eq!(fs::read_to_string(&receipt).unwrap(), supplied);
+        receipt
+    };
+    for mode in ["private", "pipeline"] {
+        run_cpu_receipt(&f.model, &start(mode), &cache, "mixed");
+    }
+    // Same length and header, different payload: only the hashes can tell.
+    let shard = f.model.join("model.safetensors");
+    fs::write(&shard, [1; 32]).unwrap();
+    for mode in ["private", "pipeline"] {
+        cpu_receipt(&f.model, &start(mode), &cache, "mixed", Some("SHA-256 mismatch: model.safetensors"));
+    }
+}
+
+#[test]
+fn exported_cache_names_do_not_erase_private_preparation_paths() {
+    let _guard = crate::runner::process_test_lock();
+    let mut exec = source_install_test_process("launch::tests::receipt_tests::exported_cache_child");
+    // The local launcher clears inherited names; it must still pass its own.
+    for name in ["XDG_CACHE_HOME", "FLASH_NVFP4_MANIFEST"] {
+        exec.env.insert(name.into(), "/exported/elsewhere".into());
+    }
+    exec.env.insert("VADE_TEST_EXPORTED_CACHE".into(), "1".into());
+    let output = crate::runner::SystemRunner { dry: false }.run(&exec).unwrap();
+    assert!(output.success, "{}", output.stdout);
+    assert!(output.stdout.contains("exported cache fixture complete"), "{}", output.stdout);
+}
+
+#[test]
+fn exported_cache_child() {
+    if std::env::var("VADE_TEST_EXPORTED_CACHE").as_deref() != Ok("1") {
+        return;
+    }
+    assert_eq!(std::env::var("XDG_CACHE_HOME").as_deref(), Ok("/exported/elsewhere"));
+    let f = Fixture::new();
+    f.installed();
+    fs::write(f.model.join("manifest.sha256"), fixture_manifest(&f.model)).unwrap();
+    let mut launch = f.launcher();
+    // The mock asserts the effective environment of the preparation helper.
+    launch.execute(Command::Install, false).unwrap();
+    assert_eq!(launch.runner.worker_ops(), ["warm-ptx"]);
+    println!("exported cache fixture complete");
+}

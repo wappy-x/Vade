@@ -46,11 +46,39 @@ pub const ROUTES: &[&str] = &[
     "/v1/admission",
     "/v1/cancel",
     "/v1/kv/release",
+    "/health",
 ];
 /// The read-only routes; every other accepted route takes POST.
-const GET_ROUTES: &[&str] = &["/v1/capabilities", "/v1/models", "/models"];
+const GET_ROUTES: &[&str] = &["/v1/capabilities", "/v1/models", "/models", "/health"];
 /// `vade-gateway --help`; `vade-harness gateway --help` states the same rules.
 const BROWSER_GUARD_HELP: &str = "Browser guard: Host must be 127.0.0.1, localhost or [::1] (with the listener port) or an --allow-host value, else 421.\nAny request with an Origin header gets 403 unless --allow-origin names that exact origin (repeatable); allowed origins get CORS headers.\n--token TOKEN (or VADE_GATEWAY_TOKEN) requires Authorization: Bearer TOKEN, else 401; that header is not forwarded upstream.\n";
+/// How long one request may wait out upstream 503 refusals before the gateway
+/// passes the refusal on, and how often the wait checks for a client hang-up.
+const ADMISSION_PATIENCE: Duration = Duration::from_secs(if cfg!(test) { 2 } else { 30 });
+const ADMISSION_POLL: Duration = Duration::from_millis(50);
+/// The largest refusal body held while waiting; larger refusals pass on at once.
+const HELD_REFUSAL_BYTES: usize = 4096;
+
+/// The pause before re-sending after an upstream 503: 50 ms doubling to 800 ms,
+/// or one second when Retry-After says 0 or 1. A longer Retry-After is the
+/// upstream's advice to the client, so that refusal is passed on unchanged.
+fn admission_delay(retry_after: Option<&str>, waits: u32) -> Option<Duration> {
+    match retry_after.map(|s| s.trim().parse::<u64>()) {
+        None => Some(Duration::from_millis(50 << waits.min(4))),
+        Some(Ok(0 | 1)) => Some(Duration::from_secs(1)),
+        Some(_) => None,
+    }
+}
+
+/// The engine's refusal of a request it has read but not admitted (all its
+/// connections are busy). Other 503s, such as capacity running out after
+/// tokens were generated, a model swap or a shutdown, may follow work.
+fn admission_refusal(body: &[u8]) -> bool {
+    json::parse_bytes(body).ok().and_then(|value| value.get("error").map(|error| {
+        error.get("type").and_then(json::Value::as_str) == Some("overloaded")
+            && error.get("message").and_then(json::Value::as_str) == Some("connection capacity reached")
+    })).unwrap_or(false)
+}
 pub(crate) const MARKER_HEADER: &str = "x-vade-gateway";
 pub(crate) const MARKER_VALUE: &str = "v1";
 
@@ -399,8 +427,10 @@ fn handle_target(
         return reject(&mut reader, messages, 400, "invalid API request target");
     }
     let local_stats = path == STATS_PATH && matches!(upstream, Upstream::Cluster(_));
+    // One engine's /health is its own; a cluster reports per endpoint in its stats.
+    let cluster_health = path == "/health" && matches!(upstream, Upstream::Cluster(_));
     if !local_stats
-        && !ROUTES.contains(&path)
+        && (!ROUTES.contains(&path) || cluster_health)
     {
         return reject(
             &mut reader,
@@ -514,6 +544,9 @@ fn handle_target(
         }
     };
     let mut retried = false;
+    let admission = Instant::now() + ADMISSION_PATIENCE;
+    let mut waits = 0u32;
+    let mut held = None;
     let mut response = loop {
         let endpoint = match upstream {
             Upstream::Single(endpoint) => endpoint,
@@ -566,6 +599,51 @@ fn handle_target(
                     retried = true;
                     continue;
                 }
+            }
+        }
+        // The engine refuses a request it cannot admit before any work starts
+        // (it reads the whole request first), so a lone upstream may take the
+        // request once a finishing stream frees its slot. Wait briefly instead
+        // of passing a momentary refusal to the client. Every other 503 may
+        // follow work and reaches the client once. Clusters keep their single
+        // fallback above.
+        let attempt = match (attempt, upstream) {
+            (Ok(mut refusal), Upstream::Single(_)) if refusal.status == 503
+                && refusal.head.get("content-length").and_then(|n| n.parse::<usize>().ok()).is_some_and(|n| n <= HELD_REFUSAL_BYTES)
+                && !cancel.is_some_and(|c| c.load(Ordering::Relaxed)) => {
+                // The patience covers reading the refusal as well as the pauses.
+                let limit = admission.min(reader.get_ref().request_deadline());
+                refusal.body.reader.get_mut().bound_deadline(limit);
+                let mut bytes = Vec::new();
+                if refusal.body.read_to_end(&mut bytes).is_err() {
+                    return reject(&mut reader, messages, 502, "HTTP upstream refusal was incomplete; request was not replayed");
+                }
+                let delay = admission_delay(refusal.head.get("retry-after"), waits)
+                    .filter(|delay| admission_refusal(&bytes) && Instant::now() + *delay < limit);
+                let Some(delay) = delay else {
+                    return relay_whole(&mut reader, messages, (refusal.status, &refusal.head, &bytes), method, path, origin.as_deref());
+                };
+                let until = Instant::now() + delay;
+                while Instant::now() < until && !cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                    reader.get_ref().check()?;
+                    thread::sleep(until.saturating_duration_since(Instant::now()).min(ADMISSION_POLL));
+                }
+                if Instant::now() >= limit {
+                    return relay_whole(&mut reader, messages, (refusal.status, &refusal.head, &bytes), method, path, origin.as_deref());
+                }
+                // Keep the refusal: if the upstream cannot be reached again, the
+                // client still gets this answer rather than a gateway error.
+                held = Some((refusal.status, refusal.head, bytes));
+                waits = waits.saturating_add(1);
+                continue;
+            }
+            (attempt, _) => attempt,
+        };
+        // Only a failed fresh connection proves the retry sent nothing; any
+        // later failure leaves its outcome unknown, reported below as such.
+        if let (Err(failure), Some((status, refusal, bytes))) = (&attempt, held.take()) {
+            if failure.connect_failed {
+                return relay_whole(&mut reader, messages, (status, &refusal, &bytes), method, path, origin.as_deref());
             }
         }
         match attempt {
@@ -628,6 +706,20 @@ fn handle_target(
     Ok(())
 }
 
+/// Forward an upstream reply already read in full, with its own length.
+fn relay_whole(reader: &mut BufReader<DeadlineStream<'_>>, messages: bool, (status, head, bytes): (u16, &transport::Head, &[u8]),
+    method: &str, path: &str, origin: Option<&str>) -> io::Result<()> {
+    let writer = reader.get_mut();
+    let mut headers = response_head(status, head, method, path, origin, &format!("Content-Length: {}\r\n", bytes.len()));
+    if headers.len() + 2 > transport::MAX_HEADERS {
+        return write_error(writer, messages, 502, "upstream response headers exceed limit");
+    }
+    headers.push_str("\r\n");
+    writer.write_all(headers.as_bytes())?;
+    writer.write_all(bytes)?;
+    writer.flush()
+}
+
 /// The gateway's status line and headers for an upstream reply, without the
 /// blank line that ends them. Hop-by-hop and marker headers stay upstream, and
 /// an allowed browser gets exactly one CORS answer: the gateway's.
@@ -636,6 +728,10 @@ fn response_head(status: u16, upstream: &transport::Head, method: &str, path: &s
     headers.push_str(&sampling::capabilities_header(method, path));
     headers.push_str(&access::cors(origin));
     headers.push_str(framing);
+    // Tell clients when to try again, even if the upstream left it out.
+    if matches!(status, 429 | 503) && upstream.get("retry-after").is_none() {
+        headers.push_str("Retry-After: 1\r\n");
+    }
     for (name, value) in &upstream.fields {
         if !transport::hop_header(name, upstream) && !name.eq_ignore_ascii_case(MARKER_HEADER)
             && !(origin.is_some() && name.starts_with("access-control-"))
@@ -917,6 +1013,146 @@ mod tests {
             }
             worker.join().unwrap();
         }
+    }
+
+    /// One mock upstream reply: `declared` body bytes, of which `body` is sent
+    /// after `pause`, with `head` as extra header lines. Status 0 reads the
+    /// request, then closes without a reply.
+    struct MockReply { status: u16, head: &'static str, body: &'static [u8], declared: usize, pause: Duration }
+    fn reply(status: u16, body: &'static [u8]) -> MockReply { MockReply { status, head: "", body, declared: body.len(), pause: Duration::ZERO } }
+
+    /// Send one chat request through a lone-upstream relay; return the client's
+    /// status line, Retry-After, reply body, every request body the upstream
+    /// read, and how long the client waited for the status line.
+    fn lone_upstream_exchange(replies: Vec<MockReply>) -> (String, Option<String>, Vec<u8>, Vec<Vec<u8>>, Duration) {
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let endpoint = Endpoint::parse(&format!("http://{upstream_address}/v1")).unwrap();
+        let upstream_worker = thread::spawn(move || {
+            let mut bodies = Vec::new();
+            for reply in replies {
+                let (socket, _) = upstream.accept().unwrap();
+                let mut reader = BufReader::new(DeadlineStream::new(socket, None).unwrap());
+                // The test's own empty connection: the relay sent nothing more.
+                let Ok(head) = transport::read_head(&mut reader) else { break };
+                let mut body = BodyReader::new(reader, &head, true, json::MAX_INPUT_BYTES).unwrap();
+                let mut bytes = Vec::new(); body.read_to_end(&mut bytes).unwrap();
+                bodies.push(bytes);
+                if reply.status == 0 { continue; }
+                let socket = body.reader.get_mut();
+                write!(socket, "HTTP/1.1 {} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}\r\n", reply.status, reply.declared, reply.head).unwrap();
+                socket.flush().unwrap();
+                thread::sleep(reply.pause);
+                let _ = socket.write_all(reply.body);
+            }
+            bodies
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let relay = thread::spawn(move || { let (socket, _) = listener.accept().unwrap(); handle(socket, &endpoint).unwrap(); });
+        let request = br#"{"model":"mock-model","messages":[{"role":"user","content":"hi"}]}"#;
+        let mut socket = DeadlineStream::new(TcpStream::connect(address).unwrap(), None).unwrap();
+        write!(socket, "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", request.len()).unwrap();
+        socket.write_all(request).unwrap();
+        let sent = Instant::now();
+        let mut reader = BufReader::new(socket);
+        let head = transport::read_head(&mut reader).unwrap();
+        let waited = sent.elapsed();
+        let mut body = Vec::new();
+        BodyReader::new(reader, &head, false, transport::MAX_BODY).unwrap().read_to_end(&mut body).unwrap();
+        relay.join().unwrap();
+        // Release a mock still waiting for a request the relay rightly never sent.
+        drop(TcpStream::connect(upstream_address));
+        let bodies = upstream_worker.join().unwrap();
+        assert!(bodies.iter().all(|body| body == &bodies[0]), "every attempt sends the same bytes");
+        (head.first.clone(), head.get("retry-after").map(str::to_owned), body, bodies, waited)
+    }
+
+    #[test]
+    fn lone_upstream_admission_refusals_are_waited_out_and_refusals_say_when_to_retry() {
+        // The engine's full-capacity reply, as sent between two chat rounds.
+        let busy = br#"{"error":{"type":"overloaded","message":"connection capacity reached"}}"#;
+        for (replies, status, retry_after, sent) in [
+            (vec![reply(503, busy), reply(503, busy), reply(200, br#"{"ok":true}"#)], 200, None, 3),
+            (vec![reply(429, br#"{"error":{"type":"rate_limit"}}"#)], 429, Some("1"), 1),
+            // The upstream then stops listening: its refusal still reaches the client.
+            (vec![reply(503, busy)], 503, Some("1"), 1),
+        ] {
+            let (first, header, body, bodies, _) = lone_upstream_exchange(replies);
+            assert!(first.starts_with(&format!("HTTP/1.1 {status} ")), "{first}");
+            assert_eq!(header.as_deref(), retry_after);
+            assert!(!body.is_empty());
+            assert_eq!(bodies.len(), sent);
+        }
+    }
+
+    #[test]
+    fn lone_upstream_503s_that_may_follow_work_are_forwarded_once() {
+        for terminal in [
+            br#"{"error":{"type":"capacity_exhausted","message":"request capacity exhausted"}}"#.as_slice(),
+            br#"{"error":{"type":"model_swapping","message":"request cancelled for model swap"}}"#,
+            br#"{"error":{"type":"server_shutdown","message":"server is shutting down; request cancelled"}}"#,
+            br#"{"error":{"type":"overloaded","message":"other"}}"#,
+            b"not json",
+        ] {
+            let (first, header, body, bodies, _) = lone_upstream_exchange(vec![reply(503, terminal), reply(200, b"{}")]);
+            assert!(first.starts_with("HTTP/1.1 503 "), "{first}");
+            assert_eq!((header.as_deref(), body.as_slice(), bodies.len()), (Some("1"), terminal, 1));
+        }
+    }
+
+    #[test]
+    fn a_retry_that_may_have_run_is_not_answered_with_the_earlier_refusal() {
+        let busy = br#"{"error":{"type":"overloaded","message":"connection capacity reached"}}"#;
+        // The retry's connection takes the request, then closes without a reply.
+        let (first, _, body, bodies, _) = lone_upstream_exchange(vec![reply(503, busy), reply(0, b"")]);
+        assert!(first.starts_with("HTTP/1.1 502 "), "{first}");
+        assert!(String::from_utf8_lossy(&body).contains("outcome may be unknown"));
+        assert_eq!(bodies.len(), 2);
+    }
+
+    #[test]
+    fn holding_a_refusal_stays_within_the_admission_budget() {
+        let busy = br#"{"error":{"type":"overloaded","message":"connection capacity reached"}}"#;
+        // A refusal that declares a body and sends it only well after the budget.
+        let stalled = MockReply { status: 503, head: "", body: b"", declared: busy.len(), pause: ADMISSION_PATIENCE + Duration::from_secs(2) };
+        let (first, _, body, bodies, waited) = lone_upstream_exchange(vec![stalled]);
+        assert!(first.starts_with("HTTP/1.1 502 "), "{first}");
+        assert!(waited < ADMISSION_PATIENCE + Duration::from_secs(1), "{waited:?}");
+        assert!(String::from_utf8_lossy(&body).contains("refusal was incomplete"));
+        assert_eq!(bodies.len(), 1);
+        // A refusal whose pause would end past the budget is passed on, not replayed.
+        let late = MockReply { status: 503, head: "Retry-After: 1\r\n", body: busy, declared: busy.len(), pause: ADMISSION_PATIENCE / 2 + Duration::from_millis(200) };
+        let (first, _, body, bodies, _) = lone_upstream_exchange(vec![late, reply(200, b"{}")]);
+        assert!(first.starts_with("HTTP/1.1 503 "), "{first}");
+        assert_eq!((body.as_slice(), bodies.len()), (busy.as_slice(), 1));
+    }
+
+    #[test]
+    fn health_reaches_the_lone_engine_at_its_server_root() {
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = Endpoint::parse(&format!("http://{}/v1", upstream.local_addr().unwrap())).unwrap();
+        let upstream_worker = thread::spawn(move || {
+            let (mut socket, _) = upstream.accept().unwrap();
+            let head = transport::read_head(&mut BufReader::new(socket.try_clone().unwrap())).unwrap();
+            let body = br#"{"status":"ready","model":"mock"}"#;
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", body.len()).unwrap();
+            socket.write_all(body).unwrap();
+            head.first
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let relay = thread::spawn(move || { let (socket, _) = listener.accept().unwrap(); handle(socket, &endpoint).unwrap(); });
+        let mut socket = DeadlineStream::new(TcpStream::connect(address).unwrap(), None).unwrap();
+        socket.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        let mut reader = BufReader::new(socket);
+        let head = transport::read_head(&mut reader).unwrap();
+        assert!(head.first.starts_with("HTTP/1.1 200 "), "{}", head.first);
+        let mut reply = Vec::new();
+        BodyReader::new(reader, &head, false, transport::MAX_BODY).unwrap().read_to_end(&mut reply).unwrap();
+        assert_eq!(reply, br#"{"status":"ready","model":"mock"}"#);
+        relay.join().unwrap();
+        assert_eq!(upstream_worker.join().unwrap(), "GET /health HTTP/1.1");
     }
 
     #[test]

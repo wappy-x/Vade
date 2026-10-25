@@ -221,6 +221,12 @@ impl<R: Runner> App<R> {
         ] {
             fields.insert(format!("env_unset.{name}"), "1".into());
         }
+        if session.fp4_local {
+            // Keep the checkpoint receipt in each rank's state folder, never in
+            // the checkpoint. A chain starts every rank from no receipt, so
+            // different start histories cannot split its content identity.
+            fields.insert("model_receipt".into(), if session.chained() { "pipeline" } else { "private" }.into());
+        }
         Ok(fields)
     }
 }

@@ -15,12 +15,13 @@ VADE_MTP_C8=0 VADE_POOL_GRAPH_FALLBACK=0 VADE_MTP_COHORT_ADAPT=0 flash-serve ...
 
 An explicit `VADE_MTP_BATCH` retains its previous table and disables the implicit
 cohort default. `VADE_MTP_C8=0` also disables that implicit cohort default.
-The two-stage layer pipeline enables guarded Auto8 through `VADE_W2_PP_C8`
-(unset or `1`). Set `VADE_W2_PP_C8=0` to restore its previous defaults: Auto
-batching, no cohort controller and no graph fallback. Explicit existing switch
+The two- and four-stage layer pipelines enable guarded Auto8 and the cohort
+controller through `VADE_W2_PP_C8` (unset or `1`). Set `VADE_W2_PP_C8=0` on every
+Spark to restore the previous defaults on either route: Auto batching, no cohort
+controller and no graph fallback. Explicit existing switch
 values retain their overrides. An explicit cohort `1` requires Auto8 and either
-world one or this enabled two-stage pipeline. Native ranks and larger pipelines
-retain their previous defaults and reject explicit cohort activation.
+world one or an enabled two- or four-stage pipeline. Native ranks and other
+pipeline sizes retain their previous defaults and reject explicit cohort activation.
 Explicit request draft/depth controls retain their meaning. The C8 and graph
 switches can be controlled independently; world one uses all three zeros for a full rollback.
 
@@ -51,9 +52,9 @@ it does not change target verification. Other unproductive probes back off to
 2,048 cycles if no proposal has survived, or 64 cycles after a survivor.
 
 Switching to drafts synchronizes and releases unused pooled decode execution
-storage on both ranks. The front marks the next pipeline request for reclamation;
-the worker completes prior readers and releases its pool before executing that
-request. The mark also propagates when the front's pool is already empty.
+storage on every rank. The front marks the next pipeline request for reclamation;
+each worker completes prior readers, releases its pool and relays the mark
+downstream before executing that request. The mark also propagates when the front's pool is already empty.
 Reusable rollback arenas stay allocated because recurrent-state views
 can retain their underlying owner. The memory ceiling and admission margin are
 unchanged. The graph fallback switch permits a healthy capture refusal to run
@@ -69,13 +70,13 @@ exact IDs, output bytes and terminal usage across alone/cohort execution, mixed
 lengths/depths, staggered arrivals and both draft settings when changing this policy in a deployment.
 
 The pipeline handshake compares the already-parsed route switch and effective
-batch, cohort, graph-fallback and robust-guard settings on both ranks. Unset and
+batch, cohort, graph-fallback and robust-guard settings on every link. Unset and
 explicit defaults agree; a different parsed setting refuses startup with local
 and peer values before weights load. Reclamation rides the existing ordered
 request stream without an additional round trip.
 Rank zero owns proposal generation, sampling, acceptance and the cost timer.
-Both stages verify target rows, and the timer includes the synchronous remote
-execution and link exchange. The worker applies a rejected prefix on the next
+Every stage verifies target rows, and the timer includes the synchronous remote
+execution and link exchange. Each worker applies a rejected prefix on the next
 request for that session, so its rollback cost enters the following cycle.
 Pipeline target verification keeps its existing eager execution path; healthy
 local capture fallback remains off by default on the pipeline.

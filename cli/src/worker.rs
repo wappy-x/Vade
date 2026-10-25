@@ -24,6 +24,8 @@ mod logs;
 use logs::{read_log, sensitive_environment_name};
 mod model;
 use model::check_model;
+#[cfg(test)]
+pub(crate) use model::receipt;
 mod prepare;
 use gpu::{gpu_empty, gpu_settled};
 mod process;
@@ -363,6 +365,7 @@ fn start(store: &Store, request: &Fields) -> Result<Fields, String> {
     let expected_command = command_bytes(&engine, &arguments);
     let mut environment = environment(request)?;
     persistent_cuda_cache(&store.root, required(request, "ptx_sha256")?, &mut environment)?;
+    model::receipt(&store.root, &model, request, &mut environment)?;
     let mut private_environment = environment.clone();
     // The SSH session may itself carry credentials. Capture inherited private
     // values for redaction, while respecting explicit removals and overrides.

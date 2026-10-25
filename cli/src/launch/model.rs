@@ -546,7 +546,7 @@ pub(super) fn test_index() -> &'static str {
 }
 
 #[cfg(test)]
-pub(super) fn test_config(context: u32) -> String {
+pub(crate) fn test_config(context: u32) -> String {
     let layers = (0..48)
         .map(|i| {
             if i % 4 == 3 {
@@ -582,7 +582,7 @@ pub(super) fn test_config(context: u32) -> String {
 }
 
 #[cfg(test)]
-pub(super) fn test_mixed_config(context: u32) -> String {
+pub(crate) fn test_mixed_config(context: u32) -> String {
     test_config(context).replace(
         r#"{"quant_method":"fp8","activation_scheme":"dynamic",
             "weight_per_tensor":false,"act_per_tensor":false,"weight_block_size":[128,128]}"#,

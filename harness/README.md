@@ -813,10 +813,24 @@ cluster routing** across compatible endpoints. The gateway:
 
 If a new connection fails, or the upstream answers 429 or 503, before any
 response bytes have been forwarded, the gateway retries once on another
-verified healthy, compatible upstream. The retry sends your request unchanged,
-including the fields you set. Once a response has started forwarding, nothing
-is replayed, and read or write failures after the request was sent are not
-retried either.
+verified healthy, compatible upstream.
+
+With a single upstream, only the engine's admission refusal is held: a complete
+503 of at most 4 KiB whose body is
+`{"error":{"type":"overloaded","message":"connection capacity reached"}}`,
+which the engine sends before doing any work. Without `Retry-After`, the
+gateway sends the same request again after 50 ms, doubling up to 800 ms; with
+`Retry-After: 0` or `1`, it waits 1 s each time. A longer `Retry-After` is
+passed on at once. The whole wait, including reading each refusal, is capped
+at 30 s; then the last refusal is passed on. It is passed on too if a new
+connection to the upstream fails. Every other 503 may follow work (capacity
+running out mid-reply, a model swap, a shutdown), so it is forwarded once. Any
+429 or 503 the gateway forwards without `Retry-After` gets `Retry-After: 1`.
+
+A retry sends your request unchanged, including the fields you set. Once a
+response has started forwarding, nothing is replayed, and read or write
+failures after the request was sent are not retried either: the client gets
+HTTP 502 because the outcome is unknown, even after an earlier refusal.
 
 With several `--upstream` options, `GET /_vade/gateway/stats` shows each
 endpoint's requests, failures and reported cached/prompt-token ratios. With one

@@ -4,8 +4,9 @@ This page gets Vade **v0.1.0** running and serving
 **nvidia/Qwen3.8-Flash-Next-FP4-Local** as text-only chat. You start with one
 Spark and no other computer.
 
-Everyone does steps 1 to 3: prerequisites, the code and the model. Then pick a
-route:
+If your checkpoint is already under `~/models`, use the
+[quick start](#quick-start-with-an-existing-model). Otherwise, do steps 1 to 3:
+prerequisites, the code and the model. Then pick a route:
 
 - [Route A](#route-a-on-this-spark) runs everything on the Spark itself. Start
   here.
@@ -15,6 +16,54 @@ route:
 
 New terms are explained where they first appear, and the
 [glossary](docs/GLOSSARY.md) has the rest.
+
+## Quick start with an existing model
+
+On an idle DGX Spark with Git, `cc`, curl and a working NVIDIA driver, paste
+this block as one shell command. Keep the complete checkpoint under
+`~/models`; for another location, first set `VADE_MODELS` to its checkpoint
+folder. No GitHub account or token is needed.
+
+```sh
+git clone --branch main https://github.com/wappy-x/vade.git "$HOME/vade" &&
+  sh "$HOME/vade/scripts/install.sh" --launch
+```
+
+If you already cloned Vade, open its folder and use these two commands instead:
+
+```sh
+sh scripts/install.sh
+./cli/target/release/vade launch
+```
+
+The installer runs only on Linux `aarch64`. It finds Rust in `~/.cargo/bin`,
+installs any missing pinned toolchains and GPU components, builds the CLI, runs preflight checks, fills
+the compiler cache and runs local `vade install`. Installation also compiles
+the GPU code into Vade's private startup cache, so the first `up` does not
+need to do that work. With `--launch`, it then starts the engine and opens chat
+in the folder you started from; without that flag, it finishes after install.
+It does not download or edit models,
+change shell profiles or run sudo. Every failed stage prints its cause and a
+next step. Read the script first if you want to inspect what it runs.
+
+The first run needs internet access for missing Rust and `build-std` files.
+With those cached, `CARGO_NET_OFFLINE=true sh scripts/install.sh` works offline
+from the checkout. It reuses available tools without asking rustup to update
+them. Toolchain and model downloads have no measured time bound.
+
+`launch` waits for the engine and opens chat. Chat can edit files in the
+folder it opens in, so ask it only to say hello, then type `/exit`. Keep using the full command path, or add its folder to `PATH`. In a
+script without a terminal, `launch` prints readiness and exits; the engine
+keeps running. To start without opening chat, use
+`"$HOME/vade/cli/target/release/vade" up`. Use `chat` to connect later and
+`down` to stop this installation's engine.
+
+If cloning fails because `~/vade` exists, use the existing-checkout commands
+above, or choose another destination. If GitHub cannot be reached, retry from
+a connection that can reach the public repository. If `VADE_CONFIG` selects a
+controller or `VADE_BUNDLE` selects a bundle, the script tells you which
+variable to unset for this local source route. Keep the same `VADE_HOME`
+(default `~/.vade`) for install, launch and all later lifecycle commands.
 
 ## Before you start
 
@@ -219,10 +268,11 @@ it.
 
 The launcher reads `launcher-bundle.conf`, the file next to `./vade` that
 records the hashes of the engine, the GPU kernels, the chat program and the
-launcher itself. The bundle is only for `vade launch` on the Spark itself. A
-controller (Route B) can't use it: its `vade install` reads only the separate
-`vade-prebuilt-v1` format, which the release doesn't include, so it builds from
-source on each Spark unless you assemble that format yourself. See
+launcher itself. A controller (Route B) can use the same unpacked bundle: set
+`prebuilt_dir` in its config to that folder, and `vade install` copies the
+bundle's engine, GPU kernels and helper to each Spark instead of building them,
+as long as the bundle was built from the controller checkout's commit. The
+controller still builds its own CLI and chat program. See
 [bundle details](cli/docs/prebuilt.md) and [first run](harness/docs/first-run.md).
 
 ## Step 3: get the model
@@ -270,8 +320,16 @@ enough. Vade's `install`, `up` and `launch` do not download these weights.
 
 ### Check the files
 
-Next, check the files against the committed manifest. Do this for an existing
-checkpoint or a copy on another Spark too. From the checkout root:
+On Route A, the first `vade launch`, `vade up` or `vade install` checks every
+file for you while it compiles the GPU code, if it finds a checksum list: the
+fetch helper's `Qwen3.8-Flash-Next-FP4-Local.sha256` beside the checkpoint
+folder, or a `manifest.sha256` inside it. A file that differs stops the launch
+with its name. Nothing is written into the checkpoint; the result is kept in
+Vade's private state, so later starts skip the work.
+
+If you got the checkpoint another way, or you use Route B, check the files
+against the committed manifest once yourself. This reads the whole checkpoint
+and takes over a minute. From the checkout root:
 
 ```sh
 MODEL_SHA256_LIST="$PWD/cli/examples/qwen3.8-flash-next-fp4-local.sha256"
@@ -304,22 +362,25 @@ Vade keeps its settings in `~/.vade/config`.
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
 unset VADE_CONFIG
-cargo +1.99.0 build --release --offline --manifest-path cli/Cargo.toml
+sh scripts/install.sh
 export PATH="$PWD/cli/target/release:$PATH"
-vade launch
+./cli/target/release/vade launch
 ```
 
-`vade launch` does the rest:
+The script builds and installs Vade, including the private GPU startup cache.
+`launch` does the rest:
 
 1. It finds the checkpoint under `~/models` and saves local settings.
-2. It builds the engine and chat program.
+2. It reuses the installed engine and chat program.
 3. It waits until the engine is ready, then opens chat.
 
-The first launch builds everything before it is ready, which can look like a
-hang. We have not timed it. When the engine is ready, it prints
-`Launch ready in ...`, followed by how long the launch took. Run from a script,
-where standard input is not a terminal, it skips chat: after that ready line it
-prints `Standard input is not a terminal, so chat was not opened. Chat: vade chat`
+When a checksum list is present, the script's `vade install` already did the
+file check described in [Check the files](#check-the-files), so `launch`
+mostly loads the model. That still takes a while and can look like a hang. When the engine is ready, it
+prints `Launch ready in ...`, followed by how long the launch took. Run from a
+script, where standard input is not a terminal, it skips chat: after that
+ready line it prints
+`Standard input is not a terminal, so chat was not opened. Chat: vade chat`
 and exits.
 
 Chat opens in the checkout, and the agent can edit files there, so ask it only
@@ -678,7 +739,8 @@ vade install
 vade up --sparks 2
 ```
 
-`vade install` builds from source on each Spark. After `vade up --sparks 2`,
+`vade install` builds from source on each Spark, unless `prebuilt_dir` points
+at a matching [release bundle](#optional-release-bundle). After `vade up --sparks 2`,
 `vade verify` reports `1 machine`, because the two ranks form one engine, not
 two separate engines.
 
@@ -808,9 +870,25 @@ harness/target/release/vade-gateway --upstream http://127.0.0.1:18080/v1 --bind 
 ```
 
 If `vade status` shows a different engine endpoint, use that one. Point your
-client at `http://127.0.0.1:8787/v1`. Ctrl-C stops the gateway. See the
-[harness documentation](harness/README.md) for the supported API and tool
-behavior.
+client at `http://127.0.0.1:8787/v1`. Ctrl-C stops the gateway.
+
+When the engine is full (16 open connections), it turns a new request away
+with HTTP 503 before doing any work. `vade-gateway` passes that refusal
+straight to your client. The harness's built-in gateway waits it out instead;
+start it in place of `vade-gateway`:
+
+```sh
+harness/target/release/vade-harness gateway --upstream http://127.0.0.1:18080/v1 --bind 127.0.0.1:8787
+```
+
+With one upstream it holds only that refusal (`connection capacity reached`)
+and sends the same bytes again after a short wait, for up to 30 s, so a client
+that opens its next round of chats while the last one is still closing just
+sees a slightly later first token. Any other 503 may come after work started,
+so it reaches the client once. This gateway also passes `GET /health` to the
+engine, so `vade bench --url http://127.0.0.1:8787/v1` and health checks work
+through it. See the [harness documentation](harness/README.md) for the
+supported API and tool behavior.
 
 The gateway guards against web pages driving it through your browser:
 
@@ -846,7 +924,10 @@ name the model, it falls back to
 
 By default it uses a bundled offline writing prompt and asks for the server's
 drafting policy, which for FP4-Local means drafting on. When many requests run
-at once, the server may answer some of them without drafting.
+at once, the server may answer some of them without drafting. `vade bench` then
+ends with a `Drafting:` line that names, for each concurrency, how many replies
+were plain; those rows measure plain speed, which is why a higher concurrency
+can show a lower rate than the one before it.
 
 Each receipt (the JSON result file) records the draft mode you asked for, the
 server's build SHA and the drafting (MTP) depth the server reports. What each
@@ -898,7 +979,7 @@ stop), and run `vade logs` and `vade doctor` before you retry.
 | `Port ... is in use; close the application using it and retry vade launch.` (from `vade up`, it ends `retry vade up.`) | Find the program using the port and stop it through its own controls. A first local setup can pick another port, but later launches reuse the saved one. On a controller, choose free `local_port` and `serve_port` values in the private config. |
 | `Model loading timed out` | Run `vade logs`, then `vade doctor`. Read the saved startup log, and retry only once you have fixed the cause. |
 | `staged hashes differ from the manifest. Nothing started; run vade install.` | A controller's `vade up` prints this, with the machine name in front. Run `vade install` to restage the matching engine and PTX. A local `vade launch` or `vade up` rebuilds a changed staged build by itself. For stale PTX during a source build, run `cargo +1.99.0 kernels` again from `engine/` before you build again. |
-| HTTP 503 with `{"error":{"type":"overloaded","message":"connection capacity reached"}}` | Your client opened more chats at once than the engine admitted. The engine turns the extra request away at its start, and the server stays ready. A retry is accepted once a chat slot is free. Lower the client's concurrency, or use the admitted count (`Concurrent chats` in `vade status`). |
+| HTTP 503 with `{"error":{"type":"overloaded","message":"connection capacity reached"}}` | The engine accepts 16 connections at once. A client that opens a 16th chat while an earlier one is still closing, or more than 16 at a time, gets this reply at the start; the server stays ready and nothing ran. Retry after a second: the engine sends no `Retry-After`, and the retry is accepted once a slot is free. `vade-harness gateway` ([client gateway](#client-gateway)) does this for you: with one upstream it waits up to 30 s for a slot, and it adds `Retry-After: 1` to any 429 or 503 it passes on without one. `vade-gateway` passes the refusal straight through. Otherwise lower the client's concurrency. |
 | `generation stopped before completion` | It can show up on the first 8- or 16-request `vade bench` after a controller start, when the engine log reports an allocation that did not fit. Run `vade logs`, then retry. |
 | `Transport: ... did not reply to the pre-start check; nothing was started or recorded.` | Vade gives each SSH connection a short time limit, so a brief network or SSH hiccup can cause this. Nothing started, so run `vade up` again. If it keeps happening, test the machine with `ssh -o BatchMode=yes` and read the SSH error in the retained logs. |
 | `Directory ... is shared. Run chmod 700 ...` or `Directory ... on ... is open to other users.` | A `stage_dir` or `state_dir` is open to other users, on the controller or on a Spark. Run the `chmod 700` command the message prints, then run `vade install` again. Next time, create these folders with `mkdir -m 700` or let Vade create them. |
