@@ -1,4 +1,15 @@
-use super::*;
+//! Child grants and the shared parent/child approval lane.
+use crate::{
+    cli::{
+        approval::ToolPreviews,
+        args::{Config, Parsed},
+        events::{WorkerEvent, WorkerResult},
+    },
+    interaction,
+};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}, mpsc};
+use std::time::{Duration, Instant};
+use vade_harness::{coding_tools, shell::ApprovalPolicy};
 
 fn config(extra: &[&str]) -> Result<Config, &'static str> {
     let mut args = vec![

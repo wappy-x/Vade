@@ -472,3 +472,115 @@ pub fn interrupted() -> bool {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fragmented_unicode_and_navigation() {
+        let mut d = Decoder::default();
+        assert!(d.feed(&[0xe2, 0x82]).is_empty());
+        assert_eq!(d.feed(&[0xac]), [Key::Text("€".into())]);
+        assert!(d.feed(b"\x1b[").is_empty());
+        assert_eq!(d.feed(b"A"), [Key::Up]);
+        assert_eq!(
+            d.feed(b"\r\x03\x7f"),
+            [Key::Enter, Key::Interrupt, Key::Backspace]
+        );
+    }
+
+    #[test]
+    fn fragmented_wheel_reports_cannot_recall_prompts_or_enter_pasted_text() {
+        let mut d = Decoder::default();
+        assert!(d.feed(b"\x1b[<64;12;").is_empty());
+        assert_eq!(d.feed(b"5M\x1b[<81;12;5M"), [Key::WheelUp, Key::WheelDown]);
+        assert!(d.feed(b"\x1b[<0;12;5M\x1b[<0;12;5m").is_empty());
+        assert_eq!(d.feed(b"\x1b[A\x1b[B"), [Key::Up, Key::Down]);
+        assert_eq!(
+            d.feed(b"\x1b[200~\x1b[<64;12;5M\x1b[201~"),
+            [Key::PasteStart, Key::PasteEnd]
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_does_not_submit_commands() {
+        let mut d = Decoder::default();
+        let keys = d.feed(b"\x1b[200~/quit\n\x03\x1b[201~");
+        assert_eq!(keys.first(), Some(&Key::PasteStart));
+        assert_eq!(keys.last(), Some(&Key::PasteEnd));
+        assert!(!keys.contains(&Key::Enter));
+        assert!(!keys.contains(&Key::Interrupt));
+        assert!(keys.contains(&Key::Newline));
+    }
+
+    #[test]
+    fn paste_normalizes_cr_lf_without_losing_blank_lines() {
+        let mut decoder = Decoder::default();
+        let keys = decoder.feed(b"\x1b[200~\r\nfirst\r\rsecond\n\x1b[201~");
+        assert_eq!(keys.iter().filter(|key| **key == Key::Newline).count(), 4);
+        assert!(!keys.contains(&Key::Enter));
+        assert_eq!(
+            decoder.feed(b"\x1b[13;2u\x1b[27;2;13~\x1b\r\n\x14"),
+            [
+                Key::Newline,
+                Key::Newline,
+                Key::Newline,
+                Key::Newline,
+                Key::CtrlT
+            ]
+        );
+        assert!(decoder.feed(b"\x1b[13;2:3u\x1b[99;9u").is_empty());
+        assert_eq!(
+            decoder.feed(b"\x1b[99;5u\x1b[27;5;106~"),
+            [Key::Interrupt, Key::Newline]
+        );
+    }
+
+    #[test]
+    fn meta_chords_and_modified_arrows_move_by_word_instead_of_clearing() {
+        let mut d = Decoder::default();
+        assert_eq!(
+            d.feed(b"\x1bb\x1bf\x1bd\x1b\x7f\x1b[1;5C\x1b[1;5D\x1b[1;3C\x1b[1;3D\x0b\x0c\x1bOC"),
+            [
+                Key::WordLeft,
+                Key::WordRight,
+                Key::DeleteWordForward,
+                Key::DeleteWord,
+                Key::WordRight,
+                Key::WordLeft,
+                Key::WordRight,
+                Key::WordLeft,
+                Key::KillToEnd,
+                Key::Redraw,
+                Key::Right,
+            ]
+        );
+        // An unknown chord is still a lone Escape; its letter never types.
+        assert_eq!(d.feed(b"\x1bq"), [Key::Escape]);
+        // Esc in one read and a letter in the next is Esc, then that letter.
+        assert!(d.feed(b"\x1b").is_empty());
+        assert_eq!(d.feed(b"b"), [Key::Escape, Key::Text("b".into())]);
+        assert!(d.feed(b"\x1b").is_empty());
+        assert_eq!(d.feed(b"\x7f"), [Key::Escape, Key::Backspace]);
+        assert!(d.feed(b"\x1b").is_empty());
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(d.timeout(), Some(Key::Escape));
+    }
+
+    #[test]
+    fn navigation_and_large_paste_decode_without_per_character_work_events() {
+        let mut decoder = Decoder::default();
+        assert_eq!(
+            decoder.feed(b"\x1b[C\x1b[D\x1b[H\x1b[F\x1b[3~"),
+            [Key::Right, Key::Left, Key::Home, Key::LineEnd, Key::Delete]
+        );
+        let mut bytes = b"\x1b[200~".to_vec();
+        bytes.extend(vec![b'x'; MAX_INPUT_BYTES]);
+        bytes.extend_from_slice(b"\x1b[201~");
+        let keys = decoder.feed(&bytes);
+        assert_eq!(keys.len(), 3);
+        assert!(matches!(&keys[1], Key::Text(text) if text.len() == MAX_INPUT_BYTES));
+        assert!(!keys.contains(&Key::Enter));
+    }
+}

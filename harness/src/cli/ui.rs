@@ -1,3 +1,4 @@
+//! Terminal input loop, prompt recall and run exit status.
 use std::io;
 use std::process::ExitCode;
 use std::sync::{atomic::Ordering, mpsc};
@@ -817,3 +818,6 @@ impl App {
         self.session.complete(user, assistant)
     }
 }
+
+#[cfg(test)]
+mod tests;

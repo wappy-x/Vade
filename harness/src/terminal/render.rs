@@ -533,3 +533,34 @@ pub fn diff(text: &str, color: bool) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+#[cfg(test)]
+mod tests {
+    use super as render;
+
+    #[test]
+    fn diff_lines_are_coloured_by_kind_and_stay_literal_without_colour() {
+        let sample = "*** Update File: a.rs\n--- a.rs\n+++ a.rs\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n[context line truncated: 9 bytes]";
+        assert_eq!(render::diff(sample, false), sample);
+        let styled = render::diff(sample, true);
+        assert!(styled.contains("\x1b[32m+new\x1b[0m"));
+        assert!(styled.contains("\x1b[31m-old\x1b[0m"));
+        assert!(styled.contains("\x1b[36m@@ -1,2 +1,2 @@\x1b[0m"));
+        assert!(styled.contains("\x1b[1m+++ a.rs\x1b[0m"));
+        assert!(styled.contains("\n ctx\n"));
+        assert_eq!(render::plain(&styled), sample);
+    }
+
+    #[test]
+    fn cursor_view_survives_narrow_resize_without_changing_input() {
+        let text = "start 🦀 café\nsecond line";
+        let cursor = "start 🦀 ca".len();
+        for width in [4, 8, 20, 80] {
+            let view = render::editor(text, cursor, "> ", width, 8, true, true);
+            assert!(view.lines.iter().all(|line| render::width(line) <= width));
+            assert!(view.cursor_column < width);
+            assert!(view.cursor_row < view.lines.len());
+        }
+        assert_eq!(text, "start 🦀 café\nsecond line");
+    }
+}

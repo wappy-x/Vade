@@ -1,3 +1,4 @@
+//! Tool labels, complete previews and serialized approval replies.
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -311,7 +312,8 @@ pub(crate) fn request_tool_preview_with_budget(
 
 #[cfg(test)]
 mod tests {
-    use super::tool_label;
+    use crate::interaction;
+    use super::*;
     use vade_harness::{json, terminal};
 
     #[test]
@@ -346,5 +348,27 @@ mod tests {
             tool_label("workspace_read", &args),
             "Read line\\u000azero\\u200b"
         );
+    }
+
+    #[test]
+    fn native_previews_survive_render_overflow_and_wait_for_fact_capacity() {
+        let (tx, rx) = interaction::lanes();
+        let cancel = AtomicBool::new(false);
+        assert!(tx.render(&"x".repeat(128 * 1024)));
+        let preview = || coding_tools::Preview {
+            title: "Command",
+            detail: "exact operation",
+            approval_required: false,
+        };
+        assert!(request_tool_preview(&tx, preview(), &cancel));
+        assert!(
+            matches!(rx.fact(), Ok(WorkerEvent::ToolPreview { detail, .. }) if detail == "exact operation")
+        );
+        for _ in 0..16 {
+            tx.fact(WorkerEvent::Notice).unwrap();
+        }
+        let worker = std::thread::spawn(move || request_tool_preview(&tx, preview(), &cancel));
+        assert!(matches!(rx.fact(), Ok(WorkerEvent::Notice)));
+        assert!(worker.join().unwrap());
     }
 }

@@ -1,3 +1,4 @@
+//! Background turn execution, steering and cancellation.
 use std::io;
 use std::sync::{
     Arc, Mutex,
@@ -722,5 +723,25 @@ pub(crate) fn emit_delta(tx: &WorkSender, cancel: &AtomicBool, emitted: &mut usi
     }
     if !rest.is_empty() {
         cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_binding_respects_cancellation_and_utf8_chunk_boundaries() {
+        let (tx, rx) = interaction::lanes();
+        let cancel = AtomicBool::new(false);
+        let mut emitted = 0;
+        let text = "é".repeat(3000);
+        emit_delta(&tx, &cancel, &mut emitted, &text);
+        let (joined, skipped) = rx.render();
+        assert!(!skipped);
+        assert_eq!(joined, text);
+        cancel.store(true, Ordering::Relaxed);
+        emit_delta(&tx, &cancel, &mut emitted, "must not render");
+        assert!(rx.render().0.is_empty());
     }
 }

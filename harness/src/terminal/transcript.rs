@@ -263,3 +263,53 @@ impl Transcript {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transcript_reflows_unicode_and_bounds_logical_and_physical_history() {
+        let mut t = Transcript::default();
+        t.push("a你好\tb\nnext", 5);
+        assert_eq!(
+            t.rows.iter().cloned().collect::<Vec<_>>(),
+            ["a你好", "    b", "next"]
+        );
+        t.reflow(3);
+        assert!(
+            t.rows
+                .iter()
+                .all(|r| r.chars().map(cell_width).sum::<usize>() <= 3)
+        );
+        assert_eq!(t.rows.iter().cloned().collect::<String>(), "a你好    bnext");
+        t.push(&"x".repeat(1024 * 1024 + 4), 1);
+        assert!(t.bytes <= 1024 * 1024 && t.rows.len() <= 16 * 1024);
+        t.push("\nend", 1);
+        assert_eq!(t.rows.back().map(String::as_str), Some("d"));
+        t.push(&"line\n".repeat(5000), 10);
+        assert!(t.lines.len() <= 4096);
+    }
+
+    #[test]
+    fn transcript_trims_in_batches_and_keeps_utf8_safe_headroom() {
+        let mut t = Transcript::default();
+        t.push(&"line\n".repeat(4096), 80);
+        assert_eq!(t.lines.len(), 4096 - 512);
+        let bytes = t.bytes;
+        for _ in 0..400 {
+            t.push("next\n", 80);
+        }
+        assert_eq!(t.lines.len(), 4096 - 512 + 400);
+        assert_eq!(t.bytes, bytes + 400 * 5);
+        assert_eq!(t.lines.front().unwrap().text, "line");
+        assert_eq!(t.rows.len(), t.lines.len());
+        let mut t = Transcript::default();
+        t.push(&"🦀".repeat(1024 * 1024 / 4 + 1), 80);
+        assert!(t.bytes <= 1024 * 1024 - 128 * 1024);
+        let bytes = t.bytes;
+        t.push(&"🦀".repeat(1024), 80);
+        assert_eq!(t.bytes, bytes + 4096);
+        assert!(t.lines.front().unwrap().starts_with('🦀'));
+    }
+}

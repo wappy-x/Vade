@@ -1,3 +1,4 @@
+//! Mode-scoped command-line configuration and validation.
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::IsTerminal;
@@ -926,3 +927,6 @@ pub(crate) fn validate_url(url: &str) -> Result<(), &'static str> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

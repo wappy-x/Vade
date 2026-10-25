@@ -1,3 +1,4 @@
+//! Worker event delivery, completion handling and result summaries.
 use std::collections::VecDeque;
 use std::io;
 use std::sync::{
@@ -1092,3 +1093,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod summary_tests;

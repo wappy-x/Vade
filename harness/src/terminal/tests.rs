@@ -1,3 +1,4 @@
+//! Complete terminal screens, approval review and transcript/frame integration.
     use super::frame::{live_tail, window};
     #[test]
     fn inline_commits_once_and_resize_repaints_only_live_rows() {
@@ -276,49 +277,6 @@
         assert_eq!(Decoder::default().feed(b"\x0f\x1b[111;5u"), [Key::CtrlO, Key::CtrlO]);
     }
     #[test]
-    fn transcript_reflows_unicode_and_bounds_logical_and_physical_history() {
-        let mut t = Transcript::default();
-        t.push("a你好\tb\nnext", 5);
-        assert_eq!(
-            t.rows.iter().cloned().collect::<Vec<_>>(),
-            ["a你好", "    b", "next"]
-        );
-        t.reflow(3);
-        assert!(
-            t.rows
-                .iter()
-                .all(|r| r.chars().map(cell_width).sum::<usize>() <= 3)
-        );
-        assert_eq!(t.rows.iter().cloned().collect::<String>(), "a你好    bnext");
-        t.push(&"x".repeat(1024 * 1024 + 4), 1);
-        assert!(t.bytes <= 1024 * 1024 && t.rows.len() <= 16 * 1024);
-        t.push("\nend", 1);
-        assert_eq!(t.rows.back().map(String::as_str), Some("d"));
-        t.push(&"line\n".repeat(5000), 10);
-        assert!(t.lines.len() <= 4096);
-    }
-    #[test]
-    fn transcript_trims_in_batches_and_keeps_utf8_safe_headroom() {
-        let mut t = Transcript::default();
-        t.push(&"line\n".repeat(4096), 80);
-        assert_eq!(t.lines.len(), 4096 - 512);
-        let bytes = t.bytes;
-        for _ in 0..400 {
-            t.push("next\n", 80);
-        }
-        assert_eq!(t.lines.len(), 4096 - 512 + 400);
-        assert_eq!(t.bytes, bytes + 400 * 5);
-        assert_eq!(t.lines.front().unwrap().text, "line");
-        assert_eq!(t.rows.len(), t.lines.len());
-        let mut t = Transcript::default();
-        t.push(&"🦀".repeat(1024 * 1024 / 4 + 1), 80);
-        assert!(t.bytes <= 1024 * 1024 - 128 * 1024);
-        let bytes = t.bytes;
-        t.push(&"🦀".repeat(1024), 80);
-        assert_eq!(t.bytes, bytes + 4096);
-        assert!(t.lines.front().unwrap().starts_with('🦀'));
-    }
-    #[test]
     fn visible_window_spans_retained_rows_and_the_provisional_tail() {
         let rows: VecDeque<String> = (0..10).map(|i| format!("r{i}")).collect();
         let extra: Vec<String> = (0..3).map(|i| format!("p{i}")).collect();
@@ -370,18 +328,6 @@
             render::plain(footer),
             "qwen3-8b · session-1 · history · PgDn"
         );
-    }
-    #[test]
-    fn diff_lines_are_coloured_by_kind_and_stay_literal_without_colour() {
-        let sample = "*** Update File: a.rs\n--- a.rs\n+++ a.rs\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n[context line truncated: 9 bytes]";
-        assert_eq!(render::diff(sample, false), sample);
-        let styled = render::diff(sample, true);
-        assert!(styled.contains("\x1b[32m+new\x1b[0m"));
-        assert!(styled.contains("\x1b[31m-old\x1b[0m"));
-        assert!(styled.contains("\x1b[36m@@ -1,2 +1,2 @@\x1b[0m"));
-        assert!(styled.contains("\x1b[1m+++ a.rs\x1b[0m"));
-        assert!(styled.contains("\n ctx\n"));
-        assert_eq!(render::plain(&styled), sample);
     }
     #[test]
     fn approval_renders_all_5000_changed_lines_despite_history_trim_and_resize() {
@@ -569,79 +515,6 @@
         terminal.approval_ready_at(79, 24).unwrap();
     }
     #[test]
-    fn preview_escapes_unicode_controls_and_literal_lookalikes() {
-        let invisible = [
-            '\0',
-            '\u{001b}',
-            '\u{0085}',
-            '\r',
-            '\t',
-            '\u{00ad}',
-            '\u{00a0}',
-            '\u{0301}',
-            '\u{034f}',
-            '\u{0483}',
-            '\u{05b0}',
-            '\u{064b}',
-            '\u{0890}',
-            '\u{115f}',
-            '\u{1160}',
-            '\u{17b4}',
-            '\u{180f}',
-            '\u{200b}',
-            '\u{200c}',
-            '\u{200d}',
-            '\u{200e}',
-            '\u{2028}',
-            '\u{202e}',
-            '\u{2060}',
-            '\u{2065}',
-            '\u{2800}',
-            '\u{3164}',
-            '\u{fe0f}',
-            '\u{feff}',
-            '\u{ffa0}',
-            '\u{fff0}',
-            '\u{fff9}',
-            '\u{13440}',
-            '\u{1d173}',
-            '\u{1d185}',
-            '\u{e0000}',
-            '\u{e0001}',
-            '\u{e007f}',
-            '\u{e0100}',
-            '\u{e0fff}',
-        ];
-        for c in invisible {
-            assert!(preview_char_needs_escape(c), "U+{:04X}", c as u32);
-            let raw = format!("before{c}after");
-            let shown = escape_preview(&raw, 64).unwrap();
-            assert!(!shown.contains(c), "raw U+{:04X}", c as u32);
-            assert!(!shown.chars().any(preview_char_needs_escape));
-            assert_eq!(sanitize(&shown), shown);
-            assert_eq!(render::plain(&render::diff(&shown, true)), shown);
-            assert_ne!(shown, escape_preview(&shown, 128).unwrap());
-        }
-        assert_eq!(
-            escape_preview("é 中 🦀 '\"\n", 64).unwrap(),
-            "é 中 🦀 '\"\n"
-        );
-        assert_eq!(
-            escape_preview("literal\\u{200b}\nactual\u{200b}\n", 64).unwrap(),
-            "literal\\\\u{200b}\nactual\\u{200b}\n"
-        );
-    }
-    #[test]
-    fn preview_escape_limit_counts_expanded_bytes_and_utf8_boundaries() {
-        let raw = "é\u{200b}\t\\\0";
-        let expected = "é\\u{200b}\\t\\\\\\u{0}";
-        assert_eq!(escape_preview(raw, expected.len()).unwrap(), expected);
-        assert!(escape_preview(raw, expected.len() - 1).is_err());
-        assert!(escape_preview("é", 1).is_err());
-        assert_eq!(escape_preview("", 0).unwrap(), "");
-        assert!(escape_preview(&"\0".repeat(MAX_APPROVAL_BYTES), MAX_APPROVAL_BYTES).is_err());
-    }
-    #[test]
     fn approvals_refuse_unescaped_unicode_and_preserve_escaped_preview_once() {
         for raw in [false, true] {
             let mut terminal = Terminal::open(true);
@@ -686,34 +559,6 @@
         }
     }
     #[test]
-    fn untrusted_text_cannot_control_the_terminal() {
-        assert_eq!(sanitize("x\x1b[2Jy\x07\r\u{202e}z\n\t"), "x[2Jyz\n\t");
-    }
-    #[test]
-    fn fragmented_unicode_and_navigation() {
-        let mut d = Decoder::default();
-        assert!(d.feed(&[0xe2, 0x82]).is_empty());
-        assert_eq!(d.feed(&[0xac]), [Key::Text("€".into())]);
-        assert!(d.feed(b"\x1b[").is_empty());
-        assert_eq!(d.feed(b"A"), [Key::Up]);
-        assert_eq!(
-            d.feed(b"\r\x03\x7f"),
-            [Key::Enter, Key::Interrupt, Key::Backspace]
-        );
-    }
-    #[test]
-    fn fragmented_wheel_reports_cannot_recall_prompts_or_enter_pasted_text() {
-        let mut d = Decoder::default();
-        assert!(d.feed(b"\x1b[<64;12;").is_empty());
-        assert_eq!(d.feed(b"5M\x1b[<81;12;5M"), [Key::WheelUp, Key::WheelDown]);
-        assert!(d.feed(b"\x1b[<0;12;5M\x1b[<0;12;5m").is_empty());
-        assert_eq!(d.feed(b"\x1b[A\x1b[B"), [Key::Up, Key::Down]);
-        assert_eq!(
-            d.feed(b"\x1b[200~\x1b[<64;12;5M\x1b[201~"),
-            [Key::PasteStart, Key::PasteEnd]
-        );
-    }
-    #[test]
     fn exit_reply_tail_is_short_and_sanitized() {
         assert_eq!(clipboard::osc52("foobar", false).unwrap(), "\x1b]52;c;Zm9vYmFy\x07");
         assert_eq!(clipboard::last_code("```rs\nold\n```\n~~~sh\r\n  echo 🦀\r\n\r\n~~~\r\n"), Some("  echo 🦀\r\n\r\n"));
@@ -725,94 +570,4 @@
         );
         assert_eq!(reply_tail(&"🦀".repeat(1000)).chars().count(), 601);
         assert_eq!(reply_tail("\x1b[2Jhello"), "[2Jhello");
-    }
-    #[test]
-    fn bracketed_paste_does_not_submit_commands() {
-        let mut d = Decoder::default();
-        let keys = d.feed(b"\x1b[200~/quit\n\x03\x1b[201~");
-        assert_eq!(keys.first(), Some(&Key::PasteStart));
-        assert_eq!(keys.last(), Some(&Key::PasteEnd));
-        assert!(!keys.contains(&Key::Enter));
-        assert!(!keys.contains(&Key::Interrupt));
-        assert!(keys.contains(&Key::Newline));
-    }
-    #[test]
-    fn paste_normalizes_cr_lf_without_losing_blank_lines() {
-        let mut decoder = Decoder::default();
-        let keys = decoder.feed(b"\x1b[200~\r\nfirst\r\rsecond\n\x1b[201~");
-        assert_eq!(keys.iter().filter(|key| **key == Key::Newline).count(), 4);
-        assert!(!keys.contains(&Key::Enter));
-        assert_eq!(
-            decoder.feed(b"\x1b[13;2u\x1b[27;2;13~\x1b\r\n\x14"),
-            [
-                Key::Newline,
-                Key::Newline,
-                Key::Newline,
-                Key::Newline,
-                Key::CtrlT
-            ]
-        );
-        assert!(decoder.feed(b"\x1b[13;2:3u\x1b[99;9u").is_empty());
-        assert_eq!(
-            decoder.feed(b"\x1b[99;5u\x1b[27;5;106~"),
-            [Key::Interrupt, Key::Newline]
-        );
-    }
-    #[test]
-    fn cursor_view_survives_narrow_resize_without_changing_input() {
-        let text = "start 🦀 café\nsecond line";
-        let cursor = "start 🦀 ca".len();
-        for width in [4, 8, 20, 80] {
-            let view = render::editor(text, cursor, "> ", width, 8, true, true);
-            assert!(view.lines.iter().all(|line| render::width(line) <= width));
-            assert!(view.cursor_column < width);
-            assert!(view.cursor_row < view.lines.len());
-        }
-        assert_eq!(text, "start 🦀 café\nsecond line");
-    }
-
-    #[test]
-    fn meta_chords_and_modified_arrows_move_by_word_instead_of_clearing() {
-        let mut d = Decoder::default();
-        assert_eq!(
-            d.feed(b"\x1bb\x1bf\x1bd\x1b\x7f\x1b[1;5C\x1b[1;5D\x1b[1;3C\x1b[1;3D\x0b\x0c\x1bOC"),
-            [
-                Key::WordLeft,
-                Key::WordRight,
-                Key::DeleteWordForward,
-                Key::DeleteWord,
-                Key::WordRight,
-                Key::WordLeft,
-                Key::WordRight,
-                Key::WordLeft,
-                Key::KillToEnd,
-                Key::Redraw,
-                Key::Right,
-            ]
-        );
-        // An unknown chord is still a lone Escape; its letter never types.
-        assert_eq!(d.feed(b"\x1bq"), [Key::Escape]);
-        // Esc in one read and a letter in the next is Esc, then that letter.
-        assert!(d.feed(b"\x1b").is_empty());
-        assert_eq!(d.feed(b"b"), [Key::Escape, Key::Text("b".into())]);
-        assert!(d.feed(b"\x1b").is_empty());
-        assert_eq!(d.feed(b"\x7f"), [Key::Escape, Key::Backspace]);
-        assert!(d.feed(b"\x1b").is_empty());
-        std::thread::sleep(Duration::from_millis(60));
-        assert_eq!(d.timeout(), Some(Key::Escape));
-    }
-    #[test]
-    fn navigation_and_large_paste_decode_without_per_character_work_events() {
-        let mut decoder = Decoder::default();
-        assert_eq!(
-            decoder.feed(b"\x1b[C\x1b[D\x1b[H\x1b[F\x1b[3~"),
-            [Key::Right, Key::Left, Key::Home, Key::LineEnd, Key::Delete]
-        );
-        let mut bytes = b"\x1b[200~".to_vec();
-        bytes.extend(vec![b'x'; MAX_INPUT_BYTES]);
-        bytes.extend_from_slice(b"\x1b[201~");
-        let keys = decoder.feed(&bytes);
-        assert_eq!(keys.len(), 3);
-        assert!(matches!(&keys[1], Key::Text(text) if text.len() == MAX_INPUT_BYTES));
-        assert!(!keys.contains(&Key::Enter));
     }

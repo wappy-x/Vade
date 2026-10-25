@@ -1,3 +1,4 @@
+//! Slash-command dispatch and session actions.
 use std::io;
 use std::sync::{Arc, Mutex};
 use vade_harness::{
@@ -773,3 +774,6 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

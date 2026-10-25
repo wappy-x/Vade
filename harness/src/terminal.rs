@@ -12,6 +12,10 @@ pub mod render;
 mod frame;
 mod input;
 mod transcript;
+mod text;
+pub use text::{answer_text, escape_preview, preview_char_needs_escape, reply_tail, sanitize};
+pub(crate) use text::AnswerPrefix;
+use text::cell_width;
 use transcript::{Thought, Transcript};
 use frame::fit_status;
 pub use input::{Decoder, Input, Key, input_channel, interrupted};
@@ -23,39 +27,6 @@ const MAX_REVIEW_HISTORY_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_TRANSCRIPT_BYTES: usize = 1024 * 1024;
 const REVIEW_OUTPUT_HIDDEN: &str = "\n[later output hidden until approval closes]\n";
 const APPROVAL_VIEW_ERROR: &str = "Approval unavailable: the terminal cannot show the full preview at this size. Enlarge the terminal to view it in full; after a refusal, request the operation again. If it still does not fit, request smaller patches.";
-
-/// Display only: keep indentation on the first visible line, but suppress
-/// blank lines left before an answer by hidden reasoning. History stays exact.
-pub fn answer_text(text: &str) -> &str {
-    let leading = text.len() - text.trim_start_matches(char::is_whitespace).len();
-    if leading == text.len() {
-        return "";
-    }
-    let start = text[..leading].rfind(['\r', '\n']).map_or(0, |at| at + 1);
-    &text[start..]
-}
-
-#[derive(Default)]
-pub(crate) struct AnswerPrefix {
-    pending: String,
-    started: bool,
-}
-impl AnswerPrefix {
-    pub(crate) fn visible<'a>(&mut self, text: &'a str) -> std::borrow::Cow<'a, str> {
-        if self.started {
-            return std::borrow::Cow::Borrowed(text);
-        }
-        self.pending.push_str(text);
-        if self.pending.trim().is_empty() {
-            return std::borrow::Cow::Borrowed("");
-        }
-        self.started = true;
-        let mut full = std::mem::take(&mut self.pending);
-        let start = full.len() - answer_text(&full).len();
-        full.drain(..start);
-        std::borrow::Cow::Owned(full)
-    }
-}
 
 /// The chat display: a bounded transcript above a fixed input dock in a raw
 /// terminal, or plain line output when the terminal is not interactive.
@@ -890,99 +861,6 @@ struct Pager {
 }
 
 
-/// Prevent terminal escape/control injection from model output, filenames and
-/// pasted input. Keep only text, newline and tab; remove directional overrides.
-pub fn sanitize(text: &str) -> String {
-    text.chars().filter(|c| (!c.is_control() || *c == '\n' || *c == '\t')
-        && !matches!(*c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')).collect()
-}
-
-/// Approval text must represent every nonprinting character visibly. Rust's Unicode
-/// printability tables also cover combining marks, format characters, fillers
-/// and variation selectors that `is_control` and our cell-width table miss.
-/// LF is the preview's structural line separator; tabs must be escaped.
-pub fn preview_char_needs_escape(c: char) -> bool {
-    if matches!(c, '\n' | '\\' | '\'' | '"') {
-        return false;
-    }
-    c.is_control()
-        || (c.is_whitespace() && c != ' ')
-        || c.escape_debug().next() == Some('\\')
-        || cell_width(c) == 0
-        || c == '\u{2800}' // Braille blank is printable, but has no visible dots.
-}
-
-/// Escape raw preview content once, before trusted headings or styling are
-/// added. Literal backslashes are doubled so `\\u{200b}` cannot impersonate a
-/// rendered zero-width space. The limit applies to the expanded display bytes.
-pub fn escape_preview(text: &str, max_bytes: usize) -> io::Result<String> {
-    let mut shown = String::with_capacity(text.len().min(max_bytes));
-    for c in text.chars() {
-        let replacement = match c {
-            '\\' => Some("\\\\"),
-            '\r' => Some("\\r"),
-            '\t' => Some("\\t"),
-            _ => None,
-        };
-        let unicode = replacement.is_none() && preview_char_needs_escape(c);
-        let bytes = replacement.map_or_else(
-            || {
-                if unicode {
-                    c.escape_unicode().count()
-                } else {
-                    c.len_utf8()
-                }
-            },
-            str::len,
-        );
-        if shown.len().saturating_add(bytes) > max_bytes {
-            return Err(io::Error::other("escaped preview exceeds display limit"));
-        }
-        if let Some(replacement) = replacement {
-            shown.push_str(replacement);
-        } else if unicode {
-            shown.extend(c.escape_unicode());
-        } else {
-            shown.push(c);
-        }
-    }
-    Ok(shown)
-}
-
-/// The last three lines of a reply, sanitized for display and clipped to its
-/// last 600 characters.
-pub fn reply_tail(text: &str) -> String {
-    let mut lines: Vec<_> = text.trim().lines().rev().take(3).collect();
-    lines.reverse();
-    let text = sanitize(&lines.join("\n"));
-    let start = text.char_indices().rev().nth(599).map_or(0, |(i, _)| i);
-    format!("{}{}", if start > 0 { "…" } else { "" }, &text[start..])
-}
-
-fn cell_width(c: char) -> usize {
-    match c {
-        '\u{0300}'..='\u{036f}'
-        | '\u{1ab0}'..='\u{1aff}'
-        | '\u{1dc0}'..='\u{1dff}'
-        | '\u{200b}'..='\u{200d}'
-        | '\u{20d0}'..='\u{20ff}'
-        | '\u{fe00}'..='\u{fe0f}'
-        | '\u{fe20}'..='\u{fe2f}'
-        | '\u{e0100}'..='\u{e01ef}' => 0,
-        '\u{1100}'..='\u{115f}'
-        | '\u{2329}'..='\u{232a}'
-        | '\u{2e80}'..='\u{a4cf}'
-        | '\u{ac00}'..='\u{d7a3}'
-        | '\u{f900}'..='\u{faff}'
-        | '\u{fe10}'..='\u{fe19}'
-        | '\u{fe30}'..='\u{fe6f}'
-        | '\u{ff01}'..='\u{ff60}'
-        | '\u{ffe0}'..='\u{ffe6}'
-        | '\u{1f000}'..='\u{1faff}'
-        | '\u{20000}'..='\u{3ffff}' => 2,
-        _ => 1,
-    }
-}
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod unix;
 

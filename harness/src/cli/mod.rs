@@ -1,3 +1,4 @@
+//! Interactive CLI state shared by input, worker and presentation modules.
 mod steering;
 pub(crate) mod admission;
 pub(crate) mod answers;
@@ -237,3 +238,6 @@ fn startup_error(option: &str, error: io::Error, remedy: &str) -> io::Error {
         .unwrap_or_else(|_| "local initialization failed".into());
     io::Error::new(error.kind(), format!("{option}: {detail}. {remedy}"))
 }
+
+#[cfg(test)]
+mod test_support;

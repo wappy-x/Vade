@@ -41,6 +41,20 @@ Markdown/text-document links, anchors and embedded asset paths. CI runs the
 same check. It reads tracked and unignored new documents and makes no network
 requests. External URLs are outside its scope.
 
+## Bundle producer checks
+
+Run `python3 tools/test-bundle-producer.py` for both bundle test suites. They
+exercise [`scripts/make-bundle.sh`](../scripts/make-bundle.sh) without Rust builds or a
+GPU. The tests run the real shell producer with
+[simulated build tools](fixtures/bundle-producer-tool.py), then use
+[`check-bundle.py`](check-bundle.py) to verify the archive and manifest. They
+cover publication races, failure cleanup and path sanitization.
+The release workflow also runs the checker against real built artifacts.
+
+Run `python3 tools/test-bundle-checker.py` for the checker's archive layout,
+manifest and corruption cases alone. It uses in-memory tar fixtures and
+simulates decompression, so no external build or compression tools are needed.
+
 ## Benchmark figure
 
 Run `python3 -I tools/benchmarks-chart.py` from the checkout to redraw the
