@@ -1,22 +1,33 @@
 # Benchmark receipts
 
-Sanitized FP4-Local receipts for the 2026-10-24 benchmark tables are in
-[2026-10-24](2026-10-24/README.md). The stale FP8 summaries have been removed:
+A receipt is the saved record of one benchmark run: its build, its settings and
+what it measured. The sanitized FP4-Local receipts behind the 2026-10-24
+benchmark tables are in [2026-10-24](2026-10-24/README.md).
+
+The [current benchmark tables](../../docs/benchmarks.md#current-results-2026-10-24)
+copy their numbers from three kinds of source: RigMark cards (the result files
+that the RigMark benchmark writes), the custom runner summaries for our
+two-Spark pair, and separate timing runs, which the tables keep apart. Each
+table row links to the sanitized copy of its source folder: the card or
+summary, the README and small JSON receipts. The full card JSON receipts, raw
+prompts, replies and logs are not in this repository. Every number in those
+tables comes from these runs. Nothing here was measured separately for the
+docs, and no receipt here was rebuilt from a card summary.
+
+The older FP8 summaries have been removed from this folder:
 `night-2026-10-11.json`, `defaults-2026-10-12.json`, `install-canary.json`,
 `exact-path-abba.json`, `exact-path-gate.json`, `determinism.json` and
-`context-candidate.json`.
+`context-candidate.json`. The
+[historical section](../../docs/benchmarks.md#historical-fp8-measurements) of
+the benchmarks page still names some of them as retired receipts.
 
-The [current benchmark tables](../../docs/benchmarks.md#current-2026-10-24)
-transcribe the named RigMark cards and distinguish the separate timing runs.
-Each table row links to the sanitized copy of its source folder: the card,
-README and small JSON receipts. The full card JSON receipts, raw prompts,
-replies and logs are not distributed in this repository. No inference was
-repeated to prepare these docs, and no replacement receipt was fabricated
-from a card summary.
+If you add a receipt to this folder, keep it small and have it reviewed.
 
-Keep future receipts small and reviewed. Exclude hostnames, usernames, machine
-addresses, private filesystem paths, credentials and raw conversations. Include
-the measured build, checkpoint identity, request settings, drafting mode,
-completion-token counts, wall-clock measurements and limitations. Store raw
-[benchmark output](../../ops/scripts/tools/README.md) privately until it has been
-reviewed for publication.
+- **Include** the measured build, checkpoint identity, request settings,
+  drafting mode, completion-token counts, wall-clock measurements and
+  limitations.
+- **Leave out** hostnames, usernames, machine addresses, private filesystem
+  paths, credentials and raw conversations.
+
+Keep raw [benchmark output](../../ops/scripts/tools/README.md) private until
+it has been reviewed for publication.

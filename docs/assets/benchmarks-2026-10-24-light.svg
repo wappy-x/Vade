@@ -1,84 +1,132 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 615" width="880" height="615" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif">
-<title id="t">Vade decode speed on 2026-10-24 receipts, home release build 73f7a9d, cloud main 4681d8b</title>
-<desc id="d">Home DGX Spark, release build 73f7a9d, drafting OFF to ON: code 27.7 to 76.7 tok/s, prose 27.7 to 42.0, C8 135.9 to 172.6. Cloud GB10, main 4681d8b, drafting OFF: one VM code 24.7, prose 23.4, C8 43.0; two VMs code 25.4, prose 23.2, C8 70.0. Cloud drafting ON timing runs, not cards: one VM code 64.0, prose 33.6; two VMs code 56.5, prose 32.0.</desc>
-<defs><pattern id="timing" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#eb6834" fill-opacity="0.28"/><rect width="2.5" height="6" fill="#eb6834"/></pattern></defs>
-<rect x="0.5" y="0.5" width="879" height="614" rx="8" fill="#fcfcfb" stroke="rgba(11,11,11,0.10)"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 1009" width="880" height="1009" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title id="t">Vade v0.1.0 decode speed, RigMark cards of 2026-10-24</title>
+<desc id="d">One DGX Spark, drafting OFF to ON: code 27.8 to 76.7 tok/s, prose 27.8 to 41.7, 8 chats 136.1 to 173.9. Two DGX Sparks, drafting OFF to ON: code 27.9 to 65.1 tok/s, prose 27.9 to 38.3, 8 chats 135.1 to 168.6. One cloud GB10 VM, drafting OFF to ON: code 24.4 to 61.1 tok/s, prose 22.5 to 31.6, 8 chats 73.3 to 97.5. Two cloud GB10 VMs, drafting OFF to ON: code 24.4 to 54.7 tok/s, prose 22.9 to 30.5, 8 chats 112.2 to 138.3. Four cloud GB10 VMs, drafting OFF to ON: code 21.9 to 51.6 tok/s, prose 20.7 to 29.0, 8 chats 104.2 either way.</desc>
+<defs><pattern id="on" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#eb6834" fill-opacity="0.45"/><rect width="3" height="6" fill="#eb6834"/></pattern></defs>
+<rect x="0.5" y="0.5" width="879" height="1008" rx="8" fill="#fcfcfb" stroke="rgba(11,11,11,0.10)"/>
 <text x="24.0" y="38.0" font-size="17" fill="#0b0b0b" text-anchor="start" font-weight="600">Decode speed, tok/s (higher = faster)</text>
-<text x="24.0" y="60.0" font-size="12" fill="#52514e" text-anchor="start">Qwen3.8-Flash-Next-FP4-Local; home: release build 73f7a9d, cloud: main 4681d8b. Each label is the value its receipt prints.</text>
+<text x="24.0" y="60.0" font-size="12" fill="#52514e" text-anchor="start">Qwen3.8-Flash-Next-FP4-Local on Vade v0.1.0 (5a22651). Each label is the value its card prints.</text>
 <rect x="24" y="75" width="12" height="12" rx="2" fill="#2a78d6"/>
-<text x="42.0" y="85.5" font-size="12" fill="#0b0b0b" text-anchor="start">Drafting OFF, card</text>
-<rect x="174.88" y="75" width="12" height="12" rx="2" fill="#eb6834"/>
-<text x="192.9" y="85.5" font-size="12" fill="#0b0b0b" text-anchor="start">Drafting ON, card</text>
-<rect x="318.79999999999995" y="75" width="12" height="12" rx="2" fill="url(#timing)"/>
-<text x="336.8" y="85.5" font-size="12" fill="#0b0b0b" text-anchor="start">Drafting ON, timing run, not a card</text>
-<text x="24.0" y="124.0" font-size="13" fill="#0b0b0b" text-anchor="start" font-weight="600">Home DGX Spark, one Spark</text>
-<text x="24.0" y="141.0" font-size="11" fill="#52514e" text-anchor="start">OFF card 1444, ON card 1438</text>
-<rect x="24.0" y="370.0" width="266.7" height="1" fill="#c3c2b7"/>
-<path d="M43.4 370.0V343.8Q43.4 339.8 47.4 339.8H63.4Q67.4 339.8 67.4 343.8V370.0Z" fill="#2a78d6"/>
-<text x="55.4" y="333.8" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">27.7</text>
-<path d="M69.4 370.0V290.5Q69.4 286.5 73.4 286.5H89.4Q93.4 286.5 93.4 290.5V370.0Z" fill="#eb6834"/>
-<text x="81.4" y="280.5" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">76.7</text>
-<text x="68.4" y="388.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Code</text>
-<text x="68.4" y="402.0" font-size="10.5" fill="#52514e" text-anchor="middle">1 stream</text>
-<path d="M132.3 370.0V343.8Q132.3 339.8 136.3 339.8H152.3Q156.3 339.8 156.3 343.8V370.0Z" fill="#2a78d6"/>
-<text x="144.3" y="333.8" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">27.7</text>
-<path d="M158.3 370.0V328.3Q158.3 324.3 162.3 324.3H178.3Q182.3 324.3 182.3 328.3V370.0Z" fill="#eb6834"/>
-<text x="170.3" y="318.3" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">42.0</text>
-<text x="157.3" y="388.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Prose</text>
-<text x="157.3" y="402.0" font-size="10.5" fill="#52514e" text-anchor="middle">1 stream</text>
-<path d="M221.2 370.0V226.0Q221.2 222.0 225.2 222.0H241.2Q245.2 222.0 245.2 226.0V370.0Z" fill="#2a78d6"/>
-<text x="245.2" y="216.0" font-size="11" fill="#0b0b0b" text-anchor="end" font-variant-numeric="tabular-nums">135.9</text>
-<path d="M247.2 370.0V186.1Q247.2 182.1 251.2 182.1H267.2Q271.2 182.1 271.2 186.1V370.0Z" fill="#eb6834"/>
-<text x="259.2" y="176.1" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">172.6</text>
-<text x="246.2" y="388.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">C8</text>
-<text x="246.2" y="402.0" font-size="10.5" fill="#52514e" text-anchor="middle">8 streams, sum</text>
-<text x="306.7" y="124.0" font-size="13" fill="#0b0b0b" text-anchor="start" font-weight="600">Cloud GB10, one VM</text>
-<text x="306.7" y="141.0" font-size="11" fill="#52514e" text-anchor="start">OFF card 1046, ON timing run 1042</text>
-<rect x="306.7" y="370.0" width="266.7" height="1" fill="#c3c2b7"/>
-<path d="M326.1 370.0V347.1Q326.1 343.1 330.1 343.1H346.1Q350.1 343.1 350.1 347.1V370.0Z" fill="#2a78d6"/>
-<text x="338.1" y="337.1" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">24.7</text>
-<path d="M352.1 370.0V304.3Q352.1 300.3 356.1 300.3H372.1Q376.1 300.3 376.1 304.3V370.0Z" fill="url(#timing)"/>
-<text x="364.1" y="294.3" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">64.0</text>
-<text x="351.1" y="388.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Code</text>
-<text x="351.1" y="402.0" font-size="10.5" fill="#52514e" text-anchor="middle">1 stream</text>
-<path d="M415.0 370.0V348.5Q415.0 344.5 419.0 344.5H435.0Q439.0 344.5 439.0 348.5V370.0Z" fill="#2a78d6"/>
-<text x="427.0" y="338.5" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">23.4</text>
-<path d="M441.0 370.0V337.4Q441.0 333.4 445.0 333.4H461.0Q465.0 333.4 465.0 337.4V370.0Z" fill="url(#timing)"/>
-<text x="453.0" y="327.4" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">33.6</text>
-<text x="440.0" y="388.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Prose</text>
-<text x="440.0" y="402.0" font-size="10.5" fill="#52514e" text-anchor="middle">1 stream</text>
-<path d="M503.9 370.0V327.2Q503.9 323.2 507.9 323.2H523.9Q527.9 323.2 527.9 327.2V370.0Z" fill="#2a78d6"/>
-<text x="515.9" y="317.2" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">43.0</text>
-<text x="528.9" y="388.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">C8</text>
-<text x="528.9" y="402.0" font-size="10.5" fill="#52514e" text-anchor="middle">8 streams, sum</text>
-<text x="589.3" y="124.0" font-size="13" fill="#0b0b0b" text-anchor="start" font-weight="600">Cloud GB10, two VMs</text>
-<text x="589.3" y="141.0" font-size="11" fill="#52514e" text-anchor="start">OFF card 1006, ON timing run 1114</text>
-<rect x="589.3" y="370.0" width="266.7" height="1" fill="#c3c2b7"/>
-<path d="M608.8 370.0V346.3Q608.8 342.3 612.8 342.3H628.8Q632.8 342.3 632.8 346.3V370.0Z" fill="#2a78d6"/>
-<text x="620.8" y="336.3" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">25.4</text>
-<path d="M634.8 370.0V312.5Q634.8 308.5 638.8 308.5H654.8Q658.8 308.5 658.8 312.5V370.0Z" fill="url(#timing)"/>
-<text x="646.8" y="302.5" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">56.5</text>
-<text x="633.8" y="388.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Code</text>
-<text x="633.8" y="402.0" font-size="10.5" fill="#52514e" text-anchor="middle">1 stream</text>
-<path d="M697.7 370.0V348.7Q697.7 344.7 701.7 344.7H717.7Q721.7 344.7 721.7 348.7V370.0Z" fill="#2a78d6"/>
-<text x="709.7" y="338.7" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">23.2</text>
-<path d="M723.7 370.0V339.2Q723.7 335.2 727.7 335.2H743.7Q747.7 335.2 747.7 339.2V370.0Z" fill="url(#timing)"/>
-<text x="735.7" y="329.2" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">32.0</text>
-<text x="722.7" y="388.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Prose</text>
-<text x="722.7" y="402.0" font-size="10.5" fill="#52514e" text-anchor="middle">1 stream</text>
-<path d="M786.6 370.0V297.8Q786.6 293.8 790.6 293.8H806.6Q810.6 293.8 810.6 297.8V370.0Z" fill="#2a78d6"/>
-<text x="798.6" y="287.8" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">70.0</text>
-<text x="811.6" y="388.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">C8</text>
-<text x="811.6" y="402.0" font-size="10.5" fill="#52514e" text-anchor="middle">8 streams, sum</text>
-<text x="24.0" y="432.0" font-size="11" fill="#52514e" text-anchor="start">Cloud C8 with drafting ON is left out: no card, and the timing run’s later ON rounds failed on build 4681d8b.</text>
-<text x="24.0" y="449.0" font-size="11" fill="#52514e" text-anchor="start">Home OFF and ON cards ran on different home Sparks with the same build.</text>
-<text x="24.0" y="466.0" font-size="11" fill="#52514e" text-anchor="start">Timing runs time whole requests; cards print decode estimates, so textured and solid bars are not the same estimator.</text>
-<text x="24.0" y="483.0" font-size="11" fill="#52514e" text-anchor="start">tok/s = completion tokens per wall second; C8 = 8 concurrent streams; cards thinking OFF, context 32768, greedy</text>
-<text x="24.0" y="500.0" font-size="11" fill="#52514e" text-anchor="start">Sources, bench/receipts/2026-10-24/ (home: release build 73f7a9d; cloud: main 4681d8b); one scale for all panels:</text>
-<text x="36.0" y="517.0" font-size="10.5" fill="#52514e" text-anchor="start">2026-10-24_1444_qwen3.8-flash-next-nvfp4_local-1spark_73f7a9d-thinking-off</text>
-<text x="36.0" y="532.0" font-size="10.5" fill="#52514e" text-anchor="start">2026-10-24_1438_qwen3.8-flash-next-nvfp4_local-1spark_73f7a9d-drafting-on-thinking-off</text>
-<text x="36.0" y="547.0" font-size="10.5" fill="#52514e" text-anchor="start">2026-10-24_1046_qwen3.8-flash-next-nvfp4_local-1spark_4681d8b-drafting-off-thinking-off</text>
-<text x="36.0" y="562.0" font-size="10.5" fill="#52514e" text-anchor="start">2026-10-24_1042_qwen3.8-flash-next-nvfp4_local-cloud-1vm-drafting-timing-not-a-card</text>
-<text x="36.0" y="577.0" font-size="10.5" fill="#52514e" text-anchor="start">2026-10-24_1006_qwen3.8-flash-next-nvfp4_local-2spark_4681d8b-drafting-off-thinking-off</text>
-<text x="36.0" y="592.0" font-size="10.5" fill="#52514e" text-anchor="start">2026-10-24_1114_qwen3.8-flash-next-nvfp4_local-cloud-2spark-drafting-on-timing-not-a-card</text>
+<text x="42.0" y="85.5" font-size="12" fill="#0b0b0b" text-anchor="start">Drafting OFF</text>
+<rect x="140.32" y="75" width="12" height="12" rx="2" fill="url(#on)"/>
+<text x="158.3" y="85.5" font-size="12" fill="#0b0b0b" text-anchor="start">Drafting ON (the default)</text>
+<text x="24.0" y="124.0" font-size="13" fill="#0b0b0b" text-anchor="start" font-weight="600">One DGX Spark</text>
+<text x="24.0" y="141.0" font-size="11" fill="#52514e" text-anchor="start">OFF card 1937, ON card 1943</text>
+<rect x="24.0" y="370.0" width="408.0" height="1" fill="#c3c2b7"/>
+<path d="M67.0 370.0V343.7Q67.0 339.7 71.0 339.7H87.0Q91.0 339.7 91.0 343.7V370.0Z" fill="#2a78d6"/>
+<text x="79.0" y="333.7" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">27.8</text>
+<path d="M93.0 370.0V290.5Q93.0 286.5 97.0 286.5H113.0Q117.0 286.5 117.0 290.5V370.0Z" fill="url(#on)"/>
+<text x="105.0" y="280.5" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">76.7</text>
+<text x="92.0" y="388.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Code</text>
+<text x="92.0" y="402.0" font-size="10.5" fill="#52514e" text-anchor="middle">1 chat</text>
+<path d="M203.0 370.0V343.7Q203.0 339.7 207.0 339.7H223.0Q227.0 339.7 227.0 343.7V370.0Z" fill="#2a78d6"/>
+<text x="215.0" y="333.7" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">27.8</text>
+<path d="M229.0 370.0V328.6Q229.0 324.6 233.0 324.6H249.0Q253.0 324.6 253.0 328.6V370.0Z" fill="url(#on)"/>
+<text x="241.0" y="318.6" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">41.7</text>
+<text x="228.0" y="388.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Prose</text>
+<text x="228.0" y="402.0" font-size="10.5" fill="#52514e" text-anchor="middle">1 chat</text>
+<path d="M339.0 370.0V225.8Q339.0 221.8 343.0 221.8H359.0Q363.0 221.8 363.0 225.8V370.0Z" fill="#2a78d6"/>
+<text x="363.0" y="215.8" font-size="11" fill="#0b0b0b" text-anchor="end" font-variant-numeric="tabular-nums">136.1</text>
+<path d="M365.0 370.0V184.6Q365.0 180.6 369.0 180.6H385.0Q389.0 180.6 389.0 184.6V370.0Z" fill="url(#on)"/>
+<text x="377.0" y="174.6" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">173.9</text>
+<text x="364.0" y="388.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">8 chats</text>
+<text x="364.0" y="402.0" font-size="10.5" fill="#52514e" text-anchor="middle">together</text>
+<text x="448.0" y="124.0" font-size="13" fill="#0b0b0b" text-anchor="start" font-weight="600">Two DGX Sparks</text>
+<text x="448.0" y="141.0" font-size="11" fill="#52514e" text-anchor="start">OFF card 2012, ON card 2019</text>
+<rect x="448.0" y="370.0" width="408.0" height="1" fill="#c3c2b7"/>
+<path d="M491.0 370.0V343.6Q491.0 339.6 495.0 339.6H511.0Q515.0 339.6 515.0 343.6V370.0Z" fill="#2a78d6"/>
+<text x="503.0" y="333.6" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">27.9</text>
+<path d="M517.0 370.0V303.1Q517.0 299.1 521.0 299.1H537.0Q541.0 299.1 541.0 303.1V370.0Z" fill="url(#on)"/>
+<text x="529.0" y="293.1" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">65.1</text>
+<text x="516.0" y="388.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Code</text>
+<text x="516.0" y="402.0" font-size="10.5" fill="#52514e" text-anchor="middle">1 chat</text>
+<path d="M627.0 370.0V343.6Q627.0 339.6 631.0 339.6H647.0Q651.0 339.6 651.0 343.6V370.0Z" fill="#2a78d6"/>
+<text x="639.0" y="333.6" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">27.9</text>
+<path d="M653.0 370.0V332.3Q653.0 328.3 657.0 328.3H673.0Q677.0 328.3 677.0 332.3V370.0Z" fill="url(#on)"/>
+<text x="665.0" y="322.3" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">38.3</text>
+<text x="652.0" y="388.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Prose</text>
+<text x="652.0" y="402.0" font-size="10.5" fill="#52514e" text-anchor="middle">1 chat</text>
+<path d="M763.0 370.0V226.9Q763.0 222.9 767.0 222.9H783.0Q787.0 222.9 787.0 226.9V370.0Z" fill="#2a78d6"/>
+<text x="787.0" y="216.9" font-size="11" fill="#0b0b0b" text-anchor="end" font-variant-numeric="tabular-nums">135.1</text>
+<path d="M789.0 370.0V190.4Q789.0 186.4 793.0 186.4H809.0Q813.0 186.4 813.0 190.4V370.0Z" fill="url(#on)"/>
+<text x="801.0" y="180.4" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">168.6</text>
+<text x="788.0" y="388.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">8 chats</text>
+<text x="788.0" y="402.0" font-size="10.5" fill="#52514e" text-anchor="middle">together</text>
+<text x="24.0" y="450.0" font-size="13" fill="#0b0b0b" text-anchor="start" font-weight="600">One cloud GB10 VM</text>
+<text x="24.0" y="467.0" font-size="11" fill="#52514e" text-anchor="start">OFF card 1946, ON card 1954</text>
+<rect x="24.0" y="696.0" width="266.7" height="1" fill="#c3c2b7"/>
+<path d="M43.4 696.0V673.4Q43.4 669.4 47.4 669.4H63.4Q67.4 669.4 67.4 673.4V696.0Z" fill="#2a78d6"/>
+<text x="55.4" y="663.4" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">24.4</text>
+<path d="M69.4 696.0V633.5Q69.4 629.5 73.4 629.5H89.4Q93.4 629.5 93.4 633.5V696.0Z" fill="url(#on)"/>
+<text x="81.4" y="623.5" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">61.1</text>
+<text x="68.4" y="714.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Code</text>
+<text x="68.4" y="728.0" font-size="10.5" fill="#52514e" text-anchor="middle">1 chat</text>
+<path d="M132.3 696.0V675.5Q132.3 671.5 136.3 671.5H152.3Q156.3 671.5 156.3 675.5V696.0Z" fill="#2a78d6"/>
+<text x="144.3" y="665.5" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">22.5</text>
+<path d="M158.3 696.0V665.6Q158.3 661.6 162.3 661.6H178.3Q182.3 661.6 182.3 665.6V696.0Z" fill="url(#on)"/>
+<text x="170.3" y="655.6" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">31.6</text>
+<text x="157.3" y="714.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Prose</text>
+<text x="157.3" y="728.0" font-size="10.5" fill="#52514e" text-anchor="middle">1 chat</text>
+<path d="M221.2 696.0V620.2Q221.2 616.2 225.2 616.2H241.2Q245.2 616.2 245.2 620.2V696.0Z" fill="#2a78d6"/>
+<text x="233.2" y="610.2" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">73.3</text>
+<path d="M247.2 696.0V593.8Q247.2 589.8 251.2 589.8H267.2Q271.2 589.8 271.2 593.8V696.0Z" fill="url(#on)"/>
+<text x="259.2" y="583.8" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">97.5</text>
+<text x="246.2" y="714.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">8 chats</text>
+<text x="246.2" y="728.0" font-size="10.5" fill="#52514e" text-anchor="middle">together</text>
+<text x="306.7" y="450.0" font-size="13" fill="#0b0b0b" text-anchor="start" font-weight="600">Two cloud GB10 VMs</text>
+<text x="306.7" y="467.0" font-size="11" fill="#52514e" text-anchor="start">OFF card 2027, ON card 2035</text>
+<rect x="306.7" y="696.0" width="266.7" height="1" fill="#c3c2b7"/>
+<path d="M326.1 696.0V673.4Q326.1 669.4 330.1 669.4H346.1Q350.1 669.4 350.1 673.4V696.0Z" fill="#2a78d6"/>
+<text x="338.1" y="663.4" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">24.4</text>
+<path d="M352.1 696.0V640.4Q352.1 636.4 356.1 636.4H372.1Q376.1 636.4 376.1 640.4V696.0Z" fill="url(#on)"/>
+<text x="364.1" y="630.4" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">54.7</text>
+<text x="351.1" y="714.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Code</text>
+<text x="351.1" y="728.0" font-size="10.5" fill="#52514e" text-anchor="middle">1 chat</text>
+<path d="M415.0 696.0V675.1Q415.0 671.1 419.0 671.1H435.0Q439.0 671.1 439.0 675.1V696.0Z" fill="#2a78d6"/>
+<text x="427.0" y="665.1" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">22.9</text>
+<path d="M441.0 696.0V666.8Q441.0 662.8 445.0 662.8H461.0Q465.0 662.8 465.0 666.8V696.0Z" fill="url(#on)"/>
+<text x="453.0" y="656.8" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">30.5</text>
+<text x="440.0" y="714.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Prose</text>
+<text x="440.0" y="728.0" font-size="10.5" fill="#52514e" text-anchor="middle">1 chat</text>
+<path d="M503.9 696.0V577.8Q503.9 573.8 507.9 573.8H523.9Q527.9 573.8 527.9 577.8V696.0Z" fill="#2a78d6"/>
+<text x="527.9" y="567.8" font-size="11" fill="#0b0b0b" text-anchor="end" font-variant-numeric="tabular-nums">112.2</text>
+<path d="M529.9 696.0V549.4Q529.9 545.4 533.9 545.4H549.9Q553.9 545.4 553.9 549.4V696.0Z" fill="url(#on)"/>
+<text x="541.9" y="539.4" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">138.3</text>
+<text x="528.9" y="714.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">8 chats</text>
+<text x="528.9" y="728.0" font-size="10.5" fill="#52514e" text-anchor="middle">together</text>
+<text x="589.3" y="450.0" font-size="13" fill="#0b0b0b" text-anchor="start" font-weight="600">Four cloud GB10 VMs</text>
+<text x="589.3" y="467.0" font-size="11" fill="#52514e" text-anchor="start">OFF card 2204, ON card 2213</text>
+<rect x="589.3" y="696.0" width="266.7" height="1" fill="#c3c2b7"/>
+<path d="M608.8 696.0V676.2Q608.8 672.2 612.8 672.2H628.8Q632.8 672.2 632.8 676.2V696.0Z" fill="#2a78d6"/>
+<text x="620.8" y="666.2" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">21.9</text>
+<path d="M634.8 696.0V643.8Q634.8 639.8 638.8 639.8H654.8Q658.8 639.8 658.8 643.8V696.0Z" fill="url(#on)"/>
+<text x="646.8" y="633.8" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">51.6</text>
+<text x="633.8" y="714.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Code</text>
+<text x="633.8" y="728.0" font-size="10.5" fill="#52514e" text-anchor="middle">1 chat</text>
+<path d="M697.7 696.0V677.5Q697.7 673.5 701.7 673.5H717.7Q721.7 673.5 721.7 677.5V696.0Z" fill="#2a78d6"/>
+<text x="709.7" y="667.5" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">20.7</text>
+<path d="M723.7 696.0V668.4Q723.7 664.4 727.7 664.4H743.7Q747.7 664.4 747.7 668.4V696.0Z" fill="url(#on)"/>
+<text x="735.7" y="658.4" font-size="11" fill="#0b0b0b" text-anchor="middle" font-variant-numeric="tabular-nums">29.0</text>
+<text x="722.7" y="714.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Prose</text>
+<text x="722.7" y="728.0" font-size="10.5" fill="#52514e" text-anchor="middle">1 chat</text>
+<path d="M786.6 696.0V586.5Q786.6 582.5 790.6 582.5H806.6Q810.6 582.5 810.6 586.5V696.0Z" fill="#2a78d6"/>
+<text x="810.6" y="576.5" font-size="11" fill="#0b0b0b" text-anchor="end" font-variant-numeric="tabular-nums">104.2</text>
+<path d="M812.6 696.0V586.5Q812.6 582.5 816.6 582.5H832.6Q836.6 582.5 836.6 586.5V696.0Z" fill="url(#on)"/>
+<text x="812.6" y="576.5" font-size="11" fill="#0b0b0b" text-anchor="start" font-variant-numeric="tabular-nums">104.2</text>
+<text x="811.6" y="714.0" font-size="11.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">8 chats</text>
+<text x="811.6" y="728.0" font-size="10.5" fill="#52514e" text-anchor="middle">together</text>
+<text x="24.0" y="766.0" font-size="11" fill="#52514e" text-anchor="start">Every bar is a RigMark card for Vade v0.1.0, thinking OFF, context 32768, greedy decoding.</text>
+<text x="24.0" y="783.0" font-size="11" fill="#52514e" text-anchor="start">Drafting is ON by default; for the OFF cards, every request sent "draft":"plain".</text>
+<text x="24.0" y="800.0" font-size="11" fill="#52514e" text-anchor="start">tok/s = completion tokens per wall second; 8 chats = eight concurrent chats, counted together.</text>
+<text x="24.0" y="817.0" font-size="11" fill="#52514e" text-anchor="start">8-chat rates vary: at eight chats the engine serves some chats without drafting.</text>
+<text x="24.0" y="834.0" font-size="11" fill="#52514e" text-anchor="start">Sources, bench/receipts/2026-10-24/; one scale for all panels:</text>
+<text x="36.0" y="851.0" font-size="10.5" fill="#52514e" text-anchor="start">2026-10-24_1937_qwen3.8-flash-next-nvfp4_local-1spark_5a22651-drafting-off-thinking-off</text>
+<text x="36.0" y="866.0" font-size="10.5" fill="#52514e" text-anchor="start">2026-10-24_1943_qwen3.8-flash-next-nvfp4_local-1spark_5a22651-drafting-on-thinking-off</text>
+<text x="36.0" y="881.0" font-size="10.5" fill="#52514e" text-anchor="start">2026-10-24_2012_qwen3.8-flash-next-nvfp4_local-2spark_5a22651-drafting-off-thinking-off</text>
+<text x="36.0" y="896.0" font-size="10.5" fill="#52514e" text-anchor="start">2026-10-24_2019_qwen3.8-flash-next-nvfp4_local-2spark_5a22651-drafting-on-thinking-off</text>
+<text x="36.0" y="911.0" font-size="10.5" fill="#52514e" text-anchor="start">2026-10-24_1946_qwen3.8-flash-next-nvfp4_local-1spark_5a22651-drafting-off-thinking-off-cloud-a-vma</text>
+<text x="36.0" y="926.0" font-size="10.5" fill="#52514e" text-anchor="start">2026-10-24_1954_qwen3.8-flash-next-nvfp4_local-1spark_5a22651-drafting-on-thinking-off-cloud-a-vma</text>
+<text x="36.0" y="941.0" font-size="10.5" fill="#52514e" text-anchor="start">2026-10-24_2027_qwen3.8-flash-next-nvfp4_local-2spark_5a22651-drafting-off-thinking-off-cloud-a</text>
+<text x="36.0" y="956.0" font-size="10.5" fill="#52514e" text-anchor="start">2026-10-24_2035_qwen3.8-flash-next-nvfp4_local-2spark_5a22651-drafting-on-thinking-off-cloud-a</text>
+<text x="36.0" y="971.0" font-size="10.5" fill="#52514e" text-anchor="start">2026-10-24_2204_qwen3.8-flash-next-nvfp4_local-4spark_5a22651-drafting-off-thinking-off-cloud-a</text>
+<text x="36.0" y="986.0" font-size="10.5" fill="#52514e" text-anchor="start">2026-10-24_2213_qwen3.8-flash-next-nvfp4_local-4spark_5a22651-drafting-on-thinking-off-cloud-a</text>
 </svg>

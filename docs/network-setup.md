@@ -2,8 +2,8 @@
 
 **How to buy, cable, address and check the network that joins DGX Sparks for Vade.**
 
-New to the words? Each term is explained the first time it appears, and the
-[Glossary](GLOSSARY.md) has them all.
+New to some of these terms? Each one is explained the first time it appears,
+and the [Glossary](GLOSSARY.md) has them all.
 
 > **In 30 seconds**
 >
@@ -12,7 +12,7 @@ New to the words? Each term is explained the first time it appears, and the
 > - Give each cable **two small private subnets** (one per rail) and **MTU 9000**.
 > - Check it: a jumbo ping, then an RDMA test. Expect **about 196 Gb/s per cable**.
 > - Vade finds the RDMA devices by itself from the addresses you give it.
-> - **No QSFP link?** Vade can run over ordinary Ethernet in [TCP mode](fresh-install.md#no-qsfp-link-use-tcp-mode) (`SEQPAR_RDMA=0`). Expected to be slower; not yet measured.
+> - **No QSFP link?** Vade can run over ordinary Ethernet in [TCP mode](../INSTALL.md#two-and-more-sparks) (`SEQPAR_RDMA=0`). Expect it to be slower; we have not measured it yet.
 
 <br>
 
@@ -36,11 +36,11 @@ New to the words? Each term is explained the first time it appears, and the
 
 | Item | How many | Notes |
 | --- | --- | --- |
-| **NVIDIA DGX Spark** | 2 | GB10 chip, 128 GB memory shared by CPU and GPU. The FP8 installation uses a pair; verify checkpoint capacity before setup. |
+| **NVIDIA DGX Spark** | 2 | GB10 chip, 128 GB memory shared by CPU and GPU. The FP8 install uses a pair; check that the checkpoint fits before you set up. |
 | **QSFP cable, 200 Gb/s** | 1 per link | Direct-attach copper (DAC), QSFP56 200G or QSFP112. Short runs (about 1 m or less) are typical for passive copper. Check NVIDIA's [Spark clustering page](https://docs.nvidia.com/dgx/dgx-spark/spark-clustering.html) for its current cable list. |
 | **Ordinary network** | 1 | The Sparks' normal Ethernet or Wi-Fi, for SSH and downloads. Keep it separate from the QSFP links. |
-| **A Mac** | 1 | Runs the `vade` command, the SSH tunnel and the coding assistant. This is the tested controller. |
-| **Switch** (optional) | 0 | Not needed for 2, 4 or 6 Sparks. See [with a switch](#with-a-switch). |
+| **A Mac** | 1 | Runs the `vade` command, the SSH tunnel and the coding assistant. We tested with a Mac as the controller, the machine that drives the Sparks. |
+| **Switch** (optional) | 0 | Not needed for any layout on this page. See [with a switch](#with-a-switch). |
 
 **Cable speed matters.** A 100 Gb/s cable links at half speed. Our links report
 `200000Mb/s` over 4 lanes; check yours with `ethtool` (see [step 7](#7-check-every-link)).
@@ -85,29 +85,53 @@ so Vade stages transfers through ordinary host memory
 
 ## 3. Pick a layout
 
-Vade splits the model across Sparks with **tensor parallelism (TP)**: every
-layer is cut into equal slices, and the Sparks work on each token together.
-Each Spark runs one **rank** (one engine process). **Rank 0** answers HTTP.
+How Vade spreads the model over several Sparks depends on the checkpoint.
+Each Spark runs one **rank** (one engine process), and **rank 0** answers HTTP.
 
-The model's layer sizes divide evenly by **2, 4 or 8**. They do not divide
-evenly by 3 or 6.
+### FP4-Local, the current checkpoint
 
-| Sparks | Vade layout | Cables | Status today |
+FP4-Local fits on one Spark. With more Sparks, Vade splits it by layers: each
+Spark holds a block of consecutive layers, runs them, and passes the result to
+the next Spark. On two Sparks this is the **layer pipeline**; on more than two
+it is a **chain**.
+
+| Sparks | Layout | Cables | How to start it |
 | --- | --- | --- | --- |
-| **1** | One-Spark native serving; no tensor-parallel link | none | Official [Flash-Next NVFP4](../engine/docs/next-http.md) (FP4-Local). Flash-Next FP8 needs multiple Sparks. |
-| **2** | 2-way TP, ring | 1 | **The tuned path.** Most published numbers are from this layout. |
-| **4** | 4-way TP, path (chain) | 3 (a ring of 4 also works) | `vade up --sparks 4`; use the [four-Spark guide](four-sparks.md). No current throughput comparison is claimed here. |
-| **6** | 6-way TP, path | 5 (a ring of 6 also works) | Starts in code, but the model splits unevenly. **Not recommended.** |
-| **3, 5, 8+** | none | none | `vade up` refuses: "Flash-Next needs 2, 4, or 6 machines." |
-| **Many users** | Several 2-Spark pairs, each its own server, behind a router | 1 per pair | Each pair is a **replica**: a full copy of the model. The harness gateway (`vade-harness gateway`, one `--upstream` per pair) spreads requests. **UNVERIFIED live:** the router has only been tested against mock servers. |
+| **1** | One Spark on its own | none | `vade launch` on the Spark, or `vade up` from a controller |
+| **2** | Layer pipeline | 1 | `vade up --sparks 2` |
+| **3 to 24** | Layer chain, in cable order | one fewer than the Sparks | `vade up --sparks N`, or `--hosts a,b,c` in cable order |
+| **Many chats** | Replicas: a separate one-Spark server on each Spark, behind a local gateway | none | `vade up --replicas N` (2 to 16) |
 
-**Ring or path?** Two ranks use a **ring**: data goes around in a loop. Four and
-six ranks use a **path**: a chain with two open ends, so the cable that would
-close the ring is not needed.
+A chain does not need the cable that would close it into a ring. Before you
+choose more than two Sparks, run `vade install` from current source, so the
+staged copy supports the chain. Our startup checks cannot prove that an
+untested cabling layout gives the same tokens on every Spark. The
+steps are in [INSTALL.md, Two and more Sparks](../INSTALL.md#two-and-more-sparks).
 
-**Tip: cable a ring anyway.** In a ring, every neighbor pair has its own direct
-cable. Six Sparks in a ring can serve as three separate pairs, or as one long
-path, without recabling.
+### Legacy FP8
+
+The older Flash-Next FP8 checkpoint needs at least two Sparks. It splits the
+model with **tensor parallelism (TP)**: every layer is cut into equal slices,
+and the Sparks work on each token together. Its layer sizes divide evenly by
+2, 4 or 8, but not by 3 or 6.
+
+Every legacy FP8 launch needs the `--fp8-legacy` flag, on four Sparks too.
+Without it, `vade up` stops and tells you to add it.
+
+| Sparks | Layout | Cables | Status |
+| --- | --- | --- | --- |
+| **2** | 2-way TP, ring | 1 | `vade up --fp8-legacy`. Two is the legacy default. |
+| **4** | 4-way TP, path (chain) | 3 (a ring of 4 also works) | `vade up --fp8-legacy --sparks 4`; use the [four-Spark guide](four-sparks.md). We do not compare its speed on this page. |
+| **6** | 6-way TP, path | 5 (a ring of 6 also works) | `vade up --fp8-legacy --sparks 6` starts it, but the model splits unevenly. **Not recommended.** |
+| **1, 3, 5, 7+** | none | none | `vade up --fp8-legacy` refuses: "Legacy FP8 needs 2, 4, or 6 machines." |
+
+**Ring or path?** Here two ranks use a **ring**, where data goes around in a
+loop. Four and six ranks use a **path**, a chain with two open ends, so you do
+not need the cable that would close the ring.
+
+**Tip: cable a ring anyway.** In a ring, every pair of neighbors has its own
+direct cable. Six Sparks in a ring can serve as three separate pairs, or as
+one long chain, without recabling.
 
 <br>
 
@@ -116,7 +140,7 @@ path, without recabling.
 ## 4. Cable it
 
 **One rule covers every layout:** port 0 of each Spark goes to port 1 of the
-next Spark. Vade does not require this rule, but it keeps addresses predictable.
+next Spark. Vade does not require it, but it keeps addresses predictable.
 
 ### Two Sparks (direct)
 
@@ -145,7 +169,7 @@ next Spark. Vade does not require this rule, but it keeps addresses predictable.
 | 3 | spark-3 port 0 | spark-4 port 1 |
 | 4 | spark-4 port 0 | spark-1 port 1 |
 
-For a 4-Spark Vade path, cables 1–3 are enough. Cable 4 closes the ring, so
+For a four-Spark chain or path, cables 1–3 are enough. Cable 4 closes the ring, so
 spark-1 + spark-2 and spark-3 + spark-4 can also run as two separate pairs.
 
 ### Six Sparks (ring)
@@ -155,10 +179,10 @@ Same rule, six cables: spark-N port 0 → spark-(N+1) port 1, and spark-6 port 0
 
 ### With a switch
 
-You can plug each Spark into a 200 Gb/s Ethernet switch that supports RoCE
-instead of cabling neighbors directly. Each Spark's `fabric.<peer>` setting is
+Instead of cabling neighbors directly, you can plug each Spark into a 200 Gb/s
+Ethernet switch that supports RoCE. Each Spark's `fabric.<peer>` setting is
 then its own address on the shared switch subnet, and both rails need a subnet.
-**UNVERIFIED: Vade has not been tested through a switch.** Direct cables are
+**Not yet tested: Vade has not been run through a switch.** Direct cables are
 simpler and are what we measured.
 
 <br>
@@ -203,7 +227,7 @@ size. 9000 ("jumbo frames") is faster than the default 1500: we measured
 196 Gb/s at 9000 and 185 Gb/s at 1500. With Ethernet MTU 9000, the RDMA path
 MTU shows as **4096**. That is expected.
 
-**What Vade needs from you:** one address per neighbor. In the Vade config,
+**What Vade needs from you** is one address per neighbor. In the Vade config,
 each machine's `fabric.<peer>` is **its own rail-0 address on the cable to that
 peer**. Vade discovers rail 1 by itself: it looks for a second subnet that both
 ends share on a 100 Gb/s-or-faster interface, and uses it when present.
@@ -246,13 +270,13 @@ after you read the preview.
 Every change is recorded in a transaction you can roll back.
 The full walkthrough, with every command, is **[Spark system setup](spark-setup.md)**.
 
-> **Honest status:** these scripts have passed Mac syntax and mock checks. The
-> complete blank-OS run on real Sparks is **UNVERIFIED**. Our working network
+> **Where this stands:** these scripts have passed Mac syntax and mock checks. The
+> complete blank-OS run on real Sparks is **not yet tested**. Our working network
 > was built by hand from NVIDIA's playbooks
 > ([two Sparks](https://build.nvidia.com/spark/connect-two-sparks/stacked-sparks),
 > [three in a ring](https://build.nvidia.com/spark/connect-three-sparks/three-sparks-ring)).
 
-**Locked memory, in plain words.** RDMA needs to pin memory so the OS cannot
+**Locked memory, in plain words.** RDMA has to pin memory so the OS cannot
 move it. Linux limits how much an account may pin. Vade needs that limit to be
 `unlimited` **in the exact SSH session that starts it**, and `vade up` refuses
 to start otherwise. Some SSH routes (for example Tailscale SSH) skip the normal
@@ -264,8 +288,8 @@ login limits. Use ordinary OpenSSH over the LAN.
 
 ## 7. Check every link
 
-Run these on each Spark, for every fabric interface. Replace the example names
-and addresses with yours.
+Run these on each Spark, for every fabric interface, with your own interface
+names and addresses in place of the examples.
 
 ### Checklist
 
@@ -357,12 +381,17 @@ ib_write_bw -d rocep1s0f1 -i 1 -x <gid-index> -p 18515 --bind_source_ip=10.77.0.
 
 `Gb/s` is gigabits per second. Divide by 8 for gigabytes: 196 Gb/s ≈ 24.5 GB/s.
 
-**Right after `vade up`, check Vade itself.** `vade logs` (the last 64 KiB of each rank's log) should show a line like
-`flash_serve transport rank=0 world=2 rdma=true` for each rank, and a
-`seqpar_links` line. On two Sparks, `rails=2` means Vade is using both halves
-of the cable; `rails=1` means it found only one. On 4 or 6 Sparks it
-reads `rails_right=2 rails_left=2`; the first rank shows `rails_left=1` and the
-last rank `rails_right=1`, because each has a neighbor on one side only.
+**Right after `vade up`, check Vade itself.** `vade logs` shows the last 64 KiB
+of each rank's log. On FP4-Local with more than one Spark, each rank prints a
+`flashnext pp stage` line with its rank, the number of ranks and the block of
+layers it runs.
+
+On legacy FP8, each rank prints a line such as
+`flash_serve transport rank=0 world=2 rdma=true`, and a `seqpar_links` line.
+On two Sparks, `rails=2` means Vade is using both halves of the cable;
+`rails=1` means it found only one. On 4 or 6 Sparks it reads
+`rails_right=2 rails_left=2`; the first rank shows `rails_left=1` and the last
+rank `rails_right=1`, because each has a neighbor on one side only.
 
 **Coming from vLLM or SGLang?** Vade does not use NCCL; it has its own RDMA
 transport. If you already run NVIDIA's `nccl-tests`, our three-Spark ring
@@ -386,8 +415,8 @@ matches the published two-Spark reference.
 | **Your LAN and Wi-Fi profiles** | The setup scripts never touch them. You need them for SSH. |
 | **The interface carrying your SSH session** | Reconfiguring it locks you out. Use the local console for network changes. |
 
-If you run a firewall on the fabric, allow between direct neighbors: ICMP,
-SSH, **RoCE v2 (UDP 4791)** and **Vade's TCP ports 29960 and 29961**
+If you run a firewall on the fabric, allow these between direct neighbors:
+ICMP, SSH, **RoCE v2 (UDP 4791)** and **Vade's TCP ports 29960 and 29961**
 (`tp_port` and `tp_port + 1`).
 
 <br>
@@ -403,7 +432,7 @@ SSH, **RoCE v2 (UDP 4791)** and **Vade's TCP ports 29960 and 29961**
 | Ping fails completely | Address on the wrong interface (case labels ≠ Linux names), or subnets differ at the two ends | Run `ibdev2netdev` and `ip -br address` on both ends. Move the address to the interface that is Up. |
 | Small ping works, `-s 8972 -M do` fails | MTU is not 9000 somewhere | Set MTU 9000 on both ends of that rail. |
 | `ib_write_bw` cannot open the device or register memory | Not in the RDMA group, or memlock limited | Run the `rdma` setup step, then **log out and back in**. Check `ulimit -l`. |
-| Bandwidth about half of 196 Gb/s per cable | Only one rail configured or used | Give rail 1 its own subnet at both ends. Check `vade logs` for `rails=2`. |
+| Bandwidth about half of 196 Gb/s per cable | Only one rail configured or used | Give rail 1 its own subnet at both ends. On legacy FP8, check `vade logs` for `rails=2`. |
 | Bandwidth about 185, not 196 Gb/s | MTU 1500 | Set MTU 9000. |
 | `vade up`: "RDMA launch needs unlimited soft and hard memlock in this SSH session" | The SSH alias Vade uses does not get unlimited locked memory (some routes, such as Tailscale SSH, skip login limits) | Point the config's `ssh =` at an OpenSSH alias over the LAN that prints `unlimited` for `ulimit -Sl` and `ulimit -Hl`. |
 | Engine log: "RDMA socket has no QSFP interface" or "no IPv4 RoCE-v2 GID on neighbour interface" | `fabric.<peer>` is not an address on a 100 Gb/s-or-faster ConnectX-7 interface, or that interface has no RoCE v2 GID yet (link down) | Use the Spark's own fabric address on that cable. Check carrier. |
@@ -413,9 +442,9 @@ SSH, **RoCE v2 (UDP 4791)** and **Vade's TCP ports 29960 and 29961**
 | RoCE errors or hangs across Sparks on kernel `7.0.0-1019-nvidia` | Known kernel regression | Add `kho=off` (setup step 6) or move to NVIDIA's fixed kernel. |
 | `rx_err_lane_*_phy` counters keep rising | Marginal cable or connector | Small corrected-error counts are normal. If they climb, reseat or replace the cable. |
 
-Still stuck? Collect `ibdev2netdev`, `ip -br address`, `ethtool <iface>` and
-`vade logs` from both ends, with your real addresses removed, before asking for help.
+Still stuck? Before you ask for help, collect `ibdev2netdev`, `ip -br address`,
+`ethtool <iface>` and `vade logs` from both ends, with your real addresses removed.
 
 <br>
 
-**Back:** [README](../README.md) · **Next:** [Fresh install](fresh-install.md) →
+**Back:** [README](../README.md) · **Next:** [INSTALL.md, Route B](../INSTALL.md#route-b-from-a-controller) and [Two and more Sparks](../INSTALL.md#two-and-more-sparks) → · Legacy FP8 only: [legacy fresh install](fresh-install.md)

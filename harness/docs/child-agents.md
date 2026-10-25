@@ -1,76 +1,169 @@
-# Bounded native children
+# Child agents
 
-The new `child_agents` library module runs independent children through the
-existing `agent::run` loop. A native parent can call `child_spawn`, `child_list`,
-`child_wait`, and `child_cancel`. Each accepted child has a scheduler-scoped task
-ID, its own typed conversation, a finite resource allocation and a terminal
-result. No child receives a mutable parent conversation or appends background
-messages to it. The parent runtime alone commits bounded tool receipts against
-its original call IDs; the parent decides how to integrate a finding.
+Child agents are helpers that the native agent can start for side tasks. Each
+child works on its own task and reports what it found to the agent that started
+it, called the *parent*.
 
-The library is wired into the real native CLI/TUI behind explicit opt-in. Add
-`--children` to an otherwise configured `agent` command, or enter `/children on`
-before the first prompt of a fresh native conversation. It is off by default and
-the flag is refused in other modes. Children use the parent's selected endpoint,
-model, frozen project rules/catalog and workspace through the existing
-contract/HTTP client and native `CodingTools` executor. No crates or second tool
-implementation are added. Read-only is the default; host launch options can
-explicitly grant native patches or sandboxed commands as described below.
+Children are off by default. To turn them on, do one of these:
 
-| Native command | Effect |
+- add `--children` to an `agent` command
+- type `/children on` before the first prompt of a fresh native conversation
+
+Other modes refuse the flag.
+
+By default a child can only read. Your launch flags can grant more: a named
+scope can give a child exact file edits or sandboxed commands, as described
+under [Tool scopes and write ownership](#tool-scopes-and-write-ownership).
+
+One term comes up all through this page. An *activation* is one run of the
+parent agent, from your prompt to its answer.
+
+## Commands
+
+| Native command | What it does |
 | --- | --- |
-| `/children` or `/children list` | List current/last activation's IDs, states, elapsed time and reservations |
-| `/children on` / `/children off` | Change opt-in before the first prompt; after history exists, use `/new` first |
-| `/children cancel ID` | Cancel just that active child; siblings and parent continue |
-| `/children cancel all` | Cancel active children and close new spawns for this activation; parent continues |
-| `/context` | Parent context plus per-child last usage and cumulative reported cached tokens |
+| `/children` or `/children list` | List IDs, states, elapsed time and reservations for the current or last activation |
+| `/children on` / `/children off` | Turn children on or off before the first prompt; once the conversation has history, use `/new` first |
+| `/children cancel ID` | Cancel just that active child; its siblings and the parent keep going |
+| `/children cancel all` | Cancel active children and close new spawns for this activation; the parent keeps going |
+| `/context` | Show parent context, plus each child's last usage and cumulative reported cached tokens |
 
-The raw TUI draws a bounded child panel above the editable prompt, adapting to
-terminal width and height. Lifecycle/usage revisions wake the existing UI thread;
-ordinary elapsed-time ticks update durations. There is no child-token render
-queue or extra UI watcher thread. Commands remain available while parent HTTP
-is stalled. Finished states are published only after workers join; a cancellation
-request does not fabricate a terminal outcome or remote acknowledgment.
+## How children run
 
-`/new` preserves the opt-in setting but clears the child display/results after
-cleanup. Every parent activation owns a new bounded scheduler. The UI retains
-only the current/last activation's full in-memory results and metadata; older
-parent tool receipts remain in its typed journal. `run_parent_observed` preserves
-all parent journal hooks, including intent/result records around scheduler tools.
-Native children also have separate private journals: the initial task is recorded
-before generation, intent is synced before every tool, and results are synced
-before the next request. `child_wait` includes the child journal name; `/sessions`
-lists these `child-...` journals. Journals retain the existing private permissions,
-size limits, artifact quotas, and refusal of redirects. Each child owns a separate
-build area, discarded with worker cleanup.
+The parent gets four tools: `child_spawn`, `child_list`, `child_wait` and
+`child_cancel`.
 
-The in-memory scheduler is not crash-restored. Pending approvals, live tasks,
-leases and collection state are never recreated from a transcript or automatically
-replayed. If a crash prevents result collection, inspect the child journals from
-`/sessions`; an unknown tool outcome still requires workspace reconciliation.
-The parent records completed spawn/wait receipts, but there is no atomic journal
-transaction across parent and children or complete durable scheduler event log.
-Task IDs are process-local; child journal names supply durable transcript references.
-Resume validates the same explicit host child flags/scopes and requires a new
-launch approval policy. Saved scope descriptions never authorize tools.
+Each child runs the same agent loop as the parent. It has its own task ID, its
+own conversation, its own limits and a final result. It uses the parent's
+engine, model, workspace, project rules and skills. It also runs the same tool
+code, with fewer tools by default. No crates or second tool implementation are
+added.
+
+A child cannot write into the parent's conversation. Instead, the parent
+records each finding against its own tool call and decides what to do with it.
+
+### The child panel
+
+While children run, a small panel above your prompt lists each one with its
+state and elapsed time. The panel is sized to fit your terminal. Commands keep
+working even while the parent is waiting on the engine.
+
+The panel reports only what really happened. A child is shown as finished only
+once its worker has really stopped, and asking to cancel a child never invents
+an outcome for it.
+
+`/new` keeps your on/off setting but clears the panel and results. Each parent
+activation gets a fresh scheduler, the in-memory part that admits and tracks
+children. Only the current or last activation's child results are kept in
+memory. The parent's [journal](agent-tools.md#journal-recovery) keeps its own
+record of each spawn and wait.
+
+## Tool scopes and write ownership
+
+A child without a named scope only gets these read tools: `workspace_read`,
+`workspace_list`, `tool_output_read`, `skill_read`, `workspace_manifest` and
+`workspace_symbols`.
+
+No child can call `child_*` tools, even though its frozen schemas match the
+parent's. (*Frozen* means fixed for the whole session; see [Shared prompt
+prefix](#shared-prompt-prefix).) Project rules, skill text and model arguments
+cannot widen the executor policy.
+
+### Grant edits or commands with a named scope
+
+Named scopes come only from trusted host configuration. The CLI provides them
+through explicit launch flags, and both flags need `--children`:
 
 ```sh
-cargo run --offline --example child_agents_mock
-cargo test --offline child_agents
-cargo test --offline --test contract_mock children_contract
+# Usage example for a separately supplied mock; does not start or contact it here.
+vade-harness agent --endpoint http://127.0.0.1:18080 --model mock --workspace . \
+  --children --child-edit edits=src/example.rs --child-edit edits=src/renamed.rs
+# Shell is a separate explicit host capability; approval still applies.
+vade-harness agent --endpoint http://127.0.0.1:18080 --model mock --workspace . \
+  --children --child-shell checks
 ```
 
-The example uses a first-party mock parent and three mock children. It displays
-running, completed, deadline cancellation, token quota, and collected outcomes.
-It opens no files or sockets. HTTP acceptance tests bind their own loopback mock
-listeners. No Engine, Spark, GPU, live model, Codex, or Hermes is contacted.
-Actual native CLI/TUI acceptance uses that existing v1 capability fixture and
-loopback contract mock helpers: the parent spawns three children, one is cancelled,
-two findings return through original tool IDs, and the parent integrates them.
-One child performs a real bounded read in a temporary fixture workspace. Separate
-checks cover UI cancel-one/all, parent cancellation, resize and disabled tools.
+The model picks a scope by name in `child_spawn`, for example
+`{"task":"...","grant":"edits"}`. Leaving out `grant` always selects the
+read-only scope. Scope names and their exact files are shown in the frozen
+parent system prefix.
 
-## Resource and lifecycle contract
+- At most 32 grants, and 32 file paths per grant, are accepted.
+- A scope can combine edit and shell flags, but a file-edit scope never grants
+  shell on its own.
+- `--approval auto` does not grant any tool capability by itself.
+
+### Leases: who may write which file
+
+A **lease** is a reservation: while a child holds a lease on a file, nobody
+else (the parent or another child) may write it. Before a child's patch runs,
+the harness lists every file the patch would add, change, delete or move to,
+and each one must be in that child's lease. The usual patch checks (syntax,
+directory handles, links, preconditions and per-file atomic updates) still
+apply.
+
+- Lease paths must be plain relative ASCII paths, not hidden, credential,
+  absolute, `..`, `.`, backslash or non-ASCII. Two leases that overlap,
+  including by letter case on macOS, are refused.
+- While any child holds a write lease, the parent's own patches must also use
+  exact ASCII paths, so it cannot get around a lease with a different spelling.
+  With no child write leases, the parent's ordinary paths work as usual.
+- A shell scope (`--child-shell`) takes the whole workspace, because a command
+  can write anywhere in it, whatever its argv. The parent and other writing
+  children wait until that child finishes **and** its result is collected;
+  read-only children keep going.
+- Patches inside a shell scope still need explicit file paths. Shell keeps the
+  usual sandbox, no network, exclusions, process, output and deadline limits,
+  and your chosen toolchain, and each child gets its own private build folder,
+  never the parent's.
+
+All file leases and shell workspace leases are reserved before submission. They
+are held through completion, until the results are explicitly collected. Before
+calling its usual executor, the native parent wrapper checks every affected
+path, move destinations included, and shell ownership.
+
+These are in-process ownership rules, not new OS isolation or atomic multi-file
+transactions. Host code outside this wrapper and unrelated editors are not
+coordinated. Separate files can still conflict in meaning, so the parent
+reviews and folds in the results.
+
+### Approvals
+
+Child edits and commands still go through the parent's approval policy
+(`--approval`) and preview:
+
+| `--approval` | Child edits and commands |
+| --- | --- |
+| `never` | Denied. |
+| `ask` | Edits need the terminal's exact one-time approval. So do commands outside the [native read-only allowlist](agent-tools.md#commands-and-approvals); allowlisted commands run after preview without asking. |
+| `auto` | Allowlisted commands run after preview without asking. Validated exact patches are applied, and all other validated commands run inside the same macOS sandbox, after preview. It never grants broader filesystem or network access. |
+
+Noninteractive runs deny operations that need approval.
+
+Parent and child previews wait in one cancellable queue and are shown one at a
+time, with a single combined 1 MiB display budget. That way concurrent requests
+cannot replace another operation's pending approval. Child previews show the
+task ID. `/children cancel ID|all` stays available during an approval and
+clears cancelled requests, and a stale answer cannot approve later work.
+
+### How tool outcomes are recorded
+
+Tool execution records `Started`, `Completed`, `Uncertain`, denial,
+cancellation, failure or output-limit status. A result describes what
+happened, and is never replaced with a false claim that execution was denied.
+Completed receipts survive a cancellation that races with the return.
+
+Partial native patch results and unsuccessful commands set `Uncertain`, even
+when their detailed receipt comes back successfully, and `child_wait` then
+reports `uncertain_writes: true`. A write that started but then panicked,
+failed or was canceled is also marked uncertain, because an error does not
+prove that no edit happened.
+
+The scheduler never replays such operations automatically or rolls back files.
+The native agent's transactional receipts and durable journal remain the
+authority on actual edits.
+
+## Budgets and cancellation
 
 | Resource | Default per child | Default whole parent activation |
 | --- | --- | --- |
@@ -84,214 +177,290 @@ checks cover UI cancel-one/all, parent cancellation, resize and disabled tools.
 | Serialized history | 512 KiB | 8 MiB allocated |
 | Tool result bytes | 128 KiB total; at most 64 KiB each | 1 MiB allocated |
 
-Task prose is capped at 16 KiB. Summaries are capped at 4 KiB on a UTF-8
-boundary with an explicit truncation flag. Full typed transcripts and tool
-receipts are returned in `ParentRun.children` for inspection. The native host
-journals them as described above; custom/mock factories may omit the observer.
-Each child also retains the ordinary runtime's response, argument,
-event and JSON-complexity bounds. The table's byte counts are serialized data
-budgets, not claims about exact process RSS or Rust AST overhead.
+The byte counts in the table are budgets for serialized data, not claims about
+exact process RSS or Rust AST overhead. A few more limits apply:
 
-There is no hidden task queue. A full concurrent set returns `Capacity`. Global
-allocations are reserved before spawning and are never replenished during that
-activation, even after collection; this bounds the total work, not just currently
-active work. A new explicit parent activation creates a new scheduler and fresh
-finite allocations. Model tool arguments can lower the configured default
-turn/token/wall limits; they cannot increase them or change global limits.
+- Task prose is capped at 16 KiB.
+- Summaries are capped at 4 KiB, cut on a UTF-8 boundary, with an explicit
+  truncation flag. Full transcripts and tool receipts are kept in each child's
+  journal.
+- Each child also keeps the ordinary runtime's response, argument, event and
+  JSON-complexity bounds.
 
-A monitor observes the parent's shared cancellation flag and deadlines on a
-10 ms polling interval while it owns workers (subject to OS scheduling). It stops further admissions and
-signals affected children. Individual cancellation leaves siblings running.
-Running workers remain in `Stopping` until their threads have actually returned
-and been joined. A request and an outcome are separate fields. A completion that
-races with a stop request remains a completion; a failed operation is not relabeled
-as a successful interruption. HTTP cancellation means local cleanup only. There
-is no remote compute cancellation acknowledgment in this transport contract.
+### When the budget is used up
 
-`run_parent` cancels and joins outstanding children on parent completion,
-failure, cancellation, and unwinding through a panic. `Scheduler::drop` also
-cancels and joins. It never detaches a running tool and claims cleanup succeeded.
-Deadlines are cooperative cancellation deadlines, not OS process termination.
-As in the existing transport, std DNS and an in-progress connect are not
-interruptible. An arbitrary host callback that never returns cannot be
-preempted by std threads and keeps shutdown pending. There is no unbounded
-subprocess or shell implementation in this module.
+There is no hidden task queue. When the concurrent set is full, the call
+returns `Capacity`.
 
-## Tool scopes and write ownership
+Global allocations are reserved before spawning. They are never topped up
+during that activation, even after collection, so they bound the total work
+and not just the work active right now. A new explicit parent activation
+creates a new scheduler with fresh finite allocations.
 
-The CLI registers every native tool with `ToolPolicy::native()` and binds
-`native_http_factory`. Unnamed children receive only `workspace_read`,
-`workspace_list`, `tool_output_read`, `skill_read`, `workspace_manifest`, and
-`workspace_symbols`. The original `read_only_http_factory` remains available for
-hosts that only need read/list. No child can call `child_*` tools, even though
-its frozen schemas match the parent. Project rules, skill text and model arguments
-cannot widen the executor policy.
+Model tool arguments can lower the configured default turn, token and wall
+limits. They cannot raise them or change the global limits.
 
-Named scopes come only from trusted host configuration. The CLI supplies these
-through explicit launch flags (both require `--children`):
+### How cancellation works
+
+While it owns workers, a monitor watches the parent's shared cancellation flag
+and deadlines, polling every 10 ms (subject to OS scheduling). It stops further
+admissions and signals the affected children.
+
+- Cancelling one child leaves its siblings running.
+- Running workers stay in `Stopping` until their threads have actually returned
+  and been joined.
+- A request and an outcome are separate fields. A completion that races with a
+  stop request is still a completion, and a failed operation is not relabelled
+  as a successful interruption.
+- HTTP cancellation means local cleanup only. This transport contract has no
+  acknowledgment that remote compute was cancelled.
+
+When the parent finishes, fails, is cancelled or panics, any children still
+running are cancelled and waited for. A running tool is never left behind with
+a claim that cleanup succeeded.
+
+Cancellation has limits of its own:
+
+- Deadlines are cooperative cancellation deadlines, not OS process termination.
+- As in the existing transport, standard-library DNS and a connect already in
+  progress cannot be interrupted.
+- A host callback that never returns cannot be preempted by standard-library
+  threads, and keeps shutdown waiting.
+
+This module has no unbounded subprocess or shell implementation.
+
+## Journals, crashes and resume
+
+Native children also have their own private journals:
+
+- the initial task is recorded before generation
+- intent is synced before every tool
+- results are synced before the next request
+
+`child_wait` includes the child journal name, and `/sessions` lists these
+`child-...` journals. Journals keep the existing private permissions, size
+limits and artifact quotas, and still refuse redirects. Each child owns a
+separate build area, which is thrown away with worker cleanup.
+
+### After a crash
+
+The in-memory scheduler is not restored after a crash. Pending approvals, live
+tasks, leases and collection state are never rebuilt from a transcript or
+replayed automatically.
+
+If a crash prevents result collection, inspect the child journals from
+`/sessions`. An unknown tool outcome still means you must reconcile the
+workspace.
+
+The parent records completed spawn and wait receipts. There is no atomic
+journal transaction across parent and children, though, and no complete
+durable log of scheduler events. Task IDs only exist within the process, and
+child journal names are the durable references to transcripts.
+
+### Resuming a session
+
+To resume a session that used children, pass the same `--children`,
+`--child-edit` and `--child-shell` flags again; a mismatch is refused.
+Approvals are never saved, so the approval policy is the `--approval` you pass
+at that launch. Saved scope descriptions never authorize tools.
+
+## Shared prompt prefix
+
+Every child starts with an exact copy of the parent's frozen system and
+developer messages (project rules included) and its complete tool schemas. On
+top of that it gets a fresh task and scope message, without the parent's chat
+history.
+
+The schemas stay identical even when a child is allowed less; execution masks
+narrow the actual authority. That way the shared prefix the model sees does not
+shift whenever permissions differ. The permission envelope is explanatory data,
+and enforcement lives in the executor.
+
+### Cache keys
+
+Child cache affinity is not inherited from the parent's request options. Each
+child has its own engine client, which generates a distinct scheduling key only
+when the engine advertises `prompt_cache_key: scheduling_hint`. Repeated turns
+of one child keep its key and its append-only serialized history.
+
+Tests compare the parent's and child's system and tools, and successive child
+wire prefixes. Here is what that does and does not show:
+
+- Cache-key, output-limit and stream options may differ between parent and
+  child requests, so whole-HTTP-body prefix equality is not asserted across
+  those separate sessions.
+- Real rendered token-prefix equality and KV sharing belong to the engine and
+  have not been tested.
+- A key or byte equality is not evidence of a cache hit.
+
+Parent cache, checkpoint and continuation handles are never forwarded. Unknown
+provider root options fail closed when a stable child prefix is created, rather
+than accidentally sharing state. `kv_branch_handles` is unused. Cache-domain
+changes follow the shared contract behavior; there is no invented KV fork and
+no cache hit claim. All inference, admission capacity and KV ownership stay in
+the engine.
+
+### Responses
+
+Children ask for bounded JSON responses (`stream: false`), because their UI
+shows lifecycle states rather than token deltas. The shared typed response
+parser validates the whole response before any tool can run. No second agent
+loop or inference implementation is introduced.
+
+## Why children need exact token counts
+
+Each child has a hard token budget (32,768 by default), so the harness needs
+the engine to count tokens exactly. Before every child request, the harness
+asks the engine how many prompt tokens the request uses. This step is called
+exact admission. The harness charges that count, plus the full output
+allowance, to the child's budget. Then it sends exactly the bytes that were
+counted.
+
+The charge is strict on purpose, which keeps the budget predictable:
+
+- Repeated context is charged every time, even if the engine serves it from
+  cache.
+- Nothing is refunded for short answers, errors or cancels.
+
+If the engine cannot count exactly, children do not run. The parent can still
+fall back to ordinary chat.
+
+### Reported usage
+
+Reported usage stays separate from reservations.
+
+- Missing usage is unknown. A reported zero stays zero, while a value that was
+  never reported stays unknown.
+- Contradictory prompt or output telemetry rejects the response before any tool
+  runs.
+- The child panel shows usage only after a validated response and a successful
+  exact reservation.
+- `/context` labels the last response and the sum across completed responses
+  with cached-token telemetry, and partial coverage is stated.
+- Cancelled requests without a completed response add no invented cache counts.
+
+The provider is responsible for honoring its exact count and output cap.
+Without an upstream tokenizer, the harness cannot independently police
+dishonest token telemetry. The client still keeps its own byte, turn and wall
+bounds.
+
+## Fit with the rest of the harness, and gaps
+
+Children work alongside the rest of the harness. Native journals, budgets,
+compaction, frozen rules and skills, transcript forks, build sessions and
+toolchain selection, setup/doctor, workload and gateway routing all stay.
+
+- Child schemas stay frozen with the parent.
+- Turning children on or off before a first prompt creates a fresh journal.
+- `/new` keeps the launch scopes, and resume refuses mismatched scopes instead
+  of quietly restoring grants.
+- Session switches and forks clear the old child panel after cleanup.
+- Compaction keeps completed metadata but starts no child work.
+
+Known gaps:
+
+- Full crash recovery of scheduler lifecycle and collection is future work. The
+  separate child journals keep tool intents and results without resuming tasks
+  automatically.
+- Journal limits are per session, not a global disk quota.
+- Shell ownership is deliberately exclusive for writes across the whole
+  workspace, rather than a guess at affected paths based on argv.
+- No live engine integration, KV sharing, recursive children or automatic
+  merging of child results is implemented.
+
+## Try it against mocks
 
 ```sh
-# Usage example for a separately supplied mock; does not start or contact it here.
-vade-harness agent --endpoint http://127.0.0.1:18080 --model mock --workspace . \
-  --children --child-edit edits=src/example.rs --child-edit edits=src/renamed.rs
-# Shell is a separate explicit host capability; approval still applies.
-vade-harness agent --endpoint http://127.0.0.1:18080 --model mock --workspace . \
-  --children --child-shell checks
+cargo run --offline --example child_agents_mock
+cargo test --offline child_agents
+cargo test --offline --test contract_mock children_contract
 ```
 
-A model chooses `{"task":"...","grant":"edits"}` in `child_spawn`; omitting `grant`
-always selects the read-only scope. Names and exact files are shown in the frozen
-parent system prefix. At most 32 grants and 32 file paths per grant are accepted.
-A scope can combine edit and shell flags, but a file-edit scope never implicitly
-grants shell. `--approval auto` does not grant any tool capability by itself.
+The example uses a first-party mock parent and three mock children. It shows
+running, completed, deadline cancellation, token quota and collected outcomes.
+It opens no files or sockets. HTTP acceptance tests bind their own loopback
+mock listeners. No engine, Spark, GPU, live model, Codex or Hermes is
+contacted.
 
-`apply_patch` has a distinct multi-path effect classification. Before dispatch,
-the scheduler extracts every add/update/delete source and move destination from
-the bounded native patch grammar. Every path must be an exact member of the
-child's file lease; the native executor still validates full patch syntax,
-directory handles, links, preconditions and per-file atomic updates. Absolute,
-parent, dot, hidden, credential, backslash and non-ASCII lease paths are refused.
-ASCII case-folding and ancestor checks reject overlapping leases on macOS. Parent
-patches also use strict canonical ASCII paths while a child write lease exists,
-so parent spelling aliases cannot bypass ownership. Without child write leases,
-the native parent's ordinary path grammar remains available.
-
-`workspace_shell` has a distinct workspace-wide effect classification. It is
-**never read-only or a single-file edit**, regardless of argv. A host shell scope
-reserves an exclusive workspace write lease, because the native sandbox permits
-visible workspace writes. Parent commands and every other write scope are blocked
-until this child finishes **and** its result is collected. Read-only children may
-continue. Patch tools still require explicit file paths even inside a shell scope.
-Shell commands retain the existing macOS sandbox, no-network policy, scan
-exclusions, process/output/deadline bounds and owner-selected read-only toolchain.
-Each child gets its own private build/cache/temp area; it never adopts the parent's.
-
-Child edits and commands still pass through the parent's `ApprovalPolicy` and
-host preview callback. `never` denies them; `ask` needs the terminal's exact
-one-time approval for edits and commands outside the
-[native read-only allowlist](agent-tools.md#commands-and-approvals). Allowlisted
-commands run after preview without asking in both `ask` and `auto`; `auto` also
-applies validated exact patches and runs all other validated commands inside the
-same macOS sandbox after preview. It never grants broader filesystem or network
-access. Noninteractive runs deny operations
-that need approval. Parent and child previews share a cancellable
-serialized lane with one aggregate 1 MiB display budget, so concurrent requests
-cannot replace another operation's pending approval. Child previews identify the
-task ID. `/children cancel ID|all` remains available during an approval and clears
-cancelled requests; a stale answer cannot approve later work.
-
-All file leases and shell workspace leases are reserved before submission and
-held through completion until explicit collection. The native parent wrapper
-checks all affected paths, including move destinations, and shell ownership before
-calling its usual executor. Host code outside this wrapper and unrelated editors
-are not coordinated; these are in-process ownership rules, not new OS isolation
-or atomic multi-file transactions. Disjoint files can still conflict semantically.
-The parent reviews and integrates results.
-
-Tool execution records `Started`, `Completed`, `Uncertain`, denial, cancellation,
-failure or output-limit status. Partial native patch results and unsuccessful
-commands set `Uncertain` even when their detailed receipt is returned successfully;
-`child_wait` then reports `uncertain_writes: true`. The result describes what
-happened; it is never replaced with a false claim that execution was denied. Completed receipts survive cancellation that races with
-return. A write that was started but panicked, failed, or was canceled is marked
-uncertain, because an error does not prove no edit happened. The scheduler never
-automatically replays such operations or rolls back files. The agent lane's
-transactional receipts and durable journal remain authoritative for actual edits.
-
-## Prompt and Engine boundary
-
-`StablePrefix::from_parent` copies the parent's frozen system/developer messages
-(including project rules) and complete tool schemas exactly. Every child starts
-with that prefix plus a fresh task/scope user message, without the parent's chat
-history. Schemas remain identical while execution masks narrow actual authority.
-This avoids shifting the shared model-visible prefix whenever permissions differ.
-The permission envelope is explanatory data; enforcement lives in the executor.
-
-Child-specific cache affinity is not inherited from parent request options. Each
-`HttpChildModel` has its own `Contract`, which generates a distinct scheduling
-key only when `prompt_cache_key: scheduling_hint` is advertised. Repeated turns
-of one child retain its key and append-only serialized history. Tests compare
-parent/child system and tools and successive child wire prefixes. Cache-key,
-output-limit and stream options may differ between parent and child requests;
-whole-HTTP-body prefix equality is not asserted across those distinct sessions.
-Actual rendered token-prefix equality and KV sharing belong to the Engine and
-have not been tested. A key or byte equality is not evidence of a cache hit.
-
-Children request bounded JSON responses (`stream: false`), because their UI
-displays lifecycle states rather than token deltas. The shared typed response
-parser validates the entire response before tools can run. No second agent loop
-or inference implementation is introduced.
-
-The native child transport requires negotiated **exact admission**. It counts
-the exact fully decorated request bytes, reserves exact prompt tokens plus the
-full output cap from that admission, checks the child's remaining allocation,
-then sends those same bytes. Repeated prefix tokens count on every request,
-including cached input. Reservations are not refunded on short outputs, errors
-or cancellation, making exhaustion conservative and predictable. Missing exact
-admission stops the child without generation; no byte estimate is presented as
-a hard token quota. The parent transport can retain its ordinary fallback.
-
-Reported usage remains separate from reservations. Missing usage is unknown.
-Contradictory prompt/output telemetry rejects the response before tool execution.
-The live `ChildView` publishes usage only after a validated response and exact
-reservation succeed. `/context` labels the last response and the sum across
-completed responses with cached-token telemetry; partial coverage is explicit.
-A reported zero stays zero, while no reported value stays unknown. Cancelled
-requests without a completed response do not contribute invented cache counts.
-The provider is responsible for honoring its exact count and output cap; without
-an upstream tokenizer the harness cannot independently enforce dishonest token
-telemetry. The client independently retains byte, turn and wall bounds.
-
-Parent cache/checkpoint/continuation handles are never forwarded. Unknown
-provider root options fail closed when creating a stable child prefix, rather
-than accidentally sharing state. `kv_branch_handles` is unused. Cache-domain
-changes use the shared contract behavior; there is no invented KV fork or cache
-hit claim. All inference, admission capacity and KV ownership stay in the Engine.
-
-## Integration contract and remaining boundaries
-
-The main merge retains native journals, budgets, compaction, frozen rules/skills,
-transcript forks, build sessions/toolchain selection, setup/doctor, workload and
-gateway routing. Child schemas remain frozen with the parent. Enabling/disabling
-children before a first prompt creates a fresh journal; `/new` preserves launch
-scopes, and resume refuses mismatched scopes instead of silently restoring grants.
-Session switches/forks clear the old child panel after cleanup. Compaction keeps
-completed metadata but starts no child work.
-
-Library hosts must pair `ToolPolicy::native()` with `native_http_factory` and
-supply the parent's real approval callback in `NativeToolHost`. Call
-`run_parent_observed` when using a durable parent journal. Custom factories remain
-trusted host code and must supply honest effect classifications, observers and
-boundary-enforcing executors; the scheduler is not a plugin sandbox. The native
-registry refuses reclassifying `apply_patch` or `workspace_shell` as read-only.
-
-Full crash recovery of scheduler lifecycle/collection remains future work; the
-separate child journals preserve tool intents/results without automatically
-resuming tasks. Journal limits are per session, not a global disk quota. Shell
-ownership is deliberately exclusive for writes across the whole workspace, not
-an argv-dependent guess at affected paths. No live Engine integration, KV sharing,
-recursive children or automatic merge is implemented. The coordinator owns
-integration and any push; this builder does not merge into main or push.
+Real native CLI/TUI acceptance uses the existing v1 capability fixture and
+loopback contract mock helpers. The parent spawns three children, and one is
+cancelled. Two findings come back through the original tool IDs, and the
+parent folds them in. One child does a real bounded read in a temporary
+fixture workspace. Separate checks cover cancelling one or all children from
+the UI, parent cancellation, resize and disabled tools.
 
 ## Evidence and credits
 
-Tests cover actual native parent spawn/wait/integration; exact shared rules/tools;
-distinct capability-gated keys; exact admitted versus dispatched bytes; missing
-admission; contradictory usage; simultaneous completion; resource exhaustion;
-disjoint and overlapping scopes; parent write exclusion; recursive/unknown grant
-refusal; cancellation in HTTP and during a write; completed versus uncertain
-tool outcomes; lifecycle display bounds; setup failure; and teardown on normal
-return, error, panic and drop. Tests run on macOS only in this round.
-Native CLI/TUI tests also prove explicit opt-in, denial of unsolicited spawn
-when disabled, missing exact admission without child generation, independent
-parent/sibling cache keys, reported versus unknown child usage, controls while
-parent I/O is blocked, cancel-all closing admission, cleanup before `/new`, and
-bounded raw-terminal resize behavior. Integration tests also exercise the real
-native edit/shell executors, all patch paths and move destinations, exclusive shell
-leases, failed journal initialization, parent observer refusal, actual terminal
-approval/denial and cancellation with two concurrent children, and private
-parent/child transcript replay without re-executing tools.
+Tests cover:
 
-Design references are credited in [Credits](../../CREDITS.md#harness).
-Implementation is first-party Rust using only the standard library; no competitor
-code or tests were copied.
+- real native parent spawn, wait and integration
+- exact shared rules and tools
+- distinct keys gated on capability
+- exact admitted versus dispatched bytes
+- missing admission and contradictory usage
+- simultaneous completion and resource exhaustion
+- separate and overlapping scopes, and parent write exclusion
+- refusal of recursive or unknown grants
+- cancellation in HTTP and during a write
+- completed versus uncertain tool outcomes
+- lifecycle display bounds and setup failure
+- teardown on normal return, error, panic and drop
+
+So far these tests have run on macOS only.
+
+Native CLI/TUI tests also prove:
+
+- explicit opt-in
+- denial of a spawn nobody asked for when children are off
+- no child generation when exact admission is missing
+- independent parent and sibling cache keys
+- reported versus unknown child usage
+- controls while parent I/O is blocked
+- cancel-all closing admission
+- cleanup before `/new`
+- bounded raw-terminal resize behavior
+
+Integration tests also exercise:
+
+- the real native edit and shell executors
+- all patch paths and move destinations
+- exclusive shell leases
+- failed journal initialization
+- parent observer refusal
+- real terminal approval and denial and cancellation with two concurrent
+  children
+- private parent/child transcript replay without running tools again
+
+Design references are credited in [Credits](../../CREDITS.md#harness). The
+implementation is first-party Rust using only the standard library; no code
+or tests from competing projects were copied.
+
+## For library hosts
+
+Skip this if you only use the CLI.
+
+- The `child_agents` library module runs each child through the same
+  `agent::run` loop the parent uses, with the same contract/HTTP client and the
+  native `CodingTools` executor.
+- The CLI registers every native tool with `ToolPolicy::native()` and binds
+  `native_http_factory`. The original `read_only_http_factory` is still
+  available for hosts that only need read and list.
+- Library hosts must pair `ToolPolicy::native()` with `native_http_factory` and
+  supply the parent's real approval callback in `NativeToolHost`.
+- Call `run_parent_observed` when using a durable parent journal. It keeps all
+  parent journal hooks, including intent and result records around scheduler
+  tools.
+- Full typed transcripts and tool receipts come back in `ParentRun.children`
+  for inspection. Custom or mock factories may leave out the journal observer.
+- `run_parent` cancels and joins outstanding children when the parent
+  completes, fails, is cancelled or unwinds through a panic, and
+  `Scheduler::drop` also cancels and joins.
+- `StablePrefix::from_parent` builds the shared child prefix, and each
+  `HttpChildModel` has its own `Contract`. The live `ChildView` publishes child
+  usage.
+- `apply_patch` and `workspace_shell` each have their own effect
+  classification (the record of what a tool can change). The native registry
+  refuses to reclassify either one as read-only.
+- Custom factories are still trusted host code and must supply honest effect
+  classifications, observers and executors that enforce the boundary; the
+  scheduler is not a plugin sandbox.

@@ -47,7 +47,7 @@
 **[benchmarks-2026-10-24-light.svg](benchmarks-2026-10-24-light.svg) and [benchmarks-2026-10-24-dark.svg](benchmarks-2026-10-24-dark.svg) chart the current results.** They appear in the main README and in [Benchmarks](../benchmarks.md#current-2026-10-24), chosen by the same `<picture>` light/dark rule; they do not move.
 
 - Do not edit them by hand. `python3 -I tools/benchmarks-chart.py` writes both from the committed receipts, so every label is a value a receipt prints.
-- The bar colors are the first two categorical slots of the data-viz palette: drafting OFF blue, drafting ON orange. Text uses neutral ink, never the bar colors.
+- The bar colors are the first two categorical slots of the data-viz palette: drafting OFF solid blue, drafting ON striped orange. Text uses neutral ink, never the bar colors.
 
 <br>
 

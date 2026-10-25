@@ -45,7 +45,7 @@ requests. External URLs are outside its scope.
 
 Run `python3 -I tools/benchmarks-chart.py` from the checkout to redraw the
 [results figure](../docs/benchmarks.md#current-2026-10-24). It uses
-only the Python standard library, reads the cards and timing-run READMEs in
+only the Python standard library, reads the v0.1.0 cards and their READMEs in
 [bench/receipts/2026-10-24](../bench/receipts/2026-10-24/README.md), and writes
 the light and dark SVG files in [docs/assets](../docs/assets/README.md). It
 stops if a value is missing, a label would collide or run past the margin, or a

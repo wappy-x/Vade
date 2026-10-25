@@ -2,112 +2,131 @@
 
 ## v0.1.0 - 2026-10-24
 
-The first public release brings together the Vade engine, CLI and harness.
+The first public release brings together the Vade engine, the CLI and the
+harness.
 
 ### Engine and serving
 
-- A std-only Rust inference engine for NVIDIA DGX Spark, with a text-only Qwen
-  Flash-Next FP4-Local release path for one Spark by default and configured
-  multi-Spark deployments through the exact layer pipeline.
-- Drafting is on by default, and requests without sampling fields are decoded
-  greedily in every world size while checkpoint sampling defaults are preserved.
-- The two-Spark drafting fix: both pipeline stages now agree on the cohort
-  drafting policy, guarded cohort drafting is admitted on the two-stage
-  pipeline, and worker decode pools are reclaimed.
-- Pipeline startup refuses ranks whose artifacts, numerical settings or prompt
-  options differ, and validates pipeline switches before choosing a topology.
-- The server reports the effective drafting mode and depth it actually ran, so
+- An inference engine for the NVIDIA DGX Spark, written in Rust using only the
+  standard library. The release path is the text-only Qwen Flash-Next
+  FP4-Local model, on one Spark by default. Configured multi-Spark
+  deployments run through the exact layer pipeline, which splits the model's
+  layers across the Sparks.
+- Drafting is on by default: an extra model head proposes tokens and the model
+  verifies them. A request that sets no sampling field is decoded greedily, on
+  any number of Sparks. A request that sets any sampling field starts from the
+  checkpoint's own sampling defaults, and its values replace those defaults.
+- Fixed drafting on two Sparks. Both pipeline stages now follow the same
+  drafting policy for a cohort (a group of requests running at the same time).
+  The two-stage pipeline now allows guarded cohort drafting, which switches a
+  cohort back to plain decoding when drafting stops paying off, and the
+  worker's decode pools are reclaimed.
+- At startup, the pipeline refuses to run if its ranks (one process per
+  Spark) have different artifacts, numerical settings or prompt options. It
+  also checks the pipeline switches before it chooses a topology.
+- The server reports the drafting mode and depth it actually ran, so
   `/health` and receipts tell the truth about drafting instead of echoing the
   request.
-- Release builds load verified precompiled kernels, and checkpoint hashing uses
-  a safe streaming SHA-256 that does not fill the file cache.
-- Startup memory admission counts reclaimable page cache as free (Linux
-  `MemAvailable`, capped by CUDA total) instead of CUDA free memory, which
-  inside containers leaves out the host page cache; memory refusals name
-  MemAvailable, the required bytes and the ceiling. Session pools hold a
-  512 MiB transient reserve back, so 8 and 16 concurrent chats at the
-  default context no longer stop generation a few megabytes short.
-- The Flash-Next prefix cache ships default-off until it ties the uncached path.
+- Release builds load verified precompiled kernels. Checkpoint hashing uses a
+  safe streaming SHA-256 that does not fill the file cache.
+- The startup memory check now counts reclaimable page cache as free (Linux
+  `MemAvailable`, capped by CUDA total) instead of using CUDA free memory,
+  which leaves out the host page cache inside containers. A memory refusal
+  names MemAvailable, the required bytes and the ceiling. Session pools hold
+  back a 512 MiB transient reserve, so 8 and 16 concurrent chats at the
+  default context no longer stop generating a few megabytes short.
+- The Flash-Next prefix cache is off by default. It stays off until tests show
+  that serving with the cache is as fast as serving without it in every
+  measured case. `VADE_FLASHNEXT_PREFIX_CACHE=1` turns it on, on one Spark
+  only.
 
 ### Model and installation
 
 - A pinned, verified FP4-Local publisher revision with a committed SHA256
-  manifest of the complete snapshot, and a one-line fetch helper that verifies
+  manifest of the complete snapshot, plus a one-line fetch helper that checks
   the download against that revision.
-- A replay-tested local install on one Spark: the launcher reads the Spark's
-  identity and resources, finds existing models, generates local defaults, and
-  runs install, up and chat in one terminal.
-- A prebuilt Linux aarch64 launcher bundle, with a release workflow that builds
-  it on version tags, checks every manifest hash and attaches the bundle and its
-  `SHA256SUMS` to the tag release. The launcher falls back to a source build when
-  a bundle is rejected.
-- Entry guides rewritten for first contact: README, INSTALL and the first-run
-  guide lead with the one-Spark launcher, distinguish the source route from the
-  bundle route, and state the supported models explicitly.
-- A two-Spark route in INSTALL alongside the one-Spark default.
-- A supported-systems table in INSTALL: the engine runs on DGX Spark / GB10
-  Linux `aarch64`; a Route B controller can be Linux `aarch64` or `x86_64` or
-  macOS; a Windows computer is supported as the SSH client for Route A, not as
-  a controller.
-- Source installs also work from a downloaded source archive without Git
-  metadata: the launcher records the archive's stamped commit as the build id,
+- A replay-tested local install on one Spark. The launcher reads the Spark's
+  identity and resources, finds the models you already have, generates local
+  defaults, and runs install, up and chat in one terminal.
+- A prebuilt launcher bundle for Linux aarch64. A release workflow builds it on
+  version tags, checks every manifest hash, and attaches the bundle and its
+  `SHA256SUMS` to the tag's release. If a bundle is rejected, the launcher
+  falls back to building from source.
+- Entry guides rewritten for first-time readers. README, INSTALL and the
+  first-run guide start with the one-Spark launcher, keep the source route and
+  the bundle route apart, and name the supported models explicitly.
+- A two-Spark route in INSTALL, next to the one-Spark default.
+- A supported-systems table in INSTALL. The engine runs on DGX Spark / GB10
+  under Linux `aarch64`. For Route B, where you drive the Spark from a
+  second computer (the controller), the controller can be Linux `aarch64` or
+  `x86_64`, or macOS. For Route A, where the CLI, engine and chat all run on
+  the Spark, a Windows computer is supported as the SSH client, but not as a
+  controller.
+- Source installs also work from a downloaded source archive with no Git
+  metadata. The launcher records the archive's stamped commit as the build id,
   or builds as `unknown` when the archive carries none.
 
 ### CLI, chat and gateway
 
 - Controller commands for install, launch, up, status, logs, verify and
-  shutdown, with bounded JSON status, specific and actionable errors, and help
-  that stays usable in pipes.
-- Controller `vade up` and `vade launch` on the Spark start the same FP4-Local
-  defaults (context 32768, output 8192); `vade launch` lowers a default or saved
-  context through 16384, 8192 and 4096 only when the engine refuses that context
-  for memory (saved once a start succeeds), and an
-  explicit `--context` the engine refuses is an error. A
-  controller bench measures concurrent chats instead of one queued chat;
-  `--context 262144` keeps the single-chat long-context preset, and
-  `vade status` prints the chats the engine admitted.
+  shutdown, with bounded JSON status, specific errors that say what to do next,
+  and help that stays usable in pipes.
+- `vade up` on the controller and `vade launch` on the Spark start the same
+  FP4-Local defaults (context 32768, output 8192). If the engine refuses the
+  default or saved context for memory, `vade launch` steps it down through
+  16384, 8192 and 4096 and saves the result once a start succeeds; that is the
+  only case where it steps down. An explicit `--context` that the engine
+  refuses is an error.
+- `--context 262144` keeps the single-chat long-context preset, and
+  `vade status` prints the chats the engine admitted (how many it allows to
+  run at once at this context). A controller bench measures concurrent chats
+  instead of one queued chat.
 - `vade up --replicas N` (2..16, FP4-Local) starts an independent one-Spark
   server on each of N Sparks behind one local `vade-gateway`, which sends each
-  request to the least-busy replica; `vade-harness vade-gateway` runs the same
-  gateway by hand with repeated `--upstream`.
-- A machine's `ssh` entry may be a `user@host` destination as well as an alias,
-  host name or IPv4 address.
-- `vade verify` for repeated greedy token exactness checks against a running
-  server, with owned endpoint discovery.
-- Chat history is kept under the Vade home (`~/.vade/projects`), never in the
-  folder you chat from; `VADE_CHAT_IN_PROJECT=1` keeps it in a git-ignored
-  `./.vade` instead.
-- Chat and coding-agent workflows with steering of active chats, retained
-  interrupted replies, session management and an OpenAI-compatible HTTP gateway
-  with credential handling and recorded replay.
-- Both gateways refuse browser-driven requests by default: a Host other than
-  loopback with the listener port is refused, any request carrying an `Origin`
-  header is refused, and a browser client can be admitted deliberately with exact
-  allow-lists and an optional bearer token.
+  request to the least-busy replica. `vade-harness vade-gateway` runs the same
+  gateway by hand, with `--upstream` repeated.
+- A machine's `ssh` entry can be a `user@host` destination as well as an
+  alias, host name or IPv4 address.
+- `vade verify` checks that repeated greedy runs against a running server
+  return the same tokens, and finds the endpoint of the server it owns
+  automatically.
+- Chat history lives under the Vade home (`~/.vade/projects`), never in the
+  folder you chat from. Set `VADE_CHAT_IN_PROJECT=1` to keep it in a
+  git-ignored `./.vade` instead.
+- Chat and coding-agent workflows: steer a chat while it runs, keep replies
+  that were interrupted, manage sessions, and use an OpenAI-compatible HTTP
+  gateway with credential handling and recorded replay.
+- Both gateways refuse browser-driven requests by default. They refuse a
+  request whose Host header is anything other than loopback with the listener
+  port, and any request that carries an `Origin` header. You can allow a
+  browser client on purpose with exact allow-lists and an optional bearer
+  token.
 
 ### Benchmarks
 
-- `vade bench` runs with zero flags: it finds the recorded endpoint, reads the
-  model from `/health`, uses a bundled offline prompt and measures the server's
-  own drafting default.
-- Drafting-aware receipts that separate the requested drafting mode from the
-  server-reported mode and depth, and withhold rates when the two disagree.
+- `vade bench` runs with no flags. It finds the recorded endpoint, reads the
+  model from `/health`, uses a bundled offline prompt and measures the
+  server's own drafting default.
+- Drafting-aware receipts (the saved result records) that keep the requested
+  drafting mode apart from the mode and depth the server reports, and withhold
+  rates when the two disagree.
 - A benchmark page with methods, results and limitations, linking every quoted
   source folder to its published, sanitized receipt.
 - A results chart in the README and on the benchmark page, drawn by a
-  standard-library script from the committed receipts so that every label is a
-  value a receipt prints.
+  standard-library script from the committed receipts, so every label is a
+  value that a receipt prints.
 
 ### Project and community
 
 - Agent rules in AGENTS.md and the human contribution process in
   CONTRIBUTING.md, with a package map, architecture notes and decisions.
-- Security policy, Code of Conduct, issue and pull request templates, NOTICE
+- A security policy, Code of Conduct, issue and pull request templates, NOTICE
   and the bundled third-party licence texts.
-- A fix for a flaky stream-cancellation test that now synchronizes cancellation
-  and verifies process reaping, and recovery of the shared process-test lock
-  after poisoning.
+- A flaky stream-cancellation test is fixed: it now synchronizes
+  cancellation and verifies that processes are reaped. The shared
+  process-test lock now recovers after it is poisoned.
 
-See [benchmark methods and results](docs/benchmarks.md) for measurements,
-recipes and their limitations. See [NOTICE](NOTICE) for bundled third-party
-material and [LICENSE](LICENSE) for Vade's Apache-2.0 licence.
+For measurements, recipes and their limitations, see
+[benchmark methods and results](docs/benchmarks.md). See [NOTICE](NOTICE) for
+bundled third-party material and [LICENSE](LICENSE) for Vade's Apache-2.0
+licence.

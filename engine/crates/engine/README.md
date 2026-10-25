@@ -54,9 +54,10 @@ text handling happens in the server.</dd>
 
 **Same answer every time, checked against the official model.**
 
-- **Same answer every time** is the contract. The October 14 Qwen3-8B chat
-  restart checks passed, but the current batched prefill check has a **known
-  issue, under investigation**; see the qualification below.
+- **Same answer every time.** That is the contract. Qwen3-8B's chat restart
+  checks passed on October 14, but the current batched prefill check has a
+  **known issue, under investigation**. The latest qualification run, below,
+  has the details.
 - **Checked against the official model.** That agreement is measured and is
   not perfect. [Validation](../../docs/validation.md) lists every
   disagreement.
@@ -68,18 +69,18 @@ On the broader Qwen3 suites, on current main `603f95b`, Vade matched the
 official reference at 1,523 of 1,536 positions for Qwen3-8B, 1,515 of 1,536
 for Qwen3-32B and 1,498 of 1,536 for Qwen3-30B-A3B, in one session per model.
 
-The earlier build `80e616c`, before the shared-prefix change (shared9),
-matched 1,522, 1,517 and 1,502. Validation also covers the narrower Qwen3.8
-and Gemma checks.
+The earlier build `80e616c`, from before the shared-prefix change (named
+shared9 in [Validation](../../docs/validation.md)), matched 1,522, 1,517 and
+1,502. Validation also covers the narrower Qwen3.8 and Gemma checks.
 
 </details>
 
 ## Build and run the checks
 
 **Six commands check Qwen3-8B: agreement with the official model, batching,
-caching, prefill, timing and clean unloads.** You need an idle Spark with Vade [installed](../../../docs/quickstart-one-spark.md)
-and Qwen3-8B downloaded. Each program prints its usage when run without
-arguments.
+caching, prefill, timing and clean unloads.** You need an idle Spark with Vade
+[installed](../../../docs/quickstart-one-spark.md) and Qwen3-8B downloaded.
+Each program prints its usage when run without arguments.
 
 ### Do it yourself
 
@@ -114,10 +115,13 @@ arguments.
    # Cache fork, truncate and replay give the same logits.
    ./target/release/batch-bench "$PTX" "$MODEL" cache
 
-   # Known issue, under investigation: current batched-last-row check fails.
-   # Run separately; stop and report its failure without relaxing tolerances.
-   # Sequential advance/step matches step-every-token, bit for bit.
-   # Prompt All/Last/None heads preserve final/next logit bits within each phase.
+   # Prefill check. Known issue, under investigation: its batched-last-row part
+   # currently fails. Run it on its own; if it fails, stop and report it, and do
+   # not loosen tolerances. It checks that reading prompt tokens without their
+   # logits (advance) and then stepping matches stepping every token, bit for
+   # bit, and that asking for logits on all prompt rows, the last row only, or
+   # none (All/Last/None) gives the same final and next-token logits within
+   # each phase.
    ./target/release/batch-bench "$PTX" "$MODEL" prefill
 
    # Timing for prompts up to 2,048 tokens, 32 answer tokens.
@@ -128,19 +132,29 @@ arguments.
    ./target/release/load-check "$PTX" "$MODEL" 2112 2 8
    ```
 
-**Current qualification:** at `e335236a11d681c473de0dce92dece1562d6efa0`,
-the one-GB10 loader, batched verification and cache checks passed, but prefill
-failed with `FAIL batch last row: logit 7 is nonfinite or differs`. Follow-up
-found finite values 16.25 versus 16.125; the historical
-`7a34e19cbae9cf98db781bfa7344b06568e86f37` passed on the same GB10.
-This is a **known issue, under investigation**. The suite stopped at prefill;
-later load/unload and candidate resource checks were not run. A repeated chat
-answer is a narrower check. Keep this failure in your qualification report.
-   The `prefill` check compares every logit bit for the four-token fixture and
-   its continuations. Prompt and decode have separate fixed arithmetic orders;
-   see the [phase-order contract](../gpu/README.md#decode-attention-order) and
-   [session methods](#qwen3-phase-order). `verify_batch` preserves sequential
-   decode bits. This fixture does not qualify all lengths, caches or serving modes.
+**Latest full check run** (commit `e335236`, one GB10):
+
+- The loader, batched verification and cache checks passed.
+- Prefill failed with `FAIL batch last row: logit 7 is nonfinite or differs`.
+  A follow-up found the values were finite but different, 16.25 versus
+  16.125. The older commit `7a34e19` passed on the same GB10.
+- The suite stopped at that failure, so the later load/unload and resource
+  checks did not run.
+
+Full commit IDs: `e335236a11d681c473de0dce92dece1562d6efa0` and
+`7a34e19cbae9cf98db781bfa7344b06568e86f37`.
+
+This is a **known issue, under investigation**. Getting the same chat answer
+twice is a narrower check than this suite. If you report your results, include
+this failure.
+
+The `prefill` check compares every bit of every logit for a four-token prompt
+and its continuations. Reading the prompt and decoding each have their own
+fixed order of arithmetic, so the check compares like with like (see the
+[GPU phase order](../gpu/README.md#decode-attention-order) and the
+[session methods](#qwen3-phase-order)). `verify_batch` matches one-at-a-time
+decode bit for bit. One small prompt does not cover every length, cache or
+serving mode.
 
 ### Ask your coding agent
 
@@ -172,7 +186,8 @@ final lines. Do not change code, commit or push.
 ## What it runs
 
 **Three Qwen3 models, Qwen3.8-27B and Gemma 4 31B in `spark-serve`, plus
-Qwen3.8-Flash-Next-FP8 in the two-Spark `flash-serve` server.**
+Qwen3.8-Flash-Next in the `flash-serve` server: FP4-Local on one Spark, and
+the legacy FP8 checkpoint on two.**
 
 | Model | Code | Note |
 | --- | --- | --- |
@@ -180,7 +195,8 @@ Qwen3.8-Flash-Next-FP8 in the two-Spark `flash-serve` server.**
 | Qwen3-30B-A3B | `src/qwen.rs` | Expert Qwen3 |
 | Qwen3.8-27B, BF16 and FP8 | `src/hybrid.rs` | Hybrid |
 | Gemma 4 31B | `src/gemma4.rs` | Text only |
-| Qwen3.8-Flash-Next-FP8 | `src/flash/` | Two-Spark `flash-serve` |
+| Qwen3.8-Flash-Next-FP4-Local | `src/flash/next*.rs` | `flash-serve`, one Spark or a layer pipeline |
+| Qwen3.8-Flash-Next-FP8 | `src/flash/` | Legacy two-Spark `flash-serve` |
 
 - **Dense Qwen3** runs entirely on the GPU, in `src/qwen.rs` and helpers.
 - **Expert Qwen3** takes the same path, with expert routing: each token uses
@@ -189,9 +205,14 @@ Qwen3.8-Flash-Next-FP8 in the two-Spark `flash-serve` server.**
   with recurrent linear attention.
 - **Gemma 4 31B** text, and Google's official assistant draft, live in
   `src/gemma4.rs` and `src/gemma4/`.
-- **Qwen3.8-Flash-Next-FP8** serves chat requests on two Sparks through
-  `flash-serve`, separately from `spark-serve`. Follow the root
-  [INSTALL.md](../../../INSTALL.md).
+- **Qwen3.8-Flash-Next-FP4-Local** is the current release model. It runs on
+  one Spark through `flash-serve`, separately from `spark-serve`; with more
+  Sparks, the same engine runs as a layer pipeline, one block of layers per
+  Spark. Its checkpoint stores each module as NVFP4, MXFP8 or plain tensors.
+  To run it, follow the root [INSTALL.md](../../../INSTALL.md).
+- **Qwen3.8-Flash-Next-FP8** is the legacy checkpoint. It serves chat
+  requests on two Sparks through `flash-serve` and starts with
+  `vade up --fp8-legacy`.
 
 ## How it works
 
@@ -303,8 +324,9 @@ arithmetic as plain decode.
 
 - A forked session shares committed cache pages. Before writing, it copies
   only the unfinished tail. Small caches copy their committed prefix.
-- Shared decode can read the original prefix with a compact private tail.
-  Ordinary session calls restore a contiguous view when needed.
+- Shared decode reads the original shared prefix plus a small private tail of
+  its own. Ordinary session calls put the cache back into one continuous block
+  when they need it.
 - Truncate and replay also detach shared storage before writing, so sessions
   keep their new tokens separate.
 
@@ -357,8 +379,8 @@ every chunk size and cache format.**
   at least 6,144 tokens with an FP32 cache. **It changes the output,** so it
   is off by default.
 
-`SPARK_PROFILE=1` reports a late 16-chat step's GPU phase times, launch and
-wait counts, and tracked peak device bytes.
+`SPARK_PROFILE=1` reports, for one step late in a 16-chat run, the GPU time of
+each phase, the launch and wait counts, and the tracked peak device bytes.
 
 </details>
 

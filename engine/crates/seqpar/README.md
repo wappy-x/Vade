@@ -13,11 +13,6 @@ between Sparks, and that must be measured on the actual group.
 This page is for developers. To serve one model across Sparks, use
 `tp-serve` from [Multiple Sparks](../../docs/multi-spark.md).
 
-Sequence partitioning, peer admission and ring transport remain here.
-[engine-fabric](../fabric/README.md) owns shared peer discovery and RDMA
-verbs; this crate re-exports `discovery` and, on Linux, `verbs` for existing
-callers.
-
 <details>
 <summary><b>Terms on this page</b>: prefill, decode, KV cache, rank, ring, path, QSFP, RDMA, TCP</summary>
 
@@ -46,9 +41,9 @@ network stack.</dd>
 
 ## Status at a glance
 
-**Three paths work today. The chat server's helper flags are not used.**
+**Three ways to run it work today. The chat server's helper flags are not used.**
 
-| Program or path | Status |
+| Program or mode | Status |
 | --- | --- |
 | `seqpar-launch`, `seqpar-generate` | Works |
 | `tp-serve` hybrid mode | Works |
@@ -56,8 +51,8 @@ network stack.</dd>
 | `spark-serve --seqpar-peer` | Not used today |
 
 - **`seqpar-launch` with `seqpar-generate`** reads a file of token IDs,
-  splits the prompt and prints the generated IDs. Decode, writing the
-  answer, runs on the final rank only.
+  splits the prompt and prints the generated IDs. Decode (writing the
+  answer) runs on the final rank only.
 - **`tp-generate --seqpar`, and `tp-serve` hybrid mode with
   `TP_SERVE_SEQUENCE_PREFILL=1`,** run sequence-parallel prefill, then
   tensor-parallel decode. See
@@ -82,6 +77,10 @@ hybrid prefill.**
 <dt><a href="../serve/README.md">spark-serve</a></dt>
 <dd>Has helper flags, unused today (see the status above).</dd>
 </dl>
+
+This crate owns prompt splitting, peer admission and the ring transport.
+[engine-fabric](../fabric/README.md) owns shared peer discovery and RDMA verbs;
+this crate re-exports `discovery` and, on Linux, `verbs`, for existing callers.
 
 <details>
 <summary><b>How it works, step by step, and how slices are sized</b></summary>
@@ -148,8 +147,8 @@ Do not change code, network settings, commit or push.
 
 **Two or more cabled Sparks, an SSH alias for each, and the same build and
 model on all of them.** [Multiple Sparks](../../docs/multi-spark.md) covers
-cabling and SSH. **Traffic between ranks is not encrypted** after a
-shared-secret check, so use only a private, trusted network.
+cabling and SSH. Ranks check a shared secret, but **traffic after that check
+is not encrypted**, so use only a private, trusted network.
 
 ### Do it yourself
 
@@ -168,7 +167,7 @@ shared-secret check, so use only a private, trusted network.
 
 3. Copy the token file to the same path on every Spark.
 
-4. Set the operator values for your group. Do not commit them.
+4. Set these values for your group. Do not commit them.
 
    - `SPARKS`: a shell array of existing SSH aliases, in cable order. The
      last one writes the answer.
@@ -204,7 +203,11 @@ change network or system settings. Do not commit or push.
 - It uses a ring when the last Spark is cabled back to the first, and a path
   (a line) otherwise.
 - A missing link between two neighbours stops the launch.
-- If one rank fails, the launcher stops the others. Jobs end on their own.
+- Each rank runs one job, a single prompt and its answer, and exits when it
+  is done. The launcher returns once every rank has exited.
+- If one rank fails, the launcher closes every rank's input, and a rank exits
+  as soon as its input closes. Any rank still running two seconds later is
+  killed; for a remote rank, that means its SSH session.
 
 Security:
 

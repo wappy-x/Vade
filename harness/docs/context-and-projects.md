@@ -1,137 +1,50 @@
-# Native context controls
+# Context, project rules and branches
 
-This is a first-party Rust/std implementation. Negotiated `/v1/admission` counts
-native model inputs with the upstream renderer/tokenizer; local per-message
-figures and unsupported-provider fallback remain labeled heuristics. Engine inference, tokenization and KV
-remain separate. Verification uses local fixtures and mock upstreams only.
+This page is for developers who run the harness's native agent (its built-in
+coding agent) on a real project. It covers four things:
 
-## Full request admission and output
+- which project rules and skills a session loads;
+- how the agent checks that each request fits the model's context window;
+- how compaction shrinks older turns when space runs out;
+- how forks, branches and resume work.
 
-Admission includes every serialized option/message field, tool schemas, request
-syntax, a framing allowance, safety margin and reserved output. There is no
-subtraction for cached input, no trust in cumulative usage counters, and no
-implicit retry. Known text parts and their extensions remain exact; unsupported
-media/unknown content types fail admission because byte length cannot estimate
-rendered media cost. Before native model dispatch, advertised exact admission
-replaces heuristic context fit and uses its actual output reservation. The
-automatic compaction worker counts the original and candidate, requires a real
-token reduction, and persists only a fitting candidate. Tokenizer/HTTP failures
-stop dispatch rather than silently downgrading. Cached input is not subtracted.
-Independent byte/structure and tool-receipt safety limits remain.
+The context window is the most tokens the model can consider at once. When the
+engine supports exact counting (`/v1/admission`), the harness asks the engine to
+count each request with its own tokenizer. Otherwise the harness uses a local
+estimate, and the screen says so.
 
-Capture, model input, display and journal storage have separate limits. A large
-captured result becomes a labeled deterministic excerpt; `tool_output_read`
-uses session-local IDs and UTF-8 byte ranges. It never executes the original
-tool. Bytes that were never captured (for example after a command hits its
-source output cap) are unavailable. Captures are at most 64 KiB each, 128 per
-session, 4 MiB total; range retrieval expires after 24 hours. Raw journal records
-remain under the 64 MiB/8,192-record quota until owner removal. Capacity is checked
-before side effects; source limits remain in force before artifact storage.
+The harness never runs the model, and it never holds the model's attention cache
+(the [KV cache](../../docs/GLOSSARY.md#ho)). Both stay in the engine. Everything
+here is written in Rust using only the standard library, and it is tested
+against local mocks.
 
-## Compaction and inspection
+## Project rules and skills
 
-`/compact-preview KEEP SUMMARY` creates only a reviewable plan. `/compact KEEP
-SUMMARY` applies that same operation while idle; bare `/compact` uses the
-automatic excerpt planner described below. There is no model-authored summary,
-summary retry, or script. Summary text is a user-role data message, never elevated
-to a new system/developer instruction. The whole input/output budget must still
-fit, and both estimated input and request bytes must strictly decrease.
+### Rules files (`AGENTS.md`)
 
-With a supplied summary, the planner retains **all user messages**, all system/developer messages, every
-assistant tool call and matching result, the latest assistant answer, and the
-newest KEEP user turns. It removes only older standalone assistant messages.
-This conservative policy preserves original constraints, unresolved user
-questions, tool receipts and any file revisions recorded in them. User summaries
-must preserve important decisions in removed assistant prose; structure tests
-cannot establish semantic quality. If those exact retained facts dominate the
-window, compaction refuses rather than deleting them. A single oversized message
-is not split. Unknown-outcome/tool-failed receipts block compaction.
+A new native session loads the root `AGENTS.md`. To add rules from deeper
+folders, pass `--rules-scope PATH`, once per folder. Each one adds that
+directory's chain of ancestors, from the root down.
 
-Before applying a plan, the journal reconstructs its current view and compares
-the complete request bytes to the planned source. A stale plan is refused even
-when message counts happen to match. The journal appends a new context generation
-with source record range, retained
-and removed message indices, exact summary, before/after bytes and unchanged
-prefix length. Existing raw bytes do not change. `/compaction` displays the last
-record's explanation; `/journal RECORD OFFSET LENGTH` returns up to 4,096 source
-bytes with `next_offset`. Inspection uses positioned reads and cannot move the
-append cursor. Terminal transcript display is not rewritten as the compact view.
+- You can select up to eight paths, each with at most eight components.
+- The harness does not discover other subtrees recursively, and it does not read
+  a home directory.
+- Only the scopes you select are active, so pick the relevant subdirectories
+  before you start work.
 
-The summary is the first user message after the frozen system/developer messages;
-user-supplied/older-turn summaries and original user instructions remain exact
-after it. Generated in-task summaries fold forward. A changed middle invalidates **all
-later causal KV**. Equal tail text does not make its old suffix KV reusable.
-Compaction verifies and retains the options/tools and system wire bytes, truncating
-only the wire-builder suffix. Dropping/changing frozen messages or schemas fails
-explicitly. It clears
-stale last-request and per-response telemetry while retaining same-session affinity
-and labeled cumulative usage. The next explicit prompt re-establishes the complete
-prefix through negotiation and advertised exact admission. Cached tokens may drop;
-only the new response's reported usage describes reuse. Reusable token prefix,
-remote checkpoints and re-prefill cost remain response-reported or unknown. Local context generations
-are bookkeeping, not Engine cache identities.
+Root rules apply to the whole workspace. Deeper rules take precedence, but only
+within their own subtree. Explicit user requests and the executor/system policy
+stay above project rules.
 
-`--prewarm-compaction` is off by default. When selected, manual compaction starts
-an idle cancellable worker; automatic compaction proceeds directly to its real request.
-An admitted one-token completion retains raw tools/messages and rendering options,
-discards all generated output, and executes no tools. The warm requires advertised
-prefix caching and exact admission; zero-token generation is unsupported. Its
-usage/wall time is separate from answer usage, and failures are not retried.
-Retained instructions and tail turns must prefill along with the summary after
-the unchanged prefix; cache eviction/block boundaries can add work. The offline
-`demo-compaction` command reports diagnostic hashes and explicit estimates only.
+Rules are ordered by depth, then by relative path. Each file is capped at
+16 KiB, with 16 files and 24 KiB in total. A selection that is incomplete or too
+large fails visibly.
 
-### Closed tool rounds inside a task
+### The skills catalog
 
-The automatic planner first tries to condense older complete tool rounds,
-including rounds inside a single user request. Both that planner and the
-older-user-turn fallback share the same exact retention: at least the latest
-three tool rounds, every original user/system/developer message, the latest
-prose answer, the latest patch attempt and successful applied edit per path,
-the latest command/check attempt and latest executed receipt per distinct argv
-or check profile, and every uncertain group. They remove calls and results
-together. A denied repeat, invalid arguments or profile preflight refusal does
-not replace the last executed receipt. A known exit, including a nonzero failure,
-confirms execution from the matching result, including an output-artifact
-envelope. Partial and unknown outcomes remain exact independently and do not
-displace the last confirmed execution; a timeout is never a check pass.
-
-The fallback also keeps the newest KEEP user turns. Multiple user turns do not
-relax any protected tool-round or receipt invariant. If preserving these facts
-prevents a real input reduction or a fitting replacement, compaction refuses
-and keeps the source view.
-
-A local extractive summary records call IDs, relative paths, requested line or
-byte ranges, search terms, result metadata and bounded head/tail facts. Its
-12 KiB budget favors recent excerpts and explicitly counts omitted old excerpts.
-Generated task summaries fold forward instead of accumulating another full
-summary on each rewrite. Original user instructions and earlier user-supplied
-summaries stay exact. This is lossy context, not verified semantic understanding;
-retrieve missing source or raw journal ranges only when needed and re-read files
-before editing them.
-
-The 80% trigger retains its 60% low watermark for optional rewrites. An actual
-non-fitting next request attempts another safe plan even above that watermark.
-It counts the replacement before saving, requires reduced exact input when
-admission is negotiated, and dispatches only a fitting replacement. Failed
-planning/counting preserves the source view and records a failure; it does not
-send the oversized request. Each successful rewrite appends a generation with
-the exact new request and source mapping. Original records remain unchanged.
-Compaction never resets the 60-round, 240-call, 20-minute or output quotas.
-
-## Frozen project rules and lazy skills
-
-A new native session loads root `AGENTS.md`. Repeated `--rules-scope PATH` selects
-additional directory ancestor chains, from the root down, with a maximum of
-eight selected paths and eight components each. It does not recursively discover
-other subtrees or read a home directory. Only these selected scopes are active;
-select the relevant subdirectories before starting work. Deeper rules take
-precedence only for their subtree. Root rules apply to the whole workspace;
-explicit user requests and executor/system policy remain above project rules.
-Rules are ordered by depth then relative path. Files are bounded at 16 KiB, with
-16 files/24 KiB total; an incomplete or oversized selection fails visibly.
-
-The optional **visible** `skills/catalog.json` is deliberately small:
+A skill is a `SKILL.md` file that the agent reads only when it needs it. You
+list skills in an optional, **visible** `skills/catalog.json`, and the format is
+deliberately small:
 
 ```json
 {
@@ -145,94 +58,373 @@ The optional **visible** `skills/catalog.json` is deliberately small:
 }
 ```
 
-The catalog accepts only these fields (up to 16 entries/8 KiB); duplicate names,
-unsafe paths, script/installer fields and oversized bodies are refused. Names
-have 1–48 ASCII letters, digits, hyphens or underscores; descriptions have at most
-240 UTF-8 bytes. Paths must stay under visible `skills/` and end in `/SKILL.md`.
-Descriptor metadata is inspected at session creation, but body text is **not
-read** until `skill_read` or local `/skill NAME` requests it. Bodies are bounded
-at 16 KiB and need UTF-8 only when loaded. Catalog order is canonical by name.
+The catalog follows a few strict rules:
 
-Rules and catalog are snapshotted in a single developer message, attributed by
-workspace-relative paths and selected scopes. It is at most 48 KiB serialized
-and counts toward full-request admission. `/project` explains each inclusion;
-`/project-rules` displays frozen text. Resume does not reread instructions or the
-catalog. `/new` deliberately refreshes them and begins a new prefix/session.
+- It accepts only these fields, with up to 16 entries and 8 KiB.
+- Names have 1–48 ASCII letters, digits, hyphens or underscores.
+- Descriptions have at most 240 UTF-8 bytes.
+- Paths must stay under the visible `skills/` folder and end in `/SKILL.md`.
+- Duplicate names, unsafe paths, script or installer fields, and oversized
+  bodies are refused.
+- The catalog is always ordered by name.
 
-A skill's recorded local revision consists of device/inode, byte size and
-modification/change timestamps; this is a stale-read guard, **not a content hash
-or security identity**. Opening and reading use the existing anchored workspace
-boundary, refuse links/special/credential/hidden paths, and compare the opened
-file's revision around the bounded read. If it differs from the frozen catalog,
-loading is refused with a refresh instruction. Exact loaded body bytes, path and
-revision become a normal tool result (or retrievable artifact) and are journaled.
-As with editing, a hostile concurrent filesystem writer is outside the guarantee.
-No body, rule, catalog entry or included script changes approval/sandbox policy;
-no automatic execution, installer, plugin or dependency loading exists here.
+The harness checks each entry's metadata when the session is created. It does
+**not read** a skill's body until `skill_read` or a local `/skill NAME` asks for
+it. Bodies are capped at 16 KiB, and they only need to be UTF-8 when they are
+loaded.
 
-`workspace_manifest` / `/map` enumerate on demand, at most 256 entries and 32
-directories, depth 0–3, excluding hidden/credential paths, links, `target`,
-`node_modules` and `vendor`. Incomplete lists say so. `workspace_symbols` /
-`/symbols` scan a single ≤64 KiB UTF-8 file for up to 64 declaration-like lines,
-240 bytes per hint. This is lexical string matching; comments, strings and
-language syntax can produce false positives or omissions. Neither view is
-semantic indexing, a file-revision guarantee, or an automatic prefix update.
+### What the session sees, and when it refreshes
 
-## Transcript branches and workspace checks
+Rules and the catalog are snapshotted in a single developer message. Each item
+is attributed by its workspace-relative path and the selected scopes. The
+message is at most 48 KiB serialized, and it counts toward full-request
+[admission](#how-the-agent-checks-that-a-request-fits).
 
-`/fork NAME [TASK_LABEL]` is an idle-only explicit operation. It reconstructs the
-last closed view from the source journal, refuses unknown tool outcomes, appends
-a filesystem checkpoint to the parent, then copies the bounded raw journal and
-adds parent session/record, context generation, optional task label and active
-user-message reference. The new file is installed atomically and exclusively
-under the private sessions directory. Existing destinations are refused. Forks
-inherit original artifact IDs, count/byte quotas and expiry without resetting
-them. Existing source records are unchanged; later messages are independent.
+- `/project` explains why each item was included.
+- `/project-rules` shows the frozen text.
+- Resume does not reread the instructions or the catalog.
+- `/new` deliberately refreshes them, and starts a new prefix (the fixed start
+  of every request) and a new session.
 
-Fork creation copies at most 64 MiB of raw journal bytes and retains the same
-8,192-record limit. It uses one bounded copy buffer; it is not a disk-sharing or
-KV-sharing implementation. Manually created sessions have independent per-file
-quotas; there is no global disk quota or automatic branch garbage collector.
-Raw history includes private transcript data. A task label does not start a
-model request, choose a new model, grant permissions, or isolate a workspace.
+### How skill reads are guarded
 
-`/resume NAME` and `/switch NAME` select a journal after cleanup. `/branch` shows
-ancestry and current checkpoint checks. A checkpoint samples at most 128 safe
-relative paths from prior read/list/manifest/symbol calls and patch paths; it
-labels incomplete sets and untracked command effects. It compares local metadata
-only. Source facts may already be stale at checkpoint time, and matching metadata
-is not proof of matching contents. Each resume/fork appends a short notice to the
-model view requiring fresh reads before acting on historical file facts. The
-notice is durable but causes no inference. Switching never undoes filesystem
-edits and never replays any tool. It is a transcript fork, not a workspace restore.
+A skill's recorded local revision is its device/inode, byte size and
+modification/change timestamps. This guards against stale reads. It is **not a
+content hash or security identity**.
 
-New journal headers bind to the selected directory's device/inode identity;
-copying one into a different workspace is refused. Legacy headers without this
-field retain their old behavior. No absolute workspace path, endpoint or
-transport credential is stored automatically. Optional Engine checkpoint handles
-are private scoped capabilities, recorded separately from messages in
-`engine_checkpoints` journal records. At most two input-boundary hints survive in
-the active view; fork copies them, ordinary append preserves them, and compaction
-or a changed source prefix invalidates them. Malformed optional hints are ignored
-without losing the transcript. `/journal` redacts handle bytes while preserving
-inspection offsets. Raw journal files remain private and must not be shared.
+Opening and reading a skill use the existing anchored workspace boundary. Links,
+special files, and credential and hidden paths are refused. The harness compares
+the opened file's revision before and after the bounded read. If it differs from
+the frozen catalog, loading is refused with an instruction to refresh.
 
-Fork/resume/switch create a fresh contract client and affinity, sharing bounded
-handle ownership within the running native session. They clear old append-only
-bytes and mark the prefix pending. The next explicit prompt negotiates and admits
-the full replay, supplying an eligible handle if available. The action itself
-sends no model request. Cache reuse and cost remain unknown until reported by a
-new response. See [Engine checkpoint boundaries and lifecycle](engine-checkpoints.md)
-for the input-only contract limitation and child/deletion integration APIs. Local
-generations and journal record numbers are never Engine cache identities.
+The exact loaded body bytes, path and revision become a normal tool result (or a
+retrievable artifact), and they are journaled. As with editing, a hostile writer
+changing the filesystem at the same time is outside the guarantee.
+
+No body, rule, catalog entry or included script changes the approval or sandbox
+policy. There is no automatic execution, installer, plugin or dependency loading
+here.
+
+### Listing files and finding declarations
+
+Two on-demand views help the agent find its way around a project:
+
+| View | What it gives |
+| --- | --- |
+| `workspace_manifest` / `/map` | A file list of at most 256 entries and 32 directories, depth 0–3. It leaves out hidden and credential paths, links, `target`, `node_modules` and `vendor`. An incomplete list says so. |
+| `workspace_symbols` / `/symbols` | Up to 64 lines that look like declarations, from a single UTF-8 file of at most 64 KiB, with 240 bytes per hint. |
+
+The symbols view is lexical string matching, so comments, strings and language
+syntax can cause false positives or misses. Neither view is semantic indexing, a
+file-revision guarantee, or an automatic prefix update.
+
+## How the agent checks that a request fits
+
+Before a request is sent, the agent runs **admission**: the check that the whole
+request fits the context window. Admission counts:
+
+- every serialized option and message field;
+- the tool schemas and the request syntax;
+- a framing allowance and a safety margin;
+- the output it reserves for the answer.
+
+Admission is deliberately strict. Nothing is subtracted for cached input,
+cumulative usage counters are not trusted, and nothing is retried implicitly.
+Known text parts and their extensions stay exact. Unsupported media and unknown
+content types fail admission, because byte length cannot estimate the rendered
+cost of media.
+
+When the engine advertises exact admission, that count replaces the local
+heuristic before the request goes to the model, and it uses the engine's actual
+output reservation. If the tokenizer or the HTTP call fails, the request is
+stopped instead of quietly downgrading to an estimate. The independent
+byte/structure limits and tool-receipt safety limits still apply. (A tool
+receipt is the recorded call and outcome of one tool run.)
+
+### Large tool output
+
+Large tool output has its own limits:
+
+- **Size.** Each capture holds at most 64 KiB, and a session keeps at most 128
+  captures and 4 MiB in total.
+- **Excerpts.** A large result reaches the model as a labelled, deterministic
+  excerpt. `tool_output_read` fetches UTF-8 byte ranges of the full capture by
+  session-local ID, and never runs the tool again.
+- **Lost bytes.** Bytes that were never captured (for example past a command's
+  output cap) are not available.
+- **Expiry.** Range retrieval expires after 24 hours. Raw journal records stay
+  under the 64 MiB / 8,192-record quota until you remove them.
+- **Order of checks.** Capacity is checked before any side effect, and source
+  limits still apply before artifact storage.
+
+## Compaction: shrinking older turns
+
+Compaction replaces older parts of the conversation with something shorter, so
+the next request fits. You can run it by hand, or let it run
+[automatically](#automatic-compaction-during-a-task) when the window fills up.
+
+### Compacting by hand
+
+| Command | What it does |
+| --- | --- |
+| `/compact-preview KEEP SUMMARY` | Shows the plan and changes nothing. |
+| `/compact KEEP SUMMARY` | Applies the plan while the agent is idle. |
+| `/compact` on its own | Uses the automatic planner. |
+
+`KEEP` is how many of the newest user turns to keep, and `SUMMARY` is your own
+text. No model writes the summary, and there are no retries or scripts. Your
+summary is stored as a user message, never as a system instruction.
+
+A compaction must make the request smaller in both estimated tokens and bytes,
+and the result must still fit. The offline `demo-compaction` command reports
+only diagnostic hashes and explicit estimates.
+
+### What a compaction with your summary keeps
+
+With a summary you supply, the planner keeps:
+
+- **all user messages**;
+- all system and developer messages;
+- every assistant tool call and its matching result;
+- the latest assistant answer;
+- the newest KEEP user turns.
+
+It removes only older standalone assistant messages. This careful policy keeps
+the original constraints, unresolved user questions, tool receipts and any file
+revisions recorded in them.
+
+That puts one job on you. Your summary must keep the important decisions from
+the assistant prose that gets removed, because structure tests cannot judge
+semantic quality.
+
+Compaction refuses rather than lose what it must keep:
+
+- If those exact retained facts take up most of the window, compaction refuses
+  instead of deleting them.
+- A single oversized message is not split.
+- Receipts with an unknown outcome or a failed tool block compaction.
+
+### How a plan is checked and recorded
+
+Every session has a journal: its private, append-only record on disk. Before it
+applies a plan, the journal rebuilds its current view and compares the complete
+request bytes with the planned source. A stale plan is refused even when the
+message counts happen to match.
+
+The journal then appends a new **context generation**, which is a new version of
+the context the model sees. The record holds:
+
+- the source record range;
+- the kept and removed message indices;
+- the exact summary;
+- the before/after bytes;
+- the length of the unchanged prefix.
+
+Existing raw bytes do not change. Two commands let you inspect the result:
+
+- `/compaction` shows the last record's explanation.
+- `/journal RECORD OFFSET LENGTH` returns up to 4,096 source bytes, with
+  `next_offset` for the next read.
+
+Inspection uses positioned reads, so it cannot move the append cursor. The
+terminal transcript is not redrawn as the compacted view.
+
+### What compaction does to the cache
+
+The summary becomes the first user message after the frozen system and developer
+messages. After it, three things stay exact: summaries you supplied, summaries
+of older turns, and the original user instructions. Generated in-task summaries
+fold forward into a single summary instead of piling up.
+
+Compaction never touches the start of the request. The options, tool definitions
+and system text stay byte for byte the same, and only what comes after them is
+rewritten. If those would change, compaction fails.
+
+Even so, expect fewer cached tokens on the next turn. The engine's cache holds
+the conversation as one unbroken sequence. Once something in the middle changes,
+everything after it must be read again, even text that stayed the same. Only
+that next turn's reported usage tells you how many tokens came from cache.
+
+Compaction clears the last request's numbers. It keeps the same session for
+cache routing, and it keeps your running usage totals. The next prompt sends the
+complete rebuilt request, counted by exact admission when the engine offers it.
+Local context generations are bookkeeping, not engine cache identities.
+
+### Warming the cache after a manual compaction
+
+`--prewarm-compaction` is off by default. When you turn it on, the harness asks
+the engine for one throwaway token right after a manual compaction, so the new
+context has a chance to be in the cache before your next prompt.
+
+- It needs exact admission and prefix caching from the engine.
+- Nothing is pinned, and the engine may still evict it.
+- It runs no tools, its output is discarded, and its usage is shown separately.
+- A failure is not retried.
+
+Automatic compaction skips the warm-up and goes straight to the real request.
+The kept instructions and recent turns still have to be read along with the
+summary, and cache eviction or block boundaries can add work.
+
+## Automatic compaction during a task
+
+### When it runs
+
+Automatic compaction triggers when the conversation reaches 80% of the context
+window. After that, optional rewrites wait for the 60% low watermark. A next
+request that really does not fit tries another safe plan, even above that
+watermark.
+
+Each attempt is checked before anything is saved or sent:
+
+- The automatic compaction worker counts the original and the candidate, and
+  requires a real token reduction. When admission is negotiated, that means a
+  smaller exact input.
+- It saves, and dispatches, only a replacement that fits.
+- If planning or counting fails, the source view is kept and a failure is
+  recorded, and the oversized request is not sent.
+
+Each successful rewrite appends a generation with the exact new request and the
+source mapping. Original records stay unchanged. Compaction never resets the
+60-round, 240-call, 20-minute or output quotas.
+
+### Closed tool rounds inside a task
+
+A tool round is one model reply that asks for tools, together with the results
+of those calls. The automatic planner first tries to condense older complete
+tool rounds, including rounds inside a single user request. That planner and the
+older-user-turn fallback keep exactly the same things:
+
+- at least the latest three tool rounds
+- every original user, system and developer message
+- the latest prose answer
+- the latest patch attempt and successful applied edit per path
+- the latest command/check attempt and latest executed receipt per distinct argv
+  or check profile
+- every uncertain group
+
+They remove calls and their results together. A few rules decide which receipt
+counts as the last executed one:
+
+- A denied repeat, invalid arguments or a profile preflight refusal does not
+  replace the last executed receipt.
+- A known exit, including a nonzero failure, confirms execution from the
+  matching result, an output-artifact envelope included.
+- Partial and unknown outcomes stay exact on their own, and do not push out the
+  last confirmed execution.
+- A timeout is never a passing check.
+
+The fallback also keeps the newest KEEP user turns. Several user turns do not
+loosen any protected tool-round or receipt rule. If keeping these facts stands
+in the way of a real input reduction or a replacement that fits, compaction
+refuses and keeps the source view.
+
+### The summary it writes
+
+The automatic planner writes a local extractive summary, built from facts it
+copies out. It records call IDs, relative paths, requested line or byte ranges,
+search terms, result metadata, and bounded facts from the head and tail.
+
+Its 12 KiB budget favors recent excerpts, and it explicitly counts the old
+excerpts it left out. Generated task summaries fold forward instead of piling up
+another full summary on each rewrite. Original user instructions and earlier
+summaries you supplied stay exact.
+
+This is lossy context, not verified semantic understanding. Fetch missing source
+or raw journal ranges only when you need them, and re-read files before editing
+them.
+
+## Forks, branches and resume
+
+A fork copies the conversation, not your files: it does not restore the
+workspace. Every branch works in the same workspace, and switching branches
+never undoes edits or reruns tools.
+
+### Making a fork
+
+`/fork NAME [TASK_LABEL]` works only while the agent is idle, and it refuses if
+any tool outcome is unknown. Otherwise it:
+
+- records a snapshot of file metadata in the parent;
+- copies the journal into a new private session, noting the parent, the context
+  version and your optional label;
+- never overwrites an existing session.
+
+The fork keeps the original saved tool outputs, with their IDs, quotas and
+expiry. After the fork, the two conversations are independent.
+
+A few limits apply:
+
+- Creating a fork copies at most 64 MiB of raw journal bytes and keeps the same
+  8,192-record limit.
+- It uses one bounded copy buffer. It does not share disk or KV.
+- Sessions you create by hand have their own per-file quotas. There is no global
+  disk quota, and no automatic cleanup of old branches.
+- Raw history includes private transcript data.
+- A task label does not start a model request, choose a new model, grant
+  permissions, or isolate a workspace.
+
+### Resuming, switching and checkpoints
+
+`/resume NAME` and `/switch NAME` select a journal after cleanup. `/branch`
+shows the ancestry and the current checkpoint checks.
+
+A checkpoint samples at most 128 safe relative paths from earlier read, list,
+manifest and symbol calls and from patch paths. It labels incomplete sets, and
+command effects it could not track. It only compares local metadata. Source
+facts may already be stale when the checkpoint is taken, and matching metadata
+does not prove matching contents.
+
+Each resume or fork appends a short notice to the model's view, telling it to
+read files fresh before acting on old file facts. The notice is durable but
+triggers no inference.
+
+### What the journal records about the workspace and engine
+
+New journal headers bind to the device/inode identity of the selected directory,
+so copying one into a different workspace is refused. Legacy headers without
+this field keep their old behavior. No absolute workspace path, endpoint or
+transport credential is stored automatically.
+
+Optional engine checkpoint handles are private, scoped capabilities. They are
+recorded separately from messages, in `engine_checkpoints` journal records.
+
+- At most two input-boundary hints survive in the active view.
+- A fork copies them, an ordinary append keeps them, and compaction or a changed
+  source prefix invalidates them.
+- Malformed optional hints are ignored without losing the transcript.
+- `/journal` redacts handle bytes but keeps the inspection offsets.
+
+Raw journal files stay private and must not be shared.
+
+### What happens on the next prompt
+
+Fork, resume and switch create a fresh contract client and affinity, and share
+bounded handle ownership within the running native session. They clear the old
+append-only bytes and mark the prefix as pending. The action itself sends no
+model request.
+
+The next explicit prompt negotiates and admits the full replay, and supplies an
+eligible handle if one is available. How much of the prompt the engine restores
+from its cache, and what that costs, stays unknown until the next response
+reports it.
+
+See [Engine checkpoint boundaries and lifecycle](engine-checkpoints.md) for the
+input-only contract limitation and the child and deletion integration APIs.
+Local generations and journal record numbers are never engine cache identities.
 
 ## Conceptual references
 
-Ideas were studied in the project's landscape/backlog research; no competitor
-implementation, prompt, format or test code was copied. Relevant conceptual
-credits are [Pi's context compaction and legal cuts](https://github.com/earendil-works/pi),
-[Hermes' separation of durable history and compressed context](https://github.com/NousResearch/hermes-agent),
-[DeepSeek Harness' ordered tool results and persistence](https://github.com/deepseek-ai/deepseek-harness),
-[Codex's durable histories and compaction](https://github.com/openai/codex),
-[DeepSeek's declarative skill catalog](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/skill),
-and [Aider's repository views](https://aider.chat/docs/repomap.html).
+We studied these ideas in the project's landscape and backlog research. We
+copied no implementation, prompt, format or test code from these or any other
+competing projects. The relevant conceptual credits are:
+
+- [Pi's context compaction and legal
+  cuts](https://github.com/earendil-works/pi)
+- [Hermes' separation of durable history and compressed
+  context](https://github.com/NousResearch/hermes-agent)
+- [DeepSeek Harness' ordered tool results and
+  persistence](https://github.com/deepseek-ai/deepseek-harness)
+- [Codex's durable histories and compaction](https://github.com/openai/codex)
+- [DeepSeek's declarative skill
+  catalog](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/skill)
+- [Aider's repository views](https://aider.chat/docs/repomap.html)

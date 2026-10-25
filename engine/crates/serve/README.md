@@ -9,21 +9,6 @@ This page is for people reading or changing the server code. To run it,
 follow [Install](../../docs/install.md). Every flag, request field and limit
 is in [Server and API](../../docs/server.md).
 
-## API authentication
-
-Both `spark-serve` and `flash-serve` accept `--api-key-file PATH`. The file
-contains one key, trimmed and at least 16 bytes, using visible ASCII `0x21-0x7E`;
-the entire file is limited to 4096 bytes. Prefer 32 random bytes encoded as hex. Send `Authorization: Bearer <key>` or `x-api-key: <key>`; if both
-are supplied, both must match. An existing owner Bearer key is checked separately
-in constant time and retains priority 255; it works alone or with the API key in
-`x-api-key`. API and owner cache scopes contain no credentials. Missing or incorrect credentials return HTTP 401
-with a generic OpenAI error. Only `GET /health` stays open; OPTIONS requires the key. Loopback authentication is
-optional until a key file is given; `--allow-remote` always requires the file
-and refuses startup with `--allow-remote requires --api-key-file PATH` if absent.
-Startup warns once if the file is group- or world-readable, without changing
-permissions or logging its contents. Remote HTTP still needs a trusted tunnel
-or TLS termination. The file is read once; restart to rotate the key.
-
 <details>
 <summary><b>Terms on this page</b>: prefill, decode, KV cache, prefix reuse, SSE, draft decoding, slot</summary>
 
@@ -67,9 +52,9 @@ in one pass. Also called speculative decoding.</dd>
 - **Qwen3-30B-A3B does not draft:** checking guesses on the expert model was
   slower.
 - **Qwen3.8-27B** drafts with the official sibling draft or the built-in MTP
-  head, for one active chat. The FP8 release, official FP8 with BF16 parts,
-  drafts with the sibling for one active chat; its built-in FP8 draft does
-  not start yet.
+  (multi-token prediction) head, for one active chat.
+- **Qwen3.8-27B-FP8**, the official FP8 release with BF16 parts, drafts with
+  the sibling for one active chat. Its built-in FP8 draft does not start yet.
 - **Gemma 4 31B** drafts with Google's official assistant, for one active
   chat.
 
@@ -146,170 +131,6 @@ starting with "ready". Then run `curl -s http://localhost:8080/health` and
 report the ready line and the health reply. Never use sudo, change the
 network or listen beyond loopback. Do not commit or push.
 ```
-
-## Engine contract v1
-
-OpenAI Completions accepts `prompt` as text or one array of token IDs, as well
-as the existing `prompt_token_ids`. `POST /tokenize` returns `tokens`, `count`
-and `max_model_len` for `{model,prompt,add_special_tokens:false}`. Token IDs
-pass through unchanged. `ignore_eos:true` continues to the token limit;
-`cache_salt` isolates exact cache reuse without changing model inputs.
-Streaming output limits count decoded content rather than SSE overhead, and
-normal streams end with usage and `[DONE]`.
-
-Chat, Completions, Responses and Messages clamp omitted or oversized output
-limits to the smaller of the service cap and context minus the complete
-tokenized prompt. Zero or malformed limits still fail, and prompts must leave
-room for at least one output token. Capabilities' `output_limit` and health's
-`caps.output_limit` report the ceiling for a nonempty prompt on the loaded engine.
-Admission probes retain the exact `output_tokens` reservation for their fit check.
-
-Chat and Responses preserve Qwen3.8's official effort instructions: low is
-brief, medium omits the effort preamble, and high aliases xhigh. Chat accepts
-`reasoning_effort` at the top level or in `chat_template_kwargs` (which wins).
-The terminal `vade.reasoning_effort` echoes the effective instruction level.
-`tool_choice:"none"` hides callable definitions and tool events while retaining
-thinking and earlier tool history.
-
-Both `spark-serve` and `flash-serve` expose `GET /v1/capabilities` and
-`POST /v1/admission`. They use the same Host, Origin and caller scope rules
-as generation. Existing Chat Completions and Responses requests remain valid.
-
-Capabilities advertise `contract_version: "vade.engine.v1"`, model identity,
-context/input/output limits, tool/thinking support, the default thinking mode,
-cache scope and an opaque `cache_domain`. The domain changes on each serving
-load epoch and differs between authorization scopes by default. An explicitly
-shared cache advertises `cache_scope: "shared"`; anonymous callers share their
-own namespace. A domain is an identifier, never a credential or proof of a hit.
-
-Identity includes SHA-256 fingerprints of checkpoint metadata, tokenizer and
-template/renderer. The weights fingerprint has
-`fingerprint_kind:"safetensors_header_metadata"`: it covers config, optional index,
-and sorted shard names, file sizes and hashes of each 8-byte header length plus
-JSON header. It is a metadata fingerprint, not a weight content digest;
-same-size payload changes are not detected. `artifact_bytes` counts files, not
-resident GPU memory. The tokenizer fingerprint hashes `tokenizer.json`;
-the template fingerprint covers canonical tokenizer config with the effective
-template text and authored rendering/translation sources. Trailing CR/LF is
-normalized as in Flash's template equality check; an optional duplicate template
-file does not change identity. Startup and swaps read only headers and metadata,
-using 65,536 bytes of hash scratch; no weight payload is read or retained for
-identity. Peer payload agreement still requires model-manifest verification.
-Checkpoint files must remain immutable while loaded. Engines embedded without
-checkpoint identity report `identity`, `tools` and `thinking` as null (unknown).
-
-Admission takes the complete candidate request, preserving schema key order:
-
-```json
-{"contract_version":"vade.engine.v1","endpoint":"/v1/chat/completions","request":{"messages":[{"role":"user","content":"Hello"}],"tools":[]},"output_tokens":128}
-```
-
-`endpoint` also accepts `/v1/responses` and `/v1/completions`. `output_tokens`
-overrides the candidate's output limit for this check; use that reservation when
-sending it for generation. The reply gives exact rendered `prompt_tokens`,
-`context_limit`, `input_limit`, `output_limit`, `admitted` and a nullable `reason`.
-It uses generation's rendering, tools, thinking and token validation, including
-hidden template framing. Cached input still occupies the full context. A valid
-but oversized request returns HTTP 200 with `admitted:false`; malformed requests
-return HTTP 400. `admission_kind:"context_fit"` and `reserves_resources:false`
-mean this does not reserve a slot or guarantee immediate memory admission. No
-model session is created. Admission uses the same connection cap as generation;
-an overloaded server returns HTTP 503. Unsupported contract versions are rejected.
-
-Every terminal usage object includes `prompt_tokens_details.cached_tokens`;
-Responses also retains its standard `input_tokens_details.cached_tokens`.
-Streaming and nonstreaming share the same accounting. Counts describe actual
-reused prompt work, excluding recurrent checkpoint tails replayed for exactness.
-The older opt-in `X-Prefix-Reused-Tokens` header describes the matched snapshot
-at admission and can be larger than final usage when a backend replays a tail.
-
-Every admitted request also echoes always-on engine prefill timing and counters
-in the top-level `vade` sampling object: `prefill_ms`, `prefill_prompt_tokens`,
-`prefill_chunks`, `prefill_rows_per_chunk`, `prefill_cache_restored_tokens`,
-`prefill_cache_reuse_pct` (restored / prompt tokens in percent, one decimal: the one
-field a client prints as "cache reuse"), `prefill_cache_restore_ms` (wall ms from
-cache lookup to the restored session; null without a hit) and
-`admission_to_first_logits_ms`. Terminal server logs carry the same object.
-Chunk timing spans successful commit, including layer yields; admission timing
-also includes restore/allocation and waits before first predictions. No device
-synchronization is added. See `docs/server.md` for batch, cache-hit and partial
-request semantics. Client TTFT remains a separate measurement.
-
-Set `include_usage_timing:true` to add `usage.vade` with `prefill_ms`, `decode_ms`
-and `timing:"admitted_wall"`. Timing starts at cache selection/session admission,
-splits when prompt logits are ready, and ends at terminal generation. It includes
-scheduler waits and streaming backpressure, excludes request parsing, tokenization
-and queue time, and is not GPU kernel time. A request ending before admission
-reports zero times and zero processed tokens.
-
-`prompt_cache_key` uses a nonempty string of at most 256 UTF-8 bytes on both
-APIs; empty, oversized and non-string values are ignored without rejecting the
-request. It favors eligible backfill work alongside the same caller's active
-key. Priority and an eligible queue head take precedence; among other candidates
-affinity precedes age, within the existing slot/byte bounds.
-Changing the key does not prevent an exact token-prefix hit; keeping it does not
-create one. `cache:false` disables reuse and this hint.
-
-### Scoped KV checkpoints
-
-Dense Qwen and hybrid `spark-serve` advertise `kv_branch_handles:true` when the
-retention budget is nonzero. Other cartridges, including Flash-Next, advertise
-false. `kv_checkpoints` in capabilities gives the authorization-specific cache
-domain, count/byte quotas, TTL in milliseconds and release endpoint. Handles
-remain authorization-scoped even if ordinary prefix caching is explicitly shared.
-Anonymous callers belong to one anonymous scope.
-
-Add `kv_checkpoint:true` to a complete Chat, Responses or Completions request to
-retain its canonical **prompt** boundary, including the prompt's next-token logits.
-Terminal JSON/SSE usage includes `usage.vade.kv` independently of timing opt-in:
-
-```json
-{"cache_domain":"DOMAIN","reuse":"not_requested","reused_tokens":0,"retention":"retained","checkpoint":{"handle":"HANDLE","prompt_tokens":4096,"reusable_prefix_tokens":4096,"expires_at_ms":1790000000000,"retained_bytes":123456789,"scope_retained_bytes":123456789}}
-```
-
-The example numbers are illustrative. `handle` is an OS-random 256-bit lowercase
-hex capability. Keep it private. The domain binds it to this loaded model,
-tokenizer/template, position/KV semantics and authorization scope; restart or
-model replacement invalidates it. No weights or raw KV leave the engine.
-
-A branch sends `kv_handle:"HANDLE"` **and the complete prompt**. The same rendering,
-token validation and context/memory admission still apply. Every saved prompt
-token must match the beginning of the new rendered prompt. An exact repeat reuses
-the saved logits; an append forks independent writable state. Full immutable
-attention pages are reference counted; incomplete pages and hybrid recurrence
-are private. Hybrid appends replay their incomplete canonical tile, so
-`reusable_prefix_tokens` excludes that tail, while `prompt_tokens` names the
-complete saved boundary. Exact repeats can reuse all `prompt_tokens`.
-
-`reuse` reports `hit`, `replayed` (matched, but all inherited rows were replayed),
-`prompt_mismatch`, `invalid_handle`, `unavailable`, `unsupported`, `cache_disabled`,
-`not_attempted` (cancelled before admission), or `not_requested`. Unknown, expired,
-evicted and foreign handles all return the same `unavailable` result. Misses use
-ordinary prefix matching and prefill. `reused_tokens` counts work actually reused
-through the named handle; normal cached-token usage can additionally report a
-fallback prefix hit. Neither affinity nor a handle bypasses token comparison.
-
-`retention` is `retained`, `capacity`, `unavailable`, `randomness_unavailable`,
-`unsupported`, `cache_disabled`, `prompt_incomplete`, or `not_requested`.
-Checkpoint issuance failure does not fail generation. A request can both use a
-handle and request a new checkpoint. Generated tails are never published by this
-API. `cache:true` is unnecessary for explicit checkpoints; `cache:false` disables
-both their use and issuance. The legacy `session` capability remains separate.
-
-Each scope may retain at most 16 handles (or the configured cache entry limit,
-if smaller) and half the configured retained-byte budget. The existing global
-cache/pool limits also apply. `retained_bytes` is a standalone accounted bound
-for one checkpoint, including tokens/logits, private state/scratch and referenced
-pages. Do not sum it across handles: `scope_retained_bytes` is the scope's total
-at issuance, counting shared allocations once. Active forks fund common pages
-once as well. Byte/count pressure evicts least-recently-used references; reads
-refresh LRU order but do not extend the fixed expiry. Expiry is an upper bound on
-retention: pressure can evict earlier, even during a long response.
-
-`POST /v1/kv/release` with `{"kv_handle":"HANDLE"}` drops that scope's reference.
-It returns `{"released":true}` idempotently, including for unknown/foreign handles.
-Existing children and other handles keep their own references. Cancelling a child
-does not release its parent. Persist the transcript for fallback, not raw KV.
 
 ## Checks
 
@@ -429,7 +250,8 @@ Row budgets per step:
 
 `--owner-key-file` reads a file with permissions 0600 containing 64 lowercase
 hex digits. Requests sending that key as `Authorization: Bearer KEY` get owner
-priority. It adds no login checks for ordinary clients.
+priority. Other clients still need no key unless you also set
+`--api-key-file`.
 
 </details>
 
@@ -585,14 +407,289 @@ Request fields, defaults, errors and limits are in
 
 </details>
 
+## API authentication
+
+On loopback, authentication is optional: the server checks a key only once
+you give it a key file. To let other machines reach it (`--allow-remote`), you
+must give it one; without it, the server refuses to start with
+`--allow-remote requires --api-key-file PATH`. Remote HTTP still needs a
+trusted tunnel or TLS termination.
+
+Both `spark-serve` and `flash-serve` accept `--api-key-file PATH`. The file
+holds one key. After trimming, the key must be at least 16 bytes of visible
+ASCII (`0x21-0x7E`), and the whole file may be at most 4096 bytes. We suggest
+32 random bytes written as hex.
+
+Clients send `Authorization: Bearer <key>` or `x-api-key: <key>`; if they send
+both, both must match. A missing or wrong credential gets HTTP 401 with a
+generic OpenAI error. Only `GET /health` stays open; OPTIONS needs the key too.
+
+If you also set an owner key (`spark-serve --owner-key-file`, described above),
+the server checks it separately, in constant time, and its requests keep
+priority 255. It works alone or alongside the API key sent in `x-api-key`.
+The cache scopes for API-key and owner-key callers contain no credentials.
+
+The file is read once, so restart the server to rotate the key. At startup the
+server warns once if the file is group- or world-readable. It does not change
+the permissions or log the contents.
+
+## Engine contract v1
+
+This section is reference material for `vade.engine.v1`: the request rules,
+extra endpoints and response fields that tools built on Vade can rely on. In
+order, it covers:
+
+- request rules and output limits;
+- capabilities, checkpoint identity and admission (`/v1/admission`);
+- usage, prefill timing and `prompt_cache_key`;
+- scoped KV checkpoints.
+
+Request rules:
+
+- OpenAI Completions accepts `prompt` as text or one array of token IDs, as
+  well as the existing `prompt_token_ids`. Token IDs pass through unchanged.
+- `POST /tokenize` returns `tokens`, `count` and `max_model_len` for
+  `{model,prompt,add_special_tokens:false}`.
+- `ignore_eos:true` continues to the token limit.
+- `cache_salt` isolates exact cache reuse without changing model inputs.
+- Streaming output limits count decoded content rather than SSE overhead, and
+  normal streams end with usage and `[DONE]`.
+
+Output limits:
+
+- If a request omits its output limit or asks for too much, Chat,
+  Completions, Responses and Messages clamp it to the smaller of the service
+  cap and the context left after the complete tokenized prompt.
+- Zero or malformed limits still fail, and a prompt must leave room for at
+  least one output token.
+- `output_limit` in capabilities and `caps.output_limit` in health report the
+  ceiling for a nonempty prompt on the loaded engine.
+- Admission probes (requests to `/v1/admission`, described below, that ask
+  whether a request fits) keep the exact `output_tokens` reservation for their
+  fit check.
+
+Chat and Responses preserve Qwen3.8's official effort instructions: low is
+brief, medium omits the effort preamble, and high is an alias for xhigh. Chat
+accepts `reasoning_effort` at the top level or in `chat_template_kwargs` (which
+wins). `vade.reasoning_effort` in the final response echoes the effort level
+actually used.
+
+`tool_choice:"none"` hides callable definitions and tool events while retaining
+thinking and earlier tool history.
+
+Both `spark-serve` and `flash-serve` expose `GET /v1/capabilities` and
+`POST /v1/admission`. They use the same Host, Origin and caller scope rules
+as generation. Existing Chat Completions and Responses requests remain valid.
+
+Capabilities advertise:
+
+- `contract_version: "vade.engine.v1"`;
+- model identity;
+- context, input and output limits;
+- tool and thinking support, and the default thinking mode;
+- the cache scope and an opaque `cache_domain`.
+
+The cache domain names one cache namespace. It changes every time the server
+loads a model, and by default it differs between authorization scopes. An
+explicitly shared cache advertises `cache_scope: "shared"`; anonymous callers
+share a namespace of their own. A domain only identifies a namespace; it is
+never a credential or proof of a cache hit.
+
+Identity includes SHA-256 fingerprints of checkpoint metadata, tokenizer and
+template/renderer.
+
+<details>
+<summary><b>What each fingerprint covers</b>, and how startup reads it</summary>
+
+- **Weights.** This fingerprint reports
+  `fingerprint_kind:"safetensors_header_metadata"`. It hashes the config and
+  the optional index, plus, for each shard in name order, its name, its file
+  size and a hash of its 8-byte header length and JSON header.
+  That makes it a metadata fingerprint, not a digest of the weights: a change
+  to the weights that keeps the file size the same goes unnoticed.
+  `artifact_bytes` counts file bytes, not resident GPU memory.
+- **Tokenizer.** The fingerprint hashes `tokenizer.json`.
+- **Template.** The fingerprint covers canonical tokenizer config with the
+  effective template text and authored rendering/translation sources.
+  Trailing CR/LF is normalized as in Flash's template equality check; an
+  optional duplicate template file does not change identity.
+
+Startup and swaps read only headers and metadata, using 65,536 bytes of hash
+scratch; no weight payload is read or retained for identity. Peer payload
+agreement still requires model-manifest verification. Checkpoint files must
+remain immutable while loaded. Engines embedded without checkpoint identity
+report `identity`, `tools` and `thinking` as null (unknown).
+
+</details>
+
+Admission takes the complete candidate request, preserving schema key order:
+
+```json
+{"contract_version":"vade.engine.v1","endpoint":"/v1/chat/completions","request":{"messages":[{"role":"user","content":"Hello"}],"tools":[]},"output_tokens":128}
+```
+
+`endpoint` also accepts `/v1/responses` and `/v1/completions`. `output_tokens`
+overrides the candidate's output limit for this check; use that reservation when
+sending it for generation.
+
+The reply gives the exact `prompt_tokens` after rendering, plus
+`context_limit`, `input_limit`, `output_limit`, `admitted` and a `reason` that
+may be null. Rendering, tools, thinking and token checks run exactly as they
+would for generation, including the template's hidden framing tokens. Cached
+input still counts against the full context.
+
+- A valid but oversized request returns HTTP 200 with `admitted:false`;
+  malformed requests return HTTP 400.
+- `admission_kind:"context_fit"` and `reserves_resources:false` mean this does
+  not reserve a slot or guarantee immediate memory admission. No model session
+  is created.
+- Admission uses the same connection cap as generation; an overloaded server
+  returns HTTP 503.
+- Unsupported contract versions are rejected.
+
+Every terminal usage object includes `prompt_tokens_details.cached_tokens`;
+Responses also retains its standard `input_tokens_details.cached_tokens`.
+Streaming and nonstreaming share the same accounting. Counts describe prompt
+work that was actually reused. They leave out recurrent checkpoint tails that a
+backend replays to stay exact.
+
+The older opt-in `X-Prefix-Reused-Tokens` header describes the matched snapshot
+at admission and can be larger than final usage when a backend replays a tail.
+
+Every admitted request also echoes always-on engine prefill timing and counters
+in the top-level `vade` sampling object.
+
+<details>
+<summary><b>Prefill timing fields</b>, and the opt-in <code>usage.vade</code> timing</summary>
+
+- `prefill_ms`, `prefill_prompt_tokens`, `prefill_chunks`,
+  `prefill_rows_per_chunk` and `prefill_cache_restored_tokens`.
+- `prefill_cache_reuse_pct`: restored / prompt tokens in percent, one decimal.
+  It is the one field a client prints as "cache reuse".
+- `prefill_cache_restore_ms`: wall ms from cache lookup to the restored
+  session; null without a hit.
+- `admission_to_first_logits_ms`.
+
+Terminal server logs carry the same object. Chunk timing spans successful
+commit, including layer yields; admission timing also includes
+restore/allocation and waits before first predictions. No device
+synchronization is added. See `docs/server.md` for batch, cache-hit and partial
+request semantics. Client TTFT remains a separate measurement.
+
+Set `include_usage_timing:true` to add `usage.vade` with `prefill_ms`,
+`decode_ms` and `timing:"admitted_wall"`. This is wall-clock time, not GPU
+kernel time:
+
+- it starts at cache selection and session admission;
+- it splits into prefill and decode when the prompt's logits are ready;
+- it ends when generation finishes.
+
+It includes scheduler waits and streaming backpressure. It leaves out request
+parsing, tokenization and queue time. A request that ends before admission
+reports zero times and zero processed tokens.
+
+</details>
+
+`prompt_cache_key` takes a nonempty string of at most 256 UTF-8 bytes on both
+APIs. Empty, oversized and non-string values are ignored, and the request still
+goes through.
+
+The key is a scheduling hint. When the server picks work to backfill, priority
+and an eligible queue head still come first; among the remaining candidates,
+work matching the same caller's active key (affinity) goes before older work,
+within the existing slot and byte limits. The key never decides a cache hit:
+changing it does not prevent an exact token-prefix hit, and keeping it does not
+create one. `cache:false` disables reuse and this hint.
+
+### Scoped KV checkpoints
+
+Dense Qwen and hybrid `spark-serve` advertise `kv_branch_handles:true` when the
+retention budget is nonzero. Other model backends (called cartridges in the
+code), including Flash-Next, advertise false. `kv_checkpoints` in capabilities
+gives the authorization-specific cache domain, count and byte quotas, how
+long a checkpoint lives (TTL) in milliseconds, and the release endpoint.
+Handles remain authorization-scoped even if ordinary prefix caching is
+explicitly shared. Anonymous callers belong to one anonymous scope.
+
+Add `kv_checkpoint:true` to a complete Chat, Responses or Completions request to
+retain the exact point where its **prompt** ends, including the prompt's
+next-token logits. Terminal JSON/SSE usage includes `usage.vade.kv` independently of timing opt-in:
+
+```json
+{"cache_domain":"DOMAIN","reuse":"not_requested","reused_tokens":0,"retention":"retained","checkpoint":{"handle":"HANDLE","prompt_tokens":4096,"reusable_prefix_tokens":4096,"expires_at_ms":1790000000000,"retained_bytes":123456789,"scope_retained_bytes":123456789}}
+```
+
+The example numbers are illustrative. `handle` is a 256-bit random value from
+the OS, in lowercase hex. It works like a key, so keep it private. The domain
+binds it to this loaded model, tokenizer/template, position/KV semantics and
+authorization scope; restart or model replacement invalidates it. No weights or
+raw KV leave the engine.
+
+To branch, send `kv_handle:"HANDLE"` **together with the complete prompt**.
+Rendering, token checks and context and memory admission work as usual. Every
+saved prompt token must match the start of the new rendered prompt. An exact
+repeat reuses the saved logits; a longer prompt gets its own writable copy of
+the state. Completely filled attention pages never change, so branches share
+them, with reference counts. Partly filled pages and hybrid recurrent state
+are private to each branch. A hybrid append replays the last unfinished tile
+of the saved prompt, so `reusable_prefix_tokens` leaves that tail out, while
+`prompt_tokens` names the whole saved boundary. Exact repeats can reuse all
+`prompt_tokens`.
+
+`reuse` reports `hit`, `replayed` (matched, but all inherited rows were replayed),
+`prompt_mismatch`, `invalid_handle`, `unavailable`, `unsupported`, `cache_disabled`,
+`not_attempted` (cancelled before admission), or `not_requested`. Unknown, expired,
+evicted and foreign handles all return the same `unavailable` result. Misses use
+ordinary prefix matching and prefill. `reused_tokens` counts work actually reused
+through the named handle; normal cached-token usage can additionally report a
+fallback prefix hit. Neither affinity nor a handle bypasses token comparison.
+
+`retention` is `retained`, `capacity`, `unavailable`, `randomness_unavailable`,
+`unsupported`, `cache_disabled`, `prompt_incomplete`, or `not_requested`.
+Checkpoint issuance failure does not fail generation. A request can both use a
+handle and request a new checkpoint. Generated tails are never published by this
+API. `cache:true` is unnecessary for explicit checkpoints; `cache:false` disables
+both their use and issuance. The legacy `session` capability remains separate.
+
+Limits and eviction:
+
+- **Per scope:** at most 16 handles (or the configured cache entry limit, if
+  smaller) and half the configured retained-byte budget. The existing global
+  cache/pool limits also apply.
+- **`retained_bytes`** is a standalone accounted bound for one checkpoint,
+  including tokens/logits, private state/scratch and referenced pages. **Do not
+  sum it across handles.**
+- **`scope_retained_bytes`** is the scope's total at issuance, counting shared
+  allocations once. Active forks also count shared pages only once.
+- **Eviction:** byte/count pressure evicts least-recently-used references;
+  reads refresh LRU order but do not extend the fixed expiry.
+- **Expiry** is an upper bound on retention: pressure can evict earlier, even
+  during a long response.
+
+`POST /v1/kv/release` with `{"kv_handle":"HANDLE"}` drops that scope's reference.
+It returns `{"released":true}` idempotently, including for unknown/foreign handles.
+Existing children and other handles keep their own references. Cancelling a child
+does not release its parent. To have something to fall back on, save the
+transcript, not raw KV.
+
 ## Safety and known limits
 
-**No login and no TLS. It listens on loopback unless told otherwise.**
+**Plain HTTP with an optional shared API key. It listens on loopback unless
+told otherwise.**
 
 - It listens on loopback by default. Any other address needs
-  `--allow-remote`.
-- **There is no login and no TLS.** To share the server, put a
-  login-checking proxy in front of it.
+  `--allow-remote`, and `--allow-remote` needs `--api-key-file`.
+- **The API key is the only credential the server checks.** With
+  `--api-key-file`, every request except `GET /health` must carry that key,
+  or the owner key if you set one. Without a key file it checks no credential
+  at all, which is allowed on loopback only. There are no user accounts.
+  Details are in [API authentication](#api-authentication).
+- **There is no TLS.** The server speaks plain HTTP. To reach it from another
+  machine, use an SSH tunnel or a TLS proxy you trust in front of it.
+- Separately from the key, it refuses a request whose `Host` header is not
+  loopback, its own listen address or an `--allow-host` entry. It also
+  refuses an `Origin` header other than its own `http://` address or an
+  `--allow-origin` entry.
 - The server never runs a tool. Tool calls are returned to the client.
 - **Swapping the model is unfinished.** Restarting the server is the reliable
   way to change models today.

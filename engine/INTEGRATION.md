@@ -1,28 +1,29 @@
 # Historical integration record
 
-> **Historical record, 2026-10-02.** It describes one past integration. Its
-> launch settings, FP32 KV cache figures and older benchmark client are not
-> today's serving defaults, and it is not a rival scoreboard. For current
-> results, see [Benchmarks](docs/benchmarks.md) and
+> **Historical record, 2026-10-02.** This page records one past integration.
+> Its launch settings, FP32 KV cache figures and older benchmark client are not
+> today's serving defaults, and the page is not a scoreboard against other
+> engines. For current results, see [Benchmarks](docs/benchmarks.md) and
 > [Validation](docs/validation.md).
 
 ## In short
 
 | Item | Result |
 | --- | --- |
-| Outcome | **Passed.** Every requested gate passed |
+| Outcome | **Passed**, on every requested gate |
 | What was merged | The must-fix branch (`mustfix`, `4c3b09a`) and the draft branch (`ldraft`, `41075a2` / `3664201`), onto `22510ca` |
 | Model | Official Qwen3-8B, BF16 weights |
 | KV cache | FP32 unless a row names another format |
 | Weights in memory | One arena of **16,380,854,272 bytes** per process |
 | Build | Release kernels and an offline, locked workspace build passed |
-| Test-code budget | No new files; two lines added to the existing batch benchmark, under 10% of the product lines added |
-| Housekeeping | Frozen run folders untouched; the measurement GPU processes stopped |
+| Test code added | No new test files. The existing batch benchmark gained two lines, under 10% of the product lines added |
+| Clean-up | The frozen run folders were not touched, and the GPU processes used for measuring were stopped |
 
-Terms on this page:
+Terms used on this page:
 
 | Term | Meaning |
 | --- | --- |
+| Gate | A pass-or-fail check the candidate had to pass |
 | KV cache | The model's memory of the conversation so far |
 | TTFT | Time to first token: from opening the connection to the first answer text |
 | STRICT | Draft decoding where the full model checks every guess, so output matches plain decoding |
@@ -30,13 +31,16 @@ Terms on this page:
 | Host HWM | Host high-water mark: the most CPU-side memory the process held |
 | seqpar | Sequence-parallel prefill: one prompt split across processes |
 | Peer | A helper process that reads part of a long prompt |
+| Rank | One process in a split run. Local ranks share one GPU and take turns on it |
 
 ## What changed
 
-- The merge kept checkpoint-derived sizes, default GPU budgets, peer
-  scheduling, swap recovery and exact arithmetic.
-- `mustfix`'s measured draft-cost prior and shared cost scale replaced
-  `ldraft`'s endpoint-only exploration of per-width costs.
+- These stayed as they were: sizes taken from the checkpoint, the default
+  GPU budgets, how peers are scheduled, recovery after a model swap, and exact
+  arithmetic.
+- From `mustfix` we kept two things: its measured starting estimate of
+  drafting cost (the prior) and its shared cost scale. They replaced
+  `ldraft`'s approach, which explored per-width costs only at the end points.
 - Background verification now uses 32 rows.
 - Shared workspace is now subtracted **before** the budget is split into
   active and retained pools. Subtracting it afterwards had stopped valid
@@ -44,11 +48,11 @@ Terms on this page:
 
 ## Gate results
 
-| Gate | Result | Peak device bytes |
+| Check | Result | Peak device bytes |
 |---|---|---:|
 | Hugging Face reference, FP32 and scaled 16-bit KV | 56/56 each; largest absolute logit error 0.00210190 and 0.00607681 | 17,076,569,488 / 16,774,317,456 |
 | Exactness, FP32 / BF16 / scaled 16-bit KV | 96 cases each, four repetitions; zero bit mismatches | 17,161,095,628 / 16,859,105,740 / 16,925,837,200 |
-| HTTP checks, plain and STRICT | Six cases each pass, including the final reservation revision | 18,960,277,208 |
+| HTTP checks, plain and STRICT | Six cases each pass, including on the final revision of the memory-reservation code | 18,960,277,208 |
 | 16 chats, 128 output tokens each | **197.557682 tok/s**, 10,366.592590 ms; all 29 replies at widths 1, 4, 8 and 16 match the token IDs from isolated runs | **17,947,975,104** |
 | 28,672-token profile | **15,728.673 ms**, top token 198 | **25,257,528,928** |
 | seqpar, two local ranks | Same eight token IDs as ordinary decode | Rank 0: 22,491,758,176; rank 1: 25,634,999,904 |
@@ -61,10 +65,10 @@ Terms on this page:
 
 ## Notes on the results
 
-**STRICT stability.** The earlier STRICT instability is fixed in this
-three-run sample. All three runs beat the earlier 117.8 tok/s reference, with
-a 0.500 tok/s spread and identical output. Stability over longer runs is
-unverified.
+**STRICT stability.** In this three-run sample, the earlier STRICT
+instability is fixed. All three runs beat the earlier 117.8 tok/s reference,
+with a 0.500 tok/s spread and identical output. We have not checked stability
+over longer runs.
 
 **Long HTTP margin.** The lone long request passed with only **68.400 ms**
 to spare against its 15.9 s limit.
@@ -105,10 +109,10 @@ memory for the full prompt.
 | 8,300-token prompt, two plain output tokens (one decode step after prefill) | 21,657,299,596 |
 | After the 8,318-token follow-up | 26,791,127,692 |
 
-Both were gigabytes above the prior candidate.
+Both figures were gigabytes above the prior candidate build.
 
 **The fix.** `DeviceState::reserve_prompt_cache` now reserves separate
-**512-row physical blocks** and stops at the real end of the prompt.
+**512-row physical blocks**, and it stops at the real end of the prompt.
 
 - It skips capacity already reserved.
 - Batch preparation detaches shared tails before writing.
@@ -138,7 +142,7 @@ locally and **22,312,465,056 bytes** with a peer.
 
 The authenticated `seqpar_prefill` message confirmed that the peer ran its
 part. Over loopback, the transport fell back to TCP on its own, and the
-server never fell back to reading the prompt alone. Each process held one
+server never fell back to reading the prompt by itself. Each process held one
 copy of the weights. No distributed speed-up is claimed.
 
 ## Reproduce
@@ -204,7 +208,7 @@ How the special runs were driven:
 | --- | --- |
 | engine | `device.rs`, `qwen.rs` (shareable reservation, spans, sliced chunks); `multi.rs` (bounded workspace/C2); `draft.rs` (cost scale); `bin/batch-bench.rs` (boundary coverage) |
 | gpu | `backend.rs`, `batch.rs`, `multi.rs` (spans and boundaries) |
-| serve | `budget.rs`, `cache.rs`, `lib.rs`, `qwen.rs`, `scheduler.rs`, `bin/spark-serve.rs` (admission, cache and chunks) |
+| serve | `budget.rs`, `cache.rs`, `lib.rs`, `qwen.rs`, `scheduler.rs`, `bin/spark-serve.rs` (admission, which decides which requests may start; the cache; and prompt chunks) |
 | docs | Existing READMEs, draft docs and this record |
 
 ## Not verified in this record

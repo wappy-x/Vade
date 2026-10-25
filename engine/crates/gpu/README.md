@@ -7,54 +7,6 @@ memory, the weight storage and the compiled kernels.
 This page is for people reading or changing the GPU layer. To just run Vade,
 start with [Install](../../docs/install.md).
 
-## Precompile kernels for a release
-
-Release producers can avoid the owner's first PTX compilation by embedding a
-trusted cubin when building the engine. This optional build input requires a
-CUDA toolkit on the producer; owners still need only the CUDA driver.
-
-Compile the exact PTX produced by `cargo kernels`, without arithmetic overrides:
-
-```sh
-ptxas --gpu-name=sm_121 spark_rust_kernels.ptx --output-file=flash.cubin
-```
-
-Create `flash.cubin.conf` beside the image, recording SHA256 digests of both
-files and the producer toolkit's driver API floor (CUDA 13.0 uses `13000`):
-
-```ini
-format=vade-cubin-v1
-target=sm_121
-ptx_sha256=<SHA256 of spark_rust_kernels.ptx>
-cubin_sha256=<SHA256 of flash.cubin>
-min_driver_api=13000
-```
-
-Set `SPARK_CUBIN=/absolute/path/flash.cubin` only for the engine build, including
-a Mac cross-build. The build refuses a changed PTX, image digest or CUDA ELF
-target. Accepted images use CUDA ELF64 OSABI `0x41`, ABI version `8`, executable
-type `2`, ELF version `1`, and exact target flags `0x06007902` for `sm_121`.
-The `sm_121a` encoding (`0x0a007902`) and other ABI/feature encodings are refused,
-even when their numeric compute capability is 12.1 and their digests match.
-[Compiler-produced header fixtures](fixtures/README.md) record that contract;
-new compiler encodings require review. Producer validation failures emit one
-plain diagnostic and exit unsuccessfully.
-The resulting engine binary contains the image, so its existing release
-digest covers it. Retain the compiler version, command and hashes with the
-release's producer receipts, separately from owner-install measurements.
-
-At runtime, byte-identical PTX on compute capability 12.1 and a sufficiently
-new driver uses the compiled image. An incompatible image falls back to PTX.
-Other PTX and devices, `CUDA_FORCE_PTX_JIT=1`, and JIT receipt probes keep the
-PTX path. There is no owner configuration key. Without `SPARK_CUBIN`, builds
-retain ordinary PTX loading.
-
-The shared loader control flow is tested with a deterministic driver on the
-host: image selection, forced PTX, receipt loads, every allowed fallback code,
-fatal errors, cleanup failures, and the exact original PTX passed after fallback.
-These tests do not establish GPU execution correctness; the release gate must
-exercise the actual embedded payload and an explicit PTX fallback on the GPU.
-
 <details>
 <summary><b>Terms on this page</b>: PTX, kernel, stream, pinned memory, CUDA graph, KV cache, tensor-core multiply, BF16, FP8, FP32</summary>
 
@@ -223,20 +175,29 @@ It loads only those rows, straight into GPU memory, and keeps no host copy.
 | --- | --- | --- |
 | BF16 | BF16 | BF16 in, FP32 sums |
 | Qwen3.8-27B official FP8 | FP8, with scales | BF16 in, FP32 sums |
-| Flash routed experts | FP8, with scales | W8A8, FP32 sums |
-| Flash covered BF16 projections | BF16 | BF16 high/residual operands, FP32 sums |
+| Flash-Next routed experts | FP8, with scales | W8A8, FP32 sums |
+| Flash-Next covered BF16 projections | BF16 | BF16 high + residual parts of FP32 inputs (see below), FP32 sums |
 
 - **BF16 checkpoints:** Qwen3, Qwen3.8-27B and Gemma 4 31B.
 - **Official FP8 checkpoints:** Qwen3.8-27B-FP8 converts weights to BF16 when
-  used, with the checkpoint's scales. Flash Next's routed experts use W8A8.
+  used, with the checkpoint's scales. In Flash-Next (Qwen3.8-Flash-Next),
+  the routed experts use W8A8 (8-bit weights and 8-bit activations).
   Both retain their published FP8 weights with no second BF16 weight copy.
-- **Flash BF16 projections:** covered projections always split FP32
-  activations into BF16 high and residual parts, multiply both on the tensor
-  cores and accumulate in FP32 in one fixed order. The scalar-FP32 alternative
-  and `FLASH_BF16_MMA` switch are removed. Other models keep their native
-  BF16 paths. On the same machine, build and setup, the one Flash mode must
-  repeat across single/batched, cached/chunked and greedy-MTP execution;
-  answers may differ from older builds.
+- **Flash-Next BF16 projections:** each covered projection splits its FP32
+  activations into BF16 high and residual parts, multiplies both on the tensor
+  cores and accumulates in FP32 in one fixed order. Other models keep their
+  native BF16 paths. With the same machine, build and setup, this one
+  Flash-Next mode must give the same answer whether a chat runs alone or
+  batched, cached or chunked, or with greedy MTP drafting (multi-token
+  prediction). Answers may differ from older builds. The scalar-FP32
+  alternative and the `FLASH_BF16_MMA` switch have been removed.
+- **FP4-Local checkpoint:** `nvidia/Qwen3.8-Flash-Next-FP4-Local` runs on one
+  Spark. Its quantization map stores each module as NVFP4, MXFP8 or plain
+  tensors; the loader reads that map and checks the tensor list. The NVFP4
+  kernels decode the checkpoint's encoded weight scales themselves, without
+  loss. See the
+  [mixed-storage loader](../model/src/flash/mixed.rs) and the
+  [FP4 kernel contract](../../docs/fp4-kernels.md).
 - Anything below the checkpoint's precision has to be turned on explicitly.
   `SPARK_ADAPTIVE_PREFILL=1`, a faster, approximate grouped attention for long
   prompts, can change output and is off by default.
@@ -281,13 +242,72 @@ For head size 128 and a BF16 KV cache:
 
 FP32 and scaled-integer KV caches, and the Qwen3-0.6B draft (two query heads
 per KV head), keep the older scalar order. Prompt reading (prefill) has its
-own fixed order. The [Qwen3 session contract](../engine/README.md#qwen3-phase-order)
-reserves sequential decode bits for `verify_batch`. The
+own fixed order. In the [Qwen3 session contract](../engine/README.md#qwen3-phase-order),
+only `verify_batch` promises the exact same bits as sequential decode. The
 [head-skipping check](../engine/README.md#build-and-run-the-checks) compares
-All/Last/None prompt heads within a phase, bit for bit; it does not equate
-prompt logits with sequential decode logits.
+asking for logits on all prompt rows, only the last, or none (All/Last/None),
+bit for bit, within a phase; it does not equate prompt logits with sequential
+decode logits.
 
 </details>
+
+## Precompile kernels for a release
+
+This section is only for people building release binaries; most readers can
+skip it.
+
+If you build a release, you can spare owners the first PTX compile by
+embedding a trusted cubin (a compiled GPU image) in the engine. This is
+optional. It needs a CUDA toolkit on the machine that builds the release;
+owners still need only the CUDA driver.
+
+Compile the exact PTX produced by `cargo kernels`, without arithmetic overrides:
+
+```sh
+ptxas --gpu-name=sm_121 spark_rust_kernels.ptx --output-file=flash.cubin
+```
+
+Next to the image, create `flash.cubin.conf`. It records the SHA256 digests of
+both files and the lowest driver API version the build toolkit needs (CUDA 13.0
+uses `13000`):
+
+```ini
+format=vade-cubin-v1
+target=sm_121
+ptx_sha256=<SHA256 of spark_rust_kernels.ptx>
+cubin_sha256=<SHA256 of flash.cubin>
+min_driver_api=13000
+```
+
+Set `SPARK_CUBIN=/absolute/path/flash.cubin` only for the engine build,
+including a Mac cross-build. The build refuses a changed PTX, image digest or
+CUDA ELF target. If validation fails on the build machine, it prints one plain
+error and exits with a failure.
+
+Accepted images use CUDA ELF64 OSABI `0x41`, ABI version `8`, executable type
+`2`, ELF version `1`, and exact target flags `0x06007902` for `sm_121`. The
+`sm_121a` encoding (`0x0a007902`) and other ABI/feature encodings are refused,
+even when their numeric compute capability is 12.1 and their digests match.
+[Compiler-produced header fixtures](fixtures/README.md) record those rules; a
+new compiler encoding needs review.
+
+The engine binary then contains the image, so its existing release digest
+covers it. Keep the compiler version, command and hashes with the release's
+build records (receipts), separate from measurements of owners' installs.
+
+At run time, the engine uses the compiled image when the PTX is
+byte-identical, the GPU has compute capability 12.1 and the driver is new
+enough. An incompatible image falls back to PTX. The PTX path is also used
+for any other PTX or device, when `CUDA_FORCE_PTX_JIT=1` is set, and by the
+probes that record just-in-time (JIT) compile receipts. Owners have no setting
+for this. Without `SPARK_CUBIN`, builds load PTX as usual.
+
+We test the shared loader's control flow on the host with a deterministic
+stand-in driver: image selection, forced PTX, receipt loads, every allowed
+fallback code, fatal errors, cleanup failures, and the exact original PTX passed
+after fallback. These tests do not prove the GPU runs the code correctly. The
+release gate (the pass-or-fail check before a release) must run the actual
+embedded payload, and an explicit PTX fallback, on the GPU.
 
 **Where next:** [spark-engine](../engine/README.md) ·
 [Credits](../../docs/CREDITS.md) · [Benchmarks](../../docs/benchmarks.md)

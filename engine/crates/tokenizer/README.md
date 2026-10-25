@@ -2,8 +2,8 @@
 
 **This crate turns text into token IDs and back, for Qwen3, Qwen3.8 and
 Gemma 4, and builds chat prompts the way each model's official chat template
-does.** It is written from scratch in Rust, runs on the CPU, and runs no
-neural model.
+does.** It is written from scratch in Rust and runs on the CPU, with no
+neural model involved.
 
 This page is for people reading or changing tokenization or chat formatting.
 
@@ -35,7 +35,7 @@ reader.**
 
 <dl>
 <dt><a href="../model/README.md">engine-model</a></dt>
-<dd>Its only dependency: the bounded JSON reader.</dd>
+<dd>The bounded JSON reader.</dd>
 <dt><a href="../serve/README.md">spark-serve</a></dt>
 <dd>Turns each chat request into token IDs, and streams the answer back as
 text.</dd>
@@ -282,9 +282,9 @@ To regenerate the tables:
 **Qwen3 and Gemma 4 tokenization matched the official tooling on every
 recorded case.**
 
-- **Qwen3.** Compared with the official `tokenizers` 0.23.2 library and the
-  official Jinja template, before Qwen3.8 and Gemma 4 support existed: no
-  mismatch.
+- **Qwen3.** No mismatch against the official `tokenizers` 0.23.2 library and
+  the official Jinja template. This check ran before Qwen3.8 and Gemma 4
+  support existed.
 - **Gemma 4.** When support was added, the `tokenize` example matched the
   official tooling on 12 tokenization, 8 chat and 4 decoding cases, plus one
   Qwen regression case.

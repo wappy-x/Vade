@@ -1,55 +1,72 @@
 # Prepare four Sparks from two pairs
 
-This is the preparation route for the official Flash-Next FP8 checkpoint on
-four Sparks. **Native four-Spark qualification of this build is pending.**
-The existing two-Spark measurements do not establish four-Spark correctness,
-memory capacity or speed. Keep the official precision, 131,072-token context
-default and 8,192-token output cap. A smaller explicit context is a separate
-configuration, not a way to qualify the default.
+This page shows how to turn two existing pairs of Sparks into one group of
+four for the official Flash-Next FP8 checkpoint.
 
-Use [Spark system setup](spark-setup.md) for OS and network preparation,
-[INSTALL.md](../INSTALL.md) for the checkpoint and pinned compilers, and the
-[Rust gates](../cli/docs/test.md) for qualification. The setup scripts live in
-`ops/scripts/spark-setup/`. This guide prepares a change for the operator; it
-does not activate a network or authorize taking over machines in use.
+**This build has not yet passed its qualification checks running natively on
+four Sparks.** Our two-Spark measurements do not prove four-Spark correctness,
+memory capacity or speed. Keep the official precision, the 131,072-token
+context default and the 8,192-token output cap. If you choose a smaller context
+on purpose, that is a separate configuration; it is not a way to qualify the
+default.
+
+You will also need:
+
+- [Spark system setup](spark-setup.md) for the OS and network
+- [INSTALL.md](../INSTALL.md) for the checkpoint and pinned compilers
+- the [Rust gates](../cli/docs/test.md) (the test suites a build must pass)
+  for qualification
+
+The setup scripts live in `ops/scripts/spark-setup/`.
+
+Two roles come up throughout: the **operator** runs these machines, and the
+**administrator** changes their OS and network. If you run your own Sparks,
+both may be you. This guide helps them prepare the change. It does not switch
+the network on, and it is not permission to take over machines that are in
+use.
 
 ## Label the machines and cables before unplugging anything
 
-Choose two idle, reserved pairs. Call the first pair **A and B** and the second
-**C and D**. These are labels in this guide, not machine names. Rank order will
-be A=0, B=1, C=2, D=3. Keep management LAN connections plugged in on all four
-machines, and retain a local-console recovery path.
+Pick two pairs that are idle and reserved for this work. Call the first pair
+**A and B** and the second **C and D**. These letters are labels for this
+guide, not machine names. The rank order (each Spark's position in the group)
+will be A=0, B=1, C=2, D=3. Keep the management LAN cables plugged in on all
+four machines (that is your ordinary network, the one you SSH over), and make
+sure you can still reach each machine from a local console in case you need to
+recover.
 
-Each existing pair has two physical QSFP cables. Label both ends of all four
-cables and their sockets. Choose either cable in each pair to keep, then record
-the following map privately before changing it:
+Each pair already has two physical QSFP cables. Label both ends of all four
+cables, and the sockets they sit in. In each pair, pick either cable to keep.
+Before you change anything, write down this map somewhere private:
 
-| Cable label | Current endpoints | Action |
+| Cable label | Connects now | What to do |
 | --- | --- | --- |
 | AB-keep | A to B | Leave both ends plugged in |
 | AB-move | A to B, their other QSFP sockets | Unplug both ends |
 | CD-keep | C to D | Leave both ends plugged in |
 | CD-move | C to D, their other QSFP sockets | Unplug both ends |
 
-Use `vade down` with each pair's owning private configuration, then `vade status`.
-Confirm all four GPUs are empty and that no other user owns a network test or
-server. Preserve each pair's private CLI state, cable map, interface addresses,
-routes and the exact fabric profiles/files needed for rollback. Do not inspect
-or copy private keys or unrelated network credentials. Do not move a cable
-while a rank still uses it.
+Next, run `vade down` and then `vade status` for each pair, using the private
+CLI configuration for that pair. Confirm that all four GPUs are empty and that
+nobody else owns a network test or server on them. Then save everything you
+would need to roll back each pair: its CLI state, the cable map, the interface
+addresses, the routes, and the exact fabric profiles or files. Do not look at
+or copy private keys or unrelated network credentials. Never move a cable while
+a rank still uses it.
 
 ## Make the path, then optionally close the ring
 
-1. Leave **AB-keep** and **CD-keep** untouched.
+1. Leave **AB-keep** and **CD-keep** alone.
 2. Unplug both ends of **AB-move** and **CD-move**. A, B, C and D now each have
-   exactly one free QSFP socket. The management LAN remains connected.
+   exactly one free QSFP socket. The management LAN stays connected.
 3. Plug **AB-move** into B's freed socket and C's freed socket. Relabel both
-   ends **BC**. You now have the three-cable path **A — B — C — D**.
-4. For a path, store **CD-move** as a labeled spare and leave A's and D's freed
-   sockets empty. For a ring, plug it into D's freed socket and A's freed
+   ends **BC**. You now have a three-cable path: **A — B — C — D**.
+4. For a path, keep **CD-move** as a labeled spare and leave the freed sockets
+   on A and D empty. For a ring, plug it into D's freed socket and A's freed
    socket, and relabel both ends **DA**. You now have **A — B — C — D — A**.
-5. Trace every cable end to end and record its actual socket at each end. Do
-   not infer the Ethernet/RDMA device from a left/right sticker: use the
+5. Follow every cable from end to end and write down the socket it actually
+   sits in at each end. Do not guess the Ethernet or RDMA device from a
+   left/right sticker; use the
    [interface-to-device mapping](spark-setup.md#1-make-a-private-cable-map).
 
 ```mermaid
@@ -60,102 +77,126 @@ flowchart LR
     D -.-|DA · reused CD-move · ring only| A
 ```
 
-One QSFP cable exposes **two Ethernet rails**, not two independent neighbor
-cables. Configure and check both rails. A four-node path has three cables and
-six rail subnets; a four-node ring has four cables and eight rail subnets.
-There is no switch and no fabric routing between nonadjacent machines.
+One QSFP cable gives you **two Ethernet rails** (two separate network
+interfaces over the same cable), not two independent links to the neighbor.
+Configure and check both rails. A four-Spark path has three cables and six rail
+subnets; a four-Spark ring has four cables and eight rail subnets. There is no
+switch, and nothing routes fabric traffic between machines that are not cabled
+to each other.
 
 ## Update only the affected fabric configuration
 
-The old second links still describe A–B and C–D after the cables move. They
-cannot be assumed to describe B–C or D–A. Record this new private rail plan:
+After the move, the old settings for the two cables you moved still describe
+A–B and C–D, not B–C or D–A. Write down this new rail plan privately:
 
-| Cable | Rail subnets | Endpoint addresses within each subnet |
+| Cable | Subnets for its two rails | Addresses at each end, within each subnet |
 | --- | --- | --- |
-| AB-keep | Preserve its two verified, disjoint subnets | Preserve A and B |
+| AB-keep | Keep its two verified, disjoint subnets | Keep A's and B's |
 | BC | Two new unused `/24` subnets | B is host 1; C is host 2 |
-| CD-keep | Preserve its two verified, disjoint subnets | Preserve C and D |
+| CD-keep | Keep its two verified, disjoint subnets | Keep C's and D's |
 | DA, ring only | Two further new unused `/24` subnets | D is host 1; A is host 2 |
 
-Check all four machines' LAN, VPN and routing tables before assigning subnets.
-Even the two retained pairs' subnets must be distinct across the whole new
-group. If they overlap, the administrator must renumber the conflicting rail
-and its two endpoints as part of this plan. Each rail has its own subnet,
-MTU 9000, Ethernet device, matching verbs device, IPv4 RoCE-v2 GID and peer
-alias. Use RDMA path MTU 4096. Set no gateway and enable no forwarding.
+Before you assign subnets, check the LAN, VPN and routing tables on all four
+machines. Every subnet must be distinct across the whole new group, including
+the ones the two kept pairs already use. If any overlap, the administrator must
+renumber the conflicting rail, at both of its ends, as part of this plan.
 
-Create a **new** ignored configuration directory on each node with
-`init-config.sh`, following [step 1](spark-setup.md#1-make-a-private-cable-map).
-For a path use its `pair` template on A/D (two rows each), and its `ring`
-template on B/C (four rows each). For a physical ring use `ring` on all four.
-These template names select the number of local rail rows; they do not select
-Vade's transport topology. Populate the seven fields in `links.tsv` from the
-new cable map. The corresponding peer row may have a different row number;
-its endpoints, rail and bandwidth test port must agree.
+Each rail gets its own:
 
-**The setup network apply step is for unused interfaces. It deliberately
-refuses to overwrite a different working fabric configuration.** For these
-already configured pairs, have the administrator preserve and edit only the
-exact profiles or files that own the moved rails. Do not delete existing
-profiles, rename a file to evade the preflight, or apply a second configuration
-on top. Retain the original files/profile identities and addresses privately
-so they can be restored. On path endpoints, retire only the old moved-link
-addresses/routes from the now-unused sockets. Keep AB-keep, CD-keep and
-management networking intact, except for any explicitly reviewed subnet conflict.
+- subnet
+- Ethernet device and matching verbs device (the RDMA device behind it)
+- IPv4 RoCE-v2 GID
+- peer alias
 
-Use the setup renderer to review the desired target and hosts entries. If the
-administrator has prepared genuinely unused interfaces, the guide's normal
-preview/apply/transaction sequence can be used. Otherwise the administrator
-must apply the reviewed fabric migration through its existing configuration
-owner. Use console-backed rollback and verify live management access before
-accepting activation, as described in
-[network setup](spark-setup.md#3-install-and-activate-the-fabric-network).
-Re-read actual GIDs after address changes; a staging GID index is not evidence.
-Preserve existing working account permissions, kernel and launch-session
-limits; changes to them require their separate setup procedure.
+Every rail uses MTU 9000 and RDMA path MTU 4096. Set no gateway and turn on no
+forwarding.
+
+On each machine, create a **new** ignored configuration directory with
+`init-config.sh`, as in [step 1](spark-setup.md#1-make-a-private-cable-map).
+For a path, use the `pair` template on A and D (two rows each) and the `ring`
+template on B and C (four rows each); for a physical ring, use `ring` on all
+four. The template names only choose how many local rail rows you get; they do
+not choose Vade's transport topology. Fill in the seven fields in `links.tsv`
+from the new cable map. The matching row on the peer may have a different row
+number, but its endpoints, rail and bandwidth test port must agree.
+
+**The network step of `apply.sh` only sets up unused interfaces. It
+deliberately refuses to overwrite a different fabric configuration that
+already works.** These pairs are already configured, so the administrator
+should save and then edit only the exact profiles or files that own the moved
+rails:
+
+- Do not delete existing profiles, rename a file to get past the preflight
+  check, or apply a second configuration on top.
+- Keep the original files, profile identities and addresses somewhere private
+  so you can restore them.
+- On the two ends of a path, remove only the old moved-link addresses and
+  routes from the sockets that are now unused.
+- Leave AB-keep, CD-keep and management networking intact, apart from any
+  subnet conflict you have explicitly reviewed.
+
+Use `render.sh` to review the target files and hosts entries you want. If the
+administrator has prepared interfaces that are genuinely unused, the normal
+sequence from the Spark system setup guide works: preview, apply, and keep the
+transaction for rollback. Otherwise the administrator must apply the reviewed
+fabric migration through whatever already owns that configuration. Either way,
+keep a console-backed rollback ready, and check that management access still
+works before you accept the activation, as described in
+[step 3 of Spark system setup](spark-setup.md#3-install-and-activate-the-fabric-network).
+
+Read the actual GIDs again after any address change; the placeholder GID index
+used before addresses exist proves nothing. Keep the existing working account
+permissions, kernel and launch-session limits; changing them needs its own
+setup procedure.
 
 Run [rail verification](spark-setup.md#8-verify-every-rail-and-the-actual-launch-session)
-as the Vade account in the actual launch session. Run prerequisite checks on
-every node, then the bounded bandwidth server/client test on **both rails of
-every cable, in both directions**. That is 12 client results for a path or 16
-for a ring, plus their matching server logs. Positive bandwidth is connectivity
-evidence, not a performance target. Stop on any failure. Reconfirm management
-SSH, unlimited soft/hard memlock, matching MTUs, device access and trusted peer
-identities. Keep filled configurations and raw evidence outside Git.
+as the Vade account, in the same session you will launch from: first the
+prerequisite checks on every machine, then the bounded bandwidth server/client
+test on **both rails of every cable, in both directions**. That is 12 client
+results for a path or 16 for a ring, plus their matching server logs. Positive
+bandwidth shows the link connects; it is not a performance target. Stop on any
+failure. Then confirm once more: management SSH, unlimited soft and hard
+memlock, matching MTUs, device access and trusted peer identities. Keep filled
+configurations and raw evidence out of Git.
 
 ## Configure Vade in cable order
 
 Add four machine sections to the private CLI configuration. Each
-`fabric.<peer>` value is **this machine's own address** on the rail to that peer,
-without a port. Use one verified primary rail consistently at both endpoints:
+`fabric.<peer>` value is **this machine's own address** on the rail to that
+peer, with no port. Pick one verified primary rail and use it consistently at
+both ends:
 
-| Machine | Required fabric entries for the path |
+| Machine | Fabric entries it needs for a path |
 | --- | --- |
 | A | `fabric.B` = A's address on AB-keep |
 | B | `fabric.A` = B's address on AB-keep; `fabric.C` = B's address on BC |
 | C | `fabric.B` = C's address on BC; `fabric.D` = C's address on CD-keep |
 | D | `fabric.C` = D's address on CD-keep |
 
-Replace A/B/C/D with the real section names only in private configuration.
-The `ssh` fields use management aliases reachable from the Mac, including the
-nonadjacent ranks. All four ranks need the same expanded absolute model and
-staged PTX paths and matching artifact hashes; follow the
-[CLI setup](../cli/README.md#multi-spark-source-setup).
+Put the real section names in place of A, B, C and D only in your private
+configuration. The `ssh` fields use management aliases the Mac can reach,
+including for ranks that are not cabled to each other. All four ranks need the
+same model path and the same staged PTX path, each written out in full
+(expanded and absolute), and their artifact hashes must match. The
+[CLI setup](../cli/README.md#multi-spark-source-setup) shows how.
 
-`vade up --sparks 4` takes the first four configured machines in order.
-Prefer an explicit ordered `--hosts` list when the configuration contains
-other machines. Preview with `--dry-run`, then launch with the same settings
-during the reserved hardware window. Use MTP 0 for the first smoke request.
-The launcher selects **logical path** topology for four Sparks, including when
-the physical cables form a ring: DA is then unused by Vade. Adding the DA
-fabric entries does not turn `vade up` into a ring launcher. Do not label that
-run as a ring measurement. A native ring gate must explicitly select
-`TP_TOPOLOGY=ring`, use all four neighbor addresses, and get its own golden set.
+`vade up --sparks 4` takes the first four configured machines, in order. If the
+configuration lists other machines too, prefer an explicit ordered `--hosts`
+list. Preview with `--dry-run`, then launch with the same settings during the
+reserved hardware window. Use MTP 0 (multi-token prediction off) for the first
+smoke request.
 
-For the native `vade test determinism` invocation, the two address arguments
-are **LISTEN and NEXT on each rank**. Fill this symbolic table privately;
+For four Sparks the launcher picks the **logical path** topology, even when
+the physical cables form a ring; Vade then leaves DA unused. Adding DA fabric
+entries does not turn `vade up` into a ring launcher, so do not label that run
+as a ring measurement. A native ring gate
+(a qualification run) must explicitly select `TP_TOPOLOGY=ring`, use all four
+neighbor addresses, and get its own golden set (saved reference answers).
+
+The native `vade test determinism` command takes two address arguments:
+**LISTEN and NEXT on each rank**. Fill in this symbolic table privately.
 `B-on-AB` means B's own primary address on the retained AB cable, and `PORT`
-is the same available native gate port everywhere:
+is one free port for the native gate run, the same on every rank:
 
 | Rank | Path LISTEN | Path NEXT |
 | --- | --- | --- |
@@ -164,35 +205,46 @@ is the same available native gate port everywhere:
 | C / 2 | `C-on-BC:PORT` | `D-on-CD:PORT` |
 | D / 3 | `D-on-CD:PORT` | `A-on-AB:PORT` (ignored) |
 
-For a native ring, replace A's LISTEN and D's NEXT with `A-on-DA:PORT`.
-All other entries stay the same. Supply real numeric socket addresses even
-for the two ignored path arguments. These are direct `flash-bench` data
-endpoints; no additional port offset is applied. The product server has a
-separate control port and uses control-port-plus-one for data, managed by
-`vade up`. Do not confuse a local `fabric.<peer>` entry with NEXT, which names
-the **next peer's** incoming interface.
+For a native ring, replace A's LISTEN and D's NEXT with `A-on-DA:PORT`; every
+other entry stays the same. Give real numeric socket addresses even for the
+two ignored path arguments.
 
-The current path transport discovers the second rail on each neighbor link;
-large transfers can use both rails when discovery succeeds. The existing
-closed-ring transport uses one primary rail per neighbor. Verify both rails
-at the OS level regardless, and record actual transport use. The parked
-closed-ring RDMA optimization is not part of this preparation change.
+Do not confuse NEXT with a local `fabric.<peer>` entry: NEXT names the **next
+peer's** incoming interface. These addresses go straight to `flash-bench` as
+data endpoints, with no extra port offset added. The product server works
+differently: it has a separate control port, uses the control port plus one for
+data, and `vade up` manages that for you.
+
+The current path transport discovers the second rail on each neighbor link,
+and large transfers can use both rails when discovery succeeds. The existing
+closed-ring transport uses one primary rail per neighbor. Check both rails at
+the OS level either way, and record which ones the transport actually uses.
+This preparation work does not include the closed-ring RDMA optimization,
+which is on hold for now.
 
 ## Qualify, then restore or hand over
 
-Use the [world-four golden procedure](../cli/docs/test.md) and the assigned
-external four-Spark qualification plan. First preserve world-two bytes against
-the base on the same pair; then capture world-four goldens twice and compare
-only matching world/topology/rank-order settings. Different Spark counts may
-produce different bytes, but each setup must remain exactly repeatable and
-pass quality checks. A Mac check or a successful startup does not establish this.
+Follow the [world-four golden procedure](../cli/docs/test.md) ("world four"
+means four ranks; goldens are saved reference answers) and the external
+four-Spark qualification plan assigned to you. First, on the same pair,
+confirm that the world-two (two-rank) bytes still match the base. Then capture
+world-four goldens twice, and compare only runs with matching world, topology
+and rank-order settings. Different Spark counts may produce different bytes,
+but each setup must repeat exactly and pass the quality checks. Neither a check
+on the Mac nor a successful startup shows this.
 
-After the four-rank work, use `vade down` with the four-rank configuration and
-verify all four GPUs are empty. To restore the pairs, unplug both ends of BC
-and DA (if present). Return AB-move to A/B's recorded sockets and CD-move to
-C/D's recorded sockets. Restore the exact saved moved-rail profiles, addresses
-and aliases using the administrator's rollback procedure; restore any retained
-rail that was renumbered too. Verify both rails of **both cables in each pair**
-before relaunching the original two-rank configurations. Physical recabling
-alone does not restore the old network. Release reservations only after the
-operator has accepted either the verified four-node handover or the restored pairs.
+When the four-rank work is done, run `vade down` with the four-rank
+configuration and check that all four GPUs are empty. Then restore the pairs:
+
+1. Unplug both ends of BC and of DA (if present).
+2. Put AB-move back in A's and B's recorded sockets, and CD-move back in C's
+   and D's.
+3. With the administrator's rollback procedure, restore the exact saved
+   moved-rail profiles, addresses and aliases, and any kept rail that was
+   renumbered. Recabling alone does not bring back the old network.
+4. Check both rails of **both cables in each pair** before relaunching the
+   original two-rank configurations.
+
+Only after the operator has accepted either the verified four-Spark handover
+or the restored pairs, release the reservations and free the machines for
+other work.

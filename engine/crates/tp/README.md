@@ -32,13 +32,15 @@ network stack. TCP is the ordinary network fallback.</dd>
 
 ## Status at a glance
 
-**Qwen3-8B and Qwen3-32B run across Sparks. Same tokens as one Spark are
-recorded for Qwen3-8B; speed across Sparks is not measured on this build.**
+**With `tp-serve`, Qwen3-8B and Qwen3-32B run across Sparks. For Qwen3-8B we
+have recorded the same tokens as on one Spark; speed across Sparks is not
+measured on this build.**
 
 | Item | Status |
 | --- | --- |
-| Qwen3-8B, Qwen3-32B (BF16) | Supported |
-| Other models | One Spark only |
+| Qwen3-8B, Qwen3-32B (BF16) on `tp-serve` | Supported |
+| Other models on `tp-serve` | Not supported |
+| Qwen3.8-Flash-Next across Sparks | `flash-serve`, [below](#flash-serve-for-qwen38-flash-next) |
 | Rank counts | Any from 2 to 64 |
 | Transport | RDMA or TCP |
 | Serving | `tp-serve` (rank 0) |
@@ -47,56 +49,21 @@ recorded for Qwen3-8B; speed across Sparks is not measured on this build.**
 | Three or more physical Sparks | Not re-checked |
 | Qwen3-32B across ranks | Not re-checked |
 
-- **Models:** dense Qwen3-8B and Qwen3-32B, official BF16. Qwen3-30B-A3B,
-  Qwen3.8-27B and Gemma 4 31B are not supported here; they run on one Spark.
-- **Transport:** RDMA over the QSFP cables, or TCP. `tp-serve` serves the
-  chat and completion APIs on rank 0.
-- **Same tokens as one Spark:** recorded for Qwen3-8B with one and two ranks,
-  on the short, medium and long checks. Speed across Sparks on this build is
-  **not measured**; earlier results are [historical](MEASUREMENTS.md).
+- **Models:** `tp-serve` supports dense Qwen3-8B and Qwen3-32B, official
+  BF16. Its typed FP8 route for hybrid Qwen3.5, 3.6 and 3.8 checkpoints is
+  unchecked and not supported. Qwen3-30B-A3B, Qwen3.8-27B and Gemma 4 31B run
+  on one Spark with [spark-serve](../serve/README.md). Qwen3.8-Flash-Next runs
+  across Sparks with this crate's other server, `flash-serve`.
+- **Transport and serving:** RDMA over the QSFP cables, or TCP; `tp-serve`
+  serves the chat and completion APIs on rank 0.
+- **Same tokens:** recorded with one and two ranks, on the short, medium and
+  long checks. Earlier speed results are [historical](MEASUREMENTS.md).
 - **Not re-checked on this build:** three or more physical Sparks (the
   launcher supports them), and Qwen3-32B across ranks (the loader and TP path
   exist). Details: [what has been tested](../../docs/multi-spark.md#what-has-been-tested).
 
-## Flash-Next research service
-
-`flash-serve` serves official Qwen3.8-Flash-Next FP8 across ranks. A cold standalone
-chat uses strict multi-token prediction (MTP) at depth 2 by default: it guesses
-up to two tokens, then the main model checks them. Strict drafting preserves
-the main model's token choices, including fixed-seed sampled requests. Overlapping
-chats stay plain through completion, even after peers finish. Cached continuations
-without retained draft history also stay plain; they reuse target state without
-rebuilding draft history.
-
-**131,072 tokens is the product context default for Flash-Next users.**
-`flash-serve` accepts an optional positional context immediately after the model
-folder, defaulting to `131072`; when omitted, the HTTP bind address follows the
-model folder. `vade up` and the tracked launch adapters use the same
-default. Explicit context values still override it. The output cap defaults to
-65,536 tokens, bounded by context; explicit limits may equal context and replies
-are capped at the room left after the tokenized prompt. Automatic pool and cache
-sizing fund one full-context session or refuse startup with a plain memory
-message. Native qualification of this default is pending; older timing
-comparisons use an explicit 32,768-token context.
-See [Server and API](../../docs/server.md#start-it).
-
-Pass `--mtp 0` on every rank to keep plain decoding, or choose a depth with
-`--mtp 1..3`. `vade up` follows the same depth-2 default; explicit `MTP=0`
-or `vade up --mtp 0` keeps it plain. A request can also select
-`"draft":"plain"`. The response's `model_draft_used` says whether model drafting
-ran; the configured `mtp_depth` is only its ceiling.
-
-Automatic memory sizing includes the MTP weights and the shared drafting
-workspace before assigning room to sessions and the prompt cache. Both ranks
-must retain their model weights in device memory. The depth-2 policy was chosen
-from earlier single-chat measurements; the new default's startup, token identity
-and timing still need a new two-Spark check. Mac checks do not qualify them.
-
-In the historical memory measurement, two ranks with an 8192-token context needed 1,383,226,112 extra
-resident weight bytes and a 191,993,600-byte shared workspace reservation per
-rank. The default prefix-cache budget fell from 2,338,127,184 to 414,558,032
-bytes per rank, so long multi-turn histories could reuse less. Those figures
-describe that earlier build, not the current automatic memory plan.
+The `flash-serve` server for Qwen3.8-Flash-Next is covered
+[at the end of this page](#flash-serve-for-qwen38-flash-next).
 
 ## Where it fits
 
@@ -158,8 +125,8 @@ then one combined kernel file.** Run them from `engine/`, after
 - Native BF16 decode loads from `target/tp.ptx`. Layer kernels are embedded at
   build time from the shared kernel build.
 
-Host-only checks, which test no GPU or cable, from `engine/` after building
-the shared kernels on either macOS or Linux. These match
+Host-only checks test no GPU or cable. Run them from `engine/` after building
+the shared kernels, on either macOS or Linux. They match
 [CI](../../../.github/workflows/ci.yml); use its `RUSTFLAGS=-D warnings` setting
 and the [Linux fake-CUDA setup](../../docs/validation.md#on-any-computer-host-checks)
 when no CUDA library is available:
@@ -312,8 +279,9 @@ final scores are rounded to BF16 before a token is chosen, as on one Spark.
 <summary><b>Hybrid mode, step by step</b></summary>
 
 1. Each rank keeps one full copy of the weights, with views of its share.
-2. Prompts and answers run on the shares, as in shard-only mode, with a BF16
-   KV cache. Answers match one Spark token for token.
+2. Prompts and answers run on the shares, as in shard-only mode (where each
+   rank loads only its share), with a BF16 KV cache. Answers match one Spark
+   token for token.
 
 **Prompt splitting is opt-in** (`TP_SERVE_SEQUENCE_PREFILL=1`, hybrid only):
 
@@ -326,9 +294,9 @@ With the opt-in, every hybrid session keeps an FP32 KV cache for that
 hand-off, not the model's BF16, so answers can differ from one Spark. That is
 why it is off by default.
 
-Without it, the default reads long prompts with TP alone. The optional FP32
-handoff changes arithmetic; qualify output tokens for the exact model and
-request set before selecting it. Historical speed alone does not qualify it.
+Without the opt-in, long prompts are read with TP alone. Before you turn it
+on, check the output tokens for your exact model and requests; fast historical
+results alone are not enough.
 
 Without prompt splitting, hybrid mode only costs memory: its chats do not
 share a pass. So `TP_SERVE_HYBRID=auto`, the default, picks it only with
@@ -368,8 +336,8 @@ KV changes answers. Default: <code>0</code>.</dd>
 <dd><code>0</code> uses TCP. Also covers sequence prefill unless
 <code>SEQPAR_RDMA</code> is set. Default: RDMA.</dd>
 <dt><code>TP_DUAL_RAIL</code></dt>
-<dd><code>0</code> uses one rail per cable when two are present. Default:
-both.</dd>
+<dd><code>0</code> uses one network link (rail) per cable when a cable carries
+two. Default: both.</dd>
 <dt><code>TP_RDMA_SMALL</code></dt>
 <dd><code>0</code> turns off the small preposted message buffers. Default:
 on.</dd>
@@ -390,12 +358,9 @@ if possible.</dd>
 
 ## Security
 
-**Every connection between machines needs the same secret, and traffic after
-that check is not encrypted.**
-
-- Every connection between machines needs the same `SEQPAR_CONTROL_SECRET`.
-- **Traffic after that check is not encrypted.** Use a private, trusted
-  network only.
+**Every connection between machines needs the same `SEQPAR_CONTROL_SECRET`.
+Traffic after that check is not encrypted, so use a private, trusted network
+only.**
 
 <details>
 <summary><b>How the secret and the start-up check work</b></summary>
@@ -409,6 +374,59 @@ its arguments, the topology and the transport options. They do not compare
 the model files themselves.
 
 </details>
+
+## flash-serve for Qwen3.8-Flash-Next
+
+`flash-serve` serves Qwen3.8-Flash-Next. It is also the server behind the
+release default, the FP4-Local checkpoint that `vade up` starts with a
+32,768-token context. This section covers the official FP8 checkpoint across
+ranks, which `vade up --fp8-legacy` selects on two Sparks.
+
+By default, a cold chat (nothing cached) running on its own uses strict
+multi-token prediction (MTP) at depth 2: it guesses up to two tokens, then the
+main model checks them. Strict drafting keeps the main model's token choices,
+including for fixed-seed sampled requests. Two cases decode plainly instead:
+
+- Chats that overlap with others, until they finish, even after the other
+  chats end.
+- Cached continuations without retained draft history. They reuse the main
+  model's state without rebuilding draft history.
+
+Pass `--mtp 0` on every rank to keep plain decoding, or choose a depth with
+`--mtp 1..3`. `vade up --fp8-legacy` uses the same depth-2 default; `MTP=0`
+or `vade up --fp8-legacy --mtp 0` keeps it plain. A request can also select
+`"draft":"plain"`. The response's `model_draft_used` says whether model drafting
+ran; the configured `mtp_depth` is only its ceiling.
+
+Automatic memory sizing includes the MTP weights and the shared drafting
+workspace before assigning room to sessions and the prompt cache. Both ranks
+must retain their model weights in device memory. The depth-2 policy was chosen
+from earlier single-chat measurements; the new default's startup, token
+identity and timing still need a new check on two real Sparks. A check run on a
+Mac does not count.
+
+In the historical memory measurement (two ranks, 8192-token context), each
+rank needed:
+
+- 1,383,226,112 extra bytes of resident weights;
+- a 191,993,600-byte shared workspace.
+
+The default prefix-cache budget fell from 2,338,127,184 to 414,558,032 bytes
+per rank, so long multi-turn histories could reuse less. These figures
+describe that earlier build, not the current automatic memory plan.
+
+**The FP8 checkpoint defaults to a context of 131,072 tokens.** To choose
+another, give a context length as the `flash-serve` argument right after the
+model folder. When you leave it out, the HTTP bind address takes that place.
+`vade up --fp8-legacy` uses the same `131072` default, and an explicit context
+value still overrides it. This default has not yet been checked on a real
+Spark; older timing comparisons use an explicit 32,768-token context. See
+[Server and API](../../docs/server.md#start-it).
+
+The output cap defaults to 65,536 tokens, bounded by context. Explicit limits
+may equal context, and replies are capped at the room left after the tokenized
+prompt. Automatic pool and cache sizing makes room for one full-context
+session, or refuses to start with a plain memory message.
 
 **Where next:** [Multiple Sparks](../../docs/multi-spark.md) ·
 [Historical scale measurements](MEASUREMENTS.md) ·

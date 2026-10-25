@@ -4,11 +4,12 @@
 app sees it.** It times the first token, the answer speed, many concurrent
 requests, long prompts and follow-up turns.
 
-The `vade-bench` crate is a first-party, standard-library-only library linked
-into the CLI. It builds no separate executable. The default `vade bench`
-protocol runs capped concurrent chats, with optional cold 8k probes,
-while retaining its metrics and JSON receipt fields. See the
-[current command guide and complete migration option table](../../../docs/benchmarks.md#run-vade-bench).
+The `vade-bench` crate is our own library, written against the Rust standard
+library alone. It is linked into the CLI and builds no separate program. By
+default, `vade bench` times several capped chats at once, and it can also run
+cold (uncached) 8k prompt probes. It keeps the same metrics and JSON receipt
+fields as before (a receipt is the saved record of a run). See the
+[current command guide and the full table of old and new options](../../../docs/benchmarks.md#run-vade-bench).
 
 ## Default timing benchmark
 
@@ -21,46 +22,54 @@ vade bench
 
 The CLI discovers the selected installation's recorded endpoint, as
 `vade verify` does. The benchmark reads the model ID from `/health` and writes
-`./vade-bench.json`. If health omits a model ID, it uses
-`qwen3.8-flash-next-fp4-local`. Supply `--url URL` for another running server,
-`--model ID` to select the model explicitly, or `--output PATH` to retain a
-separate receipt.
+`./vade-bench.json`. If `/health` gives no model ID, it uses
+`qwen3.8-flash-next-fp4-local`. Pass `--url URL` for another running server,
+`--model ID` to pick the model yourself, or `--output PATH` to keep a separate
+receipt.
 
-By default, requests use the server's drafting policy as served. Every request
-records `requested_draft_mode` (`server`, `plain` or `strict`); the receipt header
-uses `decoding.request_mode` and labels drafting `server-default`, `off` or
-`strict-requested`. Only requests explicitly sent with `--draft plain` can
-produce a drafting-off receipt. Neither override requires restarting the server.
-
-`decoding.server_mtp_depth` copies the `/health` depth verbatim, with its source
-field and the label "server-reported (known to read 0 on the FP4-Local path until
-the health fix lands)". The receipt also records `server_build_sha` from `/health`.
-The health fix will flow through without a benchmark change. `draft_observations`
-retains response-reported modes and depths separately; these reports do not prove
-actual draft use. Health depth zero never turns a server-default measurement into
-a drafting-off measurement. Explicit request overrides and stable server identity
-are still checked; contradictory sampling replies invalidate rates.
+Drafting is Vade's speculative decoding. By default, requests use whatever
+drafting policy the server has. Only requests sent with `--draft plain` can
+produce a drafting-off receipt, and neither `--draft plain` nor
+`--draft strict` needs a server restart:
 
 ```sh
 vade bench --draft plain --output vade-bench-plain.json
 vade bench --help
 ```
 
+Every request records `requested_draft_mode` (`server`, `plain` or `strict`);
+the receipt header uses `decoding.request_mode` and labels drafting
+`server-default`, `off` or `strict-requested`.
+
+`decoding.server_mtp_depth` copies the depth that `/health` reports, word for
+word, along with the field it came from. On the FP4-Local path this value
+currently reads 0 even when drafting is on, and the receipt label says so.
+Once `/health` reports the real depth, the receipt will show it with no change
+to the benchmark. The receipt also records `server_build_sha` from `/health`.
+
+`draft_observations` keeps the modes and depths that responses report,
+separately; those reports do not prove that drafting was actually used. A
+health depth of zero never turns a server-default measurement into a
+drafting-off one. The client still checks any draft override you pass and
+that the server identity stays the same. Replies with contradictory sampling
+settings invalidate the rates.
+
 The default timing requests use a bundled offline writing prompt with greedy
-sampling, cache off and thinking off. They ignore EOS to generate the fixed
-output budget. Completion counts come from server usage; early stops and
-failed requests make the cohort ineligible for a rate. `--prompts FILE`
-replaces the bundled prompt with one prompt per nonempty UTF-8 line.
-`--self-test` checks streams and arithmetic locally.
+sampling, cache off and thinking off. They ignore the end-of-sequence token
+(EOS) so every answer fills the fixed output budget. Completion counts come
+from server usage. An early stop or a failed request means the whole group of
+concurrent requests (the cohort) gets no rate. `--prompts FILE` replaces the
+bundled prompt with one prompt per nonempty UTF-8 line. `--self-test` checks
+streams and arithmetic locally.
 
 ## Retained development suite
 
-The rest of this page describes the older development suite, selected with
-`vade bench --suite`. Its existing HTTP, report, tokenizer and memory-probe code
-is reused, keeping those workloads available through the same command. Its
-receipt format and prompt definitions differ from the default timing protocol;
-it does not replace a named frozen scoreboard client. Both paths count real
-tokens, never streamed chunks.
+The rest of this page covers the older development suite, which you select
+with `vade bench --suite`. It reuses the existing HTTP, report, tokenizer and
+memory-probe code, so those workloads stay available through the same command.
+Its receipt format and prompt definitions differ from the default timing
+protocol, and it does not replace a named frozen scoreboard client. Both paths
+count real tokens, never streamed chunks.
 
 <details>
 <summary><b>Terms on this page</b>: TTFT, decode rate, aggregate rate, prefill, RSS</summary>
@@ -86,15 +95,17 @@ it.</dd>
 ## Before you compare anything
 
 **The recorded scoreboards use a frozen client, not a fresh build of this
-folder.**
+folder.** A frozen client is a pinned client build that stays unchanged.
 
 <dl>
 <dt>Frozen client <code>1d80e7c</code></dt>
 <dd>The Qwen3 scoreboards in
 <a href="../../docs/benchmarks.md">Benchmarks</a>.</dd>
 <dt>Frozen client 4</dt>
-<dd>Gemma and Qwen3.8 gates, and API-adapted TensorRT-LLM rows. Its Qwen3
-request bodies are byte-identical to <code>1d80e7c</code>.</dd>
+<dd>Version 4 of the frozen client, used for Gemma and Qwen3.8 gate runs (the
+pass/fail comparisons a change has to clear) and for TensorRT-LLM rows with
+requests adapted to its API. Its Qwen3 request bodies are byte-identical to
+<code>1d80e7c</code>.</dd>
 <dt>A build of this checkout</dt>
 <dd>Development only. It does not replace a named frozen client.</dd>
 </dl>
@@ -106,10 +117,13 @@ arguments and the repeat and noise rules.
 <details>
 <summary><b>How the workloads differ</b></summary>
 
-- The frozen SIXTEEN prompt set cycles prose, code and reasoning prompts,
-  each with a reader suffix.
-- This checkout's ordinary concurrency case repeats its prose prompt with
-  reader suffixes. Its shared-system case cycles the three bases.
+- The frozen client's SIXTEEN test (16 different requests sent at once)
+  cycles prose, code and reasoning prompts, each with a reader suffix.
+- This checkout's ordinary concurrency case repeats its prose prompt and adds
+  a numbered closing line to each copy. Its shared-system case cycles the
+  three base prompts (prose, code and reasoning), each with a reader suffix:
+  a closing line that asks for a separate response for one numbered reader,
+  so every chat's text is different.
 
 </details>
 
@@ -167,8 +181,9 @@ Setting up:
 - `--tokenizer` points at the model folder, so prompts are sized exactly.
   Setting `MODEL_DIR` does the same. Without it, long prompts are only roughly
   sized, and the true count comes from the server's usage report.
-- For default gates, leave server sizing automatic and use the named frozen
-  client.
+- For a gate run (a pass/fail comparison a change has to clear), leave the
+  server's sizing on automatic and use the named frozen client, not this
+  build.
 
 Running:
 
@@ -182,13 +197,14 @@ Running:
 
 ## What the development suite runs
 
-**Five cases, all run by `vade bench --suite` by default (`--only all`).** Chats at once can exceed
-the server's active slots; queueing time is included.
+**Five cases, all run by `vade bench --suite` by default (`--only all`).**
 
 - **Single chats** (`--only decode`). Prose, code-editing and reasoning
   prompts. 32 answer tokens, three cold runs each.
-- **Chats at once** (`--only concurrency`). 1, 4, 8 and 16 prose chats with reader
-  suffixes in this checkout. The frozen client uses mixed bases.
+- **Chats at once** (`--only concurrency`). 1, 4, 8 and 16 prose chats, each
+  with its own numbered closing line in this checkout. The frozen client
+  mixes prose, code and reasoning prompts. This case can ask for more chats
+  than the server has active slots; the time they spend queueing is included.
 - **Follow-up with a saved session** (`--only cache`). A first turn, three
   follow-ups that reuse it, and the same follow-up sent fresh.
 - **Priority** (`--only priority`). A short main chat, alone and then while a
@@ -199,7 +215,8 @@ the server's active slots; queueing time is included.
 <details>
 <summary><b>More modes</b>: follow-up, shared system prompt, sizes, request files</summary>
 
-The two modes behind the recorded rival tables:
+The two modes behind the recorded tables that compare Vade with other
+engines:
 
 - `--only followup --tokenizer MODEL --max-tokens 128 --repeats 1`. A
   28,672-token first turn, then the full conversation plus a short new
@@ -263,8 +280,9 @@ How results are reported:
 
 ## Settings
 
-**Development-suite defaults are greedy (temperature 0), seed omitted, thinking off.** Precision and
-Spark count are labels only; the client cannot check them.
+**Development-suite defaults are greedy (temperature 0), seed omitted,
+thinking off.** Precision and Spark count are labels only; the client cannot
+check them.
 
 <details>
 <summary><b>All options, with defaults</b></summary>
@@ -353,9 +371,10 @@ Limits of the probe:
 
 - It reports peaks over the server's whole life, not per case. For a clean
   peak per case, restart the server before each one.
-- **It sees only those three calls.** Once a Vade KV cache passes 2 MiB, it
-  grows through CUDA virtual memory, which the probe does not see. Its totals
-  leave that memory out.
+- **It sees only those three calls.** Once one of Vade's KV caches (the
+  attention state stored for a conversation) passes 2 MiB, it grows through
+  CUDA virtual memory, which the probe does not see. Its totals leave that
+  memory out.
 - Writing the memory file adds a little time to each allocation, which can
   show up in TTFT. Steady decoding allocates nothing, so it is not affected.
 
@@ -395,7 +414,7 @@ fair run for the other cases.
   with `"vade": null` in its receipt and a stderr warning that sampling is
   unverified. The JSON report's `missing_sampling_echoes` counts all such
   replies, including background and unfinished requests. The `flash-bench`
-  server gate still rejects missing echoes.
+  server gate, a separate pass/fail check, still rejects missing echoes.
 - When a request times out, the client sends one extra byte. Vade reads that
   as a cancellation.
 - It is not a general OpenAI SDK and does not speak TLS.
@@ -422,50 +441,93 @@ and do not fail the run by themselves.
 
 </details>
 
-**Where next:** [Benchmarks](../../docs/benchmarks.md) · [Server and API](../../docs/server.md) ·
-[spark-serve](../../crates/serve/README.md)
-
 ## Paired kernel microbench
 
-`cargo build --release --offline --manifest-path engine/tools/bench/Cargo.toml
---bin kernel-bench` builds the independent Linux CUDA Driver client. It uses
-only the standard library and existing first-party ABI/SHA code. The CUDA FFI
-module explicitly permits unsafe code; the rest of this crate denies it.
+You only need this if you are changing GPU kernels; it is not a serving
+benchmark.
 
-Run `kernel-bench --a A.ptx --x X.ptx` with complete production layer PTX files.
-Both modules share one process, stream and fixture. `--list` shows 26 cases;
-`--case NAME,...` selects them; `--ms 5000` sets measured GPU milliseconds per
-arm and case. A complete try targets about five minutes, excluding first JIT.
-`--self-test` checks host SHA/statistics/shapes. For GPU identity testing, pass
-the same PTX to both arms and repeat in three separate processes.
+`kernel-bench` times two sets of production GPU kernels against each other in
+one process, for example a baseline (A) and a candidate (X). Each side being
+timed is an arm. The kernels come as PTX, NVIDIA's GPU assembly code. This
+tool shows where kernel time goes. It does not measure end-to-end serving
+speed or check that answers stay exact.
 
-Dense Q/O/GDN-in/GDN-out shapes use M=1/8/16. M16 follows the product's
-`flash_bf16_mma` dispatch because the latency entry only supports M<=8.
-FP4 gate/down use ten selected experts at widths 1/4/8/16. Prompt cases use
-four 2048-row chunks with balanced top-10 routes over all 512 experts. These
-are synthetic finite physical operands at real shapes, not checkpoint answers
-or measured model routing distributions. HC up and the full vocabulary head
-use their product layouts and grids. Every case rotates identical weights
-through at least 1 GiB in contiguous arenas (above the 64 MiB minimum),
-with at least two distinct physical copies to average cache placement.
+### Build and run
 
-Each copy's complete logical output is poisoned, launched and checked finite
-before timing. All copies and both arms must have the same output SHA-256;
-head hashes include its per-CTA selection partials. Any mismatch exits nonzero.
+This builds the independent Linux CUDA Driver client:
+
+```sh
+cargo build --release --offline --manifest-path engine/tools/bench/Cargo.toml --bin kernel-bench
+```
+
+It uses only the Rust standard library, plus our own kernel-parameter (ABI)
+and SHA-256 code. Only the module that calls the CUDA driver, and the shared
+kernel-parameter code, may use unsafe code; the rest of the crate denies it.
+
+Run `kernel-bench --a A.ptx --x X.ptx` with complete production layer PTX
+files. Both modules share one process, stream and fixture. A full run aims for
+about five minutes, not counting the first JIT compile. The main options:
+
+- `--list` prints every case with its kernel and shape.
+- `--case NAME,...` selects cases.
+- `--ms 5000` sets the measured GPU milliseconds per arm and case.
+- `--self-test` checks the host-side SHA-256, statistics and shapes.
+
+For GPU identity testing, pass the same PTX to both arms and repeat in three
+separate processes.
+
+### What the cases cover
+
+- The dense attention projections (Q and O) and the GDN input and output
+  projections run with M, the number of token rows in one launch, set to 1, 8
+  or 16. GDN is GatedDeltaNet, the model's linear-attention layer. All three
+  sizes use the low-latency `flash_bf16_mma_latency` kernel, as the product
+  does for up to 16 rows.
+- FP4 gate and down use ten selected experts at widths 1, 4, 8 and 16.
+- Prompt cases use four 2048-row chunks with balanced top-10 routes over all
+  512 experts.
+- HC up, a hyper-connection kernel, and the full vocabulary head use their
+  product layouts and grids. Hyper-connections keep four parallel residual
+  streams in the model.
+
+The operands are synthetic finite values at real shapes, not checkpoint
+answers or measured model routing distributions. Every case rotates identical
+weights through at least 1 GiB in contiguous arenas (above the 64 MiB
+minimum), with at least two distinct physical copies so that cache placement
+averages out.
+
+### How it checks and times
+
+Before timing, each copy's complete logical output is filled with a poison
+pattern, the kernel is launched, and the output is checked to be finite. All
+copies and both arms must have the same output SHA-256; the vocabulary head's
+hashes also include its per-CTA (per GPU thread block) selection partials.
+Any mismatch exits nonzero.
+
 CUDA graphs replay only the selected kernel between two `%globaltimer` stamp
-nodes. CUDA events bracket graph replay; JSONL reports both timings per kernel,
-min/median/max, within-process CV, PTX/source hashes, stored bytes and grade.
-The small stamp/graph scheduling cost is included; no host allocation, upload
-or hashing is timed. Arms alternate, reversing order on successive samples.
-Process-to-process CV must be calculated over the three process medians.
+nodes. Each case warms both graphs for at least 250 ms before it collects
+samples, so even small graphs get more than a few milliseconds for the clock
+to settle. CUDA events bracket each graph replay. The arms alternate, and
+their order reverses on successive samples. The small stamp and graph
+scheduling cost is included in the timings; host allocation, upload and
+hashing are not timed.
 
-Floor time is compulsory stored weight/input/output bytes / 230 GB/s; prompt
-cases also use 2MNK / 90 TFLOPS and take the larger floor. Grades are A+ >=95%,
-A >=85%, B >=65%, C >=40%, D >=15%, else F. This is attribution tooling, not an
-end-to-end serving speed or answer-exactness qualification.
+For each kernel, the JSONL output reports both timings, min/median/max, the
+within-process CV (coefficient of variation: how widely the timings spread),
+PTX and source hashes, stored bytes and the grade. Calculate the
+process-to-process CV over the three process medians.
 
-Each case warms both graphs for at least 250 ms before collecting samples,
-so small graphs do not receive only a few milliseconds of clock settling.
+### Floor and grades
+
+Floor time is the time to move the compulsory stored weight, input and output
+bytes at 230 GB/s. Prompt cases also compute 2MNK / 90 TFLOPS and take the
+larger floor. A kernel's percentage is its floor time divided by its measured
+median time per launch, times 100, so 100 % would mean it ran exactly at the
+floor. The grade follows from that percentage: A+ at 95 % or more, A at 85 %,
+B at 65 %, C at 40 %, D at 15 %, and F below 15 %.
 
 For placement diagnosis, `VADE_KBENCH_ARENA_PAD_MIB` reserves 0..64 MiB
 before each fixture; default zero. Allocation/upload stays outside timings.
+
+**Where next:** [Benchmarks](../../docs/benchmarks.md) · [Server and API](../../docs/server.md) ·
+[spark-serve](../../crates/serve/README.md)
