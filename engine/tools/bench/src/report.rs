@@ -1,3 +1,7 @@
+//! Development-suite receipts, summary statistics and optional memory sampling.
+//!
+//! `Record` groups workload replies; `Report` writes JSON and summary lines.
+//! `Monitor` samples process memory and reads optional allocation ledgers.
 use crate::{
     Config, Result,
     http::{Reply, get},

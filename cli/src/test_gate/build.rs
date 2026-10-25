@@ -1,4 +1,6 @@
-//! The four build-gate steps, kept in the same order as the transition script.
+//! Ordered kernel, workspace, exported-workspace and final check steps.
+//! On macOS the first step checks only the host kernel builder; the final check
+//! uses Cargo's default members. Full host validation is specified in AGENTS.md.
 
 use super::{TempDir, exec_logged};
 use std::ffi::OsString;

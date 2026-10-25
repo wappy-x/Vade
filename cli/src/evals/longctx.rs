@@ -514,7 +514,7 @@ fn aggregate(documents: &[Comparison], length: i64) -> [Bucket; 6] {
     result
 }
 
-// Python strip/splitlines includes these control characters as well as Unicode whitespace.
+// Python strip includes these control characters as well as Unicode whitespace.
 fn py_whitespace(c: char) -> bool {
     c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}')
 }

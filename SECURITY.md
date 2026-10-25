@@ -23,6 +23,10 @@ The form is also at
 Please don't open a public issue, pull request or discussion about a
 vulnerability before a fix is out.
 
+If the **Security** tab has no **Report a vulnerability** button, or the form
+above doesn't open for you, write to the maintainers at the contact listed in
+the repository's **About** section.
+
 A useful report includes:
 
 - the Vade version (`vade --version`) or commit;
@@ -52,7 +56,8 @@ CUDA, your SSH server or client, the operating system, or the model's
 checkpoint. So is anything that needs an attacker who already controls your
 account on the Spark or the controller. Wrong or unexpected model answers are
 bugs rather than vulnerabilities; please report them through the normal issue
-form.
+form, or, while Issues are off for this repository, through the maintainers'
+contact listed in the repository's **About** section.
 
 ## How Vade is exposed by default
 

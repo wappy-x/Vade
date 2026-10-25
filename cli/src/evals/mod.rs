@@ -1,4 +1,6 @@
-//! Local evaluation tools. No lifecycle configuration or GPU ownership is needed.
+//! Host-side evaluation tools for the frozen FP8 long-context suite and GDN checks.
+//! Preparation and scoring are offline; capture sends requests to an authorized
+//! running engine. These tools do not configure or own the engine lifecycle.
 //!
 //! - `prepare`: build the frozen long-context inputs; `capture`: replay them
 //!   against a server; `longctx`: score and compare the captures.

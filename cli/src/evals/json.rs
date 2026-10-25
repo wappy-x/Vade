@@ -5,7 +5,8 @@ use std::path::Path;
 pub const MAX_INTEGER_DIGITS: usize = 4300;
 
 /// A JSON value. Objects keep their key order, and integers too large for `i64`
-/// keep their exact digits, so receipts round-trip byte for byte.
+/// keep their exact digits. Serialization uses the receipt format's spelling;
+/// parsing does not preserve input whitespace, escapes or repeated object keys.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Null,

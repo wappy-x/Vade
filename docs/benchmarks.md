@@ -6,15 +6,127 @@ build only, not for later code changes. The older FP8 measurements are kept
 at the end of the page, as history.
 
 A **receipt** is the saved record of one run: its build, its settings and what
-it measured. The result folders behind the current tables are in
+it measured. The result folders behind the 2026-10-24 tables are in
 [bench/receipts/2026-10-24](../bench/receipts/2026-10-24/README.md), as
 sanitized copies with private details such as hostnames replaced. The
-[receipt status](../bench/receipts/README.md) page says what is public.
+[receipt status](../bench/receipts/README.md) page says what is public. The
+2026-10-25 cards in the first section are not in the repository yet; each row
+names its result folder.
+
+## Current (2026-10-25, main 80ac2d4, home DGX Sparks)
+
+These are RigMark cards measured on the morning of 2026-10-25 on our own DGX
+Sparks, on main `80ac2d4` and on `6cb46bf`, the main commit from earlier that
+morning; each row names its commit. Every number is copied from the card in
+the result folder named on its row, and that folder's README gives the boxes,
+launcher and settings. Each card passed its **15/15** basic output checks.
+Unlike the v0.1.0 cards, these did not install from the public repository:
+each ran a prebuilt payload of its commit, installed and hash-checked on every
+Spark.
+
+There is no one-Spark card in this set. The one-Spark rows for comparison are
+in the [previous section](#previous-2026-10-24-v010-release-5a22651), measured
+on 2026-10-24 at `5a22651`.
+
+**FP4-Local recipe.** Model `nvidia/Qwen3.8-Flash-Next-FP4-Local`; the lab
+launcher with the `vade up --sparks 2` or `--sparks 4` controller defaults
+(context 32768, output 8192, MTP 3); the layer pipeline, each Spark holding a
+slice of the model's layers; greedy decoding; cache off; thinking OFF. Each
+card ran single-stream prose, code and structured writing **5 times** with an
+**8192-token cap**, a cold 8K prompt **3 times**, and C1/C2/C4/C8 for **3
+rounds** with a **256-token cap**. In the ON cards requests are sent as they
+are (drafting is the server default); in the OFF cards every request sends
+`"draft":"plain"`. The OFF and ON card of a pair ran on one server start,
+except the `80ac2d4` pair, where the OFF card ran on a second start of the
+same launcher, payload and flags.
+
+**FP8 recipe.** Checkpoint `Qwen/Qwen3.8-Flash-Next-FP8`; the lab launcher
+`scripts/nic-flash2.sh`, not the public `vade up` path (context 32768, output
+16384, MTP 2); the world-2 ring or the world-4 path; greedy; cache off for
+the decode and concurrency rows (the cold 8K pair includes a replay that
+restores all 8192 tokens; the cold numbers published here restore zero);
+thinking OFF. Three things differ from the FP4-Local cards. The cold 8K prompt
+was measured **once** (one cold/replay pair instead of three) because that
+path takes longer per cold prompt than FP4-Local (6.00 to 7.05 s measured
+in these cards), so one pair kept the run short. Drafting on FP8 works only at one chat: in the ON cards the
+single-stream, prefill and C1 responses were served at draft depth 2, and
+every C2, C4 and C8 response was served plain, so the ON and OFF cards differ
+only in the one-chat columns. And the `6cb46bf` ON and OFF cards of each
+size ran on one server start with **62/62** identical token ids between them,
+as their READMEs record.
+
+In the tables, prose, code and structured are one chat at a time, in tok/s.
+C1, C2, C4 and C8 are 1, 2, 4 and 8 chats at once, in tok/s for the whole
+group. Cold 8K prompt is the seconds to the first token after an 8K-token
+prompt the server has not seen. Structured output is a predictable JSON
+workload, not a measure of general agent performance.
+
+### FP4-Local
+
+| Setup | Drafting | Commit | Prose | Code | Structured | C1 | C2 | C4 | C8 | Cold 8K prompt (s) | Result folder |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Two DGX Sparks (home-1 + home-2) | OFF | `80ac2d4` | 27.9 | 27.9 | 28.2 | 27.3 | 46.9 | 80.9 | 136.2 | 2.80 | `2026-10-25_1003_qwen3.8-flash-next-nvfp4_local-2spark_80ac2d4-drafting-off-thinking-off` |
+| Two DGX Sparks (home-1 + home-2) | ON | `80ac2d4` | 42.0 | 79.3 | 98.6 | 60.8 | 91.2 | 142.9 | 176.4 | 2.80 | `2026-10-25_0941_qwen3.8-flash-next-nvfp4_local-2spark_80ac2d4-drafting-on-thinking-off` |
+| Two DGX Sparks (home-5 + home-6) | OFF | `6cb46bf` | 28.1 | 28.0 | 28.4 | 27.5 | 47.2 | 83.2 | 135.3 | 2.78 | `2026-10-25_0807_qwen3.8-flash-next-nvfp4_local-2spark_6cb46bf-drafting-off-thinking-off` |
+| Two DGX Sparks (home-5 + home-6) | ON | `6cb46bf` | 41.6 | 79.2 | 98.7 | 60.7 | 91.3 | 141.5 | 174.7 | 2.78 | `2026-10-25_0813_qwen3.8-flash-next-nvfp4_local-2spark_6cb46bf-drafting-on-thinking-off` |
+| Four DGX Sparks (home-1 + home-2 + home-3 + home-4) | OFF | `6cb46bf` | 28.4 | 28.4 | 28.7 | 27.8 | 47.8 | 82.6 | 137.5 | 2.19 | `2026-10-25_0836_qwen3.8-flash-next-nvfp4_local-4spark_6cb46bf-drafting-off-thinking-off` |
+| Four DGX Sparks (home-1 + home-2 + home-3 + home-4) | ON | `6cb46bf` | 42.1 | 80.3 | 101.4 | 62.1 | 92.3 | 141.3 | 136.5 | 2.19 | `2026-10-25_0842_qwen3.8-flash-next-nvfp4_local-4spark_6cb46bf-drafting-on-thinking-off` |
+
+### FP8
+
+| Setup | Drafting | Commit | Prose | Code | Structured | C1 | C2 | C4 | C8 | Cold 8K prompt (s) | Result folder |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Two DGX Sparks (home-1 + home-2) | OFF | `6cb46bf` | 26.7 | 26.6 | 26.7 | 25.7 | 39.8 | 63.2 | 94.5 | 6.00 | `2026-10-25_0905_qwen3.8-flash-next-fp8_local-2spark_6cb46bf-drafting-off-thinking-off` |
+| Two DGX Sparks (home-1 + home-2) | ON | `6cb46bf` | 34.0 | 47.6 | 49.2 | 42.2 | 40.8 | 64.5 | 94.8 | 6.12 | `2026-10-25_0853_qwen3.8-flash-next-fp8_local-2spark_6cb46bf-drafting-on-thinking-off` |
+| Two DGX Sparks (home-3 + home-4) | ON | `80ac2d4` | 34.0 | 48.0 | 49.1 | 42.1 | 40.4 | 63.8 | 94.8 | 6.14 | `2026-10-25_0945_qwen3.8-flash-next-fp8_local-2spark_80ac2d4-drafting-on-thinking-off` |
+| Four DGX Sparks (home-1 + home-2 + home-3 + home-4) | OFF | `6cb46bf` | 34.6 | 34.4 | 34.5 | 33.3 | 53.7 | 83.6 | 125.2 | 6.88 | `2026-10-25_0814_qwen3.8-flash-next-fp8_local-4spark_6cb46bf-drafting-off-thinking-off` |
+| Four DGX Sparks (home-1 + home-2 + home-3 + home-4) | ON | `6cb46bf` | 44.5 | 62.5 | 65.5 | 56.2 | 51.9 | 82.7 | 122.0 | 7.05 | `2026-10-25_0821_qwen3.8-flash-next-fp8_local-4spark_6cb46bf-drafting-on-thinking-off` |
+
+The FP8 drafting-OFF card at `80ac2d4` was not run; its README records a
+hard cutoff at 09:45.
+
+### Reading these cards
+
+**Drafting ON is the lever for one chat.** On the `80ac2d4` pair it took code
+from 27.9 to 79.3 tok/s, prose from 27.9 to 42.0 and structured from 28.2 to
+98.6. On four Sparks it took code from 28.4 to 80.3. On FP8 it took code from
+26.6 to 47.6 on two Sparks and from 34.4 to 62.5 on four.
+
+**A second or a fourth Spark does not make one chat faster on this build.**
+The FP4-Local world-2 and world-4 path is a layer pipeline: each Spark holds a
+slice of the layers, and one token's work passes from GPU to GPU, so at any
+moment one GPU is working on a given chat. That is why one chat with drafting
+ON wrote 79.3 tok/s of code on two Sparks and 80.3 on four, next to 76.7 on
+one Spark in the v0.1.0 card, and why drafting OFF sits at 27.9 on two Sparks
+and 28.4 on four, next to 27.8 on one. What more Sparks buy is prompt reading
+and room: the pipeline splits the prompt work, so the first token after a
+cold 8K prompt came in 2.80 s on two Sparks and 2.19 s on four, against 3.86
+s on one Spark in the v0.1.0 card, and the batched rates held as Sparks were
+added (C4 with drafting ON: 142.9 on two, 141.3 on four), with more memory
+behind them for context and parallel chats. In these cards the eight-chat
+rate did not rise with the fourth Spark: C8 with drafting ON was 176.4 on
+the `80ac2d4` pair and 136.5 on four Sparks, below that card's own C4. The
+receipts show why: on four Sparks all 24 eight-chat responses were served
+plain (draft depth 0), while on two Sparks 12 of the 24 were served with
+drafting at depth 3. "ON" names the requested default; the server falls
+back to plain decoding for eight chats on the four-stage pipeline on this
+build. That fallback is the next thing to fix.
+
+**The pipeline change the previous section promised is in these cards.** On
+two Sparks with drafting ON, code went from 65.1 tok/s on the v0.1.0 pair to
+79.3 at `80ac2d4`, prose from 38.3 to 42.0 and structured from 67.7 to 98.6,
+while the cold 8K prompt stayed at 2.80 s (2.79 s on the v0.1.0 pair).
+
+**FP8 reads long prompts slowly on this path.** The cold 8K prompt took
+6.00 to 7.05 s on FP8 against 2.19 to 2.80 s on FP4-Local, measured once per
+FP8 card, and the FP8 cards used output 16384 and MTP 2 where the FP4-Local
+cards used output 8192 and MTP 3, so the two tables are not a like-for-like
+comparison of the checkpoints.
 
 <a id="current-2026-10-24"></a>
 <a id="current-results-2026-10-24"></a>
 
-## v0.1.0 release cards (2026-10-24, 5a22651)
+## Previous (2026-10-24, v0.1.0 release 5a22651)
 
 These are RigMark cards for the v0.1.0 release, commit `5a22651`, installed
 from the public repository and measured on the evening of 2026-10-24. Every
@@ -184,7 +296,7 @@ branch (written as main `73f7a9d` from here on). The v0.1.0 engine changes one
 thing compared with that build: its startup memory check, which the engine
 calls admission, now counts free memory differently (main `2c64d0a`). The
 v0.1.0 cards are in the
-[section above](#v010-release-cards-2026-10-24-5a22651).
+[section above](#previous-2026-10-24-v010-release-5a22651).
 
 The cloud cards and the first two cloud timing runs come from main
 `4681d8b`, earlier the same day; the third timing run used build `8c9411f`.

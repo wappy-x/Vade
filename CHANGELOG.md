@@ -15,10 +15,17 @@ Changes that are merged but not yet released are under Unreleased.
 - On the layer pipeline, the check of drafted tokens now replays each
   Spark's layers as captured GPU work, and when one chat runs alone the
   drafting depth can rise to 7 instead of 3 (the resident depth in the
-  [glossary](docs/GLOSSARY.md)). One Spark is unchanged, and
-  `VADE_FLASHNEXT_MTP_DEPTH=3` restores the previous ceiling. The change
-  targets one-chat speed on two Sparks. The published cards were measured
-  before it; the next cards will show its effect.
+  [glossary](docs/GLOSSARY.md)). Measured on two Sparks against depth 3:
+  code +16 %, structured output +39 %, prose unchanged, with the same
+  tokens. `VADE_FLASHNEXT_MTP_DEPTH=3` restores the previous ceiling, and
+  `VADE_MTP_GRAPH=0` keeps every Spark's work eager. The change targets
+  one-chat speed on two Sparks. The published cards were measured before
+  it; the next cards will show its effect.
+- On the layer pipeline, the first Spark now projects the model's head for
+  only the rows one greedy chat needs, as one Spark already does, instead
+  of the full head. Measured on a pair, prose went from 41.26 to 42.60
+  tokens per second with the same tokens. `VADE_HEAD_BOUNDS=0` turns it
+  off.
 - On the layer pipeline, each Spark now keeps chat state only for the layers
   it runs, which leaves room for more chats at once: 15 instead of 9 in our
   two-Spark test with a 109 GB memory ceiling (the number depends on the
@@ -26,6 +33,11 @@ Changes that are merged but not yet released are under Unreleased.
   finished 22 % faster with drafting on and 6 % faster with drafting off, with
   the same answers. `VADE_W2_PP_STAGE_STATE=0` on every Spark restores the
   previous behavior.
+- With an uneven `VADE_W2_PP_SPLIT`, the pipeline no longer refuses at
+  startup a split that runs. Every Spark now charges each chat at the
+  costliest stage's state, so all Sparks admit the same number of chats
+  from the same budget. Even splits, the default, charge what they did
+  before.
 
 ### CLI
 
@@ -40,6 +52,86 @@ Changes that are merged but not yet released are under Unreleased.
   folder, the next-step hints from `vade launch` and `vade status` repeat that
   path (for example `./vade chat`) instead of a bare `vade` that your shell
   may not find.
+- A build supervisor that crashed, was killed or was lost to a reboot no
+  longer blocks every later `vade install`, `launch`, `up`, `update` and
+  `down` with "Build supervisor was lost". Once its processes are gone,
+  recovery closes the record and prints one line naming the job folder.
+  While anything may still run it keeps the record and the error as
+  before, and it still sends no signals.
+- `vade test` help lists world 1, which the determinism test accepts, and
+  `vade help` puts a blank line between the evaluation commands and the
+  gate usage.
+
+### Harness
+
+- Claude Code works through both gateways again. Claude Code 2.1.310 puts
+  its environment notes in every request as a `system` role entry inside
+  the messages, which the engine refuses with HTTP 400, so `claude -p`
+  failed outright. On `/v1/messages` and `count_tokens`, both gateways
+  now rewrite just those role values to `user`, the recovery Claude Code
+  documents; every other byte is forwarded unchanged.
+- `vade-harness setup claude` prints the gateway settings for Claude Code:
+  the API-root base URL, a dummy bearer, every model alias and the
+  subagents pointed at the loaded model, and betas, tool search and
+  nonessential traffic off. `--dedicated-home` also writes a private
+  Claude Code home with `CLAUDE_CONFIG_DIR`, the verified context and
+  output limits (Claude Code otherwise assumes 32000 output tokens), read
+  and search-only permissions, the tool rule and a completed onboarding
+  flag. Checked with Claude Code 2.1.310: a plain answer and a real Read
+  tool round trip.
+- `vade-harness setup aider`, `setup continue` and `setup open-webui`
+  print each client's documented settings for the engine or the gateway:
+  aider's `OPENAI_API_BASE` and `openai/` model prefix, a Continue
+  `config.yaml` for chat, edit and apply (no autocomplete, because the
+  engine ignores FIM suffixes), and Open WebUI's `OPENAI_API_BASE_URL`
+  with the Docker host and `--allow-host` note. These print or `--write`
+  only; there are no dedicated homes for them.
+- The built-in gateway (`vade-harness gateway`) relays `GET /v1/models`
+  and `/models` to the upstream's model list, keeping the query, so Open
+  WebUI, Continue and the OpenAI SDKs can list models before they chat.
+  It used to answer 404. In cluster mode the list comes from one verified
+  endpoint. `POST` gets 405 and `/v1/models/{id}` 404.
+- Both gateways' own refusals (401, 403, 404, 413, busy, upstream
+  unreachable) now carry an error type in the route's dialect:
+  `{"type":"error","error":{...}}` on the Messages routes, as Claude Code
+  and the Anthropic SDK expect, and the OpenAI shape with a type such as
+  `rate_limit_error`, `overloaded` or `server_error` elsewhere. Upstream
+  error bodies are still passed through byte for byte.
+- `vade-harness gateway` relays `POST /v1/kv/release` (it answered 404),
+  so a native session behind it can confirm a checkpoint release. With
+  several upstreams, cancel and release no longer answer 503: they go, in
+  configuration order, to every endpoint whose contract discovery has
+  verified, and you get the first reply that reports cancelled or
+  released, otherwise the first reply, or 502 when none answers. An
+  endpoint that never verified, or that answered as foreign or with a
+  changed contract, does not see the key until the verified contract
+  answers again. One gap remains: no handle-based cluster affinity for
+  requests that name a checkpoint handle.
+- In cluster mode, `vade-harness gateway` sends cancel and release to
+  every verified endpoint at once, under one 1.5-second deadline (or the
+  client request's own, if sooner), instead of one after another with a
+  30-second idle budget each. One stalled endpoint no longer keeps the
+  others from hearing a cancel. `vade-gateway` still fans out one
+  endpoint at a time.
+- `vade-gateway` keeps listening after a failed accept, such as an
+  aborted handshake or a full descriptor table. It drops only that
+  connection and logs accept errors with a short backoff.
+  `vade-harness gateway` does the same.
+- When `vade-gateway` cannot record a request or write its statistics, it
+  says what happened to the request (forwarded but not recorded, served
+  without its statistics line, or recording incomplete) and names the
+  folder or file to check, instead of a bare "recorder start failed".
+  `demo-compaction` with an argument says to run it on its own.
+- On Linux, including the Spark itself, the coding agent is no longer
+  offered `workspace_shell`, which has no sandbox there and only ever
+  returned `unsupported_platform`. The agent is told it cannot build, test
+  or run anything, re-reads its edits and names the command for you to
+  run, and `/status` says there is no command tool. macOS is unchanged,
+  and sessions saved by an earlier Linux build still resume.
+- `--children --child-shell NAME` is refused while the arguments are
+  parsed, with a message that names the cause, where the shell is not
+  offered (Linux, or `VADE_HARNESS_SHELL=off`), instead of failing later
+  with "invalid child tool scope".
 
 ### Documentation
 
@@ -49,13 +141,66 @@ Changes that are merged but not yet released are under Unreleased.
 - The results figure compares one Spark with two, with drafting on. In the
   2026-10-24 runs, a second Spark answered a long prompt sooner but didn't make
   a single chat write faster. Eight chats at once vary from run to run, and the
-  figure shows the range we measured.
+  figure shows the range we measured: 130.6 to 173.9 tokens per second on six
+  single Sparks and 167.6 to 168.7 on three pairs, from the same-day cards with
+  drafting on. The headline is checked against all nine cards.
 - [INSTALL](INSTALL.md) covers more situations: an engine that turns away an
   extra chat with HTTP 503, checking each replica with `vade verify --url`,
   keeping the launcher bundle outside your checkout, and what to do when
   `vade install` refuses a checkout with local changes.
 - The guides were rewritten in plainer language. Commands, numbers and links
   didn't change.
+- The read-back passes also fixed facts against the source: rule files are
+  capped at 16 KiB each, and the automatic output reservation includes the
+  16,384-token cap.
+- README, [INSTALL](INSTALL.md) and the one-Spark quickstart say what chat,
+  status, sampling and the bundle really do, checked against the source:
+  controller `vade chat` always opens the agent, which refuses a context
+  below 8192, and only local chat falls back to direct chat; local
+  `vade up` steps a refused default or saved context down as `vade launch`
+  does; controller `vade status` prints no URL, since the API is on the
+  local port; naming any sampling field fills the rest from the checkpoint
+  defaults; and the two legacy routes are named, with `vade run` needing a
+  fresh `VADE_HOME` after `vade launch`.
+- [INSTALL](INSTALL.md) and the CLI guide say that a controller install
+  needs `vade-prebuilt-v1`, not the launcher bundle. INSTALL and the
+  [benchmarks page](docs/benchmarks.md) say how a `vade bench` with no
+  flags differs from a RigMark card.
+- The [security policy](SECURITY.md) describes the gateways'
+  `VADE_GATEWAY_TOKEN`. It applies to the gateways you run by hand; the
+  replica gateway behind `vade up --replicas` never takes a token.
+- The harness guide and the invisible-gateway page list the complete
+  gateway sampling policy again: every shared default with its exact
+  value, every sampling field, and the null rule.
+- Engine docs: a new [unsafe-code page](engine/docs/unsafe.md) names the
+  four boundaries where the engine uses `unsafe` (kernels, the CUDA
+  driver, launches, RDMA), gives a per-package inventory and the exact
+  count of `SAFETY` notes, lists the lints that make `unsafe` a compile
+  error elsewhere, says how to write a `SAFETY` note, and states plainly
+  that the ratchet does not count unsafe sites today, so review is the
+  check. A new [module map](engine/docs/module-map.md) follows one request
+  through `flash-serve` and names the main modules per package and where
+  the tests are. Both are linked from the engine docs index.
+- Engine docs corrections: messages are capped at 4,096, and eight spare
+  connections are kept for `/health` and `/v1/cancel` once requests fill
+  the 32 (there is no single control connection); Flash Next is not a
+  separate research engine, the v0.1.0 model runs in `flash-serve`,
+  started by `vade launch` and `vade up`; and the architecture page says
+  the layer pipeline's drafting ceiling is 7.
+- Smaller fixes: the harness guide puts the source-built harness on PATH,
+  the network guide's RDMA GID example runs as written, the fresh-install
+  guide's legacy controller examples match current output, the
+  adding-a-model anchors point at the moved CLI module docs, and the
+  benchmarks page and CLI guide pick up review nits on bench
+  `ignore_eos`, `--checkpoint-hash` and the controller config.
+
+### Tools
+
+- The chart script `tools/benchmarks-chart.py` reads the release-card
+  numbers from the committed receipts, reads and writes UTF-8, names a
+  missing receipt folder, and stops if the cards stop supporting the
+  figure's headline. The assets README lists both figures and gives the
+  bar colours as hex values.
 
 ### Project
 
@@ -64,6 +209,25 @@ Changes that are merged but not yet released are under Unreleased.
   and the full error, plus `vade verify` output when answers are wrong.
 - The security policy explains how to report a vulnerability privately, what
   it covers, and what Vade exposes on the network by default.
+- Every public item in the CLI crate and the harness library has a doc
+  comment (140 harness items had none), the CLI's `main.rs` maps its
+  modules by area, and rustdoc builds without warnings.
+- No CLI source file is over 1,200 lines any more, and every non-test
+  harness source file is under 1,200 lines: tests moved beside their
+  modules and the largest files were split along their seams, with no
+  change in behaviour.
+- New tests pin the CLI's `vade doctor`, `vade status`, `down`, `logs`,
+  `detect` and `update` messages, its remaining argument errors and every
+  state in which controller chat refuses to open; the engine's bounded
+  JSON reader and admission refusal text, prompt partitions and loopback
+  rank admission, the fabric peer layout and profiling wrapper, and the
+  tokenizer against a real-format `tokenizer.json`; and the native
+  `/status` tool list per platform. The harness tests no longer depend on
+  an exported `VADE_GATEWAY_TOKEN`, the native tool tests run in both
+  shell shapes, which fixes Linux CI, and the loopback admission tests
+  retry a port lost to a parallel process.
+- Clippy findings that pointed at real issues are fixed in the CLI and the
+  harness, and the CLI has one SHA-256 implementation instead of two.
 
 ## v0.1.0 - 2026-10-24
 

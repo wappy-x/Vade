@@ -1,6 +1,7 @@
-//! The existing gate protocol, driven directly by Rust without shell dispatch.
-//! `build` runs the build gate; `determinism` drives flash-bench's logit
-//! determinism gate and keeps its receipts.
+//! Build/export and legacy flash-bench checks, driven without shell dispatch.
+//! `build` runs host build/export checks; `determinism` retains flash-bench's
+//! logit and HTTP comparison receipts. Its fixtures and backend determine
+//! coverage; accepting world one does not establish FP4-Local qualification.
 mod build;
 mod determinism;
 use crate::sha256;

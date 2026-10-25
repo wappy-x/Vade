@@ -1,3 +1,8 @@
+//! Development workload suite behind `vade bench --suite`.
+//!
+//! `lib.rs` includes this file as `suite`; the standalone binary is `kernel-bench`.
+//! This module coordinates workloads, `http` requests and `report` receipts.
+//! The default benchmark protocol lives in the library's `timed` module.
 pub(crate) mod http;
 mod report;
 use engine_tokenizer::{

@@ -1,3 +1,7 @@
+//! Plain HTTP transport and SSE response parsing for the benchmark protocols.
+//!
+//! Requests use a deadline and cancellation flag. Replies retain token IDs,
+//! timing, usage and effective server settings for receipt validation.
 use engine_model::json::{self, Value};
 use std::{
     io::{self, BufRead, BufReader, Read, Write},

@@ -1,4 +1,6 @@
 //! Preserve the gate wrapper's receipts; flash-bench owns the comparison math.
+//! This is the legacy fixture protocol. Its native checks and HTTP cases do not
+//! establish FP4-Local coverage merely because the wrapper accepts world one.
 use super::{TempDir, exec_inherited, exec_logged, executable, interrupted, sha256};
 use std::fs::{self, File};
 use std::io::Write;
