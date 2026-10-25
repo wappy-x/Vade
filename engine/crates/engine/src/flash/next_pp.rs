@@ -265,6 +265,13 @@ impl Stage {
     pub fn successor(&self) -> Option<usize> {
         (self.rank + 1..self.ranks).next()
     }
+    /// Every stage's layer interval in this geometry; each rank derives the same list (an
+    /// explicit split moves the one cut between two ranks, which both of them hold).
+    pub fn intervals(&self) -> Vec<std::ops::Range<usize>> {
+        let mut cuts: Vec<usize> = (0..=self.ranks).map(|r| LAYERS * r / self.ranks).collect();
+        (cuts[self.rank], cuts[self.rank + 1]) = (self.first, self.end);
+        cuts.windows(2).map(|w| w[0]..w[1]).collect()
+    }
     pub fn from_env(rank: usize, ranks: usize) -> Result<Self> {
         let split = if std::env::var_os("VADE_W2_PP_SPLIT").is_some() {
             Some(split_from_env()?)

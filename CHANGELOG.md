@@ -7,6 +7,11 @@ Changes that are merged but not yet released are under Unreleased.
 
 ### Engine
 
+- On one Spark, when one chat runs alone, the drafting depth can now rise to 7
+  instead of 5, as on the layer pipeline. Measured on one Spark: code 75.6 to
+  81.6 tokens per second, structured output 88.3 to 99.7, prose unchanged, with
+  the same tokens. Batches keep their depth. `VADE_FLASHNEXT_MTP_DEPTH=5`
+  restores the previous ceiling.
 - On the layer pipeline, the check of drafted tokens now replays each
   Spark's layers as captured GPU work, and when one chat runs alone the
   drafting depth can rise to 7 instead of 3 (the resident depth in the
@@ -14,6 +19,13 @@ Changes that are merged but not yet released are under Unreleased.
   `VADE_FLASHNEXT_MTP_DEPTH=3` restores the previous ceiling. The change
   targets one-chat speed on two Sparks. The published cards were measured
   before it; the next cards will show its effect.
+- On the layer pipeline, each Spark now keeps chat state only for the layers
+  it runs, which leaves room for more chats at once: 15 instead of 9 in our
+  two-Spark test with a 109 GB memory ceiling (the number depends on the
+  memory each Spark has free). In that test, sixteen chats sent at once
+  finished 22 % faster with drafting on and 6 % faster with drafting off, with
+  the same answers. `VADE_W2_PP_STAGE_STATE=0` on every Spark restores the
+  previous behavior.
 
 ### CLI
 

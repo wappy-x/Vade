@@ -173,7 +173,7 @@ Each applies on one Spark and on the two-Spark layer pipeline, which is
 described under [Two or more Sparks](#two-or-more-sparks).
 
 - **Adaptive depth.** When one chat runs alone, the engine adjusts how far
-  ahead it drafts, up to a ceiling: 5 tokens on one Spark and 7 on the layer
+  ahead it drafts, up to a ceiling: 7 tokens on one Spark and on the layer
   pipeline.
 - **Prompt lookup.** The engine copies guesses from matching earlier text in
   the same chat. It is on by default, and runs only for greedy requests that

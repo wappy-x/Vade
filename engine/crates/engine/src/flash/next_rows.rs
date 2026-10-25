@@ -116,11 +116,14 @@ fn session_pool_funds_graph_cliffs_and_refuses_shortfall() {
 }
 /// Missing owners cannot be reconstructed while published pool addresses remain live.
 /// Such a session must be replaced; reset and pooled admission share this check.
+/// `layers`: the owned interval (all 48, or a pipeline stage's own layers).
 #[cfg(any(target_os = "linux", test))]
-pub(crate) fn check_owners<G, Q>(gdn: &[Option<G>], qsa: &[Option<Q>]) -> Result<()> {
+pub(crate) fn check_owners<G, Q>(gdn: &[Option<G>], qsa: &[Option<Q>], layers: std::ops::Range<usize>) -> Result<()> {
     if gdn.len() != 48
         || qsa.len() != 48
-        || (0..48).any(|li| {
+        || layers.is_empty()
+        || layers.end > 48
+        || layers.clone().any(|li| {
             if li % 4 == 3 {
                 qsa[li].is_none()
             } else {
@@ -210,6 +213,85 @@ pub(crate) fn workspace_owner(capacities: impl Iterator<Item = usize>) -> Result
 /// Actual Next GDN owners retain four raw convolution slots per layer.
 #[cfg(any(target_os = "linux", test))]
 pub(crate) const RECURRENT_BYTES: usize = 36 * (48 * 128 * 128 + (2 * 16 + 48) * 128 * 4) * 4;
+/// VADE_W2_PP_STAGE_STATE: unset/1 = each rank allocates and funds session GDN/QSA state
+/// for its own layers only (NextModel::own_stage_state), 0 = every layer on every rank.
+/// Part of the pipeline recipe, so all ranks agree before they link.
+pub fn pp_stage_state() -> Result<bool> {
+    match std::env::var("VADE_W2_PP_STAGE_STATE").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("1") => Ok(true),
+        Ok("0") => Ok(false),
+        _ => Err("VADE_W2_PP_STAGE_STATE must be unset, 0 or 1".into()),
+    }
+}
+
+/// Session KV + recurrent bytes a rank funds for the layers it owns: `kv` is the
+/// loader plan's KV for all twelve QSA layers (every 4th). All 48 owned: exactly
+/// `kv + RECURRENT_BYTES`; a pipeline stage pays its own QSA and GDN layers only.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn owned_state_bytes(kv: usize, layers: std::ops::Range<usize>) -> usize {
+    let qsa = layers.clone().filter(|li| li % 4 == 3).count();
+    let gdn = layers.len() - qsa;
+    (kv * qsa).div_ceil(12) + RECURRENT_BYTES / 36 * gdn
+}
+#[cfg(test)]
+#[test]
+fn owned_state_bytes_split_whole_model_state_across_stages() {
+    let kv = 12 * 32768 * 4608;
+    assert_eq!(owned_state_bytes(kv, 0..48), kv + RECURRENT_BYTES);
+    for world in [2, 4] {
+        let stages = (0..world).map(|r| owned_state_bytes(kv, r * 48 / world..(r + 1) * 48 / world)).collect::<Vec<_>>();
+        assert_eq!(stages.iter().sum::<usize>(), kv + RECURRENT_BYTES, "world {world}");
+        assert!(stages.iter().all(|&b| b == stages[0]), "world {world}: {stages:?}");
+    }
+    // An uneven split (VADE_W2_PP_SPLIT) still sums to the whole model's state.
+    assert_eq!(owned_state_bytes(kv, 0..20) + owned_state_bytes(kv, 20..48), kv + RECURRENT_BYTES);
+    assert_eq!(owned_state_bytes(kv, 0..24), kv / 2 + RECURRENT_BYTES / 2);
+}
+/// A stage's own interval must be one of `stages`, which tile the 48 layers in order.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn check_stage_charge(own: std::ops::Range<usize>, stages: &[std::ops::Range<usize>]) -> Result<()> {
+    let tiled = stages.first().is_some_and(|s| s.start == 0) && stages.last().is_some_and(|s| s.end == 48)
+        && stages.iter().all(|s| s.start < s.end) && stages.windows(2).all(|w| w[0].end == w[1].start);
+    if !tiled || !stages.contains(&own) {
+        return Err(format!("pipeline stage state {own:?} is not one of the stages {stages:?}"));
+    }
+    Ok(())
+}
+/// Per-chat state funding: the costliest stage, so every rank charges the same bytes
+/// and admits the same number of chats from the same budget (one stage = 0..48: all).
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn stage_charge_bytes(kv: usize, stages: &[std::ops::Range<usize>]) -> usize {
+    stages.iter().map(|s| owned_state_bytes(kv, s.clone())).max().unwrap_or(kv + RECURRENT_BYTES)
+}
+#[cfg(test)]
+#[test]
+fn uneven_stages_fund_the_same_chat_count_on_every_rank() {
+    let kv = 12 * 32768 * 4608;
+    // The review's case: split 20 owns 5 QSA + 15 GDN layers in front, 7 + 21 behind.
+    let stages = [0..20, 20..48];
+    let (front, back) = (owned_state_bytes(kv, 0..20), owned_state_bytes(kv, 20..48));
+    assert!(front < back);
+    let charge = stage_charge_bytes(kv, &stages);
+    assert_eq!(charge, back);
+    // Same budget and shared bytes on both ranks: own-stage charges would admit more chats
+    // in front than behind (the hello refuses that); the common charge admits equal counts.
+    let (budget, shared, fixed) = (10_737_418_240usize, 1 << 30, 300 << 20);
+    let chats = |per: usize| (budget - shared) / (per + fixed);
+    assert!(chats(front) > chats(back), "{} vs {}", chats(front), chats(back));
+    // Each rank passes the same interval list, so front and back charge identical bytes.
+    assert_eq!(chats(charge), chats(back));
+    assert!(check_stage_charge(0..20, &stages).is_ok() && check_stage_charge(20..48, &stages).is_ok());
+    for world in [2, 4] {
+        let stages: Vec<_> = (0..world).map(|r| r * 48 / world..(r + 1) * 48 / world).collect();
+        // Even stages: the common charge equals each stage's own state (no loss at the default).
+        assert!(stages.iter().all(|s| stage_charge_bytes(kv, &stages) == owned_state_bytes(kv, s.clone())));
+        assert!(stages.iter().all(|s| check_stage_charge(s.clone(), &stages).is_ok()));
+    }
+    assert_eq!(stage_charge_bytes(kv, &[0..48]), kv + RECURRENT_BYTES);
+    assert!(check_stage_charge(0..20, &[0..24, 24..48]).is_err());
+    assert!(check_stage_charge(0..24, &[0..24, 25..48]).is_err());
+    assert!(check_stage_charge(0..24, &[]).is_err());
+}
 /// Prefix checkpoints retain the loader's complete GDN layout, including an open
 /// 64-row tail in chunk form. The legacy constant also defines small PLE terms;
 /// keep it unchanged and charge the actual state separately for opt-in retention.
@@ -530,7 +612,7 @@ mod tests {
             let mut qsa: Vec<_> = (0..48)
                 .map(|li| (li % 4 == 3).then(|| Box::new(li)))
                 .collect();
-            check_owners(&gdn, &qsa).unwrap();
+            check_owners(&gdn, &qsa, 0..48).unwrap();
             let slot = if layer % 4 == 3 {
                 &mut qsa[layer]
             } else {
@@ -545,15 +627,30 @@ mod tests {
             assert!(failed.is_err());
             // reset uses this gate before publishing valid=true, without rebuilding storage.
             assert!(
-                check_owners(&gdn, &qsa)
+                check_owners(&gdn, &qsa, 0..48)
                     .unwrap_err()
                     .contains("replace session")
             );
             let mut used_addresses = Vec::new();
-            let pooled = check_owners(&gdn, &qsa).map(|()| used_addresses.push(published));
+            let pooled = check_owners(&gdn, &qsa, 0..48).map(|()| used_addresses.push(published));
             assert!(pooled.is_err());
             assert!(used_addresses.is_empty());
         }
+    }
+    #[test]
+    fn stage_owners_cover_only_the_owned_layers() {
+        for (first, end) in [(0, 24), (24, 48), (0, 12), (36, 48)] {
+            let own = |li: usize| (first..end).contains(&li);
+            let mut gdn: Vec<_> = (0..48).map(|li| (li % 4 != 3 && own(li)).then(|| Box::new(li))).collect();
+            let qsa: Vec<_> = (0..48).map(|li| (li % 4 == 3 && own(li)).then(|| Box::new(li))).collect();
+            check_owners(&gdn, &qsa, first..end).unwrap();
+            assert!(check_owners(&gdn, &qsa, 0..48).is_err());
+            gdn[first] = None;
+            assert!(check_owners(&gdn, &qsa, first..end).unwrap_err().contains("replace session"));
+        }
+        let gdn: Vec<Option<u8>> = vec![None; 48];
+        assert!(check_owners(&gdn, &gdn, 0..0).is_err());
+        assert!(check_owners(&gdn, &gdn, 40..49).is_err());
     }
     #[test]
     fn changing_indexer_reads_actual_source_after_another_requests_warm_pool() {

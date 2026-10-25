@@ -158,7 +158,7 @@ with a box that explains its own engine terms.
 **MTP (multi-token prediction), drafting ON.** An extra head in the model guesses a few tokens ahead, and the main model checks them. On FP4-Local:
 
 - **Default:** drafting is on, three tokens ahead (request depth 3). A request can also ask for it with `"draft":"strict"`.
-- **One chat alone:** the engine adjusts the depth as it goes, up to a ceiling called the resident depth. The ceiling is 5 on one Spark and 7 on the layer pipeline.
+- **One chat alone:** the engine adjusts the depth as it goes, up to a ceiling called the resident depth. The ceiling is 7 on one Spark and on the layer pipeline.
 - **Prompt lookup:** also on by default, on one Spark and on the pipeline. It copies guesses from matching earlier text in the same chat. It runs only for greedy requests that draft, and `VADE_MTP_LOOKUP=0` turns it off.
 - **Several chats:** [cohort drafting](#ac) is on too.
 

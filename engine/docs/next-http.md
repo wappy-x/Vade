@@ -28,8 +28,8 @@ Current defaults are defined by the
 [prompt scheduling](../crates/engine/src/flash/next_rows.rs):
 
 - Context defaults to 32768 and output is capped at 16384, subject to admission.
-- Startup/request MTP depth defaults to 3. The resident draft ceiling is 5 on
-  one Spark and 7 on the pipeline. The adaptive chooser is enabled by default;
+- Startup/request MTP depth defaults to 3. The resident draft ceiling is 7 on
+  one Spark and on the pipeline. The adaptive chooser is enabled by default;
   request depth and resident ceiling are distinct. `--mtp 0` selects plain decoding.
 - Automatic cohort drafting covers up to five active chats; larger cohorts use
   pooled plain steps. `VADE_MTP_BATCH` and `VADE_MTP_C8` are explicit overrides.
@@ -38,6 +38,12 @@ Current defaults are defined by the
   to 2048-row tiles. `VADE_PROMPT_TILE` can select a fixed supported tile size.
 - Prompt lookup is controlled separately by `VADE_MTP_LOOKUP`; startup with
   MTP disabled also disables lookup.
+- On the pipeline, each rank allocates chat state (GDN and attention memory)
+  for its own layers only, and funds every chat at the largest stage's share,
+  so all ranks admit the same number of chats. `VADE_W2_PP_STAGE_STATE` unset
+  or `1` selects this; `0` restores whole-model state on every rank and must be
+  set on every rank (the ranks compare the setting at startup and refuse a
+  mismatch).
 
 These are source-defined defaults, not performance measurements. Verify the
 loaded checkpoint, effective settings and health identity before timing.

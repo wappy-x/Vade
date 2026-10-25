@@ -359,14 +359,19 @@ bash ops/scripts/spark-setup/verify.sh "$CFG" --bw-client 1 --apply
 ```
 
 Under the hood it runs `perftest`'s `ib_write_bw` for 5 seconds. The raw
-equivalent, for rail 0 of cable 1 (rail 1 uses its own device, address and `-p 18516`):
+equivalent, for rail 0 of cable 1 (rail 1 uses its own device, address and `-p 18516`).
+Run the server and client commands on their respective Sparks. Enter the
+numeric IPv4 RoCE v2 GID index found on each Spark in step 3 of
+[spark-setup.md](spark-setup.md#record-each-rails-real-gid):
 
 ```sh
-# server end (spark-1); GID index from step 3 of spark-setup.md
-ib_write_bw -d rocep1s0f0 -i 1 -x <gid-index> -p 18515 --bind_source_ip=10.77.0.1 \
+# server end (spark-1)
+read -r -p 'Server GID index: ' GID_INDEX
+timeout 25s ib_write_bw -d rocep1s0f0 -i 1 -x "$GID_INDEX" -p 18515 --bind_source_ip=10.77.0.1 \
   -m 4096 -F --report_gbits -D 5 -s 65536
 # client end (spark-2), pointing at the server's rail address
-ib_write_bw -d rocep1s0f1 -i 1 -x <gid-index> -p 18515 --bind_source_ip=10.77.0.2 \
+read -r -p 'Client GID index: ' GID_INDEX
+timeout 25s ib_write_bw -d rocep1s0f1 -i 1 -x "$GID_INDEX" -p 18515 --bind_source_ip=10.77.0.2 \
   -m 4096 -F --report_gbits -D 5 -s 65536 10.77.0.1
 ```
 

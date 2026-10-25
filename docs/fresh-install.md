@@ -353,9 +353,8 @@ engine_source = ../engine
 harness_source = ../harness
 cli_source = ../cli
 stage_dir = bin
-# Keep state_dir short: the SSH control socket lives here. macOS allows 103
-# characters per socket path and OpenSSH adds 17. From a deep folder, use
-# ~/.vade-state.
+# SSH runs from state_dir with a relative control-socket name, so a deep
+# checkout path is supported. Keep this directory private.
 state_dir = state
 build_manifest = state/build.conf
 model = qwen3.8-flash-next-fp8
@@ -449,12 +448,13 @@ vade status
 vade doctor
 ```
 
-`vade doctor` should print, among other lines:
+`vade doctor` should print, among other lines (each `<memory summary>` is
+replaced by that Spark's MemAvailable, MemTotal and engine ceiling):
 
 ```text
 Controller tools: ready.
-spark-1: Rust, driver, and build disk ready; RDMA (prerequisites checked) transport selected; model files found (shards checked after build).
-spark-2: Rust, driver, and build disk ready; RDMA (prerequisites checked) transport selected; model files found (shards checked after build).
+spark-1: driver and install disk ready; <memory summary>; transport: RDMA (prerequisites checked); model files found (inventory check follows).
+spark-2: driver and install disk ready; <memory summary>; transport: RDMA (prerequisites checked); model files found (inventory check follows).
 Fabric: 2 directed link checks passed. Transport ports are checked by engine startup.
 Harness doctor: passed.
 ```

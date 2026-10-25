@@ -108,7 +108,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             return Err("pipeline back rows outside the prompt tile".into());
         }
         for s in sessions.iter() {
-            crate::flash_next_rows::check_owners(&s.gdn_state, &s.qsa_state)?;
+            crate::flash_next_rows::check_owners(&s.gdn_state, &s.qsa_state, s.model.state_range())?;
         }
         if verify {
             for (s, &n) in sessions.iter_mut().zip(lens) {

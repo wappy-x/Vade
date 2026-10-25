@@ -102,8 +102,34 @@ pub struct NextModel<'a> {
     pp_split: std::cell::Cell<usize>,
     /// Exclusive last layer owned by a pipeline worker.
     pp_end: std::cell::Cell<usize>,
+    /// Layers whose session GDN/QSA state this rank allocates: [0, 48), or a pipeline
+    /// stage's own interval after own_stage_state; `state_charge`: the intervals funded.
+    state_layers: std::cell::Cell<(usize, usize)>,
+    state_charge: RefCell<Vec<std::ops::Range<usize>>>,
 }
 impl<'a> NextModel<'a> {
+    /// VADE_W2_PP_STAGE_STATE (unset/1 on, 0 = every layer): a pipeline rank allocates
+    /// session GDN/QSA state for its own layers [first, end) only; the other stages' layers
+    /// never run on it. Each chat is funded at the costliest of `stages` (every stage's
+    /// interval), so every rank admits the same count from the same budget, as with whole
+    /// state. Call before admission, while no session exists.
+    pub fn own_stage_state(&self, first: usize, end: usize, stages: &[std::ops::Range<usize>]) -> Result<()> {
+        crate::flash_next_rows::check_stage_charge(first..end, stages)?;
+        if self.pool.borrow().used[1..].contains(&true) {
+            return Err("pipeline stage state must be set before any session exists".into());
+        }
+        self.state_layers.set((first, end));
+        *self.state_charge.borrow_mut() = stages.to_vec();
+        Ok(())
+    }
+    /// Layers whose session state this rank owns (all 48 unless own_stage_state ran).
+    pub(super) fn state_range(&self) -> std::ops::Range<usize> {
+        let (first, end) = self.state_layers.get();
+        first..end
+    }
+    pub(super) fn owns_state(&self, li: usize) -> bool {
+        self.state_range().contains(&li)
+    }
     /// Pipeline backs receive the residual and never expand token inputs. Call before
     /// admission and workspace preparation; changing a live model is refused.
     pub fn disable_prompt_frontend(&mut self) -> Result<()> {
@@ -605,6 +631,8 @@ impl<'a> NextModel<'a> {
             pp: RefCell::new(None),
             pp_split: std::cell::Cell::new(0),
             pp_end: std::cell::Cell::new(LAYERS),
+            state_layers: std::cell::Cell::new((0, LAYERS)),
+            state_charge: RefCell::new(vec![0..LAYERS]),
         })
     }
     /// Device-byte estimate at `capacity` (loaded weights; FP32 KV + index
@@ -677,8 +705,8 @@ impl<'a> NextModel<'a> {
             return Err("Flash-Next context must be 1..=262144".into());
         }
         let plan = self.memory_plan(capacity)?;
-        Ok(plan.kv as usize
-            + crate::flash_next_rows::RECURRENT_BYTES
+        // The costliest funded stage (all 48 layers unless own_stage_state ran).
+        Ok(crate::flash_next_rows::stage_charge_bytes(plan.kv as usize, &self.state_charge.borrow())
             + (16 << 20)
             + mtp::Draft::reservation_bytes(self, capacity)?)
     }
@@ -844,14 +872,14 @@ impl<'a, 'w> NextSession<'a, 'w> {
         let (mult, sizes, offsets, eos) = &model.hash;
         // gdn::session_arena: every fresh state from one allocation (load_next then only checks it).
         let mut fresh = if gdn::session_arena() {
-            GdnState::fresh_arena(b, w, &(0..LAYERS).filter(|li| li % 4 != 3).collect::<Vec<_>>())?
+            GdnState::fresh_arena(b, w, &model.state_range().filter(|li| li % 4 != 3).collect::<Vec<_>>())?
         } else {
             Vec::new()
         }
         .into_iter();
         let gdn_state = (0..LAYERS)
             .map(|li| {
-                if li % 4 == 3 {
+                if li % 4 == 3 || !model.owns_state(li) {
                     Ok(None)
                 } else {
                     Gdn::load_next(b, w, li, model.gdn_proj[li], fresh.next()).map(|g| Some(g.into_state()))
@@ -860,7 +888,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             .collect::<Result<Vec<_>>>()?;
         let qsa_state = (0..LAYERS)
             .map(|li| {
-                if li % 4 != 3 {
+                if li % 4 != 3 || !model.owns_state(li) {
                     Ok(None)
                 } else {
                     Qsa::load_next_rows(b, w, li, capacity, model.qsa_proj[li], qsa.as_mut().and_then(|q| q[li].take()))
@@ -913,8 +941,11 @@ impl<'a, 'w> NextSession<'a, 'w> {
             pool.capacity = capacity;
         }
         let record = spark_gpu_probe::next_math::StateSlot {
+            // Layers another stage owns never run here: their slot words stay zero.
             layers: std::array::from_fn(|li| {
-                if li % 4 == 3 {
+                if !model.owns_state(li) {
+                    [0; 3]
+                } else if li % 4 == 3 {
                     result.qsa_state[li].as_ref().unwrap().pool_addresses()
                 } else {
                     result.gdn_state[li].as_ref().unwrap().pool_addresses()
@@ -964,7 +995,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         self.valid = false;
         self.logits_ready = false;
         if let Some(d) = self.draft.as_ref() { d.bound_at.set(None); }
-        crate::flash_next_rows::check_owners(&self.gdn_state, &self.qsa_state)?;
+        crate::flash_next_rows::check_owners(&self.gdn_state, &self.qsa_state, self.model.state_range())?;
         self.retained = 0;
         *self.checkpoint.get_mut() = None;
         if let Some(d) = &mut self.draft {
@@ -984,9 +1015,9 @@ impl<'a, 'w> NextSession<'a, 'w> {
         Ok(())
     }
     fn sync_pool_state(&self, b: &Backend<'_>) -> Result<()> {
-        crate::flash_next_rows::check_owners(&self.gdn_state, &self.qsa_state)?;
+        crate::flash_next_rows::check_owners(&self.gdn_state, &self.qsa_state, self.model.state_range())?;
         let mut layers = [[0u64; 3]; LAYERS];
-        for (li, layer) in layers.iter_mut().enumerate() {
+        for (li, layer) in layers.iter_mut().enumerate().filter(|(li, _)| self.model.owns_state(*li)) {
             *layer = if li % 4 == 3 {
                 self.qsa_state[li]
                     .as_ref()

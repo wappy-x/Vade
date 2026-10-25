@@ -826,7 +826,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             *self.checkpoint.get_mut() = None;
         }
         if self.rollback.is_none() && gdn::session_arena() {
-            let tapes: Vec<bool> = (0..LAYERS).map(|li| li % 4 != 3).collect();
+            let tapes: Vec<bool> = (0..LAYERS).map(|li| li % 4 != 3 && self.model.owns_state(li)).collect();
             let (gdn, inputs) = gdn::GdnState::rollback_arena(b, &self.gdn_state, &tapes, self.verify_rows)?;
             self.rollback = Some(Rollback { gdn, inputs, shallow: false });
         }
@@ -839,7 +839,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                     .collect::<Result<_>>()?,
                 inputs: (0..LAYERS)
                     .map(|li| {
-                        if li % 4 == 3 {
+                        if li % 4 == 3 || !self.model.owns_state(li) {
                             Ok(None)
                         } else {
                             gdn::GdnReplay::new(b, self.verify_rows).map(Some)
@@ -888,7 +888,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                     .map(|g| g.as_ref().map(|g| g.next_snapshot_storage(b)).transpose())
                     .collect::<Result<_>>()?,
                 inputs: (0..LAYERS)
-                    .map(|li| if li % 4 == 3 { Ok(None) } else { gdn::GdnReplay::new(b, self.verify_rows).map(Some) })
+                    .map(|li| if li % 4 == 3 || !self.model.owns_state(li) { Ok(None) } else { gdn::GdnReplay::new(b, self.verify_rows).map(Some) })
                     .collect::<Result<_>>()?,
                 shallow: false,
             });

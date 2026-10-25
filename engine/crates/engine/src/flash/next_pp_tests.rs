@@ -1288,3 +1288,18 @@ fn pp_wire_demux_consumes_dropped_chat_rows_before_live_rows() {
     assert_eq!(f32_bytes(&current), f32_bytes(&data[2 * W..]));
     assert!(link.kept.is_empty());
 }
+
+#[test]
+fn every_rank_derives_the_same_stage_intervals() {
+    // World 2 at the default and an explicit uneven split, world 3 and 4 even: every rank's
+    // list is identical and contains its own interval (each funds the costliest stage).
+    for (ranks, split) in [(2, None), (2, Some(20)), (2, Some(30)), (3, None), (4, None)] {
+        let lists: Vec<_> = (0..ranks).map(|r| Stage::new(r, ranks, split).unwrap()).collect();
+        for stage in &lists {
+            assert_eq!(stage.intervals(), lists[0].intervals(), "{ranks} {split:?}");
+            assert_eq!(stage.intervals()[stage.rank], stage.first..stage.end);
+        }
+        assert_eq!(lists[0].intervals().len(), ranks);
+    }
+    assert_eq!(Stage::new(1, 2, Some(20)).unwrap().intervals(), vec![0..20, 20..48]);
+}

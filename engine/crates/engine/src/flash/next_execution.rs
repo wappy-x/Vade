@@ -709,7 +709,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             return Err("Flash-Next cohort needs valid sessions of the same model".into());
         }
         for s in sessions.iter() {
-            crate::flash_next_rows::check_owners(&s.gdn_state, &s.qsa_state)?;
+            crate::flash_next_rows::check_owners(&s.gdn_state, &s.qsa_state, s.model.state_range())?;
         }
         let count = spans.last().unwrap().end;
         let source = crate::flash_next_rows::ResultSource::select_for_policy(

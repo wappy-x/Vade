@@ -45,6 +45,7 @@ cargo build --offline
 cargo run --offline -- demo
 cargo run --offline -- --demo --prompt "Show me the local demo"
 cargo run --offline -- --help
+export PATH="$PWD/target/debug:$PATH"
 ```
 
 With no mode argument you get the **demo**. It gives a clearly labelled scripted
@@ -52,8 +53,10 @@ response and makes no network requests.
 
 Talking to a model needs a running engine (next section). Direct mode needs both
 an endpoint and a model, and native agent mode also needs an explicit workspace.
-The commands below show the configuration for a mock you provide separately.
-They do not start a mock or connect anywhere during setup:
+The commands below use a mock server you provide separately. Choose one:
+`direct` and `agent` open a client for that server; `gateway` starts a listener
+that forwards incoming requests to it. Stop the client or gateway with Ctrl+C
+before choosing another:
 
 ```sh
 vade-harness direct --endpoint http://127.0.0.1:18080/v1/chat/completions --model mock
