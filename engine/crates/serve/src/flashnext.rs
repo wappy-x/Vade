@@ -28,6 +28,8 @@ pub struct FlashNext<'b, 'a, 'w> {
     one_row_pooled: crate::mtp_batch::Mode,
     /// VADE_VERIFY_ROWS: verify rows per tick and per pass for VADE_MTP_BATCH cohorts.
     verify_rows: usize,
+    /// VADE_MTP_COHORT=wide: four chats or fewer keep 16 rows (tick_width); unset 32 above.
+    wide_tick: bool,
     /// VADE_COHORT_EVEN_ROWS (default on; 0 = the sequential split): equal verify-row caps
     /// for a drafting cohort's decoders, so no lone chat buys one more drafter step.
     even_rows: bool,
@@ -117,6 +119,10 @@ pub struct Chat<'s, 'a> {
     adopted: RefCell<Option<NextStorage<'a>>>,
 }
 impl<'b, 'a, 'w> FlashNext<'b, 'a, 'w> {
+    /// Rows one cohort tick may spend: VADE_MTP_COHORT=wide keeps four chats on 16.
+    fn tick_width(&self, chats: usize) -> usize {
+        if self.wide_tick { crate::mtp_batch::tick_width(chats, self.verify_rows) } else { self.verify_rows }
+    }
     pub fn new(
         backend: &'b Backend<'a>,
         model: &'w NextModel<'a>,
@@ -155,7 +161,9 @@ impl<'b, 'a, 'w> FlashNext<'b, 'a, 'w> {
             return Err("cohort controller requires Auto8 batch mode".into());
         }
         let one_row_pooled = crate::mtp_batch::one_row_pooled()?;
-        let verify_rows = spark_engine::flash_next_rows::verify_rows()?;
+        // VADE_MTP_COHORT=wide (Experiments::wide_tick): unset VADE_VERIFY_ROWS is 32, else 16.
+        let verify_rows = spark_engine::flash_next_rows::verify_rows_setting()?
+            .unwrap_or(if experiments.wide_tick { 32 } else { crate::mtp_batch::VERIFY_ROWS });
         let even_rows = match std::env::var("VADE_COHORT_EVEN_ROWS").as_deref() {
             Ok("0") => false,
             Err(std::env::VarError::NotPresent) | Ok("1") => true,
@@ -197,6 +205,7 @@ impl<'b, 'a, 'w> FlashNext<'b, 'a, 'w> {
             cohort_draft: std::cell::Cell::new(false),
             one_row_pooled,
             verify_rows,
+            wide_tick: experiments.wide_tick,
             even_rows,
             adapt,
             adapt_full,
@@ -736,7 +745,8 @@ impl<'b, 'a, 'w> Engine for FlashNext<'b, 'a, 'w> {
         64
     }
     fn tick_row_limit(&self) -> Option<usize> {
-        self.batch_on.policy(self.cohort.get()).tick_rows.map(|_| self.verify_rows)
+        let chats = self.cohort.get();
+        self.batch_on.policy(chats).tick_rows.map(|_| self.tick_width(chats))
     }
     fn even_cohort_rows(&self) -> bool {
         self.even_rows && self.batch_on.enabled(self.cohort.get())
@@ -908,11 +918,11 @@ impl<'b, 'a, 'w> Engine for FlashNext<'b, 'a, 'w> {
             let tokens: Vec<_> = rows.iter().map(|r| r.tokens).collect();
             let mut sessions: Vec<_> = rows.iter_mut().map(|r| r.session.live.as_mut().unwrap()).collect();
             if batch_on {
-                // The row budget already holds a tick to the verify rows (VERIFY_ROWS, or
-                // VADE_VERIFY_ROWS); groups keep any wider cohort inside that width.
+                // The row budget already holds a tick to tick_width (the verify rows, or 16 for
+                // four chats under VADE_MTP_COHORT=wide). Groups use that same width.
                 let widths: Vec<_> = tokens.iter().map(|t| t.len()).collect();
                 let mut out = Vec::with_capacity(tokens.len());
-                for g in crate::mtp_batch::verify_groups(&widths, self.verify_rows) {
+                for g in crate::mtp_batch::verify_groups(&widths, self.tick_width(chats)) {
                     let ids = NextSession::verify_batch_greedy(
                         self.backend,
                         &mut sessions[g.clone()],

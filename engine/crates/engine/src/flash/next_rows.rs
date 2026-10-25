@@ -376,18 +376,38 @@ fn auto_tile_keeps_short_prompts_on_4096() {
     }
 }
 
-/// VADE_VERIFY_ROWS=32 (default off: unset = 16): a VADE_MTP_BATCH tick verifies up to 32 rows
-/// in one pass instead of groups of 16, and such a pass stages its PLE rows at once (in 16-row
-/// pieces). Other values are errors.
+/// VADE_VERIFY_ROWS: rows in one VADE_MTP_BATCH verify tick (unset = 16 here; the world-one
+/// executable resolves unset to 32 through verify_rows_setting). Explicit 16 or 32; other values
+/// are errors. A 32-row tick verifies up to 32 rows in one pass instead of groups of 16, and such
+/// a pass stages its PLE rows at once (in 16-row pieces).
 pub fn verify_rows() -> Result<usize> {
-    static ROWS: std::sync::OnceLock<Result<usize>> = std::sync::OnceLock::new();
+    verify_rows_setting().map(|rows| rows.unwrap_or(16))
+}
+/// VADE_VERIFY_ROWS as set: None when unset, else 16 or 32.
+pub fn verify_rows_setting() -> Result<Option<usize>> {
+    static ROWS: std::sync::OnceLock<Result<Option<usize>>> = std::sync::OnceLock::new();
     ROWS.get_or_init(|| match std::env::var("VADE_VERIFY_ROWS") {
-        Err(std::env::VarError::NotPresent) => Ok(16),
-        Ok(v) if v == "32" => Ok(32),
-        Ok(v) => Err(format!("VADE_VERIFY_ROWS must be unset or 32 (got {v:?})")),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Ok(v) => verify_rows_value(&v).map(Some),
         Err(e) => Err(format!("VADE_VERIFY_ROWS: {e}")),
     })
     .clone()
+}
+fn verify_rows_value(value: &str) -> Result<usize> {
+    match value {
+        "16" => Ok(16),
+        "32" => Ok(32),
+        v => Err(format!("VADE_VERIFY_ROWS must be unset, 16 or 32 (got {v:?})")),
+    }
+}
+#[cfg(test)]
+#[test]
+fn verify_rows_accepts_only_the_two_tick_widths() {
+    assert_eq!(verify_rows_value("16"), Ok(16));
+    assert_eq!(verify_rows_value("32"), Ok(32));
+    for v in ["", "0", "8", "17", "64", " 32"] {
+        assert!(verify_rows_value(v).unwrap_err().contains("VADE_VERIFY_ROWS"), "{v:?}");
+    }
 }
 
 /// Scratch width funded for a session and every cohort it can own.

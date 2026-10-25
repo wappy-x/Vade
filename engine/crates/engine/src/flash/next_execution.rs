@@ -923,8 +923,8 @@ impl<'a, 'w> NextSession<'a, 'w> {
             None
         };
         let mut open: Option<usize> = None;
-        // VADE_VERIFY_ROWS=32: a verify pass up to 32 rows still stages its PLE rows at once.
-        let ple_rows = crate::flash_next_rows::verify_rows().unwrap_or(blocks::DECODE_ROWS).min(blocks::PLE_PASS_ROWS);
+        // Passes above 16 rows come only from a 32-row tick (VADE_VERIFY_ROWS): stage PLE at once.
+        let ple_rows = blocks::PLE_PASS_ROWS;
         for li in first..end {
             if let Some(entry) = graphed.filter(|_| li % VERIFY_SEGMENT == 1) {
                 if let Some(slot) = open.take() {

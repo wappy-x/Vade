@@ -7,6 +7,11 @@ Changes that are merged but not yet released are under Unreleased.
 
 ### Engine
 
+- On one Spark, `VADE_MTP_COHORT=wide` lets five to eight chats draft three
+  tokens each and check them in one 32-row step, instead of one token each.
+  Four or fewer chats keep the 16-row step. Measured on one Spark with eight
+  code chats: 169.6 to 194.4 tokens per second, with the same tokens. Unset,
+  nothing changes.
 - On four Sparks, the layer pipeline now drafts for six to eight chats at
   once, under the same rules as two Sparks: each tick checks up to 16 drafted
   rows, and the engine switches a cohort to ordinary decoding when that is
