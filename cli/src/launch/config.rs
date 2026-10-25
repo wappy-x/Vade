@@ -291,6 +291,10 @@ impl Config {
         text::encode(&fields)
     }
     /// The loopback URL of the local engine.
+    /// The saved drafting depth: `None` means the engine chooses.
+    pub fn mtp(&self) -> Option<u32> { self.mtp }
+    /// Whether drafting is on: off only when the saved setup says `--mtp 0`.
+    pub fn drafting(&self) -> bool { self.mtp != Some(0) }
     pub fn endpoint(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }

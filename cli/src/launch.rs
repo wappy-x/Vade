@@ -31,6 +31,7 @@ mod chat;
 use config::Config;
 pub(crate) use status::snapshot;
 pub(crate) use chat::state_arguments as chat_state_arguments;
+pub(crate) use chat::setup as chat_setup;
 
 const INSTALL_SPACE: u64 = 8 * 1024 * 1024 * 1024;
 
@@ -61,6 +62,24 @@ fn owner_home() -> Result<PathBuf, String> {
 /// Whether the local home has saved defaults or an owned engine.
 pub(crate) fn owner_configured() -> bool {
     root().is_ok_and(|p| p.join("config").exists() || p.join("state/run.conf").exists())
+}
+
+/// `vade config` rows for the saved local defaults: (label, text, JSON key,
+/// JSON value), or `None` before the first launch.
+pub(crate) fn saved_settings() -> Result<Option<(PathBuf, Vec<(&'static str, String, &'static str, crate::evals::json::Value)>)>, String> {
+    use crate::evals::json::Value;
+    let root = root()?;
+    let Some(config) = Config::load(&root)? else { return Ok(None) };
+    let drafting = match config.mtp() { None => "engine default".into(), Some(0) => "off (--mtp 0)".into(), Some(depth) => format!("depth {depth}") };
+    Ok(Some((root.join("config"), vec![
+        ("Model", config.model.display().to_string(), "model_path", config.model.to_string_lossy().as_ref().into()),
+        ("Size", format!("{} bytes", config.model_bytes), "model_bytes", Value::Int(config.model_bytes as i64)),
+        ("Context", format!("{} tokens", config.context), "context_tokens", Value::Int(config.context.into())),
+        ("Output", format!("{} tokens", config.output), "output_tokens", Value::Int(config.output.into())),
+        ("Port", format!("{} on 127.0.0.1", config.port), "port", Value::Int(config.port.into())),
+        ("Drafting", drafting, "mtp", config.mtp().map_or(Value::Null, |depth| Value::Int(depth.into()))),
+        ("Sparks", "1 (this Spark)".into(), "sparks", Value::Int(1)),
+    ])))
 }
 
 /// Whether the legacy `vade run qwen3-8b` home has a setup or a running server.
@@ -182,6 +201,9 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         if dry && matches!(command, Command::Status | Command::Menu) {
             return self.status_preview();
         }
+        if dry && crate::checks::json() && matches!(command, Command::Doctor | Command::Detect) {
+            return self.dry_json(&command);
+        }
         if dry {
             output::line(format_args!(
                 "Dry run: no files, processes or connections changed."
@@ -223,6 +245,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         };
         let began = Instant::now();
         match command {
+            Command::Detect if crate::checks::json() => self.detect_json(),
             Command::Detect => {
                 self.detection(Config::load(&self.root)?.as_ref(), INSTALL_SPACE)?;
                 Ok(())
@@ -410,14 +433,77 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
     ) -> Result<(model::Model, detect::Identity), String> {
         let start = phase("Detect", "read this Spark and existing model")?;
         let model = model::discover(&self.home, config.map(|c| c.model.as_path()))?;
+        let identity = self.identify(&model, install_space)?;
+        output::text(format_args!("{}", identity.display(&model.path)))?;
+        done("Detect", start)?;
+        Ok((model, identity))
+    }
+
+    /// The checks `vade detect` makes with and without `--json`: this Spark,
+    /// an FP4-Local checkpoint, and room for it.
+    fn identify(&mut self, model: &model::Model, install_space: u64) -> Result<detect::Identity, String> {
         let identity = self.detector.detect(&self.root, &model.path)?;
         if !model.fp4_local {
             return Err("Local launch needs nvidia/Qwen3.8-Flash-Next-FP4-Local. Set VADE_MODELS to that checkpoint and choose a fresh VADE_HOME before vade launch if defaults were already saved. For FP8, set VADE_CONFIG and use vade up --fp8-legacy.".into());
         }
         identity.check_resources(model.bytes, install_space)?;
-        output::text(format_args!("{}", identity.display(&model.path)))?;
-        done("Detect", start)?;
-        Ok((model, identity))
+        Ok(identity)
+    }
+
+    /// `vade detect --json`: the same checks and exit code as `vade detect`,
+    /// then one `vade.detect.v1` object. It never prompts for a checkpoint;
+    /// a failed check ends in the schema's `error` object (see `main`).
+    fn detect_json(&mut self) -> Result<(), String> {
+        use crate::evals::json::{self, Value};
+        let saved = Config::load(&self.root)?;
+        let model = model::discover_existing(&self.home, saved.as_ref().map(|c| c.model.as_path()))?;
+        let id = self.identify(&model, INSTALL_SPACE)?;
+        let value = json::object(vec![
+            ("schema", "vade.detect.v1".into()),
+            ("dry_run", false.into()),
+            ("vendor", id.vendor.as_str().into()),
+            ("product", id.product.as_str().into()),
+            ("os", id.os.as_str().into()),
+            ("architecture", id.architecture.as_str().into()),
+            ("gpu", id.gpu.as_str().into()),
+            ("driver", id.driver.as_str().into()),
+            ("cuda", id.cuda.as_str().into()),
+            ("memory_total_bytes", Value::Int(id.memory_total as i64)),
+            ("memory_available_bytes", Value::Int(id.memory_available as i64)),
+            ("install_free_bytes", Value::Int(id.install_free as i64)),
+            ("models_free_bytes", Value::Int(id.models_free as i64)),
+            ("volumes_shared", id.volumes_shared.into()),
+            ("model", json::object(vec![
+                ("path", model.path.to_string_lossy().as_ref().into()),
+                ("bytes", Value::Int(model.bytes as i64)),
+                ("fp4_local", model.fp4_local.into()),
+            ])),
+        ]);
+        crate::checks::print_json(&value)
+    }
+
+    /// `--json --dry-run` for doctor and detect: the plan as their one object.
+    fn dry_json(&mut self, command: &Command) -> Result<(), String> {
+        use crate::evals::json;
+        if *command == Command::Detect {
+            return crate::checks::print_json(&json::object(vec![("schema", "vade.detect.v1".into()), ("dry_run", true.into()),
+                ("plan", "Detect this Spark and existing model".into())]));
+        }
+        let mut report = crate::checks::Report::new("local", true);
+        let state = self.root.join("state");
+        for (name, detail) in [
+            ("config", self.root.join("config").display().to_string()),
+            ("VADE_HOME writable", self.root.display().to_string()),
+            ("ownership", state.join("run.conf").display().to_string()),
+            ("installed binaries", "engine, kernels and chat against their install hashes".into()),
+            ("model files", "the saved checkpoint, or VADE_MODELS".into()),
+            ("nvidia-smi", "GPU, driver and CUDA".into()),
+            ("disk", "free space for install and models".into()),
+            ("free memory", "available memory against the saved limits".into()),
+            ("port", "the saved port on 127.0.0.1".into()),
+            ("engine health", "the owned engine's /health".into()),
+        ] { report.plan(name, &detail)?; }
+        report.finish()
     }
 
     fn record(&self) -> Result<Option<Fields>, String> {
@@ -815,6 +901,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         let mut exec = Exec::new("local chat", required(artifacts, "harness")?,
             chat::arguments(&config.endpoint(), required(record, "endpoint_model")?, &workspace, context, chat::state_arguments()?));
         clear_credentials(&mut exec);
+        exec.env.insert("VADE_CHAT_SETUP".into(), chat::setup(1, config.drafting()));
         let success = self.runner.interactive(&exec)?;
         if !success {
             output::operation_failed();
@@ -890,7 +977,7 @@ pub(crate) fn progress(name: &str, token: Token, text: std::fmt::Arguments<'_>) 
     output::line(format_args!("{} {text}", style::paint(token, &format!("{name:>8}"), Stream::Out)))
 }
 /// A step duration: milliseconds below a second, else tenths of a second.
-fn elapsed(duration: Duration) -> String {
+pub(crate) fn elapsed(duration: Duration) -> String {
     if duration < Duration::from_secs(1) { format!("{} ms", duration.as_millis()) } else { format!("{:.1} s", duration.as_secs_f64()) }
 }
 fn required<'a>(fields: &'a Fields, key: &str) -> Result<&'a str, String> {

@@ -7,14 +7,51 @@ use std::{
     fs,
     io::Write,
     path::PathBuf,
+    sync::{mpsc, Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+/// Progress while verify waits on its blocking requests: `write` gets the
+/// current step and the time since start, first after `first`, then every
+/// `every`, until the ticker is dropped. Nothing is written before the first
+/// step is set.
+struct Ticker {
+    step: Arc<Mutex<String>>,
+    stop: Option<mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl Ticker {
+    fn start(first: Duration, every: Duration, write: impl Fn(&str, Duration) + Send + 'static) -> Self {
+        let step = Arc::new(Mutex::new(String::new()));
+        let (stop, stopped) = mpsc::channel::<()>();
+        let shared = Arc::clone(&step);
+        let started = Instant::now();
+        let thread = std::thread::spawn(move || {
+            let mut wait = first;
+            while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(wait) {
+                let step = shared.lock().map(|step| step.clone()).unwrap_or_default();
+                if !step.is_empty() { write(&step, started.elapsed()); }
+                wait = every;
+            }
+        });
+        Self { step, stop: Some(stop), thread: Some(thread) }
+    }
+    fn set(&self, step: String) {
+        if let Ok(mut current) = self.step.lock() { *current = step; }
+    }
+}
+impl Drop for Ticker {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(thread) = self.thread.take() { let _ = thread.join(); }
+    }
+}
 
 /// Usage for `vade verify`.
 /// `vade verify --help`.
 pub fn help() -> String {
     crate::style::Page {
-        summary: "Compare token IDs byte for byte across repeated greedy runs, drafting OFF and ON.",
+        summary: "Check that every run returns the same token IDs, drafting OFF and ON.",
         usage: &["vade verify [OPTIONS]"],
         options: &[
             ("-n N", "Runs per mode, 1..10000 (default 20); --runs is an alias"),
@@ -28,6 +65,7 @@ pub fn help() -> String {
         examples: &["vade verify", "vade verify -n 3 --prompt 2k", "vade verify --url http://127.0.0.1:18080/v1"],
         notes: &[
             "Uses --url, then VADE_API_URL, then the selected installation's recorded endpoint. Keep the same VADE_CONFIG and VADE_HOME as up/run; explicit VADE_CONFIG selects the controller's local_port. Without a running installation, start vade launch or supply --url.",
+            "Compares token IDs byte for byte across repeated greedy runs.",
             "Generates a fixed token count (ignores EOS) to check every ID, with cache and thinking off. ON requests strict drafting and must actually draft; unavailable drafting fails the check.",
             "Prints one result line; exit 0 means identical, 1 means different or incomplete. Run and token numbers start at 1.",
         ],
@@ -84,7 +122,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 .parse::<usize>()
                 .ok()
                 .filter(|n| (1..=maximum).contains(n))
-                .ok_or_else(|| format!("{key} must be an integer from 1 to {maximum}."))
+                .ok_or_else(|| format!("Set {key} to a whole number from 1 to {maximum}."))
         };
         match key {
             "-n" => options.n = number(10000)?,
@@ -250,11 +288,17 @@ fn verify(options: &Options, receipt: &mut Receipt) -> Result<(String, bool), St
     crate::auth::validate(false)?;
     let mut reference: Option<http::Reply> = None;
     let mut reference_bytes = Vec::new();
+    // Progress goes to stderr (stdout keeps its one result line), also while
+    // a request blocks: first after 2 s, then every 15 s.
+    let ticker = Ticker::start(Duration::from_secs(2), Duration::from_secs(15), |step, elapsed| {
+        crate::output::stderr_line(format_args!("{:>8} still {step} ({} s elapsed)", "Verify", elapsed.as_secs()));
+    });
     let result = (|| {
         for run in 1..=options.n {
             for target in &mut targets {
                 for draft_on in [false, true] {
                     let mode = if draft_on { "ON" } else { "OFF" };
+                    ticker.set(format!("run {run}/{} {} drafting {mode}", options.n, quoted(&target.name)));
                     let reply = target
                         .endpoint
                         .completion(
@@ -396,6 +440,7 @@ fn verify(options: &Options, receipt: &mut Receipt) -> Result<(String, bool), St
             true,
         ))
     })();
+    drop(ticker);
     receipt.record_targets(&targets);
     result
 }
@@ -444,8 +489,10 @@ pub fn run(args: &[String]) -> i32 {
     }
     let options = match parse(args) {
         Ok(options) => options,
+        // A usage error is not a verification result: the standard error block.
         Err(error) => {
-            crate::output::report(format_args!("ERROR: {}", single_line(&error)), true);
+            let color = crate::style::color(crate::style::Stream::Err);
+            crate::output::stderr_line(format_args!("{}", crate::style::error_block(&single_line(&error), color)));
             return 1;
         }
     };
@@ -492,6 +539,37 @@ fn single_line(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn progress_ticks_while_a_request_blocks_and_stops_when_dropped() {
+        // Each progress line arrives on a channel; bounded waits replace sleeps.
+        let (sender, lines) = mpsc::channel::<String>();
+        let ticker = Ticker::start(Duration::from_millis(1), Duration::from_millis(1), move |step, _| { let _ = sender.send(step.to_owned()); });
+        let next = || lines.recv_timeout(Duration::from_secs(30)).expect("a progress line while the request blocks");
+        // Unset, the ticker writes nothing, so the first line is this step.
+        let first = "run 1/1 \"primary\" drafting OFF";
+        ticker.set(first.into());
+        // One long "request" (this thread waiting): progress arrives during it.
+        assert_eq!((next(), next()), (first.to_owned(), first.to_owned()));
+        // A new step reaches a later line.
+        let second = "run 1/1 \"primary\" drafting ON";
+        ticker.set(second.into());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut last = next();
+        while last != second && Instant::now() < deadline { assert_eq!(last, first); last = next(); }
+        assert_eq!(last, second);
+        // Dropping joins the thread, which drops the sender: whatever was
+        // queued drains, then the channel disconnects with nothing more.
+        drop(ticker);
+        let rest: Vec<String> = lines.iter().collect();
+        assert!(rest.iter().all(|line| line == second), "{rest:?}");
+        assert_eq!(lines.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+        // A verify that ends before the first interval prints nothing.
+        let (sender, quiet) = mpsc::channel::<()>();
+        let ticker = Ticker::start(Duration::from_secs(3600), Duration::from_secs(3600), move |_, _| { let _ = sender.send(()); });
+        ticker.set("run 1/1 \"primary\" drafting OFF".into());
+        drop(ticker);
+        assert_eq!(quiet.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+    }
     #[test]
     fn options_are_bounded_and_unambiguous() {
         for args in [

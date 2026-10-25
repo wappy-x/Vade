@@ -1,7 +1,9 @@
 $ vade run --help
-Run the separate official Qwen3-8B BF16 catalog locally on one Linux/aarch64
-NVIDIA GB10: detect prerequisites before downloading, resume and hash official
-pinned weights, start an owned server, answer, run doctor.
+Run the separate legacy Qwen3-8B BF16 workflow on one Spark.
+
+Examples:
+  vade run qwen3-8b
+  vade run qwen3-8b --dry-run
 
 Usage: vade run qwen3-8b [OPTIONS]
 
@@ -16,11 +18,10 @@ Options:
   --api-key-file PATH   Bearer credential file (or VADE_API_KEY_FILE)
   --dry-run             Show what would happen; change nothing
 
-Examples:
-  vade run qwen3-8b
-  vade run qwen3-8b --dry-run
-
 Notes:
+  - On one Linux/aarch64 NVIDIA GB10: detect prerequisites before downloading,
+    resume and hash official pinned weights, start an owned server, answer, run
+    doctor.
   - Other --weights-source directory names are imported as Qwen3-8B inside
     VADE_HOME.
   - VADE_HOME selects a dedicated private data directory. Unset VADE_CONFIG; use

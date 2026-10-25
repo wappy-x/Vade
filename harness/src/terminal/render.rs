@@ -30,11 +30,14 @@ pub fn budget_footer(text: &str, color: bool) -> String {
             round.split_once('/').and_then(|(a, b)| {
                 a.parse::<u64>().ok().zip(b.parse::<u64>().ok())
             })
-        } else if let Some(ctx) = part
-            .strip_prefix("ctx ")
-            .and_then(|c| c.strip_suffix('%'))
-        {
-            ctx.parse::<u64>().ok().map(|used| (used, 100))
+        } else if let Some(ctx) = part.strip_prefix("ctx ") {
+            // `ctx 26.2k/32.8k` (counts with k/M suffixes) or `ctx 80%`.
+            let tokens = |text: &str| -> Option<u64> {
+                let (number, scale) = match text.strip_suffix('M') { Some(n) => (n, 1e6), None => match text.strip_suffix('k') { Some(n) => (n, 1e3), None => (text, 1.0) } };
+                number.parse::<f64>().ok().map(|n| (n * scale) as u64)
+            };
+            ctx.strip_suffix('%').and_then(|p| p.parse::<u64>().ok()).map(|used| (used, 100))
+                .or_else(|| ctx.split_once('/').and_then(|(a, b)| tokens(a).zip(tokens(b))))
         } else {
             part.split_once('/').and_then(|(a, b)| seconds(a).zip(seconds(b)))
         };
@@ -96,39 +99,91 @@ pub fn clip(text: &str, columns: usize) -> String {
     out
 }
 
-/// `text` split into rows of at most `columns` cells, carrying active styles
-/// across row breaks.
+/// `text` split into rows of at most `columns` cells at word boundaries,
+/// carrying active styles (and a leading speaker bar) across row breaks.
 pub fn wrap(text: &str, columns: usize) -> Vec<String> {
+    wrap_at(text, columns, true)
+}
+
+/// [`wrap`] at exact cell boundaries, never moving a word: for approval
+/// previews, where a moved fragment could read as a diff line of its own.
+pub fn wrap_exact(text: &str, columns: usize) -> Vec<String> {
+    wrap_at(text, columns, false)
+}
+
+fn wrap_at(text: &str, columns: usize, words: bool) -> Vec<String> {
     let columns = columns.max(1);
-    let mut rows = vec![String::new()];
-    let mut cells = 0;
+    let mut rows = Vec::new();
     let mut active = String::new();
-    for (s, n) in units(text) {
-        if s.starts_with('\x1b') {
-            if s == "\x1b[0m" {
-                active.clear();
-            } else {
-                active.push_str(s);
+    let lines: Vec<&str> = text.split('\n').collect();
+    for (index, line) in lines.iter().enumerate() {
+        // A line that starts with a speaker bar keeps it on every continuation
+        // row that has room for it. Exact previews never add characters.
+        let hang = hanging_bar(line).filter(|(_, n)| words && *n < columns);
+        // The bar cells at the start of the current row.
+        let mut bar_cells = hang.as_ref().map_or(0, |(_, n)| *n);
+        let mut row = active.clone();
+        let mut cells = 0;
+        // Where the row may break: just after its last space, with the style
+        // active there.
+        let mut space: Option<(usize, String)> = None;
+        for (s, n) in units(line) {
+            if s.starts_with('\x1b') {
+                if s == "\x1b[0m" { active.clear(); } else { active.push_str(s); }
+                row.push_str(s);
+                continue;
             }
-            rows.last_mut().unwrap().push_str(s);
-            continue;
-        }
-        if n > columns {
-            continue;
-        }
-        if s == "\n" || cells + n > columns {
-            if !active.is_empty() {
-                rows.last_mut().unwrap().push_str("\x1b[0m");
+            if n > columns {
+                continue;
             }
-            rows.push(active.clone());
-            cells = 0;
-        }
-        if s != "\n" {
-            rows.last_mut().unwrap().push_str(s);
+            // A space that would overflow ends the row itself.
+            let ends_row = words && s == " " && cells + n > columns;
+            if cells + n > columns {
+                let (mut bar, mut next_bar) = hang.clone().unwrap_or_default();
+                // Move the unfinished word down when it fits on a fresh row;
+                // a word longer than a row breaks where it must.
+                let split = space.take().filter(|(at, _)| !ends_row && next_bar + width(&row[*at..]) + n <= columns);
+                // A glyph too wide to follow the bar starts its row bare.
+                if split.is_none() && next_bar + n > columns { (bar, next_bar) = (String::new(), 0); }
+                let (mut head, tail, style) = match split {
+                    // The space stays at the end of the row, so joined rows
+                    // keep every character (approval previews must be exact).
+                    Some((at, style)) => (row[..at].to_owned(), row[at..].to_owned(), style),
+                    None => (std::mem::take(&mut row), String::new(), active.clone()),
+                };
+                if !style.is_empty() { head.push_str("\x1b[0m"); }
+                rows.push(head);
+                bar_cells = next_bar;
+                cells = bar_cells + width(&tail);
+                row = format!("{bar}{style}{tail}");
+                if ends_row { continue; }
+            }
+            row.push_str(s);
             cells += n;
+            if words && s == " " && cells > bar_cells + 1 {
+                space = Some((row.len(), active.clone()));
+            }
         }
+        if index + 1 < lines.len() && !active.is_empty() {
+            row.push_str("\x1b[0m");
+        }
+        rows.push(row);
     }
     rows
+}
+
+/// The leading `▌ ` or `┆ ` of `text` with its styling, and its cells.
+fn hanging_bar(text: &str) -> Option<(String, usize)> {
+    let visible = plain(text);
+    if !(visible.starts_with("▌ ") || visible.starts_with("┆ ")) { return None; }
+    let (mut bar, mut cells) = (String::new(), 0);
+    for (s, n) in units(text) {
+        if cells == 2 && !s.starts_with('\x1b') { break; }
+        bar.push_str(s);
+        cells += n;
+    }
+    if bar.contains('\x1b') && !bar.ends_with("\x1b[0m") { bar.push_str("\x1b[0m"); }
+    Some((bar, cells))
 }
 
 /// A reply rendered for the terminal: sanitized, fenced code kept verbatim
@@ -209,25 +264,32 @@ pub fn markdown(text: &str, color: bool) -> String {
     out.join("\n")
 }
 
-/// Labels carry speaker identity even with NO_COLOR or a light terminal theme.
+/// The bar in front of every row you wrote. It carries speaker identity
+/// without colour too: the model's answer never has a bar.
+pub const USER_BAR: &str = "▌";
+/// The dim dotted bar in front of expanded thinking rows, so a thought never
+/// reads as part of the answer.
+pub const THOUGHT_BAR: &str = "┆";
+
+/// Your message: a bold cyan bar and bold text on every line.
 pub fn user(text: &str, color: bool) -> String {
-    format!("{}\n{}", header("You", &super::clock::now().0, "1;36", color), sanitize(text))
+    sanitize(text)
+        .split('\n')
+        .map(|line| format!("{} {}", style(USER_BAR, "1;36", color), style(line, "1", color)))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-/// A `── label · time ──` rule in the given style.
-pub fn header(label: &str, time: &str, sgr: &str, color: bool) -> String {
-    style(&format!("── {label} · {time} ──"), sgr, color)
-}
-
-/// A complete answer block: the Answer header and the rendered reply.
-pub fn reply(text: &str, time: &str, color: bool) -> String {
-    format!("{}\n{}", header("Answer", time, "1", color), markdown(text, color))
+/// A complete answer: the rendered reply, with no header. Your bar above it
+/// already says whose turn ended.
+pub fn reply(text: &str, color: bool) -> String {
+    markdown(text, color)
 }
 
 /// A warning block: what happened, what Vade is doing, what you can do.
-/// The label carries the meaning without colour; colour adds yellow.
-pub fn warning(what: &str, doing: &str, next: &str, time: &str, color: bool) -> String {
-    let mut text = header("Warning", time, "1;33", color);
+/// The `▲ Warning` label carries the meaning without colour; colour adds yellow.
+pub fn warning(what: &str, doing: &str, next: &str, color: bool) -> String {
+    let mut text = style("▲ Warning", "1;33", color);
     for part in [what, doing, next].into_iter().filter(|p| !p.is_empty()) {
         text.push('\n');
         text.push_str(&sanitize(part));
@@ -235,7 +297,8 @@ pub fn warning(what: &str, doing: &str, next: &str, time: &str, color: bool) -> 
     text
 }
 
-/// Thoughts keep their start clock and a closing clock even when collapsed.
+/// A thought on one dim italic line: start and end clocks, length and time.
+/// Expanded, its text follows behind a dim dotted bar.
 pub fn thinking(
     text: &str,
     tokens: Option<u64>,
@@ -251,21 +314,21 @@ pub fn thinking(
         |n| format!("{} tokens", super::clock::count(n)),
     );
     let label = format!(
-        "{} Thinking · {} · {count}{} · Ctrl+T {}{}",
+        "{} thinking {}{} · {count}{} · Ctrl+T {}{}",
         if expanded { "▾" } else { "▸" },
         time.0,
+        time.1.map_or_else(String::new, |end| format!("–{end}")),
         elapsed.map_or_else(String::new, |d| format!(" · {}", super::clock::duration(d))),
         if expanded { "collapse" } else { "expand" },
         if limited { " · display limit" } else { "" }
     );
+    // A narrow row drops the key hint whole rather than clipping a word.
+    let label = if width(&label) > columns { label.split(" · Ctrl+T").next().unwrap_or(&label).to_owned() } else { label };
     let mut rows = vec![clip(&style(&label, "2;3", color), columns)];
     if expanded {
         for line in sanitize(text).replace('\t', "    ").lines() {
-            rows.extend(wrap(&style(line, "2", color), columns));
+            rows.extend(wrap(&format!("{} {}", style(THOUGHT_BAR, "2", color), style(line, "2;3", color)), columns));
         }
-    }
-    if let Some(end) = time.1 {
-        rows.push(clip(&style(&format!("╰ {end}"), "2", color), columns));
     }
     rows
 }
@@ -397,7 +460,7 @@ pub struct EditorRows {
     pub cursor_column: usize,
 }
 
-/// `hint` shows the newline keys in the top border; callers show it until
+/// `hint` shows the keys dimly in the empty prompt; callers show it until
 /// the first message is sent, not on every frame of the session.
 pub fn editor(
     text: &str,
@@ -408,9 +471,11 @@ pub fn editor(
     hint: bool,
     color: bool,
 ) -> EditorRows {
-    let boxed = columns >= 6 && max_rows >= 3;
-    let prefix = if boxed { prefix } else { "" };
-    let inner = columns.saturating_sub(if boxed { 4 } else { 0 }).max(1);
+    // No box: the prompt marker alone marks where you type, and the dim
+    // status strip above it is the only chrome.
+    // Too narrow for the marker: the input alone.
+    let prefix = if columns >= 4 { prefix } else { "" };
+    let inner = columns.saturating_sub(width(prefix)).max(1);
     let cursor = cursor.min(text.len());
     let cursor = (0..=cursor)
         .rev()
@@ -452,45 +517,23 @@ pub fn editor(
             }
         }
     }
-    let available = max_rows.saturating_sub(if boxed { 2 } else { 0 }).max(1);
+    let available = max_rows.max(1);
     let start = caret.0.saturating_sub(available - 1);
     let mut lines = Vec::new();
-    if boxed {
-        let hint = clip(
-            if !hint {
-                ""
-            } else if columns >= 60 {
-                " Enter sends · Shift+Enter / Option+Enter / Ctrl+J newline "
-            } else {
-                " Enter sends · Ctrl+J newline "
-            },
-            columns - 2,
-        );
-        lines.push(style(
-            &format!("┌{hint}{}┐", "─".repeat(columns - 2 - width(&hint))),
-            "2",
-            color,
-        ));
-    }
     for (index, row) in rows.iter().enumerate().skip(start).take(available) {
-        if boxed {
-            let prompt = if index == 0 { prefix } else { "  " };
-            lines.push(format!(
-                "│{}{row}{}│",
-                style(prompt, "1;36", color),
-                " ".repeat(inner.saturating_sub(width(row)))
-            ));
-        } else {
-            lines.push(row.clone());
+        let prompt = if index == 0 { prefix.to_owned() } else { " ".repeat(width(prefix)) };
+        let mut line = format!("{}{row}", style(&prompt, "1;36", color));
+        // Until the first message, an empty prompt shows the keys dimly.
+        if hint && text.is_empty() {
+            let keys = if inner >= 50 { "Enter sends · Shift+Enter or Ctrl+J newline · / commands" } else { "Enter sends · Ctrl+J newline" };
+            line.push_str(&style(&clip(keys, inner), "2", color));
         }
-    }
-    if boxed {
-        lines.push(style(&format!("└{}┘", "─".repeat(columns - 2)), "2", color));
+        lines.push(line);
     }
     EditorRows {
         lines,
-        cursor_row: caret.0 - start + usize::from(boxed),
-        cursor_column: caret.1 + if boxed { 3 } else { 0 },
+        cursor_row: caret.0 - start,
+        cursor_column: caret.1 + width(prefix),
     }
 }
 
@@ -539,6 +582,30 @@ mod tests {
     use super as render;
 
     #[test]
+    fn rows_break_between_words_and_your_bar_continues() {
+        assert_eq!(render::wrap("the sky is blue", 8), ["the sky ", "is blue"]);
+        assert_eq!(render::wrap("abcdefghij", 4), ["abcd", "efgh", "ij"], "a word longer than a row still breaks");
+        assert_eq!(render::wrap_exact("the sky is blue", 8), ["the sky ", "is blue"]);
+        assert_eq!(render::wrap_exact("-a -b -c", 4), ["-a -", "b -c"], "approval rows never move words");
+        assert_eq!(render::wrap(&render::user("why is the sky blue", false), 12), ["▌ why is the", "▌ sky blue"]);
+        let rows = render::wrap(&render::user("why is the sky blue", true), 12);
+        assert!(rows.iter().all(|row| render::plain(row).starts_with("▌ ") && render::width(row) <= 12), "{rows:?}");
+        assert_eq!(render::wrap(&render::user("a\nb", false), 20), ["▌ a", "▌ b"], "one bar per row");
+        // Exact previews keep a literal bar as text and add nothing.
+        assert_eq!(render::wrap_exact("▌ abcdef", 5), ["▌ abc", "def"]);
+        assert_eq!(render::wrap_exact("┆ abc def", 5).concat(), "┆ abc def");
+        // A wide glyph that cannot follow the bar starts its row bare.
+        for (text, columns) in [("▌ 你", 3), ("▌ 你好", 3), ("▌ 🦀🦀", 3), ("▌ ab 你好世界", 4), ("▌ 🦀 x", 2)] {
+            let rows = render::wrap(text, columns);
+            assert!(rows.iter().all(|row| render::width(row) <= columns), "{text:?} at {columns}: {rows:?}");
+            assert_eq!(rows.concat().replace("▌ ", "").replace(' ', ""), text["▌ ".len()..].replace(' ', ""), "{text:?}: every glyph kept");
+        }
+        assert_eq!(render::wrap("▌ 你", 3), ["▌ ", "你"]);
+        assert_eq!(render::wrap("▌ 你好", 4), ["▌ 你", "▌ 好"], "a bar that fits stays");
+        let thought = render::thinking("step one\nstep two", Some(9), None, ("10:00:00", Some("10:00:02")), true, false, 80, false);
+        assert_eq!(thought, ["▾ thinking 10:00:00–10:00:02 · 9 tokens · Ctrl+T collapse", "┆ step one", "┆ step two"]);
+    }
+    #[test]
     fn diff_lines_are_coloured_by_kind_and_stay_literal_without_colour() {
         let sample = "*** Update File: a.rs\n--- a.rs\n+++ a.rs\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n[context line truncated: 9 bytes]";
         assert_eq!(render::diff(sample, false), sample);
@@ -556,7 +623,7 @@ mod tests {
         let text = "start 🦀 café\nsecond line";
         let cursor = "start 🦀 ca".len();
         for width in [4, 8, 20, 80] {
-            let view = render::editor(text, cursor, "> ", width, 8, true, true);
+            let view = render::editor(text, cursor, "› ", width, 8, true, true);
             assert!(view.lines.iter().all(|line| render::width(line) <= width));
             assert!(view.cursor_column < width);
             assert!(view.cursor_row < view.lines.len());

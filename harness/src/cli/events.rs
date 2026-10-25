@@ -112,15 +112,14 @@ impl Pending {
                 || format!("{} work", time(elapsed)),
                 |limit| format!("{}/{}", time(elapsed), time(limit.as_secs())),
             );
-        let context = progress.context.map_or_else(|| "ctx —".into(), |(used, limit)| {
+        // Raw counts, never a percentage; the footer badge marks 80 % use.
+        // Unknown context is left out rather than shown as a dash.
+        let context = progress.context.and_then(|(used, limit)| {
             let limit = limit.min(progress.limits.max_context_tokens as u64);
-            match used.saturating_mul(100).checked_div(limit) {
-                Some(percent) => format!("ctx {percent}%"),
-                None => "ctx —".into(),
-            }
-        });
+            (limit > 0).then(|| format!(" · ctx {}/{}", terminal::clock::count(used), terminal::clock::count(limit)))
+        }).unwrap_or_default();
         format!(
-            "round {}/{} · {work} · {context}",
+            "round {}/{} · {work}{context}",
             progress.rounds, progress.limits.max_tool_turns,
         )
     }
@@ -209,7 +208,11 @@ impl App {
                     }
                     if !self.quiet && !terminal::answer_text(prose).is_empty() && self.terminal.raw() {
                         self.terminal.answer(prose)?;
-                        self.terminal.answer_status(&format!("╰ {}", terminal::clock::now().0))?;
+                        // Prose before a tool closes with its clock; a final
+                        // answer gets the full run footer instead, once.
+                        if !label.is_empty() {
+                            self.terminal.answer_status(&format!("╰ {}", terminal::clock::now().0))?;
+                        }
                     } else if !self.quiet && !self.terminal.raw() && shown < prose.len() {
                         self.terminal.stream_text(&prose[shown..])?;
                     } else {

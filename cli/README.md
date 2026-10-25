@@ -28,11 +28,12 @@ This page explains new terms where they first come up. The
 | `vade up` | From a controller with a config file, runs the model on one or more Sparks. On the Spark itself, it also starts the local engine |
 | `vade chat` | Opens chat with the running engine |
 | `vade status` | Shows what is running; add `--json` for scripts |
+| `vade config` | Shows which setup the other commands will use (local, controller, legacy or none) and what it holds; add `--json` for scripts |
 | `vade verify` | Runs the same greedy prompt with drafting off and on, and checks that every run returns the same token IDs byte for byte |
 | `vade bench` | Measures the wait before output starts and the answer speed |
-| `vade doctor` | On the Spark itself, checks the driver, resources, model, installation and engine health. From a controller, runs machine checks plus the harness doctor |
+| `vade doctor` | Prints one line per check, then PASS or FAIL. On the Spark itself, checks the config, `VADE_HOME`, the driver, memory, disk, model, installation, port and engine health. From a controller, checks local tools, then SSH, `nvidia-smi`, disk, memory and model files on each Spark, then the fabric, port and engine. Add `--json` for scripts |
 | `vade logs` | Shows recent engine logs |
-| `vade detect` | Shows this Spark's memory, disk, driver and model, and changes nothing |
+| `vade detect` | Shows this Spark's memory, disk, driver and model, and changes nothing; add `--json` for scripts |
 | `vade install` | Saves local defaults and installs the engine and chat on this Spark. With `VADE_CONFIG` set, installs on your Sparks from a controller |
 | `vade update` | On the Spark itself, restages the current bundle or rebuilds the current source. From a controller, it first updates clean Git checkouts, then rebuilds and restages |
 | `vade down` | Stops the engine you own |
@@ -53,6 +54,9 @@ up.
 
 `vade test` has its own [gate guide](docs/test.md) and
 [evaluation guide](evals.md).
+
+What every command prints, its exit codes and the help layout are fixed in
+the [output contract](docs/ux.md).
 
 ## Install
 

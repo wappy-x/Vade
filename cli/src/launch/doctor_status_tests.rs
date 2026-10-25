@@ -21,42 +21,46 @@ fn snapshot<R: Runner, D: Detector>(launch: &mut Launcher<R, D>, dry: bool) -> R
 fn doctor_reports_every_check_and_counts_the_failures() {
     let f = Fixture::new();
     let mut launch = f.launcher();
+    // `state  name` at fixed columns, so each row can be found by its start.
+    let row = |state: &str, name: &str| format!("{state:<4}  {name:<20}  ");
     let (result, printed) = captured(|| launch.execute(Command::Doctor, false));
-    assert_eq!(result.unwrap_err(), "2 local check(s) need attention. Follow the next commands above, then retry vade doctor.");
+    assert_eq!(result.unwrap_err(), "2 doctor check(s) failed. Run each next: command above, then vade doctor.");
     for line in [
-        "Config: No saved local defaults.\nNext: Run vade launch to create defaults",
-        "Ownership: OK.",
-        "Installed engine, kernels and chat: Local artifacts are missing or have changed.\nNext: Run vade down, then vade install",
-        "Model: OK.",
-        "Machine and NVIDIA driver: OK.",
-        "Disk: OK.",
-        "Memory and launch limits: OK.",
-        "Engine: stopped. Start: ",
+        format!("{}No saved local defaults.\n      next: Run vade launch to create defaults", row("FAIL", "config")),
+        row("ok", "VADE_HOME writable"),
+        format!("{}no engine recorded", row("ok", "ownership")),
+        format!("{}Local artifacts are missing or have changed.\n      next: Run vade down, then vade install", row("FAIL", "installed binaries")),
+        row("ok", "model files"),
+        row("ok", "nvidia-smi"),
+        row("ok", "disk"),
+        row("ok", "free memory"),
+        "ok    port ".into(),
+        format!("{}stopped; start: ", row("skip", "engine health")),
+        "FAIL  7 ok, 2 failed, 1 skipped in ".into(),
     ] {
-        assert!(printed.contains(line), "{line:?} missing from:\n{printed}");
+        assert!(printed.contains(&line), "{line:?} missing from:\n{printed}");
     }
-    assert!(!printed.contains("Local checks passed."), "{printed}");
 
     // A fresh install needs install room as well as the model volume's.
     launch.detector.identity.install_free = GIB;
     let (result, printed) = captured(|| launch.execute(Command::Doctor, false));
-    assert!(result.unwrap_err().starts_with("3 local check(s) need attention."));
-    assert!(printed.contains("Disk: Insufficient disk working room: install needs 8.0 GiB and model volume needs 1 GiB.\nNext: Free space"), "{printed}");
+    assert!(result.unwrap_err().starts_with("3 doctor check(s) failed."));
+    assert!(printed.contains(&format!("{}Insufficient disk working room: install needs 8.0 GiB and model volume needs 1 GiB.\n      next: Free space", row("FAIL", "disk"))), "{printed}");
 
     launch.detector.identity = identity();
     f.installed();
     f.configured();
     let (result, printed) = captured(|| launch.execute(Command::Doctor, false));
     result.unwrap();
-    let tail = format!("Engine: stopped. Start: {}\nLocal checks passed.\n", text::command("launch"));
-    assert!(printed.ends_with(&tail), "{printed}");
+    assert!(printed.contains(&format!("{}stopped; start: {}\nPASS  9 ok, 0 failed, 1 skipped in ", row("skip", "engine health"), text::command("launch"))), "{printed}");
     assert_eq!(launch.runner.starts, 0, "doctor must not start the engine");
 
     captured(|| launch.execute(Command::Up(Default::default()), false)).0.unwrap();
     let (result, printed) = captured(|| launch.execute(Command::Doctor, false));
     result.unwrap();
-    assert!(printed.contains("Memory: resident engine recorded; available memory is shown above, without reserving its allocation again."), "{printed}");
-    assert!(printed.contains("Owned endpoint and health: OK.\nLocal checks passed.\n"), "{printed}");
+    assert!(printed.contains("the running engine holds its share"), "{printed}");
+    assert!(printed.contains("skip  port ") && printed.contains(&row("ok", "engine health")), "{printed}");
+    assert!(printed.contains("\nPASS  9 ok, 0 failed, 1 skipped in "), "{printed}");
     assert_eq!(launch.runner.starts, 1);
     captured(|| launch.execute(Command::Down, false)).0.unwrap();
 }
@@ -143,4 +147,50 @@ fn status_config_row_escapes_terminal_controls_in_the_home_path() {
     let table = launch.status_table(&config, &Fields::new()).unwrap();
     assert!(!table.contains(['\x1b', '\x07', '\r']), "{table:?}");
     assert!(table.contains("vade\\u{1b}]0;title\\u{7}\\rhome/config\n"), "{table:?}");
+}
+
+#[test]
+fn detect_json_makes_the_same_checks_and_exit_as_detect() {
+    use crate::checks::{set_json, Answer};
+    let f = Fixture::new();
+    let mut launch = f.launcher();
+    let json_run = |launch: &mut Launcher<MockRunner, MockDetector>, schema, command: Command, dry| {
+        set_json(Some(Answer { schema, mode: "local", dry }));
+        let result = captured(|| launch.execute(command, dry));
+        set_json(None);
+        result
+    };
+    let (result, printed) = json_run(&mut launch, "vade.detect.v1", Command::Detect, false);
+    result.unwrap();
+    assert_eq!(printed.lines().count(), 1, "{printed}");
+    let value = json::parse(&printed).unwrap();
+    assert_eq!((value["schema"].as_str(), &value["dry_run"]), (Some("vade.detect.v1"), &Value::Bool(false)));
+    assert_eq!(value["model"]["path"].as_str(), Some(f.model.to_string_lossy().as_ref()));
+    assert_eq!(value["model"]["fp4_local"], Value::Bool(true));
+
+    // Too little install room fails both forms with the same error, and
+    // --json prints nothing of its own (main answers with the error object).
+    launch.detector.identity.install_free = GIB;
+    let plain = captured(|| launch.execute(Command::Detect, false)).0.unwrap_err();
+    let (result, printed) = json_run(&mut launch, "vade.detect.v1", Command::Detect, false);
+    assert_eq!(result.unwrap_err(), plain);
+    assert!(printed.is_empty(), "{printed}");
+    launch.detector.identity = identity();
+
+    // An incomplete checkpoint is an error, never a successful "no model".
+    fs::rename(f.model.join("config.json"), f.model.join("config.json.moved")).unwrap();
+    let (result, printed) = json_run(&mut launch, "vade.detect.v1", Command::Detect, false);
+    assert!(result.is_err() && printed.is_empty(), "{printed}");
+    fs::rename(f.model.join("config.json.moved"), f.model.join("config.json")).unwrap();
+
+    // Dry runs answer in the schema too, and check nothing.
+    let calls = launch.detector.calls;
+    let (result, printed) = json_run(&mut launch, "vade.detect.v1", Command::Detect, true);
+    result.unwrap();
+    assert_eq!(printed, "{\"schema\":\"vade.detect.v1\",\"dry_run\":true,\"plan\":\"Detect this Spark and existing model\"}\n");
+    let (result, printed) = json_run(&mut launch, "vade.doctor.v1", Command::Doctor, true);
+    result.unwrap();
+    let value = json::parse(&printed).unwrap();
+    assert_eq!((value["mode"].as_str(), value["result"].as_str(), value["planned"].as_i64(), value["failed"].as_i64()), (Some("local"), Some("plan"), Some(10), Some(0)), "{printed}");
+    assert_eq!(launch.detector.calls, calls, "dry runs must not detect");
 }

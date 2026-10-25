@@ -1,11 +1,14 @@
 //! Argument parsing and per-command help. [`parse`] turns arguments into a
 //! [`Cli`] without reading config, files or the network; [`help`] returns the
 //! usage text for `vade help <command>`.
-/// A parsed command line: the command and the global `--dry-run` flag.
+/// A parsed command line: the command, the global `--dry-run` flag and
+/// `--json` for the read-only commands that take it (`status --json` keeps
+/// its own [`Command::StatusJson`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cli {
     pub command: Command,
     pub dry_run: bool,
+    pub json: bool,
 }
 
 /// One `vade` command, with its parsed options.
@@ -33,6 +36,8 @@ pub enum Command {
     Install,
     /// `vade detect`.
     Detect,
+    /// `vade config`: which setup is selected and what it holds.
+    Config,
     /// `vade launch`: install if needed, start on this Spark, then chat.
     Launch(UpOptions),
     /// `vade update`.
@@ -118,26 +123,32 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
         return Ok(Cli {
             command: Command::Worker(args[1..].to_vec()),
             dry_run: false,
+            json: false,
         });
     }
     let dry_run = args.iter().any(|arg| arg == "--dry-run");
-    let args: Vec<&str> = args
+    let mut args: Vec<&str> = args
         .iter()
         .filter(|arg| arg.as_str() != "--dry-run")
         .map(String::as_str)
         .collect();
+    // --json belongs to the read-only commands; `status --json` keeps its own form.
+    let json = args.first().is_some_and(|command| matches!(*command, "doctor" | "detect" | "config" | "version" | "--version" | "-V"))
+        && args[1..].contains(&"--json");
+    if json { args.retain(|arg| *arg != "--json"); }
     let Some(command) = args.first().copied() else {
         return Ok(Cli {
             command: Command::Menu,
             dry_run,
+            json,
         });
     };
     if matches!(command, "version" | "--version" | "-V") {
         if args.len() > 1 && args[1..].iter().all(|arg| matches!(*arg, "--help" | "-h")) {
-            return Ok(Cli { command: Command::Help(Some("version".into())), dry_run });
+            return Ok(Cli { command: Command::Help(Some("version".into())), dry_run, json });
         }
         if args.len() != 1 { return Err("Use vade --version without additional arguments.".into()); }
-        return Ok(Cli { command: Command::Version, dry_run });
+        return Ok(Cli { command: Command::Version, dry_run, json });
     }
     if matches!(command, "--help" | "-h" | "help") {
         if args.len() > 2 || (args.len() == 2 && !known_command(args[1])) {
@@ -146,6 +157,7 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
         return Ok(Cli {
             command: Command::Help(args.get(1).map(|s| (*s).into())),
             dry_run,
+            json,
         });
     }
     if !known_command(command) {
@@ -155,6 +167,7 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
         return Ok(Cli {
             command: Command::Help(Some(command.into())),
             dry_run,
+            json,
         });
     }
     let parsed = if command == "run" {
@@ -203,7 +216,8 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
     } else {
         if args.len() != 1 {
             return Err(format!(
-                "Unexpected argument {} for vade {command}. This command takes no options except --dry-run. Run vade {command} --help.", crate::text::argument(args[1])
+                "Unexpected argument {} for vade {command}. This command takes no options except {}. Run vade {command} --help.", crate::text::argument(args[1]),
+                if matches!(command, "doctor" | "detect" | "config") { "--json and --dry-run" } else { "--dry-run" }
             ));
         }
         match command {
@@ -214,6 +228,7 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
             "doctor" => Command::Doctor,
             "install" => Command::Install,
             "detect" => Command::Detect,
+            "config" => Command::Config,
             "update" => Command::Update,
             _ => unreachable!(),
         }
@@ -221,13 +236,14 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
     Ok(Cli {
         command: parsed,
         dry_run,
+        json,
     })
 }
 
 fn known_command(command: &str) -> bool {
     matches!(
         command,
-        "run" | "up" | "down" | "status" | "logs" | "chat" | "doctor" | "install" | "update" | "version" | "detect" | "launch"
+        "run" | "up" | "down" | "status" | "logs" | "chat" | "doctor" | "install" | "update" | "version" | "detect" | "launch" | "config"
     )
 }
 
@@ -462,7 +478,7 @@ mod tests {
         let Command::Launch(local) = cli("launch --context 65536 --output 16384").unwrap().command else { panic!() };
         assert!(local.fp4_local && local.supplied_options.contains("--context")); assert_eq!((local.context, local.output), (65536, 16384));
         assert_eq!(cli("--dry-run up --mtp 3 --dry-run").unwrap(), Cli {
-            command: Command::Up(UpOptions { supplied_options: ["--mtp".into()].into(), mtp: 3, mtp_explicit: true, ..UpOptions::default() }), dry_run: true
+            command: Command::Up(UpOptions { supplied_options: ["--mtp".into()].into(), mtp: 3, mtp_explicit: true, ..UpOptions::default() }), dry_run: true, json: false
         });
         assert!(matches!(cli("chat -h").unwrap().command, Command::Help(Some(_))));
         assert!(cli("launch --context").unwrap_err().contains("vade launch --help"));
@@ -485,7 +501,7 @@ mod tests {
         for (args, expected) in [
             ("help up down", "Use vade help, or vade help <command>."),
             ("help nonsense", "Use vade help, or vade help <command>."),
-            ("version --json", "Use vade --version without additional arguments."),
+            ("version --json now", "Use vade --version without additional arguments."),
             ("run", "Use vade launch for Flash-Next FP4-Local, or vade run qwen3-8b for the separate official Qwen3-8B BF16 catalog."),
             ("run qwen3-8b --release r --engine-source e", "Choose --release or source checkouts."),
             ("up --memory-bytes 0", "Set --memory-bytes above zero and --cache-bytes below the memory budget. Use --cache-bytes 0 to disable retained prompt cache."),

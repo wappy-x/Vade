@@ -162,7 +162,7 @@ impl Ui {
             if extra.contains(&"--plain") {
                 "> "
             } else {
-                "│> "
+                "› "
             },
             Duration::from_secs(3),
         );

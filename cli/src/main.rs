@@ -31,6 +31,7 @@ mod auth;
 mod bench;
 mod build_job;
 mod catalog;
+mod checks;
 mod cli;
 mod config;
 mod help;
@@ -42,6 +43,7 @@ mod endpoint;
 mod json;
 mod run;
 mod runner;
+mod setup;
 mod state;
 mod status;
 mod style;
@@ -60,6 +62,21 @@ fn run_main(mut args: Vec<String>) {
     if args.first().is_some_and(|arg| arg == "__socket-probe") {
         std::process::exit(if args.len() == 2 { control_socket::probe(&args[1]) } else { 1 });
     }
+    // `vade test`, `vade bench` and their help pages share the CLI's layout;
+    // `vade bench --help-all` lists every benchmark option.
+    let topic = |name: &str| (args.len() == 2 && matches!(args[0].as_str(), "help" | "--help" | "-h") && args[1] == name)
+        || (args.first().is_some_and(|arg| arg == name) && ((args.len() == 1 && name == "test")
+            || (args.len() == 2 && matches!(args[1].as_str(), "--help" | "-h"))));
+    if topic("test") || topic("bench") {
+        public_output(&cli::help(Some(if topic("test") { "test" } else { "bench" })));
+        return;
+    }
+    if args.first().is_some_and(|arg| arg == "bench") && args[1..].iter().any(|arg| arg == "--help-all") {
+        match bench::run(&["--help".into()], || false) {
+            Ok(code) => std::process::exit(code),
+            Err(error) => fail(&error),
+        }
+    }
     if args.first().is_some_and(|arg| arg == "test") {
         let code = if args
             .get(1)
@@ -69,22 +86,7 @@ fn run_main(mut args: Vec<String>) {
         } else {
             evals::run(&args[1..])
         };
-        if args.len() == 1
-            || args
-                .get(1)
-                .is_some_and(|arg| matches!(arg.as_str(), "--help" | "-h"))
-        {
-            public_output(test_gate::HELP);
-        }
         std::process::exit(output::exit_code(code));
-    }
-    if args
-        .first()
-        .is_some_and(|arg| matches!(arg.as_str(), "help" | "--help" | "-h"))
-        && args.get(1).is_some_and(|arg| arg == "test")
-    {
-        public_output(&format!("{}{}", evals::help(), test_gate::HELP));
-        return;
     }
     if args.first().is_some_and(|arg| arg == "bench") {
         let _interruptions = if args.get(1).is_some_and(|arg| arg == "--suite") {
@@ -95,12 +97,6 @@ fn run_main(mut args: Vec<String>) {
         let arguments = endpoint::bench_arguments(&args[1..]).unwrap_or_else(|error| fail(&error));
         match bench::run(&arguments, runner::interrupted) {
             Ok(code) => std::process::exit(if runner::interrupted() { 130 } else { code }),
-            Err(error) => fail(&error),
-        }
-    }
-    if args.len() == 2 && matches!(args[0].as_str(), "help" | "--help" | "-h") && args[1] == "bench" {
-        match bench::run(&["--help".into()], || false) {
-            Ok(code) => std::process::exit(code),
             Err(error) => fail(&error),
         }
     }
@@ -155,8 +151,22 @@ fn run_main(mut args: Vec<String>) {
         public_output(&cli::help(command.as_deref()));
         return;
     }
+    // From here every error of a --json command still ends in its one object
+    // (see fail).
+    checks::set_json(parsed.json.then(|| checks::Answer { schema: match parsed.command {
+        cli::Command::Doctor => "vade.doctor.v1", cli::Command::Detect => "vade.detect.v1", cli::Command::Config => "vade.config.v1", _ => "vade.version.v1",
+    }, mode: owner(&parsed.command), dry: parsed.dry_run }));
     if parsed.command == cli::Command::Version {
-        public_output(concat!("vade ", env!("CARGO_PKG_VERSION"), "\n"));
+        if parsed.json {
+            let value = evals::json::object(vec![("schema", "vade.version.v1".into()), ("version", env!("CARGO_PKG_VERSION").into())]);
+            checks::print_json(&value).unwrap_or_else(|error| fail(&error));
+        } else {
+            public_output(concat!("vade ", env!("CARGO_PKG_VERSION"), "\n"));
+        }
+        return;
+    }
+    if parsed.command == cli::Command::Config {
+        if let Err(error) = setup::show(parsed.json) { fail(&error); }
         return;
     }
     // Keep every JSON status outcome (including owner-config errors) inside
@@ -214,6 +224,17 @@ fn run_main(mut args: Vec<String>) {
     }
     let config = match config::Config::load() {
         Ok(config) => config,
+        // A fresh controller still gets one row per check and a FAIL line.
+        Err(error) if parsed.command == cli::Command::Doctor => {
+            let mut report = checks::Report::new(owner(&parsed.command), parsed.dry_run);
+            let next = "On a Spark, run vade launch; for a controller, copy cli/examples/fp4-local.conf, edit it and set VADE_CONFIG (INSTALL.md).";
+            let result = report.fail("config", &style::split(&error).0, next).and_then(|()| {
+                if !parsed.dry_run { checks::local_tools(&mut report)?; }
+                report.finish()
+            });
+            if let Err(error) = result { fail(&error); }
+            return;
+        }
         Err(error) if matches!(parsed.command, cli::Command::Menu) => {
             let error = text::terminal_text(&error);
             public_output(&format!("{} Vade needs setup.\n  {error}\n\n{}", style::paint(style::Token::Warn, "▲", style::Stream::Out),
@@ -243,12 +264,28 @@ fn run_main(mut args: Vec<String>) {
     }
 }
 
+/// The setup `command` runs against, in dispatch order: `local`, `legacy`,
+/// `controller`, or `none` before any setup.
+fn owner(command: &cli::Command) -> &'static str {
+    if launch::handles(command) { "local" }
+    else if run::home().is_ok_and(|home| run::handles(command, &home)) { "legacy" }
+    else if std::env::var_os("VADE_CONFIG").is_some() || config::config_path().is_ok_and(|path| path.is_file()) { "controller" }
+    else { "none" }
+}
+
 fn public_output(message: &str) {
     if let Err(error) = output::text(format_args!("{message}")) { fail(&error); }
 }
 
 /// Print a command error as an `error:`/`hint:` block on stderr and exit 1.
 fn fail(message: &str) -> ! {
+    if message == checks::REPORTED { std::process::exit(output::exit_code(1)); }
+    // A --json command answers with its object even when it fails early.
+    if let Some(value) = checks::unanswered(message) {
+        output::operation_failed();
+        let _ = checks::print_json(&value);
+        std::process::exit(output::exit_code(1));
+    }
     if !output::broken_pipe_success() {
         let block = style::error_block(&text::terminal_text(message), style::color(style::Stream::Err));
         output::stderr_line(format_args!("{block}"));

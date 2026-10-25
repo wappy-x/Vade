@@ -45,7 +45,7 @@ impl<R: Runner> App<R> {
 
     /// Run one lifecycle command against the configured machines.
     pub fn execute(&mut self, command: Command) -> Result<(), String> {
-        if self.dry {
+        if self.dry && !crate::checks::json() {
             crate::output::line(format_args!("Dry run. No commands run, files written, or connections opened."))?;
         }
         if !matches!(command, Command::Install | Command::Update) {
@@ -657,6 +657,7 @@ impl<R: Runner> App<R> {
         if cfg!(target_os = "linux") { exec.args.push("--no-check".into()); }
         exec.cwd = Some(workspace);
         clear_cloud_auth(&mut exec);
+        exec.env.insert("VADE_CHAT_SETUP".into(), crate::launch::chat_setup(session.ranks.len(), !(session.mtp_explicit && session.mtp == 0)));
         if !self.runner.interactive(&exec)? {
             return Err("Chat ended with an error. Run vade doctor for the next step.".into());
         }

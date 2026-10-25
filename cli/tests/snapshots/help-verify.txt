@@ -1,6 +1,10 @@
 $ vade verify --help
-Compare token IDs byte for byte across repeated greedy runs, drafting OFF and
-ON.
+Check that every run returns the same token IDs, drafting OFF and ON.
+
+Examples:
+  vade verify
+  vade verify -n 3 --prompt 2k
+  vade verify --url http://127.0.0.1:18080/v1
 
 Usage: vade verify [OPTIONS]
 
@@ -17,16 +21,12 @@ Options:
   --receipt PATH        Receipt file (default vade-verify.json in the current
                         directory)
 
-Examples:
-  vade verify
-  vade verify -n 3 --prompt 2k
-  vade verify --url http://127.0.0.1:18080/v1
-
 Notes:
   - Uses --url, then VADE_API_URL, then the selected installation's recorded
     endpoint. Keep the same VADE_CONFIG and VADE_HOME as up/run; explicit
     VADE_CONFIG selects the controller's local_port. Without a running
     installation, start vade launch or supply --url.
+  - Compares token IDs byte for byte across repeated greedy runs.
   - Generates a fixed token count (ignores EOS) to check every ID, with cache
     and thinking off. ON requests strict drafting and must actually draft;
     unavailable drafting fails the check.

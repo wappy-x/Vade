@@ -1,14 +1,169 @@
 //! Prerequisite checks, model guidance and harness diagnostics.
 use super::*;
+use crate::checks::Report;
+
+/// What one Spark's prerequisite script found.
+#[derive(Default)]
+pub(super) struct Probe {
+    /// Whether the model files were found; `None` when an earlier failure
+    /// stopped the script before it looked.
+    present: Option<bool>,
+    memory: Option<(u64, u64)>,
+    disk_kb: Option<u64>,
+    gpu: Option<String>,
+    rdma: bool,
+    /// The failed prerequisite: `disk`, a missing or failing tool, `rdma-*`,
+    /// `driver` (the GPU query failed), `ssh` (the script never started) or
+    /// `script` (it stopped without naming a check).
+    missing: Option<String>,
+    /// The message `vade install` stops with for `missing`.
+    error: Option<String>,
+}
+
+/// One row for a whole stage whose own output was captured: `planned` in a
+/// dry run, `passed` when it passed, its error when it failed.
+fn stage(report: &mut Report, dry: bool, name: &str, result: Result<(), String>, passed: &str, planned: &str, next: &str) -> Result<(), String> {
+    match result {
+        Ok(()) if dry => report.plan(name, planned),
+        Ok(()) => report.ok(name, passed),
+        Err(error) => report.fail(name, &error, next),
+    }
+}
 impl<R: Runner> App<R> {
+    /// `vade doctor` from a controller: one row per check (this computer's
+    /// tools, then SSH, nvidia-smi, disk, free memory and model files on each
+    /// Spark, the fabric, the local port and the engine), then PASS or FAIL.
+    /// A failed check never stops the rest.
     pub(super) fn doctor(&mut self) -> Result<(), String> {
-        self.local_checks()?;
+        let transport = if self.config.machines.len() > 1 { rdma_enabled() } else { Ok(false) };
+        self.doctor_with(transport)
+    }
+    /// [`Self::doctor`] with the SEQPAR_RDMA selection already read.
+    pub(super) fn doctor_with(&mut self, transport: Result<bool, String>) -> Result<(), String> {
+        let mut report = Report::new("controller", self.dry);
+        let (result, _) = crate::output::buffered(|| self.local_checks());
+        stage(&mut report, self.dry, "controller tools", result, "rustc, cargo, rsync, curl and ssh found", "rustc, cargo, rsync, curl, ssh -V",
+            "Install Rust, rsync, curl and OpenSSH, then run vade doctor.")?;
         let machines = self.config.machines.clone();
-        for machine in &machines {
-            self.machine_checks(machine)?;
+        // An invalid SEQPAR_RDMA stops every Spark probe and the fabric check;
+        // report it once and skip what it hides.
+        if let Err(error) = &transport {
+            report.fail("SEQPAR_RDMA", error, "Set SEQPAR_RDMA=0 for TCP or 1 for RDMA (or unset it), then run vade doctor.")?;
         }
-        self.network_checks(&machines)?;
-        self.harness_doctor(false)
+        for machine in &machines {
+            if transport.is_err() {
+                for check in ["ssh", "nvidia-smi", "disk", "free memory", "model files"] { report.skip(&format!("{} {check}", machine.name), "needs a valid SEQPAR_RDMA")?; }
+                continue;
+            }
+            let (probe, _) = crate::output::buffered(|| self.probe_machine(machine, self.config.prebuilt_dir.is_none()));
+            self.machine_rows(&mut report, machine, probe)?;
+        }
+        match transport {
+            _ if machines.len() == 1 => report.skip("fabric", "one Spark; no fabric")?,
+            Err(_) => report.skip("fabric", "needs a valid SEQPAR_RDMA")?,
+            Ok(rdma) => {
+                let (result, _) = crate::output::buffered(|| self.network_checks(&machines));
+                stage(&mut report, self.dry, "fabric", result, if rdma { "every fabric link answered ping" } else { "TCP; engine startup checks the addresses" },
+                    "link addresses in the config", "Check both link addresses and connectivity, then run vade doctor.")?;
+            }
+        }
+        let session = match Session::load(&self.config.state_dir) {
+            Ok(session) => session,
+            Err(error) => {
+                report.fail("ownership", &error, "Preserve the state folder; run vade status, then vade down.")?;
+                return report.finish();
+            }
+        };
+        let port = self.config.local_port;
+        if self.dry {
+            report.plan(&format!("port {port}"), "free on this computer, or held by the vade tunnel")?;
+        } else if session.is_some() {
+            report.skip(&format!("port {port}"), "held by the vade tunnel")?;
+        } else {
+            report.check(&format!("port {port}"), self.runner.port_free(port), |_| "free on this computer".into(),
+                &format!("Close the program listening on port {port}, or change local_port in the config, then run vade doctor."))?;
+        }
+        if session.is_none() && !self.dry {
+            let available = self.verify_harness().and_then(|()| self.checked(Exec::new("harness doctor availability",
+                &self.config.stage_dir.join("vade-harness").to_string_lossy(), vec!["doctor".into(), "--help".into()]),
+                "Harness doctor is unavailable. Run vade install to build it.").map(drop));
+            report.check("harness", available, |_| "installed and matches its saved hash".into(), "Run vade install, then vade doctor.")?;
+            report.skip("engine health", "stopped; start: vade up")?;
+        } else {
+            let (result, _) = crate::output::buffered(|| self.harness_doctor(false));
+            stage(&mut report, self.dry, "engine health", result, "ranks alive, tunnel up, /health ready, harness turns passed", "ranks, tunnel, /health and two small harness turns",
+                "Run vade status, then vade logs.")?;
+        }
+        report.finish()
+    }
+
+    /// The rows for one Spark's probe: SSH, nvidia-smi, disk, free memory and
+    /// model files. An earlier failure skips the rows it hides.
+    fn machine_rows(&self, report: &mut Report, machine: &Machine, probe: Result<Probe, String>) -> Result<(), String> {
+        let name = |check: &str| format!("{} {check}", machine.name);
+        let rerun = "then run vade doctor.";
+        if self.dry {
+            report.plan(&name("ssh"), &format!("ssh {} runs one read-only check script", machine.ssh))?;
+            for check in ["nvidia-smi", "disk", "free memory", "model files"] { report.plan(&name(check), "read by that script")?; }
+            return Ok(());
+        }
+        let probe = match probe {
+            Ok(probe) => probe,
+            Err(error) => {
+                report.fail(&name("ssh"), &error, &format!("Run ssh {} true to see the SSH error, {rerun}", machine.ssh))?;
+                for check in ["nvidia-smi", "disk", "free memory", "model files"] { report.skip(&name(check), "needs SSH")?; }
+                return Ok(());
+            }
+        };
+        let missing = probe.missing.as_deref();
+        if missing == Some("ssh") {
+            report.fail(&name("ssh"), &probe.error.clone().unwrap_or_default(), &format!("Run ssh {} true to see the SSH error, {rerun}", machine.ssh))?;
+            for check in ["nvidia-smi", "disk", "free memory", "model files"] { report.skip(&name(check), "needs SSH")?; }
+            return Ok(());
+        }
+        report.ok(&name("ssh"), &format!("reached {}", machine.ssh))?;
+        match missing {
+            Some("script") => {
+                report.fail(&name("check script"), &probe.error.clone().unwrap_or_default(), &format!("Rerun vade doctor; if this repeats, check the login shell with ssh {} true.", machine.ssh))?;
+                for check in ["nvidia-smi", "disk", "free memory", "model files"] { report.skip(&name(check), "not checked; the script stopped early")?; }
+                return Ok(());
+            }
+            Some(tool) if tool != "disk" && !tool.starts_with("rdma") => {
+                let error = probe.error.clone().unwrap_or_default();
+                if tool == "nvidia-smi" || tool == "driver" {
+                    report.fail(&name("nvidia-smi"), &error, &format!("Run ssh {} nvidia-smi to inspect the driver, {rerun}", machine.ssh))?;
+                } else {
+                    // The script looks for cargo and rustc before nvidia-smi.
+                    if matches!(tool, "cargo" | "rustc") { report.skip(&name("nvidia-smi"), &format!("not checked; the script stopped at {tool}"))?; }
+                    else { report.ok(&name("nvidia-smi"), "present")?; }
+                    report.fail(&name("tools"), &error, &format!("Install {tool} on {}, {rerun}", machine.name))?;
+                }
+                for check in ["disk", "free memory", "model files"] { report.skip(&name(check), "needs the tool checks")?; }
+                return Ok(());
+            }
+            _ => report.ok(&name("nvidia-smi"), probe.gpu.as_deref().unwrap_or("driver answered"))?,
+        }
+        let gib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        let free = probe.disk_kb.map_or_else(|| "free space unknown".into(), |kb| format!("{:.1} GiB free in the home folder", gib(kb.saturating_mul(1024))));
+        if missing == Some("disk") {
+            report.fail(&name("disk"), &probe.error.clone().unwrap_or(free), &format!("Free disk space on {}, {rerun}", machine.name))?;
+        } else {
+            report.ok(&name("disk"), &free)?;
+        }
+        match probe.memory {
+            Some((total, available)) => report.ok(&name("free memory"), &format!("{:.1} GiB available of {:.1} GiB (GPU and CPU share this memory)", gib(available), gib(total)))?,
+            None => report.skip(&name("free memory"), "/proc/meminfo unreadable")?,
+        }
+        if let Some(error) = probe.error.as_ref().filter(|_| missing.is_some_and(|m| m.starts_with("rdma"))) {
+            report.fail(&name("rdma"), error, "Have the administrator prepare RDMA, or set SEQPAR_RDMA=0 for TCP, then run vade doctor.")?;
+        }
+        match probe.present {
+            Some(true) => report.ok(&name("model files"), &format!("{} (config, tokenizer, weights; vade install checks every SHA256)", machine.model_path))?,
+            Some(false) => report.fail(&name("model files"), &format!("missing or incomplete at {}", machine.model_path),
+                &format!("Copy {} at {} there (INSTALL.md step 3), then run vade install.", self.config.model_repo, self.config.model_revision))?,
+            None => report.skip(&name("model files"), &format!("not checked; the script stopped at {}", missing.unwrap_or("an earlier check")))?,
+        }
+        Ok(())
     }
 
     pub(super) fn local_checks(&mut self) -> Result<(), String> {
@@ -36,19 +191,27 @@ impl<R: Runner> App<R> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn machine_checks(&mut self, machine: &Machine) -> Result<bool, String> {
         self.machine_checks_for_build(machine, self.config.prebuilt_dir.is_none())
     }
-    pub(super) fn machine_checks_for_build(&mut self, machine: &Machine, source_build: bool) -> Result<bool, String> {
+    /// Run one Spark's read-only prerequisite script over SSH and read what
+    /// it found. Only a failed SSH command or unreadable output is an `Err`;
+    /// a failed prerequisite is `missing` plus the message install prints.
+    fn probe_machine(&mut self, machine: &Machine, source_build: bool) -> Result<Probe, String> {
         let rdma = self.config.machines.len() > 1 && rdma_enabled()?;
+        // `reached` proves SSH ran the script; `missing` and `failed` name the
+        // check that stopped it.
         let command = format!(
             r#"set -eu
+printf 'reached=1\n'
 export PATH="$HOME/.cargo/bin:$PATH"
 for tool in {compiler_tools} nvidia-smi sha256sum rsync curl {ping}; do
   command -v "$tool" >/dev/null 2>&1 || {{ printf 'missing=%s\n' "$tool"; exit 1; }}
 done
 {compiler_versions}
-nvidia-smi --query-gpu=driver_version --format=csv,noheader >/dev/null
+gpu=$(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader) || {{ printf 'failed=driver\n'; exit 1; }}
+printf 'gpu=%s\n' "$(printf '%s\n' "$gpu" | head -n 1)"
 available=$(df -Pk "$HOME" | awk 'NR == 2 {{print $4}}')
 printf 'disk_kb=%s\n' "$available"
 awk '/^MemTotal:/ {{print "mem_total_kb=" $2}} /^MemAvailable:/ {{print "mem_available_kb=" $2}}' /proc/meminfo 2>/dev/null || true
@@ -70,7 +233,9 @@ fi
 printf 'rust=ok\ndriver=ok\n'
 "#,
             compiler_tools = if source_build { "cargo rustc" } else { "" },
-            compiler_versions = if source_build { "cargo --version >/dev/null\nrustc --version >/dev/null" } else { "" },
+            compiler_versions = if source_build {
+                "cargo --version >/dev/null 2>&1 || { printf 'failed=cargo\\n'; exit 1; }\nrustc --version >/dev/null 2>&1 || { printf 'failed=rustc\\n'; exit 1; }"
+            } else { "" },
             disk_kb = if source_build { 10485760 } else { 1048576 },
             model = remote_path(&machine.model_path),
             rdma = u8::from(rdma),
@@ -83,11 +248,30 @@ printf 'rust=ok\ndriver=ok\n'
         ))?;
         if self.dry {
             crate::output::line(format_args!("{}: prerequisite checks planned.", machine.name))?;
-            return Ok(true);
+            return Ok(Probe { present: Some(true), ..Probe::default() });
         }
         let fields = text::parse(&output.stdout)?;
+        let kib = |key: &str| fields.get(key).and_then(|v| v.parse::<u64>().ok()).and_then(|v| v.checked_mul(1024));
+        let mut probe = Probe {
+            present: fields.get("weights").map(|v| v == "present"),
+            memory: kib("mem_total_kb").zip(kib("mem_available_kb")),
+            disk_kb: fields.get("disk_kb").and_then(|v| v.parse().ok()),
+            gpu: fields.get("gpu").map(|gpu| text::terminal_text(gpu).into_owned()).filter(|gpu| !gpu.is_empty()),
+            rdma,
+            missing: None,
+            error: None,
+        };
         if !output.success {
-            return Err(match fields.get("missing").map(String::as_str) {
+            let failed = fields.get("failed").map(String::as_str);
+            let missing = match (fields.get("missing"), failed) {
+                (Some(tool), _) => tool.as_str(),
+                (None, Some(failed)) => failed,
+                // No `reached`: SSH itself (or the login shell) failed first.
+                _ if !fields.contains_key("reached") => "ssh",
+                _ => "script",
+            };
+            probe.missing = Some(missing.into());
+            probe.error = Some(match fields.get("missing").map(String::as_str) {
                 Some("disk") => format!(
                     "{} needs at least {} GiB free for {}. Free disk space, then run vade install.",
                     machine.name, if source_build { 10 } else { 1 }, if source_build { "a source build" } else { "prebuilt installation" }
@@ -109,18 +293,23 @@ printf 'rust=ok\ndriver=ok\n'
                         machine.name
                     )
                 }
-                _ => format!(
-                    "{} failed its Rust or CUDA driver check. Check SSH and nvidia-smi there, then run vade doctor.",
-                    machine.name
-                ),
+                _ => match missing {
+                    "driver" => format!("{} has nvidia-smi, but its GPU query failed. Run ssh {} nvidia-smi to see the driver error, then run vade doctor.", machine.name, machine.ssh),
+                    tool @ ("cargo" | "rustc") => format!("{} has {tool}, but {tool} --version failed there. Repair that Rust toolchain, then run vade doctor.", machine.name),
+                    "ssh" => format!("ssh {} did not run the check script. Run ssh {} true to see the SSH error, then run vade doctor.", machine.ssh, machine.ssh),
+                    _ => format!("{}'s check script stopped before naming a failed check. Rerun vade doctor; if this repeats, check the login shell with ssh {} true.", machine.name, machine.ssh),
+                },
             });
         }
-        let present = fields.get("weights").is_some_and(|v| v == "present");
-        let kib = |key: &str| fields.get(key).and_then(|v| v.parse::<u64>().ok()).and_then(|v| v.checked_mul(1024));
-        let memory = match (kib("mem_total_kb"), kib("mem_available_kb")) {
-            (Some(total), Some(available)) => format!("; {}", crate::detect::memory_summary(total, available)),
-            _ => String::new(),
-        };
+        Ok(probe)
+    }
+
+    pub(super) fn machine_checks_for_build(&mut self, machine: &Machine, source_build: bool) -> Result<bool, String> {
+        let probe = self.probe_machine(machine, source_build)?;
+        if self.dry { return Ok(true); }
+        if let Some(error) = probe.error { return Err(error); }
+        let (present, rdma) = (probe.present == Some(true), probe.rdma);
+        let memory = probe.memory.map_or_else(String::new, |(total, available)| format!("; {}", crate::detect::memory_summary(total, available)));
         crate::output::line(format_args!(
             "{}: driver and install disk ready{memory}; transport: {}{}; model files {}.",
             machine.name,
@@ -254,7 +443,9 @@ printf 'rust=ok\ndriver=ok\n'
             crate::output::operation_failed();
             crate::output::line(format_args!("Run this for the harness cache diagnostics:"))?;
             exec.preview()?;
-            return Err("Harness doctor needs attention. Start with vade status; then run the printed harness doctor command to see its cache diagnostics.".into());
+            // The error names the command itself: doctor's report keeps only
+            // this message, not the lines printed above.
+            return Err(format!("Harness doctor needs attention. Start with vade status; then run {} to see its cache diagnostics.", exec.shell_line()));
         }
         crate::output::line(format_args!(
             "Harness doctor: {}.",

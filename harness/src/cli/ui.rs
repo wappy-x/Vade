@@ -104,16 +104,14 @@ impl App {
     }
     fn run_loop(&mut self) -> io::Result<bool> {
         if !self.quiet {
-            self.terminal.heading("VADE")?;
-            self.terminal.note(match self.config.mode {
-                Mode::Demo => "Demo · local scripted responses",
-                Mode::Codex => "Codex owns delegated context and persistence",
-                Mode::Hermes => "Hermes owns delegated context and persistence",
-                Mode::Agent => "Native agent · bounded workspace tools · private sessions",
-                _ => "Direct · text chat over HTTP",
-            })?;
-            self.terminal
-                .note("Type / for commands · /help for a short guide")?;
+            // One quiet line, no banner: what this chat is and how to get help.
+            self.terminal.note(&format!("vade {} · / for commands, /help for a guide", match self.config.mode {
+                Mode::Demo => "demo (scripted, offline)",
+                Mode::Codex => "· Codex owns delegated context and persistence",
+                Mode::Hermes => "· Hermes owns delegated context and persistence",
+                Mode::Agent => "agent",
+                _ => "text chat",
+            }))?;
             if !self.terminal.raw() && matches!(self.config.mode, Mode::Agent | Mode::Direct) {
                 let idle = self.idle_status();
                 self.terminal.note(&idle)?;
@@ -386,6 +384,7 @@ impl App {
                             if let Some(rate) = pending.rx.estimated_rate().filter(|r| *r >= 1.0) {
                                 footer.push(format!("≈{rate:.0} tok/s"));
                             }
+                            footer.extend(setup_badge());
                             footer.extend(tail);
                             footer.push("Esc cancels".into());
                             (footer.join(" · "), String::new())
@@ -458,6 +457,14 @@ impl App {
             Mode::Codex | Mode::Hermes => parts.push(self.config.mode.provider().to_lowercase()),
             _ => parts.extend(self.config.model.clone()),
         }
+        // The numbers first: a narrow strip drops facts from the right.
+        if matches!(self.config.mode, Mode::Agent | Mode::Direct) {
+            // Zero context only when no exchange exists anywhere; a running
+            // worker holds the conversation, and retained history counts.
+            let empty = self.pending.is_none() && self.session.history().is_empty()
+                && self.native.as_ref().is_none_or(|c| c.messages().iter().all(|m| m.role() == "system"));
+            parts.extend(self.context.strip(self.config.context_tokens as u64, empty));
+        }
         if let Some(folder) = self
             .workspace
             .root()
@@ -472,17 +479,6 @@ impl App {
             let short = policy.split([' ', '(']).next().unwrap_or(policy);
             parts.push(format!("approval: {short}"));
         }
-        if matches!(self.config.mode, Mode::Agent | Mode::Direct) {
-            let status = self
-                .context
-                .compact_status(self.config.context_tokens as u64);
-            if let Some(ctx) = status
-                .split(" · ")
-                .find(|part| part.starts_with("ctx ") && !part.starts_with("ctx —"))
-            {
-                parts.push(ctx.to_owned());
-            }
-        }
         if let Some(store) = &self.journal {
             // Never block the UI thread behind a worker checkpoint; while the
             // worker holds the lock, show the last name seen.
@@ -494,6 +490,8 @@ impl App {
                 parts.push(name.clone());
             }
         }
+        // Last, so a narrow strip keeps it (the strip drops middle facts).
+        parts.extend(setup_badge());
         parts.join(" · ")
     }
     pub(crate) fn notice(&mut self, text: &str) -> io::Result<()> {
@@ -821,3 +819,14 @@ impl App {
 
 #[cfg(test)]
 mod tests;
+
+/// What the launcher knows about the engine and the CLI cannot ask the
+/// server: `VADE_CHAT_SETUP`, such as `1 Spark, drafting on`. Sanitized, at
+/// most 80 bytes, shown last on the status strip.
+pub(crate) fn setup_badge() -> Option<String> {
+    let value = std::env::var("VADE_CHAT_SETUP").ok()?;
+    let value = terminal::sanitize(value.trim());
+    let mut end = value.len().min(80);
+    while !value.is_char_boundary(end) { end -= 1; }
+    (!value.is_empty()).then(|| value[..end].to_owned())
+}

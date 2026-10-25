@@ -19,51 +19,67 @@ New terms are explained where they first appear, and the
 
 ## Quick start with an existing model
 
-On an idle DGX Spark with Git, `cc`, curl and a working NVIDIA driver, paste
-this block as one shell command. Keep the complete checkpoint under
-`~/models`; for another location, first set `VADE_MODELS` to its checkpoint
-folder. No GitHub account or token is needed.
+You need an idle DGX Spark with Git, `cc`, curl, a working NVIDIA driver and
+the complete checkpoint under `~/models`. (For another location, first set
+`VADE_MODELS` to the checkpoint folder.) During the private preview the clone
+also needs access to the repository; the private-preview note in
+[Step 2](#step-2-get-the-code) gives the two ways in.
+
+Paste this block as one shell command:
 
 ```sh
 git clone --branch main https://github.com/wappy-x/vade.git "$HOME/vade" &&
   sh "$HOME/vade/scripts/install.sh" --launch
 ```
 
-If you already cloned Vade, open its folder and use these two commands instead:
+If you already cloned Vade, open its folder and run these two commands
+instead:
 
 ```sh
 sh scripts/install.sh
 ./cli/target/release/vade launch
 ```
 
-The installer runs only on Linux `aarch64`. It finds Rust in `~/.cargo/bin`,
-installs any missing pinned toolchains and GPU components, builds the CLI, runs preflight checks, fills
-the compiler cache and runs local `vade install`. Installation also compiles
-the GPU code into Vade's private startup cache, so the first `up` does not
-need to do that work. With `--launch`, it then starts the engine and opens chat
-in the folder you started from; without that flag, it finishes after install.
-It does not download or edit models,
-change shell profiles or run sudo. Every failed stage prints its cause and a
-next step. Read the script first if you want to inspect what it runs.
+The installer runs only on Linux `aarch64`. It:
+
+1. finds Rust in `~/.cargo/bin` and installs any missing pinned toolchains and
+   GPU components;
+2. builds the CLI and runs preflight checks;
+3. fills the compiler cache and runs local `vade install`, which also compiles
+   the GPU code into Vade's private startup cache, so the first `up` doesn't
+   have to;
+4. with `--launch`, starts the engine and opens chat in the folder you started
+   from. Without that flag, it stops after install.
+
+It doesn't download or edit models, change shell profiles or run sudo. Every
+failed stage prints its cause and a next step. Read the script first if you
+want to see what it runs.
 
 The first run needs internet access for missing Rust and `build-std` files.
-With those cached, `CARGO_NET_OFFLINE=true sh scripts/install.sh` works offline
-from the checkout. It reuses available tools without asking rustup to update
-them. Toolchain and model downloads have no measured time bound.
+Once those are cached, `CARGO_NET_OFFLINE=true sh scripts/install.sh` works
+offline from the checkout and reuses the tools it finds without asking rustup
+to update them. We haven't measured how long toolchain and model downloads
+take.
 
-`launch` waits for the engine and opens chat. Chat can edit files in the
-folder it opens in, so ask it only to say hello, then type `/exit`. Keep using the full command path, or add its folder to `PATH`. In a
-script without a terminal, `launch` prints readiness and exits; the engine
-keeps running. To start without opening chat, use
-`"$HOME/vade/cli/target/release/vade" up`. Use `chat` to connect later and
-`down` to stop this installation's engine.
+**After launch.** Chat can edit files in the folder it opens in, so ask it
+only to say hello, then type `/exit`; the engine keeps running. Run later
+commands by their full path, `"$HOME/vade/cli/target/release/vade"`, or add
+that folder to `PATH`. Then `up` starts the engine without chat, `chat`
+connects again and `down` stops this installation's engine. Run from a script
+without a terminal, `launch` prints readiness and exits, and the engine keeps
+running.
 
-If cloning fails because `~/vade` exists, use the existing-checkout commands
-above, or choose another destination. If GitHub cannot be reached, retry from
-a connection that can reach the public repository. If `VADE_CONFIG` selects a
-controller or `VADE_BUNDLE` selects a bundle, the script tells you which
-variable to unset for this local source route. Keep the same `VADE_HOME`
-(default `~/.vade`) for install, launch and all later lifecycle commands.
+**If something goes wrong:**
+
+- **`~/vade` already exists:** use the existing-checkout commands above, or
+  clone somewhere else.
+- **The clone fails:** check that this connection reaches GitHub and that you
+  have access to the private repository (see [Step 2](#step-2-get-the-code)).
+- **`VADE_CONFIG` or `VADE_BUNDLE` is set:** the script tells you which one to
+  unset for this local source route.
+
+Keep the same `VADE_HOME` (default `~/.vade`) for install, launch and every
+later command.
 
 ## Before you start
 
@@ -110,7 +126,7 @@ toolchain and its downloads.
 | Runs the engine | DGX Spark / GB10, Linux `aarch64` | No other GPU or OS runs the engine. |
 | Route A: your terminal | Any SSH client: Windows, Linux or macOS | CLI, engine and chat all run on the Spark. |
 | Route B: controller computer | Linux `aarch64` or `x86_64`, macOS | Needs Rust, `ssh`, `rsync`, `curl` and `shasum`. Tested from macOS, and from Linux `aarch64` with a Spark as its own controller. |
-| Windows as controller | Not supported | The CLI does not build for Windows. Use Route A over SSH, or WSL 2 (untested). |
+| Windows as controller | Not natively | The CLI does not build for Windows. Use Route A over SSH, or a Linux controller inside WSL 2 (untested). See [From a Windows computer](#from-a-windows-computer). |
 
 Chat includes a coding agent that can read, search and edit files in your
 workspace. On Linux, which includes every Route A session, it cannot run shell
@@ -118,6 +134,40 @@ commands or its automatic workspace checks, because those need the macOS
 sandbox. Reading, searching, line edits and patches still work.
 [Chat and the coding agent on Linux](#chat-and-the-coding-agent-on-linux) has
 the details.
+
+### From a Windows computer
+
+Windows can't run the engine or build the `vade` CLI, but it can still drive a
+Spark. There are two ways.
+
+**Route A over SSH.** This is the one to use. Windows 10 and 11 include an
+OpenSSH client, so open PowerShell or Windows Terminal, run
+`ssh you@spark-address`, and follow [Route A](#route-a-on-this-spark) in that
+session. Everything runs on the Spark, and Windows is only the terminal.
+
+To reach the API from a program on Windows, forward the port when you connect:
+
+```powershell
+ssh -L 18080:127.0.0.1:18080 you@spark-address
+```
+
+While that session stays open, `http://127.0.0.1:18080/v1` on Windows reaches
+the engine on the Spark. If `vade status` shows a different port, use that one
+on both sides.
+
+**A controller inside WSL 2.** WSL 2 runs a real Linux, usually `x86_64`, and
+Route B supports Linux `x86_64` controllers. So far we have only type-checked
+this path: `cargo check --all-targets --target x86_64-unknown-linux-gnu`
+passes for the CLI and the harness. Nobody has built, linked or run a
+controller inside WSL 2 yet. If you try it, follow
+[Route B](#route-b-from-a-controller) from the WSL shell, with your SSH keys
+inside WSL.
+
+**Native Windows** is not supported. The CLI and the harness use the Unix
+parts of Rust's standard library (file permissions, process groups, file
+descriptors), and so do two engine crates the CLI links (the model reader and
+the benchmark client). None of them compile for `x86_64-pc-windows-msvc`.
+Starting `ssh` and `rsync` from a native Windows build has never been tried.
 
 ## Step 1: prerequisites
 
@@ -198,6 +248,34 @@ administrator; see [network setup](docs/network-setup.md).
 ## Step 2: get the code
 
 <a id="3-clone-and-build"></a>
+
+> [!IMPORTANT]
+> **Private preview.** The repository is private for now. Until it is public,
+> the HTTPS clone below fails for anyone without access (Git asks for a
+> password or reports `Repository not found`), and so do the release downloads
+> on this page. Ask the repository owner for access, then clone one of these
+> two ways instead:
+>
+> - **With a GitHub account that has access.** Install the
+>   [GitHub CLI](https://cli.github.com/), sign in with `gh auth login`, then
+>   run `cd ~ && gh repo clone wappy-x/vade -- --branch main && cd ~/vade`.
+> - **With a read-only deploy key.** On the Spark, make a key with
+>   `ssh-keygen -t ed25519 -f ~/.ssh/vade-deploy -N ''` and send the owner
+>   `~/.ssh/vade-deploy.pub`. Once they have added it to the repository, clone
+>   over SSH:
+>
+>   ```sh
+>   cd ~ && GIT_SSH_COMMAND='ssh -i ~/.ssh/vade-deploy -o IdentitiesOnly=yes' git clone --branch main git@github.com:wappy-x/vade.git && cd ~/vade
+>   ```
+>
+>   The first connection asks you to confirm GitHub's host key. Compare it
+>   with [GitHub's published fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints).
+>   A later `git pull` needs the same `GIT_SSH_COMMAND`.
+>
+> The rest of the page is the same. The [release bundle](#optional-release-bundle)
+> and the [Route B manifest](#check-the-files) have their own private-preview
+> notes.
+
 On the Spark, clone the repository into your home folder and stay at its root
 in this shell. Later steps assume the checkout is `~/vade`:
 
@@ -209,8 +287,8 @@ This gives you the latest `main`: v0.1.0 plus the changes listed under
 Unreleased in the [changelog](CHANGELOG.md). For the v0.1.0 release exactly,
 clone with `--branch v0.1.0` instead.
 
-The repository is public, so cloning needs no account or token. Do not put
-credentials in the clone URL. We recommend cloning, but a downloaded source
+Once the repository is public, this clone needs no account or token. Do not
+put credentials in the clone URL. We recommend cloning, but a downloaded source
 archive (GitHub's Download ZIP or `git archive`) also works and records its
 commit as the build id.
 
@@ -255,6 +333,25 @@ mkdir "$HOME/vade-launch" &&
   curl --fail --location --output "$BUNDLE" "https://github.com/wappy-x/vade/releases/download/v0.1.0/$BUNDLE" && \
   sha256sum -c SHA256SUMS && tar --zstd -xf "$BUNDLE")
 ```
+
+> [!IMPORTANT]
+> **Private preview.** While the repository is private, the two `curl`
+> downloads above answer 404. Download with the GitHub CLI instead, signed in
+> with an account that has access. It fetches both release files into the new
+> folder:
+>
+> ```sh
+> mkdir "$HOME/vade-launch" &&
+> (cd "$HOME/vade-launch" && \
+>   gh release download v0.1.0 -R wappy-x/vade && \
+>   read -r BUNDLE_SHA256 BUNDLE < SHA256SUMS && \
+>   sha256sum -c SHA256SUMS && tar --zstd -xf "$BUNDLE")
+> ```
+>
+> If the Spark has no `gh`, run `gh release download v0.1.0 -R wappy-x/vade`
+> on a computer that has it, copy both files into `~/vade-launch` on the Spark
+> (with `scp`, for example), and finish there with the `read`, `sha256sum` and
+> `tar` lines.
 
 Keeping the bundle outside the checkout leaves the clone clean, so you can
 later use the same clone as a controller. Take both files from that release
@@ -312,6 +409,14 @@ then writes a `.sha256` manifest next to the model folder.
 
 A good run ends with `verified 33 files`. If it is interrupted, it prints
 `Interrupted; run the same command again.`, and that is what you do.
+If the machine restarted or the helper was killed outright, the rerun can stop
+at once with
+`Another fetch may be running; check the sibling fetch lock directory.` When
+no fetch is running, remove the stale lock and rerun; the download resumes:
+
+```sh
+rmdir "$HOME/models/nvidia/Qwen3.8-Flash-Next-FP4-Local.fetch/lock"
+```
 
 We have not measured the space its download cache and Python environment
 take; leave headroom beyond the 102.26 GB checkpoint. A complete
@@ -350,6 +455,17 @@ curl -fsSL https://raw.githubusercontent.com/wappy-x/vade/v0.1.0/cli/examples/qw
 (cd "$HOME/models/nvidia/Qwen3.8-Flash-Next-FP4-Local" && sha256sum -c "$MODEL_SHA256_LIST")
 ```
 
+> [!IMPORTANT]
+> **Private preview.** While the repository is private, that `curl` answers
+> 404. Copy the manifest from the controller's checkout instead. From its root:
+>
+> ```sh
+> scp cli/examples/qwen3.8-flash-next-fp4-local.sha256 you@spark-a-address:
+> ```
+>
+> That puts it in the Spark's home folder, where the check above expects it.
+> Then run the `sha256sum -c` line on the Spark.
+
 ## Route A: on this Spark
 
 <a id="one-spark-directly-on-the-spark"></a>
@@ -376,16 +492,31 @@ The script builds and installs Vade, including the private GPU startup cache.
 
 When a checksum list is present, the script's `vade install` already did the
 file check described in [Check the files](#check-the-files), so `launch`
-mostly loads the model. That still takes a while and can look like a hang. When the engine is ready, it
-prints `Launch ready in ...`, followed by how long the launch took. Run from a
-script, where standard input is not a terminal, it skips chat: after that
-ready line it prints
+mostly loads the model. That still takes a while and can look like a hang.
+When the engine is ready, it prints `Launch ready in ...` with how long the
+launch took.
+
+Run from a script, where standard input is not a terminal, `launch` skips
+chat: after the ready line it prints
 `Standard input is not a terminal, so chat was not opened. Chat: vade chat`
 and exits.
 
 Chat opens in the checkout, and the agent can edit files there, so ask it only
 to say hello. Then type `/exit` to get back to your shell. The engine keeps
 running.
+
+The chat window needs an interactive terminal. A normal
+`ssh you@spark-address` login is one. To open chat with a single SSH command
+instead, add `-t`, and name the CLI by its path: that new shell does not have
+the `PATH` line below.
+
+```sh
+ssh -t you@spark-address 'cd "$HOME/vade" && ./cli/target/release/vade chat'
+```
+
+For the release bundle, use `'cd "$HOME/vade-launch" && ./vade chat'` instead.
+Without `-t` there is no terminal, so chat shows plain lines instead of its
+window.
 
 `cargo` and `vade` are on your `PATH` only in the shell that ran the block
 above. In every new shell, such as a new SSH login, run this line first:
@@ -417,6 +548,40 @@ vade status
 After the last command, status should say the engine is stopped. Restart with
 `vade up`, or with `vade launch` to start and chat. See
 [first run](harness/docs/first-run.md) for the whole lifecycle.
+
+### Check the whole route in one go
+
+[`harness/scripts/route-a-check.sh`](harness/scripts/route-a-check.sh) runs
+Route A from start to finish, with no chat window. In order, it:
+
+1. checks the toolchains and the GPU, and builds the CLI;
+2. asks `vade detect` which model `vade launch` will load;
+3. runs `vade launch` and sends one chat request through the API;
+4. runs `vade verify` against that same engine, then `vade down`.
+
+Run it from the checkout root with the GPU idle (stop any running engine with
+`vade down` first):
+
+```sh
+sh harness/scripts/route-a-check.sh
+```
+
+Each step prints PASS or FAIL with its elapsed seconds, and the last line gives
+the overall result. Step logs and the verify receipt go to a new private
+folder under `$TMPDIR` (or `/tmp`), so the checkout stays clean.
+
+The check uses a new private Vade home of its own, `~/.vade-route-a.XXXXXX`,
+instead of `~/.vade`. It never reads or stops your own installation, and no
+other `vade` command finds its engine. Because that home starts empty, the
+launch is a first setup and builds the engine and kernels again, however often
+you have launched before. At the end, and also when a step fails or the script
+is interrupted, it tries to stop its engine and reports FAIL if that stop
+fails. After a PASS it removes the private home; after a FAIL it keeps it for
+inspection and prints its path.
+
+Set `VADE_MODELS` to pick the checkpoint, as for `vade launch`; the model step
+fails when `vade` would load one outside it. `VADE_DRY=1` prints the commands
+without running anything, on any computer.
 
 ### Launch from the bundle
 
@@ -544,7 +709,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 cargo +1.99.0 build --release --offline --manifest-path cli/Cargo.toml
 export PATH="$PWD/cli/target/release:$PATH"
 mkdir -m 700 -p .local
-cp -n cli/examples/fp4-local.conf .local/fp4-local.conf
+[ -e .local/fp4-local.conf ] || cp cli/examples/fp4-local.conf .local/fp4-local.conf
 export VADE_CONFIG="$PWD/.local/fp4-local.conf"
 ```
 
@@ -707,6 +872,14 @@ Spark's own host key on that Spark, run this once there:
 
 ```sh
 ssh -o StrictHostKeyChecking=accept-new you@spark-a-address true
+```
+
+If that Spark then answers `Permission denied (publickey)`, it doesn't trust
+its own key yet. Add the key there (run `ssh-keygen -t ed25519` first if
+`~/.ssh/id_ed25519.pub` doesn't exist):
+
+```sh
+cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
 ```
 
 Running the controller on a separate computer avoids SSH to itself. Vade never

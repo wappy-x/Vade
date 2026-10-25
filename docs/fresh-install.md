@@ -49,7 +49,7 @@ history and evidence behind FP8 are in
 - [ ] **Plenty of free disk on each Spark** for the checkpoint (see its size on the model page) plus room for the build
 - [ ] **The basic programs and download tools**: `cc`, `curl`, `git`, `rsync`, `ping`, `sha256sum`, `python3`, **`python3-venv`**. Have them ready before step 5.
 - [ ] **A Mac** with Git and network access to both Sparks
-- [ ] **Network access to GitHub**, where the Vade repository is public
+- [ ] **Network access to GitHub**. The repository is private during the preview, so you also need access to it; [INSTALL step 2](../INSTALL.md#step-2-get-the-code) shows the two ways in
 
 **No Mac?** A Linux computer works as the controller for install, start, stop
 and chat. The coding assistant's shell tool and automatic checks need the
@@ -325,7 +325,10 @@ sha256sum -c ../Qwen3.8-Flash-Next-FP8.sha256   # every file must report OK
 Sparks and builds there. (The Spark clones from step 2 are only for the
 OS-setup scripts.)
 
-The public repository is <https://github.com/wappy-x/vade>. Clone it and build the CLI:
+The repository is <https://github.com/wappy-x/vade>. It is private during the
+preview, so the HTTPS `git clone` below fails for anyone without access; see
+[INSTALL step 2](../INSTALL.md#step-2-get-the-code) for the two ways in. Clone
+it and build the CLI:
 
 ```sh
 git clone https://github.com/wappy-x/vade ~/vade
@@ -333,7 +336,7 @@ cd ~/vade
 cargo build --release --offline --manifest-path cli/Cargo.toml
 export PATH="$PWD/cli/target/release:$PATH"
 mkdir -m 700 -p .local
-cp -n cli/examples/vade.conf .local/vade.conf
+[ -e .local/vade.conf ] || cp cli/examples/vade.conf .local/vade.conf
 export VADE_CONFIG="$PWD/.local/vade.conf"
 ```
 
@@ -451,22 +454,24 @@ vade status
 vade doctor
 ```
 
-`vade doctor` should print, among other lines (each `<memory summary>` is
-replaced by that Spark's MemAvailable, MemTotal and engine ceiling):
+`vade doctor` prints one row per check and ends with PASS. Among its rows:
 
 ```text
-Controller tools: ready.
-spark-1: driver and install disk ready; <memory summary>; transport: RDMA (prerequisites checked); model files found (inventory check follows).
-spark-2: driver and install disk ready; <memory summary>; transport: RDMA (prerequisites checked); model files found (inventory check follows).
-Fabric: 2 directed link checks passed. Transport ports are checked by engine startup.
-Harness doctor: passed.
+ok    controller tools      rustc, cargo, rsync, curl and ssh found
+ok    spark-1 ssh           reached spark-1
+ok    spark-1 nvidia-smi    NVIDIA GB10, <driver>
+ok    spark-1 free memory   <available> GiB available of <total> GiB (GPU and CPU share this memory)
+ok    spark-1 model files   <model path> (config, tokenizer, weights; vade install checks every SHA256)
+ok    fabric                every fabric link answered ping
+ok    engine health         ranks alive, tunnel up, /health ready, harness turns passed
+PASS  <n> ok, 0 failed, <n> skipped in <time>
 ```
 
-Run `vade doctor` while the server is up. Without a server it still checks
-the machines, but exits with code 1; start the server with
-`vade up --fp8-legacy`, then run `vade doctor` again.
+Run `vade doctor` while the server is up to check the engine too. Without a
+server the `engine health` row says `skip  stopped; start: vade up`, and the
+machine checks still decide PASS or FAIL.
 
-In TCP mode the doctor lines say `transport: TCP`.
+In TCP mode the fabric row says `TCP; engine startup checks the addresses`.
 
 Right after `vade up --fp8-legacy`, look for `rdma=true` (or `rdma=false` in
 TCP mode) in `vade logs`. Check soon: `vade logs` shows only the last 64 KiB of

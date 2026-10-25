@@ -120,6 +120,60 @@
             assert_eq!(fs::read(&path).ok(), before);
         }
     }
+    #[test]
+    fn legacy_doctor_json_is_one_doctor_object_in_every_state() {
+        use crate::{checks::{set_json, Answer}, evals::json, output::{self, testing::Capture}};
+        let mut f = Fixture::new();
+        let doctor = |f: &mut Fixture, dry: bool| {
+            f.app.dry = dry;
+            set_json(Some(Answer { schema: "vade.doctor.v1", mode: "legacy", dry }));
+            let writer = Capture::default();
+            let result = output::with_writer(writer.clone(), || f.app.execute(Command::Doctor));
+            set_json(None);
+            f.app.dry = false;
+            let printed = String::from_utf8(writer.bytes.borrow().clone()).unwrap();
+            assert_eq!(printed.lines().count(), 1, "{printed}");
+            (result, json::parse(&printed).unwrap())
+        };
+        // Plain doctor on the same state, dry or not: whether it passed.
+        let plain = |f: &mut Fixture, dry: bool| {
+            f.app.dry = dry;
+            let result = output::with_writer(Capture::default(), || f.app.execute(Command::Doctor));
+            f.app.dry = false;
+            result.is_ok()
+        };
+        // A stopped setup fails ownership in both forms, dry runs included.
+        for dry in [false, true] {
+            let (result, value) = doctor(&mut f, dry);
+            assert_eq!(result.unwrap_err(), crate::checks::REPORTED);
+            assert_eq!((value["mode"].as_str(), value["failed"].as_i64(), value["checks"][0]["name"].as_str()), (Some("legacy"), Some(1), Some("ownership")));
+            assert!(!plain(&mut f, dry), "dry={dry}");
+        }
+        // So does a malformed record.
+        fs::create_dir_all(&f.app.root).unwrap();
+        fs::set_permissions(&f.app.root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(f.app.root.join("run.conf"), "version=1\nphase=running\n").unwrap();
+        for dry in [false, true] {
+            let (result, value) = doctor(&mut f, dry);
+            assert!(result.is_err() && value["checks"][0]["state"].as_str() == Some("fail"), "dry={dry}: {value:?}");
+            assert!(!plain(&mut f, dry), "dry={dry}");
+        }
+        fs::remove_file(f.app.root.join("run.conf")).unwrap();
+        f.launch().unwrap();
+        let (result, value) = doctor(&mut f, true);
+        result.unwrap();
+        assert_eq!((value["result"].as_str(), value["ok"].as_i64(), value["planned"].as_i64()), (Some("plan"), Some(1), Some(2)));
+        assert!(plain(&mut f, true));
+        let (result, value) = doctor(&mut f, false);
+        result.unwrap();
+        assert_eq!((value["result"].as_str(), value["ok"].as_i64()), (Some("pass"), Some(3)));
+        f.app.runner.doctor_bad = true;
+        let (result, value) = doctor(&mut f, false);
+        assert!(result.is_err());
+        assert_eq!((value["checks"][2]["name"].as_str(), value["checks"][2]["state"].as_str()), (Some("harness doctor"), Some("fail")));
+        f.app.runner.doctor_bad = false;
+        f.app.execute(Command::Down).unwrap();
+    }
     #[test] fn first_answer_greedy_request_omits_seed() {
         let mut f = Fixture::new();
         f.launch().unwrap();

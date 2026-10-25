@@ -12,8 +12,8 @@ and keeps the KV state, the attention memory it holds for each conversation
 It gives you:
 
 - a native **tool-aware agent**. It reads and lists files, makes exact patch
-  edits and runs sandboxed commands once they are approved, all inside a
-  workspace you pick and within fixed limits;
+  edits and, on macOS, runs sandboxed commands once you approve them, all
+  inside a workspace you pick and within fixed limits;
 - direct streaming **text chat**. Its only tools are local commands you type,
   such as `/ls` and `/read`;
 - an offline **demo**;
@@ -40,10 +40,10 @@ Start with the offline demo: it needs no engine, no Spark and no network. From
 `harness/` in this monorepo, use the pinned Rust `1.99.0` compiler:
 
 ```sh
-cargo build --offline
-cargo run --offline -- demo
-cargo run --offline -- --demo --prompt "Show me the local demo"
-cargo run --offline -- --help
+cargo +1.99.0 build --offline
+cargo +1.99.0 run --offline -- demo
+cargo +1.99.0 run --offline -- --demo --prompt "Show me the local demo"
+cargo +1.99.0 run --offline -- --help
 export PATH="$PWD/target/debug:$PATH"
 ```
 
@@ -146,13 +146,17 @@ The agent's tools always run on the computer where you start the harness, in
 the workspace you pick there. When you drive the Spark from a controller
 (another computer; see INSTALL's [Route
 B](../INSTALL.md#route-b-from-a-controller)), inference runs on the Spark and
-the tools run on the controller. Commands run only on macOS: on Linux,
-including the Spark itself, the agent is not offered `workspace_shell`, and its
-instructions say it cannot run commands. A resumed session saved by an earlier
-version still lists the tool; a call there returns `unsupported_platform`
-without running anything. `--check` and `--child-shell` are refused there.
-`VADE_HARNESS_SHELL=off` hides the tool on macOS too, which is how the tests
-cover the Linux shape on a Mac. The legacy two-Spark FP8 setup has its own
+the tools run on the controller.
+
+Commands run only on macOS. On Linux, including the Spark itself, the agent is
+not offered `workspace_shell`, and its instructions say it cannot run
+commands; `--check` and `--child-shell` are refused there. A resumed session
+saved by an earlier version still lists the tool, but a call returns
+`unsupported_platform` without running anything. `VADE_HARNESS_SHELL=off`
+hides the tool on macOS too, which is how the tests cover the Linux shape on a
+Mac.
+
+The legacy two-Spark FP8 setup has its own
 [connection and run recipe](../engine/docs/flash-server.md#run-the-native-coding-agent).
 
 ### Search and read
@@ -392,38 +396,45 @@ off color only.
 
 **How a conversation looks.** A native TTY launch creates a fresh interactive
 journal; only `--resume NAME` loads an earlier conversation. The input wraps as
-you type and when you resize. The conversation is built from four kinds of
-block, each with a one-line label and one blank line before the next block:
+you type and when you resize. There are two voices and no boxes: your turns
+sit behind a bar, the model's answer has none, and one dim status strip sits
+above the `›` prompt.
 
 ```text
-── You · <time> ──
-Fix the failing parser test.
+▌ Fix the failing parser test.
 
-▸ Thinking · <tokens> · <elapsed> · Ctrl+T expand
+▸ thinking <start>–<end> · <tokens> · <elapsed> · Ctrl+T expand
 
 ● Read src/parser.rs
   ⎿ <lines> · <elapsed>
 
-── Answer · <time> ──
 The test failed because ...
-╰ <time> · <elapsed> · <tokens written> · <write rate> · <read rate> · <first token> · <model calls> · <context use>
+╰ <time> · <elapsed> · <tokens> tokens out · <decode rate> · prefill <rate> · first token <elapsed> · <model calls> · ctx <used>/<window> · cached <tokens>/<prompt>
 
-── Warning · <time> ──
+▲ Warning
 The next reply would not fit in the model's context.
 Vade stopped and kept the history.
 Use /compact to shrink older turns, or /new to start over.
+
+<model> · ctx <used>/<window> · in <tokens> · out <tokens> · <rate> · <folder> · approval: ask · <session> · 1 Spark, drafting on
+›
 ```
 
-- **You** marks your message.
-- **Thinking** is dim and starts collapsed to one summary row. Ctrl+T expands it
-  without hiding the reply.
-- **Answer** renders basic Markdown (headings, lists, code, rules, quotes,
-  links). It ends with one dim footer: finish time, elapsed time, tokens
-  written, write and read speed, time to first token, model calls (requests sent
-  to the model) and context use. Missing measurements show `—`. Narrow
-  terminals drop the last facts first and keep elapsed time, tokens and write
-  speed.
-- **Warning** (yellow) always says what happened, what Vade is doing about it,
+- **▌** marks every row you wrote, in bold cyan; it reads the same without
+  colour.
+- **Thinking** is one dim italic row with its start and end clocks. Ctrl+T
+  expands it; its text then sits behind a dim `┆` bar.
+- **The answer** renders basic Markdown (headings, lists, code, rules, quotes,
+  links) and wraps between words. It ends with one dim footer: finish time,
+  elapsed time, tokens out, decode and prefill speed, time to first token,
+  model calls (requests sent to the model), context use and cached prompt
+  tokens, all raw counts. Missing measurements show `—`. Narrow terminals drop
+  the last facts first and keep elapsed time, tokens and decode speed.
+- **The status strip** shows context used of the window, tokens in and out and
+  the last decode speed; `VADE_CHAT_SETUP` (set by `vade chat`) adds the Spark
+  count and drafting. While the model works it shows the state, elapsed time
+  and live tokens per second.
+- **▲ Warning** (yellow) always says what happened, what Vade is doing about it,
   and what you can do.
 
 A run that does not finish normally ends with one plain line such as
@@ -740,18 +751,21 @@ command](docs/workload.md) for how we count and read these numbers.
 
 By default the gateway forwards your client's requests to the engine unchanged
 (no extra prompts, no model swap, no new cache key), with one exception:
-sampling defaults. If a generation request sets none of the sampling fields,
-the gateway adds the greedy defaults: `temperature: 0`, `seed: 20260905`,
-`top_p: 1.0`, `top_k: 0`, `repetition_penalty: 1.0`, `presence_penalty: 0.0`
-and `frequency_penalty: 0.0`. The sampling fields are `temperature`, `top_p`,
-`top_k`, `min_p`, `typical_p`, `seed`, `frequency_penalty`, `presence_penalty`,
+sampling defaults.
+
+- **A request that sets no sampling field** gets the greedy defaults:
+  `temperature: 0`, `seed: 20260905`, `top_p: 1.0`, `top_k: 0`,
+  `repetition_penalty: 1.0`, `presence_penalty: 0.0` and
+  `frequency_penalty: 0.0`.
+- **A request that sets any one of them**, including null, gets no defaults.
+  Its body goes through byte for byte, and the engine's own defaults apply.
+
+The sampling fields are `temperature`, `top_p`, `top_k`, `min_p`,
+`typical_p`, `seed`, `frequency_penalty`, `presence_penalty`,
 `repetition_penalty`, `logit_bias`, `n`, `best_of`, `sampling` and
-`generation_config` (the response header `X-Vade-Sampling-Fields` lists them
-too). If the request sets any one of them, including null, no default is added
-and the body goes through byte for byte, so the engine's own defaults apply.
-`vade-gateway`'s opt-in optimization flags, such as
-`--stable-prefix` and `--clamp-limits`, change the body only when you turn them
-on.
+`generation_config`; the response header `X-Vade-Sampling-Fields` lists them
+too. `vade-gateway`'s opt-in optimization flags, such as `--stable-prefix` and
+`--clamp-limits`, change the body only when you turn them on.
 
 `vade-harness gateway` accepts these routes, and forwards query strings
 unchanged:
@@ -815,17 +829,21 @@ If a new connection fails, or the upstream answers 429 or 503, before any
 response bytes have been forwarded, the gateway retries once on another
 verified healthy, compatible upstream.
 
-With a single upstream, only the engine's admission refusal is held: a complete
-503 of at most 4 KiB whose body is
+With a single upstream, the gateway holds and retries only the engine's
+admission refusal: a complete 503 of at most 4 KiB whose body is
 `{"error":{"type":"overloaded","message":"connection capacity reached"}}`,
-which the engine sends before doing any work. Without `Retry-After`, the
-gateway sends the same request again after 50 ms, doubling up to 800 ms; with
-`Retry-After: 0` or `1`, it waits 1 s each time. A longer `Retry-After` is
-passed on at once. The whole wait, including reading each refusal, is capped
-at 30 s; then the last refusal is passed on. It is passed on too if a new
-connection to the upstream fails. Every other 503 may follow work (capacity
-running out mid-reply, a model swap, a shutdown), so it is forwarded once. Any
-429 or 503 the gateway forwards without `Retry-After` gets `Retry-After: 1`.
+which the engine sends before doing any work.
+
+- Without `Retry-After`, the gateway sends the same request again after 50 ms,
+  doubling up to 800 ms. With `Retry-After: 0` or `1`, it waits 1 s each time.
+  A longer `Retry-After` is passed on at once.
+- The whole wait, including reading each refusal, is capped at 30 s; then the
+  last refusal is passed on. It is also passed on if a new connection to the
+  upstream fails.
+- Every other 503 may follow work (capacity running out mid-reply, a model
+  swap, a shutdown), so the gateway forwards it once.
+- Any 429 or 503 the gateway forwards without `Retry-After` gets
+  `Retry-After: 1`.
 
 A retry sends your request unchanged, including the fields you set. Once a
 response has started forwarding, nothing is replayed, and read or write

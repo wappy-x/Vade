@@ -10,17 +10,33 @@ streaming, prompt serialization, inference and KV ownership stay with the
 modules and projects that already handle them. No implementation code from
 competing coding agents is included.
 
+**In short.** The agent works inside one workspace folder you pick. It can
+search, read and patch files there. Under the default approval policy,
+`--approval ask`, it asks before it applies each patch, and the patch preview
+shows the exact diff. On macOS it can also run commands in a sandbox; on Linux
+it has no command tool. A command's approval shows its arguments and sandbox
+settings, not the files it may change, and a short read-only list runs without
+asking. `--approval auto` applies patches and runs commands without asking,
+still inside the sandbox. Each request runs under fixed limits
+on rounds, calls and time, and a stopped request keeps its conversation, so
+`continue` picks up where it left off. The sections below give every limit and
+rule.
+
 ## How much one request may do
 
-By default, each native user request gets 60 tool rounds, 61 model turns and 240
-proposed tool calls. One model reply that asks for tools counts as one tool
-round, even when it proposes several calls. The default time limit is 20 minutes
-of active agent work, and time spent waiting for your approval does not count.
+Each native user request gets, by default:
+
+- **60 tool rounds.** One model reply that asks for tools counts as one round,
+  even when it proposes several calls.
+- **61 model turns** and **240 proposed tool calls**.
+- **20 minutes of active agent work.** Time spent waiting for your approval
+  does not count.
+
 When time runs out, the agent finishes or cleanly aborts the current tool and
 keeps the conversation and journal. It says "Stopped after 20 minutes; say
-continue to keep going". Say `continue` to keep working in the same conversation
-with a fresh request budget. Context, history and output bounds still apply and
-can stop work earlier.
+continue to keep going". Say `continue` to keep working in the same
+conversation with a fresh request budget. Context, history and output bounds
+still apply and can stop work earlier.
 
 Use `--agent-time-limit-seconds N` to change the time limit in seconds; `0`
 turns it off. Native `agent` mode also accepts a JSON config file that you pick
@@ -64,7 +80,8 @@ the connection asks the upstream to cancel; stopping the engine is best effort.
 `apply_patch` takes one JSON property, `patch`, that holds the marker format
 below. Markers use LF. Payload lines keep their bytes, including CR in CRLF file
 content. Paths are relative and go through the same hidden/credential/traversal
-filter as workspace reads. Parent directories must already exist.
+filter as workspace reads. Missing parent folders inside the workspace are
+created.
 
 ```text
 *** Begin Patch
@@ -79,25 +96,40 @@ filter as workspace reads. Parent directories must already exist.
 *** Update File: source.txt
 *** Move to: destination.txt
 *** Delete File: obsolete.txt
--entire old content
 *** End Patch
 ```
 
-Update hunks use a **bare `@@`**, in file order. The complete old hunk (the
-space and minus lines) must match exactly once, at line boundaries. There is no
-whitespace normalization, fuzzy matching, line-number search, or implicit
-replace-all. An empty existing file accepts a hunk that only inserts. Add lines
-must start with `+`, and delete lines must reproduce the entire old file with
-`-` prefixes. Right after a payload line with no trailing newline, use the
-literal marker `\ No newline at end of file`. A move can also contain update
-hunks.
+The old text, not a line number, decides where a hunk goes:
 
-Patch text is limited to 64 KiB, targets and results to 4 MiB per file, and a
-batch to 32 files. The unified approval preview shows the exact changed hunks
-with three context lines, and merges context windows that overlap. The preview
-is capped at 192 KiB. A patch whose diff would go past that is refused before
-approval, because you must see every changed line before you approve it. Reads
-and edits reject symlinks, hardlinks and special files.
+- Update hunks start with `@@`, in file order. A header with line numbers or an
+  annotation, such as `@@ -12,4 +12,4 @@ fn main`, is accepted; the numbers are
+  ignored.
+- The complete old hunk (the space and minus lines) must match exactly once, at
+  line boundaries. When there is no exact match, a unique match that differs
+  only in spaces or tabs is accepted, keeps the file's unchanged lines and is
+  reported in the result. Text that matches more than once is refused. There is
+  no other fuzzy matching, line-number search or implicit replace-all.
+- A bare empty line inside a hunk counts as an empty context line.
+- An empty existing file accepts a hunk that only inserts.
+- Add lines start with `+`. An Add body with no `+` prefixes at all is taken as
+  the whole new file; a body that mixes the two is refused. Add requires an
+  absent file, and Update an existing one.
+- A Delete needs no body. A body of `-` lines, if given, must reproduce the
+  entire old file.
+- The `*** Begin Patch` and `*** End Patch` markers may be left out, and one
+  enclosing plain, `diff` or `patch` code fence is accepted.
+- Right after a payload line with no trailing newline, use the literal marker
+  `\ No newline at end of file`.
+- A move can also contain update hunks.
+
+Size limits: patch text up to 64 KiB, targets and results up to 4 MiB per
+file, and up to 32 files in a batch. Reads and edits reject symlinks,
+hardlinks and special files.
+
+The unified approval preview shows the exact changed hunks with three context
+lines, and merges context windows that overlap. It is capped at 192 KiB. A
+patch whose diff would go past that is refused before approval, because you
+must see every changed line before you approve it.
 
 To keep the approval preview faithful to the patch, changed lines, unchanged
 context and path headers visibly escape nonprinting Unicode, combining marks,
@@ -262,12 +294,13 @@ including one installed in a home directory. Only its canonical bin and lib
 trees become readable, and they are explicitly write-denied. The required
 bin/cargo, bin/rustc and bin/rustdoc files and the bin/lib directories must be
 real, not symlinks, and the distribution must be separate from the workspace.
-You vouch for its public compiler and runtime contents. There is no credential,
-registry or toolchain discovery, no running of rustup shims, and no reading of
-the rest of the distribution or home. This option is launch policy, never a
-model tool parameter or a capability restored from a journal. System and
-Homebrew toolchains and workspace-local executables stay subject to approval and
-the same sandbox.
+
+By passing it, you vouch for its public compiler and runtime contents. There
+is no credential, registry or toolchain discovery, no running of rustup shims,
+and no reading of the rest of the distribution or home. The option is launch
+policy: never a model tool parameter, and never a capability restored from a
+journal. System and Homebrew toolchains and workspace-local executables stay
+subject to approval and the same sandbox.
 
 File metadata lookup is broader, to support OS path traversal.
 `/System/Volumes/Data` is deliberately not an allowed read root. Hidden and
@@ -414,21 +447,30 @@ and the old records stay on disk.
 
 ## Context accounting
 
-The local estimate counts every serialized part of the request at three UTF-8
-JSON bytes per token, and adds 256 + 16/message + 32/tool framing units and a
-12.5% (minimum 256) safety margin. In this estimate the output reserve defaults
-to 4,096 tokens (`DEFAULT_RESERVE` in the context estimator, `src/context.rs`),
-and `--max-output-tokens` replaces it, even with a smaller value. Once the
-client has picked the automatic output cap for a request (at most 16,384 tokens,
-or 8,192 without advertised capabilities), the estimate reserves that cap
-instead, and never less than the smaller of the advertised output limit, 8,192
-tokens and a quarter of the context. Negotiated defaults respect the advertised
-output limit, and explicit request output limits are counted too. These are
-heuristics, not exact counts or an upper bound that holds for every model. The
-byte figure is the actual serialized request size. Media and unknown content
-parts are refused without exact provider admission. Cached input is never
-subtracted. Native and direct requests use the negotiated output defaults unless
-the caller picks an output limit.
+Without an exact count from the engine, the harness estimates how much of the
+context a request uses. The input estimate and the reserve come from the
+context estimator ([`src/context.rs`](../src/context.rs)), and the output caps
+from `AUTOMATIC_OUTPUT_TOKENS` and `DEFAULT_OUTPUT_TOKENS` in
+[`src/contract.rs`](../src/contract.rs):
+
+- **Input.** Every serialized part of the request at three UTF-8 JSON bytes per
+  token, plus 256 + 16 per message + 32 per tool for framing, plus a 12.5 %
+  safety margin (at least 256).
+- **Output reserve.** 4,096 tokens by default (`DEFAULT_RESERVE`).
+  `--max-output-tokens` replaces it, even with a smaller value.
+- **Automatic output cap.** Once the client has picked one for a request (at
+  most 16,384 tokens, or 8,192 without advertised capabilities), the estimate
+  reserves that cap instead. It never reserves less than the smallest of the
+  advertised output limit, 8,192 tokens and a quarter of the context.
+
+Negotiated defaults respect the advertised output limit, and explicit request
+output limits are counted too. Native and direct requests use the negotiated
+output defaults unless the caller picks an output limit.
+
+These are heuristics, not exact counts or an upper bound that holds for every
+model. The byte figure is the actual serialized request size. Cached input is
+never subtracted. Media and unknown content parts are refused without exact
+provider admission.
 
 When the engine offers tokenizer admission (an exact count of the rendered
 request), that count drives the native fit check before generation and the

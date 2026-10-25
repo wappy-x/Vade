@@ -28,30 +28,40 @@ fn top(on: bool) -> String {
         let rows: Vec<(&str, String)> = rows.iter().map(|(name, text)| (*name, (*text).to_owned())).collect();
         format!("{}\n{}\n", heading(name), style::table_at(&rows, 2, width))
     };
-    let mut out = format!("{} runs Qwen3.8 Flash-Next FP4-Local on your DGX Spark: start it, chat\nwith it, check it, stop it.\n\n{} vade <COMMAND> [OPTIONS]\n\n",
-        style::style(Token::Title, "Vade", on), heading("Usage:"));
-    out += &group("Get started:", &[
-        ("launch", "Install if missing, start FP4-Local on this Spark, then chat"),
-        ("chat", "Open chat here (direct text below 8192 local context tokens)"),
-        ("status", "Show what is running (--json for scripts)"),
+    let mut out = format!("{} runs Qwen3.8 Flash-Next FP4-Local on your DGX Spark.\n\n{}\n", style::style(Token::Title, "Vade", on), heading("Examples:"));
+    out += &style::table(&[
+        ("vade launch", "Start on this Spark, then chat".into()),
+        ("vade status", "See what is running".into()),
+        ("vade doctor", "Check the setup, one line per check".into()),
+        ("vade down", "Stop what vade started".into()),
+    ], 2);
+    out += &format!("\n{} vade <COMMAND> [OPTIONS]\n\n", heading("Usage:"));
+    out += &group("Start and stop:", &[
+        ("launch", "Install if missing, start on this Spark, then chat"),
+        ("up", "Start without chat (this Spark, or Sparks from a controller)"),
         ("down", "Stop what vade started"),
     ], 7);
-    out += &group("Run:", &[
-        ("up", "Start FP4-Local without chat (legacy FP8 needs --fp8-legacy)"),
-        ("logs", "Show recent logs"),
-        ("install", "Save local defaults and install; VADE_CONFIG uses the controller"),
-        ("update", "Restage local binaries or update controller source"),
-        ("run", "Run the separate official Qwen3-8B BF16 catalog"),
+    out += &group("Use:", &[("chat", "Chat with the running engine")], 7);
+    out += &group("Look:", &[
+        ("status", "Show what is running and whether it is healthy"),
+        ("config", "Show which setup is selected and what it holds"),
+        ("doctor", "Check the setup: one line per check, then PASS or FAIL"),
+        ("detect", "Show this Spark's machine, memory, disk, driver and model"),
+        ("logs", "Show recent engine logs"),
     ], 7);
-    out += &group("Check:", &[
-        ("doctor", "Check what needs attention"),
-        ("detect", "Show this Spark and check available memory and disk"),
-        ("verify", "Compare exact token IDs with drafting ON and OFF"),
-        ("bench", "Measure a server from the client"),
-        ("test", "Run build, determinism, long-context, GDN and ABI checks"),
+    out += &group("Prove:", &[
+        ("verify", "Check exact token IDs across runs, drafting ON and OFF"),
+        ("bench", "Measure a running server from this client"),
+        ("test", "Run the build, determinism and long-context gate checks"),
+    ], 7);
+    out += &group("Maintain:", &[
+        ("install", "Save local defaults and install the engine and chat"),
+        ("update", "Refresh the installed engine and chat"),
+        ("run", "Run the separate legacy Qwen3-8B BF16 workflow"),
         ("version", "Print the CLI version"),
     ], 7);
     out += &group("Options:", &[
+        ("--json", "JSON output for status, doctor, config, detect, version"),
         ("--dry-run", "Preview a lifecycle command; nothing changes"),
         ("--api-key-file PATH", "Credential for chat, doctor and local run"),
         ("-h, --help", "Show help"),
@@ -66,7 +76,7 @@ fn top(on: bool) -> String {
     out += &format!("{}\n", heading("Notes:"));
     for note in [
         "Explicit VADE_CONFIG selects the controller for up, install, chat, status, logs, down and doctor, even after local setup; keep it set to the same file throughout that lifecycle. Without VADE_CONFIG, saved local setup wins over the user config directory.",
-        "For bench, vade help bench, vade --help bench and vade -h bench also work; global flags such as --dry-run before bench are unsupported.",
+        "Global flags such as --dry-run before bench are unsupported.",
     ] { out += &format!("  - {}\n", style::wrap(note, style::WIDTH, "    ")); }
     out += &format!("\nLearn more: {}\n", style::style(Token::Command, "vade <command> --help", on));
     out
@@ -75,11 +85,12 @@ fn top(on: bool) -> String {
 fn page(command: &str) -> Option<Page<'static>> {
     Some(match command {
         "launch" => Page {
-            summary: "Start Vade on this Spark and open chat. Finds the FP4-Local checkpoint, saves defaults, installs if missing, starts the engine, then opens chat. Run it again to attach.",
+            summary: "Start Vade on this Spark and open chat.",
             usage: &["vade launch [OPTIONS]"],
             options: &[CONTEXT, OUTPUT, MTP, ("--cache-bytes 0", "Disable retained prompt cache, even with an inherited opt-in"), DRY_RUN],
             examples: &["vade launch", "vade launch --context 262144 --output 16384", "vade launch --dry-run"],
             notes: &[
+                "Finds the FP4-Local checkpoint, saves defaults, installs if missing, starts the engine, then opens chat. Run it again to attach.",
                 "Local defaults match vade up from a controller: context 32768, output min(8192, context), engine-selected MTP.",
                 "If the engine refuses the default or saved context for memory, launch retries 16384, 8192 then 4096, saves the one that starts and says which; an explicit --context the engine refuses is an error.",
                 "The checkpoint comes from the saved config, then explicit VADE_MODELS, then the FP4-Local checkpoint under ~/models; launch asks if it is missing. Files install under ~/.vade (or VADE_HOME).",
@@ -87,7 +98,7 @@ fn page(command: &str) -> Option<Page<'static>> {
             ],
         },
         "up" => Page {
-            summary: "Start the engine without opening chat. Default: Qwen3.8 Flash-Next FP4-Local on one Spark.",
+            summary: "Start the engine without opening chat.",
             usage: &["vade up [OPTIONS]"],
             options: &[
                 ("--fp4-local", "Qwen3.8 Flash-Next FP4-Local (the default; optional)"),
@@ -103,6 +114,7 @@ fn page(command: &str) -> Option<Page<'static>> {
             ],
             examples: &["vade up", "vade up --context 262144 --output 16384", "VADE_CONFIG=cluster.conf vade up --sparks 2"],
             notes: &[
+                "Default: Qwen3.8 Flash-Next FP4-Local on one Spark.",
                 "Local up and launch use context 32768 and output min(8192, context). The engine's memory admission decides: only a refused default or saved context is lowered (16384, 8192, 4096), and saved once it starts. Supported explicit limits are saved; an explicit --context the engine refuses is an error. Local --chats and positive --cache-bytes are refused; --cache-bytes 0 disables retention.",
                 "Controller FP4 defaults match local ones on any Spark count: context 32768, output min(8192, context); the engine admits concurrent chats from context and memory. --context 262144 selects the single-chat long-context preset.",
                 "MTP is engine-selected. FP4-Local one-Spark concurrent chats can draft; the default request depth is 3 with strict verification. Legacy FP8 concurrent chats decode plainly. Per-request draft=plain disables drafting; draft=strict requests it when supported. --mtp overrides MTP, and 0 disables server drafting.",
@@ -115,7 +127,7 @@ fn page(command: &str) -> Option<Page<'static>> {
             summary: "Stop the engine and tunnel started by vade.",
             usage: &["vade down [--dry-run]"],
             options: &[DRY_RUN],
-            examples: &[],
+            examples: &["vade down", "vade down --dry-run"],
             notes: &[LIFECYCLE],
         },
         "status" => Page {
@@ -132,15 +144,16 @@ fn page(command: &str) -> Option<Page<'static>> {
             summary: "Show recent engine logs.",
             usage: &["vade logs [--dry-run]"],
             options: &[DRY_RUN],
-            examples: &[],
+            examples: &["vade logs", "vade logs | tail -20"],
             notes: &[LIFECYCLE],
         },
         "chat" => Page {
-            summary: "Open the Vade agent on the resident engine. Start the engine once with vade launch or vade up.",
+            summary: "Chat with the running engine.",
             usage: &["vade chat [--api-key-file PATH] [--dry-run]"],
             options: &[API_KEY, DRY_RUN],
-            examples: &[],
+            examples: &["vade chat", "VADE_CONFIG=cluster.conf vade chat"],
             notes: &[
+                "Opens the Vade agent on the resident engine. Start the engine once with vade launch or vade up.",
                 "Local contexts below 8192 tokens use direct text chat. Local Linux agent mode disables automatic workspace checks with a notice.",
                 "Typing during a reply interrupts it and keeps its partial answer in context. /queue on queues follow-ups; /queue off restores steering. /exit leaves the engine running.",
                 "Chat history is kept in ~/.vade/projects (VADE_HOME changes the root), never in this folder; VADE_CHAT_IN_PROJECT=1 keeps it in a git-ignored ./.vade.",
@@ -148,18 +161,24 @@ fn page(command: &str) -> Option<Page<'static>> {
             ],
         },
         "doctor" => Page {
-            summary: "Check what needs attention and explain next steps: the local driver, memory, disk, model, installed binaries and engine health, or the controller harness and configured machines.",
-            usage: &["vade doctor [--api-key-file PATH] [--dry-run]"],
-            options: &[API_KEY, DRY_RUN],
-            examples: &[],
-            notes: &[TRANSPORT, LIFECYCLE],
+            summary: "Check the setup: one line per check, then PASS or FAIL.",
+            usage: &["vade doctor [--json] [--api-key-file PATH] [--dry-run]"],
+            options: &[("--json", "Print one vade.doctor.v1 object with every check"), API_KEY, DRY_RUN],
+            examples: &["vade doctor", "vade doctor --json", "VADE_CONFIG=cluster.conf vade doctor --dry-run"],
+            notes: &[
+                "On this Spark: config, VADE_HOME writable, ownership, installed binaries, model files, nvidia-smi and driver, disk, free memory, port and engine health.",
+                "From a controller: local tools, then SSH, nvidia-smi, disk, free memory and model files on each configured Spark, then the fabric and the harness.",
+                "Each FAIL row is followed by the command that fixes it. Exit 0 means PASS, 1 means FAIL.",
+                TRANSPORT, LIFECYCLE,
+            ],
         },
         "install" => Page {
-            summary: "Save local defaults and install the engine and chat. Model downloads stay in your hands.",
+            summary: "Save local defaults and install the engine and chat.",
             usage: &["vade install [--dry-run]"],
             options: &[DRY_RUN],
-            examples: &[],
+            examples: &["vade install", "VADE_CONFIG=cluster.conf vade install --dry-run"],
             notes: &[
+                "Model downloads stay in your hands.",
                 "For a fresh local installation or saved owner defaults without VADE_CONFIG: detect existing weights, save defaults once in ~/.vade/config, and stage a local engine and chat program. No hand editing is needed.",
                 "With VADE_CONFIG, or a default controller config before local setup: check prerequisites, copy an exact-source SHA256-verified prebuilt_dir bundle or build source, then run doctor. Model inventory checks overlap copy/build and are cached.",
                 "A generated run qwen3-8b installation uses run again; install requires an explicit VADE_CONFIG to select a controller.",
@@ -170,28 +189,28 @@ fn page(command: &str) -> Option<Page<'static>> {
             summary: "Refresh the installed engine and chat.",
             usage: &["vade update [--dry-run]"],
             options: &[DRY_RUN],
-            examples: &[],
+            examples: &["vade update", "vade update --dry-run"],
             notes: &[
                 "Locally, restage the current bundle or rebuild the current source, then report how to restart.",
                 "With VADE_CONFIG, update source, rebuild and stage binaries, then offer a restart.",
             ],
         },
         "detect" => Page {
-            summary: "Read this Spark's identity, available memory, disk, NVIDIA driver and existing model. No files are changed.",
-            usage: &["vade detect"],
-            options: &[],
-            examples: &[],
-            notes: &[],
+            summary: "Show this Spark's machine, memory, disk, driver and model.",
+            usage: &["vade detect [--json]"],
+            options: &[("--json", "Print one vade.detect.v1 object")],
+            examples: &["vade detect", "vade detect --json"],
+            notes: &["Reads only; no files are changed and nothing is started."],
         },
         "version" => Page {
-            summary: "Print the CLI package version without loading configuration or opening connections.",
-            usage: &["vade --version", "vade version", "vade -V"],
-            options: &[],
-            examples: &[],
-            notes: &[],
+            summary: "Print the CLI version.",
+            usage: &["vade --version [--json]", "vade version [--json]", "vade -V"],
+            options: &[("--json", "Print one vade.version.v1 object")],
+            examples: &["vade --version", "vade version --json"],
+            notes: &["Loads no configuration and opens no connections."],
         },
         "run" => Page {
-            summary: "Run the separate official Qwen3-8B BF16 catalog locally on one Linux/aarch64 NVIDIA GB10: detect prerequisites before downloading, resume and hash official pinned weights, start an owned server, answer, run doctor.",
+            summary: "Run the separate legacy Qwen3-8B BF16 workflow on one Spark.",
             usage: &["vade run qwen3-8b [OPTIONS]"],
             options: &[
                 ("--port N", "Local server port, 1024..65535 (default 8080)"),
@@ -203,8 +222,56 @@ fn page(command: &str) -> Option<Page<'static>> {
             ],
             examples: &["vade run qwen3-8b", "vade run qwen3-8b --dry-run"],
             notes: &[
+                "On one Linux/aarch64 NVIDIA GB10: detect prerequisites before downloading, resume and hash official pinned weights, start an owned server, answer, run doctor.",
                 "Other --weights-source directory names are imported as Qwen3-8B inside VADE_HOME.",
                 "VADE_HOME selects a dedicated private data directory. Unset VADE_CONFIG; use a fresh VADE_HOME if local launch already has defaults. Keep the same selection for chat, status, logs and down. No system tool installation.",
+            ],
+        },
+        "config" => Page {
+            summary: "Show which setup is selected and what it holds.",
+            usage: &["vade config [--json]"],
+            options: &[("--json", "Print one vade.config.v1 object")],
+            examples: &["vade config", "vade config --json", "VADE_CONFIG=cluster.conf vade config"],
+            notes: &[
+                "The setup is local (saved defaults in VADE_HOME), controller (VADE_CONFIG or the user config file), legacy (vade run qwen3-8b) or none yet.",
+                "Reads only. To change a local value, rerun vade launch with the flag; to change a controller value, edit the file it names.",
+            ],
+        },
+        "bench" => Page {
+            summary: "Measure a running server from this client.",
+            usage: &["vade bench [OPTIONS]"],
+            options: &[
+                ("--url URL", "Server to measure (default: the recorded local endpoint)"),
+                ("--concurrency LIST", "Concurrent chats per cohort, such as 1,2,4,8 (default 1,2,4,8,16)"),
+                ("--max-tokens N", "Tokens each chat must generate (default 256)"),
+                ("--repeats N", "Repeats per cohort, none discarded (default 1)"),
+                ("--draft plain|strict", "Override drafting on every request (default: server)"),
+                ("--output FILE", "JSON receipt (default ./vade-bench.json) and a sibling .txt table"),
+                ("--api-key-file FILE", "Optional bearer credential; never stored in receipts"),
+                ("--self-test", "Run against a tiny local mock server; no GPU"),
+                ("--help-all", "List every option, including A/B runs and observation"),
+            ],
+            examples: &["vade bench", "vade bench --concurrency 1,8 --max-tokens 128", "vade bench --self-test"],
+            notes: &[
+                "Wall time is measured on this client; token counts come from the server. Requests are greedy with cache and thinking off and a fixed length.",
+                "Prints one row per cohort: tokens per second, time to first token and the bytes the server reported.",
+            ],
+        },
+        "test" => Page {
+            summary: "Run the build, determinism and long-context gate checks.",
+            usage: &[
+                "vade test build [OPTIONS]",
+                "vade test determinism [OPTIONS] -- MODEL FIXTURES ADDR0 ADDR1 RANK [--world 1|2|4]",
+                "vade test longctx prepare|run|compare [OPTIONS]",
+                "vade test gdn-state REFERENCE CANDIDATE [SPLIT] [--identity] [--legacy-prefill-group N]",
+                "vade test unix-flags-abi [--target TARGET]",
+            ],
+            options: &[],
+            examples: &["vade test build --help", "vade test determinism --help", "vade test longctx --help"],
+            notes: &[
+                "build checks the current engine checkout and a private release snapshot; determinism drives the flash-bench byte comparisons and receipts.",
+                "longctx freezes long-context prompts and compares teacher-forced logits and retrieval; gdn-state compares recurrent states; unix-flags-abi compiles Unix flag ABI assertions.",
+                "Native Spark qualification remains separate from host checks. See cli/docs/test.md and cli/evals.md for every option, default, bound and receipt.",
             ],
         },
         _ => return None,
@@ -217,11 +284,12 @@ mod tests {
     #[test]
     fn every_page_fits_the_width_and_names_its_usage() {
         for command in [None, Some("launch"), Some("up"), Some("down"), Some("status"), Some("logs"), Some("chat"), Some("doctor"),
-            Some("install"), Some("update"), Some("detect"), Some("version"), Some("run"), Some("verify")] {
+            Some("install"), Some("update"), Some("detect"), Some("version"), Some("run"), Some("verify"), Some("config"), Some("bench"), Some("test")] {
             let text = help(command);
             assert!(text.lines().all(|line| line.chars().count() <= style::WIDTH), "{command:?}:\n{text}");
             assert!(text.contains(&format!("Usage: vade {}", command.unwrap_or("<COMMAND>").replace("version", "--version"))), "{command:?}:\n{text}");
             assert!(!text.contains('\x1b') && text.ends_with('\n') && !text.ends_with("\n\n"), "{command:?}");
+            assert!(text.lines().nth(1) == Some("") && text.contains("\nExamples:\n"), "one-line summary, then examples: {command:?}:\n{text}");
         }
     }
 }

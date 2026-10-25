@@ -134,12 +134,13 @@ impl Terminal {
                 let answer = answer_text(&self.answer_preview);
                 let styled = render::markdown(answer, self.color);
                 let tail = if inline { live_tail(&styled, cells, transcript_height) } else { &styled };
-                format!("\n{}\n{tail}", render::header("Answer", &self.answer_time, "1", self.color))
+                format!("\n{tail}")
             }
         };
         let waiting = preview.is_empty() && !transient.is_empty() && transcript_height >= 4;
         let mut extra = if !self.thinking_preview.is_empty() && self.approval_view.is_none() {
-            render::thinking(
+            // One blank row above a live thought, as above a finished one.
+            std::iter::once(String::new()).chain(render::thinking(
                 if inline { live_tail(&self.thinking_preview, cells, transcript_height) } else { &self.thinking_preview },
                 None,
                 None,
@@ -148,7 +149,7 @@ impl Terminal {
                 self.thinking_preview_limited,
                 cells.max(1),
                 self.color,
-            )
+            )).collect()
         } else {
             Vec::new()
         };
@@ -172,7 +173,7 @@ impl Terminal {
                 pager.hits.clear();
                 for (row, text) in transcript.rows.iter().enumerate() {
                     let plain = render::plain(text);
-                    if plain.starts_with("── You · ") {
+                    if plain.starts_with(&format!("{} ", render::USER_BAR)) && !transcript.rows.get(row.wrapping_sub(1)).is_some_and(|above| render::plain(above).starts_with(render::USER_BAR)) {
                         pager.headers.push(row);
                     }
                     if !pager.query.is_empty() {

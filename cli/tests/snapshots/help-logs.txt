@@ -1,6 +1,10 @@
 $ vade logs --help
 Show recent engine logs.
 
+Examples:
+  vade logs
+  vade logs | tail -20
+
 Usage: vade logs [--dry-run]
 
 Options:

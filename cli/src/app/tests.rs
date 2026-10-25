@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Default)]
-struct FakeRunner { calls: Vec<Exec>, started: BTreeSet<String>, fail: Option<String>, foreign: Option<String>, bad_hash: bool, ports: Vec<u16>, dry: bool, doctor_bad: bool, tunnel_bad: bool, refused_start: Option<String>, inspect_error: Option<String>, mac_secret_seen: bool, alter_build_outputs: bool, local_state: PathBuf, exit_on_health: Option<String>, ready_model: Option<String>, health_extra: String, silent_probe: bool, gateway: Option<String>, gateway_start: Option<String>, gateway_exits: bool, gateway_stubborn: bool, signals: Vec<String> }
+struct FakeRunner { calls: Vec<Exec>, started: BTreeSet<String>, fail: Option<String>, foreign: Option<String>, bad_hash: bool, ports: Vec<u16>, dry: bool, doctor_bad: bool, tunnel_bad: bool, refused_start: Option<String>, inspect_error: Option<String>, mac_secret_seen: bool, alter_build_outputs: bool, local_state: PathBuf, exit_on_health: Option<String>, ready_model: Option<String>, health_extra: String, silent_probe: bool, gateway: Option<String>, gateway_start: Option<String>, gateway_exits: bool, gateway_stubborn: bool, signals: Vec<String>, probe: Option<(bool, &'static str)> }
 impl Runner for FakeRunner {
     fn run(&mut self, exec: &Exec) -> Result<Output, String> {
         self.calls.push(exec.clone());
@@ -68,6 +68,7 @@ impl Runner for FakeRunner {
         } else if op == "clean" { "log=Fake engine log.\n".into()
         } else if op == "logs" { text::encode(&Fields::from([("log".into(), "Fake engine log.\nflashnext ready world=1 context=32768 concurrency=rows active=8 connections=16\n".into())]))
         } else if !op.is_empty() { "phase=running\ngpu=empty\n".into()
+        } else if let Some((success, stdout)) = self.probe.filter(|_| exec.label.ends_with("prerequisites")) { return Ok(Output { success, stdout: stdout.into() });
         } else if exec.label.ends_with("prerequisites") { "weights=present\nrust=ok\ndriver=ok\ndisk_kb=99999999\nmem_total_kb=127608480\nmem_available_kb=115343360\n".into()
         } else if exec.label.ends_with("revision") { match exec.label.as_str() { "CLI revision" => "b", "harness revision" => "c", _ => "a" }.repeat(40) } else { String::new() };
         Ok(Output { success: true, stdout })
@@ -472,7 +473,9 @@ fn staged_hashes_survive_changed_build_outputs_and_guard_every_harness_use() {
     assert_eq!(fs::read(f.app.config.harness_source.join("target/release/vade-harness")).unwrap(), b"Changed after staging.\n");
     f.app.up(&legacy_options()).unwrap(); fs::write(f.app.config.stage_dir.join("vade-harness"), "Changed staged harness.").unwrap();
     for command in [Command::Chat, Command::Doctor] {
-        f.app.runner.calls.clear(); assert!(f.app.execute(command).unwrap_err().contains("differs from its saved hash"));
+        // Chat stops at the hash; doctor reports it as its harness row's FAIL.
+        f.app.runner.calls.clear(); let doctor = command == Command::Doctor; let error = f.app.execute(command).unwrap_err();
+        assert!(if doctor { error.starts_with("1 doctor check(s) failed.") } else { error.contains("differs from its saved hash") }, "{error}");
         assert!(f.app.runner.calls.iter().any(|e| e.label == "harness hash")); assert!(!f.app.runner.calls.iter().any(|e| e.label == "Vade chat" || e.label.starts_with("harness doctor")));
     }
     f.app.execute(Command::Down).unwrap(); f.app.runner.calls.clear(); assert!(f.app.harness_doctor(true).unwrap_err().contains("differs from its saved hash"));
@@ -1055,4 +1058,101 @@ fn replicas_gateway_identity_does_not_depend_on_the_locale_date() {
     assert_eq!(f.app.gateway_alive(&s).unwrap(), Some(true));
     f.app.down().unwrap();
     assert!(f.app.runner.gateway.is_none() && !f.recorded(), "down still finds and stops the gateway");
+}
+
+/// Doctor rows for checks an earlier failure stopped are `skip`, never a
+/// claim about the files or tools the script did not reach.
+#[test]
+fn doctor_skips_checks_an_earlier_failure_hid() {
+    let rows = |probe: Option<(bool, &'static str)>, machines: usize, transport: Result<bool, String>| {
+        let mut f = Fixture::fp4(machines, false);
+        f.app.runner.probe = probe;
+        let capture = crate::output::testing::Capture::default();
+        let result = crate::output::with_writer(capture.clone(), || f.app.doctor_with(transport));
+        (result, String::from_utf8(capture.bytes.borrow().clone()).unwrap())
+    };
+    let row = |printed: &str, name: &str| printed.lines().find(|line| line[6..].starts_with(name)).unwrap_or_else(|| panic!("{name}:\n{printed}")).to_owned();
+    let (result, printed) = rows(Some((false, "gpu=NVIDIA GB10, 580.95\ndisk_kb=10\nmem_total_kb=127608480\nmem_available_kb=115343360\nmissing=disk\n")), 1, Ok(false));
+    assert!(result.unwrap_err().starts_with("1 doctor check(s) failed."), "{printed}");
+    assert!(row(&printed, "a disk").starts_with("FAIL"), "{printed}");
+    assert_eq!(row(&printed, "a model files"), "skip  a model files         not checked; the script stopped at disk");
+    let (_, printed) = rows(Some((false, "missing=cargo\n")), 1, Ok(false));
+    assert_eq!(row(&printed, "a nvidia-smi"), "skip  a nvidia-smi          not checked; the script stopped at cargo");
+    assert!(row(&printed, "a tools").starts_with("FAIL"), "{printed}");
+    assert!(row(&printed, "a model files").starts_with("skip"), "{printed}");
+    let (_, printed) = rows(Some((false, "missing=rsync\n")), 1, Ok(false));
+    assert!(row(&printed, "a nvidia-smi").starts_with("ok"), "{printed}");
+    let (_, printed) = rows(Some((false, "gpu=GB10\ndisk_kb=99999999\nmissing=rdma-device\n")), 2, Ok(true));
+    assert!(row(&printed, "a rdma").starts_with("FAIL") && row(&printed, "a disk").starts_with("ok"), "{printed}");
+    assert!(row(&printed, "a model files").starts_with("skip"), "{printed}");
+    // SSH that never ran the script, a failed driver query, a failing tool
+    // and an unnamed stop are four different rows.
+    let (_, printed) = rows(Some((false, "")), 1, Ok(false));
+    assert!(row(&printed, "a ssh").starts_with("FAIL") && row(&printed, "a nvidia-smi").starts_with("skip"), "{printed}");
+    let (_, printed) = rows(Some((false, "reached=1\nfailed=driver\n")), 1, Ok(false));
+    assert!(row(&printed, "a ssh").starts_with("ok") && row(&printed, "a nvidia-smi").contains("GPU query failed"), "{printed}");
+    assert!(printed.contains("next: Run ssh a-ssh nvidia-smi to see the driver error"), "{printed}");
+    let (_, printed) = rows(Some((false, "reached=1\nfailed=cargo\n")), 1, Ok(false));
+    assert!(row(&printed, "a ssh").starts_with("ok") && row(&printed, "a tools").contains("cargo --version failed"), "{printed}");
+    let (_, printed) = rows(Some((false, "reached=1\n")), 1, Ok(false));
+    assert!(row(&printed, "a ssh").starts_with("ok") && row(&printed, "a check script").starts_with("FAIL"), "{printed}");
+    assert!(row(&printed, "a nvidia-smi").starts_with("skip"), "{printed}");
+    // The complete script still reports the files it found.
+    let (result, printed) = rows(None, 1, Ok(false));
+    result.unwrap();
+    assert!(row(&printed, "a model files").starts_with("ok"), "{printed}");
+    // An invalid SEQPAR_RDMA is one FAIL row; the report still finishes.
+    let (result, printed) = rows(None, 2, Err("Set SEQPAR_RDMA to 0 or 1.".into()));
+    assert!(result.is_err());
+    assert!(row(&printed, "SEQPAR_RDMA").starts_with("FAIL") && row(&printed, "b ssh").starts_with("skip") && row(&printed, "fabric").starts_with("skip"), "{printed}");
+    assert!(printed.lines().last().unwrap().starts_with("FAIL  "), "{printed}");
+}
+
+/// A failed harness doctor names the command to rerun in its own error,
+/// since doctor's report keeps only the error.
+#[test]
+fn failed_harness_doctor_error_names_its_retry_command() {
+    let mut f = Fixture::fp4(1, false);
+    let mut session = Session::new(&f.app.config, &fp4_options(&[]), &f.app.manifest().unwrap(), "a".repeat(64)).unwrap();
+    session.phase = "running".into();
+    session.ranks[0].attempted = true;
+    session.save(&f.app.config.state_dir).unwrap();
+    f.app.runner.started.insert("a".into());
+    f.app.runner.doctor_bad = true;
+    let capture = crate::output::testing::Capture::default();
+    let result = crate::output::with_writer(capture.clone(), || f.app.doctor());
+    assert!(result.is_err());
+    let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+    let next = printed.lines().skip_while(|line| !line.contains("engine health")).nth(1).unwrap().to_owned();
+    let harness = crate::runner::quote(&f.app.config.stage_dir.join("vade-harness").to_string_lossy());
+    assert!(next.starts_with("      next: ") && next.contains(&format!("{harness} doctor http://")) && next.contains("--max-seconds 120"), "{printed}");
+}
+
+/// The real check script marks a failed driver query or tool version, so
+/// doctor never mistakes either for an SSH failure.
+#[test]
+fn prerequisite_script_marks_failed_driver_queries_and_tool_versions() {
+    use std::os::unix::fs::PermissionsExt;
+    let _lock = runner::process_test_lock();
+    let mut f = Fixture::fp4(1, false);
+    let machine = f.app.config.machines[0].clone();
+    f.app.machine_checks_for_build(&machine, true).unwrap();
+    let script = f.app.runner.calls.last().unwrap().args.last().unwrap().clone();
+    let script = &script[script.find("set -eu").unwrap()..];
+    let bin = f.dir.join("stub-bin");
+    fs::create_dir_all(&bin).unwrap();
+    let run = |failing: &str| {
+        for tool in ["cargo", "rustc", "nvidia-smi", "sha256sum", "rsync", "curl"] {
+            let path = bin.join(tool);
+            fs::write(&path, if tool == failing { "#!/bin/sh\nexit 1\n" } else { "#!/bin/sh\nexit 0\n" }).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let output = std::process::Command::new("sh").args(["-c", script]).env("HOME", &f.dir)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display())).output().unwrap();
+        assert!(!output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    };
+    assert_eq!(run("nvidia-smi"), "reached=1\nfailed=driver\n");
+    assert_eq!(run("cargo"), "reached=1\nfailed=cargo\n");
+    assert_eq!(run("rustc"), "reached=1\nfailed=rustc\n");
 }

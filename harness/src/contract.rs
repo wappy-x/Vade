@@ -339,7 +339,7 @@ pub struct Context {
 }
 impl Context {
     /// One run's footer, most useful facts first so narrow terminals keep
-    /// elapsed time, tokens written and write speed. One number style.
+    /// elapsed time, tokens out and decode speed. One number style.
     pub fn reply_speed(
         &self,
         elapsed: std::time::Duration,
@@ -366,7 +366,7 @@ impl Context {
             .as_ref()
             .map_or(fallback_limit, |c| c.context_limit);
         format!(
-            "╰ {} · {} · {} tokens written · write {} · read {}{} · first token {}{} · ctx {used}/{} · cache reuse {}{}",
+            "╰ {} · {} · {} tokens out · {} · prefill {}{} · first token {}{} · ctx {used}/{} · cached {}{}",
             clock::now().0,
             clock::duration(elapsed + r.wall),
             if r.missing_output || r.calls == 0 {
@@ -393,8 +393,8 @@ impl Context {
             },
             clock::count(limit),
             if r.missing_cache || r.cache_prompt == 0 { "—".into() }
-            else { format!("{:.1}%", r.cache_restored as f64 * 100.0 / r.cache_prompt as f64) },
-            self.capabilities.as_ref().map_or(" · prompt cache: unknown", |c| if c.prefix_cache { " · prompt cache: on" } else { " · prompt cache: off" })
+            else { format!("{}/{}", clock::count(r.cache_restored), clock::count(r.cache_prompt)) },
+            self.capabilities.as_ref().map_or(" · prompt cache unknown", |c| if c.prefix_cache { "" } else { " · prompt cache off" })
         )
     }
     pub fn continue_reply(&mut self, previous: &Self, elapsed: std::time::Duration) {
@@ -430,9 +430,25 @@ impl Context {
             .filter(|(_, p)| *p > 0)
             .map_or_else(
                 || "cache —".into(),
-                |(c, p)| format!("{:.0}% cached", c as f64 * 100.0 / p as f64),
+                |(c, p)| format!("cached {}/{}", clock::count(c), clock::count(p)),
             );
         format!("{first} · {rate} · ctx {used}/{} · {cached}", clock::count(limit))
+    }
+    /// The status strip's facts from the latest validated response: context
+    /// used of the window, prompt tokens in, tokens out and decode speed.
+    /// Unknown values are left out rather than guessed: context reads 0 only
+    /// for a conversation the caller knows is `empty`.
+    pub fn strip(&self, fallback_limit: u64, empty: bool) -> Vec<String> {
+        use crate::terminal::clock;
+        let limit = self.capabilities.as_ref().map_or(fallback_limit, |c| c.context_limit);
+        let turn = self.turns.back().filter(|t| !t.invalid);
+        let usage = turn.map(|t| t.usage);
+        let used = usage.and_then(|u| u.prompt_tokens.zip(u.completion_tokens)).map(|(p, c)| p.saturating_add(c));
+        let mut parts: Vec<String> = used.or(empty.then_some(0)).map(|used| format!("ctx {}/{}", clock::count(used), clock::count(limit))).into_iter().collect();
+        if let Some(prompt) = usage.and_then(|u| u.prompt_tokens) { parts.push(format!("in {}", clock::count(prompt))); }
+        if let Some(output) = usage.and_then(|u| u.completion_tokens) { parts.push(format!("out {}", clock::count(output))); }
+        if let Some((n, t)) = turn.and_then(TurnUsage::decode_sample) { parts.push(clock::rate(n, t.as_secs_f64())); }
+        parts
     }
     pub fn run_speed(&self) -> String {
         let mut speed = SessionSpeed::default();

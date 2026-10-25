@@ -1,7 +1,9 @@
 === answer + status (80 columns) ===
 The change is ready. Run cargo test to check it.
 
-first token 1.5s · 23 tok/s · ctx 4.4k/32k · 96% cached
+first token 1.5s · 23 tok/s · ctx 4.4k/32k · cached 4k/4.2k
+
+
 
 
 
@@ -20,13 +22,13 @@ first token 1.5s · 23 tok/s · ctx 4.4k/32k · 96% cached
 
 
 qwen3-8b · harness · ask · 4.4k/32k ctx · session-1791581595875-6512-0
-┌ Enter sends · Shift+Enter / Option+Enter / Ctrl+J newline ──────────────────┐
-│>                                                                            │
-└─────────────────────────────────────────────────────────────────────────────┘
+› Enter sends · Shift+Enter or Ctrl+J newline · / commands
 === slash menu (80 columns) ===
 Vade
 
 How can I help?
+
+
 
 
 
@@ -45,13 +47,13 @@ How can I help?
 │  /resume            Resume a saved session.                                 │
 │  /retry             Regenerate the last answer.                             │
 └ ↑↓ · Enter run · Tab complete · Esc close  2/9 ─────────────────────────────┘
-┌ Enter sends · Shift+Enter / Option+Enter / Ctrl+J newline ──────────────────┐
-│> /                                                                          │
-└─────────────────────────────────────────────────────────────────────────────┘
+› /
 === slash menu scrolled (80 columns) ===
 Vade
 
 How can I help?
+
+
 
 
 
@@ -70,9 +72,7 @@ How can I help?
 │  /retry             Regenerate the last answer.                             │
 │› /quit              Exit the chat.                                          │
 └ ↑↓ · Enter run · Tab complete · Esc close  9/9 ─────────────────────────────┘
-┌ Enter sends · Shift+Enter / Option+Enter / Ctrl+J newline ──────────────────┐
-│>                                                                            │
-└─────────────────────────────────────────────────────────────────────────────┘
+› Enter sends · Shift+Enter or Ctrl+J newline · / commands
 === markdown (80 columns) ===
 A cleaner terminal
 
@@ -88,16 +88,16 @@ fn main() {
 }
 ```
 
-first token 1.5s · 23 tok/s · ctx 4.4k/32k · 96% cached
+first token 1.5s · 23 tok/s · ctx 4.4k/32k · cached 4k/4.2k
 
 
 
 
 
 
-┌ Enter sends · Shift+Enter / Option+Enter / Ctrl+J newline ──────────────────┐
-│>                                                                            │
-└─────────────────────────────────────────────────────────────────────────────┘
+
+
+› Enter sends · Shift+Enter or Ctrl+J newline · / commands
 === tool approval (80 columns) ===
 Read src/main.rs
 Run: cargo test
@@ -120,9 +120,9 @@ Approval required  y approve · n deny · or /approve /deny
 
 
 
-┌ Enter sends · Shift+Enter / Option+Enter / Ctrl+J newline ──────────────────┐
-│>                                                                            │
-└─────────────────────────────────────────────────────────────────────────────┘
+
+
+› Enter sends · Shift+Enter or Ctrl+J newline · / commands
 === wrapped input (80 columns) ===
 Vade
 
@@ -143,8 +143,8 @@ How can I help?
 
 
 
-┌ Enter sends · Shift+Enter / Option+Enter / Ctrl+J newline ──────────────────┐
-│> Explain the changes to the terminal and keep this draft intact during resiz│
-│  e. Include a short summary, the tests you ran, and any remaining issues. 🦀│
-│  Then show the next step.                                                   │
-└─────────────────────────────────────────────────────────────────────────────┘
+
+
+› Explain the changes to the terminal and keep this draft intact during resize.
+   Include a short summary, the tests you ran, and any remaining issues. 🦀
+  Then show the next step.

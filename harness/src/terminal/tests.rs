@@ -30,13 +30,13 @@
             let (mut cost, mut bytes, mut dropped) = (0., 0, 0);
             for _ in 0..120 {
                 let start = Instant::now(); let before = cpu(); t.preview_answer("word ");
-                let (lines, row, col) = t.frame_lines("draft", 5, "> ", "status", "", "", "", 110, 24);
+                let (lines, row, col) = t.frame_lines("draft", 5, "› ", "status", "", "", "", 110, 24);
                 bytes += if fullscreen { t.fullscreen_bytes(lines, row, col, 110, 24).len() } else { t.inline_bytes(&lines, row, col).len() }; cost += cpu() - before;
                 dropped += usize::from(start.elapsed() > Duration::from_secs_f64(1. / 60.));
                 std::thread::sleep(period.saturating_sub(start.elapsed()));
             }
             let start = Instant::now();
-            std::hint::black_box(t.frame_lines("draft", 5, "> ", "status", "", "", "", 100, 30));
+            std::hint::black_box(t.frame_lines("draft", 5, "› ", "status", "", "", "", 100, 30));
             println!("snappy run={run} rate={rate} fullscreen={fullscreen} draw_cpu_us_token={:.3} dropped_frames={dropped} bytes_token={:.3} resize_draw_ms={:.3}", cost * 1e6 / 120., bytes as f64 / 120., start.elapsed().as_secs_f64() * 1000.);
         }}}
     }
@@ -56,7 +56,7 @@
         let status = context.compact_status(32000);
         assert_eq!(
             status,
-            "first token 1.5s · 23 tok/s · ctx 4.4k/32k · 96% cached"
+            "first token 1.5s · 23 tok/s · ctx 4.4k/32k · cached 4k/4.2k"
         );
         let sample = "# A cleaner terminal\n\n**Readable answers** with `src/main.rs`.\n- Short status\n* Clear commands\n1. Read the file\n2. Run the tests\n\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```";
         for width in [80, 160] {
@@ -128,7 +128,7 @@
                 let (lines, row, col) = terminal.frame_lines(
                     draft,
                     draft.len(),
-                    "> ",
+                    "› ",
                     footer,
                     "",
                     "",
@@ -178,7 +178,7 @@
                 let (lines, row, col) = terminal.frame_lines(
                     "你好🦀\nlong draft",
                     10,
-                    "> ",
+                    "› ",
                     "model · folder",
                     "⠦ thinking… · 3.0s",
                     "",
@@ -190,7 +190,8 @@
                 assert!(
                     lines
                         .iter()
-                        .all(|line| render::width(line) <= width.saturating_sub(1).max(1))
+                        .all(|line| render::width(line) <= width.saturating_sub(1).max(1)),
+                    "{width}x{height}: {lines:?}"
                 );
                 assert!(row < height && col <= width);
             }
@@ -225,7 +226,7 @@
                 t.tool_call("Read src/parser.rs").unwrap();
                 t.tool_result("120 lines · 0.1s", false).unwrap();
                 t.answer("The test failed because the **last token** was dropped.").unwrap();
-                let footer = "╰ 14:02:41 · 29.6s · 412 tokens written · write 23 tok/s · read ≈884 tok/s · first token 3.2s · 3 model calls · ctx 44.1k/131k";
+                let footer = "╰ 14:02:41 · 29.6s · 412 tokens out · 23 tok/s · prefill ≈884 tok/s · first token 3.2s · 3 model calls · ctx 44.1k/131k";
                 t.note(&fit_status(footer, width - 1)).unwrap();
                 t.warning(
                     "The next reply would not fit in the model's context.",
@@ -234,13 +235,15 @@
                 )
                 .unwrap();
                 let status = "qwen3-8b · harness · approval: ask · ctx 44.1k/131k · session-1";
-                let (lines, _, _) = t.frame_lines("", 0, "> ", status, "", "", "", width, 28);
+                let (lines, _, _) = t.frame_lines("", 0, "› ", status, "", "", "", width, 28);
                 assert!(lines.iter().all(|line| render::width(line) < width));
                 screens.push(mask(&lines.join("\n")));
             }
             // Labels alone separate the blocks when colour is off.
             assert_eq!(render::plain(&screens[0]), screens[1]);
-            for (suffix, text) in [("ansi", &screens[0]), ("txt", &screens[1])] {
+            // The plain golden drops trailing spaces (the empty `› ` prompt).
+            let plain = screens[1].lines().map(str::trim_end).collect::<Vec<_>>().join("\n");
+            for (suffix, text) in [("ansi", &screens[0]), ("txt", &plain)] {
                 let path = format!(
                     "{}/tests/goldens/blocks-{width}.{suffix}",
                     env!("CARGO_MANIFEST_DIR")
@@ -259,7 +262,7 @@
         t.review_fullscreen = true;
         t.pager = Some(Pager::default());
         for i in 1..=3 {
-            t.transcript.push(&format!("── You · turn {i} ──\nneedle {i}\n{}", "gap\n".repeat(30)), 79);
+            t.transcript.push(&format!("{}\nneedle {i}\n{}", render::user(&format!("turn {i}"), false), "gap\n".repeat(30)), 79);
         }
         let (w, h) = (t.width(), t.height());
         t.scroll = usize::MAX;
@@ -272,7 +275,7 @@
         for next in [false, false, true] {
             t.pager_jump(next, true);
             let (rows, _, _) = t.frame_lines("", 0, "", "", "", "", "", w, h);
-            assert!(render::plain(&rows[1]).starts_with("── You · "));
+            assert!(render::plain(&rows[1]).starts_with("▌ turn "));
         }
         assert_eq!(Decoder::default().feed(b"\x0f\x1b[111;5u"), [Key::CtrlO, Key::CtrlO]);
     }
@@ -308,6 +311,8 @@
         assert_eq!(fit_status(budgets, 24), "round 7/60 · Esc cancels");
         assert_eq!(render::budget_footer(budgets, false), budgets);
         assert!(render::budget_footer("round 48/60 · 16m/20m · ctx 80%", true).contains("\x1b[7mctx 80%"));
+        assert!(render::budget_footer("round 4/60 · 1m/20m · ctx 26.3k/32.8k", true).contains("\x1b[7mctx 26.3k/32.8k"));
+        assert!(!render::budget_footer("round 4/60 · 1m/20m · ctx 1.1k/32.8k", true).contains("\x1b[7mctx"));
         // The scroll hint is reserved whole, ahead of the facts.
         let mut terminal = Terminal::open(true);
         terminal.transcript.push(&"row\n".repeat(60), 39);
@@ -315,7 +320,7 @@
         let (lines, _, _) = terminal.frame_lines(
             "",
             0,
-            "> ",
+            "› ",
             "qwen3-8b · harness · ask · session-1",
             "",
             "",
@@ -365,16 +370,16 @@
         // Later notices can evict ordinary history, but never this approval.
         terminal.note(&"later\n".repeat(6000)).unwrap();
         for width in [80, 8, 160] {
-            terminal.frame_lines("", 0, "> ", "Approval required", "", "", "", width, 24);
+            terminal.frame_lines("", 0, "› ", "Approval required", "", "", "", width, 24);
             let total = terminal.approval_view.as_ref().unwrap().rows.len();
             let mut pages = Vec::new();
-            // Empty boxed input plus footer leaves twenty transcript rows.
-            for end in (1..=total).rev().step_by(20) {
+            // One prompt row plus the status strip leaves 22 transcript rows.
+            for end in (1..=total).rev().step_by(22) {
                 terminal.scroll = total - end;
                 let (lines, _, _) =
-                    terminal.frame_lines("", 0, "> ", "Approval required", "", "", "", width, 24);
+                    terminal.frame_lines("", 0, "› ", "Approval required", "", "", "", width, 24);
                 pages.push(
-                    lines[..end.min(20)]
+                    lines[..end.min(22)]
                         .iter()
                         .map(|line| render::plain(line))
                         .filter(|line| changed(line))
@@ -417,11 +422,11 @@
         terminal.close_approval();
         terminal.approval_preview("Patch preview", "+🦀").unwrap();
         let (lines, _, _) =
-            terminal.frame_lines("", 0, "> ", "Approval required · y / n", "", "", "", 2, 24);
+            terminal.frame_lines("", 0, "› ", "Approval required · y / n", "", "", "", 2, 24);
         assert!(terminal.approval_view.as_ref().unwrap().incomplete);
         assert!(terminal.approval_ready_at(1, 24).is_err());
         assert!(!lines.iter().any(|line| line.contains("Approval required")));
-        terminal.frame_lines("", 0, "> ", "Approval required", "", "", "", 80, 24);
+        terminal.frame_lines("", 0, "› ", "Approval required", "", "", "", 80, 24);
         assert!(!terminal.approval_view.as_ref().unwrap().incomplete);
         assert!(terminal.approval_ready_at(79, 2).is_err());
         terminal.approval_ready_at(79, 24).unwrap();
@@ -557,6 +562,31 @@
             }
             assert!(!view.incomplete);
         }
+    }
+    #[test]
+    fn short_inline_approval_preview_commits_the_exact_patch() {
+        // A preview that fits inline never enters the review screen, so the
+        // committed rows are what the user approves: no moved words, no
+        // dropped break space, no repeated speaker bar.
+        let mut terminal = Terminal::open(true);
+        terminal.raw = true;
+        let cells = terminal.width().saturating_sub(1).max(1);
+        assert!(cells > 12);
+        let moved = format!("+{} -removed", "a".repeat(cells - 9));
+        let spaced = format!("+{} b", "a".repeat(cells - 1));
+        let bar = format!("▌ {} d", "c".repeat(cells - 2));
+        let detail = format!("{moved}\n{spaced}\n{bar}\n+tail  two  spaces");
+        terminal.approval_preview("Patch preview", &detail).unwrap();
+        assert!(!terminal.needs_review(cells + 1, 24));
+        let frame = terminal.inline_bytes(&[], 0, 1);
+        let committed = &frame[frame.find("\x1b[J").unwrap() + 3..frame.rfind("\r\n").unwrap()];
+        let rows: Vec<String> = committed.split("\r\n").map(render::plain).collect();
+        assert!(rows.iter().all(|row| render::width(row) <= cells));
+        let start = rows.iter().position(|row| row == "Patch preview").unwrap() + 1;
+        let end = rows.iter().position(|row| render::approval(false) == *row).unwrap();
+        assert_eq!(rows[start..end].concat(), detail.replace('\n', ""));
+        assert!(rows.contains(&" b".to_owned()) && rows.contains(&" d".to_owned()));
+        assert!(!rows.iter().any(|row| row.starts_with("-removed") || row.starts_with("▌ d")));
     }
     #[test]
     fn exit_reply_tail_is_short_and_sanitized() {

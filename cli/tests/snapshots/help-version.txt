@@ -1,9 +1,18 @@
 $ vade version --help
-Print the CLI package version without loading configuration or opening
-connections.
+Print the CLI version.
 
-Usage: vade --version
-       vade version
+Examples:
+  vade --version
+  vade version --json
+
+Usage: vade --version [--json]
+       vade version [--json]
        vade -V
+
+Options:
+  --json  Print one vade.version.v1 object
+
+Notes:
+  - Loads no configuration and opens no connections.
 --- stderr
 --- exit 0

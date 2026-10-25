@@ -1,7 +1,16 @@
 $ vade detect --help
-Read this Spark's identity, available memory, disk, NVIDIA driver and existing
-model. No files are changed.
+Show this Spark's machine, memory, disk, driver and model.
 
-Usage: vade detect
+Examples:
+  vade detect
+  vade detect --json
+
+Usage: vade detect [--json]
+
+Options:
+  --json  Print one vade.detect.v1 object
+
+Notes:
+  - Reads only; no files are changed and nothing is started.
 --- stderr
 --- exit 0

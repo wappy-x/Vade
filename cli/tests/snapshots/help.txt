@@ -1,31 +1,42 @@
 $ vade --help
-Vade runs Qwen3.8 Flash-Next FP4-Local on your DGX Spark: start it, chat
-with it, check it, stop it.
+Vade runs Qwen3.8 Flash-Next FP4-Local on your DGX Spark.
+
+Examples:
+  vade launch  Start on this Spark, then chat
+  vade status  See what is running
+  vade doctor  Check the setup, one line per check
+  vade down    Stop what vade started
 
 Usage: vade <COMMAND> [OPTIONS]
 
-Get started:
-  launch   Install if missing, start FP4-Local on this Spark, then chat
-  chat     Open chat here (direct text below 8192 local context tokens)
-  status   Show what is running (--json for scripts)
+Start and stop:
+  launch   Install if missing, start on this Spark, then chat
+  up       Start without chat (this Spark, or Sparks from a controller)
   down     Stop what vade started
 
-Run:
-  up       Start FP4-Local without chat (legacy FP8 needs --fp8-legacy)
-  logs     Show recent logs
-  install  Save local defaults and install; VADE_CONFIG uses the controller
-  update   Restage local binaries or update controller source
-  run      Run the separate official Qwen3-8B BF16 catalog
+Use:
+  chat     Chat with the running engine
 
-Check:
-  doctor   Check what needs attention
-  detect   Show this Spark and check available memory and disk
-  verify   Compare exact token IDs with drafting ON and OFF
-  bench    Measure a server from the client
-  test     Run build, determinism, long-context, GDN and ABI checks
+Look:
+  status   Show what is running and whether it is healthy
+  config   Show which setup is selected and what it holds
+  doctor   Check the setup: one line per check, then PASS or FAIL
+  detect   Show this Spark's machine, memory, disk, driver and model
+  logs     Show recent engine logs
+
+Prove:
+  verify   Check exact token IDs across runs, drafting ON and OFF
+  bench    Measure a running server from this client
+  test     Run the build, determinism and long-context gate checks
+
+Maintain:
+  install  Save local defaults and install the engine and chat
+  update   Refresh the installed engine and chat
+  run      Run the separate legacy Qwen3-8B BF16 workflow
   version  Print the CLI version
 
 Options:
+  --json               JSON output for status, doctor, config, detect, version
   --dry-run            Preview a lifecycle command; nothing changes
   --api-key-file PATH  Credential for chat, doctor and local run
   -h, --help           Show help
@@ -42,8 +53,7 @@ Notes:
     logs, down and doctor, even after local setup; keep it set to the same file
     throughout that lifecycle. Without VADE_CONFIG, saved local setup wins over
     the user config directory.
-  - For bench, vade help bench, vade --help bench and vade -h bench also work;
-    global flags such as --dry-run before bench are unsupported.
+  - Global flags such as --dry-run before bench are unsupported.
 
 Learn more: vade <command> --help
 --- stderr

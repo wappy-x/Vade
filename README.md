@@ -26,6 +26,12 @@ Unreleased.
 <a id="pick-your-path"></a>
 ## Install
 
+> [!IMPORTANT]
+> **Private preview.** The repository is private for now, so a plain clone
+> and the release download links fail without access. Ask the owner for
+> access, then follow the private-preview notes in
+> [INSTALL step 2](INSTALL.md#step-2-get-the-code).
+
 [INSTALL.md](INSTALL.md) is the full guide.
 
 ### One Spark
@@ -41,25 +47,21 @@ git clone --branch main https://github.com/wappy-x/vade.git "$HOME/vade" &&
 ```
 
 The script installs missing pinned Rust tools, builds Vade, checks this Spark
-and the model, and prepares the private GPU startup cache. If setup fails, it
-prints the next step. It needs no sudo and leaves shell profiles and model
-files alone. For a checkpoint elsewhere, set `VADE_MODELS` to its folder
-first. If `~/vade` already exists, use the
-[existing-checkout instructions](INSTALL.md#quick-start-with-an-existing-model).
+and the model, then starts the engine and opens chat in the current folder.
+It needs no sudo and leaves shell profiles and model files alone. Chat can
+edit files where it opens, so ask it only to say hello, then type `/exit`; the
+engine keeps running until `vade down`.
 
-With `--launch`, the script then starts the engine, waits until it is ready,
-and opens chat in the current folder. Chat can edit files there, so ask it
-only to say hello. Type `/exit` to leave; the engine keeps running until
-`vade down`. For `chat`, `status`, `doctor`, `logs`, `up` and `down`, use
-the full path `"$HOME/vade/cli/target/release/vade"`, or, in each new
-shell, put `cargo` and `vade` on your `PATH` first:
+In each new shell, put `cargo` and `vade` on your `PATH` first:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$HOME/vade/cli/target/release:$PATH"
 ```
 
-Most of the setup time goes to the first build and the checkpoint download.
-We have not timed fresh toolchain and model downloads.
+The [INSTALL quick start](INSTALL.md#quick-start-with-an-existing-model)
+covers an existing checkout, a checkpoint outside `~/models` and what to do if
+a step fails. Most of the setup time goes to the first build and the
+checkpoint download; we have not timed fresh toolchain and model downloads.
 
 To skip the Rust builds, take the prebuilt launcher bundle and its
 `SHA256SUMS` from the
@@ -81,6 +83,12 @@ of the Sparks) that reaches each Spark over SSH.
 
 Expect a long prompt to be read faster, not one chat to write faster; see
 [what works today](#supported-systems).
+
+### From Windows
+
+Windows can't run Vade, but it can drive a Spark. SSH in with the OpenSSH
+client that ships with Windows and follow the one-Spark steps there; see
+[from a Windows computer](INSTALL.md#from-a-windows-computer).
 
 ## What you get
 

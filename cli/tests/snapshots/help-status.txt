@@ -1,16 +1,16 @@
 $ vade status --help
 Show the engine, machines, build, settings and health.
 
+Examples:
+  vade status
+  vade status --json
+
 Usage: vade status [--json] [--dry-run]
 
 Options:
   --json     Print one vade.status.v1 object; exit 0 for stopped or ready, 1 for
              errors or an unhealthy state
   --dry-run  Read saved state only; unchecked values are null
-
-Examples:
-  vade status
-  vade status --json
 
 Notes:
   - Checks share a 15-second deadline.

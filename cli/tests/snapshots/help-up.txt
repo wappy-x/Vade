@@ -1,6 +1,10 @@
 $ vade up --help
-Start the engine without opening chat. Default: Qwen3.8 Flash-Next FP4-Local on
-one Spark.
+Start the engine without opening chat.
+
+Examples:
+  vade up
+  vade up --context 262144 --output 16384
+  VADE_CONFIG=cluster.conf vade up --sparks 2
 
 Usage: vade up [OPTIONS]
 
@@ -22,12 +26,8 @@ Options:
   --cache-bytes N   Retained prompt cache, in bytes; 0 disables retention
   --dry-run         Show what would happen; change nothing
 
-Examples:
-  vade up
-  vade up --context 262144 --output 16384
-  VADE_CONFIG=cluster.conf vade up --sparks 2
-
 Notes:
+  - Default: Qwen3.8 Flash-Next FP4-Local on one Spark.
   - Local up and launch use context 32768 and output min(8192, context). The
     engine's memory admission decides: only a refused default or saved context
     is lowered (16384, 8192, 4096), and saved once it starts. Supported explicit

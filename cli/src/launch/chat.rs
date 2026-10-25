@@ -26,6 +26,12 @@ pub(super) fn arguments(endpoint: &str, model: &str, workspace: &Path, context: 
 /// Chat journals and input recall stay out of the project: the harness keeps
 /// them in `<Vade home>/projects/<name>-<hash>`. VADE_CHAT_IN_PROJECT=1 opts into
 /// the project's own git-ignored .vade folder instead.
+/// The chat status strip's engine facts, which the harness cannot ask the
+/// server for: `2 Sparks · drafting on`.
+pub(crate) fn setup(sparks: usize, drafting: bool) -> String {
+    format!("{sparks} Spark{}, drafting {}", if sparks == 1 { "" } else { "s" }, if drafting { "on" } else { "off" })
+}
+
 pub(crate) fn state_arguments() -> Result<Vec<String>, String> {
     state_arguments_for(std::env::var_os("VADE_CHAT_IN_PROJECT"), super::root)
 }

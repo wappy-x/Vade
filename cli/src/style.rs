@@ -149,6 +149,15 @@ pub fn error_block(message: &str, on: bool) -> String {
     out
 }
 
+/// An error split the way [`error_block`] shows it, without labels or
+/// colour: what happened (one line), and the next step if it names one.
+pub fn split(message: &str) -> (String, Option<String>) {
+    let block = error_block(message, false);
+    let (fact, hint) = match block.split_once("\n hint: ") { Some((fact, hint)) => (fact, Some(hint.to_owned())), None => (block.as_str(), None) };
+    let fact = fact.strip_prefix("error: ").unwrap_or(fact).replace("\n       ", " ");
+    (fact, hint)
+}
+
 /// Rows of `label  value`, each row indented, labels padded to one column.
 pub fn table(rows: &[(&str, String)], indent: usize) -> String { table_at(rows, indent, 0) }
 
@@ -183,7 +192,7 @@ pub fn wrap(text: &str, width: usize, indent: &str) -> String {
     out
 }
 
-/// One help page: a summary, usage lines, an options table, examples and notes.
+/// One help page: a one-line summary, examples, usage lines, an options table and notes.
 pub struct Page<'a> {
     pub summary: &'a str,
     pub usage: &'a [&'a str],
@@ -200,6 +209,12 @@ impl Page<'_> {
     pub fn render(&self, on: bool) -> String {
         let heading = |name: &str| style(Token::Heading, name, on);
         let mut out = format!("{}\n\n", wrap(self.summary, WIDTH, ""));
+        // Examples come first: most readers want a command to paste.
+        if !self.examples.is_empty() {
+            out.push_str(&format!("{}\n", heading("Examples:")));
+            for example in self.examples { out.push_str(&format!("  {example}\n")); }
+            out.push('\n');
+        }
         for (index, usage) in self.usage.iter().enumerate() {
             let label = if index == 0 { heading("Usage:") } else { "      ".into() };
             out.push_str(&format!("{label} {}\n", wrap(usage, WIDTH, "       ")));
@@ -213,10 +228,6 @@ impl Page<'_> {
                 let lead = if length > width { format!("  {flag}\n{indent}") } else { format!("  {flag}{}  ", " ".repeat(width - length)) };
                 out.push_str(&format!("{lead}{}\n", wrap(text, WIDTH, &indent)));
             }
-        }
-        if !self.examples.is_empty() {
-            out.push_str(&format!("\n{}\n", heading("Examples:")));
-            for example in self.examples { out.push_str(&format!("  {example}\n")); }
         }
         if !self.notes.is_empty() {
             out.push_str(&format!("\n{}\n", heading("Notes:")));
@@ -265,6 +276,8 @@ mod tests {
             ("A is wrong. Run b. Then c happened.", "error: A is wrong. Run b. Then c happened."),
             ("Startup failed.\nRun vade logs.", "error: Startup failed.\n hint: Run vade logs."),
         ] { assert_eq!(error_block(message, false), expected, "{message}"); }
+        assert_eq!(split("Port 1 is in use; close it and retry vade up."), ("Port 1 is in use.".into(), Some("Close it and retry vade up.".into())));
+        assert_eq!(split("Set --mtp to 0..3."), ("Set --mtp to 0..3.".into(), None));
         assert_eq!(error_block("A. Run b.", true), "\x1b[1;31merror:\x1b[0m A.\n\x1b[1;36m hint:\x1b[0m Run b.");
     }
     #[test]
@@ -276,7 +289,7 @@ mod tests {
         assert_eq!(wrap("aa bb cc", 7, "  "), "aa bb\n  cc");
         let page = Page { summary: "Do a thing.", usage: &["vade x [OPTIONS]"], options: &[("--a N", "First"), ("--bb", "Second option text")],
             examples: &["vade x --a 1"], notes: &["One note."] };
-        assert_eq!(page.render(false), "Do a thing.\n\nUsage: vade x [OPTIONS]\n\nOptions:\n  --a N  First\n  --bb   Second option text\n\nExamples:\n  vade x --a 1\n\nNotes:\n  - One note.\n");
+        assert_eq!(page.render(false), "Do a thing.\n\nExamples:\n  vade x --a 1\n\nUsage: vade x [OPTIONS]\n\nOptions:\n  --a N  First\n  --bb   Second option text\n\nNotes:\n  - One note.\n");
         let words = "word ".repeat(40);
         let long = Page { summary: &words, usage: &[&words], options: &[("--flag", &words)], examples: &[], notes: &[&words] };
         for line in long.render(false).lines() {

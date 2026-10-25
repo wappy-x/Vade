@@ -77,16 +77,17 @@ impl Exec {
         }
         command
     }
+    /// The program and arguments, shell-quoted, safe to print.
+    pub fn shell_line(&self) -> String {
+        let args = std::iter::once(&self.program).chain(self.args.iter()).map(|s| quote(s)).collect::<Vec<_>>();
+        crate::text::terminal_text(&args.join(" ")).into_owned()
+    }
     /// Print the shell-quoted command line that `--dry-run` would run.
     pub fn preview(&self) -> Result<(), String> {
         if let Some(cwd) = &self.cwd {
             crate::output::line(format_args!("# folder: {}", crate::text::terminal_text(&cwd.to_string_lossy())))?;
         }
-        let args = std::iter::once(&self.program)
-            .chain(self.args.iter())
-            .map(|s| quote(s))
-            .collect::<Vec<_>>();
-        crate::output::line(format_args!("$ {}", crate::text::terminal_text(&args.join(" "))))?;
+        crate::output::line(format_args!("$ {}", self.shell_line()))?;
         if !self.stdin.is_empty() {
             crate::output::line(format_args!("# private stdin; environment values and ownership secrets are hidden"))?;
             if let Ok(fields) = crate::text::parse(&String::from_utf8_lossy(&self.stdin)) {

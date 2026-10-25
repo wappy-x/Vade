@@ -85,9 +85,30 @@ Changes that are merged but not yet released are under Unreleased.
 - `vade up --dry-run` and `vade launch --dry-run` name the context and output
   limits they would use, and whether each one is explicit, saved or the
   default, instead of printing values such as `explicit context: None`.
+- `vade doctor` prints one row per check (`ok`, `FAIL`, `skip` or `plan`,
+  the check, what it found), the fix under each failed row, then one PASS or
+  FAIL line with the counts. A failed check no longer stops the rest, and a
+  check that an earlier failure hid is `skip`, not a guess. From a
+  controller with no engine running, the engine row is `skip` and doctor
+  exits 0 when the machine checks pass.
+- `vade config` (new) names the setup the lifecycle commands will use
+  (local, controller, legacy or none) and what it holds. An owned engine
+  whose local config is gone is still the local setup, reported as an error.
+- `--json` now works on `doctor`, `config`, `detect` and `version` as well as
+  `status`: one object with a `schema` field, the same checks and exit code as
+  without it, and failures inside the object.
+- Help pages start with examples, and `vade --help` groups the commands.
+  `vade verify` argument errors use the `error:`/`hint:` form on stderr, and
+  verify prints progress on stderr while a request is still running.
 
 ### Harness
 
+- Chat has two voices: your turns sit behind a `▌` bar on every row and the
+  answer has none. A thought is one dim row (time, tokens, seconds) that
+  Ctrl+T expands. One status strip above the `›` prompt shows the model,
+  context used of the window, tokens in and out and tokens per second as raw
+  numbers; an unknown count is left out, never shown as 0. Text wraps
+  between words.
 - Claude Code works through both gateways again. Claude Code 2.1.310 puts
   its environment notes in every request as a `system` role entry inside
   the messages, which the engine refuses with HTTP 400, so `claude -p`
@@ -188,8 +209,8 @@ Changes that are merged but not yet released are under Unreleased.
   `vade install` refuses a checkout with local changes.
 - The guides were rewritten in plainer language. Commands, numbers and links
   didn't change.
-- The read-back passes also fixed facts against the source: rule files are
-  capped at 16 KiB each, and the automatic output reservation includes the
+- Two facts were corrected against the source: rule files are capped at
+  16 KiB each, and the automatic output reservation includes the
   16,384-token cap.
 - README, [INSTALL](INSTALL.md) and the one-Spark quickstart say what chat,
   status, sampling and the bundle really do, checked against the source:
@@ -229,8 +250,8 @@ Changes that are merged but not yet released are under Unreleased.
   the network guide's RDMA GID example runs as written, the fresh-install
   guide's legacy controller examples match current output, the
   adding-a-model anchors point at the moved CLI module docs, and the
-  benchmarks page and CLI guide pick up review nits on bench
-  `ignore_eos`, `--checkpoint-hash` and the controller config.
+  benchmarks page and CLI guide are clearer about bench `ignore_eos`,
+  `--checkpoint-hash` and the controller config.
 
 ### Tools
 
@@ -239,6 +260,12 @@ Changes that are merged but not yet released are under Unreleased.
   missing receipt folder, and stops if the cards stop supporting the
   figure's headline. The assets README lists both figures and gives the
   bar colours as hex values.
+- `harness/scripts/route-a-check.sh` checks Route A on one Spark in one
+  command: toolchain, CLI build, model, `vade launch`, one chat request,
+  `vade verify` and `vade down`, each with PASS or FAIL and its seconds. It
+  runs in a new private Vade home of its own, so it never touches `~/.vade`,
+  and stops its engine also after a failed step or an interrupt. See
+  [INSTALL](INSTALL.md#check-the-whole-route-in-one-go).
 
 ### Project
 

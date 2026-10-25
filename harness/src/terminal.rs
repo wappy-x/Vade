@@ -197,10 +197,18 @@ impl Terminal {
         }
     }
     fn retain(&mut self, text: &str, styled: bool) {
-        if !self.fullscreen {
-            self.committed.push_str(&text.replace('\t', "    "));
-        }
+        self.retain_at(text, styled, false);
+    }
+    /// `exact` commits cell-exact rows (approval previews): a word moved to
+    /// the next row could read as a diff line of its own.
+    fn retain_at(&mut self, text: &str, styled: bool, exact: bool) {
         let width = self.width().saturating_sub(1).max(1);
+        if !self.fullscreen {
+            // Pre-wrapped at word boundaries: native soft wrap splits words.
+            let text = text.replace('\t', "    ");
+            let rows = if exact { render::wrap_exact(&text, width) } else { render::wrap(&text, width) };
+            self.committed.push_str(&rows.join("\n"));
+        }
         if styled {
             self.transcript.push_styled(text, width);
         } else {
@@ -239,7 +247,8 @@ impl Terminal {
     pub fn date_rule(&mut self) {
         if self.raw() {
             self.date = clock::now().1;
-            self.retain(&format!("\n── {} ──\n", self.date), true);
+            let date = render::style(&self.date, "2", self.color);
+            self.retain(&format!("\n{date}\n"), true);
         }
     }
     pub fn user_message(&mut self, text: &str) -> io::Result<()> {
@@ -360,17 +369,13 @@ impl Terminal {
         self.scroll = 0;
     }
     pub fn answer(&mut self, text: &str) -> io::Result<()> {
-        let time = if self.answer_time.is_empty() { clock::now().0 } else { self.answer_time.clone() };
         self.discard_preview();
         if self.raw() {
-            let text = render::reply(answer_text(text), &time, self.color);
+            let text = render::reply(answer_text(text), self.color);
             self.gap();
             self.retain(&format!("{text}\n"), true);
             Ok(())
         } else {
-            if self.interactive {
-                self.heading(&render::header("Answer", &time, "1", false))?;
-            }
             self.line(answer_text(text))
         }
     }
@@ -388,7 +393,7 @@ impl Terminal {
     /// A warning block in three plain parts; see `render::warning`.
     pub fn warning(&mut self, what: &str, doing: &str, next: &str) -> io::Result<()> {
         self.flush_stream()?;
-        let text = render::warning(what, doing, next, &clock::now().0, self.color);
+        let text = render::warning(what, doing, next, self.color);
         if self.raw() {
             self.gap();
             self.retain(&format!("{text}\n"), true);
@@ -483,17 +488,19 @@ impl Terminal {
             if view.row_limit {
                 return Err(io::Error::other(APPROVAL_VIEW_ERROR));
             }
+            // The inline rows show the same exact text the protected view holds.
+            self.retain_at(&text, true, true);
             Some(view)
         } else {
+            self.note(title)?;
+            if title == "Patch preview" {
+                self.diff(detail)?;
+            } else {
+                self.line(detail)?;
+            }
+            self.approval()?;
             None
         };
-        self.note(title)?;
-        if title == "Patch preview" {
-            self.diff(detail)?;
-        } else {
-            self.line(detail)?;
-        }
-        self.approval()?;
         self.approval_view = view;
         if self.approval_view.is_some() {
             self.scroll = 0;
@@ -750,7 +757,7 @@ impl Terminal {
         self.draw_frame(
             text,
             cursor,
-            if multiline { "+ " } else { "> " },
+            if multiline { "+ " } else { "› " },
             if multiline {
                 "multiline · /end sends · /cancel clears"
             } else {
@@ -766,10 +773,9 @@ impl Terminal {
         answer_text(&self.answer_preview).is_empty()
     }
 
+    /// Plain output marks only your turns (the bar); the answer needs no
+    /// heading, so this is a no-op kept for the stream call sites.
     pub fn answer_heading(&mut self) -> io::Result<()> {
-        if self.interactive && !self.raw() {
-            self.heading(&render::header("Answer", &clock::now().0, "1", false))?;
-        }
         Ok(())
     }
     pub fn stream_text(&mut self, text: &str) -> io::Result<()> {
@@ -829,7 +835,7 @@ impl Terminal {
                 String::new()
             }
         );
-        self.draw_frame(text, cursor, "> ", &status, "", panel, "")
+        self.draw_frame(text, cursor, "› ", &status, "", panel, "")
     }
     /// `status` fills the footer row; `transient` (spinner, state, clock) is
     /// drawn where the answer will appear while no answer text is visible.
@@ -842,7 +848,7 @@ impl Terminal {
         panel: &str,
         popup: &str,
     ) -> io::Result<()> {
-        self.draw_frame(text, cursor, "> ", status, transient, panel, popup)
+        self.draw_frame(text, cursor, "› ", status, transient, panel, popup)
     }
 }
 

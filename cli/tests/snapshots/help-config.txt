@@ -1,0 +1,20 @@
+$ vade config --help
+Show which setup is selected and what it holds.
+
+Examples:
+  vade config
+  vade config --json
+  VADE_CONFIG=cluster.conf vade config
+
+Usage: vade config [--json]
+
+Options:
+  --json  Print one vade.config.v1 object
+
+Notes:
+  - The setup is local (saved defaults in VADE_HOME), controller (VADE_CONFIG or
+    the user config file), legacy (vade run qwen3-8b) or none yet.
+  - Reads only. To change a local value, rerun vade launch with the flag; to
+    change a controller value, edit the file it names.
+--- stderr
+--- exit 0

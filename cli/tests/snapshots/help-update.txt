@@ -1,6 +1,10 @@
 $ vade update --help
 Refresh the installed engine and chat.
 
+Examples:
+  vade update
+  vade update --dry-run
+
 Usage: vade update [--dry-run]
 
 Options:

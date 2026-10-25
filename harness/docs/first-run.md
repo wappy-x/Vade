@@ -33,9 +33,17 @@ Either way, `vade launch`:
 6. Opens chat in your current folder.
 
 Try `Say hello in one sentence.` in chat, then type `/exit` to get back to the
-shell. The engine keeps running. Run `vade launch` again later and it reuses
-the saved settings, and the engine too if it is still running. To check on the
-engine or stop it:
+shell. The engine keeps running.
+
+The chat window needs an interactive terminal. Over SSH, a normal login is
+one. For a single command, add `-t` and give the CLI's path, since that shell
+does not have your `PATH` changes: from a source install,
+`ssh -t you@spark-address 'cd "$HOME/vade" && ./cli/target/release/vade chat'`;
+from the bundle, `ssh -t you@spark-address 'cd "$HOME/vade-launch" && ./vade chat'`.
+Without a terminal, chat shows plain lines instead of its window.
+
+Run `vade launch` again later and it reuses the saved settings, and the engine
+too if it is still running. To check on the engine or stop it:
 
 ```sh
 ./vade status
@@ -44,6 +52,15 @@ engine or stop it:
 ```
 
 Drop the `./` when the CLI is on your `PATH`.
+
+To check a fresh source install in one go, run
+`sh harness/scripts/route-a-check.sh` from the checkout. It builds the CLI,
+checks which model `vade launch` will load, and starts an engine in a new
+private Vade home of its own, so it never touches `~/.vade`. It sends one chat
+request, runs `vade verify` against that engine, tries to stop it again (also
+when a step fails or you interrupt the script; a failed stop is a FAIL), and
+prints PASS or FAIL with the seconds each step took. See
+[Check the whole route in one go](../../INSTALL.md#check-the-whole-route-in-one-go).
 
 ### Where the API listens
 
@@ -80,9 +97,11 @@ chat program) and `launcher-bundle.conf`, which describes them. Because nothing
 needs building, it needs no Rust, only a working NVIDIA driver and the system
 tools listed in INSTALL.
 
-The v0.1.0 bundle and its `SHA256SUMS` are on the GitHub release page; follow
-[INSTALL's acquisition and verification instructions](../../INSTALL.md#optional-release-bundle)
-before you run it. The launcher uses the bundle that holds the `vade` you ran.
+The v0.1.0 bundle and its `SHA256SUMS` are on the GitHub release page. Follow
+[INSTALL's download and checksum steps](../../INSTALL.md#optional-release-bundle)
+before you run it. While the repository is private, the plain download links
+fail; INSTALL's private-preview note shows the `gh release download` command
+that works. The launcher uses the bundle that holds the `vade` you ran.
 `VADE_BUNDLE` can instead point to an existing bundle folder by absolute path.
 
 ### Source build
@@ -112,8 +131,10 @@ compilers or models, and does not change the driver or network.
 
 ## How the launcher finds the model
 
-Use the pinned [model acquisition and manifest check](../../INSTALL.md#step-3-get-the-model)
-to put the checkpoint in `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local`.
+Use INSTALL's [model download and manifest check](../../INSTALL.md#step-3-get-the-model)
+to put the checkpoint in `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local`. The
+engine serves it under the folder's name in lower case,
+`qwen3.8-flash-next-fp4-local`.
 The local launcher serves FP4-Local only; for older models, see
 [INSTALL's legacy models](../../INSTALL.md#legacy-models).
 
@@ -157,10 +178,10 @@ change. It never changes your model folder.
 Local defaults are saved in `~/.vade/config`, and they match the defaults a
 [controller](../../INSTALL.md#route-b-from-a-controller) uses.
 
-If you don't pick a context, the launcher starts at 32768 (or the size it
-saved last time) and steps down (16384, 8192, 4096) when the engine says it
-lacks the memory, and it tells you which size it used. If you pick one with `--context`, it uses exactly that or
-stops with an error.
+If you don't pick a context, the launcher starts at 32768 (or the size it saved
+last time). When the engine says it lacks the memory, it steps down through
+16384, 8192 and 4096, and tells you which size it used. If you pick one with
+`--context`, it uses exactly that or stops with an error.
 
 Context is the prompt plus the generated reply, counted in tokens, so a reply
 must fit in the context the prompt leaves. The engine's `/health` endpoint

@@ -111,7 +111,7 @@ impl Transcript {
             .truncate(self.rows.len().saturating_sub(self.last_line_rows));
         for index in start..self.lines.len() {
             let line = &self.lines[index];
-            let rows = render::wrap(&line.replace('\t', "    "), width);
+            let rows = render::wrap_exact(&line.replace('\t', "    "), width);
             let too_wide = line.chars().any(|c| cell_width(c) > width);
             if !self.extend_review(rows, too_wide, width) {
                 break;
@@ -208,6 +208,8 @@ impl Transcript {
             let line = &self.lines[index];
             let rows = if let Some(thought) = &line.thinking {
                 render::thinking(line, thought.tokens, thought.elapsed, (&thought.start, Some(&thought.end)), self.thinking_expanded, thought.limited, width, thought.color)
+            } else if self.protected && index >= self.review_start {
+                render::wrap_exact(&line.replace('\t', "    "), width)
             } else {
                 render::wrap(&line.replace('\t', "    "), width)
             };
@@ -282,7 +284,8 @@ mod tests {
                 .iter()
                 .all(|r| r.chars().map(cell_width).sum::<usize>() <= 3)
         );
-        assert_eq!(t.rows.iter().cloned().collect::<String>(), "a你好    bnext");
+        // Word wrap may end a row at a space; every other character stays.
+        assert_eq!(t.rows.iter().cloned().collect::<String>().replace(' ', ""), "a你好bnext");
         t.push(&"x".repeat(1024 * 1024 + 4), 1);
         assert!(t.bytes <= 1024 * 1024 && t.rows.len() <= 16 * 1024);
         t.push("\nend", 1);

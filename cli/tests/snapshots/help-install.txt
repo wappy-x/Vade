@@ -1,6 +1,9 @@
 $ vade install --help
-Save local defaults and install the engine and chat. Model downloads stay in
-your hands.
+Save local defaults and install the engine and chat.
+
+Examples:
+  vade install
+  VADE_CONFIG=cluster.conf vade install --dry-run
 
 Usage: vade install [--dry-run]
 
@@ -8,6 +11,7 @@ Options:
   --dry-run  Show what would happen; change nothing
 
 Notes:
+  - Model downloads stay in your hands.
   - For a fresh local installation or saved owner defaults without VADE_CONFIG:
     detect existing weights, save defaults once in ~/.vade/config, and stage a
     local engine and chat program. No hand editing is needed.

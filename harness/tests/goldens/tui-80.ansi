@@ -1,7 +1,9 @@
 === answer + status (80 columns) ===
 The change is [1mready[0m. Run [36mcargo test[0m to check it.
 
-[2mfirst token 1.5s · 23 tok/s · ctx 4.4k/32k · 96% cached[0m
+[2mfirst token 1.5s · 23 tok/s · ctx 4.4k/32k · cached 4k/4.2k[0m
+
+
 
 
 
@@ -20,13 +22,13 @@ The change is [1mready[0m. Run [36mcargo test[0m to check it.
 
 
 [2mqwen3-8b · harness · ask · 4.4k/32k ctx · session-1791581595875-6512-0[0m
-[2m┌ Enter sends · Shift+Enter / Option+Enter / Ctrl+J newline ──────────────────┐[0m
-│[1;36m> [0m                                                                           │
-[2m└─────────────────────────────────────────────────────────────────────────────┘[0m
+[1;36m› [0m[2mEnter sends · Shift+Enter or Ctrl+J newline · / commands[0m
 === slash menu (80 columns) ===
 Vade
 
 How can I help?
+
+
 
 
 
@@ -45,13 +47,13 @@ How can I help?
 │[1;36m  /resume[0m            Resume a saved session.                                 │[0m
 │[1;36m  /retry[0m             Regenerate the last answer.                             │[0m
 [2m└ ↑↓ · Enter run · Tab complete · Esc close  2/9 ─────────────────────────────┘[0m[0m
-[2m┌ Enter sends · Shift+Enter / Option+Enter / Ctrl+J newline ──────────────────┐[0m
-│[1;36m> [0m/                                                                          │
-[2m└─────────────────────────────────────────────────────────────────────────────┘[0m
+[1;36m› [0m/
 === slash menu scrolled (80 columns) ===
 Vade
 
 How can I help?
+
+
 
 
 
@@ -70,9 +72,7 @@ How can I help?
 │[1;36m  /retry[0m             Regenerate the last answer.                             │[0m
 │[7m› /quit              Exit the chat.                                          [0m│[0m
 [2m└ ↑↓ · Enter run · Tab complete · Esc close  9/9 ─────────────────────────────┘[0m[0m
-[2m┌ Enter sends · Shift+Enter / Option+Enter / Ctrl+J newline ──────────────────┐[0m
-│[1;36m> [0m                                                                           │
-[2m└─────────────────────────────────────────────────────────────────────────────┘[0m
+[1;36m› [0m[2mEnter sends · Shift+Enter or Ctrl+J newline · / commands[0m
 === markdown (80 columns) ===
 [1;4mA cleaner terminal[0m
 
@@ -88,16 +88,16 @@ How can I help?
 [2m}[0m
 [2m```[0m
 
-[2mfirst token 1.5s · 23 tok/s · ctx 4.4k/32k · 96% cached[0m
+[2mfirst token 1.5s · 23 tok/s · ctx 4.4k/32k · cached 4k/4.2k[0m
 
 
 
 
 
 
-[2m┌ Enter sends · Shift+Enter / Option+Enter / Ctrl+J newline ──────────────────┐[0m
-│[1;36m> [0m                                                                           │
-[2m└─────────────────────────────────────────────────────────────────────────────┘[0m
+
+
+[1;36m› [0m[2mEnter sends · Shift+Enter or Ctrl+J newline · / commands[0m
 === tool approval (80 columns) ===
 Read src/main.rs
 Run: cargo test
@@ -120,9 +120,9 @@ Run: cargo test
 
 
 
-[2m┌ Enter sends · Shift+Enter / Option+Enter / Ctrl+J newline ──────────────────┐[0m
-│[1;36m> [0m                                                                           │
-[2m└─────────────────────────────────────────────────────────────────────────────┘[0m
+
+
+[1;36m› [0m[2mEnter sends · Shift+Enter or Ctrl+J newline · / commands[0m
 === wrapped input (80 columns) ===
 Vade
 
@@ -143,8 +143,8 @@ How can I help?
 
 
 
-[2m┌ Enter sends · Shift+Enter / Option+Enter / Ctrl+J newline ──────────────────┐[0m
-│[1;36m> [0mExplain the changes to the terminal and keep this draft intact during resiz│
-│[1;36m  [0me. Include a short summary, the tests you ran, and any remaining issues. 🦀│
-│[1;36m  [0mThen show the next step.                                                   │
-[2m└─────────────────────────────────────────────────────────────────────────────┘[0m
+
+
+[1;36m› [0mExplain the changes to the terminal and keep this draft intact during resize.
+[1;36m  [0m Include a short summary, the tests you ran, and any remaining issues. 🦀
+[1;36m  [0mThen show the next step.

@@ -1,6 +1,9 @@
 $ vade chat --help
-Open the Vade agent on the resident engine. Start the engine once with vade
-launch or vade up.
+Chat with the running engine.
+
+Examples:
+  vade chat
+  VADE_CONFIG=cluster.conf vade chat
 
 Usage: vade chat [--api-key-file PATH] [--dry-run]
 
@@ -9,6 +12,8 @@ Options:
   --dry-run            Show what would happen; change nothing
 
 Notes:
+  - Opens the Vade agent on the resident engine. Start the engine once with vade
+    launch or vade up.
   - Local contexts below 8192 tokens use direct text chat. Local Linux agent
     mode disables automatic workspace checks with a notice.
   - Typing during a reply interrupts it and keeps its partial answer in context.

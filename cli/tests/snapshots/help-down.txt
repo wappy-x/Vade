@@ -1,6 +1,10 @@
 $ vade down --help
 Stop the engine and tunnel started by vade.
 
+Examples:
+  vade down
+  vade down --dry-run
+
 Usage: vade down [--dry-run]
 
 Options:

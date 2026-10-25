@@ -18,7 +18,7 @@ default; explicit `SEQPAR_RDMA=0` selects TCP. Follow [network setup](network-se
 for administrator preparation. Vade does not change that configuration.
 
 <a id="4-put-the-official-weights-on-both-sparks"></a>
-## 4. Put the official weights on both Sparks
+## Put the official weights on both Sparks
 
 An earlier test install recorded a verified copy of the weights and an
 independent check of the official hashes. Its out-of-date receipt has been
@@ -45,8 +45,9 @@ sh ops/fetch-model.sh Qwen/Qwen3.8-Flash-Next-FP8 \
 The helper needs python3 with venv and pip, plus sha256sum, find, sort and download
 access ([ops/fetch-model.sh:5](../ops/fetch-model.sh#L5)). Continue only after
 its strict verification passes, then verify every destination copy. Neither
-`vade install` nor `vade up` downloads these weights. Allow disk space for the
-complete snapshot, download state and builds; no measured minimum is claimed.
+`vade install` nor `vade up` downloads these weights. Leave disk space for the
+complete snapshot, the download state and the builds; we have not measured a
+minimum.
 
 ## Install, start and stop
 
@@ -77,10 +78,15 @@ The legacy CLI defaults ([cli/src/cli.rs:329](../cli/src/cli.rs#L329), [line 100
 tokenizing the prompt. Use `--mtp 0` for plain decoding. These are FP8 settings;
 they do not describe the FP4-Local launcher or a direct native server launch.
 
-That removed receipt covered only its own source revision and a hand-started
-two-Spark smoke test, on Sparks whose OS and network were already set up. It
-does not qualify the current launcher steps on a blank machine. To qualify a
-deployment, follow the [benchmark methods](benchmarks.md) and keep the real
-responses and token IDs. [Fresh install](fresh-install.md) keeps the longer
-legacy checklist; INSTALL [Two and more Sparks](../INSTALL.md#two-and-more-sparks) and [Client gateway](../INSTALL.md#client-gateway) describe
-the shared harness and gateway commands, with your FP8 model ID substituted.
+Nobody has run these steps end to end on a blank machine. The earlier test
+install, whose receipt was removed, covered only its own source revision and a
+hand-started two-Spark smoke test on Sparks whose OS and network were already
+set up. To qualify your own deployment, follow the
+[benchmark methods](benchmarks.md) and keep the real responses and token IDs.
+
+More on this route:
+
+- [Fresh install](fresh-install.md) has the longer legacy checklist.
+- INSTALL's [two and more Sparks](../INSTALL.md#two-and-more-sparks) and
+  [client gateway](../INSTALL.md#client-gateway) sections cover the shared
+  harness and gateway commands; use your FP8 model ID in them.

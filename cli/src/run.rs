@@ -87,7 +87,7 @@ pub struct Local<R> {
 impl<R: Runner> Local<R> {
     /// Run one command for this bootstrap.
     pub fn execute(&mut self, command: Command) -> Result<(), String> {
-        if self.dry {
+        if self.dry && !crate::checks::json() {
             crate::output::line(format_args!("Dry run: no commands, downloads or file changes."))?;
         }
         match command {
@@ -107,6 +107,7 @@ impl<R: Runner> Local<R> {
                 }
                 Ok(())
             }
+            Command::Doctor if crate::checks::json() => self.doctor_json(),
             Command::Doctor | Command::Chat => {
                 let record = self.record()?.ok_or("Start with vade run qwen3-8b.")?;
                 self.ready(&record)?;
@@ -634,6 +635,37 @@ impl<R: Runner> Local<R> {
             started.elapsed().as_secs_f64()
         ))?;
         Ok(())
+    }
+    /// `vade doctor --json` here: the ownership, health and harness checks as
+    /// one `vade.doctor.v1` object. A dry run validates the record and its
+    /// generation as plain `doctor --dry-run` does, then plans the rest.
+    fn doctor_json(&mut self) -> Result<(), String> {
+        let mut report = crate::checks::Report::new("legacy", self.dry);
+        let record = report.check("ownership", self.record().and_then(|record| record.ok_or_else(|| "No vade run qwen3-8b server is recorded.".into())),
+            |_| "server recorded".into(), "Start with vade run qwen3-8b, then run vade doctor.")?;
+        let Some(record) = record else {
+            report.skip("engine health", "needs the ownership check")?;
+            report.skip("harness doctor", "needs the ownership check")?;
+            return report.finish();
+        };
+        let (ready, _) = crate::output::buffered(|| self.ready(&record).and_then(|()| self.generation(&record["generation"])));
+        let generation = match ready {
+            Ok(generation) if self.dry => { report.plan("engine health", &format!("{}/health", endpoint(&record)?))?; Some(generation) }
+            ready => report.check("engine health", ready, |_| endpoint(&record).unwrap_or_default(), "Run vade logs, then vade down and vade run qwen3-8b.")?,
+        };
+        let Some(generation) = generation else {
+            report.skip("harness doctor", "needs engine health")?;
+            return report.finish();
+        };
+        if self.dry {
+            report.plan("harness doctor", "two small test turns")?;
+            return report.finish();
+        }
+        let started = Instant::now();
+        let (result, _) = crate::output::buffered(|| self.doctor(&record, &generation));
+        report.check("harness doctor", result, |()| format!("two test turns passed in {:.3} s", started.elapsed().as_secs_f64()),
+            "Run vade logs, then vade doctor without --json to see the harness output.")?;
+        report.finish()
     }
     fn status(&mut self) -> Result<(), String> {
         let Some(record) = self.record()? else {

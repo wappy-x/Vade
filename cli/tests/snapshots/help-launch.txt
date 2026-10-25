@@ -1,7 +1,10 @@
 $ vade launch --help
-Start Vade on this Spark and open chat. Finds the FP4-Local checkpoint, saves
-defaults, installs if missing, starts the engine, then opens chat. Run it again
-to attach.
+Start Vade on this Spark and open chat.
+
+Examples:
+  vade launch
+  vade launch --context 262144 --output 16384
+  vade launch --dry-run
 
 Usage: vade launch [OPTIONS]
 
@@ -14,12 +17,9 @@ Options:
   --cache-bytes 0  Disable retained prompt cache, even with an inherited opt-in
   --dry-run        Show what would happen; change nothing
 
-Examples:
-  vade launch
-  vade launch --context 262144 --output 16384
-  vade launch --dry-run
-
 Notes:
+  - Finds the FP4-Local checkpoint, saves defaults, installs if missing, starts
+    the engine, then opens chat. Run it again to attach.
   - Local defaults match vade up from a controller: context 32768, output
     min(8192, context), engine-selected MTP.
   - If the engine refuses the default or saved context for memory, launch

@@ -32,7 +32,7 @@ fn response_speed_uses_decode_intervals_and_weighted_session_average() {
     );
     assert!(contract.context.run_speed().contains("2 model responses"));
     assert!(contract.context.reply_speed(std::time::Duration::ZERO, 32000, true)
-        .contains("7 tokens written · write 17 tok/s · read ≈67 tok/s"));
+        .contains("7 tokens out · 17 tok/s · prefill ≈67 tok/s"));
     contract.reset_attempt();
     contract.completed(UsageCollector::default());
     assert!(
@@ -245,4 +245,26 @@ fn usage_retention_is_bounded_and_cumulative_counts_label_only_known_reports() {
     contract.begin_run();
     assert!(contract.context.turns.is_empty());
     assert_eq!(contract.context.reported_cached_tokens, 350);
+}
+
+#[test]
+fn strip_context_is_zero_only_for_a_known_empty_conversation() {
+    let with = |usage: Usage, invalid: bool| {
+        let mut context = Context::default();
+        context.turns.push_back(TurnUsage { usage, invalid, ..Default::default() });
+        context
+    };
+    let empty = Context::default();
+    assert_eq!(empty.strip(32768, true), ["ctx 0/32.8k"]);
+    // No response yet, but history exists (a new run, reopened history).
+    assert!(empty.strip(32768, false).is_empty());
+    // A response without usage, or with invalid usage, leaves context unknown.
+    let missing = with(Usage::default(), false);
+    assert!(missing.strip(32768, false).iter().all(|part| !part.starts_with("ctx")), "{:?}", missing.strip(32768, false));
+    let known = Usage { prompt_tokens: Some(26_300), completion_tokens: Some(40), cached_tokens: None };
+    assert!(with(known, true).strip(32768, false).is_empty());
+    // A reported zero is a fact and is shown.
+    let zero = Usage { prompt_tokens: Some(0), completion_tokens: Some(0), cached_tokens: None };
+    assert_eq!(with(zero, false).strip(32768, false), ["ctx 0/32.8k", "in 0", "out 0"]);
+    assert_eq!(with(known, false).strip(32768, false), ["ctx 26.3k/32.8k", "in 26.3k", "out 40"]);
 }

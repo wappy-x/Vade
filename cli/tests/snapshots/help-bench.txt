@@ -1,0 +1,30 @@
+$ vade bench --help
+Measure a running server from this client.
+
+Examples:
+  vade bench
+  vade bench --concurrency 1,8 --max-tokens 128
+  vade bench --self-test
+
+Usage: vade bench [OPTIONS]
+
+Options:
+  --url URL             Server to measure (default: the recorded local endpoint)
+  --concurrency LIST    Concurrent chats per cohort, such as 1,2,4,8 (default
+                        1,2,4,8,16)
+  --max-tokens N        Tokens each chat must generate (default 256)
+  --repeats N           Repeats per cohort, none discarded (default 1)
+  --draft plain|strict  Override drafting on every request (default: server)
+  --output FILE         JSON receipt (default ./vade-bench.json) and a sibling
+                        .txt table
+  --api-key-file FILE   Optional bearer credential; never stored in receipts
+  --self-test           Run against a tiny local mock server; no GPU
+  --help-all            List every option, including A/B runs and observation
+
+Notes:
+  - Wall time is measured on this client; token counts come from the server.
+    Requests are greedy with cache and thinking off and a fixed length.
+  - Prints one row per cohort: tokens per second, time to first token and the
+    bytes the server reported.
+--- stderr
+--- exit 0

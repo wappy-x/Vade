@@ -156,9 +156,8 @@ A GPU executes thousands of simple threads simultaneously to perform the same op
 The first line is the script's own check, printed to stderr. It shows
 `127.0.0.1:18990` instead of the default `127.0.0.1:18080` because the
 recorded run set `VADE_API_URL` to the Mac's end of the SSH tunnel. The
-answer comes from the same
-settings and prompt run with `claude --bare -p`, which is what the script now
-runs. Without `--bare`, Claude Code 2.1.310 failed on the same engine, with a
+answer comes from the same settings and prompt run with `claude --bare -p`,
+which is what the script now runs. Without `--bare`, Claude Code 2.1.310 failed on the same engine, with a
 clean `HOME` too:
 `API Error: 400 Unexpected role "system". Messages roles must be user or assistant`
 (the engine accepts only user and assistant roles inside Messages
@@ -256,18 +255,25 @@ Launch plan: qwen3.8-flash-next-fp4-local
 Start planned for qwen3.8-flash-next-fp4-local on 2 machines. Run the same command without --dry-run to start it.
 ```
 
-Copy [`two-sparks.conf`](two-sparks.conf), fill in your SSH destinations,
-link addresses and model paths, then run
-`VADE_CONFIG=/your/copy sh examples/two-sparks.sh --live`. That installs on
-both Sparks, starts them as one engine (the layer pipeline: a range of the
-model's layers on each), checks it with `vade verify` and stops it with
-`vade down`. The script unsets `VADE_API_URL` so `vade verify` checks the
-engine at your config's `local_port`, reads that endpoint from the
-`vade up --sparks 2 --dry-run` plan for its model-list check, and writes the
-`vade verify` receipt to a new temporary folder (it prints the path and keeps
-the file) so the checkout stays clean for the next `vade install`. A trap
-runs `vade down` even when a step fails or you press Ctrl-C. We have not run `--live` for this page. The
-two-Spark results we have published are
-on the [benchmarks page](../docs/benchmarks.md), and
-[INSTALL.md](../INSTALL.md#two-and-more-sparks) covers cabling, RDMA and
-TCP.
+To run it for real:
+
+1. Copy [`two-sparks.conf`](two-sparks.conf) and fill in your SSH
+   destinations, link addresses and model paths.
+2. Run `VADE_CONFIG=/your/copy sh examples/two-sparks.sh --live`.
+
+The live run installs on both Sparks and starts them as one engine (the layer
+pipeline: a range of the model's layers on each). It then checks the engine
+with `vade verify` and stops it with `vade down`. Along the way the script:
+
+- unsets `VADE_API_URL`, so `vade verify` checks the engine at your config's
+  `local_port`, and reads that endpoint from the `vade up --sparks 2 --dry-run`
+  plan for its model-list check;
+- writes the `vade verify` receipt to a new temporary folder and prints its
+  path, so the checkout stays clean for the next `vade install`;
+- runs `vade down` from a trap, even when a step fails or you press Ctrl-C.
+
+We have not run `--live` for this page. Our published two-Spark results are
+on the [benchmarks page](../docs/benchmarks.md).
+[Hardware and network setup](../docs/network-setup.md) covers cabling and
+addresses, and [INSTALL.md](../INSTALL.md#two-and-more-sparks) covers the
+controller config, RDMA and TCP.

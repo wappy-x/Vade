@@ -653,7 +653,7 @@ fn raw_tui_live_children_controls_context_and_resize_while_parent_is_stalled() {
     assert!(frame.contains("Children (3)"));
     ui.resize(9, 42);
     ui.send(b"/children\r");
-    ui.until("parent owns result integration", Duration::from_secs(1));
+    ui.until("parent owns result", Duration::from_secs(1));
     ui.resize(24, 110);
     ui.send(b"/context\r");
     let context = ui.until(
