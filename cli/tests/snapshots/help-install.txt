@@ -1,0 +1,27 @@
+$ vade install --help
+Save local defaults and install the engine and chat. Model downloads stay in
+your hands.
+
+Usage: vade install [--dry-run]
+
+Options:
+  --dry-run  Show what would happen; change nothing
+
+Notes:
+  - For a fresh local installation or saved owner defaults without VADE_CONFIG:
+    detect existing weights, save defaults once in ~/.vade/config, and stage a
+    local engine and chat program. No hand editing is needed.
+  - With VADE_CONFIG, or a default controller config before local setup: check
+    prerequisites, copy an exact-source SHA256-verified prebuilt_dir bundle or
+    build source, then run doctor. Model inventory checks overlap copy/build and
+    are cached.
+  - A generated run qwen3-8b installation uses run again; install requires an
+    explicit VADE_CONFIG to select a controller.
+  - One Spark needs no fabric or RDMA; linked Sparks use RDMA by default. Set
+    SEQPAR_RDMA=0 for TCP using the configured fabric addresses on any reachable
+    interface; QSFP and RDMA memlock are unnecessary in TCP mode.
+  - Explicit VADE_CONFIG selects the controller; otherwise generated local setup
+    wins. Keep the same VADE_CONFIG and VADE_HOME from start through chat,
+    status, logs and down.
+--- stderr
+--- exit 0

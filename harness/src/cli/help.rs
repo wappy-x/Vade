@@ -1,4 +1,4 @@
-pub(crate) const HELP: &str = "Credentials: --api-key-file PATH (or VADE_API_KEY_FILE); sends Bearer to upstream.\nVade Harness — first-party Rust coding harness
+pub(crate) const HELP: &str = "Vade Harness — first-party Rust coding harness
 
 Usage:
   vade-harness [demo] [OPTIONS]
@@ -137,9 +137,10 @@ for those modes. Codex owns its delegated policy and persistence. Inference and 
 state belong to the upstream.
 
 /help in the conversation shows common commands; /help all lists everything.
+Credentials: --api-key-file PATH (or VADE_API_KEY_FILE); sends Bearer to upstream.
 ";
 pub(crate) const AGENT_HELP: &str =
-    "Credentials: --api-key-file PATH (or VADE_API_KEY_FILE).\nVade native coding agent
+    "Vade native coding agent
 
 Usage: vade-harness agent --endpoint URL --model NAME --workspace PATH [OPTIONS]
 
@@ -196,10 +197,11 @@ remaining context minus 256 safety tokens, whichever is smaller. Truncated tool 
 Native JSON config: \"auto_continue\": false also disables continuation.
 A reply with no visible text and no tool call gets up to 2 reminders, then the
 run stops with a notice. A final answer while the check fails gets 2 reminders.
+Credentials: --api-key-file PATH (or VADE_API_KEY_FILE).
 ";
 
 pub(crate) const DIRECT_HELP: &str =
-    "Credentials: --api-key-file PATH (or VADE_API_KEY_FILE).\nVade direct text chat
+    "Vade direct text chat
 
 Usage: vade-harness direct --endpoint URL --model NAME [OPTIONS]
 
@@ -229,10 +231,11 @@ Cut-off answers continue automatically, up to 32 times within 61 model turns and
 20 minutes of active work per request. History limits can stop them sooner.
 Default output reservation uses at most 16,384 tokens, the advertised limit, or
 remaining context minus 256 safety tokens, whichever is smaller. An unfit continuation stops plainly.
+Credentials: --api-key-file PATH (or VADE_API_KEY_FILE).
 ";
 
 pub(crate) const GATEWAY_HELP: &str =
-    "Credentials: --api-key-file PATH (or VADE_API_KEY_FILE).\nVade HTTP gateway
+    "Vade HTTP gateway
 
 Usage: vade-harness gateway --upstream URL [--upstream URL ...] [OPTIONS]
 
@@ -265,6 +268,7 @@ Browser guard: Host must be 127.0.0.1, localhost or [::1] (with the listener por
 or an --allow-host value, else 421. Any request with an Origin header gets 403
 unless --allow-origin names it; allowed origins get CORS headers. With --token,
 a missing or wrong Authorization: Bearer gets 401 and the header stays local.
+Credentials: --api-key-file PATH (or VADE_API_KEY_FILE).
 ";
 
 use super::{args::Mode, commands::COMMANDS};

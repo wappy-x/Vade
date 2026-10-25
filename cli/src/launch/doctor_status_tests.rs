@@ -67,7 +67,7 @@ fn status_dry_run_and_json_read_only_the_saved_records() {
     let mut launch = f.launcher();
     let (result, printed) = captured(|| launch.execute(Command::Status, true));
     result.unwrap();
-    assert_eq!(printed, format!("Vade is stopped. Start: {}\n", text::command("launch")));
+    assert_eq!(printed, format!("○ Vade is stopped.\n  Start: {}\n", text::command("launch")));
     let stopped = snapshot(&mut launch, false).unwrap();
     assert_eq!((stopped["phase"].as_str(), &stopped["ready"]), (Some("stopped"), &Value::Bool(false)));
     assert!(stopped["errors"].as_array().unwrap().is_empty());
@@ -79,7 +79,7 @@ fn status_dry_run_and_json_read_only_the_saved_records() {
     result.unwrap();
     let config = Config::load(&f.root).unwrap().unwrap();
     assert_eq!(printed, format!(
-        "Vade recorded phase: running at {}. Readiness not checked (dry run). Local config: {}\n",
+        "○ Vade is recorded as running at {} (dry run; readiness not checked).\n  Local config: {}\n",
         config.endpoint(), f.root.join("config").display()
     ));
     let dry = snapshot(&mut launch, true).unwrap();
@@ -104,7 +104,7 @@ fn down_status_logs_and_update_name_the_next_step_in_each_state() {
     let mut launch = f.launcher();
     let run = |launch: &mut Launcher<MockRunner, MockDetector>, command| captured(|| launch.execute(command, false));
     assert_eq!(run(&mut launch, Command::Down), (Ok(()), "Vade is already stopped.\n".into()));
-    assert_eq!(run(&mut launch, Command::Status), (Ok(()), format!("Vade is stopped. Start: {}\n", text::command("launch"))));
+    assert_eq!(run(&mut launch, Command::Status), (Ok(()), format!("○ Vade is stopped.\n  Start: {}\n", text::command("launch"))));
     assert_eq!(run(&mut launch, Command::Logs), (Ok(()), "No engine log yet.\n".into()));
     assert_eq!(run(&mut launch, Command::Update).0.unwrap_err(), "No local setup yet; run vade launch first.");
     let (result, printed) = run(&mut launch, Command::Detect);
@@ -115,7 +115,11 @@ fn down_status_logs_and_update_name_the_next_step_in_each_state() {
     f.installed();
     run(&mut launch, Command::Launch(Default::default())).0.unwrap();
     let config = Config::load(&f.root).unwrap().unwrap();
-    assert_eq!(run(&mut launch, Command::Status), (Ok(()), format!("Vade is ready at {}. Chat: {}\n", config.endpoint(), text::command("chat"))));
+    let artifacts = install::load(&f.root).unwrap().unwrap();
+    let short = |key: &str| artifacts[key].chars().take(12).collect::<String>();
+    assert_eq!(run(&mut launch, Command::Status), (Ok(()), format!(
+        "● Vade is ready at {}.\n  Model     checkpoint\n  Context   8192 tokens, output 8192\n  Drafting  engine default\n  Build     {} (generation {})\n  Config    {}\n\n  Chat: {}   Stop: {}\n",
+        config.endpoint(), short("engine_sha256"), short("generation"), f.root.join("config").display(), text::command("chat"), text::command("down"))));
     assert_eq!(run(&mut launch, Command::Logs), (Ok(()), "fixture engine diagnostic".into()));
     assert_eq!(run(&mut launch, Command::Update).0.unwrap_err(), "The local engine is running; run vade down, then vade update and vade up.");
     run(&mut launch, Command::Down).0.unwrap();
@@ -127,4 +131,16 @@ fn down_status_logs_and_update_name_the_next_step_in_each_state() {
     fs::remove_file(&saved).unwrap();
     fs::create_dir(&saved).unwrap();
     assert_eq!(run(&mut launch, Command::Logs).0.unwrap_err(), "Cannot read the saved engine log; it must be a regular readable file.");
+}
+
+#[test]
+fn status_config_row_escapes_terminal_controls_in_the_home_path() {
+    let f = Fixture::new();
+    f.configured();
+    let config = Config::load(&f.root).unwrap().unwrap();
+    let mut launch = f.launcher();
+    launch.root = f.base.join("vade\x1b]0;title\x07\rhome");
+    let table = launch.status_table(&config, &Fields::new()).unwrap();
+    assert!(!table.contains(['\x1b', '\x07', '\r']), "{table:?}");
+    assert!(table.contains("vade\\u{1b}]0;title\\u{7}\\rhome/config\n"), "{table:?}");
 }

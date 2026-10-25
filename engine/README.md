@@ -1,63 +1,78 @@
 # Vade engine
 
 The engine loads supported open-weight models on NVIDIA DGX Spark and serves
-streaming requests. Its host code and GPU kernels are written in Rust. GPU
-kernels compile to PTX; the host uses the CUDA driver API without requiring a
-CUDA toolkit or NVIDIA math libraries.
+streaming requests. Its host code and GPU kernels are written in Rust. The
+kernels compile to [PTX](../docs/GLOSSARY.md#pr), NVIDIA's portable GPU code
+format, and the host talks to the GPU through the
+[CUDA driver API](../docs/GLOSSARY.md#ac), the layer every NVIDIA system
+already has. You don't need a CUDA toolkit or NVIDIA's math libraries.
 
 ## Quick start
 
 Start with the repository [INSTALL.md](../INSTALL.md). It covers the pinned
-compilers, verified checkpoint files and the Flash-Next FP4-Local launcher.
-For a single Ubuntu GB10, use the [Qwen3-8B quickstart](../docs/quickstart-one-spark.md)
-or [Qwen3.6-35B-A3B-FP8 guide](../docs/serve-35b-one-spark.md).
+compilers, the model download and its checks, and the launcher for the default
+model, `nvidia/Qwen3.8-Flash-Next-FP4-Local` (the
+[FP4-Local](../docs/GLOSSARY.md#dg) profile).
 
-For direct launches, see the [Flash-Next FP4-Local server](docs/next-http.md).
-The [legacy FP8 profile](../docs/install-legacy-fp8.md) uses separate checkpoint,
-topology and drafting settings.
+For one Ubuntu GB10 there are two model-specific guides: the
+[Qwen3-8B quickstart](../docs/quickstart-one-spark.md) and the
+[Qwen3.6-35B-A3B-FP8 guide](../docs/serve-35b-one-spark.md).
+
+To start the FP4-Local server by hand instead of through `vade`, see
+[next-http](docs/next-http.md). The [legacy FP8 profile](../docs/install-legacy-fp8.md)
+has its own checkpoint, topology and drafting settings.
 
 ## How it compares
 
-[Benchmark history](docs/benchmarks.md) preserves measured builds, workload
-settings and qualification limits. [Repository benchmarks](../docs/benchmarks.md)
-link the Flash-Next summaries to [committed receipts](../bench/receipts/README.md).
-These are historical results, not current-build performance promises.
+[Benchmark history](docs/benchmarks.md) keeps each measured build with its
+workload settings and the limits of what it proves. The
+[repository benchmarks](../docs/benchmarks.md) link the Flash-Next summaries to
+the [committed receipts](../bench/receipts/README.md). These are past results
+for those builds, not a promise about the build you run.
 
 ## Determinism
 
-The engine uses fixed reduction orders to make execution reproducible across
-the supported paths. Tests compare batching, caching, drafting and chunking
-where those combinations are implemented. Some optional arithmetic modes
-have different numerical behavior; consult the relevant model and kernel
-reference before changing switches.
+The engine adds numbers up in a fixed order, so the same request gives the same
+result on the supported paths. Tests check that batching, caching, drafting and
+chunking leave results unchanged wherever those combinations are implemented.
+Some optional arithmetic modes behave differently; read the reference for that
+model and kernel before you change a switch.
 
-Repeatability within Vade and agreement with an upstream implementation are
-separate checks. Results apply to the exact model, build, settings and request
-set recorded in [validation](docs/validation.md). Portable host oracles check
-layouts and operation order; native GPU tests are needed to establish device
-results and performance.
+Two questions are checked separately: does Vade repeat itself, and does it
+agree with an upstream implementation? Each result holds only for the model,
+build, settings and requests recorded in [validation](docs/validation.md).
+Tests that run on an ordinary computer check memory layouts and the order of
+operations. Only tests on the GPU itself can establish device results and
+speed.
 
 ## Models
 
-Supported architectures and checkpoint requirements are described in
-[Models](docs/models.md). The [model registry](crates/model/README.md) describes
-how metadata binds to execution. Download the complete pinned checkpoint and
-verify its supporting files as well as its weights.
+[Models](docs/models.md) lists the supported architectures and what each
+checkpoint must contain. The [model registry](crates/model/README.md) explains
+how a model's metadata is tied to the code that runs it. Download the whole
+pinned [checkpoint](../docs/GLOSSARY.md#ac) and check every file, not only the
+weights: [Check the files](../INSTALL.md#check-the-files) gives the command.
 
 ## Multiple Sparks
 
-The engine contains tensor-parallel and pipeline execution paths. Their
-supported models, world sizes and transports differ. Use
-[Multiple Sparks](docs/multi-spark.md), [Flash-Next FP8](docs/flash-server.md)
-or [native FP4-Local](docs/next-http.md) for the intended deployment.
+The engine has two ways to split a model across Sparks:
+
+- the [layer pipeline](../docs/GLOSSARY.md#ho), FP4-Local's default on two
+  Sparks: each Spark runs its own block of layers and passes the result on;
+- [tensor parallelism](../docs/GLOSSARY.md#sz), which splits each layer's
+  tensors so several GPUs work on a token together.
+
+Which models, Spark counts and network transports each path supports differs.
+Pick the guide for your setup: [Multiple Sparks](docs/multi-spark.md),
+[Flash-Next FP8](docs/flash-server.md) or [native FP4-Local](docs/next-http.md).
 
 ## Documentation
 
 - [Documentation index](docs/README.md)
 - [Architecture](docs/architecture.md) and [design principles](docs/concepts.md)
 - [Server and API](docs/server.md)
-- [Speculative decoding](docs/speculative-decoding.md)
-- [Build and host checks](../.github/workflows/ci.yml)
+- [Speculative decoding](docs/speculative-decoding.md) (drafting)
+- [CI workflow](../.github/workflows/ci.yml): the build and host checks
 
 ## Credits and license
 

@@ -1,0 +1,5 @@
+$ vade status
+--- stderr
+error: Config is missing: "/nonexistent-vade-snapshot/config".
+ hint: Copy cli/examples/fp4-local.conf for FP4-Local (or cli/examples/vade.conf for legacy FP8), edit the placeholders, and set VADE_CONFIG. See INSTALL.md.
+--- exit 1

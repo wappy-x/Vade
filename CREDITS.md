@@ -1,6 +1,6 @@
 # Credits
 
-**Vade's code is its own, written from scratch in Rust, and many of its ideas came from other people's work.** This page introduces the engine and harness credit lists, and keeps the harness notes in full.
+**Vade's code is its own, written from scratch in Rust, and many of its ideas came from other people's work.** This page introduces the engine and harness credit lists, and summarizes the harness notes.
 
 No source code was copied, translated or adapted from any project credited here. A credit means Vade learned from that work, not that their code runs in Vade.
 
@@ -11,7 +11,7 @@ No source code was copied, translated or adapted from any project credited here.
 | Part | Credit list | What it covers |
 | --- | --- | --- |
 | **Vade engine** | [Engine credits](engine/docs/CREDITS.md) | Model makers, reference code, papers, the DGX Spark community, NVIDIA, compilers and standards |
-| **Vade harness** | [Harness notes](harness/CREDITS-NOTES.md), kept [below](#harness) | The coding-agent clients and terminal designs the harness studied |
+| **Vade harness** | [Harness notes](harness/CREDITS-NOTES.md), summarized [below](#harness) | The coding-agent clients and terminal designs the harness studied |
 | **Third-party files** | [NOTICE](NOTICE) and [engine/NOTICE](engine/NOTICE) | The few files Vade ships from others, with their licenses |
 
 <br>
@@ -34,11 +34,11 @@ No source code was copied, translated or adapted from any project credited here.
 
 ## Harness
 
-**The harness notes, kept here in full.** The original stays at [harness/CREDITS-NOTES.md](harness/CREDITS-NOTES.md).
+**What the harness learned from, and from whom.** The harness's own notes are in [harness/CREDITS-NOTES.md](harness/CREDITS-NOTES.md).
 
-**Client setup.** Dedicated client setup uses the pinned Codex, Hermes, OpenCode and Pi command-line help and local configuration documentation to determine their configuration and instruction contracts. The Hermes context exception and file-write boundary are documented in its pinned initialization and file-safety modules. The templates, model catalog prompt and immediate-tool instruction are original Rust output; no client implementation or prompt was copied. Source links and pins are listed in [the passthrough matrix](harness/docs/passthrough-matrix.md#sources-and-credit).
+**Client setup.** For Codex, Hermes, OpenCode and Pi, client setup follows each client's own pinned command-line help and configuration docs. Hermes's context exception and file-write limits come from its pinned initialization and file-safety modules. The templates, the model catalog prompt and the instruction to call a tool right away instead of promising to are Vade's own Rust output; no client code or prompt was copied. Source links and pins are listed in [the passthrough matrix](harness/docs/passthrough-matrix.md#sources-and-credit).
 
-**Terminal presentation.** Native terminal presentation follows the clarity goals in the operator's Claude Code / Codex CLI comparison: a quiet answer footer, a highlighted command picker, and readable Markdown. The renderer, cell layout and PTY regressions are original std-only Rust; no competitor source, assets or dependencies were used.
+**Terminal presentation.** Native terminal presentation follows the clarity goals we set after comparing Claude Code and Codex CLI: a quiet answer footer, a highlighted command picker, and readable Markdown. The renderer, cell layout and PTY regression tests are original std-only Rust; no competitor source, assets or dependencies were used.
 
 **Design references.** Hermes Agent, the Pi coding agent and Codex CLI informed the harness's interface choices, as conceptual references, not dependencies: see [Design references](harness/README.md#design-references) in the harness README.
 

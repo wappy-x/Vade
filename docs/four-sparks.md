@@ -4,11 +4,14 @@ This page shows how to turn two existing pairs of Sparks into one group of
 four for the official Flash-Next FP8 checkpoint.
 
 **This build has not yet passed its qualification checks running natively on
-four Sparks.** Our two-Spark measurements do not prove four-Spark correctness,
-memory capacity or speed. Keep the official precision, the 131,072-token
-context default and the 8,192-token output cap. If you choose a smaller context
-on purpose, that is a separate configuration; it is not a way to qualify the
-default.
+four Sparks.** We have measured FP8 on four of our Sparks: the 2026-10-25
+[benchmark cards](benchmarks.md#fp8) at `6cb46bf`, whose drafting ON and OFF
+cards returned identical token IDs in 62 of 62 responses. Those cards measure
+speed; they are not the four-Spark qualification. Keep the official precision and the legacy FP8
+defaults: a 131,072-token context and an output limit of `min(65536, context)`
+(see [Legacy FP8 limits](../cli/README.md#legacy-fp8-limits-and-drafting)). If
+you choose a smaller context on purpose, that is a separate configuration; it
+is not a way to qualify the default.
 
 You will also need:
 
@@ -116,8 +119,10 @@ On each machine, create a **new** ignored configuration directory with
 For a path, use the `pair` template on A and D (two rows each) and the `ring`
 template on B and C (four rows each); for a physical ring, use `ring` on all
 four. The template names only choose how many local rail rows you get; they do
-not choose Vade's transport topology. Fill in the seven fields in `links.tsv`
-from the new cable map. The matching row on the peer may have a different row
+not choose Vade's transport topology. Fill in the seven fields of each row in
+`links.tsv` from the new cable map: Ethernet device, RDMA device, local address
+with its `/24`, peer address, peer alias, RoCE-v2 GID and bandwidth-test TCP
+port. The matching row on the peer may have a different row
 number, but its endpoints, rail and bandwidth test port must agree.
 
 **The network step of `apply.sh` only sets up unused interfaces. It
@@ -180,11 +185,13 @@ same model path and the same staged PTX path, each written out in full
 (expanded and absolute), and their artifact hashes must match. The
 [CLI setup](../cli/README.md#multi-spark-source-setup) shows how.
 
-`vade up --sparks 4` takes the first four configured machines, in order. If the
+`vade up --fp8-legacy --sparks 4` takes the first four configured machines, in
+order; without `--fp8-legacy`, `vade up` refuses an FP8 config. If the
 configuration lists other machines too, prefer an explicit ordered `--hosts`
-list. Preview with `--dry-run`, then launch with the same settings during the
-reserved hardware window. Use MTP 0 (multi-token prediction off) for the first
-smoke request.
+list. Preview with `--dry-run`, then launch with the same settings while no one
+else is using the four Sparks. For the first smoke request, launch with
+`--mtp 0`, which turns off MTP (multi-token prediction, the model drafting
+tokens ahead).
 
 For four Sparks the launcher picks the **logical path** topology, even when
 the physical cables form a ring; Vade then leaves DA unused. Adding DA fabric
@@ -193,8 +200,11 @@ as a ring measurement. A native ring gate
 (a qualification run) must explicitly select `TP_TOPOLOGY=ring`, use all four
 neighbor addresses, and get its own golden set (saved reference answers).
 
-The native `vade test determinism` command takes two address arguments:
-**LISTEN and NEXT on each rank**. Fill in this symbolic table privately.
+For four ranks, the native `vade test determinism` command takes each rank's
+own **LISTEN** and **NEXT** addresses, between the fixtures and the rank number:
+`-- MODEL FIXTURES LISTEN NEXT RANK --world 4` (see the
+[world-four procedure](../cli/docs/test.md#world-four-goldens)). Fill in this
+symbolic table privately.
 `B-on-AB` means B's own primary address on the retained AB cable, and `PORT`
 is one free port for the native gate run, the same on every rank:
 
@@ -219,14 +229,11 @@ The current path transport discovers the second rail on each neighbor link,
 and large transfers can use both rails when discovery succeeds. The existing
 closed-ring transport uses one primary rail per neighbor. Check both rails at
 the OS level either way, and record which ones the transport actually uses.
-This preparation work does not include the closed-ring RDMA optimization,
-which is on hold for now.
 
 ## Qualify, then restore or hand over
 
-Follow the [world-four golden procedure](../cli/docs/test.md) ("world four"
-means four ranks; goldens are saved reference answers) and the external
-four-Spark qualification plan assigned to you. First, on the same pair,
+Follow the [world-four golden procedure](../cli/docs/test.md#world-four-goldens) ("world four"
+means four ranks; goldens are saved reference answers). First, on the same pair,
 confirm that the world-two (two-rank) bytes still match the base. Then capture
 world-four goldens twice, and compare only runs with matching world, topology
 and rank-order settings. Different Spark counts may produce different bytes,
@@ -245,6 +252,5 @@ configuration and check that all four GPUs are empty. Then restore the pairs:
 4. Check both rails of **both cables in each pair** before relaunching the
    original two-rank configurations.
 
-Only after the operator has accepted either the verified four-Spark handover
-or the restored pairs, release the reservations and free the machines for
-other work.
+Once the operator has accepted either the verified four-Spark setup or the
+restored pairs, the machines are free for other work.

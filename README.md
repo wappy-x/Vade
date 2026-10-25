@@ -1,14 +1,20 @@
 # Vade
 
-Vade v0.1.0 is available at <https://github.com/wappy-x/vade>.
+Vade runs a large language model on your own NVIDIA DGX Spark. You get a
+coding agent in your terminal, a plain chat and an OpenAI-compatible API.
 
-Vade runs a large language model on your own NVIDIA DGX Spark. It gives you
-three things: a coding agent in your terminal, a plain chat, and an
-OpenAI-compatible API. Today it serves one model,
-`nvidia/Qwen3.8-Flash-Next-FP4-Local` (text only), on one Spark or on linked
-Sparks. Vade is written in Rust using only the standard library. It is built so
-that the same request on the same setup returns the same token IDs on every
-run, and `vade verify` lets you check that on your own machine.
+- **One model today:** `nvidia/Qwen3.8-Flash-Next-FP4-Local`, text only.
+- **One Spark or several:** it runs on one Spark by default, and you can link
+  more.
+- **Exact by design:** the same request on the same setup returns the same
+  token IDs on every run, and `vade verify` checks part of that on your own
+  engine.
+- **Plain Rust:** the Rust code, GPU kernels included, uses no third-party
+  crates. The model download helper uses Python.
+
+Latest release: [v0.1.0](https://github.com/wappy-x/vade/releases/tag/v0.1.0),
+2026-10-24. The [changelog](CHANGELOG.md) lists what has changed since, under
+Unreleased.
 
 <picture>
   <source media="(prefers-reduced-motion: reduce) and (prefers-color-scheme: dark)" srcset="docs/assets/vade-banner-dark-static.svg">
@@ -17,17 +23,21 @@ run, and `vade verify` lets you check that on your own machine.
   <img src="docs/assets/vade-banner-light.svg" width="100%" alt="Vade: an inference engine and coding-assistant harness for DGX Spark.">
 </picture>
 
-For current numbers, how we measured them and their caveats, see the
-[benchmarks page](docs/benchmarks.md). We call the saved record of a run a
-receipt; [this list](bench/receipts/README.md) shows which receipts are public.
-
 <a id="pick-your-path"></a>
 ## Install
 
-Follow [INSTALL.md](INSTALL.md). With one Spark you don't need a second
-computer: you install a few Ubuntu packages and the pinned Rust toolchains,
-clone this repository, run one GPU kernel build while you are online, and
-download and check the 102.26 GB checkpoint. Then, from the checkout, run:
+[INSTALL.md](INSTALL.md) is the full guide. In short, on the Spark you:
+
+1. install a few Ubuntu packages and the pinned Rust toolchains;
+2. clone this repository and run one GPU kernel build while you are online;
+3. download and check the 102.26 GB checkpoint.
+
+Most of the install time goes to the download and the first build. We have
+not timed a whole install.
+
+### One Spark
+
+With steps 1 to 3 done, run this from the checkout:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -37,135 +47,151 @@ export PATH="$PWD/cli/target/release:$PATH"
 vade launch
 ```
 
-`vade launch` builds and starts the engine, waits until it is ready, and opens
-chat in the current folder, which here is the checkout. To work on another
-project, `cd` there and run `vade chat`. Type `/exit` to leave chat; the engine
-keeps running until you run `vade down`.
+`vade launch` builds and starts the engine, waits until it is ready, then
+opens chat in the current folder. Chat can edit files there, so in the
+checkout, ask it only to say hello. Type `/exit` to leave; the engine keeps
+running until `vade down`. (`unset VADE_CONFIG` makes sure no controller config
+is used. On the Spark, Vade keeps its settings in `~/.vade/config`.)
 
-Most of the install time goes to the checkpoint download and the first build.
-We have not measured an end-to-end install time.
+In each new shell, put `cargo` and `vade` back on your `PATH` first. This line
+assumes the checkout is `~/vade`, as in INSTALL.md:
 
-To skip the Rust builds on the Spark, take the prebuilt launcher bundle and its
+```sh
+export PATH="$HOME/.cargo/bin:$HOME/vade/cli/target/release:$PATH"
+```
+
+To skip the Rust builds, take the prebuilt launcher bundle and its
 `SHA256SUMS` from the
-[v0.1.0 release page](https://github.com/wappy-x/vade/releases/tag/v0.1.0)
-instead; [INSTALL](INSTALL.md#optional-release-bundle) shows how.
+[v0.1.0 release page](https://github.com/wappy-x/vade/releases/tag/v0.1.0);
+[INSTALL](INSTALL.md#optional-release-bundle) shows how.
 
-If you would rather drive your Sparks from a separate Linux or macOS computer
-(we call it a controller), see
-[setting up from a controller](INSTALL.md#route-b-from-a-controller). To link
-Sparks together, see [two and more Sparks](INSTALL.md#two-and-more-sparks).
+### Two or more Sparks
+
+Linked Sparks are driven from a controller: a Linux or macOS computer (or one
+of the Sparks) that reaches each Spark over SSH.
+
+1. Do steps 1 to 3 on every Spark.
+2. Cable the Sparks and give each link an address; see
+   [hardware and network setup](docs/network-setup.md).
+3. Set up the controller with [Route B](INSTALL.md#route-b-from-a-controller),
+   then follow [two and more Sparks](INSTALL.md#two-and-more-sparks). The start
+   command is `vade up --sparks 2`.
+
+Expect a long prompt to be read faster, not one chat to write faster; see
+[what works today](#supported-systems).
 
 ## What you get
 
 - **Chat in the terminal.** `vade chat` (or `vade launch`) opens Vade's coding
-  agent. It can read, search and edit files in the folder you started it from.
-  On Linux, and so on the Spark, it can't run shell commands; see
-  [what doesn't work yet](#supported-systems). The agent needs a context of at
-  least 8192 tokens: below that, chat on the Spark falls back to plain chat,
-  and chat from a controller stops with an error. On macOS, the agent's shell
-  sees only system and Homebrew tools; if you installed Rust with rustup, see
-  [the controller notes in INSTALL](INSTALL.md#route-b-from-a-controller).
-- **An OpenAI-compatible API** at `http://127.0.0.1:18080/v1`. On the Spark, if
-  that port was busy when you first set up, `vade status` prints the address
-  in use instead, and the API is under its `/v1`. From a controller, the API is
-  on the `local_port` in your config (18080 unless you changed it). By default the model thinks before it
-  answers, and the thinking counts against the same `max_tokens` as the answer.
-  If you want only the answer, send `"enable_thinking": false` (or `"reasoning_effort": "none"`).
-- **An exactness check.** `vade verify` sends the same requests several times
-  with drafting on and off (see Defaults below), checks that the token IDs come
-  back the same, and writes `vade-verify.json`.
+  agent in the folder you start it from. It can read, search and edit files.
+  On Linux, the Spark included, it can't run shell commands yet.
+- **An OpenAI-compatible API** at `http://127.0.0.1:18080/v1`. It listens
+  only on the Spark's loopback; `vade status` prints the address if Vade had
+  to pick another port. From another computer, forward the port first:
+  `ssh -N -L 18080:127.0.0.1:18080 <user>@<spark>`. From a controller, the API
+  is on the `local_port` in your config (18080 unless you changed it).
+- **An exactness check.** `vade verify` sends the same requests several times,
+  with drafting on and off, checks that the token IDs match and writes
+  `vade-verify.json`.
 - **A benchmark client.** `vade bench` measures the running engine and writes
-  `vade-bench.json`; see [benchmarks](docs/benchmarks.md).
-- **Commands to look after the engine.** `vade status` tells you whether it is
-  ready, `vade doctor` diagnoses your setup, `vade logs` shows the engine log,
-  and `vade down` stops the engine this installation started.
+  `vade-bench.json`.
+- **Commands to look after the engine.** `vade status` says whether it is
+  ready, `vade doctor` finds problems in your setup, `vade logs` shows the
+  engine log and `vade down` stops what Vade started.
+
+**API requests think first.** Unless a request says otherwise, the model
+thinks before it answers, and the thinking counts against the same
+`max_tokens` as the answer. To get only the answer, send
+`"enable_thinking": false` or `"reasoning_effort": "none"`. `vade chat`,
+`vade verify` and `vade bench` turn thinking off for you.
 
 <a id="defaults-by-route"></a>
-**Defaults.** The [settings guide](INSTALL.md#settings-you-may-change) lists
-every default and how to change it. These are the ones you meet first:
+### Defaults
+
+The [settings guide](INSTALL.md#settings-you-may-change) lists every default
+and how to change it. The ones you meet first:
 
 - **Drafting is ON.** The model's multi-token-prediction (MTP) head guesses a
-  few tokens ahead, and the full model checks each guess, so greedy answers
-  stay the same.
-- **Greedy decoding.** A request that sets no sampling options is decoded
-  greedily: the engine always picks the most likely next token. Setting even
-  one option, such as `"temperature": 0` alone, makes the engine take the rest
-  from the checkpoint's own settings, which may include penalties that change
-  the answer. For greedy
-  answers, send no sampling options, or send all of `temperature: 0`,
-  `top_p: 1`, `top_k: 0`, `repetition_penalty: 1`, `presence_penalty: 0` and
-  `frequency_penalty: 0`.
-- **Context and output.** Whether you work on the Spark or from a controller,
-  Vade starts by asking for a context of 32768 tokens and output of up to 8192
-  tokens. On the Spark, Vade lowers the context (to 16384, then 8192, then
-  4096) only if the engine refuses it for lack of memory, and it tells you so
-  in a one-line notice.
-- **Chats at once.** The engine decides how many chats it can run at once from
-  the context and the memory it has; on a controller, `vade status` prints that
-  count.
-- **Long context.** `--context 262144` picks the single-chat long-context
-  preset, whether you work on the Spark or from a controller. On the Spark it
-  still has to pass the engine's memory check, and a refusal is reported, not
-  lowered.
+  few tokens ahead and the full model checks each guess, so greedy answers do
+  not change.
+- **Greedy decoding.** A request with no sampling options always gets the most
+  likely next token. Set even one option, such as `"temperature": 0` alone, and
+  the engine takes the rest from the checkpoint's settings, which may include
+  penalties that change the answer. For greedy answers, send no sampling
+  options, or send all of `temperature: 0`, `top_p: 1`, `top_k: 0`,
+  `repetition_penalty: 1`, `presence_penalty: 0` and `frequency_penalty: 0`.
+- **Context 32768 tokens, output up to 8192.** On the Spark, Vade lowers the
+  context (to 16384, then 8192, then 4096) only if the engine refuses it for
+  lack of memory, and says so. `--context 262144` picks the single-chat
+  long-context preset; we have no published measurement at that size yet.
+- **Chats at once** follow from the context and the memory the engine has.
 
 <a id="supported-systems"></a>
 ## What works today, and what doesn't yet
 
 - **One model.** `nvidia/Qwen3.8-Flash-Next-FP4-Local` at its pinned publisher
-  revision, text only. Two older routes are still in the tree, each with its
-  own guide: Flash-Next FP8 on two Sparks
-  ([legacy installation](docs/install-legacy-fp8.md)) and the small Qwen3-8B
-  BF16 model (`vade run qwen3-8b`, in the
-  [legacy one-Spark quickstart](docs/quickstart-one-spark.md#qwen3-8b-bf16-ubuntu-to-a-first-answer)).
-  Neither is a supported route in v0.1.0.
-  [Adding a model](docs/adding-a-model.md) is our design note on what a new
-  model must pass before we support it.
+  revision, text only. Two older routes are still in the tree but are not
+  supported in v0.1.0: Flash-Next FP8 on two Sparks
+  ([legacy install](docs/install-legacy-fp8.md)) and the small Qwen3-8B BF16
+  model (`vade run qwen3-8b`, in the
+  [legacy quickstart](docs/quickstart-one-spark.md#qwen3-8b-bf16-ubuntu-to-a-first-answer)).
+  [Adding a model](docs/adding-a-model.md) says what a new model must pass.
 - **DGX Spark only.** The engine runs on DGX Spark (NVIDIA GB10) with Linux
   `aarch64`, and nothing else.
-- **Your terminal and controllers.** To work on the Spark itself, any SSH
-  client will do, including one on Windows. A controller can run Linux
-  (`aarch64` or `x86_64`) or macOS. We tested the full controller lifecycle
-  from macOS, and from Linux `aarch64` with a Spark as its own controller.
-- **No Windows controller.** The CLI does not build for Windows. Work on the
-  Spark over SSH, or try WSL 2 (untested).
+- **Controllers run Linux or macOS.** A controller can run Linux (`aarch64` or
+  `x86_64`) or macOS. We tested the full controller lifecycle from macOS, and
+  from Linux `aarch64` with a Spark as its own controller. The CLI does not
+  build for Windows; from Windows, SSH into the Spark and work there.
 - **No shell tool on Linux.** The agent's shell tool and workspace checks need
-  the macOS sandbox, so they are not available in chat on the Spark or on any
-  other Linux computer. Reading, searching, line edits and patches work
-  everywhere.
-- **In the 2026-10-24 runs, a second Spark read prompts faster, but one chat
-  did not write faster.** A second Spark cut the time to read a cold prompt
-  (one the engine has not seen before), and on rented cloud machines it also
-  raised throughput when many chats ran at once. A single chat did not get
-  faster; see [what the measurements mean](docs/benchmarks.md#what-this-means).
-  A change to the layer pipeline, merged on 2026-10-25 after those runs,
-  targets one-chat speed on two Sparks; the next published cards will show its
-  effect.
-  The [FP4-Local guide](cli/docs/fp4-local.md) describes chains of up to 24
-  Sparks, each holding a run of the model's layers and passing its work to the
-  next. Our published measurements cover one and two Sparks, and one, two and
-  four cloud GB10 VMs.
-- **The prefix cache is opt-in.** The prefix cache reuses the start of an
-  earlier prompt, so a new request that begins the same way does not have to
-  read it again. It is OFF by default and works on one Spark only. To turn it
-  on, set `VADE_FLASHNEXT_PREFIX_CACHE=1`; see the
-  [settings guide](INSTALL.md#settings-you-may-change).
+  the macOS sandbox, so chat on the Spark, or on any Linux computer, can't run
+  commands. Reading, searching, line edits and patches work everywhere. On
+  macOS, the shell tool sees only system and Homebrew tools; see
+  [the controller notes](INSTALL.md#route-b-from-a-controller) if you
+  installed Rust with rustup.
+- **The agent needs 8192 tokens of context.** Below that, chat on the Spark
+  falls back to plain chat, and chat from a controller stops with an error.
+- **More Sparks read prompts faster; one chat does not write faster.** In the
+  2026-10-25 cards (main `6cb46bf` and `80ac2d4`), the first token after a cold
+  8K prompt came in 2.80 s on two Sparks and 2.19 s on four, against 3.86 s on
+  one Spark in the v0.1.0 card. One chat with drafting ON wrote 79.3 tok/s of
+  code on two Sparks and 80.3 on four, next to 76.7 on one. Each Spark holds a
+  run of the model's layers and passes its work to the next, so one chat uses
+  one GPU at a time. See [reading these cards](docs/benchmarks.md#reading-these-cards).
+- **On four Sparks, eight chats ran without drafting.** In the four-Spark
+  card the engine served every eight-chat response without drafting, so eight
+  chats with drafting ON reached 136.5 tok/s, against 176.4 on two.
+- **Chains are measured up to four machines.** The
+  [FP4-Local guide](cli/docs/fp4-local.md) describes chains of 2 to 24 Sparks.
+  We have run at most four: four DGX Sparks at `6cb46bf` on 2026-10-25, and
+  four cloud GB10 VMs at v0.1.0 on 2026-10-24.
+- **The prefix cache is opt-in and one-Spark only.** It lets a request that
+  starts like an earlier one skip reading that start again. See
+  [turn on the prefix cache](INSTALL.md#turn-on-the-prefix-cache).
 
 ## Exactness
 
-Vade's rule: the same request on the same setup (build, checkpoint, number
-of Sparks and settings) gives identical token IDs on every run and on every
-Spark. That holds whether the request runs alone or batched with others,
-and whether or not it hits the cache. With greedy decoding, it also holds with
-drafting ON or OFF.
+The rule: the same request on the same setup (build, checkpoint, number of
+Sparks and settings) gives identical token IDs on every run and every Spark.
+That holds whether the request runs alone or batched, whether or not it hits
+the cache, and, with greedy decoding, with drafting ON or OFF.
 
-`vade verify` checks the drafting part on your own engine. On a pass it prints
-`IDENTICAL: 20/20 runs, 1 machine, N tokens`, where N is the reply's token
-count. A pass covers the requests it sent, not every mix of batching and
-caching. In the two-Spark benchmark run on our own Sparks, the token IDs were
-identical with drafting ON and OFF in 201 of 201 measured request pairs
-([receipt](bench/receipts/2026-10-24/2026-10-24_0711_qwen3.8-flash-next-nvfp4_local-2spark_4681d8b-drafting-on-thinking-off/README.txt)).
-[Architecture: exactness and model quality](docs/architecture.md#exactness-and-model-quality)
-explains the full rule and what each check does and does not prove.
+`vade verify` checks the drafting part on your own engine. A pass prints
+`IDENTICAL: 20/20 runs, 1 machine, N tokens`, where N is the reply's length in
+tokens. It covers the requests it sent, not every mix of batching and caching.
+
+What we have checked so far covers drafting ON against OFF:
+
+- On the v0.1.0 release build (`5a22651`), the one-Spark drafting-ON card
+  matched the drafting-OFF card in 66 of 66 responses, and `vade verify`
+  printed `IDENTICAL: 20/20 runs, 1 machine, 128 tokens`
+  ([receipt](bench/receipts/2026-10-24/2026-10-24_1943_qwen3.8-flash-next-nvfp4_local-1spark_5a22651-drafting-on-thinking-off/README.txt)).
+- On an earlier build (`4681d8b`), two Sparks matched drafting ON and OFF in
+  201 of 201 request pairs
+  ([receipt](bench/receipts/2026-10-24/2026-10-24_0711_qwen3.8-flash-next-nvfp4_local-2spark_4681d8b-drafting-on-thinking-off/README.txt)).
+
+These receipts do not test alone against batched, or a cache hit against a
+miss. [Exactness and model quality](docs/architecture.md#exactness-and-model-quality)
+explains the full rule and what each check proves.
 
 ## Use our agent, add our gateway, or bring your own client
 
@@ -176,58 +202,71 @@ explains the full rule and what each check does and does not prove.
 - **Your own client.** Point any OpenAI-compatible client at
   `http://127.0.0.1:18080/v1`. The
   [client setup guide](harness/docs/passthrough-matrix.md) covers Codex,
-  Hermes, OpenCode and Pi, either directly or through the gateway.
+  Hermes, OpenCode and Pi, directly or through the gateway.
 
 ## Measured results
 
-Every row below is a RigMark card for the v0.1.0 release (commit `5a22651`),
-measured on 2026-10-24. RigMark is a public benchmark, and a card is the
-recorded result of one RigMark run. Each run used the model with a context of
-32768 tokens, greedy decoding and thinking OFF. Drafting is ON by default; in
-the OFF rows, every request sent `"draft":"plain"`. Code and prose are one
-chat at a time, and the 8-chat rate covers all eight chats together. Tok/s
-means completion tokens per second of wall-clock time.
+These are the RigMark cards for the v0.1.0 release (commit `5a22651`),
+measured on 2026-10-24. [RigMark](docs/benchmarks.md#run-rigmark-against-vade)
+is a public benchmark, and a card is the recorded result of one run. A
+receipt is the saved record of a run, and every number here comes from one.
+The [benchmarks page](docs/benchmarks.md) has the later two- and four-Spark
+cards from 2026-10-25, the full recipe and the caveats.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmarks-2026-10-24-dark.svg">
-  <img src="docs/assets/benchmarks-2026-10-24-light.svg" width="100%" alt="Bar chart comparing one DGX Spark with two, drafting ON (the default). In the 2026-10-24 runs, a second Spark answered a long prompt faster, but one chat did not write faster. Code, one chat: 76.7 tok/s on 1 Spark, 65.1 on 2 Sparks. Prose, one chat: 41.7 and 38.3. Eight chats together: 173.9 and 168.6. First reply after an 8K-token prompt: 3.86 s on 1 Spark, 2.79 s on 2 Sparks. Across all our runs, eight chats gave 130.6 to 173.9 tok/s on six single Sparks and 167.6 to 168.7 on three pairs.">
+  <img src="docs/assets/benchmarks-2026-10-24-light.svg" width="100%" alt="Bar chart comparing one DGX Spark with two, drafting ON (the default). In the 2026-10-24 runs, a second Spark answered a long prompt faster, but one chat did not write faster. Code, one chat: 76.7 tok/s on 1 Spark, 65.1 on 2 Sparks. Prose, one chat: 41.7 and 38.3. Eight chats together: 173.9 and 168.6. First reply after a cold 8192-token prompt: 3.86 s on 1 Spark, 2.79 s on 2 Sparks. Across all our runs, eight chats gave 130.6 to 173.9 tok/s on six single Sparks and 167.6 to 168.7 on three pairs.">
 </picture>
 
-The chart compares one of our Sparks with two, both with drafting ON, the
-default. Every number is printed in a
-[2026-10-24 receipt](bench/receipts/2026-10-24/README.md), and
-`python3 -I tools/benchmarks-chart.py` redraws the chart. The table below adds
+The chart compares one of our Sparks with two, drafting ON.
+`python3 -I tools/benchmarks-chart.py` redraws it from the
+[2026-10-24 receipts](bench/receipts/2026-10-24/README.md). The table adds
 drafting OFF and the cloud VMs.
 
-| Setup | Drafting | Code tok/s | Prose tok/s | 8 chats tok/s | First token, 8K prompt (s) |
-| --- | --- | ---: | ---: | ---: | ---: |
-| One DGX Spark | OFF | 27.8 | 27.8 | 136.1 | 3.82 |
-| One DGX Spark | ON | 76.7 | 41.7 | 173.9 | 3.86 |
-| Two DGX Sparks | OFF | 27.9 | 27.9 | 135.1 | 2.80 |
-| Two DGX Sparks | ON | 65.1 | 38.3 | 168.6 | 2.79 |
-| One cloud GB10 VM | OFF | 24.4 | 22.5 | 73.3 | 3.99 |
-| One cloud GB10 VM | ON | 61.1 | 31.6 | 97.5 | 3.98 |
-| Two cloud GB10 VMs | OFF | 24.4 | 22.9 | 112.2 | 2.95 |
-| Two cloud GB10 VMs | ON | 54.7 | 30.5 | 138.3 | 2.95 |
-| Four cloud GB10 VMs | OFF | 21.9 | 20.7 | 104.2 | 2.38 |
-| Four cloud GB10 VMs | ON | 51.6 | 29.0 | 104.2 | 2.42 |
+How to read it:
 
-One chat runs at the same speed on every Spark we tried. We measured six of
-our own Sparks one at a time: with drafting OFF, prose landed between 27.6 and
-27.8 tok/s and code between 27.7 and 27.8; with drafting ON, prose landed
-between 41.3 and 41.7 and code between 76.1 and 76.7.
+- Every card used context 32768, greedy decoding and thinking OFF. In the OFF
+  rows, every request sent `"draft":"plain"`.
+- Code and prose are one chat at a time, 5 runs each with an 8192-token cap.
+  The 8-chat rate covers all eight chats together, 3 rounds with a 256-token
+  cap, so 24 streams in all; the table says how many of them the engine served
+  without drafting. The first-token time is after a cold 8192-token prompt, 3
+  runs.
+- Tok/s is completion tokens per second of wall-clock time.
+  [Client time and server time](docs/benchmarks.md#client-time-and-server-time)
+  explains where that clock can start.
+- We have not run another engine on this checkpoint, so this is not a
+  head-to-head comparison.
 
-The 8-chat rate moves more. Under that load the engine serves some chats
-without drafting (each card's README says how many), so with drafting ON it
-ranged from 130.6 to 173.9 tok/s across the six Sparks. The one-Spark ON row
-above is the top of that range. One drafting-OFF run, on our Spark home-6,
-landed at 86.6, and its receipt does not say why.
+| Setup | Drafting | Code tok/s | Prose tok/s | 8 chats tok/s | 8-chat streams served without drafting | First token, cold 8192-token prompt (s) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| One DGX Spark | OFF | 27.8 | 27.8 | 136.1 | all (OFF) | 3.82 |
+| One DGX Spark | ON | 76.7 | 41.7 | 173.9 | 10/24 | 3.86 |
+| Two DGX Sparks | OFF | 27.9 | 27.9 | 135.1 | all (OFF) | 2.80 |
+| Two DGX Sparks | ON | 65.1 | 38.3 | 168.6 | 12/24 | 2.79 |
+| One cloud GB10 VM | OFF | 24.4 | 22.5 | 73.3 | all (OFF) | 3.99 |
+| One cloud GB10 VM | ON | 61.1 | 31.6 | 97.5 | 10/24 | 3.98 |
+| Two cloud GB10 VMs | OFF | 24.4 | 22.9 | 112.2 | all (OFF) | 2.95 |
+| Two cloud GB10 VMs | ON | 54.7 | 30.5 | 138.3 | 11/24 | 2.95 |
+| Four cloud GB10 VMs | OFF | 21.9 | 20.7 | 104.2 | all (OFF) | 2.38 |
+| Four cloud GB10 VMs | ON | 51.6 | 29.0 | 104.2 | 24/24 | 2.42 |
 
-The four cloud VMs run as one engine, each VM holding a slice of the model's
-layers. That chain is for models too big for one machine; in the 2026-10-24
-runs it did not make one chat faster than one Spark. In its drafting-ON run the
-engine served all eight chats without drafting, so both four-VM rows show the
-same 8-chat rate.
+What stands out:
+
+- **One chat runs at the same speed on every Spark we tried.** On six of our
+  Sparks, one at a time, drafting OFF gave 27.6 to 27.8 tok/s on prose and
+  27.7 to 27.8 on code; drafting ON gave 41.3 to 41.7 on prose and 76.1 to
+  76.7 on code.
+- **The 8-chat rate moves more.** Under that load the engine serves some chats
+  without drafting, so with drafting ON it ranged from 130.6 to 173.9 tok/s
+  across the six Sparks; the one-Spark ON row is the top of that range. One
+  drafting-OFF run on one of the six landed at 86.6
+  ([receipt](bench/receipts/2026-10-24/2026-10-24_1941_qwen3.8-flash-next-nvfp4_local-1spark_5a22651-drafting-off-thinking-off-home-6/)),
+  a drop we have not reproduced or explained.
+- **Four cloud VMs did not make one chat faster.** They run as one engine,
+  each VM holding a slice of the layers. A chain is meant for models too big
+  for one machine. In its drafting-ON run the engine served all eight chats
+  without drafting, so both four-VM rows show the same 8-chat rate.
 
 Each row has its own receipt, named by the time of its run:
 
@@ -237,15 +276,15 @@ Each row has its own receipt, named by the time of its run:
 - Two cloud GB10 VMs: [OFF (2027)](bench/receipts/2026-10-24/2026-10-24_2027_qwen3.8-flash-next-nvfp4_local-2spark_5a22651-drafting-off-thinking-off-cloud-a/), [ON (2035)](bench/receipts/2026-10-24/2026-10-24_2035_qwen3.8-flash-next-nvfp4_local-2spark_5a22651-drafting-on-thinking-off-cloud-a/)
 - Four cloud GB10 VMs: [OFF (2204)](bench/receipts/2026-10-24/2026-10-24_2204_qwen3.8-flash-next-nvfp4_local-4spark_5a22651-drafting-off-thinking-off-cloud-a/), [ON (2213)](bench/receipts/2026-10-24/2026-10-24_2213_qwen3.8-flash-next-nvfp4_local-4spark_5a22651-drafting-on-thinking-off-cloud-a/)
 
-The [benchmarks page](docs/benchmarks.md) has the other receipts and the
-recipes for reproducing each run.
+Raw benchmark output stays private until it has been reviewed for publication;
+[the receipts list](bench/receipts/README.md) says what is public.
 
-## Licence
+## License
 
 Vade's code is licensed under [Apache-2.0](LICENSE). The bundled tokenizer and
-template fixtures keep their upstream licences, the
+template fixtures keep their upstream licenses, the
 [Code of Conduct](CODE_OF_CONDUCT.md) uses CC BY 4.0, and models keep their own
-licences. [NOTICE](NOTICE) lists the shipped files and their licence texts,
+licenses. [NOTICE](NOTICE) lists the shipped files and their license texts,
 and [Credits](CREDITS.md) keeps the source attribution.
 
 ## Documentation map
@@ -255,6 +294,7 @@ and [Credits](CREDITS.md) keeps the source attribution.
 | [INSTALL.md](INSTALL.md) | The whole install, starting with one Spark |
 | [First run](harness/docs/first-run.md) | The launcher on your Spark, saved settings and later runs |
 | [CLI reference](cli/README.md) | Commands, configuration and recovery |
+| [Examples](examples/README.md) | Short scripts you can run: curl, a Python client, Claude Code, Codex, vade bench and a two-Spark launch |
 | [Benchmarks](docs/benchmarks.md) | Measured results, receipts and how to reproduce them |
 | [Architecture](docs/architecture.md) | How requests reach the engine, and the exactness rule |
 | [Glossary](docs/GLOSSARY.md) | The serving terms these docs use |

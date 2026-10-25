@@ -37,7 +37,7 @@ with a box that explains its own engine terms.
 
 **Cargo.** Rust's build tool and package manager. `cargo build` compiles; `cargo run` compiles and runs.
 
-**Chain.** A [layer pipeline](#ho) stretched across more than two Sparks. Each Spark owns a block of consecutive layers and passes the intermediate state on to the next. Groups of more than two Sparks need the `VADE_W2_PP=1` opt-in, which the controller sets for you when you run `vade up --fp4-local --sparks N`. See [architecture](architecture.md#ranks-memory-and-ownership) and [controller selection](../cli/src/app.rs).
+**Chain.** A [layer pipeline](#ho) stretched across more than two Sparks. Each Spark owns a block of consecutive layers and passes the intermediate state on to the next. Groups of more than two Sparks need the `VADE_W2_PP=1` opt-in, which the controller sets for you when you run `vade up --fp4-local --sparks N` with N above 2. See [architecture](architecture.md#several-sparks-the-layer-pipeline-and-the-chain) and [controller selection](../cli/src/app/plan.rs).
 
 **Checkpoint.** One published set of a model's files (weights, configuration and tokenizer) at one exact revision.
 
@@ -159,7 +159,7 @@ with a box that explains its own engine terms.
 
 - **Default:** drafting is on, three tokens ahead (request depth 3). A request can also ask for it with `"draft":"strict"`.
 - **One chat alone:** the engine adjusts the depth as it goes, up to a ceiling called the resident depth. The ceiling is 7 on one Spark and on the layer pipeline.
-- **Prompt lookup:** also on by default, on one Spark and on the pipeline. It copies guesses from matching earlier text in the same chat. It runs only for greedy requests that draft, and `VADE_MTP_LOOKUP=0` turns it off.
+- **Prompt lookup:** also on by default, on one Spark and on the pipeline. It copies guesses from matching earlier text in the same chat. It runs only for greedy requests that draft, and `VADE_MTP_LOOKUP=0` turns it off ([source](../engine/crates/engine/src/flash/next_lookup.rs)).
 - **Several chats:** [cohort drafting](#ac) is on too.
 
 The older tensor-map rank path never drafts or uses lookup. The code is in [drafting defaults](../engine/crates/engine/src/flash/draft_stack.rs) and [cohort policy](../engine/crates/serve/src/mtp_batch.rs).
@@ -210,7 +210,7 @@ Under greedy decoding, ON and OFF must return the same token IDs; see [request c
 
 **Replica.** A complete, independent copy of the model serving its own requests, on one Spark or a group of Sparks. A router can spread users across several replicas.
 
-**RigMark.** Our name for a benchmark run and its recorded results. A published card is the write-up of one such run: its recipe, measurements and qualification. Timing-only runs are not cards. See [Benchmarks](benchmarks.md).
+**RigMark.** A public benchmark suite ([github.com/alexellis/rigmark](https://github.com/alexellis/rigmark)). A card is the result file of one RigMark run: its recipe, measurements and output checks. A timing run with `vade bench` is not a card. See [Benchmarks](benchmarks.md#run-rigmark-against-vade).
 
 **Ring (topology).** Ranks connected in a loop, each passing data to the next. Rings belong to the transport of the older [tensor-map rank path](#sz); a current FP4-Local pair runs as a [layer pipeline](#ho) by default.
 
@@ -225,8 +225,6 @@ Under greedy decoding, ON and OFF must return the same token IDs; see [request c
 ## S–Z
 
 **Safetensors.** The file format of the model's weights: plain tensors with a small header, safe to load.
-
-**Same-setup exact.** A label you will see next to measured numbers. It means one machine setup, one set of model files and one set of settings, with answers checked byte-identical across the runs being compared.
 
 **Sampling.** Picking the next token with some randomness, controlled by settings like temperature. Turning it off gives greedy decoding.
 
@@ -267,8 +265,9 @@ Under greedy decoding, ON and OFF must return the same token IDs; see [request c
 **VADE_W2_PP (layer pipeline).** The environment switch that picks how FP4-Local spreads over several Sparks:
 
 - Unset on two Sparks: the [layer pipeline](#ho), the default.
-- `VADE_W2_PP=0` picks the older [tensor-map rank path](#sz) instead.
-- For more than two Sparks, `VADE_W2_PP=1` turns on a [chain](#ac), and `vade up --sparks N` sets it for you.
+- Unset on more than two Sparks: the older [tensor-map rank path](#sz).
+- `VADE_W2_PP=0` picks the tensor-map rank path on any number of Sparks.
+- `VADE_W2_PP=1` turns on a [chain](#ac). `vade up --fp4-local --sparks N` with N above 2 sets it for you.
 
 See [pipeline selection](../engine/crates/tp/src/flash/settings.rs).
 

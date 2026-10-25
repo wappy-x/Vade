@@ -6,7 +6,7 @@ license = "Apache-2.0"
 publish = false
 repository = "https://github.com/wappy-x/vade"
 rust-version = "1.99"
-description = "A calm command line for a local Vade engine and harness"
+description = "The vade command line: install, start, chat with and stop a Vade engine"
 
 [[bin]]
 name = "vade"

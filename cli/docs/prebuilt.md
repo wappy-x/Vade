@@ -99,7 +99,7 @@ as the running engine. The benchmark finds the endpoint by itself.
 
 It writes its results (receipts) to `./vade-bench.json` and `./vade-bench.txt`
 in the current folder, and replaces any older ones. To write them somewhere
-else, use `--out FILE` (or `--output FILE`). It doesn't create any install or
+else, use `--output FILE` (`--out FILE` is the same flag). It doesn't create any install or
 build folders to hold them.
 
 By default the benchmark uses whatever drafting the server is set to. In
@@ -131,7 +131,7 @@ unpacks these files straight into the current directory:
 | `flash.ptx` | The production GPU kernels as PTX, stamped with the build they came from |
 | `vade-harness` | Linux aarch64 chat program |
 | `launcher-bundle.conf` | Launcher format, target, revisions and file hashes |
-| `LICENSE`, `NOTICE`, `engine/` notices and licenses | Existing distribution notices |
+| `LICENSE`, `NOTICE`, `engine/` notices and licenses | The license and notice files that ship with the source |
 
 The manifest, `launcher-bundle.conf`, matches the local launcher's
 `vade-launch-bundle-v1` format:

@@ -24,6 +24,7 @@ use crate::cli::{Command, UpOptions};
 use crate::config::{Config, Machine};
 use crate::runner::{self, Exec, Output, Runner, quote, remote_path};
 use crate::state::{Artifact, Manifest, Rank, Session};
+use crate::style::{self, Stream, Token};
 use crate::text::{self, Fields};
 use std::collections::BTreeMap;
 use std::fs;
@@ -71,25 +72,20 @@ impl<R: Runner> App<R> {
                 let ready = self.local_health(&session)?
                     && connection
                     && session.phase == "running";
-                crate::output::line(format_args!(
-                    "Vade: {} on {} machines{}.",
-                    if ready {
-                        "ready"
-                    } else {
-                        "recorded, needs attention"
-                    },
-                    session.ranks.len(),
-                    if self.dry {
-                        " (health not checked)"
-                    } else {
-                        ""
-                    }
-                ))?;
+                let (mark, state) = if self.dry {
+                    (style::paint(Token::Dim, "○", Stream::Out), "recorded (health not checked)")
+                } else if ready {
+                    (style::paint(Token::Ok, "●", Stream::Out), "ready")
+                } else {
+                    (style::paint(Token::Warn, "▲", Stream::Out), "recorded and needs attention")
+                };
+                let machines: Vec<_> = session.ranks.iter().map(|rank| rank.machine.name.as_str()).collect();
+                crate::output::line(format_args!("{mark} Vade is {state} on {}.", machines.join(", ")))?;
             }
-            None => crate::output::line(format_args!("Vade: stopped."))?,
+            None => crate::output::line(format_args!("{} Vade is stopped.", style::paint(Token::Dim, "○", Stream::Out)))?,
         }
-        crate::output::line(format_args!("Start: {}   Chat: vade chat\nStop:  vade down Check: vade doctor", self.start_command()))?;
-        Ok(())
+        crate::output::text(format_args!("{}", crate::status::next_steps(&[
+            ("Start", self.start_command()), ("Chat", "vade chat"), ("Stop", "vade down"), ("Check", "vade doctor")])))
     }
 
     /// `vade up`: reuse an identical running launch, or start every rank, wait for
@@ -108,15 +104,15 @@ impl<R: Runner> App<R> {
         }
         let rdma = session.chained() && rdma;
         let transport = if session.replicas { "replicas (independent one-Spark servers behind a local gateway; no fabric)" } else { transport_name(session.ranks.len(), rdma) };
-        crate::output::line(format_args!(
-            "Launch plan: {}\nMachines: {}\nContext: {} tokens   Output limit: {} tokens\nDrafting request: {}   Concurrent chats: {}\nTransport: {}   Endpoint: {}/v1",
-            text::terminal_text(&session.model),
-            session.ranks.iter().map(|rank| rank.machine.name.as_str()).collect::<Vec<_>>().join(", "),
-            session.context, session.output,
-            if session.mtp_explicit { format!("MTP {}", session.mtp) } else { "engine default".into() },
-            session.chats.map_or_else(|| "engine-admitted".into(), |count| count.to_string()),
-            transport, session.endpoint()
-        ))?;
+        crate::output::text(format_args!("{} {}\n{}", style::paint(Token::Heading, "Launch plan:", Stream::Out), text::terminal_text(&session.model), style::table(&[
+            ("Machines", session.ranks.iter().map(|rank| rank.machine.name.as_str()).collect::<Vec<_>>().join(", ")),
+            ("Context", format!("{} tokens", session.context)),
+            ("Output limit", format!("{} tokens", session.output)),
+            ("Drafting request", if session.mtp_explicit { format!("MTP {}", session.mtp) } else { "engine default".into() }),
+            ("Concurrent chats", session.chats.map_or_else(|| "engine-admitted".into(), |count| count.to_string())),
+            ("Transport", transport.into()),
+            ("Endpoint", format!("{}/v1", session.endpoint())),
+        ], 2)))?;
         self.resolve_fabric(&mut session)?;
         self.runner.port_free(session.local_port)?;
         if session.replicas {
@@ -499,32 +495,21 @@ impl<R: Runner> App<R> {
 
     fn status(&mut self) -> Result<(), String> {
         let Some(session) = Session::load(&self.config.state_dir)? else {
-            crate::output::line(format_args!("Vade: stopped. Start: {}", self.start_command()))?;
-            return Ok(());
+            return crate::output::text(format_args!("{}", crate::status::stopped(self.start_command())));
         };
-        crate::output::line(format_args!(
-            "Vade: {}.\nMachines: {}{}\nModel: {}\nBuild: {}\nMTP: {}   Context: {}   Output limit: {}{}\nConcurrent chats: {}\nMemory budget: {}",
-            session.phase,
-            session
-                .ranks
-                .iter()
-                .map(|r| r.machine.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
-            if session.replicas { "\nMode: independent one-Spark replicas behind the local gateway" } else { "" },
-            session.model,
-            session.build,
-            session.mtp_label(),
-            session.context,
-            session.output,
-            if session.supports_output {
-                ""
-            } else {
-                " (engine fixed limit; harness limit applied)"
-            },
-            chats_label(&session),
-            session.memory_bytes.map(|bytes| format!("{bytes} bytes/rank")).unwrap_or_else(|| "automatic".into())
-        ))?;
+        // Rows print as each check finishes, in one label column.
+        let row = |label: &str, value: &str| crate::output::text(format_args!("{}", style::table_at(&[(label, value.to_owned())], 2, 21)));
+        crate::output::line(format_args!("{} is {}.", style::paint(Token::Title, "Vade", Stream::Out), session.phase))?;
+        row("Machines", &session.ranks.iter().map(|r| r.machine.name.as_str()).collect::<Vec<_>>().join(", "))?;
+        if session.replicas { row("Mode", "independent one-Spark replicas behind the local gateway")?; }
+        row("Model", &session.model)?;
+        row("Build", &session.build)?;
+        row("MTP", &session.mtp_label())?;
+        row("Context", &format!("{} tokens", session.context))?;
+        row("Output limit", &format!("{} tokens{}", session.output,
+            if session.supports_output { "" } else { " (engine fixed limit; harness limit applied)" }))?;
+        row("Concurrent chats", &chats_label(&session))?;
+        row("Memory budget", &session.memory_bytes.map(|bytes| format!("{bytes} bytes/rank")).unwrap_or_else(|| "automatic".into()))?;
         let mut all = session.ranks.iter().all(|r| r.attempted);
         for rank in session.ranks.iter().filter(|r| r.attempted) {
             match self.worker(&session, rank, "inspect", Fields::new()) {
@@ -532,22 +517,18 @@ impl<R: Runner> App<R> {
                     let alive = fields.get("alive").is_some_and(|v| v == "true");
                     all &= alive;
                     if !self.dry && !alive { crate::output::operation_failed(); }
-                    crate::output::line(format_args!(
-                        "{}: {}",
-                        rank.machine.name,
-                        if self.dry {
-                            "not checked"
-                        } else if alive {
-                            "running"
-                        } else {
-                            "stopped"
-                        }
-                    ))?;
+                    row(&rank.machine.name, &if self.dry {
+                        "not checked".to_owned()
+                    } else if alive {
+                        style::paint(Token::Ok, "running", Stream::Out)
+                    } else {
+                        style::paint(Token::Warn, "stopped", Stream::Out)
+                    })?;
                 }
                 Err(error) => {
                     all = false;
                     crate::output::operation_failed();
-                    crate::output::line(format_args!("{}", text::terminal_text(&error)))?;
+                    row(&rank.machine.name, &text::terminal_text(&error))?;
                 }
             }
         }
@@ -557,7 +538,7 @@ impl<R: Runner> App<R> {
         let tunnel = self.connection_ok(&session)?;
         if session.replicas {
             let state = if self.dry { "not checked" } else { match self.gateway_alive(&session)? { Some(true) => "running", Some(false) => "stopped", None => "not started" } };
-            crate::output::line(format_args!("Gateway: {state} (log {})", text::terminal_text(&self.gateway_log(&session).to_string_lossy())))?;
+            row("Gateway", &format!("{state} (log {})", text::terminal_text(&self.gateway_log(&session).to_string_lossy())))?;
         }
         let health_response = self.local_health_response(&session)?;
         let health =
@@ -571,37 +552,22 @@ impl<R: Runner> App<R> {
         } else {
             None
         };
-        crate::output::line(format_args!(
-            "Controller connection: {}\nHealth: {}\nSpeed: {}",
-            if self.dry {
-                "not checked"
-            } else if tunnel {
-                "up"
-            } else {
-                "down"
-            },
-            if self.dry {
-                "not checked"
-            } else if health && all && tunnel {
-                "ready"
-            } else {
-                "needs attention"
-            },
-            speed
-                .map(|value| format!("{value:.1} tok/s"))
-                .unwrap_or_else(|| if self.dry {
-                    "not checked"
-                } else {
-                    "not reported by this engine"
-                }
-                .into())
-        ))?;
+        row("Controller connection", if self.dry { "not checked" } else if tunnel { "up" } else { "down" })?;
+        row("Health", &if self.dry {
+            "not checked".to_owned()
+        } else if health && all && tunnel {
+            style::paint(Token::Ok, "ready", Stream::Out)
+        } else {
+            style::paint(Token::Warn, "needs attention", Stream::Out)
+        })?;
+        row("Speed", &speed.map(|value| format!("{value:.1} tok/s"))
+            .unwrap_or_else(|| if self.dry { "not checked" } else { "not reported by this engine" }.into()))?;
         let reported = if health { self.engine_prefix_cache(&session)? } else { None };
-        crate::output::line(format_args!("Retained prompt cache: {}", retention_label(&session, reported)))?;
+        row("Retained prompt cache", &retention_label(&session, reported))?;
         if !self.dry && !(health && all && tunnel) {
             return Err("Vade needs attention. Run vade logs or vade doctor; use vade down before another start.".into());
         }
-        Ok(())
+        crate::output::text(format_args!("\n{}", crate::status::next_steps(&[("Chat", "vade chat"), ("Stop", "vade down")])))
     }
 
     fn logs(&mut self) -> Result<(), String> {

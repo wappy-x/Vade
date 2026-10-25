@@ -73,15 +73,15 @@ fn regression_child() {
             let needle = match mode.as_str() {
                 "resource-output" => {
                     launch.detector.identity.memory_available = 1;
-                    "Detect: stopped after"
+                    "  Detect stopped after"
                 }
                 "start-output" => {
                     launch.runner.fail_start = true;
-                    "Up: stopped after"
+                    "      Up stopped after"
                 }
                 "chat-output" => {
                     launch.runner.chat_success = false;
-                    "Chat: done"
+                    "    Chat done"
                 }
                 _ => {
                     launch.runner.start_output = true;

@@ -1,0 +1,4 @@
+$ vade status --json --watch
+--- stderr
+error: Use vade status --json [--dry-run]. No other status options are supported.
+--- exit 1

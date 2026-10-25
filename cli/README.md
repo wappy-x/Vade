@@ -1,14 +1,20 @@
 # vade
 
-`vade` is the command you use to run nvidia/Qwen3.8-Flash-Next-FP4-Local on one
-DGX Spark. You start the engine, chat with it, and stop it when you are done. It
-is one binary, written in Rust 2024 with only the standard library.
+`vade` is the command you use to run nvidia/Qwen3.8-Flash-Next-FP4-Local on
+your DGX Spark. You start the engine, chat with it, and stop it when you are
+done. It is one binary, written in Rust (2024 edition) with only the standard
+library.
 
-With one Spark, the first few sections are all you need:
-[Install](#install), [Start the engine on your Spark](#start-the-engine-on-your-spark)
-and [Chat, check and stop](#chat-check-and-stop). Later sections cover checking
-and measuring the engine, driving several Sparks from a controller, the legacy
-Qwen3-8B workflow, gate commands and recovery.
+- **One Spark:** read [Install](#install),
+  [Start the engine on your Spark](#start-the-engine-on-your-spark) and
+  [Chat, check and stop](#chat-check-and-stop).
+- **Two or more Sparks:** read
+  [Multi-Spark source setup](#multi-spark-source-setup) after INSTALL's
+  [two and more Sparks](../INSTALL.md#two-and-more-sparks).
+- **Something broke:** see [Recovery](#recovery).
+
+Later sections cover checking and measuring the engine, the legacy Qwen3-8B
+workflow and the gate commands.
 
 This page explains new terms where they first come up. The
 [glossary](../docs/GLOSSARY.md) covers the rest.
@@ -17,19 +23,22 @@ This page explains new terms where they first come up. The
 
 | Command | What it does |
 | --- | --- |
-| `vade` | Shows a short status and four choices: start, chat, stop, doctor |
+| `vade` | Shows a short status and four choices: Start, Chat, Stop and Check (which runs `vade doctor`) |
 | `vade launch` | Starts the engine on the Spark itself |
 | `vade up` | From a controller with a config file, runs the model on one or more Sparks. On the Spark itself, it also starts the local engine |
 | `vade chat` | Opens chat with the running engine |
 | `vade status` | Shows what is running; add `--json` for scripts |
-| `vade verify` | Checks that the engine gives the same answer, token for token, every time |
+| `vade verify` | Runs the same greedy prompt with drafting off and on, and checks that every run returns the same token IDs byte for byte |
 | `vade bench` | Measures the wait before output starts and the answer speed |
 | `vade doctor` | On the Spark itself, checks the driver, resources, model, installation and engine health. From a controller, runs machine checks plus the harness doctor |
 | `vade logs` | Shows recent engine logs |
+| `vade detect` | Shows this Spark's memory, disk, driver and model, and changes nothing |
+| `vade install` | Saves local defaults and installs the engine and chat on this Spark. With `VADE_CONFIG` set, installs on your Sparks from a controller |
 | `vade update` | On the Spark itself, restages the current bundle or rebuilds the current source. From a controller, it first updates clean Git checkouts, then rebuilds and restages |
 | `vade down` | Stops the engine you own |
-| `vade test` | Runs the pass-or-fail checks a build has to clear (the gate checks): the source build, Flash exactness (the same tokens on every run) and evaluations on saved inputs |
+| `vade test` | Runs the pass-or-fail checks a build has to clear (the gate checks): build, determinism (the same tokens on every run), long-context, recurrent-state (GDN) and Unix-flags ABI checks; see [Gate commands](#gate-commands) |
 | `vade run qwen3-8b` | A separate, older workflow for the legacy model |
+| `vade version` | Prints the CLI version (also `vade --version` or `vade -V`) |
 
 "The engine you own" is the one Vade started for you. Vade keeps private
 records of what it starts, called ownership records, and it stops only what
@@ -120,9 +129,9 @@ To pick up a new bundle or source build, run `vade update`. It restages the
 current bundle or rebuilds the current source, then tells you the restart
 command.
 
-`vade --version` (also `vade version` or `vade -V`) prints the CLI package
-version. It doesn't load your configuration or connect to a machine. Please
-include it when you report an installation or launcher problem.
+`vade version` (also `vade --version` or `vade -V`) prints the CLI package
+version. It doesn't load your configuration or connect to a machine. Include
+it when you report an installation or launcher problem.
 
 Launcher errors name the command or option to fix. Invalid commands or options
 fail before Vade reads your config or touches the network.
@@ -252,7 +261,7 @@ the draft modes and MTP depths the responses report.
 You can override the draft mode, and neither override needs a server restart:
 
 - `--draft plain` sends `"draft":"plain"` in every request. Only receipts where
-  every request asked for plain are labelled drafting off.
+  every request asked for plain are labeled drafting off.
 - `--draft strict` asks for strict drafting.
 
 ### Other bench options
@@ -395,10 +404,10 @@ Testing so far covers this much:
 
 ### Build and configure
 
-Build the command on the controller (Linux or macOS), from the monorepo root:
+Build the command on the controller (Linux or macOS), from the checkout root:
 
 ```sh
-cargo build --release --offline --manifest-path cli/Cargo.toml
+cargo +1.99.0 build --release --offline --manifest-path cli/Cargo.toml
 ./cli/target/release/vade --help
 ```
 
@@ -561,7 +570,7 @@ With `--replicas N`, each replica sits behind its own tunnel on the N local
 ports after `local_port`, and the local gateway listens on `local_port`. It needs
 no `fabric.*` entries and can't be combined with `--sparks` or `--fp8-legacy`.
 `vade down` stops the gateway, the tunnels and every replica. See
-[Replicas](../INSTALL.md#replicas).
+[Replicas](../INSTALL.md#serve-many-chats-with-replicas).
 
 Every lifecycle command accepts `--dry-run`, in any position. A dry run prints
 every remote command it would run, including worker operations and the stdin
@@ -685,7 +694,7 @@ options](../harness/README.md) for direct launches with `--max-output-tokens` or
 `--no-auto-continue`.
 
 The harness and engine agree on each reply's output size automatically
-([details](../harness/docs/engine-contract.md#output-extension-provenance-824ab96f)).
+([details](../harness/docs/engine-contract.md#how-the-output-limits-changed-october-2026)).
 That agreement has host tests only so far; the one-Spark live test above didn't
 check these limits.
 
@@ -846,7 +855,7 @@ too.
 
 For the legacy Qwen3-8B catalog, start with the [Qwen3-8B section of the
 one-Spark
-quickstart](../docs/quickstart-one-spark.md#qwen3-8b-bf16-ubuntu-to-a-first-answer),
+quickstart](../docs/quickstart-one-spark.md#part-2-older-route-build-from-source-with-qwen3-8b),
 including its optional CLI step. The current FP4-Local route is
 [INSTALL.md](../INSTALL.md). On the Spark, with `vade` already installed:
 

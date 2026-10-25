@@ -14,12 +14,12 @@
 //!
 //! | Area | Modules |
 //! | --- | --- |
-//! | Arguments and help | [`cli`], [`auth`] (credential files), [`endpoint`] (which server a client command talks to) |
+//! | Arguments and help | [`cli`], [`help`] (help pages), [`auth`] (credential files), [`endpoint`] (which server a client command talks to) |
 //! | Lifecycle owners | [`launch`], [`app`], [`run`], [`worker`] (the private helper that owns engine processes on a Spark) |
 //! | Configuration and records | [`config`] (controller config), [`state`] (controller ownership records and locks), [`catalog`], [`repository`] |
 //! | Machine and artifacts | [`detect`], [`prebuilt`], [`build_job`], [`sha256`] |
 //! | Processes and files | [`runner`] (every subprocess), [`control_socket`], [`unix_file`], [`unix_flags`] |
-//! | Output | [`output`] (fallible stdout), [`status`] (`status --json` schema), [`text`] (terminal-safe text and `key=value` records), [`json`] (health replies) |
+//! | Output | [`output`] (fallible stdout), [`style`] (colour, errors, tables and help layout), [`status`] (`status --json` schema), [`text`] (terminal-safe text and `key=value` records), [`json`] (health replies) |
 //! | Client tools | [`bench`](mod@bench), [`verify`] (exact token IDs, drafting ON and OFF) |
 //! | Local checks | [`test_gate`] (`vade test build` and `determinism`), [`evals`] (long-context, GDN and ABI checks) |
 mod output;
@@ -33,6 +33,7 @@ mod build_job;
 mod catalog;
 mod cli;
 mod config;
+mod help;
 mod detect;
 mod launch;
 mod control_socket;
@@ -43,6 +44,7 @@ mod run;
 mod runner;
 mod state;
 mod status;
+mod style;
 mod test_gate;
 mod text;
 mod unix_file;
@@ -96,7 +98,7 @@ fn run_main(mut args: Vec<String>) {
             Err(error) => fail(&error),
         }
     }
-    if args.len() == 2 && args[0] == "help" && args[1] == "bench" {
+    if args.len() == 2 && matches!(args[0].as_str(), "help" | "--help" | "-h") && args[1] == "bench" {
         match bench::run(&["--help".into()], || false) {
             Ok(code) => std::process::exit(code),
             Err(error) => fail(&error),
@@ -107,10 +109,10 @@ fn run_main(mut args: Vec<String>) {
         .is_some_and(|arg| matches!(arg.as_str(), "__build-supervisor" | "__build-anchor"))
     {
         if args.len() != 2 {
-            fail("Invalid private build request.");
+            fail_private("Invalid private build request.");
         }
         if let Err(error) = build_job::helper(&args[0], std::path::Path::new(&args[1])) {
-            fail(&error);
+            fail_private(&error);
         }
         return;
     }
@@ -119,7 +121,7 @@ fn run_main(mut args: Vec<String>) {
             std::process::exit(2);
         }
         if let Err(error) = worker::engine() {
-            fail(&error);
+            fail_private(&error);
         }
         return;
     }
@@ -142,7 +144,7 @@ fn run_main(mut args: Vec<String>) {
     }
     auth::configure(&mut args).unwrap_or_else(|error| fail(&error));
     if args.len() == 2 && matches!(args[0].as_str(), "help" | "--help" | "-h") && args[1] == "verify" {
-        public_output(verify::HELP);
+        public_output(&verify::help());
         return;
     }
     if args.first().is_some_and(|arg| arg == "verify") {
@@ -214,9 +216,8 @@ fn run_main(mut args: Vec<String>) {
         Ok(config) => config,
         Err(error) if matches!(parsed.command, cli::Command::Menu) => {
             let error = text::terminal_text(&error);
-            public_output(&format!(
-                "Vade: setup needed.\n{error}\nStart: vade up   Chat: vade chat\nStop:  vade down Check: vade doctor\n"
-            ));
+            public_output(&format!("{} Vade needs setup.\n  {error}\n\n{}", style::paint(style::Token::Warn, "▲", style::Stream::Out),
+                status::next_steps(&[("Start", "vade up"), ("Chat", "vade chat"), ("Stop", "vade down"), ("Check", "vade doctor")])));
             return;
         }
         Err(error) => fail(&error),
@@ -246,7 +247,17 @@ fn public_output(message: &str) {
     if let Err(error) = output::text(format_args!("{message}")) { fail(&error); }
 }
 
+/// Print a command error as an `error:`/`hint:` block on stderr and exit 1.
 fn fail(message: &str) -> ! {
+    if !output::broken_pipe_success() {
+        let block = style::error_block(&text::terminal_text(message), style::color(style::Stream::Err));
+        output::stderr_line(format_args!("{block}"));
+    }
+    std::process::exit(if output::broken_pipe_success() { 0 } else { 1 })
+}
+
+/// Private helpers report errors verbatim for the parent that started them.
+fn fail_private(message: &str) -> ! {
     if !output::broken_pipe_success() {
         output::stderr_line(format_args!("{}", text::terminal_text(message)));
     }

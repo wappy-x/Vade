@@ -1,0 +1,4 @@
+$ vade help nonsense
+--- stderr
+error: Use vade help, or vade help <command>.
+--- exit 1

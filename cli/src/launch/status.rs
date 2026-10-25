@@ -4,6 +4,7 @@ use super::*;
 use crate::{
     evals::json::{self, Value},
     status::Snapshot,
+    style::{self, Stream, Token},
 };
 
 /// `vade status --json` for the local home at `root`.
@@ -29,7 +30,8 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         let config = Config::load(&self.root)?;
         match (config, record) {
             (Some(config), Some(record)) => output::line(format_args!(
-                "Vade recorded phase: {} at {}. Readiness not checked (dry run). Local config: {}",
+                "{} Vade is recorded as {} at {} (dry run; readiness not checked).\n  Local config: {}",
+                style::paint(Token::Dim, "○", Stream::Out),
                 required(&record, "phase")?,
                 config.endpoint(),
                 self.root.join("config").display()
@@ -38,9 +40,39 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                 "An owned engine has no saved config; preserve the state folder and run vade down."
                     .into(),
             ),
-            (_, None) => output::line(format_args!("Vade is stopped. Start: {}", text::command("launch"))),
+            (_, None) => output::text(format_args!("{}", stopped())),
         }
     }
+
+    /// `vade status` for a ready engine: the endpoint, then one row per setting.
+    pub(super) fn status_table(&self, config: &Config, record: &Fields) -> Result<String, String> {
+        let field = |name: &str| record.get(name).map(|value| text::terminal_text(value).into_owned());
+        let drafting = match record.get("mtp").map(String::as_str) {
+            Some("engine_default") | None => "engine default".to_owned(),
+            Some("0") => "off (--mtp 0)".to_owned(),
+            Some(depth) => format!("MTP {}", text::terminal_text(depth)),
+        };
+        let mut rows = vec![
+            ("Model", field("endpoint_model").unwrap_or_default()),
+            ("Context", format!("{} tokens, output {}", field("context_tokens").unwrap_or_default(), field("output_tokens").unwrap_or_default())),
+            ("Drafting", drafting),
+        ];
+        if record.get("prefix_cache").is_some_and(|value| value == "0") { rows.push(("Cache", "retained prompt cache off".into())); }
+        if let Some(artifacts) = install::load(&self.root)?.filter(|artifacts| artifacts.get("engine") == record.get("engine")) {
+            let build = required(&artifacts, "engine_sha256")?;
+            let generation: String = required(&artifacts, "generation")?.chars().take(12).collect();
+            rows.push(("Build", format!("{} (generation {})", build.chars().take(12).collect::<String>(), text::terminal_text(&generation))));
+        }
+        rows.push(("Config", text::terminal_text(&self.root.join("config").display().to_string()).into_owned()));
+        Ok(format!("{} Vade is ready at {}.\n{}\n{}", style::paint(Token::Ok, "●", Stream::Out), config.endpoint(), style::table(&rows, 2),
+            crate::status::next_steps(&[("Chat", &text::command("chat")), ("Stop", &text::command("down"))])))
+    }
+}
+
+/// `vade status` when nothing is running.
+pub(super) fn stopped() -> String { crate::status::stopped(&text::command("launch")) }
+
+impl<R: Runner, D: Detector> Launcher<R, D> {
 
     /// Fill a status report; dry runs record every live check as unchecked.
     pub(super) fn status_snapshot(

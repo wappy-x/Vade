@@ -66,14 +66,17 @@ contact listed in the repository's **About** section.
   18080. A controller reaches it through an SSH tunnel, not over the network.
 - The server refuses to bind to any other address unless you pass
   `--allow-remote`, and `--allow-remote` refuses to start without
-  `--api-key-file`. The server speaks plain HTTP, so put remote access behind a
-  trusted tunnel or a TLS terminator.
+  `--api-key-file` (the error reads
+  `--allow-remote requires --api-key-file PATH`). The server speaks plain
+  HTTP, so put remote access behind a trusted tunnel or a TLS terminator.
 - The gateways listen on loopback only and drop connections that come from
   anywhere else. A gateway you start yourself uses `127.0.0.1:8787` by
   default; the one `vade up --replicas` starts uses the controller's
-  `local_port` (18080 by default). They also refuse requests with a
-  non-loopback `Host` header or any `Origin` header, unless you name the host
-  or browser origin you want to allow (`--allow-host`, `--allow-origin`).
+  `local_port` (18080 by default). They also refuse browser-style requests:
+  a `Host` header other than `127.0.0.1`, `localhost` or `[::1]` (with the
+  listener's port) gets 421, and any request with an `Origin` header gets 403.
+  To let one through, name the host with `--allow-host` or the exact browser
+  origin with `--allow-origin`; both can be repeated.
 - A gateway you start yourself (`vade-gateway` or `vade-harness gateway`) can
   also require a token, which is off by default. Pass `--token`, or set the
   `VADE_GATEWAY_TOKEN` environment variable; the flag wins if you use both.
@@ -83,7 +86,8 @@ contact listed in the repository's **About** section.
   check. The gateway does not pass the token on to the engine. The value must
   be 1 to 1024 visible ASCII characters. If you don't pass `--token` and
   `VADE_GATEWAY_TOKEN` is set to anything else, including an empty value, the
-  gateway refuses to start.
+  gateway refuses to start with
+  `VADE_GATEWAY_TOKEN needs 1 to 1024 visible ASCII characters`.
 - The gateway that `vade up --replicas` starts never uses a token. Vade
   doesn't pass it `--token` and removes `VADE_GATEWAY_TOKEN` from its
   environment, so exporting the variable before `vade up` does not protect it.

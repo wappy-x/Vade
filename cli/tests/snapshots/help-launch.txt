@@ -1,0 +1,34 @@
+$ vade launch --help
+Start Vade on this Spark and open chat. Finds the FP4-Local checkpoint, saves
+defaults, installs if missing, starts the engine, then opens chat. Run it again
+to attach.
+
+Usage: vade launch [OPTIONS]
+
+Options:
+  --context N      Context window in tokens, 4096..262144 (default 32768)
+  --output N       Output limit in tokens, 1024..16384 (default min(8192,
+                   context))
+  --mtp N          Drafting depth 0..3; 0 disables server drafting (default:
+                   engine-selected)
+  --cache-bytes 0  Disable retained prompt cache, even with an inherited opt-in
+  --dry-run        Show what would happen; change nothing
+
+Examples:
+  vade launch
+  vade launch --context 262144 --output 16384
+  vade launch --dry-run
+
+Notes:
+  - Local defaults match vade up from a controller: context 32768, output
+    min(8192, context), engine-selected MTP.
+  - If the engine refuses the default or saved context for memory, launch
+    retries 16384, 8192 then 4096, saves the one that starts and says which; an
+    explicit --context the engine refuses is an error.
+  - The checkpoint comes from the saved config, then explicit VADE_MODELS, then
+    the FP4-Local checkpoint under ~/models; launch asks if it is missing. Files
+    install under ~/.vade (or VADE_HOME).
+  - Local --chats and positive --cache-bytes are unsupported. See vade up --help
+    for memory options. Unset VADE_CONFIG for local lifecycle commands.
+--- stderr
+--- exit 0

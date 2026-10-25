@@ -1,0 +1,15 @@
+$ vade update --help
+Refresh the installed engine and chat.
+
+Usage: vade update [--dry-run]
+
+Options:
+  --dry-run  Show what would happen; change nothing
+
+Notes:
+  - Locally, restage the current bundle or rebuild the current source, then
+    report how to restart.
+  - With VADE_CONFIG, update source, rebuild and stage binaries, then offer a
+    restart.
+--- stderr
+--- exit 0

@@ -954,7 +954,7 @@ fn status_prints_the_engine_retention_state() {
     let printed = capture.bytes.clone();
     crate::output::with_writer(capture, || f.app.execute(Command::Status)).unwrap();
     let printed = String::from_utf8(printed.borrow().clone()).unwrap();
-    assert!(printed.contains("\nRetained prompt cache: off (engine report)\n"), "{printed}");
+    assert!(printed.contains("\n  Retained prompt cache  off (engine report)\n"), "{printed}");
     let mut session = Session::load(&f.app.config.state_dir).unwrap().unwrap();
     assert_eq!(retention_label(&session, Some(true)), "on (engine report)");
     assert_eq!(retention_label(&session, None), "off by default; engine not checked");

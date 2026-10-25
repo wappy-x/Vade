@@ -62,7 +62,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             _ => output::line(format_args!("Engine health: unavailable until the config and ownership checks pass; run vade down before repair."))?,
         }
         if failures.is_empty() {
-            output::line(format_args!("Local checks passed."))
+            output::line(format_args!("{}", style::paint(Token::Ok, "Local checks passed.", Stream::Out)))
         } else {
             Err(format!("{} local check(s) need attention. Follow the next commands above, then retry vade doctor.", failures.len()))
         }
@@ -72,12 +72,14 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
 fn check<T>(failures: &mut Vec<String>, label: &str, result: Result<T, String>, next: &str) -> Result<Option<T>, String> {
     match result {
         Ok(value) => {
-            output::line(format_args!("{label}: OK."))?;
+            output::line(format_args!("{label}: {}", style::paint(Token::Ok, "OK.", Stream::Out)))?;
             Ok(Some(value))
         }
         Err(error) => {
             output::operation_failed();
-            output::line(format_args!("{label}: {}\nNext: {next}", text::terminal_text(&error)))?;
+            // Colour repeats what the words say: a yellow label, a cyan Next.
+            output::line(format_args!("{}: {}\n{} {next}", style::paint(Token::Warn, label, Stream::Out),
+                text::terminal_text(&error), style::paint(Token::Hint, "Next:", Stream::Out)))?;
             failures.push(error);
             Ok(None)
         }

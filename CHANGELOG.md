@@ -18,9 +18,10 @@ Changes that are merged but not yet released are under Unreleased.
   [glossary](docs/GLOSSARY.md)). Measured on two Sparks against depth 3:
   code +16 %, structured output +39 %, prose unchanged, with the same
   tokens. `VADE_FLASHNEXT_MTP_DEPTH=3` restores the previous ceiling, and
-  `VADE_MTP_GRAPH=0` keeps every Spark's work eager. The change targets
-  one-chat speed on two Sparks. The published cards were measured before
-  it; the next cards will show its effect.
+  `VADE_MTP_GRAPH=0` keeps every Spark's work eager. The 2026-10-25 two-
+  and four-Spark cards on the [benchmarks page](docs/benchmarks.md#reading-these-cards)
+  include it: with drafting on, one chat wrote code at 79.3 tokens per
+  second on two Sparks, against 65.1 on the v0.1.0 pair.
 - On the layer pipeline, the first Spark now projects the model's head for
   only the rows one greedy chat needs, as one Spark already does, instead
   of the full head. Measured on a pair, prose went from 41.26 to 42.60
@@ -135,6 +136,9 @@ Changes that are merged but not yet released are under Unreleased.
 
 ### Documentation
 
+- The README opens with a short summary and separate quick starts for one
+  Spark and for two or more, and the benchmarks page adds the 2026-10-25 two-
+  and four-Spark cards.
 - The README and the [benchmarks page](docs/benchmarks.md) show measured
   v0.1.0 results, and the receipts behind them are published under
   [bench/receipts/2026-10-24](bench/receipts/2026-10-24/README.md).
@@ -250,25 +254,23 @@ run; `vade verify` lets you check that on your own machine.
   verifies them. A request that sets no sampling field is decoded greedily, on
   any number of Sparks. A request that sets any sampling field starts from the
   checkpoint's own sampling defaults, and its values replace those defaults.
-- Fixed drafting on two Sparks. Both pipeline stages now follow the same
-  drafting policy for a cohort (a group of requests running at the same time).
-  The two-stage pipeline now allows guarded cohort drafting, which switches a
-  cohort back to plain decoding when drafting stops paying off, and the
-  worker's decode pools are reclaimed.
+- Drafting on two Sparks. Both pipeline stages follow the same drafting
+  policy for a cohort (a group of requests running at the same time), and the
+  two-stage pipeline uses guarded cohort drafting, which switches a cohort
+  back to plain decoding when drafting stops paying off.
 - At startup, the pipeline refuses to run if its ranks (one process per
   Spark) have different artifacts, numerical settings or prompt options. It
   also checks the pipeline switches before it chooses a topology.
-- The server reports the drafting mode and depth it actually ran, so
-  `/health` and receipts tell the truth about drafting instead of echoing the
-  request.
+- `/health` and receipts report the drafting mode and depth the server
+  actually ran, not the ones the request asked for.
 - Release builds load verified precompiled kernels. Checkpoint hashing uses a
   safe streaming SHA-256 that does not fill the file cache.
-- The startup memory check now counts reclaimable page cache as free (Linux
-  `MemAvailable`, capped by CUDA total) instead of using CUDA free memory,
-  which leaves out the host page cache inside containers. A memory refusal
-  names MemAvailable, the required bytes and the ceiling. Session pools hold
-  back a 512 MiB transient reserve, so 8 and 16 concurrent chats at the
-  default context no longer stop generating a few megabytes short.
+- The startup memory check counts reclaimable page cache as free (Linux
+  `MemAvailable`, capped by CUDA total), so it also works inside containers,
+  where CUDA's own free-memory figure leaves the page cache out. A memory
+  refusal names MemAvailable, the required bytes and the ceiling. Session
+  pools hold back a 512 MiB reserve, so 8 and 16 concurrent chats at the
+  default context have room to finish.
 - The Flash-Next prefix cache is off by default. It stays off until tests show
   that serving with the cache is as fast as serving without it in every
   measured case. `VADE_FLASHNEXT_PREFIX_CACHE=1` turns it on, on one Spark
@@ -286,9 +288,9 @@ run; `vade verify` lets you check that on your own machine.
   version tags, checks every manifest hash, and attaches the bundle and its
   `SHA256SUMS` to the tag's release. If a bundle is rejected, the launcher
   falls back to building from source.
-- Entry guides rewritten for first-time readers. README, INSTALL and the
-  first-run guide start with the one-Spark launcher, keep the source route and
-  the bundle route apart, and name the supported models explicitly.
+- Guides for first-time readers. README, INSTALL and the first-run guide
+  start with the one-Spark launcher, keep the source route and the bundle
+  route apart, and name the supported model explicitly.
 - A two-Spark route in INSTALL, next to the one-Spark default.
 - A supported-systems table in INSTALL. The engine runs on DGX Spark / GB10
   under Linux `aarch64`. For Route B, where you drive the Spark from a
@@ -355,12 +357,9 @@ run; `vade verify` lets you check that on your own machine.
 - Agent rules in AGENTS.md and the human contribution process in
   CONTRIBUTING.md, with a package map, architecture notes and decisions.
 - A security policy, Code of Conduct, issue and pull request templates, NOTICE
-  and the bundled third-party licence texts.
-- A flaky stream-cancellation test is fixed: it now synchronizes
-  cancellation and verifies that processes are reaped. The shared
-  process-test lock now recovers after it is poisoned.
+  and the bundled third-party license texts.
 
 For measurements, recipes and their limitations, see
 [benchmark methods and results](docs/benchmarks.md). See [NOTICE](NOTICE) for
 bundled third-party material and [LICENSE](LICENSE) for Vade's Apache-2.0
-licence.
+license.

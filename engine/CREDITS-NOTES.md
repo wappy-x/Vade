@@ -10,7 +10,7 @@ needed, compiled to PTX. When an entry names another project, Vade took an
 idea, a published equation or a documented behavior from it, or ran it
 separately as a reference to compare against. The third-party files the repository does keep, such as official model
 configurations, chat templates and Unicode data, are listed with their
-licences in [NOTICE](NOTICE).
+licenses in [NOTICE](NOTICE).
 
 Short commit hashes and branch names, such as 8e9657e or `work/m32`, name
 earlier Vade work from before this repository's history begins, so you will

@@ -1,0 +1,36 @@
+$ vade verify --help
+Compare token IDs byte for byte across repeated greedy runs, drafting OFF and
+ON.
+
+Usage: vade verify [OPTIONS]
+
+Options:
+  -n N                  Runs per mode, 1..10000 (default 20); --runs is an alias
+  --prompt short|2k|8k  Bundled offline prompt (default short); 2k/8k sizes are
+                        approximate and tokenizer-dependent
+  --url URL             Server to check (default VADE_API_URL, then the recorded
+                        endpoint)
+  --machine NAME        Add an independent running engine from that machine's
+                        verify_url in VADE_CONFIG
+  --max-tokens N        Tokens per run, 1..32768 (default 128)
+  --timeout SECONDS     Deadline for each request, 1..3600 (default 120)
+  --receipt PATH        Receipt file (default vade-verify.json in the current
+                        directory)
+
+Examples:
+  vade verify
+  vade verify -n 3 --prompt 2k
+  vade verify --url http://127.0.0.1:18080/v1
+
+Notes:
+  - Uses --url, then VADE_API_URL, then the selected installation's recorded
+    endpoint. Keep the same VADE_CONFIG and VADE_HOME as up/run; explicit
+    VADE_CONFIG selects the controller's local_port. Without a running
+    installation, start vade launch or supply --url.
+  - Generates a fixed token count (ignores EOS) to check every ID, with cache
+    and thinking off. ON requests strict drafting and must actually draft;
+    unavailable drafting fails the check.
+  - Prints one result line; exit 0 means identical, 1 means different or
+    incomplete. Run and token numbers start at 1.
+--- stderr
+--- exit 0

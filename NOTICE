@@ -5,8 +5,8 @@ The Vade engine (engine/), harness (harness/) and CLI (cli/) are licensed
 under the Apache License, Version 2.0. See LICENSE. Third-party files
 retain the licenses listed below.
 
-The harness includes no third-party code. Its sources studied are listed
-in harness/CREDITS-NOTES.md.
+The harness includes no third-party code. The sources it studied are
+listed in harness/CREDITS-NOTES.md.
 
 Third-party material included in this repository
 ------------------------------------------------

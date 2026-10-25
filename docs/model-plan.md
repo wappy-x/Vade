@@ -1,51 +1,56 @@
 # Model plan
 
-`ModelPlan` reads bounded checkpoint metadata and returns a typed description
-of layers, dimensions, tensor roles and storage. It reads safetensors headers,
-not weight payloads, and does not allocate GPU memory.
+`ModelPlan` turns a checkpoint's metadata into a typed description of the
+model: its layers, dimensions, tensor roles and storage formats. It reads
+`config.json`, the safetensors index and each shard's header. It never reads
+the weights themselves, and it allocates no GPU memory.
 
-The implementation is in [engine-model](../engine/crates/model/src/plan/mod.rs).
-The typed [hybrid loader](../engine/crates/engine/src/hybrid/forward.rs) uses
-`inspect_parts`, preserving the exact inspected index and shard metadata for
-loading. This code is part of the current tree.
+The code lives in [engine-model](../engine/crates/model/src/plan/mod.rs). The
+typed [hybrid loader](../engine/crates/engine/src/hybrid/forward.rs) calls
+`inspect_parts`, so it loads from the same index and shard headers the plan
+was built from.
 
 ## How to call it
 
-| Call | Input and result |
+| Call | What it does |
 | --- | --- |
-| `ModelPlan::from_config` | Parses config bytes; tensor inventory still awaits headers |
-| `ModelPlan::with_headers` | Reconciles names, shapes, dtypes and roles against the plan |
-| `ModelPlan::inspect` | Reads bounded config, index and shard headers from a checkpoint directory |
-| `ModelPlan::inspect_parts` | Also returns the exact inspected index and shard metadata |
+| `ModelPlan::from_config` | Parses config bytes. The tensor list stays incomplete until headers are added |
+| `ModelPlan::with_headers` | Checks tensor names, shapes, dtypes and roles against the plan |
+| `ModelPlan::inspect` | Reads the config, index and shard headers from a checkpoint folder |
+| `ModelPlan::inspect_parts` | Does the same, and also returns the index and shard headers it read |
 
-[Config adapters](../engine/crates/model/src/plan/config.rs) define supported
-families and reject unsupported semantics. [Tensor reconciliation](../engine/crates/model/src/plan/tensors.rs)
-checks stored inventory, including tied embeddings and mixed-format metadata.
-The plan describes supported BF16, block-scaled FP8 and mixed-format storage;
-this does not imply every format is executable on every serving path.
+The [config adapters](../engine/crates/model/src/plan/config.rs) define which
+model families are supported, and reject settings they don't understand.
+[Tensor reconciliation](../engine/crates/model/src/plan/tensors.rs) checks the
+stored tensors, including tied embeddings and mixed-format metadata. A plan can
+describe BF16, block-scaled FP8 and mixed-format storage. That doesn't mean
+every serving path can run every format.
 
-## Limits
+## What a valid plan proves
 
-A valid plan establishes metadata and shape consistency. It does not establish
-that weight bytes match their official hashes, that the tokenizer/template is
-supported, that memory admission succeeds, or that device arithmetic is qualified.
-Those checks belong to installation, runtime binding and native validation.
+A valid plan shows that the metadata and shapes agree. It doesn't show that
+the weight files match their published hashes, that the tokenizer and chat
+template are supported, that the model fits in memory, or that the GPU
+arithmetic is qualified. Installation, runtime binding and device validation
+check those.
 
 [Runtime profiles](../engine/crates/model/src/plan/profile.rs) and
-[projection records](../engine/crates/model/src/plan/runtime.rs) connect checked
-metadata to the execution requirements. The [splitter](splitter.md) plans
-ownership and budgets from the reconciled shape.
+[projection records](../engine/crates/model/src/plan/runtime.rs) connect the
+checked metadata to what execution needs. The [splitter](splitter.md) uses the
+checked shape to plan which Spark owns what.
 
 ## Run its tests
 
 From `engine/`:
 
 ```sh
-cargo test --offline -p engine-model --lib plan::tests -- --nocapture
+cargo +1.99.0 test --offline -p engine-model --lib plan::tests -- --nocapture
 ```
 
-Checkpoint-dependent tests use `VADE_FLASH_CONFIG` and `VADE_FLASH_CHECKPOINT`.
-Read the test output for skipped native inventory checks; a host pass without
-those inputs does not validate a downloaded checkpoint.
+Two tests need a real checkpoint and are skipped by default. To run them, set
+`VADE_FLASH_CONFIG` to a checkpoint's `config.json` and `VADE_FLASH_CHECKPOINT`
+to its folder, then add `--ignored` after the `--`. The config test expects a
+block-FP8 Flash config. A host pass without them says nothing about a
+checkpoint you downloaded.
 
-See [adding a model](adding-a-model.md) for the remaining integration checks.
+See [adding a model](adding-a-model.md) for the other checks a new model needs.

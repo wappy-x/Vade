@@ -147,6 +147,14 @@ impl Config {
         if let Some(bytes) = options.cache_bytes { self.cache_bytes = Some(bytes); }
     }
 
+    /// This saved config with `options` applied as a start applies them, before
+    /// the checkpoint and resource checks; the dry-run preview reads its limits.
+    pub fn planned(&self, options: &UpOptions) -> Self {
+        let mut planned = self.clone();
+        planned.overrides(options);
+        planned
+    }
+
     /// The configuration these options request, if the running engine already
     /// uses exactly those limits.
     pub fn check_running_options(&self, options: &UpOptions, record: &Fields) -> Result<Self, String> {

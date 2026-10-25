@@ -1,0 +1,56 @@
+$ vade up --help
+Start the engine without opening chat. Default: Qwen3.8 Flash-Next FP4-Local on
+one Spark.
+
+Usage: vade up [OPTIONS]
+
+Options:
+  --fp4-local       Qwen3.8 Flash-Next FP4-Local (the default; optional)
+  --fp8-legacy      Two-Spark legacy FP8: context 131072, output min(65536,
+                    context), MTP 2; output ceiling 262144
+  --sparks N        Number of Sparks; FP4 supports 1..24
+  --hosts a,b       Machine names in cable order, separated by commas
+  --replicas N      2..16 independent one-Spark FP4-Local servers behind a local
+                    gateway
+  --mtp N           Drafting depth 0..3; 0 disables server drafting (default:
+                    engine-selected)
+  --context N       Context window in tokens, 4096..262144 (default 32768)
+  --output N        Output limit in tokens, 1024..16384 (default min(8192,
+                    context))
+  --chats N         Concurrent chats, 1..32 (controller)
+  --memory-bytes N  Memory budget per rank, in bytes
+  --cache-bytes N   Retained prompt cache, in bytes; 0 disables retention
+  --dry-run         Show what would happen; change nothing
+
+Examples:
+  vade up
+  vade up --context 262144 --output 16384
+  VADE_CONFIG=cluster.conf vade up --sparks 2
+
+Notes:
+  - Local up and launch use context 32768 and output min(8192, context). The
+    engine's memory admission decides: only a refused default or saved context
+    is lowered (16384, 8192, 4096), and saved once it starts. Supported explicit
+    limits are saved; an explicit --context the engine refuses is an error.
+    Local --chats and positive --cache-bytes are refused; --cache-bytes 0
+    disables retention.
+  - Controller FP4 defaults match local ones on any Spark count: context 32768,
+    output min(8192, context); the engine admits concurrent chats from context
+    and memory. --context 262144 selects the single-chat long-context preset.
+  - MTP is engine-selected. FP4-Local one-Spark concurrent chats can draft; the
+    default request depth is 3 with strict verification. Legacy FP8 concurrent
+    chats decode plainly. Per-request draft=plain disables drafting;
+    draft=strict requests it when supported. --mtp overrides MTP, and 0 disables
+    server drafting.
+  - Spark counts above 2 require a current install and linked hosts in cable
+    order.
+  - --replicas N starts one independent one-Spark server on each of the first N
+    machines (or the N --hosts) and a local gateway on local_port; replica
+    tunnels use the next N local ports. Each replica uses the FP4 defaults
+    above. Use it when the model fits one Spark and many chats run at once;
+    answers are the same on every replica.
+  - One Spark needs no fabric. Controller pairs and chains use RDMA;
+    SEQPAR_RDMA=0 selects TCP. Keep VADE_CONFIG and VADE_HOME consistent through
+    chat, status and down.
+--- stderr
+--- exit 0

@@ -56,8 +56,9 @@ From the controller, `vade up` asks for a context of 32768 tokens and up to
 min(context, 8192) output tokens, the same defaults as `vade launch` on the
 Spark. A controller never lowers that context for you: if the Spark lacks the
 memory, the engine refuses it, and you choose a smaller `--context`; keep it
-at 8192 or more if you want `vade chat`. (On the Spark itself, `vade launch`
-and `vade up` lower it automatically.) See
+at 8192 or more if you want `vade chat`. (On the Spark itself, a local launch
+lowers a default or saved context, but only when the engine refuses it for
+lack of memory.) See
 [Defaults on a controller](../INSTALL.md#defaults-on-a-controller).
 
 If startup fails, see [launcher recovery](../cli/README.md#recovery).
@@ -73,7 +74,7 @@ curl -qfsS http://127.0.0.1:18080/health
 curl -qfsS http://127.0.0.1:18080/v1/capabilities
 ```
 
-Wait until `/health` says `ready` and its checkpoint section shows
+Wait until `/health` reports `"status":"ready"` and its checkpoint section shows
 `hash_state: ready`, which means the engine has finished hashing the checkpoint
 files. Until then, repeat the two commands.
 
@@ -86,10 +87,17 @@ make the answer arrive sooner, but it must not change it.
 
 With the engine still running, run `vade verify`. It:
 
-- repeats a bundled prompt 20 times with drafting on and off;
-- compares the token IDs;
-- prints one `IDENTICAL` or `DIFFERENT` line;
+- sends the short bundled prompt 20 times with drafting off and 20 times
+  with drafting on, asking for exactly 128 tokens each time, with the prompt
+  cache and thinking off;
+- compares the token IDs of every run;
+- prints one result line: `IDENTICAL: ...` when every run matches, or
+  `DIFFERENT at run ... token ...` at the first mismatch;
+- exits 0 only when the runs are identical (1 means different or incomplete);
 - saves the receipt `vade-verify.json` in the current folder.
+
+The drafting-on runs must actually draft. If drafting is unavailable, the
+check fails rather than passing on plain decoding.
 
 Move that receipt out of the checkout before you run `vade install` again,
 because install refuses a clone with untracked files.
@@ -100,8 +108,9 @@ receipt. To test more widely:
 | To | Run |
 | --- | --- |
 | Repeat the prompt more times | `vade verify -n 50` |
+| Check longer answers | `vade verify --max-tokens 256` |
 | Use a longer bundled prompt | `vade verify --prompt 2k` or `vade verify --prompt 8k` |
-| Compare with a second running engine | Add `--machine <name>` (for example `spark-b`); the [CLI guide](../cli/README.md#verify-exactness) shows how to set one up |
+| Compare with a second running engine | Add `--machine <name>` (for example `spark-b`) after you give that machine a `verify_url` in `VADE_CONFIG`; see [Compare with a second engine](../cli/README.md#compare-with-a-second-engine) |
 
 ### Put the gateway in front
 
@@ -153,8 +162,8 @@ To set up Codex against Vade, see
 `--target gateway`, the setup writes Codex settings to a separate folder, so
 your usual Codex settings are left alone. It fills that folder with the model
 and limits the running engine reports, and points Codex at
-`http://127.0.0.1:8787/v1`. The
-gateway forwards requests without converting one API format into another.
+`http://127.0.0.1:8787/v1`. The gateway forwards requests without converting
+one API format into another.
 
 ### Stop everything
 
@@ -203,7 +212,7 @@ To change this, use these chat commands:
 | `/queue on` | Lets replies finish before your next typed messages go out |
 | `/queue off` | Goes back to steering |
 | `/queue TEXT` | Queues one follow-up |
-| `/exit` | Cancels an active reply, then closes chat |
+| `/exit` | Cancels an active reply, then closes chat; the engine keeps running |
 
 `vade chat` opens either the native agent (Vade's built-in coding agent) or a
 direct chat with the model. The agent saves interrupted replies in its private
@@ -227,7 +236,8 @@ trusted local bundle root (a folder of prebuilt bundles):
 - Vade checks the model files while it copies and builds, and skips the check
   when nothing has changed.
 
-[The CLI guide](../cli/README.md) describes the prebuilt bundle layout.
+[Prebuilt bundles](../cli/README.md#prebuilt-bundles) in the CLI guide
+describes the bundle layout.
 
 <a id="qwen3-8b-bf16-ubuntu-to-a-first-answer"></a>
 
@@ -712,9 +722,13 @@ tensor-parallel server:
 
 Token refusals use the same first line, but report a token gap and say
 `GiB gap is not applicable to a token ceiling.` A request past the configured
-context names `vade --context` in that refusal. To fix it, shorten the prompt,
-lower `max_tokens`, or raise context with `--context` up to 262144. Memory
-overrides and extra Sparks cannot raise the checkpoint's token ceiling.
+context names `vade --context` in that refusal. To fix it, shorten the prompt
+or lower `max_tokens`. To raise the server's context, restart it with the flag
+for the route you used: for Part 1, run `vade down` and then
+`vade up --context 262144` (or choose a smaller supported context); for Part 2,
+stop the foreground server with Ctrl+C and restart `spark-serve` with
+`--context-tokens N`, where N fits that checkpoint and the available memory.
+Memory overrides and extra Sparks cannot raise the checkpoint's token ceiling.
 
 **How the server works out its memory:**
 

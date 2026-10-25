@@ -31,8 +31,9 @@ rustup target add --toolchain 1.99.0 aarch64-unknown-linux-gnu
 rustup toolchain install nightly-2026-10-01 --profile minimal --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda
 ```
 
-To match CI, set `RUSTFLAGS` to `-D warnings` in your shell. You don't need
-GPU flags: the kernel builder adds its own device flags.
+To match CI, which denies warnings, run `export RUSTFLAGS="-D warnings"` in
+your shell. You don't need GPU flags: the kernel builder adds its own device
+flags.
 
 ### Check your change
 
@@ -47,22 +48,25 @@ has the details.
 
 ```sh
 cargo +1.99.0 kernels
-cargo +1.99.0 check --offline --all-targets --manifest-path ../cli/Cargo.toml
-cargo +1.99.0 check --offline --all-targets --manifest-path ../harness/Cargo.toml
-cargo +1.99.0 check --offline --all-targets --manifest-path tools/bench/Cargo.toml
-cargo +1.99.0 test --offline --manifest-path ../cli/Cargo.toml --test ratchet -- --nocapture
+cargo +1.99.0 check --offline --locked --all-targets --manifest-path ../cli/Cargo.toml
+cargo +1.99.0 check --offline --locked --all-targets --manifest-path ../harness/Cargo.toml
+cargo +1.99.0 check --offline --locked --all-targets --manifest-path tools/bench/Cargo.toml
+cargo +1.99.0 test --offline --locked --manifest-path ../cli/Cargo.toml --test ratchet -- --nocapture
 python3 ../tools/check-doc-links.py
 ```
 
 That block checks the CLI, the harness and the benchmark tools, runs the
 ratchet test (explained under [rules](#rules-and-formatting)) and checks the
-documentation links. If you changed the engine, check and test the engine
-workspace too. Pass `--workspace` as CI does; a plain `cargo test` only covers
-the default members and skips some crates:
+documentation links. `--locked` makes Cargo use the committed `Cargo.lock`
+files as they are, the way CI does. If you changed the engine, check and test
+the engine workspace too. Pass `--workspace` as CI does; a plain `cargo test`
+only covers the default members and skips some crates. `--all-targets` doesn't
+run doc tests, so CI runs them in a separate step, which is the last line here:
 
 ```sh
-cargo +1.99.0 check --offline --all-targets --workspace --exclude spark-rust-kernels
-cargo +1.99.0 test --offline --all-targets --workspace --exclude spark-rust-kernels -- --nocapture
+cargo +1.99.0 check --offline --locked --all-targets --workspace --exclude spark-rust-kernels
+cargo +1.99.0 test --offline --locked --all-targets --workspace --exclude spark-rust-kernels -- --nocapture
+cargo +1.99.0 test --offline --locked --doc --workspace --exclude spark-rust-kernels
 ```
 
 Run the tests for the workspace you changed before you open a PR. The rest of
@@ -80,7 +84,7 @@ performance.
 To build the `vade` command yourself, also from `engine/`:
 
 ```sh
-cargo +1.99.0 build --release --offline --manifest-path ../cli/Cargo.toml
+cargo +1.99.0 build --release --offline --locked --manifest-path ../cli/Cargo.toml
 ```
 
 The binary lands at `cli/target/release/vade`. Building it does not install or

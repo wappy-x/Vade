@@ -11,7 +11,28 @@ use std::{
 };
 
 /// Usage for `vade verify`.
-pub const HELP: &str = "vade verify [-n 20] [--prompt short|2k|8k] [--url URL]\n            [--machine NAME] [--max-tokens 128] [--timeout 120] [--receipt PATH]\nCompare token IDs byte for byte across repeated greedy runs, drafting OFF and ON.\nUses --url, then VADE_API_URL, then the selected installation's recorded endpoint.\nKeep the same VADE_CONFIG and VADE_HOME as up/run; explicit VADE_CONFIG selects the controller's local_port.\nWithout a running installation, start vade launch or supply --url.\n--machine adds an independent running engine from that machine's verify_url in VADE_CONFIG.\nPrompts are bundled offline; 2k/8k sizes are approximate and tokenizer-dependent.\nGenerates a fixed token count (ignores EOS) to check every ID, with cache and thinking off.\nON requests strict drafting and must actually draft; unavailable drafting fails the check.\nPrints one result line; exit 0 means identical, 1 means different or incomplete.\nWrites vade-verify.json in the current directory, or --receipt PATH.\n--timeout is the deadline in seconds for each request. Run and token numbers start at 1.\n";
+/// `vade verify --help`.
+pub fn help() -> String {
+    crate::style::Page {
+        summary: "Compare token IDs byte for byte across repeated greedy runs, drafting OFF and ON.",
+        usage: &["vade verify [OPTIONS]"],
+        options: &[
+            ("-n N", "Runs per mode, 1..10000 (default 20); --runs is an alias"),
+            ("--prompt short|2k|8k", "Bundled offline prompt (default short); 2k/8k sizes are approximate and tokenizer-dependent"),
+            ("--url URL", "Server to check (default VADE_API_URL, then the recorded endpoint)"),
+            ("--machine NAME", "Add an independent running engine from that machine's verify_url in VADE_CONFIG"),
+            ("--max-tokens N", "Tokens per run, 1..32768 (default 128)"),
+            ("--timeout SECONDS", "Deadline for each request, 1..3600 (default 120)"),
+            ("--receipt PATH", "Receipt file (default vade-verify.json in the current directory)"),
+        ],
+        examples: &["vade verify", "vade verify -n 3 --prompt 2k", "vade verify --url http://127.0.0.1:18080/v1"],
+        notes: &[
+            "Uses --url, then VADE_API_URL, then the selected installation's recorded endpoint. Keep the same VADE_CONFIG and VADE_HOME as up/run; explicit VADE_CONFIG selects the controller's local_port. Without a running installation, start vade launch or supply --url.",
+            "Generates a fixed token count (ignores EOS) to check every ID, with cache and thinking off. ON requests strict drafting and must actually draft; unavailable drafting fails the check.",
+            "Prints one result line; exit 0 means identical, 1 means different or incomplete. Run and token numbers start at 1.",
+        ],
+    }.render(crate::style::color(crate::style::Stream::Out))
+}
 
 struct Options {
     n: usize,
@@ -418,7 +439,7 @@ pub fn run(args: &[String]) -> i32 {
         .iter()
         .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
     {
-        crate::public_output(HELP);
+        crate::public_output(&help());
         return 0;
     }
     let options = match parse(args) {

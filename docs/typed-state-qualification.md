@@ -1,29 +1,58 @@
-# Typed hybrid state qualification
+# Typed hybrid state receipts
 
-`Session::target_state_bytes()` records the committed position, all owned FP32
-recurrent cells, packed BF16 convolution history, and visible attention K/V.
-`Session::committed_state_bytes()` appends the prompt replay tokens, in-step MTP
-cursor/last hidden row/visible K/V, retained recurrent/history checkpoints, and
-the retained MTP replay row. Snapshot presence is explicit. Geometry and byte
-extents come from the same immutable local model configuration.
+The typed hybrid path loads per-expert block-FP8 checkpoints on one Spark. To
+test it, a session can copy its saved state out as bytes, so that two runs can
+be compared byte for byte. We call such a copy a state receipt. This note says
+what each receipt holds, when it is refused and what it proves.
 
-These receipts synchronize/read device storage and allocate temporary copies.
-They are qualification tools, never request-path work. Retain large receipts on
-the native test machine. External draft models, empty MTP sessions, speculative
-MTP cursors, and incomplete replay checkpoints are refused by the complete
-receipt. Pending or invalid target owners are refused by the target receipt.
+## What the receipts hold
 
-Compare target bytes across plain/MTP execution. Compare complete bytes only
-with matching draft/replay ownership and identical arithmetic segmentation.
-Full-vocabulary logits remain a separate receipt. A scalar GDN reference is in
-`engine/tools/bench/src/gdn_reference.rs`; its host transcendental functions do
-not establish CUDA approximation parity.
+`Session::target_state_bytes()` holds the model's own state at the last
+committed token. That is the position, the FP32 recurrent state of each
+linear-attention layer, its packed BF16 convolution history and the visible
+attention keys and values. It leaves out drafting state and scratch memory.
 
-The world-2 production refusal remains in place. Host reference and state-copy
-tests do not establish physical registration, payload residency, capacity,
-native full-model exactness, or HTTP readiness.
+`Session::committed_state_bytes()` starts with the target receipt and adds the
+rest of what a later turn would reuse:
 
-The private typed loader core is also callable by internal module tests with a
-validated rank domain. Both production entry points enforce world admission
-before reaching it. Native qualification can therefore exercise the same loader
-without enabling a public world-2 serving path.
+- the prompt tokens kept for replay;
+- the drafting head's state: its cursor, its last hidden row and its visible
+  keys and values;
+- the saved recurrent and convolution checkpoints;
+- the saved hidden row the drafting head replays from.
+
+A flag byte before each optional part says whether it is present. Every size
+comes from the model's configuration.
+
+## When a receipt is refused
+
+The target receipt is refused while a prompt or draft is still pending, or
+after an error has invalidated the session. The complete receipt is also
+refused for an external draft model, for a drafting head that has not reached
+the committed position, and when the replay hidden row is missing.
+
+## How to use them
+
+Taking a receipt synchronizes the GPU, reads device memory and allocates
+temporary copies. Receipts are for tests only and never run while serving a
+request. They can be large, so keep them on the Spark that made them.
+
+Compare target receipts between a run with drafting and one without. Compare
+complete receipts only when both runs keep the same drafting and replay state
+and split their arithmetic the same way. Full-vocabulary logits need a
+separate comparison.
+
+A scalar reference for the linear-attention layers lives in
+`engine/tools/bench/src/gdn_reference.rs`. It uses the host's math functions,
+so it does not show that the GPU's approximations match.
+
+## What they do not prove
+
+The typed hybrid path runs on one Spark only. Both public load functions refuse
+any other world size. Internal tests can call the shared loader core directly
+with a checked rank range, so a test can exercise the same loader without
+opening a multi-Spark serving path.
+
+Host tests of the reference and of state copies stop short of real hardware.
+They do not prove memory registration, placement or capacity, full-model
+exactness on the GPU, or that the server is ready.

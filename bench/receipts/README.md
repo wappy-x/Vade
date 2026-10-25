@@ -14,12 +14,9 @@ prompts, replies and logs are not in this repository. Every number in those
 tables comes from these runs. Nothing here was measured separately for the
 docs, and no receipt here was rebuilt from a card summary.
 
-The older FP8 summaries have been removed from this folder:
-`night-2026-10-11.json`, `defaults-2026-10-12.json`, `install-canary.json`,
-`exact-path-abba.json`, `exact-path-gate.json`, `determinism.json` and
-`context-candidate.json`. The
+Older FP8 receipts are retired and not in this folder. The
 [historical section](../../docs/benchmarks.md#historical-fp8-measurements) of
-the benchmarks page still names some of them as retired receipts.
+the benchmarks page still quotes some of them by name.
 
 If you add a receipt to this folder, keep it small and have it reviewed.
 

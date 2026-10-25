@@ -181,9 +181,10 @@ pub fn reject_symlinks(path: &Path) -> Result<(), String> {
     for component in path.components() {
         current.push(component);
         if fs::symlink_metadata(&current).is_ok_and(|m| m.file_type().is_symlink()) {
-            return Err(
-                "A state path is a symlink. Choose a private directory without symlinks.".into(),
-            );
+            return Err(format!(
+                "{} is a symlink. Choose a private directory without symlinks (on macOS, /tmp is one).",
+                current.display()
+            ));
         }
     }
     Ok(())

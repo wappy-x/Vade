@@ -5,29 +5,34 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  merge_group:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Keep main's receipts; superseded PR and manual runs need not finish.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  RUSTFLAGS: -D warnings
+  RUSTDOCFLAGS: -D warnings
+  CARGO_TERM_COLOR: never
+  # CPU oracles parse large fixtures and emulate GPU arithmetic. Optimize the
+  # test profile while retaining the checks that distinguish it from release.
+  CARGO_PROFILE_TEST_OPT_LEVEL: '1'
+  CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: 'true'
+  CARGO_PROFILE_TEST_OVERFLOW_CHECKS: 'true'
+  # Bound CPU contention so short-lived socket fixtures can make progress.
+  RUST_TEST_THREADS: '2'
+
 jobs:
-  host:
-    name: ${{ matrix.runner }} host checks
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        # Both are standard arm64 runners. While the repository is private, macOS
-        # minutes bill at 10x and every merge already passes these checks on a
-        # Mac, so macOS runs only when started by hand.
-        runner: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["macos-15","ubuntu-24.04-arm"]' || '["ubuntu-24.04-arm"]') }}
-    defaults:
-      run:
-        shell: bash
-    env:
-      RUSTFLAGS: -D warnings
-      CARGO_TERM_COLOR: never
+  repository:
+    name: Documentation links and release bundle regression
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -36,56 +41,129 @@ jobs:
         run: python3 tools/check-doc-links.py
       - name: Bundle producer layout and publication regression
         run: python3 tools/test-bundle-producer.py
-      - name: Install pinned Rust
+      - name: Two-Spark example script regression
+        run: python3 tools/test-two-sparks.py
+
+  engine:
+    name: Engine and GPU kernel build (${{ matrix.runner }}, no GPU)
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux runs on every change; manual runs also exercise macOS.
+        runner: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["macos-15","ubuntu-24.04-arm"]' || '["ubuntu-24.04-arm"]') }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Cache engine and build-std outputs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          # Registry entries are compiler build-std inputs, not repo dependencies.
+          path: |
+            ~/.cargo/registry
+            engine/target
+            engine/crates/tp/kernels/target
+          key: ${{ runner.os }}-${{ runner.arch }}-engine-v1-${{ hashFiles('rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-engine-v1-${{ hashFiles('rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock', '.github/workflows/ci.yml') }}-
+      - name: Install pinned host and NVPTX toolchains
         run: |
           rustup toolchain install 1.99.0 --profile minimal --no-self-update
           rustup target add --toolchain 1.99.0 aarch64-unknown-linux-gnu
           rustup toolchain install nightly-2026-10-01 --profile minimal --no-self-update --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda
           cargo +1.99.0 --version
-      - name: Engine host check and tests
-        working-directory: engine
+      - name: Build and stamp GPU kernels before host checks
+        # Always run, including cache hits: regenerate PTX stamps for this source.
+        run: cargo +1.99.0 kernels
+      - name: Compile tensor-parallel GPU kernels
         run: |
-          # Compile the real kernels and every host crate, including Linux-only
-          # engine/serve/tp/seqpar code. Device tests report libtest ignore reasons.
-          cargo +1.99.0 kernels
           RUSTFLAGS='-C target-cpu=sm_121 -C overflow-checks=off' \
             cargo +nightly-2026-10-01 build --offline -Z build-std=core --release \
             --target nvptx64-nvidia-cuda --manifest-path crates/tp/kernels/Cargo.toml
-          echo 'skipped: no GPU; device-only NVPTX crates compiled; host oracles run in spark-gpu-probe'
-          if [[ "$RUNNER_OS" == Linux ]]; then
-            python3 ../tools/ci-no-gpu.py
-            export LIBRARY_PATH="$PWD/target/ci-no-gpu${LIBRARY_PATH:+:$LIBRARY_PATH}"
-            export LD_LIBRARY_PATH="$PWD/target/ci-no-gpu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          fi
-          cargo +1.99.0 check --offline --all-targets --workspace --exclude spark-rust-kernels
-          cargo +1.99.0 test --offline --all-targets --workspace --exclude spark-rust-kernels -- --nocapture
-      - name: Standalone benchmark host check and tests
-        working-directory: engine/tools/bench
-        if: ${{ !cancelled() }}
+      - name: Prepare Linux host linkage without a GPU
+        if: runner.os == 'Linux'
         run: |
-          cargo +1.99.0 check --offline --all-targets
-          cargo +1.99.0 test --offline --all-targets
-      - name: Harness check
-        working-directory: harness
-        if: ${{ !cancelled() }}
-        run: cargo +1.99.0 check --offline --all-targets
-      - name: Harness tests
-        working-directory: harness
-        if: ${{ !cancelled() }}
-        run: cargo +1.99.0 test --offline --all-targets
-      - name: CLI check
-        working-directory: cli
-        if: ${{ !cancelled() }}
-        run: cargo +1.99.0 check --offline --all-targets
-      - name: CLI tests and repository ratchet
-        working-directory: cli
-        if: ${{ !cancelled() }}
-        run: cargo +1.99.0 test --offline --all-targets -- --nocapture
-      - name: Harness aarch64 Linux check
-        working-directory: harness
-        if: ${{ !cancelled() }}
-        run: cargo +1.99.0 check --offline --all-targets --target aarch64-unknown-linux-gnu
-      - name: CLI aarch64 Linux check
-        working-directory: cli
-        if: ${{ !cancelled() }}
-        run: cargo +1.99.0 check --offline --all-targets --target aarch64-unknown-linux-gnu
+          python3 ../tools/ci-no-gpu.py
+          echo "LIBRARY_PATH=$PWD/target/ci-no-gpu${LIBRARY_PATH:+:$LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$PWD/target/ci-no-gpu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+      - name: Check every engine host crate (warnings denied)
+        run: cargo +1.99.0 check --offline --locked --all-targets --workspace --exclude spark-rust-kernels
+      - name: Engine host tests (device tests remain ignored)
+        run: cargo +1.99.0 test --offline --locked --all-targets --workspace --exclude spark-rust-kernels -- --nocapture
+      - name: Engine doctests
+        run: cargo +1.99.0 test --offline --locked --doc --workspace --exclude spark-rust-kernels
+      - name: Engine aarch64 Linux cross-check
+        if: runner.os == 'macOS'
+        run: cargo +1.99.0 check --offline --locked --all-targets --workspace --exclude spark-rust-kernels --target aarch64-unknown-linux-gnu
+      - name: Record host validation limits
+        run: |
+          echo '### Engine host checks' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Real NVPTX kernels compiled; CPU tests and oracles ran. Device-only tests remain ignored. This run does not establish GPU exactness or performance.' >> "$GITHUB_STEP_SUMMARY"
+
+  host:
+    name: ${{ matrix.component.name }} (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["macos-15","ubuntu-24.04-arm"]' || '["ubuntu-24.04-arm"]') }}
+        component:
+          - name: CLI tests and repository ratchet
+            directory: cli
+            linux-check: true
+            doctests: false
+            rustdoc: true
+          - name: Harness tests
+            directory: harness
+            linux-check: true
+            doctests: true
+            rustdoc: true
+          - name: Standalone benchmark tests
+            directory: engine/tools/bench
+            linux-check: false
+            doctests: true
+            rustdoc: false
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ matrix.component.directory }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Cache host build outputs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ matrix.component.directory }}/target
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.component.directory }}-v1-${{ hashFiles('rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock', '.github/workflows/ci.yml') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-${{ matrix.component.directory }}-v1-${{ hashFiles('rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock', '.github/workflows/ci.yml') }}-
+      - name: Install pinned host Rust
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --no-self-update
+          rustup target add --toolchain 1.99.0 aarch64-unknown-linux-gnu
+          cargo +1.99.0 --version
+      # The repository's lint is -D warnings plus the CLI ratchet. Dense Rust
+      # formatting is intentional; AGENTS.md excludes fmt and clippy gates.
+      - name: Check all targets (warnings denied)
+        run: cargo +1.99.0 check --offline --locked --all-targets
+      - name: ${{ matrix.component.name }}
+        run: cargo +1.99.0 test --offline --locked --all-targets -- --nocapture
+      - name: Doctests
+        if: matrix.component.doctests
+        run: cargo +1.99.0 test --offline --locked --doc
+      - name: Rustdoc (warnings denied)
+        # Engine/bench tensor-shape comments need escaping before rustdoc can
+        # deny warnings there; CLI and harness documentation already pass.
+        if: matrix.component.rustdoc
+        run: cargo +1.99.0 doc --offline --locked --no-deps
+      - name: aarch64 Linux cross-check
+        if: runner.os == 'macOS' && matrix.component.linux-check
+        run: cargo +1.99.0 check --offline --locked --all-targets --target aarch64-unknown-linux-gnu

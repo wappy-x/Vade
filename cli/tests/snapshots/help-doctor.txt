@@ -1,0 +1,20 @@
+$ vade doctor --help
+Check what needs attention and explain next steps: the local driver, memory,
+disk, model, installed binaries and engine health, or the controller harness and
+configured machines.
+
+Usage: vade doctor [--api-key-file PATH] [--dry-run]
+
+Options:
+  --api-key-file PATH  Bearer credential file (or VADE_API_KEY_FILE)
+  --dry-run            Show what would happen; change nothing
+
+Notes:
+  - One Spark needs no fabric or RDMA; linked Sparks use RDMA by default. Set
+    SEQPAR_RDMA=0 for TCP using the configured fabric addresses on any reachable
+    interface; QSFP and RDMA memlock are unnecessary in TCP mode.
+  - Explicit VADE_CONFIG selects the controller; otherwise generated local setup
+    wins. Keep the same VADE_CONFIG and VADE_HOME from start through chat,
+    status, logs and down.
+--- stderr
+--- exit 0

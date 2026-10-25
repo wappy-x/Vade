@@ -6,8 +6,20 @@ use crate::{
     evals::json::{self, Value},
     run,
     runner::{Exec, Output, Runner, SystemRunner},
+    style::{paint, Stream, Token},
 };
 use std::time::{Duration, Instant};
+
+/// The human state line when nothing is running, and the command that starts it.
+pub(crate) fn stopped(start: &str) -> String {
+    format!("{} Vade is stopped.\n{}", paint(Token::Dim, "○", Stream::Out), next_steps(&[("Start", start)]))
+}
+
+/// What to type next, on one indented line: `  Chat: vade chat   Stop: vade down`.
+pub(crate) fn next_steps(steps: &[(&str, &str)]) -> String {
+    let steps: Vec<String> = steps.iter().map(|(label, command)| format!("{label}: {}", paint(Token::Command, command, Stream::Out))).collect();
+    format!("  {}\n", steps.join("   "))
+}
 
 /// One `vade.status.v1` JSON report under construction: fields, checks and
 /// errors. Any failed check makes the command exit 1.

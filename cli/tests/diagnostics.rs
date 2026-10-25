@@ -11,7 +11,9 @@ impl Fixture {
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_vade"));
         command.env("VADE_HOME", self.0.join("home")).env("VADE_CONFIG", self.0.join("missing-config"))
-            .env_remove("VADE_API_KEY_FILE").env_remove("VADE_API_KEY");
+            .env_remove("VADE_API_KEY_FILE").env_remove("VADE_API_KEY")
+            // CLICOLOR_FORCE colours even captured output; safe() rejects every ESC byte.
+            .env_remove("CLICOLOR_FORCE");
         command
     }
     fn config(&self) -> PathBuf {
@@ -48,7 +50,8 @@ fn argument_errors_identify_the_problem_before_config_or_network_io() {
         for prefix in [&[][..], &["up"][..], &["run", "qwen3-8b"][..]] {
             let output = fixture.command().args(prefix).arg(hostile).output().unwrap();
             failure(&output, &["Unknown", "bad", "--help"]);
-            assert_eq!(safe(&output.stderr).lines().count(), 1);
+            // One error line and one hint line; a hostile argument adds none.
+            assert_eq!(safe(&output.stderr).lines().count(), 2);
         }
     }
     let output = fixture.command().arg("界".repeat(2000)).output().unwrap();
@@ -133,13 +136,13 @@ fn launch_preview_summarizes_requested_settings_before_any_connection() {
     source.push_str("fabric.peer = 192.0.2.1\n[machine peer]\nssh = fixture-peer-no-network\nmodel_path = /models/fixture\nfabric.spark = 192.0.2.2\n");
     fs::write(&config, source).unwrap();
     for (flags, rdma, expected) in [
-        (vec![], "1", vec!["Machines: spark\n", "Context: 32768 tokens   Output limit: 8192 tokens", "Drafting request: engine default   Concurrent chats: engine-admitted", "local (one Spark; no fabric)"]),
-        (vec!["--chats", "4"], "1", vec!["Context: 32768 tokens   Output limit: 8192 tokens", "Concurrent chats: 4"]),
-        (vec!["--context", "262144", "--output", "16384"], "1", vec!["Context: 262144 tokens   Output limit: 16384 tokens", "Concurrent chats: engine-admitted"]),
-        (vec!["--chats", "4", "--context", "8192"], "1", vec!["Context: 8192 tokens   Output limit: 8192 tokens"]),
-        (vec!["--mtp", "0", "--context", "4096", "--output", "2048"], "1", vec!["Context: 4096 tokens   Output limit: 2048 tokens", "Drafting request: MTP 0"]),
-        (vec!["--sparks", "2", "--chats", "4"], "0", vec!["Machines: spark, peer", "Transport: TCP", "Concurrent chats: 4"]),
-        (vec!["--sparks", "2"], "1", vec!["Machines: spark, peer", "Transport: RDMA"]),
+        (vec![], "1", vec!["  Machines          spark\n", "  Context           32768 tokens\n  Output limit      8192 tokens\n", "  Drafting request  engine default\n  Concurrent chats  engine-admitted\n", "local (one Spark; no fabric)"]),
+        (vec!["--chats", "4"], "1", vec!["  Context           32768 tokens\n  Output limit      8192 tokens\n", "  Concurrent chats  4\n"]),
+        (vec!["--context", "262144", "--output", "16384"], "1", vec!["  Context           262144 tokens\n  Output limit      16384 tokens\n", "  Concurrent chats  engine-admitted\n"]),
+        (vec!["--chats", "4", "--context", "8192"], "1", vec!["  Context           8192 tokens\n  Output limit      8192 tokens\n"]),
+        (vec!["--mtp", "0", "--context", "4096", "--output", "2048"], "1", vec!["  Context           4096 tokens\n  Output limit      2048 tokens\n", "  Drafting request  MTP 0\n"]),
+        (vec!["--sparks", "2", "--chats", "4"], "0", vec!["  Machines          spark, peer\n", "  Transport         TCP\n", "  Concurrent chats  4\n"]),
+        (vec!["--sparks", "2"], "1", vec!["  Machines          spark, peer\n", "  Transport         RDMA\n"]),
     ] {
         let output = f.command().args(["up", "--dry-run"]).args(flags)
             .env("VADE_CONFIG", &config).env("SEQPAR_RDMA", rdma).env_remove("MTP").output().unwrap();
@@ -147,7 +150,7 @@ fn launch_preview_summarizes_requested_settings_before_any_connection() {
         let stdout = safe(&output.stdout);
         for text in expected { assert!(stdout.contains(text), "missing {text:?} in {stdout}"); }
         assert!(stdout.find("Launch plan:").unwrap() < stdout.find("$ ").unwrap());
-        assert!(stdout.contains("Endpoint: http://localhost:18080/v1"));
+        assert!(stdout.contains("  Endpoint          http://localhost:18080/v1\n"));
         assert!(!f.0.join("state").exists() && !f.0.join("home").exists());
     }
 }

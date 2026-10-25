@@ -12,9 +12,11 @@ what those helpers need and how to check that they worked.
 ## Start on one Spark
 
 With one DGX Spark, everything runs on the Spark itself, so you don't need a
-second computer. The command is `vade launch`. It installs Vade if it is
-missing, starts the engine and opens a chat. By default it serves
-**nvidia/Qwen3.8-Flash-Next-FP4-Local**.
+second computer. The command is `vade launch`. It finds the model, saves your
+defaults, installs Vade if it is missing, starts the engine and opens a chat.
+Run it again later to reattach. By default it serves
+**nvidia/Qwen3.8-Flash-Next-FP4-Local**, and it looks for the files under
+`~/models` unless your saved config or `VADE_MODELS` points elsewhere.
 
 1. Follow [INSTALL.md](../INSTALL.md) for the prerequisites, the pinned model
    download and the install.
@@ -36,21 +38,25 @@ Once the engine is running, these commands cover the rest:
 You download the model as part of [INSTALL step 3](../INSTALL.md#step-3-get-the-model).
 This is the command on its own. Run the [fetch helper](fetch-model.sh) from the
 top folder of your copy of the repository (the checkout root), on a Linux
-machine that has Python 3 with venv:
+machine with `python3` (including venv and pip), `sha256sum`, `find` and
+`sort`:
 
 ```sh
 sh ops/fetch-model.sh nvidia/Qwen3.8-Flash-Next-FP4-Local b9ce18a6887e18c089fdea8509a33e63429a3300 "$HOME/models/nvidia/Qwen3.8-Flash-Next-FP4-Local"
 ```
 
 The long hex string is the pinned revision: one exact version of the model.
-The helper checks the download against that revision, then writes a checksum
-manifest next to the model folder. It prints nothing while it works, and a good
-run ends with `verified 33 files`.
+The helper downloads that revision and checks it with Hugging Face's own
+verifier, which fails on any missing, extra or damaged file. It then writes a
+SHA-256 hash of every file (a checksum manifest) next to the model folder, as
+`<model folder>.sha256`. It prints nothing while it works, and a good run ends
+with `verified 33 files`. If a step fails, it prints one line that says what
+went wrong and what to do next.
 
 - **Size:** the download is 102,262,310,289 bytes (95.24 GiB).
 - **Access:** Hugging Face lists this revision as public and ungated, so you
   need no token and no click-through.
-- **Licence:** NVIDIA's licence (`nvidia-open-model-agreement`) still applies.
+- **License:** NVIDIA's license (`nvidia-open-model-agreement`) still applies.
 
 After the download, compare the files with
 [qwen3.8-flash-next-fp4-local.sha256](../cli/examples/qwen3.8-flash-next-fp4-local.sha256),
@@ -82,8 +88,8 @@ keep it out of Git.
 ### More than one Spark
 
 Sparks in a group talk to each other over direct cables, called the
-[fabric](../docs/GLOSSARY.md#dg). Give each Spark its own `[machine]` section
-in the config. Then, for every cable, add a `fabric.<peer>` line on both of
+[fabric](../docs/GLOSSARY.md#dg). Give each Spark its own `[machine <name>]` section
+in the config, such as `[machine spark-a]`. Then, for every cable, add a `fabric.<peer>` line on both of
 the Sparks it joins:
 
 - `<peer>` is the name of the Spark at the other end of the cable.
@@ -103,17 +109,23 @@ you ask for it with `vade up --fp8-legacy`.
 
 ## Context size
 
-The context window is the prompt plus the reply, counted in tokens. Vade
-starts with 32768 tokens, whether you start it on the Spark or from a
-controller. The two routes differ only when memory is short:
+The [context window](../docs/GLOSSARY.md#ac) is the prompt plus the reply,
+counted in tokens. Vade starts with 32768 tokens and caps the reply at 8192
+(or the context size, if that is smaller), whether you start it on the Spark
+or from a controller. The two routes differ only when memory is short:
 
-- **On the Spark itself**, Vade steps down to 16384, then 8192, then 4096
-  tokens, and saves the first size that starts. It never lowers a
-  `--context` you set yourself.
+- **On the Spark itself**, if the engine refuses the default or saved size for
+  lack of memory, `vade launch` and `vade up` try 16384, then 8192, then 4096
+  tokens, save the first size that starts and tell you which one. A
+  `--context` you set yourself is never lowered: if the engine refuses it, you
+  get an error.
 - **From a controller**, Vade never lowers the context. If the engine refuses
-  32768, pass a smaller `--context`.
+  32768, pass a smaller `--context`. Stay at 8192 or above if you want
+  `vade chat`: from a controller it opens the coding agent, which needs at
+  least 8192 tokens.
 
-The [defaults table](../INSTALL.md#defaults-by-route) and the
+[Context size on one Spark](../INSTALL.md#context-size-on-one-spark),
+[Defaults on a controller](../INSTALL.md#defaults-on-a-controller) and the
 [settings guide](../INSTALL.md#settings-you-may-change) list the current
 values. The values in the legacy FP8 guide don't apply here.
 

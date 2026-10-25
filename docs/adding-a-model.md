@@ -1,94 +1,99 @@
 # Adding a checkpoint
 
-Read [AGENTS.md](../AGENTS.md) first. A new checkpoint is supported only after
-its metadata, tensor storage, execution, tokenizer, memory admission and serving
-behavior have been implemented and qualified. Parsing its config is not proof
-that it can run. The release scope is text-only; the vision tower is out of scope.
+Read [AGENTS.md](../AGENTS.md) first. Vade supports a new checkpoint only after
+its metadata, tensor storage, execution, tokenizer, memory admission and
+serving behavior are implemented and qualified. Parsing its config doesn't
+prove it can run. The release is text-only, so a vision tower is out of scope.
 
-Model-generic means deriving behavior from checkpoint config, safetensors
-metadata and validated template semantics. Architecture adapters may recognize
-declared `model_type` and `architectures`; do not dispatch on a repository name,
-directory name or marketing label. No model-specific tuning, copied dimensions,
-per-checkpoint kernel constants or performance exceptions. Reject unsupported
-semantics explicitly.
+Model-generic code derives its behavior from the checkpoint's config, its
+safetensors metadata and the checked template semantics. An architecture
+adapter may recognize the declared `model_type` and `architectures`. Don't
+dispatch on a repository name, a folder name or a marketing label. Don't add
+model-specific tuning, copied dimensions, per-checkpoint kernel constants or
+performance exceptions. Reject anything unsupported with a clear error.
 
-The source pointers below were verified on main at
-`ed6898b4c285250aff83be002056b7cd0fa22071`.
+The source links below were checked at commit
+`daf087d7adcd426c707a9073bfa99cd1ff4f297b`.
 
-## 1. Identify the entry path and checkpoint inventory
+## 1. Find the entry path and the file list
 
-The CLI catalog is [cli/src/catalog.rs:5](../cli/src/catalog.rs#L5): a pinned
-revision and SHA-256 inventory for the legacy official Qwen3-8B BF16 download.
-It is not a general model registry. Its command name is restricted in
-[cli/src/cli.rs:158](../cli/src/cli.rs#L158), and acquisition consumes that
-inventory in [cli/src/run.rs:6](../cli/src/run.rs#L6). Adding another downloadable
-catalog entry would also require updating command selection and acquisition;
-changing the inventory alone does not add engine support.
+The CLI catalog, [cli/src/catalog.rs:5](../cli/src/catalog.rs#L5), pins a
+revision and the SHA-256 of every file for the legacy Qwen3-8B BF16 download.
+It is not a general model registry. The command name is restricted in
+[cli/src/cli.rs:161](../cli/src/cli.rs#L161) (only `vade run qwen3-8b` is accepted), and the download reads the
+catalog in [cli/src/run.rs:7](../cli/src/run.rs#L7). Adding another catalog
+entry means updating command selection and download as well. Changing the
+file list alone doesn't add engine support.
 
-The Flash-Next launcher discovers an existing local checkpoint instead. It
-checks config, index and shard paths in
-[cli/src/launch/model.rs:235](../cli/src/launch/model.rs#L235), uses the engine's
-config parser and quantization-sidecar detector at
-[cli/src/launch/model.rs:332](../cli/src/launch/model.rs#L332), and checks
-generation/tokenizer metadata at
-[cli/src/launch/model.rs:365](../cli/src/launch/model.rs#L365). For the controller
-route, the checkpoint location and identity belong in the deployment config;
-see [the FP4-Local example](../cli/examples/fp4-local.conf). Record the official
-revision, licence and trusted file hashes. Keep weights and credentials outside
-the source tree; never commit them.
+The Flash-Next launcher doesn't download; it finds a checkpoint already on
+disk. It checks the config, index and shard files in
+[cli/src/launch/model.rs:251](../cli/src/launch/model.rs#L251). It runs the
+engine's config parser and quantization-sidecar check at
+[cli/src/launch/model.rs:346](../cli/src/launch/model.rs#L346), and checks the
+generation and tokenizer metadata at
+[cli/src/launch/model.rs:379](../cli/src/launch/model.rs#L379). From a
+controller, the checkpoint's location and identity go in the deployment config;
+see [the FP4-Local example](../cli/examples/fp4-local.conf). Record the
+publisher's revision, the license and file hashes you trust. Keep weights and
+credentials outside the source tree, and never commit them.
 
-## 2. Implement only missing metadata semantics
+## 2. Add only the metadata support that is missing
 
 [engine/crates/model/src/plan/mod.rs:57](../engine/crates/model/src/plan/mod.rs#L57)
-reads bounded `config.json`, `model.safetensors.index.json` and shard headers,
-then reconciles the tensor inventory without loading payloads. The typed plan
-supports explicit architecture adapters, not arbitrary Transformers configs.
+reads `config.json`, `model.safetensors.index.json` and the shard headers,
+with size limits. It then checks the tensor list without loading any weights.
+The typed plan supports a fixed set of architecture adapters, not any
+Transformers config.
 
-For a missing typed-plan family or storage format, inspect
+For a family or storage format the typed plan doesn't know yet, start with
 [plan/config.rs:115](../engine/crates/model/src/plan/config.rs#L115) for config
-dispatch and geometry, [plan/tensors.rs:187](../engine/crates/model/src/plan/tensors.rs#L187)
-for names, shapes, dtypes and tied-head reconciliation, and
-[plan/runtime.rs:33](../engine/crates/model/src/plan/runtime.rs#L33) for executable
-projection constraints. The existing ordinary-attention path has separate
-adapters in [cartridge.rs:32](../engine/crates/model/src/cartridge.rs#L32) and
-[qwen3.rs:42](../engine/crates/model/src/qwen3.rs#L42); do not assume every family
-passes through `ModelPlan`.
+dispatch and geometry,
+[plan/tensors.rs:187](../engine/crates/model/src/plan/tensors.rs#L187) for
+names, shapes, dtypes and tied heads, and
+[plan/runtime.rs:33](../engine/crates/model/src/plan/runtime.rs#L33) for the
+projection limits execution needs. The older ordinary-attention path has its
+own adapters in [cartridge.rs:31](../engine/crates/model/src/cartridge.rs#L31)
+and [qwen3.rs:42](../engine/crates/model/src/qwen3.rs#L42). Not every family
+goes through `ModelPlan`.
 
 ## 3. Bind execution and account for memory
 
-Use [SplitRequest:12](../engine/crates/model/src/split/mod.rs#L12) and
-[SplitPlan::new:71](../engine/crates/model/src/split/mod.rs#L71) for topology,
-tensor ownership, workspace reserves, cache/state and drafting budgets.
-Update [plan/profile.rs:8](../engine/crates/model/src/plan/profile.rs#L8) when a
-new operation changes the profile accounting.
+Use [SplitRequest](../engine/crates/model/src/split/mod.rs#L12) and
+[SplitPlan::new](../engine/crates/model/src/split/mod.rs#L71) for the number of
+Sparks, tensor ownership, workspace reserves, cache and state, and drafting
+budgets. Update [plan/profile.rs:8](../engine/crates/model/src/plan/profile.rs#L8)
+when a new operation changes the profile accounting.
 
-For the typed hybrid path, execution starts at
+On the typed hybrid path, execution starts at
 [engine/crates/engine/src/hybrid/forward.rs:15](../engine/crates/engine/src/hybrid/forward.rs#L15).
-For Flash-Next, [engine/crates/tp/src/flash/settings.rs:120](../engine/crates/tp/src/flash/settings.rs#L120)
-selects `NextModel` from mixed storage; the FP4-Local flag asserts that contract.
-Extend the applicable loader and serving capability checks together. A new
-catalog label must never bypass a rejected shape, format or topology.
+For Flash-Next, [engine/crates/tp/src/flash/settings.rs:124](../engine/crates/tp/src/flash/settings.rs#L124)
+selects `NextModel` when the checkpoint has mixed storage, and the
+`--fp4-local` flag refuses a checkpoint without it. Extend the loader and the
+serving checks together. A new catalog label must never let through a shape,
+format or topology that is otherwise refused.
 
-## 4. Verify text and serving behavior
+## 4. Check text handling and serving
 
-Inspect [engine/crates/tokenizer/src/chat.rs:9](../engine/crates/tokenizer/src/chat.rs#L9)
-and [template validation at line 175](../engine/crates/tokenizer/src/chat.rs#L175).
-Supported template semantics come from template data; unknown templates fail
-closed. Add a template/adapter only with its licence and prompt/token-ID tests,
-including tools, thinking controls and stopping behavior. Check generation
-defaults and request handling in
-[engine/crates/serve/src/protocol.rs:189](../engine/crates/serve/src/protocol.rs#L189):
-The mixed FP4-Local / `next_model` route uses greedy decoding when sampling
-fields are absent ([flash-serve.rs:261](../engine/crates/tp/src/bin/flash-serve.rs#L261));
-the retained FP8 route ([cli/src/launch/model.rs:340](../cli/src/launch/model.rs#L340))
-selects `next_model = false` ([settings.rs:131](../engine/crates/tp/src/flash/settings.rs#L131))
-and applies checkpoint generation sampling defaults instead. Naming a sampling
-field changes how checkpoint defaults are applied.
+Read [engine/crates/tokenizer/src/chat.rs:9](../engine/crates/tokenizer/src/chat.rs#L9)
+and the [template check at line 175](../engine/crates/tokenizer/src/chat.rs#L175).
+What a template supports comes from the template itself, and an unknown
+template is refused. Add a template or adapter only with its license and with
+tests of prompts and token IDs, covering tools, thinking controls and
+stopping.
 
-## 5. Qualify before advertising support
+Check generation defaults and request handling in
+[engine/crates/serve/src/protocol.rs:190](../engine/crates/serve/src/protocol.rs#L190).
+The FP4-Local route (`next_model`) decodes greedily when a request names no
+sampling field ([flash-serve.rs:261](../engine/crates/tp/src/bin/flash-serve.rs#L261)).
+The retained FP8 route ([cli/src/launch/model.rs:340](../cli/src/launch/model.rs#L340))
+sets `next_model` to false ([settings.rs:134](../engine/crates/tp/src/flash/settings.rs#L134))
+and uses the checkpoint's own sampling defaults instead. On either route,
+naming even one sampling field changes how the checkpoint defaults apply.
 
-From `engine/`, build kernels first as described in [AGENTS.md](../AGENTS.md),
-then run these host tests and the full local-validation block there:
+## 5. Qualify it before you call it supported
+
+From `engine/`, build the kernels first as [AGENTS.md](../AGENTS.md) describes.
+Then run these host tests, followed by the full local validation block there:
 
 ```sh
 cargo +1.99.0 test --offline -p engine-model --lib plan::tests
@@ -96,17 +101,17 @@ cargo +1.99.0 test --offline -p engine-model --lib split::tests
 cargo +1.99.0 test --offline -p engine-tokenizer --lib
 ```
 
-Host tests cover metadata, shape rules, layouts, budgets and rejection paths.
-Checkpoint/device tests require a Spark and separately supplied weights; a Mac
-host pass does not qualify inference. Establish identical token IDs across
-runs and Sparks with the same setup, including alone/batched/cached/chunked
-requests and drafting ON/OFF. Compare numerical quality against the official
-checkpoint separately from repeatability within Vade. Qualify each advertised
-topology and precision rather than generalizing a result from another path.
+Host tests cover metadata, shape rules, layouts, budgets and refusals.
+Checkpoint and device tests need a Spark and the weights, so a pass on a Mac
+doesn't qualify inference. Show identical token IDs across runs and Sparks
+with the same setup: alone, batched, cached and chunked, with drafting ON and
+OFF. Compare quality against the publisher's checkpoint as a separate step
+from repeatability inside Vade. Qualify every topology and precision you
+advertise; a result on one path doesn't carry over to another.
 
 See [validation](../engine/docs/validation.md),
-[CLI gate limitations](../cli/docs/test.md) and
-[benchmark methodology](benchmarks.md). Record source/artifact identities,
-checkpoint hashes, complete request settings and raw receipts. The existing
-Flash `flash-bench` determinism recipe is not evidence that a new FP4-Local
+[the limits of the CLI gate](../cli/docs/test.md) and
+[how we benchmark](benchmarks.md). Record the source and build identities,
+checkpoint hashes, complete request settings and raw receipts. The older
+`flash-bench` determinism recipe is not evidence that a new FP4-Local
 checkpoint has passed its gate.

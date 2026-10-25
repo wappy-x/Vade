@@ -28,7 +28,7 @@ python3 ../tools/check-doc-links.py
 - [ ] **Exactness kept:** the same request on the same setup still returns the
   same token IDs, alone, batched, cached, chunked, and with drafting on or off.
   For engine changes I attached the receipts that show it. For host-only or
-  docs changes, write "not applicable" here.
+  docs changes, tick it and say "host-only" under Tests.
 
 The Rust is formatted densely on purpose. Please match the code around your
 change by hand and don't include a `cargo fmt` sweep.

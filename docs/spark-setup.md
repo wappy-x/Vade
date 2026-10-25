@@ -5,8 +5,8 @@
 > link numbers to expect, in plain words. This page is the full command
 > reference.
 
-This page is the system setup you do on every Spark before
-[INSTALL.md](../INSTALL.md). You will:
+If you link Sparks, do this system setup on every Spark before
+[INSTALL.md](../INSTALL.md). One Spark on its own needs none of it. You will:
 
 - cable the Sparks
 - give each half of every QSFP link its own network
@@ -26,9 +26,9 @@ interfaces, so it does not overwrite that fabric.
 > Sparks without changing them, together with NVIDIA's documentation and checks
 > of the scripts themselves. Nothing was changed, rebooted or bandwidth-tested
 > while writing it. A network that already works shows what you are aiming
-> for, but it does not prove these commands will rebuild it. The one earlier
-> Vade test install (the canary) left its OS settings as they were, and its
-> out-of-date record has been [removed](../bench/receipts/README.md).
+> for, but it does not prove these commands will rebuild it. Our one earlier
+> test install of Vade kept the OS settings it found, and its out-of-date
+> record has been [removed](../bench/receipts/README.md).
 
 ## Before you start
 
@@ -169,7 +169,7 @@ trust in it:
 | `peer_ipv4` | The directly cabled peer's address on the same rail |
 | `peer_alias` | A unique local name for that peer rail |
 | `ipv4_rocev2_gid` | The local GID index matching that interface and IPv4 address |
-| `test_tcp_port` | A free high TCP port, matching the peer's row for this rail |
+| `test_tcp_port` | A free TCP port from 1024 to 65535, matching the peer's row for this rail |
 
 A few rules for the rows:
 
@@ -599,8 +599,10 @@ Then:
 - Management SSH between Sparks in a ring that are not cabled to each other
   needs its own trusted names and keys.
 
-INSTALL.md asks for the sending machine's local private-key path for SSH, SCP
-and rsync. On a Spark prepared here, give it this `SSH_KEY_FILE` path. On a
+INSTALL.md's SSH config names the sending machine's private key with an
+`IdentityFile` line (see
+[Check SSH from the controller](../INSTALL.md#check-ssh-from-the-controller)).
+On a Spark prepared here, use this `SSH_KEY_FILE` path. On a
 different source machine, use that machine's own authorized key. A peer check
 with this custom key does not make OpenSSH pick it automatically anywhere
 else.
@@ -737,10 +739,11 @@ this network ready. After a maintenance reboot, repeat the prerequisite and
 rail checks to show that the setup persists.
 
 **We have not yet run any of these traffic or reboot checks on real Sparks.**
-So far this guide has only been checked on a Mac. Earlier notes recorded about
-196 Gb/s with both halves running at the same time on one cable at MTU 9000.
-This quick smoke test runs one rail at a time, so do not expect that older
-combined figure here. See
+So far this guide has only been checked on a Mac.
+[Hardware and network setup](network-setup.md) records about 196 Gb/s per
+cable and about 100–109 Gb/s one way for one rail alone. This smoke test runs
+one rail at a time and only checks for a positive rate, so do not hold it to
+the per-cable figure. See
 [upstream perftest usage](https://github.com/linux-rdma/perftest/blob/master/README).
 
 ### If a check fails
@@ -750,15 +753,18 @@ combined figure here. See
 - **The provider opens but registration fails.** Check the actual account's
   group membership and memlock, then the [kernel note](#5-check-the-kernel-before-registering-memory).
 - **A local firewall is on.** Review its rules for this isolated fabric. Allow
-  ICMP, node SSH, the selected test TCP ports, RoCE-v2 UDP 4791 and Vade's TCP
-  29960/29961 between directly cabled peers on both rails. Do not turn off the
+  ICMP, node SSH, the selected test TCP ports, RoCE-v2 UDP 4791 and Vade's two
+  TCP transport ports (the `tp_port` setting, 29960 by default, and
+  `tp_port + 1`) between directly cabled peers on both rails. Do not turn off the
   management firewall globally. Firewall changes are manual and not yet
   tested.
 
 ### Next: install Vade
 
-Once the checks pass, follow [INSTALL.md](../INSTALL.md) for compilers,
-weights, builds, the two-rank launch and the first HTTP answer.
+Once the checks pass, follow [INSTALL.md](../INSTALL.md) for the tools, the
+code and the model, then
+[Two and more Sparks](../INSTALL.md#two-and-more-sparks) for the multi-Spark
+launch.
 
 Passing these OS checks on a ring does not make it a tested Vade setup. The
 one documented Vade test install used two neighboring Sparks on a direct
@@ -766,9 +772,8 @@ cable.
 
 ## 9. Finish benchmarking and restore updates
 
-After the [installation and timing benchmark](../INSTALL.md#6-run-the-timing-benchmark),
-run `vade down` and `vade status` on the Mac with the same private
-`VADE_CONFIG`. Use `nvidia-smi` in your existing Spark sessions to confirm
+When you have finished with Vade and any benchmark runs, run `vade down` and
+then `vade status` on the controller, with the same private `VADE_CONFIG`. Use `nvidia-smi` in your existing Spark sessions to confirm
 that both owned ranks have exited and both GPUs are empty. If cleanup is
 incomplete, keep the ownership records and follow
 [CLI recovery](../cli/README.md#recovery). Finish any other reserved benchmark
@@ -897,6 +902,6 @@ These all remain **untested on hardware**:
 - update pause and restore
 - reboot persistence
 
-Confirm the cabling after a reinstall. Then use the per-node verification
-receipts (saved check results) and the Vade install canary to confirm the
-restored setup.
+Confirm the cabling after a reinstall. Then run the verification step again
+on every Spark, keep its saved results, and do a test install of Vade to
+confirm the restored setup.

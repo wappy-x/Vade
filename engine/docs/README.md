@@ -29,8 +29,10 @@ it covers and who it is for, and ends with where to go next.
 
 **What was measured, against which engines, and how to repeat it.**
 
-- [Benchmarks](benchmarks.md). Vade against SGLang, vLLM and TensorRT-LLM on
-  the same Spark: every table, setting and byte, and how to reproduce them.
+- [Benchmarks](benchmarks.md). Older measurements of Vade against SGLang,
+  vLLM and TensorRT-LLM on the same Spark, on earlier models, with each
+  table's settings and how to reproduce it. There is no matched comparison
+  for the v0.1.0 model yet.
 - [Validation](validation.md). The determinism checks and the measured
   agreement with the official model, with every disagreement.
 

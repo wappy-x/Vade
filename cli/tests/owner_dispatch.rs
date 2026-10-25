@@ -294,13 +294,23 @@ fn alternate_starts_require_a_consistent_installation_selector() {
         assert!(!String::from_utf8_lossy(&rejected.stdout).contains("Launch plan:"));
 
     }
-    for args in [["up", "--context", "65536"], ["launch", "--output", "16384"]] {
-        let text = stdout(f.command(false).args(args).bounded_output().unwrap());
-        assert!(text.contains("Local defaults:"), "{text}");
+    // The preview reports the limits the real start keeps: saved unless a flag overrides them.
+    for (args, limits) in [
+        (vec!["up"], "context 8192 (saved; lowered only on engine refusal), output 4096 (saved)."),
+        (vec!["up", "--context", "65536"], "context 65536 (explicit), output 4096 (saved)."),
+        (vec!["launch", "--output", "16384"], "context 8192 (saved; lowered only on engine refusal), output 16384 (explicit)."),
+    ] {
+        let text = stdout(f.command(false).args(&args).bounded_output().unwrap());
+        assert!(text.contains(&format!("Limits: {limits}")), "{args:?}: {text}");
     }
+    let fresh = Fixture::new(true);
+    fs::remove_file(fresh.base.join("xdg/vade/config")).unwrap();
+    let text = stdout(fresh.command(false).arg("up").bounded_output().unwrap());
+    assert!(text.contains("(default; lowered only on engine refusal)"), "{text}");
+    fresh.no_runtime_writes();
     let rejected = f.command(true).arg("launch").bounded_output().unwrap();
     assert_eq!(rejected.status.code(), Some(1), "{rejected:?}");
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("unset VADE_CONFIG"));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("hint: Use vade up, or unset VADE_CONFIG"));
     f.no_runtime_writes();
 }
 
@@ -324,7 +334,7 @@ fn legacy_generated_config_rejects_controller_start_without_explicit_selection()
         .bounded_output()
         .unwrap();
     assert_eq!(rejected.status.code(), Some(1), "{rejected:?}");
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("unset VADE_CONFIG"));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("hint: Unset VADE_CONFIG"));
     let start = stdout(
         f.command(false)
             .args(["run", "qwen3-8b"])
@@ -363,7 +373,8 @@ fn explicit_controller_selection_wins_for_every_lifecycle_command() {
     assert!(start.contains("fixture-no-network"), "{start}");
     let chat = f.command(true).arg("chat").bounded_output().unwrap();
     assert_eq!(chat.status.code(), Some(1), "{chat:?}");
-    assert!(String::from_utf8_lossy(&chat.stderr).contains("Vade is stopped. Run vade up"));
+    let error = String::from_utf8_lossy(&chat.stderr);
+    assert!(error.contains("error: Vade is stopped.\n hint: Run vade up"), "{error}");
     for command in ["status", "logs", "down"] {
         let text = stdout(f.command(true).arg(command).bounded_output().unwrap());
         assert!(

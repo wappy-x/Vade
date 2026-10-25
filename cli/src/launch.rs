@@ -9,6 +9,7 @@ use crate::{
     cli::{Command, UpOptions},
     detect, output,
     runner::{Exec, Runner},
+    style::{self, Stream, Token},
     text::{self, Fields},
 };
 use std::{
@@ -196,15 +197,21 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                     "Detect this Spark and model; save defaults; install locally; start on loopback; open chat"
                 }
             };
-            output::line(format_args!(
-                "{action}. Local config: {}",
-                self.root.join("config").display()
-            ))?;
+            output::line(format_args!("{action}.\nLocal config: {}", self.root.join("config").display()))?;
             if let Command::Up(options) | Command::Launch(options) = &command {
-                output::line(format_args!("Local defaults: context {}, output {} (lowered only on engine refusal); explicit context: {:?}, output: {:?}.",
-                    crate::cli::FP4_CONTEXT, crate::cli::fp4_output(crate::cli::FP4_CONTEXT),
-                    options.supplied_options.contains("--context").then_some(options.context),
-                    options.output_explicit.then_some(options.output)))?;
+                // A start keeps the saved limits unless a flag overrides them.
+                let saved = Config::load(&self.root)?;
+                let planned = saved.as_ref().map(|config| config.planned(options));
+                let context = if options.supplied_options.contains("--context") { format!("{} (explicit)", options.context) }
+                    else if let Some(config) = &planned { format!("{} (saved; lowered only on engine refusal)", config.context) }
+                    else { format!("{} (default; lowered only on engine refusal)", options.context) };
+                let output = if options.output_explicit { format!("{} (explicit)", options.output) }
+                    else if let (Some(config), Some(saved)) = (&planned, &saved) {
+                        if config.output < saved.output { format!("{} (saved {}, capped at context)", config.output, saved.output) }
+                        else { format!("{} (saved)", config.output) }
+                    }
+                    else { format!("{} (default)", options.output) };
+                output::line(format_args!("Limits: context {context}, output {output}."))?;
             }
             return Ok(());
         }
@@ -302,8 +309,8 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                 };
                 if matches!(command, Command::Launch(_)) {
                     output::line(format_args!(
-                        "Launch ready in {:.3} s.",
-                        began.elapsed().as_secs_f64()
+                        "Launch ready in {}.",
+                        elapsed(began.elapsed())
                     ))?;
                     let record = record.as_ref().ok_or("Launch did not produce an engine record.")?;
                     if self.runner.terminal() {
@@ -377,14 +384,10 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                 match (Config::load(&self.root)?, self.record()?) {
                     (Some(config), Some(record)) => {
                         self.ready(&config, &record)?;
-                        output::line(format_args!(
-                            "Vade is ready at {}. Chat: {}",
-                            config.endpoint(),
-                            text::command("chat")
-                        ))
+                        output::text(format_args!("{}", self.status_table(&config, &record)?))
                     }
                     (None, Some(_)) => Err("An owned engine has no saved config; preserve the state folder and run vade down.".into()),
-                    (_, None) => output::line(format_args!("Vade is stopped. Start: {}", text::command("launch"))),
+                    (_, None) => output::text(format_args!("{}", status::stopped())),
                 }
             }
             _ => Err("Use vade install, vade launch or vade chat.".into()),
@@ -595,8 +598,8 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                     );
                 }
                 if Instant::now() >= next_progress {
-                    output::line(format_args!(
-                        "Up: still loading ({} s elapsed).",
+                    progress("Up", Token::Dim, format_args!(
+                        "still loading ({} s elapsed)",
                         600 - deadline.saturating_duration_since(Instant::now()).as_secs()
                     ))?;
                     next_progress = Instant::now() + Duration::from_secs(15);
@@ -826,15 +829,15 @@ impl Drop for Phase {
             // Failure reporting must not overwrite the operation's exit
             // classification if stdout happens to close while unwinding.
             output::stderr_line(format_args!(
-                "{}: stopped after {:.3} s.",
-                self.name,
-                self.started.elapsed().as_secs_f64()
+                "{} stopped after {}",
+                style::paint(Token::Warn, &format!("{:>8}", self.name), Stream::Err),
+                elapsed(self.started.elapsed())
             ));
         }
     }
 }
 fn phase(name: &str, action: &str) -> Result<Phase, String> {
-    output::line(format_args!("{name}: {action}."))?;
+    progress(name, Token::Title, format_args!("{action}"))?;
     Ok(Phase {
         name: name.into(),
         started: Instant::now(),
@@ -843,10 +846,15 @@ fn phase(name: &str, action: &str) -> Result<Phase, String> {
 }
 fn done(name: &str, mut phase: Phase) -> Result<(), String> {
     phase.finished = true;
-    output::line(format_args!(
-        "{name}: done in {:.3} s.",
-        phase.started.elapsed().as_secs_f64()
-    ))
+    progress(name, Token::Ok, format_args!("done in {}", elapsed(phase.started.elapsed())))
+}
+/// The step name right-aligned in one column, then what it is doing.
+pub(crate) fn progress(name: &str, token: Token, text: std::fmt::Arguments<'_>) -> Result<(), String> {
+    output::line(format_args!("{} {text}", style::paint(token, &format!("{name:>8}"), Stream::Out)))
+}
+/// A step duration: milliseconds below a second, else tenths of a second.
+fn elapsed(duration: Duration) -> String {
+    if duration < Duration::from_secs(1) { format!("{} ms", duration.as_millis()) } else { format!("{:.1} s", duration.as_secs_f64()) }
 }
 fn required<'a>(fields: &'a Fields, key: &str) -> Result<&'a str, String> {
     fields

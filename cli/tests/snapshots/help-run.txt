@@ -1,0 +1,30 @@
+$ vade run --help
+Run the separate official Qwen3-8B BF16 catalog locally on one Linux/aarch64
+NVIDIA GB10: detect prerequisites before downloading, resume and hash official
+pinned weights, start an owned server, answer, run doctor.
+
+Usage: vade run qwen3-8b [OPTIONS]
+
+Options:
+  --port N              Local server port, 1024..65535 (default 8080)
+  --weights-source DIR  Verify an existing official BF16 directory read-only,
+                        without weight downloads
+  --release DIR         Run a release folder
+  --engine-source DIR   Engine source checkout (with --harness-source, instead
+                        of --release)
+  --harness-source DIR  Harness source checkout
+  --api-key-file PATH   Bearer credential file (or VADE_API_KEY_FILE)
+  --dry-run             Show what would happen; change nothing
+
+Examples:
+  vade run qwen3-8b
+  vade run qwen3-8b --dry-run
+
+Notes:
+  - Other --weights-source directory names are imported as Qwen3-8B inside
+    VADE_HOME.
+  - VADE_HOME selects a dedicated private data directory. Unset VADE_CONFIG; use
+    a fresh VADE_HOME if local launch already has defaults. Keep the same
+    selection for chat, status, logs and down. No system tool installation.
+--- stderr
+--- exit 0

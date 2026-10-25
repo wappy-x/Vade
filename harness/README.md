@@ -21,10 +21,9 @@ It gives you:
 - a hand-off of each turn to **Codex** (through its app-server) or to a
   **Hermes** agent (over ACP v1), if you have one installed.
 
-We keep the native harness small on purpose. We only change it to add automatic
-limits, to make its requests [greedy](../docs/GLOSSARY.md#dg) and
-cache-friendly, or to fix bugs. Earlier experiments with web access, PDF and
-image-to-text, and a launcher with model discovery were taken out.
+We keep the native harness small on purpose. Changes to it add automatic
+limits, make its requests [greedy](../docs/GLOSSARY.md#dg) and cache-friendly,
+or fix bugs.
 
 Already have a coding client you like? You can keep it and put Vade's gateway in
 front of the engine instead; way 2 below shows how.
@@ -48,15 +47,17 @@ cargo run --offline -- --help
 export PATH="$PWD/target/debug:$PATH"
 ```
 
-With no mode argument you get the **demo**. It gives a clearly labelled scripted
+With no mode argument you get the **demo**. It gives a clearly labeled scripted
 response and makes no network requests.
 
 Talking to a model needs a running engine (next section). Direct mode needs both
 an endpoint and a model, and native agent mode also needs an explicit workspace.
-The commands below use a mock server you provide separately. Choose one:
-`direct` and `agent` open a client for that server; `gateway` starts a listener
-that forwards incoming requests to it. Stop the client or gateway with Ctrl+C
-before choosing another:
+The commands below expect an OpenAI-compatible server that is already listening
+on `127.0.0.1:18080` and serves a model named `mock`. This page does not set
+one up, so bring your own, or start the engine first and put its model ID in
+place of `mock`. Choose one: `direct` and `agent` open a client for that server;
+`gateway` starts a listener on `127.0.0.1:8787` that forwards incoming requests
+to it. Stop the client or gateway with Ctrl+C before choosing another:
 
 ```sh
 vade-harness direct --endpoint http://127.0.0.1:18080/v1/chat/completions --model mock
@@ -173,7 +174,7 @@ live files, which can change between pages. Copy `next_offset` for more
 matches, or narrow the path when the scan reports omitted input.
 
 A line read returns up to 200 lines (an inclusive range) from a file of up to
-4 MiB, labelled with its path and range, and at most 4 KiB of text. Because
+4 MiB, labeled with its path and range, and at most 4 KiB of text. Because
 each excerpt is capped at 4 KiB, searching first and reading targeted ranges
 works better than paging through a file from the top.
 
@@ -252,7 +253,7 @@ There are three approval policies:
 
 **Answering a prompt.** Under `ask`, type `y` or `n` on an empty line (or
 `/approve` / `/deny`) in the terminal. The patch preview shows additions and
-removals in colour.
+removals in color.
 
 - A `y`/`n` typed while there is a draft in the editor, during `/paste`, or
   within 400 ms of the prompt appearing is kept as text.
@@ -725,7 +726,7 @@ From turn 2 on, each role reports:
 - admissions, overloads and errors;
 - for each turn, C, the cached prompt tokens the server reports, and U, our
   estimate of how much of the prompt it shares with the previous turn, each
-  labelled with how it was counted.
+  labeled with how it was counted.
 
 U is always marked **estimated**. A healthy run reports C close to U from turn
 2 on: the workload guide's target is that C covers at
@@ -931,7 +932,7 @@ optional **vade.engine.v1** contract (the Vade engine's capability and admission
 interface). When exact admission is advertised, the worker checks the complete
 final request and output reservation before every generation, tool rounds
 included. Without the contract, requests use ordinary chat behavior and clearly
-labelled estimates.
+labeled estimates.
 
 The harness sends its generated session cache key only when the engine
 advertises the scheduling-hint feature. Routing a conversation back to the same
@@ -1231,7 +1232,7 @@ use 0600 and owned directories use 0700, and redirects are refused.
 
 `/context` shows how much of the context each message, the tools and the
 options take. It also shows the real request size in bytes, and the last exact
-count from the engine when it offers one. Local figures are labelled estimates,
+count from the engine when it offers one. Local figures are labeled estimates,
 not a tokenizer. `--context-tokens N` overrides the context size. Without it,
 the engine's advertised limit is used (for example 262,144), or 131,072 when the
 engine advertises none.
@@ -1256,7 +1257,7 @@ rules and branches](docs/context-and-projects.md).
 
 ### Tool output, project rules and skills
 
-**Large tool results.** Tool results larger than 4 KiB become labelled
+**Large tool results.** Tool results larger than 4 KiB become labeled
 excerpts, backed by the exact captured output in the private session journal.
 
 - `tool_output_read` fetches UTF-8 byte ranges, at most 4,096 source bytes in a
@@ -1319,9 +1320,10 @@ cache. If caching is advertised, missing or zero cached tokens on the second
 turn fail the cache check. Malformed telemetry and other probe failures still
 fail.
 
-As a client of its own (way 2 and way 4), installed Codex 0.164.0 completed a
-file-edit and `cargo test` task over Responses against FP4-Local, both directly and through `vade-gateway`
-(2026-10-24).
+For your own client (ways 2 and 4), the [examples page](../examples/README.md)
+keeps recorded runs of Claude Code 2.1.310 and Codex 0.164.0 against FP4-Local
+on one Spark, driven from a Mac through an SSH tunnel (recorded 2026-10-25).
+That page lists the exact checkpoint, commit and engine settings behind them.
 
 Older measurements and their limits are in the [gateway measurement
 records](docs/gateway-measurements.md). Host fixtures (tests that run on your

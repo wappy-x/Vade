@@ -57,11 +57,11 @@ fn inspect(root: &Path) -> Result<Installed, String> {
 pub(super) fn ensure<R: Runner>(root: &Path, runner: &mut R) -> Result<Fields, String> {
     match inspect(root)? {
         Installed::Ready(installed) => {
-            crate::output::line(format_args!("Install: using the saved local artifacts."))?;
+            super::progress("Install", crate::style::Token::Dim, format_args!("using the saved local artifacts"))?;
             return Ok(installed);
         }
-        Installed::Changed(name) => crate::output::line(format_args!(
-            "Install: staged {name} is missing or changed since it was installed; replacing the staged files."))?,
+        Installed::Changed(name) => super::progress("Install", crate::style::Token::Warn, format_args!(
+            "staged {name} is missing or changed since it was installed; replacing the staged files"))?,
         Installed::Missing => (),
     }
     refresh(root, runner)
@@ -73,11 +73,11 @@ pub(super) fn refresh<R: Runner>(root: &Path, runner: &mut R) -> Result<Fields, 
     let stage = root.join("stage");
     text::private_dir(&stage)?;
     if let Some(bundle) = bundle {
-        crate::output::line(format_args!("Install: checking the supplied local bundle."))?;
+        super::progress("Install", crate::style::Token::Dim, format_args!("checking the supplied local bundle"))?;
         return publish(root, &bundle, Some(bundle_fields(&bundle)?));
     }
     let source = source_path()?;
-    crate::output::line(format_args!("Install: building the local engine and chat program."))?;
+    super::progress("Install", crate::style::Token::Dim, format_args!("building the local engine and chat program"))?;
     let snapshot = snapshot(&source, &stage, runner)?;
     let target = stage.join("build-target");
     text::private_dir(&target)?;

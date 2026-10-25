@@ -7,12 +7,12 @@ and the [Glossary](GLOSSARY.md) has them all.
 
 > **In 30 seconds**
 >
-> - **Two Sparks and one cable** is the tuned, measured setup.
+> - **Two Sparks and one cable** is the simplest linked setup. We have published measurements on two and four of our own Sparks.
 > - Use a **200 Gb/s QSFP cable**, straight from one Spark to the other. No switch needed.
 > - Give each cable **two small private subnets** (one per rail) and **MTU 9000**.
 > - Check it: a jumbo ping, then an RDMA test. Expect **about 196 Gb/s per cable**.
 > - Vade finds the RDMA devices by itself from the addresses you give it.
-> - **No QSFP link?** Vade can run over ordinary Ethernet in [TCP mode](../INSTALL.md#two-and-more-sparks) (`SEQPAR_RDMA=0`). Expect it to be slower; we have not measured it yet.
+> - **No RDMA?** Vade can run in [TCP mode](../INSTALL.md#rdma-or-tcp) (`SEQPAR_RDMA=0`). Our cloud GB10 cards used TCP over 200G links; we have not measured TCP over ordinary Ethernet.
 
 <br>
 
@@ -36,13 +36,14 @@ and the [Glossary](GLOSSARY.md) has them all.
 
 | Item | How many | Notes |
 | --- | --- | --- |
-| **NVIDIA DGX Spark** | 2 | GB10 chip, 128 GB memory shared by CPU and GPU. The FP8 install uses a pair; check that the checkpoint fits before you set up. |
+| **NVIDIA DGX Spark** | 2 or more | GB10 chip, 128 GB memory shared by CPU and GPU. FP4-Local fits on one Spark; more Sparks read long prompts faster. The legacy FP8 checkpoint needs a pair. |
 | **QSFP cable, 200 Gb/s** | 1 per link | Direct-attach copper (DAC), QSFP56 200G or QSFP112. Short runs (about 1 m or less) are typical for passive copper. Check NVIDIA's [Spark clustering page](https://docs.nvidia.com/dgx/dgx-spark/spark-clustering.html) for its current cable list. |
 | **Ordinary network** | 1 | The Sparks' normal Ethernet or Wi-Fi, for SSH and downloads. Keep it separate from the QSFP links. |
-| **A Mac** | 1 | Runs the `vade` command, the SSH tunnel and the coding assistant. We tested with a Mac as the controller, the machine that drives the Sparks. |
+| **A controller** (optional) | 0 or 1 | A Linux or macOS computer that runs the `vade` command, the SSH tunnel and the coding assistant, and drives the Sparks. A Spark can also act as its own controller. |
 | **Switch** (optional) | 0 | Not needed for any layout on this page. See [with a switch](#with-a-switch). |
 
-**Cable speed matters.** A 100 Gb/s cable links at half speed. Our links report
+**Cable speed matters.** A 100 Gb/s cable links at half speed. Vade ignores any
+interface slower than 100 Gb/s when it looks for fabric links. Our links report
 `200000Mb/s` over 4 lanes; check yours with `ethtool` (see [step 7](#7-check-every-link)).
 
 <br>
@@ -104,9 +105,10 @@ it is a **chain**.
 
 A chain does not need the cable that would close it into a ring. Before you
 choose more than two Sparks, run `vade install` from current source, so the
-staged copy supports the chain. Our startup checks cannot prove that an
-untested cabling layout gives the same tokens on every Spark. The
-steps are in [INSTALL.md, Two and more Sparks](../INSTALL.md#two-and-more-sparks).
+copy staged on each Spark supports the chain. Vade's startup checks cannot
+prove that a cabling layout we have not tested gives the same tokens on every
+Spark, so test yours before you rely on it. The steps are in
+[INSTALL.md, Two and more Sparks](../INSTALL.md#two-and-more-sparks).
 
 ### Legacy FP8
 
@@ -252,9 +254,9 @@ Never commit your real addresses; keep the config in an ignored `.local/` folder
 ## 6. Prepare the OS
 
 The repository ships **OS-setup shell scripts** in
-[ops/scripts/spark-setup/](../ops/scripts/spark-setup/). They are the only
-non-Rust code in Vade. **Every script only previews by default**; add `--apply`
-after you read the preview.
+[ops/scripts/spark-setup/](../ops/scripts/spark-setup/). They are plain shell
+scripts, separate from the Rust build. **Every script only previews by
+default**; add `--apply` after you read the preview.
 
 | Step | Script | What it does |
 | --- | --- | --- |
@@ -358,10 +360,13 @@ bash ops/scripts/spark-setup/verify.sh "$CFG" --bw-server 1 --apply
 bash ops/scripts/spark-setup/verify.sh "$CFG" --bw-client 1 --apply
 ```
 
-Under the hood it runs `perftest`'s `ib_write_bw` for 5 seconds. The raw
-equivalent, for rail 0 of cable 1 (rail 1 uses its own device, address and `-p 18516`).
-Run the server and client commands on their respective Sparks. Enter the
-numeric IPv4 RoCE v2 GID index found on each Spark in step 3 of
+Under the hood it runs `perftest`'s `ib_write_bw` for 5 seconds (`-D 5`),
+with a 25-second timeout. If you would rather run it by hand, here is the same
+test for rail 0 of cable 1. Rail 1 uses its own device and address, and port
+`18516` instead of `18515` (the defaults `init-config.sh` writes into
+`links.tsv`). Run the server command on spark-1 and the client command on
+spark-2. At each prompt, type that Spark's numeric IPv4 RoCE v2 GID index,
+which you recorded in step 3 of
 [spark-setup.md](spark-setup.md#record-each-rails-real-gid):
 
 ```sh
@@ -388,11 +393,15 @@ timeout 25s ib_write_bw -d rocep1s0f1 -i 1 -x "$GID_INDEX" -p 18515 --bind_sourc
 
 **Right after `vade up`, check Vade itself.** `vade logs` shows the last 64 KiB
 of each rank's log. On FP4-Local with more than one Spark, each rank prints a
-`flashnext pp stage` line with its rank, the number of ranks and the block of
-layers it runs.
+line such as
+`flashnext pp stage rank=<r> world=<n> layers=<first>..<end> upstream=<bool> downstream=<bool>`:
+its rank, the number of ranks (`world`), the block of layers it runs, and
+whether it receives from a previous Spark (`upstream`) and sends to a next one
+(`downstream`).
 
-On legacy FP8, each rank prints a line such as
+On legacy FP8, each rank prints a line that starts like
 `flash_serve transport rank=0 world=2 rdma=true`, and a `seqpar_links` line.
+`rdma=false` means that rank is on TCP.
 On two Sparks, `rails=2` means Vade is using both halves of the cable;
 `rails=1` means it found only one. On 4 or 6 Sparks it reads
 `rails_right=2 rails_left=2`; the first rank shows `rails_left=1` and the last
@@ -439,10 +448,10 @@ ICMP, SSH, **RoCE v2 (UDP 4791)** and **Vade's TCP ports 29960 and 29961**
 | `ib_write_bw` cannot open the device or register memory | Not in the RDMA group, or memlock limited | Run the `rdma` setup step, then **log out and back in**. Check `ulimit -l`. |
 | Bandwidth about half of 196 Gb/s per cable | Only one rail configured or used | Give rail 1 its own subnet at both ends. On legacy FP8, check `vade logs` for `rails=2`. |
 | Bandwidth about 185, not 196 Gb/s | MTU 1500 | Set MTU 9000. |
-| `vade up`: "RDMA launch needs unlimited soft and hard memlock in this SSH session" | The SSH alias Vade uses does not get unlimited locked memory (some routes, such as Tailscale SSH, skip login limits) | Point the config's `ssh =` at an OpenSSH alias over the LAN that prints `unlimited` for `ulimit -Sl` and `ulimit -Hl`. |
+| `vade up`: "RDMA launch needs unlimited soft and hard memlock in this SSH session" | The SSH alias Vade uses does not get unlimited locked memory (some routes, such as Tailscale SSH, skip login limits) | Point the config's `ssh =` at an OpenSSH alias over the LAN that prints `unlimited` for `ulimit -Sl` and `ulimit -Hl`. Or use TCP mode (`export SEQPAR_RDMA=0` on the controller). |
 | Engine log: "RDMA socket has no QSFP interface" or "no IPv4 RoCE-v2 GID on neighbour interface" | `fabric.<peer>` is not an address on a 100 Gb/s-or-faster ConnectX-7 interface, or that interface has no RoCE v2 GID yet (link down) | Use the Spark's own fabric address on that cable. Check carrier. |
-| Engine log: "RDMA required but unavailable on one or more ranks" | RDMA mode (the default) and one rank could not open RDMA | Check memlock, RDMA group membership and `ibdev2netdev` on that rank. Without a QSFP link, use TCP mode (`export SEQPAR_RDMA=0` on the Mac). |
-| `vade install` or `vade doctor`: "… needs … for RDMA. Have the administrator prepare RDMA, or set SEQPAR_RDMA=0 …" | The RDMA library, an RDMA device or unlimited memlock is missing on that Spark | Run the OS-setup `packages` and `rdma` steps, then log in again. Or use TCP mode. |
+| Engine log: "RDMA required but unavailable on one or more ranks" | RDMA mode (the default) and one rank could not open RDMA | Check memlock, RDMA group membership and `ibdev2netdev` on that rank. Without a QSFP link, use TCP mode (`export SEQPAR_RDMA=0` on the controller). |
+| `vade install` or `vade doctor`: "… needs … for RDMA. Have the administrator prepare RDMA, or set SEQPAR_RDMA=0 for TCP over the existing network, then rerun this command." | The RDMA library, an RDMA device or unlimited memlock is missing on that Spark | Run the OS-setup `packages` and `rdma` steps, then log in again. Or use TCP mode. |
 | `vade install` or `vade doctor`: fabric check fails | `fabric.<peer>` values swapped or wrong, or ICMP blocked | Each value is the machine's **own** address on its link to that peer. The check uses ping, so allow ICMP between neighbors. |
 | RoCE errors or hangs across Sparks on kernel `7.0.0-1019-nvidia` | Known kernel regression | Add `kho=off` (setup step 6) or move to NVIDIA's fixed kernel. |
 | `rx_err_lane_*_phy` counters keep rising | Marginal cable or connector | Small corrected-error counts are normal. If they climb, reseat or replace the cable. |

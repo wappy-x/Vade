@@ -114,6 +114,9 @@ with rentals), switch to **TCP mode** on the Mac before `vade install`,
 export SEQPAR_RDMA=0
 ```
 
+`0` means TCP and `1` means RDMA is required; any other value is refused.
+Unset it to go back to the RDMA default.
+
 | | RDMA (default) | TCP mode (`SEQPAR_RDMA=0`) |
 | --- | --- | --- |
 | Link | QSFP cable or RoCE switch | Any network the two Sparks share |
@@ -139,7 +142,7 @@ passes. In short:
 
 1. Cable port 0 of spark-1 to port 1 of spark-2.
 2. Give each cable link (a [rail](GLOSSARY.md#pr)) its own `/24` subnet with MTU 9000 (example: `10.77.0.1` ↔ `10.77.0.2`, `10.77.1.1` ↔ `10.77.1.2`).
-3. Clone Vade on **each Spark** and run the OS-setup scripts from the repository root, in the order given in [Spark system setup](spark-setup.md). Together they install the RDMA packages, configure the network, set unlimited locked memory (`memlock`) for RDMA, apply NVIDIA's `kho=off` fix if your kernel is `7.0.0-1019-nvidia`, and create SSH keys between the Sparks.
+3. Clone Vade on **each Spark** (`git clone --branch main https://github.com/wappy-x/vade.git ~/vade`, then `cd ~/vade`) and run the OS-setup scripts from that repository root, in the order given in [Spark system setup](spark-setup.md). Together they install the RDMA packages, configure the network, set unlimited locked memory (`memlock`) for RDMA, apply NVIDIA's `kho=off` fix if your kernel is `7.0.0-1019-nvidia`, and create SSH keys between the Sparks.
 4. Check: jumbo ping, `ib_write_bw` in both directions, `ulimit -l` = `unlimited`.
 
 **Using [TCP mode](#no-qsfp-link-use-tcp-mode)?** Skip the QSFP, RDMA and memlock
@@ -305,11 +308,11 @@ K=~/.ssh/vade-cluster
 ssh -i $K 10.77.0.2 'mkdir -p models/Qwen'
 rsync -a --info=progress2 --exclude '/.cache/huggingface/' -e "ssh -i $K" \
   ~/models/Qwen/Qwen3.8-Flash-Next-FP8/ 10.77.0.2:models/Qwen/Qwen3.8-Flash-Next-FP8/
-scp -i $K ~/models/Qwen/Qwen3.8-Flash-Next-FP8.sha256 10.77.0.2:models/
+scp -i $K ~/models/Qwen/Qwen3.8-Flash-Next-FP8.sha256 10.77.0.2:models/Qwen/
 
 # on spark-2
 cd ~/models/Qwen/Qwen3.8-Flash-Next-FP8
-sha256sum -c ~/models/Qwen3.8-Flash-Next-FP8.sha256   # every file must report OK
+sha256sum -c ../Qwen3.8-Flash-Next-FP8.sha256   # every file must report OK
 ```
 
 <br>
@@ -418,8 +421,8 @@ Installed build <sha>. Models were already present.
 Harness: available. Engine check needs vade up, then vade doctor.
 ```
 
-`<sha>` is the full 40-character Git revision that was built. The second line
-is normal: nothing is running yet. For this legacy setup, start the server
+`<sha>` is the full 40-character Git revision of the engine source that was
+built. The second line is normal: nothing is running yet. For this legacy setup, start the server
 with `vade up --fp8-legacy`, shown below.
 
 Install refuses a checkout with uncommitted changes or untracked files. Your
@@ -483,8 +486,9 @@ curl -s http://localhost:18080/v1/models
 ```
 
 Health shows `"status":"ready"` and `"model":"qwen3.8-flash-next-fp8"`.
-Wait for `"hash_state":"ready"` (Vade finishes hashing the checkpoint in the
-background) before you time anything.
+Vade hashes the checkpoint in the background after it starts. In the same
+health response, `vade.checkpoint.hash_state` reads `"pending"` until that
+finishes and `"ready"` after; wait for `"ready"` before you time anything.
 
 **A first answer:**
 

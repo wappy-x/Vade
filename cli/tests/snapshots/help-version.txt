@@ -1,0 +1,9 @@
+$ vade version --help
+Print the CLI package version without loading configuration or opening
+connections.
+
+Usage: vade --version
+       vade version
+       vade -V
+--- stderr
+--- exit 0

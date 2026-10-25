@@ -1,57 +1,82 @@
 # Launch the FP4-Local model
 
-Start with [INSTALL.md](../../INSTALL.md), the current installation entry.
+This page covers starting `nvidia/Qwen3.8-Flash-Next-FP4-Local` from a
+controller, on one Spark or on a chain of up to 24. Start with
+[INSTALL.md](../../INSTALL.md); on the Spark itself, without a controller, use
+the [first-run guide](../../harness/docs/first-run.md) instead.
 
-With a controller config selected through `VADE_CONFIG`, use `vade up`
-(`--fp4-local` is optional) for `nvidia/Qwen3.8-Flash-Next-FP4-Local` on one
-Spark, or `vade up --fp4-local --sparks N` for a 2–24 Spark layer pipeline.
-On any Spark count and with or without `--chats`, this profile defaults to
-the `vade launch` preset: context 32,768 and output limit `min(context, 8,192)`.
-The engine admits concurrent chats from context and memory; `vade status`
-prints the admitted count. An explicit `--context` always wins, through the
-engine ceiling 262,144 (`--context 262144` is the single-chat long-context
-preset), and explicit `--output` reaches 16,384. A request past the configured context
-is refused, and that refusal names `--context`. Direct `flash-serve` with
-CONTEXT omitted still defaults to 32,768; `vade up` always passes context.
-It omits
-`--mtp` so the installed engine selects its current default. An explicit
-`--mtp 0..3` or controller `MTP` value is preserved; the command option wins.
-The engine's sampling, arithmetic and cache-retention defaults are unchanged.
+## Defaults
 
-1. Build the CLI on the controller with
+With a controller config selected through `VADE_CONFIG`, `vade up` starts
+FP4-Local on one Spark (`--fp4-local` is optional). `vade up --sparks N` runs
+it as a layer pipeline across 2 to 24 Sparks: each Spark holds a slice of the
+model's layers and passes its result to the next one. Any other count is
+refused with "FP4-Local supports 1..24 Sparks. Choose --sparks 1..24 or list
+that many distinct --hosts."
+
+- **Context and output.** However many Sparks you use, and with or without
+  `--chats`, the defaults match `vade launch`: a context of 32,768 tokens and
+  output of `min(context, 8192)`. The engine decides how many chats run at
+  once from the context and its memory, and `vade status` prints that count.
+- **Your own limits.** A `--context` you pass always wins, up to the engine's
+  ceiling of 262,144 (`--context 262144` is the single-chat long-context
+  preset). `--output` takes 1,024 to 16,384. A request longer than the context is
+  refused, and the error names `--context`. `flash-serve` started by hand
+  without a context also defaults to 32,768; `vade up` always passes one.
+- **Drafting.** `vade up` leaves out `--mtp`, so the installed engine picks
+  its own default. If you pass `--mtp 0..3` (0 turns server drafting off) or set `MTP` in the controller's
+  shell, Vade keeps it, and the flag wins over the variable.
+- **Everything else.** Sampling, arithmetic and cache defaults are the
+  engine's own; `vade up` doesn't change them.
+
+## Steps
+
+1. Build the CLI on the controller:
    `cargo build --release --offline --manifest-path cli/Cargo.toml`.
-2. Copy [fp4-local.conf](../examples/fp4-local.conf) to a new file and replace
-   its placeholders. Set `VADE_CONFIG` to that file's absolute path. Use the
-   same verified checkpoint and absolute remote checkpoint/staging paths on
-   each selected Spark. See [INSTALL.md model acquisition](../../INSTALL.md#3-fetch-and-verify-the-qualified-checkpoint).
-3. For a TCP-only chain, run `export SEQPAR_RDMA=0` in the controller shell
-   **before installation** and keep it set for `install`, `up` and `doctor`.
-   A chain prepared for RDMA leaves it unset.
-   Preview `vade install --dry-run`, then run `vade install` to stage the
-   binaries. The command needs existing Rust, SSH and GPU prerequisites and
-   verified model files; it does not provision the OS or download weights.
-4. Preview `vade up --fp4-local --dry-run`, then run `vade up --fp4-local`.
-   A single Spark needs no fabric links or RDMA memlock. For 2–24 Sparks,
-   configure both addresses of every adjacent link and select `--sparks N`,
-   or list the cable order with `--hosts a,b,c,d`. No closing cable is needed.
-   The exported transport setting applies to every pipeline rank.
-5. Use `vade status`, `vade chat`, and `vade down`. Update/restart and saved
-   ownership records preserve the FP4-Local profile and explicit overrides.
+2. Copy [fp4-local.conf](../examples/fp4-local.conf) to a new file, replace
+   its placeholders, and set `VADE_CONFIG` to that file's absolute path. Every
+   Spark you use needs the same verified checkpoint, at the same absolute
+   checkpoint and staging paths. See
+   [getting the model](../../INSTALL.md#step-3-get-the-model).
+3. Linked Sparks use RDMA by default. For TCP instead, run
+   `export SEQPAR_RDMA=0` in the controller's shell **before you install**, and
+   keep it set for `install`, `up` and `doctor`. `SEQPAR_RDMA=1` makes RDMA
+   required; leave it unset to keep the RDMA default. Any other value is
+   refused.
+4. Run `vade install --dry-run` to preview, then `vade install` to stage the
+   programs. It needs Rust, SSH and the GPU already working and the model
+   files already verified; it doesn't set up the OS or download weights.
+5. Run `vade up --dry-run`, then `vade up`. One Spark needs no fabric links or
+   RDMA locked-memory limit. For 2 to 24 Sparks, give both addresses of every
+   cable between neighbors, then pass `--sparks N` or list the cable order
+   with `--hosts a,b,c,d`. The chain doesn't need a cable that closes it into
+   a ring. The transport you chose in step 3 applies to every Spark.
+6. Use `vade status`, `vade chat` and `vade down`. Updates and restarts keep
+   the FP4-Local profile and any limits you set.
 
-The legacy FP8 profile requires `vade up --fp8-legacy` and its own FP8
-controller config; bare `vade up` selects FP4-Local. For the local launcher
-without a controller, see [first run](../../harness/docs/first-run.md); its
-local defaults and supported options differ from the controller settings above.
-Larger counts explicitly select the layer chain. Installation records support
-from the engine source used for the staged build; older manifests retain
-one/two-Spark support and refuse larger counts before any remote command.
-Run `vade install` from current source to stage a chain-capable engine. This launcher
-never silently substitutes the legacy rank path or adds a tensor map.
+## Chains of more than two Sparks
 
-Host proofs cover command construction and ownership round-trip for 1–24 ranks,
-explicit budgets, default MTP omission, TCP/RDMA selection on every rank,
-cleanup after partial startup, and old-build refusal before network I/O.
-The one-Spark path additionally passed live startup, direct/gateway token-ID
-comparisons, stream cancellation and owned shutdown with verified existing
-weights. Larger chains require their own live GPU exactness qualification.
-These host checks do not qualify two-Spark TCP or a fresh download/install.
+More than two Sparks always run as a layer chain. When `vade install` stages
+the engine, it records whether that engine supports chains. A build staged by
+an older install supports one or two Sparks only, and `vade up` refuses a
+larger count before it contacts any machine; run `vade install` from current
+source to fix that. Vade never falls back to the older tensor-map rank path
+on its own.
+
+The legacy FP8 profile needs `vade up --fp8-legacy` and its own FP8 config;
+a bare `vade up` always means FP4-Local.
+
+## What has been tested
+
+- **Host tests** (no Spark) cover the commands Vade builds and the records it
+  keeps for 1 to 24 Sparks, limits you set, leaving out `--mtp` by default,
+  TCP or RDMA on every Spark, cleanup after a start that fails partway, and
+  refusing an old build before any network call.
+- **On one Spark**, live runs also covered startup, matching token IDs
+  directly and through the gateway, cancelling a stream, and shutdown, with
+  existing verified weights.
+- **Larger chains** ran in the published
+  [four-VM benchmark cards](../../bench/receipts/2026-10-24/README.md), but
+  each new layout still needs its own exactness check on real hardware.
+  Neither the host tests nor these runs cover two Sparks over TCP or a fresh
+  download and install.

@@ -51,7 +51,7 @@ maker's precision.**
 <dt>Official models only</dt>
 <dd>No community edits or community quantizations.</dd>
 <dt>Checkpoint precision</dt>
-<dd>Weights stay in the maker's format, never re-quantized.</dd>
+<dd>Answers are computed from the maker's weights as stored; only the drafter's proposal-only copies are lower precision (<a href="../../docs/architecture.md#fp4-local-and-its-number-formats">details</a>).</dd>
 </dl>
 
 - Anything that can change an answer is opt-in.

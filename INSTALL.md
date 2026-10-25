@@ -16,15 +16,13 @@ route:
 New terms are explained where they first appear, and the
 [glossary](docs/GLOSSARY.md) has the rest.
 
-Repository: <https://github.com/wappy-x/vade>.
-
 ## Before you start
 
 You need a DGX Spark (NVIDIA GB10) running Linux `aarch64`. `nvidia-smi` must
 work, and the GPU must be idle.
 
 We tested on the **580.x driver series**. Our published benchmarks used it, and
-so did the install replay (our timed run-through of this page), which ran
+so did the install replay (our scripted run-through of this page), which ran
 **580.178.04**. That is the version we tested, not a minimum.
 
 One Spark needs no fabric cable (the direct high-speed cable between Sparks)
@@ -66,7 +64,7 @@ toolchain and its downloads.
 | Windows as controller | Not supported | The CLI does not build for Windows. Use Route A over SSH, or WSL 2 (untested). |
 
 Chat includes a coding agent that can read, search and edit files in your
-workspace. On Linux, and so in every Route A session, it cannot run shell
+workspace. On Linux, which includes every Route A session, it cannot run shell
 commands or its automatic workspace checks, because those need the macOS
 sandbox. Reading, searching, line edits and patches still work.
 [Chat and the coding agent on Linux](#chat-and-the-coding-agent-on-linux) has
@@ -84,7 +82,7 @@ There are two ways to get the Vade programs:
 The Rust steps below are only for source builds. Bundle users can skip them.
 
 <a id="1-prepare-the-sparks"></a>
-On the Spark, ask its administrator to install any missing Ubuntu prerequisites:
+On the Spark, install any missing Ubuntu packages (this needs `sudo`):
 
 ```sh
 sudo apt-get update && sudo apt-get install -y build-essential git curl rsync python3 python3-venv zstd
@@ -100,27 +98,30 @@ nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader
 command -v cc git ssh rsync curl python3 sha256sum find sort nvidia-smi
 ```
 
-You should see `aarch64`, GB10 and no running compute application. If
-something else is using the GPU, stop it through its own launcher first. Do not
-change drivers or system configuration through Vade.
+You should see `aarch64`, GB10 and no running compute application. Each of
+the 10 names in the `command -v` line must print a path; nothing printed means
+that tool is missing. Install any missing one with `apt-get` (`ssh` is in
+`openssh-client`). If
+something else is using the GPU, stop it through its own launcher first. Leave
+driver and system changes to the Spark's administrator; Vade does not make
+them.
 
 <a id="2-install-the-pinned-rust-compilers"></a>
 ### Install Rust (source builds only)
 
 The engine is written in Rust and has no third-party Rust dependencies.
 
-Check for `~/.cargo/bin/rustup` first. The installer below doesn't touch your
-shell startup files, so a new shell may not find `rustup` even when it is
-installed. If that file does not exist, download the installer and
+If `~/.cargo/bin/rustup` already exists, skip to the toolchains below. (It may
+be installed even when a new shell can't find it, because the installer below
+leaves your shell startup files alone.) Otherwise, download the installer and
 read it before you run it:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf -o /tmp/vade-rustup-init.sh https://sh.rustup.rs
-head -n 40 /tmp/vade-rustup-init.sh
+less /tmp/vade-rustup-init.sh
 ```
 
-That shows the start of the script. Open the whole file in any viewer if you
-want to read it all. Then install without touching your shell startup files:
+Then install it without touching your shell startup files:
 
 ```sh
 sh /tmp/vade-rustup-init.sh -y --default-toolchain none --no-modify-path
@@ -148,12 +149,16 @@ administrator; see [network setup](docs/network-setup.md).
 ## Step 2: get the code
 
 <a id="3-clone-and-build"></a>
-On the Spark, clone the release repository and stay at its root in this shell:
+On the Spark, clone the repository into your home folder and stay at its root
+in this shell. Later steps assume the checkout is `~/vade`:
 
 ```sh
-git clone --branch main https://github.com/wappy-x/vade.git
-cd vade
+cd ~ && git clone --branch main https://github.com/wappy-x/vade.git && cd ~/vade
 ```
+
+This gives you the latest `main`: v0.1.0 plus the changes listed under
+Unreleased in the [changelog](CHANGELOG.md). For the v0.1.0 release exactly,
+clone with `--branch v0.1.0` instead.
 
 The repository is public, so cloning needs no account or token. Do not put
 credentials in the clone URL. We recommend cloning, but a downloaded source
@@ -167,6 +172,7 @@ online and after installing the pinned toolchains above. Bundle users skip this
 build:
 
 ```sh
+export PATH="$HOME/.cargo/bin:$PATH"
 (cd engine && CARGO_NET_OFFLINE=false cargo +1.99.0 kernels)
 ```
 
@@ -188,7 +194,9 @@ building from source, as above, is the alternative.
 
 Download them into a new, empty folder of their own, outside the checkout. The
 command below uses `~/vade-launch`. The checksum file gives you the exact
-bundle filename, which includes the revision:
+bundle filename, which includes the revision. If a failed try left
+`~/vade-launch`, run `rm -r ~/vade-launch` before you retry, because the
+`mkdir` below stops the block when the folder already exists:
 
 ```sh
 mkdir "$HOME/vade-launch" &&
@@ -234,25 +242,29 @@ still apply.
 
 ### Download
 
-From the checkout root on the Spark, run this one-line fetch exactly as
-written. If the complete checkpoint is already at that path, skip the fetch and
-go straight to the manifest check below.
+The download prints nothing until it finishes, and that can take hours (see
+[download rates on rented VMs](docs/benchmarks.md#rented-cloud-gb10-vms)). Over
+SSH, a dropped connection stops it, so run it under `nohup` as below (or inside
+`tmux`, if you have it); its output goes to `~/vade-fetch.log`. If the
+complete checkpoint is already at that path, skip the fetch and go straight to
+the manifest check below.
+
+From the checkout root on the Spark, run this fetch exactly as written:
 
 ```sh
-sh ops/fetch-model.sh nvidia/Qwen3.8-Flash-Next-FP4-Local b9ce18a6887e18c089fdea8509a33e63429a3300 "$HOME/models/nvidia/Qwen3.8-Flash-Next-FP4-Local"
+nohup sh ops/fetch-model.sh nvidia/Qwen3.8-Flash-Next-FP4-Local b9ce18a6887e18c089fdea8509a33e63429a3300 "$HOME/models/nvidia/Qwen3.8-Flash-Next-FP4-Local" > ~/vade-fetch.log 2>&1 &
 ```
 
-The helper sets up a private download environment and checks the snapshot
-against the pinned publisher revision. It then writes a `.sha256` manifest next
-to the model folder.
+To follow it, even from a new SSH login, run `tail -f ~/vade-fetch.log`
+(`Ctrl-C` stops only `tail`). The helper sets up a private download
+environment and checks the snapshot against the pinned publisher revision. It
+then writes a `.sha256` manifest next to the model folder.
 
-It prints nothing until it finishes, and that can take hours (see
-[download rates on rented VMs](docs/benchmarks.md#rented-cloud-gb10-vms)). Over
-SSH, run it inside `tmux` or under `nohup`. A good run ends with
-`verified 33 files`. If it is interrupted, it prints
+A good run ends with `verified 33 files`. If it is interrupted, it prints
 `Interrupted; run the same command again.`, and that is what you do.
 
-Its download cache and Python environment take extra disk space. A complete
+We have not measured the space its download cache and Python environment
+take; leave headroom beyond the 102.26 GB checkpoint. A complete
 snapshot has the byte total given above; copying only the tensor shards is not
 enough. Vade's `install`, `up` and `launch` do not download these weights.
 
@@ -267,8 +279,9 @@ MODEL_SHA256_LIST="$PWD/cli/examples/qwen3.8-flash-next-fp4-local.sha256"
 ```
 
 Every file must pass. On macOS, use `shasum -a 256 -c` instead. Keep the
-checkpoint folder name `Qwen3.8-Flash-Next-FP4-Local`, because Vade uses it as
-the served model ID.
+checkpoint folder name `Qwen3.8-Flash-Next-FP4-Local`: the engine serves the
+model under that name in lowercase, `qwen3.8-flash-next-fp4-local`, and refuses
+requests that name any other model.
 
 A Route B Spark has no checkout. Download the same manifest from the v0.1.0
 release tag instead, then run the same check:
@@ -284,7 +297,9 @@ curl -fsSL https://raw.githubusercontent.com/wappy-x/vade/v0.1.0/cli/examples/qw
 <a id="one-spark-directly-on-the-spark"></a>
 If you use the release bundle, skip the block below and follow
 [Launch from the bundle](#launch-from-the-bundle) instead. Otherwise, once the
-steps above are done, run this from the checkout root in the same shell:
+steps above are done, run this from the checkout root in the same shell.
+`unset VADE_CONFIG` makes sure no controller config is used; on the Spark,
+Vade keeps its settings in `~/.vade/config`.
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -300,11 +315,25 @@ vade launch
 2. It builds the engine and chat program.
 3. It waits until the engine is ready, then opens chat.
 
-Run from a script, where standard input is not a terminal, it skips chat: it
-prints the ready line and the chat command, then exits. The engine keeps running.
+The first launch builds everything before it is ready, which can look like a
+hang. We have not timed it. When the engine is ready, it prints
+`Launch ready in ...`, followed by how long the launch took. Run from a script,
+where standard input is not a terminal, it skips chat: after that ready line it
+prints `Standard input is not a terminal, so chat was not opened. Chat: vade chat`
+and exits.
 
-Ask it to say hello, then type `/exit` to get back to your shell. The engine
-keeps running. Next, run these in order:
+Chat opens in the checkout, and the agent can edit files there, so ask it only
+to say hello. Then type `/exit` to get back to your shell. The engine keeps
+running.
+
+`cargo` and `vade` are on your `PATH` only in the shell that ran the block
+above. In every new shell, such as a new SSH login, run this line first:
+
+```sh
+export PATH="$HOME/.cargo/bin:$HOME/vade/cli/target/release:$PATH"
+```
+
+Next, run these in order:
 
 ```sh
 vade status
@@ -318,6 +347,7 @@ as a controller, first change to another folder, such as your home folder:
 and Route B's `vade install` refuses a clone with untracked files.
 
 ```sh
+cd ~
 vade verify
 vade down
 vade status
@@ -365,9 +395,10 @@ address, such as `http://127.0.0.1:18080`, and the API lives under its `/v1`.
 Bare `vade verify` reads the running engine's port from
 `~/.vade/state/run.conf`, a record that exists only while the engine runs.
 
-Chat requests think by default, and the reasoning counts against the same
-`max_tokens` as the answer. To get the answer alone, send
-`"enable_thinking": false` (or `"reasoning_effort": "none"`).
+An API chat request makes the model think unless it says otherwise, and the
+reasoning counts against the same `max_tokens` as the answer. To get the
+answer alone, send `"enable_thinking": false` (or `"reasoning_effort": "none"`).
+`vade chat`, `vade verify` and `vade bench` already turn thinking off.
 
 ### Where Vade keeps its files
 
@@ -420,20 +451,14 @@ contexts get direct text chat.
 As [noted above](#supported-systems), the agent's shell tool
 (`workspace_shell`) and `--check` command execution need the macOS sandbox. On
 Linux they are unavailable, and the launcher turns off automatic workspace
-checks. Chat and the agent's other tools still work, so reads and approved
-patches apply.
+checks. Chat and the agent's other tools still work, so reading files and
+applying approved patches work as usual.
 
 On Linux the agent is not offered the shell tool at all. Its instructions say
 it cannot build, test or run anything here, so after an edit it re-reads the
 changed lines and tells you which build or test command to run yourself.
 `/status` in chat shows `no command tool here`, and `--child-shell` is refused
 with `--child-shell needs the macOS sandbox`.
-
-A session saved by an earlier version still offers the tool, and resuming it
-keeps that. If the model calls it there, the chat shows a `● Run: ...` line,
-the call returns `unsupported_platform` with the message
-`workspace_shell is unavailable on this platform: command execution requires the macOS sandbox`,
-and the model tells you it could not run the command.
 
 Leaving chat keeps the engine running until `vade down`.
 
@@ -580,7 +605,7 @@ Several Sparks can work together in two ways:
 
 | Use | When | Start it with |
 | --- | --- | --- |
-| A chain: one engine spread across the Sparks | The model is too big for one Spark | `vade up --sparks N` or `--hosts` |
+| A chain: one engine spread across the Sparks | You want long prompts read faster, or the model is too big for one Spark | `vade up --sparks N` or `--hosts` |
 | [Replicas](#replicas): a separate copy on each Spark | The model fits on one Spark and you want many chats | `vade up --replicas N` |
 
 Both use Route B. The setup below is for the chain; replicas need less of it.
@@ -665,11 +690,9 @@ There are two ways to choose the Sparks. Use one or the other, not both:
 
 Two Sparks run the default two-stage layer pipeline, with a range of the
 model's layers on each. With three or more Sparks, Vade uses the layer chain,
-which spreads the layers across all the Sparks you chose. If the build on your
-Sparks was staged by an older `vade install`, run `vade install` again before
-your first chain start; otherwise Vade refuses to start more than two Sparks.
+which spreads the layers across all the Sparks you chose.
 
-List both end addresses for every cable between neighbouring Sparks. You don't
+List both end addresses for every cable between neighboring Sparks. You don't
 need a cable that closes the chain into a ring.
 
 One caution: if nobody has tested your cabling layout, the checks Vade runs
@@ -679,7 +702,9 @@ Spark).
 ### RDMA or TCP
 
 Linked Sparks use RDMA by default. That needs the RDMA (verbs) device and its
-user library already set up, and a high enough locked-memory (memlock) limit.
+user library already set up, and a locked-memory (memlock) limit of
+`unlimited`, both soft and hard (`ulimit -Sl` and `ulimit -Hl`), in the SSH
+session Vade uses.
 For TCP instead, set this **before install** and keep it set for `up` and
 `doctor`:
 
@@ -860,13 +885,13 @@ checkpoint, settings and raw output with it so others can reproduce it.
 ## First-run problems
 
 The messages below are excerpts from the CLI and the engine. Whatever you see,
-keep the ownership records and run `vade logs` and `vade doctor` before you
-retry.
+leave the files under `~/.vade/state` in place (they tell `vade down` what to
+stop), and run `vade logs` and `vade doctor` before you retry.
 
 | Message | What to do |
 | --- | --- |
 | `engine source has local changes. Commit or preserve them before install/update` | A controller's `vade install` stages only committed source, and an untracked file counts as a local change. The same check covers `harness` and `CLI` source. Nothing was overwritten. Use a clean clone for the controller; `git status` shows what is untracked. |
-| `The engine refused --context N for memory` | `vade launch` or `vade up` on the Spark prints this when the engine refuses a `--context` you set yourself; the engine's own memory message follows. Choose a smaller `--context`, or leave it out next time: Vade then steps down through the standard sizes below it (32768, 16384, 8192, 4096) until the engine accepts one. Run `vade doctor` to inspect memory. A context you set yourself is never lowered silently. |
+| `The engine refused --context N for memory` | `vade launch` or `vade up` on the Spark prints this when the engine refuses a `--context` you set yourself; the engine's own memory message follows. Choose a smaller `--context`, or leave it out next time: Vade then tries the standard sizes (32768, 16384, 8192, 4096) in turn until the engine accepts one. Run `vade doctor` to inspect memory. A context you set yourself is never lowered silently. |
 | `Requested size does not fit.` / `Not enough memory` | The message gives the memory the system reports as available (MemAvailable), how much the engine needs, and the most it may use: MemAvailable minus a reserve of 10 % or 2 GiB, whichever is larger. Page cache already counts as free, so dropping caches won't help. Stop other programs that hold memory, or lower the context or the number of chats. A local launch or install also stops here when another engine holds the GPU memory, including one from another Vade install. Stop it with its own `vade down` or the launcher that started it, then retry. |
 | `This machine's GPU is in use.` | On a controller, `vade up` puts the machine name in front of it. Stop the workload with the launcher that started it, run `vade doctor`, then retry. Never kill processes by name. |
 | `Install cache preparation failed; the previous activation was kept.` | A controller's `vade install` prints this when a Spark's GPU is busy or its files fail a check. The build you had before is still the active one. The message starts with the machine name and the reason (for example `This machine's GPU is in use.`), and the line above it gives the path of a saved log. Fix the reason, or read the log, then run `vade install` again. |
@@ -877,7 +902,7 @@ retry.
 | `generation stopped before completion` | It can show up on the first 8- or 16-request `vade bench` after a controller start, when the engine log reports an allocation that did not fit. Run `vade logs`, then retry. |
 | `Transport: ... did not reply to the pre-start check; nothing was started or recorded.` | Vade gives each SSH connection a short time limit, so a brief network or SSH hiccup can cause this. Nothing started, so run `vade up` again. If it keeps happening, test the machine with `ssh -o BatchMode=yes` and read the SSH error in the retained logs. |
 | `Directory ... is shared. Run chmod 700 ...` or `Directory ... on ... is open to other users.` | A `stage_dir` or `state_dir` is open to other users, on the controller or on a Spark. Run the `chmod 700` command the message prints, then run `vade install` again. Next time, create these folders with `mkdir -m 700` or let Vade create them. |
-| `Auto-compaction deferred: safe compaction cannot fit a useful reply reservation; history retained.` | It can appear in a long chat when the context is 8192, because the output limit then equals the whole context and there is no room to shorten the history safely. Your history is kept and the reply still arrives. Type `/new` to start a fresh chat, which won't show this message. |
+| `Auto-compaction deferred: safe compaction cannot fit a useful reply reservation; history retained. Will retry on the next turn; /compact or /new may be needed.` | It can appear in a long chat when the context is 8192, because the output limit then equals the whole context and there is no room to shorten the history safely. Your history is kept and the reply still arrives. Type `/new` to start a fresh chat, which won't show this message. |
 | `Build GPU kernels failed; check the retained build log and the existing pinned Rust toolchains.` | Read the saved build log. Make sure you finished installing the pinned toolchains (step 1) and ran the online kernel build (step 2), which downloads what the offline launch build needs, then retry. |
 
 If shutdown cannot confirm which process it started, follow

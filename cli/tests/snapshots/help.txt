@@ -1,0 +1,50 @@
+$ vade --help
+Vade runs Qwen3.8 Flash-Next FP4-Local on your DGX Spark: start it, chat
+with it, check it, stop it.
+
+Usage: vade <COMMAND> [OPTIONS]
+
+Get started:
+  launch   Install if missing, start FP4-Local on this Spark, then chat
+  chat     Open chat here (direct text below 8192 local context tokens)
+  status   Show what is running (--json for scripts)
+  down     Stop what vade started
+
+Run:
+  up       Start FP4-Local without chat (legacy FP8 needs --fp8-legacy)
+  logs     Show recent logs
+  install  Save local defaults and install; VADE_CONFIG uses the controller
+  update   Restage local binaries or update controller source
+  run      Run the separate official Qwen3-8B BF16 catalog
+
+Check:
+  doctor   Check what needs attention
+  detect   Show this Spark and check available memory and disk
+  verify   Compare exact token IDs with drafting ON and OFF
+  bench    Measure a server from the client
+  test     Run build, determinism, long-context, GDN and ABI checks
+  version  Print the CLI version
+
+Options:
+  --dry-run            Preview a lifecycle command; nothing changes
+  --api-key-file PATH  Credential for chat, doctor and local run
+  -h, --help           Show help
+  -V, --version        Print the CLI version
+
+Environment:
+  VADE_HOME          Local install root and saved defaults (default ~/.vade)
+  VADE_CONFIG        Controller config file; selects the controller (see Notes)
+  VADE_API_KEY_FILE  Credential file when --api-key-file is not given
+  NO_COLOR           Plain output without colour
+
+Notes:
+  - Explicit VADE_CONFIG selects the controller for up, install, chat, status,
+    logs, down and doctor, even after local setup; keep it set to the same file
+    throughout that lifecycle. Without VADE_CONFIG, saved local setup wins over
+    the user config directory.
+  - For bench, vade help bench, vade --help bench and vade -h bench also work;
+    global flags such as --dry-run before bench are unsupported.
+
+Learn more: vade <command> --help
+--- stderr
+--- exit 0
