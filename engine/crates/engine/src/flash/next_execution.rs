@@ -744,7 +744,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         let owner = crate::flash_next_rows::workspace_owner(sessions.iter().map(|s| s.capacity))?;
         let capacity = sessions[owner].capacity;
         let mut work = model.take_work(b, capacity, count)?;
-        work.bound_head = greedy_head && verify && sessions.len() == 1 && (2..=4).contains(&count)
+        work.bound_head = greedy_head && verify && sessions.len() == 1 && (2..=crate::flash_head_options::RETAINED_ROWS).contains(&count)
             && model.head_bounds.is_some()
             && sessions.iter().all(|s| s.dump.is_none() && s.layer_bytes.is_none());
         if let Err(error) = work.status.clear(b, count, 0) {

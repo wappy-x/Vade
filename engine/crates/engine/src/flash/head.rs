@@ -66,7 +66,7 @@ impl<'a, 'w> Head<'a, 'w> {
         hidden: &DeviceVector<'_>, logits: &mut DeviceVector<'_>, partials: &mut DeviceVector<'_>,
         result: &mut DeviceVector<'_>, bounds: &Bounds<'_>) -> Result<()> {
         use spark_gpu_probe::kernel_params::{Bf16Rows, FlashBf16Input};
-        if !(1..=4).contains(&count) || rows % 64 != 0 || hidden.len() < count * H
+        if !(1..=crate::flash_head_options::RETAINED_ROWS).contains(&count) || rows % 64 != 0 || hidden.len() < count * H
             || logits.len() < rows * count || partials.len() < count * 192 * 3 || result.len() < count * 3 {
             return Err("head bound verification shape".into());
         }

@@ -39,7 +39,8 @@ fn funded(saved: usize, twin: usize, vocabulary: usize, sessions: usize, mtp: bo
 pub fn load_local<T>(enabled: bool, headless: bool, load: impl FnOnce() -> Result<T, String>) -> Result<Option<T>, String> {
     if enabled && !headless { load().map(Some) } else { Ok(None) }
 }
-pub const RETAINED_ROWS: usize = 4;
+/// Verify passes of up to eight rows (one canonical head group) take the bounded head.
+pub const RETAINED_ROWS: usize = 8;
 pub const RETAINED_INPUT_BYTES: usize = RETAINED_ROWS * 2560 * 4;
 pub fn retained_input_bytes(enabled: bool) -> usize { if enabled { RETAINED_INPUT_BYTES } else { 0 } }
 #[cfg(test)]
@@ -55,7 +56,7 @@ mod tests {
         let calls=std::cell::Cell::new(0);
         let value=load_local(true,false,|| { calls.set(calls.get()+1); Ok(17) }).unwrap();
         assert_eq!(value,Some(17)); assert_eq!(calls.get(),1);
-        assert_eq!(retained_input_bytes(value.is_some()),40960);
+        assert_eq!(retained_input_bytes(value.is_some()),81920);
     }
     #[test]
     fn bounded_head_switch_is_strict_and_default_depends_on_funding() {
@@ -76,7 +77,7 @@ mod tests {
             let enabled = funded(saved, twin, vocab, slots, true);
             assert_eq!(enabled, rows == 8192);
             assert!(saved >= if enabled { extra } else { 0 });
-            if enabled { assert_eq!(saved - extra, 96_767_872); }
+            if enabled { assert_eq!(saved - extra, 96_112_512); }
         }
         assert!(!funded(extra - 1, twin, vocab, slots, true));
         assert!(funded(extra, twin, vocab, slots, true));

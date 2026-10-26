@@ -28,11 +28,13 @@ fn run() -> Result<(), String> {
         } else {NextModel::load(b, &root)?};
         println!("NEW FOLDER model_load_s={:.6} allocated_bytes={} sparse=true temperature=0 top_p=1 top_k=0 repetition_penalty=1 presence_penalty=0 frequency_penalty=0", load.elapsed().as_secs_f64(), b.allocated_bytes());
         if fallback {
-            for count in 2..=4 {
+            for count in 2..=spark_engine::flash_head_options::RETAINED_ROWS {
                 let prompt:Vec<_>=(0..129).map(|i|100+(i*31%4096) as u32).collect();
                 let input:Vec<_>=(0..count).map(|i|9707+i as u32).collect();
                 let mut canonical=model.session(b,1024)?;
                 let mut bounded=model.session(b,1024)?;
+                // Lookup width admits verify rows past the resident MTP depth.
+                canonical.enable_lookup(b,count-1)?;bounded.enable_lookup(b,count-1)?;
                 canonical.prefill_advance(b,&prompt)?;bounded.prefill_advance(b,&prompt)?;
                 let ids=NextSession::verify_batch(b,&mut[&mut canonical],&[&input])?;
                 let expected=canonical.decode_logits(b,count)?;

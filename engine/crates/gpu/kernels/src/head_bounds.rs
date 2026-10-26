@@ -299,6 +299,7 @@ unsafe fn hb_project<const GROUPS: usize>(p: crate::kernel_params::Bf16Rows, par
 
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_head_bound_exact(p: crate::kernel_params::Bf16Rows, partial: u64, flags: u64, bases: u64, norms: u64, limits: u64) {
-    if p.tokens == 0 || p.tokens > 4 || p.cols != 2560 { return; }
+    // One group of eight rows: the canonical head's M<=8 walk (lbf_project::<1>).
+    if p.tokens == 0 || p.tokens > 8 || p.cols != 2560 { return; }
     hb_project::<1>(p, partial, flags, bases, norms, limits);
 }

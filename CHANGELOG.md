@@ -7,6 +7,12 @@ Changes that are merged but not yet released are under Unreleased.
 
 ### Engine
 
+- When one greedy chat is verified, the head projection that skips the
+  vocabulary rows that cannot win now also covers verify steps of five to
+  eight tokens; it covered two to four. This runs on one Spark and on the
+  layer pipeline's first Spark, so code and structured replies, which draft
+  the most, verify faster with the same tokens. `VADE_HEAD_BOUNDS=0` turns
+  it off.
 - On two Sparks with the FP8 checkpoint, the routed experts' decode tiles
   now keep two weight blocks in flight instead of one, so decoding is a little
   faster with the same tokens.
