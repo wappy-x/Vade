@@ -8,13 +8,15 @@ Changes that are merged but not yet released are under Unreleased.
 ### Engine
 
 - On one Spark, `VADE_MTP_COHORT=wide` lets five to eight chats draft three
-  tokens each and check them in one 32-row step, instead of one token each.
-  Four or fewer chats keep the 16-row step. Measured on one Spark with eight
-  code chats: 169.6 to 194.4 tokens per second, with the same tokens. Unset,
-  nothing changes. On two and four Sparks the layer pipeline now takes this
-  step by default (eight code chats on two Sparks: 176.0 to 201.2 tokens per
-  second, same tokens); `VADE_MTP_COHORT=off` on every Spark restores the
-  previous step.
+  tokens each and check them in one 32-row step. Before, five chats proposed
+  two tokens each and six to eight chats one each. Four or fewer chats keep
+  the 16-row step. Measured on one Spark with eight code chats (`45b3950`
+  against main `7e625e7`): 169.6 to 194.4 tokens per second, with the same
+  tokens. Unset, nothing changes on one Spark. On two and four Sparks the
+  layer pipeline now takes this step by default, with the cost controller
+  opt-in (eight code chats on two Sparks, `277463d` against main `254fb86`:
+  176.1 to 201.3 tokens per second, same tokens); `VADE_MTP_COHORT=off` on
+  every Spark restores the previous step and controller.
 - FP8 experts now launch fewer kernels per layer when a step has under 32
   tokens: the gate kernel also computes the activation and the quantized
   middle, and the routing kernel builds the tables for 2 to 31 tokens in one

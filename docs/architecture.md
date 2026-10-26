@@ -505,9 +505,11 @@ top of that, the engine has three behaviors of its own
 - **A cost guard.** With many chats at once, the engine compares the
   measured cost per token with and without drafting, and serves chats without
   drafting when that is at least 8 % cheaper per token
-  ([`flash-serve.rs`](../engine/crates/tp/src/bin/flash-serve.rs)). With
+  ([`flash-serve.rs`](../engine/crates/tp/src/bin/flash-serve.rs)). On the
+  two- and four-Spark layer pipelines by default, and with
   `VADE_MTP_COHORT=wide` on one Spark, five to eight chats instead draft three
-  tokens each in one 32-row verify step, and this guard is opt-in
+  tokens each in one 32-row verify step, and this guard is opt-in;
+  `VADE_MTP_COHORT=off` on every pipeline Spark brings the guard back
   ([c8-cohort-experiment.md](../engine/docs/c8-cohort-experiment.md)). In the
   8-chat benchmark runs some chats were served without drafting, and each
   card's README says how many ([Benchmarks](benchmarks.md#known-limits)).
