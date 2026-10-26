@@ -210,10 +210,25 @@ pub struct Engine<'m, 'b, 'a> {
     sampled_peak: Cell<usize>,
     minimum_available: Cell<usize>,
     memory_phase: Cell<&'static str>,
+    // Some: one chat drafts the chooser's depth each cycle (settings::rank_mtp).
+    draft_costs: Option<spark_engine::draft::CostCurve>,
+    // The last eight measured ms of one verify pass (and how many were seen) by rows - 1,
+    // shared by every request.
+    verify_ms: RefCell<[(usize, [f64; 8]); 16]>,
+    // Model-draft survival by depth over recent verified cycles of every request (trials,
+    // hits, each decayed by 0.99 per observation), and the verification awaiting its commit.
+    survival: RefCell<[(f64, f64); 16]>,
+    verifying: Cell<Option<(u64, usize, usize)>>,
+}
+/// Verify milliseconds for 1/2/4/8/16 rows from the rank's byte ledger at GB10's 273 GB/s;
+/// the draft policy learns the measured scale of this shape online.
+fn verify_costs(model: &Model<'_>) -> spark_engine::draft::CostCurve {
+    let (fixed, row) = model.verify_byte_ledger();
+    spark_engine::draft::CostCurve([1, 2, 4, 8, 16].map(|rows| (fixed + rows * row) as f64 / 273e6))
 }
 impl<'m, 'b, 'a> Engine<'m, 'b, 'a> {
     pub fn new(model: &'m Model<'a>, backend: &'b Backend<'a>, commands: Commands,
-        data: Data, context: usize, vocab: usize, eos: Vec<u32>, slots: usize, cache_budget: usize, reservation: usize, workspace_slots: usize) -> Result<Self> {
+        data: Data, context: usize, vocab: usize, eos: Vec<u32>, slots: usize, cache_budget: usize, reservation: usize, workspace_slots: usize, adaptive: bool) -> Result<Self> {
         if commands.rank() != 0 { return Err("Flash controller must be rank zero".into()); }
         if slots == 0 { return Err("invalid Flash session limit".into()); }
         let mailbox = data.register_mailbox(backend)?;
@@ -221,13 +236,20 @@ impl<'m, 'b, 'a> Engine<'m, 'b, 'a> {
         let local = model.request_reservation_bytes(context, TILE, workspace_slots, cache_budget != 0)?;
         if reservation < local { return Err("negotiated Flash reservation does not cover this rank".into()); }
         let batch = RefCell::new(DecodeBatch::new(backend, model)?);
+        let draft_costs = (adaptive && model.mtp_depth() != 0).then(|| verify_costs(model));
+        if let Some(costs) = draft_costs {
+            let (fixed, row) = model.verify_byte_ledger();
+            eprintln!("flash_serve adaptive_draft resident_depth={} ledger_fixed_bytes={fixed} ledger_row_bytes={row} prior_ms={:?}",
+                model.mtp_depth(), costs.0);
+        }
         Ok(Self { mailbox, model, backend, commands: RefCell::new(commands), data, context, vocab, eos,
             next: Cell::new(0), active: Cell::new(0), slots, batch,
             failure: RefCell::new(None), state: RefCell::new(CommandState::default()),
             previous_state: RefCell::new(None), cache_budget, retained: Cell::new(0), admitted: RefCell::new(BTreeMap::new()), reservation, workspace_slots, drafter: RefCell::new(None),
             draft_ready: Cell::new(false),
             sampled_peak: Cell::new(backend.peak_accounted_bytes()), minimum_available: Cell::new(usize::MAX),
-            memory_phase: Cell::new("setup") })
+            memory_phase: Cell::new("setup"), draft_costs, verify_ms: Default::default(),
+            survival: Default::default(), verifying: Cell::new(None) })
     }
     // Only this owner may retain the globally funded draft/verify workspace.
     // Hold it for the active turn; other sessions use canonical single rows.
@@ -343,6 +365,8 @@ pub struct RemoteSession<'e, 'm, 'b, 'a> {
     published: RefCell<Vec<(usize, Weak<Saved<'e, 'm, 'b, 'a>>)>>,
     revision: Cell<usize>,
     cached_prompt_tokens: Option<usize>,
+    // The adaptive chooser's model depth for the next proposal (limit_model_depth).
+    depth_cap: usize,
 }
 /// A retained candidate, a new prompt, and its completion replacement may
 /// coexist during publication. Fund their private metadata outside the active
@@ -539,6 +563,30 @@ impl Drop for RemoteSession<'_, '_, '_, '_> {
     fn drop(&mut self) { let _ = self.close(); }
 }
 impl RemoteSession<'_, '_, '_, '_> {
+    fn chosen_depth(&self) -> usize {
+        if spark_engine::draft::Target::adaptive_model_depth(self) { self.depth_cap } else { usize::MAX }
+    }
+    // The adaptive chooser's row costs: one verify pass's wall time on this rank (command,
+    // every rank's pass and the result).
+    fn observe_verify(&self, rows: usize, start: std::time::Instant) {
+        if self.engine.draft_costs.is_none() { return; }
+        if let Some((seen, ms)) = self.engine.verify_ms.borrow_mut().get_mut(rows - 1) {
+            ms[*seen % ms.len()] = start.elapsed().as_secs_f64() * 1000.0;
+            *seen += 1;
+        }
+        self.engine.verifying.set(Some((self.id, self.tokens.len(), rows)));
+    }
+    // The commit after a verification: its first row is the target's, the rest proposals.
+    fn observe_commit(&self, position: usize) {
+        let Some((id, entry, rows)) = self.engine.verifying.take() else { return; };
+        if id != self.id || position <= entry || position > entry + rows { return; }
+        let accepted = position - entry - 1;
+        for (depth, (trials, hits)) in self.engine.survival.borrow_mut().iter_mut().take(rows - 1).enumerate() {
+            *trials = 0.99 * *trials + 1.0;
+            *hits = 0.99 * *hits + f64::from(u8::from(depth < accepted));
+            if depth >= accepted { break; }
+        }
+    }
     fn verify_sampled(&mut self, tokens: &[u32], k: usize) -> Result<Predictions> {
         if tokens.is_empty() || tokens.len() > self.engine.model.mtp_depth() + 1
             || tokens.len() > self.engine.context - self.tokens.len() || k > 64
@@ -557,9 +605,11 @@ impl RemoteSession<'_, '_, '_, '_> {
         if self.engine.drafter.borrow().as_ref().is_none_or(|(owner, _)| *owner != self.id) {
             return Err("Flash verifier has no draft workspace".into());
         }
+        let start = std::time::Instant::now();
         self.engine.command(VERIFY_SAMPLED, self.id, k as u64, false, tokens)?;
         let output = self.engine.result(self.local.borrow_mut().as_mut().ok_or("missing Flash sampled verifier")?
             .verify_mtp_sampled(self.engine.backend, tokens, k))?;
+        self.observe_verify(tokens.len(), start);
         self.revision.set(self.revision.get().wrapping_add(1));
         self.tokens.extend_from_slice(tokens);
         if k != 0 { output.into_iter().map(|row| match row {
@@ -582,9 +632,11 @@ impl RemoteSession<'_, '_, '_, '_> {
         if self.engine.drafter.borrow().as_ref().is_none_or(|(owner, _)| *owner != self.id) {
             return Err("Flash verifier has no draft workspace".into());
         }
+        let start = std::time::Instant::now();
         self.engine.command(VERIFY, self.id, 0, logits, tokens)?;
         let output = self.engine.result(self.local.borrow_mut().as_mut().ok_or("missing Flash verifier")?
             .verify_mtp(self.engine.backend, tokens, logits))?;
+        self.observe_verify(tokens.len(), start);
         self.revision.set(self.revision.get().wrapping_add(1));
         self.tokens.extend_from_slice(tokens);
         Ok(output)
@@ -596,6 +648,7 @@ impl spark_engine::draft::Target for RemoteSession<'_, '_, '_, '_> {
         self.engine.command(COMMIT, self.id, position as u64, false, &[])?;
         self.engine.result(self.local.borrow_mut().as_mut().ok_or("missing Flash verifier")?
             .commit_verification(self.engine.backend, position))?;
+        self.observe_commit(position);
         self.revision.set(self.revision.get().wrapping_add(1));
         self.tokens.truncate(position);
         if self.draft_disabled { spark_serve::Session::disable_model_draft(self); }
@@ -611,6 +664,26 @@ impl spark_engine::draft::Target for RemoteSession<'_, '_, '_, '_> {
         else { self.local.borrow().as_ref().map_or(0, Session::mtp_depth) }
     }
     fn native_draft_policy(&self) -> bool { true }
+    // One chat alone (the only drafter) picks its depth per cycle, up to the resident depth.
+    fn adaptive_model_depth(&self) -> bool { self.engine.draft_costs.is_some() && self.engine.active.get() <= 1 }
+    fn limit_model_depth(&mut self, depth: usize) { self.depth_cap = depth; }
+    fn model_draft_costs(&self) -> Option<spark_engine::draft::CostCurve> { self.engine.draft_costs }
+    // The median of the last (up to eight) passes, once three exist: a first pass (setup) or
+    // one stalled pass never decides a width's cost.
+    fn model_verify_ms(&self, rows: usize) -> Option<f64> {
+        self.engine.draft_costs?;
+        let (seen, ms) = *self.engine.verify_ms.borrow().get(rows.checked_sub(1)?)?;
+        let mut recent = ms[..seen.min(ms.len())].to_vec();
+        recent.sort_by(f64::total_cmp);
+        (seen >= 3).then(|| recent[recent.len() / 2])
+    }
+    // Shrunk toward 0.8 like a request's own counts (4 pseudo-trials), so a depth few recent
+    // cycles reached (one smoke miss) can never pin every later request below it.
+    fn model_survival_prior(&self, depth: usize) -> Option<f64> {
+        self.engine.draft_costs?;
+        let (trials, hits) = *self.engine.survival.borrow().get(depth)?;
+        Some((hits + 3.2) / (trials + 4.0))
+    }
     fn sampled_model_draft(&self) -> bool { true }
     fn speculative_model_draft(&self) -> bool { true }
     fn propose_sampled_model(&mut self, history: &[u32], prompt_len: usize, next: u32,
@@ -618,7 +691,8 @@ impl spark_engine::draft::Target for RemoteSession<'_, '_, '_, '_> {
         -> Result<(spark_engine::draft::ModelProposal, Vec<spark_engine::sample::Distribution>)> {
         use spark_engine::sample::{Sampler, speculative_uniform};
         if history != self.tokens || prompt_len > history.len() { return Err("invalid sampled MTP history".into()); }
-        let depth = limit.min(self.model_draft_width()).min(self.engine.context.saturating_sub(self.tokens.len() + 1));
+        let depth = limit.min(self.model_draft_width()).min(self.chosen_depth())
+            .min(self.engine.context.saturating_sub(self.tokens.len() + 1));
         let start = std::time::Instant::now();
         let k = sampling.compact_top_k();
         if k == 0 { return Err("sampled MTP requires top_k 1..64 without history penalties".into()); }
@@ -670,7 +744,8 @@ impl spark_engine::draft::Target for RemoteSession<'_, '_, '_, '_> {
     }
     fn propose_model(&mut self, _: &[u32], next: u32, limit: usize) -> Result<Option<spark_engine::draft::ModelProposal>> {
         self.sampled = false;
-        let depth = limit.min(self.model_draft_width()).min(self.engine.context.saturating_sub(self.tokens.len() + 1));
+        let depth = limit.min(self.model_draft_width()).min(self.chosen_depth())
+            .min(self.engine.context.saturating_sub(self.tokens.len() + 1));
         let start = std::time::Instant::now();
         let tokens = if depth == 0 { Vec::new() } else {
             self.capacity = self.capacity.max(request_capacity(self.engine.context, self.tokens.len() + depth + 1));
@@ -762,7 +837,7 @@ impl spark_serve::Session for RemoteSession<'_, '_, '_, '_> {
         Ok(Self { engine: self.engine, local: Rc::new(RefCell::new(None)), id: self.engine.next_id()?,
             capacity,
             tokens: self.tokens.clone(), draft_disabled: false, sampled: false, cache_retention: self.cache_retention, saved,
-            published: RefCell::new(Vec::new()), revision: Cell::new(0), cached_prompt_tokens: None })
+            published: RefCell::new(Vec::new()), revision: Cell::new(0), cached_prompt_tokens: None, depth_cap: usize::MAX })
     }
     fn fork_prefix(&self, position: usize) -> Result<Self> {
         if position > self.tokens.len() { return Err("Flash prefix beyond committed tokens".into()); }
@@ -781,7 +856,7 @@ impl spark_serve::Session for RemoteSession<'_, '_, '_, '_> {
                 capacity: request_capacity(self.engine.context, position), tokens: self.tokens[..position].to_vec(),
                 draft_disabled: false, sampled: false, cache_retention: self.cache_retention,
                 saved: self.saved.iter().filter(|s| live.is_none() || s.shared).cloned().collect(),
-                published: RefCell::new(Vec::new()), revision: Cell::new(0), cached_prompt_tokens: None }
+                published: RefCell::new(Vec::new()), revision: Cell::new(0), cached_prompt_tokens: None, depth_cap: usize::MAX }
         } else { self.fork()? };
         fork.tokens.truncate(position);
         fork.capacity = request_capacity(self.engine.context, position);
@@ -836,7 +911,7 @@ impl<'m, 'b, 'a> spark_serve::Engine for Engine<'m, 'b, 'a> {
         Ok(RemoteSession { engine: self, local: Rc::new(RefCell::new(None)), id: self.next_id()?,
             capacity: request_capacity(self.context, 0), tokens: Vec::new(), draft_disabled: false, sampled: false,
             cache_retention: true, saved: Vec::new(),
-            published: RefCell::new(Vec::new()), revision: Cell::new(0), cached_prompt_tokens: None })
+            published: RefCell::new(Vec::new()), revision: Cell::new(0), cached_prompt_tokens: None, depth_cap: usize::MAX })
     }
     fn shared_batch(&self) -> bool { true }
     fn profile_tick_begin(&self, tick: u64) {

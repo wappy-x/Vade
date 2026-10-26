@@ -55,6 +55,23 @@ pub fn serving_mtp(next: bool, world: usize, explicit: Option<usize>) -> usize {
     }
 }
 
+/// FP8 rank path, no explicit depth, VADE_MTP_ADAPT unset/1: the resident MTP depth, the
+/// ceiling of the per-cycle chooser one chat drafts with.
+pub const RANK_MTP_DEPTH: usize = 7;
+
+/// The FP8 rank path's resident depth and whether one chat chooses its draft depth each
+/// cycle from its measured acceptance and row costs (`adapt`: VADE_MTP_ADAPT unset or 1).
+/// An explicit depth, VADE_MTP_ADAPT=0/full or plain serving keep the serving depth at full
+/// width. VADE_FLASH_MTP_DEPTH (1..=7) sets the chooser's ceiling; it is always validated.
+pub fn rank_mtp(serving: usize, explicit: bool, adapt: bool, ceiling: Option<&str>) -> Result<(usize, bool), String> {
+    let depth = match ceiling {
+        None => RANK_MTP_DEPTH,
+        Some(v) => v.parse::<usize>().ok().filter(|n| (1..=7).contains(n))
+            .ok_or(format!("VADE_FLASH_MTP_DEPTH must be 1..=7 (got {v:?})"))?,
+    };
+    Ok(if explicit || !adapt || serving == 0 { (serving, false) } else { (depth, true) })
+}
+
 /// The layer pipeline with MTP (world 2 by default: `pipeline`, `pipeline_mtp`) serves world 2
 /// as the layer pipeline of the world-1 engine with MTP, so an explicit depth there is checked
 /// as world 1 checks it (0..=3, already enforced by mtp_depth) instead of refused as rank Next.
@@ -660,5 +677,23 @@ fn pipeline_switch_errors_are_checked_before_topology_selection() {
             assert_eq!(pipeline_recipe(true, rank, world, |_| Ok(Some(true))).unwrap(), (true, true, true));
             assert_eq!(pipeline_recipe(true, rank, world, |_| Ok(Some(false))).unwrap(), (false, false, true));
         }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn rank_mtp_adapts_only_the_default_depth() {
+    // Unset: the resident ceiling, chosen per cycle; VADE_FLASH_MTP_DEPTH moves the ceiling.
+    assert_eq!(rank_mtp(2, false, true, None), Ok((RANK_MTP_DEPTH, true)));
+    for depth in 1..=7 { assert_eq!(rank_mtp(2, false, true, Some(&depth.to_string())), Ok((depth, true))); }
+    // Explicit depths, VADE_MTP_ADAPT=0/full and plain serving keep the serving depth at full width.
+    for serving in 0..=3 {
+        assert_eq!(rank_mtp(serving, true, true, None), Ok((serving, false)));
+        assert_eq!(rank_mtp(serving, false, false, Some("5")), Ok((serving, false)));
+    }
+    assert_eq!(rank_mtp(0, false, true, None), Ok((0, false)));
+    for bad in ["0", "8", "", "x", "-1"] {
+        assert!(rank_mtp(2, false, true, Some(bad)).is_err());
+        assert!(rank_mtp(2, true, false, Some(bad)).is_err());
     }
 }

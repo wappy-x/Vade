@@ -7,6 +7,15 @@ Changes that are merged but not yet released are under Unreleased.
 
 ### Engine
 
+- On two Sparks with the FP8 checkpoint, the routed experts' decode tiles
+  now keep two weight blocks in flight instead of one, so decoding is a little
+  faster with the same tokens.
+- On two Sparks with the FP8 checkpoint, one chat now picks how many tokens to
+  draft on each step, up to seven, from how many drafts were accepted recently
+  and how long each verify step took. Code and structured replies are much
+  faster; prose stays as fast as before. The tokens do not change.
+  `VADE_FLASH_MTP_DEPTH=1..7` sets the most it drafts; `VADE_MTP_ADAPT=0` or an
+  explicit `--mtp` keeps the old fixed depth.
 - On one Spark, `VADE_MTP_COHORT=wide` lets five to eight chats draft three
   tokens each and check them in one 32-row step. Before, five chats proposed
   two tokens each and six to eight chats one each. Four or fewer chats keep

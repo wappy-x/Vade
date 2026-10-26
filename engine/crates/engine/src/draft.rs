@@ -49,6 +49,13 @@ pub trait Target {
     fn adaptive_model_depth(&self) -> bool { false }
     /// Native policies: the model (not lookup) depth for the next proposal.
     fn limit_model_depth(&mut self, _depth: usize) {}
+    /// Adaptive model depth: this target's measured ms for one verify pass of `rows` rows,
+    /// shared by every request it serves. When known, the chooser uses it as is instead of
+    /// the cost prior times this request's learned scale.
+    fn model_verify_ms(&self, _rows: usize) -> Option<f64> { None }
+    /// Adaptive model depth: this target's recent model-draft survival at `depth` across
+    /// the requests it serves. A new request starts from it instead of the 0.8 prior.
+    fn model_survival_prior(&self, _depth: usize) -> Option<f64> { None }
     fn propose_model(&mut self, _history: &[u32], _next: u32, _limit: usize) -> Result<Option<ModelProposal>> { Ok(None) }
 }
 pub struct ModelProposal {
@@ -470,19 +477,25 @@ impl Speculator {
     }
     /// VADE_MTP_ADAPT's width: expected committed tokens per ms, with each depth's survival
     /// from this request's cumulative model-draft trials and hits (Beta prior: 4 trials at
-    /// 0.8), the target's row costs (prior x the measured scale) and the measured draft ms
-    /// per proposed token. Cumulative counts keep one rejection from collapsing the depth.
-    fn native_rows(&self, available: usize) -> usize {
+    /// the target's recent survival, else 0.8), the target's row costs (measured, else prior x the measured scale) and the
+    /// measured draft ms per proposed token. Cumulative counts keep one rejection from
+    /// collapsing the depth. `optimistic` takes that depth's survival at its upper bound
+    /// (two posterior standard deviations above the mean).
+    fn native_rows(&self, available: usize, measured: &[Option<f64>], prior: &[Option<f64>], optimistic: Option<usize>) -> usize {
         let (trials, hits) = (&self.stats.depth_trials[0], &self.stats.depth_hits[0]);
         let token_ms = self.control.model_token_ms.unwrap_or(4.0);
         let (mut best, mut score, mut survival, mut expected) = (1, 0.0, 1.0, 1.0);
         for rows in 1..=available.min(16) {
             if rows > 1 {
                 let d = rows - 2;
-                survival *= (hits[d] as f64 + 3.2) / (trials[d] as f64 + 4.0);
+                let mean = (hits[d] as f64 + 4.0 * prior.get(d).copied().flatten().unwrap_or(0.8)) / (trials[d] as f64 + 4.0);
+                survival *= if optimistic == Some(d) {
+                    (mean + 2.0 * (mean * (1.0 - mean) / (trials[d] as f64 + 5.0)).sqrt()).min(1.0)
+                } else { mean };
                 expected += survival;
             }
-            let rate = expected / (self.control.cost(rows, self.config.costs) + token_ms * (rows - 1) as f64);
+            let cost = measured.get(rows).copied().flatten().unwrap_or_else(|| self.control.cost(rows, self.config.costs));
+            let rate = expected / (cost + token_ms * (rows - 1) as f64);
             if rate > score { best = rows; score = rate; }
         }
         best
@@ -513,8 +526,15 @@ impl Speculator {
                     self.control.model_token_ms = Some(4.0);
                 }
                 let available = cap.min(target.model_draft_width() + 1);
-                let mut rows = self.native_rows(available);
-                if self.stats.cycles % 16 == 0 { rows = (rows + 1).min(available); }
+                let measured: Vec<_> = (0..=available).map(|rows| target.model_verify_ms(rows)).collect();
+                let prior: Vec<_> = (0..available).map(|depth| target.model_survival_prior(depth)).collect();
+                let mut rows = self.native_rows(available, &measured, &prior, None);
+                // With measured row costs a probe only refines survival, so probe one row deeper
+                // only while that depth could still pay at its upper survival bound.
+                if self.stats.cycles % 16 == 0 && (measured.iter().all(Option::is_none)
+                    || rows < available && self.native_rows(available, &measured, &prior, Some(rows - 1)) > rows) {
+                    rows = (rows + 1).min(available);
+                }
                 target.limit_model_depth(rows - 1);
             }
             let started = Instant::now();
@@ -1200,6 +1220,37 @@ mod tests {
                 assert!(plan.row_budget() <= cap.max(1));
             }
         }
+    }
+    #[test]
+    fn measured_row_costs_choose_the_width_and_bound_probes() {
+        // FP8 two-Spark rank path, 10-25 gate: verify ms by rows (2, 3, 4) and a prose request's
+        // survival (0.63, 0.59, 0.53); 4.02 ms per proposed token.
+        let prompt: Vec<u32> = (0..9).map(|i| i % 7).collect();
+        let mut spec = Speculator::from_selected(&prompt, prompt.len(), 5, 7, Config::strict(1024), Sampling::greedy()).unwrap();
+        spec.control.model_token_ms = Some(4.02);
+        spec.stats.depth_trials[0][..3].copy_from_slice(&[479, 163, 15]);
+        spec.stats.depth_hits[0][..3].copy_from_slice(&[301, 95, 8]);
+        // The linear byte-ledger prior at its learned scale ties 2 and 3 rows and picks 2.
+        spec.config.costs = CostCurve([22.598, 26.919, 35.562, 52.849, 87.421]);
+        spec.control.cost_scale = 1.7;
+        assert_eq!(spec.native_rows(4, &[], &[], None), 2);
+        let measured = [None, None, Some(46.50), Some(50.75), Some(58.29)];
+        assert_eq!(spec.native_rows(4, &measured, &[], None), 3);
+        // Even at its upper survival bound the fourth row cannot pay: no probe.
+        assert_eq!(spec.native_rows(4, &measured, &[], Some(2)), 3);
+        // An untried depth that loses at its prior mean but can pay at its bound is probed.
+        spec.stats.depth_trials[0][..3].copy_from_slice(&[479, 359, 0]);
+        spec.stats.depth_hits[0][..3].copy_from_slice(&[359, 251, 0]);
+        assert_eq!(spec.native_rows(4, &measured, &[], None), 3);
+        assert_eq!(spec.native_rows(4, &measured, &[], Some(2)), 4);
+        // A recent prose-like survival prior starts a new request at 3 rows, not the 0.8 prior's 4.
+        spec.stats.depth_trials[0] = [0; 15]; spec.stats.depth_hits[0] = [0; 15];
+        assert_eq!(spec.native_rows(4, &measured, &[], None), 4);
+        assert_eq!(spec.native_rows(4, &measured, &[Some(0.63), Some(0.59), Some(0.53)], None), 3);
+        // Code-like survival keeps the full width.
+        spec.stats.depth_trials[0][..3].copy_from_slice(&[435, 413, 382]);
+        spec.stats.depth_hits[0][..3].copy_from_slice(&[413, 386, 357]);
+        assert_eq!(spec.native_rows(4, &measured, &[], None), 4);
     }
     #[test]
     fn partial_failure_rolls_back_cycle_and_preserves_both_errors() {

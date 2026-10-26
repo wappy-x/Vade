@@ -623,3 +623,22 @@ impl<'a, 'w, E: Exchange> Session<'a, 'w, E> {
         Ok(())
     }
 }
+impl Model<'_> {
+    /// Decode bytes one rank streams for a verified row, from its own tensor ledger: the
+    /// fixed part (the head and every target layer except routed experts and lexical
+    /// tables) and the routed-expert bytes one more row adds (top_k of each layer's
+    /// experts). Draft policies scale this shape by their measured target times.
+    pub fn verify_byte_ledger(&self) -> (usize, usize) {
+        let config = &self.checkpoint.config;
+        self.persistent.iter().map(|w| {
+            let (mut fixed, mut routed) = (w.prefix_bytes("lm_head."), 0);
+            for layer in 0..config.layers.len() {
+                let prefix = format!("model.language_model.layers.{layer}.");
+                let experts = w.prefix_bytes(&format!("{prefix}mlp.experts."));
+                fixed += w.prefix_bytes(&prefix) - experts;
+                routed += experts;
+            }
+            (fixed.saturating_sub(w.prefix_bytes(PLE)), routed * config.top_k as usize / config.experts.max(1) as usize)
+        }).max().unwrap_or((0, 0))
+    }
+}

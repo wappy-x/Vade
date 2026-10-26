@@ -78,10 +78,10 @@ unsafe fn fragment(p: u32) -> [u32; 2] {
 /// grid(intermediate/32*planes,tasks,1), operands from GroupedParams::fused_gate.
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn fp8_grouped_gate_accurate(p: crate::fp8_abi::GroupedParams) {
-    let shared = ptx::shared::<28672>();
+    let shared = ptx::shared::<{ crate::fp8::GROUPED_DECODE_SHARED }>();
     if p.activation_quantization == crate::fp8_abi::FUSED_GATE {
-        // Decode gate+up, BF16 SwiGLU and the E4M3 middle in one launch. A CTA owns 32 gate
-        // channels and the same 32 up channels (the paired canonical K128 tile; values are the
+        // Decode gate+up, BF16 SwiGLU and the E4M3 middle in one launch. A CTA owns FUSED_GATE_CHANNELS gate
+        // channels and the same up channels (the paired canonical K128 tile; values are the
         // W8A8 branch's, staged in the same FP32 middle), activates them with
         // fp8_grouped_gather's BF16 SwiGLU into the gate half, and the fourth CTA to finish a
         // K128 channel group quantizes it with the gather's E4M3 arithmetic. The integer
@@ -114,7 +114,7 @@ pub unsafe extern "ptx-kernel" fn fp8_grouped_gate_accurate(p: crate::fp8_abi::G
             output: p.output + (start * 2 * i * 4) as u64, rows: m as u32, outputs: width as u32, cols: p.cols,
             input_kind: 0, round_output: 1,
         };
-        crate::fp8::project_tile::<16, 64, 128, false, false>(params, mb, nb, 2 * i, (p.route.sorted_row as *const u32).add(start),
+        crate::fp8::project_tile::<16, { 2 * C }, 128, false, false, 3>(params, mb, nb, 2 * i, (p.route.sorted_row as *const u32).add(start),
             core::ptr::null(), shared, 0, p.cols as usize, [*table.add(2), *table.add(3)]);
         ptx::sync();
         let tid = _thread_idx_x() as usize;
@@ -123,10 +123,13 @@ pub unsafe extern "ptx-kernel" fn fp8_grouped_gate_accurate(p: crate::fp8_abi::G
         // One lane per channel, a warp per row: the FP64 exp chains run side by side.
         let mut row = mb + tid / 32;
         while row < rows {
-            let at = (start + row) * 2 * i + nb + lane;
-            let gate = load_cg(middle.add(at));
-            let silu = rounded(gate / (1.0 + crate::flash_moe::exp(-gate)));
-            *middle.add(at) = rounded(silu * load_cg(middle.add(at + i)));
+            // Lanes past this CTA's C channels belong to the neighbouring CTA's tile.
+            if lane < C {
+                let at = (start + row) * 2 * i + nb + lane;
+                let gate = load_cg(middle.add(at));
+                let silu = rounded(gate / (1.0 + crate::flash_moe::exp(-gate)));
+                *middle.add(at) = rounded(silu * load_cg(middle.add(at + i)));
+            }
             row += 4;
         }
         // Every activated store publishes before the leader counts this CTA in.

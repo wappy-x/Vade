@@ -257,7 +257,7 @@ fn exchange_middle<E: Exchange>(b: &Backend<'_>, rank: &mut E, mailbox: Option<&
 fn exchange_middle_inner<E: Exchange>(b: &Backend<'_>, rank: &mut E, mailbox: Option<&HostRegistration<'_>>,
     s: &MoeScratch<'_>, own: usize, tokens: usize, finished: bool, wire: &mut [f32]) -> Result<()> {
     let world = s.middle_world()?;
-    if tokens <= 4 && mailbox.is_some() && s.prepared_tokens() <= 4 {
+    if mailbox.is_some() && s.small_middle(tokens) {
         return s.exchange_small_middle(b, rank, own, tokens, finished);
     }
     if world != 2 {

@@ -113,6 +113,10 @@ impl<'a> MoeScratch<'a> {
 
     pub fn device_bytes(&self) -> usize { self.bytes + self.grouped.as_ref().map_or(0, |s| s.bytes()) }
     pub(super) fn prepared_tokens(&self) -> usize { self.grouped.as_ref().map_or(0, Fp8GroupedScratch::token_capacity) }
+    /// A pair pass of up to four rows can swap its middle through mapped packets.
+    pub(super) fn small_middle(&self, tokens: usize) -> bool {
+        tokens <= 4 && (self.prepared_tokens() <= 4 || self.grouped.as_ref().is_some_and(Fp8GroupedScratch::small_middle_mapped))
+    }
     pub(super) fn resize(&mut self, tokens: usize) -> Result<()> {
         self.logits.resize_within_capacity(tokens * EXPERTS)?;
         self.ids.resize_within_capacity(tokens * TOP)?;

@@ -33,6 +33,11 @@ HTTP. Other worlds require the explicit pipeline opt-in below.
 splits each routed expert by columns across both ranks on every decode and verify
 pass; see [Flash-Next NVFP4 serving](../../../../docs/next-http.md).
 
+On the FP8 rank path one chat chooses its MTP depth each cycle, up to resident
+depth 7, from its measured verify times and draft acceptance. `VADE_FLASH_MTP_DEPTH`
+(1..7) sets that ceiling; `VADE_MTP_ADAPT=0` or an explicit `--mtp` keeps the fixed
+serving depth. Verification is strict, so the depth changes only speed, never tokens.
+
 `VADE_W2_PP=1` explicitly selects the layer pipeline for `WORLD=2..24`, with
 equal contiguous layer ranges by default. It needs a cable chain, not a closing
 ring: `LISTEN` is the worker's local upstream interface and `NEXT` is its

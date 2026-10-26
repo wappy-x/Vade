@@ -97,6 +97,8 @@ impl<'a> Fp8GroupedScratch<'a> {
     pub fn assignment_bytes(&self) -> usize { self.assignments.bytes }
     pub fn activation_bytes(&self) -> usize { self.activations.bytes }
     pub fn middle_world(&self) -> usize { self.middle_world }
+    /// World-2 passes of up to four rows have mapped middle packets.
+    pub fn small_middle_mapped(&self) -> bool { self.middle_world == 2 && self.packets.as_ref().is_some_and(|p| p.host.is_some()) }
     pub fn bytes(&self) -> usize { self.assignment_bytes() + self.activation_bytes() + self.counters.buffer.bytes + self.packets.as_ref().map_or(0, |b| b.bytes) }
     /// TP2 prompts reclaim gate/up storage and small decode packets are
     /// mapped. General worlds own rank-major packets; views retain allocations.
@@ -372,8 +374,10 @@ impl<'a> Backend<'a> {
                 Buffer::mapped(self.context, (world + 1) * span)?
             } else { Buffer::new(self.context, (world + 1) * span)? }));
         }
-        if scratch.tokens <= 4 && scratch.packets.is_none() {
-            let span = (scratch.tokens * fp8_abi::MIDDLE_PACKET_WORDS * 4).div_ceil(256) * 256;
+        // Pair decode passes of up to four rows swap through mapped packets, also when the
+        // scratch holds wider passes (a deep resident draft); wider passes use the workspace.
+        if scratch.packets.is_none() {
+            let span = (scratch.tokens.min(4) * fp8_abi::MIDDLE_PACKET_WORDS * 4).div_ceil(256) * 256;
             scratch.packets = Some(Rc::new(Buffer::mapped(self.context, 2 * span)?));
         }
         Ok(())

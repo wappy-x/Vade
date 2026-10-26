@@ -279,7 +279,7 @@ pub(crate) unsafe fn store_middle_pair(y: *mut u32, width: usize, row: usize, co
 /// W8A8 uses block128, grid(40*planes,tasks,1), sharing K128 arithmetic.
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn fp8_grouped_down(p: crate::fp8_abi::GroupedParams) {
-    let shared = ptx::shared::<28672>();
+    let shared = ptx::shared::<{ crate::fp8::GROUPED_DECODE_SHARED }>();
     if p.activation_quantization != 0 {
         crate::fp8::grouped_project::<false>(p, true, shared);
         return;

@@ -263,7 +263,7 @@ impl GroupedParams {
     }
 }
 /// Channels of one projection per fused CTA; a K128 group spans 128 / this many CTAs.
-pub const FUSED_GATE_CHANNELS: usize = 32;
+pub const FUSED_GATE_CHANNELS: usize = 16;
 /// Sixteen-row planes per task (grouped_planes' decode bound).
 pub const FUSED_GATE_PLANES: usize = 8;
 /// Counter words of the fused gate for a task capacity and intermediate width.

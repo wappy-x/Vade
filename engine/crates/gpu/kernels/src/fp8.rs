@@ -381,7 +381,7 @@ unsafe fn project<const TM: usize, const TN: usize, const THREADS: usize>(p: cra
         mi = first + within % rows;
         ni = within / rows;
     }
-    project_tile::<TM, TN, THREADS, false, false>(crate::fp8_abi::BlockParams {
+    project_tile::<TM, TN, THREADS, false, false, 2>(crate::fp8_abi::BlockParams {
         weights: w as u64, weight_scales: ws as u64, input: x as u64,
         input_scales: xs as u64, output: y as u64, ..p
     }, mi * tm, ni * tn, n, core::ptr::null(), core::ptr::null(), 0, 0, k, [0; 2]);
@@ -389,7 +389,7 @@ unsafe fn project<const TM: usize, const TN: usize, const THREADS: usize>(p: cra
 
 /// Canonical K128 arithmetic shared by dense and rank-sharded routed experts.
 #[inline(always)]
-pub(crate) unsafe fn project_tile<const TM: usize, const TN: usize, const THREADS: usize, const FULL: bool, const GENERAL: bool>(
+pub(crate) unsafe fn project_tile<const TM: usize, const TN: usize, const THREADS: usize, const FULL: bool, const GENERAL: bool, const STAGES: usize>(
     p: crate::fp8_abi::BlockParams, mb: usize, nb: usize, output_stride: usize,
     row_map: *const u32, output_map: *const u32, shared: u32, mut split_k: usize, input_stride: usize, paired: [u64; 2],
 ) {
@@ -409,10 +409,22 @@ pub(crate) unsafe fn project_tile<const TM: usize, const TN: usize, const THREAD
     let mut owner = 0;
     // An empty rank shard still writes exact zero partials for its routes.
     if k != 0 { stage::<TM, TN, THREADS, FULL>(shared, x, w, xs, mb, nb, 0, m, k, tid, p.input_kind, row_map, input_stride, paired[0] as *const u8); }
-    ptx::wait();
-    ptx::sync();
+    // STAGES 3 keeps two K128 blocks in flight: one commit group per block, and each
+    // block waits only for its own group. The per-output K128 order is unchanged.
+    if STAGES == 3 {
+        ptx::commit();
+        if 128 < k { stage::<TM, TN, THREADS, FULL>(shared + stride as u32, x, w, xs, mb, nb, 128, m, k, tid, p.input_kind, row_map, input_stride, paired[0] as *const u8); }
+        ptx::commit();
+    } else {
+        ptx::wait();
+        ptx::sync();
+    }
     let mut kb = 0;
     while kb < k {
+        if STAGES == 3 {
+            ptx::wait_one();
+            ptx::sync();
+        }
         if split_k != 0 && kb == split_k {
             first = sums;
             sums = [[ZERO; 4]; 4];
@@ -426,11 +438,13 @@ pub(crate) unsafe fn project_tile<const TM: usize, const TN: usize, const THREAD
                 owner += 1;
             }
         }
-        let current = shared + ((kb / 128 % 2) * stride) as u32;
-        if kb + 128 < k {
-            let next = shared + (((kb / 128 + 1) % 2) * stride) as u32;
-            stage::<TM, TN, THREADS, FULL>(next, x, w, xs, mb, nb, kb + 128, m, k, tid, p.input_kind, row_map, input_stride, paired[0] as *const u8);
+        let current = shared + ((kb / 128 % STAGES) * stride) as u32;
+        // The refilled slot was last read by the previous block; every warp has passed its barrier.
+        if kb + (STAGES - 1) * 128 < k {
+            let next = shared + (((kb / 128 + STAGES - 1) % STAGES) * stride) as u32;
+            stage::<TM, TN, THREADS, FULL>(next, x, w, xs, mb, nb, kb + (STAGES - 1) * 128, m, k, tid, p.input_kind, row_map, input_stride, paired[0] as *const u8);
         }
+        if STAGES == 3 { ptx::commit(); }
         let mut block = [[ZERO; 4]; 4];
         unroll4!(z, {
             let col = z * 32;
@@ -461,10 +475,13 @@ pub(crate) unsafe fn project_tile<const TM: usize, const TN: usize, const THREAD
             });
             }
         });
-        ptx::wait();
-        ptx::sync();
+        if STAGES != 3 {
+            ptx::wait();
+            ptx::sync();
+        }
         kb += 128;
     }
+    if STAGES == 3 { ptx::wait(); }
     if GENERAL {
         unroll4!(i, { unroll4!(j, { unroll4!(c, {
             if owner != 0 { sums[i][j].0[c] = first[i][j].0[c] + sums[i][j].0[c]; }
@@ -502,6 +519,12 @@ pub(crate) unsafe fn project_tile<const TM: usize, const TN: usize, const THREAD
         }
     });
 }
+
+/// Static shared bytes of the grouped decode entries: three stages of the decode W8A8
+/// 16x64 tile (A rows, B rows, row scales per K128 block); it also covers their BF16
+/// branch's 28672-byte tile.
+pub(crate) const GROUPED_DECODE_SHARED: usize = 3 * (16 * 128 + 64 * 128 + 16 * 4);
+const _: () = assert!(GROUPED_DECODE_SHARED >= 28672);
 
 /// Flash tiles retain the dense K128 sum order at every row count.
 /// Gate and up share token quantization; down receives expert-local groups.
@@ -560,17 +583,20 @@ unsafe fn grouped_project_impl<const PREFILL: bool, const GENERAL: bool>(p: crat
     // complete tile's staging, scale loads and stores free of row guards.
     if PREFILL && !down && tile_rows == 64 {
         // Four canonical M16 fragments reuse one weight tile; all 64 rows are live.
-        project_tile::<64, 64, 128, true, GENERAL>(params, mb, nb, output_stride, map, output_map, shared, split_k, params.cols as usize, [0; 2]);
+        project_tile::<64, 64, 128, true, GENERAL, 2>(params, mb, nb, output_stride, map, output_map, shared, split_k, params.cols as usize, [0; 2]);
     } else if PREFILL && tile_rows == 32 {
         if mb + 32 <= m {
-            project_tile::<32, 64, 128, true, GENERAL>(params, mb, nb, output_stride, map, output_map, shared, split_k, params.cols as usize, [0; 2]);
+            project_tile::<32, 64, 128, true, GENERAL, 2>(params, mb, nb, output_stride, map, output_map, shared, split_k, params.cols as usize, [0; 2]);
         } else {
-            project_tile::<32, 64, 128, false, GENERAL>(params, mb, nb, output_stride, map, output_map, shared, split_k, params.cols as usize, [0; 2]);
+            project_tile::<32, 64, 128, false, GENERAL, 2>(params, mb, nb, output_stride, map, output_map, shared, split_k, params.cols as usize, [0; 2]);
         }
     } else if PREFILL && mb + 16 <= m {
-        project_tile::<16, 64, 128, true, GENERAL>(params, mb, nb, output_stride, map, output_map, shared, split_k, params.cols as usize, [0; 2]);
+        project_tile::<16, 64, 128, true, GENERAL, 2>(params, mb, nb, output_stride, map, output_map, shared, split_k, params.cols as usize, [0; 2]);
+    } else if !PREFILL && !GENERAL {
+        // Decode W8A8 tiles stream three K128 stages (the entries reserve 3 x 10304 bytes).
+        project_tile::<16, 64, 128, false, false, 3>(params, mb, nb, output_stride, map, output_map, shared, split_k, params.cols as usize, [0; 2]);
     } else {
-        project_tile::<16, 64, 128, false, GENERAL>(params, mb, nb, output_stride, map, output_map, shared, split_k, params.cols as usize, [0; 2]);
+        project_tile::<16, 64, 128, false, GENERAL, 2>(params, mb, nb, output_stride, map, output_map, shared, split_k, params.cols as usize, [0; 2]);
     }
 }
 
@@ -644,17 +670,17 @@ unsafe fn routed_project(g: crate::fp8_abi::RoutedParams, projection: usize) {
     let output_map = if down { (p.route.output_row as *const u32).add(start) } else { core::ptr::null() };
     if tile.rows == 128 {
         let up = *(p.weights as *const crate::fp8_abi::ExpertProjection).add(expert * 3 + 1);
-        project_tile::<128, 128, 512, false, false>(params, mb, nb, pitch, map, output_map,
+        project_tile::<128, 128, 512, false, false, 2>(params, mb, nb, pitch, map, output_map,
             0, 0, input_stride, if paired { [up.weights, up.scales] } else { [0; 2] });
     } else if tile.cols == 128 {
         let up = *(p.weights as *const crate::fp8_abi::ExpertProjection).add(expert * 3 + 1);
-        project_tile::<16, 128, 128, false, false>(params, mb, nb, pitch, map, output_map,
+        project_tile::<16, 128, 128, false, false, 2>(params, mb, nb, pitch, map, output_map,
             0, 0, input_stride, if paired { [up.weights, up.scales] } else { [0; 2] });
     } else if tile.rows == 32 {
-        project_tile::<32, 64, 128, false, false>(params, mb, nb, pitch, map, output_map,
+        project_tile::<32, 64, 128, false, false, 2>(params, mb, nb, pitch, map, output_map,
             0, 0, input_stride, [0; 2]);
     } else {
-        project_tile::<16, 64, 128, false, false>(params, mb, nb, pitch, map, output_map,
+        project_tile::<16, 64, 128, false, false, 2>(params, mb, nb, pitch, map, output_map,
             0, 0, input_stride, [0; 2]);
     }
 }
@@ -696,7 +722,7 @@ pub unsafe extern "ptx-kernel" fn fp8_routed_single_gate_up(
         output: p.output + ((row * 2 * i + projection * i) * 4) as u64,
         rows: 1, outputs: d.rows, cols: d.cols, input_kind: 0, round_output: 1,
     };
-    project_tile::<16, 64, 128, false, false>(params, 0, nb, 2 * i,
+    project_tile::<16, 64, 128, false, false, 2>(params, 0, nb, 2 * i,
         core::ptr::null(), core::ptr::null(), (projection * 20608) as u32, 0, d.cols as usize, [0; 2]);
     ptx::sync();
     if tid < 16 {
@@ -759,7 +785,7 @@ pub unsafe extern "ptx-kernel" fn fp8_routed_single_down(g: crate::fp8_abi::Rout
         input_scales: p.input_scales + (row * (i / 128) * 4) as u64, output,
         rows: 1, outputs: d.rows, cols: d.cols, input_kind: 0, round_output: 0,
     };
-    project_tile::<16, 64, 128, false, false>(params, 0, nb, p.cols as usize,
+    project_tile::<16, 64, 128, false, false, 2>(params, 0, nb, p.cols as usize,
         core::ptr::null(), core::ptr::null(), 0, 0, i, [0; 2]);
 }
 

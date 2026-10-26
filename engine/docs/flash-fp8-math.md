@@ -65,7 +65,9 @@ all-reduce; the reduced down output and weighted product are rounded to BF16.
 Decode uses M16/N64 tiles; prompt experts with at least 32 routed rows reuse
 each weight tile across M32/N64. Both retain the same four K32 MMAs per K128
 dot and the same scale association and ascending block sums. Prompt entry
-points keep the larger tile's register allocation out of decode. Rank-local
+points keep the larger tile's register allocation out of decode. Decode W8A8
+expert tiles stream their K128 blocks through three cp.async stages, so two
+blocks are in flight while one multiplies; every output keeps the same order. Rank-local
 partial summation differs from an unsplit full-K reference, so official logit
 agreement still requires measurement. The one-device anchor uses the same two
 logical ranks and can test transport-independent equality without changing this
