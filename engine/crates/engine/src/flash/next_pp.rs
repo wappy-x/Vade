@@ -385,7 +385,7 @@ pub(super) struct Link {
     down: &'static AtomicBool,
     /// After any failure the link is never used again (a late reply could pair with the
     /// wrong request).
-    pub(super) poisoned: bool, pub(super) tp: bool, pub(super) tp_verify: bool, pub(super) tp_mail: bool, pub(super) tp_handoff: bool, pub(super) tp_tile: bool,
+    pub(super) poisoned: bool, pub(super) tp: bool, pub(super) tp_verify: bool, pub(super) tp_mail: bool, pub(super) tp_handoff: bool, pub(super) tp_tile: bool, pub(super) tp_heads: bool,
     /// Exchange ids: the last request sent and the last reply read (replies come in order).
     sent: u32,
     replied: u32,
@@ -483,7 +483,7 @@ impl Link {
             message: Vec::new(),
             carried: 0,
             down,
-            poisoned: false, tp: recipe.tp, tp_verify: false, tp_mail: false, tp_handoff: false, tp_tile: false,
+            poisoned: false, tp: recipe.tp, tp_verify: false, tp_mail: false, tp_handoff: false, tp_tile: false, tp_heads: false,
             sent: 0,
             replied: 0,
             limit,
@@ -618,7 +618,7 @@ impl Link {
             self.kept.push(KeptTile { parts, rows: n, data: None });
             self.owed += n;
         }
-        let mail = if std::mem::take(&mut self.tp_mail) { crate::flash_tp_switch::MAIL } else { 0 }; self.enqueue(kind | mail, meta, rows)?;
+        let mail = if std::mem::take(&mut self.tp_mail) { crate::flash_tp_switch::MAIL } else { 0 } | if std::mem::take(&mut self.tp_heads) { crate::flash_tp_switch::HEADS } else { 0 }; self.enqueue(kind | mail, meta, rows)?;
         self.acks.push_back(inline.then_some(n));
         Ok(())
     }
@@ -1128,7 +1128,7 @@ impl<'a> NextModel<'a> {
             |n| self.set_session_limit(n),
             || self.release_pooled_decode(b),
             |kind, count, meta, residual| { self.tp_mail_next(kind);
-                self.pp_back_step(b, &mut sessions, kind & !crate::flash_tp_switch::MAIL & !crate::flash_tp_switch::TILE, count, meta, tile, context, residual) })
+                self.pp_back_step(b, &mut sessions, kind & !crate::flash_tp_switch::MAIL & !crate::flash_tp_switch::TILE & !crate::flash_tp_switch::HEADS, count, meta, tile, context, residual) })
     }
     #[allow(clippy::too_many_arguments)]
     fn pp_back_step<'w>(
@@ -1187,7 +1187,7 @@ impl<'a> NextModel<'a> {
                 }
                 NextSession::pp_back_pooled(b, &mut ordered, count, residual)
             }
-            crate::flash_tp_switch::KIND_HANDOFF => self.tp_handoff(b, &mut ordered), _ => Err("pipeline request kind unknown".into()),
+            crate::flash_tp_switch::KIND_HANDOFF => self.tp_handoff(b, &mut ordered, &lens), _ => Err("pipeline request kind unknown".into()),
         }
     }
 }
@@ -1396,8 +1396,8 @@ fn serve_stage(
             prefetch.recycle(request.rows)?;
             (request.kind, request.count, request.meta)
         };
-        let release = kind & RELEASE_POOLED != 0; let mail = kind & crate::flash_tp_switch::MAIL != 0; let tile = kind & crate::flash_tp_switch::TILE != 0;
-        let kind = kind & !RELEASE_POOLED & !crate::flash_tp_switch::MAIL & !crate::flash_tp_switch::TILE;
+        let release = kind & RELEASE_POOLED != 0; let tp_bits = kind & (crate::flash_tp_switch::MAIL | crate::flash_tp_switch::TILE | crate::flash_tp_switch::HEADS);
+        let kind = kind & !RELEASE_POOLED & !tp_bits;
         if !matches!(kind, KIND_ROWS | KIND_POOLED | KIND_ROWS_ASYNC | KIND_ROWS_KEEP | KIND_ROWS_FINAL | KIND_VERIFY | crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF)
             || matches!(kind, KIND_VERIFY | KIND_ROWS_KEEP | crate::flash_tp_switch::KIND_VERIFY) && !recipe.mtp || matches!(kind, crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF) && !recipe.tp
             || matches!(kind, KIND_ROWS_ASYNC | KIND_ROWS_KEEP | KIND_ROWS_FINAL | crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF) && (!recipe.asynchronous || on_wire)
@@ -1418,7 +1418,7 @@ fn serve_stage(
         // Synchronize and drop pooled graphs/scratch before any session rollback,
         // verify allocation or execution. An error must prevent the step as well.
         let mut result = if release { release_pool() } else { Ok(()) }
-            .and_then(|()| step(kind | if mail { crate::flash_tp_switch::MAIL } else { 0 } | if tile { crate::flash_tp_switch::TILE } else { 0 }, count, &meta, &mut residual));
+            .and_then(|()| step(kind | tp_bits, count, &meta, &mut residual));
         if result.is_ok() && let Some(link) = downstream.as_mut() {
             link.release_pool |= release;
             result = link.forward(kind, &meta, &mut residual, &mut out);

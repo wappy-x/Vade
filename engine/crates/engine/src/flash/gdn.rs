@@ -26,6 +26,7 @@ mod cohort;
 pub(crate) use cohort::{cohort_copies, cohort_kernel_entries, cohort_kernels, cohort_verify, hybrid_copy_rows, launch_cohort, CohortLaunches, COHORT_LAUNCH_BYTES, COPY_ROWS_PER_CHAT, COPY_ROW_WORDS};
 #[path = "gdn_arena.rs"]
 mod arena;
+#[path = "gdn_half.rs"] mod half;
 pub(crate) use arena::session_arena;
 pub(super) use replay::GdnReplay;
 
@@ -438,6 +439,8 @@ pub struct GdnState<'a> {
     state: DeviceVector<'a>,
     history: DeviceVector<'a>,
     cached: bool,
+    /// VADE_W2_TP_PROJ=3: the vectors hold one split rank's heads only (gdn_half.rs).
+    half: bool,
 }
 impl<'a> GdnState<'a> {
     pub(super) fn pool_addresses(&self) -> [u64;3] { [self.state.device_address(),self.history.device_address(),0] }
@@ -454,7 +457,7 @@ impl<'a> GdnState<'a> {
 
     pub(super) fn snapshot(&self, b: &Backend<'a>) -> Result<Self> {
         let mut next = Self { layer: self.layer, rank: self.rank,
-            state: b.vector(self.state.len())?, history: b.vector(self.history.len())?, cached: self.cached };
+            state: b.vector(self.state.len())?, history: b.vector(self.history.len())?, cached: self.cached, half: self.half };
         self.copy_into(b, &mut next)?;
         Ok(next)
     }
@@ -466,6 +469,7 @@ impl<'a> GdnState<'a> {
             state: b.vector(self.state.len())?,
             history: b.vector(self.history.len())?,
             cached: self.cached,
+            half: self.half,
         })
     }
     pub(crate) fn reset(&mut self, b: &Backend<'a>) -> Result<()> {
@@ -492,7 +496,7 @@ impl<'a> GdnState<'a> {
             let mut history = vectors.next().unwrap();
             b.zero_vector(&mut state)?;
             b.zero_vector(&mut history)?;
-            Ok(Some(Self { layer, rank: 0, state, history, cached: false }))
+            Ok(Some(Self { layer, rank: 0, state, history, cached: false, half: false }))
         }).collect()
     }
     pub(crate) fn device_bytes(&self) -> usize { (self.state.len() + self.history.len()) * 4 }
@@ -552,6 +556,7 @@ pub struct Gdn<'a, 'w> {
     state: DeviceVector<'a>,
     history: DeviceVector<'a>,
     cached: bool,
+    half: bool,
     _weights: PhantomData<&'w ()>,
 }
 impl<'a, 'w> Gdn<'a, 'w> {
@@ -575,7 +580,7 @@ impl<'a, 'w> Gdn<'a, 'w> {
             cache
         } else {
             let mut vectors = b.vector_arena(&[(heads * DIM * DIM).max(1), (width * 4).max(1)])?.into_iter();
-            GdnState { layer, rank: w.plan.rank, state: vectors.next().unwrap(), history: vectors.next().unwrap(), cached: false }
+            GdnState { layer, rank: w.plan.rank, state: vectors.next().unwrap(), history: vectors.next().unwrap(), cached: false, half: false }
         };
         let mut result = Self { hidden: HIDDEN, precision: false, parameter_precision: 0, norm: 0, epsilon: 1e-6,
             layer, rank: w.plan.rank, heads, keys, key_start: w.plan.key_heads.start as usize,
@@ -587,7 +592,7 @@ impl<'a, 'w> Gdn<'a, 'w> {
             conv: get("conv1d.weight", &[10240, 1, 4], width * 4)?,
             alog: get("A_log", &[48], heads)?, dt: get("dt_bias", &[48], heads)?,
             out: get("out_proj.weight", &[2560, 6144], HIDDEN * heads * DIM)?,
-            state: cache.state, history: cache.history, cached: cache.cached,
+            state: cache.state, history: cache.history, cached: cache.cached, half: false,
             _weights: PhantomData };
         if fresh { result.reset(b)?; }
         Ok(result)
@@ -613,14 +618,14 @@ impl<'a, 'w> Gdn<'a, 'w> {
                 || cache.history.len() != (width * 4).max(1) { return Err("GDN cache does not belong to this layer and rank".into()); }
             cache } else {
             let mut vectors = b.vector_arena(&[recurrent.max(1), (width * 4).max(1)])?.into_iter();
-            GdnState { layer, rank: w.plan.rank, state: vectors.next().unwrap(), history: vectors.next().unwrap(), cached: false } };
+            GdnState { layer, rank: w.plan.rank, state: vectors.next().unwrap(), history: vectors.next().unwrap(), cached: false, half: false } };
         let [qkv, z, a, bproj, out] = proj;
         let mut result = Self { hidden: HIDDEN, precision: false, parameter_precision: 0, norm: 0, epsilon: 1e-6,
             layer, rank: w.plan.rank, heads, keys, key_start: w.plan.key_heads.start as usize,
             value_start: w.plan.value_heads.start as usize, qkv, z, a, b: bproj,
             conv: get("conv1d.weight", &[10240, 1, 4], width * 4)?,
             alog: get("A_log", &[48], heads)?, dt: get("dt_bias", &[48], heads)?, out,
-            state: cache.state, history: cache.history, cached: cache.cached, _weights: PhantomData };
+            state: cache.state, history: cache.history, cached: cache.cached, half: false, _weights: PhantomData };
         if fresh { result.reset(b)?; }
         Ok(result)
     }
@@ -646,7 +651,7 @@ impl<'a, 'w> Gdn<'a, 'w> {
             cache
         } else {
             let mut v = b.vector_arena(&[heads * DIM * DIM, width * 2])?.into_iter();
-            GdnState { layer, rank: 0, state: v.next().unwrap(), history: v.next().unwrap(), cached: false }
+            GdnState { layer, rank: 0, state: v.next().unwrap(), history: v.next().unwrap(), cached: false, half: false }
         };
         let parameter_precision = 1 | (u32::from(weights[&format!("{p}.A_log")].scalar_f32()) << 1)
             | (u32::from(weights[&format!("{p}.dt_bias")].scalar_f32()) << 2)
@@ -655,7 +660,7 @@ impl<'a, 'w> Gdn<'a, 'w> {
             layer, rank: 0, heads, keys, key_start: 0, value_start: 0,
             qkv: get("in_proj_qkv.weight")?, z: get("in_proj_z.weight")?, a: get("in_proj_a.weight")?, b: get("in_proj_b.weight")?,
             conv: get("conv1d.weight")?, alog: get("A_log")?, dt: get("dt_bias")?, out: get("out_proj.weight")?,
-            state: cache.state, history: cache.history, cached: cache.cached, _weights: PhantomData };
+            state: cache.state, history: cache.history, cached: cache.cached, half: false, _weights: PhantomData };
         // Grouped conv_prepare maps each key head to whole value-head groups.
         if keys == 0 || heads % keys != 0 || result.value_start % (heads / keys) != 0
             || result.key_start != result.value_start / (heads / keys) {
@@ -665,14 +670,14 @@ impl<'a, 'w> Gdn<'a, 'w> {
         Ok(result)
     }
     pub fn into_state(self) -> GdnState<'a> {
-        GdnState { layer: self.layer, rank: self.rank, state: self.state, history: self.history, cached: self.cached }
+        GdnState { layer: self.layer, rank: self.rank, state: self.state, history: self.history, cached: self.cached, half: self.half }
     }
     pub(super) fn snapshot(&self, b: &Backend<'a>) -> Result<GdnState<'a>> {
         let mut state = b.vector(self.state.len())?;
         let mut history = b.vector(self.history.len())?;
         b.copy_range(&self.state, &mut state, 0, 0, self.state.len())?;
         b.copy_range(&self.history, &mut history, 0, 0, self.history.len())?;
-        Ok(GdnState { layer: self.layer, rank: self.rank, state, history, cached: self.cached })
+        Ok(GdnState { layer: self.layer, rank: self.rank, state, history, cached: self.cached, half: self.half })
     }
     pub(super) fn save_into(&self, b: &Backend<'a>, saved: &mut Option<GdnState<'a>>) -> Result<()> {
         if let Some(saved) = saved {
@@ -1110,6 +1115,11 @@ impl<'a, 'w> Gdn<'a, 'w> {
     }
     /// Columns of the out projection's input (value heads x 128).
     pub(super) fn out_cols(&self) -> usize { self.heads * DIM }
+    /// finish_next's out projection operands (BF16 weight, gated rows, K) when it reads the gated
+    /// rows (VADE_W2_TP_PROJ=2 splits it); None while a fused scan packed its input.
+    pub(super) fn out_operands(&self, s: &GdnScratch<'_>) -> Option<(u64, u64, usize)> {
+        s.packed_out.get().is_none().then(|| (self.out, s.gated.device_address(), self.heads * DIM))
+    }
     pub(super) fn finish_next(&self, b: &Backend<'_>, s: &GdnScratch<'_>, output: &DeviceVector<'_>, tokens: usize) -> Result<()> {
         if let Some((_, rows)) = s.packed_out.take() {
             // The gated scans already wrote flash_bf16_input's words for these rows.

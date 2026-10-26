@@ -7,6 +7,9 @@ const WIDTHS: [usize; 3] = [10240, 48, 48];
 pub(in crate::flash) struct GdnReplay<'a> {
     projected: [DeviceVector<'a>; 3],
     rows: usize,
+    /// Per-row words [qkv, a, b] of the captured rows: WIDTHS, or a VADE_W2_TP_PROJ=3 head half's
+    /// (Gdn::tape_widths), which fits the same storage.
+    widths: [usize; 3],
 }
 
 impl<'a> GdnReplay<'a> {
@@ -24,7 +27,7 @@ impl<'a> GdnReplay<'a> {
 
     /// A tape over caller-provided storage of `widths(rows)` lengths (gdn::session_arena).
     pub(in crate::flash) fn from_projected(projected: [DeviceVector<'a>; 3]) -> Self {
-        Self { projected, rows: 0 }
+        Self { projected, rows: 0, widths: WIDTHS }
     }
 
     pub(in crate::flash) fn new(b: &Backend<'a>, rows: usize) -> Result<Self> {
@@ -32,7 +35,7 @@ impl<'a> GdnReplay<'a> {
             .vector_arena(&WIDTHS.map(|n| n * rows))?
             .try_into()
             .map_err(|_| "GDN replay arena shape")?;
-        Ok(Self { projected, rows: 0 })
+        Ok(Self { projected, rows: 0, widths: WIDTHS })
     }
 
     /// capture's three copies as (source, destination, words) for flash_gdn_verify_copy
@@ -42,13 +45,15 @@ impl<'a> GdnReplay<'a> {
         s: &GdnScratch<'a>,
         start: usize,
         rows: usize,
+        widths: [usize; 3],
     ) -> Result<[(u64, u64, u32); 3]> {
         self.rows = 0;
+        self.widths = widths;
         let mut out = [(0u64, 0u64, 0u32); 3];
         for (((source, target), width), slot) in [&s.qkv, &s.a, &s.b]
             .into_iter()
             .zip(&self.projected)
-            .zip(WIDTHS)
+            .zip(widths)
             .zip(out.iter_mut())
         {
             let (offset, len) = (start * width, rows * width);
@@ -72,6 +77,7 @@ impl<'a> GdnReplay<'a> {
         rows: usize,
     ) -> Result<[spark_gpu_probe::kernel_params::HybridCopyRow; 3]> {
         self.rows = 0;
+        self.widths = WIDTHS;
         let mut out = [spark_gpu_probe::kernel_params::HybridCopyRow { source: 0, destination: 0, words: 0, padding: 0 }; 3];
         for (((source, target), width), row) in [&s.qkv, &s.a, &s.b].into_iter().zip(&self.projected).zip(WIDTHS).zip(&mut out) {
             let words = rows * width;
@@ -91,12 +97,14 @@ impl<'a> GdnReplay<'a> {
         s: &GdnScratch<'a>,
         start: usize,
         rows: usize,
+        widths: [usize; 3],
     ) -> Result<()> {
         self.rows = 0;
+        self.widths = widths;
         for ((source, target), width) in [&s.qkv, &s.a, &s.b]
             .into_iter()
             .zip(&mut self.projected)
-            .zip(WIDTHS)
+            .zip(widths)
         {
             b.copy_range(source, target, start * width, 0, rows * width)?;
         }
@@ -113,7 +121,7 @@ impl<'a> Gdn<'a, '_> {
     /// copied words as one launch per row.
     pub(in crate::flash) fn replay_history(&mut self, b: &Backend<'a>, tape: &GdnReplay<'a>, rows: usize) -> Result<()> {
         use spark_gpu_probe::kernel_params::GdnHistory;
-        if rows > tape.rows || self.heads != 48 || self.keys != 16 {
+        if rows > tape.rows || tape.widths != self.tape_widths() {
             return Err("GDN replay prefix outside retained projections".into());
         }
         let width = (2 * self.keys + self.heads) * DIM;
@@ -143,12 +151,12 @@ impl<'a> Gdn<'a, '_> {
         descriptor: &mut DeviceVector<'a>,
         base: usize,
     ) -> Result<()> {
-        if rows > tape.rows || self.heads != 48 || self.keys != 16 {
+        if rows > tape.rows || tape.widths != self.tape_widths() {
             return Err("GDN replay prefix outside retained projections".into());
         }
         for row in 0..rows {
             let [qkv, a, gate_b] = std::array::from_fn(|i| {
-                tape.projected[i].slice(row * WIDTHS[i]..(row + 1) * WIDTHS[i])
+                tape.projected[i].slice(row * tape.widths[i]..(row + 1) * tape.widths[i])
             });
             let (qkv, a, gate_b) = (qkv?, a?, gate_b?);
             let original = [

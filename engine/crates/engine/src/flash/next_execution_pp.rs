@@ -115,6 +115,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 s.prepare_back_verify(b, n)?;
             }
         }
+        model.tp_gdn_frame(b, sessions, count)?;
         let owner = crate::flash_next_rows::workspace_owner(sessions.iter().map(|s| s.capacity))?;
         let capacity = sessions[owner].capacity;
         let mut work = model.take_work(b, capacity, count)?;
@@ -158,5 +159,17 @@ impl<'a, 'w> NextSession<'a, 'w> {
             }
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Verify segments start every VERIFY_SEGMENT layers from layer 1 in their own slots; the
+    /// tensor split adds a start at layer 3, after which the slots shift by one.
+    #[test]
+    fn verify_segment_starts_and_slots() {
+        let starts = |split| (0..48).filter_map(|li| super::super::segment_start(li, split).map(|s| (li, s))).collect::<Vec<_>>();
+        assert_eq!(starts(false), [(1, 0), (13, 1), (25, 2), (37, 3)]);
+        assert_eq!(starts(true), [(1, 0), (3, 1), (13, 2), (25, 3), (37, 4)]);
     }
 }

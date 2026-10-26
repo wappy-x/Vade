@@ -28,7 +28,7 @@ impl<'a> GdnState<'a> {
     pub(in crate::flash) fn storage_lengths(&self) -> [usize; 2] { [self.state.len(), self.history.len()] }
     /// Storage for this layer in caller-allocated vectors of `storage_lengths`.
     pub(in crate::flash) fn with_storage(&self, state: DeviceVector<'a>, history: DeviceVector<'a>) -> Self {
-        Self { layer: self.layer, rank: self.rank, state, history, cached: self.cached }
+        Self { layer: self.layer, rank: self.rank, state, history, cached: self.cached, half: self.half }
     }
     /// Fresh (zeroed, uncached) states for `layers`, sized as Gdn::load_next sizes a fresh
     /// state, carved from one allocation (session_arena).
@@ -43,7 +43,7 @@ impl<'a> GdnState<'a> {
         let mut v = ordered_arena(b, &lengths)?.into_iter();
         layers.iter().map(|&layer| {
             let (state, history) = (v.next().ok_or("GDN arena shape")?, v.next().ok_or("GDN arena shape")?);
-            let mut s = Self { layer, rank: w.plan.rank, state, history, cached: false };
+            let mut s = Self { layer, rank: w.plan.rank, state, history, cached: false, half: false };
             s.reset(b)?;
             Ok(s)
         }).collect()
@@ -60,7 +60,7 @@ impl<'a> GdnState<'a> {
         let mut v = ordered_arena(b, &lengths)?.into_iter();
         let mut next = || v.next().ok_or_else(|| "GDN rollback arena shape".to_string());
         let gdn = live.iter().map(|s| match s {
-            Some(s) => Ok(Some(Self { layer: s.layer, rank: s.rank, state: next()?, history: next()?, cached: s.cached })),
+            Some(s) => Ok(Some(Self { layer: s.layer, rank: s.rank, state: next()?, history: next()?, cached: s.cached, half: s.half })),
             None => Ok(None),
         }).collect::<Result<Vec<_>>>()?;
         let inputs = tapes.iter().map(|&t| if t {

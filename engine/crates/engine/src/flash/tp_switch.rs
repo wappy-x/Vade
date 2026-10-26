@@ -12,16 +12,34 @@ pub const MAIL: u32 = 1 << 30;
 pub const KIND_HANDOFF: u32 = 8;
 /// Request kind bit: a prompt tile that runs as a pipeline tile (rank 1: layers 24..48).
 pub const TILE: u32 = 1 << 29;
+/// Request kind bit (VADE_W2_TP_PROJ=3): rank 0 runs this one-chat pass's GDN layers by heads,
+/// so rank 1 does too; without it rank 1 keeps the chat's GDN states whole.
+pub const HEADS: u32 = 1 << 28;
 
 /// VADE_W2_TP (unset = 0): 1 selects the tensor split at world 2. Read once.
 pub fn from_env() -> Result<bool, String> {
     static ON: std::sync::OnceLock<Result<bool, String>> = std::sync::OnceLock::new();
     ON.get_or_init(|| parse(std::env::var("VADE_W2_TP").ok().as_deref())).clone()
 }
-/// VADE_W2_TP_PROJ=1 (with VADE_W2_TP=1): the GDN in-projections split by row halves too.
+/// VADE_W2_TP_PROJ=1, 2 or 3 (with VADE_W2_TP=1): the GDN in-projections split too.
 pub fn proj_from_env() -> Result<bool, String> {
-    static ON: std::sync::OnceLock<Result<bool, String>> = std::sync::OnceLock::new();
-    ON.get_or_init(|| parse(std::env::var("VADE_W2_TP_PROJ").ok().as_deref()).map_err(|_| "VADE_W2_TP_PROJ must be 0 or 1".into())).clone()
+    proj_level_from_env().map(|level| level != 0)
+}
+/// VADE_W2_TP_PROJ (unset = 0): 1 splits the GDN in-projections by row halves; 2 also splits the
+/// mixers' out projections and the shared expert's down projection; 3 also runs the GDN mixers
+/// of one-chat split passes by heads. Read once.
+pub fn proj_level_from_env() -> Result<u8, String> {
+    static LEVEL: std::sync::OnceLock<Result<u8, String>> = std::sync::OnceLock::new();
+    LEVEL.get_or_init(|| parse_level(std::env::var("VADE_W2_TP_PROJ").ok().as_deref())).clone()
+}
+fn parse_level(value: Option<&str>) -> Result<u8, String> {
+    match value {
+        None | Some("0") => Ok(0),
+        Some("1") => Ok(1),
+        Some("2") => Ok(2),
+        Some("3") => Ok(3),
+        _ => Err("VADE_W2_TP_PROJ must be 0, 1, 2 or 3".into()),
+    }
 }
 fn parse(value: Option<&str>) -> Result<bool, String> {
     match value {
@@ -138,5 +156,8 @@ mod tests {
         assert_eq!(parse(Some("1")), Ok(true));
         assert!(parse(Some("yes")).is_err());
         assert!(parse(Some("")).is_err());
+        assert_eq!([None, Some("0"), Some("1"), Some("2"), Some("3")].map(parse_level), [Ok(0), Ok(0), Ok(1), Ok(2), Ok(3)]);
+        assert!(parse_level(Some("4")).is_err());
+        assert!(parse_level(Some("")).is_err());
     }
 }

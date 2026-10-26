@@ -39,9 +39,11 @@ impl Metadata {
         let nvfp4 = plan.format == WeightFormat::Nvfp4;
         // VADE_W2_TP=1 (flash-serve admits it only on a two-rank pipeline and refuses it
         // elsewhere): the tensor split's recipe, so its receipts differ from the pipeline's.
+        // VADE_W2_TP_PROJ (0 to 3, checked by the engine at startup) changes what else is split.
         let tensor = if topology == "pipeline" && std::env::var_os("VADE_W2_TP").is_some_and(|v| v == "1") {
-            ",\"tensor_split\":{\"experts\":\"output_columns\",\"long_prompts\":\"pipeline_tiles_then_state_handoff\"}"
-        } else { "" };
+            format!(",\"tensor_split\":{{\"experts\":\"output_columns\",\"long_prompts\":\"pipeline_tiles_then_state_handoff\",\"projection_level\":{}}}",
+                projection_level(std::env::var("VADE_W2_TP_PROJ").ok().as_deref()))
+        } else { String::new() };
         let sha = env!("VADE_BUILD_GIT_SHA");
         #[cfg(target_os = "linux")]
         let layer_sha = quote(&sha256::digest(spark_gpu_probe::layer_ptx()?.to_bytes()));
@@ -111,6 +113,11 @@ impl Metadata {
     }
 }
 
+/// VADE_W2_TP_PROJ's level for the receipt: unset and "0" are 0; the engine refuses any other
+/// value than 1, 2 or 3 at startup.
+fn projection_level(value: Option<&str>) -> u8 {
+    match value { Some("1") => 1, Some("2") => 2, Some("3") => 3, _ => 0 }
+}
 fn render(fixed: &str, directory: &str, receipt: Option<&Receipt>, state: &str, source: &str) -> String {
     format!("{{{fixed},\"checkpoint\":{{\"directory\":{directory},\"sha256\":{},\"hash_state\":\"{state}\",\"hash_source\":\"{source}\"}}}}",
         receipt.map_or_else(|| "null".into(), |r| quote(&r.sha256)))
@@ -122,6 +129,11 @@ fn log_receipt(receipt: &Receipt, started: Instant, source: &str) {
 
 #[cfg(test)]
 mod tests {
+    /// Each projection level gives its own tensor split recipe in the receipt.
+    #[test]
+    fn receipt_projection_level_covers_every_value() {
+        assert_eq!([None, Some("0"), Some("1"), Some("2"), Some("3")].map(projection_level), [0, 0, 1, 2, 3]);
+    }
     use super::*;
     use std::io::Write;
     #[test]

@@ -917,6 +917,28 @@ impl<'a, 'w> Qsa<'a, 'w> {
     pub fn weight_bytes(&self) -> usize { self.weight_bytes }
     pub fn kv_bytes(&self) -> usize { 2 * (self.capacity * (self.plan.kv_heads.end - self.plan.kv_heads.start) as usize * DIM * 4).max(4).div_ceil(64) * 64 }
     pub fn index_bytes(&self) -> usize { self.capacity * 128 * 4 }
+    /// VADE_W2_TP_PROJ=2: project_batch with this rank's row half of the q/gate projection (query
+    /// heads [rank * h / 2, (rank + 1) * h / 2), a head's q and gate rows adjacent) into its columns
+    /// of the pass's q/gate rows, index, k and v whole, in the Next group's order with its per-row
+    /// chains. Some(q/gate width) when run, None off the Next group path.
+    pub(super) fn project_batch_half(&self, b: &Backend<'_>, batch: &mut QsaBatch<'_>, input: &DeviceVector<'_>, count: usize,
+        rank: usize) -> Result<Option<usize>> {
+        if !self.next || self.native.is_some() { return Ok(None); }
+        let heads = (self.plan.query_heads.end - self.plan.query_heads.start) as usize;
+        let keys = (self.plan.kv_heads.end - self.plan.kv_heads.start) as usize;
+        let n = heads * 2 * DIM;
+        if heads % 2 != 0 || (n / 2) % 64 != 0 { return Ok(None); }
+        batch.index.resize_within_capacity(count * INDEX)?;
+        let whole = |w: u64, y: u64, rows: usize| (w, y, rows, rows);
+        super::blocks::next_rows_group_at(b, input.device_address(), HIDDEN, count, [
+            (self.qg + (rank * n / 2 * HIDDEN * 2) as u64, batch.qg.device_address() + (rank * n / 2 * 4) as u64, n / 2, n),
+            whole(self.index, batch.index.device_address(), INDEX),
+            whole(self.k, batch.k.device_address(), keys * DIM),
+            whole(self.v, batch.v.device_address(), keys * DIM)])?;
+        Ok(Some(n))
+    }
+    /// The pass's q/gate rows (VADE_W2_TP_PROJ=2 swaps their halves).
+    pub(super) fn batch_qg<'b>(batch: &'b mut QsaBatch<'a>) -> &'b mut DeviceVector<'a> { &mut batch.qg }
     pub(super) fn project_batch(&self, b: &Backend<'_>, batch: &mut QsaBatch<'_>, input: &DeviceVector<'_>, count: usize) -> Result<()> {
         let heads = (self.plan.query_heads.end - self.plan.query_heads.start) as usize;
         batch.index.resize_within_capacity(count * INDEX)?;
@@ -1020,6 +1042,12 @@ impl<'a, 'w> Qsa<'a, 'w> {
         let width = (self.plan.query_heads.end - self.plan.query_heads.start) as usize * DIM;
         if width == 0 { return Ok(()); }
         b.zero_vector(&mut batch.gated.slice(row * width..(row + 1) * width)?)
+    }
+    /// finish_batch's out projection operands on the Next path (BF16 weight, gated rows, K;
+    /// VADE_W2_TP_PROJ=2 splits it); None on the other paths.
+    pub(super) fn out_operands(&self, batch: &QsaBatch<'_>) -> Option<(u64, u64, usize)> {
+        let heads = (self.plan.query_heads.end - self.plan.query_heads.start) as usize;
+        (self.next && heads != 0).then(|| (self.out, batch.gated.device_address(), heads * DIM))
     }
     pub(super) fn finish_batch(&self, b: &Backend<'_>, batch: &QsaBatch<'_>, output: &mut DeviceVector<'_>, count: usize) -> Result<()> {
         let heads = (self.plan.query_heads.end - self.plan.query_heads.start) as usize;

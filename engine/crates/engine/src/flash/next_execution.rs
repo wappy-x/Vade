@@ -9,7 +9,7 @@ pub(super) struct Workspace<'a> {
     /// its chunk) one retained executable per segment (layers 1-12, 13-24, 25-36, 37-47),
     /// oldest first; shapes seen once (eager); counters (graphed passes, in-place updates,
     /// instantiations, eager passes).
-    verify_graphs: Vec<(VerifyShape, [Option<spark_gpu_probe::driver::DecodeGraph<'a>>; 4])>,
+    verify_graphs: Vec<(VerifyShape, [Option<spark_gpu_probe::driver::DecodeGraph<'a>>; 5])>,
     verify_seen: Vec<VerifyShape>,
     verify_counts: [usize; 4],
     prompt: (Vec<f32>, Vec<f32>),
@@ -74,7 +74,7 @@ impl<'a> Workspace<'a> {
                 continue;
             }
             let owner = state.take().ok_or("MTP live state missing")?;
-            let mut g = Gdn::load_next(b, &model.weights, li, model.gdn_proj[li], Some(owner))?;
+            let mut g = model.gdn_load(b, li, Some(owner))?;
             let tape = rollback.inputs[li].as_ref().ok_or("MTP projection tape missing")?;
             let result = if rollback.shallow {
                 g.replay_history(b, tape, rows)
@@ -575,17 +575,11 @@ impl<'a> Workspace<'a> {
         if pack_route {
             b.offer_dense_planes(self.gate.device_address(), 640, count, dense_planes);
         }
-        // Shared is the eleventh row in each token's partials, after experts.
-        blocks::next_rows_strided(
-            b,
-            addr.shared[2],
-            self.gate.device_address(),
-            self.expert_out.device_address() + (10 * H * 4) as u64 - tp.map_or(0, |t| t.routed()),
-            H,
-            640,
-            count,
-            11 * H,
-        )?;
+        // Shared is the eleventh row in each token's partials, after experts (VADE_W2_TP_PROJ=2:
+        // this rank's rows, the columns its finish reads).
+        let shared = self.expert_out.device_address() + (10 * H * 4) as u64 - tp.map_or(0, |t| t.routed());
+        let (weight, shared, rows) = tp.map_or((addr.shared[2], shared, H), |t| t.shared_rows(addr.shared[2], shared, 640));
+        blocks::next_rows_strided(b, weight, self.gate.device_address(), shared, rows, 640, count, 11 * H)?;
         let mut finish = MoeFinishParams {
             error: self.status.device_address(),
             ids: self.ids.device_address(),
@@ -740,6 +734,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             Some(_) if verify && !model.pp_mtp() => return Err("VADE_W2_PP serves plain decoding only (VADE_W2_PP_MTP=0)".into()),
             Some(split) => Part::Front(split),
         };
+        model.tp_gdn_frame(b, sessions, count)?;
         // All admission and workspace allocation failures precede state mutation.
         let owner = crate::flash_next_rows::workspace_owner(sessions.iter().map(|s| s.capacity))?;
         let capacity = sessions[owner].capacity;
@@ -926,14 +921,16 @@ impl<'a, 'w> NextSession<'a, 'w> {
         let mut open: Option<usize> = None;
         // Passes above 16 rows come only from a 32-row tick (VADE_VERIFY_ROWS): stage PLE at once.
         let ple_rows = blocks::PLE_PASS_ROWS;
+        let split = model.tp_on();
         for li in first..end { model.tp_post(b, sessions, spans, &work.residual, count, verify, li)?;
-            if let Some(entry) = graphed.filter(|_| li % VERIFY_SEGMENT == 1) {
+            if let Some((entry, start)) = graphed.zip(segment_start(li, split)) {
                 if let Some(slot) = open.take() {
                     let updated = unsafe { b.end_segment(&mut work.verify_graphs[entry].1[slot])? };
                     work.verify_counts[if updated { 1 } else { 2 }] += 1;
                 }
-                if b.begin_segment(VERIFY_SEGMENT.min(end - li), count)? {
-                    open = Some(li / VERIFY_SEGMENT);
+                let next = (li + 1..end).find(|&l| segment_start(l, split).is_some()).unwrap_or(end);
+                if b.begin_segment(next - li, count)? {
+                    open = Some(start);
                 }
             }
             if li == 1 && verify && count <= ple_rows && sessions.iter().all(|s| s.dump.is_none()) {
@@ -1054,12 +1051,12 @@ impl<'a, 'w> NextSession<'a, 'w> {
                     })
                     .collect::<Result<Vec<_>>>()?;
                 let batch = work.qsa_batch.as_mut().unwrap();
-                attention[0].project_batch(b, batch, &work.mixed, count)?;
+                if !model.tp_qsa_project(b, li, &attention[0], batch, &work.mixed, count, attention.len())? { attention[0].project_batch(b, batch, &work.mixed, count)?; }
                 for (q, span) in attention.iter_mut().zip(spans) {
                     work.qsa.use_norm(model.qsa_norms[li].as_ref().unwrap())?;
                     q.attend_batch_row(b, batch, span.start, &mut work.qsa, span.len())?;
                 }
-                attention[0].finish_batch(b, batch, &mut work.block, count)?;
+                if !attention[0].out_operands(batch).map_or(Ok(false), |o| model.tp_out_project(b, li, o, &mut work.block, count, attention.len()))? { attention[0].finish_batch(b, batch, &mut work.block, count)?; }
                 for (s, q) in sessions.iter_mut().zip(attention) {
                     s.qsa_state[li] = Some(q.into_state());
                 }
@@ -1095,15 +1092,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             } else {
                 let mut attention = sessions
                     .iter_mut()
-                    .map(|s| {
-                        Gdn::load_next(
-                            b,
-                            &model.weights,
-                            li,
-                            model.gdn_proj[li],
-                            s.gdn_state[li].take(),
-                        )
-                    })
+                    .map(|s| model.gdn_load(b, li, s.gdn_state[li].take()))
                     .collect::<Result<Vec<_>>>()?;
                 work.gdn
                     .copy_norm(b, model.gdn_norms[li].as_ref().unwrap())?;
@@ -1151,9 +1140,9 @@ impl<'a, 'w> NextSession<'a, 'w> {
                         let tape = rollback.inputs[li].as_mut().ok_or("MTP GDN tape missing")?;
                         // With gdn::cohort_copies the layer's tapes and entry histories are already copied.
                         let tape = if copies { None } else if gdn::fused_verify_copy(b, &work.recurrence) {
-                            Some(tape.capture_ranges(&work.gdn, span.start, span.len())?)
+                            Some(tape.capture_ranges(&work.gdn, span.start, span.len(), g.tape_widths())?)
                         } else {
-                            tape.capture(b, &work.gdn, span.start, span.len())?;
+                            tape.capture(b, &work.gdn, span.start, span.len(), g.tape_widths())?;
                             None
                         };
                         g.verify_next(
@@ -1184,7 +1173,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 if cohort {
                     attention[0].gate_rows(b, &work.gdn, 0, count)?;
                 }
-                attention[0].finish_next(b, &work.gdn, &work.block, count)?;
+                if !model.tp_gdn_finish(b, li, &attention[0], &work.gdn, &mut work.block, count, attention.len())? { attention[0].finish_next(b, &work.gdn, &work.block, count)?; }
                 for (s, g) in sessions.iter_mut().zip(attention) {
                     s.gdn_state[li] = Some(g.into_state());
                 }
@@ -1458,6 +1447,13 @@ mod head_split;
 pub(super) use pool::Pool;
 /// Layers per captured verify segment (VADE_MTP_GRAPH): segments start at layers 1, 13, 25, 37.
 const VERIFY_SEGMENT: usize = 12;
+/// The slot of the verify segment starting at layer `li`, if one does. With the tensor split a
+/// segment also starts at layer 3: the pass's first segment launch then waits on a two-layer
+/// capture only, and the host captures each later segment while the GPU runs the one before
+/// (the same launches in the same order, so the same words).
+fn segment_start(li: usize, split: bool) -> Option<usize> {
+    if li % VERIFY_SEGMENT == 1 { Some(li / VERIFY_SEGMENT + usize::from(split && li > 1)) } else { (split && li == 3).then_some(1) }
+}
 /// Verify shapes with retained segments (VADE_MTP_GRAPH), and shapes remembered as seen once.
 const VERIFY_SHAPES: usize = 6;
 /// Chats a cohort verify pass's GDN descriptor table holds (VADE_GDN_COHORT).

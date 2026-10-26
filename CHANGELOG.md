@@ -45,7 +45,14 @@ Changes that are merged but not yet released are under Unreleased.
   Sparks on steps of one chat; the halves are exchanged as raw bits, so the
   tokens are the same (opt-in; unset keeps today's split). Steps with more than
   one chat keep the whole projections, where the larger exchanges cost more
-  than the split saves.
+  than the split saves. `VADE_W2_TP_PROJ=2` also splits each layer's out
+  projection and the attention layers' q/gate projection on steps of one chat
+  and the shared expert's down projection on every split step, with the same
+  tokens. `VADE_W2_TP_PROJ=3` also splits each linear-attention layer by heads
+  on steps of one chat: each Spark keeps the recurrent state of its own heads
+  only, with the same tokens. A chat switches once its time alone has paid for
+  rebuilding its whole state, measured on the running pair. These splits cover
+  layers 2 to 47 on steps of at most 16 rows.
 - With the two-Spark tensor split (`VADE_W2_TP=1`), `VADE_W2_TP_WIRE=write` on
   both ranks moves each exchange with one-sided RDMA writes straight from one
   GPU's mapped mailbox into the other's, with no host copies and no host work on

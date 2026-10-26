@@ -88,13 +88,35 @@ layer 2 (the launcher pins `VADE_W2_PP_SPLIT=2`):
   their captured graphs. Rank 0's residual after layer 1 reaches rank 1 the same
   way; wider passes send it with the request.
 - `VADE_W2_TP_PROJ=1` on both ranks (opt-in, with the split) also splits each GDN
-  layer's qkv and z in-projections by output rows on passes of one chat (passes
+  layer's qkv and z in-projections by output rows on the split layers (from
+  layer 2) of passes of one chat at most 16 rows wide (passes
   of several chats keep the whole projections): each rank runs its half of
   the rows with the unchanged row kernels (and the matching rows of the MXFP8
   twin), and the halves cross as raw bits in two back-to-back messages, so the
   second travels while the first is awaited. Conv, recurrence, gate and the out
   projection stay whole on both ranks. The tokens are the same. A rank with the
   switch set and a peer without it fail at startup.
+- `VADE_W2_TP_PROJ=2` on both ranks does what `1` does and also splits, by
+  output rows, the out projection of every split GDN and attention layer and
+  the attention layers' q/gate projection (by query-head halves; index, k and
+  v stay whole) on passes of one chat (one more message each carries the
+  halves) and the
+  shared expert's down projection on every split pass (no extra message: each
+  rank's MoE finish reads only its own columns of it). The tokens are the same.
+  Rank 0 refuses to start when rank 1 runs another `VADE_W2_TP_PROJ` level.
+- `VADE_W2_TP_PROJ=3` on both ranks does what `2` does and, on passes of one
+  chat (at most 16 rows), can split each GDN layer by heads instead of its
+  in-projection halves: each rank projects the rows of its own heads, runs the
+  conv, recurrence and output gate on a state that holds only its heads (in the
+  same storage), and the ranks swap the gated rows (one message) before the
+  split out projection. Before any other pass (several chats, a prompt wider
+  than the mailbox, a pipeline tile) both ranks rebuild the whole state over the
+  split's TCP link, so rank 0 switches a chat only when that pays: it times one
+  rebuild once (a probe exchange of one chat's halves) and the passes run whole
+  and by heads, and switches a chat once the time it would have saved since its
+  last pass of another shape reaches one rebuild (the first chat switches at
+  once, to measure). Rank 1 follows rank 0's choice, sent with each pass. The
+  tokens are the same.
 - `VADE_W2_TP_WIRE=write` on both ranks (opt-in; unset keeps the proxy above)
   moves each message with one-sided RDMA writes instead: when the kernel publishes
   a message, a doorbell thread on its rank posts two chained writes on one queue

@@ -84,6 +84,8 @@ impl<'a, 'w> NextSession<'a, 'w> {
         }
     }
     fn try_capture(&mut self, b: &Backend<'a>) -> Result<()> {
+        // A VADE_W2_TP_PROJ=3 head half is no prefix of another chat's whole state.
+        if self.gdn_state.iter().flatten().any(|g| g.is_half()) { return Err("GDN state holds one split rank's heads".into()); }
         let mut c = match self.checkpoint.get_mut().take() {
             Some(c) => c,
             None => {
