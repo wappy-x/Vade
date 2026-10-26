@@ -10,7 +10,7 @@
 //! at most two messages in flight per direction, so a slot is never rewritten while in use.
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use crate::tp_mailbox_host::{TpMailboxHost, TP_MAILBOX_SLOTS, HEADER, SEND_SEQ, SEND_LEN, RECV_SEQ, ERROR};
+use crate::tp_mailbox_host::{TpMailboxHost, TP_MAILBOX_SLOTS, HEADER, SEND_SEQ, SEND_LEN, RECV_SEQ, ERROR, TAKE_PAUSE, WIDE, TAKE_CTAS};
 
 /// The mapped mailbox of one rank (device-visible host memory), `slot_bytes` per slot.
 pub struct TpMailbox<'a> { vector: DeviceVector<'a>, host: *mut f32, slot_words: usize, host_taken: AtomicBool }
@@ -32,6 +32,8 @@ impl<'a> TpMailbox<'a> {
     /// A take timed out or the proxy failed (sticky).
     pub fn failed(&self) -> bool { self.words()[ERROR].load(Ordering::Acquire) != 0 }
     pub fn slot_bytes(&self) -> usize { self.slot_words * 4 }
+    /// 1 when the host asked for four-word copies (tp_mailbox_host::WIDE).
+    fn wide(&self) -> u64 { u64::from(self.words()[WIDE].load(Ordering::Relaxed) == 1) }
 }
 
 impl<'a> Backend<'a> {
@@ -55,19 +57,23 @@ impl<'a> Backend<'a> {
         check_mailbox_shape(m, source.len, rows, width, half, own)?;
         let slot = seq as usize % TP_MAILBOX_SLOTS;
         let mut args = [source.buffer.address, rows as u64, width as u64, half as u64, own as u64, m.device(m.send_slot(slot)),
-            m.device(SEND_LEN + slot), m.device(SEND_SEQ + slot), (seq as u32) as u64];
+            m.device(SEND_LEN + slot), m.device(SEND_SEQ + slot), (seq as u32) as u64 | m.wide() << 32];
         self.tp_mailbox_launch("tp_mailbox_put", 1, 1024, &mut args)
     }
-    /// Queue tp_mailbox_take: wait (at most `limit_ns`) for message `seq` in its receive slot,
+    /// Queue tp_mailbox_take: wait (at most `limit_ns`, below 2^47) for message `seq` in its receive slot,
     /// then its rows go to words [peer, peer + half) of each `width`-word row of `target`.
     pub fn tp_mailbox_take(&self, m: &TpMailbox<'_>, target: &mut DeviceVector<'_>, rows: usize, width: usize, half: usize,
         peer: usize, seq: u64, limit_ns: u64) -> Result<(), String> {
         self.check_mailbox_owner(m, target)?;
         check_mailbox_shape(m, target.len, rows, width, half, peer)?;
         let slot = seq as usize % TP_MAILBOX_SLOTS;
+        // The limit keeps 47 bits; bit 47 asks for four-word copies and the top 16 carry the host's
+        // poll pause (0 = the kernel's 2048 ns).
+        let limit = limit_ns.min((1 << 47) - 1) | m.wide() << 47 | u64::from(m.words()[TAKE_PAUSE].load(Ordering::Relaxed) & 0xffff) << 48;
         let mut args = [target.buffer.address, rows as u64, width as u64, half as u64, peer as u64, m.device(m.recv_slot(slot)),
-            m.device(RECV_SEQ + slot), (seq as u32) as u64, m.device(ERROR), limit_ns];
-        self.tp_mailbox_launch("tp_mailbox_take", (rows * half).div_ceil(256).clamp(1, 96) as u32, 256, &mut args)
+            m.device(RECV_SEQ + slot), (seq as u32) as u64, m.device(ERROR), limit];
+        let most = match m.words()[TAKE_CTAS].load(Ordering::Relaxed) { 0 => 96, n => n.min(96) as usize };
+        self.tp_mailbox_launch("tp_mailbox_take", (rows * half).div_ceil(256).clamp(1, most) as u32, 256, &mut args)
     }
     /// The mailbox and the rows' vector were allocated in this Backend's context: a launch on
     /// another context could outlive the memory it reads or writes.

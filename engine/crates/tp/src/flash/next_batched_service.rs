@@ -26,7 +26,7 @@ pub fn run(
     mut pp: Option<(std::net::TcpStream, spark_engine::flash::next_batched::PpStage)>,
     fast: Option<Box<dyn spark_engine::flash::next_batched::PpWire>>,
     experiments: spark_serve::mtp_batch::Experiments,
-    tp: Option<(std::net::TcpStream, Box<dyn spark_engine::flash::next_batched::PpWire>)>,
+    tp: Option<(std::net::TcpStream, super::tp_proxy::Wire)>,
 ) -> Result<(), String> {
     let ptx = CString::new(std::fs::read(ptx_path).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
@@ -189,10 +189,14 @@ pub fn run(
                 "flashnext ready world={world} model={name} context={context} concurrency=rows active={active} connections={POOL_SIZE} mtp_depth={mtp} resident_bytes={resident} session_pool_bytes={pool} session_reservation_bytes={needed} shared_pool_reservation_bytes={shared} transient_reserve_bytes={} prefix_cache={prefix_cache}",
                 spark_serve::budget::TRANSIENT_RESERVE
             );
-            let proxy_stop = AtomicBool::new(false);
+            let worker = tp_wire.zip(model.tp_mailbox_host()).map(|(wire, host)| wire.bind(host, true)).transpose()?;
+            let (proxy_stop, attached) = (AtomicBool::new(false), AtomicBool::new(false));
             let served = std::thread::scope(|scope| {
-                let proxy = tp_wire.zip(model.tp_mailbox_host())
-                    .map(|(wire, host)| scope.spawn(|| super::tp_proxy::run(host, wire, &proxy_stop)));
+                let proxy = worker.map(|worker| scope.spawn(|| worker.run(&proxy_stop, &attached, shutdown)));
+                if let Some(Err(error)) = proxy.as_ref().map(|p| super::tp_proxy::wait_attached(&attached, p)) {
+                    eprintln!("flashnext tp: {error}");
+                    return Err(error);
+                }
                 let served = scheduler::serve_requests(
                     listener,
                     &engine,
@@ -233,7 +237,7 @@ pub fn run_back(
     mut next: Option<(std::net::TcpStream, Option<Box<dyn spark_engine::flash::next_batched::PpWire>>)>,
     stage: spark_engine::flash::next_batched::PpStage,
     experiments: spark_serve::mtp_batch::Experiments,
-    tp: Option<(std::net::TcpStream, Box<dyn spark_engine::flash::next_batched::PpWire>)>,
+    tp: Option<(std::net::TcpStream, super::tp_proxy::Wire)>,
 ) -> Result<(), String> {
     let ptx = CString::new(std::fs::read(ptx_path).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
@@ -298,10 +302,10 @@ pub fn run_back(
             Some((link, swap)) => { model.set_tp(backend, 1, link)?; (None::<std::net::TcpStream>, Some(swap)) }
             None => (None, None),
         };
-        let proxy_stop = AtomicBool::new(false);
+        let worker = tp_wire.zip(model.tp_mailbox_host()).map(|(wire, host)| wire.bind(host, false)).transpose()?;
+        let (proxy_stop, attached) = (AtomicBool::new(false), AtomicBool::new(false));
         let served = std::thread::scope(|scope| {
-            let proxy = tp_wire.zip(model.tp_mailbox_host())
-                .map(|(wire, host)| scope.spawn(|| super::tp_proxy::run(host, wire, &proxy_stop)));
+            let proxy = worker.map(|worker| scope.spawn(|| worker.run(&proxy_stop, &attached, shutdown)));
             let served = model.serve_pp_back(backend, stream, fast, next, stage, context, active, tile, shutdown);
             proxy_stop.store(true, std::sync::atomic::Ordering::Relaxed);
             let proxied = proxy.map_or(Ok(()), |p| p.join().map_err(|_| "tensor split proxy panicked".to_string()).and_then(|r| r));

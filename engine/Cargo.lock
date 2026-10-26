@@ -46,6 +46,9 @@ dependencies = [
 [[package]]
 name = "spark-gpu-probe"
 version = "0.1.0"
+dependencies = [
+ "engine-fabric",
+]
 
 [[package]]
 name = "spark-rust-kernels"

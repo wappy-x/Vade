@@ -128,15 +128,23 @@ pub fn run_pp(
     let tp = if tensor {
         let (out, inc) = spark_seqpar::control::connect_peers((rank > 0).then_some(listen), (rank == 0).then_some(next), deadline)?;
         let mut link = out.or(inc).ok_or("tensor split has no peer link")?;
+        // VADE_W2_TP_WIRE=write: one-sided writes between the mapped mailboxes (tp_proxy).
+        let write = tp_proxy::write_from_env()?;
         // Swaps are at most 16 rows of halves (about 100 KB): the wire's smallest slot.
         #[cfg(target_os = "linux")]
-        let swap: Box<dyn spark_engine::flash::next_batched::PpWire> =
-            Box::new(wire::RdmaWire::connect(&mut link, true, 8 << 20, limit)?.ok_or("tensor split wire refused")?);
+        let swap = if write {
+            agree_write_wire(&mut link, limit)?;
+            tp_proxy::Wire::Write(tp_proxy::WriteLink::new(&link)?)
+        } else {
+            tp_proxy::Wire::Proxy(Box::new(wire::RdmaWire::connect(&mut link, true, 8 << 20, limit)?.ok_or("tensor split wire refused")?))
+        };
         #[cfg(not(target_os = "linux"))]
-        let swap: Box<dyn spark_engine::flash::next_batched::PpWire> = return Err("VADE_W2_TP=1 needs Linux".into());
+        let swap: tp_proxy::Wire = { let _ = write; return Err("VADE_W2_TP=1 needs Linux".into()) };
         eprintln!("flashnext tp link rank={rank} world={world}");
+        if write { eprintln!("flashnext tp wire=write"); }
         Some((link, swap))
     } else {
+        if tp_proxy::write_from_env()? { return Err("VADE_W2_TP_WIRE=write needs VADE_W2_TP=1".into()); }
         None
     };
     if rank == 0 {
@@ -149,6 +157,20 @@ pub fn run_pp(
         batched::run_back(root, ptx_path, limits.context_tokens, link, fast, shutdown, options,
             checkpoint, outgoing, stage, experiments, tp)
     }
+}
+
+/// VADE_W2_TP_WIRE=write: the byte RdmaWire::connect's negotiation sends is 1, so a peer on
+/// today's wire fails its negotiation and this rank fails here (the link keeps the same timeouts).
+#[cfg(target_os = "linux")]
+fn agree_write_wire(link: &mut std::net::TcpStream, limit: std::time::Duration) -> Result<(), String> {
+    use std::io::{Read, Write};
+    let mut peer = [0u8];
+    link.set_read_timeout(Some(limit)).and_then(|()| link.set_write_timeout(Some(limit)))
+        .and_then(|()| link.write_all(&[2])).and_then(|()| link.read_exact(&mut peer)).map_err(|e| format!("VADE_W2_TP_WIRE agreement: {e}"))?;
+    if peer[0] != 2 {
+        return Err("VADE_W2_TP_WIRE is write here and unset on the peer rank: set it on both ranks or neither".into());
+    }
+    Ok(())
 }
 
 /// Send this rank's VADE_W2_TP and read the peer's (one byte each way, 30 s at most).

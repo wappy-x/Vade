@@ -21,6 +21,16 @@ Changes that are merged but not yet released are under Unreleased.
   about 9 percent faster, prose about 4 percent. Verification keeps the BF16
   head, so outputs are unchanged. Cost: rank 0 chat slots 19 -> 17, and
   +0.33 GB per rank. `VADE_FP8_DRAFT_MX8=0` turns it off.
+- With the two-Spark tensor split (`VADE_W2_TP=1`), `VADE_W2_TP_WIRE=write` on
+  both ranks moves each exchange with one-sided RDMA writes straight from one
+  GPU's mapped mailbox into the other's, with no host copies and no host work on
+  the receiving side (opt-in; unset keeps today's wire). The tokens are the
+  same. Measured on two Sparks with a mailbox benchmark, one exchange: 17.6 to
+  10.3 microseconds at 10 KB, 34.0 to 15.3 at 40 KB, 165.9 to 59.4 at 400 KB.
+  One chat with drafting on, against the split on today's wire (main
+  `62c9c83`): prose 44.76 to 45.68, code 87.14 to 91.48,
+  structured 111.08 to 114.26 tokens per second, ids identical. The front
+  Spark still waits on the other Spark's compute for most of each exchange.
 - On one Spark, `VADE_MTP_COHORT=wide` lets five to eight chats draft three
   tokens each and check them in one 32-row step. Before, five chats proposed
   two tokens each and six to eight chats one each. Four or fewer chats keep

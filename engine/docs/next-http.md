@@ -87,6 +87,23 @@ layer 2 (the launcher pins `VADE_W2_PP_SPLIT=2`):
   pass on both ranks) and copies the rows in. Split verify passes therefore keep
   their captured graphs. Rank 0's residual after layer 1 reaches rank 1 the same
   way; wider passes send it with the request.
+- `VADE_W2_TP_WIRE=write` on both ranks (opt-in; unset keeps the proxy above)
+  moves each message with one-sided RDMA writes instead: when the kernel publishes
+  a message, a doorbell thread on its rank posts two chained writes on one queue
+  pair, the published bytes straight into the peer's receive slot and then the
+  sequence word the peer's kernel waits for. There are no host copies and no
+  receive-side host work. As on the proxy, the split's lockstep keeps a slot's
+  payload from being rewritten while it is in use; the doorbell also posts a
+  slot again only after the write completion of the message that used it
+  before. A failure marks this rank's mailbox failed and, best effort, the
+  peer's; the peer's takes otherwise stop at their timeout. A wire that cannot
+  start stops both ranks before rank 0 serves. Under this wire the takes poll with a 128 ns pause cap
+  (`VADE_W2_TP_TAKE_PAUSE_NS`), the kernels copy four words at a time
+  (`VADE_W2_TP_WIDE=0` keeps one word) and a take uses at most 6 CTAs
+  (`VADE_W2_TP_TAKE_CTAS`, 1-96). While a pass runs the doorbell spins at most
+  1 millisecond between yields of its core (`VADE_W2_TP_DOORBELL_SPIN_US`,
+  0-1000); `VADE_W2_TP_DOORBELL_CPU` pins it to one core. The words moved are the same, so token IDs do not change.
+  The ranks compare the wire at link setup and stop if only one has it.
 - A prompt pass whose every chat spans at least half the prompt tile (1024 rows at
   the default 2048-row tile) runs as a pipeline tile
   (rank 0 layers 0-23, rank 1 layers 24-47, exactly as the pipeline). Before such a

@@ -6,3 +6,6 @@ license = "Apache-2.0"
 publish = false
 repository = "https://github.com/wappy-x/vade"
 rust-version = "1.99"
+
+[dependencies]
+engine-fabric = { path = "../fabric" }
