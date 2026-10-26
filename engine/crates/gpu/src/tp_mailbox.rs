@@ -10,10 +10,11 @@
 //! at most two messages in flight per direction, so a slot is never rewritten while in use.
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use crate::tp_mailbox_host::{TpMailboxHost, TP_MAILBOX_SLOTS, HEADER, SEND_SEQ, SEND_LEN, RECV_SEQ, ERROR, TAKE_PAUSE, WIDE, TAKE_CTAS};
+use crate::tp_mailbox_host::{Bell, TpMailboxHost, TP_MAILBOX_SLOTS, HEADER, SEND_SEQ, SEND_LEN, RECV_SEQ, ERROR, TAKE_PAUSE, WIDE, TAKE_CTAS};
 
 /// The mapped mailbox of one rank (device-visible host memory), `slot_bytes` per slot.
-pub struct TpMailbox<'a> { vector: DeviceVector<'a>, host: *mut f32, slot_words: usize, host_taken: AtomicBool }
+/// `bell`: every queued put rings it, so a waiting write doorbell (VADE_W2_TP_DOORBELL=wait) can park.
+pub struct TpMailbox<'a> { vector: DeviceVector<'a>, host: *mut f32, slot_words: usize, host_taken: AtomicBool, bell: Bell }
 impl<'a> TpMailbox<'a> {
     fn words(&self) -> &[AtomicU32] {
         // SAFETY: the mapping is HEADER + 2 * SLOTS * slot_words aligned u32 words, zeroed by the
@@ -27,7 +28,7 @@ impl<'a> TpMailbox<'a> {
     fn device(&self, word: usize) -> u64 { self.vector.device_address() + (word * 4) as u64 }
     /// The proxy thread's endpoint: handed out once, so one thread owns the host side.
     pub fn take_host(&self) -> Option<TpMailboxHost<'_>> {
-        (!self.host_taken.swap(true, Ordering::AcqRel)).then(|| TpMailboxHost::new(self.words(), self.slot_words))
+        (!self.host_taken.swap(true, Ordering::AcqRel)).then(|| TpMailboxHost::with_bell(self.words(), self.slot_words, &self.bell))
     }
     /// A take timed out or the proxy failed (sticky).
     pub fn failed(&self) -> bool { self.words()[ERROR].load(Ordering::Acquire) != 0 }
@@ -47,7 +48,7 @@ impl<'a> Backend<'a> {
         self.zero_vector(&mut vector)?;
         self.synchronize()?;
         let host = self.mapped_exchange_host(&vector)?;
-        Ok(TpMailbox { vector, host, slot_words: slot_bytes / 4, host_taken: AtomicBool::new(false) })
+        Ok(TpMailbox { vector, host, slot_words: slot_bytes / 4, host_taken: AtomicBool::new(false), bell: Bell::default() })
     }
     /// Queue tp_mailbox_put: words [own, own + half) of each of `rows` rows of `width` words of
     /// `source` go to the send slot of message `seq`, then its sequence word is published.
@@ -58,7 +59,9 @@ impl<'a> Backend<'a> {
         let slot = seq as usize % TP_MAILBOX_SLOTS;
         let mut args = [source.buffer.address, rows as u64, width as u64, half as u64, own as u64, m.device(m.send_slot(slot)),
             m.device(SEND_LEN + slot), m.device(SEND_SEQ + slot), (seq as u32) as u64 | m.wide() << 32];
-        self.tp_mailbox_launch("tp_mailbox_put", 1, 1024, &mut args)
+        self.tp_mailbox_launch("tp_mailbox_put", 1, 1024, &mut args)?;
+        m.bell.queued(seq);
+        Ok(())
     }
     /// Queue tp_mailbox_take: wait (at most `limit_ns`, below 2^47) for message `seq` in its receive slot,
     /// then its rows go to words [peer, peer + half) of each `width`-word row of `target`.

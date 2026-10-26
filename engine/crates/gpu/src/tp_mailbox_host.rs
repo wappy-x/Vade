@@ -9,7 +9,7 @@
 //! Message s (1, 2, ... per direction, counted in u64) uses slot s % SLOTS and publishes the
 //! low 32 bits of s; a slot is reused only four messages later, and the split's lockstep keeps
 //! at most two messages in flight per direction, so a slot is never rewritten while in use.
-use std::{ops::Range, sync::atomic::{AtomicBool, AtomicU32, Ordering}, time::{Duration, Instant}};
+use std::{ops::Range, sync::{atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering}, OnceLock}, thread::Thread, time::{Duration, Instant}};
 
 /// Slots per direction.
 pub const TP_MAILBOX_SLOTS: usize = 4;
@@ -36,11 +36,48 @@ pub const WIDE: usize = 129;
 /// CTA on GB10 (tp-gather-bench, 2026-10-26), so fewer CTAs that copy more each wait less.
 pub const TAKE_CTAS: usize = 130;
 
+/// VADE_W2_TP_DOORBELL=wait: the host's count of queued puts, which lets the write doorbell block
+/// (thread park, a futex on Linux) while every queued message is posted, instead of polling. The
+/// GPU cannot wake a host thread, but the host queues each put before the GPU publishes it.
+#[derive(Default)]
+pub struct Bell { queued: AtomicU64, parked: AtomicBool, thread: OnceLock<Thread>, parks: AtomicU64, parked_ns: AtomicU64 }
+impl Bell {
+    /// The host queued the put of message `seq`; a parked doorbell wakes. A no-op until a waiting
+    /// doorbell registered (the spin doorbell and the proxy never park).
+    pub fn queued(&self, seq: u64) {
+        if let Some(thread) = self.thread.get() {
+            self.queued.fetch_max(seq, Ordering::SeqCst);
+            if self.parked.load(Ordering::SeqCst) { thread.unpark(); }
+        }
+    }
+    /// The calling thread is the doorbell from now on (once).
+    fn register(&self) -> Result<(), String> {
+        self.thread.set(std::thread::current()).map_err(|_| "tensor split doorbell already registered".to_string())
+    }
+    /// Park for at most `most` unless message `next` is queued (or a put races in: `queued` then
+    /// sees `parked` and unparks, and a park after an unpark returns at once).
+    fn rest(&self, next: u64, most: Duration) {
+        self.parked.store(true, Ordering::SeqCst);
+        if self.queued.load(Ordering::SeqCst) < next {
+            let at = Instant::now();
+            std::thread::park_timeout(most);
+            self.parks.fetch_add(1, Ordering::Relaxed);
+            self.parked_ns.fetch_add(at.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+        self.parked.store(false, Ordering::SeqCst);
+    }
+    /// How often the doorbell parked and for how long in all (ns).
+    pub fn stats(&self) -> (u64, u64) { (self.parks.load(Ordering::Relaxed), self.parked_ns.load(Ordering::Relaxed)) }
+    fn in_flight(&self, next: u64) -> bool { self.queued.load(Ordering::SeqCst) >= next }
+}
+
 /// The host side of a mailbox, owned by one proxy thread.
-pub struct TpMailboxHost<'m> { mailbox: &'m [AtomicU32], slot_words: usize }
+pub struct TpMailboxHost<'m> { mailbox: &'m [AtomicU32], slot_words: usize, bell: Option<&'m Bell> }
 impl<'m> TpMailboxHost<'m> {
     /// The mailbox's words (header, then the send and receive slots of `slot_words` each).
-    pub fn new(mailbox: &'m [AtomicU32], slot_words: usize) -> Self { Self { mailbox, slot_words } }
+    pub fn new(mailbox: &'m [AtomicU32], slot_words: usize) -> Self { Self { mailbox, slot_words, bell: None } }
+    /// The same, with the bell the mailbox's put launches ring (a waiting doorbell needs it).
+    pub fn with_bell(mailbox: &'m [AtomicU32], slot_words: usize, bell: &'m Bell) -> Self { Self { mailbox, slot_words, bell: Some(bell) } }
     /// Low sequence word the GPU last published in send slot `seq % SLOTS`.
     pub fn sent(&mut self, seq: u64) -> u32 { self.mailbox[SEND_SEQ + seq as usize % TP_MAILBOX_SLOTS].load(Ordering::Acquire) }
     /// Copy message `seq` (1, 2, ...) out of its send slot: exactly the byte length the GPU
@@ -66,6 +103,8 @@ impl<'m> TpMailboxHost<'m> {
         self.mailbox[RECV_SEQ + slot].store(seq as u32, Ordering::Release);
         Ok(())
     }
+    /// The put launches' bell, when this view has it.
+    pub fn bell(&self) -> Option<&'m Bell> { self.bell }
     /// The mailbox's words, for the one-sided wire that registers them (VADE_W2_TP_WIRE=write).
     pub fn words(&self) -> &'m [AtomicU32] { self.mailbox }
     /// Send slot `slot`'s first word and receive slot `slot`'s first word.
@@ -109,11 +148,15 @@ pub trait TpDoorbell {
 /// at a time and then yielding the core (yield_now: any runnable thread goes first), then sleeps
 /// with a doubling backoff up to `idle_max`; a slot's previous message must complete within
 /// `reuse` (RC retries included), and after a failure the ERROR write to the peer gets `notify`.
+/// `rest` (VADE_W2_TP_DOORBELL=wait; None: poll as above): while no queued message is waiting to be
+/// posted and every posted one completed, block on the mailbox's Bell for at most `rest` at a time
+/// instead; the `active` window and the backoff then cover only queued messages the GPU has not
+/// published yet.
 #[derive(Clone, Copy)]
-pub struct Ring { pub active: Duration, pub spin: Duration, pub idle_max: Duration, pub reuse: Duration, pub notify: Duration }
+pub struct Ring { pub active: Duration, pub spin: Duration, pub idle_max: Duration, pub reuse: Duration, pub notify: Duration, pub rest: Option<Duration> }
 impl Default for Ring {
     fn default() -> Self {
-        Self { active: Duration::from_millis(20), spin: Duration::from_micros(1000), idle_max: Duration::from_micros(100), reuse: Duration::from_secs(2), notify: Duration::from_millis(100) }
+        Self { active: Duration::from_millis(20), spin: Duration::from_micros(1000), idle_max: Duration::from_micros(100), reuse: Duration::from_secs(2), notify: Duration::from_millis(100), rest: None }
     }
 }
 /// Spin until `spin` has passed since `since`, then yield the core once and restart the count.
@@ -126,9 +169,15 @@ impl TpMailboxHost<'_> {
     /// staged sequence word into the peer's RECV_SEQ. The slot's previous message (s - SLOTS) must
     /// have completed first; the lockstep already implies the peer placed it, so this waits only
     /// for its acknowledgement. Completions arrive once each, in order.
+    /// With `Ring::rest` it parks on the mailbox's Bell while nothing is in flight (every queued
+    /// message posted and completed); a put launch or the caller's unpark (after `stop`) wakes it.
     pub fn ring(&mut self, link: &mut dyn TpDoorbell, stop: &AtomicBool, timing: Ring) -> Result<(), String> {
         let (mut next, mut done, slots) = (1u64, 0u64, TP_MAILBOX_SLOTS as u64);
         let (mut active, mut pause, mut paced) = (Instant::now(), Duration::from_micros(1), Instant::now());
+        let bell = match timing.rest {
+            Some(_) => { let bell = self.bell.ok_or("the waiting tensor split doorbell needs the mailbox's bell")?; bell.register()?; Some(bell) }
+            None => None,
+        };
         while !stop.load(Ordering::Relaxed) {
             reap(link, &mut done)?;
             if self.sent(next) == next as u32 {
@@ -156,6 +205,13 @@ impl TpMailboxHost<'_> {
             }
             if self.error() {
                 return Err(format!("mailbox failed before message {next}"));
+            }
+            if let (Some(bell), Some(most)) = (bell, timing.rest) {
+                if done + 1 >= next && !bell.in_flight(next) {
+                    bell.rest(next, most);
+                    (active, pause) = (Instant::now(), Duration::from_micros(1));
+                    continue;
+                }
             }
             if active.elapsed() < timing.active {
                 pace(&mut paced, timing.spin);
@@ -293,8 +349,11 @@ mod tests {
         fn notify(&mut self, from: usize, to: usize) -> Result<(), String> { self.post(from..from + 1, to, from, to, u64::MAX) }
     }
     /// The doorbell as the write wire's thread runs it: ring, and on an error fail both ranks.
-    fn run_write_within(mut host: TpMailboxHost<'_>, mut link: impl TpDoorbell, stop: &AtomicBool, reuse: Duration) -> Result<(), String> {
-        let result = host.ring(&mut link, stop, Ring { reuse, ..Ring::default() });
+    fn run_write_within(host: TpMailboxHost<'_>, link: impl TpDoorbell, stop: &AtomicBool, reuse: Duration) -> Result<(), String> {
+        run_write_with(host, link, stop, Ring { reuse, ..Ring::default() })
+    }
+    fn run_write_with(mut host: TpMailboxHost<'_>, mut link: impl TpDoorbell, stop: &AtomicBool, timing: Ring) -> Result<(), String> {
+        let result = host.ring(&mut link, stop, timing);
         if result.is_err() { host.fail_peer(&mut link); }
         result
     }
@@ -306,10 +365,12 @@ mod tests {
     }
     /// One rank's GPU: put fills send slot seq % SLOTS with tag(seq) and publishes; take waits for
     /// RECV_SEQ and checks the peer's whole message (no torn or stale words).
-    struct Gpu<'m> { m: &'m [AtomicU32], slot_words: usize, sent: u64, taken: u64, tag: fn(u64) -> u32, peer_tag: fn(u64) -> u32 }
+    /// `bell`: the host queues each put (rings the bell) just before the GPU publishes it.
+    struct Gpu<'m> { m: &'m [AtomicU32], slot_words: usize, sent: u64, taken: u64, tag: fn(u64) -> u32, peer_tag: fn(u64) -> u32, bell: Option<&'m Bell> }
     impl Gpu<'_> {
         fn put(&mut self, words: usize) {
             self.sent += 1;
+            if let Some(bell) = self.bell { bell.queued(self.sent); }
             let slot = self.sent as usize % TP_MAILBOX_SLOTS;
             for w in &self.m[HEADER + slot * self.slot_words..][..words] { w.store((self.tag)(self.sent), Ordering::Relaxed); }
             self.m[SEND_LEN + slot].store((words * 4) as u32, Ordering::Relaxed);
@@ -337,7 +398,13 @@ mod tests {
     /// reads a slot the GPU is rewriting, slots wrap many times, and both doorbells stop cleanly.
     #[test]
     fn write_doorbells_keep_slots_whole_under_late_completions() {
+        for wait in [false, true] { doorbells_keep_slots_whole(wait); }
+    }
+    fn doorbells_keep_slots_whole(wait: bool) {
         let slot_words = 64;
+        let (b0, b1) = (Bell::default(), Bell::default());
+        let (bell0, bell1) = (wait.then_some(&b0), wait.then_some(&b1));
+        let timing = Ring { rest: wait.then_some(Duration::from_secs(10)), ..Ring::default() };
         let (m0, m1) = (mailbox(slot_words), mailbox(slot_words));
         let (stop, torn) = (AtomicBool::new(false), AtomicBool::new(false));
         struct Stop<'s>(&'s AtomicBool);
@@ -346,23 +413,66 @@ mod tests {
         let nic = |local, peer, tag, seed| Nic { local, peer, tag, queue: Default::default(), flying: Default::default(), seed, posts: Vec::new(), torn: &torn, fail_post: false };
         std::thread::scope(|scope| {
             let _stop = Stop(&stop);
-            let d0 = scope.spawn(|| run_write(TpMailboxHost::new(&m0, slot_words), nic(&m0, &m1, tag0, 7), &stop));
-            let d1 = scope.spawn(|| run_write(TpMailboxHost::new(&m1, slot_words), nic(&m1, &m0, tag1, 11), &stop));
+            let d0 = scope.spawn(|| run_write_with(TpMailboxHost::with_bell(&m0, slot_words, &b0), nic(&m0, &m1, tag0, 7), &stop, timing));
+            let d1 = scope.spawn(|| run_write_with(TpMailboxHost::with_bell(&m1, slot_words, &b1), nic(&m1, &m0, tag1, 11), &stop, timing));
+            // Both bells registered (or none) before any put rings them.
+            until(|| !wait || b0.thread.get().is_some() && b1.thread.get().is_some());
             let r1 = scope.spawn(|| -> Result<(), String> {
-                let mut g = Gpu { m: &m1, slot_words, sent: 0, taken: 0, tag: tag1, peer_tag: tag0 };
+                let mut g = Gpu { m: &m1, slot_words, sent: 0, taken: 0, tag: tag1, peer_tag: tag0, bell: bell1 };
                 for _ in 0..passes { g.take(slot_words)?; for l in 0..layers { g.put(1 + l * 7); g.take(1 + l * 7)?; } }
                 Ok(())
             });
-            let mut g = Gpu { m: &m0, slot_words, sent: 0, taken: 0, tag: tag0, peer_tag: tag1 };
+            let mut g = Gpu { m: &m0, slot_words, sent: 0, taken: 0, tag: tag0, peer_tag: tag1, bell: bell0 };
             for _ in 0..passes { g.put(slot_words); for l in 0..layers { g.put(1 + l * 7); g.take(1 + l * 7).unwrap(); } }
             r1.join().unwrap().unwrap();
             stop.store(true, Ordering::Relaxed);
-            d0.join().unwrap().unwrap();
-            d1.join().unwrap().unwrap();
+            // A parked doorbell sees stop only once woken (the service unparks it the same way).
+            for (d, bell) in [(d0, &b0), (d1, &b1)] {
+                if let Some(t) = bell.thread.get() { t.unpark(); }
+                d.join().unwrap().unwrap();
+            }
             assert_eq!(g.sent, (passes * (layers + 1)) as u64);
         });
         assert!(!torn.load(Ordering::Relaxed), "a NIC read a slot while its GPU rewrote it");
         assert!(!TpMailboxHost::new(&m0, slot_words).error() && !TpMailboxHost::new(&m1, slot_words).error());
+    }
+    /// VADE_W2_TP_DOORBELL=wait: with nothing queued the doorbell parks (no polling), a queued put
+    /// wakes it and its message is posted, it parks again once that write completed, and after stop
+    /// an unpark ends it at once (its own recheck is 60 s away here).
+    #[test]
+    fn waiting_doorbell_parks_until_a_put_is_queued_and_stops_on_unpark() {
+        let slot_words = 4;
+        let (m0, m1, bell, stop, torn) = (mailbox(slot_words), mailbox(slot_words), Bell::default(), AtomicBool::new(false), AtomicBool::new(false));
+        let nic = Nic { local: &m0, peer: &m1, tag: tag0, queue: Default::default(), flying: Default::default(), seed: 9, posts: Vec::new(), torn: &torn, fail_post: false };
+        let timing = Ring { rest: Some(Duration::from_secs(60)), ..Ring::default() };
+        std::thread::scope(|scope| {
+            struct Stop<'s>(&'s AtomicBool, &'s Bell);
+            impl Drop for Stop<'_> { fn drop(&mut self) { self.0.store(true, Ordering::Relaxed); if let Some(t) = self.1.thread.get() { t.unpark(); } } }
+            let guard = Stop(&stop, &bell);
+            let doorbell = scope.spawn(|| run_write_with(TpMailboxHost::with_bell(&m0, slot_words, &bell), nic, &stop, timing));
+            until(|| bell.stats().0 == 0 && bell.parked.load(Ordering::SeqCst));
+            let mut g = Gpu { m: &m0, slot_words, sent: 0, taken: 0, tag: tag0, peer_tag: tag1, bell: Some(&bell) };
+            for seq in 1..=6u64 {
+                // Parked before each put (all earlier writes completed), then woken by it.
+                until(|| bell.parked.load(Ordering::SeqCst) && bell.stats().0 + 1 >= seq);
+                g.put(slot_words);
+                until(|| m1[RECV_SEQ + seq as usize % TP_MAILBOX_SLOTS].load(Ordering::Acquire) == seq as u32);
+                assert!(m1[HEADER + (TP_MAILBOX_SLOTS + seq as usize % TP_MAILBOX_SLOTS) * slot_words..][..slot_words].iter().all(|w| w.load(Ordering::Relaxed) == seq as u32));
+            }
+            until(|| bell.parked.load(Ordering::SeqCst));
+            let at = Instant::now();
+            drop(guard);
+            doorbell.join().unwrap().unwrap();
+            assert!(at.elapsed() < Duration::from_secs(5), "stop ended the parked doorbell");
+        });
+        assert!(bell.stats().0 >= 6, "parked between messages: {:?}", bell.stats());
+        assert!(!torn.load(Ordering::Relaxed));
+        // A waiting doorbell needs a bell, and a bell has one doorbell.
+        let m = mailbox(slot_words);
+        let nic = Nic { local: &m, peer: &m1, tag: tag0, queue: Default::default(), flying: Default::default(), seed: 1, posts: Vec::new(), torn: &torn, fail_post: false };
+        assert!(TpMailboxHost::new(&m, slot_words).ring(&mut { nic }, &AtomicBool::new(true), timing).is_err());
+        let nic = Nic { local: &m, peer: &m1, tag: tag0, queue: Default::default(), flying: Default::default(), seed: 1, posts: Vec::new(), torn: &torn, fail_post: false };
+        assert!(TpMailboxHost::with_bell(&m, slot_words, &bell).ring(&mut { nic }, &AtomicBool::new(true), timing).unwrap_err().contains("already registered"));
     }
     /// Traffic that breaks the lockstep (five puts with no take): message 5 reuses message 1's
     /// slot before 1 completed, so the doorbell refuses to post it, fails its mailbox and writes
@@ -382,7 +492,7 @@ mod tests {
                 fn reap(&mut self, _: &mut dyn FnMut(u64)) -> Result<(), String> { self.0.reap(&mut |_| ())?; self.0.flying.iter_mut().for_each(|f| f.1 = u32::MAX); Ok(()) }
                 fn notify(&mut self, from: usize, to: usize) -> Result<(), String> { self.0.notify(from, to)?; for q in &mut self.0.queue { q.5 = 1; } self.0.reap(&mut |_| ()) }
             }
-            let mut g = Gpu { m: &m0, slot_words, sent: 0, taken: 0, tag: tag0, peer_tag: tag1 };
+            let mut g = Gpu { m: &m0, slot_words, sent: 0, taken: 0, tag: tag0, peer_tag: tag1, bell: None };
             for _ in 0..4 { g.put(slot_words); }
             // Message 5 is published once the doorbell staged message 4 (or failed).
             let result = std::thread::scope(|scope| {

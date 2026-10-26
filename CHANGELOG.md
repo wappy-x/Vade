@@ -7,6 +7,13 @@ Changes that are merged but not yet released are under Unreleased.
 
 ### Engine
 
+- With the two-Spark tensor split on the one-sided wire (`VADE_W2_TP=1`,
+  `VADE_W2_TP_WIRE=write`), the wire's doorbell thread now sleeps when no
+  exchange is in flight, instead of polling. Speed and tokens are the same;
+  during one chat it used 75 percent of a CPU core per Spark instead of 92,
+  and between requests it uses none. `VADE_W2_TP_DOORBELL=spin` keeps the old
+  polling. A stop during the wire's startup now ends it at once, even if the
+  other Spark never answers.
 - When one greedy chat is verified, the head projection that skips the
   vocabulary rows that cannot win now also covers verify steps of five to
   eight tokens; it covered two to four. This runs on one Spark and on the

@@ -102,7 +102,13 @@ layer 2 (the launcher pins `VADE_W2_PP_SPLIT=2`):
   (`VADE_W2_TP_WIDE=0` keeps one word) and a take uses at most 6 CTAs
   (`VADE_W2_TP_TAKE_CTAS`, 1-96). While a pass runs the doorbell spins at most
   1 millisecond between yields of its core (`VADE_W2_TP_DOORBELL_SPIN_US`,
-  0-1000); `VADE_W2_TP_DOORBELL_CPU` pins it to one core. The words moved are the same, so token IDs do not change.
+  0-1000); `VADE_W2_TP_DOORBELL_CPU` pins it to one core. The doorbell blocks
+  whenever every message the host has queued is posted and acknowledged
+  (between passes, between requests, and while rank 1 idles); the next queued
+  message wakes it. Only while a queued message is not yet published does it
+  poll as above. `VADE_W2_TP_DOORBELL=spin` keeps it polling through those
+  gaps too (the earlier behaviour). A stop also ends the wire's startup key
+  swap at once, even when the peer never answers. The words moved are the same, so token IDs do not change.
   The ranks compare the wire at link setup and stop if only one has it.
 - A prompt pass whose every chat spans at least half the prompt tile (1024 rows at
   the default 2048-row tile) runs as a pipeline tile

@@ -15,7 +15,11 @@
 //! completion of the message that used it before (four messages earlier); the lockstep already
 //! implies the peer placed that message, so this check only waits for its acknowledgement.
 //! Inside the ACTIVE window the thread spins at most VADE_W2_TP_DOORBELL_SPIN_US (1 ms) between
-//! yields of its core (VADE_W2_TP_DOORBELL_CPU pins it to one core). After
+//! yields of its core (VADE_W2_TP_DOORBELL_CPU pins it to one core). By default
+//! (VADE_W2_TP_DOORBELL=wait) the thread blocks (park, a futex on Linux) whenever every message the
+//! host queued is posted and completed; the next put launch wakes it, so its core is free when no
+//! message is in flight (between passes, between requests, while rank 1 idles).
+//! VADE_W2_TP_DOORBELL=spin keeps polling through those gaps as well. After
 //! any error it fails its mailbox and writes 1 into the peer's ERROR word, which the peer's takes
 //! poll; their timeout stays the backstop.
 use spark_engine::flash::next_batched::PpWire;
@@ -133,13 +137,14 @@ impl WriteLink {
         }
         Err("no IPv4 RoCE-v2 GID on the tensor split interface".into())
     }
-    /// Open the queue pair over this rank's mailbox and swap `hello` with the peer's thread (swap).
-    fn attach<'m>(&mut self, words: &'m [std::sync::atomic::AtomicU32], lead: bool) -> Result<spark_gpu_probe::tp_rdma::TpRdma<'m>, String> {
+    /// Open the queue pair over this rank's mailbox and swap `hello` with the peer's thread (swap),
+    /// for at most ATTACH_WAIT and only until `cancel` (rechecked every ATTACH_POLL).
+    fn attach<'m>(&mut self, words: &'m [std::sync::atomic::AtomicU32], lead: bool, cancel: &dyn Fn() -> bool) -> Result<spark_gpu_probe::tp_rdma::TpRdma<'m>, String> {
         let mut rdma = spark_gpu_probe::tp_rdma::TpRdma::open(&self.device, self.index, self.gid, self.mtu, words)?;
         let before = self.link.read_timeout().map_err(|e| e.to_string())?;
-        self.link.set_read_timeout(Some(ATTACH_WAIT)).map_err(|e| e.to_string())?;
+        self.link.set_read_timeout(Some(ATTACH_POLL)).map_err(|e| e.to_string())?;
         let hello = rdma.hello();
-        let swapped = swap(&mut self.link, &hello, lead, |peer| rdma.ready(peer));
+        let swapped = swap(&mut self.link, &hello, lead, Instant::now() + ATTACH_WAIT, cancel, |peer| rdma.ready(peer));
         self.link.set_read_timeout(before).map_err(|e| e.to_string())?;
         swapped.map(|()| rdma)
     }
@@ -149,13 +154,34 @@ impl WriteLink {
 /// queue pair is up, and rank 0 (`lead`) reads it last, so rank 0 serves only once both ranks
 /// are ready and no swap byte is left unread on either side. Any failure is returned before the
 /// acknowledgement moves, so the other rank's swap fails too once the caller shuts the link.
+/// The link's reads time out (ATTACH_POLL) so a silent peer cannot hold a stopping rank: each
+/// timeout rechecks `cancel` and the `deadline`.
 #[cfg(target_os = "linux")]
-fn swap<L: std::io::Read + std::io::Write>(link: &mut L, hello: &[u8], lead: bool, ready: impl FnOnce(&[u8; HELLO]) -> Result<(), String>) -> Result<(), String> {
+fn swap<L: std::io::Read + std::io::Write>(link: &mut L, hello: &[u8], lead: bool, deadline: Instant, cancel: &dyn Fn() -> bool,
+    ready: impl FnOnce(&[u8; HELLO]) -> Result<(), String>) -> Result<(), String> {
     let mut peer = [0u8; HELLO];
     let io = |e: std::io::Error| format!("tensor split mailbox exchange: {e}");
-    link.write_all(hello).and_then(|()| link.read_exact(&mut peer)).map_err(io)?;
+    link.write_all(hello).map_err(io)?;
+    read_full(link, &mut peer, deadline, cancel)?;
     ready(&peer)?;
-    if lead { link.read_exact(&mut [0u8; 1]).map_err(io) } else { link.write_all(&[1]).map_err(io) }
+    if lead { read_full(link, &mut [0u8; 1], deadline, cancel) } else { link.write_all(&[1]).map_err(io) }
+}
+/// Fill `out` from the link, through read timeouts, until `deadline` or `cancel`.
+#[cfg(target_os = "linux")]
+fn read_full(link: &mut impl std::io::Read, out: &mut [u8], deadline: Instant, cancel: &dyn Fn() -> bool) -> Result<(), String> {
+    let mut at = 0;
+    while at < out.len() {
+        match link.read(&mut out[at..]) {
+            Ok(0) => return Err("tensor split mailbox exchange: the peer closed the link".into()),
+            Ok(n) => at += n,
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted) => {
+                if cancel() { return Err("tensor split mailbox exchange: stopped before the peer attached".into()); }
+                if Instant::now() >= deadline { return Err("tensor split mailbox exchange: the peer did not attach in time".into()); }
+            }
+            Err(e) => return Err(format!("tensor split mailbox exchange: {e}")),
+        }
+    }
+    Ok(())
 }
 #[cfg(target_os = "linux")]
 use spark_gpu_probe::tp_rdma::HELLO;
@@ -168,6 +194,9 @@ pub enum Worker<'m> {
 /// The longest a rank waits for its peer to attach its mailbox (both ranks load their models first).
 #[cfg(target_os = "linux")]
 const ATTACH_WAIT: Duration = Duration::from_secs(600);
+/// How often a waiting swap rechecks its stop flags.
+#[cfg(target_os = "linux")]
+const ATTACH_POLL: Duration = Duration::from_millis(100);
 impl Wire {
     /// Both ranks, after set_tp and before any take is queued (no peer traffic here); `lead` is
     /// rank 0, which serves only once its thread attached.
@@ -182,6 +211,7 @@ impl Wire {
                 host.set_take_ctas(take_ctas()?);
                 doorbell_cpu()?;
                 doorbell_spin()?;
+                doorbell_wait()?;
                 Ok(Worker::Write(host, link, lead))
             }
         }
@@ -195,14 +225,16 @@ impl Worker<'_> {
     /// handoff on the link follows the swap on both ranks. A failed attach fails this mailbox and
     /// shuts the link down, so the peer's swap fails at once too and rank 0 does not serve.
     /// `failed` is the service's stop flag: a failed attach also stops this rank's service (rank 1's
-    /// back has no other way to learn it before its next request).
+    /// back has no other way to learn it before its next request). Either flag set during the swap
+    /// ends it (within ATTACH_POLL), so stopping never waits for a silent peer.
     pub fn run(self, stop: &AtomicBool, attached: &AtomicBool, failed: &AtomicBool) -> Result<(), String> {
         match self {
             Worker::Proxy(host, wire) => { let _ = failed; attached.store(true, Ordering::Release); run(host, wire, stop) }
             #[cfg(target_os = "linux")]
             Worker::Write(mut host, mut link, lead) => {
                 let words = host.words();
-                let rdma = match doorbell_cpu().and_then(|cpu| cpu.map_or(Ok(()), spark_tp::runtime::pin_cpu)).and_then(|()| link.attach(words, lead)) {
+                let cancel = || stop.load(Ordering::Relaxed) || failed.load(Ordering::Relaxed);
+                let rdma = match doorbell_cpu().and_then(|cpu| cpu.map_or(Ok(()), spark_tp::runtime::pin_cpu)).and_then(|()| link.attach(words, lead, &cancel)) {
                     Ok(rdma) => rdma,
                     Err(error) => {
                         host.fail();
@@ -217,6 +249,11 @@ impl Worker<'_> {
             }
         }
     }
+}
+/// Start the wire thread (named vade-tp-wire, so its core time can be read per thread).
+pub fn spawn<'scope, 'env, 'm: 'scope>(scope: &'scope std::thread::Scope<'scope, 'env>, worker: Worker<'m>, stop: &'scope AtomicBool, attached: &'scope AtomicBool,
+    failed: &'scope AtomicBool) -> Result<std::thread::ScopedJoinHandle<'scope, Result<(), String>>, String> {
+    std::thread::Builder::new().name("vade-tp-wire".into()).spawn_scoped(scope, move || worker.run(stop, attached, failed)).map_err(|e| format!("tensor split wire thread: {e}"))
 }
 /// Rank 0, after spawning the wire thread: wait until it attached; if it ended first (its attach
 /// failed), that is a startup error and rank 0 does not serve.
@@ -267,6 +304,23 @@ fn doorbell_spin() -> Result<Duration, String> {
         Err(e) => Err(format!("VADE_W2_TP_DOORBELL_SPIN_US: {e}")),
     }
 }
+/// VADE_W2_TP_DOORBELL (write wire only): wait (unset) parks the doorbell while nothing is in
+/// flight (TpMailboxHost::ring, Ring::rest), woken by the next put launch or, at shutdown, by the
+/// service; spin polls through those gaps too. The two tied on one-chat speed on a GB10 pair, and
+/// wait used 75 % of a core per rank during a chat against 92 % (2026-10-26).
+#[cfg(target_os = "linux")]
+fn doorbell_wait() -> Result<bool, String> {
+    match std::env::var("VADE_W2_TP_DOORBELL").as_deref() {
+        Ok("spin") => Ok(false),
+        Err(std::env::VarError::NotPresent) | Ok("wait") => Ok(true),
+        Ok(v) => Err(format!("VADE_W2_TP_DOORBELL must be unset, spin or wait (got {v:?})")),
+        Err(e) => Err(format!("VADE_W2_TP_DOORBELL: {e}")),
+    }
+}
+/// A parked doorbell rechecks its stop flag and mailbox at least this often (the service also
+/// unparks it after setting stop).
+#[cfg(target_os = "linux")]
+const REST: Duration = Duration::from_millis(50);
 /// VADE_W2_TP_DOORBELL_CPU: the core the write doorbell runs on (unset: not pinned).
 #[cfg(target_os = "linux")]
 fn doorbell_cpu() -> Result<Option<usize>, String> {
@@ -280,10 +334,14 @@ fn doorbell_cpu() -> Result<Option<usize>, String> {
 /// The write doorbell (TpMailboxHost::ring); after an error the peer's ERROR word is written too.
 #[cfg(target_os = "linux")]
 fn run_write(mut host: TpMailboxHost<'_>, mut rdma: spark_gpu_probe::tp_rdma::TpRdma<'_>, stop: &AtomicBool) -> Result<(), String> {
-    let result = doorbell_spin().and_then(|spin| host.ring(&mut rdma, stop, Ring { active: ACTIVE, spin, idle_max: IDLE_MAX, ..Ring::default() }));
+    let timing = doorbell_spin().and_then(|spin| Ok(Ring { active: ACTIVE, spin, idle_max: IDLE_MAX, rest: doorbell_wait()?.then_some(REST), ..Ring::default() }));
+    let result = timing.and_then(|timing| host.ring(&mut rdma, stop, timing));
     if let Err(error) = &result {
         host.fail_peer(&mut rdma);
         eprintln!("flashnext tp doorbell: {error}");
+    }
+    if let (Some((parks, ns)), true) = (host.bell().map(|b| b.stats()), doorbell_wait() == Ok(true)) {
+        eprintln!("flashnext tp doorbell waits={parks} parked_ms={:.0}", ns as f64 / 1e6);
     }
     result
 }
@@ -380,19 +438,19 @@ mod tests {
         use std::os::unix::net::UnixStream;
         for back_ok in [true, false] {
             let (mut front, mut back) = UnixStream::pair().unwrap();
-            front.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-            back.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            front.set_read_timeout(Some(ATTACH_POLL)).unwrap();
+            back.set_read_timeout(Some(ATTACH_POLL)).unwrap();
             let (front_hello, back_hello) = ([1u8; HELLO], [2u8; HELLO]);
             let (lead, rank1) = std::thread::scope(|scope| {
                 let rank1 = scope.spawn(move || {
-                    let result = swap(&mut back, &back_hello, false, |peer| {
+                    let result = swap(&mut back, &back_hello, false, Instant::now() + Duration::from_secs(10), &|| false, |peer| {
                         assert_eq!(peer, &[1u8; HELLO]);
                         if back_ok { Ok(()) } else { Err("QP RTR: failed".into()) }
                     });
                     if result.is_err() { back.shutdown(std::net::Shutdown::Both).unwrap(); }
                     result
                 });
-                let lead = swap(&mut front, &front_hello, true, |peer| { assert_eq!(peer, &[2u8; HELLO]); Ok(()) });
+                let lead = swap(&mut front, &front_hello, true, Instant::now() + Duration::from_secs(10), &|| false, |peer| { assert_eq!(peer, &[2u8; HELLO]); Ok(()) });
                 (lead, rank1.join().unwrap())
             });
             if back_ok {
@@ -402,5 +460,34 @@ mod tests {
                 assert!(lead.unwrap_err().starts_with("tensor split mailbox exchange"), "rank 0 must not serve");
             }
         }
+    }
+    /// A silent peer (connected, never sends its hello): a stop during the swap ends it within a
+    /// few polls on either rank, and without a stop the swap ends at its deadline, never later.
+    #[test]
+    fn a_stop_ends_the_key_swap_with_a_silent_peer() {
+        use std::os::unix::net::UnixStream;
+        for lead in [true, false] {
+            let (mut rank, _silent) = UnixStream::pair().unwrap();
+            rank.set_read_timeout(Some(ATTACH_POLL)).unwrap();
+            let stop = AtomicBool::new(false);
+            let (result, waited) = std::thread::scope(|scope| {
+                let swapping = scope.spawn(|| {
+                    let at = Instant::now();
+                    let r = swap(&mut rank, &[1u8; HELLO], lead, Instant::now() + Duration::from_secs(600), &|| stop.load(Ordering::Relaxed), |_| Ok(()));
+                    (r, at.elapsed())
+                });
+                std::thread::sleep(Duration::from_millis(300));
+                stop.store(true, Ordering::Relaxed);
+                swapping.join().unwrap()
+            });
+            assert_eq!(result, Err("tensor split mailbox exchange: stopped before the peer attached".into()));
+            assert!(waited < Duration::from_secs(5), "stop took {waited:?}");
+        }
+        let (mut rank, _silent) = UnixStream::pair().unwrap();
+        rank.set_read_timeout(Some(ATTACH_POLL)).unwrap();
+        let at = Instant::now();
+        let result = swap(&mut rank, &[1u8; HELLO], false, Instant::now() + Duration::from_millis(250), &|| false, |_| Ok(()));
+        assert_eq!(result, Err("tensor split mailbox exchange: the peer did not attach in time".into()));
+        assert!(at.elapsed() < Duration::from_secs(5));
     }
 }

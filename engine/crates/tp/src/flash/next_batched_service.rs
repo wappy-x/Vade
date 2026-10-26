@@ -192,7 +192,7 @@ pub fn run(
             let worker = tp_wire.zip(model.tp_mailbox_host()).map(|(wire, host)| wire.bind(host, true)).transpose()?;
             let (proxy_stop, attached) = (AtomicBool::new(false), AtomicBool::new(false));
             let served = std::thread::scope(|scope| {
-                let proxy = worker.map(|worker| scope.spawn(|| worker.run(&proxy_stop, &attached, shutdown)));
+                let proxy = worker.map(|worker| super::tp_proxy::spawn(scope, worker, &proxy_stop, &attached, shutdown)).transpose()?;
                 if let Some(Err(error)) = proxy.as_ref().map(|p| super::tp_proxy::wait_attached(&attached, p)) {
                     eprintln!("flashnext tp: {error}");
                     return Err(error);
@@ -209,6 +209,8 @@ pub fn run(
                     requests,
                 );
                 proxy_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                // A waiting doorbell (VADE_W2_TP_DOORBELL=wait) may be parked: wake it to see stop.
+                if let Some(p) = &proxy { p.thread().unpark(); }
                 let proxied = proxy.map_or(Ok(()), |p| p.join().map_err(|_| "tensor split proxy panicked".to_string()).and_then(|r| r));
                 served.and_then(|s| proxied.map(|()| s))
             });
@@ -305,9 +307,10 @@ pub fn run_back(
         let worker = tp_wire.zip(model.tp_mailbox_host()).map(|(wire, host)| wire.bind(host, false)).transpose()?;
         let (proxy_stop, attached) = (AtomicBool::new(false), AtomicBool::new(false));
         let served = std::thread::scope(|scope| {
-            let proxy = worker.map(|worker| scope.spawn(|| worker.run(&proxy_stop, &attached, shutdown)));
+            let proxy = worker.map(|worker| super::tp_proxy::spawn(scope, worker, &proxy_stop, &attached, shutdown)).transpose()?;
             let served = model.serve_pp_back(backend, stream, fast, next, stage, context, active, tile, shutdown);
             proxy_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(p) = &proxy { p.thread().unpark(); }
             let proxied = proxy.map_or(Ok(()), |p| p.join().map_err(|_| "tensor split proxy panicked".to_string()).and_then(|r| r));
             served.and_then(|()| proxied)
         });
