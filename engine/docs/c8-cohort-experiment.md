@@ -26,7 +26,7 @@ Explicit request draft/depth controls retain their meaning. The C8 and graph
 switches can be controlled independently; world one uses all three zeros for a full rollback.
 
 `VADE_MTP_COHORT=wide` (one Spark, or a two- or four-stage pipeline with its guarded
-cohort default; unset keeps everything above) widens the cohort tick: with `VADE_VERIFY_ROWS` unset, five to eight chats verify up
+cohort default, where it is the default; `off` keeps everything above) widens the cohort tick: with `VADE_VERIFY_ROWS` unset, five to eight chats verify up
 to 32 rows in one pass, so eight chats draft depth 3 (four rows each) instead of the
 controller's one proposal. Four chats or fewer stay on the 16-row tile. The cost
 controller becomes opt-in under `wide` (`VADE_MTP_COHORT_ADAPT=1` turns it back on);

@@ -58,14 +58,18 @@ impl Experiments {
             Err(error) => Err(format!("{name}: {error}")),
         };
         let wide = cohort_wide_value(read("VADE_MTP_COHORT")?.as_deref())?;
-        Self::startup_cohort(world, pipeline, wide, read)
+        Self::resolve(world, pipeline, wide, read)
     }
     /// Resolve a startup recipe without rereading environment during link agreement.
     pub fn startup_with(world: usize, pipeline: bool, read: impl FnMut(&str) -> Result<Option<String>, String>) -> Result<Self, String> {
         Self::startup_cohort(world, pipeline, false, read)
     }
     /// `wide` = VADE_MTP_COHORT=wide: one Spark or a guarded pipeline; false resolves exactly as startup_with.
-    pub fn startup_cohort(world: usize, pipeline: bool, wide: bool, mut read: impl FnMut(&str) -> Result<Option<String>, String>) -> Result<Self, String> {
+    pub fn startup_cohort(world: usize, pipeline: bool, wide: bool, read: impl FnMut(&str) -> Result<Option<String>, String>) -> Result<Self, String> {
+        Self::resolve(world, pipeline, Some(wide), read)
+    }
+    /// `wide` None (VADE_MTP_COHORT unset): wide on a guarded pipeline, off elsewhere.
+    fn resolve(world: usize, pipeline: bool, wide: Option<bool>, mut read: impl FnMut(&str) -> Result<Option<String>, String>) -> Result<Self, String> {
         let batch=read("VADE_MTP_BATCH")?;
         let c8=read("VADE_MTP_C8")?;
         let graph=read("VADE_POOL_GRAPH_FALLBACK")?;
@@ -78,6 +82,7 @@ impl Experiments {
             _ => return Err("VADE_W2_PP_C8 must be unset, 0 or 1".into()),
         };
         let local=COHORT_WORLDS.contains(&world);
+        let wide=wide.unwrap_or(pp);
         if wide && !(local && !pipeline || pp) {
             return Err("VADE_MTP_COHORT=wide needs one Spark or a guarded pipeline (VADE_W2_PP_C8); unset it for rank serving".into());
         }
@@ -417,20 +422,31 @@ fn read(name: &str) -> Result<Mode, String> {
     }
 }
 
-/// VADE_MTP_COHORT: unset = the existing cohort policy, "wide" = the world-one wide tick.
-fn cohort_wide_value(value: Option<&str>) -> Result<bool, String> {
+/// VADE_MTP_COHORT: unset = the route's default (wide on a guarded pipeline), "wide", or "off"
+/// (the 16-row controller tick).
+fn cohort_wide_value(value: Option<&str>) -> Result<Option<bool>, String> {
     match value {
-        None => Ok(false),
-        Some("wide") => Ok(true),
-        Some(v) => Err(format!("VADE_MTP_COHORT must be unset or wide (got {v:?})")),
+        None => Ok(None),
+        Some("wide") => Ok(Some(true)),
+        Some("off") => Ok(Some(false)),
+        Some(v) => Err(format!("VADE_MTP_COHORT must be unset, wide or off (got {v:?})")),
     }
 }
 #[cfg(test)]
 #[test]
 fn wide_cohort_is_opt_in_world_one_only_and_unset_matches_startup_with() {
-    for v in ["", "0", "1", "Wide", " wide"] { assert!(cohort_wide_value(Some(v)).unwrap_err().contains("VADE_MTP_COHORT")); }
-    assert_eq!(cohort_wide_value(None), Ok(false));
-    assert_eq!(cohort_wide_value(Some("wide")), Ok(true));
+    for v in ["", "0", "1", "Wide", " wide", "OFF"] { assert!(cohort_wide_value(Some(v)).unwrap_err().contains("VADE_MTP_COHORT")); }
+    assert_eq!(cohort_wide_value(None), Ok(None));
+    assert_eq!(cohort_wide_value(Some("wide")), Ok(Some(true)));
+    assert_eq!(cohort_wide_value(Some("off")), Ok(Some(false)));
+    // Unset: wide on guarded pipelines only; one Spark, native ranks and VADE_W2_PP_C8=0 stay off.
+    let none2=|_: &str| Ok(None);
+    for world in [2,4] { assert!(Experiments::resolve(world,true,None,none2).unwrap().wide_tick); }
+    for (world,pipeline) in [(1,false),(1,true),(2,false),(3,true),(4,false)] {
+        assert_eq!(Experiments::resolve(world,pipeline,None,none2),Experiments::startup_with(world,pipeline,none2));
+    }
+    let pp_off=|k: &str| Ok((k=="VADE_W2_PP_C8").then(|| "0".to_owned()));
+    assert_eq!(Experiments::resolve(2,true,None,pp_off),Experiments::startup_with(2,true,pp_off));
     let none=|_: &str| Ok(None);
     for (world,pipeline) in [(1,false),(1,true),(2,false),(2,true),(4,true)] {
         assert_eq!(Experiments::startup_cohort(world,pipeline,false,none),Experiments::startup_with(world,pipeline,none));
