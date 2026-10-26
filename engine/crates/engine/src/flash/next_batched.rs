@@ -388,7 +388,7 @@ impl<'a> NextModel<'a> {
         let scratch_savings = crate::flash_next_workspace::saved_bytes(H, 48, 16, crate::flash_next_rows::prompt_tile());
         let head_bounds = crate::flash_head_options::load_local(
             crate::flash_head_options::load_funded(scratch_savings, Head::mx8_draft_bytes(vocab), vocab,
-                POOL_SIZE, mtp_depth != 0)?, headless, || Head::load_bounds(b, head, vocab))?;
+                POOL_SIZE, mtp_depth != 0)?, crate::flash_head_options::bounds_rows(vocab, headless).is_none(), || { let (start, rows) = crate::flash_head_options::bounds_rows(vocab, headless).ok_or("no head bounds rows")?; Head::load_bounds(b, head, start, rows) })?;
         // Capture draft configuration once; all sessions borrow this immutable twin.
         let draft_head_rows = Head::draft_rows(checkpoint.config.vocab as usize,
             crate::flash_draft_stack::draft_vocab()?);

@@ -744,8 +744,8 @@ impl<'a, 'w> NextSession<'a, 'w> {
         let owner = crate::flash_next_rows::workspace_owner(sessions.iter().map(|s| s.capacity))?;
         let capacity = sessions[owner].capacity;
         let mut work = model.take_work(b, capacity, count)?;
-        work.bound_head = greedy_head && verify && sessions.len() == 1 && (2..=crate::flash_head_options::RETAINED_ROWS).contains(&count)
-            && model.head_bounds.is_some()
+        work.bound_head = greedy_head && verify && sessions.len() == 1 && (head_split::eligible(model, sessions.len(), count, verify)
+            || (2..=crate::flash_head_options::RETAINED_ROWS).contains(&count) && model.head_bounds.is_some())
             && sessions.iter().all(|s| s.dump.is_none() && s.layer_bytes.is_none());
         if let Err(error) = work.status.clear(b, count, 0) {
             model.return_work(work);
@@ -755,6 +755,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             s.valid = false;
             s.logits_ready = false;
             if let Some(d) = s.draft.as_ref() { d.bound_at.set(None); }
+            s.head.take_split();
         }
         // VADE_MTP_GRAPH=0: the eager build of `execute`, which holds no segment code.
         // VADE_W2_PP stages capture their own layers' segments; each closes before the exchange.
@@ -1321,7 +1322,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             }
         }
         match part {
-            Part::Back(..) => return Ok(()),
+            Part::Back(..) => return Self::split_head_back(b, sessions, work, count, verify),
             Part::Front(_) => {
                 let meta: Vec<[u32; 4]> = sessions
                     .iter()
@@ -1384,20 +1385,13 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 .mixer
                 .mix_tiled(b, &mut work.hc, &work.residual, &work.mixed, count)?;
             if verify {
+                if Self::split_head_front(b, sessions, work, spans, count)? { return Ok(()); }
                 if work.bound_head {
-                    Head::project_bound_rows(b, model.weights.device_address("lm_head.weight")?, model.vocabulary(), count,
+                    Head::project_bound_rows(b, model.weights.device_address("lm_head.weight")?, 0, model.vocabulary(), count,
                         &work.mixed, &mut work.head_logits, &mut work.head_partials, &mut work.head_result,
                         model.head_bounds.as_ref().ok_or("head bounds missing")?)?;
-                } else { Head::project_next_rows(
-                    b,
-                    model.weights.device_address("lm_head.weight")?,
-                    model.vocabulary(),
-                    count,
-                    &work.mixed,
-                    &mut work.head_logits,
-                    &mut work.head_partials,
-                    &mut work.head_result,
-                )?; }
+                } else { Head::project_next_rows(b, model.weights.device_address("lm_head.weight")?, model.vocabulary(), count,
+                    &work.mixed, &mut work.head_logits, &mut work.head_partials, &mut work.head_result)?; }
                 for (s, span) in sessions.iter_mut().zip(spans) {
                     if work.bound_head {
                         let d = s.draft.as_mut().ok_or("MTP disabled")?;
@@ -1415,7 +1409,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                         span.len() * model.vocabulary(),
                     )?;
                 }
-                return Ok(());
+                return Self::split_head_after(b, model, sessions.len(), work, count);
             }
             work.head_input.resize_within_capacity(sessions.len() * H)?;
             for (row, span) in spans.iter().enumerate() {
@@ -1459,6 +1453,8 @@ pub(super) enum Part<'p> {
 mod pool;
 #[path = "next_execution_pp.rs"]
 mod pp_rows;
+#[path = "head_split.rs"]
+mod head_split;
 pub(super) use pool::Pool;
 /// Layers per captured verify segment (VADE_MTP_GRAPH): segments start at layers 1, 13, 25, 37.
 const VERIFY_SEGMENT: usize = 12;

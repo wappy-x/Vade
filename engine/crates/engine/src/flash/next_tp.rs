@@ -118,6 +118,8 @@ impl<'a> NextModel<'a> {
         if layout.hidden != H || layout.residual != W || layout.experts != EXPERTS {
             return Err(format!("tensor split geometry {layout:?} differs from the loaded world-one layout"));
         }
+        // VADE_W2_TP_HEAD: before the wire thread's key swap on the same link (the proxy's attach wait).
+        crate::flash_head_options::agree_split(&link, rank, crate::flash_head_options::split_from_env()?, std::time::Duration::from_secs(600))?;
         if self.tp_box.set(b.tp_mailbox(layout.slot_bytes())?).is_err() {
             return Err("the tensor split mailbox is already set".into());
         }
@@ -301,6 +303,21 @@ impl<'a> NextModel<'a> {
     }
     fn tp_rank(&self) -> Option<usize> {
         self.tp.borrow().as_ref().map(|s| s.rank)
+    }
+    /// VADE_W2_TP_HEAD=1: `rows` rows of `width` words from rank 1 to rank 0, queued in the
+    /// stream (rank 1 puts `vector`'s rows, rank 0 takes them into `vector`); both ranks call it
+    /// for the same passes (execution::head_split).
+    pub(super) fn tp_rows_to_front(&self, b: &Backend<'a>, vector: &mut DeviceVector<'a>, rows: usize, width: usize) -> Result<()> {
+        let mut guard = self.tp.borrow_mut();
+        let s = guard.as_mut().ok_or("tensor split missing")?;
+        let mailbox = self.tp_box.get().ok_or("tensor split mailbox missing")?;
+        if s.rank == 1 {
+            s.sent += 1;
+            b.tp_mailbox_put(mailbox, vector, rows, width, width, 0, s.sent)
+        } else {
+            s.taken += 1;
+            b.tp_mailbox_take(mailbox, vector, rows, width, width, 0, s.taken, s.limit_ns)
+        }
     }
     /// Layers whose MoE output is formed without the deferred finish: the front's last layer
     /// before the post (its residual crosses) and every split layer (its halves cross).

@@ -7,6 +7,12 @@ Changes that are merged but not yet released are under Unreleased.
 
 ### Engine
 
+- With the two-Spark tensor split (`VADE_W2_TP=1`), `VADE_W2_TP_HEAD=1` on
+  both Sparks splits the verify head of one greedy chat between them: each
+  Spark scores half of the vocabulary (with the bounded head, it screens only
+  its half and rescores exactly the rows that can win) and the second Spark
+  sends its best token per row to the first. The tokens do not change. Sampled chats and drafts keep
+  the whole head on the first Spark. Unset keeps the whole head there.
 - With the two-Spark tensor split on the one-sided wire (`VADE_W2_TP=1`,
   `VADE_W2_TP_WIRE=write`), the wire's doorbell thread now sleeps when no
   exchange is in flight, instead of polling. Speed and tokens are the same;

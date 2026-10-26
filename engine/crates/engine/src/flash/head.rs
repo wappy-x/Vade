@@ -19,6 +19,10 @@ pub(super) const CONF_CTAS: usize = 96;
 pub(super) struct Bounds<'a> {
     twin: DeviceVector<'a>,
     norms: DeviceVector<'a>,
+    /// The head rows these bounds screen: [start, start + rows) (VADE_W2_TP_HEAD: a rank's
+    /// vocabulary half; otherwise the whole head).
+    start: usize,
+    rows: usize,
 }
 impl Bounds<'_> {
     pub(super) fn bytes(&self) -> u64 { (self.twin.len() + self.norms.len()) as u64 * 4 }
@@ -38,12 +42,19 @@ pub struct Head<'a, 'w> {
     /// VADE_FLASHNEXT_DRAFT_FP4=2 (the default): rescore the FP4 screen's top four 1024-row chunks from
     /// the MXFP8 twin's values (needs that twin).
     fp4_rescore: bool,
+    /// VADE_W2_TP_HEAD: the last verify pass projected rows [0, n) here and rank 1 rows [n, ..);
+    /// its argmax rows are merged on readback (take_split) and its logits are sparse.
+    split: Option<u32>,
     ready: bool,
     max_ready: bool,
     _weights: PhantomData<&'w ()>,
 }
 impl<'a, 'w> Head<'a, 'w> {
-    pub(super) fn load_bounds(b: &Backend<'a>, weight: u64, rows: usize) -> Result<Bounds<'a>> {
+    /// Bounds of head rows [start, start + rows): the MXFP8 screen and the row norms of that
+    /// range only (a range of whole 8-row groups is a contiguous run of the head layout).
+    pub(super) fn load_bounds(b: &Backend<'a>, weight: u64, start: usize, rows: usize) -> Result<Bounds<'a>> {
+        if !start.is_multiple_of(64) { return Err("head bounds start at a 64-row tile".into()); }
+        let weight = weight + Self::row_offsets(start).0;
         let twin = Self::load_mx8_draft(b, weight, rows)?.ok_or("head bounds need complete MX8 rows")?;
         let norms = b.vector(rows * 2)?;
         let (mut w, mut t, mut n, mut o) = (weight, twin.device_address(), rows as u32, norms.device_address());
@@ -56,16 +67,18 @@ impl<'a, 'w> Head<'a, 'w> {
         // Nonfinite norms cannot justify pruning: the shared envelope retains
         // those rows and runs their canonical head. Negative norms are malformed.
         if values.iter().any(|v| *v < 0.0) { return Err("invalid target-head norm bounds".into()); }
-        let bounds = Bounds { twin, norms };
+        let bounds = Bounds { twin, norms, start, rows };
         Ok(bounds)
     }
 
     /// Sparse greedy verification; the session retains inputs for canonical full-logit readers.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn project_bound_rows(b: &Backend<'_>, weight: u64, rows: usize, count: usize,
+    /// Head rows [start, start + rows) of `weight` (the bounds' range); argmax ids count from `start`.
+    pub(super) fn project_bound_rows(b: &Backend<'_>, weight: u64, start: usize, rows: usize, count: usize,
         hidden: &DeviceVector<'_>, logits: &mut DeviceVector<'_>, partials: &mut DeviceVector<'_>,
         result: &mut DeviceVector<'_>, bounds: &Bounds<'_>) -> Result<()> {
         use spark_gpu_probe::kernel_params::{Bf16Rows, FlashBf16Input};
+        if (bounds.start, bounds.rows) != (start, rows) { return Err("head bounds cover other rows".into()); }
         if !(1..=crate::flash_head_options::RETAINED_ROWS).contains(&count) || rows % 64 != 0 || hidden.len() < count * H
             || logits.len() < rows * count || partials.len() < count * 192 * 3 || result.len() < count * 3 {
             return Err("head bound verification shape".into());
@@ -91,8 +104,10 @@ impl<'a, 'w> Head<'a, 'w> {
         let mut p = Bf16Rows { weight, output: logits.device_address(), rows: rows as u32, stride: rows as u32,
             weight2: 0, output2: 0, rows2: 0, stride2: 0, input: input.output, cols: H as u32,
             tokens: count as u32, input_bf16: 1, hc_silu: 0, input_plane_words: 0 };
+        let (skip, flag_skip, base_skip) = Self::row_offsets(start);
         let (mut flags, mut bases) = LBF12.read().map_err(|_| "LBF12 registry poisoned")?
-            .filter(|&(w, _, _)| w == weight).map_or((0,0), |(_, f, a)| (f,a));
+            .filter(|&(w, _, _)| w == weight).map_or((0,0), |(_, f, a)| (f + flag_skip, a + base_skip));
+        p.weight = weight + skip;
         let mut blocks = 192u32;
         unsafe {
             b.launch_flash("flash_next_head_input", (count.div_ceil(8)*(H/16)*32).div_ceil(128) as u32, 128,
@@ -134,7 +149,7 @@ impl<'a, 'w> Head<'a, 'w> {
         let mut vectors = b.vector_arena(&Self::arena_lengths(rows))?.into_iter();
         Ok(Self { weight, range: range.start as u32..range.end as u32,
             logits: vectors.next().unwrap(), partials: vectors.next().unwrap(),
-            result: vectors.next().unwrap(), top_k: None, mx8: None, fp4: None, fp4_rescore: false, ready: false, max_ready: false, _weights: PhantomData })
+            result: vectors.next().unwrap(), top_k: None, mx8: None, fp4: None, fp4_rescore: false, split: None, ready: false, max_ready: false, _weights: PhantomData })
     }
     pub fn vocabulary(&self) -> Range<u32> { self.range.clone() }
     /// Draft proposals only: score the first `rows` vocabulary ids (a multiple of 8; the
@@ -405,9 +420,24 @@ impl<'a, 'w> Head<'a, 'w> {
         }
         Ok(())
     }
-    pub(super) fn project_next_rows(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn project_next_rows(b: &Backend<'_>, weight: u64, rows: usize, count: usize, hidden: &DeviceVector<'_>,
+        logits: &mut DeviceVector<'_>, partials: &mut DeviceVector<'_>, result: &mut DeviceVector<'_>) -> Result<()> {
+        Self::project_next_rows_at(b, weight, 0, rows, count, hidden, logits, partials, result)
+    }
+    /// Byte offsets of head row `start` (a multiple of 8) in the resident weight, the LBF12 tile
+    /// flags and the row base exponents: every array keeps whole 8-row groups in row order.
+    pub(super) fn row_offsets(start: usize) -> (u64, u64, u64) {
+        ((start * H * 2) as u64, (start / 8 * 16) as u64, (start / 8 * (H / 32) * 8) as u64)
+    }
+    /// Head rows [start, start + rows) only (VADE_W2_TP_HEAD): the launches of the whole head on
+    /// that range's weights, flags and bases. Each logit is one warp's walk over its 8-row group
+    /// in the same K order, so it is the whole head's; argmax ids count from row `start`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn project_next_rows_at(
         b: &Backend<'_>,
         weight: u64,
+        start: usize,
         rows: usize,
         count: usize,
         hidden: &DeviceVector<'_>,
@@ -417,7 +447,8 @@ impl<'a, 'w> Head<'a, 'w> {
     ) -> Result<()> {
         use spark_gpu_probe::kernel_params::{Bf16Rows, FlashBf16Input};
         let tiles = crate::flash_next_rows::head_tiles(count)?;
-        if hidden.is_segmented()
+        if !start.is_multiple_of(8)
+            || hidden.is_segmented()
             || logits.is_segmented()
             || partials.is_segmented()
             || result.is_segmented()
@@ -431,7 +462,10 @@ impl<'a, 'w> Head<'a, 'w> {
             return Err("Flash-Next head selection extent".into());
         }
         b.prepare_flash_dense()?;
-        let lbf12 = (*LBF12.read().map_err(|_| "LBF12 registry poisoned")?).filter(|&(w, _, _)| w == weight);
+        let (skip, flag_skip, base_skip) = Self::row_offsets(start);
+        let lbf12 = (*LBF12.read().map_err(|_| "LBF12 registry poisoned")?).filter(|&(w, _, _)| w == weight)
+            .map(|(w, flags, bases)| (w, flags + flag_skip, bases + base_skip));
+        let weight = weight + skip;
         // Each slice packs its own complete groups of eight. Weight addresses,
         // K-range folds and tie order are identical to the one-row projection.
         for tile in tiles {
@@ -511,6 +545,12 @@ impl<'a, 'w> Head<'a, 'w> {
         }
         Ok(())
     }
+    /// VADE_W2_TP_HEAD: this session's last verify pass projected rows [0, rows) here. Its logits
+    /// are sparse: `ready` stays false until a canonical reader re-projects the retained inputs.
+    pub(super) fn mark_split(&mut self, rows: u32) {
+        self.ready = false; self.max_ready = false; self.split = Some(rows);
+    }
+    pub(super) fn take_split(&mut self) -> Option<u32> { self.split.take() }
     pub(super) fn publish_next(&mut self,b: &Backend<'_>,logits: &DeviceVector<'_>,result: &DeviceVector<'_>,row: usize) -> Result<()> {
         self.ready=false; self.max_ready=false;
         b.copy_range(logits,&mut self.logits,row*self.range.len(),0,self.range.len())?;
@@ -531,6 +571,7 @@ impl<'a, 'w> Head<'a, 'w> {
         Ok(())
     }
     pub(super) fn select_row(&mut self, b: &Backend<'_>, logits: &DeviceVector<'_>, row: usize) -> Result<()> {
+        self.split = None;
         if !self.range.is_empty() { b.copy_range(logits, &mut self.logits, row * self.range.len(), 0, self.range.len())?; }
         self.ready = true; self.max_ready = false;
         Ok(())
@@ -598,6 +639,17 @@ impl<'a, 'w> Head<'a, 'w> {
         }).collect()
     }
 }
+/// VADE_W2_TP_HEAD: each row's argmax over the whole vocabulary from the two halves' argmax rows
+/// (`own` over rows [0, start), `peer` over rows [start, ..) with ids from 0): the larger logit,
+/// ties to the lower id (always `own`'s), the order logits_argmax_finish uses within one head.
+pub(super) fn merge_split(own: &[(u32, f32)], peer: &[(u32, f32)], start: u32) -> Result<Vec<(u32, f32)>> {
+    if own.len() != peer.len() { return Err("split head rows differ".into()); }
+    own.iter().zip(peer).map(|(&(i, v), &(j, w))| {
+        let j = j.checked_add(start).ok_or("split head id overflow")?;
+        let (value, id) = spark_gpu_probe::next_math::better((v, i), (w, j));
+        Ok((id, value))
+    }).collect()
+}
 fn first_mx8(heads: &[&mut Head<'_, '_>]) -> Option<u64> {
     let twin = heads.first()?.mx8.as_ref()?.device_address();
     heads.iter().all(|h| h.mx8.as_ref().map(|v| v.device_address()) == Some(twin)).then_some(twin)
@@ -606,6 +658,37 @@ fn first_mx8(heads: &[&mut Head<'_, '_>]) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::Head;
+    /// Rank 1's half starts where the whole head's arrays hold row `start`: the weight layout
+    /// (next_math::head_weight), and the LBF12 flags and bases that lbf12_bytes sizes per row prefix.
+    #[test]
+    fn split_row_offsets_follow_the_head_layouts() {
+        for start in [0usize, 8, 64, 124_160, 248_312] {
+            let (weight, flags, bases) = Head::row_offsets(start);
+            assert_eq!(weight as usize, spark_gpu_probe::next_math::head_weight(start, 0, super::H) * 2);
+            assert_eq!(flags as usize + bases as usize, Head::lbf12_bytes(start));
+            assert_eq!(flags as usize, start / 8 * 16);
+        }
+    }
+    /// The merge equals one argmax over the concatenated row (larger logit, ties to the lower id),
+    /// for every split point and with ties across the halves.
+    #[test]
+    fn split_merge_equals_the_whole_argmax() {
+        let whole = |row: &[f32]| row.iter().enumerate().fold((u32::MAX, f32::NEG_INFINITY), |best, (i, &v)| {
+            if v > best.1 || v == best.1 && (i as u32) < best.0 { (i as u32, v) } else { best } });
+        let rows: Vec<Vec<f32>> = vec![vec![1.0, 3.0, 2.0, 3.0, 0.5, -1.0, 3.0, 2.5], vec![-2.0, -2.0, -1.0, -3.0, -1.0, -1.0, -5.0, -1.0],
+            vec![0.0, -0.0, 0.0, 0.0, -0.0, 0.0, 0.0, 0.0], vec![1.0, 1.0, 1.0, 1.0, 9.0, 9.0, 1.0, 1.0]];
+        for start in 1..8usize {
+            let own: Vec<_> = rows.iter().map(|r| whole(&r[..start])).collect();
+            let peer: Vec<_> = rows.iter().map(|r| whole(&r[start..])).collect();
+            let merged = super::merge_split(&own, &peer, start as u32).unwrap();
+            for (row, m) in rows.iter().zip(merged) {
+                let w = whole(row);
+                assert_eq!((m.0, m.1.to_bits()), (w.0, w.1.to_bits()), "start {start} row {row:?}");
+            }
+        }
+        assert!(super::merge_split(&[(0, 1.0)], &[], 4).is_err());
+        assert!(super::merge_split(&[(0, 1.0)], &[(u32::MAX, 2.0)], 4).is_err());
+    }
     /// The FP8 draft twin's placement (resident rows into the Flash-Next head layout the MXFP8
     /// pack reads) is a bijection over a whole shard: every weight lands once, none is lost.
     #[test]

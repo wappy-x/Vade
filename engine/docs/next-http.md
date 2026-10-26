@@ -110,6 +110,20 @@ layer 2 (the launcher pins `VADE_W2_PP_SPLIT=2`):
   gaps too (the earlier behaviour). A stop also ends the wire's startup key
   swap at once, even when the peer never answers. The words moved are the same, so token IDs do not change.
   The ranks compare the wire at link setup and stop if only one has it.
+- `VADE_W2_TP_HEAD=1` on both ranks (opt-in; needs `VADE_W2_TP=1`) splits the
+  verify head of one chat's verify pass of 1 to 8 tokens by vocabulary halves.
+  Both ranks hold the pass's final residual, mix it and project their half of
+  the head rows with the same launches as the whole head, so every logit is the
+  whole head's. When the bounded head is funded, each rank loads the screen and
+  row norms of its own half only (rank 1 then holds about 0.33 GB more and rank 0
+  as much less) and rescores exactly the rows of its half that can win. Rank 1 sends its best logit and token per row (12 bytes per
+  row) through the mailbox; rank 0 keeps the larger logit, ties to the lower
+  token ID, as the whole head's argmax does. Only greedy verification uses the
+  halves: a sampled pass runs the whole head on rank 0 and drops rank 1's
+  message. The verifier then holds no full logits; a request for logits or
+  log-probabilities projects the whole head again from the kept inputs. Token
+  IDs do not change. The ranks compare the switch at startup and stop if only
+  one has it. Drafts keep the whole draft head on rank 0.
 - A prompt pass whose every chat spans at least half the prompt tile (1024 rows at
   the default 2048-row tile) runs as a pipeline tile
   (rank 0 layers 0-23, rank 1 layers 24-47, exactly as the pipeline). Before such a

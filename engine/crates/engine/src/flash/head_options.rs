@@ -16,7 +16,63 @@ pub fn load() -> Result<bool, String> {
 /// Refuse a malformed value at startup without fixing the switch: a pipeline rank pins it
 /// (tp settings::PIPELINE_DEFAULTS) after argument parsing and before the model reads it.
 pub fn validate() -> Result<(), String> {
-    parse(std::env::var("VADE_HEAD_BOUNDS")).map(|_| ())
+    parse(std::env::var("VADE_HEAD_BOUNDS")).map(|_| ())?;
+    if split_from_env()? && !crate::flash_tp_switch::from_env()? {
+        return Err("VADE_W2_TP_HEAD=1 needs VADE_W2_TP=1 on both ranks".into());
+    }
+    Ok(())
+}
+/// VADE_W2_TP_HEAD (unset = 0; with VADE_W2_TP=1): 1 splits the greedy verify head of one-chat
+/// passes of 2..=RETAINED_ROWS rows by vocabulary halves across the two ranks. Read once.
+pub fn split_from_env() -> Result<bool, String> {
+    static SPLIT: OnceLock<Result<bool, String>> = OnceLock::new();
+    SPLIT.get_or_init(|| parse_split(std::env::var("VADE_W2_TP_HEAD").ok().as_deref())).clone()
+}
+fn parse_split(value: Option<&str>) -> Result<bool, String> {
+    match value {
+        None | Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        _ => Err("VADE_W2_TP_HEAD must be 0 or 1".into()),
+    }
+}
+/// Rows of rank 0's vocabulary half under VADE_W2_TP_HEAD: the lower half in whole 64-row
+/// tiles (the bounded screen's unit); rank 1 takes the rest.
+pub fn split_rows(vocabulary: usize) -> usize { vocabulary / 128 * 64 }
+/// The head rows whose bounds this rank loads, as (start, rows): the whole head on a rank with the
+/// head; under VADE_W2_TP_HEAD=1 (with VADE_W2_TP=1) the front its lower half and the headless rank 1
+/// its upper half. None: no bounds (a headless pipeline rank).
+pub fn bounds_rows(vocabulary: usize, headless: bool) -> Option<(usize, usize)> {
+    split_bounds_rows(vocabulary, headless, split_from_env() == Ok(true) && crate::flash_tp_switch::from_env() == Ok(true))
+}
+fn split_bounds_rows(vocabulary: usize, headless: bool, split: bool) -> Option<(usize, usize)> {
+    let half = split_rows(vocabulary);
+    match (split, headless) {
+        (false, true) => None,
+        (false, false) => Some((0, vocabulary)),
+        (true, false) => Some((0, half)),
+        (true, true) => Some((half, vocabulary - half)),
+    }
+}
+/// The split's two ranks, on its TCP link before each rank's wire thread starts: rank 1 writes its
+/// VADE_W2_TP_HEAD (one byte; it cannot wait here, rank 0 reaches this only after rank 1 serves),
+/// rank 0 reads it and stops at startup when it differs from its own (rank 1 then loses the link).
+/// A rank that splits the head sends one mailbox message per eligible pass that the other rank
+/// would never take, so a pair that disagrees must not serve.
+pub fn agree_split(mut link: &std::net::TcpStream, rank: usize, on: bool, limit: std::time::Duration) -> Result<(), String> {
+    use std::io::{Read, Write};
+    if rank != 0 {
+        return link.write_all(&[on as u8]).map_err(|e| format!("VADE_W2_TP_HEAD agreement: {e}"));
+    }
+    let before = link.read_timeout().map_err(|e| e.to_string())?;
+    link.set_read_timeout(Some(limit)).map_err(|e| e.to_string())?;
+    let mut peer = [0u8];
+    let agreed = link.read_exact(&mut peer).map_err(|e| format!("VADE_W2_TP_HEAD agreement: {e}"));
+    link.set_read_timeout(before).map_err(|e| e.to_string())?;
+    agreed?;
+    if (peer[0] != 0) != on {
+        return Err(format!("VADE_W2_TP_HEAD is {} here and {} on the peer rank: set it on both ranks or neither", on as u8, peer[0]));
+    }
+    Ok(())
 }
 fn configured() -> Result<Option<bool>, String> {
     ENABLED.get_or_init(|| parse(std::env::var("VADE_HEAD_BOUNDS"))).clone()
@@ -45,7 +101,43 @@ pub const RETAINED_INPUT_BYTES: usize = RETAINED_ROWS * 2560 * 4;
 pub fn retained_input_bytes(enabled: bool) -> usize { if enabled { RETAINED_INPUT_BYTES } else { 0 } }
 #[cfg(test)]
 mod tests {
-    use super::{parse, load_local, retained_input_bytes, funded};
+    use super::{parse, parse_split, agree_split, load_local, retained_input_bytes, funded, split_bounds_rows, split_rows};
+    /// Each rank's bounds cover its own half in whole 64-row tiles, the halves tile the head, and
+    /// without the switch the front keeps the whole head and a headless rank none.
+    #[test]
+    fn split_bounds_cover_each_ranks_half() {
+        for vocabulary in [248_320usize, 151_936, 64 * 1000 + 64] {
+            let half = split_rows(vocabulary);
+            assert_eq!(half % 64, 0);
+            assert!(half <= vocabulary - half && vocabulary - 2 * half < 128);
+            assert_eq!(split_bounds_rows(vocabulary, false, true), Some((0, half)));
+            assert_eq!(split_bounds_rows(vocabulary, true, true), Some((half, vocabulary - half)));
+            assert_eq!(split_bounds_rows(vocabulary, false, false), Some((0, vocabulary)));
+            assert_eq!(split_bounds_rows(vocabulary, true, false), None);
+        }
+        assert_eq!(split_rows(248_320), 124_160);
+    }
+    #[test]
+    fn head_split_switch_is_strict_and_ranks_must_agree() {
+        assert_eq!(parse_split(None), Ok(false));
+        assert_eq!(parse_split(Some("0")), Ok(false));
+        assert_eq!(parse_split(Some("1")), Ok(true));
+        for value in ["", "2", "yes", " 1"] { assert!(parse_split(Some(value)).is_err()); }
+        let limit = std::time::Duration::from_secs(5);
+        for (front, back) in [(false, false), (true, true), (true, false), (false, true)] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let peer = std::thread::spawn(move || {
+                let (link, _) = listener.accept().unwrap();
+                // Rank 1 never waits: its byte is written before any later traffic on the link.
+                agree_split(&link, 1, back, limit).map(|()| link)
+            });
+            let link = std::net::TcpStream::connect(address).unwrap();
+            let theirs = peer.join().unwrap();
+            assert!(theirs.is_ok());
+            assert_eq!(agree_split(&link, 0, front, limit).is_ok(), front == back);
+        }
+    }
     #[test]
     fn disabled_and_headless_models_never_allocate_optional_head_state() {
         for (enabled, headless) in [(false,false),(false,true),(true,true)] {

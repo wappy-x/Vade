@@ -130,7 +130,7 @@ impl<'a, 'w> Draft<'a, 'w> {
             .sum::<usize>();
         Ok((with_draft - target) as usize
             + arena
-            + crate::flash_head_options::retained_input_bytes(model.head_bounds.is_some())
+            + crate::flash_head_options::retained_input_bytes(model.retains_head_inputs())
             + Workspace::reservation_bytes(1, 1, depth, model.prompt_frontend)
             + QsaScratch::reservation_bytes(&model.weights.plan, 1, capacity, false)
             + [W, 320, W, 4, H].into_iter()
@@ -167,7 +167,7 @@ impl<'a, 'w> Draft<'a, 'w> {
             partials: v.next().ok_or("missing draft arena vector")?,
             result: v.next().ok_or("missing draft arena vector")?,
             verification: v.next().ok_or("missing draft arena vector")?,
-            bound_input: if model.head_bounds.is_some() {
+            bound_input: if model.retains_head_inputs() {
                 Some(b.vector(crate::flash_head_options::RETAINED_INPUT_BYTES / 4)?)
             } else { None },
             bound_at: std::cell::Cell::new(None),
@@ -973,7 +973,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         let model = sessions[0].model;
         let held = model.work.borrow();
         let work = held.as_ref().ok_or("missing verifier workspace")?;
-        let result = b.read_argmax_results(&work.head_result, tokens.iter().map(|t| t.len()).sum());
+        let result = Self::split_results(b, sessions, &work.head_result, tokens.iter().map(|t| t.len()).sum());
         drop(held);
         if result.is_err() {
             for s in sessions.iter_mut() {
