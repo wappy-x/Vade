@@ -9,7 +9,8 @@
 //! VADE_VERIFY_ROWS=32 (spark_engine::flash_next_rows::verify_rows, default off) raises the
 //! tick and the verify pass to 32 rows; above 16 rows a chat's bytes rest on each row
 //! kernel's M 17-32 census, so that switch needs its own law proof per build.
-//! VADE_MTP_COHORT=wide (world one only, default off): unset VADE_VERIFY_ROWS resolves to 32
+//! VADE_MTP_COHORT=wide (one Spark and the guarded two-/four-stage pipelines, default off):
+//! unset VADE_VERIFY_ROWS resolves to 32
 //! for five to eight chats (tick_width; four or fewer stay on 16) and the depth-one controller
 //! (VADE_MTP_COHORT_ADAPT) becomes opt-in, so eight chats draft depth 3 in one 32-row pass.
 //! Unset, startup resolves exactly as before.
@@ -63,7 +64,7 @@ impl Experiments {
     pub fn startup_with(world: usize, pipeline: bool, read: impl FnMut(&str) -> Result<Option<String>, String>) -> Result<Self, String> {
         Self::startup_cohort(world, pipeline, false, read)
     }
-    /// `wide` = VADE_MTP_COHORT=wide: world one only; false resolves exactly as startup_with.
+    /// `wide` = VADE_MTP_COHORT=wide: one Spark or a guarded pipeline; false resolves exactly as startup_with.
     pub fn startup_cohort(world: usize, pipeline: bool, wide: bool, mut read: impl FnMut(&str) -> Result<Option<String>, String>) -> Result<Self, String> {
         let batch=read("VADE_MTP_BATCH")?;
         let c8=read("VADE_MTP_C8")?;
@@ -77,8 +78,8 @@ impl Experiments {
             _ => return Err("VADE_W2_PP_C8 must be unset, 0 or 1".into()),
         };
         let local=COHORT_WORLDS.contains(&world);
-        if wide && (!local || pipeline) {
-            return Err("VADE_MTP_COHORT=wide is world-one only; unset it for pipeline/rank serving".into());
+        if wide && !(local && !pipeline || pp) {
+            return Err("VADE_MTP_COHORT=wide needs one Spark or a guarded pipeline (VADE_W2_PP_C8); unset it for rank serving".into());
         }
         let guarded=local || pp;
         let mode=cohort_mode(parse(batch.as_deref())?, c8.as_deref().or(guarded.then_some("1")))?;
@@ -438,8 +439,17 @@ fn wide_cohort_is_opt_in_world_one_only_and_unset_matches_startup_with() {
     assert_eq!(wide,Experiments { graph_fallback:true,batch_mode:Some(Mode::Auto8),guard_robust:true,wide_tick:true,..Experiments::default() });
     let explicit=Experiments::startup_cohort(1,false,true,|k: &str| Ok((k=="VADE_MTP_COHORT_ADAPT").then(|| "1".to_owned()))).unwrap();
     assert!(explicit.cohort_cost && explicit.wide_tick);
-    for (world,pipeline) in [(1,true),(2,true),(2,false),(4,true)] {
+    for (world,pipeline) in [(1,true),(2,false),(3,true),(4,false)] {
         assert!(Experiments::startup_cohort(world,pipeline,true,none).unwrap_err().contains("VADE_MTP_COHORT"));
+    }
+    // Guarded pipelines: the controller becomes opt-in and the tick widens; VADE_W2_PP_C8=0 refuses wide.
+    for world in [2,4] {
+        let pp=Experiments::startup_cohort(world,true,true,none).unwrap();
+        assert_eq!(pp,Experiments { pipeline_c8:true,batch_mode:Some(Mode::Auto8),guard_robust:true,wide_tick:true,..Experiments::default() });
+        let explicit=Experiments::startup_cohort(world,true,true,|k: &str| Ok((k=="VADE_MTP_COHORT_ADAPT").then(|| "1".to_owned()))).unwrap();
+        assert!(explicit.cohort_cost && explicit.wide_tick);
+        let off=|k: &str| Ok((k=="VADE_W2_PP_C8").then(|| "0".to_owned()));
+        assert!(Experiments::startup_cohort(world,true,true,off).unwrap_err().contains("VADE_MTP_COHORT"));
     }
 }
 

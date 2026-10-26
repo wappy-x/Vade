@@ -25,14 +25,15 @@ pipeline sizes retain their previous defaults and reject explicit cohort activat
 Explicit request draft/depth controls retain their meaning. The C8 and graph
 switches can be controlled independently; world one uses all three zeros for a full rollback.
 
-`VADE_MTP_COHORT=wide` (world one only; unset keeps everything above) widens the
-one-Spark cohort tick: with `VADE_VERIFY_ROWS` unset, five to eight chats verify up
+`VADE_MTP_COHORT=wide` (one Spark, or a two- or four-stage pipeline with its guarded
+cohort default; unset keeps everything above) widens the cohort tick: with `VADE_VERIFY_ROWS` unset, five to eight chats verify up
 to 32 rows in one pass, so eight chats draft depth 3 (four rows each) instead of the
 controller's one proposal. Four chats or fewer stay on the 16-row tile. The cost
 controller becomes opt-in under `wide` (`VADE_MTP_COHORT_ADAPT=1` turns it back on);
 `VADE_VERIFY_ROWS=16` keeps the 16-row tick. Rows above 16 use each row kernel's
 M 17-32 path, whose bytes per chat equal the chat's bytes alone. Any other value of
-`VADE_MTP_COHORT` is a startup error, and so is `wide` on a pipeline or rank.
+`VADE_MTP_COHORT` is a startup error, and so is `wide` on native ranks or with
+`VADE_W2_PP_C8=0`. On a pipeline, set it on every Spark: it joins the pipeline identity.
 
 ```sh
 VADE_MTP_COHORT=wide flash-serve ...

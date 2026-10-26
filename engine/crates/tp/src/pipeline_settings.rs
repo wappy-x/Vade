@@ -7,8 +7,8 @@
 use std::ffi::OsString;
 use spark_serve::mtp_batch::{Experiments, Mode};
 
-const COHORT_NAMES: [&str; 5] = ["VADE_W2_PP_C8", "VADE_MTP_BATCH/VADE_MTP_C8 (effective)",
-    "VADE_POOL_GRAPH_FALLBACK", "VADE_MTP_COHORT_ADAPT", "VADE_C8_GUARD_ROBUST"];
+const COHORT_NAMES: [&str; 6] = ["VADE_W2_PP_C8", "VADE_MTP_BATCH/VADE_MTP_C8 (effective)",
+    "VADE_POOL_GRAPH_FALLBACK", "VADE_MTP_COHORT_ADAPT", "VADE_C8_GUARD_ROBUST", "VADE_MTP_COHORT"];
 
 pub(super) fn names() -> Vec<&'static str> {
     // flash/settings.rs pipeline companions; model/flash and engine/flash load,
@@ -42,7 +42,7 @@ pub(super) fn fingerprints(experiments: Experiments, mut read: impl FnMut(&str) 
         Mode::Auto => "auto", Mode::Auto8 => "auto8", Mode::Off => "off", Mode::On => "on",
     };
     let cohort = [bit(experiments.pipeline_c8), mode, bit(experiments.graph_fallback),
-        bit(experiments.cohort_cost), bit(experiments.guard_robust)];
+        bit(experiments.cohort_cost), bit(experiments.guard_robust), if experiments.wide_tick { "wide" } else { "off" }];
     use spark_engine::flash_prompt_options::Options;
     let prompt = Options::parse(|name| read(name).map(|v| v.into_string()
         .map_err(|_| format!("{name} must be 0 or 1"))).transpose())?.configured_values();
@@ -88,7 +88,7 @@ fn cohort_identity_uses_the_frozen_recipe_without_rereading_its_switches() {
     let parsed = Experiments::startup_with(2, true, |_| Ok(None)).unwrap();
     let identity = fingerprints(parsed, |name| {
         assert!(!["VADE_W2_PP_C8", "VADE_MTP_BATCH", "VADE_MTP_C8", "VADE_POOL_GRAPH_FALLBACK",
-            "VADE_MTP_COHORT_ADAPT", "VADE_C8_GUARD_ROBUST"].contains(&name), "reread {name}");
+            "VADE_MTP_COHORT_ADAPT", "VADE_C8_GUARD_ROBUST", "VADE_MTP_COHORT"].contains(&name), "reread {name}");
         None
     }).unwrap();
     assert_eq!(identity.len(), names().len() * 64);

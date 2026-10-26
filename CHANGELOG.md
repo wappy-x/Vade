@@ -11,7 +11,8 @@ Changes that are merged but not yet released are under Unreleased.
   tokens each and check them in one 32-row step, instead of one token each.
   Four or fewer chats keep the 16-row step. Measured on one Spark with eight
   code chats: 169.6 to 194.4 tokens per second, with the same tokens. Unset,
-  nothing changes.
+  nothing changes. On two Sparks, set it on both to get the same step on the
+  layer pipeline.
 - FP8 experts now launch fewer kernels per layer when a step has under 32
   tokens: the gate kernel also computes the activation and the quantized
   middle, and the routing kernel builds the tables for 2 to 31 tokens in one
