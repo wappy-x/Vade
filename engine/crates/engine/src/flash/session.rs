@@ -380,6 +380,8 @@ pub struct Model<'a> {
     mtp_depth: usize,
     profile_layers: bool,
     prompt: RefCell<Option<PromptScratch<'a>>>,
+    /// The single rank's draft-only MXFP8 head image (Head::fp8_draft_twin), if enabled.
+    draft_mx8: Option<DeviceVector<'a>>,
 }
 impl<'a> Model<'a> {
     pub fn is_resident(&self) -> bool { self.resident }
@@ -515,7 +517,7 @@ impl<'a> Model<'a> {
                 persistent.last().unwrap().resident_bytes(), start.elapsed().as_secs_f64()*1000.0);
         }
         Ok(Self { root: root.to_owned(), checkpoint, persistent, resident: false, activation_quantization,
-            mtp_depth: 0, profile_layers: crate::collective::layers_enabled(), prompt: RefCell::new(None) })
+            mtp_depth: 0, profile_layers: crate::collective::layers_enabled(), prompt: RefCell::new(None), draft_mx8: None })
     }
     /// Load a single rank for a distributed session. The budget covers weights
     /// and execution memory; a low budget retains the existing streamed path.
@@ -553,8 +555,8 @@ impl<'a> Model<'a> {
             weights.payload_bytes as f64 / (io_ms * 1e6), stats.weight_file_bytes,
             stats.weight_file_bytes as f64 / (io_ms * 1e6), stats.weight_buffered_bytes,
             b.peak_pinned_staging_bytes(), b.pinned_staging_bytes());
-        Ok(Self { root: root.to_owned(), checkpoint, persistent: vec![weights], resident, activation_quantization,
-            mtp_depth, profile_layers: crate::collective::layers_enabled(), prompt: RefCell::new(None) })
+        Ok(Self { draft_mx8: if mtp_depth != 0 && resident { Head::fp8_draft_twin(b, &weights)? } else { None }, root: root.to_owned(),
+            checkpoint, persistent: vec![weights], resident, activation_quantization, mtp_depth, profile_layers: crate::collective::layers_enabled(), prompt: RefCell::new(None) })
     }
     /// Serving ranks agree on this decision before any potentially slow load.
     /// The caller passes the remaining bytes of the backend's bounded budget.
@@ -903,6 +905,7 @@ impl<'a, 'w, E: Exchange> Session<'a, 'w, E> {
             result.front.push(FrontScratch::with_tokens(b, result.group)?);
             result.ple.push(Ple::load(b, w)?);
             result.head.push(Head::load(b, w)?);
+            result.head.last_mut().unwrap().use_mx8_draft(model.draft_mx8.as_ref().filter(|_| local == 1));
             result.resident_moe.push(if model.resident {
                 (0..model.checkpoint.config.layers.len()).map(|layer| Moe::load(w, layer, model.activation_quantization))
                     .collect::<Result<Vec<_>>>()?

@@ -229,6 +229,42 @@ impl<'a, 'w> Head<'a, 'w> {
     pub(super) fn use_mx8_draft(&mut self, twin: Option<&'w DeviceVector<'a>>) {
         self.mx8 = twin;
     }
+    /// VADE_FP8_DRAFT_MX8 (unset = 1, 0 = off): the FP8 rank path's drafts score this rank's
+    /// vocabulary rows from an MXFP8 image (load_mx8_draft), half the BF16 head's bytes per
+    /// drafted token. Verification keeps the BF16 head: only proposals can change, never ids.
+    /// The image's pack reads the Flash-Next head layout, so the resident rows are placed in
+    /// that layout in a temporary copy first.
+    pub(super) fn fp8_draft_twin(b: &Backend<'a>, w: &Weights<'_>) -> Result<Option<DeviceVector<'a>>> {
+        let on = match std::env::var("VADE_FP8_DRAFT_MX8") {
+            Err(std::env::VarError::NotPresent) => true,
+            Ok(v) if v == "0" => false, Ok(v) if v == "1" => true,
+            _ => return Err("VADE_FP8_DRAFT_MX8 must be 0 or 1".into()),
+        };
+        let rows = (w.plan.vocabulary.end - w.plan.vocabulary.start) as usize;
+        if !on || Self::mx8_draft_bytes(rows) == 0 { return Ok(None); }
+        let mut placed = vec![0u8; rows * H * 2];
+        w.read_bf16_matrix("lm_head.weight", H, |r, c| spark_gpu_probe::next_math::head_weight(r, c, H), &mut placed)?;
+        let mut copy = b.vector(rows * H / 2)?;
+        b.write_vector_bytes(&mut copy, &placed)?;
+        let twin = Self::load_mx8_draft(b, copy.device_address(), rows);
+        // The pack has completed (load_mx8_draft drains); return the staging heap to the OS.
+        drop((copy, placed));
+        b.trim_host_memory();
+        twin
+    }
+    /// A drafted token's logits: the MXFP8 twin when one is lent, else the BF16 head.
+    pub fn project_draft(&mut self, b: &Backend<'_>, hidden: &DeviceVector<'_>) -> Result<()> {
+        let Some(twin) = self.mx8.map(|v| v.device_address()) else { return self.project(b, hidden) };
+        self.ready = false; self.max_ready = false;
+        if hidden.len() != H || hidden.is_segmented() {
+            return Err("Flash draft head requires a contiguous 2560-wide FP32 mixture".into());
+        }
+        if !self.range.is_empty() {
+            super::blocks::mx8_rows(b, twin, hidden.device_address(), self.logits.device_address(), self.range.len(), H, 1)?;
+        }
+        self.ready = true;
+        Ok(())
+    }
     pub fn weight_bytes(&self) -> usize { self.range.len() * H * 2 }
     pub fn device_bytes(&self) -> usize {
         let mut allocations = Vec::new();
@@ -570,6 +606,25 @@ fn first_mx8(heads: &[&mut Head<'_, '_>]) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::Head;
+    /// The FP8 draft twin's placement (resident rows into the Flash-Next head layout the MXFP8
+    /// pack reads) is a bijection over a whole shard: every weight lands once, none is lost.
+    #[test]
+    fn fp8_draft_twin_placement_is_a_bijection() {
+        let (rows, cols) = (704, super::H);
+        let mut seen = vec![false; rows * cols];
+        for r in 0..rows {
+            for c in 0..cols {
+                let to = spark_gpu_probe::next_math::head_weight(r, c, cols);
+                assert!(to < rows * cols && !seen[to], "row {r} col {c}");
+                seen[to] = true;
+            }
+        }
+        for r in 0..rows {
+            for c in 0..cols {
+                assert!(spark_gpu_probe::kernel_params::flash_bf16_element(r, c, cols, rows) < rows * cols);
+            }
+        }
+    }
     #[test]
     fn shared_draft_twin_accounting_and_prefix_fallback() {
         assert_eq!(Head::mx8_draft_bytes(248320), 655_564_800);

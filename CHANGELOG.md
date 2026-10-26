@@ -16,6 +16,11 @@ Changes that are merged but not yet released are under Unreleased.
   faster; prose stays as fast as before. The tokens do not change.
   `VADE_FLASH_MTP_DEPTH=1..7` sets the most it drafts; `VADE_MTP_ADAPT=0` or an
   explicit `--mtp` keeps the old fixed depth.
+- On two Sparks with the FP8 checkpoint, drafts read a draft-only MXFP8 head
+  copy, so each drafted token costs less: code and structured replies are
+  about 9 percent faster, prose about 4 percent. Verification keeps the BF16
+  head, so outputs are unchanged. Cost: rank 0 chat slots 19 -> 17, and
+  +0.33 GB per rank. `VADE_FP8_DRAFT_MX8=0` turns it off.
 - On one Spark, `VADE_MTP_COHORT=wide` lets five to eight chats draft three
   tokens each and check them in one 32-row step. Before, five chats proposed
   two tokens each and six to eight chats one each. Four or fewer chats keep

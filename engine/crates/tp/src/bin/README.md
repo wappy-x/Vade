@@ -37,6 +37,8 @@ On the FP8 rank path one chat chooses its MTP depth each cycle, up to resident
 depth 7, from its measured verify times and draft acceptance. `VADE_FLASH_MTP_DEPTH`
 (1..7) sets that ceiling; `VADE_MTP_ADAPT=0` or an explicit `--mtp` keeps the fixed
 serving depth. Verification is strict, so the depth changes only speed, never tokens.
+Its drafts score an MXFP8 copy of the rank's head rows (`VADE_FP8_DRAFT_MX8`, unset or
+`1` = on, `0` = the BF16 head); verification always uses the BF16 head.
 
 `VADE_W2_PP=1` explicitly selects the layer pipeline for `WORLD=2..24`, with
 equal contiguous layer ranges by default. It needs a cable chain, not a closing

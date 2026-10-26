@@ -469,6 +469,27 @@ impl<'a> Weights<'a> {
         }
         Ok(self.arena.device_address() + (tensor.offset + offset) as u64)
     }
+    /// Every BF16 element of a local [rows, cols] matrix, element (r, c) written to
+    /// out[2 * place(r, c)..]: one device read of the resident bytes, whatever their layout.
+    pub fn read_bf16_matrix(&self, name: &str, cols: usize, place: impl Fn(usize, usize) -> usize, out: &mut [u8]) -> Result<()> {
+        let tensor = self.tensor(name)?;
+        if tensor.tensor.dtype != Dtype::Bf16 || cols == 0 || tensor.bytes % (2 * cols) != 0 || out.len() != tensor.bytes
+            || tensor.packed_cols != 0 && tensor.packed_cols != cols {
+            return Err(format!("{name}: BF16 matrix read shape"));
+        }
+        let rows = tensor.bytes / (2 * cols);
+        let mut raw = vec![0u8; tensor.bytes];
+        self.arena.read(tensor.offset, &mut raw)?;
+        for r in 0..rows {
+            for c in 0..cols {
+                let from = if tensor.packed_cols == 0 { r * cols + c } else { flash_bf16_element(r, c, cols, rows) };
+                let to = place(r, c);
+                if to >= rows * cols { return Err(format!("{name}: BF16 matrix placement")); }
+                out[2 * to..2 * to + 2].copy_from_slice(&raw[2 * from..2 * from + 2]);
+            }
+        }
+        Ok(())
+    }
     pub fn read(&self, name: &str, local_offset: usize, out: &mut [u8]) -> Result<()> {
         let tensor = self.tensor(name)?;
         if local_offset

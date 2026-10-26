@@ -454,7 +454,7 @@ impl<'a, 'w, E: Exchange> Session<'a, 'w, E> {
                     Hc::mixer(&self.model.persistent[r], "mtp.hyper_connection_mixer")?
                         .mix_tiled(b, &mut d.hc, &d.hidden, &d.input, 1)
                 })?;
-                self.head[r].project(b, &d.input)?;
+                self.head[r].project_draft(b, &d.input)?;
             }
             token = choose(self, b, i)?;
             output.push(token);
