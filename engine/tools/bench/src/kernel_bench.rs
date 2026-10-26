@@ -97,6 +97,8 @@ struct Options {
     /// Time an order-changing X whose bytes differ from A (bytes_equal false).
     allow_diff: bool,
     order: bool,
+    /// --fp8-moe CONFIG: the FP8 W8A8 grouped MoE layer family at that checkpoint's shapes.
+    fp8_moe: String,
 }
 fn cases() -> Vec<Case> {
     let mut out = fp8group::cases();
@@ -793,6 +795,7 @@ fn run() -> Result<()> {
         det: false,
         allow_diff: false,
         order: false,
+        fp8_moe: String::new(),
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -901,7 +904,7 @@ fn run() -> Result<()> {
                 concat!(
                     "kernel-bench --a A.ptx --x X.ptx [--case all|NAME,...] [--ms 5000]",
                     " [--det 1]",
-                    " [--allow-diff]",
+                    " [--allow-diff]\n       kernel-bench --a A.ptx --x X.ptx --fp8-moe CONFIG.json [--ms 5000] [--allow-diff]",
                     "\n",
                     "--det 1: order-change mode, A/X bytes may differ (each arm's SHA is printed; compare X across processes).\n",
                     "{} real shapes",
@@ -909,6 +912,7 @@ fn run() -> Result<()> {
                     "; paired modules in one context; synthetic finite fixtures; JSONL stdout.\nWeights rotate across >=64 MiB per case. CUDA-event and globaltimer graph brackets exclude setup/hash.\n--ms is minimum measured GPU milliseconds per arm/case; default full try about five minutes.\nM16 dense uses product flash_bf16_mma dispatch; latency entry supports only M<=8.\n",
                     "Prefill: production grid, four 2048-token chunks; -8k = captured cold-8K expert counts, -8k-uniform = 40 rows x 512 experts.\n",
                     "GDN: gdn_seq-* = main's prompt scan both arms (bytes A==X); gdn_chunk-*/gdn_fla0-2k = order change on X (SHA per arm + error vs A, determinism = same X SHA across processes); gdn_slot-c8 = decode slot, 8 chats; gdn_split-263 = chunk-form boundary law (cuts at 63/64/65 etc., one-row calls and decode-slot rows must equal one call, bytes); gdn_cslot-c8 = chunk-form decode step, 8 chats (X) vs main slot (A).\n",
+                    "--fp8-moe: the W8A8 grouped MoE layer at CONFIG's shapes instead of the cases (KBENCH_FP8MOE_M, _RING, _X, _XROUTE, _XENTRIES, _A; see the README). Plain-text lines, not JSONL; layer time = globaltimer interior per graph replay over the route sets, stage times between stamps; there --ms is wall-clock milliseconds of replays per arm.\n",
                     "Floors: stored compulsory bytes/230GB/s; prompt max(bytes/230GB/s,2MNK/90TFLOPS).\nGraph brackets include two timestamp nodes; globaltimer measures their interior. No profiler speed claims."
                 ),
                 cases().len()
@@ -922,6 +926,7 @@ fn run() -> Result<()> {
             "--case" => o.only = v,
             "--ms" => o.ms = v.parse().map_err(|_| "invalid --ms")?,
             "--det" => o.det = v == "1",
+            "--fp8-moe" => o.fp8_moe = v,
             _ => return Err(format!("unknown option {flag}")),
         }
     }
@@ -939,6 +944,7 @@ fn run() -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
+        if !o.fp8_moe.is_empty() { return cuda::fp8_moe(&o, &o.fp8_moe); }
         cuda::run(&o, &selected)
     }
     #[cfg(not(target_os = "linux"))]

@@ -74,9 +74,88 @@ unsafe fn fragment(p: u32) -> [u32; 2] {
 /// width K; middle rows use the expert's local width in a 640-wide reservation.
 /// Legacy BF16 uses block256. W8A8 uses block128, grid(20*planes,tasks,1),
 /// and the canonical K128 helper with row-major BF16-rounded FP32 output.
+/// FUSED_GATE (decode) also writes the gather's E4M3 middle: block128,
+/// grid(intermediate/32*planes,tasks,1), operands from GroupedParams::fused_gate.
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn fp8_grouped_gate_accurate(p: crate::fp8_abi::GroupedParams) {
     let shared = ptx::shared::<28672>();
+    if p.activation_quantization == crate::fp8_abi::FUSED_GATE {
+        // Decode gate+up, BF16 SwiGLU and the E4M3 middle in one launch. A CTA owns 32 gate
+        // channels and the same 32 up channels (the paired canonical K128 tile; values are the
+        // W8A8 branch's, staged in the same FP32 middle), activates them with
+        // fp8_grouped_gather's BF16 SwiGLU into the gate half, and the fourth CTA to finish a
+        // K128 channel group quantizes it with the gather's E4M3 arithmetic. The integer
+        // arrival count only picks that CTA: no value depends on arrival order.
+        // Grid(intermediate/32*planes, tasks, 1); see GroupedParams::fused_gate.
+        use crate::fp8_abi::{FUSED_GATE_CHANNELS as C, FUSED_GATE_PLANES, RoutingLayout};
+        use crate::fp8::{quantize4, rounded};
+        if core::arch::nvptx::_block_dim_x() != 128 { core::arch::nvptx::trap(); }
+        // Other CTAs' stores, read at L2 after the acquire.
+        let load_cg = |at: *const f32| -> f32 { let v: f32; asm!("ld.global.cg.f32 {v}, [{p}];", v=out(reg32)v, p=in(reg64)at); v };
+        let (codes, scales, counters) = (p.route.pair_to_row, p.route.token_pairs, p.route.output_row);
+        let tasks = p.route.tasks as *const u32;
+        let task = _block_idx_y() as usize;
+        if task >= *tasks as usize { return; }
+        let expert = *tasks.add(1 + task * 2) as usize;
+        let m = *(p.route.counts as *const u32).add(expert) as usize;
+        let planes = crate::fp8_abi::grouped_planes(p.route.tokens, false);
+        let (tile, plane) = ((_block_idx_x() / planes) as usize, (_block_idx_x() % planes) as usize);
+        let mb = *tasks.add(2 + task * 2) as usize + plane * 16;
+        if plane >= FUSED_GATE_PLANES || mb >= m { return; }
+        let start = *(p.route.starts as *const u32).add(expert) as usize;
+        let table = (p.weights as *const u64).add(expert * 7);
+        let width = *table.add(6) as usize;
+        let nb = tile * C;
+        if nb >= width { return; }
+        let layout = RoutingLayout::FLASH;
+        let i = layout.intermediate as usize;
+        let params = crate::fp8_abi::BlockParams {
+            weights: *table, weight_scales: *table.add(1), input: p.input, input_scales: p.input_scales,
+            output: p.output + (start * 2 * i * 4) as u64, rows: m as u32, outputs: width as u32, cols: p.cols,
+            input_kind: 0, round_output: 1,
+        };
+        crate::fp8::project_tile::<16, 64, 128, false, false>(params, mb, nb, 2 * i, (p.route.sorted_row as *const u32).add(start),
+            core::ptr::null(), shared, 0, p.cols as usize, [*table.add(2), *table.add(3)]);
+        ptx::sync();
+        let tid = _thread_idx_x() as usize;
+        let (lane, rows) = (tid % 32, m.min(mb + 16));
+        let middle = p.output as *mut f32;
+        // One lane per channel, a warp per row: the FP64 exp chains run side by side.
+        let mut row = mb + tid / 32;
+        while row < rows {
+            let at = (start + row) * 2 * i + nb + lane;
+            let gate = load_cg(middle.add(at));
+            let silu = rounded(gate / (1.0 + crate::flash_moe::exp(-gate)));
+            *middle.add(at) = rounded(silu * load_cg(middle.add(at + i)));
+            row += 4;
+        }
+        // Every activated store publishes before the leader counts this CTA in.
+        asm!("fence.acq_rel.gpu;");
+        ptx::sync();
+        let group = nb / 128;
+        if tid == 0 {
+            let counter = (counters as *mut u32).add((task * FUSED_GATE_PLANES + plane) * (i / 128) + group);
+            let previous: u32;
+            asm!("atom.acq_rel.gpu.global.add.u32 {old}, [{c}], 1;", old=out(reg32)previous, c=in(reg64)counter);
+            let last = previous as usize + 1 == 128 / C;
+            if last { *counter = 0; }
+            ptx::store(shared + 20608, last as u32 as f32);
+        }
+        ptx::sync();
+        if ptx::load(shared + 20608) == 0.0 { return; }
+        asm!("fence.acq_rel.gpu;");
+        // fp8_grouped_gather's quantizer (quantize_middle::<false>): a warp per expert row.
+        let col = group * 128 + lane * 4;
+        let mut row = mb + tid / 32;
+        while row < rows {
+            let input = (p.output as *const f32).add((start + row) * 2 * i + col);
+            let (word, scale) = quantize4([load_cg(input), load_cg(input.add(1)), load_cg(input.add(2)), load_cg(input.add(3))]);
+            *((codes as *mut u8).add(layout.code_index(start, row, width, col)).cast::<u32>()) = word;
+            if lane == 0 { *(scales as *mut f32).add(layout.scale_index(start, row, width, group)) = scale; }
+            row += 4;
+        }
+        return;
+    }
     if p.activation_quantization != 0 {
         crate::fp8::grouped_project::<false>(p, false, shared);
         return;

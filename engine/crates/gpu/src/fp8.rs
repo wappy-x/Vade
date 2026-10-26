@@ -69,6 +69,8 @@ impl<'a> Fp8RoutingFlag<'a> {
 pub struct Fp8GroupedScratch<'a> {
     assignments: Buffer<'a>, activations: Rc<Buffer<'a>>, tokens: usize, rows: usize, activation_quantization: bool,
     middle: Option<(fp8_abi::GroupedParams, usize)>,
+    /// Fused-gate arrival counts: zero on creation, reset by each group's last CTA.
+    counters: DeviceVector<'a>,
     packets: Option<Rc<Buffer<'a>>>,
     middle_world: usize,
     routing: Option<Fp8RoutingFlag<'a>>,
@@ -95,7 +97,7 @@ impl<'a> Fp8GroupedScratch<'a> {
     pub fn assignment_bytes(&self) -> usize { self.assignments.bytes }
     pub fn activation_bytes(&self) -> usize { self.activations.bytes }
     pub fn middle_world(&self) -> usize { self.middle_world }
-    pub fn bytes(&self) -> usize { self.assignment_bytes() + self.activation_bytes() + self.packets.as_ref().map_or(0, |b| b.bytes) }
+    pub fn bytes(&self) -> usize { self.assignment_bytes() + self.activation_bytes() + self.counters.buffer.bytes + self.packets.as_ref().map_or(0, |b| b.bytes) }
     /// TP2 prompts reclaim gate/up storage and small decode packets are
     /// mapped. General worlds own rank-major packets; views retain allocations.
     pub fn middle_packets(&self) -> Result<(DeviceVector<'a>, DeviceVector<'a>), String> {
@@ -341,12 +343,14 @@ impl<'a> Backend<'a> {
             let timer = self.profiling.get().then(Instant::now);
             let routing = scratch.as_ref().and_then(|s| s.routing.clone());
             let middle_world = scratch.as_ref().map_or(2, |s| s.middle_world);
+            let mut counters = self.vector(fp8_abi::fused_gate_counters(task_capacity, I))?;
+            self.zero_vector(&mut counters)?;
             *scratch = Some(Fp8GroupedScratch {
                 assignments: Buffer::new(self.context, byte_count(words, 4)?)?,
                 activations: Rc::new(Buffer::new(self.context, if activation_quantization {
                     grouped_layout(rows, tokens, true)?.1
                 } else { byte_count(rows, H * 4 + I * 2)? })?),
-                tokens, rows, activation_quantization, middle: None, packets: None, routing, middle_world,
+                tokens, rows, activation_quantization, middle: None, counters, packets: None, routing, middle_world,
             });
             self.stats.borrow_mut().allocation_ns += elapsed(timer);
         }
@@ -723,6 +727,9 @@ impl<'a> Backend<'a> {
         unsafe {
             if tokens == 1 {
                 self.enqueue_dims(kernels.grouped_single, 1, 1, 1, 256, &mut [parameter(&mut route)])?;
+            } else if tokens < 32 && E as u32 <= fp8_abi::SMALL_ROUTE_THREADS && pairs as u32 <= fp8_abi::SMALL_ROUTE_THREADS {
+                // One CTA builds the same tables (rows inside an expert in pair order).
+                self.enqueue_dims(kernels.grouped_single, 1, 1, 1, fp8_abi::SMALL_ROUTE_THREADS, &mut [parameter(&mut route)])?;
             } else {
                 self.enqueue_dims(kernels.grouped_clear, E.max(tokens * 32).div_ceil(256) as u32, 1, 1, 256, &mut [parameter(&mut route)])?;
                 self.enqueue_dims(kernels.grouped_count, pairs.div_ceil(256) as u32, 1, 1, 256, &mut [parameter(&mut route)])?;
@@ -786,9 +793,19 @@ impl<'a> Backend<'a> {
                 let (gate, down) = if tokens >= 32 {
                     (kernels.grouped_gate_prefill, kernels.grouped_down_prefill)
                 } else { (kernels.grouped_gate, kernels.grouped_down) };
-                self.enqueue_dims(gate, 20 * planes, task_capacity as u32, 1, 128, &mut [parameter(&mut p)])?;
-                (p.input, p.input_scales, p.output) = (middle, middle_scales, middle_q);
-                self.enqueue_dims(kernels.grouped_gather, 80, task_capacity as u32, 1, 256, &mut [parameter(&mut p)])?;
+                if tokens >= 32 {
+                    self.enqueue_dims(gate, 20 * planes, task_capacity as u32, 1, 128, &mut [parameter(&mut p)])?;
+                    (p.input, p.input_scales, p.output) = (middle, middle_scales, middle_q);
+                    self.enqueue_dims(kernels.grouped_gather, 80, task_capacity as u32, 1, 256, &mut [parameter(&mut p)])?;
+                } else {
+                    // One launch writes the gather's E4M3 middle; the FP32 middle is its staging.
+                    let s = scratch.as_ref().unwrap();
+                    if s.counters.len < fp8_abi::fused_gate_counters(task_capacity, I) { return Err("fused gate counter capacity".into()); }
+                    let mut f = p.fused_gate(middle_q, middle_scales, s.counters.device_address());
+                    self.enqueue_dims(kernels.grouped_gate, (I / fp8_abi::FUSED_GATE_CHANNELS) as u32 * planes,
+                        task_capacity as u32, 1, 128, &mut [parameter(&mut f)])?;
+                    (p.input, p.input_scales, p.output) = (middle, middle_scales, middle_q);
+                }
                 (p.input, p.input_scales, p.output) = (middle_q, middle_scales, output.buffer.address);
                 if defer_down {
                     scratch.as_mut().unwrap().middle = Some((p, task_capacity));

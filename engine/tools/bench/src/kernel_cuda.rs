@@ -32,6 +32,8 @@ mod fp4_prompt;
 #[path = "kernel_fp8.rs"] pub(super) mod fp8group;
 #[path = "kernel_mxgroup.rs"]
 mod mxgroup;
+#[path = "kernel_fp8moe.rs"] mod fp8moe;
+pub(super) use fp8moe::run as fp8_moe;
 use mxgroup::{all_mx, group_mx, mxgroup_fixture, mxgroup_weight, mxrows_a, mxrows_entries, mxrows_shared, mxrows_x};
 /// Latency-kernel shared bytes per warp, as the engine launches them.
 const RING: u32 = params::LATENCY_RING as u32;
@@ -1118,22 +1120,25 @@ impl Drop for Graph<'_> {
     }
 }
 fn graph<'a>(g: &'a Gpu, f: H, merge: H, arm: usize, px: Pre, timer: H, times: u64, c: &Case, v: &mut Fixture) -> Result<Graph<'a>> {
-    let mut raw = null_mut();
-    let mut exec = null_mut();
-    let mut start = null_mut();
-    let mut end = null_mut();
+    capture_graph(g, || {
+        let mut t = times;
+        g.launch(timer, [1, 1, 1], 1, 0, &mut [ptr(&mut t)])?;
+        for chunk in 0..v.chunks {
+            for i in 0..v.ring.len() {
+                launch(g, f, merge, c, v, (i + chunk) % v.ring.len(), arm, px)?;
+            }
+        }
+        t = times + 8;
+        g.launch(timer, [1, 1, 1], 1, 0, &mut [ptr(&mut t)])
+    })
+}
+/// One CUDA graph of the launches `body` enqueues (it brackets them with its own stamps).
+fn capture_graph<'a>(g: &'a Gpu, body: impl FnOnce() -> Result<()>) -> Result<Graph<'a>> {
+    let (mut raw, mut exec, mut start, mut end) = (null_mut(), null_mut(), null_mut(), null_mut());
     unsafe {
         check((g.d.capture)(g.s, 0))?;
     }
-    let mut t = times;
-    g.launch(timer, [1, 1, 1], 1, 0, &mut [ptr(&mut t)])?;
-    for chunk in 0..v.chunks {
-        for i in 0..v.ring.len() {
-            launch(g, f, merge, c, v, (i + chunk) % v.ring.len(), arm, px)?;
-        }
-    }
-    t = times + 8;
-    g.launch(timer, [1, 1, 1], 1, 0, &mut [ptr(&mut t)])?;
+    body()?;
     unsafe {
         check((g.d.capture_end)(g.s, &mut raw))?;
         check((g.d.instantiate)(&mut exec, raw, 0))?;

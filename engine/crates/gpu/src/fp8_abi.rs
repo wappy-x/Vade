@@ -248,6 +248,27 @@ pub struct GroupedParams {
     pub output_shard: u32,
 }
 
+/// Block size of fp8_grouped_single's multi-token branch: one thread per expert and
+/// per routed pair, so it serves at most this many experts and pairs.
+pub const SMALL_ROUTE_THREADS: u32 = 512;
+/// fp8_grouped_gate_accurate mode that also writes the gather's E4M3 middle (decode).
+pub const FUSED_GATE: u32 = 2;
+impl GroupedParams {
+    /// The gate reads neither pair_to_row, token_pairs nor output_row, so in FUSED_GATE
+    /// mode they carry the middle codes, their scales and the arrival counters (zero
+    /// between launches, `fused_gate_counters` words).
+    pub fn fused_gate(self, codes: u64, scales: u64, counters: u64) -> Self {
+        Self { route: GroupedRouteParams { pair_to_row: codes, token_pairs: scales, output_row: counters, ..self.route },
+            activation_quantization: FUSED_GATE, ..self }
+    }
+}
+/// Channels of one projection per fused CTA; a K128 group spans 128 / this many CTAs.
+pub const FUSED_GATE_CHANNELS: usize = 32;
+/// Sixteen-row planes per task (grouped_planes' decode bound).
+pub const FUSED_GATE_PLANES: usize = 8;
+/// Counter words of the fused gate for a task capacity and intermediate width.
+pub const fn fused_gate_counters(tasks: usize, intermediate: usize) -> usize { tasks * FUSED_GATE_PLANES * (intermediate / 128) }
+
 /// Ten local E4M3/scale records (at most three K128 blocks), then the peer's
 /// 1280 shared-expert output columns. No activation is requantized on the wire.
 pub const MIDDLE_PACKET_WORDS: usize = 10 * (384 / 4 + 3) + 1280;

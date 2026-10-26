@@ -389,7 +389,7 @@ unsafe fn project<const TM: usize, const TN: usize, const THREADS: usize>(p: cra
 
 /// Canonical K128 arithmetic shared by dense and rank-sharded routed experts.
 #[inline(always)]
-unsafe fn project_tile<const TM: usize, const TN: usize, const THREADS: usize, const FULL: bool, const GENERAL: bool>(
+pub(crate) unsafe fn project_tile<const TM: usize, const TN: usize, const THREADS: usize, const FULL: bool, const GENERAL: bool>(
     p: crate::fp8_abi::BlockParams, mb: usize, nb: usize, output_stride: usize,
     row_map: *const u32, output_map: *const u32, shared: u32, mut split_k: usize, input_stride: usize, paired: [u64; 2],
 ) {

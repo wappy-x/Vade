@@ -12,6 +12,15 @@ Changes that are merged but not yet released are under Unreleased.
   Four or fewer chats keep the 16-row step. Measured on one Spark with eight
   code chats: 169.6 to 194.4 tokens per second, with the same tokens. Unset,
   nothing changes.
+- FP8 experts now launch fewer kernels per layer when a step has under 32
+  tokens: the gate kernel also computes the activation and the quantized
+  middle, and the routing kernel builds the tables for 2 to 31 tokens in one
+  launch. The arithmetic order is unchanged, so the tokens are the same.
+  Measured on two Sparks with the FP8 checkpoint against main: one chat 42.34
+  to 42.77 tokens per second with drafting on and 25.78 to 25.79 with it off,
+  eight chats 93.60 to 95.32. The expert weights already streamed near the
+  memory limit, so the gain is small; `kernel-bench --fp8-moe` times each
+  stage of the expert layer.
 - On four Sparks, the layer pipeline now drafts for six to eight chats at
   once, under the same rules as two Sparks: each tick checks up to 16 drafted
   rows, and the engine switches a cohort to ordinary decoding when that is

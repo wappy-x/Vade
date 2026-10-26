@@ -540,6 +540,30 @@ median time per launch, times 100, so 100 % would mean it ran exactly at the
 floor. The grade follows from that percentage: A+ at 95 % or more, A at 85 %,
 B at 65 %, C at 40 %, D at 15 %, and F below 15 %.
 
+### FP8 MoE layer
+
+`kernel-bench --a A.ptx --x X.ptx --fp8-moe CONFIG.json` times the W8A8
+grouped expert layer instead of the case list. It reads the hidden size,
+expert width, expert count, experts per token and layer count from the
+checkpoint's `config.json` (inside `text_config` when present), fills all
+experts with synthetic finite E4M3 weights, and runs the token counts in
+`KBENCH_FP8MOE_M` (default `1,3,8,c16,c17,c31`; each 1 to 31, and a leading
+`c` sends every token to the same ten experts, so 17 or more fill a second
+sixteen-row plane) in two layouts: one GPU with every channel, and rank 0 of
+two Sparks (local gate widths, including one-block and empty shards, and down
+over its half of the outputs). Each arm replays `KBENCH_FP8MOE_RING` cold
+route sets (default 16) in a CUDA graph; a stamp after every stage (route,
+token quantize, gate and up, SwiGLU and quantize, down) splits the time. A
+malformed or unknown setting is an error. Both arms must write the same routed
+rows and, for every token and expert slot, the same E4M3 middle codes and
+scales: for each route set alone, and again for each route set replayed as its
+own graph after the timed replays.
+
+`KBENCH_FP8MOE_X=fused` (or `pipeline`) gives arm X the fused gate mode,
+`KBENCH_FP8MOE_XROUTE=small` (or `kernels`) its one-launch route for 2 to 31
+tokens, and `KBENCH_FP8MOE_XENTRIES=GATE,DOWN` other gate and down entries with
+the same parameters. `KBENCH_FP8MOE_A=fused` does the same for arm A.
+
 For placement diagnosis, `VADE_KBENCH_ARENA_PAD_MIB` reserves 0..64 MiB
 before each fixture; default zero. Allocation/upload stays outside timings.
 

@@ -229,13 +229,113 @@ unsafe fn order<const MAX: usize>(p: crate::fp8_abi::GroupedRouteParams, layout:
     }
 }
 
-/// Build all routing metadata for a single token in one CTA.
+/// Build all routing metadata in one CTA: for a single token, or for several tokens
+/// (the host sends 2..=31) with at most SMALL_ROUTE_THREADS experts and pairs.
 /// # Safety
-/// Launch one block256. Pairs contains ten distinct, valid expert IDs, all for
-/// token zero. Scratch has the ordinary grouped sizes, with 160 padded rows.
-/// Every destination is independently derived from the ten input assignments.
+/// One token: launch one block256; pairs contains ten distinct, valid expert IDs,
+/// all for token zero; scratch has the ordinary grouped sizes, with 160 padded rows,
+/// and every destination is independently derived from the ten input assignments.
+/// Several tokens: launch one block of SMALL_ROUTE_THREADS; pairs is token-major
+/// [tokens,10,3] like fp8_grouped_count's, and scratch has the ordinary grouped
+/// capacities for that many tokens (row capacity checked, rows past it trap).
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn fp8_grouped_single(p: crate::fp8_abi::GroupedRouteParams) {
+    if p.tokens > 1 {
+        // 2..=31 tokens, block512: clear, count, prefix and order in one CTA, phase by
+        // phase. Starts, padding and tasks are fp8_grouped_prefix's, from a block scan with
+        // one expert per thread; rows inside an expert follow pair order where
+        // fp8_grouped_count places them by atomic arrival. Each row is computed alone and
+        // consumers address it through pair_to_row and output_row, so outputs are unchanged.
+        let layout = crate::fp8_abi::RoutingLayout::FLASH;
+        let selected = layout.selected as usize;
+        let (tokens, pair_count) = (p.tokens as usize, p.pair_count as usize);
+        let threads = crate::fp8_abi::SMALL_ROUTE_THREADS;
+        if _block_dim_x() != threads || p.experts > threads || pair_count > threads as usize || pair_count != tokens * selected {
+            core::arch::nvptx::trap();
+        }
+        let pairs = p.pairs as *const f32;
+        let shared = crate::ptx::shared::<384>();
+        let tid = _thread_idx_x() as usize;
+        let (warp, lane) = (tid / 32, tid % 32);
+        // fp8_grouped_clear's row validation; the CTA keeps each token's final status.
+        let mut token = warp;
+        while token < tokens {
+            let mut failed = p.failed(token);
+            if !failed {
+                let mut invalid = false;
+                if lane < selected {
+                    let at = pairs.add(token * (selected * 3) + lane * 3);
+                    invalid = *at != token as f32 || !crate::fp8_abi::valid_route(token as f32, *at.add(1), *at.add(2), p.tokens, p.experts);
+                }
+                failed = crate::ptx::ballot(invalid) != 0;
+                if failed && lane == 0 { routing_error(p, token); }
+            }
+            if lane == 0 { crate::ptx::store(shared + (token * 4) as u32, failed as u32 as f32); }
+            token += 16;
+        }
+        crate::ptx::sync();
+        let live = |pair: usize| crate::ptx::load(shared + (pair / selected * 4) as u32) == 0.0;
+        let expert_of = |pair: usize| *pairs.add(pair * 3 + 1) as u32;
+        let mut count = 0;
+        if tid < p.experts as usize {
+            for pair in 0..pair_count { count += (live(pair) && expert_of(pair) == tid as u32) as u32; }
+            *(p.counts as *mut u32).add(tid) = count;
+        }
+        if tid < tokens { *(p.token_count as *mut u32).add(tid) = if live(tid * selected) { selected as u32 } else { 0 }; }
+        // fp8_grouped_prefix's offsets as a block scan in expert order (one expert per thread).
+        let (rows, tiles) = ((count + 15) & !15, (count + 127) / 128);
+        let (row_in, tile_in) = (inclusive(rows, lane as u32), inclusive(tiles, lane as u32));
+        if lane == 31 {
+            crate::ptx::store(shared + 256 + (warp * 8) as u32, f32::from_bits(row_in));
+            crate::ptx::store(shared + 260 + (warp * 8) as u32, f32::from_bits(tile_in));
+        }
+        crate::ptx::sync();
+        let (mut row, mut tile) = (row_in - rows, tile_in - tiles);
+        for w in 0..warp {
+            row += crate::ptx::load(shared + 256 + (w * 8) as u32).to_bits();
+            tile += crate::ptx::load(shared + 260 + (w * 8) as u32).to_bits();
+        }
+        if tid < p.experts as usize {
+            *(p.starts as *mut u32).add(tid) = row;
+            let mut padding = count;
+            while padding < rows {
+                if row + padding >= p.row_capacity { core::arch::nvptx::trap(); }
+                *(p.sorted_row as *mut u32).add((row + padding) as usize) = u32::MAX;
+                padding += 1;
+            }
+            let mut local = 0;
+            while local < count {
+                *(p.tasks as *mut u32).add((1 + tile * 2) as usize) = tid as u32;
+                *(p.tasks as *mut u32).add((2 + tile * 2) as usize) = local;
+                tile += 1;
+                local += 128;
+            }
+            if tid + 1 == p.experts as usize {
+                *(p.starts as *mut u32).add(tid + 1) = row + rows;
+                *(p.tasks as *mut u32) = tile;
+            }
+        }
+        crate::ptx::sync();
+        // fp8_grouped_order: expert-major rows, then ascending (expert, pair) slots per token.
+        if tid < pair_count && live(tid) {
+            let (pair, token) = (tid, tid / selected);
+            let expert = expert_of(pair);
+            let mut local = 0;
+            for previous in 0..pair { local += (live(previous) && expert_of(previous) == expert) as u32; }
+            let row = *(p.starts as *const u32).add(expert as usize) + local;
+            if row >= p.row_capacity { core::arch::nvptx::trap(); }
+            *(p.pair_to_row as *mut u32).add(pair) = row;
+            *(p.sorted_row as *mut u32).add(row as usize) = token as u32;
+            let mut rank = 0;
+            for other in token * selected..(token + 1) * selected {
+                let e = expert_of(other);
+                rank += (e < expert || (e == expert && other < pair)) as usize;
+            }
+            *(p.token_pairs as *mut u32).add(token * selected + rank) = pair as u32;
+            *(p.output_row as *mut u32).add(row as usize) = layout.output_index(token, rank) as u32;
+        }
+        return;
+    }
     let pairs = p.pairs as *const f32;
     let counts = p.counts as *mut u32;
     let starts = p.starts as *mut u32;
