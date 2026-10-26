@@ -22,6 +22,20 @@ Changes that are merged but not yet released are under Unreleased.
   eight chats 93.60 to 95.32. The expert weights already streamed near the
   memory limit, so the gain is small; `kernel-bench --fp8-moe` times each
   stage of the expert layer.
+- Two Sparks can now split every decode step between them instead of passing
+  it down the layer pipeline: set `VADE_W2_TP=1` on both `flash-serve` ranks of a
+  direct launch (opt-in; `vade up` keeps the pipeline, which stays the default). Both Sparks compute half of each routed expert
+  and exchange the halves inside the GPU stream, so the tokens stay identical
+  to one Spark. Long prompts run as pipeline tiles, and each chat then hands the
+  other Spark the state it did not compute. Measured on two Sparks with drafting
+  on, against the pipeline: prose 41.73 to 44.70, code 78.84 to 87.34,
+  structured 97.99 to 111.41 tokens per second, one to four chats 4 to 9 %
+  faster, 8 chats unchanged; ids identical on all 66 card requests. A cold 8K
+  prompt takes 2.82 s instead of 2.79 s. Plain (drafting-off) decoding was about
+  7 % slower in a smaller test: under the split it does not use pooled decode.
+  A known cost: while a pass runs, the host proxy that carries the exchange
+  polls for the next message (yielding the core) for up to 20 ms after each
+  one. Without the switch, two Sparks run exactly as before.
 - On four Sparks, the layer pipeline now drafts for six to eight chats at
   once, under the same rules as two Sparks: each tick checks up to 16 drafted
   rows, and the engine switches a cohort to ordinary decoding when that is

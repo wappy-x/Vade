@@ -46,7 +46,7 @@ pub(super) const KIND_ROWS: u32 = 1;
 pub(super) const KIND_POOLED: u32 = 2;
 /// VADE_W2_PP_ASYNC=1: a prompt tile whose rows the front does not project; the back acks
 /// it without returning rows, so the front runs its next tile while the back runs this one.
-const KIND_ROWS_ASYNC: u32 = 3;
+pub(super) const KIND_ROWS_ASYNC: u32 = 3;
 /// VADE_W2_PP_ASYNC=1: queued prompt tiles held for the sender thread at most.
 const QUEUED: usize = 4;
 /// Reply status: 0 done, 1 failed (payload = error text), 2 working: a heartbeat header with
@@ -71,12 +71,12 @@ pub(super) const KIND_VERIFY: u32 = 4;
 /// to the drafters of their chats (the draft history world 1 writes for every prompt row).
 /// When the peer is the last rank, the ack carries this tile's rows immediately. The
 /// back writes that ack on `pp-replier` so the next tile's compute is not behind the copy.
-const KIND_ROWS_KEEP: u32 = 5;
+pub(super) const KIND_ROWS_KEEP: u32 = 5;
 /// Final prompt tile. The request rides the sender thread (TCP, in order with the queued
 /// tiles) so its write overlaps the earlier acks instead of waiting behind `drain`.
 /// The reply still carries rows, including kept rows owed by earlier tiles, and uses the
 /// RDMA wire when that reply fits (same bound as a synchronous exchange).
-const KIND_ROWS_FINAL: u32 = 6;
+pub(super) const KIND_ROWS_FINAL: u32 = 6;
 /// The front's cohort controller authorized reclamation. Carried with the next
 /// request (TCP or wire), after earlier queued work and before this request's work.
 /// It also covers a filtered single row: request shape alone is not authorization.
@@ -285,11 +285,11 @@ impl Stage {
 struct Recipe {
     limit: Duration,
     asynchronous: bool,
-    mtp: bool,
+    mtp: bool, tp: bool,
 }
 impl Recipe {
     fn from_env() -> Result<Self> {
-        Ok(Self { limit: timeout_from_env()?, asynchronous: async_from_env()?, mtp: mtp_from_env()? })
+        Ok(Self { limit: timeout_from_env()?, asynchronous: async_from_env()?, mtp: mtp_from_env()?, tp: crate::flash_tp_switch::from_env()? })
     }
 }
 
@@ -305,10 +305,10 @@ fn put(out: &mut Vec<u8>, v: u32) {
 fn word(bytes: &[u8], i: usize) -> u32 {
     u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap())
 }
-fn f32_bytes(v: &[f32]) -> &[u8] {
+pub(super) fn f32_bytes(v: &[f32]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(v.as_ptr().cast(), std::mem::size_of_val(v)) }
 }
-fn f32_bytes_mut(v: &mut [f32]) -> &mut [u8] {
+pub(super) fn f32_bytes_mut(v: &mut [f32]) -> &mut [u8] {
     unsafe { std::slice::from_raw_parts_mut(v.as_mut_ptr().cast(), std::mem::size_of_val(v)) }
 }
 
@@ -385,7 +385,7 @@ pub(super) struct Link {
     down: &'static AtomicBool,
     /// After any failure the link is never used again (a late reply could pair with the
     /// wrong request).
-    poisoned: bool,
+    pub(super) poisoned: bool, pub(super) tp: bool, pub(super) tp_verify: bool, pub(super) tp_mail: bool, pub(super) tp_handoff: bool, pub(super) tp_tile: bool,
     /// Exchange ids: the last request sent and the last reply read (replies come in order).
     sent: u32,
     replied: u32,
@@ -436,7 +436,7 @@ impl Link {
         stream.set_read_timeout(Some(Duration::from_millis(100))).map_err(err)?;
         stream.set_write_timeout(Some(limit)).map_err(err)?;
         let mut hello = Vec::new();
-        for v in [MAGIC_HELLO, stage.end as u32, context as u32, active as u32, tile as u32, u32::from(fast.is_some()), limit.as_millis() as u32, stage.ranks as u32, stage.rank as u32, u32::from(recipe.mtp)] {
+        for v in [MAGIC_HELLO, stage.end as u32, context as u32, active as u32, tile as u32, u32::from(fast.is_some()), limit.as_millis() as u32, stage.ranks as u32, stage.rank as u32, u32::from(recipe.mtp) | u32::from(recipe.tp) << 1] {
             put(&mut hello, v);
         }
         stream.write_all(&hello).map_err(err)?;
@@ -483,7 +483,7 @@ impl Link {
             message: Vec::new(),
             carried: 0,
             down,
-            poisoned: false,
+            poisoned: false, tp: recipe.tp, tp_verify: false, tp_mail: false, tp_handoff: false, tp_tile: false,
             sent: 0,
             replied: 0,
             limit,
@@ -501,7 +501,7 @@ impl Link {
     }
     /// Any front-side pipeline error leaves the two ranks' session state unknown: the link is
     /// poisoned and the server stops.
-    fn fail(&mut self, e: String) -> String {
+    pub(super) fn fail(&mut self, e: String) -> String {
         self.poisoned = true;
         if !self.down.swap(true, Ordering::Relaxed) {
             eprintln!("flashnext pp front: link failed ({e}); stopping the server");
@@ -595,7 +595,7 @@ impl Link {
     }
     /// Read the acks of every queued tile (in order); the first back failure is returned.
     /// Afterwards the sender thread has handed every queued byte to the socket.
-    fn drain(&mut self) -> Result<()> {
+    pub(super) fn drain(&mut self) -> Result<()> {
         let mut heard = Instant::now();
         while self.pending > 0 {
             self.queued_frame(&mut heard)?;
@@ -604,7 +604,7 @@ impl Link {
     }
     /// Queue a non-final prompt tile (rows already copied to `rows`) for the sender thread.
     /// `keep`: the back keeps the tile's rows for these chats' drafters (within KEEP_ROWS).
-    fn post(&mut self, meta: &[[u32; 4]], rows: Vec<f32>, keep: Option<Vec<KeepPart>>) -> Result<()> {
+    pub(super) fn post(&mut self, meta: &[[u32; 4]], rows: Vec<f32>, keep: Option<Vec<KeepPart>>) -> Result<()> {
         if rows.len() % W != 0 || meta.is_empty() || meta.len() > POOL_SIZE {
             return Err("invalid pipeline exchange shape".into());
         }
@@ -612,13 +612,13 @@ impl Link {
         if keep.is_some() && !self.keep_room(n) {
             return Err("pipeline kept rows past the limit".into());
         }
-        let kind = if keep.is_some() { KIND_ROWS_KEEP } else { KIND_ROWS_ASYNC };
+        let kind = if keep.is_some() { KIND_ROWS_KEEP } else if std::mem::take(&mut self.tp_verify) { crate::flash_tp_switch::KIND_VERIFY } else if std::mem::take(&mut self.tp_handoff) { crate::flash_tp_switch::KIND_HANDOFF } else { KIND_ROWS_ASYNC };
         let inline = keep.is_some() && self.inline_kept;
         if let Some(parts) = keep {
             self.kept.push(KeptTile { parts, rows: n, data: None });
             self.owed += n;
         }
-        self.enqueue(kind, meta, rows)?;
+        let mail = if std::mem::take(&mut self.tp_mail) { crate::flash_tp_switch::MAIL } else { 0 }; self.enqueue(kind | mail, meta, rows)?;
         self.acks.push_back(inline.then_some(n));
         Ok(())
     }
@@ -703,7 +703,7 @@ impl Link {
     /// Queue the exact kind and metadata; used on every forward edge.
     fn enqueue(&mut self, kind: u32, meta: &[[u32; 4]], rows: Vec<f32>) -> Result<()> {
         self.sent = self.sent.wrapping_add(1);
-        let flagged = kind | if self.release_pool { RELEASE_POOLED } else { 0 };
+        let flagged = kind | if self.release_pool { RELEASE_POOLED } else { 0 } | if self.tp_tile { crate::flash_tp_switch::TILE } else { 0 };
         let head = request_head(flagged, rows.len() / W, meta, self.sent);
         self.bytes += (rows.len() * 4) as u64;
         let queue = self.queue.clone().ok_or("pipeline queue missing")?;
@@ -789,7 +789,7 @@ impl Link {
         let started = Instant::now();
         self.drain()?;
         self.sent = self.sent.wrapping_add(1);
-        let flagged = kind | if self.release_pool { RELEASE_POOLED } else { 0 };
+        let flagged = kind | if self.release_pool { RELEASE_POOLED } else { 0 } | if self.tp_tile { crate::flash_tp_switch::TILE } else { 0 };
         let head = request_head(flagged, residual.len() / W, meta, self.sent);
         let bytes = std::mem::size_of_val(residual);
         // Both directions must fit, including every kept row returned before current rows.
@@ -1000,7 +1000,7 @@ impl<'a> NextModel<'a> {
     }
     /// Front split when the link is up (prompt tiles and pooled steps call the back).
     pub(super) fn pp_front_split(&self) -> Option<usize> {
-        self.pp.borrow().as_ref().map(|l| l.split)
+        self.pp.borrow().as_ref().filter(|l| !l.tp).map(|l| l.split)
     }
     /// Front, VADE_W2_PP_MTP=1: whether verify rows may cross the pipeline.
     pub(super) fn pp_mtp(&self) -> bool {
@@ -1127,7 +1127,8 @@ impl<'a> NextModel<'a> {
         serve_stage(stream, fast, next, stage, context, active, tile, stop, Recipe::from_env()?,
             |n| self.set_session_limit(n),
             || self.release_pooled_decode(b),
-            |kind, count, meta, residual| self.pp_back_step(b, &mut sessions, kind, count, meta, tile, context, residual))
+            |kind, count, meta, residual| { self.tp_mail_next(kind);
+                self.pp_back_step(b, &mut sessions, kind & !crate::flash_tp_switch::MAIL & !crate::flash_tp_switch::TILE, count, meta, tile, context, residual) })
     }
     #[allow(clippy::too_many_arguments)]
     fn pp_back_step<'w>(
@@ -1174,11 +1175,11 @@ impl<'a> NextModel<'a> {
         }
         let lens: Vec<usize> = meta.iter().map(|m| m[3] as usize).collect();
         match kind {
-            KIND_ROWS | KIND_ROWS_ASYNC | KIND_ROWS_KEEP | KIND_ROWS_FINAL | KIND_VERIFY => {
+            KIND_ROWS | KIND_ROWS_ASYNC | KIND_ROWS_KEEP | KIND_ROWS_FINAL | KIND_VERIFY | crate::flash_tp_switch::KIND_VERIFY => {
                 if lens.iter().sum::<usize>() != count {
                     return Err("pipeline rows do not match the residual".into());
                 }
-                NextSession::pp_back_rows(b, &mut ordered, &lens, residual, kind == KIND_VERIFY)
+                NextSession::pp_back_rows(b, &mut ordered, &lens, residual, matches!(kind, KIND_VERIFY | crate::flash_tp_switch::KIND_VERIFY))
             }
             KIND_POOLED => {
                 if lens.iter().any(|&n| n != 1) {
@@ -1186,7 +1187,7 @@ impl<'a> NextModel<'a> {
                 }
                 NextSession::pp_back_pooled(b, &mut ordered, count, residual)
             }
-            _ => Err("pipeline request kind unknown".into()),
+            crate::flash_tp_switch::KIND_HANDOFF => self.tp_handoff(b, &mut ordered), _ => Err("pipeline request kind unknown".into()),
         }
     }
 }
@@ -1225,7 +1226,7 @@ fn serve_stage(
     let refusal = if word(&hello, 0) != MAGIC_HELLO {
         Some("hello magic".to_string())
     } else if split != stage.first || word(&hello, 7) as usize != stage.ranks || word(&hello, 8) as usize + 1 != stage.rank
-        || word(&hello, 9) != u32::from(recipe.mtp) || f_active == 0 || f_context != context || f_tile != tile || f_active > active || word(&hello, 5) != u32::from(fast.is_some())
+        || word(&hello, 9) != (u32::from(recipe.mtp) | u32::from(recipe.tp) << 1) || f_active == 0 || f_context != context || f_tile != tile || f_active > active || word(&hello, 5) != u32::from(fast.is_some())
         || word(&hello, 6) != limit.as_millis() as u32
     {
         Some(format!("shape front split={split} context={f_context} active={f_active} tile={f_tile} rdma={} timeout_ms={} back context={context} active={active} tile={tile} rdma={} timeout_ms={}", word(&hello, 5), word(&hello, 6), fast.is_some(), limit.as_millis()))
@@ -1395,11 +1396,11 @@ fn serve_stage(
             prefetch.recycle(request.rows)?;
             (request.kind, request.count, request.meta)
         };
-        let release = kind & RELEASE_POOLED != 0;
-        let kind = kind & !RELEASE_POOLED;
-        if !matches!(kind, KIND_ROWS | KIND_POOLED | KIND_ROWS_ASYNC | KIND_ROWS_KEEP | KIND_ROWS_FINAL | KIND_VERIFY)
-            || matches!(kind, KIND_VERIFY | KIND_ROWS_KEEP) && !recipe.mtp
-            || matches!(kind, KIND_ROWS_ASYNC | KIND_ROWS_KEEP | KIND_ROWS_FINAL) && (!recipe.asynchronous || on_wire)
+        let release = kind & RELEASE_POOLED != 0; let mail = kind & crate::flash_tp_switch::MAIL != 0; let tile = kind & crate::flash_tp_switch::TILE != 0;
+        let kind = kind & !RELEASE_POOLED & !crate::flash_tp_switch::MAIL & !crate::flash_tp_switch::TILE;
+        if !matches!(kind, KIND_ROWS | KIND_POOLED | KIND_ROWS_ASYNC | KIND_ROWS_KEEP | KIND_ROWS_FINAL | KIND_VERIFY | crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF)
+            || matches!(kind, KIND_VERIFY | KIND_ROWS_KEEP | crate::flash_tp_switch::KIND_VERIFY) && !recipe.mtp || matches!(kind, crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF) && !recipe.tp
+            || matches!(kind, KIND_ROWS_ASYNC | KIND_ROWS_KEEP | KIND_ROWS_FINAL | crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF) && (!recipe.asynchronous || on_wire)
         {
             return Err("pipeline request kind or carrier outside the agreed recipe".into());
         }
@@ -1417,7 +1418,7 @@ fn serve_stage(
         // Synchronize and drop pooled graphs/scratch before any session rollback,
         // verify allocation or execution. An error must prevent the step as well.
         let mut result = if release { release_pool() } else { Ok(()) }
-            .and_then(|()| step(kind, count, &meta, &mut residual));
+            .and_then(|()| step(kind | if mail { crate::flash_tp_switch::MAIL } else { 0 } | if tile { crate::flash_tp_switch::TILE } else { 0 }, count, &meta, &mut residual));
         if result.is_ok() && let Some(link) = downstream.as_mut() {
             link.release_pool |= release;
             result = link.forward(kind, &meta, &mut residual, &mut out);
@@ -1426,7 +1427,7 @@ fn serve_stage(
         *working.lock().unwrap_or_else(|p| p.into_inner()) = None;
         // Last rank: this tile's rows ride the ack. They are not held for the final reply.
         let inline_keep = downstream.is_none() && result.is_ok() && kind == KIND_ROWS_KEEP;
-        let queued_empty = result.is_ok() && matches!(kind, KIND_ROWS_ASYNC | KIND_ROWS_KEEP) && !inline_keep;
+        let queued_empty = result.is_ok() && matches!(kind, KIND_ROWS_ASYNC | KIND_ROWS_KEEP | crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF) && !inline_keep;
         if downstream.is_none() && result.is_ok() && !queued_empty && !inline_keep && !kept.is_empty() {
             let reply_bytes = kept.len().checked_add(residual.len()).and_then(|n| n.checked_mul(4))
                 .and_then(|n| n.checked_add(REPLY_HEAD));

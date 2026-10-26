@@ -91,7 +91,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         verify: bool,
     ) -> Result<()> {
         let model = sessions[0].model;
-        let split = model.pp_split.get();
+        let split = model.tp_back_split().unwrap_or(model.pp_split.get());
         let owned: Vec<Vec<u32>> = lens.iter().map(|&n| vec![0u32; n]).collect();
         let tokens: Vec<&[u32]> = owned.iter().map(|t| t.as_slice()).collect();
         let spans = crate::flash_next_rows::validate(
@@ -137,6 +137,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         if result.is_ok() {
             result = b.synchronize().and_then(|()| match work.status.failed_after_readback() {
                 Ok(true) => Err("Flash-Next device routing rejected a row; reset cohort".into()),
+                Ok(false) if model.tp_failed() => Err("tensor split mailbox timed out or its proxy failed".into()),
                 Ok(false) => Ok(()),
                 Err(error) => Err(error),
             });

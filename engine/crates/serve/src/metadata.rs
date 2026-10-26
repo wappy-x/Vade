@@ -37,12 +37,17 @@ impl Metadata {
         let experts = std::env::var_os("FLASH_BF16_EXPERTS");
         let sampled = std::env::var_os("FLASH_MTP_SAMPLED");
         let nvfp4 = plan.format == WeightFormat::Nvfp4;
+        // VADE_W2_TP=1 (flash-serve admits it only on a two-rank pipeline and refuses it
+        // elsewhere): the tensor split's recipe, so its receipts differ from the pipeline's.
+        let tensor = if topology == "pipeline" && std::env::var_os("VADE_W2_TP").is_some_and(|v| v == "1") {
+            ",\"tensor_split\":{\"experts\":\"output_columns\",\"long_prompts\":\"pipeline_tiles_then_state_handoff\"}"
+        } else { "" };
         let sha = env!("VADE_BUILD_GIT_SHA");
         #[cfg(target_os = "linux")]
         let layer_sha = quote(&sha256::digest(spark_gpu_probe::layer_ptx()?.to_bytes()));
         #[cfg(not(target_os = "linux"))]
         let layer_sha = "null";
-        let fixed = format!("\"build\":{{\"git_sha\":{},\"dirty\":{},\"source\":{}}},\"ptx_sha256\":\"{}\",\"layer_ptx_sha256\":{layer_sha},\"numerics\":{{\"flash_dense_arithmetic\":\"bf16_hi_lo_tensor_core\",\"flash_bf16_experts_set\":{},\"flash_bf16_experts\":{},\"flash_mtp_sampled_set\":{},\"flash_mtp_sampled\":{},\"nvfp4\":{nvfp4},\"mtp_depth\":{mtp_depth},\"world_size\":{world_size},\"topology\":{}}},\"server_start_unix_ms\":{}",
+        let fixed = format!("\"build\":{{\"git_sha\":{},\"dirty\":{},\"source\":{}}},\"ptx_sha256\":\"{}\",\"layer_ptx_sha256\":{layer_sha},\"numerics\":{{\"flash_dense_arithmetic\":\"bf16_hi_lo_tensor_core\",\"flash_bf16_experts_set\":{},\"flash_bf16_experts\":{},\"flash_mtp_sampled_set\":{},\"flash_mtp_sampled\":{},\"nvfp4\":{nvfp4},\"mtp_depth\":{mtp_depth},\"world_size\":{world_size},\"topology\":{}{tensor}}},\"server_start_unix_ms\":{}",
             if sha == "unknown" { "null".into() } else { quote(sha) }, env!("VADE_BUILD_DIRTY"), quote(env!("VADE_BUILD_SOURCE")),
             sha256::digest(ptx.to_bytes()),
             experts.is_some(), experts.as_deref().is_some_and(|v| v == "1"),

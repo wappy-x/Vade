@@ -825,7 +825,7 @@ fn byte_count(elements: usize, width: usize) -> Result<usize, String> {
 #[path = "backend.rs"]
 mod backend;
 pub use backend::{with_backend, with_backend_mode, Backend, HostRegistration, Matrix, MatvecMode, DeviceVector, CacheRows, TopKScratch, ExpertTable, MoeScratch, MoeBatchScratch, MOE_ROUTING_ERROR,
-    Fp8GroupedScratch, Fp8RoutingFlag, WeightArena, ExchangeSlot};
+    Fp8GroupedScratch, Fp8RoutingFlag, WeightArena, ExchangeSlot, TpMailbox, TpMailboxHost, TP_MAILBOX_SLOTS};
 pub use backend::{BackendStats, Fence, FrontendStream};
 pub use backend::{DecodeGraph, PromptBuffer};
 

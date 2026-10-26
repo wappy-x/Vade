@@ -120,6 +120,49 @@ pub fn pipeline_pins(set: impl Fn(&str) -> bool) -> Vec<(&'static str, &'static 
     PIPELINE_DEFAULTS.into_iter().filter(|&(name, _)| !set(name)).collect()
 }
 
+/// VADE_W2_TP=1 (unset = 0, opt-in): world 2 FP4-Local serves the two-rank tensor split
+/// (spark_engine flash::next_batched tp): the pipeline's links, recipe and session protocol
+/// with rank 1 starting at layer 2, and both ranks splitting each routed expert by columns.
+/// Refused at any other world, and together with an explicit VADE_W2_PP or VADE_W2_PP_SPLIT.
+pub fn tensor_split(
+    mixed: bool,
+    world: usize,
+    mut read: impl FnMut(&str) -> Result<Option<bool>, String>,
+) -> Result<bool, String> {
+    if read("VADE_W2_TP")? != Some(true) {
+        return Ok(false);
+    }
+    if !mixed || world != PIPELINE_RANKS {
+        return Err("VADE_W2_TP=1 needs FP4-Local at world 2".into());
+    }
+    if !matches!(read("VADE_W2_PP"), Ok(None)) {
+        return Err("VADE_W2_TP=1 is refused together with an explicit VADE_W2_PP".into());
+    }
+    // The split posts every pass through the pipeline's asynchronous queue and its exchanges
+    // ride the RDMA wire: an explicit 0 for either is refused before any rank loads.
+    for name in ["VADE_W2_PP_ASYNC", "VADE_W2_PP_RDMA"] {
+        if read(name)? == Some(false) {
+            return Err(format!("VADE_W2_TP=1 needs {name} (leave it unset)"));
+        }
+    }
+    Ok(true)
+}
+
+/// The tensor split's extra pin (with PIPELINE_DEFAULTS): rank 1 starts at layer 2, the
+/// first layer the pipeline lets a back own (layer 1 consumes the frontend's PLE).
+pub const TENSOR_PINS: [(&str, &str); 1] = [("VADE_W2_PP_SPLIT", "2")];
+
+/// The pins a tensor-split rank adds; an explicit VADE_W2_PP_SPLIT is refused.
+pub fn tensor_pins(tp: bool, set: impl Fn(&str) -> bool) -> Result<Vec<(&'static str, &'static str)>, String> {
+    if !tp {
+        return Ok(Vec::new());
+    }
+    if TENSOR_PINS.iter().any(|&(name, _)| set(name)) {
+        return Err("VADE_W2_TP=1 sets VADE_W2_PP_SPLIT itself; leave it unset".into());
+    }
+    Ok(TENSOR_PINS.to_vec())
+}
+
 /// The checkpoint's mixed storage contract selects NextModel, never the FP8 loader.
 pub fn next_model(
     mixed: bool,
@@ -313,6 +356,27 @@ impl CommandState {
         }
     }
 }
+#[cfg(test)]
+#[test]
+fn tensor_split_is_opt_in_world_two_and_refuses_explicit_pipeline_switches() {
+    let env = |pairs: &'static [(&'static str, &'static str)]| move |name: &str| -> Result<Option<bool>, String> {
+        Ok(pairs.iter().find(|(n, _)| *n == name).map(|(_, v)| *v == "1"))
+    };
+    assert_eq!(tensor_split(true, 2, env(&[])), Ok(false));
+    assert_eq!(tensor_split(true, 2, env(&[("VADE_W2_TP", "0")])), Ok(false));
+    assert_eq!(tensor_split(true, 2, env(&[("VADE_W2_TP", "1")])), Ok(true));
+    assert!(tensor_split(true, 4, env(&[("VADE_W2_TP", "1")])).is_err());
+    assert!(tensor_split(false, 2, env(&[("VADE_W2_TP", "1")])).is_err());
+    assert!(tensor_split(true, 2, env(&[("VADE_W2_TP", "1"), ("VADE_W2_PP", "1")])).is_err());
+    assert!(tensor_split(true, 2, env(&[("VADE_W2_TP", "1"), ("VADE_W2_PP", "0")])).is_err());
+    assert!(tensor_split(true, 2, env(&[("VADE_W2_TP", "1"), ("VADE_W2_PP_ASYNC", "0")])).is_err());
+    assert!(tensor_split(true, 2, env(&[("VADE_W2_TP", "1"), ("VADE_W2_PP_RDMA", "0")])).is_err());
+    assert_eq!(tensor_split(true, 2, env(&[("VADE_W2_TP", "1"), ("VADE_W2_PP_ASYNC", "1")])), Ok(true));
+    assert_eq!(tensor_pins(false, |_| true), Ok(Vec::new()));
+    assert_eq!(tensor_pins(true, |_| false), Ok(vec![("VADE_W2_PP_SPLIT", "2")]));
+    assert!(tensor_pins(true, |name| name == "VADE_W2_PP_SPLIT").is_err());
+}
+
 #[cfg(test)]
 #[test]
 fn mixed_checkpoint_selects_rows_and_rank_backends() {

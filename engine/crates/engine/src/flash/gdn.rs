@@ -442,6 +442,8 @@ pub struct GdnState<'a> {
 impl<'a> GdnState<'a> {
     pub(super) fn pool_addresses(&self) -> [u64;3] { [self.state.device_address(),self.history.device_address(),0] }
     pub(super) fn commit_next(&mut self) { self.cached=true; }
+    /// VADE_W2_TP=1 state handoff: the recurrent state, the conv history and the cached flag as raw words.
+    pub(super) fn handoff(&mut self) -> (&mut DeviceVector<'a>, &mut DeviceVector<'a>, &mut bool) { (&mut self.state, &mut self.history, &mut self.cached) }
     /// Rejection after a shallow verify (see shallow_verify): S and the tail
     /// rows below the window are live and unchanged, so only the conv history
     /// (and the cached flag) come back from the entry snapshot.

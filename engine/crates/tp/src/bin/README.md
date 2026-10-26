@@ -29,6 +29,10 @@ world 2, and world 4, select the pinned native rank backend with
 `--tensor-map PATH`; each rank uses the same invocation and only rank zero binds
 HTTP. Other worlds require the explicit pipeline opt-in below.
 
+`VADE_W2_TP=1` (opt-in, world 2 only) keeps the pipeline's links and protocol but
+splits each routed expert by columns across both ranks on every decode and verify
+pass; see [Flash-Next NVFP4 serving](../../../../docs/next-http.md).
+
 `VADE_W2_PP=1` explicitly selects the layer pipeline for `WORLD=2..24`, with
 equal contiguous layer ranges by default. It needs a cable chain, not a closing
 ring: `LISTEN` is the worker's local upstream interface and `NEXT` is its

@@ -2,6 +2,9 @@
 use std::{net::TcpListener, path::Path, sync::atomic::AtomicBool, time::SystemTime};
 #[path = "next_batched_service.rs"]
 mod batched;
+#[path = "next_tp_proxy.rs"]
+mod tp_proxy;
+
 #[cfg(target_os = "linux")]
 #[path = "next_pp_wire.rs"]
 mod wire;
@@ -41,6 +44,7 @@ pub fn run(
         None,
         None,
         experiments,
+        None,
     )
 }
 
@@ -103,8 +107,12 @@ pub fn run_pp(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
     // Each cable carries both directions. Accept upstream and connect downstream;
     // no closing ring edge exists or is required. Wire setup progresses front to back.
-    let (outgoing, incoming) = spark_seqpar::control::connect_peers(
+    let (mut outgoing, mut incoming) = spark_seqpar::control::connect_peers(
         (rank > 0).then_some(listen), stage.successor().map(|_| next), deadline)?;
+    // Both ends of every pipeline link agree on VADE_W2_TP before anything else, so a pair
+    // with the switch set on one rank only stops here instead of waiting for a second link.
+    let tensor = spark_engine::flash_tp_switch::from_env()?;
+    for link in [outgoing.as_mut(), incoming.as_mut()].into_iter().flatten() { agree_tensor_split(link, tensor)?; }
     let mut incoming = incoming.map(|mut link| {
         let fast = wire(&mut link)?;
         Ok::<_, String>((link, fast))
@@ -115,14 +123,45 @@ pub fn run_pp(
     }).transpose()?;
     eprintln!("flashnext pp stage rank={rank} world={world} layers={}..{} upstream={} downstream={}",
         stage.first, stage.end, incoming.is_some(), outgoing.is_some());
+    // VADE_W2_TP=1: a second cable link (opened after the pipeline's, same order on both
+    // ranks) carries the per-layer column swaps on its own RDMA wire.
+    let tp = if tensor {
+        let (out, inc) = spark_seqpar::control::connect_peers((rank > 0).then_some(listen), (rank == 0).then_some(next), deadline)?;
+        let mut link = out.or(inc).ok_or("tensor split has no peer link")?;
+        // Swaps are at most 16 rows of halves (about 100 KB): the wire's smallest slot.
+        #[cfg(target_os = "linux")]
+        let swap: Box<dyn spark_engine::flash::next_batched::PpWire> =
+            Box::new(wire::RdmaWire::connect(&mut link, true, 8 << 20, limit)?.ok_or("tensor split wire refused")?);
+        #[cfg(not(target_os = "linux"))]
+        let swap: Box<dyn spark_engine::flash::next_batched::PpWire> = return Err("VADE_W2_TP=1 needs Linux".into());
+        eprintln!("flashnext tp link rank={rank} world={world}");
+        Some((link, swap))
+    } else {
+        None
+    };
     if rank == 0 {
         let (link, fast) = outgoing.ok_or("pipeline front has no downstream link")?;
         batched::run(root, ptx_path, listener.ok_or("missing rank-zero listener")?,
             tokenizer.ok_or("missing rank-zero tokenizer")?, limits, eos, requests, server_start,
-            shutdown, options, mtp, checkpoint, Some((link, stage)), fast, experiments)
+            shutdown, options, mtp, checkpoint, Some((link, stage)), fast, experiments, tp)
     } else {
         let (link, fast) = incoming.take().ok_or("pipeline worker has no upstream link")?;
         batched::run_back(root, ptx_path, limits.context_tokens, link, fast, shutdown, options,
-            checkpoint, outgoing, stage, experiments)
+            checkpoint, outgoing, stage, experiments, tp)
     }
+}
+
+/// Send this rank's VADE_W2_TP and read the peer's (one byte each way, 30 s at most).
+fn agree_tensor_split(link: &mut std::net::TcpStream, on: bool) -> Result<(), String> {
+    use std::io::{Read, Write};
+    let before = link.read_timeout().map_err(|e| e.to_string())?;
+    link.set_read_timeout(Some(std::time::Duration::from_secs(30))).map_err(|e| e.to_string())?;
+    let mut peer = [0u8];
+    let agreed = link.write_all(&[on as u8]).and_then(|()| link.read_exact(&mut peer)).map_err(|e| format!("VADE_W2_TP agreement: {e}"));
+    link.set_read_timeout(before).map_err(|e| e.to_string())?;
+    agreed?;
+    if (peer[0] != 0) != on {
+        return Err(format!("VADE_W2_TP is {} here and {} on the peer rank: set it on both ranks or neither", on as u8, peer[0]));
+    }
+    Ok(())
 }

@@ -234,7 +234,7 @@ impl<'a> Workspace<'a> {
         count: usize,
         mask: Option<spark_gpu_probe::next_math::SlotStep>,
     ) -> Result<()> {
-        self.moe_at(b, &model.moe[li], count, mask, true)
+        self.moe_at(b, &model.moe[li], count, mask, true, None)
     }
     pub(super) fn draft_moe(
         &mut self,
@@ -245,7 +245,7 @@ impl<'a> Workspace<'a> {
     ) -> Result<()> {
         self.status.clear(b, 1, 0)?;
         b.copy_range(input, &mut self.mixed, 0, 0, H)?;
-        self.moe_at(b, addr, 1, None, false)?;
+        self.moe_at(b, addr, 1, None, false, None)?;
         // No host sync here: the caller reads the routing status after the step's argmax
         // readback (draft_routing_failed), as the cohort draft path does.
         b.copy_range(&self.block, output, 0, 0, H)
@@ -257,7 +257,7 @@ impl<'a> Workspace<'a> {
     /// Cohort draft MoE (VADE_MTP_BATCH): `count` drafting chats' rows from `mixed`
     /// into `block` on the decode kernels; the caller clears and reads the status.
     pub(super) fn draft_moe_rows(&mut self, b: &Backend<'a>, addr: &MoeAddr<'a>, count: usize) -> Result<()> {
-        self.moe_at(b, addr, count, None, false)
+        self.moe_at(b, addr, count, None, false, None)
     }
     fn moe_at(
         &mut self,
@@ -265,7 +265,7 @@ impl<'a> Workspace<'a> {
         addr: &MoeAddr<'a>,
         count: usize,
         mask: Option<spark_gpu_probe::next_math::SlotStep>,
-        prefill: bool,
+        prefill: bool, tp: Option<super::tp::TpMoe<'_, 'a>>,
     ) -> Result<()> {
         use gdn::Arg::{Ptr, U32};
         use spark_gpu_probe::{fp8_abi::MoeFinishParams, kernel_params::FlashMoeRoute};
@@ -393,10 +393,10 @@ impl<'a> Workspace<'a> {
         };
         let mut params = GroupedParams {
             route: grouped,
-            weights: addr.experts.device_address(),
+            weights: addr.experts.device_address() + tp.map_or(0, |t| t.table()),
             input: self.mixed.device_address(),
             input_scales: 0,
-            output: self.compact_mid.device_address(),
+            output: self.compact_mid.device_address() + tp.map_or(0, |t| t.mid()),
             cols: H as u32,
             activation_quantization: 0,
             output_shard: 0,
@@ -516,15 +516,15 @@ impl<'a> Workspace<'a> {
                     "fp4_bw_gate"
                 },
                 // Prompt gate: only x < width/128 (<= 5) are live N128 tiles (was 20).
-                if wide { 5 } else { 40 },
+                if wide { 5 } else { tp.map_or(40, |t| t.gate_ctas(40)) },
                 tasks as u32,
                 planes,
                 if wide { 256 } else { 64 },
                 if wide { spark_gpu_probe::kernel_params::FP4_PREFILL_GATE_SHARED_BYTES } else { 0 },
                 &mut [(&mut params as *mut GroupedParams).cast()],
             )?;
-            params.input = self.compact_mid.device_address();
-            params.output = self.expert_out.device_address();
+            if let Some(t) = tp { t.swap_mid(b, &mut self.compact_mid, count)?; } params.input = self.compact_mid.device_address();
+            params.output = self.expert_out.device_address() + tp.map_or(0, |t| t.routed());
             // One token: down may start while the gate runs; fp4_bw_down_pdl waits
             // (griddepcontrol) before reading compact_mid, so bytes are unchanged.
             // Off by default: VADE_BW_PDL=1 turns it on. At 8 rows the overlap
@@ -542,7 +542,7 @@ impl<'a> Workspace<'a> {
                     "fp4_bw_down"
                 },
                 // Prompt down: x < 4 live (two M64 planes x two first N128 tiles: was 80).
-                if wide { 4 } else { 160 },
+                if wide { 4 } else { tp.map_or(160, |t| t.down_ctas(160)) },
                 tasks as u32,
                 planes,
                 if wide { 256 } else { 64 },
@@ -580,7 +580,7 @@ impl<'a> Workspace<'a> {
             b,
             addr.shared[2],
             self.gate.device_address(),
-            self.expert_out.device_address() + (10 * H * 4) as u64,
+            self.expert_out.device_address() + (10 * H * 4) as u64 - tp.map_or(0, |t| t.routed()),
             H,
             640,
             count,
@@ -590,27 +590,27 @@ impl<'a> Workspace<'a> {
             error: self.status.device_address(),
             ids: self.ids.device_address(),
             weights: self.weights.device_address(),
-            partials: self.expert_out.device_address(),
+            partials: self.expert_out.device_address() + tp.map_or(0, |t| t.routed()),
             shared_gate: self.shared_gate.device_address(),
-            output: self.block.device_address(),
+            output: self.block.device_address() + tp.map_or(0, |t| t.out()),
             activation_quantization: 1,
             column_start: 0,
             columns: H as u32,
         };
-        if self.defer_finish {
+        if self.defer_finish && tp.is_none() {
             self.deferred_finish = Some(finish);
             return Ok(());
         }
         unsafe {
             b.launch_flash_rows(
                 "flash_next_k16_finish",
-                H.div_ceil(256) as u32,
+                tp.map_or(H.div_ceil(256) as u32, |t| t.finish_ctas()),
                 count as u32,
                 256,
                 0,
                 &mut [(&mut finish as *mut MoeFinishParams).cast()],
-            )
-        }
+            )?;
+        } tp.map_or(Ok(()), |t| t.swap_out(b, &mut self.block, count))
     }
     fn dump_routes(&self, b: &Backend<'_>, count: usize) -> Result<Vec<Vec<(usize, f32)>>> {
         let ids = b.read_vector_range(&self.ids, 0, count * 10)?;
@@ -716,7 +716,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             !verify && tokens.iter().all(|t| t.len() == 1),
             // Serving chooses one path for the whole scheduled cohort and installs
             // that same policy on every session. Read it once, without an OFF scan.
-            sessions[0].allow_pooled_decode,
+            sessions[0].allow_pooled_decode && !model.tp_on(),
             || {
                 sessions.iter().all(|s| {
                     s.dump.is_none()
@@ -735,7 +735,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             return Err("Flash-Next execution tile exceeds the prompt tile".into());
         }
         // VADE_W2_PP=1 front: layers [split, 48) run on the back rank (MTP verify with VADE_W2_PP_MTP=1).
-        let part = match model.pp_front_split() {
+        let part = match model.pp_front_split().or(model.tp_part(b, sessions, &spans, verify)?) {
             None => Part::Whole,
             Some(_) if verify && !model.pp_mtp() => return Err("VADE_W2_PP serves plain decoding only (VADE_W2_PP_MTP=0)".into()),
             Some(split) => Part::Front(split),
@@ -768,8 +768,8 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 // One completion boundary, including advance-only prompt tiles.
                 // Sticky mapped status covers all 48 layers without a MoE readback.
                 b.synchronize()?;
-                if work.status.failed_after_readback()? {
-                    Err("Flash-Next device routing rejected a row; reset cohort".into())
+                if work.status.failed_after_readback()? || model.tp_failed() {
+                    Err(if model.tp_failed() { "tensor split mailbox timed out or its proxy failed" } else { "Flash-Next device routing rejected a row; reset cohort" }.into())
                 } else {
                     Ok(())
                 }
@@ -841,7 +841,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         work.mixed.resize_within_capacity(count * H)?;
         work.block.resize_within_capacity(count * H)?;
         if let Part::Back(_, input) = part {
-            b.write_vector_range(&mut work.residual, 0, &input[..count * W])?;
+            model.tp_residual_in(b, &mut work.residual, input, count)?;
         }
         // Hash every row first (same advance order; spans are consecutive from
         // row 0), then run the per-row frontend (PLE hints, preads, dequant,
@@ -894,7 +894,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         // the first as segments (one Spark: 1-47 in four; VADE_W2_PP: clipped at the split, 24 eager on the back),
         // launching each (updated in place when its topology holds) while the host captures the next. The captured
         // work is the eager work in the same order. A shape's first pass runs eagerly; the oldest shape retires.
-        let graphed = if GRAPH && verify && unobserved {
+        let graphed = if GRAPH && verify && unobserved && !model.tp_host_pass(count) {
             let shape = VerifyShape {
                 rows: count,
                 chats: sessions.len(),
@@ -925,7 +925,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         let mut open: Option<usize> = None;
         // Passes above 16 rows come only from a 32-row tick (VADE_VERIFY_ROWS): stage PLE at once.
         let ple_rows = blocks::PLE_PASS_ROWS;
-        for li in first..end {
+        for li in first..end { model.tp_post(b, sessions, spans, &work.residual, count, verify, li)?;
             if let Some(entry) = graphed.filter(|_| li % VERIFY_SEGMENT == 1) {
                 if let Some(slot) = open.take() {
                     let updated = unsafe { b.end_segment(&mut work.verify_graphs[entry].1[slot])? };
@@ -1253,8 +1253,8 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 H,
             )?;
             // A combine deferred below also takes over this layer's k16_finish.
-            work.defer_finish = unobserved && li >= 1 && li + 1 < end;
-            work.moe_at(b, &model.moe[li], count, None, !verify)?;
+            work.defer_finish = unobserved && li >= 1 && li + 1 < end && !model.tp_plain(li, count);
+            work.moe_at(b, &model.moe[li], count, None, !verify, model.tp_moe(li, count))?;
             work.defer_finish = false;
             Self::check_ops(
                 b,
@@ -1271,7 +1271,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             };
             // Layer 1 starts with the PLE residual update and the last layer feeds the final
             // mixer: those combines run here.
-            if unobserved && li >= 1 && li + 1 < end {
+            if unobserved && li >= 1 && li + 1 < end && !model.tp_plain(li, count) {
                 pending_moe = Some(li);
             } else {
                 sessions[0].mlp_hc[li].combine_tiled(
@@ -1368,7 +1368,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             let tiled = s.batch_drafts || (input.len() > 1 && super::mtp::tile_all());
             if let Some(d) = &mut s.draft {
                 Self::flush_into(b, model, d, work)?;
-                if matches!(part, Part::Front(_)) && model.pp_mtp() {
+                if (matches!(part, Part::Front(_)) || model.tp_on()) && model.pp_mtp() {
                     Self::observe_kept(b, model, d, work, s.slot, s.pos, s.batch_drafts)?;
                 }
                 if tiled {

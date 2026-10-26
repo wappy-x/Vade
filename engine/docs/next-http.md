@@ -49,6 +49,59 @@ These are source-defined defaults, not performance measurements. Verify the
 loaded checkpoint, effective settings and health identity before timing.
 The [checkpoint and kernel reference](fp4-kernels.md) describes storage.
 
+## Two-Spark tensor split (opt-in)
+
+`VADE_W2_TP=1` selects a tensor split of the
+[layer stack](../crates/engine/src/flash/next_tp.rs) at world 2 instead of the
+pipeline. It is a direct `flash-serve` launch option: `vade up` does not forward it.
+Start both ranks exactly as for the default pipeline (same `TP_RUN_ID` and
+`SEQPAR_CONTROL_SECRET`, each rank's own control address and its peer's), add
+`VADE_W2_TP=1` on both, leave `VADE_W2_PP` and `VADE_W2_PP_SPLIT` unset (an
+explicit value is refused), and keep `VADE_W2_PP_ASYNC` and `VADE_W2_PP_RDMA` at
+their default on (`0` is refused):
+
+```sh
+VADE_W2_TP=1 TP_RUN_ID="$RUN" SEQPAR_CONTROL_SECRET="$SECRET" \
+  flash-serve 0 2 "$RANK0_ADDR" "$RANK1_ADDR" "$PTX" "$MODEL" 127.0.0.1:8080 0 --fp4-local
+VADE_W2_TP=1 TP_RUN_ID="$RUN" SEQPAR_CONTROL_SECRET="$SECRET" \
+  flash-serve 1 2 "$RANK1_ADDR" "$RANK0_ADDR" "$PTX" "$MODEL" 127.0.0.1:8080 0 --fp4-local
+```
+
+It keeps the pipeline's links, recipe and session protocol, with rank 1 starting at
+layer 2 (the launcher pins `VADE_W2_PP_SPLIT=2`):
+
+- Rank 0 runs the world-one engine on every layer, plus the head, sampling and
+  drafting. Rank 1 mirrors every main-model pass from layer 2 on.
+- On passes of at most 16 rows (decode, verify and short prompt tiles), both
+  ranks split every routed expert by output columns with the unchanged NVFP4
+  expert kernels: each rank computes half of every expert's gate/up columns and
+  half of its down columns, at widths taken from the checkpoint configuration.
+  The ranks swap the BF16 middle halves and then the finished MoE output halves
+  as raw bits. No sum is split, and the router, routes and shared expert run on
+  both ranks from the same bits, so every output element is world one's. Token
+  IDs are identical to world one and to the pipeline.
+- The exchanges stay inside the CUDA stream: a kernel writes this rank's half
+  into a mapped mailbox slot and publishes its sequence word; a proxy thread on
+  each rank forwards the slot over RDMA; the peer's kernel waits for the word
+  (with a sleep backoff, bounded by `VADE_W2_PP_TIMEOUT_MS`; a timeout fails the
+  pass on both ranks) and copies the rows in. Split verify passes therefore keep
+  their captured graphs. Rank 0's residual after layer 1 reaches rank 1 the same
+  way; wider passes send it with the request.
+- A prompt pass whose every chat spans at least half the prompt tile (1024 rows at
+  the default 2048-row tile) runs as a pipeline tile
+  (rank 0 layers 0-23, rank 1 layers 24-47, exactly as the pipeline). Before such a
+  chat's next split pass, the ranks swap the session state the other did not
+  compute (GDN state and history, QSA keys, values and index rows) as raw words
+  over the split's TCP link. Shorter prompt spans run on both ranks. A failed swap
+  stops the link and leaves the chats' sessions unusable (they are not reused).
+- Plain (drafting-off) steps use the session path instead of pooled decode.
+- An explicit `VADE_W2_PP` or `VADE_W2_PP_SPLIT`, a `0` for `VADE_W2_PP_ASYNC` or
+  `VADE_W2_PP_RDMA`, or any world but 2, is refused. The ranks compare
+  `VADE_W2_TP` on their first link and stop at once if only one has it. The
+  pipeline remains the world-2 default until this mode passes its gates.
+- The serving metadata (`vade.numerics`) adds `"tensor_split"` (the split's recipe)
+  under `numerics` when it is on; pipeline receipts are unchanged.
+
 ## Native rank backend
 
 The following world-two/four backend is separate from the default two-rank

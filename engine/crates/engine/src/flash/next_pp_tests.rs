@@ -129,7 +129,7 @@ fn pp_prefetch_idle_reader_obeys_stop() {
 fn pp_prefetch_stage_cancels_before_another_queued_step() {
     static STOP: AtomicBool = AtomicBool::new(false);
     static FRONT_STOP: AtomicBool = AtomicBool::new(false);
-    let recipe = Recipe { limit: Duration::from_secs(1), asynchronous: true, mtp: false };
+    let recipe = Recipe { limit: Duration::from_secs(1), asynchronous: true, mtp: false, tp: false };
     let (front, back) = pair();
     let (posted, wait_posted) = mpsc::channel();
     let worker = std::thread::spawn(move || {
@@ -155,7 +155,7 @@ fn pp_prefetch_stage_cancels_before_another_queued_step() {
 #[test]
 fn pp_prefetch_stage_rejects_wrong_tcp_exchange_id_before_step() {
     static STOP: AtomicBool = AtomicBool::new(false);
-    let recipe = Recipe { limit: Duration::from_secs(1), asynchronous: false, mtp: false };
+    let recipe = Recipe { limit: Duration::from_secs(1), asynchronous: false, mtp: false, tp: false };
     let (front, back) = pair();
     let worker = std::thread::spawn(move || serve_stage(back, None, None, Stage::new(1, 2, None).unwrap(),
         64, 8, 8, &STOP, recipe, |_| Ok(()), || Ok(()), |_, _, _, _| panic!("wrong ID executed")));
@@ -163,6 +163,120 @@ fn pp_prefetch_stage_rejects_wrong_tcp_exchange_id_before_step() {
     link.stream.write_all(&prefetch_frame(2, KIND_ROWS, &vec![0.0; W])).unwrap();
     assert!(worker.join().unwrap().unwrap_err().contains("id 2, expected 1"));
     link.poisoned = true;
+}
+
+#[test]
+fn tp_mail_tile_handoff_and_verify_kinds_reach_the_back_in_order() {
+    use crate::flash_tp_switch::{KIND_HANDOFF, KIND_VERIFY as TP_VERIFY, MAIL, TILE};
+    static STOP: AtomicBool = AtomicBool::new(false);
+    let recipe = Recipe { limit: Duration::from_secs(2), asynchronous: true, mtp: true, tp: true };
+    let (front, back) = pair();
+    let worker = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        serve_stage(back, None, None, Stage::new(1, 2, None).unwrap(), 64, 8, 8, &STOP, recipe, |_| Ok(()), || Ok(()),
+            |kind, count, meta, _| { seen.push((kind, count, meta[0][2])); Ok(()) }).unwrap();
+        seen
+    });
+    let mut link = Link::connect(front, None, Stage::new(0, 2, None).unwrap(), 64, 8, 8, &STOP, recipe).unwrap();
+    // A pipeline tile (TILE) whose pass also posts mailbox meta (MAIL); then the handoff the
+    // tile's chats owe; then a split verify pass and a plain whole pass: each flag is one-shot.
+    (link.tp_tile, link.tp_mail) = (true, true);
+    link.post(&[[1, 64, 0, 2]], vec![0.0; 2 * W], None).unwrap();
+    assert!(!link.tp_mail);
+    link.tp_tile = false;
+    link.drain().unwrap();
+    link.tp_handoff = true;
+    link.post(&[[1, 64, 2, 1]], vec![0.0; W], None).unwrap();
+    assert!(!link.tp_handoff);
+    link.tp_verify = true;
+    link.post(&[[1, 64, 3, 1]], vec![0.0; W], None).unwrap();
+    link.drain().unwrap();
+    link.exchange(KIND_ROWS, &[[1, 64, 4, 1]], &mut vec![0.0; W]).unwrap();
+    drop(link);
+    assert_eq!(worker.join().unwrap(), [(KIND_ROWS_ASYNC | MAIL | TILE, 2, 0), (KIND_HANDOFF, 1, 2), (TP_VERIFY, 1, 3), (KIND_ROWS, 1, 4)]);
+}
+
+#[test]
+fn tp_kinds_are_refused_by_a_pipeline_only_back_and_tp_hello_must_match() {
+    use crate::flash_tp_switch::{KIND_HANDOFF, KIND_VERIFY as TP_VERIFY};
+    static STOP: AtomicBool = AtomicBool::new(false);
+    let plain = Recipe { limit: Duration::from_secs(1), asynchronous: true, mtp: true, tp: false };
+    for kind in [KIND_HANDOFF, TP_VERIFY] {
+        let (front, back) = pair();
+        let worker = std::thread::spawn(move || serve_stage(back, None, None, Stage::new(1, 2, None).unwrap(),
+            64, 8, 8, &STOP, plain, |_| Ok(()), || Ok(()), |_, _, _, _| panic!("split kind executed without the split")));
+        let mut link = Link::connect(front, None, Stage::new(0, 2, None).unwrap(), 64, 8, 8, &STOP, plain).unwrap();
+        link.stream.write_all(&prefetch_frame(1, kind, &vec![0.0; W])).unwrap();
+        assert!(worker.join().unwrap().unwrap_err().contains("outside the agreed recipe"));
+        link.poisoned = true;
+    }
+    // A split front and a pipeline back (or the reverse) never reach a pass.
+    for (front_tp, back_tp) in [(true, false), (false, true)] {
+        let (front, back) = pair();
+        let worker = std::thread::spawn(move || serve_stage(back, None, None, Stage::new(1, 2, None).unwrap(),
+            64, 8, 8, &STOP, Recipe { tp: back_tp, ..plain }, |_| Ok(()), || Ok(()), |_, _, _, _| panic!("mismatched split ran")));
+        let connected = Link::connect(front, None, Stage::new(0, 2, None).unwrap(), 64, 8, 8, &STOP, Recipe { tp: front_tp, ..plain });
+        assert!(connected.is_err());
+        assert!(worker.join().unwrap().is_err());
+    }
+}
+
+#[test]
+fn pp_tensor_split_kinds_carry_mail_tile_and_handoff_in_order() {
+    // VADE_W2_TP=1: a pipeline tile (TILE), a mailbox pass (MAIL), a state handoff and a split
+    // verify reach the back in posting order, each one-shot flag consumed by its own post.
+    use crate::flash_tp_switch::{KIND_HANDOFF, KIND_VERIFY as TP_VERIFY, MAIL, TILE};
+    static STOP: AtomicBool = AtomicBool::new(false);
+    let recipe = Recipe { limit: Duration::from_secs(2), asynchronous: true, mtp: true, tp: true };
+    let (front, back) = pair();
+    let worker = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        serve_stage(back, None, None, Stage::new(1, 2, None).unwrap(), 64, 8, 8, &STOP, recipe, |_| Ok(()), || Ok(()),
+            |kind, count, meta, _| { seen.push((kind, count, meta[0][2])); Ok(()) }).unwrap();
+        seen
+    });
+    let mut link = Link::connect(front, None, Stage::new(0, 2, None).unwrap(), 64, 8, 8, &STOP, recipe).unwrap();
+    assert!(link.tp);
+    link.tp_tile = true;
+    link.post(&[[1, 64, 0, 1]], vec![0.0; W], None).unwrap();
+    link.tp_tile = false;
+    link.tp_handoff = true;
+    link.post(&[[1, 64, 1, 1]], vec![0.0; W], None).unwrap();
+    assert!(!link.tp_handoff);
+    link.tp_mail = true;
+    link.post(&[[1, 64, 2, 1]], vec![0.0; W], None).unwrap();
+    assert!(!link.tp_mail);
+    link.tp_verify = true;
+    link.post(&[[1, 64, 3, 1]], vec![0.0; W], None).unwrap();
+    assert!(!link.tp_verify);
+    link.drain().unwrap();
+    link.exchange(KIND_ROWS, &[[1, 64, 4, 1]], &mut vec![0.0; W]).unwrap();
+    drop(link);
+    assert_eq!(worker.join().unwrap(), [(KIND_ROWS_ASYNC | TILE, 1, 0), (KIND_HANDOFF, 1, 1), (KIND_ROWS_ASYNC | MAIL, 1, 2),
+        (TP_VERIFY, 1, 3), (KIND_ROWS, 1, 4)]);
+}
+
+#[test]
+fn pp_tensor_split_kinds_are_refused_outside_the_agreed_recipe() {
+    // A pipeline-only back never runs a handoff or a split verify, and a TP front cannot
+    // connect to it at all: the hello carries the mode.
+    static STOP: AtomicBool = AtomicBool::new(false);
+    let plain = Recipe { limit: Duration::from_secs(1), asynchronous: true, mtp: true, tp: false };
+    for kind in [crate::flash_tp_switch::KIND_HANDOFF, crate::flash_tp_switch::KIND_VERIFY] {
+        let (front, back) = pair();
+        let worker = std::thread::spawn(move || serve_stage(back, None, None, Stage::new(1, 2, None).unwrap(),
+            64, 8, 8, &STOP, plain, |_| Ok(()), || Ok(()), |_, _, _, _| panic!("split kind executed")));
+        let mut link = Link::connect(front, None, Stage::new(0, 2, None).unwrap(), 64, 8, 8, &STOP, plain).unwrap();
+        link.stream.write_all(&prefetch_frame(1, kind, &vec![0.0; W])).unwrap();
+        assert!(worker.join().unwrap().unwrap_err().contains("outside the agreed recipe"));
+        link.poisoned = true;
+    }
+    let (front, back) = pair();
+    let worker = std::thread::spawn(move || serve_stage(back, None, None, Stage::new(1, 2, None).unwrap(),
+        64, 8, 8, &STOP, plain, |_| Ok(()), || Ok(()), |_, _, _, _| panic!("mismatched mode executed")));
+    let split = Recipe { tp: true, ..plain };
+    assert!(Link::connect(front, None, Stage::new(0, 2, None).unwrap(), 64, 8, 8, &STOP, split).is_err());
+    assert!(worker.join().unwrap().is_err());
 }
 
 #[test]
@@ -219,7 +333,7 @@ fn pp_draft_transition_reclaims_warmed_worker_pools_before_rows_on_every_stage()
     for ranks in 2..=4 {
         for fast_wire in [false, true] {
             static STOP: AtomicBool = AtomicBool::new(false);
-            let recipe = Recipe { limit: Duration::from_secs(2), asynchronous: true, mtp: true };
+            let recipe = Recipe { limit: Duration::from_secs(2), asynchronous: true, mtp: true, tp: false };
             let mut edges: Vec<_> = (1..ranks).map(|_| {
                 let (near, far) = pair();
                 let (nf, ff) = if fast_wire {
@@ -291,7 +405,7 @@ fn pp_draft_transition_reclaims_warmed_worker_pools_before_rows_on_every_stage()
 #[test]
 fn pp_failed_pool_reclamation_refuses_draft_execution_and_retains_pending_flag() {
     static STOP: AtomicBool = AtomicBool::new(false);
-    let recipe = Recipe { limit: Duration::from_secs(1), asynchronous: false, mtp: true };
+    let recipe = Recipe { limit: Duration::from_secs(1), asynchronous: false, mtp: true, tp: false };
     let (front, back) = pair();
     let worker = std::thread::spawn(move || serve_stage(back, None, None, Stage::new(1, 2, None).unwrap(),
         64, 8, 8, &STOP, recipe, |_| Ok(()), || Err("pool synchronization failed".into()),
@@ -307,7 +421,7 @@ fn pp_failed_pool_reclamation_refuses_draft_execution_and_retains_pending_flag()
 
 fn chain_capacity(ranks: usize, capacity: Option<usize>) {
     static STOP: AtomicBool = AtomicBool::new(false);
-    let recipe = Recipe { limit: Duration::from_secs(2), asynchronous: true, mtp: true };
+    let recipe = Recipe { limit: Duration::from_secs(2), asynchronous: true, mtp: true, tp: false };
     let mut edges = Vec::new();
     for _ in 1..ranks {
         let (near, far) = pair();
@@ -429,7 +543,7 @@ fn write_status(back: &mut TcpStream, id: u32, rows: Option<&[f32]>) {
 #[test]
 fn pp_final_tile_is_on_the_wire_before_the_queued_ack() {
     static STOP: AtomicBool = AtomicBool::new(false);
-    let recipe = Recipe { limit: Duration::from_secs(2), asynchronous: true, mtp: false };
+    let recipe = Recipe { limit: Duration::from_secs(2), asynchronous: true, mtp: false, tp: false };
     let (near, mut far) = pair();
     let back = std::thread::spawn(move || {
         far.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
@@ -466,7 +580,7 @@ fn pp_final_tile_is_on_the_wire_before_the_queued_ack() {
 fn pp_final_tile_returns_kept_rows_on_tcp_and_on_the_wire() {
     for capacity in [None, Some(REPLY_HEAD + 3 * W * 4)] {
         static STOP: AtomicBool = AtomicBool::new(false);
-        let recipe = Recipe { limit: Duration::from_secs(2), asynchronous: true, mtp: true };
+        let recipe = Recipe { limit: Duration::from_secs(2), asynchronous: true, mtp: true, tp: false };
         let (near, far) = pair();
         let (front_fast, back_fast) = match capacity {
             Some(capacity) => {
@@ -513,7 +627,7 @@ fn pp_final_tile_returns_kept_rows_on_tcp_and_on_the_wire() {
 #[test]
 fn pp_final_tile_crosses_a_middle_rank() {
     static STOP: AtomicBool = AtomicBool::new(false);
-    let recipe = Recipe { limit: Duration::from_secs(2), asynchronous: true, mtp: true };
+    let recipe = Recipe { limit: Duration::from_secs(2), asynchronous: true, mtp: true, tp: false };
     let (front_s, middle_in) = pair();
     let (middle_out, back_s) = pair();
     let tail = std::thread::spawn(move || {
@@ -561,7 +675,7 @@ fn pp_final_tile_across_a_middle_agrees_on_the_carrier_after_early_relay() {
     // which is what makes the middle peek and relay the kept ack early.
     static STOP: AtomicBool = AtomicBool::new(false);
     static SLEPT: AtomicBool = AtomicBool::new(false);
-    let recipe = Recipe { limit: Duration::from_secs(10), asynchronous: true, mtp: true };
+    let recipe = Recipe { limit: Duration::from_secs(10), asynchronous: true, mtp: true, tp: false };
     let (front_s, middle_in) = pair();
     let (middle_out, back_s) = pair();
     let (front_fast, middle_fast) = pipes_with_capacity(REPLY_HEAD + 80 * W * 4);
@@ -642,7 +756,7 @@ fn pp_stage_geometry_covers_each_layer_once_and_keeps_ple_on_front() {
 #[test]
 fn pp_chain_tail_failure_reaches_front_without_a_success_reply() {
     static STOP: AtomicBool = AtomicBool::new(false);
-    let recipe = Recipe { limit: Duration::from_secs(1), asynchronous: false, mtp: false };
+    let recipe = Recipe { limit: Duration::from_secs(1), asynchronous: false, mtp: false, tp: false };
     let (front, middle_in) = pair();
     let (middle_out, back) = pair();
     let tail = std::thread::spawn(move || serve_stage(back, None, None, Stage::new(2, 3, None).unwrap(),
@@ -661,7 +775,7 @@ fn pp_chain_tail_failure_reaches_front_without_a_success_reply() {
 #[test]
 fn pp_chain_mismatched_world_fails_admission_before_any_work() {
     static STOP: AtomicBool = AtomicBool::new(false);
-    let recipe = Recipe { limit: Duration::from_secs(1), asynchronous: false, mtp: false };
+    let recipe = Recipe { limit: Duration::from_secs(1), asynchronous: false, mtp: false, tp: false };
     let (front, back) = pair();
     let worker = std::thread::spawn(move || serve_stage(back, None, None, Stage::new(1, 2, None).unwrap(),
         64, 8, 8, &STOP, recipe, |_| panic!("must not admit"), || panic!("must not release"), |_, _, _, _| panic!("must not execute")));
@@ -672,7 +786,7 @@ fn pp_chain_mismatched_world_fails_admission_before_any_work() {
 #[test]
 fn pp_middle_enforces_downstream_timeout_while_heartbeating_upstream() {
     static STOP: AtomicBool = AtomicBool::new(false);
-    let recipe = Recipe { limit: Duration::from_millis(200), asynchronous: false, mtp: false };
+    let recipe = Recipe { limit: Duration::from_millis(200), asynchronous: false, mtp: false, tp: false };
     let (front, middle_in) = pair();
     let (middle_out, mut tail) = pair();
     let silent = std::thread::spawn(move || {
@@ -731,7 +845,7 @@ fn front(stream: TcpStream, limit: Duration) -> Link {
         message: Vec::new(),
         carried: 0,
         down: &DOWN,
-        poisoned: false,
+        poisoned: false, tp: false, tp_verify: false, tp_mail: false, tp_handoff: false, tp_tile: false,
         sent: 0,
         replied: 0,
         limit,
@@ -1244,7 +1358,7 @@ fn pp_kept_rows_arrive_on_the_ack_and_skip_the_later_wire_reply() {
     static STOP: AtomicBool = AtomicBool::new(false);
     let (near, far) = pair();
     let (a, b) = pipes();
-    let recipe = Recipe { limit: Duration::from_secs(2), asynchronous: true, mtp: true };
+    let recipe = Recipe { limit: Duration::from_secs(2), asynchronous: true, mtp: true, tp: false };
     let worker = std::thread::spawn(move || serve_stage(far, Some(Box::new(b)), None,
         Stage::new(1, 2, None).unwrap(), 64, 8, 8, &STOP, recipe, |_| Ok(()), || Ok(()), |_, _, _, _| Ok(())));
     let mut link = Link::connect(near, Some(Box::new(a)), Stage::new(0, 2, None).unwrap(), 64, 8, 8, &STOP, recipe).unwrap();

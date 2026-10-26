@@ -661,6 +661,13 @@ impl<'a> QsaState<'a> {
         Ok(next)
     }
     pub(super) fn rewind(&mut self, position: usize) { self.past = position; self.pending = None; }
+    /// VADE_W2_TP=1 state handoff: keys, values and raw index rows 0..past, the row widths, and `past`.
+    pub(super) fn handoff(&mut self) -> Result<([&mut DeviceVector<'a>; 3], [usize; 3], &mut usize)> {
+        if self.pending.is_some() { return Err("QSA handoff with a pending write".into()); }
+        let width = if self.keys.len() < DIM { 0 } else { self.keys.len() / self.capacity };
+        let index = self.raw_index.len().checked_div(self.capacity).unwrap_or(0);
+        Ok(([&mut self.keys, &mut self.values, &mut self.raw_index], [width, width, index], &mut self.past))
+    }
     /// No attention write in flight (a finished session's arena may be adopted).
     pub(super) fn idle(&self) -> bool { self.pending.is_none() }
     pub(super) fn device_bytes(&self) -> usize { (self.keys.len() + self.values.len() + self.raw_index.len()) * 4 }

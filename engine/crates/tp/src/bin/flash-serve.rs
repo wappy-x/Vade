@@ -114,7 +114,7 @@ fn run() -> Result<(), String> {
     let context_explicit = raw_args.get(6).is_some_and(|arg| arg.parse::<SocketAddr>().is_err());
     let args = settings::startup_args(raw_args);
     if args.len() < 9 {
-        return Err("usage: flash-serve RANK WORLD LISTEN NEXT PTX MODEL [CONTEXT] BIND REQUESTS (0=continuous) [--allow-remote] [--api-key-file PATH] [--mtp 0..3] [--nvfp4] [--verify-full] [--fp4-local] [--indexer sparse|dense] [--tensor-map PATH]; FP4-Local defaults to context 32768, output cap 16384, up to sixteen memory-admitted chats with automatic local prompt tiles (pipeline default 2048 rows) and sparse indexing; mixed directories auto-select NextModel; world 1 strict MTP 3 plus lookup, world 2 the layer pipeline of the world-1 engine with the same MTP (VADE_W2_PP=0: the rank path), world 2/4 rank path plain only with --tensor-map PATH; FP8 defaults to context 131072, output cap min(65536, context), strict MTP 2; data transport uses LISTEN/NEXT ports + 1; world-1 Flash-Next defaults to C8 cohort control and healthy capture fallback (VADE_MTP_COHORT=wide, world 1 or a guarded two-/four-stage pipeline: 5-8 chats draft depth 3 in one 32-row verify tick, cohort control opt-in); all three VADE_MTP_C8/VADE_MTP_COHORT_ADAPT/VADE_POOL_GRAPH_FALLBACK=0 restore the prior automatic policy; explicit VADE_MTP_BATCH retains its table; VADE_W2_PP_C8 unset/1 enables guarded Auto8 and cohort control on the two- and four-stage pipelines, 0 restores their prior policy; explicit cohort=1 requires Auto8 and a supported route; other pipeline sizes and native ranks retain their prior defaults; invalid switch values fail at startup; VADE_C8_GUARD_ROBUST unset/1 stays on draft unless plain is 8% cheaper per token, 0 keeps the live 2% latch".into());
+        return Err("usage: flash-serve RANK WORLD LISTEN NEXT PTX MODEL [CONTEXT] BIND REQUESTS (0=continuous) [--allow-remote] [--api-key-file PATH] [--mtp 0..3] [--nvfp4] [--verify-full] [--fp4-local] [--indexer sparse|dense] [--tensor-map PATH]; FP4-Local defaults to context 32768, output cap 16384, up to sixteen memory-admitted chats with automatic local prompt tiles (pipeline default 2048 rows) and sparse indexing; mixed directories auto-select NextModel; world 1 strict MTP 3 plus lookup, world 2 the layer pipeline of the world-1 engine with the same MTP (VADE_W2_PP=0: the rank path; VADE_W2_TP=1 on both ranks: the FP4-Local tensor split), world 2/4 rank path plain only with --tensor-map PATH; FP8 defaults to context 131072, output cap min(65536, context), strict MTP 2; data transport uses LISTEN/NEXT ports + 1; world-1 Flash-Next defaults to C8 cohort control and healthy capture fallback (VADE_MTP_COHORT=wide, world 1 or a guarded two-/four-stage pipeline: 5-8 chats draft depth 3 in one 32-row verify tick, cohort control opt-in); all three VADE_MTP_C8/VADE_MTP_COHORT_ADAPT/VADE_POOL_GRAPH_FALLBACK=0 restore the prior automatic policy; explicit VADE_MTP_BATCH retains its table; VADE_W2_PP_C8 unset/1 enables guarded Auto8 and cohort control on the two- and four-stage pipelines, 0 restores their prior policy; explicit cohort=1 requires Auto8 and a supported route; other pipeline sizes and native ranks retain their prior defaults; invalid switch values fail at startup; VADE_C8_GUARD_ROBUST unset/1 stays on draft unless plain is 8% cheaper per token, 0 keeps the live 2% latch".into());
     }
     spark_engine::flash_prompt_options::load()?;
     spark_engine::flash_head_options::validate()?;
@@ -189,6 +189,7 @@ fn run() -> Result<(), String> {
     // world four without that opt-in keeps the tensor-map rank path. Pipeline stages run
     // world-one arithmetic; startup validates their geometry before opening any link.
     let mixed = checkpoint.config.mixed.is_some();
+    let tp = settings::tensor_split(mixed, world, switch)?;
     let (pipeline, pipeline_mtp, distributed) = settings::pipeline_recipe(mixed, rank, world, switch)?;
     if pipeline { spark_engine::flash::next_batched::PpStage::from_env(rank, world)?; }
     settings::pipeline_depth(pipeline, pipeline_mtp, mtp_explicit.then_some(mtp))?;
@@ -197,6 +198,7 @@ fn run() -> Result<(), String> {
     let multi = next_model && distributed;
     let pp = multi && pipeline;
     let rank_next = multi && !pp;
+    if tp && !pp { return Err("VADE_W2_TP=1 needs the FP4-Local service on two connected ranks".into()); }
     let pp_mtp = pp && pipeline_mtp;
     // Parse once after route resolution, before any GPU load or peer connection.
     let experiments = spark_serve::mtp_batch::Experiments::startup_pipeline(world, pp)?;
@@ -204,7 +206,9 @@ fn run() -> Result<(), String> {
         // Startup is still single-threaded and nothing has read these yet: every unset companion
         // takes its pipeline default (settings::PIPELINE_DEFAULTS), so both ranks and every reader
         // see one recipe; a set one ("0", another tile) stays as given.
-        for (name, value) in settings::pipeline_pins(|name| std::env::var_os(name).is_some()) {
+        // VADE_W2_TP=1 adds its own pin (rank 1 starts at layer 2); it refuses a set split.
+        let tensor = settings::tensor_pins(tp, |name| std::env::var_os(name).is_some())?;
+        for (name, value) in settings::pipeline_pins(|name| std::env::var_os(name).is_some()).into_iter().chain(tensor) {
             unsafe { std::env::set_var(name, value); }
         }
     }

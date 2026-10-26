@@ -26,6 +26,7 @@ pub fn run(
     mut pp: Option<(std::net::TcpStream, spark_engine::flash::next_batched::PpStage)>,
     fast: Option<Box<dyn spark_engine::flash::next_batched::PpWire>>,
     experiments: spark_serve::mtp_batch::Experiments,
+    tp: Option<(std::net::TcpStream, Box<dyn spark_engine::flash::next_batched::PpWire>)>,
 ) -> Result<(), String> {
     let ptx = CString::new(std::fs::read(ptx_path).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
@@ -73,7 +74,8 @@ pub fn run(
             let depth = spark_engine::flash_draft_stack::resident_mtp_depth(pp.is_some())?;
             // Rank 0 projects the head on every world (VADE_W2_PP front too): it funds the bounded head.
             let model = NextModel::load_with_checkpoint_role(backend, root, Some(checkpoint), options, depth, false)?;
-            if let Some((_, stage)) = pp.as_ref() && spark_engine::flash_next_rows::pp_stage_state()? {
+            // VADE_W2_TP=1: rank 0 runs every layer itself, so it keeps all 48 layers' state.
+            if let Some((_, stage)) = pp.as_ref() && tp.is_none() && spark_engine::flash_next_rows::pp_stage_state()? {
                 model.own_stage_state(stage.first, stage.end, &stage.intervals())?;
             }
             // VADE_FLASHNEXT_KV_RESERVE (default on; =0 off): freed session KV arenas stay in
@@ -127,6 +129,12 @@ pub fn run(
                 model.set_pp_front(stream, fast, stage, context, active, tile, shutdown)?;
                 eprintln!("flashnext pp front ranks={} split={} context={context} active={active} tile={tile}", stage.ranks, stage.end);
             }
+            // VADE_W2_TP=1: the swap wire's TCP link stays open while serving; the proxy thread
+            // owns the wire.
+            let (_tp_link, tp_wire) = match tp {
+                Some((link, swap)) => { model.set_tp(backend, 0, link)?; (None::<std::net::TcpStream>, Some(swap)) }
+                None => (None, None),
+            };
             let (identity, metadata) = receipts.join().map_err(|_| "startup receipt worker panicked")??;
             limits.identity = Some(identity);
             limits.metadata = Some(metadata.clone());
@@ -181,17 +189,25 @@ pub fn run(
                 "flashnext ready world={world} model={name} context={context} concurrency=rows active={active} connections={POOL_SIZE} mtp_depth={mtp} resident_bytes={resident} session_pool_bytes={pool} session_reservation_bytes={needed} shared_pool_reservation_bytes={shared} transient_reserve_bytes={} prefix_cache={prefix_cache}",
                 spark_serve::budget::TRANSIENT_RESERVE
             );
-            let served = scheduler::serve_requests(
-                listener,
-                &engine,
-                Some(&tokenizer),
-                &limits,
-                &cache,
-                &config,
-                shutdown,
-                &name,
-                requests,
-            );
+            let proxy_stop = AtomicBool::new(false);
+            let served = std::thread::scope(|scope| {
+                let proxy = tp_wire.zip(model.tp_mailbox_host())
+                    .map(|(wire, host)| scope.spawn(|| super::tp_proxy::run(host, wire, &proxy_stop)));
+                let served = scheduler::serve_requests(
+                    listener,
+                    &engine,
+                    Some(&tokenizer),
+                    &limits,
+                    &cache,
+                    &config,
+                    shutdown,
+                    &name,
+                    requests,
+                );
+                proxy_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                let proxied = proxy.map_or(Ok(()), |p| p.join().map_err(|_| "tensor split proxy panicked".to_string()).and_then(|r| r));
+                served.and_then(|s| proxied.map(|()| s))
+            });
             if served.is_err() {
                 spark_gpu_probe::teardown::arm();
             }
@@ -217,6 +233,7 @@ pub fn run_back(
     mut next: Option<(std::net::TcpStream, Option<Box<dyn spark_engine::flash::next_batched::PpWire>>)>,
     stage: spark_engine::flash::next_batched::PpStage,
     experiments: spark_serve::mtp_batch::Experiments,
+    tp: Option<(std::net::TcpStream, Box<dyn spark_engine::flash::next_batched::PpWire>)>,
 ) -> Result<(), String> {
     let ptx = CString::new(std::fs::read(ptx_path).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
@@ -277,7 +294,19 @@ pub fn run_back(
         }
         backend.synchronize()?;
         eprintln!("flashnext pp back loaded context={context} active={active} resident_bytes={resident} session_pool_bytes={pool}");
-        let served = model.serve_pp_back(backend, stream, fast, next, stage, context, active, tile, shutdown);
+        let (_link, tp_wire) = match tp {
+            Some((link, swap)) => { model.set_tp(backend, 1, link)?; (None::<std::net::TcpStream>, Some(swap)) }
+            None => (None, None),
+        };
+        let proxy_stop = AtomicBool::new(false);
+        let served = std::thread::scope(|scope| {
+            let proxy = tp_wire.zip(model.tp_mailbox_host())
+                .map(|(wire, host)| scope.spawn(|| super::tp_proxy::run(host, wire, &proxy_stop)));
+            let served = model.serve_pp_back(backend, stream, fast, next, stage, context, active, tile, shutdown);
+            proxy_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let proxied = proxy.map_or(Ok(()), |p| p.join().map_err(|_| "tensor split proxy panicked".to_string()).and_then(|r| r));
+            served.and_then(|()| proxied)
+        });
         if served.is_err() {
             spark_gpu_probe::teardown::arm();
         }

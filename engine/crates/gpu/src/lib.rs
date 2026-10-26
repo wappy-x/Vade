@@ -5,6 +5,7 @@ pub mod admission;
 pub mod kernel_params;
 #[cfg(target_os = "linux")]
 pub mod driver;
+pub mod tp_mailbox_host;
 #[cfg(all(test, not(target_os = "linux")))]
 #[allow(dead_code)]
 #[path = "decode_profile.rs"]

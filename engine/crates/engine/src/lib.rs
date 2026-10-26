@@ -15,6 +15,8 @@ mod flash_next_pp_host;
 pub mod flash_candidate;
 #[path = "flash/draft_stack.rs"]
 pub mod flash_draft_stack;
+#[path = "flash/tp_switch.rs"]
+pub mod flash_tp_switch;
 #[cfg(any(target_os = "linux", test))]
 #[path = "flash/mx8_registry.rs"]
 pub(crate) mod flash_mx8_registry;

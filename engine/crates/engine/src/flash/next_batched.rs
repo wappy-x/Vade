@@ -97,7 +97,7 @@ pub struct NextModel<'a> {
     ple_global: f32,
     hash: (Vec<i64>, Vec<i64>, Vec<i64>, i64),
     /// VADE_W2_PP=1 front link (rank 0); None everywhere else (world 1 is unchanged).
-    pp: RefCell<Option<pp::Link>>,
+    pp: RefCell<Option<pp::Link>>, tp: RefCell<Option<tp::Swap>>, tp_box: std::cell::OnceCell<spark_gpu_probe::driver::TpMailbox<'a>>,
     /// VADE_W2_PP=1 first back layer on both ranks; 0 = no pipeline.
     pp_split: std::cell::Cell<usize>,
     /// Exclusive last layer owned by a pipeline worker.
@@ -476,7 +476,7 @@ impl<'a> NextModel<'a> {
                     width: 640,
                     reserved: 0,
                 });
-            }
+            } if tp::from_env()? { tp::shifted(&mut descriptors, &tp::layout(&checkpoint.config)?); } // VADE_W2_TP=1: rank 1's halves follow
             let bytes = unsafe {
                 std::slice::from_raw_parts(
                     descriptors.as_ptr().cast::<u8>(),
@@ -628,7 +628,7 @@ impl<'a> NextModel<'a> {
             moe,
             ple_global,
             hash: (mult, sizes, offsets, 248044),
-            pp: RefCell::new(None),
+            pp: RefCell::new(None), tp: RefCell::new(None), tp_box: std::cell::OnceCell::new(),
             pp_split: std::cell::Cell::new(0),
             pp_end: std::cell::Cell::new(LAYERS),
             state_layers: std::cell::Cell::new((0, LAYERS)),
@@ -789,7 +789,7 @@ mod execution;
 #[path = "next_mtp.rs"]
 mod mtp;
 #[path = "next_pp.rs"]
-mod pp;
+mod pp; #[path = "next_tp.rs"] mod tp;
 pub use pp::{wire_capacity as pp_wire_capacity, negotiate_capacity as pp_negotiate_capacity, mtp_from_env as pp_mtp_from_env, negotiate_wire as pp_negotiate_wire, split_from_env as pp_split_from_env, timeout_from_env as pp_timeout_from_env, Stage as PpStage, PpWire};
 #[path = "next_prefix.rs"]
 mod prefix;
