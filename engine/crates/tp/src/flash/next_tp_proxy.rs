@@ -390,7 +390,11 @@ mod tests {
         impl Drop for Stop<'_> { fn drop(&mut self) { self.0.store(true, Ordering::Relaxed); } }
         std::thread::scope(|scope| {
             let _stop = Stop(&stop);
-            let worker = scope.spawn(|| run(TpMailboxHost::new(&memory, slot_words), Box::new(Wire(proxy_out, proxy_in)), &stop));
+            // The worker reports through a channel, so a proxy that keeps polling after FAILED
+            // fails the test at the deadline (the guard then stops it) instead of hanging a join.
+            let (done, finished) = channel();
+            let (memory, stop) = (&memory, &stop);
+            scope.spawn(move || { let _ = done.send(run(TpMailboxHost::new(memory, slot_words), Box::new(Wire(proxy_out, proxy_in)), stop)); });
             memory[HEADER + slot_words].store(5, Ordering::Relaxed);
             memory[SEND_LEN + 1].store(4, Ordering::Relaxed);
             memory[SEND_SEQ + 1].store(1, Ordering::Release);
@@ -402,7 +406,7 @@ mod tests {
             while memory[RECV_SEQ + 1].load(Ordering::Acquire) != 1 { assert!(Instant::now() < deadline); std::thread::yield_now(); }
             assert_eq!(memory[HEADER + (TP_MAILBOX_SLOTS + 1) * slot_words].load(Ordering::Relaxed), 9);
             to_proxy.send([&0u64.to_le_bytes()[..], &FAILED.to_le_bytes()].concat()).unwrap();
-            assert!(worker.join().unwrap().is_err());
+            assert!(finished.recv_timeout(Duration::from_secs(5)).expect("the proxy stops after FAILED").is_err());
             for _ in 0..2 { assert_eq!(parse_head(&from_proxy.recv_timeout(Duration::from_secs(5)).unwrap()), Ok((0, FAILED))); }
         });
         assert!(TpMailboxHost::new(&memory, slot_words).error());

@@ -1107,7 +1107,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                     .collect::<Result<Vec<_>>>()?;
                 work.gdn
                     .copy_norm(b, model.gdn_norms[li].as_ref().unwrap())?;
-                attention[0].project_next(b, &work.gdn, &work.mixed, count)?;
+                if !model.tp_gdn_project(b, li, &attention[0], &mut work.gdn, &work.mixed, count, attention.len())? { attention[0].project_next(b, &work.gdn, &work.mixed, count)?; }
                 // Every session's call fully fused (prompt rows, no verify): the
                 // gated scans write the out projection's packed input directly.
                 if !verify && count >= 64 && spans.iter().all(|span| gdn::fuses_fully(span.len())) {

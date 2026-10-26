@@ -87,6 +87,14 @@ layer 2 (the launcher pins `VADE_W2_PP_SPLIT=2`):
   pass on both ranks) and copies the rows in. Split verify passes therefore keep
   their captured graphs. Rank 0's residual after layer 1 reaches rank 1 the same
   way; wider passes send it with the request.
+- `VADE_W2_TP_PROJ=1` on both ranks (opt-in, with the split) also splits each GDN
+  layer's qkv and z in-projections by output rows on passes of one chat (passes
+  of several chats keep the whole projections): each rank runs its half of
+  the rows with the unchanged row kernels (and the matching rows of the MXFP8
+  twin), and the halves cross as raw bits in two back-to-back messages, so the
+  second travels while the first is awaited. Conv, recurrence, gate and the out
+  projection stay whole on both ranks. The tokens are the same. A rank with the
+  switch set and a peer without it fail at startup.
 - `VADE_W2_TP_WIRE=write` on both ranks (opt-in; unset keeps the proxy above)
   moves each message with one-sided RDMA writes instead: when the kernel publishes
   a message, a doorbell thread on its rank posts two chained writes on one queue

@@ -40,6 +40,12 @@ Changes that are merged but not yet released are under Unreleased.
   about 9 percent faster, prose about 4 percent. Verification keeps the BF16
   head, so outputs are unchanged. Cost: rank 0 chat slots 19 -> 17, and
   +0.33 GB per rank. `VADE_FP8_DRAFT_MX8=0` turns it off.
+- With the two-Spark tensor split, `VADE_W2_TP_PROJ=1` on both ranks also
+  splits the in-projections of every linear-attention layer between the two
+  Sparks on steps of one chat; the halves are exchanged as raw bits, so the
+  tokens are the same (opt-in; unset keeps today's split). Steps with more than
+  one chat keep the whole projections, where the larger exchanges cost more
+  than the split saves.
 - With the two-Spark tensor split (`VADE_W2_TP=1`), `VADE_W2_TP_WIRE=write` on
   both ranks moves each exchange with one-sided RDMA writes straight from one
   GPU's mapped mailbox into the other's, with no host copies and no host work on

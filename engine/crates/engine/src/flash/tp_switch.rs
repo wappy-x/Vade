@@ -18,6 +18,11 @@ pub fn from_env() -> Result<bool, String> {
     static ON: std::sync::OnceLock<Result<bool, String>> = std::sync::OnceLock::new();
     ON.get_or_init(|| parse(std::env::var("VADE_W2_TP").ok().as_deref())).clone()
 }
+/// VADE_W2_TP_PROJ=1 (with VADE_W2_TP=1): the GDN in-projections split by row halves too.
+pub fn proj_from_env() -> Result<bool, String> {
+    static ON: std::sync::OnceLock<Result<bool, String>> = std::sync::OnceLock::new();
+    ON.get_or_init(|| parse(std::env::var("VADE_W2_TP_PROJ").ok().as_deref()).map_err(|_| "VADE_W2_TP_PROJ must be 0 or 1".into())).clone()
+}
 fn parse(value: Option<&str>) -> Result<bool, String> {
     match value {
         None | Some("0") => Ok(false),

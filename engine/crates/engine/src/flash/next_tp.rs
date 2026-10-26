@@ -48,7 +48,7 @@ pub(super) fn shifted(descriptors: &mut Vec<spark_gpu_probe::driver::fp4_abi::Ex
 
 /// This rank's half and its mailbox counters (NextModel::tp_box holds the mailbox; the proxy
 /// thread owns the RDMA wire). Messages count from 1 per direction in u64.
-pub(super) struct Swap {
+pub(super) struct Swap<'a> {
     rank: usize,
     layout: TpLayout,
     sent: u64,
@@ -65,6 +65,10 @@ pub(super) struct Swap {
     handoff: Vec<u32>,
     /// Rank 0: the current pass runs as a pipeline tile (tp_part).
     front_tile: bool,
+    /// VADE_W2_TP_PROJ=1: the GDN in-projections split by rows too (tp_gdn_project), with this
+    /// rank's row halves of their MXFP8 twins (copied from the loaded twins, so the same bytes).
+    proj: bool,
+    _twins: Vec<blocks::Mx8Twin<'a>>,
 }
 
 /// One routed MoE layer's split on this rank (Workspace::moe_at offsets and swaps).
@@ -72,7 +76,7 @@ pub(super) struct Swap {
 pub(super) struct TpMoe<'s, 'a> {
     rank: usize,
     layout: TpLayout,
-    swap: &'s RefCell<Option<Swap>>,
+    swap: &'s RefCell<Option<Swap<'a>>>,
     mailbox: &'s spark_gpu_probe::driver::TpMailbox<'a>,
 }
 impl<'a> TpMoe<'_, 'a> {
@@ -104,6 +108,20 @@ impl<'a> TpMoe<'_, 'a> {
         b.tp_mailbox_put(self.mailbox, vector, rows, width, half, s.rank * half, s.sent)?;
         b.tp_mailbox_take(self.mailbox, vector, rows, width, half, (1 - s.rank) * half, s.taken, s.limit_ns)
     }
+    /// `halves` for two vectors of one launch: both puts, then both takes, so the second
+    /// message travels while the first is awaited. With the pass's residual message still
+    /// unread by the peer, three are in flight, below the mailbox's four slots.
+    fn halves_pair(self, b: &Backend<'a>, [(x, xw), (y, yw)]: [(&mut DeviceVector<'a>, usize); 2], rows: usize) -> Result<()> {
+        let mut guard = self.swap.borrow_mut();
+        let s = guard.as_mut().ok_or("tensor split missing")?;
+        let (sent, taken, rank) = (s.sent, s.taken, s.rank);
+        s.sent += 2;
+        s.taken += 2;
+        b.tp_mailbox_put(self.mailbox, x, rows, xw, xw / 2, rank * xw / 2, sent + 1)?;
+        b.tp_mailbox_put(self.mailbox, y, rows, yw, yw / 2, rank * yw / 2, sent + 2)?;
+        b.tp_mailbox_take(self.mailbox, x, rows, xw, xw / 2, (1 - rank) * xw / 2, taken + 1, s.limit_ns)?;
+        b.tp_mailbox_take(self.mailbox, y, rows, yw, yw / 2, (1 - rank) * yw / 2, taken + 2, s.limit_ns)
+    }
 }
 
 impl<'a> NextModel<'a> {
@@ -123,10 +141,59 @@ impl<'a> NextModel<'a> {
         if self.tp_box.set(b.tp_mailbox(layout.slot_bytes())?).is_err() {
             return Err("the tensor split mailbox is already set".into());
         }
+        // The ranks agreed on VADE_W2_TP_PROJ with VADE_W2_TP on their first link (next_service).
+        let proj = crate::flash_tp_switch::proj_from_env()?;
+        let twins = if proj { self.tp_half_twins(b, rank)? } else { Vec::new() };
         *self.tp.borrow_mut() = Some(Swap { rank, layout, sent: 0, taken: 0, limit_ns: pp::timeout_from_env()?.as_nanos() as u64,
-            mail_pass: false, tile_pass: false, link, handoff: Vec::new(), front_tile: false });
-        eprintln!("flashnext tp rank={rank} split={SPLIT} rows<={} layout={layout:?}", TpLayout::ROWS);
+            mail_pass: false, tile_pass: false, link, handoff: Vec::new(), front_tile: false, proj, _twins: twins });
+        eprintln!("flashnext tp rank={rank} split={SPLIT} rows<={} proj={proj} layout={layout:?}", TpLayout::ROWS);
         Ok(())
+    }
+    /// VADE_W2_TP_PROJ=1: this rank's row half [rank * n / 2, (rank + 1) * n / 2) of every split
+    /// layer's GDN qkv and z in-projection twin. Rows are 64-row blocks first in both the packed
+    /// BF16 order and the twin's bytes, and the twin's scales are [row / 8][K / 32][8], so a half
+    /// is two contiguous ranges of the loaded twin, registered under its BF16 half's address.
+    fn tp_half_twins(&self, b: &Backend<'a>, rank: usize) -> Result<Vec<blocks::Mx8Twin<'a>>> {
+        let c = &self.checkpoint.config;
+        let k = c.hidden as usize;
+        let value = (c.linear_value_heads * c.linear_value_dim) as usize;
+        let rows = [2 * (c.linear_key_heads * c.linear_key_dim) as usize + value, value];
+        let mut twins = Vec::new();
+        for li in SPLIT..self.gdn_proj.len() {
+            for (m, &n) in rows.iter().enumerate() {
+                let w = self.gdn_proj[li][m];
+                if w == 0 { continue; }
+                let half = n / 2;
+                let Some((full, r, cols)) = crate::flash_mx8_registry::get(w, n).filter(|&(_, r, cols)| (r, cols) == (n, k)) else { continue };
+                if half % 64 != 0 || k % 32 != 0 { return Err(format!("VADE_W2_TP_PROJ: GDN projection [{r}][{cols}] has no 64-row halves")); }
+                let source = self.mx8.iter().find(|t| t.twin.device_address() == full).ok_or("VADE_W2_TP_PROJ: loaded twin missing")?;
+                let mut twin = b.vector(blocks::mx8_twin_bytes(half, k) / 4)?;
+                let scales = |rows: usize| (rows * k).div_ceil(256) * 256 / 4;
+                let scale_words = |rows: usize| rows / 8 * (k / 32) * 2;
+                b.copy_range(&source.twin, &mut twin, rank * half * k / 4, 0, half * k / 4)?;
+                b.copy_range(&source.twin, &mut twin, scales(n) + scale_words(rank * half), scales(half), scale_words(half))?;
+                twins.push(blocks::Mx8Twin::register(w + (rank * half * k * 2) as u64, twin, half, k));
+            }
+        }
+        b.synchronize()?;
+        Ok(twins)
+    }
+    /// VADE_W2_TP_PROJ=1, a split layer at <= ROWS rows: each rank runs its row half of the GDN
+    /// qkv and z in-projections (same per-row chains and merge as the whole launch) into its
+    /// columns of the full outputs, a and b whole, then the ranks swap the halves as raw bits.
+    /// False: not split here (the caller runs the whole projection).
+    pub(super) fn tp_gdn_project(&self, b: &Backend<'a>, li: usize, gdn: &gdn::Gdn<'a, '_>, s: &mut gdn::GdnScratch<'a>,
+        input: &DeviceVector<'a>, count: usize, chats: usize) -> Result<bool> {
+        // One chat only: a pass of several chats carries more rows, and its larger halves cost
+        // more to exchange than the split saves. Both ranks run the same chats, so both agree.
+        if chats != 1 { return Ok(false); }
+        let Some(moe) = self.tp_moe(li, count).filter(|_| self.tp.borrow().as_ref().is_some_and(|s| s.proj)) else { return Ok(false) };
+        let ([qkv, z, a, bb], k) = gdn.projection();
+        let half = |(w, n): (u64, usize), y: u64| (w + (moe.rank * n / 2 * k * 2) as u64, y + (moe.rank * n / 2 * 4) as u64, n / 2, n);
+        blocks::next_rows_group_at(b, input.device_address(), k, count, [half(qkv, s.qkv.device_address()), half(z, s.z.device_address()),
+            (a.0, s.a.device_address(), a.1, a.1), (bb.0, s.b.device_address(), bb.1, bb.1)])?;
+        moe.halves_pair(b, [(&mut s.qkv, qkv.1), (&mut s.z, z.1)], count)?;
+        Ok(true)
     }
     pub(super) fn tp_on(&self) -> bool {
         self.tp.borrow().is_some()
@@ -241,6 +308,20 @@ impl<'a> NextModel<'a> {
                 }
             }
         }
+        // The largest message the peer may send: every received layer's whole state (QSA rows up
+        // to each vector's capacity), so a bad length fails here instead of in an allocation.
+        let mut limit = 0usize;
+        for chat in sessions.iter_mut() {
+            for li in recv.clone() {
+                limit += 8 + if li % 4 == 3 {
+                    let (vectors, _, _) = chat.qsa_state[li].as_mut().ok_or("QSA state missing for the handoff")?.handoff()?;
+                    vectors.iter().map(|v| v.len() * 4).sum::<usize>()
+                } else {
+                    let (state, history, _) = chat.gdn_state[li].as_mut().ok_or("GDN state missing for the handoff")?.handoff();
+                    (state.len() + history.len()) * 4
+                };
+            }
+        }
         link.set_nonblocking(false).map_err(err)?;
         link.set_read_timeout(Some(pp::timeout_from_env()?)).map_err(err)?;
         let mut writer = link.try_clone().map_err(err)?;
@@ -249,13 +330,13 @@ impl<'a> NextModel<'a> {
             let sender = scope.spawn(|| -> std::io::Result<()> { writer.write_all(&(out.len() as u64).to_le_bytes())?; writer.write_all(&out) });
             let mut len = [0u8; 8];
             link.read_exact(&mut len).map_err(err)?;
-            arrived.resize(u64::from_le_bytes(len) as usize, 0);
+            arrived.resize(handoff_len(len, limit)?, 0);
             link.read_exact(&mut arrived).map_err(err)?;
             sender.join().map_err(|_| "tensor split handoff sender panicked")?.map_err(err)
         })?;
         let mut at = 0usize;
         let mut take = |n: usize| -> Result<&[u8]> {
-            let bytes = arrived.get(at..at + n).ok_or("tensor split handoff message too short")?;
+            let bytes = at.checked_add(n).and_then(|end| arrived.get(at..end)).ok_or("tensor split handoff message too short")?;
             at += n;
             Ok(bytes)
         };
@@ -267,7 +348,9 @@ impl<'a> NextModel<'a> {
                     let q = chat.qsa_state[li].as_mut().ok_or("QSA state missing for the handoff")?;
                     let (vectors, widths, past) = q.handoff()?;
                     for (v, w) in vectors.into_iter().zip(widths) {
-                        if w != 0 && head != 0 { let values = words(take(head * w * 4)?); b.write_vector_range(v, 0, &values)?; }
+                        if w == 0 || head == 0 { continue; }
+                        let values = words(take(handoff_words(head, w, v.len())? * 4)?);
+                        b.write_vector_range(v, 0, &values)?;
                     }
                     *past = head;
                 } else {
@@ -365,6 +448,17 @@ impl<'a> NextModel<'a> {
     }
 }
 
+/// A handoff message's length field, refused above `limit` (the receiving chats' whole state)
+/// before anything is allocated.
+fn handoff_len(field: [u8; 8], limit: usize) -> Result<usize> {
+    usize::try_from(u64::from_le_bytes(field)).ok().filter(|&n| n <= limit)
+        .ok_or_else(|| "tensor split handoff message longer than the chats' state".into())
+}
+/// Words of `rows` QSA rows of `width`, refused past the state vector's `len` words.
+fn handoff_words(rows: usize, width: usize, len: usize) -> Result<usize> {
+    rows.checked_mul(width).filter(|&n| n <= len).ok_or_else(|| "tensor split handoff QSA rows exceed the state".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,5 +478,16 @@ mod tests {
             assert_eq!(d[3].down.global_scale, 3002);
             assert_eq!(d[2].width, layout.expert_width as u32);
         }
+    }
+    /// A peer's handoff length beyond the receiving state, or one that does not fit usize, and QSA
+    /// rows past the state's capacity (or whose word count overflows) are refused, not allocated.
+    #[test]
+    fn handoff_bounds_refuse_lengths_and_rows_past_the_state() {
+        assert_eq!(handoff_len(64u64.to_le_bytes(), 64).unwrap(), 64);
+        assert!(handoff_len(65u64.to_le_bytes(), 64).is_err());
+        assert!(handoff_len(u64::MAX.to_le_bytes(), usize::MAX - 1).is_err());
+        assert_eq!(handoff_words(3, 128, 4 * 128).unwrap(), 384);
+        assert!(handoff_words(5, 128, 4 * 128).is_err());
+        assert!(handoff_words(1 << 62, 128, 4 * 128).is_err(), "the row count's product must not wrap");
     }
 }

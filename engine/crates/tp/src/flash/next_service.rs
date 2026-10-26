@@ -112,7 +112,8 @@ pub fn run_pp(
     // Both ends of every pipeline link agree on VADE_W2_TP before anything else, so a pair
     // with the switch set on one rank only stops here instead of waiting for a second link.
     let tensor = spark_engine::flash_tp_switch::from_env()?;
-    for link in [outgoing.as_mut(), incoming.as_mut()].into_iter().flatten() { agree_tensor_split(link, tensor)?; }
+    let split = tensor as u8 | (tensor && spark_engine::flash_tp_switch::proj_from_env()?) as u8 * 2;
+    for link in [outgoing.as_mut(), incoming.as_mut()].into_iter().flatten() { agree_tensor_split(link, split)?; }
     let mut incoming = incoming.map(|mut link| {
         let fast = wire(&mut link)?;
         Ok::<_, String>((link, fast))
@@ -173,17 +174,19 @@ fn agree_write_wire(link: &mut std::net::TcpStream, limit: std::time::Duration) 
     Ok(())
 }
 
-/// Send this rank's VADE_W2_TP and read the peer's (one byte each way, 30 s at most).
-fn agree_tensor_split(link: &mut std::net::TcpStream, on: bool) -> Result<(), String> {
+/// Send this rank's VADE_W2_TP (bit 0) and VADE_W2_TP_PROJ (bit 1) and read the peer's (one byte
+/// each way, 30 s at most).
+fn agree_tensor_split(link: &mut std::net::TcpStream, on: u8) -> Result<(), String> {
     use std::io::{Read, Write};
     let before = link.read_timeout().map_err(|e| e.to_string())?;
     link.set_read_timeout(Some(std::time::Duration::from_secs(30))).map_err(|e| e.to_string())?;
     let mut peer = [0u8];
-    let agreed = link.write_all(&[on as u8]).and_then(|()| link.read_exact(&mut peer)).map_err(|e| format!("VADE_W2_TP agreement: {e}"));
+    let agreed = link.write_all(&[on]).and_then(|()| link.read_exact(&mut peer)).map_err(|e| format!("VADE_W2_TP agreement: {e}"));
     link.set_read_timeout(before).map_err(|e| e.to_string())?;
     agreed?;
-    if (peer[0] != 0) != on {
-        return Err(format!("VADE_W2_TP is {} here and {} on the peer rank: set it on both ranks or neither", on as u8, peer[0]));
+    if peer[0] != on {
+        return Err(format!("VADE_W2_TP / VADE_W2_TP_PROJ are {}/{} here and {}/{} on the peer rank: set them on both ranks or neither",
+            on & 1, on >> 1, peer[0] & 1, peer[0] >> 1));
     }
     Ok(())
 }

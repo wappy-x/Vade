@@ -140,7 +140,7 @@ fn mx8_weight(weight: u64, rows: usize, cols: usize, tokens: usize) -> u64 {
         && !spark_gpu_probe::kernel_params::latency_mx8_widen(tokens, cols) {
         return weight;
     }
-    match mx8_registry::get(weight) {
+    match mx8_registry::get(weight, rows) {
         Some((twin, r, c)) if (r, c) == (rows, cols) => twin | 1,
         _ => weight,
     }
@@ -390,15 +390,14 @@ const TILED_HC_UP_ROWS: usize = 512;
 /// rows): one packed input and one flash_bf16_mma_latency_group launch (groups of <= 640
 /// rows merge their four ranges inside the CTA). Each output keeps the solo launch's
 /// canonical ranges and (p0+p1)+(p2+p3) merge, so the bytes equal per-matrix next_rows.
-pub(super) fn next_rows_group(
-    b: &Backend<'_>,
-    x: u64,
-    cols: usize,
-    tokens: usize,
-    rows: [(u64, u64, usize); 4],
-) -> Result<()> {
+pub(super) fn next_rows_group(b: &Backend<'_>, x: u64, cols: usize, tokens: usize, rows: [(u64, u64, usize); 4]) -> Result<()> {
+    next_rows_group_at(b, x, cols, tokens, rows.map(|r| (r.0, r.1, r.2, r.2)))
+}
+/// next_rows_group with each output's row stride (weight, output, rows, stride): VADE_W2_TP=2
+/// launches a rank's row half of a matrix into its columns of the full-width output.
+pub(super) fn next_rows_group_at(b: &Backend<'_>, x: u64, cols: usize, tokens: usize, rows: [(u64, u64, usize, usize); 4]) -> Result<()> {
     // Prompt tiles share one packed input and the tiled launches (HC injection + down).
-    if next_prefill(b, x, cols, tokens, rows.map(|r| (r.0, r.1, r.2, r.2)))? {
+    if next_prefill(b, x, cols, tokens, rows)? {
         return Ok(());
     }
     // Small groups (latency_split: <= 4096 rows, e.g. HC [4, 320] x 10240) at 17-32 tokens: one
@@ -411,7 +410,7 @@ pub(super) fn next_rows_group(
         && rows.iter().filter(|r| r.2 != 0).count() >= 2
         && spark_gpu_probe::kernel_params::latency_split(total, true) {
         let packed = b.pack_flash_latency_input(x, cols, tokens)?;
-        let at = |r: (u64, u64, usize)| (r.0, r.1, r.2, r.2);
+        let at = |r: (u64, u64, usize, usize)| r;
         let mut p = Bf16Pairs {
             pairs: [
                 row_params(packed, cols, tokens, at(rows[0]), at(rows[1]), true, false),
@@ -434,7 +433,7 @@ pub(super) fn next_rows_group(
         && spark_gpu_probe::kernel_params::latency_mx8_widen(tokens, cols)
         && rows.iter().all(|r| r.2 == 0 || mx8_weight(r.0, r.2, cols, tokens) & 1 != 0) {
         let packed = b.pack_flash_latency_input(x, cols, tokens)?;
-        let at = |r: (u64, u64, usize)| (r.0, r.1, r.2, r.2);
+        let at = |r: (u64, u64, usize, usize)| r;
         let mut p = Bf16Pairs {
             pairs: [
                 row_params(packed, cols, tokens, at(rows[0]), at(rows[1]), true, false),
@@ -456,7 +455,8 @@ pub(super) fn next_rows_group(
         };
     }
     if tokens > DECODE_ROWS || cols % 64 != 0 || rows.iter().filter(|r| r.2 != 0).count() < 2 {
-        for (w, y, n) in rows {
+        for (w, y, n, stride) in rows {
+            if n != 0 && stride != n { return Err("strided group output outside the grouped decode launch".into()); }
             if n != 0 {
                 next_rows(b, w, x, y, n, cols, tokens)?;
             }
@@ -464,7 +464,7 @@ pub(super) fn next_rows_group(
         return Ok(());
     }
     let packed = b.pack_flash_latency_input(x, cols, tokens)?;
-    let at = |r: (u64, u64, usize)| (r.0, r.1, r.2, r.2);
+    let at = |r: (u64, u64, usize, usize)| r;
     let mut p = Bf16Pairs {
         pairs: [
             row_params(packed, cols, tokens, at(rows[0]), at(rows[1]), true, false),

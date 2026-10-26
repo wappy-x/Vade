@@ -97,7 +97,7 @@ pub struct NextModel<'a> {
     ple_global: f32,
     hash: (Vec<i64>, Vec<i64>, Vec<i64>, i64),
     /// VADE_W2_PP=1 front link (rank 0); None everywhere else (world 1 is unchanged).
-    pp: RefCell<Option<pp::Link>>, tp: RefCell<Option<tp::Swap>>, tp_box: std::cell::OnceCell<spark_gpu_probe::driver::TpMailbox<'a>>,
+    pp: RefCell<Option<pp::Link>>, tp: RefCell<Option<tp::Swap<'a>>>, tp_box: std::cell::OnceCell<spark_gpu_probe::driver::TpMailbox<'a>>,
     /// VADE_W2_PP=1 first back layer on both ranks; 0 = no pipeline.
     pp_split: std::cell::Cell<usize>,
     /// Exclusive last layer owned by a pipeline worker.

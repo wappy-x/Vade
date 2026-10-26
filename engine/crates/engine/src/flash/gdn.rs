@@ -730,6 +730,8 @@ impl<'a, 'w> Gdn<'a, 'w> {
         self.cached = false;
         Ok(())
     }
+    /// The in-projection members in project_next's order as (weight, rows), and K (VADE_W2_TP_PROJ).
+    pub(super) fn projection(&self) -> ([(u64, usize); 4], usize) { ([(self.qkv, (2 * self.keys + self.heads) * DIM), (self.z, self.heads * DIM), (self.a, self.heads), (self.b, self.heads)], self.hidden) }
     pub(super) fn project_next(&self, b: &Backend<'_>, s: &GdnScratch<'_>, input: &DeviceVector<'_>, tokens: usize) -> Result<()> {
         if tokens == 0 || tokens > s.capacity || input.len() != tokens*self.hidden || self.precision || self.heads == 0 {
             return Err("Flash-Next projected GDN shape".into());

@@ -7,7 +7,8 @@
 //! error word on separate 64-byte lines), then SLOTS send slots, then SLOTS receive slots.
 //! Message s (1, 2, ... per direction, counted in u64) uses slot s % SLOTS and publishes the
 //! low 32 bits of s; a slot is reused only four messages later, and the split's lockstep keeps
-//! at most two messages in flight per direction, so a slot is never rewritten while in use.
+//! at most three messages in flight per direction (two with VADE_W2_TP_PROJ unset), so a slot is
+//! never rewritten while in use.
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::tp_mailbox_host::{Bell, TpMailboxHost, TP_MAILBOX_SLOTS, HEADER, SEND_SEQ, SEND_LEN, RECV_SEQ, ERROR, TAKE_PAUSE, WIDE, TAKE_CTAS};
