@@ -47,7 +47,7 @@ history and evidence behind FP8 are in
 - [ ] **The same home folder on both Sparks** (`echo $HOME` prints the same path), so `~/models/...` means the same place on both. If they differ, use absolute paths in the config instead of `~/`.
 - [ ] **The standard 128 GB of unified memory on each Spark**, with no other GPU jobs
 - [ ] **Plenty of free disk on each Spark** for the checkpoint (see its size on the model page) plus room for the build
-- [ ] **The basic programs and download tools**: `cc`, `curl`, `git`, `rsync`, `ping`, `sha256sum`, `python3`, **`python3-venv`**. Have them ready before step 5.
+- [ ] **The basic programs and download tools**: `cc`, `curl`, `git`, `rsync`, `ping`, `sha256sum`, Rust 1.99.0. Have them ready before step 5.
 - [ ] **A Mac** with Git and network access to both Sparks
 - [ ] **Network access to GitHub**. The repository is private during the preview, so you also need access to it; [INSTALL step 2](../INSTALL.md#step-2-get-the-code) shows the two ways in
 
@@ -158,26 +158,11 @@ even on a fresh VM:
 set -euo pipefail
 sudo apt-get update
 sudo apt-get install -y build-essential ca-certificates curl git openssh-client \
-  rsync iputils-ping python3 python3-venv
+  rsync iputils-ping
 ```
 
-Expected: exit 0 from both commands. The `python3-venv` package matters
-because the model download in step 5 runs inside a private Python environment
-(a venv), and without this package Python cannot set one up with pip. If “no
-installation candidate” remains after refreshing the lists, stop and have the
-administrator check the package sources; on Ubuntu 24.04 the package is
-`python3.12-venv`.
-
-**Check that Python can create a virtual environment**, before any model
-download:
-
-```sh
-VADE_VENV_CHECK=$(mktemp -d)
-python3 -m venv "$VADE_VENV_CHECK/check"
-"$VADE_VENV_CHECK/check/bin/python" -m pip --version
-```
-
-Expected: a pip version and exit 0, normally in under a minute.
+Expected: exit 0 from both commands. The model helper uses Rust 1.99.0 and
+curl. Install the pinned Rust toolchains in step 4 before the model download.
 Do not continue until these prerequisites and the link checks pass.
 
 <br>
@@ -270,13 +255,13 @@ build output. How long the download takes depends on your connection and on
 Hugging Face.
 
 > `vade` does **not** download Flash-Next. You fetch it once with the
-> repository's helper, `ops/fetch-model.sh`. The helper runs Hugging Face's own
-> `hf` tool for the download and then checks every file.
+> repository's helper, `ops/fetch-model.sh`. It uses curl for the download.
+> Rust checks every file against the pinned publisher metadata.
 
 **Download and verify on spark-1**, from the repository root you cloned in step 2.
 Keep the folder name exactly `Qwen3.8-Flash-Next-FP8`: its lowercase name becomes
-the model ID (`qwen3.8-flash-next-fp8`). The venv/pip check in step 2 must pass
-first, and no other download may be writing into this folder.
+the model ID (`qwen3.8-flash-next-fp8`). The pinned Rust install in step 4 must
+pass first, and no other download may be writing into this folder.
 
 ```sh
 sh ops/fetch-model.sh Qwen/Qwen3.8-Flash-Next-FP8 236dfdf285828023ca3bcd3f37366c58a3469b13 "$HOME/models/Qwen/Qwen3.8-Flash-Next-FP8"
@@ -290,8 +275,9 @@ command; finished downloads are reused. Continue only after it succeeds.
 **What the [helper](../ops/fetch-model.sh) does.** Below, `MODEL_DIR` is the
 folder you passed to it.
 
-- It installs its own `hf` tool in a private venv beside the model folder, at
-  `MODEL_DIR.fetch/venv`.
+- It keeps partial downloads in a private sibling folder, `MODEL_DIR.fetch`.
+- It checks file sizes, LFS SHA-256 hashes and Git blob hashes from the pinned
+  publisher metadata. It rejects extra files and links.
 - It checks every file against the official checksums and writes
   `MODEL_DIR.sha256`, which you use on spark-2 below.
 

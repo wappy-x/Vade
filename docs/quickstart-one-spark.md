@@ -284,9 +284,8 @@ for the complete checkpoint, the builds and download state; we have no measured
 minimum for free disk.
 
 The required programs are `cc`, `curl`, `git`, `sha256sum`, `cmp`, `less`,
-`jq`, `python3` and `python3-venv`. Vade itself needs neither Python nor the
-CUDA toolkit; this guide checks for Python and venv only so that the official
-Hugging Face tool is ready if you want it. Rust is pinned to **1.99.0** and the
+and `jq`. Vade needs no Python or CUDA toolkit. The model download helper uses
+Rust and curl. Rust is pinned to **1.99.0** and the
 GPU kernels to **nightly-2026-10-01**; keep both versions.
 
 An administrator installs any missing Ubuntu packages **before** you start the
@@ -295,17 +294,11 @@ user-level install. Refresh the package lists first, even on a fresh image:
 ```sh
 set -euo pipefail
 sudo apt-get update
-sudo apt-get install -y build-essential ca-certificates curl diffutils git jq less python3 python3-venv
+sudo apt-get install -y build-essential ca-certificates curl diffutils git jq less
 ```
 
 Expected: both commands exit 0, and package installation finishes with no
 missing candidates.
-
-`python3-venv` can report “no installation candidate” when the package lists
-are stale or missing. On Ubuntu 24.04 the versioned dependency is
-`python3.12-venv`. If refreshing the lists still leaves no candidate, stop and
-ask the administrator to check the Ubuntu package sources. Do not work around
-the failure.
 
 Start a Bash session in the parent folder where you will clone Vade (or in an
 existing checkout). Run the checks there, so the disk figure is for that
@@ -320,13 +313,10 @@ set -euo pipefail
 uname -m
 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
 nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader
-command -v cc curl git sha256sum cmp less jq python3
+command -v cc curl git sha256sum cmp less jq
 ldconfig -p | grep 'libcuda.so.1'
 df -h .
 awk '/MemTotal:|MemAvailable:/ {print}' /proc/meminfo
-VADE_VENV_CHECK=$(mktemp -d)
-python3 -m venv "$VADE_VENV_CHECK/check"
-"$VADE_VENV_CHECK/check/bin/python" -m pip --version
 ```
 
 Expected:
@@ -334,8 +324,7 @@ Expected:
 - `aarch64`, GB10 and a driver version;
 - no compute-process rows;
 - all programs found, and a driver library;
-- enough free disk and RAM;
-- a pip version.
+- enough free disk and RAM.
 
 Compare disk `Avail` with the files you will download and build. Memory values
 are in kB. There is no measured minimum for free RAM; context is sized at
@@ -343,9 +332,7 @@ startup. Inside a container, read the RAM figures together with
 [Containers: large model refused despite free RAM](#containers-large-model-refused-despite-free-ram)
 below.
 
-The venv check must exit 0; “ensurepip is not available” means the venv
-package is missing. This check leaves its small temporary environment in place
-so you can inspect it. Keep this Bash session for steps 1–4.
+Keep this Bash session for steps 1–4.
 
 ### 1. Install the pinned Rust tools
 

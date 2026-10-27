@@ -37,12 +37,12 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+      - name: Install pinned host Rust
+        run: rustup toolchain install 1.99.0 --profile minimal --no-self-update
       - name: Documentation links
-        run: python3 tools/check-doc-links.py
-      - name: Bundle producer layout and publication regression
-        run: python3 tools/test-bundle-producer.py
-      - name: Two-Spark example script regression
-        run: python3 tools/test-two-sparks.py
+        run: cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- check-doc-links
+      - name: Repository tool and example regressions
+        run: cargo +1.99.0 test --offline --locked --all-targets --manifest-path tools/Cargo.toml
 
   engine:
     name: Engine and GPU kernel build (${{ matrix.runner }}, no GPU)
@@ -89,7 +89,7 @@ jobs:
       - name: Prepare Linux host linkage without a GPU
         if: runner.os == 'Linux'
         run: |
-          python3 ../tools/ci-no-gpu.py
+          cargo +1.99.0 run --offline --locked --manifest-path ../tools/Cargo.toml -p vade-tools -- ci-no-gpu
           echo "LIBRARY_PATH=$PWD/target/ci-no-gpu${LIBRARY_PATH:+:$LIBRARY_PATH}" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$PWD/target/ci-no-gpu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
       - name: Check every engine host crate (warnings denied)

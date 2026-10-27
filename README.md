@@ -10,7 +10,7 @@ coding agent in your terminal, a plain chat and an OpenAI-compatible API.
   token IDs on every run, and `vade verify` checks part of that on your own
   engine.
 - **Plain Rust:** the Rust code, GPU kernels included, uses no third-party
-  crates. The model download helper uses Python.
+  crates. Repository tools also use Rust and the standard library.
 
 Latest release: [v0.1.0](https://github.com/wappy-x/vade/releases/tag/v0.1.0),
 2026-10-24. The [changelog](CHANGELOG.md) lists what has changed since, under
@@ -229,7 +229,7 @@ cards from 2026-10-25, the full recipe and the caveats.
 </picture>
 
 The chart compares one of our Sparks with two, drafting ON.
-`python3 -I tools/benchmarks-chart.py` redraws it from the
+`cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- benchmarks-chart` redraws it from the
 [2026-10-24 receipts](bench/receipts/2026-10-24/README.md). The table adds
 drafting OFF and the cloud VMs.
 
@@ -304,7 +304,7 @@ and [Credits](CREDITS.md) keeps the source attribution.
 | [INSTALL.md](INSTALL.md) | The whole install, starting with one Spark |
 | [First run](harness/docs/first-run.md) | The launcher on your Spark, saved settings and later runs |
 | [CLI reference](cli/README.md) | Commands, configuration and recovery |
-| [Examples](examples/README.md) | Short scripts you can run: curl, a Python client, Claude Code, Codex, vade bench and a two-Spark launch |
+| [Examples](examples/README.md) | Short examples you can run: curl, a Rust API client, Claude Code, Codex, vade bench and a two-Spark launch |
 | [Benchmarks](docs/benchmarks.md) | Measured results, receipts and how to reproduce them |
 | [Architecture](docs/architecture.md) | How requests reach the engine, and the exactness rule |
 | [Glossary](docs/GLOSSARY.md) | The serving terms these docs use |

@@ -1,6 +1,6 @@
 # Owner attach benchmark
 
-On an idle Mac, run `python3 cli/benches/owner_attach.py` from the checkout.
+On an idle Mac, run `cargo +1.99.0 bench --offline --locked --manifest-path cli/Cargo.toml --bench owner_attach -- --run` from the checkout.
 This optional benchmark discards one warmup, runs 20 sequential samples, and
 compares the 95th percentile with a one-second target. Use `--samples` or
 `--target-seconds` to state a different measurement contract. Keep other builds

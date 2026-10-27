@@ -178,27 +178,29 @@ There are two ways to get the Vade programs:
   [Optional release bundle](#optional-release-bundle) in step 2). The bundle is
   only for running Vade on the Spark itself.
 
-The Rust steps below are only for source builds. Bundle users can skip them.
+Source builds need both pinned Rust toolchains. The model download helper
+needs host Rust 1.99.0. Bundle users with an existing verified checkpoint can
+skip Rust setup.
 
 <a id="1-prepare-the-sparks"></a>
 On the Spark, install any missing Ubuntu packages (this needs `sudo`):
 
 ```sh
-sudo apt-get update && sudo apt-get install -y build-essential git curl rsync python3 python3-venv zstd
+sudo apt-get update && sudo apt-get install -y build-essential git curl rsync zstd
 ```
 
-The model download helper in step 3 needs Python with venv and pip. Now check
+The model download helper in step 3 uses Rust 1.99.0 and curl. Now check
 the driver and the tools you already have:
 
 ```sh
 uname -m
 nvidia-smi --query-gpu=name,driver_version,utilization.gpu --format=csv,noheader
 nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader
-command -v cc git ssh rsync curl python3 sha256sum find sort nvidia-smi
+command -v cc git ssh rsync curl sha256sum find sort nvidia-smi
 ```
 
 You should see `aarch64`, GB10 and no running compute application. Each of
-the 10 names in the `command -v` line must print a path; nothing printed means
+the 9 names in the `command -v` line must print a path; nothing printed means
 that tool is missing. Install any missing one with `apt-get` (`ssh` is in
 `openssh-client`). If
 something else is using the GPU, stop it through its own launcher first. Leave
@@ -206,7 +208,7 @@ driver and system changes to the Spark's administrator; Vade does not make
 them.
 
 <a id="2-install-the-pinned-rust-compilers"></a>
-### Install Rust (source builds only)
+### Install Rust
 
 The engine is written in Rust and has no third-party Rust dependencies.
 
@@ -226,13 +228,17 @@ Then install it without touching your shell startup files:
 sh /tmp/vade-rustup-init.sh -y --default-toolchain none --no-modify-path
 ```
 
-Next, install the pinned toolchains (the exact Rust versions Vade builds with)
-on each Spark that builds from source. One is for the host and one is for the
-GPU:
+Install the pinned host toolchain on each machine that builds from source or
+runs the model download helper:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
 rustup toolchain install 1.99.0 --profile minimal
+```
+
+Source builds also need the pinned GPU toolchain:
+
+```sh
 rustup toolchain install nightly-2026-10-01 --profile minimal --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda
 ```
 
@@ -403,23 +409,23 @@ nohup sh ops/fetch-model.sh nvidia/Qwen3.8-Flash-Next-FP4-Local b9ce18a6887e18c0
 ```
 
 To follow it, even from a new SSH login, run `tail -f ~/vade-fetch.log`
-(`Ctrl-C` stops only `tail`). The helper sets up a private download
-environment and checks the snapshot against the pinned publisher revision. It
+(`Ctrl-C` stops only `tail`). The helper uses a private sibling folder for
+partial downloads and checks the snapshot against the pinned publisher revision. It
 then writes a `.sha256` manifest next to the model folder.
 
-A good run ends with `verified 33 files`. If it is interrupted, it prints
-`Interrupted; run the same command again.`, and that is what you do.
-If the machine restarted or the helper was killed outright, the rerun can stop
-at once with
-`Another fetch may be running; check the sibling fetch lock directory.` When
-no fetch is running, remove the stale lock and rerun; the download resumes:
+A good run ends with `verified 33 files`. If it is interrupted, run the same
+command again. Partial downloads stay in the sibling `.fetch` directory.
+The helper stops its downloader after an interruption. It keeps an operating
+system file lock until the downloader exits. A rerun can report
+`another fetch may be running` during that cleanup. Wait for cleanup, then
+rerun. A restart releases the lock too. The `.fetch/lock` file stays in place;
+do not remove it. Its presence does not mean that a fetch is running.
+Metadata requests have a 120-second deadline. A transfer fails if its rate
+stays below 1 byte per second for 120 seconds. Large active downloads can
+continue for hours.
 
-```sh
-rmdir "$HOME/models/nvidia/Qwen3.8-Flash-Next-FP4-Local.fetch/lock"
-```
-
-We have not measured the space its download cache and Python environment
-take; leave headroom beyond the 102.26 GB checkpoint. A complete
+Partial downloads can use space in addition to the model files. Leave
+headroom beyond the 102.26 GB checkpoint. A complete
 snapshot has the byte total given above; copying only the tensor shards is not
 enough. Vade's `install`, `up` and `launch` do not download these weights.
 

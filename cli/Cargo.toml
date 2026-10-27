@@ -16,3 +16,7 @@ path = "src/main.rs"
 engine-model = { path = "../engine/crates/model" }
 engine-tokenizer = { path = "../engine/crates/tokenizer" }
 vade-bench = { path = "../engine/tools/bench" }
+
+[[bench]]
+name = "owner_attach"
+harness = false

@@ -2,18 +2,18 @@
 # Purpose: point Claude Code at Vade's Anthropic Messages API and ask it one question.
 # Run:     sh examples/claude-code.sh                 (one-shot: prints the answer)
 #          sh examples/claude-code.sh --interactive   (opens Claude Code in this folder)
-# Needs:   a running engine, curl, Python 3, and Claude Code (`claude`) on PATH.
+# Needs:   a running engine, curl, Rust 1.99.0, and Claude Code (`claude`) on PATH.
 #          VADE_API_URL picks another endpoint (default http://127.0.0.1:18080).
 # Expected output: see "Claude Code" in examples/README.md.
 # This is not a live-qualified client route; harness/docs/passthrough-matrix.md says what is checked.
 set -eu
+. "$(dirname -- "$0")/api-common.sh"
 BASE=${VADE_API_URL:-http://127.0.0.1:18080}
 BASE=${BASE%/}
 BASE=${BASE%/v1}
 
 # Read the served model and its context window from the running engine.
 CAPABILITIES=$(curl --fail-with-body -sS "$BASE/v1/capabilities")
-field() { printf '%s' "$CAPABILITIES" | python3 -I -c "import json, sys; print(json.load(sys.stdin)['$1'])"; }
 MODEL=$(field model)
 CONTEXT=$(field context_limit)
 echo "Vade at $BASE serves $MODEL with a $CONTEXT-token context." >&2

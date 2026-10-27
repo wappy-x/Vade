@@ -52,7 +52,7 @@ cargo +1.99.0 check --offline --locked --all-targets --manifest-path ../cli/Carg
 cargo +1.99.0 check --offline --locked --all-targets --manifest-path ../harness/Cargo.toml
 cargo +1.99.0 check --offline --locked --all-targets --manifest-path tools/bench/Cargo.toml
 cargo +1.99.0 test --offline --locked --manifest-path ../cli/Cargo.toml --test ratchet -- --nocapture
-python3 ../tools/check-doc-links.py
+cargo +1.99.0 run --offline --locked --manifest-path ../tools/Cargo.toml -p vade-tools -- check-doc-links
 ```
 
 That block checks the CLI, the harness and the benchmark tools, runs the
@@ -92,6 +92,8 @@ start an engine. To install from source on a Spark, follow
 [INSTALL.md](INSTALL.md).
 
 ## Rules and formatting
+
+No Python in this repository. Rust first; shell only where Rust cannot do the job.
 
 - **No third-party dependencies.** Use only the Rust standard library and the
   first-party path crates already here. Registry, git, external path, dev and

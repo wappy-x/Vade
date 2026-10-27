@@ -221,7 +221,7 @@ bundle and checksum to the tag's GitHub release. The tag workflow does the
 full native build, and it checks both the archive checksum and the extracted
 manifest hashes before it publishes.
 
-Pull-request CI runs `python3 tools/test-bundle-producer.py` without
+Pull-request CI runs `cargo +1.99.0 test --offline --locked --manifest-path tools/Cargo.toml --test producer --test bundle` without
 compiling the full engine. It tests that the producer:
 
 - lays out the files and writes the manifest hashes correctly

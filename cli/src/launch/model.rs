@@ -13,7 +13,7 @@ use std::{
 use std::fs::File;
 
 const DEFAULT_CHECKPOINT: &str = "Qwen3.8-Flash-Next-FP4-Local";
-const MODEL_HELP: &str = "Use nvidia/Qwen3.8-Flash-Next-FP4-Local. Download to a checkpoint folder with: hf download nvidia/Qwen3.8-Flash-Next-FP4-Local --local-dir ~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local";
+const MODEL_HELP: &str = "Use nvidia/Qwen3.8-Flash-Next-FP4-Local. From the checkout, download a checkpoint folder with: sh ops/fetch-model.sh nvidia/Qwen3.8-Flash-Next-FP4-Local b9ce18a6887e18c089fdea8509a33e63429a3300 ~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local";
 
 #[derive(Clone, Debug)]
 pub(super) struct Model {
@@ -267,7 +267,7 @@ fn inspect(path: &Path) -> Result<Model, String> {
         format!("Model metadata {} is missing or unreadable.", display(&index_path))
     })?;
     if !index_path.starts_with(&path) {
-        return Err(format!("Model shard index symlink escapes the checkpoint folder. Hugging Face cache snapshots need a separate --local-dir download. {MODEL_HELP}; then run vade launch."));
+        return Err(format!("Model shard index symlink escapes the checkpoint folder. Download a separate local checkpoint folder. {MODEL_HELP}; then run vade launch."));
     }
     let index = metadata(&index_path, limits.header_bytes as u64)?;
     let index = if layout.mixed.is_some() {
@@ -300,7 +300,7 @@ fn inspect(path: &Path) -> Result<Model, String> {
             )
         })?;
         if !payload.starts_with(&path) {
-            return Err(format!("Model shard symlink escapes the checkpoint folder. Hugging Face cache snapshots need a separate --local-dir download. {MODEL_HELP}; then run vade launch."));
+            return Err(format!("Model shard symlink escapes the checkpoint folder. Download a separate local checkpoint folder. {MODEL_HELP}; then run vade launch."));
         }
         let meta = fs::metadata(&payload).map_err(|_| {
             format!(

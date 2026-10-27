@@ -4,7 +4,7 @@ This page is a map. For each everyday task, from the first launch to stopping
 the engine, it points you to the guide that covers it.
 
 You run Vade through `vade`, a command-line tool written in Rust that starts,
-stops, benchmarks and tests the engine. A few shell and Python helpers handle
+stops, benchmarks and tests the engine. A few Rust tools and shell helpers handle
 the jobs around it: preparing the system and downloading the model's files
 (the [checkpoint](../docs/GLOSSARY.md#ac)). [INSTALL.md](../INSTALL.md) lists
 what those helpers need and how to check that they worked.
@@ -38,16 +38,16 @@ Once the engine is running, these commands cover the rest:
 You download the model as part of [INSTALL step 3](../INSTALL.md#step-3-get-the-model).
 This is the command on its own. Run the [fetch helper](fetch-model.sh) from the
 top folder of your copy of the repository (the checkout root), on a Linux
-machine with `python3` (including venv and pip), `sha256sum`, `find` and
-`sort`:
+machine with Rust 1.99.0 and `curl`:
 
 ```sh
 sh ops/fetch-model.sh nvidia/Qwen3.8-Flash-Next-FP4-Local b9ce18a6887e18c089fdea8509a33e63429a3300 "$HOME/models/nvidia/Qwen3.8-Flash-Next-FP4-Local"
 ```
 
 The long hex string is the pinned revision: one exact version of the model.
-The helper downloads that revision and checks it with Hugging Face's own
-verifier, which fails on any missing, extra or damaged file. It then writes a
+The helper reads the pinned file list from Hugging Face. Rust checks file sizes,
+LFS SHA-256 hashes and Git blob hashes. It fails on missing, extra or damaged
+files. It then writes a
 SHA-256 hash of every file (a checksum manifest) next to the model folder, as
 `<model folder>.sha256`. It prints nothing while it works, and a good run ends
 with `verified 33 files`. If a step fails, it prints one line that says what
@@ -62,7 +62,7 @@ After the download, compare the files with
 [qwen3.8-flash-next-fp4-local.sha256](../cli/examples/qwen3.8-flash-next-fp4-local.sha256),
 the list of hashes committed in the repository.
 [Check the files](../INSTALL.md#check-the-files) gives the command. INSTALL
-step 3 also covers disk space and the Python setup.
+step 3 also covers disk space and the Rust setup.
 
 ## Drive Sparks from another computer
 

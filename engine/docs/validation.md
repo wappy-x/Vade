@@ -197,7 +197,7 @@ On a **Linux host without a GPU**, CI builds a fake CUDA library that aborts
 if a device call is attempted. From `engine/`, before the host checks:
 
 ```sh
-python3 ../tools/ci-no-gpu.py
+cargo +1.99.0 run --offline --locked --manifest-path ../tools/Cargo.toml -p vade-tools -- ci-no-gpu
 export LIBRARY_PATH="$PWD/target/ci-no-gpu${LIBRARY_PATH:+:$LIBRARY_PATH}"
 export LD_LIBRARY_PATH="$PWD/target/ci-no-gpu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 ```

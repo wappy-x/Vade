@@ -49,5 +49,5 @@ paths are removed; the exact reference adapter remains available.
 
 Host CI builds real stamped PTX and every workspace host crate on Linux.
 Device tests are ignored with `skipped: no GPU` reasons; run them explicitly
-with `--ignored` and their documented GPU inputs. `tools/ci-no-gpu.py` creates
+with `--ignored` and their documented GPU inputs. The `vade-tools ci-no-gpu` command creates
 a CI-only link library whose device calls abort; never distribute it.

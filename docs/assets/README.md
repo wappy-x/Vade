@@ -46,7 +46,7 @@
 
 **[benchmarks-2026-10-24-light.svg](benchmarks-2026-10-24-light.svg) and [benchmarks-2026-10-24-dark.svg](benchmarks-2026-10-24-dark.svg) compare one DGX Spark with two.** Both use drafting ON, the default, on our own Sparks: writing speed for code, prose and eight chats, and the wait for the first reply after an 8K-token prompt. They appear in the main README and in [Benchmarks](../benchmarks.md#current-2026-10-24), chosen by the same `<picture>` light/dark rule; they do not move.
 
-- Do not edit them by hand. `python3 -I tools/benchmarks-chart.py` writes both from the committed receipts, so every number is a value a receipt prints.
+- Do not edit them by hand. `cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- benchmarks-chart` writes both from the committed receipts, so every number is a value a receipt prints. The Rust SVG writer is under 300 lines.
 - The headline says in words what the bars show. The script checks it against every same-day home card with the same settings, six single Sparks and three pairs, and stops if any of them disagrees. Under the eight-chat bars, a note gives the range those cards show.
 - 1 Spark is blue (`#2a78d6` light, `#3987e5` dark) and 2 Sparks is orange (`#eb6834` light, `#d95926` dark), a pair chosen to stay apart for colorblind readers. Every bar also carries its name, so color is never the only clue. Text uses neutral ink, never the bar colors.
 - Drafting OFF and the cloud VMs stay in the tables on the [Benchmarks](../benchmarks.md#current-2026-10-24) page.

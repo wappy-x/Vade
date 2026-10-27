@@ -10,6 +10,8 @@ repository URL is defined by [`VADE_REPO_URL`](cli/src/repository.rs).
 
 ## House rules
 
+No Python in this repository. Rust first; shell only where Rust cannot do the job.
+
 - **Zero third-party dependencies.** Use the Rust standard library and the
   first-party crates already in the tree. Registry, git, off-tree path, build
   and dev dependencies all count, and so do lockfile sources. Don't add a
@@ -119,7 +121,7 @@ cargo +1.99.0 check --offline --all-targets --manifest-path ../cli/Cargo.toml
 cargo +1.99.0 check --offline --all-targets --manifest-path ../harness/Cargo.toml
 cargo +1.99.0 check --offline --all-targets --manifest-path tools/bench/Cargo.toml
 cargo +1.99.0 test --offline --manifest-path ../cli/Cargo.toml --test ratchet -- --nocapture
-python3 ../tools/check-doc-links.py
+cargo +1.99.0 run --offline --locked --manifest-path ../tools/Cargo.toml -p vade-tools -- check-doc-links
 ```
 
 ### Engine and full CI checks
@@ -136,7 +138,7 @@ On **Linux hosts without a GPU only**, CI installs a CUDA stub that aborts on
 any device call before it runs the host tests. From `engine/`:
 
 ```sh
-python3 ../tools/ci-no-gpu.py
+cargo +1.99.0 run --offline --locked --manifest-path ../tools/Cargo.toml -p vade-tools -- ci-no-gpu
 export LIBRARY_PATH="$PWD/target/ci-no-gpu${LIBRARY_PATH:+:$LIBRARY_PATH}"
 export LD_LIBRARY_PATH="$PWD/target/ci-no-gpu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 ```

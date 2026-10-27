@@ -38,7 +38,7 @@ jobs:
         # link-only CUDA stub on runners without a driver. PTX needs no GPU.
         run: sh scripts/make-bundle.sh
       - name: Check the archive and every manifest hash
-        run: python3 tools/check-bundle.py .local/bundles "$GITHUB_WORKSPACE" "$HOME" bundle-build.
+        run: cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- check-bundle .local/bundles "$GITHUB_WORKSPACE" "$HOME" bundle-build.
       - name: Attach the bundle and checksum to the tag release
         env:
           GH_TOKEN: ${{ github.token }}

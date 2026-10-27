@@ -6,19 +6,19 @@ Start an engine first: `vade launch` on the Spark, or `vade up` from a
 controller ([INSTALL.md](../INSTALL.md)). Every script then talks to
 `http://127.0.0.1:18080`, the default API address; set `VADE_API_URL` to use
 another one (`vade status` prints the address in use). Nothing here needs a
-package install: the scripts use `sh`, `curl` and Python's standard library.
+package install: the scripts use `sh`, `curl` and the repository's Rust tools.
 
 | Script | What it shows | Runs without a Spark |
 | --- | --- | --- |
 | [`curl-openai.sh`](curl-openai.sh) | The OpenAI-compatible API with plain curl: models, one answer, one streamed answer | No |
 | [`curl-anthropic.sh`](curl-anthropic.sh) | The Anthropic Messages API with plain curl: token count, one answer, one streamed answer | No |
-| [`openai_client.py`](openai_client.py) | A std-only Python client: streaming, tool calling, and prompt caching across turns | No |
+| [`openai_client.sh`](openai_client.sh), [`openai_client.rs`](openai_client.rs) | Shell and std-only Rust clients: streaming, tool calling, and prompt caching across turns | No |
 | [`claude-code.sh`](claude-code.sh) | Claude Code pointed at Vade's Messages API | No |
 | [`codex.sh`](codex.sh) | The Codex CLI pointed at Vade's Responses API, in a private Codex home | No |
 | [`bench.sh`](bench.sh) | Reproduce the published one-Spark `vade bench` number | `--self-test` only |
 | [`two-sparks.sh`](two-sparks.sh) and [`two-sparks.conf`](two-sparks.conf) | One engine across two Sparks, started from a controller | Dry run only (the default) |
 
-The outputs below come from real runs: the curl and Python examples on one
+The outputs below come from earlier real runs: curl and the former API client on one
 Spark, the bench example on a second Spark, and Claude Code and Codex from a
 Mac through an SSH tunnel to the first Spark. Every request leaves sampling
 unset, so the engine decodes greedily and the same request gives the same
@@ -95,9 +95,20 @@ event: message_stop
 data: {"type":"message_stop","vade":{…}}
 ```
 
-## Python: streaming, tools and caching
+## API clients: streaming, tools and caching
 
-`python3 -I examples/openai_client.py`
+Run `sh examples/openai_client.sh`. It builds the std-only Rust JSON helper and
+uses curl for HTTP or HTTPS. The loop prints each streamed content delta.
+The Rust version uses `TcpStream` and the same JSON parser:
+
+```sh
+cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml --example openai-client
+```
+
+Both accept `stream`, `tools` or `cache` as arguments. Both read `VADE_API_URL`
+and `VADE_API_KEY_FILE`. The Rust example supports plain HTTP. Use the shell
+example for HTTPS. The saved output below is from the former client. Host tests
+check the replacements with mock responses; they have not been run on a Spark.
 
 ```text
 [model] qwen3.8-flash-next-fp4-local at http://127.0.0.1:18080
@@ -127,12 +138,12 @@ turn's prefix already there too. The answers are the same with the cache on
 or off:
 
 ```text
-$ python3 -I examples/openai_client.py cache
+$ sh examples/openai_client.sh cache
 [model] qwen3.8-flash-next-fp4-local at http://127.0.0.1:18080
 == cache
 [turn 1] prompt 2014 tokens, cached 0: 17
 [turn 2] prompt 2040 tokens, cached 1984: 19
-$ python3 -I examples/openai_client.py cache
+$ sh examples/openai_client.sh cache
 [model] qwen3.8-flash-next-fp4-local at http://127.0.0.1:18080
 == cache
 [turn 1] prompt 2014 tokens, cached 1984: 17

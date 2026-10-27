@@ -174,7 +174,7 @@ JSON workload, not a measure of general agent performance.
 The figure compares one of our Sparks with two, both with drafting ON, the
 default. It draws two cards from the home table below: one Spark ON and two
 Sparks ON. Drafting OFF and the cloud VMs are in the tables only. To redraw
-it, run `python3 -I tools/benchmarks-chart.py`; it reads the receipts and
+it, run `cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- benchmarks-chart`; it reads the receipts and
 rewrites both SVG files in [docs/assets](assets/README.md).
 
 ### Home

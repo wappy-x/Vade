@@ -1080,7 +1080,7 @@ cargo +1.99.0 check --offline --all-targets --manifest-path ../cli/Cargo.toml
 cargo +1.99.0 check --offline --all-targets --manifest-path ../harness/Cargo.toml
 cargo +1.99.0 check --offline --all-targets --manifest-path tools/bench/Cargo.toml
 cargo +1.99.0 test --offline --manifest-path ../cli/Cargo.toml --test ratchet -- --nocapture
-python3 ../tools/check-doc-links.py
+cargo +1.99.0 run --offline --locked --manifest-path ../tools/Cargo.toml -p vade-tools -- check-doc-links
 ```
 
 The CLI's tests use fake SSH and local temporary files. Live installation, CUDA,

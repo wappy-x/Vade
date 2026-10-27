@@ -42,8 +42,8 @@ sh ops/fetch-model.sh Qwen/Qwen3.8-Flash-Next-FP8 \
   /absolute/path/to/Qwen3.8-Flash-Next-FP8
 ```
 
-The helper needs python3 with venv and pip, plus sha256sum, find, sort and download
-access ([ops/fetch-model.sh:5](../ops/fetch-model.sh#L5)). Continue only after
+The helper needs Rust 1.99.0, curl and download
+access ([ops/fetch-model.sh](../ops/fetch-model.sh)). Continue only after
 its strict verification passes, then verify every destination copy. Neither
 `vade install` nor `vade up` downloads these weights. Leave disk space for the
 complete snapshot, the download state and the builds; we have not measured a

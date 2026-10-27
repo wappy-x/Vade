@@ -34,7 +34,7 @@ sh ops/fetch-model.sh Qwen/Qwen3.6-35B-A3B-FP8 \
   95a723d08a9490559dae23d0cff1d9466213d989 "$MODEL"
 ```
 
-The helper requires Python with venv/pip and network access during setup;
+The helper requires Rust 1.99.0, curl and network access during setup;
 inference uses Rust and the NVIDIA driver. It verifies the official snapshot
 and writes a sibling checksum manifest. Continue only after `verified … files`
 and exit zero; rerun the same command after an interrupted download.

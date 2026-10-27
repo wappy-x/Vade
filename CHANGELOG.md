@@ -5,6 +5,16 @@ Changes that are merged but not yet released are under Unreleased.
 
 ## Unreleased
 
+### Repository tools
+
+- All repository tools now use Rust and the standard library. There are no
+  Python files or Python setup requirements. The tools crate checks links and
+  release bundles, tests shell examples, builds CI CUDA linkage stubs and draws
+  the release figure. The model helper uses Rust validation and curl. API
+  examples are available in shell and Rust. Interrupted model downloads release
+  their lock after curl stops. Stalled transfers fail with a time limit. The
+  shell API example reports stream errors and incomplete streams as failures.
+
 ### Engine
 
 - With the two-Spark tensor split (`VADE_W2_TP=1`), the verify step of five
@@ -350,7 +360,7 @@ Changes that are merged but not yet released are under Unreleased.
 
 ### Tools
 
-- The chart script `tools/benchmarks-chart.py` reads the release-card
+- The chart tool `vade-tools benchmarks-chart` reads the release-card
   numbers from the committed receipts, reads and writes UTF-8, names a
   missing receipt folder, and stops if the cards stop supporting the
   figure's headline. The assets README lists both figures and gives the
