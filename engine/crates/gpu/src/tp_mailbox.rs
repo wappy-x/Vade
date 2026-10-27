@@ -1,4 +1,4 @@
-//! VADE_W2_TP=1 in-graph mailbox, device side (the host endpoint is crate::tp_mailbox_host): mapped host slots that kernels fill and drain inside the
+//! The tensor split's in-graph mailbox, device side (the host endpoint is crate::tp_mailbox_host): mapped host slots that kernels fill and drain inside the
 //! stream (tp_mailbox_put / tp_mailbox_take), and the one host endpoint a proxy thread uses
 //! to move each slot over RDMA. The host side touches the mapping only as `[AtomicU32]`:
 //! payload words with Relaxed loads/stores, each slot's sequence word with Release (publish)
@@ -7,14 +7,14 @@
 //! error word on separate 64-byte lines), then SLOTS send slots, then SLOTS receive slots.
 //! Message s (1, 2, ... per direction, counted in u64) uses slot s % SLOTS and publishes the
 //! low 32 bits of s; a slot is reused only four messages later, and the split's lockstep keeps
-//! at most three messages in flight per direction (two with VADE_W2_TP_PROJ unset), so a slot is
+//! at most three messages in flight per direction, so a slot is
 //! never rewritten while in use.
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::tp_mailbox_host::{Bell, TpMailboxHost, TP_MAILBOX_SLOTS, HEADER, SEND_SEQ, SEND_LEN, RECV_SEQ, ERROR, TAKE_PAUSE, WIDE, TAKE_CTAS};
 
 /// The mapped mailbox of one rank (device-visible host memory), `slot_bytes` per slot.
-/// `bell`: every queued put rings it, so a waiting write doorbell (VADE_W2_TP_DOORBELL=wait) can park.
+/// `bell`: every queued put rings it, so a waiting write doorbell can park.
 pub struct TpMailbox<'a> { vector: DeviceVector<'a>, host: *mut f32, slot_words: usize, host_taken: AtomicBool, bell: Bell }
 impl<'a> TpMailbox<'a> {
     fn words(&self) -> &[AtomicU32] {

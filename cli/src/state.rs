@@ -315,7 +315,7 @@ impl Session {
     pub fn chained(&self) -> bool {
         self.ranks.len() > 1 && !self.replicas
     }
-    /// Two FP4-Local Sparks on one model: the tensor split (VADE_W2_PATH=pipeline: the layer pipeline).
+    /// Two FP4-Local Sparks on one model: the tensor split, the only two-Spark path.
     pub fn two_sparks(&self) -> bool {
         self.fp4_local && self.chained() && self.ranks.len() == 2
     }

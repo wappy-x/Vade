@@ -19,7 +19,7 @@ pub(super) const CONF_CTAS: usize = 96;
 pub(super) struct Bounds<'a> {
     twin: DeviceVector<'a>,
     norms: DeviceVector<'a>,
-    /// The head rows these bounds screen: [start, start + rows) (VADE_W2_TP_HEAD: a rank's
+    /// The head rows these bounds screen: [start, start + rows) (the split head: a rank's
     /// vocabulary half; otherwise the whole head).
     start: usize,
     rows: usize,
@@ -42,7 +42,7 @@ pub struct Head<'a, 'w> {
     /// VADE_FLASHNEXT_DRAFT_FP4=2 (the default): rescore the FP4 screen's top four 1024-row chunks from
     /// the MXFP8 twin's values (needs that twin).
     fp4_rescore: bool,
-    /// VADE_W2_TP_HEAD: the last verify pass projected rows [0, n) here and rank 1 rows [n, ..);
+    /// The split head: the last verify pass projected rows [0, n) here and rank 1 rows [n, ..);
     /// its argmax rows are merged on readback (take_split) and its logits are sparse.
     split: Option<u32>,
     ready: bool,
@@ -430,7 +430,7 @@ impl<'a, 'w> Head<'a, 'w> {
     pub(super) fn row_offsets(start: usize) -> (u64, u64, u64) {
         ((start * H * 2) as u64, (start / 8 * 16) as u64, (start / 8 * (H / 32) * 8) as u64)
     }
-    /// Head rows [start, start + rows) only (VADE_W2_TP_HEAD): the launches of the whole head on
+    /// Head rows [start, start + rows) only (the split head): the launches of the whole head on
     /// that range's weights, flags and bases. Each logit is one warp's walk over its 8-row group
     /// in the same K order, so it is the whole head's; argmax ids count from row `start`.
     #[allow(clippy::too_many_arguments)]
@@ -545,7 +545,7 @@ impl<'a, 'w> Head<'a, 'w> {
         }
         Ok(())
     }
-    /// VADE_W2_TP_HEAD: this session's last verify pass projected rows [0, rows) here. Its logits
+    /// The split head: this session's last verify pass projected rows [0, rows) here. Its logits
     /// are sparse: `ready` stays false until a canonical reader re-projects the retained inputs.
     pub(super) fn mark_split(&mut self, rows: u32) {
         self.ready = false; self.max_ready = false; self.split = Some(rows);
@@ -639,7 +639,7 @@ impl<'a, 'w> Head<'a, 'w> {
         }).collect()
     }
 }
-/// VADE_W2_TP_HEAD: each row's argmax over the whole vocabulary from the two halves' argmax rows
+/// The split head: each row's argmax over the whole vocabulary from the two halves' argmax rows
 /// (`own` over rows [0, start), `peer` over rows [start, ..) with ids from 0): the larger logit,
 /// ties to the lower id (always `own`'s), the order logits_argmax_finish uses within one head.
 pub(super) fn merge_split(own: &[(u32, f32)], peer: &[(u32, f32)], start: u32) -> Result<Vec<(u32, f32)>> {

@@ -15,12 +15,10 @@ VADE_MTP_C8=0 VADE_POOL_GRAPH_FALLBACK=0 VADE_MTP_COHORT_ADAPT=0 flash-serve ...
 
 An explicit `VADE_MTP_BATCH` retains its previous table and disables the implicit
 cohort default. `VADE_MTP_C8=0` also disables that implicit cohort default.
-The two- and four-stage layer pipelines enable guarded Auto8 through
-`VADE_W2_PP_C8` (unset or `1`); there the wide tick below is the default and the
+The two- and four-stage pipeline services (the tensor split and the 4-Spark layer
+chain) always use guarded Auto8; there the wide tick below is the default and the
 cohort controller is opt-in (`VADE_MTP_COHORT=off` brings back the controller and
-the 16-row tick while keeping the guard). Set `VADE_W2_PP_C8=0` on every Spark to
-disable the guard itself and restore the previous defaults on either route: Auto
-batching, no cohort controller, no wide tick and no graph fallback. Explicit existing switch
+the 16-row tick while keeping the guard). Explicit existing switch
 values retain their overrides. An explicit cohort `1` requires Auto8 and either
 world one or an enabled two- or four-stage pipeline. Native ranks and other
 pipeline sizes retain their previous defaults and reject explicit cohort activation.
@@ -28,14 +26,14 @@ Explicit request draft/depth controls retain their meaning. The C8 and graph
 switches can be controlled independently; world one uses all three zeros for a full rollback.
 
 `VADE_MTP_COHORT=wide` (opt-in on one Spark; the default on a two- or four-stage
-pipeline with its guard on, where `off` restores the controller's 16-row tick) widens the cohort tick: with `VADE_VERIFY_ROWS` unset, five to eight chats verify up
+pipeline, where `off` restores the controller's 16-row tick) widens the cohort tick: with `VADE_VERIFY_ROWS` unset, five to eight chats verify up
 to 32 rows in one pass, so eight chats draft depth 3 (four rows each) instead of the
 controller's one proposal. Four chats or fewer stay on the 16-row tile. The cost
 controller becomes opt-in under `wide` (`VADE_MTP_COHORT_ADAPT=1` turns it back on);
 `VADE_VERIFY_ROWS=16` keeps the 16-row tick. Rows above 16 use each row kernel's
 M 17-32 path, whose bytes per chat equal the chat's bytes alone. Any other value of
-`VADE_MTP_COHORT` is a startup error, and so is `wide` on native ranks or on a
-pipeline with `VADE_W2_PP_C8=0` (one Spark accepts it with that switch). On a pipeline, give every Spark the same
+`VADE_MTP_COHORT` is a startup error, and so is `wide` on native ranks. On a
+pipeline, give every Spark the same
 value (or leave it unset on all): the resolved tick joins the pipeline identity.
 
 ```sh

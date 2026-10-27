@@ -941,12 +941,10 @@ There are two ways to choose the Sparks. Use one or the other, not both:
 - `vade up --hosts spark-a,spark-b,spark-c` picks named machines in cable
   order.
 
-Two Sparks run the tensor split: both Sparks work on every token, each on half
-of the experts and of most projections, with every proven level on.
-`VADE_W2_PATH=pipeline` runs the older two-stage layer pipeline instead, with
-a range of the model's layers on each; it is a debug switch and goes away with
-that path. With three or more Sparks, Vade uses the layer chain, which spreads
-the layers across all the Sparks you chose.
+Two Sparks run the tensor split, the only two-Spark path: both Sparks work on
+every token, each on half of the experts and of most projections. With three or
+more Sparks, Vade uses the layer chain, which spreads the layers across all the
+Sparks you chose.
 
 List both end addresses for every cable between neighboring Sparks. You don't
 need a cable that closes the chain into a ring.
@@ -970,9 +968,9 @@ export SEQPAR_RDMA=0
 
 TCP uses the configured, reachable fabric addresses and needs neither RDMA nor
 a fabric cable (a QSFP link). A single local Spark needs no transport between
-Sparks at all. The two-Spark tensor split needs RDMA, so two Sparks over TCP
-run the older layer pipeline: also set `VADE_W2_PATH=pipeline`, or `vade up`
-stops and asks for it.
+Sparks at all. The two-Spark tensor split needs RDMA, so `vade up` refuses
+TCP on two FP4-Local Sparks. TCP serves FP4-Local chains of three or more
+Sparks, and FP8, which keeps its ring on two Sparks.
 
 <a id="replicas"></a>
 ### Serve many chats with replicas

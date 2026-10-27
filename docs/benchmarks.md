@@ -100,8 +100,8 @@ halves.
 
 **You set nothing.** The 2026-10-26 split cards set four `VADE_W2_*` names by
 hand. These cards set none, and the receipts show the same path and levels.
-`vade status` shows the path and its levels. The layer pipeline stays
-available for comparison behind `VADE_W2_PATH=pipeline`.
+`vade status` shows the path and its levels. The layer pipeline no longer
+serves two Sparks.
 
 **The speed is the same as with the levels set by hand.** With drafting ON,
 prose was 53.9 and 53.5 tok/s here, against 54.2 on the 2026-10-26 split
@@ -153,8 +153,8 @@ token: each one computes half of every expert and of most projections, and for
 one chat also half of the linear-attention heads and of the output head; the
 two halves meet over the RDMA link. Before, two Sparks ran the **layer
 pipeline**, where each Spark holds half of the layers and one token's work
-passes from one GPU to the other. The pipeline stays in the code for a short
-time, behind one debug switch, `VADE_W2_PATH=pipeline`; it will be removed.
+passes from one GPU to the other. That path is gone: the split is the only
+two-Spark path.
 
 These are RigMark cards measured on 2026-10-26 on our own DGX Sparks. Each
 card passed its **15/15** basic output checks and ran a prebuilt payload of
@@ -167,7 +167,7 @@ code and structured 5 times with an 8192-token cap, a cold 8K prompt 3 times,
 and C1/C2/C4/C8 for 3 rounds with a 256-token cap. These builds came before
 the split became the default, so their split cards set its four levels by hand
 (`VADE_W2_TP=1 VADE_W2_TP_WIRE=write VADE_W2_TP_PROJ=3 VADE_W2_TP_HEAD=1`); the
-default now sets the same four.
+same four are now the only code, and those names are gone.
 
 | Path | Drafting | Commit | Sparks | Prose | Code | Structured | C1 | C2 | C4 | C8 | Cold 8K prompt (s) | Result folder |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
@@ -207,10 +207,9 @@ The [2026-10-27 cards](#current-2026-10-27-main-12142bb-home-dgx-sparks) run
 with both changes and give the first-token times. These cards do not measure
 them.
 
-**Every level is on by default.** `vade status` shows the path and its
+**Every level is the only code.** `vade status` shows the path and its
 levels, and the engine's serving receipt records them under
-`vade.numerics.path` and `vade.numerics.tensor_split`. To measure
-the older pipeline on the same build, start with `VADE_W2_PATH=pipeline`.
+`vade.numerics.path` and `vade.numerics.tensor_split`.
 
 <a id="current-2026-10-25-main-80ac2d4-home-dgx-sparks"></a>
 

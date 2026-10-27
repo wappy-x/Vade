@@ -1,4 +1,4 @@
-//! VADE_W2_TP=1: the two-rank tensor split of the FP4-Local layer stack (world 2, opt-in).
+//! The two-rank tensor split of the FP4-Local layer stack: the only 2-Spark path (world 2).
 //! Rank 0 runs the world-one engine (frontend, every layer, head, drafting). Rank 1 mirrors
 //! every main-model pass from layer SPLIT on through the pipeline back's session protocol
 //! (rank 0 posts the pass before layer 0 and never waits for rows). On passes of at most
@@ -18,9 +18,7 @@ use std::time::Instant;
 #[path = "next_tp_heads.rs"]
 mod heads;
 
-/// The first layer rank 1 runs: rank 0 keeps the frontend and layer 1's PLE (pp::Stage).
-pub(super) const SPLIT: usize = 2;
-pub(super) use crate::flash_tp_switch::from_env;
+pub(super) use crate::flash_tp_switch::SPLIT;
 
 /// The checkpoint's split geometry.
 pub(super) fn layout(config: &engine_model::flash::Config) -> Result<TpLayout> {
@@ -55,7 +53,7 @@ pub(super) struct Swap<'a> {
     layout: TpLayout,
     sent: u64,
     taken: u64,
-    /// A take waits at most this long (VADE_W2_PP_TIMEOUT_MS), then fails the pass.
+    /// A take waits at most this long (pp::LINK_TIMEOUT), then fails the pass.
     limit_ns: u64,
     /// Rank 1: this pass's residual arrives in the mailbox (the request's MAIL bit).
     mail_pass: bool,
@@ -67,16 +65,14 @@ pub(super) struct Swap<'a> {
     handoff: Vec<u32>,
     /// Rank 0: the current pass runs as a pipeline tile (tp_part).
     front_tile: bool,
-    /// VADE_W2_TP_PROJ (0 to 3): 1 splits the GDN in-projections by rows too (tp_gdn_project);
-    /// 2 also the mixers' out projections (tp_out_project) and the shared expert's down
-    /// projection (TpMoe::shared_rows), with this rank's row halves of their MXFP8 twins (copied
-    /// from the loaded twins, so the same bytes); 3 runs the GDN mixers of one-chat split passes
-    /// by heads instead of the level 1 in-projection halves (next_tp_heads.rs).
-    proj: u8,
+    /// This rank's row halves of the projections' MXFP8 twins (copied from the loaded twins, so
+    /// the same bytes): the GDN in-projections (tp_gdn_project), the mixers' out projections
+    /// (tp_out_project) and the shared expert's down projection (TpMoe::shared_rows). The GDN
+    /// mixers of one-chat split passes run by heads (next_tp_heads.rs).
     _twins: Vec<blocks::Mx8Twin<'a>>,
-    /// Level 3: this rank's GDN head operands and buffers.
+    /// This rank's GDN head operands and buffers.
     heads: Option<heads::GdnHeads<'a>>,
-    /// Level 3, the current pass runs its GDN layers by heads (rank 0 decides in tp_gdn_frame and
+    /// The current pass runs its GDN layers by heads (rank 0 decides in tp_gdn_frame and
     /// posts the HEADS bit; rank 1 reads it from the request).
     heads_pass: bool,
     /// The current pass verifies (rank 0: tp_part's flag; rank 1: the request kind), so it splits
@@ -91,8 +87,6 @@ pub(super) struct TpMoe<'s, 'a> {
     layout: TpLayout,
     swap: &'s RefCell<Option<Swap<'a>>>,
     mailbox: &'s spark_gpu_probe::driver::TpMailbox<'a>,
-    /// VADE_W2_TP_PROJ=2: the shared expert's down projection runs this rank's output rows only.
-    shared_half: bool,
 }
 impl<'a> TpMoe<'_, 'a> {
     /// Bytes past the layer's descriptors: rank 1's shifted table.
@@ -113,10 +107,9 @@ impl<'a> TpMoe<'_, 'a> {
         self.halves(b, block, count, self.layout.hidden)
     }
     /// The shared expert's down projection ([hidden][k] BF16 at `weight`, output `y` as moe_at
-    /// lays it out): VADE_W2_TP_PROJ=2 gives this rank's output rows [out_cols r, out_cols (r + 1))
-    /// as (weight, y, rows), the only columns its finish reads; otherwise the whole matrix.
+    /// lays it out): this rank's output rows [out_cols r, out_cols (r + 1)) as (weight, y, rows),
+    /// the only columns its finish reads.
     pub(super) fn shared_rows(self, weight: u64, y: u64, k: usize) -> (u64, u64, usize) {
-        if !self.shared_half { return (weight, y, self.layout.hidden); }
         let start = self.rank * self.layout.out_cols();
         (weight + (start * k * 2) as u64, y + (start * 4) as u64, self.layout.out_cols())
     }
@@ -151,69 +144,59 @@ impl<'a> NextModel<'a> {
     /// Both ranks, before serving: this rank's half and the mailbox. The proxy thread then takes
     /// the mailbox's one host endpoint (tp_mailbox_host).
     pub fn set_tp(&self, b: &Backend<'a>, rank: usize, link: std::net::TcpStream) -> Result<()> {
-        if rank > 1 || !from_env()? {
-            return Err("the tensor split needs VADE_W2_TP=1 and rank 0 or 1".into());
+        if rank > 1 || !crate::flash_tp_switch::on() {
+            return Err("the tensor split needs world 2 and rank 0 or 1".into());
         }
         let layout = layout(&self.checkpoint.config)?;
         // The world-one MoE path this split reuses sizes its buffers from the same geometry.
         if layout.hidden != H || layout.residual != W || layout.experts != EXPERTS {
             return Err(format!("tensor split geometry {layout:?} differs from the loaded world-one layout"));
         }
-        // VADE_W2_TP_HEAD: before the wire thread's key swap on the same link (the proxy's attach wait).
-        crate::flash_head_options::agree_split(&link, rank, crate::flash_head_options::split_from_env()?, std::time::Duration::from_secs(600))?;
         if self.tp_box.set(b.tp_mailbox(layout.slot_bytes())?).is_err() {
             return Err("the tensor split mailbox is already set".into());
         }
-        // The ranks agreed on whether VADE_W2_TP_PROJ is set with VADE_W2_TP on their first link
-        // (next_service); its level is checked here.
-        let proj = crate::flash_tp_switch::proj_level_from_env()?;
-        if proj != 0 { agree_level(&link, rank, proj)?; }
-        let twins = if proj != 0 { self.tp_half_twins(b, rank, proj)? } else { Vec::new() };
-        let heads = if proj >= 3 { Some(heads::GdnHeads::new(self, b, rank)?) } else { None };
-        *self.tp.borrow_mut() = Some(Swap { rank, layout, sent: 0, taken: 0, limit_ns: pp::timeout_from_env()?.as_nanos() as u64,
-            mail_pass: false, tile_pass: false, link, handoff: Vec::new(), front_tile: false, proj, _twins: twins, heads, heads_pass: false,
+        let twins = self.tp_half_twins(b, rank)?;
+        let heads = Some(heads::GdnHeads::new(self, b, rank)?);
+        *self.tp.borrow_mut() = Some(Swap { rank, layout, sent: 0, taken: 0, limit_ns: pp::LINK_TIMEOUT.as_nanos() as u64,
+            mail_pass: false, tile_pass: false, link, handoff: Vec::new(), front_tile: false, _twins: twins, heads, heads_pass: false,
             verify_pass: false });
-        eprintln!("flashnext tp rank={rank} split={SPLIT} rows<={} (verify) <={} (other) proj={proj} layout={layout:?}", TpLayout::ROWS,
+        eprintln!("flashnext tp rank={rank} split={SPLIT} rows<={} (verify) <={} (other) layout={layout:?}", TpLayout::ROWS,
             TpLayout::PROMPT_ROWS);
         Ok(())
     }
-    /// VADE_W2_TP_PROJ: this rank's row half [rank * n / 2, (rank + 1) * n / 2) of every split
-    /// layer's GDN qkv and z in-projection twin (level 2: also the GDN or QSA out projection's and
-    /// the shared expert down projection's; level 3: also the qkv twin's rows of this rank's q, k
-    /// and v heads). Rows are 64-row blocks first in both the packed BF16 order
+    /// This rank's row half [rank * n / 2, (rank + 1) * n / 2) of every split layer's GDN z
+    /// in-projection, GDN and QSA out projection, QSA q/gate projection and shared expert down
+    /// projection twin, the qkv twin's rows of this rank's q, k and v heads, and the qkv twin's
+    /// row half. Rows are 64-row blocks first in both the packed BF16 order
     /// and the twin's bytes, and the twin's scales are [row / 8][K / 32][8], so a row range is two
     /// contiguous ranges of the loaded twin, registered under its BF16 rows' address.
-    fn tp_half_twins(&self, b: &Backend<'a>, rank: usize, level: u8) -> Result<Vec<blocks::Mx8Twin<'a>>> {
+    fn tp_half_twins(&self, b: &Backend<'a>, rank: usize) -> Result<Vec<blocks::Mx8Twin<'a>>> {
         let c = &self.checkpoint.config;
         let hidden = c.hidden as usize;
         let value = (c.linear_value_heads * c.linear_value_dim) as usize;
         let keys = (c.linear_key_heads * c.linear_key_dim) as usize;
         let rows = [2 * keys + value, value];
-        // Level 2 splits BF16 matrices of `hidden` rows at their row half even without a twin.
-        if level >= 2 && (hidden / 2) % 64 != 0 { return Err(format!("VADE_W2_TP_PROJ=2: hidden {hidden} has no 64-row halves")); }
+        // The split also cuts BF16 matrices of `hidden` rows at their row half without a twin.
+        if !(hidden / 2).is_multiple_of(64) { return Err(format!("tensor split: hidden {hidden} has no 64-row halves")); }
         let mut twins = Vec::new();
         for li in SPLIT..self.gdn_proj.len() {
             // (BF16 matrix, rows, K, first row, rows of this rank); absent matrices are 0.
             let half = |w: u64, n: usize, k: usize| (w, n, k, rank * n / 2, n / 2);
-            let mut split: Vec<(u64, usize, usize, usize, usize)> = if level >= 3 {
-                let (qkv, n) = (self.gdn_proj[li][0], rows[0]);
-                vec![(qkv, n, hidden, rank * keys / 2, keys / 2), (qkv, n, hidden, keys + rank * keys / 2, keys / 2),
-                    (qkv, n, hidden, 2 * keys + rank * value / 2, value / 2), half(self.gdn_proj[li][1], value, hidden),
-                    // Passes before a chat's states become halves run level 1's qkv half.
-                    half(qkv, n, hidden)]
-            } else { rows.iter().enumerate().map(|(m, &n)| half(self.gdn_proj[li][m], n, hidden)).collect() };
-            if level >= 2 {
-                split.extend([half(self.gdn_proj[li][4], hidden, value), half(self.qsa_proj[li][4], hidden, (c.query_heads * c.head_dim) as usize),
-                    half(self.qsa_proj[li][0], (c.query_heads * 2 * c.head_dim) as usize, hidden),
-                    half(self.moe[li].shared[2], hidden, c.shared_width as usize)]);
-            }
+            let (qkv, n) = (self.gdn_proj[li][0], rows[0]);
+            let split = [(qkv, n, hidden, rank * keys / 2, keys / 2), (qkv, n, hidden, keys + rank * keys / 2, keys / 2),
+                (qkv, n, hidden, 2 * keys + rank * value / 2, value / 2), half(self.gdn_proj[li][1], value, hidden),
+                // Passes before a chat's states become halves run the qkv row half.
+                half(qkv, n, hidden),
+                half(self.gdn_proj[li][4], hidden, value), half(self.qsa_proj[li][4], hidden, (c.query_heads * c.head_dim) as usize),
+                half(self.qsa_proj[li][0], (c.query_heads * 2 * c.head_dim) as usize, hidden),
+                half(self.moe[li].shared[2], hidden, c.shared_width as usize)];
             for (w, n, k, start, part) in split {
                 if w == 0 { continue; }
                 let Some((full, r, cols)) = crate::flash_mx8_registry::get(w, n).filter(|&(_, r, cols)| (r, cols) == (n, k)) else { continue };
                 if start % 64 != 0 || part % 64 != 0 || k % 32 != 0 {
-                    return Err(format!("VADE_W2_TP_PROJ: projection [{r}][{cols}] has no 64-row ranges at row {start}"));
+                    return Err(format!("tensor split: projection [{r}][{cols}] has no 64-row ranges at row {start}"));
                 }
-                let source = self.mx8.iter().find(|t| t.twin.device_address() == full).ok_or("VADE_W2_TP_PROJ: loaded twin missing")?;
+                let source = self.mx8.iter().find(|t| t.twin.device_address() == full).ok_or("tensor split: loaded twin missing")?;
                 let mut twin = b.vector(blocks::mx8_twin_bytes(part, k) / 4)?;
                 let scales = |rows: usize| (rows * k).div_ceil(256) * 256 / 4;
                 let scale_words = |rows: usize| rows / 8 * (k / 32) * 2;
@@ -225,7 +208,7 @@ impl<'a> NextModel<'a> {
         b.synchronize()?;
         Ok(twins)
     }
-    /// VADE_W2_TP_PROJ=1, a split layer at <= ROWS rows: each rank runs its row half of the GDN
+    /// A split layer at <= ROWS rows of one chat: each rank runs its row half of the GDN
     /// qkv and z in-projections (same per-row chains and merge as the whole launch) into its
     /// columns of the full outputs, a and b whole, then the ranks swap the halves as raw bits.
     /// False: not split here (the caller runs the whole projection).
@@ -234,7 +217,7 @@ impl<'a> NextModel<'a> {
         // One chat only: a pass of several chats carries more rows, and its larger halves cost
         // more to exchange than the split saves. Both ranks run the same chats, so both agree.
         if chats != 1 { return Ok(false); }
-        let Some(moe) = self.tp_moe(li, count).filter(|_| self.tp.borrow().as_ref().is_some_and(|s| s.proj >= 1)) else { return Ok(false) };
+        let Some(moe) = self.tp_moe(li, count) else { return Ok(false) };
         if gdn.is_half() { return self.tp_heads_project(b, li, moe.rank, s, input, count).map(|()| true); }
         let ([qkv, z, a, bb], k) = gdn.projection();
         let half = |(w, n): (u64, usize), y: u64| (w + (moe.rank * n / 2 * k * 2) as u64, y + (moe.rank * n / 2 * 4) as u64, n / 2, n);
@@ -243,7 +226,7 @@ impl<'a> NextModel<'a> {
         moe.halves_pair(b, [(&mut s.qkv, qkv.1), (&mut s.z, z.1)], count)?;
         Ok(true)
     }
-    /// VADE_W2_TP_PROJ=2, a split layer at <= ROWS rows of one chat: each rank runs its row half
+    /// A split layer at <= ROWS rows of one chat: each rank runs its row half
     /// [rank * n / 2, (rank + 1) * n / 2) of the mixer's out projection ([n][k] BF16 at `weight`
     /// over the `x` rows, n = hidden; same per-row chains and merge as the whole launch) into its
     /// columns of `output`, then the ranks swap the halves as raw bits (one message per layer).
@@ -252,20 +235,20 @@ impl<'a> NextModel<'a> {
         count: usize, chats: usize) -> Result<bool> {
         // One chat only, as tp_gdn_project: wider passes exchange larger halves.
         if chats != 1 { return Ok(false); }
-        let Some(moe) = self.tp_moe(li, count).filter(|_| self.tp.borrow().as_ref().is_some_and(|s| s.proj >= 2)) else { return Ok(false) };
+        let Some(moe) = self.tp_moe(li, count) else { return Ok(false) };
         let (n, half) = (moe.layout.hidden, moe.layout.out_cols());
         blocks::next_rows_strided(b, weight + (moe.rank * half * k * 2) as u64, x, output.device_address() + (moe.rank * half * 4) as u64,
             half, k, count, n)?;
         moe.halves(b, output, count, n)?;
         Ok(true)
     }
-    /// VADE_W2_TP_PROJ=2, a split layer at <= ROWS rows of one chat: each rank runs its row half of
+    /// A split layer at <= ROWS rows of one chat: each rank runs its row half of
     /// the served QSA q/gate projection (Qsa::project_batch_half), then the ranks swap the halves
     /// as raw bits. False: the caller projects whole.
     pub(super) fn tp_qsa_project(&self, b: &Backend<'a>, li: usize, q: &Qsa<'a, '_>, batch: &mut crate::flash::qsa::QsaBatch<'a>,
         input: &DeviceVector<'a>, count: usize, chats: usize) -> Result<bool> {
         if chats != 1 { return Ok(false); }
-        let Some(moe) = self.tp_moe(li, count).filter(|_| self.tp.borrow().as_ref().is_some_and(|s| s.proj >= 2)) else { return Ok(false) };
+        let Some(moe) = self.tp_moe(li, count) else { return Ok(false) };
         let Some(n) = q.project_batch_half(b, batch, input, count, moe.rank)? else { return Ok(false) };
         moe.halves(b, Qsa::batch_qg(batch), count, n)?;
         Ok(true)
@@ -360,7 +343,7 @@ impl<'a> NextModel<'a> {
     }
     /// Rank 1, KIND_HANDOFF: its layers 24..48 of these chats for rank 0's layers 2..24.
     pub(super) fn tp_handoff<'w>(&self, b: &Backend<'a>, sessions: &mut [&mut NextSession<'a, 'w>], lens: &[usize]) -> Result<()> {
-        // VADE_W2_TP_PROJ=3: rank 0 asks for these chats' GDN whole rebuild (next_tp_heads.rs).
+        // Rank 0 asks for these chats' GDN whole rebuild (next_tp_heads.rs).
         if !lens.is_empty() && lens.iter().all(|&n| n == heads::GDN_WHOLE as usize) { return self.tp_gdn_frame(b, sessions, usize::MAX); }
         if !lens.is_empty() && lens.iter().all(|&n| n == heads::GDN_PROBE as usize) { return self.tp_gdn_probe(); }
         let link = self.tp.borrow().as_ref().map(|s| s.link.try_clone()).ok_or("tensor split missing")?.map_err(err)?;
@@ -462,7 +445,7 @@ impl<'a> NextModel<'a> {
     fn tp_rank(&self) -> Option<usize> {
         self.tp.borrow().as_ref().map(|s| s.rank)
     }
-    /// VADE_W2_TP_HEAD=1: `rows` rows of `width` words from rank 1 to rank 0, queued in the
+    /// The split head: `rows` rows of `width` words from rank 1 to rank 0, queued in the
     /// stream (rank 1 puts `vector`'s rows, rank 0 takes them into `vector`); both ranks call it
     /// for the same passes (execution::head_split).
     pub(super) fn tp_rows_to_front(&self, b: &Backend<'a>, vector: &mut DeviceVector<'a>, rows: usize, width: usize) -> Result<()> {
@@ -483,9 +466,9 @@ impl<'a> NextModel<'a> {
         self.tp_on() && (li + 1 == SPLIT || li >= SPLIT && self.tp_split_rows(count))
     }
     pub(super) fn tp_moe(&self, li: usize, count: usize) -> Option<TpMoe<'_, 'a>> {
-        let (rank, layout, proj) = self.tp.borrow().as_ref().map(|s| (s.rank, s.layout, s.proj))?;
+        let (rank, layout) = self.tp.borrow().as_ref().map(|s| (s.rank, s.layout))?;
         let mailbox = self.tp_box.get()?;
-        (li >= SPLIT && self.tp_split_rows(count)).then_some(TpMoe { rank, layout, swap: &self.tp, mailbox, shared_half: proj >= 2 })
+        (li >= SPLIT && self.tp_split_rows(count)).then_some(TpMoe { rank, layout, swap: &self.tp, mailbox })
     }
     /// Rank 0: post the pass to rank 1 (the previous pass's ack first). Prompt and plain rows
     /// ride KIND_ROWS_ASYNC, verify rows KIND_VERIFY. Up to ROWS rows: the request (MAIL bit,
@@ -526,22 +509,6 @@ impl<'a> NextModel<'a> {
     }
 }
 
-/// VADE_W2_TP_PROJ's level on the split's TCP link, which carries nothing else yet: rank 1 sends
-/// its level (one byte) and rank 0 reads it and refuses a different one. Rank 0 reaches set_tp
-/// only after rank 1 acked the pipeline link, so neither rank waits for the other here.
-fn agree_level(link: &std::net::TcpStream, rank: usize, level: u8) -> Result<()> {
-    use std::io::{Read, Write};
-    let mut link = link.try_clone().map_err(err)?;
-    if rank != 0 { return link.write_all(&[level]).map_err(|e| format!("VADE_W2_TP_PROJ agreement: {e}")); }
-    link.set_read_timeout(Some(std::time::Duration::from_secs(300))).map_err(err)?;
-    let mut peer = [0u8];
-    link.read_exact(&mut peer).map_err(|e| format!("VADE_W2_TP_PROJ agreement: {e}"))?;
-    if peer[0] != level {
-        return Err(format!("VADE_W2_TP_PROJ is {level} here and {} on the peer rank: set the same value on both ranks", peer[0]));
-    }
-    Ok(())
-}
-
 /// tp_part's tile test over each chat's (span rows, continues a tiled prompt): not a verify
 /// pass, and every span fills at least half of the prompt tile `tile` or continues.
 fn tile_pass(verify: bool, tile: usize, chats: impl IntoIterator<Item = (usize, bool)>) -> bool {
@@ -553,7 +520,7 @@ fn exchange(link: &std::net::TcpStream, out: &[u8], limit: usize) -> Result<Vec<
     use std::io::{Read, Write};
     let mut link = link.try_clone().map_err(err)?;
     link.set_nonblocking(false).map_err(err)?;
-    link.set_read_timeout(Some(pp::timeout_from_env()?)).map_err(err)?;
+    link.set_read_timeout(Some(pp::LINK_TIMEOUT)).map_err(err)?;
     let mut writer = link.try_clone().map_err(err)?;
     let mut arrived = Vec::new();
     std::thread::scope(|scope| -> Result<()> {
@@ -666,16 +633,5 @@ mod tests {
         assert!(!tile_pass(true, 8192, [(4, true)]));
         assert!(tile_pass(false, 8192, [(32, true), (8192, false)]));
         assert!(!tile_pass(false, 8192, [(32, true), (100, false)]));
-    }
-    /// Rank 0 accepts rank 1's VADE_W2_TP_PROJ level only when it equals its own.
-    #[test]
-    fn proj_level_agreement_refuses_a_different_peer_level() {
-        for (mine, peer, ok) in [(2u8, 2u8, true), (1, 2, false), (2, 1, false), (1, 1, true)] {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let rank1 = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-            let (rank0, _) = listener.accept().unwrap();
-            agree_level(&rank1, 1, peer).unwrap();
-            assert_eq!(agree_level(&rank0, 0, mine).is_ok(), ok, "{mine} vs {peer}");
-        }
     }
 }

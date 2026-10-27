@@ -1,4 +1,4 @@
-//! VADE_W2_TP_PROJ=3 (opt-in, with VADE_W2_TP=1): a GDN layer's mixer for one tensor split
+//! The tensor split: a GDN layer's mixer for one tensor split
 //! rank's heads. Rank r owns value heads [r V/2, (r + 1) V/2) and key heads [r K/2, (r + 1) K/2)
 //! (the value/key repeat is unchanged). The kernels already run on a rank-local head range
 //! (key_start, value_start over compact operands), so a half runs today's launches, per head the

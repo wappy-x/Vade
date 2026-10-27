@@ -3,7 +3,7 @@
 //! contiguous layer interval and relays final residuals back over the same cables.
 //! Prompt tiles and decode steps preserve world-one kernels, FP32 bits and layer order.
 //! Each boundary materializes the same per-element combine (see blocks.rs).
-//! World two remains the default; larger WORLD values require VADE_W2_PP=1.
+//! World two serves the tensor split (next_tp.rs) on this protocol; three or more ranks run it as a layer chain.
 #[cfg(target_os = "linux")]
 use super::*;
 // Host-only protocol tests use the same fixed Flash-Next wire geometry, without CUDA.
@@ -46,10 +46,10 @@ const REQUEST_HEAD: usize = 20;
 const REPLY_HEAD: usize = 16;
 pub(super) const KIND_ROWS: u32 = 1;
 pub(super) const KIND_POOLED: u32 = 2;
-/// VADE_W2_PP_ASYNC=1: a prompt tile whose rows the front does not project; the back acks
+/// A prompt tile whose rows the front does not project; the back acks
 /// it without returning rows, so the front runs its next tile while the back runs this one.
 pub(super) const KIND_ROWS_ASYNC: u32 = 3;
-/// VADE_W2_PP_ASYNC=1: queued prompt tiles held for the sender thread at most.
+/// Queued prompt tiles held for the sender thread at most.
 const QUEUED: usize = 4;
 /// Reply status: 0 done, 1 failed (payload = error text), 2 working: a heartbeat header with
 /// no payload and the id of the request the back is running (sent on the TCP link).
@@ -65,10 +65,10 @@ fn working_head(id: u32) -> Vec<u8> {
     }
     head
 }
-/// VADE_W2_PP_MTP=1: MTP verify rows for layers [split, 48); the back records its own GDN
+/// MTP verify rows for layers [split, 48); the back records its own GDN
 /// tape and commits the accepted prefix when the chat's next request names its position.
 pub(super) const KIND_VERIFY: u32 = 4;
-/// VADE_W2_PP_MTP=1 with VADE_W2_PP_ASYNC=1: a queued prompt tile whose rows the back keeps;
+/// A queued prompt tile whose rows the back keeps;
 /// they return ahead of the rows of the next synchronous reply, and the front feeds them
 /// to the drafters of their chats (the draft history world 1 writes for every prompt row).
 /// When the peer is the last rank, the ack carries this tile's rows immediately. The
@@ -102,25 +102,7 @@ struct KeptTile {
     data: Option<Vec<f32>>,
 }
 
-/// VADE_W2_PP_MTP: 1 lets the front verify MTP drafts across the pipeline (flash-serve pins 1 when unset).
-pub fn mtp_from_env() -> Result<bool> {
-    match std::env::var("VADE_W2_PP_MTP").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("0") => Ok(false),
-        Ok("1") => Ok(true),
-        _ => Err("VADE_W2_PP_MTP must be 0 or 1".into()),
-    }
-}
-
-/// VADE_W2_PP_ASYNC: 1 ships non-final prompt tiles without waiting (flash-serve pins 1 when unset).
-fn async_from_env() -> Result<bool> {
-    match std::env::var("VADE_W2_PP_ASYNC").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("0") => Ok(false),
-        Ok("1") => Ok(true),
-        _ => Err("VADE_W2_PP_ASYNC must be 0 or 1".into()),
-    }
-}
-
-/// VADE_W2_PP_RDMA=1: a polled message wire (RoCE send/receive, built by spark-tp) for the
+/// Over RDMA (SEQPAR_RDMA unset or 1): a polled message wire (RoCE send/receive, built by spark-tp) for the
 /// synchronous exchanges that fit `capacity` bytes (pooled decode steps, short projected
 /// tiles). Messages and their order are the TCP ones; only the carrier changes.
 pub trait PpWire: Send {
@@ -131,7 +113,7 @@ pub trait PpWire: Send {
     fn try_recv(&mut self, out: &mut Vec<u8>) -> Result<bool>;
 }
 
-/// VADE_W2_PP_TIMEOUT_MS (default 10000, 100..=600000; both ranks must agree, the hello
+/// LINK_TIMEOUT (both ranks use the same; the hello
 /// checks it): the longest silence a rank accepts from its peer. Once a message's first byte
 /// arrived its rest must arrive within it, and a front send must make progress within it.
 /// While the back runs a request it sends a heartbeat header every beat_period, so the
@@ -146,18 +128,7 @@ pub trait PpWire: Send {
 /// the queued tiles' acks, whose waits have their own heartbeat clocks). Past the limit
 /// without a heartbeat the link is dropped and the request fails. (The back waits for the
 /// start of the next request without a limit: idle is normal.)
-pub fn timeout_from_env() -> Result<Duration> {
-    match std::env::var("VADE_W2_PP_TIMEOUT_MS") {
-        Err(std::env::VarError::NotPresent) => Ok(Duration::from_secs(10)),
-        Ok(v) => v
-            .parse::<u64>()
-            .ok()
-            .filter(|ms| (100..=600_000).contains(ms))
-            .map(Duration::from_millis)
-            .ok_or_else(|| format!("VADE_W2_PP_TIMEOUT_MS must be 100..=600000 (got {v:?})")),
-        Err(e) => Err(format!("VADE_W2_PP_TIMEOUT_MS: {e}")),
-    }
-}
+pub const LINK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Agree on the optional short-message wire before any GPU resources are opened.
 /// Authenticated sockets still carry the authentication phase's short deadline.
@@ -171,7 +142,7 @@ pub fn negotiate_wire(stream: &mut TcpStream, want: bool, limit: Duration) -> Re
     let mut peer = [0u8; 1];
     stream.read_exact(&mut peer).map_err(err)?;
     if peer[0] != u8::from(want) {
-        return Err(format!("VADE_W2_PP_RDMA differs across ranks (this {}, peer {})", u8::from(want), peer[0]));
+        return Err(format!("SEQPAR_RDMA differs across ranks (this {}, peer {})", u8::from(want), peer[0]));
     }
     Ok(())
 }
@@ -225,19 +196,6 @@ fn peer_text(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// VADE_W2_PP_SPLIT: first back layer (default 24 = half of the 48 layers).
-pub fn split_from_env() -> Result<usize> {
-    match std::env::var("VADE_W2_PP_SPLIT") {
-        Err(std::env::VarError::NotPresent) => Ok(LAYERS / 2),
-        Ok(v) => v
-            .parse::<usize>()
-            .ok()
-            .filter(|s| (2..LAYERS).contains(s))
-            .ok_or_else(|| format!("VADE_W2_PP_SPLIT must be 2..={} (got {v:?})", LAYERS - 1)),
-        Err(e) => Err(format!("VADE_W2_PP_SPLIT: {e}")),
-    }
-}
-
 /// A contiguous stage of the layer chain. Geometry depends only on layer/rank counts.
 /// The front keeps at least two layers because layer 1 consumes the frontend's PLE.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -256,7 +214,7 @@ impl Stage {
             // One explicit cut describes the intervals between these boundaries.
             let boundaries = [0, split, LAYERS];
             if ranks + 1 != boundaries.len() || !(2..LAYERS).contains(&split) {
-                return Err("VADE_W2_PP_SPLIT requires two ranks and split in 2..48".into());
+                return Err("a two-rank cut needs two ranks and a cut in 2..48".into());
             }
             (boundaries[rank], boundaries[rank + 1])
         } else {
@@ -274,11 +232,10 @@ impl Stage {
         (cuts[self.rank], cuts[self.rank + 1]) = (self.first, self.end);
         cuts.windows(2).map(|w| w[0]..w[1]).collect()
     }
-    pub fn from_env(rank: usize, ranks: usize) -> Result<Self> {
-        let split = if std::env::var_os("VADE_W2_PP_SPLIT").is_some() {
-            Some(split_from_env()?)
-        } else { None };
-        Self::new(rank, ranks, split)
+    /// This rank's stage: the tensor split cuts after its first SPLIT layers (rank 1 runs every
+    /// split pass from there); a longer chain cuts the layers evenly.
+    pub fn for_rank(rank: usize, ranks: usize) -> Result<Self> {
+        Self::new(rank, ranks, crate::flash_tp_switch::on().then_some(crate::flash_tp_switch::SPLIT))
     }
 }
 
@@ -291,7 +248,8 @@ struct Recipe {
 }
 impl Recipe {
     fn from_env() -> Result<Self> {
-        Ok(Self { limit: timeout_from_env()?, asynchronous: async_from_env()?, mtp: mtp_from_env()?, tp: crate::flash_tp_switch::from_env()? })
+        // Every served pipeline queues prompt tiles and verifies MTP drafts across its ranks.
+        Ok(Self { limit: LINK_TIMEOUT, asynchronous: true, mtp: true, tp: crate::flash_tp_switch::on() })
     }
 }
 
@@ -373,13 +331,13 @@ pub(super) struct Link {
     exchanges: u64,
     bytes: u64,
     wait: Duration,
-    /// VADE_W2_PP_ASYNC=1: queued (header, rows) messages for the sender thread, the
+    /// Queued (header, rows) messages for the sender thread, the
     /// thread's returned row buffers, and the acks still owed by the back.
     queue: Option<mpsc::SyncSender<(Vec<u8>, Vec<f32>)>>,
     free: Option<mpsc::Receiver<Vec<f32>>>,
     pending: usize,
     posted: u64,
-    /// VADE_W2_PP_RDMA=1: the polled wire, its message buffer, exchanges it carried.
+    /// Over RDMA: the polled wire, its message buffer, exchanges it carried.
     fast: Option<Box<dyn PpWire>>,
     message: Vec<u8>,
     carried: u64,
@@ -401,9 +359,9 @@ pub(super) struct Link {
     /// reply (or a heartbeat) for id t no heartbeat for an id below t can follow. Ids from
     /// `floor` to `replied` are answered wire exchanges whose late heartbeats are ignored.
     floor: u32,
-    /// VADE_W2_PP_MTP=1: verify rows may cross (KIND_VERIFY).
+    /// Verify rows may cross (KIND_VERIFY).
     mtp: bool,
-    /// VADE_W2_PP_MTP=1: kept tiles in post order, and the rows the back still holds.
+    /// Kept tiles in post order, and the rows the back still holds.
     kept: Vec<KeptTile>,
     owed: usize,
     /// Middle ranks relay the final stage's kept rows without interpreting them.
@@ -995,11 +953,11 @@ impl<'a> NextModel<'a> {
     pub(super) fn pp_front_split(&self) -> Option<usize> {
         self.pp.borrow().as_ref().filter(|l| !l.tp).map(|l| l.split)
     }
-    /// Front, VADE_W2_PP_MTP=1: whether verify rows may cross the pipeline.
+    /// Front: whether verify rows may cross the pipeline.
     pub(super) fn pp_mtp(&self) -> bool {
         self.pp.borrow().as_ref().is_some_and(|l| l.mtp)
     }
-    /// Front, VADE_W2_PP_ASYNC=1: whether non-final prompt tiles are queued.
+    /// Front: whether non-final prompt tiles are queued.
     pub(super) fn pp_async(&self) -> bool {
         self.pp.borrow().as_ref().is_some_and(|l| l.queue.is_some())
     }
@@ -1018,9 +976,9 @@ impl<'a> NextModel<'a> {
         let result = link.queued_frame(&mut heard);
         result.map(|_| true).map_err(|e| link.fail(e))
     }
-    /// Front, VADE_W2_PP_ASYNC=1: copy `count` residual rows out and queue them; the back
+    /// Front: copy `count` residual rows out and queue them; the back
     /// runs its layers while this rank runs the next tile. No rows come back now; with
-    /// `keep` (VADE_W2_PP_MTP=1) they come back with the next synchronous reply.
+    /// `keep` they come back with the next synchronous reply.
     pub(super) fn pp_post(&self, b: &Backend<'a>, meta: &[[u32; 4]], vector: &DeviceVector<'a>, count: usize, keep: Option<Vec<KeepPart>>) -> Result<()> {
         let mut guard = self.pp.borrow_mut();
         let link = guard.as_mut().filter(|l| !l.poisoned).ok_or("pipeline link failed earlier; the front is stopping")?;
@@ -1070,22 +1028,22 @@ impl<'a> NextModel<'a> {
             self.pp_exchange(b, kind, meta, vector, count)
         }
     }
-    /// Front, VADE_W2_PP_MTP=1: the kept rows of `slot` that came back (see Link::take_kept).
+    /// Front: the kept rows of `slot` that came back (see Link::take_kept).
     pub(super) fn pp_take_kept(&self, slot: u32) -> Vec<(usize, Vec<u32>, Vec<f32>)> {
         self.pp.borrow_mut().as_mut().map_or_else(Vec::new, |l| l.take_kept(slot))
     }
-    /// Front, VADE_W2_PP_MTP=1: forget `slot`'s kept spans (a new chat starts on it, or its
+    /// Front: forget `slot`'s kept spans (a new chat starts on it, or its
     /// chat ended). Never panics: a link borrowed elsewhere keeps the spans until slot reuse.
     pub(super) fn pp_drop_kept(&self, slot: u32) {
         if let Ok(mut guard) = self.pp.try_borrow_mut() && let Some(l) = guard.as_mut() {
             l.drop_kept(slot);
         }
     }
-    /// Front, VADE_W2_PP_MTP=1: true while `slot` has kept rows its chat has not observed.
+    /// Front: true while `slot` has kept rows its chat has not observed.
     pub(super) fn pp_has_kept(&self, slot: u32) -> bool {
         self.pp.borrow().as_ref().is_some_and(|l| l.has_kept(slot))
     }
-    /// Front, VADE_W2_PP_MTP=1: room to keep `n` more rows (else the tile runs synchronously).
+    /// Front: room to keep `n` more rows (else the tile runs synchronously).
     pub(super) fn pp_keep_room(&self, n: usize) -> bool {
         self.pp.borrow().as_ref().is_some_and(|l| l.keep_room(n))
     }
@@ -1152,7 +1110,7 @@ impl<'a> NextModel<'a> {
             if pos == 0 && (s.pos != 0 || !s.valid) {
                 s.reset(b)?;
             }
-            // VADE_W2_PP_MTP=1: after a verify, the chat's next request carries the position the
+            // After a verify, the chat's next request carries the position the
             // front committed; the back commits the same accepted prefix first.
             if s.retained > 0 && s.valid {
                 s.commit_back(b, pos)?;
@@ -1261,7 +1219,7 @@ fn serve_stage(
     let mut expect = 1u32;
     // While a request runs (TCP or wire), the heartbeat thread sends a STATUS_WORKING
     // header with its id on the TCP link every beat_period, for as long as it runs (no
-    // cap: see timeout_from_env). It writes only under the lock and only while a request
+    // cap: see LINK_TIMEOUT). It writes only under the lock and only while a request
     // is marked, and the mark is cleared before the reply is written, so a heartbeat never
     // splits a message and every heartbeat of a request is on the TCP link before its
     // reply (a wire reply can still overtake it: the front ignores such late heartbeats).

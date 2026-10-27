@@ -225,7 +225,7 @@ fn tp_kinds_are_refused_by_a_pipeline_only_back_and_tp_hello_must_match() {
 
 #[test]
 fn pp_tensor_split_kinds_carry_mail_tile_and_handoff_in_order() {
-    // VADE_W2_TP=1: a pipeline tile (TILE), a mailbox pass (MAIL), a state handoff and a split
+    // The tensor split: a pipeline tile (TILE), a mailbox pass (MAIL), a state handoff and a split
     // verify reach the back in posting order, each one-shot flag consumed by its own post.
     use crate::flash_tp_switch::{KIND_HANDOFF, KIND_VERIFY as TP_VERIFY, MAIL, TILE};
     static STOP: AtomicBool = AtomicBool::new(false);

@@ -1,4 +1,4 @@
-//! VADE_W2_TP_PROJ=3: the GDN mixers of one-chat split passes run by heads (gdn_half.rs). Rank r
+//! The GDN mixers of one-chat split passes run by heads (gdn_half.rs). Rank r
 //! launches the in-projection rows of its own q, k and v heads and its z, a and b rows (one
 //! grouped decode launch at the half's row widths plus one for a and b; each row keeps the whole
 //! launch's chains and merge), runs the layer's conv, recurrence and output gate on its heads'
@@ -34,7 +34,7 @@ impl<'a> GdnHeads<'a> {
         let heads = (w.plan.value_heads.end - w.plan.value_heads.start) as usize;
         let keys = (w.plan.key_heads.end - w.plan.key_heads.start) as usize;
         if keys == 0 || heads % keys != 0 || keys % 2 != 0 || c.linear_key_dim != c.linear_value_dim {
-            return Err(format!("VADE_W2_TP_PROJ=3: GDN heads {heads} / keys {keys} have no head halves"));
+            return Err(format!("tensor split: GDN heads {heads} / keys {keys} have no head halves"));
         }
         let mut conv = Vec::with_capacity(LAYERS);
         for li in 0..LAYERS {
@@ -83,8 +83,8 @@ impl<'a> NextModel<'a> {
         blocks::next_rows_group_at(b, x, k, count, [(row(a, rank * h), s.a.device_address(), h, h),
             (row(gb, rank * h), s.b.device_address(), h, h), (0, 0, 0, 0), (0, 0, 0, 0)])
     }
-    /// The GDN layer's out projection into `block` on a split pass: level 3 swaps the ranks' gated
-    /// rows first, then (level 2 and up) both split it by row halves (tp_out_project). False: the
+    /// The GDN layer's out projection into `block` on a split pass: by heads, the ranks swap their gated
+    /// rows first; then both split it by row halves (tp_out_project). False: the
     /// caller finishes whole.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::flash) fn tp_gdn_finish(&self, b: &Backend<'a>, li: usize, gdn: &gdn::Gdn<'a, '_>, s: &gdn::GdnScratch<'a>,
@@ -117,7 +117,7 @@ impl<'a> NextModel<'a> {
     pub(in crate::flash) fn tp_gdn_frame<'w>(&self, b: &Backend<'a>, sessions: &mut [&mut NextSession<'a, 'w>], count: usize) -> Result<()> {
         let (rank, mut temp, heads, keys, mut policy, bit) = {
             let mut guard = self.tp.borrow_mut();
-            let Some(s) = guard.as_mut().filter(|s| s.proj >= 3) else { return Ok(()) };
+            let Some(s) = guard.as_mut() else { return Ok(()) };
             let h = s.heads.as_mut().ok_or("GDN head operands missing")?;
             (s.rank, h.temp.take().ok_or("GDN conversion staging missing")?, h.heads, h.keys, std::mem::take(&mut h.policy), s.heads_pass)
         };

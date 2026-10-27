@@ -568,8 +568,8 @@ impl<R: Runner> App<R> {
         })?;
         row("Speed", &speed.map(|value| format!("{value:.1} tok/s"))
             .unwrap_or_else(|| if self.dry { "not checked" } else { "not reported by this engine" }.into()))?;
-        if session.two_sparks() {
-            row("Two-Spark path", &health.then(|| health::TwoSparkPath::from_health(&health_response.stdout)).flatten().map(|path| path.label())
+        if session.chained() {
+            row("Multi-Spark path", &health.then(|| health::MultiSparkPath::from_health(&health_response.stdout)).flatten().map(|path| path.label())
                 .unwrap_or_else(|| if self.dry { "not checked" } else { "not reported by this engine" }.into()))?;
         }
         let reported = if health { self.engine_prefix_cache(&session)? } else { None };

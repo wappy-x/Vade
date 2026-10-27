@@ -72,62 +72,33 @@ pub fn rank_mtp(serving: usize, explicit: bool, adapt: bool, ceiling: Option<&st
     Ok(if explicit || !adapt || serving == 0 { (serving, false) } else { (depth, true) })
 }
 
-/// The layer pipeline with MTP (world 2 by default: `pipeline`, `pipeline_mtp`) serves world 2
-/// as the layer pipeline of the world-1 engine with MTP, so an explicit depth there is checked
-/// as world 1 checks it (0..=3, already enforced by mtp_depth) instead of refused as rank Next.
-pub fn startup_mtp(pipeline_mtp: bool, explicit: Option<usize>) -> Option<usize> {
-    explicit.filter(|_| !pipeline_mtp)
+/// The pipeline service serves with the world-1 engine's MTP (the tensor split at world 2, the
+/// layer chain at three or more ranks), so an explicit depth there is checked as world 1 checks
+/// it (0..=3, already enforced by mtp_depth) instead of refused as rank Next.
+pub fn startup_mtp(pipeline: bool, explicit: Option<usize>) -> Option<usize> {
+    explicit.filter(|_| !pipeline)
 }
 
-/// World size that selects the pipeline by default. Larger chains are opt-in.
+/// World size of the tensor split, which serves on the pipeline service.
 pub const PIPELINE_RANKS: usize = 2;
 
-/// VADE_W2_PP (`switch`: None when unset): world 2 FP4-Local serves as the two-rank layer
-/// pipeline of the world-1 engine unless VADE_W2_PP=0 (the rank path). Every other world keeps
-/// unset = off: world 4 keeps the rank path; explicit 1 selects an N-stage cable chain.
-/// World 1 never builds a pipeline because its peer set is empty.
-pub fn pipeline(world: usize, switch: Option<bool>) -> bool {
-    switch.unwrap_or(world == PIPELINE_RANKS)
-}
-
-/// Keep the existing explicit-depth refusal when MTP is disabled, for every chain size.
-pub fn pipeline_depth(pipeline: bool, mtp: bool, explicit: Option<usize>) -> Result<(), String> {
-    if pipeline && !mtp && explicit.is_some_and(|n| n > 0) {
-        return Err("VADE_W2_PP_MTP=0 requires --mtp 0 or no explicit MTP depth".into());
-    }
-    Ok(())
-}
-
-/// VADE_W2_PP_MTP on the pipeline: unset = MTP drafts verified across it, 0 = plain decoding.
-pub fn pipeline_mtp(switch: Option<bool>) -> bool {
-    switch.unwrap_or(true)
-}
-
-/// Validate both switches before topology selection, including a local process.
-/// Return pipeline enabled, pipeline drafting, and whether this rank has peers.
-pub fn pipeline_recipe(
-    mixed: bool,
-    rank: usize,
-    world: usize,
-    mut read: impl FnMut(&str) -> Result<Option<bool>, String>,
-) -> Result<(bool, bool, bool), String> {
-    let requested = pipeline(world, read("VADE_W2_PP")?);
-    let drafting = pipeline_mtp(read("VADE_W2_PP_MTP")?);
+/// The engine chooses the path; no switch selects it. FP4-Local with peers serves on the
+/// pipeline service: the tensor split at world 2 and the layer chain at three or more ranks.
+/// `--tensor-map` (`rank_path`) selects the older rank path instead, which serves world 4 only
+/// (tensor_split refuses it at world 2). World 1 never builds a pipeline because its peer set
+/// is empty. Return pipeline enabled and whether this rank has peers.
+pub fn pipeline_recipe(mixed: bool, rank: usize, world: usize, rank_path: bool) -> (bool, bool) {
     let distributed = (0..world).any(|peer| peer != rank);
-    let enabled = mixed && requested && distributed;
-    Ok((enabled, enabled && drafting, distributed))
+    (mixed && !rank_path && distributed, distributed)
 }
 
-/// The pipeline's companions and their defaults, the measured 2-Spark recipe: MTP verify rows
-/// cross the pipeline, non-final prompt tiles are queued, decode steps ride the RDMA wire,
-/// 2048-row prompt tiles, and the front projects the bounded head (one Spark funds it from
-/// 8192-row tile scratch; the front's 2048-row tiles already leave it more pool than one
-/// Spark keeps; ranks without the head never load it). A pipeline rank pins every unset one
-/// at startup (before anything reads them); a set one ("0", another tile) stays as given.
-pub const PIPELINE_DEFAULTS: [(&str, &str); 5] = [
-    ("VADE_W2_PP_MTP", "1"),
-    ("VADE_W2_PP_ASYNC", "1"),
-    ("VADE_W2_PP_RDMA", "1"),
+/// The pipeline's companions and their defaults: 2048-row prompt tiles, and the front projects
+/// the bounded head (one Spark funds it from 8192-row tile scratch; the front's 2048-row tiles
+/// already leave it more pool than one Spark keeps; ranks without the head never load it). A
+/// pipeline rank pins every unset one at startup (before anything reads them); a set one
+/// ("0", another tile) stays as given. MTP verify rows always cross the pipeline and non-final
+/// prompt tiles are always queued.
+pub const PIPELINE_DEFAULTS: [(&str, &str); 2] = [
     ("VADE_PROMPT_TILE", "2048"),
     ("VADE_HEAD_BOUNDS", "1"),
 ];
@@ -137,77 +108,45 @@ pub fn pipeline_pins(set: impl Fn(&str) -> bool) -> Vec<(&'static str, &'static 
     PIPELINE_DEFAULTS.into_iter().filter(|&(name, _)| !set(name)).collect()
 }
 
-/// VADE_W2_PATH (a debug switch; it goes when the layer pipeline's code is deleted): unset = the
-/// tensor split, the one 2-Spark path; `pipeline` = the layer pipeline of the world-1 engine.
-pub fn debug_pipeline(value: Result<String, std::env::VarError>) -> Result<bool, String> {
+/// The transport between Sparks, SEQPAR_RDMA: unset, 1 or auto is RDMA, 0 is TCP. The
+/// pipeline's polled wire follows it, and the tensor split needs RDMA.
+pub fn rdma(value: Result<String, std::env::VarError>) -> Result<bool, String> {
     match value.as_deref() {
-        Err(std::env::VarError::NotPresent) => Ok(false),
-        Ok("pipeline") => Ok(true),
-        _ => Err("VADE_W2_PATH must be unset or pipeline".into()),
+        Err(std::env::VarError::NotPresent) | Ok("1" | "auto") => Ok(true),
+        Ok("0") => Ok(false),
+        _ => Err("SEQPAR_RDMA must be unset, auto, 0 or 1".into()),
     }
 }
 
-/// World 2 FP4-Local serves the two-rank tensor split (spark_engine flash::next_batched tp): the
-/// pipeline's links, recipe and session protocol with rank 1 starting at layer 2, and both ranks
-/// splitting each routed expert by columns. It is the default there; the layer pipeline stays
-/// only for VADE_W2_PATH=pipeline (`pipeline_path`), VADE_W2_TP=0, an explicit VADE_W2_PP, and
-/// VADE_W2_PP_ASYNC=0 or VADE_W2_PP_RDMA=0 (the split needs both). An explicit VADE_W2_TP=1 is
-/// refused at any other world, with VADE_W2_PATH=pipeline and with any of those pipeline switches.
-pub fn tensor_split(
-    mixed: bool,
-    world: usize,
-    pipeline_path: bool,
-    mut read: impl FnMut(&str) -> Result<Option<bool>, String>,
-) -> Result<bool, String> {
-    let explicit = match read("VADE_W2_TP")? {
-        Some(false) => return Ok(false),
-        Some(true) if pipeline_path => return Err("VADE_W2_TP=1 is refused together with VADE_W2_PATH=pipeline".into()),
-        Some(true) => true,
-        None if pipeline_path || !mixed || world != PIPELINE_RANKS => return Ok(false),
-        None => false,
-    };
+/// World 2 FP4-Local serves the two-rank tensor split (spark_engine flash::next_batched tp), the
+/// only 2-Spark path: the pipeline's links, recipe and session protocol with rank 1 starting at
+/// layer 2, both ranks splitting each routed expert by columns, the projections and the
+/// linear-attention heads, one-sided RDMA writes for the exchanges and the verify head split by
+/// vocabulary halves. Its exchanges ride RDMA, so TCP (`rdma` false) and `--tensor-map`
+/// (`rank_path`) are refused at world 2 before any rank loads. FP8 keeps its ring path.
+pub fn tensor_split(mixed: bool, world: usize, rank_path: bool, rdma: bool) -> Result<bool, String> {
     if !mixed || world != PIPELINE_RANKS {
-        return Err("VADE_W2_TP=1 needs FP4-Local at world 2".into());
+        return Ok(false);
     }
-    if !matches!(read("VADE_W2_PP"), Ok(None)) {
-        return if explicit { Err("VADE_W2_TP=1 is refused together with an explicit VADE_W2_PP".into()) } else { Ok(false) };
+    if rank_path {
+        return Err("two Sparks run the tensor split; --tensor-map selects the rank path, which serves four Sparks".into());
     }
-    // The split posts every pass through the pipeline's asynchronous queue and its exchanges
-    // ride the RDMA wire: an explicit 0 for either keeps the pipeline, or is refused with
-    // VADE_W2_TP=1, before any rank loads.
-    for name in ["VADE_W2_PP_ASYNC", "VADE_W2_PP_RDMA"] {
-        if read(name)? == Some(false) {
-            return if explicit { Err(format!("VADE_W2_TP=1 needs {name} (leave it unset)")) } else { Ok(false) };
-        }
+    if !rdma {
+        return Err("two Sparks run the tensor split, which needs RDMA: unset SEQPAR_RDMA or set it to 1".into());
     }
     Ok(true)
 }
-
-/// The tensor split's extra pin (with PIPELINE_DEFAULTS): rank 1 starts at layer 2, the
-/// first layer the pipeline lets a back own (layer 1 consumes the frontend's PLE).
-pub const TENSOR_PINS: [(&str, &str); 1] = [("VADE_W2_PP_SPLIT", "2")];
-
-/// The tensor split's levels, every proven one on. A split rank pins each unset one at startup;
-/// a set one stays as given. These names are temporary: each goes when its level is the only code.
-pub const SPLIT_LEVELS: [(&str, &str); 4] = [
-    ("VADE_W2_TP", "1"),
-    ("VADE_W2_TP_WIRE", "write"),
-    ("VADE_W2_TP_PROJ", "3"),
-    ("VADE_W2_TP_HEAD", "1"),
-];
-
-/// The pins a tensor-split rank adds: the layer cut and the unset levels; an explicit
-/// VADE_W2_PP_SPLIT is refused.
-pub fn tensor_pins(tp: bool, set: impl Fn(&str) -> bool) -> Result<Vec<(&'static str, &'static str)>, String> {
-    if !tp {
-        return Ok(Vec::new());
-    }
-    if TENSOR_PINS.iter().any(|&(name, _)| set(name)) {
-        return Err("the tensor split sets VADE_W2_PP_SPLIT itself; leave it unset (VADE_W2_PATH=pipeline: the layer pipeline)".into());
-    }
-    Ok(TENSOR_PINS.into_iter().chain(SPLIT_LEVELS.into_iter().filter(|&(name, _)| !set(name))).collect())
+/// The path the engine chose and why, for the receipt (None on one Spark): the tensor split, the
+/// FP4-Local layer chain, the FP4-Local rank path (`--tensor-map`) or FP8's ring.
+pub fn chosen_path(distributed: bool, next_model: bool, tp: bool, pp: bool) -> Option<spark_engine::flash_tp_switch::Path> {
+    use spark_engine::flash_tp_switch::Path;
+    distributed.then_some(match (tp, pp, next_model) {
+        (true, _, _) => Path::TENSOR_SPLIT,
+        (false, true, _) => Path::LAYER_PIPELINE,
+        (false, false, true) => Path::RANK_PATH,
+        (false, false, false) => Path::RING,
+    })
 }
-
 /// The checkpoint's mixed storage contract selects NextModel, never the FP8 loader.
 pub fn next_model(
     mixed: bool,
@@ -403,58 +342,30 @@ impl CommandState {
 }
 #[cfg(test)]
 #[test]
-fn tensor_split_is_the_world_two_default_and_the_pipeline_needs_a_switch() {
-    let env = |pairs: &'static [(&'static str, &'static str)]| move |name: &str| -> Result<Option<bool>, String> {
-        Ok(pairs.iter().find(|(n, _)| *n == name).map(|(_, v)| *v == "1"))
-    };
-    // No switch set: the split at world 2 FP4-Local, nothing else changes.
-    assert_eq!(tensor_split(true, 2, false, env(&[])), Ok(true));
-    assert_eq!(tensor_split(true, 1, false, env(&[])), Ok(false));
-    assert_eq!(tensor_split(true, 4, false, env(&[])), Ok(false));
-    assert_eq!(tensor_split(false, 2, false, env(&[])), Ok(false));
-    // VADE_W2_PATH=pipeline, VADE_W2_TP=0, an explicit VADE_W2_PP or a pipeline switch the split
-    // cannot honor keeps the layer pipeline (or the rank path).
-    assert_eq!(tensor_split(true, 2, true, env(&[])), Ok(false));
-    assert_eq!(tensor_split(true, 2, false, env(&[("VADE_W2_TP", "0")])), Ok(false));
-    assert_eq!(tensor_split(true, 2, true, env(&[("VADE_W2_TP", "0")])), Ok(false));
-    for off in [&[("VADE_W2_PP", "0")][..], &[("VADE_W2_PP_ASYNC", "0")], &[("VADE_W2_PP_RDMA", "0")]] {
-        assert_eq!(tensor_split(true, 2, false, env(off)), Ok(false), "{off:?}");
+fn tensor_split_is_the_only_world_two_path() {
+    // World 2 FP4-Local always runs the split; every other world and FP8 never do.
+    assert_eq!(tensor_split(true, 2, false, true), Ok(true));
+    for (mixed, world) in [(true, 1), (true, 3), (true, 4), (false, 2), (false, 4)] {
+        assert_eq!(tensor_split(mixed, world, false, true), Ok(false), "{mixed} {world}");
+        assert_eq!(tensor_split(mixed, world, true, false), Ok(false), "{mixed} {world}");
     }
-    assert_eq!(tensor_split(true, 2, false, env(&[("VADE_W2_PP", "1")])), Ok(false));
-    assert_eq!(tensor_split(true, 2, false, env(&[("VADE_W2_PP_ASYNC", "1"), ("VADE_W2_PP_RDMA", "1")])), Ok(true));
-    // The old name keeps working for the gates; its refusals stay.
-    assert_eq!(tensor_split(true, 2, false, env(&[("VADE_W2_TP", "1")])), Ok(true));
-    assert!(tensor_split(true, 2, true, env(&[("VADE_W2_TP", "1")])).is_err());
-    assert!(tensor_split(true, 4, false, env(&[("VADE_W2_TP", "1")])).is_err());
-    assert!(tensor_split(false, 2, false, env(&[("VADE_W2_TP", "1")])).is_err());
-    assert!(tensor_split(true, 2, false, env(&[("VADE_W2_TP", "1"), ("VADE_W2_PP", "1")])).is_err());
-    assert!(tensor_split(true, 2, false, env(&[("VADE_W2_TP", "1"), ("VADE_W2_PP", "0")])).is_err());
-    assert!(tensor_split(true, 2, false, env(&[("VADE_W2_TP", "1"), ("VADE_W2_PP_ASYNC", "0")])).is_err());
-    assert!(tensor_split(true, 2, false, env(&[("VADE_W2_TP", "1"), ("VADE_W2_PP_RDMA", "0")])).is_err());
-    assert_eq!(tensor_split(true, 2, false, env(&[("VADE_W2_TP", "1"), ("VADE_W2_PP_ASYNC", "1")])), Ok(true));
-    // Switch errors come first, whatever the topology.
-    let bad = |name: &str| -> Result<Option<bool>, String> { if name == "VADE_W2_TP" { Err("VADE_W2_TP must be 0 or 1".into()) } else { Ok(None) } };
-    assert!(tensor_split(true, 1, false, bad).is_err());
-    use std::env::VarError::NotPresent;
-    assert_eq!(debug_pipeline(Err(NotPresent)), Ok(false));
-    assert_eq!(debug_pipeline(Ok("pipeline".into())), Ok(true));
-    for value in ["", "split", "Pipeline", "0", "1"] { assert!(debug_pipeline(Ok(value.into())).is_err(), "{value:?}"); }
-    assert!(debug_pipeline(Err(std::env::VarError::NotUnicode("x".into()))).is_err());
-}
-
-#[cfg(test)]
-#[test]
-fn a_split_rank_pins_the_layer_cut_and_every_unset_level() {
-    let all = [("VADE_W2_PP_SPLIT", "2"), ("VADE_W2_TP", "1"), ("VADE_W2_TP_WIRE", "write"), ("VADE_W2_TP_PROJ", "3"), ("VADE_W2_TP_HEAD", "1")];
-    assert_eq!(tensor_pins(false, |_| true), Ok(Vec::new()));
-    assert_eq!(tensor_pins(false, |_| false), Ok(Vec::new()));
-    assert_eq!(tensor_pins(true, |_| false), Ok(all.to_vec()));
-    // A set level stays as given (a gate's VADE_W2_TP_PROJ=2, VADE_W2_TP_HEAD=0).
-    assert_eq!(tensor_pins(true, |name| name == "VADE_W2_TP_PROJ" || name == "VADE_W2_TP_HEAD"), Ok(all[..3].to_vec()));
-    assert_eq!(tensor_pins(true, |name| name.starts_with("VADE_W2_TP")), Ok(all[..1].to_vec()));
-    assert!(tensor_pins(true, |name| name == "VADE_W2_PP_SPLIT").is_err());
-    // The pins name only the split's switches, never a pipeline companion.
-    assert!(SPLIT_LEVELS.iter().all(|(name, _)| PIPELINE_DEFAULTS.iter().all(|(other, _)| other != name)));
+    // TCP and --tensor-map are refused at world 2.
+    assert!(tensor_split(true, 2, false, false).unwrap_err().contains("needs RDMA"));
+    assert!(tensor_split(true, 2, true, true).unwrap_err().contains("--tensor-map"));
+    // SEQPAR_RDMA: unset, 1 or auto is RDMA; 0 is TCP; anything else stops startup.
+    use std::env::VarError::{NotPresent, NotUnicode};
+    assert_eq!(rdma(Err(NotPresent)), Ok(true));
+    for (value, on) in [("1", true), ("auto", true), ("0", false)] { assert_eq!(rdma(Ok(value.into())), Ok(on)); }
+    for value in ["", "yes", "2", " 1"] { assert!(rdma(Ok(value.into())).is_err(), "{value:?}"); }
+    assert!(rdma(Err(NotUnicode("x".into()))).is_err());
+    // The receipt names each path and why; one Spark names none.
+    use spark_engine::flash_tp_switch::Path;
+    assert_eq!(chosen_path(true, true, true, true), Some(Path::TENSOR_SPLIT));
+    assert_eq!(chosen_path(true, true, false, true), Some(Path::LAYER_PIPELINE));
+    assert_eq!(chosen_path(true, true, false, false), Some(Path::RANK_PATH));
+    assert_eq!(chosen_path(true, false, false, false), Some(Path::RING));
+    assert_eq!(Path::RING.reason, "FP8: the tensor split does not serve FP8");
+    assert_eq!(chosen_path(false, true, false, false), None);
 }
 
 #[cfg(test)]
@@ -659,86 +570,35 @@ fn pipeline_mtp_accepts_explicit_depths() {
 
 #[cfg(test)]
 #[test]
-fn world_two_defaults_to_the_pipeline_with_mtp() {
-    // VADE_W2_PP unset: the pipeline at world 2 only; "0" is the rank path everywhere, "1" asks
-    // for the pipeline (run_pp checks N-stage geometry; world 1 never reaches it).
-    for (world, unset) in [(1, false), (2, true), (4, false)] {
-        assert_eq!(pipeline(world, None), unset);
-        assert!(!pipeline(world, Some(false)));
-        assert!(pipeline(world, Some(true)));
-    }
-    // VADE_W2_PP_MTP unset: MTP across the pipeline; "0" plain decoding.
-    assert!(pipeline_mtp(None));
-    assert!(pipeline_mtp(Some(true)));
-    assert!(!pipeline_mtp(Some(false)));
+fn the_pipeline_service_drafts_and_pins_its_companions() {
     // Every unset companion is pinned at the measured recipe; a set one is kept as given.
-    let all = [("VADE_W2_PP_MTP", "1"), ("VADE_W2_PP_ASYNC", "1"), ("VADE_W2_PP_RDMA", "1"), ("VADE_PROMPT_TILE", "2048"),
-        ("VADE_HEAD_BOUNDS", "1")];
+    let all = [("VADE_PROMPT_TILE", "2048"), ("VADE_HEAD_BOUNDS", "1")];
     assert_eq!(pipeline_pins(|_| false), all);
-    assert_eq!(pipeline_pins(|name| name == "VADE_W2_PP_MTP"), all[1..]);
-    assert_eq!(pipeline_pins(|name| name == "VADE_PROMPT_TILE"), [&all[..3], &all[4..]].concat());
-    assert_eq!(pipeline_pins(|name| name == "VADE_HEAD_BOUNDS"), all[..4]);
+    assert_eq!(pipeline_pins(|name| name == "VADE_PROMPT_TILE"), all[1..]);
+    assert_eq!(pipeline_pins(|name| name == "VADE_HEAD_BOUNDS"), all[..1]);
     assert!(pipeline_pins(|_| true).is_empty());
-    // The pinned MTP companion agrees with pipeline_mtp's default.
-    assert_eq!(pipeline_mtp(None), all.contains(&("VADE_W2_PP_MTP", "1")));
     for depth in 0..=3 {
         for rank in 0..2 {
-            // Default world 2: an explicit depth is checked as world 1 checks it.
-            let mtp = pipeline(2, None) && pipeline_mtp(None);
-            assert_eq!(next_model(true, false, rank, 2, startup_mtp(mtp, Some(depth))), Ok(true));
-            // "0" escapes: VADE_W2_PP=0 (rank path) or VADE_W2_PP_MTP=0 refuse depths 1..=3 as before.
-            for mtp in [pipeline(2, Some(false)) && pipeline_mtp(None), pipeline(2, None) && pipeline_mtp(Some(false))] {
-                assert_eq!(next_model(true, false, rank, 2, startup_mtp(mtp, Some(depth))).is_ok(), depth == 0);
-            }
-            // World 4 keeps the rank path and its refusal.
-            let mtp = pipeline(4, None) && pipeline_mtp(None);
-            assert_eq!(next_model(true, false, rank, 4, startup_mtp(mtp, Some(depth))).is_ok(), depth == 0);
+            // The pipeline service: an explicit depth is checked as world 1 checks it.
+            assert_eq!(next_model(true, false, rank, 2, startup_mtp(true, Some(depth))), Ok(true));
+            // World 4's rank path keeps its refusal.
+            assert_eq!(next_model(true, false, rank, 4, startup_mtp(false, Some(depth))).is_ok(), depth == 0);
         }
     }
-    // Serving depth: the pipeline with MTP serves as world 1 (default 3, explicit kept); the
-    // escapes serve plain like the rank path.
+    // Serving depth: the pipeline with MTP serves as world 1 (default 3, explicit kept).
     assert_eq!(serving_mtp(true, 1, None), spark_engine::flash_next_lookup::DEFAULT_MTP_DEPTH);
     assert_eq!(serving_mtp(true, 2, None), 0);
 }
 
 #[test]
-fn larger_chains_are_opt_in_and_plain_depth_refusal_is_preserved() {
-    for world in [3, 4, 6, 24] {
-        assert!(!pipeline(world, None));
-        assert!(!pipeline(world, Some(false)));
-        assert!(pipeline(world, Some(true)));
-    }
-    for depth in 1..=3 {
-        assert!(pipeline_depth(true, false, Some(depth)).is_err());
-        assert!(pipeline_depth(true, true, Some(depth)).is_ok());
-        assert!(pipeline_depth(false, false, Some(depth)).is_ok());
-    }
-    assert!(pipeline_depth(true, false, None).is_ok());
-    assert!(pipeline_depth(true, false, Some(0)).is_ok());
-}
-
-#[test]
-fn pipeline_switch_errors_are_checked_before_topology_selection() {
-    for world in [1, 2, 3, 4, 24] {
-        for rank in 0..world {
-            for mixed in [false, true] {
-                for invalid in ["VADE_W2_PP", "VADE_W2_PP_MTP"] {
-                    for selected in [Some(false), Some(true), None] {
-                        let error = pipeline_recipe(mixed, rank, world, |name| {
-                            if name == invalid { Err(format!("{name} must be 0 or 1")) }
-                            else { Ok(selected) }
-                        }).unwrap_err();
-                        assert_eq!(error, format!("{invalid} must be 0 or 1"));
-                    }
-                }
-            }
-        }
-    }
-    assert_eq!(pipeline_recipe(true, 0, 1, |_| Ok(Some(true))).unwrap(), (false, false, false));
+fn the_engine_chooses_the_pipeline_service_from_peers_and_tensor_map() {
+    // World 1 never builds a pipeline; FP8 never does; --tensor-map selects the rank path.
+    assert_eq!(pipeline_recipe(true, 0, 1, false), (false, false));
     for world in [2, 3, 4, 24] {
         for rank in 0..world {
-            assert_eq!(pipeline_recipe(true, rank, world, |_| Ok(Some(true))).unwrap(), (true, true, true));
-            assert_eq!(pipeline_recipe(true, rank, world, |_| Ok(Some(false))).unwrap(), (false, false, true));
+            assert_eq!(pipeline_recipe(true, rank, world, false), (true, true));
+            assert_eq!(pipeline_recipe(true, rank, world, true), (false, true));
+            assert_eq!(pipeline_recipe(false, rank, world, false), (false, true));
         }
     }
 }

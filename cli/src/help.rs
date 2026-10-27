@@ -3,7 +3,7 @@
 use crate::style::{self, Page, Stream, Token};
 
 const LIFECYCLE: &str = "Explicit VADE_CONFIG selects the controller; otherwise generated local setup wins. Keep the same VADE_CONFIG and VADE_HOME from start through chat, status, logs and down.";
-const TRANSPORT: &str = "One Spark needs no fabric or RDMA; linked Sparks use RDMA by default. Set SEQPAR_RDMA=0 for TCP using the configured fabric addresses on any reachable interface; QSFP and RDMA memlock are unnecessary in TCP mode.";
+const TRANSPORT: &str = "One Spark needs no fabric or RDMA; linked Sparks use RDMA by default. Set SEQPAR_RDMA=0 for TCP using the configured fabric addresses on any reachable interface; QSFP and RDMA memlock are unnecessary in TCP mode. Two FP4-Local Sparks serve only over RDMA; FP8 on two Sparks may use TCP.";
 const GPU_BUSY: &str = "Only a running compute app or power draw of at least 30 W makes a GPU busy; a stale utilization reading is reported and never blocks.";
 const DRY_RUN: (&str, &str) = ("--dry-run", "Show what would happen; change nothing");
 const API_KEY: (&str, &str) = ("--api-key-file PATH", "Bearer credential file (or VADE_API_KEY_FILE)");
@@ -120,11 +120,10 @@ fn page(command: &str) -> Option<Page<'static>> {
                 "Controller FP4 defaults match local ones on any Spark count: context 32768, output min(8192, context). --context 262144 requests a larger context. The engine still sets the chat count from context and memory.",
                 "Controller FP4 ignores --chats and --cache-bytes. Its engine admits chats from memory and uses its own prefix cache setting.",
                 "MTP is engine-selected. FP4-Local one-Spark concurrent chats can draft; the default request depth is 3 with strict verification. Legacy FP8 concurrent chats decode plainly. Per-request draft=plain disables drafting; draft=strict requests it when supported. --mtp overrides MTP, and 0 disables server drafting.",
-                "Two Sparks run the tensor split: both Sparks work on every token, with every proven level on. VADE_W2_PATH=pipeline runs the older layer pipeline instead; it is a debug switch and goes away with that path. The split needs RDMA: with SEQPAR_RDMA=0 (TCP), two Sparks need VADE_W2_PATH=pipeline.",
-                "VADE_W2_TP, VADE_W2_TP_WIRE, VADE_W2_TP_PROJ and VADE_W2_TP_HEAD set one split level by hand on both Sparks. These names are temporary and will be removed; leave them unset. VADE_W2_TP=0 no longer selects the pipeline.",
+                "Two FP4-Local Sparks run the tensor split, the only two-Spark path for FP4-Local: both Sparks work on every token. It needs RDMA, so vade up refuses SEQPAR_RDMA=0 (TCP) for two FP4-Local Sparks. FP8 on two Sparks keeps its ring and may use TCP.",
                 "Spark counts above 2 require a current install and linked hosts in cable order.",
                 "--replicas N starts one independent one-Spark server on each of the first N machines (or the N --hosts) and a local gateway on local_port; replica tunnels use the next N local ports. Each replica uses the FP4 defaults above. Use it when the model fits one Spark and many chats run at once; answers are the same on every replica.",
-                "One Spark needs no fabric. Controller pairs and chains use RDMA; SEQPAR_RDMA=0 selects TCP. Keep VADE_CONFIG and VADE_HOME consistent through chat, status and down.",
+                "One Spark needs no fabric. Linked Sparks use RDMA by default. SEQPAR_RDMA=0 selects TCP, except for two FP4-Local Sparks. Keep VADE_CONFIG and VADE_HOME consistent through chat, status and down.",
                 GPU_BUSY,
             ],
         },

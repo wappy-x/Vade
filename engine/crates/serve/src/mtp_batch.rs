@@ -1,6 +1,6 @@
 //! VADE_MTP_BATCH: embedded AUTO drafts at 1..=5 chats; world-one executable
 //! startup resolves its default to guarded Auto8 and passes that mode explicitly.
-//! VADE_W2_PP_C8 extends that guard to two- and four-stage pipelines (unset/1 on, 0 old policy).
+//! The two- and four-stage pipeline services (the tensor split and the 4-Spark layer chain) always use that guard.
 //! Off keeps main's table: one drafting chat, the scheduler's row budget and
 //! the trait's automatic limit. On drafts for cohorts of up to eight chats and
 //! caps a tick's verify rows at the decode width (16, blocks::DECODE_ROWS):
@@ -75,16 +75,11 @@ impl Experiments {
         let graph=read("VADE_POOL_GRAPH_FALLBACK")?;
         let cohort=read("VADE_MTP_COHORT_ADAPT")?;
         let guard=read("VADE_C8_GUARD_ROBUST")?;
-        let pp=read("VADE_W2_PP_C8")?;
-        let pp = match pp.as_deref() {
-            None | Some("1") => pipeline && PIPELINE_COHORT_WORLDS.contains(&world),
-            Some("0") => false,
-            _ => return Err("VADE_W2_PP_C8 must be unset, 0 or 1".into()),
-        };
+        let pp = pipeline && PIPELINE_COHORT_WORLDS.contains(&world);
         let local=COHORT_WORLDS.contains(&world);
         let wide=wide.unwrap_or(pp);
         if wide && !(local && !pipeline || pp) {
-            return Err("VADE_MTP_COHORT=wide needs one Spark or a guarded pipeline (VADE_W2_PP_C8); unset it for rank serving".into());
+            return Err("VADE_MTP_COHORT=wide needs one Spark or a guarded pipeline; unset it for rank serving".into());
         }
         let guarded=local || pp;
         let mode=cohort_mode(parse(batch.as_deref())?, c8.as_deref().or(guarded.then_some("1")))?;
@@ -121,7 +116,7 @@ fn executable_defaults_match_opt_in_only_on_world_one_and_honor_rollbacks() {
         let result=Experiments::startup_with(world,false,|key| {
             reads.push(key.to_owned());Ok(values.iter().find(|(k,_)|*k==key).map(|(_,v)|v.to_string()))
         });
-        assert_eq!(reads,["VADE_MTP_BATCH","VADE_MTP_C8","VADE_POOL_GRAPH_FALLBACK","VADE_MTP_COHORT_ADAPT","VADE_C8_GUARD_ROBUST","VADE_W2_PP_C8"]);
+        assert_eq!(reads,["VADE_MTP_BATCH","VADE_MTP_C8","VADE_POOL_GRAPH_FALLBACK","VADE_MTP_COHORT_ADAPT","VADE_C8_GUARD_ROBUST"]);
         result
     };
     let on=[("VADE_MTP_C8","1"),("VADE_POOL_GRAPH_FALLBACK","1"),("VADE_MTP_COHORT_ADAPT","1")];
@@ -154,15 +149,13 @@ fn pipeline_c8_defaults_and_rollback_follow_the_actual_route() {
             reads.push(key.to_owned());
             Ok(values.iter().find(|(k,_)|*k==key).map(|(_,v)|v.to_string()))
         });
-        assert_eq!(reads.len(),6);
+        assert_eq!(reads.len(),5);
         result
     };
     let old=Experiments { batch_mode:Some(Mode::Auto),guard_robust:true,..Experiments::default() };
     let enabled=Experiments { pipeline_c8:true,cohort_cost:true,batch_mode:Some(Mode::Auto8),graph_fallback:false,guard_robust:true,wide_tick:false };
     for world in [2,4] {
         assert_eq!(resolve(world,true,&[]),Ok(enabled));
-        assert_eq!(resolve(world,true,&[("VADE_W2_PP_C8","1")]),Ok(enabled));
-        assert_eq!(resolve(world,true,&[("VADE_W2_PP_C8","0")]),Ok(old));
         assert_eq!(resolve(world,true,&[("VADE_MTP_C8","1"),("VADE_MTP_COHORT_ADAPT","1")]),Ok(enabled));
         for value in ["0","1"] {
             let explicit=resolve(world,true,&[("VADE_MTP_BATCH",value)]).unwrap();
@@ -171,39 +164,11 @@ fn pipeline_c8_defaults_and_rollback_follow_the_actual_route() {
         }
         assert_eq!(resolve(world,true,&[("VADE_MTP_C8","0")]),Ok(Experiments { pipeline_c8:true,..old }));
         assert!(!resolve(world,true,&[("VADE_MTP_COHORT_ADAPT","0")]).unwrap().cohort_cost);
-        for value in ["", "true", "2", " 1"] {
-            assert!(resolve(world,true,&[("VADE_W2_PP_C8",value)]).unwrap_err().contains("VADE_W2_PP_C8"));
-        }
     }
+    // Off the guarded pipelines the old policy stays.
     for (world,pipeline) in [(2,false),(3,false),(3,true),(4,false)] {
-        for value in ["0","1"] {
-            assert_eq!(resolve(world,pipeline,&[("VADE_W2_PP_C8",value)]),Ok(old));
-        }
+        assert_eq!(resolve(world,pipeline,&[]),Ok(old));
         assert!(resolve(world,pipeline,&[("VADE_MTP_C8","1"),("VADE_MTP_COHORT_ADAPT","1")]).is_err());
-    }
-    for value in ["0","1"] {
-        assert_eq!(resolve(1,false,&[("VADE_W2_PP_C8",value)]),resolve(1,false,&[]));
-    }
-    // OFF keeps the pre-C8 pipeline formulas, including explicit legacy overrides
-    // and invalid combinations, rather than just matching the default tuple.
-    for batch in [None, Some("0"), Some("1")] {
-        for c8 in [None, Some("0"), Some("1")] {
-            for graph in [None, Some("0"), Some("1")] {
-                for cohort in [None, Some("0"), Some("1")] {
-                    for guard in [None, Some("0"), Some("1")] {
-                        let mut values = vec![("VADE_W2_PP_C8", "0")];
-                        for (name, value) in [("VADE_MTP_BATCH", batch), ("VADE_MTP_C8", c8),
-                            ("VADE_POOL_GRAPH_FALLBACK", graph), ("VADE_MTP_COHORT_ADAPT", cohort),
-                            ("VADE_C8_GUARD_ROBUST", guard)] {
-                            if let Some(value) = value { values.push((name, value)); }
-                        }
-                        for world in [2,4] {
-                            assert_eq!(resolve(world,true,&values),resolve(world,false,&values), "world={world} {values:?}");
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 #[cfg(test)]
@@ -228,8 +193,8 @@ fn world_four_resolves_pipeline_cohort_and_world_one_three_keep_their_defaults()
 #[test]
 fn world_four_pipeline_admits_eight_chats_under_the_world_two_rules() {
     // Every switch combination, rollback and refusal included, resolves as on two stages.
-    let names=["VADE_MTP_BATCH","VADE_MTP_C8","VADE_POOL_GRAPH_FALLBACK","VADE_MTP_COHORT_ADAPT","VADE_C8_GUARD_ROBUST","VADE_W2_PP_C8"];
-    for combo in 0..3usize.pow(6) {
+    let names=["VADE_MTP_BATCH","VADE_MTP_C8","VADE_POOL_GRAPH_FALLBACK","VADE_MTP_COHORT_ADAPT","VADE_C8_GUARD_ROBUST"];
+    for combo in 0..3usize.pow(5) {
         let value=|i: usize| [None,Some("0"),Some("1")][combo/3usize.pow(i as u32)%3];
         let resolve=|world| Experiments::startup_with(world,true,|key| Ok(value(names.iter().position(|n| *n==key).unwrap()).map(str::to_owned)));
         assert_eq!(resolve(4),resolve(2),"combo {combo}");
@@ -439,14 +404,12 @@ fn wide_cohort_is_opt_in_world_one_only_and_unset_matches_startup_with() {
     assert_eq!(cohort_wide_value(None), Ok(None));
     assert_eq!(cohort_wide_value(Some("wide")), Ok(Some(true)));
     assert_eq!(cohort_wide_value(Some("off")), Ok(Some(false)));
-    // Unset: wide on guarded pipelines only; one Spark, native ranks and VADE_W2_PP_C8=0 stay off.
+    // Unset: wide on guarded pipelines only; one Spark and native ranks stay off.
     let none2=|_: &str| Ok(None);
     for world in [2,4] { assert!(Experiments::resolve(world,true,None,none2).unwrap().wide_tick); }
     for (world,pipeline) in [(1,false),(1,true),(2,false),(3,true),(4,false)] {
         assert_eq!(Experiments::resolve(world,pipeline,None,none2),Experiments::startup_with(world,pipeline,none2));
     }
-    let pp_off=|k: &str| Ok((k=="VADE_W2_PP_C8").then(|| "0".to_owned()));
-    assert_eq!(Experiments::resolve(2,true,None,pp_off),Experiments::startup_with(2,true,pp_off));
     let none=|_: &str| Ok(None);
     for (world,pipeline) in [(1,false),(1,true),(2,false),(2,true),(4,true)] {
         assert_eq!(Experiments::startup_cohort(world,pipeline,false,none),Experiments::startup_with(world,pipeline,none));
@@ -458,14 +421,12 @@ fn wide_cohort_is_opt_in_world_one_only_and_unset_matches_startup_with() {
     for (world,pipeline) in [(1,true),(2,false),(3,true),(4,false)] {
         assert!(Experiments::startup_cohort(world,pipeline,true,none).unwrap_err().contains("VADE_MTP_COHORT"));
     }
-    // Guarded pipelines: the controller becomes opt-in and the tick widens; VADE_W2_PP_C8=0 refuses wide.
+    // Guarded pipelines: the controller becomes opt-in and the tick widens.
     for world in [2,4] {
         let pp=Experiments::startup_cohort(world,true,true,none).unwrap();
         assert_eq!(pp,Experiments { pipeline_c8:true,batch_mode:Some(Mode::Auto8),guard_robust:true,wide_tick:true,..Experiments::default() });
         let explicit=Experiments::startup_cohort(world,true,true,|k: &str| Ok((k=="VADE_MTP_COHORT_ADAPT").then(|| "1".to_owned()))).unwrap();
         assert!(explicit.cohort_cost && explicit.wide_tick);
-        let off=|k: &str| Ok((k=="VADE_W2_PP_C8").then(|| "0".to_owned()));
-        assert!(Experiments::startup_cohort(world,true,true,off).unwrap_err().contains("VADE_MTP_COHORT"));
     }
 }
 

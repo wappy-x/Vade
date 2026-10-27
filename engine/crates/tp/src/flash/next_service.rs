@@ -48,7 +48,7 @@ pub fn run(
     )
 }
 
-/// VADE_W2_PP: the world-one layer engine across an N-stage chain (world-two default).
+/// The pipeline service: the world-one layer engine across an N-stage chain (the tensor split at world two).
 /// Rank zero serves HTTP and the head; workers relay over the same neighbor cables.
 #[allow(clippy::too_many_arguments)]
 pub fn run_pp(
@@ -77,19 +77,12 @@ pub fn run_pp(
     }
     // Both ranks refuse the prefix cache before they link (prefix_switch::refuse_on_pipeline).
     spark_serve::prefix_switch::refuse_on_pipeline(spark_serve::prefix_switch::prefix_cache()?)?;
-    if mtp != 0 && !spark_engine::flash::next_batched::pp_mtp_from_env()? {
-        return Err("VADE_W2_PP serves plain decoding only (--mtp 0) unless VADE_W2_PP_MTP=1".into());
-    }
-    let stage = spark_engine::flash::next_batched::PpStage::from_env(rank, world)?;
-    let limit = spark_engine::flash::next_batched::pp_timeout_from_env()?;
-    // VADE_W2_PP_RDMA=1 (flash-serve pins 1 when unset): decode steps and short projected tiles ride a polled
-    // RoCE wire; queued tiles stay on TCP, and synchronous requests/replies use
-    // the wire only when both complete messages fit. Both ranks agree capacity.
-    let rdma = match std::env::var("VADE_W2_PP_RDMA").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("0") => false,
-        Ok("1") => true,
-        _ => return Err("VADE_W2_PP_RDMA must be 0 or 1".into()),
-    };
+    let stage = spark_engine::flash::next_batched::PpStage::for_rank(rank, world)?;
+    let limit = spark_engine::flash::next_batched::PP_LINK_TIMEOUT;
+    // Over RDMA (SEQPAR_RDMA unset, auto or 1; the tensor split needs it): decode steps and short
+    // projected tiles ride a polled RoCE wire; queued tiles stay on TCP, and synchronous
+    // requests/replies use the wire only when both complete messages fit. Both ranks agree capacity.
+    let rdma = crate::settings::rdma(std::env::var("SEQPAR_RDMA"))?;
     let wire = |link: &mut std::net::TcpStream| -> Result<Option<Box<dyn spark_engine::flash::next_batched::PpWire>>, String> {
         #[cfg(target_os = "linux")]
         {
@@ -101,19 +94,15 @@ pub fn run_pp(
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (link, limit);
-            if rdma { Err("VADE_W2_PP_RDMA needs Linux".into()) } else { Ok(None) }
+            if rdma { Err("the RDMA wire needs Linux (SEQPAR_RDMA=0 selects TCP)".into()) } else { Ok(None) }
         }
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
     // Each cable carries both directions. Accept upstream and connect downstream;
     // no closing ring edge exists or is required. Wire setup progresses front to back.
-    let (mut outgoing, mut incoming) = spark_seqpar::control::connect_peers(
+    let (outgoing, incoming) = spark_seqpar::control::connect_peers(
         (rank > 0).then_some(listen), stage.successor().map(|_| next), deadline)?;
-    // Both ends of every pipeline link agree on VADE_W2_TP before anything else, so a pair
-    // with the switch set on one rank only stops here instead of waiting for a second link.
-    let tensor = spark_engine::flash_tp_switch::from_env()?;
-    let split = tensor as u8 | (tensor && spark_engine::flash_tp_switch::proj_from_env()?) as u8 * 2;
-    for link in [outgoing.as_mut(), incoming.as_mut()].into_iter().flatten() { agree_tensor_split(link, split)?; }
+    let tensor = spark_engine::flash_tp_switch::on();
     let mut incoming = incoming.map(|mut link| {
         let fast = wire(&mut link)?;
         Ok::<_, String>((link, fast))
@@ -124,28 +113,20 @@ pub fn run_pp(
     }).transpose()?;
     eprintln!("flashnext pp stage rank={rank} world={world} layers={}..{} upstream={} downstream={}",
         stage.first, stage.end, incoming.is_some(), outgoing.is_some());
-    // VADE_W2_TP=1: a second cable link (opened after the pipeline's, same order on both
-    // ranks) carries the per-layer column swaps on its own RDMA wire.
+    // The tensor split: a second cable link (opened after the pipeline's, same order on both
+    // ranks) carries the per-layer column swaps as one-sided writes between the mapped
+    // mailboxes (tp_proxy).
     let tp = if tensor {
         let (out, inc) = spark_seqpar::control::connect_peers((rank > 0).then_some(listen), (rank == 0).then_some(next), deadline)?;
-        let mut link = out.or(inc).ok_or("tensor split has no peer link")?;
-        // VADE_W2_TP_WIRE=write: one-sided writes between the mapped mailboxes (tp_proxy).
-        let write = tp_proxy::write_from_env()?;
-        // Swaps are at most TpLayout::ROWS rows of halves (about 200 KB): the wire's smallest slot.
+        let link = out.or(inc).ok_or("tensor split has no peer link")?;
         #[cfg(target_os = "linux")]
-        let swap = if write {
-            agree_write_wire(&mut link, limit)?;
-            tp_proxy::Wire::Write(tp_proxy::WriteLink::new(&link)?)
-        } else {
-            tp_proxy::Wire::Proxy(Box::new(wire::RdmaWire::connect(&mut link, true, 8 << 20, limit)?.ok_or("tensor split wire refused")?))
-        };
+        let swap = tp_proxy::Wire::Write(tp_proxy::WriteLink::new(&link)?);
         #[cfg(not(target_os = "linux"))]
-        let swap: tp_proxy::Wire = { let _ = write; return Err("VADE_W2_TP=1 needs Linux".into()) };
+        let swap: tp_proxy::Wire = return Err("the tensor split needs Linux".into());
         eprintln!("flashnext tp link rank={rank} world={world}");
-        if write { eprintln!("flashnext tp wire=write"); }
+        eprintln!("flashnext tp wire=write");
         Some((link, swap))
     } else {
-        if tp_proxy::write_from_env()? { return Err("VADE_W2_TP_WIRE=write needs VADE_W2_TP=1".into()); }
         None
     };
     if rank == 0 {
@@ -158,35 +139,4 @@ pub fn run_pp(
         batched::run_back(root, ptx_path, limits.context_tokens, link, fast, shutdown, options,
             checkpoint, outgoing, stage, experiments, tp)
     }
-}
-
-/// VADE_W2_TP_WIRE=write: the byte RdmaWire::connect's negotiation sends is 1, so a peer on
-/// today's wire fails its negotiation and this rank fails here (the link keeps the same timeouts).
-#[cfg(target_os = "linux")]
-fn agree_write_wire(link: &mut std::net::TcpStream, limit: std::time::Duration) -> Result<(), String> {
-    use std::io::{Read, Write};
-    let mut peer = [0u8];
-    link.set_read_timeout(Some(limit)).and_then(|()| link.set_write_timeout(Some(limit)))
-        .and_then(|()| link.write_all(&[2])).and_then(|()| link.read_exact(&mut peer)).map_err(|e| format!("VADE_W2_TP_WIRE agreement: {e}"))?;
-    if peer[0] != 2 {
-        return Err("VADE_W2_TP_WIRE is write here and unset on the peer rank: set it on both ranks or neither".into());
-    }
-    Ok(())
-}
-
-/// Send this rank's VADE_W2_TP (bit 0) and VADE_W2_TP_PROJ (bit 1) and read the peer's (one byte
-/// each way, 30 s at most).
-fn agree_tensor_split(link: &mut std::net::TcpStream, on: u8) -> Result<(), String> {
-    use std::io::{Read, Write};
-    let before = link.read_timeout().map_err(|e| e.to_string())?;
-    link.set_read_timeout(Some(std::time::Duration::from_secs(30))).map_err(|e| e.to_string())?;
-    let mut peer = [0u8];
-    let agreed = link.write_all(&[on]).and_then(|()| link.read_exact(&mut peer)).map_err(|e| format!("VADE_W2_TP agreement: {e}"));
-    link.set_read_timeout(before).map_err(|e| e.to_string())?;
-    agreed?;
-    if peer[0] != on {
-        return Err(format!("VADE_W2_TP / VADE_W2_TP_PROJ are {}/{} here and {}/{} on the peer rank: set them on both ranks or neither",
-            on & 1, on >> 1, peer[0] & 1, peer[0] >> 1));
-    }
-    Ok(())
 }

@@ -33,6 +33,28 @@ Changes that are merged but not yet released are under Unreleased.
 
 ### Engine
 
+- **The tensor split is the only two-Spark path, and the engine chooses each
+  path itself.** No `VADE_W2_*` switch remains: `VADE_W2_PATH`, `VADE_W2_TP`,
+  `VADE_W2_TP_WIRE`, `VADE_W2_TP_PROJ`, `VADE_W2_TP_HEAD`, `VADE_W2_PP`,
+  `VADE_W2_PP_SPLIT`, `VADE_W2_PP_MTP`, `VADE_W2_PP_ASYNC`, `VADE_W2_PP_RDMA`,
+  `VADE_W2_PP_STAGE_STATE`, `VADE_W2_PP_TIMEOUT_MS`, `VADE_W2_PP_C8`, the
+  `VADE_W2_TP_DOORBELL*`, `VADE_W2_TP_TAKE_*` and `VADE_W2_TP_WIDE` wire
+  settings, `VADE_W2_CHUNK` and `VADE_W2_BW` no longer have any effect. Each
+  setting keeps the value that was its default, so token IDs do not change.
+  FP4-Local on two Sparks runs the tensor split at its proven levels (the write
+  wire, projection level 3, the head split by vocabulary halves, verify passes
+  of up to 32 rows). On three or more Sparks it runs the layer chain; with
+  `--tensor-map` on four Sparks it runs the older rank path. FP8 keeps its
+  ring. The serving receipt names the path and why in `vade.numerics.path` and
+  `vade.numerics.path_reason`. The split
+  needs RDMA: `vade up` refuses `SEQPAR_RDMA=0` on two FP4-Local Sparks
+  before it contacts a Spark. FP8 on two Sparks keeps its ring and may use
+  TCP. The pipeline wire follows `SEQPAR_RDMA`. For every group of Sparks
+  that serves one model, `vade status` shows the path and why in the
+  `Multi-Spark path` row, and `vade status --json` shows them in
+  `multi_spark_path` (before: `two_spark_path`, for two FP4-Local Sparks
+  only). For the split, both also show its levels.
+
 - **Two Sparks run the tensor split by default.** `vade up --sparks 2` now
   runs the tensor split, with every proven level on: both Sparks work on every
   token. You set nothing. Before, two Sparks ran the layer pipeline. In the
@@ -40,15 +62,8 @@ Changes that are merged but not yet released are under Unreleased.
   second against 42.2 on the pipeline, code at 100.9 against 80.3 and
   structured output at 130.4 against 100.8; eight chats reached 220.0 against
   201.7. With drafting OFF, eight chats are slower on the split: 110.6 against
-  137.0. `VADE_W2_PATH=pipeline` runs the layer pipeline, as a debug switch,
-  until it is removed. It is the one way there: `vade up` refuses
-  `VADE_W2_TP=0`, and two Sparks over TCP (`SEQPAR_RDMA=0`) need it, because
-  the split needs RDMA. A changed switch is a different launch, so `vade up`
-  does not reuse a running server started without it. `VADE_W2_TP`,
-  `VADE_W2_TP_WIRE`, `VADE_W2_TP_PROJ` and `VADE_W2_TP_HEAD` still set one
-  level by hand, for a short time. `vade status` shows the two-Spark path and
-  its levels, and the serving receipt records them under `path` and
-  `tensor_split`. See the [benchmarks
+  137.0. The split needs RDMA. The serving receipt records the path and the
+  split's levels under `path` and `tensor_split`. See the [benchmarks
   page](docs/benchmarks.md#current-2026-10-26-main-262b0c3-home-dgx-sparks).
 
 - On two Sparks, a long prompt from a chat that drafts no longer stalls
@@ -142,12 +157,12 @@ and thinking off. Rates below are tokens per second.
   about 9 percent faster, prose about 4 percent. Verification keeps the BF16
   head, so outputs are unchanged. Cost: rank 0 chat slots 19 -> 17, and
   +0.33 GB per rank. `VADE_FP8_DRAFT_MX8=0` turns it off.
-- With the two-Spark tensor split (`VADE_W2_TP=1`), `VADE_W2_TP_WIRE=write` on
-  both ranks moves each exchange with one-sided RDMA writes straight from one
-  GPU's mapped mailbox into the other's, with no host copies and no host work on
-  the receiving side (opt-in; unset keeps today's wire). The tokens are the
-  same. Measured on two Sparks with a mailbox benchmark, one exchange: 17.6 to
-  10.3 microseconds at 10 KB, 34.0 to 15.3 at 40 KB, 165.9 to 59.4 at 400 KB.
+- With the two-Spark tensor split, the write wire moves each exchange with
+  one-sided RDMA writes straight from one GPU's mapped mailbox into the
+  other's, with no host copies and no host work on the receiving side. It is
+  now the split's only wire. The tokens are the same. Measured on two Sparks
+  with a mailbox benchmark, one exchange: 17.6 to 10.3 microseconds at 10 KB,
+  34.0 to 15.3 at 40 KB, 165.9 to 59.4 at 400 KB.
   One chat with drafting on, against the split on today's wire (main
   `62c9c83`): prose 44.76 to 45.68, code 87.14 to 91.48,
   structured 111.08 to 114.26 tokens per second, ids identical. The front
@@ -172,8 +187,8 @@ and thinking off. Rates below are tokens per second.
   memory limit, so the gain is small; `kernel-bench --fp8-moe` times each
   stage of the expert layer.
 - Two Sparks can now split every decode step between them instead of passing
-  it down the layer pipeline: set `VADE_W2_TP=1` on both `flash-serve` ranks of a
-  direct launch (opt-in; `vade up` keeps the pipeline, which stays the default). Both Sparks compute half of each routed expert
+  it down the layer pipeline. This tensor split is now the only two-Spark path
+  for FP4-Local. Both Sparks compute half of each routed expert
   and exchange the halves inside the GPU stream, so the tokens stay identical
   to one Spark. Long prompts run as pipeline tiles, and each chat then hands the
   other Spark the state it did not compute. Measured on two Sparks with drafting
@@ -182,16 +197,12 @@ and thinking off. Rates below are tokens per second.
   faster, 8 chats unchanged; ids identical on all 66 card requests. A cold 8K
   prompt takes 2.82 s instead of 2.79 s. Plain (drafting-off) decoding was about
   7 % slower in a smaller test: under the split it does not use pooled decode.
-  A known cost: while a pass runs, the host proxy that carries the exchange
-  polls for the next message (yielding the core) for up to 20 ms after each
-  one. Without the switch, two Sparks run exactly as before.
 - On four Sparks, the layer pipeline now drafts for six to eight chats at
   once, under the same rules as two Sparks: each tick checks up to 16 drafted
   rows, and the engine switches a cohort to ordinary decoding when that is
   cheaper. Before, eight chats on four Sparks were always decoded plainly.
   Measured on four Sparks with eight code chats: 138.93 to 180.95 tokens per
-  second, with the same tokens. `VADE_W2_PP_C8=0` on every Spark restores the
-  previous policy.
+  second, with the same tokens.
 - On one Spark, when one chat runs alone, the drafting depth can now rise to 7
   instead of 5, as on the layer pipeline. Measured on one Spark: code 75.6 to
   81.6 tokens per second, structured output 88.3 to 99.7, prose unchanged, with
@@ -217,13 +228,7 @@ and thinking off. Rates below are tokens per second.
   two-Spark test with a 109 GB memory ceiling (the number depends on the
   memory each Spark has free). In that test, sixteen chats sent at once
   finished 22 % faster with drafting on and 6 % faster with drafting off, with
-  the same answers. `VADE_W2_PP_STAGE_STATE=0` on every Spark restores the
-  previous behavior.
-- With an uneven `VADE_W2_PP_SPLIT`, the pipeline no longer refuses at
-  startup a split that runs. Every Spark now charges each chat at the
-  costliest stage's state, so all Sparks admit the same number of chats
-  from the same budget. Even splits, the default, charge what they did
-  before.
+  the same answers.
 
 ### CLI
 

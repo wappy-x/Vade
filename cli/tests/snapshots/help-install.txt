@@ -25,7 +25,8 @@ Notes:
     a stale utilization reading is reported and never blocks.
   - One Spark needs no fabric or RDMA; linked Sparks use RDMA by default. Set
     SEQPAR_RDMA=0 for TCP using the configured fabric addresses on any reachable
-    interface; QSFP and RDMA memlock are unnecessary in TCP mode.
+    interface; QSFP and RDMA memlock are unnecessary in TCP mode. Two FP4-Local
+    Sparks serve only over RDMA; FP8 on two Sparks may use TCP.
   - Explicit VADE_CONFIG selects the controller; otherwise generated local setup
     wins. Keep the same VADE_CONFIG and VADE_HOME from start through chat,
     status, logs and down.

@@ -358,7 +358,7 @@ source `26b1692` (2026-10-19).
   restores exact prompt prefixes from its cache. The default is off: no reuse
   at all, and capabilities report `prefix_cache:false`, as on main 26b1692 and
   earlier.
-- **Two ranks.** With two ranks (world 2), the layer pipeline (`VADE_W2_PP`)
+- **Two or more ranks.** The pipeline service (the tensor split and the layer chain)
   refuses the switch at startup on both ranks: a restored prefix would hold the
   front rank's layers only, while the back rank keeps no prefix checkpoints.
 - **Host memory.** When the KV reserve needs host memory for spare session

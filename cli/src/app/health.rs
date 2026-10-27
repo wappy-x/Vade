@@ -203,31 +203,45 @@ impl<R: Runner> App<R> {
     }
 }
 
-/// The path the engine's receipt names in a health reply (`vade.numerics.path`): the tensor split
-/// or the layer pipeline and, for the split, its levels. None: the reply does not name one (one
-/// Spark, or an older engine).
+/// The path the engine's receipt names in a health reply (`vade.numerics.path`) for Sparks that
+/// serve one model: the tensor split (the only two-Spark path for FP4-Local), the layer chain, the
+/// rank path or FP8's ring, why (`path_reason`) and, for the split, its levels. None: the reply
+/// does not name one (one Spark, or an older engine).
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TwoSparkPath { pub path: String, pub projection_level: Option<f64>, pub wire: Option<String>, pub head: Option<String> }
-impl TwoSparkPath {
+pub(crate) struct MultiSparkPath { pub path: String, pub reason: Option<String>, pub projection_level: Option<f64>, pub wire: Option<String>, pub head: Option<String> }
+impl MultiSparkPath {
     pub(crate) fn from_health(health: &str) -> Option<Self> {
         let split = |key| crate::json::path_string(health, &["vade", "numerics", "tensor_split", key]);
         Some(Self {
             path: crate::json::path_string(health, &["vade", "numerics", "path"])?,
+            reason: crate::json::path_string(health, &["vade", "numerics", "path_reason"]),
             projection_level: crate::json::path_number(health, &["vade", "numerics", "tensor_split", "projection_level"]),
             wire: split("wire"),
             head: split("head"),
         })
     }
-    /// One status line: `tensor split (projection level 3, write wire, head split by vocabulary halves)`.
+    /// One status line: the path, then the receipt's reason and, for the split, its levels:
+    /// `tensor split (FP4-Local on two Sparks; projection level 3, write wire, head split by vocabulary halves)`.
     pub(crate) fn label(&self) -> String {
         match self.path.as_str() {
-            "tensor_split" => format!("tensor split (projection level {}, {} wire, {})",
-                self.projection_level.map_or("unknown".into(), |level| format!("{level}")),
-                text::terminal_text(self.wire.as_deref().unwrap_or("unknown")),
-                match self.head.as_deref() { Some("vocabulary_halves") => "head split by vocabulary halves".into(), Some("whole") => "whole head".into(),
-                    other => format!("head {}", text::terminal_text(other.unwrap_or("unknown"))) }),
-            "layer_pipeline" => "layer pipeline (VADE_W2_PATH=pipeline, or TCP)".into(),
-            other => text::terminal_text(other).into_owned(),
+            "tensor_split" => {
+                let levels = format!("projection level {}, {} wire, {}",
+                    self.projection_level.map_or("unknown".into(), |level| format!("{level}")),
+                    text::terminal_text(self.wire.as_deref().unwrap_or("unknown")),
+                    match self.head.as_deref() { Some("vocabulary_halves") => "head split by vocabulary halves".into(), Some("whole") => "whole head".into(),
+                        other => format!("head {}", text::terminal_text(other.unwrap_or("unknown"))) });
+                match self.reason.as_deref() {
+                    Some(reason) => format!("tensor split ({}; {levels})", text::terminal_text(reason)),
+                    None => format!("tensor split ({levels})"),
+                }
+            }
+            "layer_pipeline" => self.with_reason("layer chain"),
+            "rank_path" => self.with_reason("rank path"),
+            other => self.with_reason(&text::terminal_text(other)),
         }
+    }
+    /// `name (the receipt's reason)`, or the name alone when the receipt gives no reason.
+    fn with_reason(&self, name: &str) -> String {
+        self.reason.as_deref().map_or_else(|| name.to_owned(), |reason| format!("{name} ({})", text::terminal_text(reason)))
     }
 }

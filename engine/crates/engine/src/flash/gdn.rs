@@ -439,13 +439,13 @@ pub struct GdnState<'a> {
     state: DeviceVector<'a>,
     history: DeviceVector<'a>,
     cached: bool,
-    /// VADE_W2_TP_PROJ=3: the vectors hold one split rank's heads only (gdn_half.rs).
+    /// Under the tensor split: the vectors hold one split rank's heads only (gdn_half.rs).
     half: bool,
 }
 impl<'a> GdnState<'a> {
     pub(super) fn pool_addresses(&self) -> [u64;3] { [self.state.device_address(),self.history.device_address(),0] }
     pub(super) fn commit_next(&mut self) { self.cached=true; }
-    /// VADE_W2_TP=1 state handoff: the recurrent state, the conv history and the cached flag as raw words.
+    /// Tensor split state handoff: the recurrent state, the conv history and the cached flag as raw words.
     pub(super) fn handoff(&mut self) -> (&mut DeviceVector<'a>, &mut DeviceVector<'a>, &mut bool) { (&mut self.state, &mut self.history, &mut self.cached) }
     /// Rejection after a shallow verify (see shallow_verify): S and the tail
     /// rows below the window are live and unchanged, so only the conv history
@@ -735,7 +735,7 @@ impl<'a, 'w> Gdn<'a, 'w> {
         self.cached = false;
         Ok(())
     }
-    /// The in-projection members in project_next's order as (weight, rows), and K (VADE_W2_TP_PROJ).
+    /// The in-projection members in project_next's order as (weight, rows), and K (the tensor split cuts them).
     pub(super) fn projection(&self) -> ([(u64, usize); 4], usize) { ([(self.qkv, (2 * self.keys + self.heads) * DIM), (self.z, self.heads * DIM), (self.a, self.heads), (self.b, self.heads)], self.hidden) }
     pub(super) fn project_next(&self, b: &Backend<'_>, s: &GdnScratch<'_>, input: &DeviceVector<'_>, tokens: usize) -> Result<()> {
         if tokens == 0 || tokens > s.capacity || input.len() != tokens*self.hidden || self.precision || self.heads == 0 {
@@ -1116,7 +1116,7 @@ impl<'a, 'w> Gdn<'a, 'w> {
     /// Columns of the out projection's input (value heads x 128).
     pub(super) fn out_cols(&self) -> usize { self.heads * DIM }
     /// finish_next's out projection operands (BF16 weight, gated rows, K) when it reads the gated
-    /// rows (VADE_W2_TP_PROJ=2 splits it); None while a fused scan packed its input.
+    /// rows (the tensor split splits it); None while a fused scan packed its input.
     pub(super) fn out_operands(&self, s: &GdnScratch<'_>) -> Option<(u64, u64, usize)> {
         s.packed_out.get().is_none().then(|| (self.out, s.gated.device_address(), self.heads * DIM))
     }

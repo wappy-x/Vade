@@ -141,15 +141,11 @@ fn launch_preview_summarizes_requested_settings_before_any_connection() {
         (vec!["--context", "262144", "--output", "16384"], "1", vec!["  Context           262144 tokens\n  Output limit      16384 tokens\n", "  Concurrent chats  engine-admitted\n"]),
         (vec!["--chats", "4", "--context", "8192"], "1", vec!["  Context           8192 tokens\n  Output limit      8192 tokens\n"]),
         (vec!["--mtp", "0", "--context", "4096", "--output", "2048"], "1", vec!["  Context           4096 tokens\n  Output limit      2048 tokens\n", "  Drafting request  MTP 0\n"]),
-        (vec!["--sparks", "2", "--chats", "4"], "0", vec!["  Machines          spark, peer\n", "  Transport         TCP\n", "  Concurrent chats  4\n"]),
+        (vec!["--sparks", "2", "--chats", "4"], "1", vec!["  Machines          spark, peer\n", "  Transport         RDMA\n", "  Concurrent chats  4\n"]),
         (vec!["--sparks", "2"], "1", vec!["  Machines          spark, peer\n", "  Transport         RDMA\n"]),
     ] {
-        // Two Sparks over TCP run the layer pipeline only when it is named.
-        let path = if rdma == "0" { "pipeline" } else { "" };
-        let mut command = f.command();
-        command.args(["up", "--dry-run"]).args(flags).env("VADE_CONFIG", &config).env("SEQPAR_RDMA", rdma).env_remove("MTP");
-        if path.is_empty() { command.env_remove("VADE_W2_PATH"); } else { command.env("VADE_W2_PATH", path); }
-        let output = command.output().unwrap();
+        let output = f.command().args(["up", "--dry-run"]).args(flags)
+            .env("VADE_CONFIG", &config).env("SEQPAR_RDMA", rdma).env_remove("MTP").output().unwrap();
         assert!(output.status.success(), "{}", safe(&output.stderr));
         let stdout = safe(&output.stdout);
         for text in expected { assert!(stdout.contains(text), "missing {text:?} in {stdout}"); }
@@ -157,6 +153,9 @@ fn launch_preview_summarizes_requested_settings_before_any_connection() {
         assert!(stdout.contains("  Endpoint          http://localhost:18080/v1\n"));
         assert!(!f.0.join("state").exists() && !f.0.join("home").exists());
     }
+    // Two FP4-Local Sparks run the tensor split, which needs RDMA: the preview refuses TCP.
+    let output = f.command().args(["up", "--dry-run", "--sparks", "2"]).env("VADE_CONFIG", &config).env("SEQPAR_RDMA", "0").env_remove("MTP").output().unwrap();
+    assert!(!output.status.success() && safe(&output.stderr).contains("needs RDMA"), "{}", safe(&output.stderr));
 }
 
 #[test]

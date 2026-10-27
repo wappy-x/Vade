@@ -9,7 +9,7 @@
 //! | VADE_MTP_CONF | 0.4: a proposal stops at drafter p < 0.4 | off (p in [0, 1) sets another threshold) |
 //! | VADE_FLASHNEXT_DRAFT_VOCAB | 65536: drafter argmax over ids below 65536 (the full head when the vocabulary is smaller) | 0: full head |
 //! | VADE_VERIFY_MX4, VADE_VERIFY_MX4_PART, VADE_VERIFY_MX4_MIXED, VADE_VERIFY_MX_SOLO97 | 1: exact direct-input / solo entries | 0 |
-//! | VADE_FLASHNEXT_MTP_DEPTH | 7 on one Spark and on the VADE_W2_PP pipeline | 3 |
+//! | VADE_FLASHNEXT_MTP_DEPTH | 7 on one Spark and on the pipeline service | 3 |
 //!
 //! Old default in one line: VADE_FLASHNEXT_DRAFT_FP4=0 VADE_FLASHNEXT_DRAFT_MX8_LAYER=0
 //! VADE_MTP_CONF=off VADE_FLASHNEXT_DRAFT_VOCAB=0 VADE_VERIFY_MX4=0 VADE_VERIFY_MX4_PART=0

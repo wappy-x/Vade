@@ -866,7 +866,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         self.retained = tokens.len();
         Ok(())
     }
-    /// VADE_W2_PP_MTP=1 back: GDN rollback storage for `rows` verify rows at `pos` (the back
+    /// Pipeline back: GDN rollback storage for `rows` verify rows at `pos` (the back
     /// keeps no draft, token hash or PLE history; the front owns those).
     pub(super) fn prepare_back_verify(&mut self, b: &Backend<'a>, rows: usize) -> Result<()> {
         // The front widens its verify rows for lookup drafts (enable_lookup: at most 16 rows);
@@ -896,7 +896,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         self.retained = rows;
         Ok(())
     }
-    /// VADE_W2_PP_MTP=1 back: keep `position` (the front's commit) of the last verify's rows:
+    /// Pipeline back: keep `position` (the front's commit) of the last verify's rows:
     /// the GDN restore + replay and QSA rewind of commit_mtp, for layers [split, 48).
     pub(super) fn commit_back(&mut self, b: &Backend<'a>, position: usize) -> Result<()> {
         let base = self.pos - self.retained;
@@ -1074,7 +1074,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         }
         let mut work = self.model.take_work(b, self.capacity, 1)?;
         // Replayed rows sit at positions position - prefix .. position (chunk form).
-        // VADE_W2_PP=1 front: only layers [0, split) live on this rank.
+        // Pipeline front: only layers [0, split) live on this rank.
         let layers = 0..self.model.pp_front_split().unwrap_or(LAYERS);
         let replayed = work.replay_gdn(b, self.model, &mut self.gdn_state, rollback, prefix, position - prefix, layers);
         self.model.return_work(work);

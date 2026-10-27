@@ -1,4 +1,4 @@
-//! VADE_W2_TP=1 in-graph mailbox: rows cross between two Sparks inside the CUDA stream.
+//! The tensor split's in-graph mailbox: rows cross between two Sparks inside the CUDA stream.
 //! `tp_mailbox_put` copies one rank's rows (or row halves) into a mapped host slot and then
 //! publishes the slot's sequence word; a host proxy thread forwards the slot over RDMA and
 //! publishes it in the peer's receive slot, where `tp_mailbox_take` waits for the word and

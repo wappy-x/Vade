@@ -1,9 +1,9 @@
-//! VADE_W2_PP=1 cohort rows that cross the layer pipeline: the front's kept rows for the
-//! drafters (VADE_W2_PP_MTP=1) and the back's layers [split, 48) for the front's rows.
+//! Cohort rows that cross the layer pipeline: the front's kept rows for the
+//! drafters and the back's layers [split, 48) for the front's rows.
 use super::*;
 
 impl<'a, 'w> NextSession<'a, 'w> {
-    /// VADE_W2_PP_MTP=1 front: the chat's kept rows (its queued prompt tiles) enter its draft
+    /// Pipeline front: the chat's kept rows (its queued prompt tiles) enter its draft
     /// history before any newer row, on the pooled path as on the tile path (backlog first).
     pub(super) fn ingest_kept(&mut self, b: &Backend<'a>) -> Result<()> {
         if self.draft.is_none() || !self.model.pp_has_kept(self.slot) {
@@ -17,7 +17,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         model.return_work(work);
         result
     }
-    /// VADE_W2_PP_MTP=1 front: kept rows of the chat's queued prompt tiles enter its draft
+    /// Pipeline front: kept rows of the chat's queued prompt tiles enter its draft
     /// history first, in order, as world 1 observes each tile; uploaded through the MoE output
     /// buffer (idle once the layers ran) in chunks of the workspace's rows.
     #[allow(clippy::too_many_arguments)]
@@ -81,7 +81,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         }
         model.pp_collect_final(b, &mut work.residual, count)
     }
-    /// VADE_W2_PP=1 back: layers [split, 48) for the front's prompt rows (the residual
+    /// Pipeline back: layers [split, 48) for the front's prompt rows (the residual
     /// arrives at layer `split` and leaves after layer 47). Positions advance like the front's.
     pub(crate) fn pp_back_rows(
         b: &Backend<'a>,

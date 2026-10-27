@@ -9,8 +9,7 @@ the [first-run guide](../../harness/docs/first-run.md) instead.
 
 With a controller config selected through `VADE_CONFIG`, `vade up` starts
 FP4-Local on one Spark (`--fp4-local` is optional). `vade up --sparks 2` runs
-it as a tensor split: both Sparks work on every token, with every proven level
-on (`VADE_W2_PATH=pipeline`, a debug switch, runs the layer pipeline instead).
+it as a tensor split, the only two-Spark path: both Sparks work on every token.
 `vade up --sparks N` with N from 3 to 24 runs it as a layer pipeline: each
 Spark holds a slice of the model's layers and passes its result to the next
 one. Any other count is
@@ -48,8 +47,8 @@ that many distinct --hosts."
    `export SEQPAR_RDMA=0` in the controller's shell **before you install**, and
    keep it set for `install`, `up` and `doctor`. `SEQPAR_RDMA=1` makes RDMA
    required; leave it unset to keep the RDMA default. Any other value is
-   refused. Two Sparks over TCP also need `VADE_W2_PATH=pipeline`: the tensor
-   split needs RDMA, so they run the layer pipeline.
+   refused. Two Sparks need RDMA: the tensor split has no TCP form, so
+   `vade up --sparks 2` refuses `SEQPAR_RDMA=0`.
 4. Run `vade install --dry-run` to preview, then `vade install` to stage the
    programs. It needs Rust, SSH and the GPU already working and the model
    files already verified; it doesn't set up the OS or download weights.
@@ -85,5 +84,5 @@ a bare `vade up` always means FP4-Local.
 - **Larger chains** ran in the published
   [four-VM benchmark cards](../../bench/receipts/2026-10-24/README.md), but
   each new layout still needs its own exactness check on real hardware.
-  Neither the host tests nor these runs cover two Sparks over TCP or a fresh
+  Neither the host tests nor these runs cover a fresh
   download and install.

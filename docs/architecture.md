@@ -498,17 +498,17 @@ top of that, the engine has three behaviors of its own
   maximize the expected committed tokens per millisecond, from that
   request's acceptance so far and the measured costs
   ([`draft.rs`](../engine/crates/engine/src/draft.rs)), up to a ceiling of 7
-  tokens, on one Spark and on the layer pipeline.
+  tokens, on one Spark, on the tensor split and on the layer chain.
 - **Cohort drafting.** With several chats at once, the release server starts
   in a guarded mode that drafts for groups of up to eight chats, on one Spark
-  and on the two-Spark pipeline, keeping each step's verify rows within the
+  and on the two-Spark tensor split, keeping each step's verify rows within the
   width of the row kernels. (The library's older automatic mode, which some
   engine notes still describe, stopped at five.)
 - **A cost guard.** With many chats at once, the engine compares the
   measured cost per token with and without drafting, and serves chats without
   drafting when that is at least 8 % cheaper per token
   ([`flash-serve.rs`](../engine/crates/tp/src/bin/flash-serve.rs)). On the
-  two- and four-Spark layer pipelines by default, and with
+  two-Spark tensor split and the four-Spark layer chain by default, and with
   `VADE_MTP_COHORT=wide` on one Spark, five to eight chats instead draft three
   tokens each in one 32-row verify step, and this guard is opt-in;
   `VADE_MTP_COHORT=off` on every pipeline Spark brings the guard back
@@ -529,15 +529,12 @@ dimensions, gathers the results in a fixed order, and can divide the
 linear-attention heads and the vocabulary head too
 ([`next_tp.rs`](../engine/crates/engine/src/flash/next_tp.rs),
 [`next_tp_heads.rs`](../engine/crates/engine/src/flash/next_tp_heads.rs)).
-It is the two-Spark default: at startup each rank sets every proven level
-that is unset (`VADE_W2_TP=1`, `VADE_W2_TP_WIRE=write`, `VADE_W2_TP_PROJ=3`,
-`VADE_W2_TP_HEAD=1`; these names are temporary)
+It is the only two-Spark path, and every proven level is the only code: no
+environment name selects or tunes a level
 ([`settings.rs`](../engine/crates/tp/src/flash/settings.rs)). The split keeps
 the layer pipeline's links, recipe and session protocol, so the pipeline
-below is also its frame. The engine reference describes the settings and its
-limits ([two-Spark tensor split](../engine/docs/next-http.md)).
-`VADE_W2_PATH=pipeline`, a debug switch, runs the two-stage layer pipeline
-instead until that code is removed.
+below is also its frame. The engine reference describes the split and its
+limits ([two-Spark tensor split](../engine/docs/next-http.md)). It needs RDMA.
 
 A Spark has one GPU and one pool of memory. To use three or more, Vade splits
 the model by layers, not by matrices. Each Spark runs one
@@ -576,20 +573,15 @@ unchanged, so the pipeline does the same arithmetic as a single Spark
 ([`next_pp.rs`](../engine/crates/engine/src/flash/next_pp.rs)). Drafting stays
 available because verification rows cross the pipeline like any other rows.
 
-**Choosing the layout.** Two Sparks run the tensor split by default. Longer
-chains are opt-in with `VADE_W2_PP=1`, which `vade up --sparks N` sets for
-you when N is above two
-([`settings.rs`](../engine/crates/tp/src/flash/settings.rs),
-[`plan.rs`](../cli/src/app/plan.rs)):
-
-| `VADE_W2_PP` | Two Sparks | More than two Sparks |
-| --- | --- | --- |
-| unset | Tensor split (`VADE_W2_PATH=pipeline`: layer pipeline) | Older tensor-map rank path (four Sparks only) |
-| `0` | Older tensor-map rank path | Older tensor-map rank path (four Sparks only) |
-| `1` | Layer pipeline | N-stage chain |
+**Choosing the layout.** The engine chooses the path itself; no switch selects
+it ([`settings.rs`](../engine/crates/tp/src/flash/settings.rs)). FP4-Local on
+two Sparks runs the tensor split; on three or more it runs the N-stage chain;
+with `--tensor-map` on four Sparks it runs the older rank path. FP8 keeps its
+ring. The serving receipt names the path and why (`vade.numerics.path` and
+`path_reason`).
 
 **Transport.** Decode steps and short prompt tiles travel on a polled RDMA
-(RoCE) wire, while queued prompt tiles stay on TCP; a TCP-only chain is also
+(RoCE) wire, while queued prompt tiles stay on TCP; a TCP-only chain of three or more Sparks is also
 supported ([`next_service.rs`](../engine/crates/tp/src/flash/next_service.rs),
 [FP4-Local launch](../cli/docs/fp4-local.md)). The pipeline's recipe, which
 covers drafting across stages, queued prompt tiles, the RDMA wire, 2048-row

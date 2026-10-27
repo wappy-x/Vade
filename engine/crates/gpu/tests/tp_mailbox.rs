@@ -1,4 +1,4 @@
-//! VADE_W2_TP=1 mailbox wrappers refuse a mailbox or rows from another Backend (context).
+//! The tensor split's mailbox wrappers refuse a mailbox or rows from another Backend (context).
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "skipped: no GPU; requires CUDA"]

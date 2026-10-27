@@ -213,16 +213,6 @@ pub(crate) fn workspace_owner(capacities: impl Iterator<Item = usize>) -> Result
 /// Actual Next GDN owners retain four raw convolution slots per layer.
 #[cfg(any(target_os = "linux", test))]
 pub(crate) const RECURRENT_BYTES: usize = 36 * (48 * 128 * 128 + (2 * 16 + 48) * 128 * 4) * 4;
-/// VADE_W2_PP_STAGE_STATE: unset/1 = each rank allocates and funds session GDN/QSA state
-/// for its own layers only (NextModel::own_stage_state), 0 = every layer on every rank.
-/// Part of the pipeline recipe, so all ranks agree before they link.
-pub fn pp_stage_state() -> Result<bool> {
-    match std::env::var("VADE_W2_PP_STAGE_STATE").as_deref() {
-        Err(std::env::VarError::NotPresent) | Ok("1") => Ok(true),
-        Ok("0") => Ok(false),
-        _ => Err("VADE_W2_PP_STAGE_STATE must be unset, 0 or 1".into()),
-    }
-}
 
 /// Session KV + recurrent bytes a rank funds for the layers it owns: `kv` is the
 /// loader plan's KV for all twelve QSA layers (every 4th). All 48 owned: exactly
@@ -243,7 +233,7 @@ fn owned_state_bytes_split_whole_model_state_across_stages() {
         assert_eq!(stages.iter().sum::<usize>(), kv + RECURRENT_BYTES, "world {world}");
         assert!(stages.iter().all(|&b| b == stages[0]), "world {world}: {stages:?}");
     }
-    // An uneven split (VADE_W2_PP_SPLIT) still sums to the whole model's state.
+    // An uneven cut (the tensor split's) still sums to the whole model's state.
     assert_eq!(owned_state_bytes(kv, 0..20) + owned_state_bytes(kv, 20..48), kv + RECURRENT_BYTES);
     assert_eq!(owned_state_bytes(kv, 0..24), kv / 2 + RECURRENT_BYTES / 2);
 }

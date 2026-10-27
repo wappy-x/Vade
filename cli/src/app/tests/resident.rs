@@ -1,7 +1,7 @@
 //! Resident reuse rejects changed configuration and preserves owned state.
 use super::*;
 
-pub(super) fn assert_refused_without_touching_resident(f: &mut Fixture, options: &UpOptions, change: &str) {
+fn assert_refused_without_touching_resident(f: &mut Fixture, options: &UpOptions, change: &str) {
     let saved = fs::read(f.app.config.state_dir.join("session.conf")).unwrap();
     for command in [
         Command::Up(options.clone()),
@@ -205,8 +205,9 @@ fn legacy_ownership_records_refuse_reuse_but_still_allow_owned_cleanup() {
 fn changed_transport_refuses_reuse_after_loading_the_saved_record() {
     const CASE: &str = "VADE_TEST_RESIDENT_TRANSPORT";
     if let Ok(previous) = std::env::var(CASE) {
-        let mut f = Fixture::fp4(2, false);
-        let options = fp4_options(&["--sparks", "2"]);
+        // An FP8 pair: two FP4-Local Sparks refuse TCP before any launch (tests/two_spark.rs).
+        let mut f = Fixture::new(2, false);
+        let options = legacy_options();
         // Construct the launch under the other transport without mutating the
         // test process environment shared by parallel tests.
         let mut session = f
@@ -227,9 +228,7 @@ fn changed_transport_refuses_reuse_after_loading_the_saved_record() {
     for (previous, current) in [("0", "1"), ("1", "0")] {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "app::tests::resident_tests::changed_transport_refuses_reuse_after_loading_the_saved_record", "--nocapture"])
-            .env(CASE, previous).env("SEQPAR_RDMA", current)
-            // Two Sparks over TCP run the layer pipeline only when it is named; both launches name it.
-            .env("VADE_W2_PATH", "pipeline").output().unwrap();
+            .env(CASE, previous).env("SEQPAR_RDMA", current).output().unwrap();
         assert!(
             output.status.success(),
             "{}{}",

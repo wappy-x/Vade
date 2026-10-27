@@ -79,9 +79,9 @@ fn graph_allowance_is_the_funded_decode_graph_term() {
 pub(crate) struct Pooled<'a> {
     graph: [Option<(DecodeGraph<'a>, DecodeGraph<'a>)>; 2],
     capture_retry: [crate::flash_next_rows::CaptureBackoff; 2],
-    /// VADE_W2_PP=1 front: mixer + head + positions after the back's rows return.
+    /// Pipeline front: mixer + head + positions after the back's rows return.
     fin: [Option<DecodeGraph<'a>>; 2],
-    /// VADE_W2_PP=1 back: layers [split, 48) + positions.
+    /// Pipeline back: layers [split, 48) + positions.
     back: [Option<DecodeGraph<'a>>; 2],
     work: Workspace<'a>,
     slots: DeviceVector<'a>,
@@ -387,7 +387,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 layer: 0,
                 rows: width as u32,
             };
-            // VADE_W2_PP=1 front: the tail graph stops at `split`; `fin` runs the head after
+            // Pipeline front: the tail graph stops at `split`; `fin` runs the head after
             // the back's rows return (otherwise `end` is 48 and nothing changes).
             let split = model.pp_front_split();
             let end = split.unwrap_or(LAYERS);
@@ -480,7 +480,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 if s.draft.is_none() {
                     continue;
                 }
-                // VADE_W2_PP_MTP=1: kept rows (queued prompt tiles) precede this row in the history.
+                // Kept rows (queued prompt tiles) precede this row in the history.
                 if split.is_some() {
                     s.ingest_kept(b)?;
                 }
@@ -519,7 +519,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
     }
 }
 impl<'a, 'w> NextSession<'a, 'w> {
-    /// VADE_W2_PP=1 back: one pooled decode step over layers [split, 48) for the front's
+    /// Pipeline back: one pooled decode step over layers [split, 48) for the front's
     /// cohort (same padded width; this rank's own slots), residual in and out.
     pub(in super::super) fn pp_back_pooled(
         b: &Backend<'a>,

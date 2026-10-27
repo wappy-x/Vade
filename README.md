@@ -165,7 +165,7 @@ and how to change it. The ones you meet first:
 - **The agent needs 8192 tokens of context.** Below that, chat on the Spark
   falls back to plain chat, and chat from a controller stops with an error.
 - **Two Sparks make one chat faster; four do not yet.** Two Sparks run the
-  tensor split by default, with no settings to set: both work on every token.
+  tensor split, the only two-Spark path, with no settings to set: both work on every token.
   In the 2026-10-27 cards, one chat with drafting ON wrote 100.4 and 99.7 tok/s
   of code on two pairs, against 76.7 on one Spark in the v0.1.0 card. Four or
   more Sparks run the layer pipeline: each Spark holds a run of the model's
@@ -311,10 +311,10 @@ and 21.60 s. The drafting-OFF cards and the full tables are on the
 `vade up --sparks 2` runs the tensor split. These RigMark cards ran on two of
 our DGX Sparks on 2026-10-26, drafting ON (the default), context 32768,
 greedy decoding and thinking OFF. The split row is main `262b0c3` with the
-split's four levels set by hand, the same four that are now the default. The
+split's four levels set by hand, the same four that are now the only code. The
 pipeline row is the path two Sparks ran before, measured on main `99e8f62`
-the same afternoon; `VADE_W2_PATH=pipeline` still selects it, for a short
-time.
+the same afternoon. That path no longer exists: the tensor split is the only
+two-Spark path.
 
 | Two DGX Sparks | Prose tok/s | Code tok/s | Structured tok/s | 1 chat tok/s | 4 chats tok/s | 8 chats tok/s | First token, cold 8192-token prompt (s) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

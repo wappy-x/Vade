@@ -1,4 +1,4 @@
-//! VADE_W2_PP_RDMA=1: the layer pipeline's polled message wire over one RoCE RC queue
+//! Over RDMA: the layer pipeline's polled message wire over one RoCE RC queue
 //! pair (spark-seqpar's mailbox slot API). Two receive slots stay posted; one send slot.
 //! Each side has at most one message in flight, so two receive slots never run short.
 use spark_seqpar::transport::RdmaEndpoint;
@@ -17,7 +17,7 @@ pub struct RdmaWire {
     slot: usize,
     sends: usize,
     arrived: VecDeque<(usize, usize)>,
-    /// VADE_W2_PP_TIMEOUT_MS: the longest a send waits for the previous one to complete.
+    /// LINK_TIMEOUT: the longest a send waits for the previous one to complete.
     limit: Duration,
 }
 

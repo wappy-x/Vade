@@ -12,13 +12,8 @@
 use super::*;
 use crate::next_bw::bw_route_rows;
 
-/// Prompt rows per chunk (VADE_W2_CHUNK=1..CHUNK_MAX overrides; 1 = one token per step).
-pub(super) fn chunk_rows() -> usize {
-    std::env::var("VADE_W2_CHUNK")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .map_or(crate::next_http::CHUNK, |v| v.clamp(1, crate::next_http::CHUNK_MAX))
-}
+/// Prompt rows per chunk.
+pub(super) fn chunk_rows() -> usize { crate::next_http::CHUNK }
 /// next_native::project over n row-major rows in groups of at most 16 (its M limit);
 /// each row's output is the same as its own M-row launch.
 fn project_rows(b: &Backend<'_>, matrices: &[(Matrix, u64, u64)], n: usize) -> Result<()> {

@@ -1,4 +1,4 @@
-//! VADE_W2_TP=1 in-graph mailbox, host side (std only; the mapped allocation and the
+//! The tensor split's in-graph mailbox, host side (std only; the mapped allocation and the
 //! kernel launches are spark-gpu-probe driver::TpMailbox): mapped host slots that kernels fill and drain inside the
 //! stream (tp_mailbox_put / tp_mailbox_take), and the one host endpoint a proxy thread uses
 //! to move each slot over RDMA. The host side touches the mapping only as `[AtomicU32]`:
@@ -19,7 +19,7 @@ pub const SEND_SEQ: usize = 0;
 pub const SEND_LEN: usize = 16;
 pub const RECV_SEQ: usize = 32;
 pub const ERROR: usize = 64;
-/// VADE_W2_TP_WIRE=write: host-owned staging words the NIC reads (never written by a kernel):
+/// The write wire: host-owned staging words the NIC reads (never written by a kernel):
 /// FLAG_OUT + slot holds the sequence word a message's second write puts in the peer's RECV_SEQ,
 /// FAIL_OUT the 1 a failing rank writes into the peer's ERROR word.
 pub const FLAG_OUT: usize = 96;
@@ -36,7 +36,7 @@ pub const WIDE: usize = 129;
 /// CTA on GB10 (tp-gather-bench, 2026-10-26), so fewer CTAs that copy more each wait less.
 pub const TAKE_CTAS: usize = 130;
 
-/// VADE_W2_TP_DOORBELL=wait: the host's count of queued puts, which lets the write doorbell block
+/// The host's count of queued puts, which lets the write doorbell block
 /// (thread park, a futex on Linux) while every queued message is posted, instead of polling. The
 /// GPU cannot wake a host thread, but the host queues each put before the GPU publishes it.
 #[derive(Default)]
@@ -105,7 +105,7 @@ impl<'m> TpMailboxHost<'m> {
     }
     /// The put launches' bell, when this view has it.
     pub fn bell(&self) -> Option<&'m Bell> { self.bell }
-    /// The mailbox's words, for the one-sided wire that registers them (VADE_W2_TP_WIRE=write).
+    /// The mailbox's words, for the one-sided wire that registers them (the write wire).
     pub fn words(&self) -> &'m [AtomicU32] { self.mailbox }
     /// Send slot `slot`'s first word and receive slot `slot`'s first word.
     pub fn send_slot(&self, slot: usize) -> usize { HEADER + slot * self.slot_words }
@@ -134,7 +134,7 @@ impl<'m> TpMailboxHost<'m> {
     pub fn error(&self) -> bool { self.mailbox[ERROR].load(Ordering::Acquire) != 0 }
 }
 
-/// VADE_W2_TP_WIRE=write: what the doorbell needs from its queue pair (crate::tp_rdma::TpRdma).
+/// The write wire: what the doorbell needs from its queue pair (crate::tp_rdma::TpRdma).
 pub trait TpDoorbell {
     /// Words `from` to the peer's words from `to`, then staging word `flag` to the peer's word
     /// `flag_to`, in that order; the second write completes with id `id`.
@@ -148,7 +148,7 @@ pub trait TpDoorbell {
 /// at a time and then yielding the core (yield_now: any runnable thread goes first), then sleeps
 /// with a doubling backoff up to `idle_max`; a slot's previous message must complete within
 /// `reuse` (RC retries included), and after a failure the ERROR write to the peer gets `notify`.
-/// `rest` (VADE_W2_TP_DOORBELL=wait; None: poll as above): while no queued message is waiting to be
+/// `rest` (Some: park; None: poll as above): while no queued message is waiting to be
 /// posted and every posted one completed, block on the mailbox's Bell for at most `rest` at a time
 /// instead; the `active` window and the backoff then cover only queued messages the GPU has not
 /// published yet.
@@ -436,7 +436,7 @@ mod tests {
         assert!(!torn.load(Ordering::Relaxed), "a NIC read a slot while its GPU rewrote it");
         assert!(!TpMailboxHost::new(&m0, slot_words).error() && !TpMailboxHost::new(&m1, slot_words).error());
     }
-    /// VADE_W2_TP_DOORBELL=wait: with nothing queued the doorbell parks (no polling), a queued put
+    /// With nothing queued the doorbell parks (no polling), a queued put
     /// wakes it and its message is posted, it parks again once that write completed, and after stop
     /// an unpark ends it at once (its own recheck is 60 s away here).
     #[test]

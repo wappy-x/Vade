@@ -393,7 +393,7 @@ const TILED_HC_UP_ROWS: usize = 512;
 pub(super) fn next_rows_group(b: &Backend<'_>, x: u64, cols: usize, tokens: usize, rows: [(u64, u64, usize); 4]) -> Result<()> {
     next_rows_group_at(b, x, cols, tokens, rows.map(|r| (r.0, r.1, r.2, r.2)))
 }
-/// next_rows_group with each output's row stride (weight, output, rows, stride): VADE_W2_TP_PROJ
+/// next_rows_group with each output's row stride (weight, output, rows, stride): the tensor split
 /// launches a rank's row half of a matrix into its columns of the full-width output.
 pub(super) fn next_rows_group_at(b: &Backend<'_>, x: u64, cols: usize, tokens: usize, rows: [(u64, u64, usize, usize); 4]) -> Result<()> {
     // Prompt tiles share one packed input and the tiled launches (HC injection + down).

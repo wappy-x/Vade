@@ -575,7 +575,7 @@ impl<'a> Workspace<'a> {
         if pack_route {
             b.offer_dense_planes(self.gate.device_address(), 640, count, dense_planes);
         }
-        // Shared is the eleventh row in each token's partials, after experts (VADE_W2_TP_PROJ=2:
+        // Shared is the eleventh row in each token's partials, after experts (the tensor split:
         // this rank's rows, the columns its finish reads).
         let shared = self.expert_out.device_address() + (10 * H * 4) as u64 - tp.map_or(0, |t| t.routed());
         let (weight, shared, rows) = tp.map_or((addr.shared[2], shared, H), |t| t.shared_rows(addr.shared[2], shared, 640));
@@ -728,10 +728,10 @@ impl<'a, 'w> NextSession<'a, 'w> {
         if count > crate::flash_next_rows::prompt_tile() {
             return Err("Flash-Next execution tile exceeds the prompt tile".into());
         }
-        // VADE_W2_PP=1 front: layers [split, 48) run on the back rank (MTP verify with VADE_W2_PP_MTP=1).
+        // Pipeline front: layers [split, 48) run on the back rank (MTP verify included).
         let part = match model.pp_front_split().or(model.tp_part(b, sessions, &spans, verify)?) {
             None => Part::Whole,
-            Some(_) if verify && !model.pp_mtp() => return Err("VADE_W2_PP serves plain decoding only (VADE_W2_PP_MTP=0)".into()),
+            Some(_) if verify && !model.pp_mtp() => return Err("this pipeline serves plain decoding only (MTP verify=0)".into()),
             Some(split) => Part::Front(split),
         };
         model.tp_gdn_frame(b, sessions, count)?;
@@ -753,7 +753,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             s.head.take_split();
         }
         // VADE_MTP_GRAPH=0: the eager build of `execute`, which holds no segment code.
-        // VADE_W2_PP stages capture their own layers' segments; each closes before the exchange.
+        // Pipeline stages capture their own layers' segments; each closes before the exchange.
         let result = if verify && mtp_graph() {
             Self::execute::<true>(b, &mut work, sessions, tokens, &spans, output, verify, part).inspect_err(|_| b.abort_segment())
         } else {
@@ -826,7 +826,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
     ) -> Result<()> {
         let model = sessions[0].model;
         let count = spans.last().unwrap().end;
-        // Layers this rank runs: all of them (world 1), [0, split) on the VADE_W2_PP front
+        // Layers this rank runs: all of them (world 1), [0, split) on the pipeline front
         // (the back's rows come back before the tail), [split, 48) on the back (no tail).
         let (first, end) = match part {
             Part::Whole => (0, LAYERS),
@@ -887,7 +887,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         let unobserved = !sessions.iter().any(|s| s.layer_bytes.is_some() || s.dump.is_some());
         let mut pending_moe: Option<usize> = None;
         // VADE_MTP_GRAPH (default on): a verify pass whose shape was seen before captures its stage's layers after
-        // the first as segments (one Spark: 1-47 in four; VADE_W2_PP: clipped at the split, 24 eager on the back),
+        // the first as segments (one Spark: 1-47 in four; the pipeline: clipped at the split, 24 eager on the back),
         // launching each (updated in place when its topology holds) while the host captures the next. The captured
         // work is the eager work in the same order. A shape's first pass runs eagerly; the oldest shape retires.
         let graphed = if GRAPH && verify && unobserved && !model.tp_host_pass(count) {
@@ -1318,12 +1318,12 @@ impl<'a, 'w> NextSession<'a, 'w> {
                     .zip(spans)
                     .map(|(s, span)| [s.slot, s.capacity as u32, s.pos as u32, span.len() as u32])
                     .collect();
-                // VADE_W2_PP_MTP=1: a chat at position 0 drops rows a previous chat on its slot left.
+                // A chat at position 0 drops rows a previous chat on its slot left.
                 if model.pp_mtp() {
                     sessions.iter().filter(|s| s.pos == 0).for_each(|s| model.pp_drop_kept(s.slot));
                 }
-                // VADE_W2_PP_ASYNC=1: a tile without projection is queued; the back runs it while
-                // this rank runs the next tile. With VADE_W2_PP_MTP=1 the back keeps the rows of
+                // A tile without projection is queued; the back runs it while
+                // this rank runs the next tile. The back keeps the rows of
                 // chats that draft; they come back with the next synchronous reply and enter each
                 // chat's draft history before its next observe (observe_kept).
                 if !output && model.pp_async() {
@@ -1431,7 +1431,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
     }
 }
 
-/// Which layers `execute` runs on this rank (VADE_W2_PP=1 splits them at `split`).
+/// Which layers `execute` runs on this rank (the pipeline splits them at `split`).
 #[derive(Clone, Copy)]
 pub(super) enum Part<'p> {
     Whole,

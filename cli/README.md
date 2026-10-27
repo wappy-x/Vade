@@ -302,7 +302,9 @@ built into `vade` itself; see [the suite guide](../engine/tools/bench/README.md)
 `vade status --json` prints one `vade.status.v1` JSON object. It reports the
 saved phase, model and build, settings, endpoint, the process identity of each
 rank, observed health, and errors. Ownership tokens and credentials are never
-status fields.
+status fields. When several Sparks serve one model, `multi_spark_path` gives
+the path that the engine chose (`path`), why (`path_reason`) and, for the
+tensor split, its levels. It is `null` when the engine does not report a path.
 
 All checks share one 15-second deadline, so an unreachable rank cannot add
 another timeout to every later check.

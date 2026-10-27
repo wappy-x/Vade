@@ -1,5 +1,6 @@
-//! Two Sparks run the tensor split by default: vade up sets no level itself, carries this
-//! shell's debug switch and temporary level names to both ranks, and status names the path.
+//! Two FP4-Local Sparks run the tensor split, the only two-Spark path for FP4-Local: vade up sets
+//! no level, carries no path switch and refuses TCP before any remote call; FP8 pairs keep their
+//! ring and may use TCP. Status names the path and why for every group of Sparks on one model.
 use super::*;
 
 /// The worker start requests of one `vade up --sparks N`.
@@ -9,145 +10,103 @@ fn starts(f: &Fixture) -> Vec<Fields> {
 }
 
 #[test]
-fn switches_name_every_value_and_the_pipeline_has_one_way_in() {
-    use std::env::VarError::{NotPresent, NotUnicode};
-    let env = |pairs: &'static [(&'static str, &'static str)]| move |name: &str| pairs.iter().find(|(n, _)| *n == name).map(|(_, v)| v.to_string()).ok_or(NotPresent);
-    let unset: Vec<(&str, Option<String>)> = plan::TWO_SPARK_SWITCHES.iter().map(|&name| (name, None)).collect();
-    assert_eq!(plan::two_spark_switches(env(&[]), true), Ok(unset.clone()));
-    let mut path = unset.clone(); path[0].1 = Some("pipeline".into());
-    assert_eq!(plan::two_spark_switches(env(&[("VADE_W2_PATH", "pipeline")]), true), Ok(path.clone()));
-    // TCP runs the pipeline only when it is named.
-    assert_eq!(plan::two_spark_switches(env(&[("VADE_W2_PATH", "pipeline")]), false), Ok(path));
-    assert!(plan::two_spark_switches(env(&[]), false).unwrap_err().contains("needs RDMA"));
-    let mut levels = unset.clone(); levels[1].1 = Some("1".into()); levels[3].1 = Some("2".into());
-    assert_eq!(plan::two_spark_switches(env(&[("VADE_W2_TP_PROJ", "2"), ("VADE_W2_TP", "1"), ("VADE_W2_PP", "1")]), true), Ok(levels));
-    // The old spelling of the pipeline, and a split forced against it, stop vade up.
-    assert!(plan::two_spark_switches(env(&[("VADE_W2_TP", "0")]), true).unwrap_err().contains("VADE_W2_PATH=pipeline"));
-    assert!(plan::two_spark_switches(env(&[("VADE_W2_TP", "0"), ("VADE_W2_PATH", "pipeline")]), true).is_err());
-    assert!(plan::two_spark_switches(env(&[("VADE_W2_TP", "1"), ("VADE_W2_PATH", "pipeline")]), true).unwrap_err().contains("disagree"));
-    for path in ["", "split", "Pipeline"] {
-        let read = move |name: &str| if name == "VADE_W2_PATH" { Ok(path.to_string()) } else { Err(NotPresent) };
-        assert!(plan::two_spark_switches(read, true).unwrap_err().contains("VADE_W2_PATH must be unset or pipeline"), "{path:?}");
-    }
-    let read = |name: &str| if name == "VADE_W2_TP_HEAD" { Err(NotUnicode("x".into())) } else { Err(NotPresent) };
-    assert!(plan::two_spark_switches(read, true).unwrap_err().contains("VADE_W2_TP_HEAD"));
-}
-
-#[test]
-fn a_changed_two_spark_switch_is_a_different_launch() {
-    const CASE: &str = "VADE_TEST_TWO_SPARK_FINGERPRINT";
-    if std::env::var(CASE).is_ok() {
-        // The resident started with no switch set; this shell now sets one level.
-        let mut f = Fixture::fp4(2, false);
-        let options = fp4_options(&["--sparks", "2"]);
-        let mut session = f.app.requested_session_with(&options, None, true, |_| Err(std::env::VarError::NotPresent)).unwrap();
-        assert_ne!(session.launch_fingerprint, f.app.requested_session(&options, None, true).unwrap().launch_fingerprint);
-        f.app.resolve_fabric(&mut session).unwrap();
-        f.app.resolve_rank_paths(&mut session).unwrap();
-        session.phase = "running".into();
-        for rank in &mut session.ranks {
-            rank.attempted = true;
-            f.app.runner.started.insert(rank.machine.name.clone());
-        }
-        session.save(&f.app.config.state_dir).unwrap();
-        super::resident_tests::assert_refused_without_touching_resident(&mut f, &options, "changed VADE_W2_TP_PROJ");
-        return;
-    }
-    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-    command.args(["--exact", "app::tests::two_spark::a_changed_two_spark_switch_is_a_different_launch", "--nocapture"]).env(CASE, "1");
-    for name in plan::TWO_SPARK_SWITCHES { command.env_remove(name); }
-    command.env_remove("SEQPAR_RDMA").env("VADE_W2_TP_PROJ", "2");
-    let result = command.output().unwrap();
-    assert!(result.status.success(), "{}{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
-    assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"), "the child ran the case");
-}
-
-#[test]
-fn up_with_two_sparks_leaves_the_split_levels_to_the_engine() {
-    const CASE: &str = "VADE_TEST_TWO_SPARK_SWITCHES";
+fn up_with_two_sparks_runs_the_split_over_rdma_only() {
+    const CASE: &str = "VADE_TEST_TWO_SPARK_SPLIT";
     if let Ok(case) = std::env::var(CASE) {
         let mut f = Fixture::fp4(2, false);
-        if case == "bad" {
-            let error = f.app.up(&fp4_options(&["--sparks", "2"])).unwrap_err();
-            assert!(["VADE_W2_PATH must be unset or pipeline", "VADE_W2_TP=0 no longer", "needs RDMA"].iter().any(|text| error.contains(text)), "{error}");
-            assert!(starts(&f).is_empty() && f.app.runner.started.is_empty());
+        if case == "tcp" {
+            // The refusal is local: no SSH, fabric, artifact, path or GPU check, no ownership record.
+            for options in [fp4_options(&["--sparks", "2"]), fp4_options(&["--sparks", "2", "--mtp", "0"])] {
+                let error = f.app.up(&options).unwrap_err();
+                assert!(error.contains("needs RDMA") && error.contains("FP4-Local"), "{error}");
+                assert!(f.app.runner.calls.is_empty(), "{:?}", f.app.runner.calls.iter().map(|c| &c.label).collect::<Vec<_>>());
+                assert!(f.app.runner.ports.is_empty() && f.app.runner.started.is_empty() && !f.recorded());
+            }
+            // FP8 keeps its ring on two Sparks, and TCP serves it.
+            let mut fp8 = Fixture::new(2, false);
+            fp8.app.up(&legacy_options()).unwrap();
+            let requests = starts(&fp8);
+            assert_eq!(requests.len(), 2);
+            assert!(requests.iter().all(|request| request["env.SEQPAR_RDMA"] == "0"), "{requests:?}");
             return;
         }
         f.app.up(&fp4_options(&["--sparks", "2"])).unwrap();
         let requests = starts(&f);
         assert_eq!(requests.len(), 2);
         for request in &requests {
-            let carried: Vec<_> = request.keys().filter(|key| key.starts_with("env.VADE_W2_TP") || key.starts_with("env.VADE_W2_PATH")).cloned().collect();
-            let removed: Vec<_> = request.keys().filter_map(|key| key.strip_prefix("env_unset.")).filter(|name| plan::TWO_SPARK_SWITCHES.contains(name)).collect();
-            match case.as_str() {
-                "empty" => {
-                    assert!(carried.is_empty(), "{carried:?}");
-                    assert_eq!(removed.len(), 5, "every unset switch is removed on the rank: {removed:?}");
-                }
-                _ => {
-                    assert_eq!(carried, ["env.VADE_W2_PATH", "env.VADE_W2_TP_PROJ"]);
-                    assert_eq!((request["env.VADE_W2_PATH"].as_str(), request["env.VADE_W2_TP_PROJ"].as_str()), ("pipeline", "2"));
-                    assert_eq!(removed, ["VADE_W2_TP", "VADE_W2_TP_HEAD", "VADE_W2_TP_WIRE"]);
-                }
-            }
-            assert!(!request.contains_key("env.VADE_W2_PP") && !request.contains_key("env_unset.VADE_W2_PP_SPLIT"));
+            assert!(request.keys().all(|key| !key.contains("VADE_W2")), "{request:?}");
+            assert_eq!(request["env.SEQPAR_RDMA"], "1");
         }
-        // A chain of four keeps its own recipe; the 2-Spark switches stay out of it.
+        // A chain of four carries no path switch either: the engine chooses the chain.
         let mut chain = Fixture::fp4(4, false);
         chain.app.up(&fp4_options(&["--sparks", "4", "--mtp", "0"])).unwrap();
-        assert!(starts(&chain).iter().all(|request| request.keys().all(|key| !key.contains("VADE_W2_TP") && !key.contains("VADE_W2_PATH"))));
+        assert!(starts(&chain).iter().all(|request| request.keys().all(|key| !key.contains("VADE_W2"))));
         return;
     }
-    for (case, set) in [("empty", &[][..]), ("pipeline", &[("VADE_W2_PATH", "pipeline"), ("VADE_W2_TP_PROJ", "2")]), ("bad", &[("VADE_W2_PATH", "layer")]),
-        ("bad", &[("VADE_W2_TP", "0")]), ("bad", &[("SEQPAR_RDMA", "0")])] {
+    for (case, rdma) in [("rdma", None), ("rdma", Some("1")), ("tcp", Some("0"))] {
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command.args(["--exact", "app::tests::two_spark::up_with_two_sparks_leaves_the_split_levels_to_the_engine", "--nocapture"]).env(CASE, case);
-        for name in plan::TWO_SPARK_SWITCHES { command.env_remove(name); }
-        command.env_remove("SEQPAR_RDMA");
-        for (name, value) in set { command.env(name, value); }
+        command.args(["--exact", "app::tests::two_spark::up_with_two_sparks_runs_the_split_over_rdma_only", "--nocapture"]).env(CASE, case);
+        match rdma { Some(value) => command.env("SEQPAR_RDMA", value), None => command.env_remove("SEQPAR_RDMA") };
         let result = command.output().unwrap();
         assert!(result.status.success(), "{case}: {}{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"), "the child ran the case");
     }
 }
 
-const SPLIT: &str = r#","vade":{"numerics":{"world_size":2,"topology":"pipeline","path":"tensor_split","tensor_split":{"experts":"output_columns","projection_level":3,"wire":"write","head":"vocabulary_halves"}}}"#;
+const SPLIT: &str = r#","vade":{"numerics":{"world_size":2,"topology":"pipeline","path":"tensor_split","path_reason":"FP4-Local on two Sparks","tensor_split":{"experts":"output_columns","projection_level":3,"wire":"write","head":"vocabulary_halves"}}}"#;
+const CHAIN: &str = r#","vade":{"numerics":{"world_size":4,"topology":"pipeline","path":"layer_pipeline","path_reason":"FP4-Local on three or more Sparks"}}"#;
+const RING: &str = r#","vade":{"numerics":{"world_size":2,"topology":"ring","path":"ring","path_reason":"FP8: the tensor split does not serve FP8"}}"#;
 
-#[test]
-fn status_names_the_two_spark_path_and_its_levels() {
-    use crate::{evals::json::{self, Value}, status::Snapshot};
-    let path = health::TwoSparkPath::from_health(&format!("{{\"status\":\"ready\"{SPLIT}}}")).unwrap();
-    assert_eq!(path.label(), "tensor split (projection level 3, write wire, head split by vocabulary halves)");
-    let pipeline = health::TwoSparkPath::from_health(r#"{"status":"ready","vade":{"numerics":{"path":"layer_pipeline"}}}"#).unwrap();
-    assert_eq!((pipeline.label().as_str(), pipeline.projection_level), ("layer pipeline (VADE_W2_PATH=pipeline, or TCP)", None));
-    assert_eq!(health::TwoSparkPath::from_health(r#"{"status":"ready","vade":{"numerics":{"topology":"local"}}}"#), None);
-    for (extra, row, json_path) in [(SPLIT, "tensor split (projection level 3, write wire, head split by vocabulary halves)", Some("tensor_split")),
-        ("", "not reported by this engine", None)] {
-        let mut f = Fixture::fp4(2, false);
-        f.app.runner.health_extra = extra.into();
-        f.app.up(&fp4_options(&["--sparks", "2"])).unwrap();
-        let capture = crate::output::testing::Capture::default();
-        let printed = capture.bytes.clone();
-        crate::output::with_writer(capture, || f.app.execute(Command::Status)).unwrap();
-        let printed = String::from_utf8(printed.borrow().clone()).unwrap();
-        assert!(printed.contains(&format!("\n  Two-Spark path         {row}\n")), "{printed}");
-        let mut report = Snapshot::new("configured", false);
-        f.app.status_snapshot(&mut report).unwrap();
-        let value = json::parse(&report.finish(Duration::ZERO).0).unwrap();
-        match json_path {
-            Some(name) => {
-                assert_eq!(value["two_spark_path"]["path"].as_str(), Some(name));
-                assert_eq!((&value["two_spark_path"]["projection_level"], value["two_spark_path"]["wire"].as_str(), value["two_spark_path"]["head"].as_str()),
-                    (&Value::from(3.0), Some("write"), Some("vocabulary_halves")));
-            }
-            None => assert_eq!(value["two_spark_path"], Value::Null),
-        }
-    }
-    // One Spark has no 2-Spark path row.
-    let mut one = Fixture::fp4(1, false);
-    one.app.runner.health_extra = SPLIT.into();
-    one.app.up(&fp4_options(&[])).unwrap();
+/// `vade status` text and `vade status --json` of a running launch.
+fn status(f: &mut Fixture) -> (String, crate::evals::json::Value) {
     let capture = crate::output::testing::Capture::default();
     let printed = capture.bytes.clone();
-    crate::output::with_writer(capture, || one.app.execute(Command::Status)).unwrap();
-    assert!(!String::from_utf8(printed.borrow().clone()).unwrap().contains("Two-Spark path"));
+    crate::output::with_writer(capture, || f.app.execute(Command::Status)).unwrap();
+    let printed = String::from_utf8(printed.borrow().clone()).unwrap();
+    let mut report = crate::status::Snapshot::new("configured", false);
+    f.app.status_snapshot(&mut report).unwrap();
+    (printed, crate::evals::json::parse(&report.finish(Duration::ZERO).0).unwrap())
+}
+
+#[test]
+fn status_names_every_multi_spark_path_and_its_reason() {
+    use crate::evals::json::{self, Value};
+    let split_levels = "projection level 3, write wire, head split by vocabulary halves";
+    let cases: [(&str, fn() -> Fixture, UpOptions, &str, String, &str); 4] = [
+        ("split", || Fixture::fp4(2, false), fp4_options(&["--sparks", "2"]), SPLIT,
+            format!("tensor split (FP4-Local on two Sparks; {split_levels})"),
+            r#"{"path":"tensor_split","path_reason":"FP4-Local on two Sparks","projection_level":3.0,"wire":"write","head":"vocabulary_halves"}"#),
+        ("chain", || Fixture::fp4(4, false), fp4_options(&["--sparks", "4"]), CHAIN,
+            "layer chain (FP4-Local on three or more Sparks)".into(),
+            r#"{"path":"layer_pipeline","path_reason":"FP4-Local on three or more Sparks","projection_level":null,"wire":null,"head":null}"#),
+        ("FP8 ring", || Fixture::new(2, false), legacy_options(), RING,
+            "ring (FP8: the tensor split does not serve FP8)".into(),
+            r#"{"path":"ring","path_reason":"FP8: the tensor split does not serve FP8","projection_level":null,"wire":null,"head":null}"#),
+        ("older engine", || Fixture::fp4(2, false), fp4_options(&["--sparks", "2"]), "", "not reported by this engine".into(), "null"),
+    ];
+    for (name, fixture, options, extra, row, expected) in cases {
+        let mut f = fixture();
+        f.app.runner.health_extra = extra.into();
+        f.app.up(&options).unwrap();
+        let (printed, value) = status(&mut f);
+        assert!(printed.contains(&format!("\n  Multi-Spark path       {row}\n")), "{name}: {printed}");
+        assert_eq!(value["ready"], Value::Bool(true), "{name}");
+        assert_eq!(value["multi_spark_path"], json::parse(expected).unwrap(), "{name}");
+    }
+    // The split without a reason (an older receipt), and the rank path, which only --tensor-map selects.
+    let split = health::MultiSparkPath::from_health(&format!("{{\"status\":\"ready\"{}}}", SPLIT.replace(r#""path_reason":"FP4-Local on two Sparks","#, ""))).unwrap();
+    assert_eq!(split.label(), format!("tensor split ({split_levels})"));
+    let rank = health::MultiSparkPath::from_health(r#"{"vade":{"numerics":{"path":"rank_path","path_reason":"FP4-Local with --tensor-map"}}}"#).unwrap();
+    assert_eq!(rank.label(), "rank path (FP4-Local with --tensor-map)");
+    assert_eq!(health::MultiSparkPath::from_health(r#"{"status":"ready","vade":{"numerics":{"topology":"local"}}}"#), None);
+    // One Spark and independent replicas serve no model together: no path row or field.
+    for (count, options) in [(1, fp4_options(&[])), (2, fp4_options(&["--replicas", "2"]))] {
+        let mut f = Fixture::fp4(count, false);
+        f.app.runner.health_extra = SPLIT.into();
+        f.app.up(&options).unwrap();
+        let (printed, value) = status(&mut f);
+        assert!(!printed.contains("Multi-Spark path"), "{printed}");
+        assert_eq!(value.get("multi_spark_path"), None, "{value:?}");
+        f.app.down().unwrap();
+    }
 }

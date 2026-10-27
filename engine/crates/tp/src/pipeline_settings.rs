@@ -7,7 +7,7 @@
 use std::ffi::OsString;
 use spark_serve::mtp_batch::{Experiments, Mode};
 
-const COHORT_NAMES: [&str; 6] = ["VADE_W2_PP_C8", "VADE_MTP_BATCH/VADE_MTP_C8 (effective)",
+const COHORT_NAMES: [&str; 6] = ["pipeline cohort guard (route)", "VADE_MTP_BATCH/VADE_MTP_C8 (effective)",
     "VADE_POOL_GRAPH_FALLBACK", "VADE_MTP_COHORT_ADAPT", "VADE_C8_GUARD_ROBUST", "VADE_MTP_COHORT"];
 
 pub(super) fn names() -> Vec<&'static str> {
@@ -16,7 +16,7 @@ pub(super) fn names() -> Vec<&'static str> {
     let mut names = vec![
         "FLASH_NVFP4", "FLASH_BF16_EXPERTS", "FLASH_VERIFY_FULL", "FLASH_MTP_SAMPLED",
         "SPARK_KV_BF16", "SPARK_ADAPTIVE_PREFILL",
-        "VADE_W2_PP_MTP", "VADE_W2_PP_ASYNC", "VADE_W2_PP_SPLIT", "VADE_W2_PP_STAGE_STATE", "VADE_PROMPT_TILE",
+        "VADE_PROMPT_TILE",
         "VADE_FLASHNEXT_MTP_DEPTH", "VADE_FLASHNEXT_MX8", "VADE_FLASHNEXT_DRAFT_MX8",
         "VADE_FLASHNEXT_DRAFT_FP4", "VADE_FLASHNEXT_DRAFT_VOCAB", "VADE_MTP_CONF",
         "VADE_QSA_TC", "VADE_GDN_CHUNK", "VADE_GDN_PREP_SPLIT", "VADE_GDN_VERIFY_COPY",
@@ -87,7 +87,7 @@ pub(super) fn describe(name: &str, value: &[u8]) -> String {
 fn cohort_identity_uses_the_frozen_recipe_without_rereading_its_switches() {
     let parsed = Experiments::startup_with(2, true, |_| Ok(None)).unwrap();
     let identity = fingerprints(parsed, |name| {
-        assert!(!["VADE_W2_PP_C8", "VADE_MTP_BATCH", "VADE_MTP_C8", "VADE_POOL_GRAPH_FALLBACK",
+        assert!(!["VADE_MTP_BATCH", "VADE_MTP_C8", "VADE_POOL_GRAPH_FALLBACK",
             "VADE_MTP_COHORT_ADAPT", "VADE_C8_GUARD_ROBUST", "VADE_MTP_COHORT"].contains(&name), "reread {name}");
         None
     }).unwrap();

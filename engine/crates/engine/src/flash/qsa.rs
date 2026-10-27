@@ -661,7 +661,7 @@ impl<'a> QsaState<'a> {
         Ok(next)
     }
     pub(super) fn rewind(&mut self, position: usize) { self.past = position; self.pending = None; }
-    /// VADE_W2_TP=1 state handoff: keys, values and raw index rows 0..past, the row widths, and `past`.
+    /// Tensor split state handoff: keys, values and raw index rows 0..past, the row widths, and `past`.
     pub(super) fn handoff(&mut self) -> Result<([&mut DeviceVector<'a>; 3], [usize; 3], &mut usize)> {
         if self.pending.is_some() { return Err("QSA handoff with a pending write".into()); }
         let width = if self.keys.len() < DIM { 0 } else { self.keys.len() / self.capacity };
@@ -917,7 +917,7 @@ impl<'a, 'w> Qsa<'a, 'w> {
     pub fn weight_bytes(&self) -> usize { self.weight_bytes }
     pub fn kv_bytes(&self) -> usize { 2 * (self.capacity * (self.plan.kv_heads.end - self.plan.kv_heads.start) as usize * DIM * 4).max(4).div_ceil(64) * 64 }
     pub fn index_bytes(&self) -> usize { self.capacity * 128 * 4 }
-    /// VADE_W2_TP_PROJ=2: project_batch with this rank's row half of the q/gate projection (query
+    /// The tensor split: project_batch with this rank's row half of the q/gate projection (query
     /// heads [rank * h / 2, (rank + 1) * h / 2), a head's q and gate rows adjacent) into its columns
     /// of the pass's q/gate rows, index, k and v whole, in the Next group's order with its per-row
     /// chains. Some(q/gate width) when run, None off the Next group path.
@@ -937,7 +937,7 @@ impl<'a, 'w> Qsa<'a, 'w> {
             whole(self.v, batch.v.device_address(), keys * DIM)])?;
         Ok(Some(n))
     }
-    /// The pass's q/gate rows (VADE_W2_TP_PROJ=2 swaps their halves).
+    /// The pass's q/gate rows (the tensor split swaps their halves).
     pub(super) fn batch_qg<'b>(batch: &'b mut QsaBatch<'a>) -> &'b mut DeviceVector<'a> { &mut batch.qg }
     pub(super) fn project_batch(&self, b: &Backend<'_>, batch: &mut QsaBatch<'_>, input: &DeviceVector<'_>, count: usize) -> Result<()> {
         let heads = (self.plan.query_heads.end - self.plan.query_heads.start) as usize;
@@ -1044,7 +1044,7 @@ impl<'a, 'w> Qsa<'a, 'w> {
         b.zero_vector(&mut batch.gated.slice(row * width..(row + 1) * width)?)
     }
     /// finish_batch's out projection operands on the Next path (BF16 weight, gated rows, K;
-    /// VADE_W2_TP_PROJ=2 splits it); None on the other paths.
+    /// the tensor split splits it); None on the other paths.
     pub(super) fn out_operands(&self, batch: &QsaBatch<'_>) -> Option<(u64, u64, usize)> {
         let heads = (self.plan.query_heads.end - self.plan.query_heads.start) as usize;
         (self.next && heads != 0).then(|| (self.out, batch.gated.device_address(), heads * DIM))

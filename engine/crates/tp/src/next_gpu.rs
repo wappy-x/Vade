@@ -311,7 +311,7 @@ impl<'a> Arena<'a> {
 /// flash_next_routed_activate: RN BF16 A rows of the mixed F32 input, next_pair weights,
 /// one ascending m16n8k16 K16 chain from zero, BF16 gate/up, the same SwiGLU and a BF16
 /// down boundary (fp4_experts.rs), so each owned expert's BF16 rows keep their bits and the
-/// host fold below is unchanged. VADE_W2_BW=0 keeps flash_next_routed (A/B checks).
+/// host fold below is unchanged.
 /// fp4_bw_down's output layout (fp4_experts.rs write_slots): slot `token * 11 + rank`, each slot
 /// an FP32-sized stride of 2560 words whose first 1280 hold the row's BF16 pairs.
 const BW_SLOTS: usize = 11;
@@ -324,7 +324,6 @@ struct BwScratch<'a> {
 impl<'a> BwScratch<'a> {
     fn new(b: &Backend<'a>, arena: &Arena<'a>) -> Result<Option<Self>> {
         if arena.bw_tables.is_empty()
-            || std::env::var("VADE_W2_BW").is_ok_and(|v| v == "0")
             || !b.has_flash("fp4_bw_gate_c1")
             || !b.has_flash("fp4_bw_down")
         {

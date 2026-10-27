@@ -37,10 +37,9 @@ impl Metadata {
         let experts = std::env::var_os("FLASH_BF16_EXPERTS");
         let sampled = std::env::var_os("FLASH_MTP_SAMPLED");
         let nvfp4 = plan.format == WeightFormat::Nvfp4;
-        // VADE_W2_TP=1 (flash-serve pins it at world 2 FP4-Local unless VADE_W2_PATH=pipeline, and
-        // refuses it elsewhere): the tensor split's recipe and levels, so its receipts differ from
-        // the pipeline's. The engine checks each level's value at startup.
-        let tensor = pipeline_path(topology, |name| std::env::var(name).ok());
+        // The path flash-serve chose and why; the tensor split names its recipe, so its
+        // receipts differ from the layer chain's and the ring's.
+        let tensor = path_field(spark_engine::flash_tp_switch::path());
         let sha = env!("VADE_BUILD_GIT_SHA");
         #[cfg(target_os = "linux")]
         let layer_sha = quote(&sha256::digest(spark_gpu_probe::layer_ptx()?.to_bytes()));
@@ -110,21 +109,15 @@ impl Metadata {
     }
 }
 
-/// VADE_W2_TP_PROJ's level for the receipt: unset and "0" are 0; the engine refuses any other
-/// value than 1, 2 or 3 at startup.
-fn projection_level(value: Option<&str>) -> u8 {
-    match value { Some("1") => 1, Some("2") => 2, Some("3") => 3, _ => 0 }
-}
-/// The receipt's path at a pipeline topology, read after flash-serve's pins: `"path"` names it
-/// (the tensor split or the layer pipeline), and the tensor split adds its recipe with each level
-/// (projection level, the exchange wire, the verify head kept whole or split by vocabulary halves).
-fn pipeline_path(topology: &str, read: impl Fn(&str) -> Option<String>) -> String {
-    if topology != "pipeline" { return String::new(); }
-    if read("VADE_W2_TP").as_deref() != Some("1") { return ",\"path\":\"layer_pipeline\"".into(); }
-    format!(",\"path\":\"tensor_split\",\"tensor_split\":{{\"experts\":\"output_columns\",\"long_prompts\":\"pipeline_tiles_then_state_handoff\",\"projection_level\":{},\"wire\":\"{}\",\"head\":\"{}\"}}",
-        projection_level(read("VADE_W2_TP_PROJ").as_deref()),
-        if read("VADE_W2_TP_WIRE").as_deref() == Some("write") { "write" } else { "proxy" },
-        if read("VADE_W2_TP_HEAD").as_deref() == Some("1") { "vocabulary_halves" } else { "whole" })
+/// The receipt's path line: `"path"` names the multi-Spark path the engine chose and
+/// `"path_reason"` says why (spark_engine::flash_tp_switch::Path); the tensor split adds its
+/// recipe. One Spark adds nothing.
+fn path_field(path: Option<spark_engine::flash_tp_switch::Path>) -> String {
+    let Some(path) = path else { return String::new() };
+    let split = if path == spark_engine::flash_tp_switch::Path::TENSOR_SPLIT {
+        ",\"tensor_split\":{\"experts\":\"output_columns\",\"long_prompts\":\"pipeline_tiles_then_state_handoff\",\"projection_level\":3,\"wire\":\"write\",\"head\":\"vocabulary_halves\"}"
+    } else { "" };
+    format!(",\"path\":{},\"path_reason\":{}{split}", quote(path.name), quote(path.reason))
 }
 fn render(fixed: &str, directory: &str, receipt: Option<&Receipt>, state: &str, source: &str) -> String {
     format!("{{{fixed},\"checkpoint\":{{\"directory\":{directory},\"sha256\":{},\"hash_state\":\"{state}\",\"hash_source\":\"{source}\"}}}}",
@@ -137,21 +130,14 @@ fn log_receipt(receipt: &Receipt, started: Instant, source: &str) {
 
 #[cfg(test)]
 mod tests {
-    /// Each projection level gives its own tensor split recipe in the receipt.
+    /// The receipt names the path the engine chose and why; the split adds its recipe; one Spark adds nothing.
     #[test]
-    fn receipt_projection_level_covers_every_value() {
-        assert_eq!([None, Some("0"), Some("1"), Some("2"), Some("3")].map(projection_level), [0, 0, 1, 2, 3]);
-    }
-    /// The receipt names the pipeline topology's path and each split level; other topologies add nothing.
-    #[test]
-    fn receipt_names_the_path_and_the_split_levels() {
-        let env = |pairs: &'static [(&'static str, &'static str)]| move |name: &str| pairs.iter().find(|(n, _)| *n == name).map(|(_, v)| v.to_string());
-        let all = &[("VADE_W2_TP", "1"), ("VADE_W2_TP_WIRE", "write"), ("VADE_W2_TP_PROJ", "3"), ("VADE_W2_TP_HEAD", "1")];
-        assert_eq!(pipeline_path("pipeline", env(all)), ",\"path\":\"tensor_split\",\"tensor_split\":{\"experts\":\"output_columns\",\"long_prompts\":\"pipeline_tiles_then_state_handoff\",\"projection_level\":3,\"wire\":\"write\",\"head\":\"vocabulary_halves\"}");
-        assert!(pipeline_path("pipeline", env(&[("VADE_W2_TP", "1")])).ends_with("\"projection_level\":0,\"wire\":\"proxy\",\"head\":\"whole\"}"));
-        assert_eq!(pipeline_path("pipeline", env(&[])), ",\"path\":\"layer_pipeline\"");
-        assert_eq!(pipeline_path("pipeline", env(&[("VADE_W2_TP", "0"), ("VADE_W2_TP_PROJ", "3")])), ",\"path\":\"layer_pipeline\"");
-        assert_eq!(pipeline_path("local", env(all)), "");
+    fn receipt_names_the_path_and_the_split_recipe() {
+        use spark_engine::flash_tp_switch::Path;
+        assert_eq!(path_field(Some(Path::TENSOR_SPLIT)), ",\"path\":\"tensor_split\",\"path_reason\":\"FP4-Local on two Sparks\",\"tensor_split\":{\"experts\":\"output_columns\",\"long_prompts\":\"pipeline_tiles_then_state_handoff\",\"projection_level\":3,\"wire\":\"write\",\"head\":\"vocabulary_halves\"}");
+        assert_eq!(path_field(Some(Path::LAYER_PIPELINE)), ",\"path\":\"layer_pipeline\",\"path_reason\":\"FP4-Local on three or more Sparks\"");
+        assert_eq!(path_field(Some(Path::RING)), ",\"path\":\"ring\",\"path_reason\":\"FP8: the tensor split does not serve FP8\"");
+        assert_eq!(path_field(None), "");
     }
     use super::*;
     use std::io::Write;

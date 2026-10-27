@@ -22,20 +22,10 @@ const ADVANCE: u64 = 7;
 /// arg = count | head << 16 (head: the last row's prediction is returned).
 const CHUNK_OP: u64 = 8;
 pub const CHUNK: usize = 128;
-/// Longest chunk a rank can hold: VADE_W2_CHUNK=129..256 (default off) splits prompts into
-/// longer chunks, so each layer's host exchange covers more rows; the per-row arithmetic is unchanged.
+/// Longest chunk a rank can hold: the CHUNK command's payload bound.
 pub const CHUNK_MAX: usize = 256;
-/// Prompt rows per CHUNK command: CHUNK, or VADE_W2_CHUNK when it asks for more (<= CHUNK_MAX).
-/// Smaller VADE_W2_CHUNK values keep CHUNK here and only shrink the rank chunk (row fallback).
-pub fn prompt_chunk() -> usize {
-    static ROWS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *ROWS.get_or_init(|| {
-        std::env::var("VADE_W2_CHUNK")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .map_or(CHUNK, |v| v.clamp(CHUNK, CHUNK_MAX))
-    })
-}
+/// Prompt rows per CHUNK command.
+pub fn prompt_chunk() -> usize { CHUNK }
 pub trait Causal {
     fn token(&mut self, token: u32) -> Result<u32>;
     fn advance(&mut self, token: u32) -> Result<()> {

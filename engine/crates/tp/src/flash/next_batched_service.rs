@@ -41,7 +41,7 @@ pub fn run(
     let ab_ptx = spark_gpu_probe::driver::ab_ptx_from_env()?;
     if let Some((stream, _)) = pp.as_mut() {
         spark_tp::runtime::verify_pipeline_artifacts(stream, &ptx, root, ab_ptx.as_deref(), experiments,
-            spark_engine::flash::next_batched::pp_timeout_from_env()?)?;
+            spark_engine::flash::next_batched::PP_LINK_TIMEOUT)?;
     }
     let ceiling = std::env::var("SEQPAR_MEMORY_BYTES")
         .ok()
@@ -76,14 +76,15 @@ pub fn run(
                 "flashnext startup cache_files={files} cache_bytes_advised={bytes} cache_errors={errors} budget_bytes={budget}"
             );
             let load_start = std::time::Instant::now();
-            // VADE_FLASHNEXT_MTP_DEPTH=1..=15 (unset = 7 on one Spark and on the VADE_W2_PP
+            // VADE_FLASHNEXT_MTP_DEPTH=1..=15 (unset = 7 on one Spark and on the pipeline
             // pipeline; spark_engine::flash_draft_stack): resident MTP depth. Requests keep
             // mtp_depth 0..=3; deeper drafts serve only VADE_MTP_ADAPT's default-depth requests.
             let depth = spark_engine::flash_draft_stack::resident_mtp_depth(pp.is_some())?;
-            // Rank 0 projects the head on every world (VADE_W2_PP front too): it funds the bounded head.
+            // Rank 0 projects the head on every world (the pipeline front too): it funds the bounded head.
             let model = NextModel::load_with_checkpoint_role(backend, root, Some(checkpoint), options, depth, false)?;
-            // VADE_W2_TP=1: rank 0 runs every layer itself, so it keeps all 48 layers' state.
-            if let Some((_, stage)) = pp.as_ref() && tp.is_none() && spark_engine::flash_next_rows::pp_stage_state()? {
+            // The tensor split: rank 0 runs every layer itself, so it keeps all 48 layers' state.
+            // A chain rank funds session state for its own layers only.
+            if let Some((_, stage)) = pp.as_ref() && tp.is_none() {
                 model.own_stage_state(stage.first, stage.end, &stage.intervals())?;
             }
             // VADE_FLASHNEXT_KV_RESERVE (default on; =0 off): freed session KV arenas stay in
@@ -144,7 +145,7 @@ pub fn run(
                 model.set_pp_front(stream, fast, stage, context, active, tile, shutdown)?;
                 eprintln!("flashnext pp front ranks={} split={} context={context} active={active} tile={tile}", stage.ranks, stage.end);
             }
-            // VADE_W2_TP=1: the swap wire's TCP link stays open while serving; the proxy thread
+            // The tensor split: the swap wire's TCP link stays open while serving; the proxy thread
             // owns the wire.
             let (_tp_link, tp_wire) = match tp {
                 Some((link, swap)) => { model.set_tp(backend, 0, link)?; (None::<std::net::TcpStream>, Some(swap)) }
@@ -217,7 +218,7 @@ pub fn run(
                     requests,
                 );
                 proxy_stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                // A waiting doorbell (VADE_W2_TP_DOORBELL=wait) may be parked: wake it to see stop.
+                // A waiting doorbell may be parked: wake it to see stop.
                 if let Some(p) = &proxy { p.thread().unpark(); }
                 let proxied = proxy.map_or(Ok(()), |p| p.join().map_err(|_| "tensor split proxy panicked".to_string()).and_then(|r| r));
                 served.and_then(|s| proxied.map(|()| s))
@@ -226,7 +227,7 @@ pub fn run(
                 spark_gpu_probe::teardown::arm();
             }
             if served.is_ok() && model.pp_failed() {
-                return Err("VADE_W2_PP: the pipeline link failed; the front stopped".into());
+                return Err("the pipeline link failed; the front stopped".into());
             }
             served
         })
@@ -263,11 +264,11 @@ pub fn run_back(
     // the front, which cannot finish its identity handshake after a tail mismatch.
     if let Some((stream, _)) = next.as_mut() {
         spark_tp::runtime::verify_pipeline_artifacts(stream, &ptx, root, None, experiments,
-            spark_engine::flash::next_batched::pp_timeout_from_env()?)?;
+            spark_engine::flash::next_batched::PP_LINK_TIMEOUT)?;
     }
     // Workers have no A/B cohort scheduler; the front's fingerprint includes its A/B PTX.
     spark_tp::runtime::verify_pipeline_artifacts(&mut stream, &ptx, root, None, experiments,
-        spark_engine::flash::next_batched::pp_timeout_from_env()?)?;
+        spark_engine::flash::next_batched::PP_LINK_TIMEOUT)?;
     let ceiling = std::env::var("SEQPAR_MEMORY_BYTES")
         .ok()
         .map(|s| s.parse::<usize>().map_err(|_| "invalid SEQPAR_MEMORY_BYTES"))
@@ -287,9 +288,8 @@ pub fn run_back(
         let depth = spark_engine::flash_draft_stack::resident_mtp_depth(true)?;
         let mut model = NextModel::load_with_checkpoint_role(backend, root, Some(checkpoint), options, depth, true)?;
         model.disable_prompt_frontend()?;
-        if spark_engine::flash_next_rows::pp_stage_state()? {
-            model.own_stage_state(stage.first, stage.end, &stage.intervals())?;
-        }
+        // Each back rank funds session state for its own layers only.
+        model.own_stage_state(stage.first, stage.end, &stage.intervals())?;
         let kv_reserve = match std::env::var("VADE_FLASHNEXT_KV_RESERVE").as_deref() {
             Ok("0") => false,
             Err(std::env::VarError::NotPresent) | Ok("1") => true,

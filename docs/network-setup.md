@@ -12,7 +12,7 @@ and the [Glossary](GLOSSARY.md) has them all.
 > - Give each cable **two small private subnets** (one per rail) and **MTU 9000**.
 > - Check it: a jumbo ping, then an RDMA test. Expect **about 196 Gb/s per cable**.
 > - Vade finds the RDMA devices by itself from the addresses you give it.
-> - **No RDMA?** Vade can run in [TCP mode](../INSTALL.md#rdma-or-tcp) (`SEQPAR_RDMA=0`). Our cloud GB10 cards used TCP over 200G links; we have not measured TCP over ordinary Ethernet.
+> - **No RDMA?** Vade can run in [TCP mode](../INSTALL.md#rdma-or-tcp) (`SEQPAR_RDMA=0`), except FP4-Local on two Sparks: the tensor split needs RDMA. Our cloud GB10 cards used TCP over 200G links; we have not measured TCP over ordinary Ethernet.
 
 <br>
 
@@ -91,15 +91,17 @@ Each Spark runs one **rank** (one engine process), and **rank 0** answers HTTP.
 
 ### FP4-Local, the current checkpoint
 
-FP4-Local fits on one Spark. With more Sparks, Vade splits it by layers: each
-Spark holds a block of consecutive layers, runs them, and passes the result to
-the next Spark. On two Sparks this is the **layer pipeline**; on more than two
-it is a **chain**.
+FP4-Local fits on one Spark. On two Sparks, Vade runs the **tensor split**:
+both Sparks work on every token. The split needs RDMA, so `vade up` refuses
+TCP (`SEQPAR_RDMA=0`) on two FP4-Local Sparks. With more than two Sparks, Vade
+splits the model by layers: each Spark holds a block of consecutive layers,
+runs them, and passes the result to the next Spark. This is the **chain**. It
+runs over RDMA or TCP.
 
 | Sparks | Layout | Cables | How to start it |
 | --- | --- | --- | --- |
 | **1** | One Spark on its own | none | `vade launch` on the Spark, or `vade up` from a controller |
-| **2** | Layer pipeline | 1 | `vade up --sparks 2` |
+| **2** | Tensor split, over RDMA only | 1 | `vade up --sparks 2` |
 | **3 to 24** | Layer chain, in cable order | one fewer than the Sparks | `vade up --sparks N`, or `--hosts a,b,c` in cable order |
 | **Many chats** | Replicas: a separate one-Spark server on each Spark, behind a local gateway | none | `vade up --replicas N` (2 to 16) |
 

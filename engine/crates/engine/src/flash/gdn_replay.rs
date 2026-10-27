@@ -7,7 +7,7 @@ const WIDTHS: [usize; 3] = [10240, 48, 48];
 pub(in crate::flash) struct GdnReplay<'a> {
     projected: [DeviceVector<'a>; 3],
     rows: usize,
-    /// Per-row words [qkv, a, b] of the captured rows: WIDTHS, or a VADE_W2_TP_PROJ=3 head half's
+    /// Per-row words [qkv, a, b] of the captured rows: WIDTHS, or a tensor split head half's
     /// (Gdn::tape_widths), which fits the same storage.
     widths: [usize; 3],
 }

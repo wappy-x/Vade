@@ -316,10 +316,9 @@ fn fp4_chain_transport_launch_and_failed_start_cleanup_cover_every_rank() {
             assert_eq!(starts.clone().count(), count);
             for start in starts {
                 let request = text::parse(std::str::from_utf8(&start.stdin).unwrap()).unwrap();
-                assert_eq!(request["env.VADE_W2_PP"], "1");
+                assert!(request.keys().all(|key| !key.contains("VADE_W2")), "the engine chooses the chain itself");
                 assert_eq!(request["model_receipt"], "pipeline");
-                assert_eq!(request["env.VADE_W2_PP_RDMA"], expected);
-                assert_eq!(request["env_unset.VADE_W2_PP_SPLIT"], "1");
+                assert_eq!(request["env.SEQPAR_RDMA"], expected);
                 assert_eq!(request["arg.1"], count.to_string());
                 assert_eq!(request["arg.11"], "0");
             }
@@ -693,7 +692,6 @@ fn fp4_transport_selection_controls_both_pipeline_ranks_and_prerequisites() {
             let request = text::parse(std::str::from_utf8(&start.stdin).unwrap()).unwrap();
             assert_eq!(request["env.SEQPAR_RDMA"], expected);
             assert_eq!(request["env.TP_RDMA"], expected);
-            assert_eq!(request["env.VADE_W2_PP_RDMA"], expected);
             assert_eq!(request["model_receipt"], "pipeline");
         }
         for probe in fixture.app.runner.calls.iter().filter(|c| c.label.ends_with(" probe")) {
@@ -701,14 +699,13 @@ fn fp4_transport_selection_controls_both_pipeline_ranks_and_prerequisites() {
         }
         return;
     }
-    for value in [None, Some("0"), Some("1")] {
+    // Two Sparks over TCP are refused (tests/two_spark.rs); chains cover TCP.
+    for value in [None, Some("1")] {
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command.args(["--exact", "app::tests::fp4_transport_selection_controls_both_pipeline_ranks_and_prerequisites", "--nocapture"])
             .env(CASE, value.unwrap_or("1"));
         if let Some(value) = value { command.env("SEQPAR_RDMA", value); }
         else { command.env_remove("SEQPAR_RDMA"); }
-        // Two Sparks over TCP run the layer pipeline only when it is named.
-        if value == Some("0") { command.env("VADE_W2_PATH", "pipeline"); } else { command.env_remove("VADE_W2_PATH"); }
         let result = command.output().unwrap();
         assert!(result.status.success(), "{}{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
     }

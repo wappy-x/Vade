@@ -1,5 +1,5 @@
-//! VADE_W2_TP: the switch, wire kinds and split geometry of the two-rank tensor split
-//! (flash::next_batched::tp), shared with the host-only pipeline protocol build.
+//! The two-rank tensor split (flash::next_batched::tp): its selection, wire kinds and split
+//! geometry, shared with the host-only pipeline protocol build. It is the only 2-Spark path.
 
 /// A verify pass posted to rank 1: it records its GDN tape (pipeline KIND_VERIFY) and acks
 /// without rows, like an asynchronous prompt tile (pipeline KIND_ROWS_ASYNC).
@@ -12,43 +12,37 @@ pub const MAIL: u32 = 1 << 30;
 pub const KIND_HANDOFF: u32 = 8;
 /// Request kind bit: a prompt tile that runs as a pipeline tile (rank 1: layers 24..48).
 pub const TILE: u32 = 1 << 29;
-/// Request kind bit (VADE_W2_TP_PROJ=3): rank 0 runs this one-chat pass's GDN layers by heads,
-/// so rank 1 does too; without it rank 1 keeps the chat's GDN states whole.
+/// Request kind bit: rank 0 runs this one-chat pass's GDN layers by heads, so rank 1 does too;
+/// without it rank 1 keeps the chat's GDN states whole.
 pub const HEADS: u32 = 1 << 28;
+/// The first layer rank 1 runs: rank 0 keeps the frontend and layer 1's PLE (pp::Stage).
+pub const SPLIT: usize = 2;
 
-/// VADE_W2_TP (unset = 0 here): 1 selects the tensor split at world 2. flash-serve pins it to 1
-/// there, with every proven level (tp settings::SPLIT_LEVELS), unless VADE_W2_PATH=pipeline; the
-/// name is temporary. Read once.
-pub fn from_env() -> Result<bool, String> {
-    static ON: std::sync::OnceLock<Result<bool, String>> = std::sync::OnceLock::new();
-    ON.get_or_init(|| parse(std::env::var("VADE_W2_TP").ok().as_deref())).clone()
+/// The multi-Spark path flash-serve chose at startup and why, for the receipt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Path {
+    pub name: &'static str,
+    pub reason: &'static str,
 }
-/// VADE_W2_TP_PROJ=1, 2 or 3 (with VADE_W2_TP=1): the GDN in-projections split too.
-pub fn proj_from_env() -> Result<bool, String> {
-    proj_level_from_env().map(|level| level != 0)
+impl Path {
+    pub const TENSOR_SPLIT: Self = Self { name: "tensor_split", reason: "FP4-Local on two Sparks" };
+    pub const LAYER_PIPELINE: Self = Self { name: "layer_pipeline", reason: "FP4-Local on three or more Sparks" };
+    pub const RANK_PATH: Self = Self { name: "rank_path", reason: "FP4-Local with --tensor-map" };
+    pub const RING: Self = Self { name: "ring", reason: "FP8: the tensor split does not serve FP8" };
 }
-/// VADE_W2_TP_PROJ (unset = 0 here; a split rank pins 3): 1 splits the GDN in-projections by row
-/// halves; 2 also splits the mixers' out projections and the shared expert's down projection; 3
-/// also runs the GDN mixers of one-chat split passes by heads. Read once.
-pub fn proj_level_from_env() -> Result<u8, String> {
-    static LEVEL: std::sync::OnceLock<Result<u8, String>> = std::sync::OnceLock::new();
-    LEVEL.get_or_init(|| parse_level(std::env::var("VADE_W2_TP_PROJ").ok().as_deref())).clone()
+static PATH: std::sync::OnceLock<Option<Path>> = std::sync::OnceLock::new();
+/// flash-serve selects the path once at startup, before anything reads it (None on one Spark).
+/// The tensor split is on for the FP4-Local service at world 2 only. A second selection is refused.
+pub fn select(path: Option<Path>) -> Result<(), String> {
+    PATH.set(path).map_err(|_| "the multi-Spark path is already selected".to_string())
 }
-fn parse_level(value: Option<&str>) -> Result<u8, String> {
-    match value {
-        None | Some("0") => Ok(0),
-        Some("1") => Ok(1),
-        Some("2") => Ok(2),
-        Some("3") => Ok(3),
-        _ => Err("VADE_W2_TP_PROJ must be 0, 1, 2 or 3".into()),
-    }
+/// The selected path (None until flash-serve selects one, and on one Spark).
+pub fn path() -> Option<Path> {
+    PATH.get().copied().flatten()
 }
-fn parse(value: Option<&str>) -> Result<bool, String> {
-    match value {
-        None | Some("0") => Ok(false),
-        Some("1") => Ok(true),
-        _ => Err("VADE_W2_TP must be 0 or 1".into()),
-    }
+/// Whether this process serves the tensor split.
+pub fn on() -> bool {
+    path() == Some(Path::TENSOR_SPLIT)
 }
 
 /// The split's geometry, derived from the checkpoint: residual width (HC branches x hidden),
@@ -159,16 +153,5 @@ mod tests {
         assert!(TpLayout::PROMPT_ROWS <= 16 && TpLayout::PROMPT_ROWS <= TpLayout::ROWS);
         assert!(TpLayout::new(2570, 4, 640, 10, 512).is_err());
         assert!(TpLayout::new(2560, 0, 640, 10, 512).is_err());
-    }
-    #[test]
-    fn switch_accepts_only_zero_one_or_unset() {
-        assert_eq!(parse(None), Ok(false));
-        assert_eq!(parse(Some("0")), Ok(false));
-        assert_eq!(parse(Some("1")), Ok(true));
-        assert!(parse(Some("yes")).is_err());
-        assert!(parse(Some("")).is_err());
-        assert_eq!([None, Some("0"), Some("1"), Some("2"), Some("3")].map(parse_level), [Ok(0), Ok(0), Ok(1), Ok(2), Ok(3)]);
-        assert!(parse_level(Some("4")).is_err());
-        assert!(parse_level(Some("")).is_err());
     }
 }

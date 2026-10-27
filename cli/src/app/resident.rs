@@ -10,16 +10,6 @@ impl<R: Runner> App<R> {
         existing: Option<&Session>,
         rdma: bool,
     ) -> Result<Session, String> {
-        self.requested_session_with(options, existing, rdma, |name| std::env::var(name))
-    }
-    /// `read`: this shell's 2-Spark switches (plan::two_spark_switches), part of the launch.
-    pub(super) fn requested_session_with(
-        &self,
-        options: &UpOptions,
-        existing: Option<&Session>,
-        rdma: bool,
-        read: impl Fn(&str) -> Result<String, std::env::VarError>,
-    ) -> Result<Session, String> {
         // Bare up keeps the recorded launch options, but always rebuilds the
         // request from today's configuration and activated build manifest.
         let mut options = match existing.filter(|_| options.supplied_options.is_empty()) {
@@ -46,6 +36,11 @@ impl<R: Runner> App<R> {
             None => text::random_hex(32)?,
         };
         let mut session = Session::new(&self.config, &options, &manifest, token)?;
+        // Two FP4-Local Sparks run the tensor split, which needs RDMA. Refuse TCP here, before any
+        // remote call or ownership write. FP8 pairs keep their ring and may use TCP.
+        if session.two_sparks() && !rdma {
+            return Err("Two FP4-Local Sparks run the tensor split, which needs RDMA. Unset SEQPAR_RDMA, then run vade up.".into());
+        }
         // Capture before resolving ~/ paths and fabric names: a saved session
         // contains expanded launch paths, while the next request starts with
         // the configured strings. Hash the complete request, excluding only
@@ -86,13 +81,6 @@ impl<R: Runner> App<R> {
             ("rdma", (session.chained() && rdma).to_string()),
         ] {
             fields.insert(key.into(), value);
-        }
-        // Two Sparks: the path and level switches the ranks start with, so a changed one is a
-        // different launch, never the running server.
-        if session.two_sparks() {
-            for (name, value) in plan::two_spark_switches(read, session.chained() && rdma)? {
-                fields.insert(format!("env.{name}"), value.unwrap_or_else(|| "<unset>".into()));
-            }
         }
         session.launch_fingerprint = Some(crate::sha256::sha(text::encode(&fields).as_bytes()));
         Ok(session)

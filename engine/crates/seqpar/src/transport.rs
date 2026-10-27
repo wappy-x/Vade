@@ -21,7 +21,7 @@ mod gather;
 #[cfg(target_os = "linux")]
 #[path = "rdma.rs"]
 mod rdma;
-/// The RC send/receive endpoint (mailbox slot API) for other two-rank links (VADE_W2_PP_RDMA).
+/// The RC send/receive endpoint (mailbox slot API) for other two-rank links (the pipeline wire).
 #[cfg(target_os = "linux")]
 #[allow(unused_imports)] // used by spark-tp through the crate; unused where bins include this module by path
 pub use rdma::Endpoint as RdmaEndpoint;

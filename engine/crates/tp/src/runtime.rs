@@ -501,13 +501,13 @@ mod identity_tests {
             bytes.extend(super::pipeline_settings::fingerprints(parsed, |_| None).unwrap());
             bytes
         };
-        for setting in ["VADE_W2_PP_C8", "VADE_MTP_C8", "VADE_MTP_COHORT_ADAPT", "VADE_C8_GUARD_ROBUST"] {
+        for setting in ["VADE_MTP_C8", "VADE_MTP_COHORT_ADAPT", "VADE_C8_GUARD_ROBUST"] {
             let (front, back) = exchange(2, identity(&[]), 2, identity(&[(setting, "1")]));
             assert!(front.is_ok() && back.is_ok(), "{setting}: {front:?}, {back:?}");
         }
         let (front, back) = exchange(2, identity(&[]), 2, identity(&[("VADE_POOL_GRAPH_FALLBACK", "0")]));
         assert!(front.is_ok() && back.is_ok());
-        for (setting, expected) in [("VADE_W2_PP_C8", "VADE_W2_PP_C8"),
+        for (setting, expected) in [
             ("VADE_MTP_C8", "VADE_MTP_BATCH/VADE_MTP_C8 (effective)"),
             ("VADE_MTP_BATCH", "VADE_MTP_BATCH/VADE_MTP_C8 (effective)"),
             ("VADE_MTP_COHORT_ADAPT", "VADE_MTP_COHORT_ADAPT"),
@@ -519,16 +519,7 @@ mod identity_tests {
                 assert!(error.contains(expected) && error.contains("refusing startup"), "{error}");
                 assert!(!error.contains("sha256:"), "parsed setting should be readable: {error}");
             }
-            if setting == "VADE_W2_PP_C8" {
-                assert!(front.contains("local=1, peer=0"), "{front}");
-                assert!(back.contains("local=0, peer=1"), "{back}");
-            }
         }
-        // Even an explicit plain override cannot hide a different parsed route gate.
-        let (front, back) = exchange(2, identity(&[("VADE_W2_PP_C8", "1"), ("VADE_MTP_BATCH", "0")]),
-            2, identity(&[("VADE_W2_PP_C8", "0"), ("VADE_MTP_BATCH", "0")]));
-        assert!(front.unwrap_err().contains("VADE_W2_PP_C8"));
-        assert!(back.unwrap_err().contains("VADE_W2_PP_C8"));
     }
 
     #[test]

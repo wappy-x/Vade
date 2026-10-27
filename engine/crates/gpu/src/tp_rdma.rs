@@ -1,4 +1,4 @@
-//! VADE_W2_TP_WIRE=write: the RC queue pair that moves tensor split messages with one-sided
+//! The tensor split's write wire: the RC queue pair that moves tensor split messages with one-sided
 //! writes, from this rank's mapped TP mailbox (tp_mailbox_host layout) straight into the peer's.
 //! It registers exactly the mailbox's words (access LOCAL_WRITE | REMOTE_WRITE) and borrows them,
 //! so the registration and the queue pair (both released on drop, queue pair first) never outlive

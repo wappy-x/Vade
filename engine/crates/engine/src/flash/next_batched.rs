@@ -96,9 +96,9 @@ pub struct NextModel<'a> {
     qsa_norms: Vec<Option<DeviceVector<'a>>>,
     ple_global: f32,
     hash: (Vec<i64>, Vec<i64>, Vec<i64>, i64),
-    /// VADE_W2_PP=1 front link (rank 0); None everywhere else (world 1 is unchanged).
+    /// Pipeline front link (rank 0); None everywhere else (world 1 is unchanged).
     pp: RefCell<Option<pp::Link>>, tp: RefCell<Option<tp::Swap<'a>>>, tp_box: std::cell::OnceCell<spark_gpu_probe::driver::TpMailbox<'a>>,
-    /// VADE_W2_PP=1 first back layer on both ranks; 0 = no pipeline.
+    /// Pipeline first back layer on both ranks; 0 = no pipeline.
     pp_split: std::cell::Cell<usize>,
     /// Exclusive last layer owned by a pipeline worker.
     pp_end: std::cell::Cell<usize>,
@@ -108,7 +108,7 @@ pub struct NextModel<'a> {
     state_charge: RefCell<Vec<std::ops::Range<usize>>>,
 }
 impl<'a> NextModel<'a> {
-    /// VADE_W2_PP_STAGE_STATE (unset/1 on, 0 = every layer): a pipeline rank allocates
+    /// A pipeline rank allocates
     /// session GDN/QSA state for its own layers [first, end) only; the other stages' layers
     /// never run on it. Each chat is funded at the costliest of `stages` (every stage's
     /// interval), so every rank admits the same count from the same budget, as with whole
@@ -476,7 +476,7 @@ impl<'a> NextModel<'a> {
                     width: 640,
                     reserved: 0,
                 });
-            } if tp::from_env()? { tp::shifted(&mut descriptors, &tp::layout(&checkpoint.config)?); } // VADE_W2_TP=1: rank 1's halves follow
+            } if crate::flash_tp_switch::on() { tp::shifted(&mut descriptors, &tp::layout(&checkpoint.config)?); } // the tensor split: rank 1's halves follow
             let bytes = unsafe {
                 std::slice::from_raw_parts(
                     descriptors.as_ptr().cast::<u8>(),
@@ -790,7 +790,7 @@ mod execution;
 mod mtp;
 #[path = "next_pp.rs"]
 mod pp; #[path = "next_tp.rs"] mod tp;
-pub use pp::{wire_capacity as pp_wire_capacity, negotiate_capacity as pp_negotiate_capacity, mtp_from_env as pp_mtp_from_env, negotiate_wire as pp_negotiate_wire, split_from_env as pp_split_from_env, timeout_from_env as pp_timeout_from_env, Stage as PpStage, PpWire};
+pub use pp::{wire_capacity as pp_wire_capacity, negotiate_capacity as pp_negotiate_capacity, negotiate_wire as pp_negotiate_wire, LINK_TIMEOUT as PP_LINK_TIMEOUT, Stage as PpStage, PpWire};
 #[path = "next_prefix.rs"]
 mod prefix;
 pub use prefix::{NextPrefix, NextStorage};
@@ -1298,7 +1298,7 @@ impl Drop for NextSession<'_, '_> {
     fn drop(&mut self) {
         if self.slot != 0 {
             self.model.pool.borrow_mut().used[self.slot as usize] = false;
-            // VADE_W2_PP_MTP=1 front: kept rows never outlive their chat.
+            // Pipeline front: kept rows never outlive their chat.
             self.model.pp_drop_kept(self.slot);
         }
     }

@@ -19,7 +19,7 @@ pub fn cache_yield() -> Result<bool, String> {
 pub fn adopt() -> Result<bool, String> {
     switch(ADOPT, std::env::var(ADOPT.0))
 }
-/// The VADE_W2_PP layer pipeline refuses VADE_FLASHNEXT_PREFIX_CACHE=1: run_pp on both ranks
+/// The pipeline service (the tensor split and the layer chain) refuses VADE_FLASHNEXT_PREFIX_CACHE=1: run_pp on both ranks
 /// before they link, FlashNext again on a configured front. A retained prefix, copied or
 /// adopted, holds the front rank's layers [0, split) only. The back keeps no checkpoint of
 /// its layers and accepts a slot by position, so a restored prompt would resume on whatever
@@ -27,7 +27,7 @@ pub fn adopt() -> Result<bool, String> {
 /// checkpoints and restores its own layers.
 pub fn refuse_on_pipeline(prefix_cache: bool) -> Result<(), String> {
     if prefix_cache {
-        return Err("VADE_FLASHNEXT_PREFIX_CACHE=1 serves world 1 only: the VADE_W2_PP pipeline's back rank keeps no prefix checkpoints; unset it or set 0 for the pipeline".into());
+        return Err("VADE_FLASHNEXT_PREFIX_CACHE=1 serves world 1 only: the back rank of two or more Sparks keeps no prefix checkpoints; unset it or set 0 there".into());
     }
     Ok(())
 }
@@ -77,6 +77,6 @@ mod tests {
         // Off: the pipeline starts as before. On: refused, naming the switch and the pipeline.
         assert_eq!(refuse_on_pipeline(false), Ok(()));
         let refusal = refuse_on_pipeline(true).unwrap_err();
-        assert!(refusal.contains("VADE_FLASHNEXT_PREFIX_CACHE=1") && refusal.contains("VADE_W2_PP"), "{refusal}");
+        assert!(refusal.contains("VADE_FLASHNEXT_PREFIX_CACHE=1") && refusal.contains("back rank"), "{refusal}");
     }
 }

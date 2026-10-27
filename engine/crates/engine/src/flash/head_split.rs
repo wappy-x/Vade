@@ -1,4 +1,4 @@
-//! VADE_W2_TP_HEAD=1 (with VADE_W2_TP=1): the verify head of a one-chat pass of
+//! The tensor split's head split: the verify head of a one-chat pass of
 //! 2..=RETAINED_ROWS rows, split by vocabulary halves across the tensor split's two ranks.
 //! Both ranks hold the pass's final residual (every split layer swaps its halves), mix it
 //! (no head weight is read for the mix), and project their half of the head rows with the
@@ -17,11 +17,11 @@ pub(super) fn split_rows(vocabulary: usize) -> usize {
     crate::flash_head_options::split_rows(vocabulary)
 }
 
-/// Both ranks see the same answer for the same pass: the switch, the tensor split, a verify
+/// Both ranks see the same answer for the same pass: the tensor split, a verify
 /// pass of one chat and 1..=RETAINED_ROWS rows that crosses in the mailbox.
 pub(super) fn eligible(model: &NextModel<'_>, chats: usize, count: usize, verify: bool) -> bool {
     verify && chats == 1 && (1..=crate::flash_head_options::RETAINED_ROWS).contains(&count) && model.tp_on()
-        && !model.tp_host_pass(count) && crate::flash_head_options::split_from_env() == Ok(true)
+        && !model.tp_host_pass(count)
 }
 
 impl NextModel<'_> {
@@ -29,7 +29,7 @@ impl NextModel<'_> {
     /// readers: under the bounded head or the split head.
     pub(in super::super) fn retains_head_inputs(&self) -> bool {
         self.head_bounds.is_some()
-            || crate::flash_tp_switch::from_env() == Ok(true) && crate::flash_head_options::split_from_env() == Ok(true)
+            || crate::flash_tp_switch::on()
     }
 }
 

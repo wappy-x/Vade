@@ -24,11 +24,6 @@ fn run() -> Result<(), String> {
     if let Ok(value) = std::env::var("OUTPUT") {
         command.env("FLASH_SERVE_OUTPUT_TOKENS", value);
     }
-    // This launcher's form is the rank path (--tensor-map): world 2 keeps it unless VADE_W2_PP
-    // is set (flash-serve's world-2 default is the layer pipeline).
-    if std::env::var_os("VADE_W2_PP").is_none() {
-        command.env("VADE_W2_PP", "0");
-    }
     Err(command.exec().to_string())
 }
 fn main() {

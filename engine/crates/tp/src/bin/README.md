@@ -19,19 +19,17 @@
 Use the existing positional form with `RANK=0`, `WORLD=1`, a production PTX
 file and the checkpoint directory. `--fp4-local` asserts the checkpoint type;
 the mixed storage metadata also selects the Next backend automatically.
-World 1 keeps the rows/MTP service. World 2 serves the same engine as a two-rank
-layer pipeline by default (rank 0: HTTP, layers [0, 24) and the head; rank 1: the
-rest), with world 1's MTP default, queued prompt tiles, the RDMA wire,
-2048-row prompt tiles and the bounded head on rank 0 (`VADE_W2_PP`, `VADE_W2_PP_MTP`,
-`VADE_W2_PP_ASYNC`, `VADE_W2_PP_RDMA`, `VADE_PROMPT_TILE`, `VADE_HEAD_BOUNDS`; `0` turns
-one off). `VADE_W2_PP=0` at
-world 2, and world 4, select the pinned native rank backend with
-`--tensor-map PATH`; each rank uses the same invocation and only rank zero binds
-HTTP. Other worlds require the explicit pipeline opt-in below.
-
-`VADE_W2_TP=1` (opt-in, world 2 only) keeps the pipeline's links and protocol but
-splits each routed expert by columns across both ranks on every decode and verify
-pass; see [Flash-Next NVFP4 serving](../../../../docs/next-http.md).
+World 1 keeps the rows/MTP service. World 2 serves the same engine as the
+two-rank tensor split, the only two-Spark path: it runs on the layer pipeline's
+links and protocol (rank 1 starts at layer 2) and splits each routed expert by
+columns, the projections and the linear-attention heads across both ranks, with
+world 1's MTP default, queued prompt tiles, the RDMA wire, 2048-row prompt tiles
+and the bounded head (`VADE_PROMPT_TILE`, `VADE_HEAD_BOUNDS`; `0` turns one off).
+At world 2, flash-serve refuses `SEQPAR_RDMA=0` (the split needs RDMA) and
+`--tensor-map`. See [Flash-Next NVFP4 serving](../../../../docs/next-http.md).
+World 4 selects the pinned native rank backend with `--tensor-map PATH`; each
+rank uses the same invocation and only rank zero binds HTTP. Other worlds
+run the chain below.
 
 On the FP8 rank path one chat chooses its MTP depth each cycle, up to resident
 depth 7, from its measured verify times and draft acceptance. `VADE_FLASH_MTP_DEPTH`
@@ -40,15 +38,13 @@ serving depth. Verification is strict, so the depth changes only speed, never to
 Its drafts score an MXFP8 copy of the rank's head rows (`VADE_FP8_DRAFT_MX8`, unset or
 `1` = on, `0` = the BF16 head); verification always uses the BF16 head.
 
-`VADE_W2_PP=1` explicitly selects the layer pipeline for `WORLD=2..24`, with
+`WORLD=3..24` without `--tensor-map` runs the layer pipeline as a chain, with
 equal contiguous layer ranges by default. It needs a cable chain, not a closing
 ring: `LISTEN` is the worker's local upstream interface and `NEXT` is its
 downstream neighbor. Rank zero ignores `LISTEN`; the last rank ignores `NEXT`.
 Middle ranks relay final residuals back on the same full-duplex cables. Do not
-pass `--tensor-map` for this mode. `VADE_W2_PP_SPLIT` retains its two-rank meaning
-and is refused for larger chains. Other pipeline switches retain their meanings;
-`VADE_W2_PP_MTP=0` selects plain decoding. Larger chains remain opt-in and require
-their own GPU exactness qualification; host protocol tests alone do not qualify them.
+pass `--tensor-map` for this mode; `--mtp 0` selects plain decoding. Chains
+require their own GPU exactness qualification; host protocol tests alone do not qualify them.
 
 For FP4-Local the context defaults to 32768 and output is capped at
 min(16384, context). FP8 keeps its existing defaults. The checkpoint position
@@ -70,7 +66,7 @@ depths are rejected before admission. Sampled requests use plain decoding.
 Verifier output is projected in slices of at most 16 rows, preserving each row's
 arithmetic through the maximum native 16-chat/depth-3 cohort (64 rows).
 
-The rank backend (world 4, or world 2 with `VADE_W2_PP=0`) defaults to plain decoding and refuses startup `--mtp 1..3` or
+The rank backend (world 4) defaults to plain decoding and refuses startup `--mtp 1..3` or
 `MTP=1..3`. All four HTTP APIs reject `mtp_depth > 0` before admission; zero and
 an absent depth select plain. The shared Next-only depth validation leaves FP8
 request policy unchanged. Context is fixed at 32768 and output is capped at
