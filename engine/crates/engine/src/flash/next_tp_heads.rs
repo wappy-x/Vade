@@ -162,7 +162,7 @@ impl<'a> NextModel<'a> {
             }
         }
         let half = |chat: &NextSession<'a, 'w>| layers.iter().any(|&li| chat.gdn_state[li].as_ref().is_some_and(|g| g.is_half()));
-        let one = count <= TpLayout::ROWS && sessions.len() == 1;
+        let one = !self.tp_host_pass(count) && sessions.len() == 1;
         let by_heads = if rank != 0 { bit && count != usize::MAX } else {
             policy.tick(now);
             for chat in sessions.iter().filter(|chat| !one || chat.pos == 0) { policy.reset(chat.slot); }

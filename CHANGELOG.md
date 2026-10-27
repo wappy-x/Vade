@@ -7,6 +7,12 @@ Changes that are merged but not yet released are under Unreleased.
 
 ### Engine
 
+- With the two-Spark tensor split (`VADE_W2_TP=1`), the verify step of five
+  to eight chats (up to 32 rows) now splits the routed experts between the
+  Sparks like smaller steps do. Before, such a step ran every layer whole on
+  both Sparks. Eight code chats on two Sparks went from 178.4 to 220.8 tokens
+  per second in one measurement, with the same tokens. Prompt steps above 16
+  rows keep the whole experts.
 - With the two-Spark tensor split (`VADE_W2_TP=1`), `VADE_W2_TP_HEAD=1` on
   both Sparks splits the verify head of one greedy chat between them: each
   Spark scores half of the vocabulary (with the bounded head, it screens only

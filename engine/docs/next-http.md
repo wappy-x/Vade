@@ -72,7 +72,9 @@ layer 2 (the launcher pins `VADE_W2_PP_SPLIT=2`):
 
 - Rank 0 runs the world-one engine on every layer, plus the head, sampling and
   drafting. Rank 1 mirrors every main-model pass from layer 2 on.
-- On passes of at most 16 rows (decode, verify and short prompt tiles), both
+- On verify passes of at most 32 rows (the served 8-chat cohort tick verifies
+  32 rows in one pass) and on other passes (decode and short prompt tiles) of
+  at most 16 rows (wider prompt passes run the prompt expert kernels), both
   ranks split every routed expert by output columns with the unchanged NVFP4
   expert kernels: each rank computes half of every expert's gate/up columns and
   half of its down columns, at widths taken from the checkpoint configuration.

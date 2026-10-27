@@ -131,7 +131,7 @@ pub fn run_pp(
         let mut link = out.or(inc).ok_or("tensor split has no peer link")?;
         // VADE_W2_TP_WIRE=write: one-sided writes between the mapped mailboxes (tp_proxy).
         let write = tp_proxy::write_from_env()?;
-        // Swaps are at most 16 rows of halves (about 100 KB): the wire's smallest slot.
+        // Swaps are at most TpLayout::ROWS rows of halves (about 200 KB): the wire's smallest slot.
         #[cfg(target_os = "linux")]
         let swap = if write {
             agree_write_wire(&mut link, limit)?;

@@ -61,8 +61,14 @@ pub struct TpLayout {
     pub experts: usize,
 }
 impl TpLayout {
-    /// Rows a pass may have for its experts to split (decode, verify, short prompt tiles).
-    pub const ROWS: usize = 16;
+    /// Rows a verify pass may have for its experts to split: the served cohort tick's widest pass
+    /// (VADE_VERIFY_ROWS, 32 rows) stays split. A mailbox slot holds this many residual rows.
+    pub const ROWS: usize = 32;
+    /// Rows any other pass (decode, short prompt tiles) may have to split: above 16 rows a prompt
+    /// pass runs the prompt expert kernels, which compute whole columns (Workspace::moe_at).
+    pub const PROMPT_ROWS: usize = 16;
+    /// The split bound of a pass of this kind.
+    pub fn split_rows(verify: bool) -> usize { if verify { Self::ROWS } else { Self::PROMPT_ROWS } }
     pub fn new(hidden: u64, branches: u64, expert_width: u64, top_k: u64, experts: u64) -> Result<Self, String> {
         let n = |v: u64| usize::try_from(v).map_err(|_| "tensor split geometry overflow".to_string());
         let layout = Self { hidden: n(hidden)?, residual: n(hidden.checked_mul(branches).ok_or("tensor split geometry overflow")?)?,
@@ -146,6 +152,9 @@ mod tests {
             assert_eq!(layout.slot_bytes(), TpLayout::ROWS * layout.residual * 4);
         }
         assert!(TpLayout::new(2560, 4, 650, 10, 512).is_err());
+        // Prompt passes split only below the prompt expert kernels' threshold; verify passes up to the mailbox.
+        assert_eq!((TpLayout::split_rows(true), TpLayout::split_rows(false)), (TpLayout::ROWS, TpLayout::PROMPT_ROWS));
+        assert!(TpLayout::PROMPT_ROWS <= 16 && TpLayout::PROMPT_ROWS <= TpLayout::ROWS);
         assert!(TpLayout::new(2570, 4, 640, 10, 512).is_err());
         assert!(TpLayout::new(2560, 0, 640, 10, 512).is_err());
     }

@@ -79,6 +79,9 @@ pub(super) struct Swap<'a> {
     /// Level 3, the current pass runs its GDN layers by heads (rank 0 decides in tp_gdn_frame and
     /// posts the HEADS bit; rank 1 reads it from the request).
     heads_pass: bool,
+    /// The current pass verifies (rank 0: tp_part's flag; rank 1: the request kind), so it splits
+    /// up to TpLayout::ROWS rows instead of TpLayout::PROMPT_ROWS.
+    verify_pass: bool,
 }
 
 /// One routed MoE layer's split on this rank (Workspace::moe_at offsets and swaps).
@@ -168,8 +171,10 @@ impl<'a> NextModel<'a> {
         let twins = if proj != 0 { self.tp_half_twins(b, rank, proj)? } else { Vec::new() };
         let heads = if proj >= 3 { Some(heads::GdnHeads::new(self, b, rank)?) } else { None };
         *self.tp.borrow_mut() = Some(Swap { rank, layout, sent: 0, taken: 0, limit_ns: pp::timeout_from_env()?.as_nanos() as u64,
-            mail_pass: false, tile_pass: false, link, handoff: Vec::new(), front_tile: false, proj, _twins: twins, heads, heads_pass: false });
-        eprintln!("flashnext tp rank={rank} split={SPLIT} rows<={} proj={proj} layout={layout:?}", TpLayout::ROWS);
+            mail_pass: false, tile_pass: false, link, handoff: Vec::new(), front_tile: false, proj, _twins: twins, heads, heads_pass: false,
+            verify_pass: false });
+        eprintln!("flashnext tp rank={rank} split={SPLIT} rows<={} (verify) <={} (other) proj={proj} layout={layout:?}", TpLayout::ROWS,
+            TpLayout::PROMPT_ROWS);
         Ok(())
     }
     /// VADE_W2_TP_PROJ: this rank's row half [rank * n / 2, (rank + 1) * n / 2) of every split
@@ -276,10 +281,10 @@ impl<'a> NextModel<'a> {
     pub(super) fn tp_failed(&self) -> bool {
         self.tp_box.get().is_some_and(|m| m.failed())
     }
-    /// A split-mode pass wider than the mailbox (more than ROWS rows): its residual crosses
+    /// A split-mode pass wider than its kind's bound (TpLayout::split_rows): its residual crosses
     /// with the request, it splits no expert and runs without captured verify segments.
     pub(super) fn tp_host_pass(&self, count: usize) -> bool {
-        self.tp_on() && count > TpLayout::ROWS
+        self.tp.borrow().as_ref().is_some_and(|s| count > TpLayout::split_rows(s.verify_pass))
     }
     /// Rank 1, per request: the residual arrives in the mailbox (MAIL bit), or the request is
     /// a pipeline tile for layers 24..48 (TILE bit).
@@ -287,7 +292,9 @@ impl<'a> NextModel<'a> {
         let mail = kind & crate::flash_tp_switch::MAIL != 0;
         let tile = kind & crate::flash_tp_switch::TILE != 0;
         let heads = kind & crate::flash_tp_switch::HEADS != 0;
-        if let Some(s) = self.tp.borrow_mut().as_mut() { s.mail_pass = mail; s.tile_pass = tile; s.heads_pass = heads; }
+        let flags = crate::flash_tp_switch::MAIL | crate::flash_tp_switch::TILE | crate::flash_tp_switch::HEADS;
+        let verify = kind & !flags == crate::flash_tp_switch::KIND_VERIFY;
+        if let Some(s) = self.tp.borrow_mut().as_mut() { s.mail_pass = mail; s.tile_pass = tile; s.heads_pass = heads; s.verify_pass = verify; }
     }
     /// Rank 1: the first layer of the current request (24 for a pipeline tile, else SPLIT).
     pub(super) fn tp_back_split(&self) -> Option<usize> {
@@ -308,6 +315,7 @@ impl<'a> NextModel<'a> {
         let mut guard = self.tp.borrow_mut();
         let s = guard.as_mut().ok_or("tensor split missing")?;
         s.front_tile = tile;
+        s.verify_pass = verify;
         if tile {
             for chat in sessions.iter() { if !s.handoff.contains(&chat.slot) { s.handoff.push(chat.slot); } }
             return Ok(Some(LAYERS / 2));
@@ -467,12 +475,12 @@ impl<'a> NextModel<'a> {
     /// Layers whose MoE output is formed without the deferred finish: the front's last layer
     /// before the post (its residual crosses) and every split layer (its halves cross).
     pub(super) fn tp_plain(&self, li: usize, count: usize) -> bool {
-        self.tp_on() && (li + 1 == SPLIT || li >= SPLIT && count <= TpLayout::ROWS)
+        self.tp_on() && (li + 1 == SPLIT || li >= SPLIT && !self.tp_host_pass(count))
     }
     pub(super) fn tp_moe(&self, li: usize, count: usize) -> Option<TpMoe<'_, 'a>> {
         let (rank, layout, proj) = self.tp.borrow().as_ref().map(|s| (s.rank, s.layout, s.proj))?;
         let mailbox = self.tp_box.get()?;
-        (li >= SPLIT && count <= TpLayout::ROWS).then_some(TpMoe { rank, layout, swap: &self.tp, mailbox, shared_half: proj >= 2 })
+        (li >= SPLIT && !self.tp_host_pass(count)).then_some(TpMoe { rank, layout, swap: &self.tp, mailbox, shared_half: proj >= 2 })
     }
     /// Rank 0: post the pass to rank 1 (the previous pass's ack first). Prompt and plain rows
     /// ride KIND_ROWS_ASYNC, verify rows KIND_VERIFY. Up to ROWS rows: the request (MAIL bit,
