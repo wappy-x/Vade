@@ -147,6 +147,17 @@ layer 2:
   message. The verifier then holds no full logits; a request for logits or
   log-probabilities projects the whole head again from the kept inputs. Token
   IDs do not change. Drafts keep the whole draft head on rank 0.
+- The plain greedy decode step (drafting OFF) splits its head the same way.
+  Rank 0 asks for the split in the step's request to rank 1 when the step
+  reads only the token IDs and its rows cross in the mailbox (1 to 16 chats).
+  Each rank projects its half for each chat's last row with the same launches
+  as the whole head. Rank 1 sends each chat's best logit and token (12 bytes
+  per chat), and rank 0 keeps the larger logit, ties to the lower token ID. A
+  sampled step, a prompt pass and a dump run the whole head on rank 0 as
+  before, so they keep full logits. Each chat keeps its head input of the
+  split step. A later request for that step's logits (for example when the
+  chosen token is not in the tokenizer) projects the whole head again from it.
+  Token IDs do not change.
 - A prompt pass whose every chat spans at least half the prompt tile (1024 rows at
   the 2048-row tile that two Sparks use) runs as a pipeline tile
   (rank 0 layers 0-23, rank 1 layers 24-47, exactly as the pipeline). The rest of

@@ -45,6 +45,12 @@ pub struct Head<'a, 'w> {
     /// The split head: the last verify pass projected rows [0, n) here and rank 1 rows [n, ..);
     /// its argmax rows are merged on readback (take_split) and its logits are sparse.
     split: Option<u32>,
+    /// The plain split head (head_split): this rank projected rows [0, n); `result` holds this
+    /// half's argmax row, then rank 1's. The logits are sparse: full-logit readers project the
+    /// whole head again from `input` (NextSession::canonical_split_logits).
+    halves: Option<u32>,
+    /// The plain split head's retained input row (H floats; under the tensor split only).
+    input: Option<DeviceVector<'a>>,
     ready: bool,
     max_ready: bool,
     _weights: PhantomData<&'w ()>,
@@ -121,8 +127,9 @@ impl<'a, 'w> Head<'a, 'w> {
         }
         Ok(())
     }
+    /// Logits, argmax partials, and two argmax rows (the plain split head keeps both halves' rows).
     fn arena_lengths(rows: usize) -> [usize; 3] {
-        [rows.max(1), (rows.div_ceil(1024) * 3).max(1), 3]
+        [rows.max(1), (rows.div_ceil(1024) * 3).max(1), 6]
     }
     pub(super) fn reservation_bytes(rows: usize) -> usize {
         Self::arena_lengths(rows).into_iter()
@@ -147,9 +154,10 @@ impl<'a, 'w> Head<'a, 'w> {
             w.device_address("lm_head.weight")?
         };
         let mut vectors = b.vector_arena(&Self::arena_lengths(rows))?.into_iter();
+        let input = if crate::flash_tp_switch::on() && rows != 0 { Some(b.vector(H)?) } else { None };
         Ok(Self { weight, range: range.start as u32..range.end as u32,
             logits: vectors.next().unwrap(), partials: vectors.next().unwrap(),
-            result: vectors.next().unwrap(), top_k: None, mx8: None, fp4: None, fp4_rescore: false, split: None, ready: false, max_ready: false, _weights: PhantomData })
+            result: vectors.next().unwrap(), top_k: None, mx8: None, fp4: None, fp4_rescore: false, split: None, halves: None, input, ready: false, max_ready: false, _weights: PhantomData })
     }
     pub fn vocabulary(&self) -> Range<u32> { self.range.clone() }
     /// Draft proposals only: score the first `rows` vocabulary ids (a multiple of 8; the
@@ -270,7 +278,7 @@ impl<'a, 'w> Head<'a, 'w> {
     /// A drafted token's logits: the MXFP8 twin when one is lent, else the BF16 head.
     pub fn project_draft(&mut self, b: &Backend<'_>, hidden: &DeviceVector<'_>) -> Result<()> {
         let Some(twin) = self.mx8.map(|v| v.device_address()) else { return self.project(b, hidden) };
-        self.ready = false; self.max_ready = false;
+        self.ready = false; self.max_ready = false; self.halves = None;
         if hidden.len() != H || hidden.is_segmented() {
             return Err("Flash draft head requires a contiguous 2560-wide FP32 mixture".into());
         }
@@ -287,12 +295,12 @@ impl<'a, 'w> Head<'a, 'w> {
         allocations.sort_unstable_by_key(|v| v.0);
         allocations.dedup_by_key(|v| v.0);
         // The immutable MXFP8 twin is owned and accounted once by NextModel.
-        [self.logits.len(), self.partials.len(), self.result.len()].into_iter()
+        [self.logits.len(), self.partials.len(), self.result.len(), self.input.as_ref().map_or(0, |v| v.len())].into_iter()
             .map(|n| (n * 4).div_ceil(64) * 64).sum::<usize>() + allocations.iter().map(|v| v.1).sum::<usize>()
     }
     /// Input is the final HC mixture; there is no separate final RMSNorm.
     pub fn project(&mut self, b: &Backend<'_>, hidden: &DeviceVector<'_>) -> Result<()> {
-        self.ready = false; self.max_ready = false;
+        self.ready = false; self.max_ready = false; self.halves = None;
         if hidden.len() != H || hidden.is_segmented() {
             return Err("Flash output head requires a contiguous 2560-wide FP32 mixture".into());
         }
@@ -315,7 +323,7 @@ impl<'a, 'w> Head<'a, 'w> {
             || logits.len() < count * rows || heads.iter().any(|h| h.weight != weight || h.range != range) {
             return Err("Flash output batch needs one vocabulary shard and contiguous mixtures".into());
         }
-        for head in heads.iter_mut() { head.ready = false; head.max_ready = false; }
+        for head in heads.iter_mut() { head.ready = false; head.max_ready = false; head.halves = None; }
         if rows != 0 {
             b.profile_output_head(|| super::blocks::bf16_rows(b, weight, hidden.device_address(), logits.device_address(), rows, H, count, rows))?;
             for (i, head) in heads.iter_mut().enumerate() {
@@ -333,7 +341,7 @@ impl<'a, 'w> Head<'a, 'w> {
         let (weight, range, count) = (first.weight, first.range.clone(), heads.len());
         if count > 16 || hidden.len() != count*H || logits.len() < count*range.len()
             || heads.iter().any(|h| h.weight != weight || h.range != range) { return Err("Flash-Next head row shape".into()); }
-        for head in heads.iter_mut() { head.ready = false; head.max_ready = false; }
+        for head in heads.iter_mut() { head.ready = false; head.max_ready = false; head.halves = None; }
         if let (Some(twin), 1, 0) = (heads[0].fp4.map(|v| v.device_address()), count, range.start) {
             // VADE_FLASHNEXT_DRAFT_FP4=1 (drafter only): the NVFP4 image, then main's argmax call.
             let head = &mut *heads[0];
@@ -548,11 +556,41 @@ impl<'a, 'w> Head<'a, 'w> {
     /// The split head: this session's last verify pass projected rows [0, rows) here. Its logits
     /// are sparse: `ready` stays false until a canonical reader re-projects the retained inputs.
     pub(super) fn mark_split(&mut self, rows: u32) {
-        self.ready = false; self.max_ready = false; self.split = Some(rows);
+        self.ready = false; self.max_ready = false; self.split = Some(rows); self.halves = None;
     }
-    pub(super) fn take_split(&mut self) -> Option<u32> { self.split.take() }
+    /// A new pass starts: the verify split's mark is taken and the plain split's rows are dropped.
+    pub(super) fn take_split(&mut self) -> Option<u32> { self.halves = None; self.split.take() }
+    /// The plain split head: chat `row`'s argmax rows of both halves (`result` holds `chats` rows of
+    /// this rank's rows [0, start), then rank 1's), merged by local_max, and its head input row
+    /// (`hidden` row `row`), kept for full-logit readers. The logits stay sparse.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn publish_halves(&mut self, b: &Backend<'_>, result: &DeviceVector<'_>, hidden: &DeviceVector<'_>,
+        row: usize, chats: usize, start: u32) -> Result<()> {
+        self.ready = false; self.max_ready = false; self.split = None; self.halves = None;
+        if self.range.start != 0 || !(1..self.range.end).contains(&start) || row >= chats {
+            return Err("plain split head rows".into());
+        }
+        let input = self.input.as_mut().ok_or("plain split head has no retained input")?;
+        b.copy_range(hidden, input, row * H, 0, H)?;
+        b.copy_range(result, &mut self.result, row * 3, 0, 3)?;
+        b.copy_range(result, &mut self.result, (chats + row) * 3, 3, 3)?;
+        self.halves = Some(start);
+        Ok(())
+    }
+    /// The head keeps an input row for the plain split head (Head::load under the tensor split).
+    pub(super) fn retains_input(&self) -> bool { self.input.is_some() }
+    /// After a plain split step: the retained input row the whole head projects again.
+    pub(super) fn split_input(&self) -> Option<&DeviceVector<'a>> { self.halves.and(self.input.as_ref()) }
+    /// A full-logit reader projected the whole head again (canonical_split_logits): these are this
+    /// step's logits, so the head is whole again (top-k reads them).
+    pub(super) fn restore(&mut self, b: &Backend<'_>, values: &[f32]) -> Result<()> {
+        if self.halves.is_none() || values.len() != self.range.len() { return Err("plain split head restore".into()); }
+        b.write_vector(&mut self.logits.slice(0..values.len())?, values)?;
+        self.halves = None; self.ready = true; self.max_ready = false;
+        Ok(())
+    }
     pub(super) fn publish_next(&mut self,b: &Backend<'_>,logits: &DeviceVector<'_>,result: &DeviceVector<'_>,row: usize) -> Result<()> {
-        self.ready=false; self.max_ready=false;
+        self.ready=false; self.max_ready=false; self.halves=None;
         b.copy_range(logits,&mut self.logits,row*self.range.len(),0,self.range.len())?;
         b.copy_range(result,&mut self.result,row*3,0,3)?;
         self.ready=true; self.max_ready=true; Ok(())
@@ -560,7 +598,7 @@ impl<'a, 'w> Head<'a, 'w> {
     /// Consecutive verified positions share the vocabulary weight pass.
     pub(super) fn project_rows(&mut self, b: &Backend<'_>, hidden: &DeviceVector<'_>,
         logits: &mut DeviceVector<'_>, count: usize) -> Result<()> {
-        self.ready = false; self.max_ready = false;
+        self.ready = false; self.max_ready = false; self.halves = None;
         if count == 0 || hidden.len() < count * H || logits.len() < count * self.range.len() {
             return Err("invalid Flash verification head rows".into());
         }
@@ -571,13 +609,18 @@ impl<'a, 'w> Head<'a, 'w> {
         Ok(())
     }
     pub(super) fn select_row(&mut self, b: &Backend<'_>, logits: &DeviceVector<'_>, row: usize) -> Result<()> {
-        self.split = None;
+        self.split = None; self.halves = None;
         if !self.range.is_empty() { b.copy_range(logits, &mut self.logits, row * self.range.len(), 0, self.range.len())?; }
         self.ready = true; self.max_ready = false;
         Ok(())
     }
     /// Transfer only the GPU winner; full rows are downloaded only on request.
     pub fn local_max(&mut self, b: &Backend<'_>) -> Result<Option<Candidate>> {
+        if let Some(start) = self.halves {
+            let both = b.read_argmax_results(&self.result, 2)?;
+            let (token, logit) = merge_split(&both[..1], &both[1..], start)?[0];
+            return Ok(Some(Candidate { token: self.range.start + token, logit }));
+        }
         if !self.ready { return Err("Flash head has no projected logits".into()); }
         if self.range.is_empty() { return Ok(None); }
         let (token, logit) = if self.max_ready { b.read_argmax_results(&self.result, 1)?.remove(0) }
@@ -639,17 +682,7 @@ impl<'a, 'w> Head<'a, 'w> {
         }).collect()
     }
 }
-/// The split head: each row's argmax over the whole vocabulary from the two halves' argmax rows
-/// (`own` over rows [0, start), `peer` over rows [start, ..) with ids from 0): the larger logit,
-/// ties to the lower id (always `own`'s), the order logits_argmax_finish uses within one head.
-pub(super) fn merge_split(own: &[(u32, f32)], peer: &[(u32, f32)], start: u32) -> Result<Vec<(u32, f32)>> {
-    if own.len() != peer.len() { return Err("split head rows differ".into()); }
-    own.iter().zip(peer).map(|(&(i, v), &(j, w))| {
-        let j = j.checked_add(start).ok_or("split head id overflow")?;
-        let (value, id) = spark_gpu_probe::next_math::better((v, i), (w, j));
-        Ok((id, value))
-    }).collect()
-}
+pub(super) use crate::flash_head_options::merge_split;
 fn first_mx8(heads: &[&mut Head<'_, '_>]) -> Option<u64> {
     let twin = heads.first()?.mx8.as_ref()?.device_address();
     heads.iter().all(|h| h.mx8.as_ref().map(|v| v.device_address()) == Some(twin)).then_some(twin)
@@ -668,26 +701,6 @@ mod tests {
             assert_eq!(flags as usize + bases as usize, Head::lbf12_bytes(start));
             assert_eq!(flags as usize, start / 8 * 16);
         }
-    }
-    /// The merge equals one argmax over the concatenated row (larger logit, ties to the lower id),
-    /// for every split point and with ties across the halves.
-    #[test]
-    fn split_merge_equals_the_whole_argmax() {
-        let whole = |row: &[f32]| row.iter().enumerate().fold((u32::MAX, f32::NEG_INFINITY), |best, (i, &v)| {
-            if v > best.1 || v == best.1 && (i as u32) < best.0 { (i as u32, v) } else { best } });
-        let rows: Vec<Vec<f32>> = vec![vec![1.0, 3.0, 2.0, 3.0, 0.5, -1.0, 3.0, 2.5], vec![-2.0, -2.0, -1.0, -3.0, -1.0, -1.0, -5.0, -1.0],
-            vec![0.0, -0.0, 0.0, 0.0, -0.0, 0.0, 0.0, 0.0], vec![1.0, 1.0, 1.0, 1.0, 9.0, 9.0, 1.0, 1.0]];
-        for start in 1..8usize {
-            let own: Vec<_> = rows.iter().map(|r| whole(&r[..start])).collect();
-            let peer: Vec<_> = rows.iter().map(|r| whole(&r[start..])).collect();
-            let merged = super::merge_split(&own, &peer, start as u32).unwrap();
-            for (row, m) in rows.iter().zip(merged) {
-                let w = whole(row);
-                assert_eq!((m.0, m.1.to_bits()), (w.0, w.1.to_bits()), "start {start} row {row:?}");
-            }
-        }
-        assert!(super::merge_split(&[(0, 1.0)], &[], 4).is_err());
-        assert!(super::merge_split(&[(0, 1.0)], &[(u32::MAX, 2.0)], 4).is_err());
     }
     /// The FP8 draft twin's placement (resident rows into the Flash-Next head layout the MXFP8
     /// pack reads) is a bijection over a whole shard: every weight lands once, none is lost.

@@ -167,7 +167,7 @@ fn pp_prefetch_stage_rejects_wrong_tcp_exchange_id_before_step() {
 
 #[test]
 fn tp_mail_tile_handoff_and_verify_kinds_reach_the_back_in_order() {
-    use crate::flash_tp_switch::{HEADS, KIND_HANDOFF, KIND_VERIFY as TP_VERIFY, MAIL, TILE};
+    use crate::flash_tp_switch::{HEAD, HEADS, KIND_HANDOFF, KIND_VERIFY as TP_VERIFY, MAIL, TILE};
     static STOP: AtomicBool = AtomicBool::new(false);
     let recipe = Recipe { limit: Duration::from_secs(2), asynchronous: true, mtp: true, tp: true };
     let (front, back) = pair();
@@ -179,8 +179,9 @@ fn tp_mail_tile_handoff_and_verify_kinds_reach_the_back_in_order() {
     });
     let mut link = Link::connect(front, None, Stage::new(0, 2, None).unwrap(), 64, 8, 8, &STOP, recipe).unwrap();
     // A pipeline tile (TILE) whose pass also posts mailbox meta (MAIL); then the handoff the
-    // tile's chats owe; then a split verify pass by GDN heads (MAIL, HEADS) and a plain whole
-    // pass: each flag is one-shot and reaches the back's step unchanged.
+    // tile's chats owe; then a split verify pass by GDN heads (MAIL, HEADS), a plain step whose
+    // greedy head splits (MAIL, HEAD) and a plain whole pass: each flag is one-shot and reaches
+    // the back's step unchanged.
     (link.tp_tile, link.tp_mail) = (true, true);
     link.post(&[[1, 64, 0, 2]], vec![0.0; 2 * W], None).unwrap();
     assert!(!link.tp_mail);
@@ -192,10 +193,13 @@ fn tp_mail_tile_handoff_and_verify_kinds_reach_the_back_in_order() {
     (link.tp_verify, link.tp_mail, link.tp_heads) = (true, true, true);
     link.post(&[[1, 64, 3, 1]], vec![0.0; W], None).unwrap();
     assert!(!link.tp_heads);
+    (link.tp_mail, link.tp_head) = (true, true);
+    link.post(&[[1, 64, 4, 1]], vec![0.0; W], None).unwrap();
+    assert!(!link.tp_head);
     link.drain().unwrap();
-    link.exchange(KIND_ROWS, &[[1, 64, 4, 1]], &mut vec![0.0; W]).unwrap();
+    link.exchange(KIND_ROWS, &[[1, 64, 5, 1]], &mut vec![0.0; W]).unwrap();
     drop(link);
-    assert_eq!(worker.join().unwrap(), [(KIND_ROWS_ASYNC | MAIL | TILE, 2, 0), (KIND_HANDOFF, 1, 2), (TP_VERIFY | MAIL | HEADS, 1, 3), (KIND_ROWS, 1, 4)]);
+    assert_eq!(worker.join().unwrap(), [(KIND_ROWS_ASYNC | MAIL | TILE, 2, 0), (KIND_HANDOFF, 1, 2), (TP_VERIFY | MAIL | HEADS, 1, 3), (KIND_ROWS_ASYNC | MAIL | HEAD, 1, 4), (KIND_ROWS, 1, 5)]);
 }
 
 #[test]
@@ -847,7 +851,7 @@ fn front(stream: TcpStream, limit: Duration) -> Link {
         message: Vec::new(),
         carried: 0,
         down: &DOWN,
-        poisoned: false, tp: false, tp_verify: false, tp_mail: false, tp_handoff: false, tp_tile: false, tp_heads: false,
+        poisoned: false, tp: false, tp_verify: false, tp_mail: false, tp_handoff: false, tp_tile: false, tp_heads: false, tp_head: false,
         sent: 0,
         replied: 0,
         limit,

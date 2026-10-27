@@ -742,6 +742,9 @@ impl<'a, 'w> NextSession<'a, 'w> {
         work.bound_head = greedy_head && verify && sessions.len() == 1 && (head_split::eligible(model, sessions.len(), count, verify)
             || (2..=crate::flash_head_options::RETAINED_ROWS).contains(&count) && model.head_bounds.is_some())
             && sessions.iter().all(|s| s.dump.is_none() && s.layer_bytes.is_none());
+        // Rank 0 decides each pass whether its plain greedy head splits; tp_post sends it to rank 1.
+        model.tp_set_head_pass(greedy_head && output && !verify && matches!(part, Part::Whole)
+            && head_split::plain_eligible(model, sessions, count, &work));
         if let Err(error) = work.status.clear(b, count, 0) {
             model.return_work(work);
             return Err(error);
@@ -1311,7 +1314,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             }
         }
         match part {
-            Part::Back(..) => return Self::split_head_back(b, sessions, work, count, verify),
+            Part::Back(..) => return Self::split_head_back(b, sessions, work, spans, count, verify),
             Part::Front(_) => {
                 let meta: Vec<[u32; 4]> = sessions
                     .iter()
@@ -1409,6 +1412,9 @@ impl<'a, 'w> NextSession<'a, 'w> {
                     row * H,
                     H,
                 )?;
+            }
+            if model.tp_head_pass() {
+                return Self::split_plain_front(b, sessions, work);
             }
             Head::project_next_batch(
                 b,

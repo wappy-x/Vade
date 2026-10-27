@@ -1027,6 +1027,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             self.head.select_row(b, &d.verification, count - 1)?;
             d.bound_at.set(None);
         }
+        if let Some(row) = self.canonical_split_logits(b)? { self.head.restore(b, &row)?; }
         if rows == 1 { return self.head.top_k(b, k).map(|v| vec![v]); }
         if rows != self.retained || !self.valid { return Err("missing MTP logits".into()); }
         self.head.top_k_rows(b, &self.draft.as_ref().ok_or("MTP disabled")?.verification, rows, k)

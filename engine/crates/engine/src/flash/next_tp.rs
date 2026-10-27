@@ -75,6 +75,9 @@ pub(super) struct Swap<'a> {
     /// The current pass runs its GDN layers by heads (rank 0 decides in tp_gdn_frame and
     /// posts the HEADS bit; rank 1 reads it from the request).
     heads_pass: bool,
+    /// The current plain pass splits its greedy head by vocabulary halves (rank 0 decides in
+    /// run_rows_inner and posts the HEAD bit; rank 1 reads it from the request; head_split).
+    head_pass: bool,
     /// The current pass verifies (rank 0: tp_part's flag; rank 1: the request kind), so it splits
     /// up to TpLayout::ROWS rows instead of TpLayout::PROMPT_ROWS.
     verify_pass: bool,
@@ -159,7 +162,7 @@ impl<'a> NextModel<'a> {
         let heads = Some(heads::GdnHeads::new(self, b, rank)?);
         *self.tp.borrow_mut() = Some(Swap { rank, layout, sent: 0, taken: 0, limit_ns: pp::LINK_TIMEOUT.as_nanos() as u64,
             mail_pass: false, tile_pass: false, link, handoff: Vec::new(), front_tile: false, _twins: twins, heads, heads_pass: false,
-            verify_pass: false });
+            head_pass: false, verify_pass: false });
         eprintln!("flashnext tp rank={rank} split={SPLIT} rows<={} (verify) <={} (other) layout={layout:?}", TpLayout::ROWS,
             TpLayout::PROMPT_ROWS);
         Ok(())
@@ -282,9 +285,18 @@ impl<'a> NextModel<'a> {
         let mail = kind & crate::flash_tp_switch::MAIL != 0;
         let tile = kind & crate::flash_tp_switch::TILE != 0;
         let heads = kind & crate::flash_tp_switch::HEADS != 0;
-        let flags = crate::flash_tp_switch::MAIL | crate::flash_tp_switch::TILE | crate::flash_tp_switch::HEADS;
+        let head = kind & crate::flash_tp_switch::HEAD != 0;
+        let flags = crate::flash_tp_switch::MAIL | crate::flash_tp_switch::TILE | crate::flash_tp_switch::HEADS | crate::flash_tp_switch::HEAD;
         let verify = kind & !flags == crate::flash_tp_switch::KIND_VERIFY;
-        if let Some(s) = self.tp.borrow_mut().as_mut() { s.mail_pass = mail; s.tile_pass = tile; s.heads_pass = heads; s.verify_pass = verify; }
+        if let Some(s) = self.tp.borrow_mut().as_mut() { s.mail_pass = mail; s.tile_pass = tile; s.heads_pass = heads; s.head_pass = head; s.verify_pass = verify; }
+    }
+    /// The current plain pass splits its greedy head (head_split): rank 0 sets it before each
+    /// pass's post, rank 1 from the request's HEAD bit.
+    pub(super) fn tp_head_pass(&self) -> bool {
+        self.tp.borrow().as_ref().is_some_and(|s| s.head_pass)
+    }
+    pub(super) fn tp_set_head_pass(&self, on: bool) {
+        if let Some(s) = self.tp.borrow_mut().as_mut().filter(|s| s.rank == 0) { s.head_pass = on; }
     }
     /// Rank 1: the first layer of the current request (24 for a pipeline tile, else SPLIT).
     pub(super) fn tp_back_split(&self) -> Option<usize> {
@@ -493,7 +505,7 @@ impl<'a> NextModel<'a> {
             .map(|(s, span)| [s.slot, s.capacity as u32, s.pos as u32, span.len() as u32]).collect();
         let mut guard = self.pp.borrow_mut();
         let link = guard.as_mut().filter(|l| !l.poisoned).ok_or("tensor split link failed earlier; the front is stopping")?;
-        let heads = self.tp.borrow().as_ref().is_some_and(|s| s.heads_pass);
+        let (heads, head) = self.tp.borrow().as_ref().map_or((false, false), |s| (s.heads_pass, s.head_pass));
         let posted = link.drain().and_then(|()| {
             // A row buffer the sender thread returned (pages already mapped): a new vector per
             // pass can get new pages from the allocator, and the readback then pays their faults
@@ -503,6 +515,7 @@ impl<'a> NextModel<'a> {
             link.tp_verify = verify;
             link.tp_mail = mail;
             link.tp_heads = heads;
+            link.tp_head = head;
             link.post(&meta, rows, None)
         });
         posted.map_err(|e| link.fail(e))

@@ -15,6 +15,9 @@ pub const TILE: u32 = 1 << 29;
 /// Request kind bit: rank 0 runs this one-chat pass's GDN layers by heads, so rank 1 does too;
 /// without it rank 1 keeps the chat's GDN states whole.
 pub const HEADS: u32 = 1 << 28;
+/// Request kind bit: rank 0 splits this plain pass's greedy head by vocabulary halves, so rank 1
+/// projects its half of each chat's last row and sends the argmax rows (execution::head_split).
+pub const HEAD: u32 = 1 << 27;
 /// The first layer rank 1 runs: rank 0 keeps the frontend and layer 1's PLE (pp::Stage).
 pub const SPLIT: usize = 2;
 

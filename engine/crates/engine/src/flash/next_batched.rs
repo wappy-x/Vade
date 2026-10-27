@@ -1089,7 +1089,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         if let Some(rows) = self.canonical_bound_logits(b)? {
             return rows.into_iter().last().ok_or_else(|| "missing canonical head row".into());
         }
-        self.head.logits(b)
+        self.canonical_split_logits(b)?.map_or_else(|| self.head.logits(b), Ok)
     }
     /// Process a prompt through bounded tiles. Only its last row projects lm_head.
     pub fn prefill(&mut self, b: &Backend<'a>, tokens: &[u32]) -> Result<Vec<f32>> {

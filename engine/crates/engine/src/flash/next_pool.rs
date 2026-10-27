@@ -287,7 +287,8 @@ impl<'a, 'w> NextSession<'a, 'w> {
         tokens: &[u32],
     ) -> Result<Vec<u32>> {
         let inputs = tokens.iter().map(std::slice::from_ref).collect::<Vec<_>>();
-        let source = Self::run_rows(b, sessions, &inputs, true)?;
+        // Only the ids are read: under the tensor split the head may split by vocabulary halves.
+        let source = Self::run_rows_inner(b, sessions, &inputs, true, false, true)?;
         let model = sessions[0].model;
         let count = sessions.len();
         let result = source.read(

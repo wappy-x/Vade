@@ -16,6 +16,11 @@ Changes that are merged but not yet released are under Unreleased.
 - Checkpoint indexes now reject fractional byte counts that rounded to integers.
   The agent harness now rejects replies with an empty finish reason.
 
+- On two FP4-Local Sparks, a greedy decode step with drafting OFF now splits
+  the output head by vocabulary halves across the two Sparks, as drafted
+  verification already does. Each Spark computes half of the head. Token IDs
+  do not change. Sampled steps and prompts still use the whole head.
+
 ### Repository tools
 
 - `vade-tools bench-docs <cards-dir> <repo-dir>` refreshes the marked benchmark
