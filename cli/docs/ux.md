@@ -26,7 +26,7 @@ shows the whole screen.)
 
 1. **Who is who.** Everything you wrote sits behind a cyan `▌` bar, in bold.
    The model's answer has no bar and no header. The bar reads the same without
-   colour, so the two voices never blur on a light theme or with `NO_COLOR`.
+   color, so the two voices never blur on a light theme or with `NO_COLOR`.
 2. **Thinking is not the answer.** A thought is one dim, italic line: when it
    started and ended, how many tokens, how long. Ctrl+T opens it; its text
    then sits behind a dim `┆` bar, never in the answer's column.
@@ -84,18 +84,18 @@ command to run.
 
 1. **One fact per line.** A line says one thing: a value, a check result or a
    step. Explanations go in `--help`, not in normal output.
-2. **Stable columns.** Labelled values line up in one column (`Model     ...`).
+2. **Stable columns.** Labeled values line up in one column (`Model     ...`).
    Check rows are `state  name  detail` with fixed widths, so you can read them
    by eye and cut them with `awk`. Wording and column order change only with a
    snapshot update in the same commit.
 3. **Results on stdout, problems on stderr.** Errors always go to stderr. With
    `--json`, stdout holds only the JSON object. `vade verify` prints exactly one
    result line on stdout and its progress on stderr.
-4. **Colour only on a terminal.** Colour is on when the stream is a terminal
+4. **Color only on a terminal.** Color is on when the stream is a terminal
    and `TERM` is not `dumb`. `NO_COLOR` turns it off and `CLICOLOR_FORCE=1`
-   turns it on for pipes; `NO_COLOR` wins. Colour never carries meaning on its
-   own: every coloured word reads the same in plain text. JSON, receipts and
-   `key=value` records are never coloured.
+   turns it on for pipes; `NO_COLOR` wins. Color never carries meaning on its
+   own: every colored word reads the same in plain text. JSON, receipts and
+   `key=value` records are never colored.
 5. **`--json` on every read-only command.** `status`, `doctor`, `config`,
    `detect` and `version` take `--json` and print one object on one line, with
    a `schema` field (`vade.status.v1`, `vade.doctor.v1`, `vade.config.v1`,

@@ -197,32 +197,36 @@ Every rail of every cable gets its **own small private subnet** (`/24`). The two
 ends of the cable use host numbers `.1` and `.2`. No gateway, no routing: these
 links only connect direct neighbors.
 
-**Example scheme (copy it, or pick your own):** use `10.77.0.0/16`, two `/24`s
-per cable. The end using its **port 0** is `.1`; the end using its **port 1** is `.2`.
+Choose eight distinct private `/24` subnets for a four-cable ring, two per
+cable. The labels below belong in your private cable map. The end using its
+**port 0** is host `.1`; the end using its **port 1** is host `.2`.
 
 | Cable | Ends | Rail 0 subnet | Rail 1 subnet |
 | --- | --- | --- | --- |
-| 1 | spark-1 port 0 ↔ spark-2 port 1 | `10.77.0.0/24` | `10.77.1.0/24` |
-| 2 | spark-2 port 0 ↔ spark-3 port 1 | `10.77.2.0/24` | `10.77.3.0/24` |
-| 3 | spark-3 port 0 ↔ spark-4 port 1 | `10.77.4.0/24` | `10.77.5.0/24` |
-| 4 | spark-4 port 0 ↔ spark-1 port 1 | `10.77.6.0/24` | `10.77.7.0/24` |
+| 1 | spark-1 port 0 ↔ spark-2 port 1 | Subnet A | Subnet B |
+| 2 | spark-2 port 0 ↔ spark-3 port 1 | Subnet C | Subnet D |
+| 3 | spark-3 port 0 ↔ spark-4 port 1 | Subnet E | Subnet F |
+| 4 | spark-4 port 0 ↔ spark-1 port 1 | Subnet G | Subnet H |
 
-So on cable 1, for example:
+Cable 1 would look like this. All numeric addresses on this page are
+documentation examples. Replace them with your assigned private addresses
+before you run a command or save a configuration.
 
 | Spark | Interface | Address |
 | --- | --- | --- |
-| spark-1 | `enp1s0f0np0` (port 0, rail 0) | `10.77.0.1/24` |
-| spark-1 | `enP2p1s0f0np0` (port 0, rail 1) | `10.77.1.1/24` |
-| spark-2 | `enp1s0f1np1` (port 1, rail 0) | `10.77.0.2/24` |
-| spark-2 | `enP2p1s0f1np1` (port 1, rail 1) | `10.77.1.2/24` |
+| spark-1 | `enp1s0f0np0` (port 0, rail 0) | `192.0.2.1/24` |
+| spark-1 | `enP2p1s0f0np0` (port 0, rail 1) | `198.51.100.1/24` |
+| spark-2 | `enp1s0f1np1` (port 1, rail 0) | `192.0.2.2/24` |
+| spark-2 | `enP2p1s0f1np1` (port 1, rail 1) | `198.51.100.2/24` |
 
 **Before you pick a range,** make sure nothing else uses it, on every Spark:
 
 ```sh
-ip -4 route show table all | grep '10\.77\.'     # expect no output
+ip -4 route show table all
 ```
 
-Avoid your home or office LAN range, VPN ranges and Docker's `172.17.0.0/16`.
+Check the full route list for an overlap with each planned subnet. Avoid your
+home or office LAN, VPN and container networks.
 
 **MTU 9000 on every fabric interface, at both ends.** MTU is the largest packet
 size. 9000 ("jumbo frames") is faster than the default 1500: we measured
@@ -237,11 +241,11 @@ ends share on a 100 Gb/s-or-faster interface, and uses it when present.
 ```ini
 [machine spark-1]
 # spark-1's own address on cable 1
-fabric.spark-2 = 10.77.0.1
+fabric.spark-2 = 192.0.2.1
 
 [machine spark-2]
 # spark-2's own address on cable 1
-fabric.spark-1 = 10.77.0.2
+fabric.spark-1 = 192.0.2.2
 ```
 
 The full config file is in [cli/examples/vade.conf](../cli/examples/vade.conf).
@@ -341,7 +345,7 @@ roceP2p1s0f0 port 1 ==> enP2p1s0f0np0 (Up)
 forbids splitting, so this fails loudly if any MTU is wrong)
 
 ```sh
-ping -c 3 -M do -s 8972 -I enp1s0f0np0 10.77.0.2
+ping -c 3 -M do -s 8972 -I enp1s0f0np0 192.0.2.2
 ```
 
 ```text
@@ -372,12 +376,12 @@ which you recorded in step 3 of
 ```sh
 # server end (spark-1)
 read -r -p 'Server GID index: ' GID_INDEX
-timeout 25s ib_write_bw -d rocep1s0f0 -i 1 -x "$GID_INDEX" -p 18515 --bind_source_ip=10.77.0.1 \
+timeout 25s ib_write_bw -d rocep1s0f0 -i 1 -x "$GID_INDEX" -p 18515 --bind_source_ip=192.0.2.1 \
   -m 4096 -F --report_gbits -D 5 -s 65536
 # client end (spark-2), pointing at the server's rail address
 read -r -p 'Client GID index: ' GID_INDEX
-timeout 25s ib_write_bw -d rocep1s0f1 -i 1 -x "$GID_INDEX" -p 18515 --bind_source_ip=10.77.0.2 \
-  -m 4096 -F --report_gbits -D 5 -s 65536 10.77.0.1
+timeout 25s ib_write_bw -d rocep1s0f1 -i 1 -x "$GID_INDEX" -p 18515 --bind_source_ip=192.0.2.2 \
+  -m 4096 -F --report_gbits -D 5 -s 65536 192.0.2.1
 ```
 
 ### Numbers we measured

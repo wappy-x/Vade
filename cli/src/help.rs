@@ -11,7 +11,7 @@ const OUTPUT: (&str, &str) = ("--output N", "Output limit in tokens, 1024..16384
 const MTP: (&str, &str) = ("--mtp N", "Drafting depth 0..3; 0 disables server drafting (default: engine-selected)");
 
 /// The help page for `command`, or the top-level page; headings are styled
-/// when standard output takes colour.
+/// when standard output takes color.
 pub fn help(command: Option<&str>) -> String {
     let on = style::color(Stream::Out);
     match command.and_then(page) {
@@ -71,7 +71,7 @@ fn top(on: bool) -> String {
         ("VADE_HOME", "Local install root and saved defaults (default ~/.vade)"),
         ("VADE_CONFIG", "Controller config file; selects the controller (see Notes)"),
         ("VADE_API_KEY_FILE", "Credential file when --api-key-file is not given"),
-        ("NO_COLOR", "Plain output without colour"),
+        ("NO_COLOR", "Plain output without color"),
     ], 0);
     out += &format!("{}\n", heading("Notes:"));
     for note in [
@@ -87,12 +87,12 @@ fn page(command: &str) -> Option<Page<'static>> {
         "launch" => Page {
             summary: "Start Vade on this Spark and open chat.",
             usage: &["vade launch [OPTIONS]"],
-            options: &[CONTEXT, OUTPUT, MTP, ("--cache-bytes 0", "Disable retained prompt cache, even with an inherited opt-in"), DRY_RUN],
+            options: &[CONTEXT, OUTPUT, MTP, ("--memory-bytes N", "Memory budget for this Spark, in bytes"), ("--cache-bytes 0", "Disable retained prompt cache, even with an inherited opt-in"), DRY_RUN],
             examples: &["vade launch", "vade launch --context 262144 --output 16384", "vade launch --dry-run"],
             notes: &[
-                "Finds the FP4-Local checkpoint, saves defaults, installs if missing, starts the engine, then opens chat. Run it again to attach.",
+                "Finds the FP4-Local checkpoint, saves defaults, installs if missing and starts the engine. It opens chat when standard input is a terminal. Run it again to attach.",
                 "Local defaults match vade up from a controller: context 32768, output min(8192, context), engine-selected MTP.",
-                "If the engine refuses the default or saved context for memory, launch retries 16384, 8192 then 4096, saves the one that starts and says which; an explicit --context the engine refuses is an error.",
+                "If the engine refuses the default or saved context for memory, launch tries smaller sizes from 32768, 16384, 8192 and 4096. It saves the first size that starts. A refused explicit --context is an error.",
                 "The checkpoint comes from the saved config, then explicit VADE_MODELS, then the FP4-Local checkpoint under ~/models; launch asks if it is missing. Files install under ~/.vade (or VADE_HOME).",
                 "Local --chats and positive --cache-bytes are unsupported. See vade up --help for memory options. Unset VADE_CONFIG for local lifecycle commands.",
             ],
@@ -102,21 +102,22 @@ fn page(command: &str) -> Option<Page<'static>> {
             usage: &["vade up [OPTIONS]"],
             options: &[
                 ("--fp4-local", "Qwen3.8 Flash-Next FP4-Local (the default; optional)"),
-                ("--fp8-legacy", "Two-Spark legacy FP8: context 131072, output min(65536, context), MTP 2; output ceiling 262144"),
+                ("--fp8-legacy", "Legacy FP8 on 2, 4 or 6 Sparks: context 131072, output min(65536, context), MTP 2; output ceiling 262144"),
                 ("--sparks N", "Number of Sparks; FP4 supports 1..24"),
                 ("--hosts a,b", "Machine names in cable order, separated by commas"),
                 ("--replicas N", "2..16 independent one-Spark FP4-Local servers behind a local gateway"),
                 MTP, CONTEXT, OUTPUT,
-                ("--chats N", "Concurrent chats, 1..32 (controller)"),
+                ("--chats N", "Concurrent legacy FP8 chats, 1..32 (controller)"),
                 ("--memory-bytes N", "Memory budget per rank, in bytes"),
-                ("--cache-bytes N", "Retained prompt cache, in bytes; 0 disables retention"),
+                ("--cache-bytes N", "Legacy FP8 retained prompt cache, in bytes; 0 disables it. Local FP4 accepts only 0"),
                 DRY_RUN,
             ],
             examples: &["vade up", "vade up --context 262144 --output 16384", "VADE_CONFIG=cluster.conf vade up --sparks 2"],
             notes: &[
                 "Default: Qwen3.8 Flash-Next FP4-Local on one Spark.",
-                "Local up and launch use context 32768 and output min(8192, context). The engine's memory admission decides: only a refused default or saved context is lowered (16384, 8192, 4096), and saved once it starts. Supported explicit limits are saved; an explicit --context the engine refuses is an error. Local --chats and positive --cache-bytes are refused; --cache-bytes 0 disables retention.",
-                "Controller FP4 defaults match local ones on any Spark count: context 32768, output min(8192, context); the engine admits concurrent chats from context and memory. --context 262144 selects the single-chat long-context preset.",
+                "Local up and launch start with context 32768 and output min(8192, context). They reuse saved limits. A memory refusal lowers a default or saved context to a smaller size from 32768, 16384, 8192 and 4096. The first size that starts is saved. A refused explicit --context is an error. Local --chats and positive --cache-bytes are refused; --cache-bytes 0 disables retention.",
+                "Controller FP4 defaults match local ones on any Spark count: context 32768, output min(8192, context). --context 262144 requests a larger context. The engine still sets the chat count from context and memory.",
+                "Controller FP4 ignores --chats and --cache-bytes. Its engine admits chats from memory and uses its own prefix cache setting.",
                 "MTP is engine-selected. FP4-Local one-Spark concurrent chats can draft; the default request depth is 3 with strict verification. Legacy FP8 concurrent chats decode plainly. Per-request draft=plain disables drafting; draft=strict requests it when supported. --mtp overrides MTP, and 0 disables server drafting.",
                 "Spark counts above 2 require a current install and linked hosts in cable order.",
                 "--replicas N starts one independent one-Spark server on each of the first N machines (or the N --hosts) and a local gateway on local_port; replica tunnels use the next N local ports. Each replica uses the FP4 defaults above. Use it when the model fits one Spark and many chats run at once; answers are the same on every replica.",
@@ -168,7 +169,7 @@ fn page(command: &str) -> Option<Page<'static>> {
             notes: &[
                 "On this Spark: config, VADE_HOME writable, ownership, installed binaries, model files, nvidia-smi and driver, disk, free memory, port and engine health.",
                 "From a controller: local tools, then SSH, nvidia-smi, disk, free memory and model files on each configured Spark, then the fabric and the harness.",
-                "Each FAIL row is followed by the command that fixes it. Exit 0 means PASS, 1 means FAIL.",
+                "Each FAIL row gives the next step. Exit 0 means PASS, 1 means FAIL.",
                 TRANSPORT, LIFECYCLE,
             ],
         },
@@ -180,7 +181,7 @@ fn page(command: &str) -> Option<Page<'static>> {
             notes: &[
                 "Model downloads stay in your hands.",
                 "For a fresh local installation or saved owner defaults without VADE_CONFIG: detect existing weights, save defaults once in ~/.vade/config, and stage a local engine and chat program. No hand editing is needed.",
-                "With VADE_CONFIG, or a default controller config before local setup: check prerequisites, copy an exact-source SHA256-verified prebuilt_dir bundle or build source, then run doctor. Model inventory checks overlap copy/build and are cached.",
+                "With VADE_CONFIG, or a default controller config before local setup: check prerequisites, copy an exact-source SHA256-verified prebuilt_dir bundle or build source, then check the harness. Model inventory checks overlap copy/build and are cached.",
                 "A generated run qwen3-8b installation uses run again; install requires an explicit VADE_CONFIG to select a controller.",
                 TRANSPORT, LIFECYCLE,
             ],
@@ -234,14 +235,14 @@ fn page(command: &str) -> Option<Page<'static>> {
             examples: &["vade config", "vade config --json", "VADE_CONFIG=cluster.conf vade config"],
             notes: &[
                 "The setup is local (saved defaults in VADE_HOME), controller (VADE_CONFIG or the user config file), legacy (vade run qwen3-8b) or none yet.",
-                "Reads only. To change a local value, rerun vade launch with the flag; to change a controller value, edit the file it names.",
+                "Reads only. To change local limits, run vade down, then vade launch with the new flags. To change controller settings, stop the engine with its current config, then edit the file shown here.",
             ],
         },
         "bench" => Page {
             summary: "Measure a running server from this client.",
             usage: &["vade bench [OPTIONS]"],
             options: &[
-                ("--url URL", "Server to measure (default: the recorded local endpoint)"),
+                ("--url URL", "Server to measure (default: VADE_API_URL, then the selected installation's endpoint)"),
                 ("--concurrency LIST", "Concurrent chats per cohort, such as 1,2,4,8 (default 1,2,4,8,16)"),
                 ("--max-tokens N", "Tokens each chat must generate (default 256)"),
                 ("--repeats N", "Repeats per cohort, none discarded (default 1)"),

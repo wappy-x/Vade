@@ -13,6 +13,12 @@ They drive two existing Rust tools: the exporter `vade-export`, which writes
 the snapshot, and the `flash-bench` benchmark, which runs and compares the
 GPU cases.
 
+This determinism runner uses the older `flash-bench` model path and fixtures.
+Its one-Spark option does not prove that it covers FP4-Local. Do not use an
+FP8 fixture pass as the FP4-Local device gate. `vade verify` checks token IDs
+on a running server, but it does not cover the full batch, cache and chunk
+matrix either.
+
 Two words come up often on this page. A *gate* is a set of checks a change
 must pass before it can merge. A *receipt* is the saved record of a run and
 what it checked.

@@ -199,11 +199,11 @@ impl Store {
         let record = read_fields(&self.journal())?;
         if let Some(record) = &record {
             if record.get("token") != Some(&self.token) {
-                return Err("The saved run file belongs to another launch. Leave these files in place; see README Recovery.".into());
+                return Err("The saved run file belongs to another launch. Leave these files in place; see Recovery in cli/README.md.".into());
             }
         } else if self.active().exists() {
             return Err(
-                "The machine's saved process file is missing. Leave these files in place; see README Recovery."
+                "The machine's saved process file is missing. Leave these files in place; see Recovery in cli/README.md."
                     .into(),
             );
         }
@@ -233,14 +233,14 @@ impl Store {
             if crate::text::hex(name, 64) {
                 let kind = entry
                     .file_type()
-                    .map_err(|_| "Cannot inspect saved run files. Leave these files in place; see README Recovery.".to_string())?;
+                    .map_err(|_| "Cannot inspect saved run files. Leave these files in place; see Recovery in cli/README.md.".to_string())?;
                 if !kind.is_dir()
                     || fs::read_dir(entry.path())
-                        .map_err(|_| "Cannot read saved run files. Leave these files in place; see README Recovery.".to_string())?
+                        .map_err(|_| "Cannot read saved run files. Leave these files in place; see Recovery in cli/README.md.".to_string())?
                         .next()
                         .is_some()
                 {
-                    return Err("A previous machine run needs cleanup. Use its original vade down; if it cannot finish, see README Recovery.".into());
+                    return Err("A previous machine run needs cleanup. Use its original vade down; if it cannot finish, see Recovery in cli/README.md.".into());
                 }
             }
         }
@@ -549,7 +549,7 @@ fn inspect(store: &Store) -> Result<Fields, String> {
     let alive = match Identity::from_record(&record)? {
         Some(identity) => verify(&identity)?,
         None if record.get("phase").is_some_and(|v| v == "stopped") => false,
-        None => return Err("Start was interrupted before the process was saved. Leave these files in place; see README Recovery.".into()),
+        None => return Err("Start was interrupted before the process was saved. Leave these files in place; see Recovery in cli/README.md.".into()),
     };
     Ok(reply(&record, alive))
 }
@@ -562,7 +562,7 @@ fn stop(store: &Store) -> Result<Fields, String> {
         Some(identity) => stop_identity(&identity)?,
         None if record.get("phase").is_some_and(|v| v == "stopped") => {}
         None => return Err(
-            "The saved startup file is incomplete, so stopping is unsafe. Leave these files in place; see README Recovery."
+            "The saved startup file is incomplete, so stopping is unsafe. Leave these files in place; see Recovery in cli/README.md."
                 .into(),
         ),
     }
@@ -592,7 +592,7 @@ fn clean(store: &Store) -> Result<Fields, String> {
             Some("journal.conf" | "env.conf" | "server.log")
         ) {
             return Err(
-                "Stopped run has extra files. Leave these files in place; see README Recovery."
+                "Stopped run has extra files. Leave these files in place; see Recovery in cli/README.md."
                     .into(),
             );
         }
@@ -606,7 +606,7 @@ fn clean(store: &Store) -> Result<Fields, String> {
     remove_own_file(&store.active())?;
     remove_own_file(&store.journal())?;
     fs::remove_dir(&store.run).map_err(|_| {
-        "Stopped run has extra files. Leave these files in place; see README Recovery.".to_string()
+        "Stopped run has extra files. Leave these files in place; see Recovery in cli/README.md.".to_string()
     })?;
     Ok(fields(&[
         ("phase", "absent"),
@@ -838,7 +838,7 @@ fn private_open(path: &Path, exclusive: bool, create: bool) -> Result<File, Stri
     // descriptor walk and O_NOFOLLOW enforce refusal even if this lookup races.
     crate::text::reject_symlinks(path)?;
     let open_error = || {
-        "Cannot open a private machine state file. Check permissions; see README Recovery."
+        "Cannot open a private machine state file. Check permissions; see Recovery in cli/README.md."
             .to_string()
     };
     let anchor = AnchoredPath::new(path).map_err(|_| open_error())?;
@@ -887,13 +887,13 @@ fn read_fields(path: &Path) -> Result<Option<Fields>, String> {
     let mut input = String::new();
     file.take(MAX_REQUEST + 1)
         .read_to_string(&mut input)
-        .map_err(|_| "Cannot read the machine's saved run file. Leave these files in place; see README Recovery.".to_string())?;
+        .map_err(|_| "Cannot read the machine's saved run file. Leave these files in place; see Recovery in cli/README.md.".to_string())?;
     if input.len() as u64 > MAX_REQUEST {
-        return Err("The machine's saved run file is too large. Leave these files in place; see README Recovery.".into());
+        return Err("The machine's saved run file is too large. Leave these files in place; see Recovery in cli/README.md.".into());
     }
     crate::text::parse(&input)
         .map(Some)
-        .map_err(|_| "The machine's saved run file is invalid. Leave these files in place; see README Recovery.".into())
+        .map_err(|_| "The machine's saved run file is invalid. Leave these files in place; see Recovery in cli/README.md.".into())
 }
 
 fn remove_own_file(path: &Path) -> Result<(), String> {
@@ -905,7 +905,7 @@ fn remove_own_file(path: &Path) -> Result<(), String> {
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         _ => Err(
-            "Cleanup found a changed state path. Leave these files in place; see README Recovery."
+            "Cleanup found a changed state path. Leave these files in place; see Recovery in cli/README.md."
                 .into(),
         ),
     }
@@ -944,7 +944,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 fn unhex(value: &str) -> Result<Vec<u8>, String> {
     if !value.len().is_multiple_of(2) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("The saved process identity is invalid. Leave these files in place; see README Recovery.".into());
+        return Err("The saved process identity is invalid. Leave these files in place; see Recovery in cli/README.md.".into());
     }
     value
         .as_bytes()

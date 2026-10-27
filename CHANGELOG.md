@@ -17,31 +17,61 @@ Changes that are merged but not yet released are under Unreleased.
 
 ### Engine
 
-- With the two-Spark tensor split (`VADE_W2_TP=1`), the verify step of five
-  to eight chats (up to 32 rows) now splits the routed experts between the
-  Sparks like smaller steps do. Before, such a step ran every layer whole on
-  both Sparks. Eight code chats on two Sparks went from 178.4 to 220.8 tokens
-  per second in one measurement, with the same tokens. Prompt steps above 16
-  rows keep the whole experts.
-- With the two-Spark tensor split (`VADE_W2_TP=1`), `VADE_W2_TP_HEAD=1` on
-  both Sparks splits the verify head of one greedy chat between them: each
-  Spark scores half of the vocabulary (with the bounded head, it screens only
-  its half and rescores exactly the rows that can win) and the second Spark
-  sends its best token per row to the first. The tokens do not change. Sampled chats and drafts keep
-  the whole head on the first Spark. Unset keeps the whole head there.
-- With the two-Spark tensor split on the one-sided wire (`VADE_W2_TP=1`,
-  `VADE_W2_TP_WIRE=write`), the wire's doorbell thread now sleeps when no
-  exchange is in flight, instead of polling. Speed and tokens are the same;
-  during one chat it used 75 percent of a CPU core per Spark instead of 92,
-  and between requests it uses none. `VADE_W2_TP_DOORBELL=spin` keeps the old
-  polling. A stop during the wire's startup now ends it at once, even if the
-  other Spark never answers.
-- When one greedy chat is verified, the head projection that skips the
-  vocabulary rows that cannot win now also covers verify steps of five to
-  eight tokens; it covered two to four. This runs on one Spark and on the
-  layer pipeline's first Spark, so code and structured replies, which draft
-  the most, verify faster with the same tokens. `VADE_HEAD_BOUNDS=0` turns
-  it off.
+Merges #105 through #110 were measured on October 26, 2026, with the FP4-Local
+checkpoint on two DGX Sparks. These runs used greedy decoding, drafting on,
+and thinking off. Rates below are tokens per second.
+
+- **#110: Keep eight-chat verification split.** With the tensor split at
+  `262b0c3`, verify steps of up to 32 rows split the routed experts between
+  the Sparks. Other steps
+  split experts only up to 16 rows. With projection level 3 and the split
+  verify head enabled, eight code chats went from 173.127 to 219.097 in
+  pooled measurements across two pairs, against `09a1184`. All 336 token-ID
+  comparisons matched. A later RigMark card on the merged revision measured
+  220.0 for eight chats. Both figures are aggregate throughput.
+- **#109: Split more layer work between two Sparks.** At `09a1184`,
+  projection level 2 splits output projections, attention query/gate
+  projections, and the shared expert's down projection. Level 3 also divides
+  linear-attention heads and their recurrent state on one-chat steps. A shorter first captured
+  verify segment reduces the initial wait for GPU work. In two runs per
+  revision on one pair, level 3 against level 1 on `dbc2385` changed prose
+  from 48.104–48.244 to 51.079–51.243, code from 94.343–94.968 to
+  97.711–97.775, and structured output from 121.116–121.417 to
+  124.674–125.281. Both revisions kept the verify head unsplit. All 168
+  token-ID comparisons matched.
+- **#108: Share linear-attention input projections.** At `dbc2385`,
+  projection level 1 divides the input projections of split layers between
+  the Sparks when one chat runs. It exchanges both sets of output rows
+  before waiting for either set. It also fixes weight-copy lookup and bounds
+  the state transfer before allocation. In two runs per revision on one
+  pair, against `41e3c22` with projection splitting off, prose changed from
+  45.208–45.454 to 47.804–48.253, code from 91.190–91.347 to
+  94.493–94.848, and structured output from 117.047–117.213 to
+  119.726–121.516. Both revisions kept the verify head unsplit. All 168
+  token-ID comparisons matched.
+- **#107: Share token scoring between two Sparks.** At `41e3c22`, the
+  split verify head scores half of the vocabulary on each Spark for one
+  greedy chat. When bounds are available, each Spark screens its own half
+  and fully scores the rows that can win. Sampled chats and drafts keep the
+  whole head on the first Spark. Against `984147f` with the tensor split and
+  RDMA write transfer,
+  pooled measurements across two pairs changed prose from 45.617 to 47.091
+  and structured output from 117.189 to 120.018. Code changed from 91.636
+  to 92.053, a tie within the gate's tolerance. All 392 token-ID comparisons
+  matched, including the extra eight-chat check.
+- **#106: Let the transfer thread sleep.** At `984147f`, the RDMA write
+  transfer thread sleeps when no exchange is in progress. During requests,
+  it used 0.82 of a CPU core on the first Spark and 0.79–0.80 on the second,
+  compared with 0.98 on each before. Throughput tied with `2ef7744`; all 48
+  token-ID comparisons matched. A stop during startup also
+  cancels the connection attempt if the other Spark does not answer.
+- **#105: Check more draft tokens with the bounded head.** At `2ef7744`,
+  the exact head that skips vocabulary rows that cannot win also covers
+  verify steps of five to eight rows, up from two to four. Pooled
+  measurements across two pairs, against `6f5388d` on the pipeline path,
+  changed code from 78.689 to 80.375 and structured output from 98.215 to
+  100.305. Prose changed from 42.008 to 42.118, a tie. All 336 token-ID
+  comparisons and 79 exactness checks matched.
 - On two Sparks with the FP8 checkpoint, the routed experts' decode tiles
   now keep two weight blocks in flight instead of one, so decoding is a little
   faster with the same tokens.
@@ -56,19 +86,6 @@ Changes that are merged but not yet released are under Unreleased.
   about 9 percent faster, prose about 4 percent. Verification keeps the BF16
   head, so outputs are unchanged. Cost: rank 0 chat slots 19 -> 17, and
   +0.33 GB per rank. `VADE_FP8_DRAFT_MX8=0` turns it off.
-- With the two-Spark tensor split, `VADE_W2_TP_PROJ=1` on both ranks also
-  splits the in-projections of every linear-attention layer between the two
-  Sparks on steps of one chat; the halves are exchanged as raw bits, so the
-  tokens are the same (opt-in; unset keeps today's split). Steps with more than
-  one chat keep the whole projections, where the larger exchanges cost more
-  than the split saves. `VADE_W2_TP_PROJ=2` also splits each layer's out
-  projection and the attention layers' q/gate projection on steps of one chat
-  and the shared expert's down projection on every split step, with the same
-  tokens. `VADE_W2_TP_PROJ=3` also splits each linear-attention layer by heads
-  on steps of one chat: each Spark keeps the recurrent state of its own heads
-  only, with the same tokens. A chat switches once its time alone has paid for
-  rebuilding its whole state, measured on the running pair. These splits cover
-  layers 2 to 47 on steps of at most 16 rows.
 - With the two-Spark tensor split (`VADE_W2_TP=1`), `VADE_W2_TP_WIRE=write` on
   both ranks moves each exchange with one-sided RDMA writes straight from one
   GPU's mapped mailbox into the other's, with no host copies and no host work on

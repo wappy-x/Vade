@@ -117,7 +117,9 @@ receipt. To test more widely:
 The gateway sits between your client and the engine. Your client only has to
 change its base URL, which is why this is called "invisible" mode.
 [Standalone gateway](../harness/docs/invisible-gateway.md) covers what it
-forwards and the greedy defaults it adds when a request sets no sampling field.
+forwards and the optional `--greedy-when-unset` policy. That policy adds
+greedy defaults only when a request sets no sampling field. The FP4-Local
+engine already uses greedy decoding for those requests.
 
 Start the gateway in a second controller terminal, from the same checkout. If
 `harness/target/release/vade-gateway` is not there yet, first build it as
@@ -703,7 +705,8 @@ tensor-parallel server:
 | Refused by | Controls it names |
 | --- | --- |
 | `spark-serve` | `--context-tokens`, `--output-tokens`, `--max-active` |
-| Flash | Launcher `CONTEXT` / `OUTPUT`, positional context, `FLASH_SERVE_OUTPUT_TOKENS`, `FLASH_SERVE_MAX_ACTIVE` |
+| Flash-Next FP4-Local | CLI `--context` and `--output`, or the native server's positional context and `FLASH_SERVE_OUTPUT_TOKENS`; memory admission chooses the chat count |
+| Legacy Flash-Next FP8 | The same context and output controls, plus `--chats` or `FLASH_SERVE_MAX_ACTIVE` |
 | `tp-serve` | Positional `CONTEXT`, `TP_SERVE_MAX_ACTIVE` |
 | A logical cap on the KV cache (which holds each chat's attention state) or on sessions | `--kv-budget-mib`, `--session-budget-mib` |
 

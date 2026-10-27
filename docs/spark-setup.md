@@ -66,9 +66,10 @@ A few ground rules:
   block, even if your terminal has no `set -e` setting. If anything fails,
   stop and investigate before you run another block.
 - **Every setup step previews first.** A plain run prints the commands it would
-  run and the file differences. It writes no files and changes no system
-  settings. Add `--apply` only after you have reviewed that preview. This also
-  goes for creating local examples and rendered files.
+  run. Steps that edit configuration files also show the file differences.
+  A preview writes no files and changes no system settings. Add `--apply`
+  only after you have reviewed it. This also applies to local examples and
+  rendered files.
 - **Verification works the same way.** By default it only previews its checks.
   `--apply` runs them, including peer SSH, ping and bandwidth traffic.
 - **Console commands stay manual.** Commands such as `netplan try` are separate

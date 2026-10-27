@@ -173,7 +173,7 @@ project. Only one is the release path.
 
 | Program | What it is |
 | --- | --- |
-| [`flash-serve`](../engine/crates/tp/src/bin/flash-serve.rs) | **The release server.** Serves FP4-Local on one Spark, as a two-Spark layer pipeline, or as a longer chain. It also serves the legacy two-Spark Flash-Next FP8 checkpoint. `vade launch` and `vade up` start it. |
+| [`flash-serve`](../engine/crates/tp/src/bin/flash-serve.rs) | **The release server.** Serves FP4-Local on one Spark, across two Sparks, or as a longer chain. It also serves the legacy Flash-Next FP8 checkpoint. `vade launch` and `vade up` start it. |
 | [`spark-serve`](../engine/crates/serve/src/bin/spark-serve.rs) | The original one-Spark server for earlier models (Qwen3, Qwen3.8-27B, Gemma 4). It shares the HTTP and scheduler library with `flash-serve` but is not a v0.1.0 route; see [its README](../engine/crates/serve/README.md). |
 | [`next-http`](../engine/crates/tp/src/bin/next-http.rs) | A compatibility launcher that hands off to `flash-serve` on the older tensor-map rank path, with drafting off. |
 | [`next-tp`](../engine/crates/tp/src/bin/next-tp.rs) | The rank qualification tool, not an HTTP service. |
@@ -334,7 +334,9 @@ and MXFP8 copies of the MTP layer's seven BF16 matrices (`fc_embedding`,
 keeps the full BF16 head and the checkpoint's weights, so these copies change
 which tokens are proposed and how many are accepted, not the token IDs
 returned. Any other change that would compute below the checkpoint's precision
-has to be switched on explicitly.
+needs the full exactness gate, quality evidence against main and a reviewed
+card before it can become the default. Keep one production path, as required
+by [AGENTS.md](../AGENTS.md#exactness-law-and-merge-gate).
 
 ### The legacy FP8 checkpoint
 
@@ -518,7 +520,23 @@ On one Spark, drafting takes code from 27.8 to 76.7 tok/s and prose from 27.8
 to 41.7 in the v0.1.0 cards ([what this means](benchmarks.md#what-this-means)).
 The older tensor-map rank path never drafts.
 
-## Several Sparks: the layer pipeline and the chain
+<a id="several-sparks-the-layer-pipeline-and-the-chain"></a>
+## Several Sparks: the tensor split, layer pipeline and chain
+
+The two-Spark tensor split shares matrix work between both GPUs during a
+decode step. It divides eligible expert and projection outputs by tensor
+dimensions, gathers the results in a fixed order, and can divide the
+linear-attention heads and the vocabulary head too
+([`next_tp.rs`](../engine/crates/engine/src/flash/next_tp.rs),
+[`next_tp_heads.rs`](../engine/crates/engine/src/flash/next_tp_heads.rs)).
+This tree still selects it explicitly with `VADE_W2_TP=1` on both ranks.
+The engine reference describes the required settings and its limits
+([two-Spark tensor split](../engine/docs/next-http.md)).
+
+The repository's one-path rule selects the tensor split as the two-Spark
+implementation. The remaining pipeline default described below is the
+current code, pending that default change's device gate and benchmark card.
+See [the merge rule](../AGENTS.md#exactness-law-and-merge-gate).
 
 A Spark has one GPU and one pool of memory. To use two or more, Vade by
 default splits the model by layers, not by matrices. Each Spark runs one
@@ -583,11 +601,11 @@ they run the same PTX and checkpoint artifacts, and every worker reserves
 memory for the number of chats the front will admit
 ([`next_batched_service.rs`](../engine/crates/tp/src/flash/next_batched_service.rs)).
 
-**What more Sparks buy today.** They read a long prompt faster: in the
+**What the measured layer pipeline provides.** In the
 2026-10-25 cards the first token after a cold 8K prompt came in 2.80 s on two
 Sparks and 2.19 s on four, against 3.86 s on one Spark in the v0.1.0 card.
-They do not make one chat write faster, because at any moment one GPU works
-on a given chat: with drafting ON, code ran at 79.3 tok/s on two Sparks and
+Only one pipeline GPU works on a given chat at a time. With drafting ON,
+code ran at 79.3 tok/s on two Sparks and
 80.3 on four, next to 76.7 on one. A chain is mainly for models too large for
 a single machine
 ([reading these cards](benchmarks.md#reading-these-cards)).
@@ -691,10 +709,12 @@ questions:
   and long-context retrieval? Matching an older Vade build is a separate
   question from matching an outside reference runtime.
 
-A change that alters the arithmetic order on purpose must sit behind an
-explicit switch. Before it can become the default, it needs repeatability,
-layer-difference checks against the measured numerical noise floor, GSM8K and
-IFEval comparisons, and long-memory checks for large changes
+An intentional change to arithmetic order needs the full exactness gate,
+reviewed golden updates and quality evidence against main before it becomes
+the default. Record the change and its results in a benchmark card. Keep one
+production path; a runtime switch does not replace this evidence. Quality
+checks include layer differences against the measured numerical noise floor,
+GSM8K and IFEval comparisons, and long-memory checks for large changes
 ([CLI validation](../cli/docs/test.md), [evals](../cli/evals.md)).
 
 ## What is measured, and how

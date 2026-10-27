@@ -141,7 +141,7 @@ Follow **[Hardware and network setup](network-setup.md)** until every link check
 passes. In short:
 
 1. Cable port 0 of spark-1 to port 1 of spark-2.
-2. Give each cable link (a [rail](GLOSSARY.md#pr)) its own `/24` subnet with MTU 9000 (example: `10.77.0.1` ↔ `10.77.0.2`, `10.77.1.1` ↔ `10.77.1.2`).
+2. Give each cable link (a [rail](GLOSSARY.md#pr)) its own `/24` subnet with MTU 9000 (example: `192.0.2.1` ↔ `192.0.2.2`, `198.51.100.1` ↔ `198.51.100.2`).
 3. Clone Vade on **each Spark** (`git clone --branch main https://github.com/wappy-x/vade.git ~/vade`, then `cd ~/vade`) and run the OS-setup scripts from that repository root, in the order given in [Spark system setup](spark-setup.md). Together they install the RDMA packages, configure the network, set unlimited locked memory (`memlock`) for RDMA, apply NVIDIA's `kho=off` fix if your kernel is `7.0.0-1019-nvidia`, and create SSH keys between the Sparks.
 4. Check: jumbo ping, `ib_write_bw` in both directions, `ulimit -l` = `unlimited`.
 
@@ -288,13 +288,13 @@ created in the SSH step of
 [Spark system setup](spark-setup.md#6-establish-ssh-between-the-sparks).
 
 ```sh
-# on spark-1; 10.77.0.2 is spark-2's example fabric address
+# on spark-1; 192.0.2.2 is spark-2's example fabric address
 # (TCP mode: use any key that lets spark-1 log in to spark-2)
 K=~/.ssh/vade-cluster
-ssh -i $K 10.77.0.2 'mkdir -p models/Qwen'
+ssh -i $K 192.0.2.2 'mkdir -p models/Qwen'
 rsync -a --info=progress2 --exclude '/.cache/huggingface/' -e "ssh -i $K" \
-  ~/models/Qwen/Qwen3.8-Flash-Next-FP8/ 10.77.0.2:models/Qwen/Qwen3.8-Flash-Next-FP8/
-scp -i $K ~/models/Qwen/Qwen3.8-Flash-Next-FP8.sha256 10.77.0.2:models/Qwen/
+  ~/models/Qwen/Qwen3.8-Flash-Next-FP8/ 192.0.2.2:models/Qwen/Qwen3.8-Flash-Next-FP8/
+scp -i $K ~/models/Qwen/Qwen3.8-Flash-Next-FP8.sha256 192.0.2.2:models/Qwen/
 
 # on spark-2
 cd ~/models/Qwen/Qwen3.8-Flash-Next-FP8
@@ -363,7 +363,7 @@ health_timeout_secs = 360
 # An alias from ~/.ssh/config.
 ssh = spark-1
 # spark-1's OWN address on the cable to spark-2.
-fabric.spark-2 = 10.77.0.1
+fabric.spark-2 = 192.0.2.1
 model_path = ~/models/Qwen/Qwen3.8-Flash-Next-FP8
 engine_source = ~/vade-source
 cli_source = ~/vade-cli-source
@@ -373,7 +373,7 @@ state_dir = ~/.local/state/vade
 [machine spark-2]
 ssh = spark-2
 # spark-2's OWN address on the cable to spark-1.
-fabric.spark-1 = 10.77.0.2
+fabric.spark-1 = 192.0.2.2
 model_path = ~/models/Qwen/Qwen3.8-Flash-Next-FP8
 engine_source = ~/vade-source
 cli_source = ~/vade-cli-source

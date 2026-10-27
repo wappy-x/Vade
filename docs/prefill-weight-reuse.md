@@ -9,19 +9,27 @@ IDs stay the same.
 ## The router and gate kernel
 
 The matrices in question are the per-layer and drafting-layer router and the
-shared-expert gate, all stored as BF16. The prompt kernel takes them when all
-of the following hold:
+shared-expert gate, all stored as BF16. The dispatcher first checks whether
+the prompt group can use packed matrix multiplication. For these small
+matrices, that path needs more than 256 tokens, at least 64 output columns,
+input and output widths divisible by 64, and enough aligned scratch space.
+It uses `flash_bf16_mma64`; see
+[`fixed_bf16_projection`](../engine/crates/gpu/src/batch.rs).
 
-- the prompt has more than 8 tokens;
+If that path is not selected, the weight-reuse kernel applies when reuse is
+enabled and all of the following hold:
+
+- the prompt group has more than 8 tokens;
 - the matrix has at most 512 output columns;
 - its input width K is at most 4096 and divisible by 64.
 
-Each launch covers up to 256 tokens, and a longer prompt takes several
-launches. Each block has 256 threads and covers eight output columns. It copies
+Each weight-reuse launch covers up to 256 tokens. A larger group that reaches
+this fallback takes several launches. Each block has 256 threads and covers
+eight output columns. It copies
 its eight-column weight slice into 16 × K bytes of shared memory once, then
-reuses it for every token in the launch. Other BF16 matrices, and prompts of 8
-tokens or fewer, keep the existing kernel. The routed-expert GEMMs, scatter and
-combine are unchanged.
+reuses it for every token in the launch. Groups that meet neither set of
+conditions use the row kernel. The routed-expert GEMMs, scatter and combine
+are unchanged.
 
 ## Why the token IDs stay the same
 

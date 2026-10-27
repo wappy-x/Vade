@@ -4,7 +4,7 @@ Real output, so you can see the [output contract](ux.md) without a Spark.
 Everything below was captured on 2026-10-25 on a Mac from this branch's own
 debug builds of `vade` and `vade-harness`, with an empty private `HOME` (a
 temporary directory, shown here as `/tmp/vade-example`) and no network. The
-`vade` commands ran with `TERM=dumb` (so no colour); the `[exit N]` lines are
+`vade` commands ran with `TERM=dumb` (so no color); the `[exit N]` lines are
 their exit codes. Chat needs a real terminal (`TERM=dumb` turns its raw mode
 off), so it ran differently, as described under [Chat](#chat).
 
@@ -14,12 +14,12 @@ One real exchange: `vade-harness agent` (what `vade chat` opens) driven
 through a pseudo-terminal with `TERM=xterm-256color` and `COLUMNS`/`LINES` set
 to the screen size, against a small offline mock server that streams a short
 thought and an answer. The screens were rebuilt from the raw terminal bytes
-with a minimal terminal model, then colour was dropped. The counts and
+with a minimal terminal model, then color was dropped. The counts and
 speeds are the mock's, not the engine's: the mock reports 790 prompt and 312
 answer tokens for a few short chunks, so `227 tok/s` here says nothing about a
 Spark. `VADE_CHAT_SETUP` was set the way `vade chat` sets it.
 
-In colour, the `▌` bar and your words are bold cyan, the thought row is dim
+In color, the `▌` bar and your words are bold cyan, the thought row is dim
 italic, and the footer and status strip are dim.
 
 At 100 columns, after the answer:
@@ -138,7 +138,7 @@ Environment:
   VADE_HOME          Local install root and saved defaults (default ~/.vade)
   VADE_CONFIG        Controller config file; selects the controller (see Notes)
   VADE_API_KEY_FILE  Credential file when --api-key-file is not given
-  NO_COLOR           Plain output without colour
+  NO_COLOR           Plain output without color
 
 Notes:
   - Explicit VADE_CONFIG selects the controller for up, install, chat, status,

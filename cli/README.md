@@ -91,10 +91,12 @@ The context is the most tokens the model considers at once: the prompt plus the
 answer so far. By default the context is 32768 tokens and each answer can be up
 to 8192. Those go lower only when the model requires it, or when the engine's
 memory check refuses the default or saved context. In that case startup tries
-16384, 8192 and 4096, saves the first one that starts, and tells you.
+the smaller sizes from 32768, 16384, 8192 and 4096. It saves the first one that
+starts and tells you which size it selected.
 
 You can raise the limits with `--context` and `--output`; stop the engine first
-with `vade down`. `--context 262144` picks the single-chat long-context preset.
+with `vade down`. `--context 262144` selects the largest context. The engine
+still decides how many chats can run at once from the available memory.
 Output is capped at 16384 tokens and at the configured context. If the engine
 refuses a `--context` you passed, you get an error with its memory message.
 
@@ -172,8 +174,9 @@ stage those instead on the Spark itself, set `VADE_BUNDLE` to an existing local
 launcher bundle, then run `vade install` with no controller config selected
 (no `VADE_CONFIG`, and no default controller config file). The release
 bundle and its `SHA256SUMS` are on the GitHub release page, and
-[INSTALL.md](../INSTALL.md) shows the download. A controller install can't use
-a launcher bundle; it reads only the `vade-prebuilt-v1` format described in
+[INSTALL.md](../INSTALL.md) shows the download. A controller can also use a
+launcher bundle when its engine and CLI revisions match the source checkout.
+Set `prebuilt_dir` in the controller config; see
 [Prebuilt bundles](#prebuilt-bundles).
 
 ## Verify exactness
@@ -384,9 +387,9 @@ memory.
 The engine decides from context and memory how many chats can run at once. It
 reports that count when it starts, and the controller's `vade status` prints it.
 
-An explicit `--context` wins, up to 262144 (`--context 262144` picks the
-single-chat long-context preset on either route). An explicit `--output`
-reaches 16384. MTP stays engine-selected unless you override it. A request
+An explicit `--context` wins, up to 262144 on either route. This long-context
+setting still lets the engine decide the chat count from memory. An explicit
+`--output` reaches 16384. MTP stays engine-selected unless you override it. A request
 longer than the configured context is refused, and the refusal names
 `--context`.
 
@@ -401,10 +404,11 @@ staged engine, Vade refuses those counts before it runs anything on the Sparks.
 Testing so far covers this much:
 
 - On one Spark, a live test on real hardware covers the launcher, direct chat,
-  the gateway (the harness's HTTP relay to the engine) and cancelling a reply.
-- For larger chains, starting and recovering are covered only by host tests
-  (tests that run without a Spark), and so is picking TCP on two Sparks. None of
-  those has passed its checks on real Sparks yet.
+  the gateway (the harness's HTTP relay to the engine) and canceling a reply.
+- Larger chains also ran in the published
+  [four-VM benchmark cards](../bench/receipts/2026-10-24/README.md). Those runs
+  do not qualify every layout or recovery case. Each deployment still needs
+  its own exactness checks. Two-Spark TCP is covered by host tests only.
 
 ### Build and configure
 
@@ -570,7 +574,7 @@ With `VADE_CONFIG` set, the lifecycle commands work like this:
 | `vade logs` | Recent redacted engine logs, including saved logs after shutdown. |
 | `vade chat` | Opens the coding agent (`vade-harness agent`) in the current folder, connected to the engine you own, with the recorded context. Details below the table. |
 | `vade doctor` | Machine checks plus the harness doctor and its two small cache test turns. |
-| `vade install` | Checks, builds, stages, and runs doctor. Without a running engine, it verifies that doctor is available and explains the remaining engine check. |
+| `vade install` | Checks, builds, stages, and checks the harness. Without a running engine, it verifies that the harness doctor is available and explains the remaining engine check. |
 | `vade update` | Updates clean checkouts with `git pull --ff-only`, rebuilds, restages, and offers a restart. A checkout with no remote stays local. |
 
 With `--replicas N`, each replica sits behind its own tunnel on the N local
@@ -733,6 +737,12 @@ Two optional flags set memory and cache sizes:
   `FLASH_SERVE_KV_BYTES`, including `0` to turn retention off. Local FP4-Local
   supports only `--cache-bytes 0`, which it translates to its own prefix-cache
   switch; a positive capacity is refused.
+
+The controller accepts and saves `--chats` and `--cache-bytes` for FP4-Local,
+but the current FP4-Local engine does not use those values. This includes
+`--cache-bytes 0`. It chooses the chat count from context and memory, and its
+separate prefix-cache setting controls retention. Check the admitted chat
+count and cache capability instead of treating these saved flags as limits.
 
 For FP4-Local, the retained prefix cache stays off unless it was switched on at
 startup (see [the prompt cache](#chats-at-once-and-the-prompt-cache)); a request

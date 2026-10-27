@@ -5,7 +5,7 @@ formats, and they serve different setups:
 
 | Format | Use it when | In the v0.1.0 release |
 | --- | --- | --- |
-| Launcher bundle (`vade-launch-bundle-v1`) | You run Vade on one Spark | Yes |
+| Launcher bundle (`vade-launch-bundle-v1`) | You run Vade on one Spark, or install from a controller with matching source revisions | Yes |
 | Controller bundle (`vade-prebuilt-v1`) | You install with `vade install` from a controller | No, you assemble it yourself |
 
 Most of this page covers the launcher bundle. The
@@ -114,9 +114,9 @@ Each receipt records:
 - the build SHA from `/health`
 - the drafting depth the server reports
 
-With FP4-Local checkpoints, the drafting depth that `/health` reports has a
-known caveat. [Benchmark options](../README.md#measure-a-running-server)
-explains it and has more on receipts.
+The health report records the server's drafting setting. To check what each
+response used, read the receipt's `draft_observations` fields. See
+[benchmark options](../README.md#measure-a-running-server).
 
 ## What's in the launcher bundle
 
@@ -221,8 +221,9 @@ bundle and checksum to the tag's GitHub release. The tag workflow does the
 full native build, and it checks both the archive checksum and the extracted
 manifest hashes before it publishes.
 
-Pull-request CI runs `cargo +1.99.0 test --offline --locked --manifest-path tools/Cargo.toml --test producer --test bundle` without
-compiling the full engine. It tests that the producer:
+The repository-tool CI step runs
+`cargo +1.99.0 test --offline --locked --all-targets --manifest-path tools/Cargo.toml`.
+Its bundle tests check that the producer:
 
 - lays out the files and writes the manifest hashes correctly
 - refuses the cases it should refuse, and cleans up after a failure

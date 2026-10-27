@@ -73,7 +73,7 @@ vade chat
 Exit the chat, then run `vade down`. Preserve ownership records if cleanup
 fails and follow [Recovery](../cli/README.md#recovery).
 
-The legacy CLI defaults ([cli/src/cli.rs:329](../cli/src/cli.rs#L329), [line 100](../cli/src/cli.rs#L100)) are context 131,072, output limit
+The legacy CLI defaults ([CLI parser](../cli/src/cli.rs)) are context 131,072, output limit
 65,536 and MTP depth 2. Output is also bounded by the remaining context after
 tokenizing the prompt. Use `--mtp 0` for plain decoding. These are FP8 settings;
 they do not describe the FP4-Local launcher or a direct native server launch.

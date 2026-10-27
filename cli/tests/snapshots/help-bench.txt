@@ -9,7 +9,8 @@ Examples:
 Usage: vade bench [OPTIONS]
 
 Options:
-  --url URL             Server to measure (default: the recorded local endpoint)
+  --url URL             Server to measure (default: VADE_API_URL, then the
+                        selected installation's endpoint)
   --concurrency LIST    Concurrent chats per cohort, such as 1,2,4,8 (default
                         1,2,4,8,16)
   --max-tokens N        Tokens each chat must generate (default 256)

@@ -222,7 +222,7 @@ impl<R: Runner> App<R> {
                 crate::output::stderr_line(format_args!("Start did not finish. Cleaning up this launch."));
                 if let Err(cleanup) = self.cleanup(&mut session) {
                     crate::output::cleanup_failed();
-                    return Err(format!("{error} Cleanup could not finish: {cleanup} Leave saved ownership files in place; retry vade down or see README Recovery."));
+                    return Err(format!("{error} Cleanup could not finish: {cleanup} Leave saved ownership files in place; retry vade down or see Recovery in cli/README.md."));
                 }
                 crate::output::stderr_line(format_args!("Owned cleanup finished. This launch's ranks and tunnel are closed."));
             }
@@ -702,7 +702,7 @@ fn clear_cloud_auth(exec: &mut Exec) {
 fn remove_dead_socket(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let refusal =
-        "Tunnel ownership could not be checked. Leave its files in place; see README Recovery.";
+        "Tunnel ownership could not be checked. Leave its files in place; see Recovery in cli/README.md.";
     text::private_dir(path.parent().ok_or(refusal)?)?;
     text::reject_symlinks(path)?;
     let original = match fs::symlink_metadata(path) {

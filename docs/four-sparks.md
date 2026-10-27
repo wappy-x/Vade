@@ -121,7 +121,7 @@ template on B and C (four rows each); for a physical ring, use `ring` on all
 four. The template names only choose how many local rail rows you get; they do
 not choose Vade's transport topology. Fill in the seven fields of each row in
 `links.tsv` from the new cable map: Ethernet device, RDMA device, local address
-with its `/24`, peer address, peer alias, RoCE-v2 GID and bandwidth-test TCP
+with its `/24`, peer address, peer alias, RoCE-v2 GID index and bandwidth-test TCP
 port. The matching row on the peer may have a different row
 number, but its endpoints, rail and bandwidth test port must agree.
 

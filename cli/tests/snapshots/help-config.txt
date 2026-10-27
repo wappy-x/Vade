@@ -14,7 +14,8 @@ Options:
 Notes:
   - The setup is local (saved defaults in VADE_HOME), controller (VADE_CONFIG or
     the user config file), legacy (vade run qwen3-8b) or none yet.
-  - Reads only. To change a local value, rerun vade launch with the flag; to
-    change a controller value, edit the file it names.
+  - Reads only. To change local limits, run vade down, then vade launch with the
+    new flags. To change controller settings, stop the engine with its current
+    config, then edit the file shown here.
 --- stderr
 --- exit 0

@@ -40,7 +40,7 @@ impl Runner for FakeRunner {
             "replica gateway stop" => { assert_eq!(exec.args[1], "4242"); self.signals.push(exec.args[0].clone()); if exec.args[0] == "-KILL" || !self.gateway_stubborn { self.gateway = None; } } _ => {} }
         if self.fail.as_ref() == Some(&exec.label) { self.fail = None; return Err("Fake lost reply or interrupted cleanup.".into()); }
         if matches!(op, "inspect" | "stop" | "clean" | "gpu") && self.refused_start.as_ref() == Some(&name) { return Err("Foreign owner must never receive cleanup.".into()); }
-        if op == "inspect" && self.foreign.as_ref() == Some(&name) { return Ok(Output { success: false, stdout: text::encode(&Fields::from([("error".into(), self.inspect_error.clone().unwrap_or_else(|| "The saved process number now belongs to a different process. Nothing was signalled. Leave these files in place; see README Recovery.".into()))])) }); }
+        if op == "inspect" && self.foreign.as_ref() == Some(&name) { return Ok(Output { success: false, stdout: text::encode(&Fields::from([("error".into(), self.inspect_error.clone().unwrap_or_else(|| "The saved process number now belongs to a different process. Nothing was signaled. Leave these files in place; see Recovery in cli/README.md.".into()))])) }); }
         if op == "stop" { self.started.remove(&name); }
         let stdout = if exec.label == "fabric address resolution" { "127.0.0.1 STREAM\n".into() } else if matches!(exec.label.as_str(), "controller binary hashes" | "harness hash") {
             if self.alter_build_outputs && exec.label == "controller binary hashes" {
@@ -390,7 +390,7 @@ fn unverified_listening_or_foreign_socket_blocks_all_stops() {
     let mut f = Fixture::new(2, false); f.app.up(&legacy_options()).unwrap();
     let session = Session::load(&f.app.config.state_dir).unwrap().unwrap(); let socket = session.socket(&f.app.config.state_dir);
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap(); f.app.runner.tunnel_bad = true; f.app.runner.calls.clear();
-    assert!(f.app.execute(Command::Down).unwrap_err().contains("README Recovery"));
+    assert!(f.app.execute(Command::Down).unwrap_err().contains("Recovery in cli/README.md"));
     assert!(socket.exists() && f.recorded());
     assert!(!f.app.runner.calls.iter().any(|e| e.label.ends_with(" stop") || e.label == "controller tunnel exit"));
     drop(listener); fs::remove_file(&socket).unwrap(); fs::write(&socket, "Foreign file.").unwrap(); f.app.runner.calls.clear();
@@ -406,8 +406,8 @@ fn recovery_errors_keep_files_before_any_stop() {
     let session = Session::load(&f.app.config.state_dir).unwrap().unwrap(); let socket = session.socket(&f.app.config.state_dir);
     drop(std::os::unix::net::UnixListener::bind(&socket).unwrap()); f.app.runner.tunnel_bad = true; f.app.runner.foreign = Some("b".into());
     for reason in ["This machine rebooted after launch.", "Start was interrupted before the process was saved."] {
-        f.app.runner.inspect_error = Some(format!("{reason} Leave these files in place; see README Recovery.")); f.app.runner.calls.clear();
-        let error = f.app.execute(Command::Down).unwrap_err(); assert!(error.contains(reason) && error.contains("README Recovery") && !error.contains("Preserve") && !error.contains("journal"));
+        f.app.runner.inspect_error = Some(format!("{reason} Leave these files in place; see Recovery in cli/README.md.")); f.app.runner.calls.clear();
+        let error = f.app.execute(Command::Down).unwrap_err(); assert!(error.contains(reason) && error.contains("Recovery in cli/README.md") && !error.contains("Preserve") && !error.contains("journal"));
         assert!(f.recorded() && socket.exists() && f.app.runner.started.len() == 2);
         assert!(!f.app.runner.calls.iter().any(|e| e.label.ends_with(" stop") || e.label.starts_with("controller tunnel")));
     }

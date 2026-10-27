@@ -19,8 +19,7 @@ Notes:
     health.
   - From a controller: local tools, then SSH, nvidia-smi, disk, free memory and
     model files on each configured Spark, then the fabric and the harness.
-  - Each FAIL row is followed by the command that fixes it. Exit 0 means PASS, 1
-    means FAIL.
+  - Each FAIL row gives the next step. Exit 0 means PASS, 1 means FAIL.
   - One Spark needs no fabric or RDMA; linked Sparks use RDMA by default. Set
     SEQPAR_RDMA=0 for TCP using the configured fabric addresses on any reachable
     interface; QSFP and RDMA memlock are unnecessary in TCP mode.

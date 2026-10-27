@@ -645,15 +645,15 @@ fn manifest(dump: &Path, rank: &str, width: usize) -> Result<usize, String> {
 }
 
 const HELP: &str = r#"Usage: vade test determinism --bench BIN --ptx PTX --dump-dir DIR \
-  [--groups N,N] [--require-poison] [--url URL --server-logs LOG0 LOG1 [LOG2 LOG3] --bodies REQUEST.json,... --wait-server SECONDS] -- \
+  [--groups N,N] [--require-poison] [--url URL --server-logs LOG0 [LOG1 [LOG2 LOG3]] --bodies REQUEST.json,... --wait-server SECONDS] -- \
   MODEL FIXTURE.json[,FIXTURE.json...] ADDR0 ADDR1 RANK [--world 1|2|4]
-Or: vade test determinism --server-only [--world 1|2|4] --bench BIN --url URL --server-logs LOG0 LOG1 [LOG2 LOG3] \
+Or: vade test determinism --server-only [--world 1|2|4] --bench BIN --url URL --server-logs LOG0 [LOG1 [LOG2 LOG3]] \
   --fixtures FIXTURE.json,... [--bodies REQUEST.json,...]
 Or: vade test determinism --selftest --bench BIN
 
 Launch all ranks concurrently with identical inputs and a fresh external
-TP_RUN_ID, private SEQPAR_CONTROL_SECRET, SEQPAR_RDMA=1, TP_TOPOLOGY=ring or path,
-SPARK_PROFILE=0 and memory budget.
+TP_RUN_ID, private SEQPAR_CONTROL_SECRET, TP_TOPOLOGY=ring or path,
+SPARK_PROFILE=0 and memory budget. Set SEQPAR_RDMA=1 for multiple ranks.
 World 2 remains the default: ADDR0/ADDR1 are the two shared pair endpoints.
 World 1 uses the generic native adapter with rank 0 and a non-RDMA startup seal.
 Native preflight inspects ModelPlan headers and binds model/world/fixtures/groups to captures.
@@ -666,8 +666,9 @@ see cli/docs/test.md for the world-four capture and promotion procedure.
 No hosts, model paths or server lifecycle are inferred. The caller owns all
 rank PIDs and, after the logit runs release the GPU, starts the usual server.
 With --url, rank zero waits up to --wait-server seconds (default 0) for /health.
-Rank zero requires all flash-serve startup logs via --server-logs in rank order, readable
-locally after health succeeds. Capture stdout and stderr together on each rank.
+Rank zero requires one flash-serve startup log per rank via --server-logs,
+in rank order and readable locally after health succeeds. Capture stdout and
+stderr together on each rank.
 All three MTP logs on each rank and every server log must contain that rank's
 RDMA seal line for the selected world. An old binary without it fails even when tokens and logit bytes match.
 Use the server's root URL; --bodies uses /v1/chat/completions with retained
@@ -690,13 +691,15 @@ fresh sessions that verify the same 63 teacher-forced decode inputs in launches
 of k + 1 rows for k = 3, 7 and 15; every row is compared with the one-row reference.
 Follow-up: 63 decode inputs, canonicalize, fresh exact restore, then one suffix
 token against a cold prefill of the identical prompt plus 64 frozen labels.
-Native batch-mixed cycles widths 3..16: 577 rows, 573122560 bytes/rank against each lane's solo position; HTTP mixes three prompts.
+Native batch-mixed cycles widths 3..16: 577 rows per rank against each lane's
+solo position; HTTP mixes three prompts. Each FP32 logit row uses the model's
+vocabulary size times 4 bytes. Preflight reports this size as row_bytes.
 Native batch-mixed-16 cycles 8192/2048/285 with lane r advanced by r frozen
 inputs, then compares 48 full-width passes to that lane's solo positions:
-768 rows, 762839040 bytes/rank. batch-mixed-16-poison uses the env-only hook
+768 rows per rank. batch-mixed-16-poison uses the env-only hook
 VADE_TEST_ROUTING_REJECT=1:3 (legacy) or 1:3:16 (width-aware), deferred through
 setup, requires row 3 to fail inside the first sixteen-row pass, retains its
-slot as padding, and compares 720 survivor rows (715161600 bytes/rank) to the
+slot as padding, and compares 720 survivor rows per rank to the
 no-hook mixed-16 captures. --gate-capabilities reports the compiled per-row
 API via the engine Cargo feature flash-routing-per-row; detection is printed.
 Default flash-bench builds report routing_reject_per_row=1 and must run poison.
@@ -708,12 +711,13 @@ The summary always carries poison=SKIP|PASS|FAIL. Input errors exit 2.
 the merge-receipt form is vade test determinism --require-poison
 followed by the normal rank arguments above.
 Both forms use sixteen rows for all 48 calls. The poison step compares 15
-survivor rows (14899200 bytes/rank); 47 subsequent calls retain all sixteen
-slots and compare 705 survivor rows (700262400 bytes/rank).
+survivor rows; 47 subsequent calls retain all sixteen slots and compare 705
+survivor rows.
 Both extra native cells share a 120-second work cap (checked between calls;
 the 900-second invocation timeout still bounds hangs), reuse one weight copy,
 and cannot exceed the device peak already reached by the existing cases.
-Extra dump bytes are 762839040/rank, or 1478000640/rank with poison enabled.
+Extra dumps hold 768 rows per rank, or 1488 rows with poison enabled.
+Multiply these counts by row_bytes for the storage size.
 Homogeneous cohorts prefill one row and restore its snapshot into the others.
 Only the lead's prompt-end output is captured; all rows' 63 actual decode
 outputs are compared. A copied prompt-end output is never a PASS comparison.

@@ -17,8 +17,8 @@ Notes:
     local engine and chat program. No hand editing is needed.
   - With VADE_CONFIG, or a default controller config before local setup: check
     prerequisites, copy an exact-source SHA256-verified prebuilt_dir bundle or
-    build source, then run doctor. Model inventory checks overlap copy/build and
-    are cached.
+    build source, then check the harness. Model inventory checks overlap
+    copy/build and are cached.
   - A generated run qwen3-8b installation uses run again; install requires an
     explicit VADE_CONFIG to select a controller.
   - One Spark needs no fabric or RDMA; linked Sparks use RDMA by default. Set

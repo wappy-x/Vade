@@ -10,8 +10,8 @@ Usage: vade up [OPTIONS]
 
 Options:
   --fp4-local       Qwen3.8 Flash-Next FP4-Local (the default; optional)
-  --fp8-legacy      Two-Spark legacy FP8: context 131072, output min(65536,
-                    context), MTP 2; output ceiling 262144
+  --fp8-legacy      Legacy FP8 on 2, 4 or 6 Sparks: context 131072, output
+                    min(65536, context), MTP 2; output ceiling 262144
   --sparks N        Number of Sparks; FP4 supports 1..24
   --hosts a,b       Machine names in cable order, separated by commas
   --replicas N      2..16 independent one-Spark FP4-Local servers behind a local
@@ -21,22 +21,24 @@ Options:
   --context N       Context window in tokens, 4096..262144 (default 32768)
   --output N        Output limit in tokens, 1024..16384 (default min(8192,
                     context))
-  --chats N         Concurrent chats, 1..32 (controller)
+  --chats N         Concurrent legacy FP8 chats, 1..32 (controller)
   --memory-bytes N  Memory budget per rank, in bytes
-  --cache-bytes N   Retained prompt cache, in bytes; 0 disables retention
+  --cache-bytes N   Legacy FP8 retained prompt cache, in bytes; 0 disables it.
+                    Local FP4 accepts only 0
   --dry-run         Show what would happen; change nothing
 
 Notes:
   - Default: Qwen3.8 Flash-Next FP4-Local on one Spark.
-  - Local up and launch use context 32768 and output min(8192, context). The
-    engine's memory admission decides: only a refused default or saved context
-    is lowered (16384, 8192, 4096), and saved once it starts. Supported explicit
-    limits are saved; an explicit --context the engine refuses is an error.
-    Local --chats and positive --cache-bytes are refused; --cache-bytes 0
-    disables retention.
+  - Local up and launch start with context 32768 and output min(8192, context).
+    They reuse saved limits. A memory refusal lowers a default or saved context
+    to a smaller size from 32768, 16384, 8192 and 4096. The first size that
+    starts is saved. A refused explicit --context is an error. Local --chats and
+    positive --cache-bytes are refused; --cache-bytes 0 disables retention.
   - Controller FP4 defaults match local ones on any Spark count: context 32768,
-    output min(8192, context); the engine admits concurrent chats from context
-    and memory. --context 262144 selects the single-chat long-context preset.
+    output min(8192, context). --context 262144 requests a larger context. The
+    engine still sets the chat count from context and memory.
+  - Controller FP4 ignores --chats and --cache-bytes. Its engine admits chats
+    from memory and uses its own prefix cache setting.
   - MTP is engine-selected. FP4-Local one-Spark concurrent chats can draft; the
     default request depth is 3 with strict verification. Legacy FP8 concurrent
     chats decode plainly. Per-request draft=plain disables drafting;

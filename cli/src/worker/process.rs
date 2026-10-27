@@ -31,11 +31,11 @@ impl Identity {
             .ok()
             .filter(|pid| *pid > 1 && *pid <= i32::MAX as u32)
             .ok_or_else(|| {
-                "The saved process number is invalid. Leave these files in place; see README Recovery.".to_string()
+                "The saved process number is invalid. Leave these files in place; see Recovery in cli/README.md.".to_string()
             })?;
         let start = required(record, "start_ticks")?.to_owned();
         if start.is_empty() || !start.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err("The saved process start time is invalid. Leave these files in place; see README Recovery.".into());
+            return Err("The saved process start time is invalid. Leave these files in place; see Recovery in cli/README.md.".into());
         }
         let exe = unhex(required(record, "exe_hex")?)?;
         use std::os::unix::ffi::OsStringExt;
@@ -56,7 +56,7 @@ pub(super) fn snapshot(pid: u32) -> Result<Option<Identity>, String> {
             Ok(value) => Ok(Some(value)),
             Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound) => Ok(None),
             Err(_) => {
-                Err("Cannot verify the saved engine process. Leave these files in place; see README Recovery.".into())
+                Err("Cannot verify the saved engine process. Leave these files in place; see Recovery in cli/README.md.".into())
             }
         }
     };
@@ -64,7 +64,7 @@ pub(super) fn snapshot(pid: u32) -> Result<Option<Identity>, String> {
         return Ok(None);
     };
     let stat = String::from_utf8(stat).map_err(|_| {
-        "Cannot read engine identity. Leave these files in place; see README Recovery.".to_string()
+        "Cannot read engine identity. Leave these files in place; see Recovery in cli/README.md.".to_string()
     })?;
     let Some(start) = stat_start(&stat)? else {
         return Ok(None);
@@ -74,7 +74,7 @@ pub(super) fn snapshot(pid: u32) -> Result<Option<Identity>, String> {
         Ok(path) => path,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => {
-            return Err("Cannot verify the engine executable. Leave these files in place; see README Recovery.".into());
+            return Err("Cannot verify the engine executable. Leave these files in place; see Recovery in cli/README.md.".into());
         }
     };
     let Some(command) = read(&root.join("cmdline"))? else {
@@ -89,7 +89,7 @@ pub(super) fn snapshot(pid: u32) -> Result<Option<Identity>, String> {
         String::from_utf8(after).map_err(|_| "Cannot parse engine identity.".to_string())?;
     if stat_start(&after)?.as_ref() != Some(&start) {
         return Err(
-            "The engine process changed while checking it. Retry vade status; if it still fails, see README Recovery."
+            "The engine process changed while checking it. Retry vade status; if it still fails, see Recovery in cli/README.md."
                 .into(),
         );
     }
@@ -151,14 +151,14 @@ pub(super) fn verify_snapshot(
 ) -> Result<bool, String> {
     if boot != identity.boot {
         return Err(
-            "This machine rebooted after launch. Leave these files in place; see README Recovery."
+            "This machine rebooted after launch. Leave these files in place; see Recovery in cli/README.md."
                 .into(),
         );
     }
     match now {
         None => Ok(false),
         Some(now) if now == identity => Ok(true),
-        Some(_) => Err("The saved process number now belongs to a different process. Nothing was signalled. Leave these files in place; see README Recovery.".into()),
+        Some(_) => Err("The saved process number now belongs to a different process. Nothing was signaled. Leave these files in place; see Recovery in cli/README.md.".into()),
     }
 }
 
@@ -199,7 +199,7 @@ fn send_pidfd(handle: &File, number: i32) -> Result<(), String> {
         )
     };
     if result == -1 && std::io::Error::last_os_error().raw_os_error() != Some(3) {
-        return Err("Could not safely signal the engine. Retry vade down; if it still fails, see README Recovery.".into());
+        return Err("Could not safely signal the engine. Retry vade down; if it still fails, see Recovery in cli/README.md.".into());
     }
     Ok(())
 }
@@ -211,7 +211,7 @@ pub(super) fn stop_identity(identity: &Identity) -> Result<(), String> {
         return Ok(());
     }
     let handle = handle
-        .ok_or_else(|| "The engine process changed before stop. Leave these files in place; see README Recovery.".to_string())?;
+        .ok_or_else(|| "The engine process changed before stop. Leave these files in place; see Recovery in cli/README.md.".to_string())?;
     send_pidfd(&handle, TERM)?;
     if wait_stopped(identity, Duration::from_secs(30))? {
         return Ok(());
@@ -222,7 +222,7 @@ pub(super) fn stop_identity(identity: &Identity) -> Result<(), String> {
     if wait_stopped(identity, Duration::from_secs(5))? {
         return Ok(());
     }
-    Err("The owned engine did not stop. Its saved files remain; retry vade down or see README Recovery.".into())
+    Err("The owned engine did not stop. Its saved files remain; retry vade down or see Recovery in cli/README.md.".into())
 }
 
 fn wait_stopped(identity: &Identity, timeout: Duration) -> Result<bool, String> {
@@ -239,7 +239,7 @@ fn wait_stopped(identity: &Identity, timeout: Duration) -> Result<bool, String> 
 pub(super) fn rollback_child(child: &mut Child) -> Result<(), String> {
     if child
         .try_wait()
-        .map_err(|_| "Cannot check the newly started engine. Leave these files in place; see README Recovery.".to_string())?
+        .map_err(|_| "Cannot check the newly started engine. Leave these files in place; see Recovery in cli/README.md.".to_string())?
         .is_some()
     {
         return Ok(());
@@ -252,7 +252,7 @@ pub(super) fn rollback_child(child: &mut Child) -> Result<(), String> {
         if child
             .try_wait()
             .map_err(|_| {
-                "Cannot check the newly started engine. Leave these files in place; see README Recovery.".to_string()
+                "Cannot check the newly started engine. Leave these files in place; see Recovery in cli/README.md.".to_string()
             })?
             .is_some()
         {
@@ -261,11 +261,11 @@ pub(super) fn rollback_child(child: &mut Child) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(100));
     }
     child.kill().map_err(|_| {
-        "Could not stop the failed launch. Leave these files in place; see README Recovery."
+        "Could not stop the failed launch. Leave these files in place; see Recovery in cli/README.md."
             .to_string()
     })?;
     child
         .wait()
-        .map_err(|_| "Could not confirm the failed launch stopped. Leave these files in place; see README Recovery.".to_string())?;
+        .map_err(|_| "Could not confirm the failed launch stopped. Leave these files in place; see Recovery in cli/README.md.".to_string())?;
     Ok(())
 }

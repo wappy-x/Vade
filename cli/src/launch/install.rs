@@ -207,7 +207,7 @@ fn snapshot<R: Runner>(source: &Path, stage: &Path, runner: &mut R) -> Result<Pa
 
 fn clean_source<R: Runner>(runner: &mut R, source: &Path) -> Result<(), String> {
     if !git(runner, source, &["diff", "--name-only", "HEAD", "--", "engine", "harness", "rust-toolchain.toml"])?.trim().is_empty() {
-        return Err("Vade source has unsaved changes; commit or restore the engine and harness source before installing.".into());
+        return Err("Vade source has uncommitted changes; commit or restore engine/, harness/ and rust-toolchain.toml before installing.".into());
     }
     Ok(())
 }

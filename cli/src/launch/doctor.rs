@@ -18,7 +18,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             "Preserve the state folder; run vade down before repairing the installation.")?;
         let installed = report.check("installed binaries", install::load(&self.root)
             .and_then(|value| value.ok_or_else(|| "Local artifacts are missing or have changed.".into())),
-            |_| "engine, kernels and chat match their install hashes".into(),
+            |_| "engine, kernels and chat match their saved file metadata".into(),
             "Run vade down, then vade install from your Vade checkout or with VADE_BUNDLE set.")?;
         let model = report.check("model files", model::discover_existing(&self.home,
             config.as_ref().map(|config| config.model.as_path())).and_then(|model| {
@@ -29,7 +29,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                     return Err("The saved checkpoint is unavailable; another checkpoint was selected by VADE_MODELS.".into());
                 }
                 Ok(model)
-            }), |model| format!("{} ({} bytes; the engine checks every file hash at load)", model.path.display(), model.bytes),
+            }), |model| format!("{} ({} bytes; startup verifies the model manifest)", model.path.display(), model.bytes),
             "Set VADE_MODELS to the complete FP4-Local checkpoint, then run vade launch. When replacing a valid saved checkpoint, first run vade down with the existing VADE_HOME, then choose a fresh VADE_HOME.")?;
         let models = model.as_ref().map(|model| model.path.clone())
             .or_else(|| config.as_ref().map(|config| config.model.clone()))

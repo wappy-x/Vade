@@ -132,8 +132,9 @@ and how to change it. The ones you meet first:
   `repetition_penalty: 1`, `presence_penalty: 0` and `frequency_penalty: 0`.
 - **Context 32768 tokens, output up to 8192.** On the Spark, Vade lowers the
   context (to 16384, then 8192, then 4096) only if the engine refuses it for
-  lack of memory, and says so. `--context 262144` picks the single-chat
-  long-context preset; we have no published measurement at that size yet.
+  lack of memory, and says so. `--context 262144` requests a larger context;
+  we have no published measurement at that size yet. The engine still sets
+  the chat count from memory.
 - **Chats at once** follow from the context and the memory the engine has.
 
 <a id="supported-systems"></a>

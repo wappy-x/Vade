@@ -12,26 +12,23 @@ dispatch on a repository name, a folder name or a marketing label. Don't add
 model-specific tuning, copied dimensions, per-checkpoint kernel constants or
 performance exceptions. Reject anything unsupported with a clear error.
 
-The source links below were checked at commit
-`daf087d7adcd426c707a9073bfa99cd1ff4f297b`.
-
 ## 1. Find the entry path and the file list
 
-The CLI catalog, [cli/src/catalog.rs:5](../cli/src/catalog.rs#L5), pins a
+The CLI catalog, [cli/src/catalog.rs](../cli/src/catalog.rs), pins a
 revision and the SHA-256 of every file for the legacy Qwen3-8B BF16 download.
 It is not a general model registry. The command name is restricted in
-[cli/src/cli.rs:161](../cli/src/cli.rs#L161) (only `vade run qwen3-8b` is accepted), and the download reads the
-catalog in [cli/src/run.rs:7](../cli/src/run.rs#L7). Adding another catalog
+[cli/src/cli.rs](../cli/src/cli.rs) (only `vade run qwen3-8b` is accepted), and the download reads the
+catalog in [cli/src/run.rs](../cli/src/run.rs). Adding another catalog
 entry means updating command selection and download as well. Changing the
 file list alone doesn't add engine support.
 
 The Flash-Next launcher doesn't download; it finds a checkpoint already on
 disk. It checks the config, index and shard files in
-[cli/src/launch/model.rs:251](../cli/src/launch/model.rs#L251). It runs the
+[cli/src/launch/model.rs](../cli/src/launch/model.rs). It runs the
 engine's config parser and quantization-sidecar check at
-[cli/src/launch/model.rs:346](../cli/src/launch/model.rs#L346), and checks the
+[cli/src/launch/model.rs](../cli/src/launch/model.rs), and checks the
 generation and tokenizer metadata at
-[cli/src/launch/model.rs:379](../cli/src/launch/model.rs#L379). From a
+[cli/src/launch/model.rs](../cli/src/launch/model.rs). From a
 controller, the checkpoint's location and identity go in the deployment config;
 see [the FP4-Local example](../cli/examples/fp4-local.conf). Record the
 publisher's revision, the license and file hashes you trust. Keep weights and
@@ -39,34 +36,34 @@ credentials outside the source tree, and never commit them.
 
 ## 2. Add only the metadata support that is missing
 
-[engine/crates/model/src/plan/mod.rs:57](../engine/crates/model/src/plan/mod.rs#L57)
+[engine/crates/model/src/plan/mod.rs](../engine/crates/model/src/plan/mod.rs)
 reads `config.json`, `model.safetensors.index.json` and the shard headers,
 with size limits. It then checks the tensor list without loading any weights.
 The typed plan supports a fixed set of architecture adapters, not any
 Transformers config.
 
 For a family or storage format the typed plan doesn't know yet, start with
-[plan/config.rs:115](../engine/crates/model/src/plan/config.rs#L115) for config
+[plan/config.rs](../engine/crates/model/src/plan/config.rs) for config
 dispatch and geometry,
-[plan/tensors.rs:187](../engine/crates/model/src/plan/tensors.rs#L187) for
+[plan/tensors.rs](../engine/crates/model/src/plan/tensors.rs) for
 names, shapes, dtypes and tied heads, and
-[plan/runtime.rs:33](../engine/crates/model/src/plan/runtime.rs#L33) for the
+[plan/runtime.rs](../engine/crates/model/src/plan/runtime.rs) for the
 projection limits execution needs. The older ordinary-attention path has its
-own adapters in [cartridge.rs:31](../engine/crates/model/src/cartridge.rs#L31)
-and [qwen3.rs:42](../engine/crates/model/src/qwen3.rs#L42). Not every family
+own adapters in [cartridge.rs](../engine/crates/model/src/cartridge.rs)
+and [qwen3.rs](../engine/crates/model/src/qwen3.rs). Not every family
 goes through `ModelPlan`.
 
 ## 3. Bind execution and account for memory
 
-Use [SplitRequest](../engine/crates/model/src/split/mod.rs#L12) and
-[SplitPlan::new](../engine/crates/model/src/split/mod.rs#L71) for the number of
+Use [SplitRequest](../engine/crates/model/src/split/mod.rs) and
+[SplitPlan::new](../engine/crates/model/src/split/mod.rs) for the number of
 Sparks, tensor ownership, workspace reserves, cache and state, and drafting
-budgets. Update [plan/profile.rs:8](../engine/crates/model/src/plan/profile.rs#L8)
+budgets. Update [plan/profile.rs](../engine/crates/model/src/plan/profile.rs)
 when a new operation changes the profile accounting.
 
 On the typed hybrid path, execution starts at
-[engine/crates/engine/src/hybrid/forward.rs:15](../engine/crates/engine/src/hybrid/forward.rs#L15).
-For Flash-Next, [engine/crates/tp/src/flash/settings.rs:124](../engine/crates/tp/src/flash/settings.rs#L124)
+[engine/crates/engine/src/hybrid/forward.rs](../engine/crates/engine/src/hybrid/forward.rs).
+For Flash-Next, [engine/crates/tp/src/flash/settings.rs](../engine/crates/tp/src/flash/settings.rs)
 selects `NextModel` when the checkpoint has mixed storage, and the
 `--fp4-local` flag refuses a checkpoint without it. Extend the loader and the
 serving checks together. A new catalog label must never let through a shape,
@@ -74,19 +71,19 @@ format or topology that is otherwise refused.
 
 ## 4. Check text handling and serving
 
-Read [engine/crates/tokenizer/src/chat.rs:9](../engine/crates/tokenizer/src/chat.rs#L9)
-and the [template check at line 175](../engine/crates/tokenizer/src/chat.rs#L175).
+Read [engine/crates/tokenizer/src/chat.rs](../engine/crates/tokenizer/src/chat.rs)
+and the [template check](../engine/crates/tokenizer/src/chat.rs).
 What a template supports comes from the template itself, and an unknown
 template is refused. Add a template or adapter only with its license and with
 tests of prompts and token IDs, covering tools, thinking controls and
 stopping.
 
 Check generation defaults and request handling in
-[engine/crates/serve/src/protocol.rs:190](../engine/crates/serve/src/protocol.rs#L190).
+[engine/crates/serve/src/protocol.rs](../engine/crates/serve/src/protocol.rs).
 The FP4-Local route (`next_model`) decodes greedily when a request names no
-sampling field ([flash-serve.rs:261](../engine/crates/tp/src/bin/flash-serve.rs#L261)).
-The retained FP8 route ([cli/src/launch/model.rs:340](../cli/src/launch/model.rs#L340))
-sets `next_model` to false ([settings.rs:134](../engine/crates/tp/src/flash/settings.rs#L134))
+sampling field ([flash-serve.rs](../engine/crates/tp/src/bin/flash-serve.rs)).
+The retained FP8 route ([cli/src/launch/model.rs](../cli/src/launch/model.rs))
+sets `next_model` to false ([settings.rs](../engine/crates/tp/src/flash/settings.rs))
 and uses the checkpoint's own sampling defaults instead. On either route,
 naming even one sampling field changes how the checkpoint defaults apply.
 

@@ -69,11 +69,11 @@ fn shard_index_and_mocked_identity_fail_closed() {
     assert!(verify_snapshot(&original, "boot-a", Some(&original)).unwrap());
     assert!(!verify_snapshot(&original, "boot-a", None).unwrap());
     let reboot = verify_snapshot(&original, "boot-b", None).unwrap_err();
-    assert!(reboot.contains("README Recovery") && !reboot.contains("Preserve"));
+    assert!(reboot.contains("Recovery in cli/README.md") && !reboot.contains("Preserve"));
     let mut replacement = original.clone();
     replacement.start = "101".into();
     let changed = verify_snapshot(&original, "boot-a", Some(&replacement)).unwrap_err();
-    assert!(changed.contains("Nothing was signalled") && changed.contains("README Recovery"));
+    assert!(changed.contains("Nothing was signaled") && changed.contains("Recovery in cli/README.md"));
 }
 #[test]
 fn stopped_recovery_is_idempotent_and_foreign_owner_is_preserved() {
@@ -151,7 +151,7 @@ fn stopped_recovery_is_idempotent_and_foreign_owner_is_preserved() {
         request.insert("op".into(), operation.into());
         let error = handle(&request).unwrap_err();
         assert!(
-            error.contains("README Recovery")
+            error.contains("Recovery in cli/README.md")
                 && !error.contains("journal")
                 && !error.contains("Preserve")
         );

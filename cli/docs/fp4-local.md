@@ -18,10 +18,13 @@ that many distinct --hosts."
   `--chats`, the defaults match `vade launch`: a context of 32,768 tokens and
   output of `min(context, 8192)`. The engine decides how many chats run at
   once from the context and its memory, and `vade status` prints that count.
+  The controller accepts and saves `--chats` and `--cache-bytes`, but the
+  current FP4-Local engine ignores them. Its memory admission and separate
+  prefix-cache setting control those limits.
 - **Your own limits.** A `--context` you pass always wins, up to the engine's
-  ceiling of 262,144 (`--context 262144` is the single-chat long-context
-  preset). `--output` takes 1,024 to 16,384. A request longer than the context is
-  refused, and the error names `--context`. `flash-serve` started by hand
+  ceiling of 262,144. This long-context setting still lets the engine decide
+  the chat count from memory. `--output` takes 1,024 to 16,384. A request longer
+  than the context is refused, and the error names `--context`. `flash-serve` started by hand
   without a context also defaults to 32,768; `vade up` always passes one.
 - **Drafting.** `vade up` leaves out `--mtp`, so the installed engine picks
   its own default. If you pass `--mtp 0..3` (0 turns server drafting off) or set `MTP` in the controller's
@@ -73,7 +76,7 @@ a bare `vade up` always means FP4-Local.
   TCP or RDMA on every Spark, cleanup after a start that fails partway, and
   refusing an old build before any network call.
 - **On one Spark**, live runs also covered startup, matching token IDs
-  directly and through the gateway, cancelling a stream, and shutdown, with
+  directly and through the gateway, canceling a stream, and shutdown, with
   existing verified weights.
 - **Larger chains** ran in the published
   [four-VM benchmark cards](../../bench/receipts/2026-10-24/README.md), but

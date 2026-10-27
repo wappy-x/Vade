@@ -93,8 +93,11 @@ start an engine. To install from source on a Spark, follow
 
 ## Rules and formatting
 
-No Python in this repository. Rust first; shell only where Rust cannot do the job.
-
+- **Rust and the standard library.** Use shell only where Rust cannot do the
+  job. Do not use or require Python.
+- **Plain writing.** Use ASD-STE100 Simplified Technical English and American
+  spelling in docs, help, errors and reports. Use short sentences and active
+  voice. Give each sentence one main idea.
 - **No third-party dependencies.** Use only the Rust standard library and the
   first-party path crates already here. Registry, git, external path, dev and
   build dependencies all count.
@@ -145,9 +148,12 @@ until the comparison on a second Spark is done.
 
 - If your change leaves the arithmetic order alone, it must keep main's
   results: the same token IDs.
-- If you change the arithmetic order on purpose, put it behind an explicit
-  switch, and bring the full exactness gate and a quality comparison against
-  main.
+- Use one execution path for each topology. The tensor split is the only
+  two-Spark path. Change a default only after the full exactness gate and a
+  measurement card. Do not keep the old path behind a switch.
+- If you change the arithmetic order, also provide a quality comparison
+  against main and reviewed updates to any goldens (saved reference answers)
+  that change.
 
 ### Tools for the checks
 

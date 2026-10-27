@@ -10,8 +10,11 @@ repository URL is defined by [`VADE_REPO_URL`](cli/src/repository.rs).
 
 ## House rules
 
-No Python in this repository. Rust first; shell only where Rust cannot do the job.
-
+- **Language.** Write code in Rust with the standard library only. Use shell
+  only where Rust cannot do the job. Do not use or require Python.
+- **Writing.** Use ASD-STE100 Simplified Technical English and American
+  spelling. Use short sentences, active voice and plain words. Give each
+  sentence one main idea. Apply this rule to docs, help, errors and reports.
 - **Zero third-party dependencies.** Use the Rust standard library and the
   first-party crates already in the tree. Registry, git, off-tree path, build
   and dev dependencies all count, and so do lockfile sources. Don't add a
@@ -56,10 +59,14 @@ must all match, and so must drafting (multi-token prediction, MTP) ON and OFF.
 Don't introduce floating-point atomics, reductions that depend on arrival
 order, or reduction splits that change with batch size, prompt length or
 occupancy. Reduction order and tiling must follow fixed tensor dimensions. A
-change that keeps the arithmetic order must match main's token IDs. If you
-change the order on purpose, put it behind an explicit switch. Before it can
-become the default, it needs a full exactness gate, reviewed updates to the
-goldens (the saved reference answers) and quality evidence against main.
+change that keeps the arithmetic order must match main's token IDs.
+
+Use one execution path for each topology. The tensor split is the only
+two-Spark path. A default changes only after a full exactness gate and a
+measurement card with the results. Do not keep an old path behind a switch.
+If the arithmetic order changes, also review any updates to the goldens (the
+saved reference answers) and provide quality evidence against main before
+the change becomes the default.
 Performance claims need reproducible receipts (the saved records of a run)
 with revision, hardware, checkpoint identity, settings and raw results.
 

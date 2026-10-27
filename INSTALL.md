@@ -77,6 +77,9 @@ running.
   have access to the private repository (see [Step 2](#step-2-get-the-code)).
 - **`VADE_CONFIG` or `VADE_BUNDLE` is set:** the script tells you which one to
   unset for this local source route.
+- **This Spark already has a controller config:** use the manual
+  [Route A steps](#route-a-on-this-spark). Without saved local settings,
+  the installer's `vade install` can select that controller config.
 
 Keep the same `VADE_HOME` (default `~/.vade`) for install, launch and every
 later command.
@@ -173,10 +176,12 @@ Starting `ssh` and `rsync` from a native Windows build has never been tried.
 
 There are two ways to get the Vade programs:
 
-- **Build from source.** Route B needs it.
+- **Build from source.** Route B needs this for the controller's CLI and chat
+  program.
 - **Use the prebuilt launcher bundle** from the v0.1.0 release (see
   [Optional release bundle](#optional-release-bundle) in step 2). The bundle is
-  only for running Vade on the Spark itself.
+  for running Vade on the Spark itself. Route B can also use its engine files
+  through `prebuilt_dir`, as described below.
 
 Source builds need both pinned Rust toolchains. The model download helper
 needs host Rust 1.99.0. Bundle users with an existing verified checkpoint can
@@ -208,6 +213,7 @@ driver and system changes to the Spark's administrator; Vade does not make
 them.
 
 <a id="2-install-the-pinned-rust-compilers"></a>
+<a id="install-rust-source-builds-only"></a>
 ### Install Rust
 
 The engine is written in Rust and has no third-party Rust dependencies.
@@ -478,27 +484,27 @@ curl -fsSL https://raw.githubusercontent.com/wappy-x/vade/v0.1.0/cli/examples/qw
 If you use the release bundle, skip the block below and follow
 [Launch from the bundle](#launch-from-the-bundle) instead. Otherwise, once the
 steps above are done, run this from the checkout root in the same shell.
-`unset VADE_CONFIG` makes sure no controller config is used; on the Spark,
-Vade keeps its settings in `~/.vade/config`.
+`vade launch` selects the local Spark and requires `VADE_CONFIG` to be unset.
+If an earlier controller launch still owns an engine, stop it with that
+controller's config first. Local settings go in `~/.vade/config`.
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
 unset VADE_CONFIG
-sh scripts/install.sh
+cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml
 export PATH="$PWD/cli/target/release:$PATH"
 ./cli/target/release/vade launch
 ```
 
-The script builds and installs Vade, including the private GPU startup cache.
-`launch` does the rest:
+The build creates the CLI. `launch` does the rest:
 
 1. It finds the checkpoint under `~/models` and saves local settings.
-2. It reuses the installed engine and chat program.
+2. It builds and installs the engine, kernels and chat program if needed.
 3. It waits until the engine is ready, then opens chat.
 
-When a checksum list is present, the script's `vade install` already did the
-file check described in [Check the files](#check-the-files), so `launch`
-mostly loads the model. That still takes a while and can look like a hang.
+When a checksum list is present, `launch` also performs the file check
+described in [Check the files](#check-the-files). Later launches reuse the
+installed files and the saved check. Loading the model still takes time.
 When the engine is ready, it prints `Launch ready in ...` with how long the
 launch took.
 
@@ -624,8 +630,9 @@ The default API is `http://127.0.0.1:18080/v1`. If that port is taken, first
 setup picks another free loopback port and saves it as `port=` in
 `~/.vade/config`; later launches reuse it. `vade status` prints the base
 address, such as `http://127.0.0.1:18080`, and the API lives under its `/v1`.
-Bare `vade verify` reads the running engine's port from
-`~/.vade/state/run.conf`, a record that exists only while the engine runs.
+Without `--url` or `VADE_API_URL`, local `vade verify` reads the running
+engine's port from `~/.vade/state/run.conf`. That record exists only while the
+engine runs.
 
 An API chat request makes the model think unless it says otherwise, and the
 reasoning counts against the same `max_tokens` as the answer. To get the
@@ -653,9 +660,10 @@ at **32768** tokens, and output at **min(context, 8192)**. These are the same
 defaults as a controller's `vade up` in Route B below.
 
 The engine checks whether that fits in memory. If it refuses the default or
-saved context for lack of memory (and only then), `vade launch` and `vade up`
-try 16384, then 8192, then 4096, and save the first size that starts. Vade
-prints one line telling you:
+saved context for lack of memory, `vade launch` and `vade up` try smaller
+standard sizes in order: 32768, 16384, 8192, 4096. They skip sizes at or above
+the refused context and save the first size that starts. Vade prints one line
+telling you:
 
 - the size it settled on
 - the sizes that were refused
@@ -824,10 +832,11 @@ as `Concurrent chats`. If the report is missing, status says the count was not
 reported. `--chats` does not change it on FP4-Local; the `--chats` row in the
 [flag table](#settings-you-may-change) below has the details.
 
-For the single-chat long-context preset, start with `vade up --context 262144`
-(add `--output 16384` for longer replies). At that size the engine serves one
-chat at a time. The controller starts at 32768 because there the engine runs
-several chats at once. Measured speeds at 32768 are on the
+For a larger context, start with `vade up --context 262144`
+(add `--output 16384` for longer replies). This sets the context, not the chat
+count. Check `Concurrent chats` in `vade status` for the admitted count.
+The controller starts at 32768 to leave more room for concurrent chats.
+Measured speeds at 32768 are on the
 [benchmarks page](docs/benchmarks.md).
 
 ## Two and more Sparks
@@ -1009,9 +1018,10 @@ that actually apply to a request.
 | From a controller: `vade up` on any number of Sparks, with or without `--chats` | 32768 | `min(context, 8192)` | ON, engine-selected | OFF |
 | From a controller: `vade up --replicas N`, each replica | 32768 | `min(context, 8192)` | ON, engine-selected | OFF |
 
-`--context 262144` picks the single-chat long-context preset on either route
-(add `--output 16384` for longer replies). On the Spark it still has to pass
-the engine's memory check, and a refusal is reported, not lowered.
+`--context 262144` requests a larger context on either route
+(add `--output 16384` for longer replies). The engine still sets the chat
+count from memory. An explicit context must pass the engine's memory check;
+a refusal is reported and the context is not lowered.
 
 | Flag | What it does |
 | --- | --- |
@@ -1075,8 +1085,8 @@ The gateway guards against web pages driving it through your browser:
   (bare or with its port).
 - It answers 403 to any request with an `Origin` header.
 
-Command-line clients send neither and pass through unchanged. To use a browser
-client on purpose, add `--allow-origin https://app.example` (exact origin,
+Command-line clients that use the loopback address and omit `Origin` pass
+these checks. To use a browser client, add `--allow-origin https://app.example` (exact origin,
 repeatable; `--allow-host NAME` allows another Host name). Ideally add
 `--token TOKEN` or `VADE_GATEWAY_TOKEN` too, which then requires
 `Authorization: Bearer TOKEN` on every request.
@@ -1093,8 +1103,9 @@ vade bench
 ```
 
 Keep the same `VADE_HOME` / `VADE_CONFIG` you used to start the engine. The
-client uses the endpoint recorded by the local launch or the controller's
-configured port. It reads the model from `/health` and writes
+client uses `VADE_API_URL` if set. Otherwise, it uses the endpoint recorded by
+the local launch or the controller's configured port. It reads the model from
+`/health` and writes
 `./vade-bench.json` and a `./vade-bench.txt` table into the current folder. On a
 controller, run it from outside the checkout, or move both files out before
 your next `vade install`, which refuses untracked files. If health does not
@@ -1152,7 +1163,7 @@ stop), and run `vade logs` and `vade doctor` before you retry.
 | --- | --- |
 | `engine source has local changes. Commit or preserve them before install/update` | A controller's `vade install` stages only committed source, and an untracked file counts as a local change. The same check covers `harness` and `CLI` source. Nothing was overwritten. Use a clean clone for the controller; `git status` shows what is untracked. |
 | `The engine refused --context N for memory` | `vade launch` or `vade up` on the Spark prints this when the engine refuses a `--context` you set yourself; the engine's own memory message follows. Choose a smaller `--context`, or leave it out next time: Vade then tries the standard sizes (32768, 16384, 8192, 4096) in turn until the engine accepts one. Run `vade doctor` to inspect memory. A context you set yourself is never lowered silently. |
-| `Requested size does not fit.` / `Not enough memory` | The message gives the memory the system reports as available (MemAvailable), how much the engine needs, and the most it may use: MemAvailable minus a reserve of 10 % or 2 GiB, whichever is larger. Page cache already counts as free, so dropping caches won't help. Stop other programs that hold memory, or lower the context or the number of chats. A local launch or install also stops here when another engine holds the GPU memory, including one from another Vade install. Stop it with its own `vade down` or the launcher that started it, then retry. |
+| `Requested size does not fit.` / `Not enough memory` | Read the quantities in the message. A token-limit error asks for a shorter prompt or reply. A memory error gives the required and available memory. The engine's memory ceiling is MemAvailable minus a reserve of 10 % or 2 GiB, whichever is larger. Page cache already counts as free, so dropping caches won't help. Stop other programs that hold memory, or lower the context. FP4-Local chooses its chat count from memory; `--chats` does not lower it. A local launch or install also refuses to start when another engine holds the GPU memory. Stop that engine with its own `vade down` or the launcher that started it, then retry. |
 | `This machine's GPU is in use.` | On a controller, `vade up` puts the machine name in front of it. Stop the workload with the launcher that started it, run `vade doctor`, then retry. Never kill processes by name. |
 | `Install cache preparation failed; the previous activation was kept.` | A controller's `vade install` prints this when a Spark's GPU is busy or its files fail a check. The build you had before is still the active one. The message starts with the machine name and the reason (for example `This machine's GPU is in use.`), and the line above it gives the path of a saved log. Fix the reason, or read the log, then run `vade install` again. |
 | `Port ... is in use; close the application using it and retry vade launch.` (from `vade up`, it ends `retry vade up.`) | Find the program using the port and stop it through its own controls. A first local setup can pick another port, but later launches reuse the saved one. On a controller, choose free `local_port` and `serve_port` values in the private config. |

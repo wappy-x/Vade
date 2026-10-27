@@ -29,7 +29,7 @@ with a box that explains its own engine terms.
 
 **BF16 (bfloat16).** A 16-bit number format for model weights. It keeps the range of 32-bit numbers but has less precision.
 
-**Bundle.** A ready-made set of engine, GPU kernel and harness artifacts, with a manifest and checksums. You use it instead of rebuilding locally. There are two formats. The launcher bundle (`vade-launch-bundle-v1`, with `launcher-bundle.conf`) is for running on one Spark; see [bundle loading](../cli/src/launch/install.rs). A controller's `vade install` reads only the separate `vade-prebuilt-v1` format; see [controller prebuilt bundles](../cli/docs/prebuilt.md#prebuilt-binaries-for-a-controller-install).
+**Bundle.** A ready-made set of engine, GPU kernel and harness artifacts, with a manifest and checksums. You use it instead of rebuilding locally. There are two formats. The launcher bundle (`vade-launch-bundle-v1`, with `launcher-bundle.conf`) supports a local install; see [bundle loading](../cli/src/launch/install.rs). A controller's `vade install` accepts this bundle when its source revisions match, or the separate `vade-prebuilt-v1` format; see [controller prebuilt bundles](../cli/docs/prebuilt.md#prebuilt-binaries-for-a-controller-install).
 
 **Byte-identical.** Exactly the same, down to every byte of the answer text.
 
@@ -238,11 +238,11 @@ Under greedy decoding, ON and OFF must return the same token IDs; see [request c
 
 **Streaming.** Sending the answer as it is written, token by token, instead of all at the end.
 
-**Subnet, /24.** A block of network addresses that share a prefix. A `/24` such as `10.77.0.0/24` holds addresses `10.77.0.1` to `10.77.0.254`. Each fabric rail gets its own.
+**Subnet, /24.** A block of network addresses that share a prefix. A `/24` such as `192.0.2.0/24` holds addresses `192.0.2.1` to `192.0.2.254`. Each fabric rail gets its own.
 
 **Sum order.** The fixed order in which partial results from different Sparks are added. Floating-point addition rounds, so another order can change the answer's bytes.
 
-**Tensor parallelism (TP).** Splitting a layer's tensors across several GPUs so they work on a token together. FP4-Local's default two-Spark layer pipeline works differently: it gives each stage a whole range of layers (see [architecture](architecture.md#ranks-memory-and-ownership)).
+**Tensor parallelism (TP).** Splitting a layer's tensors across several GPUs so they work on a token together. FP4-Local has a two-Spark tensor split selected with `VADE_W2_TP=1` on both ranks. The layer pipeline gives each stage a whole range of layers instead; see [architecture](architecture.md#several-sparks-the-layer-pipeline-and-the-chain) for the current default and the one-path rule.
 
 **Tensor-map rank path.** The older way to run FP4-Local on several Sparks:
 
@@ -265,8 +265,8 @@ Under greedy decoding, ON and OFF must return the same token IDs; see [request c
 **VADE_W2_PP (layer pipeline).** The environment switch that picks how FP4-Local spreads over several Sparks:
 
 - Unset on two Sparks: the [layer pipeline](#ho), the default.
-- Unset on more than two Sparks: the older [tensor-map rank path](#sz).
-- `VADE_W2_PP=0` picks the tensor-map rank path on any number of Sparks.
+- Unset on four Sparks: the older [tensor-map rank path](#sz). Other larger counts require a chain.
+- `VADE_W2_PP=0` picks the tensor-map rank path on two or four Sparks. Other multi-Spark counts are refused.
 - `VADE_W2_PP=1` turns on a [chain](#ac). `vade up --fp4-local --sparks N` with N above 2 sets it for you.
 
 See [pipeline selection](../engine/crates/tp/src/flash/settings.rs).
