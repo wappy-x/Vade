@@ -21,6 +21,8 @@ Notes:
     copy/build and are cached.
   - A generated run qwen3-8b installation uses run again; install requires an
     explicit VADE_CONFIG to select a controller.
+  - Only a running compute app or power draw of at least 30 W makes a GPU busy;
+    a stale utilization reading is reported and never blocks.
   - One Spark needs no fabric or RDMA; linked Sparks use RDMA by default. Set
     SEQPAR_RDMA=0 for TCP using the configured fabric addresses on any reachable
     interface; QSFP and RDMA memlock are unnecessary in TCP mode.

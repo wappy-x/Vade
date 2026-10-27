@@ -28,6 +28,7 @@ fn run_main(mut arguments: Vec<String>) -> ExitCode {
     let mut args = arguments.iter().cloned();
     match args.next().as_deref() {
         Some("workload") => return vade_harness::workload::cli(args),
+        Some("quality-card") => return vade_harness::quality::cli(args),
         Some("setup") => return vade_harness::setup::cli(args),
         Some("doctor") => return vade_harness::doctor::cli(args),
         // The staged harness carries the standalone relay, e.g. for vade up --replicas.

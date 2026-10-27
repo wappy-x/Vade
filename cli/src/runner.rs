@@ -8,6 +8,10 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// Maximum stdout captured from one command. Probes must split larger data
+/// before capture, rather than raise this bound for an unbounded reply.
+pub(crate) const MAX_CAPTURE_BYTES: u64 = 16 * 1024 * 1024;
+
 /// A pre_exec fork can briefly inherit another test's flock descriptor even
 /// with CLOEXEC. Serialize process-spawning tests with the worker lock test.
 #[cfg(test)]
@@ -314,7 +318,7 @@ impl Runner for SystemRunner {
             // Never echo arbitrary stderr: remote tools may include inherited credentials.
             let metadata =
                 std::fs::metadata(&outpath).map_err(|_| "Cannot read command output. Check the retained log directory permissions and free space.")?;
-            if metadata.len() > 16 * 1024 * 1024 {
+            if metadata.len() > MAX_CAPTURE_BYTES {
                 return Err("Command output is too large. Inspect local source build logs.".into());
             }
             let stdout = std::fs::read_to_string(outpath)

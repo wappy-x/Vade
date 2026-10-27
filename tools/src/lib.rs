@@ -5,6 +5,7 @@ pub mod json;
 pub mod cuda;
 pub mod chart;
 pub mod fetch;
+pub mod bench_docs;
 // Share the existing safe, streaming implementation. No Cargo dependency is needed.
 #[path = "../../engine/tools/export/src/sha256.rs"]
 pub mod sha256;

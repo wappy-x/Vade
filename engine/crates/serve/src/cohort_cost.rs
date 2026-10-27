@@ -79,7 +79,7 @@ impl Controller {
         if self.choice != Some(wanted) {
             self.choice = Some(wanted);
             self.switched_at = self.tick;
-            eprintln!("cohort_path tick={} draft={wanted} safety={safety}", self.tick);
+            engine_model::events::note_line("cohort_path", &format!("cohort_path tick={} draft={wanted} safety={safety}", self.tick));
         }
         wanted
     }

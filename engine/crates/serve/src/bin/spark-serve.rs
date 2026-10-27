@@ -692,7 +692,7 @@ fn discover_hybrid_draft(target: &std::path::Path, root: &std::path::Path,
     })();
     match candidate {
         Ok(path) => { eprintln!("draft_model_discovered cartridge=qwen3_5 sibling=Qwen3.5-0.8B"); Some(path) }
-        Err(error) => { eprintln!("draft_model_skipped {error}"); None }
+        Err(error) => { engine_model::events::note_line("draft_model_skipped", &format!("draft_model_skipped {error}")); None }
     }
 }
 #[cfg(target_os = "linux")]

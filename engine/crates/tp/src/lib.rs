@@ -2,6 +2,7 @@
 pub mod transport;
 pub use engine_fabric::discovery;
 pub mod runtime;
+pub mod startup_pool;
 pub mod flash_pool;
 pub mod next;
 #[cfg(any(target_os="linux",test))]

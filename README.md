@@ -81,7 +81,10 @@ of the Sparks) that reaches each Spark over SSH.
    then follow [two and more Sparks](INSTALL.md#two-and-more-sparks). The start
    command is `vade up --sparks 2`.
 
-Expect a long prompt to be read faster, not one chat to write faster; see
+Two Sparks run the tensor split by default, with no settings to set: both
+work on every token, so one chat writes faster and a long prompt is read
+faster. Four or more Sparks read a long
+prompt faster, but one chat does not write faster yet; see
 [what works today](#supported-systems).
 
 ### From Windows
@@ -161,13 +164,23 @@ and how to change it. The ones you meet first:
   installed Rust with rustup.
 - **The agent needs 8192 tokens of context.** Below that, chat on the Spark
   falls back to plain chat, and chat from a controller stops with an error.
-- **More Sparks read prompts faster; one chat does not write faster.** In the
-  2026-10-25 cards (main `6cb46bf` and `80ac2d4`), the first token after a cold
-  8K prompt came in 2.80 s on two Sparks and 2.19 s on four, against 3.86 s on
-  one Spark in the v0.1.0 card. One chat with drafting ON wrote 79.3 tok/s of
-  code on two Sparks and 80.3 on four, next to 76.7 on one. Each Spark holds a
-  run of the model's layers and passes its work to the next, so one chat uses
-  one GPU at a time. See [reading these cards](docs/benchmarks.md#reading-these-cards).
+- **Two Sparks make one chat faster; four do not yet.** Two Sparks run the
+  tensor split by default, with no settings to set: both work on every token.
+  In the 2026-10-27 cards, one chat with drafting ON wrote 100.4 and 99.7 tok/s
+  of code on two pairs, against 76.7 on one Spark in the v0.1.0 card. Four or
+  more Sparks run the layer pipeline: each Spark holds a run of the model's
+  layers and passes its work to the next, so one chat uses one GPU at a time,
+  and one chat wrote 80.3 tok/s of code on four. More Sparks read prompts
+  faster: the first token after a cold 8K prompt came in 2.80 s on two Sparks
+  and 2.19 s on four, against 3.86 s on one. See
+  [what changed since the 2026-10-26 cards](docs/benchmarks.md#what-changed-since-the-2026-10-26-cards),
+  [what the split changes](docs/benchmarks.md#what-the-split-changes) and
+  [reading these cards](docs/benchmarks.md#reading-these-cards).
+- **Eight chats without drafting are slower on two Sparks than before.** With
+  drafting OFF, eight chats reached 111.6 and 110.8 tok/s on the split in the
+  2026-10-27 cards, against 137.0 on the layer pipeline in the 2026-10-26
+  cards. Drafting is on by default; with it, eight chats reached 221.8 and
+  221.6 against 201.7.
 - **On four Sparks, eight chats ran without drafting.** In the four-Spark
   card the engine served every eight-chat response without drafting, so eight
   chats with drafting ON reached 136.5 tok/s, against 176.4 on two.
@@ -192,6 +205,10 @@ tokens. It covers the requests it sent, not every mix of batching and caching.
 
 What we have checked so far covers drafting ON against OFF:
 
+- On main `12142bb` (2026-10-27), the two-Spark tensor-split cards matched
+  drafting ON against OFF in 66 of 66 responses on each of two pairs. The
+  pairs also matched each other and the 2026-10-26 cards
+  ([benchmarks](docs/benchmarks.md#current-2026-10-27-main-12142bb-home-dgx-sparks)).
 - On the v0.1.0 release build (`5a22651`), the one-Spark drafting-ON card
   matched the drafting-OFF card in 66 of 66 responses, and `vade verify`
   printed `IDENTICAL: 20/20 runs, 1 machine, 128 tokens`
@@ -217,12 +234,103 @@ explains the full rule and what each check proves.
 
 ## Measured results
 
+<!-- bench-docs:start -->
+
+### Latest measured main
+
+| Model | Sparks | Path | Drafting | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) | IDs saved / responses |
+| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| qwen3.8-flash-next-fp4-local | 2 | tensor split | OFF | 29.719 | 29.579 | 29.776 | 28.829 | 75.333 | 110.818 | 2.77 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 2 | tensor split | ON | 53.503 | 99.737 | 129.74 | 75.249 | 164.802 | 221.582 | 2.799 | 66/66 |
+
+Measured main revision: `12142bb551abd960448135f3e75953d518fb77fa`.
+
+2 Sparks, tensor split, drafting OFF: finished `2026-10-27T12:53:33.568612+00:00`; card SHA256 `00ec2d26de0584ff53de605f288b53c0f1b89231777b88b60d7158ba3a073304`.
+
+2 Sparks, tensor split, drafting ON: finished `2026-10-27T12:41:38.391950+00:00`; card SHA256 `f91c43bd13cab79fb2b788556f3fbc64b3a311a367f1fb06062ab9f777fa8c6e`.
+
+Rates are card medians in tok/s. C1, C4 and C8 cover all chats together.
+Cold 8K is the median time to the first token. IDs saved counts responses
+with recorded token IDs. This count does not prove that the IDs match.
+
+Only the newest measured revision in main's first-parent history appears.
+Each row uses the last finished, complete, passing, thinking-OFF card for
+its Spark count, path and drafting setting. Older revisions do not fill gaps.
+
+From the repository root, refresh both tables with this command.
+Replace the quoted path with the folder that holds the cards.
+
+```sh
+cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- bench-docs '<cards-dir>' .
+```
+
+The sections below are historical results. Their dates and revision names
+apply only to those measurements.
+
+<!-- bench-docs:end -->
+
+[RigMark](docs/benchmarks.md#run-rigmark-against-vade) is a public benchmark,
+and a card is the recorded result of one run. A receipt is the saved record of
+a run, and every number here comes from one. The
+[benchmarks page](docs/benchmarks.md) has every card, the full recipe and the
+caveats.
+
+### Two Sparks, 2026-10-27
+
+`vade up --sparks 2` runs the tensor split by default. You set nothing. These
+RigMark cards ran on two pairs of our DGX Sparks on 2026-10-27, at main
+`12142bb`, with no split settings in the environment, drafting ON (the
+default), context 32768, greedy decoding and thinking OFF. They measure the
+same speeds as the 2026-10-26 cards below, where the split's four levels were
+still set by hand, and their token IDs match those cards in 66 of 66
+responses.
+
+| Two DGX Sparks | Prose tok/s | Code tok/s | Structured tok/s | 1 chat tok/s | 4 chats tok/s | 8 chats tok/s | First token, cold 8192-token prompt (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Tensor split (the default), home-1 + home-2 | 53.9 | 100.4 | 130.3 | 76.9 | 165.7 | 221.8 | 2.80 |
+| Tensor split (the default), home-3 + home-4 | 53.5 | 99.7 | 129.7 | 75.2 | 164.8 | 221.6 | 2.80 |
+
+Prose, code and structured are one chat at a time, 5 runs each with an
+8192-token cap. The 1-, 4- and 8-chat rates cover all chats together, 3 rounds
+with a 256-token cap. Structured output is a predictable JSON workload, not a
+measure of general agent performance.
+
+Long prompts reach their first token sooner than they did on the 2026-10-26
+builds, for two reasons. The first token no longer waits while the two Sparks
+swap a long prompt's layer state, and that swap now goes GPU to GPU over the
+RDMA link (#114). And the first Spark now reads the second Spark's
+prompt-tile replies as they arrive, so a long prompt from a chat that drafts
+no longer stalls in the middle of the read (#120). On a second start with
+context 69632, a 32,099-token prompt reached its first token in 10.10 s on
+the first pair and 10.24 s on the second; a 64,217-token prompt took 21.54 s
+and 21.60 s. The drafting-OFF cards and the full tables are on the
+[benchmarks page](docs/benchmarks.md#current-2026-10-27-main-12142bb-home-dgx-sparks).
+
+### Two Sparks, 2026-10-26
+
+`vade up --sparks 2` runs the tensor split. These RigMark cards ran on two of
+our DGX Sparks on 2026-10-26, drafting ON (the default), context 32768,
+greedy decoding and thinking OFF. The split row is main `262b0c3` with the
+split's four levels set by hand, the same four that are now the default. The
+pipeline row is the path two Sparks ran before, measured on main `99e8f62`
+the same afternoon; `VADE_W2_PATH=pipeline` still selects it, for a short
+time.
+
+| Two DGX Sparks | Prose tok/s | Code tok/s | Structured tok/s | 1 chat tok/s | 4 chats tok/s | 8 chats tok/s | First token, cold 8192-token prompt (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Tensor split (the default) | 54.2 | 100.9 | 130.4 | 76.8 | 161.4 | 220.0 | 2.81 |
+| Layer pipeline (before) | 42.2 | 80.3 | 100.8 | 61.9 | 143.2 | 201.7 | 2.78 |
+
+Prose, code and structured are one chat at a time, 5 runs each with an
+8192-token cap. The 1-, 4- and 8-chat rates cover all chats together, 3 rounds
+with a 256-token cap. Structured output is a predictable JSON workload, not a
+measure of general agent performance. The drafting-OFF cards and a second pair
+are on the [benchmarks page](docs/benchmarks.md#previous-2026-10-26-main-262b0c3-home-dgx-sparks).
+
+### The v0.1.0 release, 2026-10-24
+
 These are the RigMark cards for the v0.1.0 release (commit `5a22651`),
-measured on 2026-10-24. [RigMark](docs/benchmarks.md#run-rigmark-against-vade)
-is a public benchmark, and a card is the recorded result of one run. A
-receipt is the saved record of a run, and every number here comes from one.
-The [benchmarks page](docs/benchmarks.md) has the later two- and four-Spark
-cards from 2026-10-25, the full recipe and the caveats.
+measured on 2026-10-24, when two Sparks ran the layer pipeline.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmarks-2026-10-24-dark.svg">

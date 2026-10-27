@@ -1,5 +1,5 @@
 //! Install preparation under the server operation lock, without a resident owner.
-use super::{Fields, Store, check_hash, expanded_path, fields, gpu_empty, persistent_cuda_cache, required};
+use super::{Fields, Store, check_hash, expanded_path, fields, gpu_empty, persistent_cuda_cache, required, stale_line};
 use std::{path::Path, time::{Duration, Instant}};
 
 /// Check every checkpoint file into the local launcher's private receipt and
@@ -77,7 +77,7 @@ pub(super) fn run(request: &Fields) -> Result<Fields, String> {
     let model = request.get("model_path").map(|path| expanded_path(path)).transpose()?;
     let verify = request.get("verify_model").map(|path| expanded_path(path)).transpose()?;
     let exec = ptx_warmup_command(&store.root, &engine, &ptx, ptx_hash, model.as_deref())?;
-    gpu_empty()?;
+    let stale = gpu_empty()?;
     let began = Instant::now();
     use crate::runner::Runner;
     // Compilation is GPU and CPU work; hashing is disk work. Run them together.
@@ -92,6 +92,7 @@ pub(super) fn run(request: &Fields) -> Result<Fields, String> {
         return Err("Install preparation failed. Inspect the retained command logs, then retry install.".into());
     }
     let mut reply = fields(&[("ptx_cache", "warm"), ("elapsed_ms", &format!("{:.3}", began.elapsed().as_secs_f64() * 1000.0))]);
+    if let Some(v) = stale { reply.insert("gpu_note".into(), stale_line(v)); }
     let mut timings = crate::text::parse(&output.stdout)?;
     timings.extend(verified.unwrap_or_default());
     for key in ["ptx_warmup_ms", "model_verify_ms", "model_hashed_bytes", "model_reused_files"] {

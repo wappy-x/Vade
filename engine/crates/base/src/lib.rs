@@ -1,6 +1,7 @@
 //! Portable bounded metadata utilities.
 pub mod json;
 pub mod admission;
+pub mod events;
 
 #[derive(Debug)]
 pub struct Error(pub String);

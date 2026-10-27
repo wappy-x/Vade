@@ -202,6 +202,8 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                             input.responding = true; reading.push(input);
                         }
                     } else if queued.len() + active.len() + preparing >= config.connections {
+                        engine_model::events::note("admission_refused", format_args!("reason=connections queued={} active={} preparing={preparing} connections={}",
+                            queued.len(), active.len(), config.connections));
                         if input.wire.response(503, &protocol::error_json("overloaded", "connection capacity reached"), limits).is_ok() {
                             input.responding = true;
                             reading.push(input);
@@ -375,7 +377,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 active[i].reservation_plain = true;
                 reserved = reservations(active.iter().map(|j| &j.generation.state)).0;
                 delta = bytes.saturating_sub(active[i].generation.state.reserved_session_bytes);
-                eprintln!("draft_memory_pressure id={} action=plain reserved_bytes={bytes}", active[i].id);
+                engine_model::events::note_line("draft_memory_pressure", &format!("draft_memory_pressure id={} action=plain reserved_bytes={bytes}", active[i].id));
             }
             if let Some(next_reserved) = reserved.checked_add(delta).filter(|&n| n <= ceiling) {
                 // Reclaim unfunded cache pages before any backend allocation.
@@ -391,7 +393,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 i += 1;
             } else {
                 let mut job = active.remove(i);
-                eprintln!("request capacity exhausted id={} completion_tokens={}", job.id, job.generation.usage.completion_tokens);
+                engine_model::events::note_line("request_capacity_exhausted", &format!("request capacity exhausted id={} completion_tokens={}", job.id, job.generation.usage.completion_tokens));
                 if job.error(RequestError::Capacity, &crate::budget::refusal(reserved as u128 + delta as u128, ceiling, &format!("weights/rank already loaded; next reservation/session {bytes} bytes; growth {delta} bytes + live reservations {reserved} bytes; {} active sessions; CONTEXT={}; OUTPUT={}", active.len()+1, limits.context_tokens, job.ready.request.max_tokens), "the scheduler active pool, capped by owner-priority headroom; retained cache reclaimed first", crate::budget::SERVE), limits).is_ok() {
                     reading.push(Reading { wire: job.ready.wire, data: Vec::new(), head: None,
                         deadline: Instant::now(), responding: true });
@@ -573,23 +575,34 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
             }
             if state.is_none() && ready.request.cache {
                 if let Some(key) = ready.request.session.as_ref() {
-                    state = cache.fork_scoped(key, ready.scope.as_deref(), &ready.prompt, Instant::now()).unwrap_or(None);
+                    let forked = cache.fork_scoped(key, ready.scope.as_deref(), &ready.prompt, Instant::now());
+                    fork_failed("session", ready.prompt.len(), &forked.failed);
+                    state = forked.state;
                 }
             }
             if automatic_cache && kv.is_none_or(|kv| kv.reuse != "hit") {
-                let cached = cache.fork_automatic(ready.scope.as_deref(), &ready.prompt, Instant::now())
-                    .unwrap_or(None);
+                let forked = cache.fork_automatic(ready.scope.as_deref(), &ready.prompt, Instant::now());
+                fork_failed("automatic", ready.prompt.len(), &forked.failed);
+                let cached = forked.state;
                 if cached.as_ref().is_some_and(|s| s.tokens.len() > state.as_ref().map_or(0, |s| s.tokens.len())) {
                     state = cached;
                 }
                 for source in active.iter().filter(|a| a.automatic_cache && a.ready.scope == ready.scope
                     && a.prefill_rows == 0 && a.long_prefill.is_none()) {
                     if shared_prefix(&source.generation.state.tokens, &ready.prompt).min(source.ready.prompt.len()) > state.as_ref().map_or(0, |s| s.tokens.len()) {
-                        if let Ok(Some(fork)) = source.generation.state.fork_prefix_limit(&ready.prompt, source.ready.prompt.len()) { state = Some(fork); }
+                        match source.generation.state.fork_prefix_limit(&ready.prompt, source.ready.prompt.len()) {
+                            Ok(Some(fork)) => state = Some(fork),
+                            Ok(None) => {}
+                            Err(error) => fork_failed("active", ready.prompt.len(), &[error]),
+                        }
                     }
                 }
             }
             let reused = state.as_ref().map_or(0, |s| s.tokens.len());
+            if reused == 0 && (automatic_cache || ready.request.cache && ready.request.session.is_some()) {
+                let (reason, scoped) = cache.miss_reason(ready.scope.as_deref());
+                engine_model::events::note("prefix_cache_miss", format_args!("prompt_tokens={} reason={reason} scoped_entries={scoped}", ready.prompt.len()));
+            }
             // Recheck the actual fork: eviction or a different retained owner
             // can leave less cached work than the admission estimate.
             if plain {
@@ -636,7 +649,8 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
             });
             let state = match state {
                 Ok(state) => state,
-                Err(_) => {
+                Err(error) => {
+                    engine_model::events::note("session_unavailable", format_args!("prompt_tokens={} error={error}", ready.prompt.len()));
                     let _ = ready.wire.response(
                         503,
                         &protocol::error_json("engine_error", "session unavailable"),
@@ -1256,7 +1270,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                         result => {
                             if let Err(error) = result {
                                 if !prefill.allows_fallback(&error) { return Err(error); }
-                                eprintln!("seqpar_fallback tokens={} reason={error}", job.ready.prompt.len());
+                                engine_model::events::note_line("seqpar_fallback", &format!("seqpar_fallback tokens={} reason={error}", job.ready.prompt.len()));
                                 job.long_prefill = None;
                                 job.echo.prefill.as_mut().unwrap().abandon();
                             }
@@ -1338,7 +1352,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 }
             }
             if let Some(error) = error {
-                eprintln!("request stopped: {error}");
+                engine_model::events::note_line("request_stopped", &format!("request stopped: {error}"));
                 let (kind, message) = if job.output_failed { (RequestError::Output, error.as_str()) }
                     else if error.starts_with("Flash MoE routing rejected") || error.starts_with("MoE routing rejected") {
                         (RequestError::Generation, error.as_str())
@@ -1412,7 +1426,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
         }
     }
     if let Some(error) = fatal.or_else(|| engine.fatal_error()) {
-        eprintln!("GPU context poisoned: {error}");
+        engine_model::events::note_line("gpu_context_poisoned", &format!("GPU context poisoned: {error}"));
         let stop = AtomicBool::new(false);
         // Briefly publish failed health while rejecting all new generation.
         let _ = unavailable(listener, limits, model, &stop, None, "poisoned",
@@ -1442,6 +1456,12 @@ fn prompt_cohort_candidate(remaining: usize, position: usize, limit: usize, chun
 fn prompt_uses_cohort(remaining: usize, position: usize, limit: usize, chunk_rows: usize, ready: usize) -> bool {
     prompt_cohort_candidate(remaining, position, limit, chunk_rows)
         && (remaining <= limit || ready >= 2)
+}
+/// One event for each prefix fork that failed and fell through to the next candidate or a miss.
+fn fork_failed(kind: &str, prompt_tokens: usize, errors: &[String]) {
+    for error in errors {
+        engine_model::events::note("prefix_cache_fork_failed", format_args!("kind={kind} prompt_tokens={prompt_tokens} error={error}"));
+    }
 }
 
 #[cfg(test)]

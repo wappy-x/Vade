@@ -28,6 +28,14 @@ pub fn run(
     experiments: spark_serve::mtp_batch::Experiments,
     tp: Option<(std::net::TcpStream, super::tp_proxy::Wire)>,
 ) -> Result<(), String> {
+    let load_deadline = std::time::Instant::now() + spark_tp::startup_pool::LOAD_LIMIT;
+    unsafe extern "C" {
+        fn signal(number: i32, handler: extern "C" fn(i32)) -> usize;
+    }
+    unsafe {
+        signal(2, super::super::stop);
+        signal(15, super::super::stop);
+    }
     let ptx = CString::new(std::fs::read(ptx_path).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     let ab_ptx = spark_gpu_probe::driver::ab_ptx_from_env()?;
@@ -114,6 +122,13 @@ pub fn run(
                     "CONTEXT / SEQPAR_MEMORY_BYTES",
                 ));
             }
+            // TP ranks can see different free memory. Agree before the existing serving hello.
+            let active = if tp.is_some() {
+                let (stream, _) = pp.as_mut().ok_or("tensor split has no control link")?;
+                let (peer, chosen) = spark_tp::startup_pool::agree(stream, active, load_deadline, shutdown)?;
+                eprintln!("flashnext tp session_pool rank0={active} rank1={peer} chosen={chosen} context={context}");
+                chosen
+            } else { active };
             model.set_session_limit(active)?;
             // VADE_VECTOR_POOL (default on; =0 off): a request's freed device vectors (GDN
             // states, rollback storage, draft and head arenas, workspaces) wait in a size-keyed
@@ -170,13 +185,6 @@ pub fn run(
                 prefix_cache,
                 sharing: scheduler::Sharing::default(),
             };
-            unsafe extern "C" {
-                fn signal(number: i32, handler: extern "C" fn(i32)) -> usize;
-            }
-            unsafe {
-                signal(2, super::super::stop);
-                signal(15, super::super::stop);
-            }
             backend.synchronize()?;
             let ms = |a: std::time::Instant, b: std::time::Instant| (b - a).as_secs_f64() * 1000.0;
             let now = std::time::Instant::now();
@@ -241,6 +249,14 @@ pub fn run_back(
     experiments: spark_serve::mtp_batch::Experiments,
     tp: Option<(std::net::TcpStream, super::tp_proxy::Wire)>,
 ) -> Result<(), String> {
+    let load_deadline = std::time::Instant::now() + spark_tp::startup_pool::LOAD_LIMIT;
+    unsafe extern "C" {
+        fn signal(number: i32, handler: extern "C" fn(i32)) -> usize;
+    }
+    unsafe {
+        signal(2, super::super::stop);
+        signal(15, super::super::stop);
+    }
     let ptx = CString::new(std::fs::read(ptx_path).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     // Check the downstream edge first, then upstream: admission propagates toward
@@ -291,13 +307,10 @@ pub fn run_back(
         if needed > pool as u128 {
             return Err(format!("pipeline back cannot fund one session: needed {needed} bytes, pool {pool} bytes"));
         }
-        unsafe extern "C" {
-            fn signal(number: i32, handler: extern "C" fn(i32)) -> usize;
-        }
-        unsafe {
-            signal(2, super::super::stop);
-            signal(15, super::super::stop);
-        }
+        let active = if tp.is_some() {
+            let (_, chosen) = spark_tp::startup_pool::agree(&mut stream, active, load_deadline, shutdown)?;
+            chosen
+        } else { active };
         backend.synchronize()?;
         eprintln!("flashnext pp back loaded context={context} active={active} resident_bytes={resident} session_pool_bytes={pool}");
         let (_link, tp_wire) = match tp {

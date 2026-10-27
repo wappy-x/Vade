@@ -541,8 +541,8 @@ pub(crate) fn parse_head(head: &[u8], access: &AccessPolicy, admin: bool)
     let valid_route = if admin { parts[0] == "POST" && path == "/v1/admin/swap" }
         else { (parts[0] == "POST"
             && matches!(path, "/tokenize" | "/v1/completions" | "/v1/chat/completions" | "/v1/responses" | "/v1/messages" | "/v1/messages/count_tokens" | "/v1/cancel" | "/v1/kv/release" | "/v1/admission"))
-            || (parts[0] == "GET" && matches!(path, "/health" | "/v1/models" | "/v1/capabilities"))
-            || (parts[0] == "OPTIONS" && matches!(path, "/tokenize" | "/v1/completions" | "/v1/chat/completions" | "/v1/responses" | "/v1/messages" | "/v1/messages/count_tokens" | "/v1/cancel" | "/v1/kv/release" | "/v1/admission" | "/v1/models" | "/v1/capabilities")) };
+            || (parts[0] == "GET" && matches!(path, "/health" | "/v1/models" | "/v1/capabilities" | "/v1/events"))
+            || (parts[0] == "OPTIONS" && matches!(path, "/tokenize" | "/v1/completions" | "/v1/chat/completions" | "/v1/responses" | "/v1/messages" | "/v1/messages/count_tokens" | "/v1/cancel" | "/v1/kv/release" | "/v1/admission" | "/v1/models" | "/v1/capabilities" | "/v1/events")) };
     let mut headers = std::collections::BTreeMap::new();
     for line in lines {
         let (name, value) = line.split_once(':').ok_or("invalid header line")?;
@@ -613,7 +613,7 @@ pub(crate) fn parse_head(head: &[u8], access: &AccessPolicy, admin: bool)
     let preflight = parts[0] == "OPTIONS";
     if preflight {
         let method = headers.get("access-control-request-method").copied().unwrap_or("POST");
-        if method != if matches!(path, "/v1/models" | "/v1/capabilities") { "GET" } else { "POST" } {
+        if method != if matches!(path, "/v1/models" | "/v1/capabilities" | "/v1/events") { "GET" } else { "POST" } {
             return Err("unsupported CORS method".into());
         }
         let requested = headers.get("access-control-request-headers").copied().unwrap_or("content-type, authorization");

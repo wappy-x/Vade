@@ -1,4 +1,4 @@
-use super::{prompt_cohort_candidate, prompt_uses_cohort};
+use super::{fork_failed, prompt_cohort_candidate, prompt_uses_cohort};
 
 // Hybrid pooled geometry: 512-row short limit, 256-row canonical tile.
 const LIMIT: usize = 512;
@@ -59,4 +59,13 @@ fn cohort_and_long_paths_visit_same_tiles_in_order() {
             }).collect();
         assert_eq!(cohort, long, "tile order differs at {total} tokens");
     }
+}
+
+#[test]
+fn each_passed_fork_error_is_one_event() {
+    // Counts only grow, so other tests that note events at the same time cannot break this check.
+    let before = engine_model::events::count("prefix_cache_fork_failed");
+    fork_failed("automatic", 7, &["fork failed: a".into(), "truncate failed: b".into()]);
+    fork_failed("session", 7, &[]);
+    assert!(engine_model::events::count("prefix_cache_fork_failed") >= before + 2);
 }

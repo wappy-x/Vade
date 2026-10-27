@@ -662,7 +662,7 @@ fn native_preflight_failure_receipt_is_preserved_without_uncertain_writes() {
 
 #[test]
 #[cfg(target_os = "macos")]
-fn native_child_timed_out_command_preserves_receipt_and_marks_partial_writes_uncertain() {
+fn native_child_timed_out_command_preserves_receipt_and_marks_possible_writes_uncertain() {
     let fixture = Fixture::new();
     let result = run_once(
         Arc::new(fixture.workspace()),
@@ -670,12 +670,61 @@ fn native_child_timed_out_command_preserves_receipt_and_marks_partial_writes_unc
         ApprovalPolicy::Ask,
         "workspace_shell",
         val(
-            r#"{"argv":["/bin/sh","-c","printf partial > output; /bin/sleep 2"],"timeout_ms":100}"#,
+            r#"{"argv":["/bin/sleep","2"],"timeout_ms":100}"#,
         ),
         Arc::new(|_, _, _| true),
     );
-    assert_eq!(fixture.read("output"), "partial");
     assert!(output(&result, "action").contains("Timeout"));
     assert_eq!(result.tools[0].status, ToolStatus::Uncertain);
     assert!(result.uncertain_writes());
+}
+
+#[test]
+fn child_timeout_receipt_preserves_in_memory_partial_writes() {
+    struct PartialWrite {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        receipt: String,
+        uncertain: bool,
+    }
+    impl ToolExecutor for PartialWrite {
+        fn execute(&mut self, call: ToolInvocation<'_>, _: &AtomicBool) -> Result<String, ToolError> {
+            assert_eq!(call.call.name, "workspace_write");
+            assert_eq!(call.arguments.get("path").and_then(Value::as_str), Some("src/a.rs"));
+            self.bytes.lock().unwrap().extend_from_slice(b"partial");
+            self.uncertain = true;
+            Ok(self.receipt.clone())
+        }
+        fn last_side_effect_uncertain(&self) -> bool { self.uncertain }
+    }
+    // The native adapter above checks a real timeout. This executor supplies a
+    // partial write before its receipt, without relying on process scheduling.
+    let receipt = shell::CommandOutput {
+        outcome: shell::Outcome::Timeout, stdout: "partial output".into(), stderr: String::new(),
+        stdout_bytes: 14, stderr_bytes: 0, stdout_omitted: 0, stderr_omitted: 0,
+        elapsed_ms: 100, exit_code: None, signal: None,
+    }.render();
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let base = factory(vec![proposal("action", "workspace_write", val(r#"{"path":"src/a.rs"}"#))], Arc::clone(&dispatches));
+    let worker_factory: Arc<Factory> = Arc::new({
+        let bytes = Arc::clone(&bytes);
+        let receipt = receipt.clone();
+        move |context, cancel| {
+            let mut worker = base(context, cancel)?;
+            worker.tools = Box::new(PartialWrite { bytes: Arc::clone(&bytes), receipt: receipt.clone(), uncertain: false });
+            Ok(worker)
+        }
+    });
+    let mut scheduler = scheduler(write_config(), Arc::new(AtomicBool::new(false)), worker_factory);
+    let id = scheduler.spawn(write_task("a")).unwrap();
+    finished(&scheduler, id);
+    let result = scheduler.take_result(id).unwrap();
+    assert_eq!(bytes.lock().unwrap().as_slice(), b"partial");
+    assert!(output(&result, "action").contains(&receipt));
+    assert_eq!(result.tools.len(), 1);
+    assert!(result.tools[0].writes);
+    assert_eq!(result.tools[0].status, ToolStatus::Uncertain);
+    assert!(result.uncertain_writes());
+    assert_eq!(result.outcome, Outcome::Runtime(StopReason::ToolFailed));
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1, "an uncertain write must not be retried");
 }

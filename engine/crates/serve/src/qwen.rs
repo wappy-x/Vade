@@ -218,7 +218,7 @@ impl<'m, 'a, 'b> crate::Engine for Qwen<'m, 'a, 'b> {
         let pending = match seqpar.coordinator.start(session, tokens, &seqpar.peers) {
             Ok(pending) => pending,
             Err(error) => {
-                eprintln!("seqpar_fallback phase=start tokens={} reason={error}", tokens.len());
+                engine_model::events::note_line("seqpar_fallback", &format!("seqpar_fallback phase=start tokens={} reason={error}", tokens.len()));
                 return Ok(None);
             }
         };

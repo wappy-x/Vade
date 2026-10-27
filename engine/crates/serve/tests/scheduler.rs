@@ -562,6 +562,28 @@ fn other_engines_ignore_next_mtp_option_on_every_http_api() {
 }
 
 #[test]
+fn events_route_and_health_report_the_best_effort_counts() {
+    let server = Server::with_limits(Codec(1, false), false, 0, Limits::default());
+    engine_model::events::note("events_route_test", format_args!("tokens={}", 12));
+    let read = |path: &str| { let mut reply = String::new(); server.send_route("GET", path, "", "").read_to_string(&mut reply).unwrap(); reply };
+    let reply = read("/v1/events");
+    assert!(reply.starts_with("HTTP/1.1 200 "), "{reply}");
+    let value = engine_model::json::parse(reply.split_once("\r\n\r\n").unwrap().1.as_bytes(), Default::default()).unwrap();
+    let object = value.object().unwrap();
+    assert!(object["counts"].object().unwrap()["events_route_test"].u64().unwrap() >= 1, "{reply}");
+    // Other tests in this binary share the ring: the marker is there unless 64 newer lines pushed it out.
+    let recent = object["recent"].array().unwrap();
+    assert!(recent.iter().all(|e| { let e = e.object().unwrap(); e["unix_ms"].u64().is_ok() && e["name"].string().is_ok() && e["line"].string().is_ok() }), "{reply}");
+    assert!(recent.len() == engine_model::events::RECENT || recent.iter().any(|e| e.object().unwrap()["line"].string().unwrap() == "events_route_test tokens=12"), "{reply}");
+    let reply = read("/health");
+    let value = engine_model::json::parse(reply.split_once("\r\n\r\n").unwrap().1.as_bytes(), Default::default()).unwrap();
+    assert!(value.object().unwrap()["events"].object().unwrap()["events_route_test"].u64().unwrap() >= 1, "{reply}");
+    let mut reply = String::new();
+    server.send_route("POST", "/v1/events", "{}", "").read_to_string(&mut reply).unwrap();
+    assert!(!reply.starts_with("HTTP/1.1 200 "), "events is GET only: {reply}");
+}
+
+#[test]
 fn sampling_echo_on_scheduler_responses() {
     let root = std::env::temp_dir().join(format!("vade-echo-{}", std::process::id()));
     std::fs::create_dir(&root).unwrap(); std::fs::write(root.join("model.safetensors"), b"a").unwrap();
@@ -588,6 +610,10 @@ fn sampling_echo_on_scheduler_responses() {
         let engine_model::json::Value::Object(numerics) = fields.get_mut("numerics").unwrap() else { unreachable!() };
         numerics.insert("draft".into(), engine_model::json::Value::String("plain".into()));
         numerics.insert("mtp_depth".into(), engine_model::json::Value::Number("0".into()));
+        // Event counts are process-wide (other tests in this binary add to them): a name -> count object.
+        let events = vade.get("events").unwrap();
+        assert!(events.object().unwrap().values().all(|v| matches!(v, engine_model::json::Value::Number(_))), "{reply}");
+        fields.insert("events".into(), events.clone());
         assert_eq!(value.object().unwrap().get("vade"), Some(&expected), "{reply}");
     } }
     drop(server); std::fs::remove_dir_all(root).unwrap();
@@ -1015,6 +1041,7 @@ fn full_table_cancel_preflight_preserves_response_and_control_admission()
         full, empty,
         "full-table preflight must preserve every header"
     );
+    let refused = engine_model::events::count("admission_refused");
     for path in ["/v1/completions", "/v1/kv/release", "/v1/admission"] {
         let reply = preflight(path)?;
         let (head, body) = reply.split_once("\r\n\r\n").ok_or("missing headers")?;
@@ -1030,6 +1057,7 @@ fn full_table_cancel_preflight_preserves_response_and_control_admission()
             r#"{"error":{"type":"overloaded","message":"connection capacity reached"}}"#
         );
     }
+    assert!(engine_model::events::count("admission_refused") >= refused + 3, "each refusal is one event");
     for (method, path, body) in [
         ("GET", "/health", String::new()),
         (

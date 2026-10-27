@@ -155,6 +155,16 @@ impl<R: Runner> App<R> {
                 fields.insert("env.VADE_W2_PP".into(), "1".into());
                 // A two-stage split cannot describe an N-stage layer chain.
                 fields.insert("env_unset.VADE_W2_PP_SPLIT".into(), "1".into());
+            } else {
+                // Two Sparks run the tensor split with every proven level on; the engine sets
+                // them. Carry this shell's debug switch and temporary level names to both ranks,
+                // and remove an unset one there, so a rank never inherits its own login's value.
+                for (name, value) in two_spark_switches(|name| std::env::var(name), rdma == "1")? {
+                    match value {
+                        Some(value) => fields.insert(format!("env.{name}"), value),
+                        None => fields.insert(format!("env_unset.{name}"), "1".into()),
+                    };
+                }
             }
         }
         for (name, value) in [
@@ -229,4 +239,36 @@ impl<R: Runner> App<R> {
         }
         Ok(fields)
     }
+}
+
+/// The 2-Spark switches for both ranks, each with this shell's value or None when unset:
+/// `VADE_W2_PATH=pipeline` (a debug switch, the one way to the older layer pipeline) and the
+/// split's temporary level names, which set one level by hand. The engine checks the level
+/// values; unset ones take the proven defaults. `rdma`: the split needs it, so TCP asks for the
+/// pipeline by name; VADE_W2_TP=0 no longer selects it.
+pub(crate) const TWO_SPARK_SWITCHES: [&str; 5] = ["VADE_W2_PATH", "VADE_W2_TP", "VADE_W2_TP_WIRE", "VADE_W2_TP_PROJ", "VADE_W2_TP_HEAD"];
+pub(crate) fn two_spark_switches(read: impl Fn(&str) -> Result<String, std::env::VarError>, rdma: bool)
+    -> Result<Vec<(&'static str, Option<String>)>, String> {
+    let mut set = Vec::new();
+    for name in TWO_SPARK_SWITCHES {
+        set.push((name, match read(name) {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(_) => return Err(format!("{name} must be plain text; unset it or correct it, then run vade up.")),
+        }));
+    }
+    let pipeline = match set[0].1.as_deref() {
+        None => false,
+        Some("pipeline") => true,
+        Some(_) => return Err("VADE_W2_PATH must be unset or pipeline; unset it for the tensor split, then run vade up.".into()),
+    };
+    match (set[1].1.as_deref(), pipeline) {
+        (Some("0"), _) => return Err("VADE_W2_TP=0 no longer selects the layer pipeline; unset it, or set VADE_W2_PATH=pipeline, then run vade up.".into()),
+        (Some("1"), true) => return Err("VADE_W2_TP=1 and VADE_W2_PATH=pipeline disagree; unset one, then run vade up.".into()),
+        _ => {}
+    }
+    if !rdma && !pipeline {
+        return Err("The two-Spark tensor split needs RDMA. Unset SEQPAR_RDMA for RDMA, or set VADE_W2_PATH=pipeline for the layer pipeline over TCP, then run vade up.".into());
+    }
+    Ok(set)
 }

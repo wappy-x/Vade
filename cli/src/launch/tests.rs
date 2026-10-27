@@ -42,6 +42,8 @@ struct MockRunner {
     calls: Vec<Exec>,
     cleanup_ops: Vec<String>,
     health_ready: bool,
+    // The `GET /v1/events` reply body; `None` makes the read fail.
+    events: Option<&'static str>,
     listener_owned: bool,
     fail_start: bool,
     fail_prepare: bool,
@@ -68,6 +70,7 @@ impl MockRunner {
             calls: Vec::new(),
             cleanup_ops: Vec::new(),
             health_ready: true,
+            events: Some(r#"{"counts":{"prefix_cache_miss":2,"scheduler_pool":1},"recent":[{"unix_ms":0,"name":"scheduler_pool","line":"scheduler_pool active=8 connections=16"}]}"#),
             listener_owned: true,
             fail_start: false,
             fail_prepare: false,
@@ -202,13 +205,19 @@ impl Runner for MockRunner {
                 operation => panic!("Unexpected worker operation {operation}"),
             };
         }
+        if exec.label == "local events" {
+            assert_eq!((exec.program.as_str(), exec.args[0].as_str()), ("curl", "-q"));
+            assert!(exec.args.last().unwrap().starts_with("http://127.0.0.1:") && exec.args.last().unwrap().ends_with("/v1/events"));
+            assert!(exec.args.contains(&"--noproxy".into()));
+            return self.events.map_or_else(|| Ok(Output { success: false, stdout: String::new() }), reply);
+        }
         if exec.label == "local health" {
             assert_eq!(exec.program, "curl");
             assert!(exec.args.last().unwrap().starts_with("http://127.0.0.1:"));
             assert!(exec.args.contains(&"--noproxy".into()));
             assert!(!exec.args.iter().any(|s| s.starts_with("https:")));
             return reply(if self.health_ready {
-                r#"{"status":"ready","model":"checkpoint"}"#
+                r#"{"status":"ready","model":"checkpoint","events":{"scheduler_pool":1}}"#
             } else {
                 r#"{"status":"loading","model":"checkpoint"}"#
             });

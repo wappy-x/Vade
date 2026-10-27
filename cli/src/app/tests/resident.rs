@@ -1,7 +1,7 @@
 //! Resident reuse rejects changed configuration and preserves owned state.
 use super::*;
 
-fn assert_refused_without_touching_resident(f: &mut Fixture, options: &UpOptions, change: &str) {
+pub(super) fn assert_refused_without_touching_resident(f: &mut Fixture, options: &UpOptions, change: &str) {
     let saved = fs::read(f.app.config.state_dir.join("session.conf")).unwrap();
     for command in [
         Command::Up(options.clone()),
@@ -227,7 +227,9 @@ fn changed_transport_refuses_reuse_after_loading_the_saved_record() {
     for (previous, current) in [("0", "1"), ("1", "0")] {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "app::tests::resident_tests::changed_transport_refuses_reuse_after_loading_the_saved_record", "--nocapture"])
-            .env(CASE, previous).env("SEQPAR_RDMA", current).output().unwrap();
+            .env(CASE, previous).env("SEQPAR_RDMA", current)
+            // Two Sparks over TCP run the layer pipeline only when it is named; both launches name it.
+            .env("VADE_W2_PATH", "pipeline").output().unwrap();
         assert!(
             output.status.success(),
             "{}{}",

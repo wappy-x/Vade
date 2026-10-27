@@ -33,6 +33,8 @@ use std::collections::BTreeMap;
 #[path = "next_pp_prefetch.rs"]
 mod prefetch;
 use prefetch::{Incoming, Prefetch};
+#[path = "next_pp_acks.rs"]
+mod acks;
 
 // Version 2: every request carries an exchange id that its reply echoes.
 const MAGIC_REQUEST: u32 = 0x3250_5056; // "VPP2"
@@ -456,7 +458,7 @@ impl Link {
                         // A send that waits on a busy back retries; the front's main thread
                         // judges the back's liveness (heartbeats) and sets `down` on failure.
                         if let Err(e) = send_all(&mut writer, &head, down).and_then(|()| send_all(&mut writer, f32_bytes(&rows), down)) {
-                            eprintln!("flashnext pp sender: {e}");
+                            engine_model::events::note_line("pp_sender_error", &format!("flashnext pp sender: {e}"));
                             return;
                         }
                         let _ = spare.send(rows);
@@ -504,7 +506,7 @@ impl Link {
     pub(super) fn fail(&mut self, e: String) -> String {
         self.poisoned = true;
         if !self.down.swap(true, Ordering::Relaxed) {
-            eprintln!("flashnext pp front: link failed ({e}); stopping the server");
+            engine_model::events::note_line("pp_link_failed", &format!("flashnext pp front: link failed ({e}); stopping the server"));
         }
         #[cfg(target_os = "linux")]
         spark_gpu_probe::teardown::arm();
@@ -708,28 +710,19 @@ impl Link {
         self.bytes += (rows.len() * 4) as u64;
         let queue = self.queue.clone().ok_or("pipeline queue missing")?;
         // At most QUEUED tiles wait for the socket; past that the front waits while the back
-        // runs a tile. After one heartbeat period it reads the queued tiles' headers as they
-        // come (heartbeats or acks; the socket's 100 ms read timeout paces the peek) and
-        // fails once the back stays silent for `limit`.
-        let (mut item, started, mut heard) = ((head, rows), Instant::now(), Instant::now());
+        // runs a tile. Meanwhile it reads the queued tiles' headers at once as they come
+        // (heartbeats or acks: an unread KEEP ack holds the back) and fails once the back
+        // stays silent for `limit`.
+        let (mut item, mut heard) = ((head, rows), Instant::now());
         loop {
             match queue.try_send(item) {
                 Ok(()) => break,
                 Err(mpsc::TrySendError::Full(back)) => {
                     item = back;
-                    if started.elapsed() < beat_period(self.limit) || self.pending == 0 {
-                        std::thread::sleep(Duration::from_micros(200));
+                    if self.pending > 0 && self.header_ready()? {
+                        self.queued_frame(&mut heard)?;
                     } else {
-                        let mut probe = [0u8; REPLY_HEAD];
-                        match self.stream.peek(&mut probe) {
-                            Ok(n) if n >= REPLY_HEAD => {
-                                self.queued_frame(&mut heard)?;
-                            }
-                            Ok(0) => return Err("pipeline back closed".into()),
-                            Ok(_) => std::thread::sleep(Duration::from_micros(200)),
-                            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => (),
-                            Err(e) => return Err(format!("pipeline read: {e}")),
-                        }
+                        std::thread::sleep(Duration::from_micros(200));
                     }
                     if heard.elapsed() > self.limit {
                         return Err(format!("pipeline back silent for {} ms while tiles wait", self.limit.as_millis()));
@@ -777,7 +770,7 @@ impl Link {
             Ok(())
         }
     }
-    fn spare(&mut self, len: usize) -> Vec<f32> {
+    pub(super) fn spare(&mut self, len: usize) -> Vec<f32> {
         let mut v = self.free.as_ref().and_then(|f| f.try_recv().ok()).unwrap_or_default();
         v.resize(len, 0.0);
         v
@@ -1032,7 +1025,8 @@ impl<'a> NextModel<'a> {
         let mut guard = self.pp.borrow_mut();
         let link = guard.as_mut().filter(|l| !l.poisoned).ok_or("pipeline link failed earlier; the front is stopping")?;
         let mut rows = link.spare(count * W);
-        let result = b.read_vector_range_into(vector, 0, &mut rows).and_then(|()| link.post(meta, rows, keep));
+        // The copy waits for this tile's layers; earlier tiles' acks are read meanwhile.
+        let result = link.reading_acks(|| b.read_vector_range_into(vector, 0, &mut rows)).and_then(|()| link.post(meta, rows, keep));
         result.map_err(|e| link.fail(e))
     }
     /// Front: copy the final prompt tile and hand it to the sender thread. Rows come back
@@ -1041,7 +1035,7 @@ impl<'a> NextModel<'a> {
         let mut guard = self.pp.borrow_mut();
         let link = guard.as_mut().filter(|l| !l.poisoned).ok_or("pipeline link failed earlier; the front is stopping")?;
         let mut rows = link.spare(count * W);
-        let result = b.read_vector_range_into(vector, 0, &mut rows).and_then(|()| link.post_final(meta, rows));
+        let result = link.reading_acks(|| b.read_vector_range_into(vector, 0, &mut rows)).and_then(|()| link.post_final(meta, rows));
         result.map_err(|e| link.fail(e))
     }
     /// Front: take the final tile's rows back into `vector` (see `Link::finish_final`).
@@ -1442,7 +1436,7 @@ fn serve_stage(
         busy += started.elapsed();
         served += 1;
         if let Err(e) = &result {
-            eprintln!("flashnext pp back request failed: {e}");
+            engine_model::events::note_line("pp_back_request_failed", &format!("flashnext pp back request failed: {e}"));
         }
         let err_bytes = result.as_ref().err().map(|e| e.as_bytes().to_vec());
         let body = if err_bytes.is_some() {

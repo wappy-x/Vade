@@ -415,8 +415,13 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             Command::Status | Command::Menu => {
                 match (Config::load(&self.root)?, self.record()?) {
                     (Some(config), Some(record)) => {
-                        self.ready(&config, &record)?;
-                        output::text(format_args!("{}", self.status_table(&config, &record)?))
+                        let health = self.ready(&config, &record)?;
+                        let mut read = crate::app::events::read(config.endpoint(), "local events");
+                        read.timeout = Duration::from_secs(6);
+                        clear_credentials(&mut read);
+                        let events = self.runner.run(&read)?;
+                        let events = crate::app::events::status_lines(&events, &health, crate::app::events::now_ms());
+                        output::text(format_args!("{}", self.status_table(&config, &record, &events)?))
                     }
                     (None, Some(_)) => Err("An owned engine has no saved config; preserve the state folder and run vade down.".into()),
                     (_, None) => output::text(format_args!("{}", status::stopped())),
@@ -721,7 +726,8 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         }
     }
 
-    fn ready(&mut self, config: &Config, record: &Fields) -> Result<(), String> {
+    /// The ready engine's `/health` body.
+    fn ready(&mut self, config: &Config, record: &Fields) -> Result<String, String> {
         if required(record, "phase")? != "running" {
             return Err("Startup is incomplete; run vade down, then vade launch.".into());
         }
@@ -731,13 +737,13 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             Fields::from([("port".into(), config.port.to_string())]),
             false,
         )?;
-        if self.health(config)?.as_deref() != Some(required(record, "endpoint_model")?) {
-            return Err(
+        match self.health_reply(config)? {
+            Some((model, body)) if model == required(record, "endpoint_model")? => Ok(body),
+            _ => Err(
                 "The owned engine is not ready; run vade logs, then vade down and vade launch."
                     .into(),
-            );
+            ),
         }
-        Ok(())
     }
 
     fn stage_manifest(&self, model: &Path) -> Result<Option<PathBuf>, String> {
@@ -754,6 +760,10 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
     }
 
     fn health(&mut self, config: &Config) -> Result<Option<String>, String> {
+        Ok(self.health_reply(config)?.map(|(model, _)| model))
+    }
+    /// The served model name and the whole body, from a ready `/health` reply.
+    fn health_reply(&mut self, config: &Config) -> Result<Option<(String, String)>, String> {
         let mut exec = Exec::new(
             "local health",
             "curl",
@@ -782,7 +792,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             return Ok(None);
         }
         Ok(crate::json::string(&reply.stdout, "model")
-            .filter(|s| !s.is_empty() && !s.chars().any(char::is_control)))
+            .filter(|s| !s.is_empty() && !s.chars().any(char::is_control)).map(|model| (model, reply.stdout)))
     }
 
     fn worker(
@@ -836,6 +846,11 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             return Err(fields.get("error").cloned().unwrap_or_else(|| {
                 format!("Local {op} failed; preserve the state folder and run vade down.")
             }));
+        }
+        if matches!(op, "probe" | "start" | "warm-ptx") {
+            if let Some(note) = fields.get("gpu_note") {
+                output::line(format_args!("{}", text::terminal_text(note)))?;
+            }
         }
         Ok(fields)
     }

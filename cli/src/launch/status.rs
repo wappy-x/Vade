@@ -45,7 +45,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
     }
 
     /// `vade status` for a ready engine: the endpoint, then one row per setting.
-    pub(super) fn status_table(&self, config: &Config, record: &Fields) -> Result<String, String> {
+    pub(super) fn status_table(&self, config: &Config, record: &Fields, events: &[String]) -> Result<String, String> {
         let field = |name: &str| record.get(name).map(|value| text::terminal_text(value).into_owned());
         let drafting = match record.get("mtp").map(String::as_str) {
             Some("engine_default") | None => "engine default".to_owned(),
@@ -64,7 +64,8 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             rows.push(("Build", format!("{} (generation {})", build.chars().take(12).collect::<String>(), text::terminal_text(&generation))));
         }
         rows.push(("Config", text::terminal_text(&self.root.join("config").display().to_string()).into_owned()));
-        Ok(format!("{} Vade is ready at {}.\n{}\n{}", style::paint(Token::Ok, "●", Stream::Out), config.endpoint(), style::table(&rows, 2),
+        let events: String = events.iter().map(|line| format!("  {line}\n")).collect();
+        Ok(format!("{} Vade is ready at {}.\n{}{events}\n{}", style::paint(Token::Ok, "●", Stream::Out), config.endpoint(), style::table(&rows, 2),
             crate::status::next_steps(&[("Chat", &text::command("chat")), ("Stop", &text::command("down"))])))
     }
 }

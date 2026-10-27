@@ -6,16 +6,21 @@ use crate::checks::Report;
 impl<R: Runner, D: Detector> Launcher<R, D> {
     pub(super) fn doctor(&mut self) -> Result<(), String> {
         let mut report = Report::new("local", false);
+        crate::doctor::binary(&mut report)?;
         let gib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-        let config = report.check("config", Config::load(&self.root)
-            .and_then(|value| value.ok_or_else(|| "No saved local defaults.".into())),
-            |_| self.root.join("config").display().to_string(),
-            "Run vade launch to create defaults; preserve an invalid config for inspection.")?;
+        let config = report.check("config", Config::load(&self.root),
+            |config| if config.is_some() { self.root.join("config").display().to_string() }
+                else { "No saved config; first-run defaults apply.".into() },
+            "Preserve the invalid config for inspection, then run vade config.")?.flatten();
         report.check("VADE_HOME writable", writable(&self.root), |detail| detail.clone(),
             "Choose a VADE_HOME you own (export VADE_HOME=~/.vade), then retry vade doctor.")?;
         let record = report.check("ownership", self.record(),
             |record| if record.is_some() { "engine recorded".into() } else { "no engine recorded".into() },
             "Preserve the state folder; run vade down before repairing the installation.")?;
+        if config.is_none() && matches!(&record, Some(Some(_))) {
+            report.fail("saved config", "An owned engine has no valid saved config.",
+                "Preserve the state folder, then run vade down before repairing the saved config.")?;
+        }
         let installed = report.check("installed binaries", install::load(&self.root)
             .and_then(|value| value.ok_or_else(|| "Local artifacts are missing or have changed.".into())),
             |_| "engine, kernels and chat match their saved file metadata".into(),
@@ -31,6 +36,28 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                 Ok(model)
             }), |model| format!("{} ({} bytes; startup verifies the model manifest)", model.path.display(), model.bytes),
             "Set VADE_MODELS to the complete FP4-Local checkpoint, then run vade launch. When replacing a valid saved checkpoint, first run vade down with the existing VADE_HOME, then choose a fresh VADE_HOME.")?;
+        let known_model = model.as_ref().map(|model| model.path.clone())
+            .or_else(|| config.as_ref().map(|config| config.model.clone()))
+            .or_else(|| std::env::var_os("VADE_MODELS").map(|value| {
+                let value = PathBuf::from(value);
+                if value == Path::new("~") { self.home.clone() }
+                else if let Ok(relative) = value.strip_prefix("~/") { self.home.join(relative) }
+                else { value }
+            }));
+        if let Some(path) = &known_model { crate::doctor::local_model(&mut report, path)?; }
+        match crate::doctor::start_options() {
+            Ok(options) => {
+                let (context, output, mtp, cache) = if let Some(config) = &config {
+                    let planned = config.planned(&options);
+                    (planned.context, planned.output, planned.mtp(), planned.prefix_cache().map(|value| value.as_deref() == Some("1")))
+                } else {
+                    let context = model.as_ref().map_or(options.context, |model| options.context.min(model.context_limit));
+                    (context, options.output.min(context), options.mtp_explicit.then_some(options.mtp), crate::doctor::prefix_cache())
+                };
+                crate::doctor::defaults(&mut report, context, output, mtp, cache)?;
+            }
+            Err(error) => report.fail("launch defaults", &error, "Correct MTP, then run vade doctor.")?,
+        }
         let models = model.as_ref().map(|model| model.path.clone())
             .or_else(|| config.as_ref().map(|config| config.model.clone()))
             .unwrap_or_else(|| self.home.join("models"));

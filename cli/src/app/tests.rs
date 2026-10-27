@@ -5,6 +5,8 @@ mod install_tests;
 mod owner_dispatch;
 #[path = "tests/chat_guards.rs"]
 mod chat_guards;
+#[path = "tests/two_spark.rs"]
+mod two_spark;
 use super::*;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -59,6 +61,12 @@ impl Runner for FakeRunner {
         } else if exec.label.ends_with("artifact hashes") || exec.label.ends_with("build and stage") {
             format!("{}  binary\n{}  ptx\n{}  worker\n", if self.bad_hash { "9" } else { "1" }.repeat(64), "2".repeat(64), "3".repeat(64))
         } else if exec.label == "controller capabilities" { r#"{"object":"engine.capabilities","prefix_cache":false}"#.into()
+        } else if exec.label == "controller events" {
+            // A replica (read at 127.0.0.1:<its tunnel port>) reports its own counts.
+            match exec.args.last().unwrap().strip_prefix("http://127.0.0.1:").and_then(|url| url.strip_suffix("/v1/events")) {
+                Some(port) => format!(r#"{{"counts":{{"replica_{port}":1}},"recent":[]}}"#),
+                None => r#"{"counts":{"prefix_cache_miss":2,"scheduler_pool":1},"recent":[{"unix_ms":0,"name":"scheduler_pool","line":"scheduler_pool active=8 connections=16"}]}"#.into(),
+            }
         } else if exec.label.contains("health") {
             if let Some(name) = self.exit_on_health.take() { self.started.remove(&name); }
             format!("{{\"status\":\"ready\",\"model\":\"{}\"{}}}", self.ready_model.as_deref().unwrap_or("qwen3.8-flash-next-fp8"), self.health_extra)
@@ -70,6 +78,19 @@ impl Runner for FakeRunner {
         } else if !op.is_empty() { "phase=running\ngpu=empty\n".into()
         } else if let Some((success, stdout)) = self.probe.filter(|_| exec.label.ends_with("prerequisites")) { return Ok(Output { success, stdout: stdout.into() });
         } else if exec.label.ends_with("prerequisites") { "weights=present\nrust=ok\ndriver=ok\ndisk_kb=99999999\nmem_total_kb=127608480\nmem_available_kb=115343360\n".into()
+        } else if exec.label.ends_with("doctor files") {
+            let mut fields = Fields::from([
+                ("model_folder".into(), "present".into()), ("model_config".into(), "present".into()),
+                ("model_config_hex".into(), "7b7d".into()), ("model_tokenizer".into(), "present".into()),
+                ("model_tokenizer_hex".into(), "7b7d".into()), ("model_index".into(), "present".into()),
+                ("model_index_hex".into(), "7b227765696768745f6d6170223a7b2278223a226d6f64656c2e7361666574656e736f7273227d7d".into()),
+                ("prefix_cache".into(), "0".into()),
+                ("model_shards".into(), "1".into()), ("model_bytes".into(), "16".into()),
+                ("model_complete".into(), "1".into()), ("model_shard.0".into(), "6d6f64656c2e7361666574656e736f7273:16".into()),
+                ("model_disk_kb".into(), "99999999".into()), ("install_disk_kb".into(), "99999999".into()),
+            ]);
+            for port in [18080, 29960, 29961] { fields.insert(format!("port_{port}"), "free".into()); }
+            text::encode(&fields)
         } else if exec.label.ends_with("revision") { match exec.label.as_str() { "CLI revision" => "b", "harness revision" => "c", _ => "a" }.repeat(40) } else { String::new() };
         Ok(Output { success: true, stdout })
     }
@@ -686,6 +707,8 @@ fn fp4_transport_selection_controls_both_pipeline_ranks_and_prerequisites() {
             .env(CASE, value.unwrap_or("1"));
         if let Some(value) = value { command.env("SEQPAR_RDMA", value); }
         else { command.env_remove("SEQPAR_RDMA"); }
+        // Two Sparks over TCP run the layer pipeline only when it is named.
+        if value == Some("0") { command.env("VADE_W2_PATH", "pipeline"); } else { command.env_remove("VADE_W2_PATH"); }
         let result = command.output().unwrap();
         assert!(result.status.success(), "{}{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
     }
@@ -962,7 +985,8 @@ fn status_prints_the_engine_retention_state() {
     let printed = capture.bytes.clone();
     crate::output::with_writer(capture, || f.app.execute(Command::Status)).unwrap();
     let printed = String::from_utf8(printed.borrow().clone()).unwrap();
-    assert!(printed.contains("\n  Retained prompt cache  off (engine report)\n"), "{printed}");
+    assert!(printed.contains("\n  Retained prompt cache  off (engine report)\n  Event counts: prefix_cache_miss 2, scheduler_pool 1\n  Last 1 events (oldest first):\n    00:00:00Z ("), "{printed}");
+    assert!(printed.contains(") scheduler_pool active=8 connections=16\n"), "{printed}");
     let mut session = Session::load(&f.app.config.state_dir).unwrap().unwrap();
     assert_eq!(retention_label(&session, Some(true)), "on (engine report)");
     assert_eq!(retention_label(&session, None), "off by default; engine not checked");
@@ -1006,6 +1030,20 @@ fn replicas_start_world_one_servers_with_own_tunnels_behind_an_owned_gateway() {
     f.app.status().unwrap(); f.app.down().unwrap();
     assert!(f.app.runner.gateway.is_none() && !f.recorded(), "down stops the identified gateway and clears the record");
     assert_eq!(f.app.runner.signals, ["-TERM"], "a gateway that stops on TERM never gets KILL");
+}
+
+#[test]
+fn replica_status_reads_and_labels_each_server_events() {
+    let mut f = Fixture::fp4(2, false);
+    f.app.up(&fp4_options(&["--replicas", "2"])).unwrap();
+    let port = Session::load(&f.app.config.state_dir).unwrap().unwrap().local_port;
+    let capture = crate::output::testing::Capture::default();
+    let printed = capture.bytes.clone();
+    crate::output::with_writer(capture, || f.app.execute(Command::Status)).unwrap();
+    let printed = String::from_utf8(printed.borrow().clone()).unwrap();
+    // Each replica is read at its own tunnel, not through the gateway, which picks one per request.
+    assert!(printed.contains(&format!("\n  a:\n    Event counts: replica_{} 1\n    Last events: none\n  b:\n    Event counts: replica_{} 1\n", port + 1, port + 2)), "{printed}");
+    f.app.down().unwrap();
 }
 
 #[test]
@@ -1066,6 +1104,10 @@ fn replicas_gateway_identity_does_not_depend_on_the_locale_date() {
 fn doctor_skips_checks_an_earlier_failure_hid() {
     let rows = |probe: Option<(bool, &'static str)>, machines: usize, transport: Result<bool, String>| {
         let mut f = Fixture::fp4(machines, false);
+        if machines > 1 {
+            let session = Session::new(&f.app.config, &fp4_options(&["--sparks", &machines.to_string()]), &f.app.manifest().unwrap(), "a".repeat(64)).unwrap();
+            session.save(&f.app.config.state_dir).unwrap();
+        }
         f.app.runner.probe = probe;
         let capture = crate::output::testing::Capture::default();
         let result = crate::output::with_writer(capture.clone(), || f.app.doctor_with(transport));
@@ -1106,6 +1148,85 @@ fn doctor_skips_checks_an_earlier_failure_hid() {
     assert!(result.is_err());
     assert!(row(&printed, "SEQPAR_RDMA").starts_with("FAIL") && row(&printed, "b ssh").starts_with("skip") && row(&printed, "fabric").starts_with("skip"), "{printed}");
     assert!(printed.lines().last().unwrap().starts_with("FAIL  "), "{printed}");
+}
+
+#[test]
+fn doctor_requires_configured_wire_links_before_reporting_reachability() {
+    let mut f = Fixture::new(2, false);
+    for machine in &mut f.app.config.machines { machine.fabric.clear(); }
+    let capture = crate::output::testing::Capture::default();
+    let result = crate::output::with_writer(capture.clone(), || f.app.doctor_with(Ok(true)));
+    let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+    assert!(result.is_err());
+    assert!(printed.contains("FAIL  launch topology") && printed.contains("Add fabric.b under a and fabric.a under b"), "{printed}");
+    assert!(!f.app.runner.calls.iter().any(|exec| exec.label.ends_with(" fabric")));
+    assert!(f.app.runner.started.is_empty());
+}
+
+#[test]
+fn doctor_uses_default_one_spark_selection_and_checks_the_full_memory_floor() {
+    let mut f = Fixture::fp4(2, false);
+    f.app.runner.probe = Some((true, "weights=present\nrust=ok\ndriver=ok\ndisk_kb=99999999\nmem_total_kb=125829120\nmem_available_kb=4194304\n"));
+    let capture = crate::output::testing::Capture::default();
+    let result = crate::output::with_writer(capture.clone(), || f.app.doctor_with(Ok(true)));
+    let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+    assert!(result.is_err() && printed.contains("FAIL  a model memory") && printed.contains("Not enough memory"), "{printed}");
+    assert!(printed.contains("one Spark; no fabric") && !printed.contains("b model memory"), "{printed}");
+    assert!(!f.app.runner.calls.iter().any(|call| call.label.starts_with("b ") || call.label.ends_with(" fabric")));
+    let probe = f.app.runner.calls.iter().find(|call| call.label == "a prerequisites").unwrap().args.last().unwrap();
+    assert!(probe.contains("if test 0 = 1; then"), "{probe}");
+    std::mem::forget(f);
+}
+
+#[test]
+fn doctor_accepts_replica_configs_without_fabric_and_uses_the_saved_ranks() {
+    let mut f = Fixture::fp4(3, true);
+    for machine in &mut f.app.config.machines { machine.fabric.clear(); }
+    let session = Session::new(&f.app.config, &fp4_options(&["--replicas", "2"]), &f.app.manifest().unwrap(), "a".repeat(64)).unwrap();
+    session.save(&f.app.config.state_dir).unwrap();
+    let capture = crate::output::testing::Capture::default();
+    crate::output::with_writer(capture.clone(), || f.app.doctor_with(Err("Set SEQPAR_RDMA to 0 or 1.".into()))).unwrap();
+    let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+    assert!(printed.contains("independent replicas; no fabric") && !printed.contains("FAIL"), "{printed}");
+    assert!(printed.contains("a port 18080") && printed.contains("b port 18080"), "{printed}");
+    assert!(!printed.contains("port 29960") && !printed.contains("c model files"), "{printed}");
+    std::mem::forget(f);
+}
+
+#[test]
+fn doctor_checks_http_only_on_the_serving_rank_of_an_active_chain() {
+    for count in 2..=3 {
+        let mut f = Fixture::fp4(count, true);
+        let session = Session::new(&f.app.config, &fp4_options(&["--sparks", &count.to_string()]), &f.app.manifest().unwrap(), "a".repeat(64)).unwrap();
+        session.save(&f.app.config.state_dir).unwrap();
+        for machine in &mut f.app.config.machines { machine.fabric.clear(); }
+        let capture = crate::output::testing::Capture::default();
+        let result = crate::output::with_writer(capture.clone(), || f.app.doctor_with(Ok(true)));
+        let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+        assert!(result.is_ok(), "{printed}");
+        assert!(printed.contains("a port 18080") && !printed.contains("a port 29960"), "{printed}");
+        for machine in session.ranks.iter().skip(1) {
+            assert!(!printed.contains(&format!("{} port 18080", machine.machine.name)), "{printed}");
+            assert!(printed.contains(&format!("{} port 29960", machine.machine.name)), "{printed}");
+        }
+        assert!(!printed.contains("port 29961"), "{printed}");
+        assert_eq!(f.app.runner.calls.iter().filter(|call| call.label.ends_with(" fabric")).count(), count - 1);
+        for link in session.ranks.windows(2) {
+            let label = format!("{} to {} fabric", link[0].machine.name, link[1].machine.name);
+            let call = f.app.runner.calls.iter().find(|call| call.label == label).unwrap();
+            assert!(call.args.last().unwrap().contains(link[0].next.rsplit_once(':').unwrap().0));
+        }
+        std::mem::forget(f);
+    }
+}
+
+#[test]
+fn doctor_keeps_legacy_controller_limits() {
+    let mut f = Fixture::new(2, true);
+    let capture = crate::output::testing::Capture::default();
+    crate::output::with_writer(capture.clone(), || f.app.doctor_with(Ok(true))).unwrap();
+    let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+    assert!(printed.contains("131072 tokens") && printed.contains("65536 tokens"), "{printed}");
 }
 
 /// A failed harness doctor names the command to rerun in its own error,

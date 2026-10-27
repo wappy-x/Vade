@@ -372,7 +372,7 @@ impl Config {
         }
         Ok(selected)
     }
-    fn check_links(&self, selected: &[Machine]) -> Result<(), String> {
+    pub(crate) fn check_links(&self, selected: &[Machine]) -> Result<(), String> {
         for link in selected.windows(2) {
             let a = &link[0];
             let b = &link[1];

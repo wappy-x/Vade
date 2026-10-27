@@ -31,7 +31,7 @@ This page explains new terms where they first come up. The
 | `vade config` | Shows which setup the other commands will use (local, controller, legacy or none) and what it holds; add `--json` for scripts |
 | `vade verify` | Runs the same greedy prompt with drafting off and on, and checks that every run returns the same token IDs byte for byte |
 | `vade bench` | Measures the wait before output starts and the answer speed |
-| `vade doctor` | Prints one line per check, then PASS or FAIL. On the Spark itself, checks the config, `VADE_HOME`, the driver, memory, disk, model, installation, port and engine health. From a controller, checks local tools, then SSH, `nvidia-smi`, disk, memory and model files on each Spark, then the fabric, port and engine. Add `--json` for scripts |
+| `vade doctor` | Prints one line per check, then PASS or FAIL. On the Spark itself, checks the config, `VADE_HOME`, the driver, memory, disk, model, installation, port and engine health. From a controller, checks local tools, then SSH, `nvidia-smi`, disk, memory and model files on the active Sparks or the default `vade up` selection, then the fabric, port and engine. Add `--json` for scripts |
 | `vade logs` | Shows recent engine logs |
 | `vade detect` | Shows this Spark's memory, disk, driver and model, and changes nothing; add `--json` for scripts |
 | `vade install` | Saves local defaults and installs the engine and chat on this Spark. With `VADE_CONFIG` set, installs on your Sparks from a controller |
@@ -854,7 +854,7 @@ too.
    process the original launch started. A process name, port or GPU entry alone
    is not enough. Never signal a reused PID or another job's process.
 3. Once you have confirmed the affected engine is gone, check `nvidia-smi` for
-   compute processes and zero utilization. If the GPU is busy, leave its files
+   compute processes and for power draw under 30 W. If the GPU is busy, leave its files
    alone until its current owner finishes. Move only this token's saved
    directory out of `state_dir` into the private backup, and remove
    `active.conf` only when its token matches exactly. Leave other token

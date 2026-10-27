@@ -402,7 +402,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                         })?;
                         if pool.graph[arm].is_none() {
                             pool.capture_retry[arm].refused();
-                            eprintln!("flash_next pooled_graph_fallback width={width} retry_backoff=true");
+                            engine_model::events::note_line("pooled_graph_fallback", &format!("flash_next pooled_graph_fallback width={width} retry_backoff=true"));
                         } else { pool.capture_retry[arm].captured(); }
                     }
                 } else {

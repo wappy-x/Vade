@@ -31,6 +31,19 @@ pub(crate) fn memory_summary(total: u64, available: u64) -> String {
     )
 }
 
+/// Require the checkpoint and the same working room as a local launch.
+pub(crate) fn check_memory(total: u64, available: u64, model_bytes: u64) -> Result<(), String> {
+    let required_memory = model_bytes.saturating_add(MEMORY_RESERVE);
+    if total < required_memory || available < required_memory {
+        return Err(format!(
+            "Not enough memory: {}; required {:.1} GiB for the checkpoint and working room before any context. Fix: stop other processes holding memory (free -g, nvidia-smi); dropping caches does not help, then run vade doctor before retrying vade up.",
+            memory_summary(total, available),
+            gib(required_memory),
+        ));
+    }
+    Ok(())
+}
+
 /// What `vade detect` reads about this Spark: names, memory, free disk on the
 /// install and model volumes, and the NVIDIA driver and GPU.
 #[derive(Clone, Debug)]
@@ -76,14 +89,7 @@ impl Identity {
 
     /// The model is already present: do not require space for another copy.
     pub fn check_resources(&self, model_bytes: u64, install_required: u64) -> Result<(), String> {
-        let required_memory = model_bytes.saturating_add(MEMORY_RESERVE);
-        if self.memory_total < required_memory || self.memory_available < required_memory {
-            return Err(format!(
-                "Not enough memory: {}; required {:.1} GiB for the checkpoint and working room before any context. Fix: stop other processes holding memory (free -g, nvidia-smi); dropping caches does not help, then run vade doctor before retrying vade up.",
-                memory_summary(self.memory_total, self.memory_available),
-                gib(required_memory),
-            ));
-        }
+        check_memory(self.memory_total, self.memory_available, model_bytes)?;
         let install_need = install_required.saturating_add(if self.volumes_shared {
             MODEL_DISK_RESERVE
         } else {

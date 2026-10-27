@@ -376,3 +376,26 @@
             assert_eq!(output.status.code(), Some(1), "{case}: failed HTTP answers must stay failures when stdout closes; stderr={}", String::from_utf8_lossy(&output.stderr));
         }
     }
+    #[test]
+    fn detect_script_judges_recorded_gpu_samples() {
+        let _process_guard = crate::runner::process_test_lock();
+        let mut f = Fixture::new();
+        f.app.detect(false, true, false).unwrap();
+        let script = f.app.runner.calls.iter().find(|e| e.label == "Spark prerequisites").unwrap().args[1].clone();
+        let stub = f.directory.join("nvidia-smi");
+        fs::write(&stub, "#!/bin/sh\ncase \"$*\" in\n*name,driver_version*) printf 'NVIDIA GB10, 580.00, N/A\\n' ;;\n*query-compute-apps*) printf '%s' \"$STUB_APPS\" ;;\n*power.draw*) printf '%s' \"$STUB_POWER\" ;;\n*utilization.gpu*) printf '%s' \"$STUB_UTIL\" ;;\nesac\n").unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o700)).unwrap();
+        let run = |apps: &str, power: &str, util: &str| {
+            let out = std::process::Command::new("sh").args(["-c", &script, "vade-detect", f.directory.to_str().unwrap()])
+                .env("PATH", format!("{}:/usr/bin:/bin", f.directory.display()))
+                .env("STUB_APPS", apps).env("STUB_POWER", power).env("STUB_UTIL", util).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8(out.stdout).unwrap()
+        };
+        // Idle and a stale 96 % counter at 19 W are not busy; apps and power are.
+        assert!(run("", "18.50\n", "0\n").contains("busy=no\n"));
+        let stale = run("", "19.00\n", "96\n");
+        assert!(stale.contains("busy=no\n") && stale.contains("stale_utilization=96\n"), "{stale}");
+        assert!(run("1234\n", "19.00\n", "0\n").contains("busy=yes\n"));
+        assert!(run("", "45.20\n", "0\n").contains("busy=yes\n"));
+    }

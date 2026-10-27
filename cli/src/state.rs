@@ -315,6 +315,10 @@ impl Session {
     pub fn chained(&self) -> bool {
         self.ranks.len() > 1 && !self.replicas
     }
+    /// Two FP4-Local Sparks on one model: the tensor split (VADE_W2_PATH=pipeline: the layer pipeline).
+    pub fn two_sparks(&self) -> bool {
+        self.fp4_local && self.chained() && self.ranks.len() == 2
+    }
     /// The engine's own rank and world size for this machine.
     pub fn engine_slot(&self, index: usize) -> (usize, usize) {
         if self.replicas { (0, 1) } else { (index, self.ranks.len()) }

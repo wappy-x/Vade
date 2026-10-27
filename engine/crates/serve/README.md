@@ -393,6 +393,9 @@ Request fields, defaults, errors and limits are in
 <code>prompt_token_ids</code>.</dd>
 <dt><code>GET /v1/models</code>, <code>GET /health</code></dt>
 <dd>Model name, state and memory in use.</dd>
+<dt><code>GET /v1/events</code></dt>
+<dd>Best-effort events of this process: counts by name and the last 64 lines.
+See <a href="#best-effort-events">Best-effort events</a>.</dd>
 <dt><code>POST /v1/cancel</code></dt>
 <dd>Cancel a request.</dd>
 <dt><code>POST /v1/admin/swap</code></dt>
@@ -476,6 +479,31 @@ actually used.
 
 `tool_choice:"none"` hides callable definitions and tool events while retaining
 thinking and earlier tool history.
+
+### Best-effort events
+
+A best-effort path is a fallback, a retry, a skipped step, a refused
+admission, a pool size decision or a cache miss. The paths that have an event
+write one log line. The line starts with a stable name, then the numbers as
+`key=value`, for example
+`prefix_cache_miss prompt_tokens=812 reason=empty scoped_entries=0`.
+Lines that existed before keep their text and are counted under a name. Some
+best-effort paths do not have an event yet. The event is counted before the
+line is written, and a failed log write is ignored.
+
+- `GET /v1/events` returns `{"counts":{name:count},"recent":[{"unix_ms",
+  "name","line"}]}`: the counts since the process started, and its last 64
+  lines, oldest first. It uses the same key rules as `GET /v1/models`.
+- `GET /health` and the `vade` object of every response carry the counts as
+  `"events":{name:count}`, so a benchmark card can show a fallback the same
+  day. A response holds the counts from the time the server built it.
+- `vade status` prints the counts and the last 20 lines, for a local launch
+  and for a controller launch. With replicas, it reads each server and labels
+  each section with the machine name. If the events read fails, it keeps the
+  counts from `/health` and names the failure.
+
+The events are host bookkeeping only. No decision reads them, so they cannot
+change a token.
 
 Both `spark-serve` and `flash-serve` expose `GET /v1/capabilities` and
 `POST /v1/admission`. They use the same Host, Origin and caller scope rules

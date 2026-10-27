@@ -22,8 +22,9 @@ pub fn validate() -> Result<(), String> {
     }
     Ok(())
 }
-/// VADE_W2_TP_HEAD (unset = 0; with VADE_W2_TP=1): 1 splits the greedy verify head of one-chat
-/// passes of 2..=RETAINED_ROWS rows by vocabulary halves across the two ranks. Read once.
+/// VADE_W2_TP_HEAD (unset = 0 here; a split rank pins 1; with VADE_W2_TP=1): 1 splits the greedy
+/// verify head of one-chat passes of 2..=RETAINED_ROWS rows by vocabulary halves across the two
+/// ranks. Read once.
 pub fn split_from_env() -> Result<bool, String> {
     static SPLIT: OnceLock<Result<bool, String>> = OnceLock::new();
     SPLIT.get_or_init(|| parse_split(std::env::var("VADE_W2_TP_HEAD").ok().as_deref())).clone()
@@ -80,7 +81,14 @@ fn configured() -> Result<Option<bool>, String> {
 /// Existing explicit switches keep their meaning; automatic mode must fund the
 /// full twin, norms and retained inputs for every possible session, not just C1.
 pub fn load_funded(saved: usize, twin: usize, vocabulary: usize, sessions: usize, mtp: bool) -> Result<bool, String> {
-    configured().map(|enabled| enabled.unwrap_or(funded(saved, twin, vocabulary, sessions, mtp)))
+    configured().map(|enabled| enabled.unwrap_or_else(|| {
+        let on = funded(saved, twin, vocabulary, sessions, mtp);
+        if !on {
+            engine_model::events::note("head_bounds_skipped", format_args!("reason={} saved_bytes={saved} twin_bytes={twin} vocabulary={vocabulary} sessions={sessions}",
+                if !mtp { "no_draft" } else if twin == 0 { "no_twin" } else { "unfunded" }));
+        }
+        on
+    }))
 }
 fn funded(saved: usize, twin: usize, vocabulary: usize, sessions: usize, mtp: bool) -> bool {
     if !mtp || twin == 0 { return false; }

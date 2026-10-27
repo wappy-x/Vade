@@ -30,7 +30,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         let (chunk, len, mut next) = (work.rows.max(1), work.expert_out.len(), 0);
         for (at, tokens, rows) in &kept {
             if *at < next || at + tokens.len() > pos {
-                eprintln!("flashnext pp kept rows of slot {slot} out of order ({at} + {} after {next}, chat at {pos}); not fed", tokens.len());
+                engine_model::events::note_line("pp_rows_not_fed", &format!("flashnext pp kept rows of slot {slot} out of order ({at} + {} after {next}, chat at {pos}); not fed", tokens.len()));
                 break;
             }
             for c in (0..tokens.len()).step_by(chunk) {

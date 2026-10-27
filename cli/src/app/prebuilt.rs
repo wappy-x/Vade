@@ -39,6 +39,9 @@ impl<R: Runner> App<R> {
         if fields.get("ptx_cache").map(String::as_str) != Some("warm") {
             return Err("Install cache preparation returned no verified completion; the previous activation was kept.".into());
         }
+        if let Some(note) = fields.get("gpu_note") {
+            crate::output::line(format_args!("{}: {}", machine.name, text::terminal_text(note)))?;
+        }
         let timings = ["elapsed_ms", "ptx_warmup_ms", "model_verify_ms", "model_hashed_bytes", "model_reused_files"]
             .into_iter().filter_map(|key| fields.get(key).map(|value| format!(" {key}={}", text::terminal_text(value))))
             .collect::<String>();

@@ -207,8 +207,8 @@ impl<'a, 'w, E: Exchange> Session<'a, 'w, E> {
         if failed {
             self.disable_mtp_history(b)?;
             self.mtp_failed = true;
-            eprintln!("flash_mtp fallback=plain rank={} reason={}", self.model.persistent[0].plan.rank,
-                allocated.err().unwrap_or_else(|| "peer history allocation failed".into()));
+            engine_model::events::note_line("mtp_fallback_plain", &format!("flash_mtp fallback=plain rank={} reason={}", self.model.persistent[0].plan.rank,
+                allocated.err().unwrap_or_else(|| "peer history allocation failed".into())));
             return Ok(false);
         }
         self.mtp_enabled = true;
@@ -342,9 +342,9 @@ impl<'a, 'w, E: Exchange> Session<'a, 'w, E> {
         if failed {
             self.disable_mtp_history(b)?;
             self.mtp_failed = true;
-            eprintln!("flash_mtp fallback=plain rank={} device_bytes={} reason={}",
+            engine_model::events::note_line("mtp_fallback_plain", &format!("flash_mtp fallback=plain rank={} device_bytes={} reason={}",
                 self.model.persistent[0].plan.rank, b.allocated_bytes(),
-                allocated.err().unwrap_or_else(|| "peer workspace allocation failed".into()));
+                allocated.err().unwrap_or_else(|| "peer workspace allocation failed".into())));
             return Ok(false);
         }
         self.mtp_workspace = true;

@@ -75,6 +75,8 @@ pub struct CachedSession<S> {
     pub next_logits: Vec<f32>,
     pub reserved_session_bytes: usize,
 }
+/// A prefix search result: the first candidate that forked, and the error of each one that failed first.
+pub struct Forked<S> { pub state: Option<CachedSession<S>>, pub failed: Vec<String> }
 pub(crate) fn shared_prefix(a: &[u32], b: &[u32]) -> usize {
     a.iter().zip(b).take_while(|(a, b)| a == b).count()
 }
@@ -297,10 +299,10 @@ impl<S> SessionCache<S> {
             self.remove(index);
         }
         if self.entries.len() != entries {
-            eprintln!("prefix_cache_pressure evicted_entries={} retained_bytes={} unfunded_bytes={} available_bytes={}",
-                entries - self.entries.len(), self.retained_bytes, self.unfunded_bytes(), self.available_bytes);
+            engine_model::events::note_line("prefix_cache_pressure", &format!("prefix_cache_pressure evicted_entries={} retained_bytes={} unfunded_bytes={} available_bytes={}",
+                entries - self.entries.len(), self.retained_bytes, self.unfunded_bytes(), self.available_bytes));
             if let Some(p) = physical.filter(|&p| p < bytes.min(self.limits.retained_bytes)) {
-                eprintln!("prefix_cache_yield physical_bytes={p} pool_bytes={bytes}");
+                engine_model::events::note_line("prefix_cache_yield", &format!("prefix_cache_yield physical_bytes={p} pool_bytes={bytes}"));
             }
         }
     }
@@ -322,8 +324,8 @@ impl<S> SessionCache<S> {
                 let retained = self.retained_bytes;
                 self.release_replay(replay);
                 if self.retained_bytes != retained {
-                    eprintln!("prefix_cache_make_room released_replay_id={} freed_bytes={} retained_bytes={} incoming_bytes={charge}",
-                        self.entries[replay].id, retained - self.retained_bytes, self.retained_bytes);
+                    engine_model::events::note_line("prefix_cache_make_room", &format!("prefix_cache_make_room released_replay_id={} freed_bytes={} retained_bytes={} incoming_bytes={charge}",
+                        self.entries[replay].id, retained - self.retained_bytes, self.retained_bytes));
                 }
                 replay += 1;
                 continue;
@@ -331,8 +333,8 @@ impl<S> SessionCache<S> {
             let retained = self.retained_bytes;
             let Some(index) = self.entries.iter().position(|e| !e.pinned()) else { return false; };
             let victim = self.remove(index);
-            eprintln!("prefix_cache_make_room evicted_id={} evicted_tokens={} freed_bytes={} retained_bytes={} incoming_bytes={charge}",
-                victim.id, victim.state.tokens.len(), retained - self.retained_bytes, self.retained_bytes);
+            engine_model::events::note_line("prefix_cache_make_room", &format!("prefix_cache_make_room evicted_id={} evicted_tokens={} freed_bytes={} retained_bytes={} incoming_bytes={charge}",
+                victim.id, victim.state.tokens.len(), retained - self.retained_bytes, self.retained_bytes));
         }
     }
     fn remove(&mut self, index: usize) -> Entry<S> {
@@ -599,7 +601,11 @@ impl<S: crate::Session> SessionCache<S> {
         }
         match self.fork_entry(index, prompt, now) {
             Ok(Some(state)) => (Some(state), "hit"),
-            _ => (None, "unavailable"),
+            Ok(None) => (None, "unavailable"),
+            Err(error) => {
+                engine_model::events::note("prefix_cache_fork_failed", format_args!("kind=checkpoint prompt_tokens={} error={error}", prompt.len()));
+                (None, "unavailable")
+            }
         }
     }
     /// Proposal KV is expendable; target KV and its canonical logits are not.
@@ -650,6 +656,11 @@ impl<S: crate::Session> SessionCache<S> {
     pub(crate) fn reusable_tokens(&self, scope: Option<&str>, prompt: &[u32]) -> usize {
         self.candidates(scope, prompt, None).first().map_or(0, |&(_, restored)| restored)
     }
+    /// Why a lookup found nothing to reuse, and how many entries share the scope.
+    pub(crate) fn miss_reason(&self, scope: Option<&str>) -> (&'static str, usize) {
+        let scoped = self.entries.iter().filter(|e| e.scope.as_deref() == scope).count();
+        (if self.entries.is_empty() { "empty" } else if scoped == 0 { "scope_miss" } else { "no_restorable_prefix" }, scoped)
+    }
     pub(crate) fn profile_match(&self, id: u64, scope: Option<&str>, prompt: &[u32]) {
         let scoped = self.entries.iter().filter(|e| e.scope.as_deref() == scope).count();
         if let Some(&(index, restored)) = self.candidates(scope, prompt, None).first() {
@@ -660,8 +671,7 @@ impl<S: crate::Session> SessionCache<S> {
             eprintln!("request_prefix_match id={id} prompt_tokens={} cached_tokens={} matched_tokens={shared} restorable_tokens={restored} reason={reason} scoped_entries={scoped} retained_bytes={}",
                 prompt.len(), tokens.len(), self.retained_bytes);
         } else {
-            let reason = if self.entries.is_empty() { "empty" }
-                else if scoped == 0 { "scope_miss" } else { "no_restorable_prefix" };
+            let (reason, _) = self.miss_reason(scope);
             eprintln!("request_prefix_match id={id} prompt_tokens={} matched_tokens=0 reason={reason} scoped_entries={scoped} retained_bytes={}",
                 prompt.len(), self.retained_bytes);
         }
@@ -680,16 +690,21 @@ impl<S: crate::Session> SessionCache<S> {
             else if key.is_some() { self.candidates(scope, prompt, key) } else { Vec::new() };
         candidate.first().map_or_else(Vec::new, |&(i, _)| self.entries[i].state.session.funded_snapshot_allocations(Some(prompt.len())))
     }
-    pub(crate) fn fork_automatic(&mut self, scope: Option<&str>, prompt: &[u32], now: Instant)
-        -> Result<Option<CachedSession<S>>, String> {
+    pub(crate) fn fork_automatic(&mut self, scope: Option<&str>, prompt: &[u32], now: Instant) -> Forked<S> {
         self.fork_candidates(scope, prompt, None, now)
     }
-    fn fork_candidates(&mut self, scope: Option<&str>, prompt: &[u32], key: Option<&SessionKey>, now: Instant)
-        -> Result<Option<CachedSession<S>>, String> {
+    /// A candidate that fails to fork gives its error to the caller; the search goes on to the next one.
+    fn fork_candidates(&mut self, scope: Option<&str>, prompt: &[u32], key: Option<&SessionKey>, now: Instant) -> Forked<S> {
+        let mut forked = Forked { state: None, failed: Vec::new() };
+        // Positions shift when a fork refreshes an entry; the search ends at the first success.
         for (index, _) in self.candidates(scope, prompt, key) {
-            if let Some(state) = self.fork_entry(index, prompt, now)? { return Ok(Some(state)); }
+            match self.fork_entry(index, prompt, now) {
+                Ok(Some(state)) => { forked.state = Some(state); break; }
+                Ok(None) => {}
+                Err(error) => forked.failed.push(error),
+            }
         }
-        Ok(None)
+        forked
     }
     /// Search only the supplied capability's history. Fork before truncating;
     /// another branch can still use the original snapshot unchanged.
@@ -698,20 +713,16 @@ impl<S: crate::Session> SessionCache<S> {
         key: &SessionKey,
         prompt: &[u32],
         now: Instant,
-    ) -> Result<Option<CachedSession<S>>, String> {
+    ) -> Forked<S> {
         self.fork_scoped(key, None, prompt, now)
     }
-    pub(crate) fn fork_scoped(&mut self, key: &SessionKey, scope: Option<&str>, prompt: &[u32], now: Instant)
-        -> Result<Option<CachedSession<S>>, String> {
+    pub(crate) fn fork_scoped(&mut self, key: &SessionKey, scope: Option<&str>, prompt: &[u32], now: Instant) -> Forked<S> {
         self.fork_candidates(scope, prompt, Some(key), now)
     }
 
     fn fork_entry(&mut self, index: usize, prompt: &[u32], now: Instant)
         -> Result<Option<CachedSession<S>>, String> {
-        let mut state = match self.entries[index].state.fork_prefix(prompt) {
-            Ok(Some(state)) => state,
-            _ => return Ok(None),
-        };
+        let Some(mut state) = self.entries[index].state.fork_prefix(prompt)? else { return Ok(None); };
         if self.entries[index].checkpoint.is_some() {
             state.checkpoint_lease = Some(self.entries[index].children.clone());
         }
@@ -750,7 +761,9 @@ impl<S: crate::Session> SessionCache<S> {
         self.fund_pages(state.session.prefix_allocations(state.tokens.len()).unwrap_or_default());
         self.fund_pages(state.session.funded_snapshot_allocations(None));
         self.remove(index);
-        let _ = self.insert_scoped(key, scope, state, now);
+        if let Err(error) = self.insert_scoped(key, scope, state, now) {
+            engine_model::events::note("prefix_cache_draft_insert_failed", format_args!("error={error}"));
+        }
     }
     pub(crate) fn snapshot_scoped(&mut self, key: SessionKey, scope: Option<&str>, state: &CachedSession<S>, now: Instant, prompt_end: bool) {
         // Reject before evicting another conversation or allocating a KV copy.
@@ -779,6 +792,8 @@ impl<S: crate::Session> SessionCache<S> {
             .saturating_add(index_charge(state.tokens.len(), scope))
             .saturating_add(allocations.as_ref().map_or(0, |a| a.len() * 96));
         if charge > self.limits.retained_bytes {
+            engine_model::events::note("prefix_cache_snapshot_skipped", format_args!("reason=too_large tokens={} charge_bytes={charge} limit_bytes={}",
+                state.tokens.len(), self.limits.retained_bytes));
             return;
         }
         // A new prompt replaces older turns; its completion keeps this prompt's
@@ -787,13 +802,21 @@ impl<S: crate::Session> SessionCache<S> {
         // Credit it before make_room, not only after the snapshot has forked.
         self.fund_pages(state.session.funded_snapshot_allocations(None));
         self.drop_prefixes(&key, scope, &state.tokens, prompt_end && !state.next_logits.is_empty());
-        if !self.make_room(charge, &allocations.unwrap_or_default()) { return; }
-        let Ok(session) = state.session.fork() else {
+        if !self.make_room(charge, &allocations.unwrap_or_default()) {
+            engine_model::events::note("prefix_cache_snapshot_skipped", format_args!("reason=no_room tokens={} charge_bytes={charge} retained_bytes={} available_bytes={}",
+                state.tokens.len(), self.retained_bytes, self.available_bytes));
             return;
+        }
+        let session = match state.session.fork() {
+            Ok(session) => session,
+            Err(error) => {
+                engine_model::events::note("prefix_cache_snapshot_skipped", format_args!("reason=fork_failed tokens={} error={error}", state.tokens.len()));
+                return;
+            }
         };
         self.fund_pages(session.funded_snapshot_allocations(None));
         let reserved = session.retained_bytes().unwrap_or(reserved);
-        let _ = self.insert_scoped(
+        if let Err(error) = self.insert_scoped(
             key,
             scope,
             CachedSession {
@@ -804,7 +827,9 @@ impl<S: crate::Session> SessionCache<S> {
                 reserved_session_bytes: reserved,
             },
             now,
-        );
+        ) {
+            engine_model::events::note("prefix_cache_snapshot_skipped", format_args!("reason=insert_refused tokens={} error={error}", state.tokens.len()));
+        }
     }
 }
 
@@ -1059,10 +1084,32 @@ mod tests {
         c.release_checkpoint(&h.handle, None);
         c.insert_snapshot(key(1), kv(&[1, 2], &forks), now).unwrap();
         c.insert_snapshot(key(2), kv(&[5, 6], &forks), now).unwrap();
-        assert!(c.fork_automatic(None, &[1, 2], now).unwrap().is_some());
-        assert!(c.fork_automatic(None, &[5, 6, 7], now).unwrap().is_some());
+        assert!(c.fork_automatic(None, &[1, 2], now).state.is_some());
+        assert!(c.fork_automatic(None, &[5, 6, 7], now).state.is_some());
         c.insert_snapshot(key(3), kv(&[5, 6, 7], &forks), now).unwrap();
         assert_eq!((c.reusable_tokens(None, &[1, 2, 3]), c.entries[0].key), (2, key(1)));
+    }
+    #[test]
+    fn a_failed_fork_reaches_the_caller_and_a_later_candidate_still_forks() {
+        let (now, forks) = (Instant::now(), Rc::new(Cell::new(0)));
+        let mut c = SessionCache::new(limits()).unwrap();
+        let mut broken = kv(&[1, 2, 3, 4], &forks);
+        broken.session.fail_truncate = true;
+        c.insert_snapshot(key(1), broken, now).unwrap();
+        c.insert_snapshot(key(2), kv(&[1, 2], &forks), now).unwrap();
+        // The longer entry is tried first; its truncate fails, so the search goes on to the shorter one.
+        let forked = c.fork_automatic(None, &[1, 2, 3, 9], now);
+        assert_eq!(forked.failed, ["truncate failed"]);
+        assert_eq!(forked.state.unwrap().tokens, [1, 2]);
+        let forked = c.fork_automatic(None, &[1, 2, 3, 8], now);
+        assert_eq!((forked.failed.len(), forked.state.map(|s| s.tokens)), (1, Some(vec![1, 2])));
+        let mut c = SessionCache::new(limits()).unwrap();
+        let mut broken = kv(&[1, 2, 3, 4], &forks);
+        broken.session.fail_truncate = true;
+        c.insert_snapshot(key(1), broken, now).unwrap();
+        let forked = c.fork_scoped(&key(1), None, &[1, 2, 3, 9], now);
+        assert!(forked.state.is_none(), "every candidate failed");
+        assert_eq!(forked.failed, ["truncate failed"], "the miss keeps the error");
     }
     #[test]
     fn completion_without_draft_prefix_never_forks() {

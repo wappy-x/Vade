@@ -36,6 +36,7 @@ mod cli;
 mod config;
 mod help;
 mod detect;
+mod doctor;
 mod launch;
 mod control_socket;
 mod evals;
@@ -229,7 +230,15 @@ fn run_main(mut args: Vec<String>) {
             let mut report = checks::Report::new(owner(&parsed.command), parsed.dry_run);
             let next = "On a Spark, run vade launch; for a controller, copy cli/examples/fp4-local.conf, edit it and set VADE_CONFIG (INSTALL.md).";
             let result = report.fail("config", &style::split(&error).0, next).and_then(|()| {
-                if !parsed.dry_run { checks::local_tools(&mut report)?; }
+                if !parsed.dry_run {
+                    doctor::binary(&mut report)?;
+                    match doctor::start_options() {
+                        Ok(options) => doctor::defaults(&mut report, options.context, options.output,
+                            options.mtp_explicit.then_some(options.mtp), doctor::prefix_cache())?,
+                        Err(error) => report.fail("launch defaults", &error, "Correct MTP, then run vade doctor.")?,
+                    }
+                    checks::local_tools(&mut report)?;
+                }
                 report.finish()
             });
             if let Err(error) = result { fail(&error); }
@@ -300,3 +309,7 @@ fn fail_private(message: &str) -> ! {
     }
     std::process::exit(if output::broken_pipe_success() { 0 } else { 1 })
 }
+
+#[cfg(test)]
+#[path = "../tests/host_edges/mod.rs"]
+mod host_edges;

@@ -110,11 +110,13 @@ fn model_response(path: &str, state: &str, model: &str, active: usize, queued: u
     match path {
         "/cors" => Some(String::new()),
         "/v1/models" if state == "failed" || state == "poisoned" => Some(format!("{{\"object\":\"list\",\"status\":\"{state}\",\"data\":[]}}")),
-        "/health" => Some(format!("{{\"status\":\"{state}\",\"model\":{model},\"active\":{active},\"queued\":{queued},\"device_bytes\":{},\"vade\":{},\"caps\":{{\"context_limit\":{},\"input_limit\":{},\"output_limit\":{}}}}}",
+        "/health" => Some(format!("{{\"status\":\"{state}\",\"model\":{model},\"active\":{active},\"queued\":{queued},\"device_bytes\":{},\"vade\":{},\"events\":{},\"caps\":{{\"context_limit\":{},\"input_limit\":{},\"output_limit\":{}}}}}",
             device_bytes.map_or_else(|| "null".to_owned(), |n| n.to_string()),
             limits.metadata.as_ref().map_or_else(|| "null".into(), |m| drafting
                 .map_or_else(|| m.json().to_owned(), |(mode, depth)| m.json_with_drafting(mode, depth))),
-            context.min(limits.context_tokens), limits.input_tokens, limits.output_limit(context))),
+            engine_model::events::counts_json(), context.min(limits.context_tokens), limits.input_tokens, limits.output_limit(context))),
+        // This process's best-effort event counts and last lines (engine_base::events).
+        "/v1/events" => Some(engine_model::events::json()),
         "/v1/models" => Some(format!("{{\"object\":\"list\",\"status\":\"{state}\",\"data\":[{{\"id\":{model},\"object\":\"model\",\"owned_by\":\"vade\",\"context_length\":{0},\"max_model_len\":{0},\"max_output_tokens\":{1},\"input_modalities\":[\"text\"]}}]}}", context.min(limits.context_tokens), limits.output_limit(context))),
         _ => None,
     }
@@ -302,7 +304,7 @@ impl DraftPolicy {
             if now.duration_since(since) >= Duration::from_millis(500) { self.strict = true; }
         }
         if report && previous != self.strict {
-            eprintln!("draft_policy active_chats={chats} mode={}", if self.strict { "strict" } else { "plain" });
+            engine_model::events::note_line("draft_policy", &format!("draft_policy active_chats={chats} mode={}", if self.strict { "strict" } else { "plain" }));
         }
     }
     fn resolve(&self, mode: protocol::DraftMode) -> protocol::DraftMode {
@@ -595,6 +597,7 @@ impl Reading {
                     // Overflow admission reads the whole request before replying,
                     // then uses the normal response drain without evicting owners.
                     if self.wire.control_only && !head.control_target {
+                        engine_model::events::note("admission_refused", format_args!("reason=connection_table_full body_bytes={}", head.length));
                         self.wire.response(
                             503,
                             &protocol::error_json("overloaded", "connection capacity reached"),
@@ -725,7 +728,7 @@ impl Ready {
     }
     /// A queued cancellation is a failure, never an exhausted output budget.
     fn cancel(&mut self, id: u64, error: RequestError, limits: &Limits, domain: &crate::contract::Domain, mtp_depth: usize) -> Result<(), String> {
-        let mut echo = protocol::SamplingEcho::new(&self.request, protocol::DraftMode::Plain, mtp_depth).with_metadata(limits);
+        let mut echo = protocol::SamplingEcho::new(&self.request, protocol::DraftMode::Plain, mtp_depth).with_metadata(limits).with_events();
         echo.prefill = Some(crate::usage::Prefill::new(self.prompt.len(), 0, self.enqueued));
         echo.log(id);
         eprintln!("request_cancelled id={id} code={} vade={}", error.code(), echo.json());
@@ -876,7 +879,7 @@ fn retirement_refresh_hook(enabled: bool, mut refresh: impl FnMut() -> Result<()
     -> Option<impl FnMut()> {
     enabled.then(|| move || {
         if let Err(error) = refresh() {
-            eprintln!("retirement_pressure_refresh skipped: {error}");
+            engine_model::events::note_line("retirement_pressure_refresh_skipped", &format!("retirement_pressure_refresh skipped: {error}"));
         }
     })
 }
@@ -1036,7 +1039,7 @@ fn balance_cache<'s, S: Session + 's>(cache: &mut SessionCache<S>, budget: usize
 impl<'e, 't, E: Engine, T: Tokenizer> Active<'e, 't, E, T> {
     fn sampling_echo(&self) -> protocol::SamplingEcho {
         protocol::SamplingEcho { draft_used: self.generation.draft_used,
-            model_draft_used: self.generation.model_draft_used, ..self.echo.clone() }
+            model_draft_used: self.generation.model_draft_used, ..self.echo.clone() }.with_events()
     }
     fn chunk(
         &mut self,
@@ -1385,6 +1388,8 @@ fn serve_inner<'e, E: Engine, T: Tokenizer>(
         (&ab_config, &ab_cache)
     } else { (config, cache_limits) };
     protocol::SamplingEcho::log_defaults(limits, config.draft, config.mtp_depth);
+    engine_model::events::note("scheduler_pool", format_args!("active={} connections={} active_bytes={} session_budget_bytes={} retained_cache_bytes={} prefix_cache={} draft={} mtp_depth={}",
+        config.active, config.connections, config.active_bytes, config.session_budget_bytes, cache_limits.retained_bytes, config.prefix_cache, config.draft.name(), config.mtp_depth));
     let (prepare_tx, input_rx) = mpsc::sync_channel(config.connections.max(1));
     let (output_tx, prepare_rx) = mpsc::channel();
     let (context, vocab, eos) = (engine.context_limit(), engine.vocab_size(), engine.eos_token_ids());

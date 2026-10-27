@@ -104,8 +104,10 @@ impl<R: Runner> App<R> {
         }
         let tunnel = self.connection_ok(&session);
         let tunnel = report.observe("tunnel", "localhost", tunnel);
+        let mut path = None;
         let health = self.local_health_response(&session).map(|output| {
             if output.success && ready(&output.stdout, &session.model) {
+                path = health::TwoSparkPath::from_health(&output.stdout);
                 let speed = ["tok_s", "tokens_per_second", "tokens_per_sec"]
                     .iter()
                     .find_map(|key| crate::json::number(&output.stdout, key))
@@ -118,6 +120,15 @@ impl<R: Runner> App<R> {
                 false
             }
         });
+        if session.two_sparks() {
+            // The receipt's path and levels from the health reply; null when it names none.
+            report.set("two_spark_path", path.map_or(Value::Null, |path| json::object(vec![
+                ("path", path.path.into()),
+                ("projection_level", path.projection_level.map_or(Value::Null, Value::from)),
+                ("wire", path.wire.map_or(Value::Null, Value::from)),
+                ("head", path.head.map_or(Value::Null, Value::from)),
+            ])));
+        }
         let health = report.observe("health", "localhost", health);
         report.readiness(
             all && tunnel == Some(true) && health == Some(true) && session.phase == "running",

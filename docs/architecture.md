@@ -529,17 +529,18 @@ dimensions, gathers the results in a fixed order, and can divide the
 linear-attention heads and the vocabulary head too
 ([`next_tp.rs`](../engine/crates/engine/src/flash/next_tp.rs),
 [`next_tp_heads.rs`](../engine/crates/engine/src/flash/next_tp_heads.rs)).
-This tree still selects it explicitly with `VADE_W2_TP=1` on both ranks.
-The engine reference describes the required settings and its limits
-([two-Spark tensor split](../engine/docs/next-http.md)).
+It is the two-Spark default: at startup each rank sets every proven level
+that is unset (`VADE_W2_TP=1`, `VADE_W2_TP_WIRE=write`, `VADE_W2_TP_PROJ=3`,
+`VADE_W2_TP_HEAD=1`; these names are temporary)
+([`settings.rs`](../engine/crates/tp/src/flash/settings.rs)). The split keeps
+the layer pipeline's links, recipe and session protocol, so the pipeline
+below is also its frame. The engine reference describes the settings and its
+limits ([two-Spark tensor split](../engine/docs/next-http.md)).
+`VADE_W2_PATH=pipeline`, a debug switch, runs the two-stage layer pipeline
+instead until that code is removed.
 
-The repository's one-path rule selects the tensor split as the two-Spark
-implementation. The remaining pipeline default described below is the
-current code, pending that default change's device gate and benchmark card.
-See [the merge rule](../AGENTS.md#exactness-law-and-merge-gate).
-
-A Spark has one GPU and one pool of memory. To use two or more, Vade by
-default splits the model by layers, not by matrices. Each Spark runs one
+A Spark has one GPU and one pool of memory. To use three or more, Vade splits
+the model by layers, not by matrices. Each Spark runs one
 engine process, called a *[rank](GLOSSARY.md#pr)*, and the ranks form a chain
 over direct cables:
 
@@ -575,7 +576,7 @@ unchanged, so the pipeline does the same arithmetic as a single Spark
 ([`next_pp.rs`](../engine/crates/engine/src/flash/next_pp.rs)). Drafting stays
 available because verification rows cross the pipeline like any other rows.
 
-**Choosing the layout.** Two Sparks run the layer pipeline by default. Longer
+**Choosing the layout.** Two Sparks run the tensor split by default. Longer
 chains are opt-in with `VADE_W2_PP=1`, which `vade up --sparks N` sets for
 you when N is above two
 ([`settings.rs`](../engine/crates/tp/src/flash/settings.rs),
@@ -583,7 +584,7 @@ you when N is above two
 
 | `VADE_W2_PP` | Two Sparks | More than two Sparks |
 | --- | --- | --- |
-| unset | Layer pipeline | Older tensor-map rank path (four Sparks only) |
+| unset | Tensor split (`VADE_W2_PATH=pipeline`: layer pipeline) | Older tensor-map rank path (four Sparks only) |
 | `0` | Older tensor-map rank path | Older tensor-map rank path (four Sparks only) |
 | `1` | Layer pipeline | N-stage chain |
 

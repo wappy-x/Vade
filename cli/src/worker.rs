@@ -28,6 +28,7 @@ use model::check_model;
 pub(crate) use model::receipt;
 mod prepare;
 use gpu::{gpu_empty, gpu_settled};
+pub(crate) use gpu::stale_line;
 mod process;
 use process::*;
 
@@ -307,16 +308,20 @@ fn handle(request: &Fields) -> Result<Fields, String> {
             if request.get("rdma").map(String::as_str) == Some("1") {
                 check_memlock()?;
             }
-            gpu_empty()?;
-            Ok(fields(&[
+            let stale = gpu_empty()?;
+            let mut reply = fields(&[
                 ("gpu", "empty"),
                 ("pidfd", "ok"),
                 ("phase", "absent"),
-            ]))
+            ]);
+            if let Some(v) = stale { reply.insert("gpu_note".into(), stale_line(v)); }
+            Ok(reply)
         }
         "gpu" => {
-            gpu_settled()?;
-            Ok(fields(&[("gpu", "empty")]))
+            let stale = gpu_settled()?;
+            let mut reply = fields(&[("gpu", "empty")]);
+            if let Some(v) = stale { reply.insert("gpu_note".into(), stale_line(v)); }
+            Ok(reply)
         }
         "start" => start(&store, request),
         "inspect" => inspect(&store),
@@ -388,7 +393,7 @@ fn start(store: &Store, request: &Fields) -> Result<Fields, String> {
     }) {
         return Err("A private value appeared in engine arguments. Put it in the private environment instead.".into());
     }
-    gpu_empty()?;
+    let stale = gpu_empty()?;
     crate::text::private_dir(&store.run)?;
     // SSH disconnects must not interrupt the commit of the recovery journal.
     let _signals = IgnoreDisconnect::new();
@@ -488,7 +493,9 @@ fn start(store: &Store, request: &Fields) -> Result<Fields, String> {
                 if previous.as_ref() == Some(&identity) {
                     record.insert("phase".into(), "running".into());
                     store.save(&record)?;
-                    return Ok(reply(&record, true));
+                    let mut response = reply(&record, true);
+                    if let Some(v) = stale { response.insert("gpu_note".into(), stale_line(v)); }
+                    return Ok(response);
                 }
                 // Bridge recovery before waiting for a second stable snapshot.
                 // A lost SSH acknowledgement can recover this owned identity.

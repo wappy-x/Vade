@@ -17,7 +17,14 @@ if command -v nvidia-smi >/dev/null 2>&1; then
   gpu=$(nvidia-smi --query-gpu=name,driver_version,memory.free --format=csv,noheader,nounits) || exit 1
   printf 'gpu=%s\n' "$gpu"
   apps=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader) || exit 1
-  printf 'busy=%s\n' "$(test -z "$apps" && echo no || echo yes)"
+  power=$(nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits) || exit 1
+  utilization=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits) || utilization=''
+  if [ -n "$apps" ] || ! printf '%s\n' "$power" | awk 'NF {n++; if ($1 !~ /^[0-9]+([.][0-9]+)?$/) bad=1; else if ($1 + 0 >= 30) busy=1} END {exit (n == 0 || bad || busy)}'; then
+    printf 'busy=yes\n'
+  else
+    printf 'busy=no\n'
+    printf '%s\n' "$utilization" | awk 'NF && $1 ~ /^[0-9]+$/ && $1 + 0 > max {max = $1 + 0} END {if (max > 0) printf "stale_utilization=%d\n", max}'
+  fi
 fi
 awk '/^MemAvailable:/ {printf "ram_bytes=%.0f\n", $2 * 1024}' /proc/meminfo 2>/dev/null
 probe=$1
@@ -74,6 +81,8 @@ df -Pk "$probe" | awk 'NR==2 {printf "disk_bytes=%.0f\n", $4 * 1024}'
         if !owned {
             if fields.get("busy").map(String::as_str) != Some("no") {
                 missing.push("idle GPU (another compute job is active)".into());
+            } else if let Some(v) = fields.get("stale_utilization").and_then(|v| v.parse::<u32>().ok()).filter(|v| (1..=100).contains(v)) {
+                crate::output::line(format_args!("{}", crate::worker::stale_line(v)))?;
             }
             if ram < 24 * 1024 * 1024 * 1024
                 || gpu_free.is_some_and(|b| b < 24 * 1024 * 1024 * 1024)

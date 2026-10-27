@@ -7,7 +7,7 @@ pub mod cartridge;
 pub mod gemma4;
 pub mod gemma4_assistant;
 pub mod split;
-pub use engine_base::{Error, Result, json};
+pub use engine_base::{Error, Result, events, json};
 pub mod qwen3;
 pub mod qwen3_5;
 pub mod phi4;

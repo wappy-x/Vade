@@ -329,6 +329,30 @@ pub struct Index {
     pub weight_map: BTreeMap<String, String>,
     pub(crate) size_declared: bool,
 }
+fn exact_index_size(value: &Value) -> Result<u64> {
+    if let Ok(size) = value.u64() { return Ok(size); }
+    let Value::Number(text) = value else { return Err(invalid("expected JSON number")); };
+    let bad = || invalid("index total_size must be an exact nonnegative integer");
+    let (mantissa, exponent) = text.split_once(['e', 'E']).unwrap_or((text, "0"));
+    let negative = mantissa.starts_with('-');
+    let mantissa = mantissa.strip_prefix('-').unwrap_or(mantissa);
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{whole}{fraction}");
+    let digits = digits.trim_start_matches('0');
+    if digits.is_empty() { return Ok(0); }
+    if negative { return Err(bad()); }
+    let significant = digits.trim_end_matches('0');
+    let exponent = exponent.parse::<i64>().map_err(|_| bad())?;
+    let power = exponent.checked_sub(fraction.len() as i64)
+        .and_then(|n| n.checked_add((digits.len() - significant.len()) as i64)).ok_or_else(bad)?;
+    // Decimal/scientific forms retain their exact-integer ceiling. Integer
+    // literals above that ceiling already returned through Value::u64.
+    if power < 0 || power > 16 || significant.len() + power as usize > 16 { return Err(bad()); }
+    let size = significant.parse::<u64>().map_err(|_| bad())?
+        .checked_mul(10u64.pow(power as u32)).ok_or_else(bad)?;
+    if size > 1u64 << 53 { return Err(bad()); }
+    Ok(size)
+}
 impl Index {
     pub fn open(path: &Path, limits: Limits) -> Result<Self> {
         Self::parse(&read_bounded(path, limits.header_bytes)?, limits)
@@ -355,13 +379,7 @@ impl Index {
         }
         let metadata = field(object, "metadata")?.object()?;
         // Some official indexes serialize integer byte counts with a .0 suffix.
-        let total_size = metadata.get("total_size").map(|size| size.u64().or_else(|_| {
-            let n = size.f64()?;
-            if n < 0.0 || n.fract() != 0.0 || n > (1u64 << 53) as f64 {
-                return Err(invalid("index total_size must be an exact nonnegative integer"));
-            }
-            Ok(n as u64)
-        })).transpose()?.unwrap_or(0);
+        let total_size = metadata.get("total_size").map(exact_index_size).transpose()?.unwrap_or(0);
         let map = field(object, "weight_map")?.object()?;
         if map.is_empty() || map.len() > limits.tensors {
             return Err(invalid("empty or excessive index tensor count"));

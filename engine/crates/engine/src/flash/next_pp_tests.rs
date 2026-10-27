@@ -1419,3 +1419,49 @@ fn every_rank_derives_the_same_stage_intervals() {
     }
     assert_eq!(Stage::new(1, 2, Some(20)).unwrap().intervals(), vec![0..20, 20..48]);
 }
+
+/// A KEEP ack carries its tile's rows; the front reads it while it waits for its own GPU
+/// (reading_acks), not at the next drain, so the back's replier is never left blocked.
+#[test]
+fn pp_kept_ack_is_read_while_the_front_waits_for_its_gpu() {
+    static STOP: AtomicBool = AtomicBool::new(false);
+    let recipe = Recipe { limit: Duration::from_secs(2), asynchronous: true, mtp: true, tp: false };
+    let (near, mut far) = pair();
+    let peer = near.try_clone().unwrap();
+    let (written, ack) = mpsc::channel();
+    let back = std::thread::spawn(move || {
+        far.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut hello = [0u8; 40];
+        far.read_exact(&mut hello).unwrap();
+        let mut reply = Vec::new();
+        put(&mut reply, MAGIC_HELLO);
+        put(&mut reply, 0);
+        far.write_all(&reply).unwrap();
+        let (kind, id, rows) = read_pipe_request(&mut far, Duration::from_secs(2)).unwrap();
+        assert_eq!(kind, KIND_ROWS_KEEP);
+        let answered: Vec<f32> = rows.iter().map(|v| v + 1.0).collect();
+        write_status(&mut far, id, Some(&answered));
+        written.send(()).unwrap();
+        // The front reads the ack without drain, then closes the link.
+        assert!(read_pipe_request(&mut far, Duration::from_secs(2)).is_err());
+    });
+    let mut link = Link::connect(near, None, Stage::new(0, 2, None).unwrap(), 64, 8, 8, &STOP, recipe).unwrap();
+    link.post(&[[1, 64, 0, 2]], vec![2.0; 2 * W], Some(vec![KeepPart { slot: 1, pos: 0, tokens: vec![1, 2], start: 0 }])).unwrap();
+    assert_eq!(link.pending, 1);
+    // The GPU wait ends once the ack is on the socket and taken: nothing is left to peek.
+    link.reading_acks(|| {
+        ack.recv_timeout(Duration::from_secs(2)).map_err(err)?;
+        let begun = Instant::now();
+        peer.set_nonblocking(true).map_err(err)?;
+        while peer.peek(&mut [0u8; 1]).is_ok_and(|n| n > 0) && begun.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        peer.set_nonblocking(false).map_err(err)
+    }).unwrap();
+    assert_eq!((link.pending, link.owed), (0, 0));
+    assert_eq!(link.kept.len(), 1);
+    assert!(link.kept[0].data.as_ref().unwrap().iter().all(|&v| v == 3.0));
+    link.poisoned = true;
+    drop((link, peer));
+    back.join().unwrap();
+}

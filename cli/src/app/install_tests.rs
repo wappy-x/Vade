@@ -496,3 +496,30 @@ fn machines_build_concurrently_and_report_in_machine_order() {
         }
     }
 }
+
+/// Run the real install GPU check against recorded nvidia-smi outputs.
+#[test]
+fn build_gpu_check_judges_recorded_samples() {
+    let _process_guard = crate::runner::process_test_lock();
+    use std::os::unix::fs::PermissionsExt;
+    let root = fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("vade-build-gpu-{}", text::random_hex(8).unwrap()));
+    fs::create_dir_all(&root).unwrap();
+    let stub = root.join("nvidia-smi");
+    fs::write(&stub, "#!/bin/sh\ncase \"$*\" in\n*query-compute-apps*) printf '%s' \"$STUB_APPS\" ;;\n*power.draw*) printf '%s' \"$STUB_POWER\" ;;\n*utilization.gpu*) printf '%s' \"$STUB_UTIL\" ;;\nesac\n").unwrap();
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o700)).unwrap();
+    let run = |apps: &str, power: &str, util: &str| {
+        let out = std::process::Command::new("sh").args(["-c", super::super::deployment::BUILD_GPU_CHECK])
+            .env("PATH", format!("{}:/usr/bin:/bin", root.display()))
+            .env("STUB_APPS", apps).env("STUB_POWER", power).env("STUB_UTIL", util).output().unwrap();
+        (out.status.success(), String::from_utf8(out.stdout).unwrap())
+    };
+    // Idle, then a stale 96 % counter at 19 W with no apps: both install.
+    assert_eq!(run("", "18.50\n", "0\n"), (true, String::new()));
+    assert_eq!(run("", "19.00\n", "96\n"), (true, "stale_utilization=96\n".into()));
+    // A listed compute app blocks, and so does power draw alone at 30 W or more.
+    assert!(!run("1234\n", "19.00\n", "0\n").0);
+    assert!(!run("", "45.20\n", "0\n").0);
+    assert!(!run("", "30.00\n", "0\n").0);
+    assert!(!run("", "N/A\n", "0\n").0);
+    fs::remove_dir_all(root).unwrap();
+}

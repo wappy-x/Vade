@@ -66,7 +66,7 @@ impl Stall {
             let mut tcp = loop { match listener.accept() { Ok((s,_)) => break s,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && start.elapsed() < Duration::from_secs(5) => thread::sleep(Duration::from_millis(5)),
                 _ => return } };
-            tcp.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            tcp.set_nonblocking(false).unwrap(); tcp.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
             let mut reader = BufReader::new(tcp.try_clone().unwrap());
             loop { let mut line = String::new(); match reader.read_line(&mut line) { Ok(0)|Err(_) => return, Ok(_) if line == "\r\n" => break, _ => () } }
             if body { tcp.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nh").unwrap(); }

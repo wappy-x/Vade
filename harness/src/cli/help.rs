@@ -9,6 +9,7 @@ Usage:
   vade-harness vade-gateway --upstream URL [--upstream URL ...] [OPTIONS]
   vade-harness codex --workspace PATH --permission POLICY [OPTIONS]
   vade-harness workload --endpoint URL --model NAME --json FILE [OPTIONS]
+  vade-harness quality-card --endpoint URL --model NAME --json FILE [OPTIONS]
   vade-harness setup CLIENT --endpoint URL --model NAME [OPTIONS]
   vade-harness doctor URL [--model NAME] [--max-seconds N]
   vade-harness hermes --workspace PATH --permission deny-callbacks [OPTIONS]
@@ -22,6 +23,7 @@ Modes:
   vade-gateway          Run the standalone vade-gateway relay; see vade-gateway --help
   codex                 Delegate exact prompts to optional installed Codex app-server
   workload              Concurrent native sessions; see workload --help
+  quality-card          Answer quality and exactness cost cards; see quality-card --help
   setup                 Print offline client configuration; see setup --help
   doctor                Probe capabilities, admission and two-turn cache reuse
   hermes                Delegate exact prompts to optional Hermes ACP v1 agent

@@ -120,6 +120,8 @@ pub(crate) struct SamplingEcho {
     pub model_draft_used: bool,
     pub prefill: Option<crate::usage::Prefill>,
     pub metadata: Option<crate::metadata::Metadata>,
+    /// The process's best-effort event counts, read once when the scheduler builds the reply; none in a bare echo.
+    pub events: Option<String>,
 }
 impl SamplingEcho {
     pub fn new(request: &Request, draft: DraftMode, mtp_depth: usize) -> Self {
@@ -129,10 +131,15 @@ impl SamplingEcho {
                 Prompt::Chat(input) => Some(if input.enable_thinking { input.reasoning_effort.name() } else { "none" }),
                 _ => None,
             },
-            draft_used: false, model_draft_used: false, prefill: None, metadata: None }
+            draft_used: false, model_draft_used: false, prefill: None, metadata: None, events: None }
     }
     pub fn with_metadata(mut self, limits: &Limits) -> Self {
         self.metadata = limits.metadata.clone();
+        self
+    }
+    /// Owns a snapshot of the counts: every serialization of this echo prints the same events.
+    pub fn with_events(mut self) -> Self {
+        self.events = Some(engine_model::events::counts_json());
         self
     }
     fn sampling_json(&self, seed: &str) -> String {
@@ -145,7 +152,9 @@ impl SamplingEcho {
         let prefill = self.prefill.as_ref().map(|p| format!(",{}", p.json())).unwrap_or_default();
         let metadata = self.metadata.as_ref().map(|m| format!(",{}", m.fields(self.draft, mtp_depth))).unwrap_or_default();
         let effort = self.reasoning_effort.map(|e| format!(",\"reasoning_effort\":{}", quote(e))).unwrap_or_default();
-        format!("{{\"sampling\":{},\"draft\":\"{}\",\"mtp_depth\":{},\"thinking\":{}{effort},\"draft_used\":{},\"model_draft_used\":{}{prefill}{metadata}}}",
+        // A card shows a fallback the same day.
+        let events = self.events.as_ref().map(|e| format!(",\"events\":{e}")).unwrap_or_default();
+        format!("{{\"sampling\":{},\"draft\":\"{}\",\"mtp_depth\":{},\"thinking\":{}{effort},\"draft_used\":{},\"model_draft_used\":{}{prefill}{metadata}{events}}}",
             self.sampling_json(&self.sampling.seed.to_string()), self.draft.name(), mtp_depth, self.thinking,
             self.draft_used, self.model_draft_used)
     }
@@ -175,7 +184,7 @@ impl SamplingEcho {
         let defaults = |thinking| {
             let echo = Self { sampling: default_sampling(limits, thinking, false), draft, mtp_depth, thinking,
                 reasoning_effort: None,
-                draft_used: false, model_draft_used: false, prefill: None, metadata: None };
+                draft_used: false, model_draft_used: false, prefill: None, metadata: None, events: None };
             format!("{{\"sampling\":{},\"draft\":\"{}\",\"mtp_depth\":{mtp_depth},\"thinking\":{thinking}}}",
                 echo.sampling_json("null"), draft.name())
         };
@@ -777,6 +786,19 @@ pub(crate) fn raw_array(source: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod sampling_tests {
     use super::*;
+    #[test]
+    fn an_echo_prints_the_event_snapshot_it_owns() {
+        let request = parse(br#"{"prompt_token_ids":[1]}"#, false, &Limits::default()).unwrap();
+        let bare = SamplingEcho::new(&request, DraftMode::Plain, 0);
+        assert!(!bare.json().contains("\"events\""), "a bare echo reads no process counts");
+        engine_model::events::note("echo_snapshot_test", format_args!("n=1"));
+        let echo = bare.clone().with_events();
+        let first = echo.json();
+        assert!(first.contains("\"events\":{") && first.contains("\"echo_snapshot_test\":"), "{first}");
+        engine_model::events::note("echo_snapshot_test", format_args!("n=2"));
+        assert_eq!(echo.json(), first, "a later event does not change this reply");
+        assert_eq!(bare.json(), SamplingEcho::new(&request, DraftMode::Plain, 0).json());
+    }
     #[test]
     fn defaults_overrides_and_rejections() {
         let limits = Limits::default();

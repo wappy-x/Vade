@@ -5,8 +5,24 @@ Changes that are merged but not yet released are under Unreleased.
 
 ## Unreleased
 
+- `vade doctor` now shows the binary version, four launch defaults, model file
+  counts and sizes, and Spark listener ports before startup.
+
+- `vade install` and `vade up` no longer refuse on a stale GPU utilization
+  counter. A GPU counts as busy only when a compute app is listed or power
+  draw is at least 30 W. A stale counter prints a notice and the command
+  continues.
+
+- Checkpoint indexes now reject fractional byte counts that rounded to integers.
+  The agent harness now rejects replies with an empty finish reason.
+
 ### Repository tools
 
+- `vade-tools bench-docs <cards-dir> <repo-dir>` refreshes the marked benchmark
+  tables from the newest measured main revision. It keeps the raw card values,
+  measurement times and revision in both pages. It resolves drafting from the
+  request and the recorded server default. An effective depth of 0 means OFF.
+  It refuses an unknown drafting mode or depth.
 - All repository tools now use Rust and the standard library. There are no
   Python files or Python setup requirements. The tools crate checks links and
   release bundles, tests shell examples, builds CI CUDA linkage stubs and draws
@@ -16,6 +32,46 @@ Changes that are merged but not yet released are under Unreleased.
   shell API example reports stream errors and incomplete streams as failures.
 
 ### Engine
+
+- **Two Sparks run the tensor split by default.** `vade up --sparks 2` now
+  runs the tensor split, with every proven level on: both Sparks work on every
+  token. You set nothing. Before, two Sparks ran the layer pipeline. In the
+  2026-10-26 cards with drafting ON, one chat wrote prose at 54.2 tokens per
+  second against 42.2 on the pipeline, code at 100.9 against 80.3 and
+  structured output at 130.4 against 100.8; eight chats reached 220.0 against
+  201.7. With drafting OFF, eight chats are slower on the split: 110.6 against
+  137.0. `VADE_W2_PATH=pipeline` runs the layer pipeline, as a debug switch,
+  until it is removed. It is the one way there: `vade up` refuses
+  `VADE_W2_TP=0`, and two Sparks over TCP (`SEQPAR_RDMA=0`) need it, because
+  the split needs RDMA. A changed switch is a different launch, so `vade up`
+  does not reuse a running server started without it. `VADE_W2_TP`,
+  `VADE_W2_TP_WIRE`, `VADE_W2_TP_PROJ` and `VADE_W2_TP_HEAD` still set one
+  level by hand, for a short time. `vade status` shows the two-Spark path and
+  its levels, and the serving receipt records them under `path` and
+  `tensor_split`. See the [benchmarks
+  page](docs/benchmarks.md#current-2026-10-26-main-262b0c3-home-dgx-sparks).
+
+- On two Sparks, a long prompt from a chat that drafts no longer stalls
+  halfway. The first Spark now reads the second Spark's replies for each
+  prompt tile as they arrive. Before, it read them only late, so both Sparks
+  waited on each other for seconds in a 32K prompt. The tokens do not change.
+
+- Before the two-Spark tensor split serves requests, both ranks agree on the
+  smaller session count that they can fund. Different free memory on the two
+  Sparks no longer causes a startup refusal when both can fund a session.
+  The count exchange uses a 600-second load deadline. A worker no longer
+  fails when the front takes longer than the serving timeout to load.
+
+- With the two-Spark tensor split, the last rows of a long
+  prompt now run on the layer pipeline like the prompt's earlier tiles, so the
+  first token no longer waits for the two Sparks to swap the prompt's layer
+  state. The swap now runs before the chat's second token. The tokens do not
+  change.
+- With the two-Spark tensor split, the swap of a long
+  prompt's layer state between the two Sparks now goes GPU to GPU through the
+  split's RDMA mailbox, in pieces of one mailbox slot, instead of through host
+  memory and TCP. The state words are copied as they are, so the tokens do not
+  change.
 
 Merges #105 through #110 were measured on October 26, 2026, with the FP4-Local
 checkpoint on two DGX Sparks. These runs used greedy decoding, drafting on,
@@ -225,6 +281,13 @@ and thinking off. Rates below are tokens per second.
 
 ### Harness
 
+- New `vade-harness quality-card` measures answer quality and the cost of
+  exactness. It runs one fixed set of 12 prompts (code, structured output,
+  prose) against a served model and prints two cards: quality scores from
+  exact checks only (code answers run under unit tests), and strict
+  drafting against plain decoding with token ids compared and the verify
+  cost read from the server draft receipts. See the
+  [quality card guide](harness/docs/quality-card.md).
 - Chat has two voices: your turns sit behind a `▌` bar on every row and the
   answer has none. A thought is one dim row (time, tokens, seconds) that
   Ctrl+T expands. One status strip above the `›` prompt shows the model,

@@ -35,38 +35,25 @@ impl<R: Runner> App<R> {
     /// Spark, the fabric, the local port and the engine), then PASS or FAIL.
     /// A failed check never stops the rest.
     pub(super) fn doctor(&mut self) -> Result<(), String> {
-        let transport = if self.config.machines.len() > 1 { rdma_enabled() } else { Ok(false) };
-        self.doctor_with(transport)
+        self.doctor_with(rdma_enabled())
     }
     /// [`Self::doctor`] with the SEQPAR_RDMA selection already read.
     pub(super) fn doctor_with(&mut self, transport: Result<bool, String>) -> Result<(), String> {
         let mut report = Report::new("controller", self.dry);
+        crate::doctor::binary(&mut report)?;
+        let mut arguments = vec!["up".into()];
+        if self.config.model.ends_with("-fp8") { arguments.push("--fp8-legacy".into()); }
+        let options = match crate::cli::parse(&arguments) {
+            Ok(crate::cli::Cli { command: Command::Up(options), .. }) => {
+                crate::doctor::generation_defaults(&mut report, options.context, options.output, options.mtp_explicit.then_some(options.mtp))?;
+                Some(options)
+            }
+            Err(error) => { report.fail("launch defaults", &error, "Correct MTP, then run vade doctor.")?; None }
+            _ => unreachable!(),
+        };
         let (result, _) = crate::output::buffered(|| self.local_checks());
         stage(&mut report, self.dry, "controller tools", result, "rustc, cargo, rsync, curl and ssh found", "rustc, cargo, rsync, curl, ssh -V",
             "Install Rust, rsync, curl and OpenSSH, then run vade doctor.")?;
-        let machines = self.config.machines.clone();
-        // An invalid SEQPAR_RDMA stops every Spark probe and the fabric check;
-        // report it once and skip what it hides.
-        if let Err(error) = &transport {
-            report.fail("SEQPAR_RDMA", error, "Set SEQPAR_RDMA=0 for TCP or 1 for RDMA (or unset it), then run vade doctor.")?;
-        }
-        for machine in &machines {
-            if transport.is_err() {
-                for check in ["ssh", "nvidia-smi", "disk", "free memory", "model files"] { report.skip(&format!("{} {check}", machine.name), "needs a valid SEQPAR_RDMA")?; }
-                continue;
-            }
-            let (probe, _) = crate::output::buffered(|| self.probe_machine(machine, self.config.prebuilt_dir.is_none()));
-            self.machine_rows(&mut report, machine, probe)?;
-        }
-        match transport {
-            _ if machines.len() == 1 => report.skip("fabric", "one Spark; no fabric")?,
-            Err(_) => report.skip("fabric", "needs a valid SEQPAR_RDMA")?,
-            Ok(rdma) => {
-                let (result, _) = crate::output::buffered(|| self.network_checks(&machines));
-                stage(&mut report, self.dry, "fabric", result, if rdma { "every fabric link answered ping" } else { "TCP; engine startup checks the addresses" },
-                    "link addresses in the config", "Check both link addresses and connectivity, then run vade doctor.")?;
-            }
-        }
         let session = match Session::load(&self.config.state_dir) {
             Ok(session) => session,
             Err(error) => {
@@ -74,7 +61,70 @@ impl<R: Runner> App<R> {
                 return report.finish();
             }
         };
-        let port = self.config.local_port;
+        let machines = if let Some(session) = &session {
+            session.ranks.iter().map(|rank| rank.machine.clone()).collect()
+        } else if let Some(options) = &options {
+            match self.config.selected(options) {
+                Ok(machines) => machines,
+                Err(error) => { report.fail("launch topology", &error, "Correct the config, then run vade doctor.")?; Vec::new() }
+            }
+        } else { Vec::new() };
+        let replicas = session.as_ref().is_some_and(|session| session.replicas);
+        let split = session.as_ref().map_or(machines.len() > 1, Session::chained);
+        let fp4_local = session.as_ref().map_or(options.as_ref().is_some_and(|options| options.fp4_local), |session| session.fp4_local);
+        let transport = if split { transport } else { Ok(false) };
+        let owned = session.is_some();
+        // A split run needs a valid SEQPAR_RDMA before its probes can run.
+        // Report it once and skip what it hides.
+        if let Err(error) = &transport {
+            report.fail("SEQPAR_RDMA", error, "Set SEQPAR_RDMA=0 for TCP or 1 for RDMA (or unset it), then run vade doctor.")?;
+        }
+        for (index, machine) in machines.iter().enumerate() {
+            if transport.is_err() {
+                for check in ["ssh", "nvidia-smi", "disk", "free memory", "model files"] { report.skip(&format!("{} {check}", machine.name), "needs a valid SEQPAR_RDMA")?; }
+                continue;
+            }
+            let (probe, _) = crate::output::buffered(|| self.probe_machine_with_rdma(machine, self.config.prebuilt_dir.is_none(), transport.as_ref().copied().unwrap_or(false)));
+            let memory = probe.as_ref().ok().and_then(|probe| probe.memory);
+            self.machine_rows(&mut report, machine, probe)?;
+            let mut ports = Vec::new();
+            if session.as_ref().map_or(index == 0, |session| session.servers().contains(&index)) {
+                ports.push(crate::doctor::Port::http(session.as_ref().map_or(self.config.serve_port, |session| session.serve_port)));
+            }
+            let starts_path = fp4_local || session.as_ref().is_some_and(|session| session.topology() == "path");
+            if split && !(starts_path && index == 0) {
+                let listen = session.as_ref().map(|session| session.ranks[index].listen.clone()).or_else(|| {
+                    let peer = if index == 0 { machines.get(1) } else { machines.get(index - 1) }?;
+                    machine.fabric.get(&peer.name).map(|host| format!("{host}:{}", self.config.tp_port))
+                });
+                if let Some((host, port)) = listen.as_deref().and_then(|listen| listen.rsplit_once(':')) {
+                    if let Ok(port) = port.parse::<u16>() {
+                        if port != 0 {
+                            ports.push(crate::doctor::Port::new(host.trim_start_matches('[').trim_end_matches(']'), port));
+                            if !fp4_local {
+                                if let Some(data) = port.checked_add(1) { ports.push(crate::doctor::Port::new(host.trim_start_matches('[').trim_end_matches(']'), data)); }
+                            }
+                        }
+                    }
+                }
+            }
+            crate::doctor::machine(&mut report, &mut self.runner, machine, &ports, self.dry,
+                crate::doctor::RemoteState { owned, memory, split })?;
+        }
+        match transport {
+            _ if machines.is_empty() => report.skip("fabric", "needs a valid launch topology")?,
+            _ if !split => report.skip("fabric", if replicas { "independent replicas; no fabric" } else { "one Spark; no fabric" })?,
+            Err(_) => report.skip("fabric", "needs a valid SEQPAR_RDMA")?,
+            Ok(rdma) => {
+                let (result, _) = crate::output::buffered(|| match &session {
+                    Some(session) => self.session_network_checks(session, rdma),
+                    None => self.config.check_links(&machines).and_then(|()| self.network_checks_with_rdma(&machines, rdma)),
+                });
+                stage(&mut report, self.dry, "fabric", result, if rdma { "every fabric link answered ping" } else { "TCP; engine startup checks the addresses" },
+                    "link addresses in the config", "Check both link addresses and connectivity, then run vade doctor.")?;
+            }
+        }
+        let port = session.as_ref().map_or(self.config.local_port, |session| session.local_port);
         if self.dry {
             report.plan(&format!("port {port}"), "free on this computer, or held by the vade tunnel")?;
         } else if session.is_some() {
@@ -156,6 +206,10 @@ impl<R: Runner> App<R> {
         }
         if let Some(error) = probe.error.as_ref().filter(|_| missing.is_some_and(|m| m.starts_with("rdma"))) {
             report.fail(&name("rdma"), error, "Have the administrator prepare RDMA, or set SEQPAR_RDMA=0 for TCP, then run vade doctor.")?;
+        } else if probe.rdma && missing.is_none() {
+            report.ok(&name("rdma"), "verbs device, library and memory lock limit are ready")?;
+        } else if probe.rdma {
+            report.skip(&name("rdma"), "needs the earlier prerequisite checks")?;
         }
         match probe.present {
             Some(true) => report.ok(&name("model files"), &format!("{} (config, tokenizer, weights; vade install checks every SHA256)", machine.model_path))?,
@@ -200,6 +254,9 @@ impl<R: Runner> App<R> {
     /// a failed prerequisite is `missing` plus the message install prints.
     fn probe_machine(&mut self, machine: &Machine, source_build: bool) -> Result<Probe, String> {
         let rdma = self.config.machines.len() > 1 && rdma_enabled()?;
+        self.probe_machine_with_rdma(machine, source_build, rdma)
+    }
+    fn probe_machine_with_rdma(&mut self, machine: &Machine, source_build: bool, rdma: bool) -> Result<Probe, String> {
         // `reached` proves SSH ran the script; `missing` and `failed` name the
         // check that stopped it.
         let command = format!(
@@ -340,6 +397,9 @@ printf 'rust=ok\ndriver=ok\n'
 
     pub(super) fn network_checks(&mut self, machines: &[Machine]) -> Result<(), String> {
         let rdma = self.config.machines.len() > 1 && rdma_enabled()?;
+        self.network_checks_with_rdma(machines, rdma)
+    }
+    fn network_checks_with_rdma(&mut self, machines: &[Machine], rdma: bool) -> Result<(), String> {
         let mut count = 0;
         for machine in machines {
             for peer_name in machine.fabric.keys() {
@@ -371,6 +431,25 @@ printf 'rust=ok\ndriver=ok\n'
                 "checks passed"
             }
         ))?;
+        Ok(())
+    }
+
+    /// Saved ranks retain their actual link endpoints, not the config's fabric map.
+    fn session_network_checks(&mut self, session: &Session, rdma: bool) -> Result<(), String> {
+        for (index, rank) in session.ranks.iter().enumerate() {
+            let closes_ring = !session.fp4_local && session.topology() == "ring";
+            let peer = session.ranks.get(index + 1).or_else(|| closes_ring.then(|| session.ranks.first()).flatten());
+            let Some(peer) = peer else { continue; };
+            let (host, port) = rank.next.rsplit_once(':').ok_or("The saved fabric endpoint is invalid. Preserve the state folder, then run vade status.")?;
+            if port.parse::<u16>().ok().is_none_or(|port| port == 0) || host.is_empty() {
+                return Err("The saved fabric endpoint is invalid. Preserve the state folder, then run vade status.".into());
+            }
+            if rdma {
+                self.checked(runner::ssh(&rank.machine.ssh, format!("ping -n -c 1 -W 2 {} >/dev/null", quote(host.trim_start_matches('[').trim_end_matches(']'))),
+                    &format!("{} to {} fabric", rank.machine.name, peer.machine.name)),
+                    &format!("Fabric from {} to {} did not reply. Check the saved link addresses, then run vade doctor.", rank.machine.name, peer.machine.name))?;
+            }
+        }
         Ok(())
     }
 

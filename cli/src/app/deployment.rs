@@ -1,5 +1,16 @@
 //! Source synchronization, immutable builds, activation and updates.
 use super::*;
+
+/// Busy means a listed compute app or power draw at or above 30 W.
+/// Utilization alone never blocks; a stale counter is reported, not obeyed.
+pub(super) const BUILD_GPU_CHECK: &str = r#"set -eu
+applications=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)
+power=$(nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits)
+utilization=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits) || utilization=''
+test -z "$applications"
+printf '%s\n' "$power" | awk 'NF {n++; if ($1 !~ /^[0-9]+([.][0-9]+)?$/) bad=1; else if ($1 + 0 >= 30) busy=1} END {exit (n == 0 || bad || busy)}'
+printf '%s\n' "$utilization" | awk 'NF && $1 ~ /^[0-9]+$/ && $1 + 0 > max {max = $1 + 0} END {if (max > 0) printf "stale_utilization=%d\n", max}'
+"#;
 impl<R: Runner> App<R> {
     fn source_revision(&mut self, path: &Path, label: &str) -> Result<String, String> {
         let folder = path.to_string_lossy().into_owned();
@@ -276,9 +287,12 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
                 })
             });
             if !borrowed {
-                let gpu_check = "set -eu\napplications=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)\nutilization=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits)\ntest -z \"$applications\" && test -n \"$utilization\"\nprintf '%s\\n' \"$utilization\" | awk 'NF && $1 != 0 {exit 1}'\n";
-                self.checked(runner::ssh(&machine.ssh,gpu_check.into(),&format!("{} build GPU check",machine.name)),
+                let checked = self.checked(runner::ssh(&machine.ssh,BUILD_GPU_CHECK.into(),&format!("{} build GPU check",machine.name)),
                     &format!("{} GPU is in use or unavailable. Finish its current job with its original launcher before install; nothing was stopped.",machine.name))?;
+                if let Some(v) = checked.stdout.lines().find_map(|line| line.strip_prefix("stale_utilization="))
+                    .and_then(|v| v.parse::<u32>().ok()).filter(|v| (1..=100).contains(v)) {
+                    crate::output::line(format_args!("{}: {}", machine.name, crate::worker::stale_line(v)))?;
+                }
             }
             if let Some(bundle) = &bundle {
                 let reusable = previous.as_ref()

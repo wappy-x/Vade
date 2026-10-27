@@ -16,7 +16,9 @@ pub const TILE: u32 = 1 << 29;
 /// so rank 1 does too; without it rank 1 keeps the chat's GDN states whole.
 pub const HEADS: u32 = 1 << 28;
 
-/// VADE_W2_TP (unset = 0): 1 selects the tensor split at world 2. Read once.
+/// VADE_W2_TP (unset = 0 here): 1 selects the tensor split at world 2. flash-serve pins it to 1
+/// there, with every proven level (tp settings::SPLIT_LEVELS), unless VADE_W2_PATH=pipeline; the
+/// name is temporary. Read once.
 pub fn from_env() -> Result<bool, String> {
     static ON: std::sync::OnceLock<Result<bool, String>> = std::sync::OnceLock::new();
     ON.get_or_init(|| parse(std::env::var("VADE_W2_TP").ok().as_deref())).clone()
@@ -25,9 +27,9 @@ pub fn from_env() -> Result<bool, String> {
 pub fn proj_from_env() -> Result<bool, String> {
     proj_level_from_env().map(|level| level != 0)
 }
-/// VADE_W2_TP_PROJ (unset = 0): 1 splits the GDN in-projections by row halves; 2 also splits the
-/// mixers' out projections and the shared expert's down projection; 3 also runs the GDN mixers
-/// of one-chat split passes by heads. Read once.
+/// VADE_W2_TP_PROJ (unset = 0 here; a split rank pins 3): 1 splits the GDN in-projections by row
+/// halves; 2 also splits the mixers' out projections and the shared expert's down projection; 3
+/// also runs the GDN mixers of one-chat split passes by heads. Read once.
 pub fn proj_level_from_env() -> Result<u8, String> {
     static LEVEL: std::sync::OnceLock<Result<u8, String>> = std::sync::OnceLock::new();
     LEVEL.get_or_init(|| parse_level(std::env::var("VADE_W2_TP_PROJ").ok().as_deref())).clone()

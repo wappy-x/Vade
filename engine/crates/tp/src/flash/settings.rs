@@ -137,29 +137,47 @@ pub fn pipeline_pins(set: impl Fn(&str) -> bool) -> Vec<(&'static str, &'static 
     PIPELINE_DEFAULTS.into_iter().filter(|&(name, _)| !set(name)).collect()
 }
 
-/// VADE_W2_TP=1 (unset = 0, opt-in): world 2 FP4-Local serves the two-rank tensor split
-/// (spark_engine flash::next_batched tp): the pipeline's links, recipe and session protocol
-/// with rank 1 starting at layer 2, and both ranks splitting each routed expert by columns.
-/// Refused at any other world, and together with an explicit VADE_W2_PP or VADE_W2_PP_SPLIT.
+/// VADE_W2_PATH (a debug switch; it goes when the layer pipeline's code is deleted): unset = the
+/// tensor split, the one 2-Spark path; `pipeline` = the layer pipeline of the world-1 engine.
+pub fn debug_pipeline(value: Result<String, std::env::VarError>) -> Result<bool, String> {
+    match value.as_deref() {
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Ok("pipeline") => Ok(true),
+        _ => Err("VADE_W2_PATH must be unset or pipeline".into()),
+    }
+}
+
+/// World 2 FP4-Local serves the two-rank tensor split (spark_engine flash::next_batched tp): the
+/// pipeline's links, recipe and session protocol with rank 1 starting at layer 2, and both ranks
+/// splitting each routed expert by columns. It is the default there; the layer pipeline stays
+/// only for VADE_W2_PATH=pipeline (`pipeline_path`), VADE_W2_TP=0, an explicit VADE_W2_PP, and
+/// VADE_W2_PP_ASYNC=0 or VADE_W2_PP_RDMA=0 (the split needs both). An explicit VADE_W2_TP=1 is
+/// refused at any other world, with VADE_W2_PATH=pipeline and with any of those pipeline switches.
 pub fn tensor_split(
     mixed: bool,
     world: usize,
+    pipeline_path: bool,
     mut read: impl FnMut(&str) -> Result<Option<bool>, String>,
 ) -> Result<bool, String> {
-    if read("VADE_W2_TP")? != Some(true) {
-        return Ok(false);
-    }
+    let explicit = match read("VADE_W2_TP")? {
+        Some(false) => return Ok(false),
+        Some(true) if pipeline_path => return Err("VADE_W2_TP=1 is refused together with VADE_W2_PATH=pipeline".into()),
+        Some(true) => true,
+        None if pipeline_path || !mixed || world != PIPELINE_RANKS => return Ok(false),
+        None => false,
+    };
     if !mixed || world != PIPELINE_RANKS {
         return Err("VADE_W2_TP=1 needs FP4-Local at world 2".into());
     }
     if !matches!(read("VADE_W2_PP"), Ok(None)) {
-        return Err("VADE_W2_TP=1 is refused together with an explicit VADE_W2_PP".into());
+        return if explicit { Err("VADE_W2_TP=1 is refused together with an explicit VADE_W2_PP".into()) } else { Ok(false) };
     }
     // The split posts every pass through the pipeline's asynchronous queue and its exchanges
-    // ride the RDMA wire: an explicit 0 for either is refused before any rank loads.
+    // ride the RDMA wire: an explicit 0 for either keeps the pipeline, or is refused with
+    // VADE_W2_TP=1, before any rank loads.
     for name in ["VADE_W2_PP_ASYNC", "VADE_W2_PP_RDMA"] {
         if read(name)? == Some(false) {
-            return Err(format!("VADE_W2_TP=1 needs {name} (leave it unset)"));
+            return if explicit { Err(format!("VADE_W2_TP=1 needs {name} (leave it unset)")) } else { Ok(false) };
         }
     }
     Ok(true)
@@ -169,15 +187,25 @@ pub fn tensor_split(
 /// first layer the pipeline lets a back own (layer 1 consumes the frontend's PLE).
 pub const TENSOR_PINS: [(&str, &str); 1] = [("VADE_W2_PP_SPLIT", "2")];
 
-/// The pins a tensor-split rank adds; an explicit VADE_W2_PP_SPLIT is refused.
+/// The tensor split's levels, every proven one on. A split rank pins each unset one at startup;
+/// a set one stays as given. These names are temporary: each goes when its level is the only code.
+pub const SPLIT_LEVELS: [(&str, &str); 4] = [
+    ("VADE_W2_TP", "1"),
+    ("VADE_W2_TP_WIRE", "write"),
+    ("VADE_W2_TP_PROJ", "3"),
+    ("VADE_W2_TP_HEAD", "1"),
+];
+
+/// The pins a tensor-split rank adds: the layer cut and the unset levels; an explicit
+/// VADE_W2_PP_SPLIT is refused.
 pub fn tensor_pins(tp: bool, set: impl Fn(&str) -> bool) -> Result<Vec<(&'static str, &'static str)>, String> {
     if !tp {
         return Ok(Vec::new());
     }
     if TENSOR_PINS.iter().any(|&(name, _)| set(name)) {
-        return Err("VADE_W2_TP=1 sets VADE_W2_PP_SPLIT itself; leave it unset".into());
+        return Err("the tensor split sets VADE_W2_PP_SPLIT itself; leave it unset (VADE_W2_PATH=pipeline: the layer pipeline)".into());
     }
-    Ok(TENSOR_PINS.to_vec())
+    Ok(TENSOR_PINS.into_iter().chain(SPLIT_LEVELS.into_iter().filter(|&(name, _)| !set(name))).collect())
 }
 
 /// The checkpoint's mixed storage contract selects NextModel, never the FP8 loader.
@@ -375,23 +403,58 @@ impl CommandState {
 }
 #[cfg(test)]
 #[test]
-fn tensor_split_is_opt_in_world_two_and_refuses_explicit_pipeline_switches() {
+fn tensor_split_is_the_world_two_default_and_the_pipeline_needs_a_switch() {
     let env = |pairs: &'static [(&'static str, &'static str)]| move |name: &str| -> Result<Option<bool>, String> {
         Ok(pairs.iter().find(|(n, _)| *n == name).map(|(_, v)| *v == "1"))
     };
-    assert_eq!(tensor_split(true, 2, env(&[])), Ok(false));
-    assert_eq!(tensor_split(true, 2, env(&[("VADE_W2_TP", "0")])), Ok(false));
-    assert_eq!(tensor_split(true, 2, env(&[("VADE_W2_TP", "1")])), Ok(true));
-    assert!(tensor_split(true, 4, env(&[("VADE_W2_TP", "1")])).is_err());
-    assert!(tensor_split(false, 2, env(&[("VADE_W2_TP", "1")])).is_err());
-    assert!(tensor_split(true, 2, env(&[("VADE_W2_TP", "1"), ("VADE_W2_PP", "1")])).is_err());
-    assert!(tensor_split(true, 2, env(&[("VADE_W2_TP", "1"), ("VADE_W2_PP", "0")])).is_err());
-    assert!(tensor_split(true, 2, env(&[("VADE_W2_TP", "1"), ("VADE_W2_PP_ASYNC", "0")])).is_err());
-    assert!(tensor_split(true, 2, env(&[("VADE_W2_TP", "1"), ("VADE_W2_PP_RDMA", "0")])).is_err());
-    assert_eq!(tensor_split(true, 2, env(&[("VADE_W2_TP", "1"), ("VADE_W2_PP_ASYNC", "1")])), Ok(true));
+    // No switch set: the split at world 2 FP4-Local, nothing else changes.
+    assert_eq!(tensor_split(true, 2, false, env(&[])), Ok(true));
+    assert_eq!(tensor_split(true, 1, false, env(&[])), Ok(false));
+    assert_eq!(tensor_split(true, 4, false, env(&[])), Ok(false));
+    assert_eq!(tensor_split(false, 2, false, env(&[])), Ok(false));
+    // VADE_W2_PATH=pipeline, VADE_W2_TP=0, an explicit VADE_W2_PP or a pipeline switch the split
+    // cannot honor keeps the layer pipeline (or the rank path).
+    assert_eq!(tensor_split(true, 2, true, env(&[])), Ok(false));
+    assert_eq!(tensor_split(true, 2, false, env(&[("VADE_W2_TP", "0")])), Ok(false));
+    assert_eq!(tensor_split(true, 2, true, env(&[("VADE_W2_TP", "0")])), Ok(false));
+    for off in [&[("VADE_W2_PP", "0")][..], &[("VADE_W2_PP_ASYNC", "0")], &[("VADE_W2_PP_RDMA", "0")]] {
+        assert_eq!(tensor_split(true, 2, false, env(off)), Ok(false), "{off:?}");
+    }
+    assert_eq!(tensor_split(true, 2, false, env(&[("VADE_W2_PP", "1")])), Ok(false));
+    assert_eq!(tensor_split(true, 2, false, env(&[("VADE_W2_PP_ASYNC", "1"), ("VADE_W2_PP_RDMA", "1")])), Ok(true));
+    // The old name keeps working for the gates; its refusals stay.
+    assert_eq!(tensor_split(true, 2, false, env(&[("VADE_W2_TP", "1")])), Ok(true));
+    assert!(tensor_split(true, 2, true, env(&[("VADE_W2_TP", "1")])).is_err());
+    assert!(tensor_split(true, 4, false, env(&[("VADE_W2_TP", "1")])).is_err());
+    assert!(tensor_split(false, 2, false, env(&[("VADE_W2_TP", "1")])).is_err());
+    assert!(tensor_split(true, 2, false, env(&[("VADE_W2_TP", "1"), ("VADE_W2_PP", "1")])).is_err());
+    assert!(tensor_split(true, 2, false, env(&[("VADE_W2_TP", "1"), ("VADE_W2_PP", "0")])).is_err());
+    assert!(tensor_split(true, 2, false, env(&[("VADE_W2_TP", "1"), ("VADE_W2_PP_ASYNC", "0")])).is_err());
+    assert!(tensor_split(true, 2, false, env(&[("VADE_W2_TP", "1"), ("VADE_W2_PP_RDMA", "0")])).is_err());
+    assert_eq!(tensor_split(true, 2, false, env(&[("VADE_W2_TP", "1"), ("VADE_W2_PP_ASYNC", "1")])), Ok(true));
+    // Switch errors come first, whatever the topology.
+    let bad = |name: &str| -> Result<Option<bool>, String> { if name == "VADE_W2_TP" { Err("VADE_W2_TP must be 0 or 1".into()) } else { Ok(None) } };
+    assert!(tensor_split(true, 1, false, bad).is_err());
+    use std::env::VarError::NotPresent;
+    assert_eq!(debug_pipeline(Err(NotPresent)), Ok(false));
+    assert_eq!(debug_pipeline(Ok("pipeline".into())), Ok(true));
+    for value in ["", "split", "Pipeline", "0", "1"] { assert!(debug_pipeline(Ok(value.into())).is_err(), "{value:?}"); }
+    assert!(debug_pipeline(Err(std::env::VarError::NotUnicode("x".into()))).is_err());
+}
+
+#[cfg(test)]
+#[test]
+fn a_split_rank_pins_the_layer_cut_and_every_unset_level() {
+    let all = [("VADE_W2_PP_SPLIT", "2"), ("VADE_W2_TP", "1"), ("VADE_W2_TP_WIRE", "write"), ("VADE_W2_TP_PROJ", "3"), ("VADE_W2_TP_HEAD", "1")];
     assert_eq!(tensor_pins(false, |_| true), Ok(Vec::new()));
-    assert_eq!(tensor_pins(true, |_| false), Ok(vec![("VADE_W2_PP_SPLIT", "2")]));
+    assert_eq!(tensor_pins(false, |_| false), Ok(Vec::new()));
+    assert_eq!(tensor_pins(true, |_| false), Ok(all.to_vec()));
+    // A set level stays as given (a gate's VADE_W2_TP_PROJ=2, VADE_W2_TP_HEAD=0).
+    assert_eq!(tensor_pins(true, |name| name == "VADE_W2_TP_PROJ" || name == "VADE_W2_TP_HEAD"), Ok(all[..3].to_vec()));
+    assert_eq!(tensor_pins(true, |name| name.starts_with("VADE_W2_TP")), Ok(all[..1].to_vec()));
     assert!(tensor_pins(true, |name| name == "VADE_W2_PP_SPLIT").is_err());
+    // The pins name only the split's switches, never a pipeline companion.
+    assert!(SPLIT_LEVELS.iter().all(|(name, _)| PIPELINE_DEFAULTS.iter().all(|(other, _)| other != name)));
 }
 
 #[cfg(test)]

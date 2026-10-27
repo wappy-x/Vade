@@ -144,8 +144,12 @@ fn launch_preview_summarizes_requested_settings_before_any_connection() {
         (vec!["--sparks", "2", "--chats", "4"], "0", vec!["  Machines          spark, peer\n", "  Transport         TCP\n", "  Concurrent chats  4\n"]),
         (vec!["--sparks", "2"], "1", vec!["  Machines          spark, peer\n", "  Transport         RDMA\n"]),
     ] {
-        let output = f.command().args(["up", "--dry-run"]).args(flags)
-            .env("VADE_CONFIG", &config).env("SEQPAR_RDMA", rdma).env_remove("MTP").output().unwrap();
+        // Two Sparks over TCP run the layer pipeline only when it is named.
+        let path = if rdma == "0" { "pipeline" } else { "" };
+        let mut command = f.command();
+        command.args(["up", "--dry-run"]).args(flags).env("VADE_CONFIG", &config).env("SEQPAR_RDMA", rdma).env_remove("MTP");
+        if path.is_empty() { command.env_remove("VADE_W2_PATH"); } else { command.env("VADE_W2_PATH", path); }
+        let output = command.output().unwrap();
         assert!(output.status.success(), "{}", safe(&output.stderr));
         let stdout = safe(&output.stdout);
         for text in expected { assert!(stdout.contains(text), "missing {text:?} in {stdout}"); }

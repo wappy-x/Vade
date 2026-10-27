@@ -11,6 +11,7 @@ fn run() -> Result<()> {
         },
         Some("ci-no-gpu") if args.len() == 1 => vade_tools::cuda::run(&vade_tools::root()),
         Some("benchmarks-chart") if args.len() == 1 => vade_tools::chart::run(&vade_tools::root()),
+        Some("bench-docs") if args.len() == 3 => vade_tools::bench_docs::run(std::path::Path::new(&args[1]),std::path::Path::new(&args[2])),
         Some("fetch-model") if args.len() == 4 => vade_tools::fetch::run(&args[1],&args[2],std::path::Path::new(&args[3])),
         Some("json-get"|"json-print"|"json-value"|"json-quote"|"json-stream-check") => {
             let mut input = String::new(); io::stdin().read_to_string(&mut input)?;
@@ -27,7 +28,7 @@ fn run() -> Result<()> {
                 else { println!("{}",part.text()?); }
             } Ok(())
         },
-        _ => Err("usage: vade-tools {check-doc-links|check-bundle DIR [FORBIDDEN ...]|ci-no-gpu|benchmarks-chart|fetch-model REPO REV DIR|json-get [KEY ...]|json-print [KEY ...]|json-value [KEY ...]|json-quote|json-stream-check}".into())
+        _ => Err("usage: vade-tools {check-doc-links|check-bundle DIR [FORBIDDEN ...]|ci-no-gpu|benchmarks-chart|bench-docs CARDS_DIR REPO_DIR|fetch-model REPO REV DIR|json-get [KEY ...]|json-print [KEY ...]|json-value [KEY ...]|json-quote|json-stream-check}".into())
     }
 }
 fn main() { if let Err(error) = run() { eprintln!("vade-tools: {error}"); std::process::exit(1); } }

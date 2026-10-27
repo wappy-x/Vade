@@ -30,6 +30,7 @@ pub mod project;
 pub mod shell;
 #[cfg(test)]
 mod test_workspace;
+pub mod quality;
 pub mod wake;
 pub mod workload;
 

@@ -34,6 +34,7 @@ impl Server {
                     match listener.accept() { Ok((s,_)) => break s,
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && start.elapsed() < Duration::from_secs(10) => thread::sleep(Duration::from_millis(5)),
                     Err(e) => return Err(e) } };
+                stream.set_nonblocking(false)?;
                 stream.set_read_timeout(Some(Duration::from_secs(2)))?; stream.set_write_timeout(Some(Duration::from_secs(2)))?;
                 requests.push(request(&mut BufReader::new(stream.try_clone()?))?);
                 stream.write_all(&response)?;
@@ -53,6 +54,16 @@ impl Drop for Server { fn drop(&mut self) { self.stop.store(true,Ordering::Relax
     }
 }
 #[test] fn mock_api_drop_stops_and_joins_an_unused_server() { drop(Server::raw(vec![Vec::new()])); }
+#[test] fn mock_api_waits_for_delayed_headers_and_body() {
+    let s = Server::raw(vec![Vec::new()]);
+    let mut tcp = std::net::TcpStream::connect(s.url.strip_prefix("http://").unwrap()).unwrap();
+    tcp.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+    for part in ["POST / HTTP/1.1\r\nHost: local\r\n", "Content-Length: 5\r\n\r\nhe", "llo"] {
+        thread::sleep(Duration::from_millis(50)); tcp.write_all(part.as_bytes()).unwrap();
+    }
+    drop(tcp);
+    assert_eq!(s.finish(),vec!["POST / HTTP/1.1\r\nHost: local\r\nContent-Length: 5\r\nhello"]);
+}
 pub fn replies() -> Vec<(String,bool)> {
     vec![(r#"{"data":[{"id":"test-model"}]}"#.into(),false),
         ("data: {\"choices\":[{\"delta\":{\"content\":\"hello é\\n\"}}]}\r\n\r\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n".into(),true),

@@ -368,6 +368,9 @@ impl AssistantTurn {
             .get("message")
             .ok_or_else(|| invalid("response has no message"))?;
         let finish = required_string(choice, "finish_reason")?;
+        if finish.is_empty() {
+            return Err(invalid("invalid finish reason"));
+        }
         let mut turn = Self::new(
             response_message(message.clone(), &FinishReason::from_wire(finish), limits)?,
             FinishReason::from_wire(finish),

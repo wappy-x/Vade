@@ -47,7 +47,7 @@ fn memory_receipt(backend: &Backend<'_>, rank: usize, phase: &str, live_sessions
     let remaining = match backend.available_memory_bytes() {
         Ok(bytes) => bytes,
         Err(error) => {
-            eprintln!("flash_serve memory rank={rank} phase={phase} remaining_unified_bytes=unavailable error={error}");
+            engine_model::events::note_line("memory_probe_unavailable", &format!("flash_serve memory rank={rank} phase={phase} remaining_unified_bytes=unavailable error={error}"));
             return;
         }
     };
@@ -337,7 +337,9 @@ impl Saved<'_, '_, '_, '_> {
 impl Drop for Saved<'_, '_, '_, '_> {
     fn drop(&mut self) {
         self.engine.retained.set(self.engine.retained.get() - self.bytes());
-        let _ = self.engine.command(RELEASE, self.id, 0, false, &[]);
+        if let Err(error) = self.engine.command(RELEASE, self.id, 0, false, &[]) {
+            engine_model::events::note("session_release_failed", format_args!("kind=saved session={} error={error}", self.id));
+        }
     }
 }
 
@@ -560,7 +562,9 @@ impl<'e, 'm, 'b, 'a> RemoteSession<'e, 'm, 'b, 'a> {
     }
 }
 impl Drop for RemoteSession<'_, '_, '_, '_> {
-    fn drop(&mut self) { let _ = self.close(); }
+    fn drop(&mut self) {
+        if let Err(error) = self.close() { engine_model::events::note("session_release_failed", format_args!("kind=remote error={error}")); }
+    }
 }
 impl RemoteSession<'_, '_, '_, '_> {
     fn chosen_depth(&self) -> usize {
@@ -1218,7 +1222,7 @@ pub fn worker<'a>(model: &Model<'a>, backend: &Backend<'a>, mut commands: Comman
             Ok(()) })();
             if let Err(error) = executed {
                 if error.starts_with("Flash MoE routing rejected") {
-                    eprintln!("flash_serve worker rank={} session={requested} op={op} request_failed: {error}", commands.rank());
+                    engine_model::events::note_line("worker_request_failed", &format!("flash_serve worker rank={} session={requested} op={op} request_failed: {error}", commands.rank()));
                 }
                 return Err(error);
             }

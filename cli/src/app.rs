@@ -15,6 +15,7 @@ mod deployment;
 mod prebuilt;
 mod diagnostics;
 mod health;
+pub(crate) mod events;
 mod status;
 mod plan;
 mod resident;
@@ -295,6 +296,11 @@ impl<R: Runner> App<R> {
                 .unwrap_or("Machine check failed. Check SSH and prerequisites with vade doctor.");
             return Err(format!("{}: {message}", rank.machine.name));
         }
+        if matches!(op, "probe" | "start") {
+            if let Some(note) = fields.get("gpu_note") {
+                crate::output::line(format_args!("{}: {}", rank.machine.name, text::terminal_text(note)))?;
+            }
+        }
         Ok(fields)
     }
 
@@ -562,8 +568,15 @@ impl<R: Runner> App<R> {
         })?;
         row("Speed", &speed.map(|value| format!("{value:.1} tok/s"))
             .unwrap_or_else(|| if self.dry { "not checked" } else { "not reported by this engine" }.into()))?;
+        if session.two_sparks() {
+            row("Two-Spark path", &health.then(|| health::TwoSparkPath::from_health(&health_response.stdout)).flatten().map(|path| path.label())
+                .unwrap_or_else(|| if self.dry { "not checked" } else { "not reported by this engine" }.into()))?;
+        }
         let reported = if health { self.engine_prefix_cache(&session)? } else { None };
         row("Retained prompt cache", &retention_label(&session, reported))?;
+        if health {
+            for line in self.engine_events(&session, &health_response.stdout)? { crate::output::line(format_args!("  {line}"))?; }
+        }
         if !self.dry && !(health && all && tunnel) {
             return Err("Vade needs attention. Run vade logs or vade doctor; use vade down before another start.".into());
         }

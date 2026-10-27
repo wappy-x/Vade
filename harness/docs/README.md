@@ -15,6 +15,7 @@
 | [Other clients](passthrough-matrix.md) | Using Codex, Hermes, OpenCode or Pi through the gateway. |
 | [Setup and doctor](setup-doctor.md) | Writing client configurations, and checking an endpoint. |
 | [Workload](workload.md) | Measuring many concurrent agent sessions. |
+| [Quality card](quality-card.md) | Answer quality scores and the cost of exact drafting, from one fixed prompt set. |
 | [Performance](performance.md) | Local mock measurements and the prompt-prefix contract. |
 
 Raw measurement output: [performance-samples.txt](performance-samples.txt), [performance-contract-samples.txt](performance-contract-samples.txt).

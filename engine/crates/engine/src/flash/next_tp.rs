@@ -281,10 +281,17 @@ impl<'a> NextModel<'a> {
     pub(super) fn tp_failed(&self) -> bool {
         self.tp_box.get().is_some_and(|m| m.failed())
     }
-    /// A split-mode pass wider than its kind's bound (TpLayout::split_rows): its residual crosses
-    /// with the request, it splits no expert and runs without captured verify segments.
+    /// A split-mode pass wider than its kind's bound (TpLayout::split_rows) or a pipeline prompt
+    /// tile: its residual crosses with the request, it splits no expert and runs without
+    /// captured verify segments.
     pub(super) fn tp_host_pass(&self, count: usize) -> bool {
-        self.tp.borrow().as_ref().is_some_and(|s| count > TpLayout::split_rows(s.verify_pass))
+        self.tp_on() && !self.tp_split_rows(count)
+    }
+    /// The pass's rows cross in the mailbox and its layers split: at most TpLayout::split_rows
+    /// rows (verify passes 32, others 16), and not a pipeline prompt tile (rank 0's front_tile,
+    /// rank 1's TILE bit), whose layers run whole on one rank each.
+    fn tp_split_rows(&self, count: usize) -> bool {
+        self.tp.borrow().as_ref().is_some_and(|s| count <= TpLayout::split_rows(s.verify_pass) && !s.front_tile && !s.tile_pass)
     }
     /// Rank 1, per request: the residual arrives in the mailbox (MAIL bit), or the request is
     /// a pipeline tile for layers 24..48 (TILE bit).
@@ -307,13 +314,17 @@ impl<'a> NextModel<'a> {
         if self.tp_rank() != Some(0) {
             return Ok(None);
         }
-        // A prompt pass runs as a pipeline tile when every chat's span fills at least half of
-        // the engine's prompt tile (the pipeline's unit of work, an operator setting, not a
-        // checkpoint figure); shorter spans stay in the lockstep and owe no state handoff.
-        let tile = !verify && spans.iter().all(|span| 2 * span.len() >= crate::flash_next_rows::prompt_tile());
-        if let Some(link) = self.pp.borrow_mut().as_mut() { link.tp_tile = tile; }
         let mut guard = self.tp.borrow_mut();
         let s = guard.as_mut().ok_or("tensor split missing")?;
+        // A prompt pass runs as a pipeline tile when every chat's span fills at least half of
+        // the engine's prompt tile (the pipeline's unit of work, an operator setting, not a
+        // checkpoint figure), or continues a prompt that ran as tiles (the chat owes a handoff
+        // and its last pass gave no logits): so the prompt's last rows and its first token run
+        // on the pipeline path, and the handoff waits for the chat's next pass. Shorter
+        // prompts stay in the lockstep and owe no state handoff.
+        let tile = tile_pass(verify, crate::flash_next_rows::prompt_tile(), sessions.iter().zip(spans)
+            .map(|(chat, span)| (span.len(), chat.pos > 0 && !chat.logits_ready && s.handoff.contains(&chat.slot))));
+        if let Some(link) = self.pp.borrow_mut().as_mut() { link.tp_tile = tile; }
         s.front_tile = tile;
         s.verify_pass = verify;
         if tile {
@@ -359,86 +370,80 @@ impl<'a> NextModel<'a> {
     }
     /// Both ranks: send this rank's session state of `send` layers and install the peer's of
     /// `recv` layers, as raw FP32 words (GDN recurrent state, conv history and cached flag;
-    /// QSA keys, values and raw index rows 0..past, and past), chats in the given order.
+    /// QSA keys, values and raw index rows 0..past, and past), chats in the given order. The
+    /// split link carries four head words per layer (QSA past or the GDN cached flag, then the
+    /// words of each state vector, which the receiver checks against its own); the state words
+    /// cross device to device in the mailbox, in pieces of at most one slot, and no host
+    /// touches them. Message i carries this rank's piece i (or one pad word once its pieces
+    /// end) and both ranks put message i + 1 before they take message i, so neither runs more
+    /// than one message ahead of the peer's takes (the mailbox's lockstep).
     fn tp_swap_state<'w>(&self, b: &Backend<'a>, sessions: &mut [&mut NextSession<'a, 'w>], send: std::ops::Range<usize>,
         recv: std::ops::Range<usize>, link: std::net::TcpStream) -> Result<()> {
         let started = Instant::now();
-        let mut out: Vec<u8> = Vec::new();
-        let mut floats: Vec<f32> = Vec::new();
-        let mut put = |b: &Backend<'a>, v: &DeviceVector<'a>, n: usize, out: &mut Vec<u8>| -> Result<()> {
-            floats.resize(n, 0.0);
-            b.read_vector_range_into(v, 0, &mut floats)?;
-            out.extend_from_slice(pp::f32_bytes(&floats));
-            Ok(())
-        };
-        for chat in sessions.iter_mut() {
+        let mailbox = self.tp_box.get().ok_or("tensor split mailbox missing")?;
+        let slot = mailbox.slot_bytes() / 4;
+        let (mut head, mut sends, mut recvs) = (Vec::new(), Vec::new(), Vec::new());
+        for (c, chat) in sessions.iter_mut().enumerate() {
             for li in send.clone() {
-                if li % 4 == 3 {
-                    let q = chat.qsa_state[li].as_mut().ok_or("QSA state missing for the handoff")?;
-                    let (vectors, widths, past) = q.handoff()?;
-                    let rows = *past;
-                    out.extend_from_slice(&(rows as u64).to_le_bytes());
-                    for (v, w) in vectors.into_iter().zip(widths) { if w != 0 { put(b, v, rows * w, &mut out)?; } }
-                } else {
-                    let g = chat.gdn_state[li].as_mut().ok_or("GDN state missing for the handoff")?;
-                    let (state, history, cached) = g.handoff();
-                    out.extend_from_slice(&u64::from(*cached).to_le_bytes());
-                    let (ns, nh) = (state.len(), history.len());
-                    put(b, state, ns, &mut out)?;
-                    put(b, history, nh, &mut out)?;
-                }
+                let (flag, words) = layer_words(chat, li, None)?;
+                head.extend(std::iter::once(flag).chain(words).flat_map(|w| (w as u64).to_le_bytes()));
+                for (k, n) in words.into_iter().enumerate() { pieces(&mut sends, (c, li, k), n, slot); }
             }
         }
-        // The largest message the peer may send: every received layer's whole state (QSA rows up
-        // to each vector's capacity), so a bad length fails here instead of in an allocation.
-        let mut limit = 0usize;
-        for chat in sessions.iter_mut() {
+        let heads = sessions.len() * recv.len() * 32;
+        let arrived = exchange(&link, &head, heads)?;
+        if arrived.len() != heads {
+            return Err("tensor split handoff head has the wrong length".into());
+        }
+        let mut fields = arrived.as_chunks::<8>().0.iter().map(|w| usize::try_from(u64::from_le_bytes(*w)).unwrap_or(usize::MAX));
+        for (c, chat) in sessions.iter_mut().enumerate() {
             for li in recv.clone() {
-                limit += 8 + if li % 4 == 3 {
-                    let (vectors, _, _) = chat.qsa_state[li].as_mut().ok_or("QSA state missing for the handoff")?.handoff()?;
-                    vectors.iter().map(|v| v.len() * 4).sum::<usize>()
-                } else {
-                    let (state, history, _) = chat.gdn_state[li].as_mut().ok_or("GDN state missing for the handoff")?.handoff();
-                    (state.len() + history.len()) * 4
-                };
+                let mut field = || fields.next().ok_or("tensor split handoff head too short");
+                let flag = field()?;
+                let peer = [field()?, field()?, field()?];
+                let (_, words) = layer_words(chat, li, Some(flag))?;
+                if words != peer {
+                    return Err("tensor split handoff: the peer's state sizes differ from this rank's".into());
+                }
+                for (k, n) in words.into_iter().enumerate() { pieces(&mut recvs, (c, li, k), n, slot); }
             }
         }
-        let arrived = exchange(&link, &out, limit)?;
-        let mut at = 0usize;
-        let mut take = |n: usize| -> Result<&[u8]> {
-            let bytes = at.checked_add(n).and_then(|end| arrived.get(at..end)).ok_or("tensor split handoff message too short")?;
-            at += n;
-            Ok(bytes)
+        let (pad, mut pad_in) = (b.vector(1)?, b.vector(1)?);
+        let (mut sent, mut taken, limit) = self.tp.borrow().as_ref().map(|s| (s.sent, s.taken, s.limit_ns)).ok_or("tensor split missing")?;
+        let messages = sends.len().max(recvs.len());
+        let put = |sessions: &mut [&mut NextSession<'a, 'w>], i: usize, sent: &mut u64| -> Result<()> {
+            *sent += 1;
+            match sends.get(i) {
+                Some(&Piece { at: (c, li, k), from, words }) => {
+                    let v = state_vector(sessions[c], li, k)?;
+                    b.tp_mailbox_put(mailbox, v, 1, v.len(), words, from, *sent)
+                }
+                None => b.tp_mailbox_put(mailbox, &pad, 1, 1, 1, 0, *sent),
+            }
         };
-        let words = |bytes: &[u8]| -> Vec<f32> { bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect() };
-        for chat in sessions.iter_mut() {
-            for li in recv.clone() {
-                let head = u64::from_le_bytes(take(8)?.try_into().unwrap()) as usize;
-                if li % 4 == 3 {
-                    let q = chat.qsa_state[li].as_mut().ok_or("QSA state missing for the handoff")?;
-                    let (vectors, widths, past) = q.handoff()?;
-                    for (v, w) in vectors.into_iter().zip(widths) {
-                        if w == 0 || head == 0 { continue; }
-                        let values = words(take(handoff_words(head, w, v.len())? * 4)?);
-                        b.write_vector_range(v, 0, &values)?;
-                    }
-                    *past = head;
-                } else {
-                    let g = chat.gdn_state[li].as_mut().ok_or("GDN state missing for the handoff")?;
-                    let (state, history, cached) = g.handoff();
-                    let (ns, nh) = (state.len(), history.len());
-                    let values = words(take(ns * 4)?); b.write_vector_range(state, 0, &values)?;
-                    let values = words(take(nh * 4)?); b.write_vector_range(history, 0, &values)?;
-                    *cached = head != 0;
+        let mut swapped = if messages > 0 { put(sessions, 0, &mut sent) } else { Ok(()) };
+        for i in 0..messages {
+            if swapped.is_err() { break; }
+            if i + 1 < messages { swapped = put(sessions, i + 1, &mut sent); }
+            taken += 1;
+            swapped = swapped.and_then(|()| match recvs.get(i) {
+                Some(&Piece { at: (c, li, k), from, words }) => {
+                    let v = state_vector(sessions[c], li, k)?;
+                    let width = v.len();
+                    b.tp_mailbox_take(mailbox, v, 1, width, words, from, taken, limit)
                 }
-            }
+                None => b.tp_mailbox_take(mailbox, &mut pad_in, 1, 1, 1, 0, taken, limit),
+            });
         }
-        if at != arrived.len() {
-            return Err("tensor split handoff message has extra bytes".into());
-        }
+        if let Some(s) = self.tp.borrow_mut().as_mut() { (s.sent, s.taken) = (sent, taken); }
+        swapped?;
         b.synchronize()?;
-        eprintln!("flashnext tp handoff chats={} sent_bytes={} received_bytes={} ms={:.1}", sessions.len(), out.len(), arrived.len(),
-            started.elapsed().as_secs_f64() * 1e3);
+        if self.tp_failed() {
+            return Err("tensor split mailbox timed out or its proxy failed during the handoff".into());
+        }
+        let bytes = |p: &[Piece]| p.iter().map(|p| p.words * 4).sum::<usize>();
+        eprintln!("flashnext tp handoff chats={} sent_bytes={} received_bytes={} messages={messages} ms={:.1}", sessions.len(), bytes(&sends),
+            bytes(&recvs), started.elapsed().as_secs_f64() * 1e3);
         Ok(())
     }
 
@@ -475,12 +480,12 @@ impl<'a> NextModel<'a> {
     /// Layers whose MoE output is formed without the deferred finish: the front's last layer
     /// before the post (its residual crosses) and every split layer (its halves cross).
     pub(super) fn tp_plain(&self, li: usize, count: usize) -> bool {
-        self.tp_on() && (li + 1 == SPLIT || li >= SPLIT && !self.tp_host_pass(count))
+        self.tp_on() && (li + 1 == SPLIT || li >= SPLIT && self.tp_split_rows(count))
     }
     pub(super) fn tp_moe(&self, li: usize, count: usize) -> Option<TpMoe<'_, 'a>> {
         let (rank, layout, proj) = self.tp.borrow().as_ref().map(|s| (s.rank, s.layout, s.proj))?;
         let mailbox = self.tp_box.get()?;
-        (li >= SPLIT && !self.tp_host_pass(count)).then_some(TpMoe { rank, layout, swap: &self.tp, mailbox, shared_half: proj >= 2 })
+        (li >= SPLIT && self.tp_split_rows(count)).then_some(TpMoe { rank, layout, swap: &self.tp, mailbox, shared_half: proj >= 2 })
     }
     /// Rank 0: post the pass to rank 1 (the previous pass's ack first). Prompt and plain rows
     /// ride KIND_ROWS_ASYNC, verify rows KIND_VERIFY. Up to ROWS rows: the request (MAIL bit,
@@ -503,14 +508,15 @@ impl<'a> NextModel<'a> {
         }
         let meta: Vec<[u32; 4]> = sessions.iter().zip(spans)
             .map(|(s, span)| [s.slot, s.capacity as u32, s.pos as u32, span.len() as u32]).collect();
-        let mut rows = vec![0.0; count * W];
-        if !mail {
-            b.read_vector_range_into(residual, 0, &mut rows)?;
-        }
         let mut guard = self.pp.borrow_mut();
         let link = guard.as_mut().filter(|l| !l.poisoned).ok_or("tensor split link failed earlier; the front is stopping")?;
         let heads = self.tp.borrow().as_ref().is_some_and(|s| s.heads_pass);
         let posted = link.drain().and_then(|()| {
+            // A row buffer the sender thread returned (pages already mapped): a new vector per
+            // pass can get new pages from the allocator, and the readback then pays their faults
+            // (5 MB in about 45 ms against under 1 ms, 2026-10-26).
+            let mut rows = link.spare(count * W);
+            if mail { rows.fill(0.0); } else { b.read_vector_range_into(residual, 0, &mut rows)?; }
             link.tp_verify = verify;
             link.tp_mail = mail;
             link.tp_heads = heads;
@@ -536,6 +542,11 @@ fn agree_level(link: &std::net::TcpStream, rank: usize, level: u8) -> Result<()>
     Ok(())
 }
 
+/// tp_part's tile test over each chat's (span rows, continues a tiled prompt): not a verify
+/// pass, and every span fills at least half of the prompt tile `tile` or continues.
+fn tile_pass(verify: bool, tile: usize, chats: impl IntoIterator<Item = (usize, bool)>) -> bool {
+    !verify && chats.into_iter().all(|(rows, continues)| 2 * rows >= tile || continues)
+}
 /// Both ranks: send `out` (length-prefixed) on the split link while reading the peer's message
 /// (refused above `limit` bytes before anything is allocated).
 fn exchange(link: &std::net::TcpStream, out: &[u8], limit: usize) -> Result<Vec<u8>> {
@@ -554,6 +565,42 @@ fn exchange(link: &std::net::TcpStream, out: &[u8], limit: usize) -> Result<Vec<
         sender.join().map_err(|_| "tensor split handoff sender panicked")?.map_err(err)
     })?;
     Ok(arrived)
+}
+/// One handoff message's words: `words` words from word `from` of state vector `at` (chat,
+/// layer, vector: QSA keys, values, raw index; GDN state, conv history).
+struct Piece { at: (usize, usize, usize), from: usize, words: usize }
+/// `words` words of state vector `at` as pieces of at most `slot` words, in order.
+fn pieces(out: &mut Vec<Piece>, at: (usize, usize, usize), words: usize, slot: usize) {
+    out.extend((0..words).step_by(slot).map(|from| Piece { at, from, words: slot.min(words - from) }));
+}
+/// A chat's layer `li` in the handoff: its head word (QSA past, the GDN cached flag) and the words
+/// of each state vector that cross (QSA keys, values, raw index rows 0..past; GDN state, conv
+/// history). `install`: the peer's head word, set here, and the words to receive for it.
+fn layer_words(chat: &mut NextSession<'_, '_>, li: usize, install: Option<usize>) -> Result<(usize, [usize; 3])> {
+    if li % 4 == 3 {
+        let (vectors, widths, past) = chat.qsa_state[li].as_mut().ok_or("QSA state missing for the handoff")?.handoff()?;
+        let rows = install.unwrap_or(*past);
+        let mut words = [0; 3];
+        for (k, (v, w)) in vectors.into_iter().zip(widths).enumerate() {
+            if w != 0 && rows != 0 { words[k] = handoff_words(rows, w, v.len())?; }
+        }
+        *past = rows;
+        Ok((rows, words))
+    } else {
+        let (state, history, cached) = chat.gdn_state[li].as_mut().ok_or("GDN state missing for the handoff")?.handoff();
+        if let Some(flag) = install { *cached = flag != 0; }
+        Ok((usize::from(*cached), [state.len(), history.len(), 0]))
+    }
+}
+/// State vector `k` of a chat's layer `li` (the order tp_swap_state's pieces name).
+fn state_vector<'s, 'a>(chat: &'s mut NextSession<'a, '_>, li: usize, k: usize) -> Result<&'s mut DeviceVector<'a>> {
+    if li % 4 == 3 {
+        let (vectors, _, _) = chat.qsa_state[li].as_mut().ok_or("QSA state missing for the handoff")?.handoff()?;
+        vectors.into_iter().nth(k).ok_or_else(|| "QSA handoff vector missing".into())
+    } else {
+        let (state, history, _) = chat.gdn_state[li].as_mut().ok_or("GDN state missing for the handoff")?.handoff();
+        Ok(if k == 0 { state } else { history })
+    }
 }
 /// A handoff message's length field, refused above `limit` (the receiving chats' whole state)
 /// before anything is allocated.
@@ -596,6 +643,29 @@ mod tests {
         assert_eq!(handoff_words(3, 128, 4 * 128).unwrap(), 384);
         assert!(handoff_words(5, 128, 4 * 128).is_err());
         assert!(handoff_words(1 << 62, 128, 4 * 128).is_err(), "the row count's product must not wrap");
+    }
+    /// A state vector crosses as whole slots and one shorter last piece, in order; none when empty.
+    #[test]
+    fn handoff_pieces_cover_each_vector_once_in_order() {
+        let mut out = Vec::new();
+        pieces(&mut out, (0, 3, 1), 10, 4);
+        pieces(&mut out, (0, 3, 2), 0, 4);
+        pieces(&mut out, (1, 4, 0), 8, 4);
+        let got: Vec<_> = out.iter().map(|p| (p.at, p.from, p.words)).collect();
+        assert_eq!(got, [((0, 3, 1), 0, 4), ((0, 3, 1), 4, 4), ((0, 3, 1), 8, 2), ((1, 4, 0), 0, 4), ((1, 4, 0), 4, 4)]);
+    }
+    /// A long prompt's tail (rows under half the tile, the chat owes a handoff) stays a pipeline
+    /// tile; a short prompt and every verify pass stay split; one short new chat splits the pass.
+    #[test]
+    fn prompt_tail_of_a_tiled_prompt_stays_a_pipeline_tile() {
+        assert!(tile_pass(false, 8192, [(8192, false)]));
+        assert!(tile_pass(false, 8192, [(4096, false)]));
+        assert!(!tile_pass(false, 8192, [(4095, false)]));
+        for rows in [1, 16, 17, 63, 4095] { assert!(tile_pass(false, 8192, [(rows, true)]), "{rows}"); }
+        assert!(!tile_pass(true, 8192, [(8192, false)]));
+        assert!(!tile_pass(true, 8192, [(4, true)]));
+        assert!(tile_pass(false, 8192, [(32, true), (8192, false)]));
+        assert!(!tile_pass(false, 8192, [(32, true), (100, false)]));
     }
     /// Rank 0 accepts rank 1's VADE_W2_TP_PROJ level only when it equals its own.
     #[test]
