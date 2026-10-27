@@ -1344,10 +1344,11 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                         stats.target_ms, stats.draft_ms, stats.guard_fires, stats.guarded,
                         job.generation.draft_memory_bytes(), draft_bank.memory_bytes());
                     if stats.model_proposals > 0 {
-                        eprintln!("draft_cost id={} proposals={} proposal_ms={:.3} ms_per_proposal={:.3} catchup_ms={:.3} width_cycles={:?} target_costs_ms={:?} depth_trials={:?} depth_hits={:?} band_trials={:?} band_hits={:?}",
+                        eprintln!("draft_cost id={} proposals={} proposal_ms={:.3} ms_per_proposal={:.3} catchup_ms={:.3} width_cycles={:?} target_costs_ms={:?} depth_trials={:?} depth_hits={:?} band_trials={:?} band_hits={:?} plan={:016x} draft_price={}",
                             job.id, stats.model_proposals, stats.model_proposal_ms,
                             stats.model_proposal_ms / stats.model_proposals as f64, stats.model_catchup_ms, stats.widths,
-                            stats.costs_ms, stats.depth_trials[0], stats.depth_hits[0], stats.model_band_trials, stats.model_band_hits);
+                            stats.costs_ms, stats.depth_trials[0], stats.depth_hits[0], stats.model_band_trials, stats.model_band_hits,
+                            stats.plan_hash, stats.draft_price);
                     }
                 }
             }

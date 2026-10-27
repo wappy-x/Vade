@@ -33,6 +33,16 @@ Changes that are merged but not yet released are under Unreleased.
 
 ### Engine
 
+- **A chat alone drafts the same depths every run.** The depth chooser no
+  longer reads the time of single passes. On FP4-Local it prices verify rows
+  with its cost prior and a draft price. Each chat measures the draft price
+  over its first 16 cycles, rounds it to a power of two and keeps it for the
+  rest of the chat. The same request on the same setup now drafts the same
+  depth in each cycle every run, so its speed varies less from one server
+  start to the next. Token IDs do not change, because verification selects
+  every token. The `draft_cost` server log line now also shows `plan` (a hash
+  of the rows of each cycle) and `draft_price`.
+
 - **The tensor split is the only two-Spark path, and the engine chooses each
   path itself.** No `VADE_W2_*` switch remains: `VADE_W2_PATH`, `VADE_W2_TP`,
   `VADE_W2_TP_WIRE`, `VADE_W2_TP_PROJ`, `VADE_W2_TP_HEAD`, `VADE_W2_PP`,

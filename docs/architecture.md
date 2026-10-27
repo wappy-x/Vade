@@ -496,9 +496,13 @@ top of that, the engine has three behaviors of its own
 - **Adaptive depth.** For a chat running alone whose request names no
   depth (or names depth 3), the engine picks each cycle's depth to
   maximize the expected committed tokens per millisecond, from that
-  request's acceptance so far and the measured costs
+  request's acceptance so far and the costs
   ([`draft.rs`](../engine/crates/engine/src/draft.rs)), up to a ceiling of 7
-  tokens, on one Spark, on the tensor split and on the layer chain.
+  tokens, on one Spark, on the tensor split and on the layer chain. On
+  FP4-Local the costs are the verify cost prior and a draft price. Each chat
+  measures that price over its first 16 cycles, rounds it to a power of two
+  and keeps it, so the same request on the same setup drafts the same depths
+  every run.
 - **Cohort drafting.** With several chats at once, the release server starts
   in a guarded mode that drafts for groups of up to eight chats, on one Spark
   and on the two-Spark tensor split, keeping each step's verify rows within the

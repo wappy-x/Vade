@@ -214,6 +214,10 @@ impl Config {
     }
 }
 
+/// Prior ms of one proposed model token at the cost prior's own scale (cost_scale 1.0).
+const TOKEN_PRIOR_MS: f64 = 4.0;
+/// The native chooser's draft price reads this many verify scales and draft token times.
+const PRICE_WINDOW: usize = 16;
 struct Control {
     rates: [[f64; 15]; 3],
     guard_rate: [f64; 3],
@@ -221,11 +225,30 @@ struct Control {
     draft_ms: f64,
     model_token_ms: Option<f64>,
     learn_ms: f64,
+    /// This request's first verify scales and draft ms per proposed token, then their price.
+    price_scales: Vec<f64>, price_tokens: Vec<f64>, price: Option<f64>,
 }
 impl Control {
     fn new() -> Self {
         Self { rates: [[0.25; 15], [0.90; 15], [0.50; 15]], guard_rate: [0.0; 3],
-            cost_scale: 1.0, draft_ms: 0.0, model_token_ms: None, learn_ms: 0.0 }
+            cost_scale: 1.0, draft_ms: 0.0, model_token_ms: None, learn_ms: 0.0,
+            price_scales: Vec::new(), price_tokens: Vec::new(), price: None }
+    }
+    /// The native chooser's ms for one proposed token, in units of the cost prior. It is the
+    /// prior's TOKEN_PRIOR_MS until the request has PRICE_WINDOW samples of each kind; then
+    /// it is the ratio of their medians as the nearest power of two, fixed for the request.
+    /// Run-to-run noise (a few percent) moves it only at a level boundary, so the width
+    /// follows the request's verified ids.
+    fn draft_price(&self) -> f64 { self.price.unwrap_or(TOKEN_PRIOR_MS) }
+    fn observe_price(&mut self, scale: Option<f64>, token_ms: Option<f64>) {
+        if self.price.is_some() { return; }
+        for (window, value) in [(&mut self.price_scales, scale), (&mut self.price_tokens, token_ms)] {
+            if let Some(value) = value.filter(|v| v.is_finite() && *v > 0.0 && window.len() < PRICE_WINDOW) { window.push(value); }
+        }
+        if self.price_scales.len() < PRICE_WINDOW || self.price_tokens.len() < PRICE_WINDOW { return; }
+        let median = |values: &[f64]| { let mut v = values.to_vec(); v.sort_by(f64::total_cmp); v[v.len() / 2] };
+        let ratio = median(&self.price_tokens) / median(&self.price_scales);
+        self.price = Some(if ratio.is_finite() && ratio > 0.0 { 2f64.powi(ratio.log2().round() as i32) } else { TOKEN_PRIOR_MS });
     }
     fn cost(&self, rows: usize, prior: CostCurve) -> f64 {
         self.cost_scale * prior.ms(rows)
@@ -257,6 +280,7 @@ impl Control {
         }
     }
     fn observe_cost(&mut self, rows: usize, target_ms: f64, learn_ms: f64, prior: CostCurve) {
+        self.observe_price(Some(target_ms/prior.ms(rows)), None);
         self.cost_scale = 0.75*self.cost_scale + 0.25*target_ms.max(f64::EPSILON)/prior.ms(rows);
         self.learn_ms = 0.75*self.learn_ms + 0.25*learn_ms / rows as f64;
     }
@@ -337,6 +361,11 @@ pub struct Stats {
     pub model_proposals: usize,
     /// Useful target calls by row count; index zero is plain decoding.
     pub widths: [usize; 16],
+    /// A hash (FNV-1a steps from zero) of the row count of each of those calls, in order:
+    /// equal plans hash equal.
+    pub plan_hash: u64,
+    /// The native chooser's draft price at the end (Control::draft_price).
+    pub draft_price: f64,
     pub recycle_ms: f64,
     pub target_ms: f64,
     /// Current target cost estimates at widths 1/2/4/8/16, including interpolation.
@@ -477,13 +506,18 @@ impl Speculator {
     }
     /// VADE_MTP_ADAPT's width: expected committed tokens per ms, with each depth's survival
     /// from this request's cumulative model-draft trials and hits (Beta prior: 4 trials at
-    /// the target's recent survival, else 0.8), the target's row costs (measured, else prior x the measured scale) and the
-    /// measured draft ms per proposed token. Cumulative counts keep one rejection from
-    /// collapsing the depth. `optimistic` takes that depth's survival at its upper bound
-    /// (two posterior standard deviations above the mean).
+    /// the target's recent survival, else 0.8), the target's row costs and the draft ms per
+    /// proposed token. Cumulative counts keep one rejection from collapsing the depth.
+    /// `optimistic` takes that depth's survival at its upper bound (two posterior standard
+    /// deviations above the mean). With measured row costs (the target's model_verify_ms),
+    /// rows cost those (else prior x the measured scale) plus the measured draft ms. Without
+    /// them, rows cost the prior plus Control::draft_price: the top two widths differ by
+    /// about 1 % or less, so a few percent of timing noise would pick a different width and
+    /// shift every later cycle; the ids, not the timing, now decide the plan.
     fn native_rows(&self, available: usize, measured: &[Option<f64>], prior: &[Option<f64>], optimistic: Option<usize>) -> usize {
         let (trials, hits) = (&self.stats.depth_trials[0], &self.stats.depth_hits[0]);
-        let token_ms = self.control.model_token_ms.unwrap_or(4.0);
+        let token_ms = self.control.model_token_ms.unwrap_or(TOKEN_PRIOR_MS);
+        let priced = measured.iter().any(Option::is_some);
         let (mut best, mut score, mut survival, mut expected) = (1, 0.0, 1.0, 1.0);
         for rows in 1..=available.min(16) {
             if rows > 1 {
@@ -494,8 +528,10 @@ impl Speculator {
                 } else { mean };
                 expected += survival;
             }
-            let cost = measured.get(rows).copied().flatten().unwrap_or_else(|| self.control.cost(rows, self.config.costs));
-            let rate = expected / (cost + token_ms * (rows - 1) as f64);
+            let rate = if priced {
+                let cost = measured.get(rows).copied().flatten().unwrap_or_else(|| self.control.cost(rows, self.config.costs));
+                expected / (cost + token_ms * (rows - 1) as f64)
+            } else { expected / (self.config.costs.ms(rows) + self.control.draft_price() * (rows - 1) as f64) };
             if rate > score { best = rows; score = rate; }
         }
         best
@@ -517,13 +553,13 @@ impl Speculator {
             if self.done { return Err("draft has no available rows".into()); }
             let cap = row_cap.min(self.config.max_rows).min(self.config.max_new-self.tokens().len());
             if target.adaptive_model_depth() && cap > 1 {
-                // Expected committed tokens per ms over this request's survival rates, the
-                // target's row-cost prior (scale learned from measured passes) and the measured
-                // draft ms per proposed token; every 16th cycle explores one row deeper.
+                // Expected committed tokens per ms over this request's survival rates and the
+                // row costs (native_rows: measured passes where the target has them, else the
+                // prior and the guarded draft price); every 16th cycle explores one row deeper.
                 if let Some(costs) = target.model_draft_costs() { self.config.costs = costs; }
                 if self.control.model_token_ms.is_none() {
                     self.control.rates[0] = [0.8; 15];
-                    self.control.model_token_ms = Some(4.0);
+                    self.control.model_token_ms = Some(TOKEN_PRIOR_MS);
                 }
                 let available = cap.min(target.model_draft_width() + 1);
                 let measured: Vec<_> = (0..=available).map(|rows| target.model_verify_ms(rows)).collect();
@@ -640,6 +676,7 @@ impl Speculator {
         // steady-state proposal cost used to choose every subsequent width.
         if let Some(ms) = self.control.model_token_ms.as_mut().filter(|_| !proposal.tokens.is_empty()) {
             *ms = 0.75 * *ms + 0.25 * proposal.proposal_ms / proposal.tokens.len() as f64;
+            self.control.observe_price(None, Some(proposal.proposal_ms / proposal.tokens.len() as f64));
         }
         let mut guesses = proposal.tokens;
         if let Some(n) = guesses.iter().position(|&t| !allowed(t)) { guesses.truncate(n); }
@@ -851,6 +888,8 @@ impl Speculator {
             self.next = next;
             self.stats.cycles += 1;
             self.stats.widths[plan.input.len()-1] += 1;
+            self.stats.plan_hash = (self.stats.plan_hash ^ plan.input.len() as u64).wrapping_mul(0x100000001b3);
+            self.stats.draft_price = self.control.draft_price();
             self.stats.rows += plan.input.len();
             self.stats.proposed += plan.input.len()-1;
             self.stats.accepted += committed-1;
@@ -1230,7 +1269,7 @@ mod tests {
         spec.control.model_token_ms = Some(4.02);
         spec.stats.depth_trials[0][..3].copy_from_slice(&[479, 163, 15]);
         spec.stats.depth_hits[0][..3].copy_from_slice(&[301, 95, 8]);
-        // The linear byte-ledger prior at its learned scale ties 2 and 3 rows and picks 2.
+        // Before any measured pass, the linear byte-ledger prior and the prior draft price pick 2.
         spec.config.costs = CostCurve([22.598, 26.919, 35.562, 52.849, 87.421]);
         spec.control.cost_scale = 1.7;
         assert_eq!(spec.native_rows(4, &[], &[], None), 2);
@@ -1251,6 +1290,82 @@ mod tests {
         spec.stats.depth_trials[0][..3].copy_from_slice(&[435, 413, 382]);
         spec.stats.depth_hits[0][..3].copy_from_slice(&[413, 386, 357]);
         assert_eq!(spec.native_rows(4, &measured, &[], None), 4);
+    }
+    /// One chat on a native adaptive target without measured row costs (FP4-Local's shape).
+    /// The drafter guesses the reference, wrong at fixed positions, so survival depends on ids.
+    struct Adaptive { history: Vec<u32>, reference: Vec<u32>, depth: usize, draft_ms: f64 }
+    impl Target for Adaptive {
+        fn checkpoint(&self) -> usize { self.history.len() }
+        fn truncate(&mut self, p: usize) -> Result<()> { self.history.truncate(p); Ok(()) }
+        fn step(&mut self, t: u32) -> Result<Vec<f32>> { self.history.push(t); Ok(vec![0.0; 64]) }
+        fn native_draft_policy(&self) -> bool { true } fn adaptive_model_depth(&self) -> bool { true }
+        fn model_draft_width(&self) -> usize { 7 } fn limit_model_depth(&mut self, depth: usize) { self.depth = depth; }
+        fn model_draft_costs(&self) -> Option<CostCurve> { Some(CostCurve([46.6, 51.3, 60.8, 79.9, 118.0])) }
+        fn propose_model(&mut self, history: &[u32], _next: u32, limit: usize) -> Result<Option<ModelProposal>> {
+            // Misses are denser in the first half, so the chooser moves between widths.
+            let tokens: Vec<u32> = (history.len() + 1..history.len() + 1 + limit.min(self.depth)).map(|p| {
+                let miss = (p * 7919) % if p < 160 { 5 } else { 13 } == 0;
+                self.reference[p] ^ u32::from(miss)
+            }).collect();
+            Ok(Some(ModelProposal { proposal_ms: self.draft_ms * tokens.len() as f64, tokens, catchup_ms: 0.0 }))
+        }
+    }
+    /// Runs one 256-token request the way the scheduler does and returns the rows of each
+    /// cycle; `draft_ms` and `verify_ms` give each cycle's measured times.
+    fn adaptive_plan(draft_ms: impl Fn(usize) -> f64, verify_ms: impl Fn(usize, usize) -> f64) -> (Vec<usize>, Stats) {
+        let (reference, prompt): (Vec<u32>, _) = ((0..400u32).map(|i| (i * 13 + i / 7) % 31 * 2).collect(), 24);
+        let mut target = Adaptive { history: reference[..prompt].to_vec(), reference: reference.clone(), depth: 7, draft_ms: 0.0 };
+        let mut spec = Speculator::from_selected(&reference[..prompt], prompt, reference[prompt], 64, Config::strict(256), Sampling::greedy()).unwrap();
+        let mut rows = Vec::new();
+        while !spec.is_done() {
+            target.draft_ms = draft_ms(rows.len());
+            let mut plan = spec.prepare_model(&mut target, 16, None, |_| false, |_| true).unwrap();
+            let entry = target.history.len(); target.history.extend_from_slice(&plan.input);
+            plan.record_target_ms(verify_ms(rows.len(), plan.input.len())); rows.push(plan.input.len());
+            let output: Vec<u32> = (1..=plan.input.len()).map(|i| reference[entry + i]).collect();
+            spec.finish_greedy(&mut target, plan, &output, |_| false).unwrap();
+        }
+        assert_eq!(spec.tokens(), &reference[prompt..prompt + 256]);
+        (rows, std::mem::take(&mut spec.stats))
+    }
+    #[test]
+    fn native_width_follows_the_ids_not_one_pass_timing() {
+        // Two-Spark C1 shape (10-27 cards): verify passes at 0.6 x the prior, 1.55 ms per
+        // proposed token; the measured price 2.6 locks at level 2 after the window.
+        let prior = CostCurve([46.6, 51.3, 60.8, 79.9, 118.0]);
+        let (calm, stats) = adaptive_plan(|_| 1.55, |_, rows| 0.6 * prior.ms(rows));
+        assert_eq!(stats.draft_price, 2.0);
+        assert!(calm.iter().any(|&r| r != calm[0]), "the chooser must still move with survival: {calm:?}");
+        // The same request, same ids: the plan sequence is the same every time.
+        assert_eq!(adaptive_plan(|_| 1.55, |_, rows| 0.6 * prior.ms(rows)).0, calm);
+        // A single stalled pass or draft early in the chat does not change any later width.
+        assert_eq!(adaptive_plan(|c| if c == 2 { 40.0 } else { 1.55 }, |_, rows| 0.6 * prior.ms(rows)).0, calm);
+        assert_eq!(adaptive_plan(|_| 1.55, |c, rows| if c == 1 { 600.0 } else { 0.6 * prior.ms(rows) }).0, calm);
+        // Run-to-run jitter of a few percent on every sample (the 10-27 cards: draft ms per
+        // token 1.41 to 1.56, verify scale 0.59 to 0.64) leaves the plan unchanged too.
+        let (jitter, other) = adaptive_plan(|c| [1.41, 1.56, 1.49][c % 3], |c, rows| [0.59, 0.64, 0.61, 0.6][c % 4] * prior.ms(rows));
+        assert_eq!((jitter, other.plan_hash, other.widths), (calm, stats.plan_hash, stats.widths));
+    }
+    #[test]
+    fn draft_price_locks_one_level_after_its_window() {
+        let fill = |token_ms: &dyn Fn(usize) -> f64| { let mut control = Control::new(); for i in 0..PRICE_WINDOW {
+            assert_eq!(control.draft_price(), TOKEN_PRIOR_MS);
+            control.observe_price(Some(0.6), None); control.observe_price(None, Some(token_ms(i)));
+        } control };
+        // Measured 2.6 and 2.3 per prior ms (C1, structured) share level 2; 3.3 takes level 4.
+        assert_eq!(fill(&|_| 1.55).draft_price(), 2.0);
+        assert_eq!(fill(&|i| if i % 2 == 0 { 1.4 } else { 1.38 }).draft_price(), 2.0);
+        assert_eq!(fill(&|i| if i == 0 { 1.55 } else { 2.0 }).draft_price(), 4.0);
+        // One outlier among the window's samples does not reach the price.
+        assert_eq!(fill(&|i| if i == 3 { 500.0 } else { 1.55 }).draft_price(), 2.0);
+        // Far slower or faster drafters take their own power of two; the level then holds.
+        let mut slow = fill(&|_| 150.0); assert_eq!(slow.draft_price(), 256.0);
+        slow.observe_price(Some(0.01), Some(0.01)); assert_eq!(slow.draft_price(), 256.0);
+        assert_eq!(fill(&|_| 0.3).draft_price(), 0.5);
+        // Pure plain cycles (no proposals) never leave the prior.
+        let mut plain = Control::new();
+        for _ in 0..4 * PRICE_WINDOW { plain.observe_price(Some(0.6), None); }
+        assert_eq!(plain.draft_price(), TOKEN_PRIOR_MS);
     }
     #[test]
     fn partial_failure_rolls_back_cycle_and_preserves_both_errors() {
