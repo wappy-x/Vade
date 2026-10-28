@@ -37,6 +37,10 @@ Changes that are merged but not yet released are under Unreleased.
 
 ### Repository tools
 
+- The README states the engine's scope and limits. Contribution and security
+  guides explain the proof and report steps. Issue forms ask for checkpoint
+  details and token IDs. Agent rules now state the same proof and writing
+  rules. The benchmark page adds one-Spark results and repeat commands.
 - `vade-tools bench-docs <cards-dir> <repo-dir>` refreshes the marked benchmark
   tables from the newest measured main revision. It keeps the raw card values,
   measurement times and revision in both pages. It resolves drafting from the

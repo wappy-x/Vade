@@ -16,6 +16,25 @@ Latest release: [v0.1.0](https://github.com/wappy-x/vade/releases/tag/v0.1.0),
 2026-10-24. The [changelog](CHANGELOG.md) lists what has changed since, under
 Unreleased.
 
+## What it is
+
+Vade is an exact inference engine for NVIDIA FP4-Local checkpoints on DGX
+Spark. It runs on one Spark or splits the work across two Sparks. The same
+request must give identical token IDs with drafting on or off. The
+[exactness section](#exactness) states the rule and the checks we have run.
+
+The engine and its GPU kernels use Rust and the standard library only.
+Vade has no third-party Rust dependencies and needs no Python.
+
+## What it is not
+
+Vade does not train models. It is not a general server for GPUs from several
+vendors. It does not yet support every NVIDIA FP4-Local checkpoint; the
+supported model is listed above.
+
+The engine is not a chat UI. The separate harness supplies terminal chat
+and the coding agent that use the engine's API.
+
 <picture>
   <source media="(prefers-reduced-motion: reduce) and (prefers-color-scheme: dark)" srcset="docs/assets/vade-banner-dark-static.svg">
   <source media="(prefers-reduced-motion: reduce)" srcset="docs/assets/vade-banner-light-static.svg">
@@ -195,10 +214,11 @@ and how to change it. The ones you meet first:
 
 ## Exactness
 
-The rule: the same request on the same setup (build, checkpoint, number of
-Sparks and settings) gives identical token IDs on every run and every Spark.
-That holds whether the request runs alone or batched, whether or not it hits
-the cache, and, with greedy decoding, with drafting ON or OFF.
+The rule: the same request on the same build, checkpoint and settings gives
+identical token IDs on every run and every Spark. Supported Spark counts
+must agree too. That holds whether the request runs alone, batched or
+chunked, whether or not it hits the cache, and, with greedy decoding, with
+drafting ON or OFF.
 
 `vade verify` checks the drafting part on your own engine. A pass prints
 `IDENTICAL: 20/20 runs, 1 machine, N tokens`, where N is the reply's length in

@@ -5,22 +5,21 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to report this. If it's a security problem, please don't file it here: use **Security → Report a vulnerability** instead (see SECURITY.md).
+        For a security problem, use **Security → Report a vulnerability** instead of this form. See SECURITY.md.
 
-        Before you paste anything, remove API keys, private prompts, machine addresses and user names.
+        Remove credentials, private prompts and connection details before you attach commands or logs.
   - type: input
     id: version
     attributes:
       label: Vade version
-      description: The output of `vade --version`. If you built from source, add the commit (`git rev-parse --short HEAD`).
-      placeholder: vade 0.1.0, commit abc1234
+      description: The output of `vade --version`. If you built from source, add the full commit ID from `git rev-parse HEAD`.
     validations:
       required: true
   - type: input
     id: model
     attributes:
-      label: Model
-      description: The model the engine was serving, as `vade status` shows it.
+      label: Checkpoint and revision
+      description: Give the checkpoint name and revision or file hashes. Include the tokenizer revision if it differs.
       placeholder: nvidia/Qwen3.8-Flash-Next-FP4-Local
     validations:
       required: true
@@ -31,7 +30,7 @@ body:
       options:
         - "1"
         - "2"
-        - "3 or more"
+        - More (give the exact count below)
         - None, the problem happens on the controller alone
     validations:
       required: true
@@ -49,33 +48,40 @@ body:
     id: command
     attributes:
       label: Command you ran
-      description: The exact command, with every flag. Include any `VADE_` environment variables you set.
+      description: Give the exact command and every flag. Add nonsecret environment settings and the request body. Replace private values with clear placeholders.
       render: shell
     validations:
       required: true
   - type: textarea
-    id: what-happened
+    id: expected
     attributes:
-      label: What happened, and what you expected
-      description: A sentence or two is fine.
+      label: What you expected
+      description: State the result you expected from this command or request.
+    validations:
+      required: true
+  - type: textarea
+    id: seen
+    attributes:
+      label: What you saw
+      description: State the result you got. Say whether it repeats and give the exact Spark count if it is not listed above.
     validations:
       required: true
   - type: textarea
     id: error
     attributes:
-      label: Full error text
-      description: Paste the whole message as text, not a screenshot. `vade logs` shows the engine's side.
+      label: Error text and logs
+      description: Paste relevant text from the error or `vade logs`. If there is no error, say so.
       render: text
     validations:
       required: true
   - type: textarea
-    id: verify
+    id: ids
     attributes:
-      label: vade verify output
-      description: Needed when the problem is about wrong answers, or answers that change from run to run. Run `vade verify` against the same engine and paste everything it prints.
+      label: Token IDs and exactness receipt
+      description: For changing or wrong answers, attach the expected and seen token IDs, or the `vade verify` receipt. Include sampling, drafting and cache settings. Say which check is missing if you cannot collect it. Do not attach private prompt text.
       render: text
   - type: textarea
     id: extra
     attributes:
       label: Anything else
-      description: Whether you used the prebuilt launcher bundle, your controller's operating system, changes to the default config, or a receipt that shows the problem.
+      description: Give the operating system, launcher source and any other settings needed to reproduce this bug. For more Sparks than the options above, give the exact count.

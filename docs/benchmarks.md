@@ -127,6 +127,141 @@ prompt gave the same token IDs, and they match the morning runs.
 | home-1 + home-2, final | 10.24 | 21.06 |
 | home-1 + home-2, morning | 10.10 | 21.54 |
 
+### One Spark beside the final pair
+
+The one-Spark cards below ran on `8a349e9ae50b7ad284ccd427e165378c6644490a`
+after the final pair cards. That commit changed docs only, so its engine tree
+is the same as `09e1fc4`. The one-Spark ON and OFF cards share one server
+start. Their context, output, prompts and request counts match the final
+pair recipe above. Thinking was OFF and the cache was off.
+
+| Setup | Drafting | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| One DGX Spark, `8a349e9` | ON | 42.243 | 80.571 | 100.151 | 64.229 | 143.496 | 169.937 | 3.798 |
+| Two DGX Sparks, final `09e1fc4` | ON | 54.088 | 100.616 | 129.586 | 79.006 | 165.194 | 218.787 | 2.190 |
+| One DGX Spark, `8a349e9` | OFF | 27.917 | 27.777 | 28.000 | 27.175 | 85.626 | 136.173 | 3.758 |
+| Two DGX Sparks, final `09e1fc4` | OFF | 35.229 | 35.384 | 35.144 | 33.761 | 82.601 | 123.883 | 2.166 |
+
+Rates are card medians in tok/s. C1 through C8 count all chats together.
+These are separate cards, not a controlled speed comparison on the same
+hardware. The one-Spark source cards are
+`2026-10-28_0011_qwen3.8-flash-next-nvfp4_local-1spark_8a349e9-drafting-on-thinking-off-onespark`
+and
+`2026-10-28_0024_qwen3.8-flash-next-nvfp4_local-1spark_8a349e9-drafting-off-thinking-off-onespark`.
+Their card JSON SHA256 values are
+`deda98b35323209ee9919712e0f5dec8c33c88e8dbda1fcbfa62a11e517e9981`
+and `24e785936f009a02a395717cbf1305c4828ac3eecd9be25749947af4291b7f7e`,
+respectively. These cards are not yet in the repository.
+
+**The token IDs match.** The saved comparison found identical IDs in all
+66 responses, one-Spark ON against OFF, and each against both final
+two-Spark cards. The one-Spark cards also match the one-Spark cards from
+2026-10-24. This is a separate result from the speed table and from the
+cards' basic output checks. It covers these requests, not every prompt.
+
+### Reproduce this table
+
+Use the build, checkpoint and request recipe named in the source card.
+Install it as [INSTALL.md](../INSTALL.md) shows. Use the same private
+configuration for every command. Set `VADE_API_URL` to the endpoint that
+`vade status` reports. Keep model files, configuration and receipts outside
+the source tree.
+
+From the controller, start the pair with the measured limits:
+
+```sh
+vade up --sparks 2 --context 32768 --output 8192 --mtp 3
+vade status --json > status-two-sparks.json
+vade verify -n 3 --prompt short --max-tokens 256 --receipt ids-two-short.json
+vade verify -n 3 --prompt 2k --max-tokens 256 --receipt ids-two-2k.json
+vade verify -n 3 --prompt 8k --max-tokens 256 --receipt ids-two-8k.json
+```
+
+Each `verify` command must report `IDENTICAL` and exit successfully. It checks
+the generated token IDs with drafting ON and OFF on the running engine.
+Keep its receipt with the timing results. A missing ID or an incomplete
+request is not an exactness pass. For independent engines on separate
+Sparks, use the [second-engine check](../cli/README.md#compare-with-a-second-engine).
+The ranks of a pair are one engine, so they do not count as that comparison.
+
+The published speed table uses a pinned card client and RigMark's prompt
+corpus. Its recipe is five natural-stop samples each for prose, code and
+structured output, with an 8192-token cap; three cold/replay pairs at 8192
+prompt tokens; and three rounds at each of C1, C2, C4 and C8, with a
+256-token cap. Its seed is 20260905. The cards name upstream RigMark commit
+`52c29c3fc1d741b9aef8895b23372aafa5dc6161`. Chat requests use temperature 0,
+top-p 1, top-k 0, repetition penalty 1, presence and frequency penalties 0,
+cache off and thinking off. ON omits `draft`; OFF sends `"draft":"plain"`.
+Prefill uses token IDs at `/v1/completions`, with `draft` set to `plain`,
+`max_tokens` set to 8 and `ignore_eos` true. It uses the same greedy fields
+and a fresh cache salt for each cold/replay pair.
+
+The optional external RigMark tool can run the same timed cells. Its prompt
+corpus, request counts and timing formulas match the card recipe. Its
+prefill requests differ: public RigMark omits top-p, top-k, penalties and
+`draft`, which the card client sets explicitly. `--extra-body` affects chat
+requests only. It cannot change that prefill body. See the
+[pinned request code](https://github.com/alexellis/rigmark/blob/52c29c3fc1d741b9aef8895b23372aafa5dc6161/bench.py).
+
+Use a separate checkout and set `RIGMARK_DIR` to it. Run the client on the
+HTTP-serving Spark and set `VADE_API_URL` to its local endpoint. This
+matches the client placement of the recorded cards.
+
+```sh
+cd "$RIGMARK_DIR"
+git checkout --detach 52c29c3fc1d741b9aef8895b23372aafa5dc6161
+./rigmark configure
+```
+
+Set `metadata.json` to the actual build, checkpoint and hardware. Set
+`context_limit` to 32768. The cards use checkpoint revision
+`b9ce18a6887e18c089fdea8509a33e63429a3300` and identity
+`d99ccbed3a9db8a2f099eca98e17c0bc3a2ebe84df95852f3b07c87c20a32716`.
+Then run ON and OFF on the same server start. This pinned RigMark version
+calls the command `run`.
+
+```sh
+./rigmark run --base-url "$VADE_API_URL" --model qwen3.8-flash-next-fp4-local \
+  --label vade-two-served --comparison-id 2026-10-11-vade-rigmark-compat-thinking-off \
+  --metadata metadata.json --runs 5 --decode-tokens 8192 \
+  --prefill-depths 8192 --prefill-runs 3 --concurrency 1,2,4,8 \
+  --concurrency-runs 3 --concurrency-tokens 256 --concurrency-workload code \
+  --seed 20260905 --output rigmark-two-served.json \
+  --extra-body '{"cache":false,"chat_template_kwargs":{"enable_thinking":false},"top_k":0,"repetition_penalty":1,"presence_penalty":0,"frequency_penalty":0}'
+./rigmark run --base-url "$VADE_API_URL" --model qwen3.8-flash-next-fp4-local \
+  --label vade-two-plain --comparison-id 2026-10-11-vade-rigmark-compat-thinking-off \
+  --metadata metadata.json --runs 5 --decode-tokens 8192 \
+  --prefill-depths 8192 --prefill-runs 3 --concurrency 1,2,4,8 \
+  --concurrency-runs 3 --concurrency-tokens 256 --concurrency-workload code \
+  --seed 20260905 --output rigmark-two-plain.json \
+  --extra-body '{"cache":false,"chat_template_kwargs":{"enable_thinking":false},"draft":"plain","top_k":0,"repetition_penalty":1,"presence_penalty":0,"frequency_penalty":0}'
+```
+
+**Exact card replay is not yet available from this repository.** The pinned
+card client and its saved-card ID comparator are private measurement tools.
+The public [RigMark instructions](#run-rigmark-against-vade) give the workload
+settings. They do not supply that client or its token-ID comparison. A full
+replay must save every request and token-ID array, match requests across
+ON/OFF and Spark counts, and compare every ID in order. Saving IDs alone is
+not a match check.
+
+The Rust CLI can run this separate timing check on the same server:
+
+```sh
+vade bench --concurrency 1,2,4,8 --max-tokens 256 --repeats 3 \
+  --output timing-two-served.json
+vade bench --draft plain --concurrency 1,2,4,8 --max-tokens 256 --repeats 3 \
+  --output timing-two-plain.json
+vade down
+```
+
+These commands use the CLI's bundled prompt and fixed output lengths. They
+do not reproduce the card's prose, code or structured cells. For the
+one-Spark check, repeat in a separate receipt folder with
+`vade up --sparks 1 --context 32768 --output 8192 --mtp 3`. Keep the same
+checkpoint and request settings. Never label these CLI timings as a replay
+of the table.
+
 <a id="current-2026-10-27-main-12142bb-home-dgx-sparks"></a>
 
 ## Previous (2026-10-27 morning, main 12142bb, home DGX Sparks)
@@ -857,8 +992,8 @@ inside `chat_template_kwargs`.
 **What "DO NOT HEADLINE" means.** RigMark checks each of the 15 single-stream
 samples: code and prose need visible answer text and a normal stop; structured
 output needs the requested JSON values. If any sample fails, the card header
-reads `▲ n/15 BASIC OUTPUT GATES PASSED — DO NOT HEADLINE`, and you should not
-quote its rates as a result. On 2026-10-24 a RigMark run with its default
+marks the result `DO NOT HEADLINE`, and you should not quote its rates as a
+result. On 2026-10-24 a RigMark run with its default
 settings against a two-VM pair scored **6/15**: code 0/5 and prose 1/5 hit the
 cap while still reasoning, and structured passed 5/5. With thinking off
 through `--extra-body`, the cards above pass **15/15**. These checks, which

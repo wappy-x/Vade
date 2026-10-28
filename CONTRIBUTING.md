@@ -79,6 +79,25 @@ These are host checks. Device-only tests are skipped when there is no GPU, so
 a host PASS does not prove GPU correctness, exactness, memory use or
 performance.
 
+### Check the committed revision
+
+Commit the change before its final checks. Maintainers run the private
+`ci-local.sh` tool against that exact commit:
+
+```sh
+ci-local.sh "$WORKTREE" "$COMMIT"
+```
+
+`WORKTREE` is the source checkout. `COMMIT` is its full commit ID. The tool
+checks out that commit in a separate worktree and saves the host test logs.
+It is part of the maintainers' private lab, so it is not in this repository.
+Contributors can run the commands on this page and the full host checks in
+[AGENTS.md](AGENTS.md). Keep the logs with the commit ID in the PR.
+
+A `ci-local` pass is part of the proof. It does not replace the checks in
+[CI](.github/workflows/ci.yml) or the Spark gate below. If the source changes
+after a check, run the affected checks on the new commit.
+
 ### Build the CLI
 
 To build the `vade` command yourself, also from `engine/`:
@@ -97,7 +116,8 @@ start an engine. To install from source on a Spark, follow
   job. Do not use or require Python.
 - **Plain writing.** Use ASD-STE100 Simplified Technical English and American
   spelling in docs, help, errors and reports. Use short sentences and active
-  voice. Give each sentence one main idea.
+  voice. Give each sentence one main idea. Use plain words and no em dashes.
+  Give each numerical claim a source card, log or command output.
 - **No third-party dependencies.** Use only the Rust standard library and the
   first-party path crates already here. Registry, git, external path, dev and
   build dependencies all count.
@@ -107,6 +127,9 @@ start an engine. To install from source on a Spark, follow
 - **Model-generic behavior.** Derive it from the checkpoint configuration and
   tensor metadata, with no dispatch on the model name and no model-specific
   tuning. See [adding a model](docs/adding-a-model.md).
+- **No arithmetic-order switches.** Use one execution path for each topology.
+  Do not add a flag or environment variable that selects a different order
+  for the math. A speed claim does not make such a switch acceptable.
 - **Formatting by hand.** The code is formatted densely on purpose, so match
   the surrounding style and don't run `cargo fmt`, `clippy --fix` or any
   formatting sweep. CI gates on neither the formatter nor clippy.
@@ -129,9 +152,10 @@ start an engine. To install from source on a Spark, follow
 
 Exactness means **identical token IDs every run on every Spark with the same
 setup**. A request must give the same result whether it runs alone, batched,
-cached or chunked, and drafting ON must match drafting OFF. When a request
-doesn't specify sampling, decoding is greedy (always the most likely next
-token).
+cached or chunked, and drafting ON must match drafting OFF. Check the same
+request across the supported Spark counts too. Similar answer text is not
+enough. When a request doesn't specify sampling, decoding is greedy (always
+the most likely next token).
 
 To keep that true, don't use floating-point atomics, reductions that depend
 on arrival order, or reductions whose split order changes with batching,
@@ -153,7 +177,12 @@ until the comparison on a second Spark is done.
   measurement card. Do not keep the old path behind a switch.
 - If you change the arithmetic order, also provide a quality comparison
   against main and reviewed updates to any goldens (saved reference answers)
-  that change.
+  that change. An ID change needs the project owner's approval before merge.
+
+Run the Spark proof on the exact commit that will merge. Keep the token ID
+arrays, the requests and the effective settings in its receipts. Show the
+result of each comparison, including failed or missing checks. The card must
+cover the change's affected cases as well as the required exactness cases.
 
 ### Tools for the checks
 
@@ -167,8 +196,22 @@ Two tools cover the checks today:
    (fixtures) through the older `flash-bench` benchmark, so a pass there
    doesn't yet prove that FP4-Local is qualified.
 
-Neither one covers everything yet, so list in the PR which checks you ran and
-which you didn't.
+Neither one covers everything yet. A pass from either tool alone is not the
+full Spark gate. List in the PR which checks you ran and which you didn't.
+
+### The measurement card
+
+An engine change needs a card that joins its exactness and measurement
+results. Name the source commit, checkpoint revision, hardware type and
+Spark count. Record the commands, request bodies, effective sampling, cache
+state and drafting mode. Include the token ID comparisons and the raw timing
+results. Keep failed runs and explain any omitted cases.
+
+For a speed claim, compare the candidate with main on the same setup and
+requests. Keep the timing plan fixed before you run it. Give the repeated
+results and their full ranges, not just the best run. A host test or a
+similar-looking answer cannot support that claim. See the
+[benchmark method](docs/benchmarks.md) for the public results and their limits.
 
 ## Commits and pull requests
 
@@ -178,8 +221,9 @@ the PR against `main` at
 [github.com/wappy-x/vade](https://github.com/wappy-x/vade).
 
 In the PR, explain the problem, the resulting behavior, the commands you ran
-and any limits of your validation. For engine changes, attach the receipts
-from `vade verify` and `vade test determinism`.
+and any limits of your validation. For engine changes, attach the Spark card
+and its exactness receipts. Include the output of `vade verify` and any
+`vade test determinism` checks, with their coverage limits.
 
 If users would notice the change, add one plain line about it to the
 Unreleased section of [CHANGELOG.md](CHANGELOG.md).
@@ -194,6 +238,7 @@ Unreleased section of [CHANGELOG.md](CHANGELOG.md).
 3. **Engine changes pass the device gate.** A change to engine arithmetic,
    scheduling, caching or transport also needs the runs on real Sparks
    described under [exactness](#exactness-and-evidence) before it can land.
+   The commit, host logs and Spark card must name the same source revision.
 4. **The maintainer applies it.** `main` here is published from the
    maintainers' development tree, one commit per update, so the merge
    button isn't used. The maintainer applies the accepted change there, CI

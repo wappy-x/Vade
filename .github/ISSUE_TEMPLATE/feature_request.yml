@@ -5,7 +5,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for the idea. Vade keeps a few fixed rules: Rust's standard library only, no third-party dependencies, and the same request on the same setup must return the same token IDs. Ideas that fit those rules are much easier to take on.
+        Vade uses Rust's standard library, with no third-party dependencies or Python. The same request must give identical token IDs across runs and Sparks. New arithmetic-order switches and model-specific tuning do not fit the project rules.
+
+        Remove private data and connection details before you attach examples.
   - type: textarea
     id: problem
     attributes:
@@ -17,7 +19,7 @@ body:
     id: proposal
     attributes:
       label: What you'd like Vade to do
-      description: The command, flag, API field or behavior you have in mind.
+      description: Describe the result you want. Include an example command or request if it helps.
     validations:
       required: true
   - type: textarea
@@ -30,3 +32,8 @@ body:
     attributes:
       label: Your setup
       description: How many Sparks, and whether you run on the Spark or from a controller, if that matters here.
+  - type: textarea
+    id: proof
+    attributes:
+      label: How to check the result
+      description: Describe a useful test. For an engine change, say how token IDs should match across runs, batching, caching, chunking and drafting modes.

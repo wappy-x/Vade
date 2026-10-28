@@ -14,7 +14,9 @@ repository URL is defined by [`VADE_REPO_URL`](cli/src/repository.rs).
   only where Rust cannot do the job. Do not use or require Python.
 - **Writing.** Use ASD-STE100 Simplified Technical English and American
   spelling. Use short sentences, active voice and plain words. Give each
-  sentence one main idea. Apply this rule to docs, help, errors and reports.
+  sentence one main idea. Do not use em dashes or lab slang. Apply this rule
+  to docs, help, errors, reports and messages. Every numerical claim must
+  name its card, log or command output. Give raw values with any percentage.
 - **Zero third-party dependencies.** Use the Rust standard library and the
   first-party crates already in the tree. Registry, git, off-tree path, build
   and dev dependencies all count, and so do lockfile sources. Don't add a
@@ -49,12 +51,14 @@ repository URL is defined by [`VADE_REPO_URL`](cli/src/repository.rs).
 ## Exactness law and merge gate
 
 Exactness means **identical token IDs every run on every Spark with the same
-setup**, not merely similar text. Greedy decoding is the default when a request
-leaves sampling unspecified. Before you merge a change to engine arithmetic,
-scheduling, caching or transport, run it at least three times and compare the
-results across at least two Sparks. For the same request and settings, the
-answer must not depend on how it ran. Alone, batched, cached and chunked runs
-must all match, and so must drafting (multi-token prediction, MTP) ON and OFF.
+setup**. The same request and settings must also give the same IDs across
+supported Spark counts. Similar text is not proof. Greedy decoding is the
+default when a request leaves sampling unspecified. Before you merge a change
+to engine arithmetic, scheduling, caching or transport, run it at least three
+times and compare the results across at least two Sparks. For the same
+request and settings, the answer must not depend on how it ran. Alone,
+batched, cached and chunked runs must all match. Drafting (multi-token
+prediction, MTP) ON and OFF must match too.
 
 Don't introduce floating-point atomics, reductions that depend on arrival
 order, or reduction splits that change with batch size, prompt length or
@@ -62,11 +66,13 @@ occupancy. Reduction order and tiling must follow fixed tensor dimensions. A
 change that keeps the arithmetic order must match main's token IDs.
 
 Use one execution path for each topology. The tensor split is the only
-two-Spark path. A default changes only after a full exactness gate and a
-measurement card with the results. Do not keep an old path behind a switch.
-If the arithmetic order changes, also review any updates to the goldens (the
-saved reference answers) and provide quality evidence against main before
-the change becomes the default.
+two-Spark path. Do not add switches or flags that select a different
+arithmetic order. Do not keep an old path behind a switch. A proposed
+arithmetic change needs the full exactness gate, a measurement card and
+quality evidence against main. Review any updates to the goldens (the saved
+reference answers). A change that alters token IDs needs the owner's
+approval before merge.
+
 Performance claims need reproducible receipts (the saved records of a run)
 with revision, hardware, checkpoint identity, settings and raw results.
 

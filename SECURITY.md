@@ -1,102 +1,72 @@
 # Security policy
 
-## Supported versions
+## Report a security problem
 
-| Version | Security fixes |
-| --- | --- |
-| v0.1.x | Yes |
-| Unreleased commits on `main` | No |
+Use the repository's **Security** tab and choose **Report a vulnerability**.
+Send the report privately. Do not put exploit details in a public issue, pull
+request or discussion.
 
-Fixes land on `main` and ship in the next v0.1.x release.
+If private reporting is not available, use a private maintainer contact listed
+by the repository. If none is listed, ask for a private reporting route without
+posting the exploit.
 
-## Reporting a vulnerability
-
-Please report vulnerabilities privately, through GitHub's private vulnerability
-reporting:
-
-1. Open the repository's **Security** tab.
-2. Choose **Report a vulnerability**.
-3. Fill in the form. Only you and the maintainers can see it.
-
-The form is also at
-[github.com/wappy-x/vade/security/advisories/new](https://github.com/wappy-x/vade/security/advisories/new).
-Please don't open a public issue, pull request or discussion about a
-vulnerability before a fix is out.
-
-If the **Security** tab has no **Report a vulnerability** button, or the form
-above doesn't open for you, write to the maintainers at the contact listed in
-the repository's **About** section.
-
-A useful report includes:
-
-- the Vade version (`vade --version`) or commit;
-- the command, flags and configuration that reproduce the problem;
-- what an attacker can do with it, and from where (the same machine, the local
-  network, or the internet);
-- the relevant lines from logs or receipts (the saved records of a run).
-
-Remove credentials, API keys, private prompts and machine addresses before you
-attach anything. We'll confirm that we received the report, work on a fix with
-you in the private advisory, and agree on when to publish it.
+Include the Vade version or source commit, the command and settings, and the
+steps that show the problem. State what the attacker can access and where the
+attacker runs. Include a small log sample if it helps. Remove keys, tokens,
+private prompts, machine addresses and personal data before you send it.
 
 ## What is in scope
 
-- **The engine's HTTP server** (`flash-serve` and `spark-serve`), including its
-  API key check and how it handles requests and streams.
-- **The gateways** (`vade-gateway`, which `vade up --replicas` starts, and
-  `vade-harness gateway`), including the checks that refuse browser-driven
-  requests.
-- **The CLI's remote commands**, the ones that reach Sparks over SSH from a
-  controller: `vade install`, `vade up`, `vade status`, `vade logs`,
-  `vade verify` and `vade down`. That covers what they run on a Spark, the files
-  they write there and the tunnels they open.
+Report faults in code that Vade ships:
 
-Problems in software Vade doesn't ship are out of scope: the NVIDIA driver and
-CUDA, your SSH server or client, the operating system, or the model's
-checkpoint. So is anything that needs an attacker who already controls your
-account on the Spark or the controller. Wrong or unexpected model answers are
-bugs rather than vulnerabilities; please report them through the normal issue
-form, or, while Issues are off for this repository, through the maintainers'
-contact listed in the repository's **About** section.
+- Engine request parsing, streams, API key checks and cache access.
+- Gateway access checks, request routing and data sent to an engine.
+- CLI installation, remote commands, tunnels and files that Vade writes.
+- Harness tools, file and command access, and credential handling.
 
-## How Vade is exposed by default
+Problems in the operating system, NVIDIA driver, CUDA, SSH or a model checkpoint
+belong to those projects. Wrong model answers are normally bugs. An answer
+that bypasses a Vade access check is a security report. A report must show what
+access the fault adds; access the caller already has is not a new boundary.
 
-- The engine's HTTP server binds to loopback (`127.0.0.1`), so only programs on
-  the same machine can reach it. With Vade's own config it listens on port
-  18080. A controller reaches it through an SSH tunnel, not over the network.
-- The server refuses to bind to any other address unless you pass
-  `--allow-remote`, and `--allow-remote` refuses to start without
-  `--api-key-file` (the error reads
-  `--allow-remote requires --api-key-file PATH`). The server speaks plain
-  HTTP, so put remote access behind a trusted tunnel or a TLS terminator.
-- The gateways listen on loopback only and drop connections that come from
-  anywhere else. A gateway you start yourself uses `127.0.0.1:8787` by
-  default; the one `vade up --replicas` starts uses the controller's
-  `local_port` (18080 by default). They also refuse browser-style requests:
-  a `Host` header other than `127.0.0.1`, `localhost` or `[::1]` (with the
-  listener's port) gets 421, and any request with an `Origin` header gets 403.
-  To let one through, name the host with `--allow-host` or the exact browser
-  origin with `--allow-origin`; both can be repeated.
-- A gateway you start yourself (`vade-gateway` or `vade-harness gateway`) can
-  also require a token, which is off by default. Pass `--token`, or set the
-  `VADE_GATEWAY_TOKEN` environment variable; the flag wins if you use both.
-  With a token set, every request must carry `Authorization: Bearer` followed
-  by the token, or the gateway answers 401. The one exception is a browser's
-  CORS preflight from an origin you allowed, which is answered before the
-  check. The gateway does not pass the token on to the engine. The value must
-  be 1 to 1024 visible ASCII characters. If you don't pass `--token` and
-  `VADE_GATEWAY_TOKEN` is set to anything else, including an empty value, the
-  gateway refuses to start with
-  `VADE_GATEWAY_TOKEN needs 1 to 1024 visible ASCII characters`.
-- The gateway that `vade up --replicas` starts never uses a token. Vade
-  doesn't pass it `--token` and removes `VADE_GATEWAY_TOKEN` from its
-  environment, so exporting the variable before `vade up` does not protect it.
-  It relies on its loopback and browser checks alone.
+## The gateway is local
 
-Treat the token as a password. Pick a long random value, keep it out of
-committed files and shell history (for example, load it from a file only you
-can read), and leave it out of issues and vulnerability reports. The token
-does not encrypt anything: the gateways speak plain HTTP on loopback.
+The gateways bind only to loopback. The default address is `127.0.0.1`.
+They also refuse connections whose peer address is not loopback. A program on
+the same machine can reach the gateway. The gateway does not check which
+local user owns that program.
 
-If your report depends on changing any of these defaults, tell us which ones
-you changed.
+The gateway checks the HTTP `Host` header and refuses browser `Origin` headers
+unless you allow them. `--allow-host` and `--allow-origin` change these checks.
+These checks do not authenticate a local program. A local program can send
+its own headers and call the API routes that the gateway serves. Those routes
+can use the configured engines, including engines reached through SSH tunnels.
+See the [gateway routes and bind checks](harness/src/gateway.rs) and
+[access checks](harness/src/gateway/access.rs).
+
+A gateway you start yourself has no token by default. Use `--token` or
+`VADE_GATEWAY_TOKEN` to require a bearer token. The flag takes precedence.
+The gateway consumes that token and does not send it to the engine. An allowed
+browser preflight is answered before the token check; it does not call the
+engine.
+
+The gateway started by `vade up --replicas` has no token. The CLI removes
+`VADE_GATEWAY_TOKEN` from its environment and does not pass `--token`.
+Setting that variable before `vade up` does not protect the replica gateway.
+Local programs can use it without a credential. See the
+[replica launcher](cli/src/app/replicas.rs).
+
+Use the gateway only on a machine whose local programs and users you trust.
+The gateway speaks plain HTTP. A token does not encrypt traffic. Keep tokens
+out of source files, shell history and reports.
+
+## Engine access
+
+The installed CLI reaches the engine through SSH tunnels. Engine servers use
+loopback by default. A direct remote bind needs both `--allow-remote` and
+`--api-key-file`. Loopback serving does not require an API key by default.
+See the [engine key checks](engine/crates/serve/src/auth.rs).
+
+If your report needs a changed bind address, allowed host, allowed origin or
+authentication setting, include that setting. This policy describes the
+current access rules. It does not establish that a security review has passed.
