@@ -140,6 +140,18 @@ Changes that are merged but not yet released are under Unreleased.
   The count exchange uses a 600-second load deadline. A worker no longer
   fails when the front takes longer than the serving timeout to load.
 
+- Flash-Next sizes its freed-memory reserve for the largest observed chat
+  cohort, with a minimum of four conversations. During a session release, it
+  checks memory pressure again after earlier buffers free device memory.
+  Attention arenas can then return to the reserve when the memory margin
+  permits it. Logs count new allocations, reuse, returns and direct frees.
+  Under host memory pressure, a freed buffer also returns to the reserve
+  while the buffers of its kind stay inside the admitted session plan. Eight
+  chats then reuse their attention arenas without new allocations. Spares
+  above the plan are still released. After 30 seconds without a request, a
+  reserve releases its spares if it still reads pressure. A new request ends
+  the idle period before its admission can allocate.
+
 - With the two-Spark tensor split, the last rows of a long
   prompt now run on the layer pipeline like the prompt's earlier tiles, so the
   first token no longer waits for the two Sparks to swap the prompt's layer

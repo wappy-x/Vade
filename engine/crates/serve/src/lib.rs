@@ -240,6 +240,10 @@ pub trait Engine {
     fn fatal_error(&self) -> Option<String> { None }
     /// Return idle KV pages or reclaim them when system memory is under pressure.
     fn maintain_memory(&self, _idle: bool) -> Result<(), String> { Ok(()) }
+    /// Admission of a queued request starts. It runs before the cache balance, cache forks
+    /// and session construction, which can allocate or poll memory pressure; it ends an idle
+    /// period that maintain_memory(true) started.
+    fn admission_started(&self) {}
     /// Refresh cached memory pressure after a retired session releases ownership,
     /// before the next retirement or admission. Backends without reserves do nothing.
     fn refresh_memory_pressure(&self) -> Result<(), String> { Ok(()) }

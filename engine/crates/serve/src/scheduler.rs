@@ -3,6 +3,9 @@ mod dispatch;
 #[cfg(test)]
 #[path = "metadata_test.rs"]
 mod metadata_tests;
+#[cfg(test)]
+#[path = "scheduler_retirement_tests.rs"]
+mod retirement_tests;
 use dispatch::serve_loop;
 
 use crate::{

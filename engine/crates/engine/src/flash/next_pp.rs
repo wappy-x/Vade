@@ -1089,7 +1089,7 @@ impl<'a> NextModel<'a> {
         self.pp_end.set(stage.end);
         let mut sessions = BTreeMap::new();
         serve_stage(stream, fast, next, stage, context, active, tile, stop, Recipe::from_env()?,
-            |n| self.set_session_limit(n),
+            |n| self.set_session_limit(n).map(|()| b.fund_session_reserves(n)),
             || self.release_pooled_decode(b),
             |kind, count, meta, residual| { self.tp_mail_next(kind);
                 self.pp_back_step(b, &mut sessions, kind & !crate::flash_tp_switch::MAIL & !crate::flash_tp_switch::TILE & !crate::flash_tp_switch::HEADS & !crate::flash_tp_switch::HEAD & !crate::flash_tp_switch::SEQ, count, meta, tile, context, residual) })

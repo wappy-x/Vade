@@ -1391,6 +1391,14 @@ impl<'a> Backend<'a> {
         self.context.kv_reserve.borrow_mut().conversation_ended(bytes);
         self.context.vector_pool.borrow_mut().conversation_ended(bytes);
     }
+    /// Retain enough returned storage for the largest cohort serving has observed.
+    pub fn kv_reserve_cohort(&self, chats: usize) { self.context.kv_reserve.borrow_mut().cohort(chats); self.context.vector_pool.borrow_mut().cohort(chats); }
+    /// Serving admits a request next: end the idle period of both reserves before it can allocate.
+    pub fn kv_reserve_busy(&self) { self.context.kv_reserve.borrow_mut().busy(); self.context.vector_pool.borrow_mut().busy(); }
+    /// Memory admission funds `sessions`: under host pressure both reserves keep buffers inside that plan (ReservePolicy::funded); call before the first session.
+    pub fn fund_session_reserves(&self, sessions: usize) { self.context.kv_reserve.borrow_mut().fund(sessions); self.context.vector_pool.borrow_mut().fund(sessions); }
+    /// Ordinary KV arenas only; each owner reports one return or one direct free.
+    pub fn kv_reserve_stats(&self) -> crate::KvArenaStats { self.context.kv_reserve.borrow().stats() }
     /// (host bytes left before KV reserve pressure, bytes the reserve may still keep); None: off.
     pub fn kv_reserve_room(&self) -> Result<Option<(i128, usize)>, String> {
         self.context.activate()?;

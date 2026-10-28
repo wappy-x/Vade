@@ -45,6 +45,49 @@ These are source-defined defaults, not performance measurements. Verify the
 loaded checkpoint, effective settings and health identity before timing.
 The [checkpoint and kernel reference](fp4-kernels.md) describes storage.
 
+## Conversation memory reuse
+
+Freed attention arenas and device vectors can serve later requests. Each
+reserve keeps at most the larger of 2,000,000,000 bytes and the largest
+conversation reservation times the largest observed cohort, with a minimum
+cohort of four. This changes reuse capacity, not the startup session limit.
+Memory pressure and the device budget can release reserve memory sooner.
+
+A session can free ordinary buffers before it releases its attention arenas.
+If the cached pressure reading refused reuse and accounted device memory has
+fallen since that reading, the return path reads host memory again. It keeps
+the same safety margin. A failed read keeps the refusal in effect.
+
+Flash-Next serving also gives both reserves its session plan: the admitted
+session limit. With every admitted session live, host memory can fall below
+the margin while the engine stays inside its own budget. A freed buffer then
+returns to the reserve, not to the device allocator, and the next session uses
+it again without a new allocation. This exception applies to an ordinary buffer
+only. It applies only while the buffers of that kind that the process holds,
+live or spare, are at most the session limit times the largest session
+reservation. Under pressure, a reserve still releases segmented pages and
+spares above that bound. After 30 seconds without a request, each reserve
+releases its spares when it reads pressure. Each reserve reads pressure
+separately. If the first release clears the pressure, the second reserve
+keeps its spares. Without pressure, spares inside the plan stay. A new request
+ends the idle period before its admission can allocate memory or read
+pressure. A worker Spark has no periodic idle check. It reads pressure when it
+allocates. It also reads pressure when it returns a buffer after device bytes
+fell under pressure, if the buffers held are outside the plan. It keeps spares
+inside the plan.
+
+The `flashnext kv_arenas` log gives per-operation counts and bytes for ordinary attention
+arena allocations, reuse, reserve returns, direct frees and reserve evictions.
+Fresh session construction emits an `admit` line before `request_admitted`.
+Cached-state restoration has no `admit` arena line. Its events still contribute
+to the cumulative `kv_reserve` counters. A `retire` line precedes
+`request_retired` for a normally completed live session. Direct frees and
+reserve evictions have separate counters; neither means an arena is retained
+by a live owner. These counters do not include segmented KV pages.
+`request_admitted` also gives `admitted_at_ms`, measured from one monotonic
+clock at the start of the serving loop. Subtract these timestamps to measure
+the interval between admissions. Queue wait times have different start times.
+
 <a id="two-spark-tensor-split-opt-in"></a><a id="one-spark-and-the-two-spark-pipeline"></a>
 
 ## Two-Spark tensor split

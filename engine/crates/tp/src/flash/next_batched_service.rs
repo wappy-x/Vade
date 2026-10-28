@@ -140,6 +140,8 @@ pub fn run(
                 backend.configure_vector_pool(available.saturating_sub(budget).max(1 << 30));
                 backend.kv_conversation_ended(needed as usize);
             }
+            // Under host memory pressure, the reserves keep returned buffers inside this plan.
+            backend.fund_session_reserves(active);
             // Every worker must fund the front's admitted chats before serving begins.
             if let Some((stream, stage)) = pp {
                 model.set_pp_front(stream, fast, stage, context, active, tile, shutdown)?;
@@ -304,6 +306,9 @@ pub fn run_back(
         let resident_tiles = backend.flash_dense_bytes() + backend.flash_mixed_bytes();
         let (active, pool, _shared) = model.session_pool_plan(context, 1, spark_serve::budget::after_transient_reserve(budget.saturating_sub(resident)), resident_tiles)?;
         model.prepare_prompt_workspace(backend, context)?;
+        // A workspace allocation under host pressure can clear the reserve before the session
+        // plan exists. Restore the session bound so the funded plan below holds.
+        if kv_reserve { backend.kv_conversation_ended(needed as usize); }
         if needed > pool as u128 {
             return Err(format!("pipeline back cannot fund one session: needed {needed} bytes, pool {pool} bytes"));
         }
@@ -311,6 +316,7 @@ pub fn run_back(
             let (_, chosen) = spark_tp::startup_pool::agree(&mut stream, active, load_deadline, shutdown)?;
             chosen
         } else { active };
+        backend.fund_session_reserves(active);
         backend.synchronize()?;
         eprintln!("flashnext pp back loaded context={context} active={active} resident_bytes={resident} session_pool_bytes={pool}");
         let (_link, tp_wire) = match tp {

@@ -118,6 +118,24 @@ pub struct Chat<'s, 'a> {
     arenas: RefCell<Option<Rc<Arenas<'a>>>>,
     adopted: RefCell<Option<NextStorage<'a>>>,
 }
+fn report_arenas(phase: &str, before: spark_gpu_probe::KvArenaStats, after: spark_gpu_probe::KvArenaStats) {
+    eprintln!("flashnext kv_arenas phase={phase} allocated_count={} allocated_bytes={} reused_count={} reused_bytes={} returned_count={} returned_bytes={} direct_freed_count={} direct_freed_bytes={} evicted_count={} evicted_bytes={}",
+        after.allocated_count - before.allocated_count, after.allocated_bytes - before.allocated_bytes,
+        after.reused_count - before.reused_count, after.reused_bytes - before.reused_bytes,
+        after.returned_count - before.returned_count, after.returned_bytes - before.returned_bytes,
+        after.direct_freed_count - before.direct_freed_count, after.direct_freed_bytes - before.direct_freed_bytes,
+        after.evicted_count - before.evicted_count, after.evicted_bytes - before.evicted_bytes);
+}
+impl Drop for Chat<'_, '_> {
+    fn drop(&mut self) {
+        if let Some(session) = self.live.take() {
+            let before = self.backend.kv_reserve_stats();
+            // Preserve field drop order: live state precedes cached prefix ownership.
+            drop(session);
+            report_arenas("retire", before, self.backend.kv_reserve_stats());
+        }
+    }
+}
 impl<'b, 'a, 'w> FlashNext<'b, 'a, 'w> {
     /// Rows one cohort tick may spend: VADE_MTP_COHORT=wide keeps four chats on 16.
     fn tick_width(&self, chats: usize) -> usize {
@@ -571,7 +589,9 @@ impl<'b, 'a, 'w> Engine for FlashNext<'b, 'a, 'w> {
         self.session()
     }
     fn session(&self) -> Result<Self::Session<'_>, String> {
+        let before = self.backend.kv_reserve_stats();
         let mut session = self.model.session_with_chunk(self.backend, self.context, self.chunk)?;
+        report_arenas("admit", before, self.backend.kv_reserve_stats());
         session.batch_drafts(self.batch_on.enabled(self.cohort.get()));
         Ok(Chat {
             backend: self.backend,
@@ -613,6 +633,7 @@ impl<'b, 'a, 'w> Engine for FlashNext<'b, 'a, 'w> {
     }
     fn active_cohort(&self, chats: usize) {
         self.cohort.set(chats);
+        self.backend.kv_reserve_cohort(chats);
         if self.cohort_cost_control {
             self.cohort_plain.set(false);
             self.cohort_draft.set(false);
@@ -812,17 +833,23 @@ impl<'b, 'a, 'w> Engine for FlashNext<'b, 'a, 'w> {
     fn fatal_error(&self) -> Option<String> {
         self.backend.fatal_error()
     }
-    /// VADE_FLASHNEXT_KV_RESERVE: kept session arenas are released under host memory pressure
-    /// (and on demand by any allocation), not after 30 s idle: a conversation's next turn
-    /// often follows a human pause. The cap (four sessions) is restored after a release.
+    /// VADE_FLASHNEXT_KV_RESERVE: kept session arenas are released on demand by any allocation,
+    /// not after 30 s idle alone: a conversation's next turn often follows a human pause.
+    /// Under host memory pressure, spares inside the funded session plan stay until the server
+    /// has been idle for 30 s (Backend::fund_session_reserves); other spares are released.
+    /// The cap covers at least four sessions and grows to the largest observed cohort. It is
+    /// restored after a release.
     /// VADE_FLASHNEXT_KV_RESERVE=0: nothing runs, without a KV reserve (unless the vector
     /// pool is configured: the same calls maintain it).
-    fn maintain_memory(&self, _idle: bool) -> Result<(), String> {
+    fn maintain_memory(&self, idle: bool) -> Result<(), String> {
         if !spark_engine::flash::qsa::kv_reserve() && !self.backend.vector_pool_configured() { return Ok(()); }
-        self.backend.maintain_kv_reserve(false)?;
+        self.backend.maintain_kv_reserve(idle)?;
         self.backend.kv_conversation_ended(self.reservation);
         Ok(())
     }
+    /// An idle period started before this request arrived must not release funded spares
+    /// during its admission.
+    fn admission_started(&self) { self.backend.kv_reserve_busy(); }
     fn refresh_memory_pressure(&self) -> Result<(), String> {
         self.backend.refresh_kv_pressure()?;
         // Pressure may clear the reserve and its cap. Restore the existing

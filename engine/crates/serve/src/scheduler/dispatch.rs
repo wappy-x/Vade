@@ -77,6 +77,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
     let mut active: Vec<Active<'_, '_, E, T>> = Vec::new();
     let mut retired: Vec<Retired<E::Session<'e>>> = Vec::new();
     let mut next_id = 0u64;
+    let admission_clock = Instant::now();
     let mut tick = 0u64;
     let mut prefill_budget = PrefillBudget::new();
     let mut swap: Option<Swap> = None;
@@ -412,6 +413,9 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 && engine.shared_batch() {
                 break;
             }
+            // The idle maintenance above may predate this request; the cache balance below
+            // can poll memory pressure and the forks can allocate.
+            engine.admission_started();
             let (reserved, pages) = reservations(active.iter().map(|j| &j.generation.state));
             let hold = engine.cache_hold_bytes() + active.iter().map(|j| request_hold(&j.ready)).sum::<usize>();
             cache.rebalance_within(config.session_budget_bytes.checked_sub(reserved)
@@ -701,9 +705,9 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 continue;
             }
             next_id += 1;
-            eprintln!("request_admitted id={next_id} prompt_tokens={} queue_ms={:.3} reserved_bytes={request_bytes} prefix_reused_tokens={reused} active={} active_reserved_bytes={active_reserved_bytes} cache_retained_bytes={} cache_unfunded_bytes={}",
+            eprintln!("request_admitted id={next_id} prompt_tokens={} queue_ms={:.3} reserved_bytes={request_bytes} prefix_reused_tokens={reused} active={} active_reserved_bytes={active_reserved_bytes} cache_retained_bytes={} cache_unfunded_bytes={} admitted_at_ms={:.3}",
                 ready.prompt.len(), ready.enqueued.elapsed().as_secs_f64() * 1000.0,
-                active.len() + 1, cache.retained_bytes(), cache.unfunded_bytes());
+                active.len() + 1, cache.retained_bytes(), cache.unfunded_bytes(), admission_clock.elapsed().as_secs_f64() * 1000.0);
             // Queue wait must not consume a thinking reply's generation budget.
             ready.deadline = Instant::now() + limits.generation_timeout;
             let mut generation = Generation::new(

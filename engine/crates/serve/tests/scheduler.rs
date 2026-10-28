@@ -5,7 +5,7 @@ use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -149,6 +149,43 @@ impl Engine for Tiled {
     fn eos_token_ids(&self) -> &[u32] { &[7] }
     fn session_reservation_bytes(&self) -> Option<usize> { Some(65536) }
 }
+#[allow(dead_code)]
+#[path = "../../gpu/src/reserve_policy.rs"]
+mod reserve_policy;
+/// A funded reserve under host pressure, driven by the serving loop's memory hooks. Each
+/// session construction counts a pressure poll there that would release funded spares if
+/// the idle period had lasted IDLE_RELEASE by then.
+struct ReserveProbe { policy: Mutex<reserve_policy::ReservePolicy>, idle_passes: Mutex<usize>, idle_pass: Condvar, idle_releases: AtomicUsize, checks: AtomicUsize }
+impl ReserveProbe {
+    /// Wait, at most 10 s, until the scheduler counts more than `seen` idle passes.
+    fn idle_pass_after(&self, seen: usize) {
+        let (_passes, wait) = self.idle_pass.wait_timeout_while(self.idle_passes.lock().unwrap(), Duration::from_secs(10), |n| *n <= seen).unwrap();
+        assert!(!wait.timed_out(), "no idle pass within 10 s");
+    }
+    fn check(&self) {
+        let policy = self.policy.lock().unwrap();
+        assert!(policy.pressure && policy.funded(0));
+        self.checks.fetch_add(1, Ordering::Relaxed);
+        if policy.sheds(false, 0, policy.idle_long(Instant::now() + reserve_policy::IDLE_RELEASE)) {
+            self.idle_releases.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+struct Reserved(Model, Arc<ReserveProbe>);
+impl Engine for Reserved {
+    type Session<'a> = Kv;
+    fn session(&self) -> Result<Kv, String> { self.1.check(); self.0.session() }
+    fn maintain_memory(&self, idle: bool) -> Result<(), String> {
+        if idle { *self.1.idle_passes.lock().unwrap() += 1; self.1.idle_pass.notify_all(); }
+        self.1.policy.lock().unwrap().idle(idle, Instant::now());
+        Ok(())
+    }
+    fn admission_started(&self) { self.1.policy.lock().unwrap().idle(false, Instant::now()); }
+    fn context_limit(&self) -> usize { self.0.context_limit() }
+    fn vocab_size(&self) -> usize { 8 }
+    fn eos_token_ids(&self) -> &[u32] { &[7] }
+    fn session_reservation_bytes(&self) -> Option<usize> { self.0.session_reservation_bytes() }
+}
 struct Codec(usize, bool);
 impl Decoder for Codec {
     fn push(&mut self, _: u32) -> Result<String, String> {
@@ -284,6 +321,27 @@ impl Server {
                 draft_global_bank: false, prefix_cache: true,
                 sharing: scheduler::Sharing { report_prefix_reuse: true, client_priority_cap: 1, ..Default::default() } },
             &shutdown, "tiled", requests).unwrap()
+        });
+        Self { ab: None, cohort: None, address, stop, live, calls, heads, worker: Some(worker) }
+    }
+    fn reserved(requests: usize, probe: Arc<ReserveProbe>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (live, calls, heads) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let model = Reserved(Model { ab: None, cohort: None, live: live.clone(), calls: calls.clone(), heads: heads.clone(), opt_in: false }, probe);
+        let shutdown = stop.clone();
+        let worker = std::thread::spawn(move || {
+            scheduler::serve_requests(listener, &model, Some(&Codec(1, false)),
+            &Limits { output_bytes: 16 * 1024 * 1024, ..Limits::default() },
+            &CacheLimits { entries: 32, retained_bytes: 1 << 20, tokens_per_entry: 1024,
+                logits_per_entry: 8, idle_ttl: Duration::from_secs(60) },
+            &scheduler::Config { active: 3, connections: 16, prefill_chunk: 1,
+                foreground_rows: 8, background_rows: 16, active_bytes: 32768,
+                session_budget_bytes: 2 << 20, draft: protocol::DraftMode::Strict, mtp_depth: 0,
+                draft_global_bank: false, prefix_cache: true,
+                sharing: scheduler::Sharing { report_prefix_reuse: true, ..Default::default() } },
+            &shutdown, "reserved", requests).unwrap()
         });
         Self { ab: None, cohort: None, address, stop, live, calls, heads, worker: Some(worker) }
     }
@@ -1122,4 +1180,27 @@ fn ab_mode_serializes_and_forces_cold_requests() {
         assert!(body.contains("\"cached_tokens\":0"), "{body}");
     }
     assert_eq!(*server.ab.as_ref().unwrap().lock().unwrap(), [false, true, true, false]);
+}
+
+#[test]
+fn admission_after_an_idle_pass_never_takes_the_idle_release() {
+    // A funded plan of eight sessions under host pressure, as the C8 card runs.
+    let mut policy = reserve_policy::ReservePolicy::default();
+    policy.configure(1000);
+    policy.conversation_ended(16384);
+    policy.fund(8, 0);
+    policy.poll(0, 0);
+    let probe = Arc::new(ReserveProbe { policy: Mutex::new(policy), idle_passes: Mutex::new(0),
+        idle_pass: Condvar::new(), idle_releases: AtomicUsize::new(0), checks: AtomicUsize::new(0) });
+    let server = Server::reserved(4, probe.clone());
+    // Each request arrives after a new idle pass: the scheduler marks idle, then drains it.
+    let mut seen = 0;
+    for prompt in [[1, 2], [3, 4], [5, 6], [2, 1]] {
+        probe.idle_pass_after(seen);
+        server.run(&prompt, "");
+        seen = *probe.idle_passes.lock().unwrap();
+    }
+    drop(server);
+    assert_eq!(probe.checks.load(Ordering::Relaxed), 4);
+    assert_eq!(probe.idle_releases.load(Ordering::Relaxed), 0);
 }

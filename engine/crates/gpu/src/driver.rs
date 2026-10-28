@@ -279,11 +279,19 @@ impl Context {
     }
     fn free(&self, address: DevicePtr, bytes: usize, host: Option<Handle>, reuse: Reuse) {
         let spares = match reuse { Reuse::Kv => Some(&self.kv_reserve), Reuse::Vector => Some(&self.vector_pool), Reuse::None => None };
-        if spares.is_some_and(|spares| self.cleanup_errors.borrow().is_empty()
-            && spares.borrow_mut().keep(address, bytes, false)) { return; }
+        if self.cleanup_errors.borrow().is_empty() {
+            if let Some(spares) = spares {
+                let mut reserve = spares.borrow_mut();
+                reserve.prepare_return(self);
+                if reserve.keep(address, bytes, false) { return; }
+            }
+        }
         let (code, operation) = unsafe { if let Some(host) = host { (cuMemFreeHost(host), "cuMemFreeHost") } else { (cuMemFree_v2(address), "cuMemFree_v2") } };
         self.record_cleanup(code, operation);
-        if code == 0 { self.allocated.set(self.allocated.get() - bytes); }
+        if code == 0 {
+            self.allocated.set(self.allocated.get() - bytes);
+            if let Some(spares) = spares { spares.borrow_mut().direct_freed(bytes); }
+        }
     }
     /// Release kept spares, the vector pool's first, until `bytes` more fit the budget.
     fn make_room(&self, bytes: usize) -> Result<(), String> {
@@ -386,6 +394,7 @@ impl<'a> Buffer<'a> {
         }
         let mut buffer = Self::new(context, bytes)?;
         buffer.reuse = Reuse::Vector;
+        context.vector_pool.borrow_mut().allocated(bytes);
         Ok(buffer)
     }
     fn allocate(context: &'a Context, bytes: usize, managed: bool) -> Result<Self, String> {

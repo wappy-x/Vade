@@ -28,39 +28,64 @@ impl MappedSpare {
 /// (VADE_VECTOR_POOL) is a second Reserve with the same limits for plain device vectors.
 pub(super) struct Reserve {
     label: &'static str,
-    pages: Vec<Spare>, bytes: usize, limit: usize, conversation: usize,
+    pages: Vec<Spare>, bytes: usize,
     mapped: Vec<MappedSpare>,
-    margin: usize, pressure: bool, next_poll: Instant, idle_since: Option<Instant>,
-    reused: usize, released: usize, reported: (usize, usize, usize),
-    /// MemAvailable and the context's accounted device bytes at the last pressure poll.
-    available: usize, accounted: usize,
+    policy: crate::reserve_policy::ReservePolicy,
+    next_poll: Instant,
+    reused: usize, released: usize, reported: (usize, usize, usize, bool, crate::KvArenaStats),
+    stats: crate::KvArenaStats,
 }
 impl Default for Reserve {
     fn default() -> Self {
-        Self { label: "kv_reserve", pages: Vec::new(), mapped: Vec::new(), bytes: 0, limit: 0, conversation: 0, margin: 0,
-            pressure: false, next_poll: Instant::now(), idle_since: None,
-            reused: 0, released: 0, reported: (0, 0, 0), available: 0, accounted: 0 }
+        Self { label: "kv_reserve", pages: Vec::new(), mapped: Vec::new(), bytes: 0, policy: Default::default(),
+            next_poll: Instant::now(),
+            reused: 0, released: 0, reported: (0, 0, 0, false, Default::default()), stats: Default::default() }
     }
 }
 impl Reserve {
-    const MINIMUM: usize = 2_000_000_000;
     pub(super) fn vectors() -> Self { Self { label: "vector_pool", ..Self::default() } }
-    pub(super) fn configured(&self) -> bool { self.limit != 0 }
+    pub(super) fn configured(&self) -> bool { self.policy.limit != 0 }
     pub(super) fn configure(&mut self, margin: usize) {
-        self.limit = Self::MINIMUM;
-        self.margin = margin;
+        self.policy.configure(margin);
         self.next_poll = Instant::now();
     }
-    pub(super) fn conversation_ended(&mut self, bytes: usize) {
-        if self.limit == 0 { return; }
-        self.conversation = self.conversation.max(bytes);
-        self.limit = Self::MINIMUM.max(self.conversation.saturating_mul(4));
+    pub(super) fn conversation_ended(&mut self, bytes: usize) { self.policy.conversation_ended(bytes); }
+    pub(super) fn cohort(&mut self, chats: usize) { self.policy.cohort(chats); }
+    pub(super) fn fund(&mut self, sessions: usize) { self.policy.fund(sessions, self.stats.held_bytes()); }
+    fn funded(&self) -> bool { self.policy.funded(self.stats.held_bytes()) }
+    /// Admission starts: end the idle period before admission can allocate or poll.
+    pub(super) fn busy(&mut self) { self.policy.idle(false, Instant::now()); }
+    pub(super) fn stats(&self) -> crate::KvArenaStats { self.stats }
+    pub(super) fn allocated(&mut self, bytes: usize) {
+        self.stats.allocated_count = self.stats.allocated_count.saturating_add(1);
+        self.stats.allocated_bytes = self.stats.allocated_bytes.saturating_add(bytes);
+    }
+    pub(super) fn direct_freed(&mut self, bytes: usize) {
+        self.stats.direct_freed_count = self.stats.direct_freed_count.saturating_add(1);
+        self.stats.direct_freed_bytes = self.stats.direct_freed_bytes.saturating_add(bytes);
+    }
+    /// Recheck a cached rejection after earlier fields freed device memory. Failed
+    /// reads leave pressure set; no byte estimate substitutes for MemAvailable.
+    pub(super) fn prepare_return(&mut self, context: &Context) {
+        // A funded return is kept under pressure, so it needs no new reading.
+        if self.policy.needs_refresh(context.accounted_bytes()) && !self.funded() {
+            let conversation = self.policy.conversation;
+            self.next_poll = Instant::now();
+            let _ = self.pressure(context, Instant::now());
+            // A pressure clear resets the cap. Restore this session's bound now,
+            // as serving does after each full session release; pressure still wins.
+            self.policy.conversation_ended(conversation);
+        }
     }
     pub(super) fn take(&mut self, bytes: usize, segment: bool) -> Option<u64> {
         let index = self.pages.iter().position(|p| p.bytes == bytes && p.segment == segment)?;
         let page = self.pages.swap_remove(index);
         self.bytes -= bytes;
         self.reused = self.reused.saturating_add(bytes);
+        if !segment {
+            self.stats.reused_count = self.stats.reused_count.saturating_add(1);
+            self.stats.reused_bytes = self.stats.reused_bytes.saturating_add(bytes);
+        }
         Some(page.handle)
     }
     fn take_mapped(&mut self, reserved: usize, granularity: usize, initial: usize) -> Option<MappedSpare> {
@@ -71,9 +96,13 @@ impl Reserve {
         Some(mapped)
     }
     pub(super) fn keep(&mut self, handle: u64, bytes: usize, segment: bool) -> bool {
-        if self.pressure || self.bytes.saturating_add(bytes) > self.limit { return false; }
+        if !self.policy.can_keep(self.bytes, bytes, !segment && self.funded()) { return false; }
         self.pages.push(Spare { handle, bytes, segment });
         self.bytes += bytes;
+        if !segment {
+            self.stats.returned_count = self.stats.returned_count.saturating_add(1);
+            self.stats.returned_bytes = self.stats.returned_bytes.saturating_add(bytes);
+        }
         true
     }
     fn release(&mut self, context: &Context, page: Spare) {
@@ -83,6 +112,10 @@ impl Reserve {
         if code == 0 {
             context.allocated.set(context.allocated.get() - page.bytes);
             self.released = self.released.saturating_add(page.bytes);
+            if !page.segment {
+                self.stats.evicted_count = self.stats.evicted_count.saturating_add(1);
+                self.stats.evicted_bytes = self.stats.evicted_bytes.saturating_add(page.bytes);
+            }
         }
     }
     fn release_mapped(&mut self, context: &Context, mapped: MappedSpare) {
@@ -98,47 +131,70 @@ impl Reserve {
     pub(super) fn clear(&mut self, context: &Context) {
         while let Some(mapped) = self.mapped.pop() { self.bytes -= mapped.bytes(); self.release_mapped(context, mapped); }
         while let Some(page) = self.pages.pop() { self.bytes -= page.bytes; self.release(context, page); }
-        self.conversation = 0;
-        if self.limit != 0 { self.limit = Self::MINIMUM; }
+        self.policy.clear();
     }
     fn pressure(&mut self, context: &Context, now: Instant) -> Result<(), String> {
-        if self.limit == 0 || now < self.next_poll { return Ok(()); }
+        if self.policy.limit == 0 || now < self.next_poll { return Ok(()); }
         self.next_poll = now + std::time::Duration::from_millis(100);
         let info = std::fs::read_to_string("/proc/meminfo").map_err(|e| e.to_string())?;
         let available = info.lines().find(|l| l.starts_with("MemAvailable:"))
             .and_then(|l| l.split_whitespace().nth(1)).and_then(|n| n.parse::<usize>().ok())
             .and_then(|n| n.checked_mul(1024)).ok_or("missing MemAvailable")?;
-        self.available = available;
-        self.accounted = context.accounted_bytes();
-        self.pressure = available < self.margin;
-        if self.pressure { self.clear(context); }
+        let previous = self.policy.pressure;
+        self.policy.poll(available, context.accounted_bytes());
+        if self.policy.pressure != previous {
+            eprintln!("{} pressure_changed pressure={} available_bytes={} margin_bytes={} device_bytes={}",
+                self.label, self.policy.pressure, available, self.policy.margin, self.policy.accounted);
+        }
+        if self.policy.pressure { self.shed(context, now); }
         Ok(())
     }
-    /// Host bytes left before the pressure rule releases every spare page (MemAvailable minus
+    /// Pressure release. A reserve without a session plan releases every spare. A funded
+    /// reserve keeps ordinary spares inside the plan: live sessions take them back without
+    /// a new allocation. It releases segmented spares, ordinary spares above the plan and,
+    /// after IDLE_RELEASE without a request, every spare.
+    fn shed(&mut self, context: &Context, now: Instant) {
+        let idle = self.policy.idle_long(now);
+        if self.policy.sessions == 0 || idle { self.clear(context); return; }
+        while let Some(mapped) = self.mapped.pop() { self.bytes -= mapped.bytes(); self.release_mapped(context, mapped); }
+        let mut index = 0;
+        while index < self.pages.len() {
+            if self.policy.sheds(self.pages[index].segment, self.stats.held_bytes(), idle) {
+                let page = self.pages.swap_remove(index);
+                self.bytes -= page.bytes;
+                self.release(context, page);
+            } else { index += 1; }
+        }
+    }
+    /// Host bytes left before the pressure rule releases spare pages (MemAvailable minus
     /// the margin at the last poll, less the device bytes accounted since it, so pages released
     /// or mapped between two polls count at once; negative under pressure) and the bytes this
     /// reserve may still keep under its cap. None while the reserve is off. An elastic consumer
     /// (the serving prefix cache) that leaves this room keeps admission on reused pages.
     pub(super) fn room(&mut self, context: &Context) -> Result<Option<(i128, usize)>, String> {
-        if self.limit == 0 { return Ok(None); }
+        if self.policy.limit == 0 { return Ok(None); }
         self.pressure(context, Instant::now())?;
-        let since = context.accounted_bytes() as i128 - self.accounted as i128;
-        Ok(Some((self.available as i128 - self.margin as i128 - since, self.limit.saturating_sub(self.bytes))))
+        let since = context.accounted_bytes() as i128 - self.policy.accounted as i128;
+        Ok(Some((self.policy.available as i128 - self.policy.margin as i128 - since, self.policy.limit.saturating_sub(self.bytes))))
     }
     pub(super) fn maintain(&mut self, context: &Context, idle: bool) -> Result<(), String> {
-        if self.limit == 0 { return Ok(()); }
+        if self.policy.limit == 0 { return Ok(()); }
         let now = Instant::now();
-        if idle { self.idle_since.get_or_insert(now); } else { self.idle_since = None; }
+        self.policy.idle(idle, now);
         let poll = now >= self.next_poll;
         self.pressure(context, now)?;
-        if self.idle_since.is_some_and(|start| now.duration_since(start).as_secs() >= 30) && self.bytes != 0 {
+        // A funded reserve keeps idle spares without pressure: a next turn often follows a pause.
+        if self.policy.sessions == 0 && self.policy.idle_long(now) && self.bytes != 0 {
             self.clear(context);
         }
-        let state = (self.bytes, self.reused, self.released);
+        let state = (self.bytes, self.reused, self.released, self.policy.pressure, self.stats);
         if poll && state != self.reported {
-            eprintln!("{} reserve_bytes={} cap_bytes={} reused_bytes={} released_bytes={} device_bytes={} idle_ms={} pressure={}",
-                self.label, self.bytes, self.limit, self.reused, self.released, context.allocated.get(),
-                self.idle_since.map_or(0, |start| now.duration_since(start).as_millis()), self.pressure);
+            eprintln!("{} reserve_bytes={} cap_bytes={} reused_bytes={} released_bytes={} device_bytes={} idle_ms={} pressure={} allocated_count={} allocated_bytes={} reused_count={} returned_count={} returned_bytes={} direct_freed_count={} direct_freed_bytes={} evicted_count={} evicted_bytes={}",
+                self.label, self.bytes, self.policy.limit, self.reused, self.released, context.allocated.get(),
+                self.policy.idle_since.map_or(0, |start| now.duration_since(start).as_millis()), self.policy.pressure,
+                self.stats.allocated_count, self.stats.allocated_bytes, self.stats.reused_count,
+                self.stats.returned_count, self.stats.returned_bytes, self.stats.direct_freed_count,
+                self.stats.direct_freed_bytes, self.stats.evicted_count, self.stats.evicted_bytes);
             self.reported = state;
         }
         Ok(())
@@ -178,6 +234,7 @@ impl<'a> Buffer<'a> {
         }
         let mut buffer = Self::new(context, bytes)?;
         buffer.reuse = Reuse::Kv;
+        context.kv_reserve.borrow_mut().allocated(bytes);
         Ok(buffer)
     }
     pub(super) fn segmented(context: &'a Context, maximum: usize, initial: usize) -> Result<Self, String> {
@@ -342,7 +399,7 @@ impl Segments<'_> {
             || m.bytes != m.physical.bytes) { return false; }
         let bytes: usize = self.maps.iter().map(|m| m.bytes).sum();
         let mut reserve = context.kv_reserve.borrow_mut();
-        if reserve.pressure || reserve.bytes.saturating_add(bytes) > reserve.limit { return false; }
+        if !reserve.policy.can_keep(reserve.bytes, bytes, false) { return false; }
         let maps = self.maps.iter_mut().map(|m| {
             let physical = Rc::get_mut(&mut m.physical).unwrap();
             (std::mem::replace(&mut physical.handle, 0), physical.bytes)

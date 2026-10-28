@@ -32,6 +32,10 @@ pub mod gdn_params;
 pub mod next_params;
 pub mod next_math;
 pub mod compact;
+#[cfg(any(target_os = "linux", test))]
+mod reserve_policy;
+#[cfg(any(target_os = "linux", test))]
+pub use reserve_policy::KvArenaStats;
 #[path = "fp8_abi.rs"]
 pub mod fp8_abi;
 
