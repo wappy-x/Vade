@@ -6,14 +6,14 @@
 
 | Model | Sparks | Path | Drafting | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) | IDs saved / responses |
 | --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| qwen3.8-flash-next-fp4-local | 2 | tensor split | OFF | 35.229 | 35.384 | 35.144 | 33.761 | 82.601 | 123.883 | 2.166 | 66/66 |
-| qwen3.8-flash-next-fp4-local | 2 | tensor split | ON | 54.088 | 100.616 | 129.586 | 79.006 | 165.194 | 218.787 | 2.19 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 2 | tensor split | OFF | 35.106 | 35.258 | 35.437 | 33.941 | 82.095 | 124.336 | 2.165 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 2 | tensor split | ON | 54.304 | 100.748 | 129.336 | 79.358 | 165.752 | 217.525 | 2.186 | 66/66 |
 
-Measured main revision: `09e1fc439fc6cdf0d9c3597c7ff4859a8cd1dd00`.
+Measured main revision: `bb24e80054b30964b43ea147cdd50d25a51a1a3c`.
 
-2 Sparks, tensor split, drafting OFF: finished `2026-10-28T04:14:49.238519+00:00`; card SHA256 `6602a1c85126740267fe1c2da439be2186eda2fa85794a4f730555a10cf3bd68`.
+2 Sparks, tensor split, drafting OFF: finished `2026-10-28T11:40:21.174381+00:00`; card SHA256 `0e3a6064222a39e8cbbc1b46ede2a184e509ce8e039296ef24a6d0e07f9b74a9`.
 
-2 Sparks, tensor split, drafting ON: finished `2026-10-28T04:09:19.976047+00:00`; card SHA256 `c91cb1c634be9dcadfd79b1d8a1f9096da50b96d7ae3585498df9e2280ffc607`.
+2 Sparks, tensor split, drafting ON: finished `2026-10-28T11:34:48.775524+00:00`; card SHA256 `19b449c722e1d9d3e039bb02426bd2f984e7b4df817e69467078ef8d884e972a`.
 
 Rates are card medians in tok/s. C1, C4 and C8 cover all chats together.
 Cold 8K is the median time to the first token. IDs saved counts responses
@@ -38,7 +38,11 @@ apply only to those measurements.
 This page has every speed we have published for Vade, newest first, and how
 to measure your own:
 
-- [Final 2026-10-27 cards](#current-2026-10-27-final-main-09e1fc4-home-dgx-sparks):
+- [2026-10-28 morning cards](#current-2026-10-28-morning-main-bb24e80-home-dgx-sparks):
+  two DGX Sparks at main `bb24e80`, drafting ON on one pair and OFF on the
+  other, first-token times for 32K, 64K and 128K prompts, and a second
+  question on a long chat with the prefix cache on one Spark.
+- [Final 2026-10-27 cards](#previous-2026-10-27-final-main-09e1fc4-home-dgx-sparks):
   two DGX Sparks at main `09e1fc4`, drafting ON on one pair and OFF on the
   other, and first-token times for 32K and 64K prompts.
 - [2026-10-27 morning cards](#previous-2026-10-27-morning-main-12142bb-home-dgx-sparks):
@@ -65,13 +69,74 @@ it measured. The receipts behind the 2026-10-24 tables are in
 sanitized copies: private details such as hostnames are replaced, so our
 machines appear as home-1 to home-6 and the rented ones as vm-a to vm-d. The
 [receipt status](../bench/receipts/README.md) page says what is public. The
-2026-10-25, 2026-10-26 and 2026-10-27 cards are not in the repository yet;
-each row names its result folder. The 2026-10-27 folder names end in a pair
-suffix that uses internal machine names (and, for the final cards, `-final`),
-so those names are given here without the suffix; the time, commit and
+2026-10-25 to 2026-10-28 cards are not in the repository yet; each row names
+its result folder. The 2026-10-27 and 2026-10-28 folder names end in a pair
+suffix that uses internal machine names (and `-final` or `-am`), so those
+names are given here without the suffix; the time, commit and
 drafting setting in each name still identify the card.
 
-## Current (2026-10-27 final, main 09e1fc4, home DGX Sparks)
+## Current (2026-10-28 morning, main bb24e80, home DGX Sparks)
+
+These are the morning RigMark cards of 2026-10-28, measured on the same two
+pairs of our own DGX Sparks as the
+[final 2026-10-27 cards](#previous-2026-10-27-final-main-09e1fc4-home-dgx-sparks),
+at main `bb24e80` (#136). The recipe is the same: context 32768, output 8192,
+MTP 3, greedy, cache off, thinking OFF, and no `VADE_W2_*` name at any server
+start. Each card passed its **15/15** basic output checks and ran a prebuilt
+payload of its commit, installed and hash-checked on both Sparks. Both serving
+receipts record the tensor split with the same four levels as before.
+home-1 + home-2 ran drafting ON, and home-3 + home-4 ran drafting OFF, each
+on its own server start.
+
+| Path | Drafting | Commit | Sparks | Prose | Code | Structured | C1 | C2 | C4 | C8 | Cold 8K prompt (s) | Result folder |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Tensor split | ON | `bb24e80` | home-1 + home-2 | 54.3 | 100.7 | 129.3 | 79.4 | 103.0 | 165.8 | 217.5 | 2.19 | `2026-10-28_0634_qwen3.8-flash-next-nvfp4_local-2spark_bb24e80-drafting-on-thinking-off-split` |
+| Tensor split | OFF | `bb24e80` | home-3 + home-4 | 35.1 | 35.3 | 35.4 | 33.9 | 49.0 | 82.1 | 124.3 | 2.17 | `2026-10-28_0640_qwen3.8-flash-next-nvfp4_local-2spark_bb24e80-drafting-off-thinking-off-split` |
+
+### What changed since the final 2026-10-27 cards
+
+**The cards are the same.** On the same pairs, every rate is within 0.9 % of
+the final 2026-10-27 cards. The largest move is drafting OFF structured
+output, 35.4 tok/s against 35.1. Eight chats with drafting ON reached 217.5
+against 218.8; the three rounds were 199.1, 218.9 and 217.5 tok/s, and the
+first round was low in the final cards too (198.5). The night's engine
+changes are for long prompts and the prefix cache; the KV page ledger (#133)
+is off by default.
+
+**The answers did not change.** The token IDs matched in 66 of 66 responses:
+the ON card against the OFF card, and each card against the final 2026-10-27
+cards.
+
+**A 64K prompt reaches its first token about 1 s sooner.** Two Sparks now
+read the middle of a prompt of 32K tokens or more in passes of the whole
+prompt workspace (#135). These cells ran on home-1 + home-2 with no
+`VADE_W2_*` name, one server start per prompt, context 69632 for 32K and 64K
+and 131072 for 128K. The cache was off. Each prompt ran four times, twice
+with drafting OFF and twice with drafting ON, with a 1024-token cap. The
+table gives both runs of each. All four runs of a prompt gave the same token
+IDs, and the 32K and 64K IDs match the final 2026-10-27 runs.
+
+| Prompt | Tokens | First token, drafting ON (s) | First token, drafting OFF (s) | Final 2026-10-27, drafting ON (s) |
+| --- | ---: | ---: | ---: | ---: |
+| 32K | 32,099 | 10.03, 10.09 | 10.24, 10.03 | 10.24, 10.01 |
+| 64K | 64,217 | 20.04, 19.99 | 19.33, 19.22 | 21.06, 21.06 |
+| 128K | 129,220 | 42.47, 42.53 | 40.16, 39.98 | not measured |
+
+The final 2026-10-27 runs used a different client with the same prompts.
+
+**One Spark answers the next question on a long chat from its cache.** This
+cell ran on one DGX Spark (home-1) with context 65536 and the prefix cache on
+(`VADE_FLASHNEXT_PREFIX_CACHE=1`), drafting ON. The first question carried a
+32,103-token prompt and gave its first token in 16.33 s. The second question
+(32,309 tokens) reused 32,064 tokens from the cache and gave its first token
+in 0.62 s. The same second question with the cache off took 16.29 s. Both
+answers have the same token IDs with and without the cache. Before #136, at
+this context the cache had no room to store the first question. Two Sparks
+do not use the prefix cache yet.
+
+<a id="current-2026-10-27-final-main-09e1fc4-home-dgx-sparks"></a>
+
+## Previous (2026-10-27 final, main 09e1fc4, home DGX Sparks)
 
 These are the last RigMark cards of 2026-10-27, measured on two pairs of our
 own DGX Sparks at main `09e1fc4`. Each card passed its **15/15** basic output

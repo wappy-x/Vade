@@ -147,6 +147,26 @@ Changes that are merged but not yet released are under Unreleased.
   memory and TCP. The state words are copied as they are, so the tokens do not
   change.
 
+The morning cards of October 28, 2026 measured main `bb24e80` (#136) with the
+same recipe and the same two pairs of DGX Sparks as the final cards of
+October 27. Rates below are tokens per second.
+
+- With drafting ON, one chat wrote prose at 54.3, code at 100.7 and structured
+  output at 129.3. Eight chats reached 217.5. A cold 8K prompt gave its first
+  token in 2.19 s.
+- With drafting OFF, one chat wrote prose at 35.1 and code at 35.3, and eight
+  chats reached 124.3. A cold 8K prompt took 2.17 s.
+- Every rate is within 0.9 % of the final October 27 cards. Token IDs matched
+  in 66 of 66 responses between the ON and OFF cards, and against the final
+  October 27 cards.
+- With drafting ON, a 64,217-token prompt gave its first token in 20.04 s,
+  against 21.06 s in the final October 27 run, and a 129,220-token prompt in
+  42.47 s. A 32,099-token prompt took 10.03 s.
+- On one Spark with context 65536 and the prefix cache on, the second question
+  on a 32,103-token chat reused 32,064 tokens and gave its first token in
+  0.62 s. With the cache off it took 16.29 s. See the
+  [benchmarks page](docs/benchmarks.md#current-2026-10-28-morning-main-bb24e80-home-dgx-sparks).
+
 The final cards of October 27, 2026 measured main `09e1fc4` (#131) with the
 FP4-Local checkpoint on two pairs of DGX Sparks, greedy decoding, thinking off
 and no `VADE_W2_*` setting. Rates below are tokens per second.
