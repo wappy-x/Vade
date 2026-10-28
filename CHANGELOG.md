@@ -5,6 +5,12 @@ Changes that are merged but not yet released are under Unreleased.
 
 ## Unreleased
 
+- Two Sparks read a prompt of 32K tokens or more in wider passes. The middle
+  of the prompt now runs in passes of the whole prompt workspace (4096 rows by
+  default) instead of 2048 rows, so the experts run fewer, larger batches. The
+  start and the end of the prompt keep 2048-row passes. Shorter prompts read as
+  before. Token IDs do not change. (own-read-profile)
+
 - Two Sparks read a cold prompt of 2K to 8K tokens faster. Each Spark reads
   half of the prompt, and the answer stays the same, token for token. In the
   final 2026-10-27 cards, a cold 8K prompt gave its first token in 2.19 s

@@ -31,14 +31,26 @@ pub const SEQ: u32 = 1 << 26;
 pub const PIPELINE_TILE: usize = 2048;
 /// The smallest first part of a token-split prompt (rows).
 pub const SEQ_MIN_ROWS: usize = 1024;
+/// The shortest prompt, in prompt workspaces, whose middle slices take the whole workspace
+/// (seq_slice). On the two-rank pipeline the first token comes after one rank's time for every row
+/// plus its time for the largest tile (the fill and the drain), so a wide tile adds a PIPELINE_TILE
+/// of bubble that the experts' saving pays only on a long prompt (two Sparks, every middle slice
+/// wide: 12K +0.36 s, 32K -0.15 s, 64K -1.06 s, 128K -3.0 s). An operator figure.
+pub const WIDE_MIN_CHUNKS: usize = 8;
 
 /// Rows of the next prompt slice of a chat at `pos` whose prompt ends at `end`, on a two-rank
 /// split front with a `chunk`-row prompt workspace. A cold prompt of 2 SEQ_MIN_ROWS..=2 chunk rows
 /// comes whole in one slice, and the engine runs its two parts back to back in that one call
 /// (seq_first), so no other pass, cancellation or slot reuse falls between the first part and
-/// its import; every other prompt keeps PIPELINE_TILE slices.
+/// its import. Other prompts run as pipeline tiles: in a prompt of WIDE_MIN_CHUNKS workspaces or
+/// more, a slice after a chat's first takes the whole workspace while more than chunk +
+/// PIPELINE_TILE rows remain (the routed experts see twice the rows per expert in a 4096-row
+/// tile, at about 0.6 of the cost per row); the first slice keeps the pipeline's fill short and
+/// the last rows its drain. Every other slice, and every slice of a workspace of at most
+/// PIPELINE_TILE rows, stays PIPELINE_TILE.min(chunk) rows.
 pub fn seq_slice(pos: usize, end: usize, chunk: usize) -> usize {
     if seq_first(pos, end, chunk).is_some() { return end - pos; }
+    if pos > 0 && end >= WIDE_MIN_CHUNKS * chunk && end - pos > chunk + PIPELINE_TILE { return chunk; }
     PIPELINE_TILE.min(chunk)
 }
 /// The token split's first part of a prompt at `pos` ending at `end`, if it takes one: P = N / 2
@@ -348,6 +360,31 @@ mod tests {
                 if let Some(p) = seq_first(0, end, chunk) { assert!(p % 64 == 0 && p <= chunk && end - p <= chunk, "{chunk} {end}"); }
             }
         }
+    }
+    /// Prompts of WIDE_MIN_CHUNKS workspaces or more: the first slice and the last rows keep
+    /// PIPELINE_TILE, the middle slices the whole workspace; shorter prompts keep PIPELINE_TILE;
+    /// every cut stays a multiple of 64 and the token split does not change.
+    #[test]
+    fn long_prompts_take_the_workspace_in_the_middle() {
+        let walk = |end: usize, chunk: usize| {
+            let (mut pos, mut cuts) = (0, vec![]);
+            while pos < end { let n = seq_slice(pos, end, chunk).min(end - pos); cuts.push(n); pos += n; }
+            cuts
+        };
+        assert_eq!(walk(32768, 4096), [2048, 4096, 4096, 4096, 4096, 4096, 4096, 2048, 2048, 2048]);
+        assert_eq!(walk(40000, 4096), [[2048].as_slice(), &[4096; 8], &[2048, 2048, 1088]].concat());
+        assert_eq!(walk(32099, 4096), [[2048; 15].as_slice(), &[1379]].concat());
+        assert_eq!(walk(12000, 4096), [2048, 2048, 2048, 2048, 2048, 1760]);
+        assert_eq!(walk(8192, 4096), [8192]);
+        assert_eq!(walk(10000, 2048), [2048, 2048, 2048, 2048, 1808]);
+        for (end, chunk) in [(129220, 4096), (64217, 4096), (32769, 4096), (70000, 8192), (9000, 1024)] {
+            let cuts = walk(end, chunk);
+            assert_eq!((cuts[0], cuts.iter().sum::<usize>()), (PIPELINE_TILE.min(chunk), end));
+            assert!(cuts.iter().all(|&n| n <= chunk) && cuts[..cuts.len() - 1].iter().all(|n| n % 64 == 0), "{end} {chunk}");
+            assert!(cuts.iter().rev().take_while(|&&n| n < chunk).sum::<usize>() <= chunk + PIPELINE_TILE, "{end} {chunk}");
+        }
+        assert_eq!((seq_slice(4096, 32768, 4096), seq_slice(4096, 32767, 4096)), (4096, PIPELINE_TILE));
+        assert_eq!(seq_slice(26624, 32768, 4096), PIPELINE_TILE);
     }
     /// First part, second part, a tail alone, then the push before decode; only an expected first
     /// part splits; a slot reused from position 0 drops its state; short or final parts stay normal.

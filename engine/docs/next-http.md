@@ -162,7 +162,7 @@ layer 2:
   (1024 rows) runs as a pipeline tile (rank 0 layers 0-23, rank 1 layers 24-47,
   exactly as the pipeline). Two Sparks use a 4096-row prompt workspace for the
   token split below, but the serve still hands other prompts to the engine in
-  2048-row tiles. The rest of
+  2048-row tiles (wider in the middle of a long prompt, below). The rest of
   such a prompt (its later, shorter passes up to the first token) also runs as
   pipeline tiles. Before the chat's next split pass, the ranks swap the session
   state the other did not compute (GDN state and history, QSA keys, values and
@@ -170,6 +170,16 @@ layer 2:
   one slot; the TCP link carries only each layer's row count and vector sizes,
   which both ranks check. Shorter prompts run on both ranks. A failed swap stops
   the link and leaves the chats' sessions unusable (they are not reused).
+- In such a prompt of eight prompt workspaces or more (32768 rows by default),
+  a pass after a chat's first one takes the whole workspace (4096 rows by
+  default) while more than the workspace plus 2048 rows remain; a new chat's
+  first pass and the last rows of the prompt keep 2048-row tiles, so the
+  pipeline fills and drains in short tiles. Every cut except the last stays a
+  multiple of 64. The routed experts get twice the rows per expert in a wider
+  pass, and each row and layer computes the same words, so token IDs do not
+  change. A shorter prompt, or a workspace of 2048 rows or less, keeps 2048-row
+  tiles: the first token comes after one rank's time for all rows plus its time
+  for the largest tile, and a wider tile pays for itself only in a long prompt.
 - A cold one-chat prompt of 2048 to 8192 rows (two prompt workspaces) runs as a
   token split instead ([`next_tp_seq.rs`](../crates/engine/src/flash/next_tp_seq.rs)).
   The serve hands the whole prompt in one call, and the engine runs it as two
