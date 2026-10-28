@@ -55,8 +55,9 @@ impl Link {
 }
 #[cfg(target_os = "linux")]
 impl NextModel<'_> {
-    /// Front: read the queued-tile acks already on the socket (never waits), so the rows they
-    /// carry are back for observe_kept.
+    /// Front: read the queued-tile acks already on the socket, so the rows they carry are back
+    /// for observe_kept. It waits for no new header; the payload of a header that has arrived
+    /// can still wait, within the read deadline (queued_frame).
     pub(in crate::flash) fn pp_read_acks(&self) -> Result<()> {
         let mut guard = self.pp.borrow_mut();
         let link = guard.as_mut().filter(|l| !l.poisoned).ok_or("pipeline link failed earlier; the front is stopping")?;

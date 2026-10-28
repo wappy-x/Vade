@@ -323,6 +323,9 @@ impl<'a> NextModel<'a> {
         if self.tp_rank() != Some(0) {
             return Ok(None);
         }
+        // A slot that a new chat reuses from position 0 owes nothing: a previous chat's pipeline
+        // handoff entry goes first, also when the new prompt runs on the token split below.
+        if let Some(s) = self.tp.borrow_mut().as_mut() { s.handoff.retain(|slot| !sessions.iter().any(|chat| chat.slot == *slot && chat.pos == 0)); }
         // Token split (next_tp_seq.rs): its prompt passes, or its handoffs before any other pass.
         if let Some(tile) = self.tp_seq_plan(b, sessions, spans, verify, output)? {
             if let Some(link) = self.pp.borrow_mut().as_mut() { (link.tp_tile, link.tp_seq) = (tile, tile); }
@@ -346,9 +349,7 @@ impl<'a> NextModel<'a> {
             for chat in sessions.iter() { if !s.handoff.contains(&chat.slot) { s.handoff.push(chat.slot); } }
             return Ok(Some(LAYERS / 2));
         }
-        // A slot that a new chat reuses from position 0 owes nothing (its prompt ran split).
         let owed: Vec<usize> = (0..sessions.len()).filter(|&i| sessions[i].pos > 0 && s.handoff.contains(&sessions[i].slot)).collect();
-        s.handoff.retain(|slot| !sessions.iter().any(|chat| chat.slot == *slot && chat.pos == 0));
         if owed.is_empty() {
             return Ok(None);
         }
