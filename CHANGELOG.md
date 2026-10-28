@@ -6,8 +6,10 @@ Changes that are merged but not yet released are under Unreleased.
 ## Unreleased
 
 - Two Sparks read a cold prompt of 2K to 8K tokens faster. Each Spark reads
-  half of the prompt, and the answer stays the same, token for token. A cold
-  8K prompt now gives its first token in about 2.20 s instead of 2.79 s.
+  half of the prompt, and the answer stays the same, token for token. In the
+  final 2026-10-27 cards, a cold 8K prompt gave its first token in 2.19 s
+  with drafting ON and 2.17 s with drafting OFF, against 2.80 s and 2.77 s in
+  that morning's cards.
   Longer prompts read as before. In exchange, two Sparks hold one chat fewer at
   a 32K context: 8 instead of 9.
 
@@ -130,6 +132,22 @@ Changes that are merged but not yet released are under Unreleased.
   split's RDMA mailbox, in pieces of one mailbox slot, instead of through host
   memory and TCP. The state words are copied as they are, so the tokens do not
   change.
+
+The final cards of October 27, 2026 measured main `09e1fc4` (#131) with the
+FP4-Local checkpoint on two pairs of DGX Sparks, greedy decoding, thinking off
+and no `VADE_W2_*` setting. Rates below are tokens per second.
+
+- With drafting ON, one chat wrote prose at 54.1, code at 100.6 and structured
+  output at 129.6. Eight chats reached 218.8. A cold 8K prompt gave its first
+  token in 2.19 s.
+- With drafting OFF, one chat wrote prose at 35.2 and code at 35.4, and eight
+  chats reached 123.9. That morning, on the same pair, these were 29.7, 29.6
+  and 110.8. A cold 8K prompt took 2.17 s.
+- On a second start with context 69632 and drafting ON, a 32,099-token prompt
+  gave its first token in 10.24 s and a 64,217-token prompt in 21.06 s.
+- Token IDs matched in 66 of 66 responses between the ON and OFF cards, and
+  against that morning's cards. See the
+  [benchmarks page](docs/benchmarks.md#current-2026-10-27-final-main-09e1fc4-home-dgx-sparks).
 
 Merges #105 through #110 were measured on October 26, 2026, with the FP4-Local
 checkpoint on two DGX Sparks. These runs used greedy decoding, drafting on,

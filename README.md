@@ -166,21 +166,22 @@ and how to change it. The ones you meet first:
   falls back to plain chat, and chat from a controller stops with an error.
 - **Two Sparks make one chat faster; four do not yet.** Two Sparks run the
   tensor split, the only two-Spark path, with no settings to set: both work on every token.
-  In the 2026-10-27 cards, one chat with drafting ON wrote 100.4 and 99.7 tok/s
-  of code on two pairs, against 76.7 on one Spark in the v0.1.0 card. Four or
+  In the final 2026-10-27 card, one chat with drafting ON wrote 100.6 tok/s
+  of code on two Sparks, against 76.7 on one Spark in the v0.1.0 card. Four or
   more Sparks run the layer pipeline: each Spark holds a run of the model's
   layers and passes its work to the next, so one chat uses one GPU at a time,
-  and one chat wrote 80.3 tok/s of code on four. More Sparks read prompts
-  faster: the first token after a cold 8K prompt came in 2.80 s on two Sparks
-  and 2.19 s on four, against 3.86 s on one. See
+  and one chat wrote 80.3 tok/s of code on four. Two or more Sparks read
+  prompts faster than one: the first token after a cold 8K prompt came in
+  2.19 s on two Sparks and 2.19 s on four, against 3.86 s on one. See
+  [the final 2026-10-27 cards](docs/benchmarks.md#current-2026-10-27-final-main-09e1fc4-home-dgx-sparks),
   [what changed since the 2026-10-26 cards](docs/benchmarks.md#what-changed-since-the-2026-10-26-cards),
   [what the split changes](docs/benchmarks.md#what-the-split-changes) and
   [reading these cards](docs/benchmarks.md#reading-these-cards).
 - **Eight chats without drafting are slower on two Sparks than before.** With
-  drafting OFF, eight chats reached 111.6 and 110.8 tok/s on the split in the
-  2026-10-27 cards, against 137.0 on the layer pipeline in the 2026-10-26
-  cards. Drafting is on by default; with it, eight chats reached 221.8 and
-  221.6 against 201.7.
+  drafting OFF, eight chats reached 123.9 tok/s on the split in the final
+  2026-10-27 card, against 137.0 on the layer pipeline in the 2026-10-26
+  cards. Drafting is on by default; with it, eight chats reached 218.8
+  against 201.7.
 - **On four Sparks, eight chats ran without drafting.** In the four-Spark
   card the engine served every eight-chat response without drafting, so eight
   chats with drafting ON reached 136.5 tok/s, against 176.4 on two.
@@ -205,6 +206,10 @@ tokens. It covers the requests it sent, not every mix of batching and caching.
 
 What we have checked so far covers drafting ON against OFF:
 
+- On main `09e1fc4` (the final 2026-10-27 cards), the drafting-ON card on one
+  pair matched the drafting-OFF card on the other pair in 66 of 66 responses.
+  Both also matched that morning's cards at `12142bb`
+  ([benchmarks](docs/benchmarks.md#current-2026-10-27-final-main-09e1fc4-home-dgx-sparks)).
 - On main `12142bb` (2026-10-27), the two-Spark tensor-split cards matched
   drafting ON against OFF in 66 of 66 responses on each of two pairs. The
   pairs also matched each other and the 2026-10-26 cards
@@ -240,14 +245,14 @@ explains the full rule and what each check proves.
 
 | Model | Sparks | Path | Drafting | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) | IDs saved / responses |
 | --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| qwen3.8-flash-next-fp4-local | 2 | tensor split | OFF | 29.719 | 29.579 | 29.776 | 28.829 | 75.333 | 110.818 | 2.77 | 66/66 |
-| qwen3.8-flash-next-fp4-local | 2 | tensor split | ON | 53.503 | 99.737 | 129.74 | 75.249 | 164.802 | 221.582 | 2.799 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 2 | tensor split | OFF | 35.229 | 35.384 | 35.144 | 33.761 | 82.601 | 123.883 | 2.166 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 2 | tensor split | ON | 54.088 | 100.616 | 129.586 | 79.006 | 165.194 | 218.787 | 2.19 | 66/66 |
 
-Measured main revision: `12142bb551abd960448135f3e75953d518fb77fa`.
+Measured main revision: `09e1fc439fc6cdf0d9c3597c7ff4859a8cd1dd00`.
 
-2 Sparks, tensor split, drafting OFF: finished `2026-10-27T12:53:33.568612+00:00`; card SHA256 `00ec2d26de0584ff53de605f288b53c0f1b89231777b88b60d7158ba3a073304`.
+2 Sparks, tensor split, drafting OFF: finished `2026-10-28T04:14:49.238519+00:00`; card SHA256 `6602a1c85126740267fe1c2da439be2186eda2fa85794a4f730555a10cf3bd68`.
 
-2 Sparks, tensor split, drafting ON: finished `2026-10-27T12:41:38.391950+00:00`; card SHA256 `f91c43bd13cab79fb2b788556f3fbc64b3a311a367f1fb06062ab9f777fa8c6e`.
+2 Sparks, tensor split, drafting ON: finished `2026-10-28T04:09:19.976047+00:00`; card SHA256 `c91cb1c634be9dcadfd79b1d8a1f9096da50b96d7ae3585498df9e2280ffc607`.
 
 Rates are card medians in tok/s. C1, C4 and C8 cover all chats together.
 Cold 8K is the median time to the first token. IDs saved counts responses
@@ -277,34 +282,42 @@ caveats.
 
 ### Two Sparks, 2026-10-27
 
-`vade up --sparks 2` runs the tensor split by default. You set nothing. These
-RigMark cards ran on two pairs of our DGX Sparks on 2026-10-27, at main
-`12142bb`, with no split settings in the environment, drafting ON (the
-default), context 32768, greedy decoding and thinking OFF. They measure the
-same speeds as the 2026-10-26 cards below, where the split's four levels were
-still set by hand, and their token IDs match those cards in 66 of 66
-responses.
+`vade up --sparks 2` runs the tensor split by default. You set nothing. The
+final RigMark cards of 2026-10-27 ran on two pairs of our DGX Sparks at main
+`09e1fc4`, with no split settings in the environment, context 32768, greedy
+decoding and thinking OFF. One pair ran drafting ON (the default). The other
+pair ran drafting OFF. Each card had its own server start. The two cards
+match each other in 66 of 66 responses, and they match that morning's cards
+at `12142bb`.
 
-| Two DGX Sparks | Prose tok/s | Code tok/s | Structured tok/s | 1 chat tok/s | 4 chats tok/s | 8 chats tok/s | First token, cold 8192-token prompt (s) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Tensor split (the default), home-1 + home-2 | 53.9 | 100.4 | 130.3 | 76.9 | 165.7 | 221.8 | 2.80 |
-| Tensor split (the default), home-3 + home-4 | 53.5 | 99.7 | 129.7 | 75.2 | 164.8 | 221.6 | 2.80 |
+| Two DGX Sparks | Drafting | Prose tok/s | Code tok/s | Structured tok/s | 1 chat tok/s | 4 chats tok/s | 8 chats tok/s | First token, cold 8192-token prompt (s) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Tensor split (the default), home-1 + home-2 | ON | 54.1 | 100.6 | 129.6 | 79.0 | 165.2 | 218.8 | 2.19 |
+| Tensor split (the default), home-3 + home-4 | OFF | 35.2 | 35.4 | 35.1 | 33.8 | 82.6 | 123.9 | 2.17 |
 
 Prose, code and structured are one chat at a time, 5 runs each with an
 8192-token cap. The 1-, 4- and 8-chat rates cover all chats together, 3 rounds
 with a 256-token cap. Structured output is a predictable JSON workload, not a
 measure of general agent performance.
 
+Against that morning's cards, a cold 8K prompt now reaches its first token
+in 2.19 s instead of 2.80 s with drafting ON, and in 2.17 s instead of 2.77 s
+with drafting OFF: each Spark reads half of a cold prompt of 2K to 8K tokens.
+Drafting OFF is faster: on the same pair, one chat wrote code at 35.4 tok/s
+instead of 29.6, and eight chats reached 123.9 instead of 110.8. With
+drafting ON, prose, code and structured output stay within 1 tok/s of the
+morning cards.
+
 Long prompts reach their first token sooner than they did on the 2026-10-26
 builds, for two reasons. The first token no longer waits while the two Sparks
 swap a long prompt's layer state, and that swap now goes GPU to GPU over the
 RDMA link (#114). And the first Spark now reads the second Spark's
 prompt-tile replies as they arrive, so a long prompt from a chat that drafts
-no longer stalls in the middle of the read (#120). On a second start with
-context 69632, a 32,099-token prompt reached its first token in 10.10 s on
-the first pair and 10.24 s on the second; a 64,217-token prompt took 21.54 s
-and 21.60 s. The drafting-OFF cards and the full tables are on the
-[benchmarks page](docs/benchmarks.md#current-2026-10-27-main-12142bb-home-dgx-sparks).
+no longer stalls in the middle of the read (#120). On a second start of the
+drafting-ON pair with context 69632, a 32,099-token prompt reached its first
+token in 10.24 s, and a 64,217-token prompt took 21.06 s. The morning cards,
+the drafting-OFF details and the full tables are on the
+[benchmarks page](docs/benchmarks.md#current-2026-10-27-final-main-09e1fc4-home-dgx-sparks).
 
 ### Two Sparks, 2026-10-26
 
