@@ -203,13 +203,17 @@ and how to change it. The ones you meet first:
   2026-10-27 card, against 137.0 on the layer pipeline in the 2026-10-26
   cards. Drafting is on by default; with it, eight chats reached 218.8
   against 201.7.
-- **On four Sparks, eight chats ran without drafting.** In the four-Spark
-  card the engine served every eight-chat response without drafting, so eight
-  chats with drafting ON reached 136.5 tok/s, against 176.4 on two.
+- **On four Sparks, eight chats now draft.** In the 2026-10-25 four-Spark
+  card the engine served every eight-chat response without drafting, and
+  eight chats reached 136.5 tok/s. In the 2026-10-28 end-of-day card at
+  `76977df`, it drafted at every chat count, and eight chats reached
+  192.9 tok/s, against 229.5 on the two-Spark split and 177.5 on one Spark
+  ([benchmarks](docs/benchmarks.md#current-2026-10-28-end-of-day-main-76977df-home-dgx-sparks)).
 - **Chains are measured up to four machines.** The
   [FP4-Local guide](cli/docs/fp4-local.md) describes chains of 2 to 24 Sparks.
-  We have run at most four: four DGX Sparks at `6cb46bf` on 2026-10-25, and
-  four cloud GB10 VMs at v0.1.0 on 2026-10-24.
+  We have run at most four: four DGX Sparks at `6cb46bf` on 2026-10-25 and
+  at `76977df` on 2026-10-28, and four cloud GB10 VMs at v0.1.0 on
+  2026-10-24.
 - **The prefix cache is off by default.** It lets a request that starts
   like an earlier one skip reading that start again. It works on one Spark
   and on two Sparks (the tensor split). On one Spark with context 65536, the
@@ -236,10 +240,16 @@ tokens. It covers the requests it sent, not every mix of batching and caching.
 
 What we have checked so far covers drafting ON against OFF:
 
+- On main `76977df` (the 2026-10-28 end-of-day cards), FP4-Local gave the
+  same token IDs on one, two and four Sparks, with drafting ON and OFF, in
+  66 of 66 responses in every compare. FP8 matched drafting ON against OFF
+  on each Spark count, but its two-Spark and four-Spark cards matched in
+  only 7 of 66 responses, as on 2026-10-25 (5 of 62). This is a known FP8
+  limit ([benchmarks](docs/benchmarks.md#current-2026-10-28-end-of-day-main-76977df-home-dgx-sparks)).
 - On main `9d2ec6c` (the 2026-10-28 cards after #142), the drafting-ON card
   matched the drafting-OFF card on the same pair in 66 of 66 responses. Both
   also matched the `8b7b866` card
-  ([benchmarks](docs/benchmarks.md#current-2026-10-28-after-142-main-9d2ec6c-home-dgx-sparks)).
+  ([benchmarks](docs/benchmarks.md#previous-2026-10-28-after-142-main-9d2ec6c-home-dgx-sparks)).
 - On main `104205a` (the 2026-10-28 cards after #139), the drafting-ON card
   matched the drafting-OFF card on the same pair in 66 of 66 responses. Both
   also matched the 2026-10-28 morning cards at `bb24e80`, and a drafting-ON
@@ -288,14 +298,38 @@ explains the full rule and what each check proves.
 
 | Model | Sparks | Path | Drafting | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) | IDs saved / responses |
 | --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| qwen3.8-flash-next-fp4-local | 1 | local | OFF | 27.573 | 27.619 | 27.908 | 26.961 | 83.889 | 137.585 | 3.806 | 66/66 |
-| qwen3.8-flash-next-fp4-local | 1 | local | ON | 42.007 | 80.378 | 100.327 | 64.182 | 142.468 | 176.388 | 3.76 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 1 | local | OFF | 27.582 | 27.625 | 27.927 | 26.965 | 83.569 | 130.553 | 3.811 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 1 | local | ON | 42.039 | 80.458 | 99.93 | 64.074 | 143.929 | 177.496 | 3.759 | 66/66 |
+| qwen3.8-flash-next-fp8 | 2 | ring | OFF | 26.823 | 26.709 | 26.856 | 25.839 | 66.618 | 99.298 | 6.005 | 66/66 |
+| qwen3.8-flash-next-fp8 | 2 | ring | ON | 36.6 | 50.883 | 52.706 | 45.124 | 66.499 | 98.327 | 5.969 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 2 | tensor split | OFF | 35.071 | 35.375 | 35.487 | 33.814 | 82.476 | 126.344 | 2.153 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 2 | tensor split | ON | 53.792 | 99.972 | 128.426 | 76.87 | 162.493 | 229.457 | 2.186 | 66/66 |
+| qwen3.8-flash-next-fp8 | 4 | path | OFF | 35.266 | 34.722 | 35.284 | 33.9 | 88.201 | 128.203 | 6.948 | 66/66 |
+| qwen3.8-flash-next-fp8 | 4 | path | ON | 46.669 | 65.115 | 68.026 | 58.452 | 86.39 | 128.832 | 6.911 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 4 | pipeline | OFF | 28.157 | 28.177 | 28.503 | 27.642 | 84.974 | 139.335 | 2.177 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 4 | pipeline | ON | 42.758 | 81.287 | 101.673 | 65.82 | 145.757 | 192.895 | 2.176 | 66/66 |
 
-Measured main revision: `6926aaa6c571b4a0dd9ab845dbb93f9049de67e5`.
+Measured main revision: `76977dff88d36a85a8bfeaff6725d169e8a44845`.
 
-1 Sparks, local, drafting OFF: finished `2026-10-28T18:02:53.546070+00:00`; card SHA256 `c692b08b3133403559aed5dc2798d22b859a98ba0321350349c15fea2f2090eb`.
+1 Sparks, local, drafting OFF: finished `2026-10-28T18:43:01.904860+00:00`; card SHA256 `257c5dcf80ed8ad1cdbd266735e3eba7dd9a7ad02e15ae4cf1e55dad3ef3ea54`.
 
-1 Sparks, local, drafting ON: finished `2026-10-28T17:56:23.865775+00:00`; card SHA256 `dbbb938750bc1e309f2553a2a16e77720538d2150aaac928f55eba41b5e0f9ad`.
+1 Sparks, local, drafting ON: finished `2026-10-28T18:36:30.110067+00:00`; card SHA256 `e1f30da8e92d727a5f49c9493b0acdb4a4ea6f86d4937444e7ff4741b7a11221`.
+
+2 Sparks, ring, drafting OFF: finished `2026-10-28T19:44:41.463006+00:00`; card SHA256 `1ee05800f41f2424e80de00ca1c09dacdc3c899ccbce6cbbc494c2801964f69e`.
+
+2 Sparks, ring, drafting ON: finished `2026-10-28T19:40:31.787574+00:00`; card SHA256 `24134290373fe44fb8fbc5be0277f8ceab2499a17347b57441e51a0ecece3997`.
+
+2 Sparks, tensor split, drafting OFF: finished `2026-10-28T18:58:50.757964+00:00`; card SHA256 `d9edf41a3cea1b240fb8e330862a8835fc6102b867606786d4fca9e99c58933a`.
+
+2 Sparks, tensor split, drafting ON: finished `2026-10-28T18:55:24.379380+00:00`; card SHA256 `9f6adc1a65ce34c2ca8c96b19fd660a2c00608b8e8c7868200656a57c7a333cf`.
+
+4 Sparks, path, drafting OFF: finished `2026-10-28T20:03:46.518365+00:00`; card SHA256 `56ccef9d52df49d8faf9fba12843c0e1725b88a56f73b4d22eaa1b36ab76721b`.
+
+4 Sparks, path, drafting ON: finished `2026-10-28T19:52:29.112169+00:00`; card SHA256 `0bce50fb52d3b546063248dca6bbadbe1f8f43debb4e522d838ff4a05fca6512`.
+
+4 Sparks, pipeline, drafting OFF: finished `2026-10-28T19:30:09.669329+00:00`; card SHA256 `c9c4beed5eb735a624e1e14b340f39585ba15f471abbafd627582759136a3ae5`.
+
+4 Sparks, pipeline, drafting ON: finished `2026-10-28T19:17:33.795856+00:00`; card SHA256 `d7c59327f7f1686889a753ccda4ece58d850abf6bc3f482d88a453ef9487ab11`.
 
 Rates are card medians in tok/s. C1, C4 and C8 cover all chats together.
 Cold 8K is the median time to the first token. IDs saved counts responses
@@ -323,6 +357,23 @@ a run, and every number here comes from one. The
 [benchmarks page](docs/benchmarks.md) has every card, the full recipe and the
 caveats.
 
+### One, two and four Sparks, 2026-10-28, end of day
+
+Cards ran at main `76977df` on one, two and four Sparks, with FP4-Local on
+each and FP8 on two and four. The engine is the same as in the cards after
+#142. All ten cards are in the latest measured table above. With drafting
+ON, FP4-Local reached these rates (tok/s, from the cards):
+
+| Sparks | Prose | Code | Structured | C8 | Cold 8K prompt (s) |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 42.0 | 80.5 | 99.9 | 177.5 | 3.76 |
+| 2 | 53.8 | 100.0 | 128.4 | 229.5 | 2.19 |
+| 4 | 42.8 | 81.3 | 101.7 | 192.9 | 2.18 |
+
+On a 32K-token chat with the prefix cache on, the second question took
+0.63 s on one Spark and 0.76 s on two. The full tables are on the
+[benchmarks page](docs/benchmarks.md#current-2026-10-28-end-of-day-main-76977df-home-dgx-sparks).
+
 ### Two Sparks, 2026-10-28, after #142
 
 Two-Spark cards ran at main `9d2ec6c` (#142). With #142, the prefix cache
@@ -339,7 +390,7 @@ With the cache on, the second question on a 32K-token chat took 0.75 to
 it took 1.60 to 1.62 s instead of 31.79 to 31.86 s. The first question took
 0.67 to 1.26 s longer, because the engine saves the prompt state. The full
 tables are on the
-[benchmarks page](docs/benchmarks.md#current-2026-10-28-after-142-main-9d2ec6c-home-dgx-sparks).
+[benchmarks page](docs/benchmarks.md#previous-2026-10-28-after-142-main-9d2ec6c-home-dgx-sparks).
 
 ### Two Sparks, 2026-10-28, after #139 and #140
 

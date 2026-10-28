@@ -6,14 +6,38 @@
 
 | Model | Sparks | Path | Drafting | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) | IDs saved / responses |
 | --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| qwen3.8-flash-next-fp4-local | 1 | local | OFF | 27.573 | 27.619 | 27.908 | 26.961 | 83.889 | 137.585 | 3.806 | 66/66 |
-| qwen3.8-flash-next-fp4-local | 1 | local | ON | 42.007 | 80.378 | 100.327 | 64.182 | 142.468 | 176.388 | 3.76 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 1 | local | OFF | 27.582 | 27.625 | 27.927 | 26.965 | 83.569 | 130.553 | 3.811 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 1 | local | ON | 42.039 | 80.458 | 99.93 | 64.074 | 143.929 | 177.496 | 3.759 | 66/66 |
+| qwen3.8-flash-next-fp8 | 2 | ring | OFF | 26.823 | 26.709 | 26.856 | 25.839 | 66.618 | 99.298 | 6.005 | 66/66 |
+| qwen3.8-flash-next-fp8 | 2 | ring | ON | 36.6 | 50.883 | 52.706 | 45.124 | 66.499 | 98.327 | 5.969 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 2 | tensor split | OFF | 35.071 | 35.375 | 35.487 | 33.814 | 82.476 | 126.344 | 2.153 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 2 | tensor split | ON | 53.792 | 99.972 | 128.426 | 76.87 | 162.493 | 229.457 | 2.186 | 66/66 |
+| qwen3.8-flash-next-fp8 | 4 | path | OFF | 35.266 | 34.722 | 35.284 | 33.9 | 88.201 | 128.203 | 6.948 | 66/66 |
+| qwen3.8-flash-next-fp8 | 4 | path | ON | 46.669 | 65.115 | 68.026 | 58.452 | 86.39 | 128.832 | 6.911 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 4 | pipeline | OFF | 28.157 | 28.177 | 28.503 | 27.642 | 84.974 | 139.335 | 2.177 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 4 | pipeline | ON | 42.758 | 81.287 | 101.673 | 65.82 | 145.757 | 192.895 | 2.176 | 66/66 |
 
-Measured main revision: `6926aaa6c571b4a0dd9ab845dbb93f9049de67e5`.
+Measured main revision: `76977dff88d36a85a8bfeaff6725d169e8a44845`.
 
-1 Sparks, local, drafting OFF: finished `2026-10-28T18:02:53.546070+00:00`; card SHA256 `c692b08b3133403559aed5dc2798d22b859a98ba0321350349c15fea2f2090eb`.
+1 Sparks, local, drafting OFF: finished `2026-10-28T18:43:01.904860+00:00`; card SHA256 `257c5dcf80ed8ad1cdbd266735e3eba7dd9a7ad02e15ae4cf1e55dad3ef3ea54`.
 
-1 Sparks, local, drafting ON: finished `2026-10-28T17:56:23.865775+00:00`; card SHA256 `dbbb938750bc1e309f2553a2a16e77720538d2150aaac928f55eba41b5e0f9ad`.
+1 Sparks, local, drafting ON: finished `2026-10-28T18:36:30.110067+00:00`; card SHA256 `e1f30da8e92d727a5f49c9493b0acdb4a4ea6f86d4937444e7ff4741b7a11221`.
+
+2 Sparks, ring, drafting OFF: finished `2026-10-28T19:44:41.463006+00:00`; card SHA256 `1ee05800f41f2424e80de00ca1c09dacdc3c899ccbce6cbbc494c2801964f69e`.
+
+2 Sparks, ring, drafting ON: finished `2026-10-28T19:40:31.787574+00:00`; card SHA256 `24134290373fe44fb8fbc5be0277f8ceab2499a17347b57441e51a0ecece3997`.
+
+2 Sparks, tensor split, drafting OFF: finished `2026-10-28T18:58:50.757964+00:00`; card SHA256 `d9edf41a3cea1b240fb8e330862a8835fc6102b867606786d4fca9e99c58933a`.
+
+2 Sparks, tensor split, drafting ON: finished `2026-10-28T18:55:24.379380+00:00`; card SHA256 `9f6adc1a65ce34c2ca8c96b19fd660a2c00608b8e8c7868200656a57c7a333cf`.
+
+4 Sparks, path, drafting OFF: finished `2026-10-28T20:03:46.518365+00:00`; card SHA256 `56ccef9d52df49d8faf9fba12843c0e1725b88a56f73b4d22eaa1b36ab76721b`.
+
+4 Sparks, path, drafting ON: finished `2026-10-28T19:52:29.112169+00:00`; card SHA256 `0bce50fb52d3b546063248dca6bbadbe1f8f43debb4e522d838ff4a05fca6512`.
+
+4 Sparks, pipeline, drafting OFF: finished `2026-10-28T19:30:09.669329+00:00`; card SHA256 `c9c4beed5eb735a624e1e14b340f39585ba15f471abbafd627582759136a3ae5`.
+
+4 Sparks, pipeline, drafting ON: finished `2026-10-28T19:17:33.795856+00:00`; card SHA256 `d7c59327f7f1686889a753ccda4ece58d850abf6bc3f482d88a453ef9487ab11`.
 
 Rates are card medians in tok/s. C1, C4 and C8 cover all chats together.
 Cold 8K is the median time to the first token. IDs saved counts responses
@@ -38,7 +62,11 @@ apply only to those measurements.
 This page has every speed we have published for Vade, newest first, and how
 to measure your own:
 
-- [2026-10-28 cards after #142](#current-2026-10-28-after-142-main-9d2ec6c-home-dgx-sparks):
+- [2026-10-28 end-of-day cards](#current-2026-10-28-end-of-day-main-76977df-home-dgx-sparks):
+  one, two and four DGX Sparks at main `76977df`, FP4-Local and FP8,
+  drafting ON and OFF, and the second question on a 32K chat with the prefix
+  cache on and off.
+- [2026-10-28 cards after #142](#previous-2026-10-28-after-142-main-9d2ec6c-home-dgx-sparks):
   two DGX Sparks on one pair at main `9d2ec6c`, drafting ON and OFF, and the
   second question on a 32K and a 100K chat with the prefix cache on and off.
 - [2026-10-28 cards after #139 and #140](#previous-2026-10-28-main-8b7b866-and-104205a-home-dgx-sparks):
@@ -79,15 +107,114 @@ machines appear as home-1 to home-6 and the rented ones as vm-a to vm-d. The
 2026-10-25 to 2026-10-28 cards are not in the repository yet; each row names
 its result folder. The 2026-10-27 and 2026-10-28 folder names end in a pair
 suffix that uses internal machine names (and `-final`, `-am`, `-139`,
-`-139-c140` or `-142`), so those
+`-139-c140`, `-142`, `-eod-1s`, `-eod-2s`, `-eod-4s`, `-eod-fp8-2s` or
+`-eod-fp8-4s`), so those
 names are given here without the suffix; the time, commit and
 drafting setting in each name still identify the card. The first-token,
-prefix-cache and repeated cold-prompt timings of 2026-10-28 after #139 and
-after #142 come from separate runs, not from the cards. Each of those tables
-or sentences names its run folder, such as `c139-l32` or `r142-wtT-x1`.
+prefix-cache and repeated cold-prompt timings of 2026-10-28 after #139,
+after #142 and at the end of the day come from separate runs, not from the cards. Each of those tables
+or sentences names its run folder, such as `c139-l32`, `r142-wtT-x1` or
+`eod-wtT-x1`.
 These folders are not in the repository yet either.
 
-## Current (2026-10-28 after #142, main 9d2ec6c, home DGX Sparks)
+## Current (2026-10-28 end of day, main 76977df, home DGX Sparks)
+
+These cards ran at main `76977df`. It changes only documentation after
+`9d2ec6c` (#142), so the engine is the same as in the cards after #142. Every
+card ran the prebuilt payload of `76977df` (flash-serve `4dedff9d`, PTX
+`4288b2a8`), with context 32768, greedy decoding, thinking OFF and no
+`VADE_` name at any server start. Each card passed its **15/15** basic output
+checks and had its own server start. Drafting OFF sends `draft: plain` on
+every request. The one-Spark cards used `vade install` and
+`vade up --sparks 1` from a bundle of the same payload. The two-Spark and
+four-Spark cards used the lab launcher. FP4-Local used MTP 3 and output 8192.
+FP8 used MTP 2 and output 16384, as on 2026-10-25 and 2026-10-27. All cards
+used the same pinned RigMark client, with three cold 8K prompt pairs (66
+responses).
+
+### FP4-Local
+
+| Sparks | Path | Drafting | Machines | Prose | Code | Structured | C1 | C2 | C4 | C8 | Cold 8K prompt (s) | Result folder |
+| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 1 | local | ON | home-5 | 42.0 | 80.5 | 99.9 | 64.1 | 90.6 | 143.9 | 177.5 | 3.76 | `2026-10-28_1336_qwen3.8-flash-next-nvfp4_local-1spark_76977df-drafting-on-thinking-off` |
+| 1 | local | OFF | home-6 | 27.6 | 27.6 | 27.9 | 27.0 | 46.6 | 83.6 | 130.6 | 3.81 | `2026-10-28_1343_qwen3.8-flash-next-nvfp4_local-1spark_76977df-drafting-off-thinking-off` |
+| 2 | tensor split | ON | home-3 + home-4 | 53.8 | 100.0 | 128.4 | 76.9 | 100.7 | 162.5 | 229.5 | 2.19 | `2026-10-28_1355_qwen3.8-flash-next-nvfp4_local-2spark_76977df-drafting-on-thinking-off-split` |
+| 2 | tensor split | OFF | home-1 + home-2 | 35.1 | 35.4 | 35.5 | 33.8 | 49.2 | 82.5 | 126.3 | 2.15 | `2026-10-28_1358_qwen3.8-flash-next-nvfp4_local-2spark_76977df-drafting-off-thinking-off-split` |
+| 4 | layer chain | ON | home-1 + home-2 + home-3 + home-4 | 42.8 | 81.3 | 101.7 | 65.8 | 92.3 | 145.8 | 192.9 | 2.18 | `2026-10-28_1417_qwen3.8-flash-next-nvfp4_local-4spark_76977df-drafting-on-thinking-off-chain` |
+| 4 | layer chain | OFF | home-1 + home-2 + home-3 + home-4 | 28.2 | 28.2 | 28.5 | 27.6 | 47.4 | 85.0 | 139.3 | 2.18 | `2026-10-28_1430_qwen3.8-flash-next-nvfp4_local-4spark_76977df-drafting-off-thinking-off-chain` |
+
+### FP8
+
+| Sparks | Path | Drafting | Machines | Prose | Code | Structured | C1 | C2 | C4 | C8 | Cold 8K prompt (s) | Result folder |
+| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2 | ring | ON | home-1 + home-2 | 36.6 | 50.9 | 52.7 | 45.1 | 41.9 | 66.5 | 98.3 | 5.97 | `2026-10-28_1440_qwen3.8-flash-next-fp8_local-2spark_76977df-drafting-on-thinking-off` |
+| 2 | ring | OFF | home-3 + home-4 | 26.8 | 26.7 | 26.9 | 25.8 | 41.7 | 66.6 | 99.3 | 6.01 | `2026-10-28_1444_qwen3.8-flash-next-fp8_local-2spark_76977df-drafting-off-thinking-off` |
+| 4 | layer chain | ON | home-1 + home-2 + home-3 + home-4 | 46.7 | 65.1 | 68.0 | 58.5 | 55.0 | 86.4 | 128.8 | 6.91 | `2026-10-28_1452_qwen3.8-flash-next-fp8_local-4spark_76977df-drafting-on-thinking-off-chain` |
+| 4 | layer chain | OFF | home-1 + home-2 + home-3 + home-4 | 35.3 | 34.7 | 35.3 | 33.9 | 55.6 | 88.2 | 128.2 | 6.95 | `2026-10-28_1503_qwen3.8-flash-next-fp8_local-4spark_76977df-drafting-off-thinking-off-chain` |
+
+The cards ran in pairs at the same time on separate machines: the one-Spark
+cards together, the two-Spark FP4-Local cards together, and the two-Spark
+FP8 cards together. The four-Spark cards ran alone. The result folder names
+end in a machine suffix and `-eod-1s`, `-eod-2s`, `-eod-4s`, `-eod-fp8-2s`
+or `-eod-fp8-4s`; the table gives the names without the suffix.
+
+**FP4-Local gave the same answers on one, two and four Sparks.** The token
+IDs matched in 66 of 66 responses in every compare: drafting ON against OFF,
+one Spark against two and four, and each card against the cards of the same
+Spark count earlier on 2026-10-28.
+
+**FP8 gives different answers on two and on four Sparks.** On each Spark
+count, the drafting-ON card matched the drafting-OFF card in 66 of 66
+responses. The two-Spark cards matched the 2026-10-27 FP8 cards in 66 of 66,
+and the four-Spark cards matched the 2026-10-25 four-Spark FP8 cards in 62 of
+62 (those cards have one cold 8K pair, not three). But the two-Spark and
+four-Spark cards matched in only 7 of 66 responses. The 2026-10-25 FP8 cards
+show the same gap: 5 of 62. This is a known limit of FP8 on this main. It is
+not a change of this main.
+
+**Four Sparks run one chat at the speed of one Spark.** The layer chain
+passes each token through the four Sparks in turn, so one chat does not get
+faster. With drafting ON, eight chats reached 192.9 tok/s on four Sparks,
+against 177.5 on one Spark and 229.5 on the two-Spark tensor split. On
+2026-10-25 the four-Spark chain served eight chats without drafting, at
+136.5 tok/s; now it drafts at every chat count. The cold 8K prompt is fastest
+on two and four Sparks (2.18 to 2.19 s, against 3.76 s on one Spark).
+
+**FP8 drafts at one chat only.** With drafting ON, FP8 drafted at depth 2 on
+the one-chat cells and on C1, and served C2 to C8 at depth 0. So its C4 and
+C8 rates with drafting ON (66.5 and 98.3 tok/s) are close to the rates with
+drafting OFF (66.6 and 99.3).
+
+**One rate moved between two starts.** On one Spark with drafting OFF, C8
+reached 130.6 tok/s, against 137.6 on the same machine at 13:02 the same day
+(main `6926aaa`, the same engine). The best of the three rounds was 137.9 in
+both cards, so this is the spread between server starts.
+
+### A long chat and its second question
+
+These runs used one fresh FP4-Local server per run, drafting ON, outside the
+cards. Each run asked a first question on a 32K-token chat (32,103 tokens).
+Then it asked a second question on the same chat (32,309 tokens) with the
+cache allowed, and the same question again with `cache` set to false. Times
+are seconds to the first token. The token IDs were the same in every run, on
+every Spark count, with the cache on or off.
+
+| Sparks | Context | Prefix cache | First question | Second question | Reused tokens | Second question, cache false | Run folder |
+| ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |
+| 1 | 65536 | off | 16.04 | 16.03 | 0 | 16.08 | `eod-long` on home-5 |
+| 1 | 65536 | on | 16.23 | 0.63 | 32,064 | 16.17 | `eod-long` on home-6 |
+| 2 | 131072 | off | 10.31 | 9.95 | 0 | 9.97 | `eod-wtT-a1` |
+| 2 | 131072 | on | 11.09 | 0.76 | 32,064 | 9.98 | `eod-wtT-x1` |
+| 4 | 65536 | off | 10.77 | 10.33 | 0 | 10.90 | `long32k` |
+
+The prefix cache was turned on with `VADE_FLASHNEXT_PREFIX_CACHE=1` at the
+server start, as [turn on the prefix cache](../INSTALL.md#turn-on-the-prefix-cache)
+says. These runs did not try the cache on four Sparks, and did not measure
+FP8.
+
+<a id="current-2026-10-28-after-142-main-9d2ec6c-home-dgx-sparks"></a>
+
+## Previous (2026-10-28 after #142, main 9d2ec6c, home DGX Sparks)
 
 These cards ran at main `9d2ec6c`, after the merge of #142. With #142, the
 prefix cache can restore a prompt on both Sparks of the tensor split. The
