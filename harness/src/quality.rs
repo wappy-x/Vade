@@ -1000,7 +1000,7 @@ fn reply_evidence_failure(reply: &Reply) -> Option<String> {
 }
 /// The one place that decides if a strict/plain pair carries complete
 /// exactness evidence. Both replies must be complete on their own (see
-/// [`reply_evidence_failure`]), the strict arm must report draft `strict`
+/// `reply_evidence_failure`), the strict arm must report draft `strict`
 /// and the plain arm draft `plain` (the engine downgrades strict to plain
 /// when no draft depth is resident; plain against plain proves nothing),
 /// and both arms must agree on the finish reason and the completion count.

@@ -837,6 +837,70 @@ impl<S: crate::Session> SessionCache<S> {
 mod tests {
     use super::*;
     use std::{cell::Cell, rc::Rc};
+    // Regression values from the kg3-w1c-1 server log. Device storage is a byte count only.
+    const ROOM_POOL: usize = 19_161_848_420;
+    const ROOM_RETAINED: usize = 9_580_924_210;
+    const ROOM_LIVE: usize = 4_440_712_516;
+    const ROOM_RESERVE_CAP: usize = 16_959_722_768;
+    const ROOM_CHARGE: usize = 2_117_492_316;
+    const ROOM_SLACK: usize = 1 << 30;
+    #[derive(Clone)]
+    struct RoomSnapshot { bytes: usize, forks: Rc<Cell<usize>> }
+    impl crate::Session for RoomSnapshot {
+        fn step(&mut self, _: u32) -> Result<Vec<f32>, String> { unreachable!() }
+        fn retained_bytes(&self) -> Option<usize> { Some(self.bytes) }
+        fn fork(&self) -> Result<Self, String> {
+            self.forks.set(self.forks.get() + 1);
+            Ok(self.clone())
+        }
+    }
+    fn room_fixture() -> (SessionCache<RoomSnapshot>, CachedSession<RoomSnapshot>) {
+        let tokens = 32_103;
+        let cache = SessionCache::new(CacheLimits { entries: 16, retained_bytes: ROOM_RETAINED,
+            tokens_per_entry: 65_536, logits_per_entry: 1, idle_ttl: Duration::from_secs(3600) }).unwrap();
+        let state = CachedSession { checkpoint_lease: None,
+            session: RoomSnapshot { bytes: ROOM_CHARGE - tokens * 4 - 4 - index_charge(tokens, None),
+                forks: Rc::new(Cell::new(0)) }, tokens: vec![1; tokens], next_logits: vec![1.],
+            reserved_session_bytes: ROOM_LIVE };
+        (cache, state)
+    }
+    #[test]
+    fn snapshot_uses_room_without_funding_unused_reserve_capacity() {
+        let (mut cache, state) = room_fixture();
+        let now = Instant::now();
+        // Synthetic physical room puts the logged snapshot exactly at the growth limit.
+        let free = crate::prefix_switch::cache_physical_room(
+            Some(((ROOM_CHARGE + ROOM_SLACK) as i128, ROOM_RESERVE_CAP)), ROOM_SLACK);
+        cache.rebalance_within(ROOM_POOL - ROOM_LIVE - (128 << 20), free, BTreeSet::new(), now);
+        cache.snapshot(SessionKey::generate().unwrap(), &state, now);
+        assert_eq!((cache.len(), cache.retained_bytes(), state.session.forks.get()), (1, ROOM_CHARGE, 1));
+        // The copied snapshot consumes room. Retirement only transfers existing allocations.
+        let free = crate::prefix_switch::cache_physical_room(
+            Some((ROOM_SLACK as i128, ROOM_RESERVE_CAP - 3_623_878_656)), ROOM_SLACK);
+        cache.rebalance_within(ROOM_POOL, free, BTreeSet::new(), now);
+        assert_eq!((cache.len(), cache.retained_bytes()), (1, ROOM_CHARGE));
+        // A new reservation that fills the logical pool still reclaims the whole snapshot.
+        cache.rebalance_within(0, free, BTreeSet::new(), now);
+        assert_eq!((cache.len(), cache.retained_bytes()), (0, 0));
+        cache.snapshot(SessionKey::generate().unwrap(), &state, now);
+        assert_eq!((cache.len(), state.session.forks.get()), (0, 1));
+    }
+    #[test]
+    fn snapshot_room_keeps_growth_slack_and_yields_to_actual_pressure() {
+        let (mut cache, state) = room_fixture();
+        let now = Instant::now();
+        let free = crate::prefix_switch::cache_physical_room(
+            Some(((ROOM_CHARGE + ROOM_SLACK - 1) as i128, ROOM_RESERVE_CAP)), ROOM_SLACK);
+        cache.rebalance_within(ROOM_POOL - ROOM_LIVE, free, BTreeSet::new(), now);
+        cache.snapshot(SessionKey::generate().unwrap(), &state, now);
+        assert_eq!((cache.len(), state.session.forks.get()), (0, 0));
+        cache.rebalance_within(ROOM_POOL - ROOM_LIVE, None, BTreeSet::new(), now);
+        cache.snapshot(SessionKey::generate().unwrap(), &state, now);
+        assert_eq!(cache.retained_bytes(), ROOM_CHARGE);
+        let free = crate::prefix_switch::cache_physical_room(Some((-1, ROOM_RESERVE_CAP)), ROOM_SLACK);
+        cache.rebalance_within(ROOM_POOL, free, BTreeSet::new(), now);
+        assert_eq!((cache.len(), cache.retained_bytes()), (0, 0));
+    }
     #[test]
     fn snapshot_credits_live_storage_revealed_at_prompt_end() {
         #[derive(Clone)] struct Funded(bool);

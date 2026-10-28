@@ -49,7 +49,7 @@ pub struct FlashNext<'b, 'a, 'w> {
     prefix_cache: bool,
     /// VADE_FLASHNEXT_ADOPT (default off).
     adopt: bool,
-    /// VADE_FLASHNEXT_CACHE_YIELD (default on): retention yields the KV reserve's room.
+    /// VADE_FLASHNEXT_CACHE_YIELD (default on): retention yields to host memory pressure.
     cache_yield: bool,
 }
 /// Device bytes a live request holds above its admitted bound besides the chunk-form GDN
@@ -785,12 +785,11 @@ impl<'b, 'a, 'w> Engine for FlashNext<'b, 'a, 'w> {
         };
         tails + CACHE_REQUEST_MARGIN_BYTES
     }
-    /// The KV reserve refills to its cap from finished requests' pages; what the live
-    /// reservations cannot return must still fit before its pressure rule (growth: plus a slack).
-    fn cache_free_physical_bytes(&self, live_reserved: usize) -> Result<Option<(i128, usize)>, String> {
+    /// Current physical room bounds retention. The scheduler also reclaims retained entries
+    /// before new request allocations. Unused spare-buffer capacity needs no extra funding.
+    fn cache_free_physical_bytes(&self, _live_reserved: usize) -> Result<Option<(i128, usize)>, String> {
         if !self.cache_yield { return Ok(None); }
-        Ok(self.backend.kv_reserve_room()?.map(|(room, keep)|
-            (room - keep.saturating_sub(live_reserved) as i128, CACHE_YIELD_SLACK_BYTES)))
+        Ok(crate::prefix_switch::cache_physical_room(self.backend.kv_reserve_room()?, CACHE_YIELD_SLACK_BYTES))
     }
     fn request_option_bytes(&self, request: &crate::protocol::Request) -> usize {
         if !request.prompt_lookup {

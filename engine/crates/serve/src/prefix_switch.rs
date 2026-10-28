@@ -7,11 +7,16 @@
 pub fn prefix_cache() -> Result<bool, String> {
     switch(PREFIX_CACHE, std::env::var(PREFIX_CACHE.0))
 }
-/// VADE_FLASHNEXT_CACHE_YIELD: unset or 1 = retained prefixes yield the host memory the KV
-/// reserve's spare session pages need before its pressure rule (variant b; the bound counts the
-/// KV reserve's retention only); 0 = the session pool alone bounds the cache.
+/// VADE_FLASHNEXT_CACHE_YIELD: unset or 1 = retained prefixes yield to current host memory
+/// pressure; 0 = the session pool alone bounds the cache.
 pub fn cache_yield() -> Result<bool, String> {
     switch(CACHE_YIELD, std::env::var(CACHE_YIELD.0))
+}
+/// Unused reserve capacity owns no memory. Actual spare buffers already count in `room`.
+/// Retiring a request moves its buffers to the reserve without a new allocation.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn cache_physical_room(reserve: Option<(i128, usize)>, slack: usize) -> Option<(i128, usize)> {
+    reserve.map(|(room, _unused_capacity)| (room, slack))
 }
 /// VADE_FLASHNEXT_ADOPT: 1 = a finished request's KV arenas stay with the prompt prefix it
 /// published in place (no row copies), and the conversation's next turn builds its session
@@ -49,6 +54,15 @@ fn switch((name, unset): (&str, bool), value: Result<String, std::env::VarError>
 mod tests {
     use super::*;
     use std::env::VarError;
+
+    #[test]
+    fn physical_room_keeps_pressure_and_the_disabled_reserve() {
+        assert_eq!(cache_physical_room(None, 1024), None);
+        for unused in [0, usize::MAX] {
+            assert_eq!(cache_physical_room(Some((-1, unused)), 1024), Some((-1, 1024)));
+            assert_eq!(cache_physical_room(Some((4096, unused)), 1024), Some((4096, 1024)));
+        }
+    }
 
     #[test]
     fn switches_take_zero_or_one_and_the_cache_defaults_off() {

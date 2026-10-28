@@ -5,6 +5,10 @@ Changes that are merged but not yet released are under Unreleased.
 
 ## Unreleased
 
+- When enabled, the Flash-Next prefix cache can use free memory that an empty
+  spare-buffer reserve has not allocated. Cache retention still yields to live
+  requests and physical memory pressure.
+
 - Two Sparks read a prompt of 32K tokens or more in wider passes. The middle
   of the prompt now runs in passes of the whole prompt workspace (4096 rows by
   default) instead of 2048 rows, so the experts run fewer, larger batches. The
