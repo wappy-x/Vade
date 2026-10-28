@@ -201,6 +201,8 @@ fn cases() -> Vec<Case> {
         out.push(Case { name: format!("route_pack-{tag}"), kernel: "flash_next_compact_route_silu", m, n: 1, k: 1, kind: 29, ..Default::default() });
     }
     out.push(Case { name: "route_full_pack_mask-c1".into(), kernel: "flash_next_route_compact1_silu_mask", m: 1, n: 1, k: 1, kind: 28, ..Default::default() });
+    // Plain C1 uses the same packed entry with an empty mask. A keeps the four-lane latency pack.
+    out.push(Case { name: "route_full_pack_mask-c1-plain".into(), kernel: "flash_next_route_compact1_silu", m: 1, n: 1, k: 1, kind: 28, ..Default::default() });
     // A = flash_moe_route, X = flash_moe_route_fast (each exp as exp_split, same bits).
     // A = flash_moe_silu, X = flash_moe_silu_fast on m x 640 (a 2048-token prompt chunk; decode 8).
     for m in [8, 2048] {
@@ -882,6 +884,7 @@ fn run() -> Result<()> {
                 // mxg- at M5/M6: 4 groups x 2.
                 + 8
                 + 39 // FP8 grouped decode and prompt gate fixtures.
+                + 1 // Plain C1 route and shared-input pack.
                 ;
             assert_eq!(cases().len(), expect);
             println!("PASS host SHA/statistics/shape self-test; GPU A==A requires --a PTX --x SAME_PTX");

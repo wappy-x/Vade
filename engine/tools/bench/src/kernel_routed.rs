@@ -422,6 +422,15 @@ fn route_silu_fixture(g: &mut Gpu, c: &Case) -> Result<Fixture> {
     v.raw = g.upload(&f32s(0x9a7e_0000_0000))?;
     v.rows.input = g.upload(&f32s(0x0b00_0000_0000))?;
     v.rows.rows = gate_at as u32;
+    // The plain C1 case uses an empty mask and hashes only the latency pack's live lanes.
+    v.rows.hc_silu = u32::from(c.name.ends_with("-plain"));
+    if v.rows.hc_silu != 0 {
+        let lanes = params::flash_latency_lanes(c.m);
+        v.written.push((0, planes_at));
+        for plane in 0..2 { for kt in 0..640 / 16 {
+            v.written.push((planes_at + (plane * 5120 + kt * 128) * 4, lanes * 16));
+        } }
+    }
     let m = g.module(super::prompt::copy_ptx().as_bytes()).map_err(|e| format!("copy PTX: {e}"))?;
     v.norms = [null_mut(), g.function(m, "kb_copy")?];
     v.stored += 3 * n * 4;
@@ -477,19 +486,23 @@ pub(super) fn launch_route(g: &Gpu, f: H, merge: H, v: &mut Fixture, arm: usize)
             // flash_next_route_mask + flash_next_compact_route_silu, X = the _mask entry.
             let (pairs, q) = (route.tokens * 10, (route.tokens * 10).div_ceil(4) as u64 * 16);
             let slots = v.rows.output2 + 2 * q;
-            for (mut dst, mut src) in [(ids, v.rows.output2), (weights, v.rows.output2 + q)] {
+            let plain = v.rows.hc_silu != 0;
+            if !plain { for (mut dst, mut src) in [(ids, v.rows.output2), (weights, v.rows.output2 + q)] {
                 let mut n = (q / 16) as u32;
                 g.launch(v.norms[1], [n.div_ceil(256), 1, 1], 256, 0, &mut [ptr(&mut dst), ptr(&mut src), ptr(&mut n)])?;
-            }
-            let mut step = SlotStep { slots, table: slots, layer: 0, rows: route.tokens };
+            } }
+            let mut step = if plain { SlotStep { slots: 0, table: 0, layer: 0, rows: 0 } }
+                else { SlotStep { slots, table: slots, layer: 0, rows: route.tokens } };
             let mut r = params::FlashMoeRoute { logits: v.rows.weight2, ids, weights, tokens: 1, norm_topk: 1 };
-            // route_pack_mask: X = the _pack_mask entry (20 silu_pack CTAs); A = the route-mask entry's
-            // _mask entry (c.kernel) then main's flash_bf16_input of the gate at lanes 32 (every fragment).
+            // route_pack_mask: X runs 20 silu_pack CTAs. A runs c.kernel, then flash_bf16_input.
+            // Plain C1 packs the four consumed lanes. Masked cases pack all 32 lanes.
             let (pack, mut planes) = (v.rows.stride2 != 0, v.out + v.rows.stride2 as u64);
             let grid = [1 + if pack && arm == 1 { 20 } else { n.div_ceil(256) }, 1, 1];
             if arm == 1 || pack {
                 let mut args = if v.rows.weight2 != 0 {
-                    vec![ptr(&mut r), ptr(&mut route), ptr(&mut gate), ptr(&mut up), ptr(&mut count), ptr(&mut step)]
+                    let mut args = vec![ptr(&mut r), ptr(&mut route), ptr(&mut gate), ptr(&mut up), ptr(&mut count)];
+                    if !plain || arm == 1 { args.push(ptr(&mut step)); }
+                    args
                 } else {
                     vec![ptr(&mut route), ptr(&mut ids), ptr(&mut weights), ptr(&mut gate), ptr(&mut up), ptr(&mut count), ptr(&mut step)]
                 };
@@ -500,8 +513,9 @@ pub(super) fn launch_route(g: &Gpu, f: H, merge: H, v: &mut Fixture, arm: usize)
                 if arm == 1 {
                     return Ok(());
                 }
-                let mut p = params::FlashBf16Input { input: gate, output: planes, tokens: route.tokens, cols: 640, hc_silu: 0, lanes: 32 };
-                return g.launch(v.pack, [(5120 / 128 * 32u32).div_ceil(128), 1, 1], 128, 0, &mut [ptr(&mut p)]);
+                let lanes = if plain { params::flash_latency_lanes(route.tokens as usize) as u32 } else { 32 };
+                let mut p = params::FlashBf16Input { input: gate, output: planes, tokens: route.tokens, cols: 640, hc_silu: 0, lanes };
+                return g.launch(v.pack, [(5120 / 128 * lanes).div_ceil(128), 1, 1], 128, 0, &mut [ptr(&mut p)]);
             }
             if v.rows.weight2 != 0 {
                 g.launch(merge, [1, 1, 1], 128, 0, &mut [ptr(&mut r)])?;

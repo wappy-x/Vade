@@ -190,6 +190,16 @@ pub fn path() -> Option<Path> {
 pub fn on() -> bool {
     path() == Some(Path::TENSOR_SPLIT)
 }
+/// A plain pass of the split whose chats each decode one token runs as captured segments, as a
+/// verify pass does (flash::next_execution): the same arithmetic and mailbox order as the eager
+/// pass (a capture may add an empty QSA pool launch, which does no tensor work), the host
+/// capturing each segment while the GPU runs the one before. A first-seen shape, an unfunded
+/// segment or a pass whose rows cross with the request stays eager, and so does a pass a decode
+/// profile reads back from (`readback`: its probes synchronize, which an open capture refuses).
+/// `lens`: each chat's rows.
+pub fn plain_segments(split: bool, verify: bool, readback: bool, lens: impl IntoIterator<Item = usize>) -> bool {
+    split && !verify && !readback && lens.into_iter().all(|n| n == 1)
+}
 
 /// The split's geometry, derived from the checkpoint: residual width (HC branches x hidden),
 /// hidden width, routed-expert width (gate/up rows, down K), routed experts per token and the
@@ -472,4 +482,15 @@ mod tests {
         assert_eq!(seq.plan(&[(4, 0, 1024, true)], false, false), Ok(SeqPlan::Tile));
     }
     fn normal_discard(discard: Option<u32>) -> Result<SeqPlan, String> { Ok(SeqPlan::Normal { discard, push: vec![] }) }
+    /// Only the split's plain passes whose chats each decode one token run as segments.
+    #[test]
+    fn plain_segments_take_one_token_split_passes_only() {
+        assert!(plain_segments(true, false, false, [1]));
+        assert!(plain_segments(true, false, false, [1, 1, 1]));
+        assert!(!plain_segments(false, false, false, [1]));
+        assert!(!plain_segments(true, true, false, [1]));
+        assert!(!plain_segments(true, false, true, [1]), "a decode profile reading back keeps the pass eager");
+        assert!(!plain_segments(true, false, false, [1, 2]));
+        assert!(!plain_segments(true, false, false, [TpLayout::PROMPT_ROWS]));
+    }
 }

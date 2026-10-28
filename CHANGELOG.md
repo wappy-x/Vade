@@ -60,6 +60,10 @@ Changes that are merged but not yet released are under Unreleased.
   every token. The `draft_cost` server log line now also shows `plan` (a hash
   of the rows of each cycle) and `draft_price`.
 
+- A one-token decode pass packs the shared expert's input during routing.
+  This removes one GPU launch per layer. The math keeps the same order.
+  (own-moe-step)
+
 - **The tensor split is the only two-Spark path, and the engine chooses each
   path itself.** No `VADE_W2_*` switch remains: `VADE_W2_PATH`, `VADE_W2_TP`,
   `VADE_W2_TP_WIRE`, `VADE_W2_TP_PROJ`, `VADE_W2_TP_HEAD`, `VADE_W2_PP`,
@@ -81,6 +85,18 @@ Changes that are merged but not yet released are under Unreleased.
   `Multi-Spark path` row, and `vade status --json` shows them in
   `multi_spark_path` (before: `two_spark_path`, for two FP4-Local Sparks
   only). For the split, both also show its levels.
+
+- **Plain decoding on two Sparks now runs as captured CUDA graphs.** With
+  drafting OFF, the tensor split's one-token step now captures layers 1 to 47
+  in the same segments that drafting's verify pass uses. The GPU runs one
+  segment while the host captures the next, so fewer launch gaps stay in the
+  step. Each segment keeps the same arithmetic in the same order, and the
+  exchanges between the Sparks keep their order. Token IDs do not change.
+  There is no setting. A first step of each shape, a segment that the graph
+  budget cannot fund, or a step that a decode profile reads back from runs
+  eagerly as before. The engine log line `flash_next segment_graph` (before:
+  `flash_next mtp_graph`) now shows `verify=true` or `verify=false`.
+  (own-decode-graph)
 
 - **Two Sparks run the tensor split by default.** `vade up --sparks 2` now
   runs the tensor split, with every proven level on: both Sparks work on every

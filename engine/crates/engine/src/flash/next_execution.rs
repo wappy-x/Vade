@@ -5,8 +5,8 @@ use spark_gpu_probe::driver::Fp8RoutingFlag;
 mod prompt_route;
 
 pub(super) struct Workspace<'a> {
-    /// VADE_MTP_GRAPH: per verify shape (rows, chats, chats whose GDN window stays inside
-    /// its chunk) one retained executable per segment (layers 1-12, 13-24, 25-36, 37-47),
+    /// VADE_MTP_GRAPH and flash_tp_switch::plain_segments: per shape (verify or plain, rows, chats, chats whose GDN
+    /// window stays inside its chunk) one retained executable per segment (layers 1-12, 13-24, 25-36, 37-47),
     /// oldest first; shapes seen once (eager); counters (graphed passes, in-place updates,
     /// instantiations, eager passes).
     verify_graphs: Vec<(VerifyShape, [Option<spark_gpu_probe::driver::DecodeGraph<'a>>; 5])>,
@@ -346,15 +346,15 @@ impl<'a> Workspace<'a> {
         let mut mask_step = mask.filter(|_| mask_route);
         // Decode (<= 16 rows): the route launch's CTAs >= 1 also write the shared down's dense
         // hi/lo planes of the silu'd gate (one tile row: 20 CTAs), offered to its pack below:
-        // pooled rows (_pack_mask entries) and verify / draft rows (flash_next_compact_route_pack).
-        let pack_route = silu_route
-            && !dense
-            && count <= 16
-            && if mask_route {
-                b.has_flash("flash_next_compact_route_pack_mask")
+        // pooled and one-row passes (_pack_mask entries; one row: C1, empty mask), verify / draft rows (_compact_route_pack).
+        let pack_route = silu_route && !dense && count <= 16
+            && if mask_route || one_route {
+                b.has_flash(if one_route { "flash_next_route_compact1_pack_mask" } else { "flash_next_compact_route_pack_mask" })
             } else {
-                mask.is_none() && !one_route && b.has_flash("flash_next_compact_route_pack")
+                mask.is_none() && b.has_flash("flash_next_compact_route_pack")
             };
+        // route_ids checks rows before slots or table: zero rows keep every assignment, SiLU and plane order.
+        if one_route && pack_route && mask_step.is_none() { mask_step = Some(spark_gpu_probe::next_math::SlotStep { slots: 0, table: 0, layer: 0, rows: 0 }); }
         let mut dense_planes = if pack_route { b.flash_dense_input()? } else { 0 };
         if !route_ids {
             gdn::launch(
@@ -755,9 +755,9 @@ impl<'a, 'w> NextSession<'a, 'w> {
             if let Some(d) = s.draft.as_ref() { d.bound_at.set(None); }
             s.head.take_split();
         }
-        // VADE_MTP_GRAPH=0: the eager build of `execute`, which holds no segment code.
+        // VADE_MTP_GRAPH=0: the eager build of `execute` for verify passes, which holds no segment code.
         // Pipeline stages capture their own layers' segments; each closes before the exchange.
-        let result = if verify && mtp_graph() {
+        let result = if verify && mtp_graph() || crate::flash_tp_switch::plain_segments(model.tp_on(), verify, b.decode_readback_active(), tokens.iter().map(|t| t.len())) {
             Self::execute::<true>(b, &mut work, sessions, tokens, &spans, output, verify, part).inspect_err(|_| b.abort_segment())
         } else {
             Self::execute::<false>(b, &mut work, sessions, tokens, &spans, output, verify, part)
@@ -889,17 +889,17 @@ impl<'a, 'w> NextSession<'a, 'w> {
         // that combine then runs inside the mix's norm (combine_mix_tiled).
         let unobserved = !sessions.iter().any(|s| s.layer_bytes.is_some() || s.dump.is_some());
         let mut pending_moe: Option<usize> = None;
-        // VADE_MTP_GRAPH (default on): a verify pass whose shape was seen before captures its stage's layers after
+        // VADE_MTP_GRAPH (default on): a verify pass (or a plain one-token pass of the tensor split, flash_tp_switch::plain_segments, under its own shape) whose shape was seen before captures its stage's layers after
         // the first as segments (one Spark: 1-47 in four; the pipeline: clipped at the split, 24 eager on the back),
         // launching each (updated in place when its topology holds) while the host captures the next. The captured
         // work is the eager work in the same order. A shape's first pass runs eagerly; the oldest shape retires.
-        let graphed = if GRAPH && verify && unobserved && !model.tp_host_pass(count) {
+        let graphed = if GRAPH && unobserved && !model.tp_host_pass(count) {
             let shape = VerifyShape {
-                rows: count,
+                verify, rows: count,
                 chats: sessions.len(),
-                shallow: sessions.iter().zip(spans).enumerate()
+                shallow: if !verify { 0 } else { sessions.iter().zip(spans).enumerate()
                     .filter(|(_, (s, span))| gdn::shallow_verify(s.pos, span.len()))
-                    .fold(0, |mask, (i, _)| mask | 1u32 << i),
+                    .fold(0, |mask, (i, _)| mask | 1u32 << i) },
             };
             if let Some(i) = work.verify_graphs.iter().position(|(k, _)| *k == shape) {
                 Some(i)
@@ -1311,7 +1311,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             let passes = work.verify_counts[0];
             if passes.is_power_of_two() || passes % 256 == 0 {
                 let [_, updated, instantiated, eager] = work.verify_counts;
-                eprintln!("flash_next mtp_graph passes={passes} eager_passes={eager} segments_updated={updated} segments_instantiated={instantiated} shapes={} deferred_frees={} rows={count} chats={}", work.verify_graphs.len(), b.deferred_frees(), sessions.len());
+                eprintln!("flash_next segment_graph verify={verify} passes={passes} eager_passes={eager} segments_updated={updated} segments_instantiated={instantiated} shapes={} deferred_frees={} rows={count} chats={}", work.verify_graphs.len(), b.deferred_frees(), sessions.len());
             }
         }
         match part {
@@ -1466,11 +1466,11 @@ fn segment_start(li: usize, split: bool) -> Option<usize> {
 const VERIFY_SHAPES: usize = 6;
 /// Chats a cohort verify pass's GDN descriptor table holds (VADE_GDN_COHORT).
 const COHORT_TABLE_CHATS: usize = 32;
-/// A verify pass's capture key: its launches depend on the row count, the chats and, per chat,
-/// whether its GDN window stays inside one chunk (gdn::shallow_verify).
+/// A segmented pass's capture key: verify or plain (their launches differ), the row count, the
+/// chats and, per verify chat, whether its GDN window stays inside one chunk (gdn::shallow_verify).
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct VerifyShape {
-    rows: usize,
+    verify: bool, rows: usize,
     chats: usize,
     shallow: u32,
 }

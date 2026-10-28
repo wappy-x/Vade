@@ -144,8 +144,9 @@ impl<'a, 'w> NextSession<'a, 'w> {
             s.logits_ready = false;
             if let Some(d) = s.draft.as_ref() { d.bound_at.set(None); }
         }
-        // Verify rows run the same captured segments as world one (VADE_MTP_GRAPH).
-        let mut result = if verify && super::mtp_graph() {
+        // Verify rows run the same captured segments as world one (VADE_MTP_GRAPH); so do the
+        // tensor split's plain one-token rows (flash_tp_switch::plain_segments), as on rank 0.
+        let mut result = if verify && super::mtp_graph() || crate::flash_tp_switch::plain_segments(model.tp_on(), verify, b.decode_readback_active(), lens.iter().copied()) {
             Self::execute::<true>(b, &mut work, sessions, &tokens, &spans, false, verify, Part::Back(split, &*residual))
                 .inspect_err(|_| b.abort_segment())
         } else {
@@ -187,5 +188,13 @@ mod tests {
         let starts = |split| (0..48).filter_map(|li| super::super::segment_start(li, split).map(|s| (li, s))).collect::<Vec<_>>();
         assert_eq!(starts(false), [(1, 0), (13, 1), (25, 2), (37, 3)]);
         assert_eq!(starts(true), [(1, 0), (3, 1), (13, 2), (25, 3), (37, 4)]);
+    }
+    /// A plain shape never reuses a verify shape's executables of the same rows and chats.
+    #[test]
+    fn plain_and_verify_shapes_differ() {
+        use super::super::VerifyShape;
+        let shape = |verify| VerifyShape { verify, rows: 1, chats: 1, shallow: 0 };
+        assert!(shape(false) != shape(true));
+        assert!(shape(false) == shape(false));
     }
 }

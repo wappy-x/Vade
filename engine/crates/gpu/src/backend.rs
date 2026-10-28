@@ -810,8 +810,10 @@ impl<'a> Backend<'a> {
     pub fn decode_read_bytes(&self, class: usize, bytes: impl FnOnce() -> usize) {
         if let Some(p) = &self.context.decode_profile { p.borrow_mut().bytes(class, bytes); }
     }
+    /// A decode profile is collecting bytes: its probes synchronize the stream, which an open capture refuses.
+    pub fn decode_readback_active(&self) -> bool { self.context.decode_profile.as_ref().is_some_and(|p| p.borrow().collecting_bytes()) }
     fn decode_byte_probe(&self, class: usize, read: impl FnOnce() -> Result<usize, String>) -> Result<(), String> {
-        if self.context.decode_profile.as_ref().is_some_and(|p| p.borrow().collecting_bytes()) {
+        if self.decode_readback_active() {
             let bytes = read()?; self.decode_read_bytes(class, || bytes);
         }
         Ok(())
