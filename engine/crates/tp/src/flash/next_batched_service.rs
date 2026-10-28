@@ -124,12 +124,14 @@ pub fn run(
                 ));
             }
             // TP ranks can see different free memory. Agree before the existing serving hello.
-            let active = if tp.is_some() {
+            let (active, pool) = if tp.is_some() {
                 let (stream, _) = pp.as_mut().ok_or("tensor split has no control link")?;
                 let (peer, chosen) = spark_tp::startup_pool::agree(stream, active, load_deadline, shutdown)?;
                 eprintln!("flashnext tp session_pool rank0={active} rank1={peer} chosen={chosen} context={context}");
-                chosen
-            } else { active };
+                // Retention charges both ranks the same entries: bound it by the smaller pool.
+                let pool = if spark_serve::prefix_switch::prefix_cache()? { spark_tp::startup_pool::agree(stream, pool, load_deadline, shutdown)?.1 } else { pool };
+                (chosen, pool)
+            } else { (active, pool) };
             model.set_session_limit(active)?;
             // VADE_VECTOR_POOL (default on; =0 off): a request's freed device vectors (GDN
             // states, rollback storage, draft and head arenas, workspaces) wait in a size-keyed
@@ -158,7 +160,7 @@ pub fn run(
             limits.metadata = Some(metadata.clone());
             let engine = FlashNext::with_experiments(backend, &model, context, eos, experiments)?;
             // VADE_FLASHNEXT_PREFIX_CACHE (default off; 1 = on): exact 64-aligned prompt prefixes,
-            // world 1 only (a pipeline front refuses it: prefix_switch::refuse_on_pipeline).
+            // on one Spark and on the tensor split, where each rank keeps its own copy (next_pp_cache.rs).
             // Retention is elastic: admission reclaims it before any live reservation.
             // VADE_FLASHNEXT_ADOPT: an adopted entry holds a whole session arena (16 GB at
             // CONTEXT 262144), so retention may use the pool; admission still reclaims first.
@@ -312,10 +314,11 @@ pub fn run_back(
         if needed > pool as u128 {
             return Err(format!("pipeline back cannot fund one session: needed {needed} bytes, pool {pool} bytes"));
         }
-        let active = if tp.is_some() {
+        let (active, pool) = if tp.is_some() {
             let (_, chosen) = spark_tp::startup_pool::agree(&mut stream, active, load_deadline, shutdown)?;
-            chosen
-        } else { active };
+            let pool = if spark_serve::prefix_switch::prefix_cache()? { spark_tp::startup_pool::agree(&mut stream, pool, load_deadline, shutdown)?.1 } else { pool };
+            (chosen, pool)
+        } else { (active, pool) };
         backend.fund_session_reserves(active);
         backend.synchronize()?;
         eprintln!("flashnext pp back loaded context={context} active={active} resident_bytes={resident} session_pool_bytes={pool}");
@@ -327,7 +330,8 @@ pub fn run_back(
         let (proxy_stop, attached) = (AtomicBool::new(false), AtomicBool::new(false));
         let served = std::thread::scope(|scope| {
             let proxy = worker.map(|worker| super::tp_proxy::spawn(scope, worker, &proxy_stop, &attached, shutdown)).transpose()?;
-            let served = model.serve_pp_back(backend, stream, fast, next, stage, context, active, tile, shutdown);
+            let prefix_budget = if spark_serve::prefix_switch::prefix_cache()? { pool / 2 } else { 0 };
+            let served = model.serve_pp_back(backend, stream, fast, next, stage, context, active, tile, prefix_budget, shutdown);
             proxy_stop.store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(p) = &proxy { p.thread().unpark(); }
             let proxied = proxy.map_or(Ok(()), |p| p.join().map_err(|_| "tensor split proxy panicked".to_string()).and_then(|r| r));

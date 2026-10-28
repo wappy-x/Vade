@@ -35,11 +35,13 @@ mod prefetch;
 use prefetch::{Incoming, Prefetch};
 #[path = "next_pp_acks.rs"]
 mod acks;
+#[path = "next_pp_cache.rs"]
+pub(super) mod cache;
 
 // Version 2: every request carries an exchange id that its reply echoes.
 const MAGIC_REQUEST: u32 = 0x3250_5056; // "VPP2"
 const MAGIC_RESPONSE: u32 = 0x3252_5056; // "VPR2"
-const MAGIC_HELLO: u32 = 0x3448_5056; // "VPH4": explicit pooled-storage release on transitions
+const MAGIC_HELLO: u32 = 0x3548_5056; // "VPH5": paired prefix checkpoint ownership
 /// Request header words: magic, kind, rows, chats, exchange id (then 4 words per chat).
 const REQUEST_HEAD: usize = 20;
 /// Reply header words: magic, status, payload bytes, exchange id.
@@ -373,6 +375,7 @@ pub(super) struct Link {
     inline_kept: bool,
     /// A draft transition still has to release downstream pooled decode storage.
     release_pool: bool,
+    cache: cache::Tickets,
 }
 fn request_head(kind: u32, rows: usize, meta: &[[u32; 4]], id: u32) -> Vec<u8> {
     let mut head = Vec::with_capacity(REQUEST_HEAD + meta.len() * 16);
@@ -457,6 +460,7 @@ impl Link {
             acks: VecDeque::new(),
             inline_kept: stage.rank + 2 == stage.ranks,
             release_pool: false,
+            cache: cache::Tickets::default(),
         })
     }
     /// Any front-side pipeline error leaves the two ranks' session state unknown: the link is
@@ -1084,75 +1088,19 @@ impl<'a> NextModel<'a> {
         result.map_err(|e| link.fail(e))
     }
     /// Worker: mirror the front's sessions and execute just this stage's layer range.
-    pub fn serve_pp_back(&self, b: &Backend<'a>, stream: TcpStream, fast: Option<Box<dyn PpWire>>, next: Option<(TcpStream, Option<Box<dyn PpWire>>)>, stage: Stage, context: usize, active: usize, tile: usize, stop: &'static AtomicBool) -> Result<()> {
+    pub fn serve_pp_back(&self, b: &Backend<'a>, stream: TcpStream, fast: Option<Box<dyn PpWire>>, next: Option<(TcpStream, Option<Box<dyn PpWire>>)>, stage: Stage, context: usize, active: usize, tile: usize, prefix_budget: usize, stop: &'static AtomicBool) -> Result<()> {
         self.pp_split.set(stage.first);
         self.pp_end.set(stage.end);
         let mut sessions = BTreeMap::new();
+        let mut prefixes = BTreeMap::new();
         serve_stage(stream, fast, next, stage, context, active, tile, stop, Recipe::from_env()?,
             |n| self.set_session_limit(n).map(|()| b.fund_session_reserves(n)),
             || self.release_pooled_decode(b),
-            |kind, count, meta, residual| { self.tp_mail_next(kind);
-                self.pp_back_step(b, &mut sessions, kind & !crate::flash_tp_switch::MAIL & !crate::flash_tp_switch::TILE & !crate::flash_tp_switch::HEADS & !crate::flash_tp_switch::HEAD & !crate::flash_tp_switch::SEQ, count, meta, tile, context, residual) })
-    }
-    #[allow(clippy::too_many_arguments)]
-    fn pp_back_step<'w>(
-        &'w self,
-        b: &Backend<'a>,
-        sessions: &mut BTreeMap<u32, NextSession<'a, 'w>>,
-        kind: u32,
-        count: usize,
-        meta: &[[u32; 4]],
-        tile: usize,
-        context: usize,
-        residual: &mut [f32],
-    ) -> Result<()> {
-        for &[slot, capacity, pos, len] in meta {
-            let (capacity, pos) = (capacity as usize, pos as usize);
-            if len == 0 || slot == 0 {
-                return Err("pipeline row without a slot".into());
-            }
-            if capacity == 0 || capacity > context {
-                return Err(format!("pipeline session capacity {capacity} outside 1..={context}"));
-            }
-            if sessions.get(&slot).is_none_or(|s| s.capacity != capacity) {
-                sessions.remove(&slot);
-                sessions.insert(slot, self.session_with_chunk(b, capacity, tile)?);
-            }
-            let s = sessions.get_mut(&slot).unwrap();
-            if pos == 0 && (s.pos != 0 || !s.valid) {
-                s.reset(b)?;
-            }
-            // After a verify, the chat's next request carries the position the
-            // front committed; the back commits the same accepted prefix first.
-            if s.retained > 0 && s.valid {
-                s.commit_back(b, pos)?;
-            }
-            if s.pos != pos || !s.valid {
-                return Err(format!("pipeline session slot {slot}: back position {} valid {} vs front {pos}", s.pos, s.valid));
-            }
-        }
-        let mut by_slot: Vec<(u32, &mut NextSession<'a, 'w>)> = sessions.iter_mut().map(|(k, v)| (*k, v)).collect();
-        let mut ordered: Vec<&mut NextSession<'a, 'w>> = Vec::with_capacity(meta.len());
-        for m in meta {
-            let i = by_slot.iter().position(|(k, _)| *k == m[0]).ok_or("pipeline cohort repeats a slot")?;
-            ordered.push(by_slot.swap_remove(i).1);
-        }
-        let lens: Vec<usize> = meta.iter().map(|m| m[3] as usize).collect();
-        match kind {
-            KIND_ROWS | KIND_ROWS_ASYNC | KIND_ROWS_KEEP | KIND_ROWS_FINAL | KIND_VERIFY | crate::flash_tp_switch::KIND_VERIFY => {
-                if lens.iter().sum::<usize>() != count {
-                    return Err("pipeline rows do not match the residual".into());
-                }
-                NextSession::pp_back_rows(b, &mut ordered, &lens, residual, matches!(kind, KIND_VERIFY | crate::flash_tp_switch::KIND_VERIFY))
-            }
-            KIND_POOLED => {
-                if lens.iter().any(|&n| n != 1) {
-                    return Err("pipeline pooled step needs one row per chat".into());
-                }
-                NextSession::pp_back_pooled(b, &mut ordered, count, residual)
-            }
-            crate::flash_tp_switch::KIND_HANDOFF => self.tp_handoff(b, &mut ordered, &lens), _ => Err("pipeline request kind unknown".into()),
-        }
+            |kind, count, meta, residual| {
+                let plain = kind & !crate::flash_tp_switch::MAIL & !crate::flash_tp_switch::TILE & !crate::flash_tp_switch::HEADS & !crate::flash_tp_switch::HEAD & !crate::flash_tp_switch::SEQ;
+                // Prefix commands run no pass: the split's per-pass state stays as the last pass set it.
+                if !cache::command(plain) { self.tp_mail_next(kind); }
+                self.pp_back_step(b, &mut sessions, &mut prefixes, prefix_budget, plain, count, meta, tile, context, residual) })
     }
 }
 
@@ -1362,7 +1310,7 @@ fn serve_stage(
         };
         let release = kind & RELEASE_POOLED != 0; let tp_bits = kind & (crate::flash_tp_switch::MAIL | crate::flash_tp_switch::TILE | crate::flash_tp_switch::HEADS | crate::flash_tp_switch::HEAD | crate::flash_tp_switch::SEQ);
         let kind = kind & !RELEASE_POOLED & !tp_bits;
-        if !matches!(kind, KIND_ROWS | KIND_POOLED | KIND_ROWS_ASYNC | KIND_ROWS_KEEP | KIND_ROWS_FINAL | KIND_VERIFY | crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF)
+        if !(cache::command(kind) || matches!(kind, KIND_ROWS | KIND_POOLED | KIND_ROWS_ASYNC | KIND_ROWS_KEEP | KIND_ROWS_FINAL | KIND_VERIFY | crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF))
             || matches!(kind, KIND_VERIFY | KIND_ROWS_KEEP | crate::flash_tp_switch::KIND_VERIFY) && !recipe.mtp || matches!(kind, crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF) && !recipe.tp
             || matches!(kind, KIND_ROWS_ASYNC | KIND_ROWS_KEEP | KIND_ROWS_FINAL | crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF) && (!recipe.asynchronous || on_wire)
         {

@@ -75,8 +75,8 @@ pub fn run_pp(
     if !sparse {
         return Err("rows require --indexer sparse".into());
     }
-    // Both ranks refuse the prefix cache before they link (prefix_switch::refuse_on_pipeline).
-    spark_serve::prefix_switch::refuse_on_pipeline(spark_serve::prefix_switch::prefix_cache()?)?;
+    // The split has paired prefix snapshots. The layer chain still refuses retention.
+    spark_serve::prefix_switch::refuse_on_pipeline(spark_serve::prefix_switch::prefix_cache()?, spark_engine::flash_tp_switch::on())?;
     let stage = spark_engine::flash::next_batched::PpStage::for_rank(rank, world)?;
     let limit = spark_engine::flash::next_batched::PP_LINK_TIMEOUT;
     // Over RDMA (SEQPAR_RDMA unset, auto or 1; the tensor split needs it): decode steps and short

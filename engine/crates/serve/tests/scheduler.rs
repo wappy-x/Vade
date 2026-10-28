@@ -20,6 +20,7 @@ struct Model {
     heads: Arc<AtomicUsize>,
     /// Engine::prefix_cache_opt_in (Flash-Next): only asking requests use the prefix cache.
     opt_in: bool,
+    retention_extra: usize,
 }
 struct Kv {
     history: Vec<u32>,
@@ -103,6 +104,9 @@ impl Engine for Model {
     }
     fn session_reservation_bytes(&self) -> Option<usize> {
         Some(16384)
+    }
+    fn request_reservation_bytes_with_retention(&self, _: usize, _: bool, _: Option<usize>, retain: bool) -> Option<usize> {
+        16384usize.checked_add(if retain { self.retention_extra } else { 0 })
     }
 }
 // Typed hybrid scheduling contract, without GPU arithmetic or per-token sleeps.
@@ -241,13 +245,16 @@ impl Server {
         Self::with_model(Codec(1, false), true, 0, Limits { output_bytes: 16 * 1024 * 1024, ..Limits::default() }, true)
     }
     fn with_model<T: Tokenizer + Send + 'static>(codec: T, prefix_cache: bool, mtp_depth: usize, limits: Limits, opt_in: bool) -> Self {
+        Self::with_retention_bytes(codec, prefix_cache, mtp_depth, limits, opt_in, 0)
+    }
+    fn with_retention_bytes<T: Tokenizer + Send + 'static>(codec: T, prefix_cache: bool, mtp_depth: usize, limits: Limits, opt_in: bool, retention_extra: usize) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let live = Arc::new(AtomicUsize::new(0));
         let calls = Arc::new(AtomicUsize::new(0));
         let heads = Arc::new(AtomicUsize::new(0));
-        let ab = limits.ab_ptx.then(|| Arc::new(Mutex::new(Vec::new())));
+        let ab = (limits.ab_ptx || retention_extra > 0).then(|| Arc::new(Mutex::new(Vec::new())));
         let cohort = limits.ab_cohorts.then(|| Arc::new(Mutex::new((None, 0))));
         let model = Model {
             ab: ab.clone(),
@@ -256,6 +263,7 @@ impl Server {
             calls: calls.clone(),
             heads: heads.clone(),
             opt_in,
+            retention_extra,
         };
         let shutdown = stop.clone();
         let worker = std::thread::spawn(move || {
@@ -305,7 +313,7 @@ impl Server {
         let address = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let (live, calls, heads) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        let model = Tiled(Model { ab: None, cohort: None, live: live.clone(), calls: calls.clone(), heads: heads.clone(), opt_in: false }, observation.as_ref().map(|o| o.0.clone()));
+        let model = Tiled(Model { ab: None, cohort: None, live: live.clone(), calls: calls.clone(), heads: heads.clone(), opt_in: false, retention_extra: 0 }, observation.as_ref().map(|o| o.0.clone()));
         let shutdown = stop.clone();
         let worker = std::thread::spawn(move || {
             if let Some((_, start)) = observation {
@@ -329,7 +337,7 @@ impl Server {
         let address = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let (live, calls, heads) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        let model = Reserved(Model { ab: None, cohort: None, live: live.clone(), calls: calls.clone(), heads: heads.clone(), opt_in: false }, probe);
+        let model = Reserved(Model { ab: None, cohort: None, live: live.clone(), calls: calls.clone(), heads: heads.clone(), opt_in: false, retention_extra: 0 }, probe);
         let shutdown = stop.clone();
         let worker = std::thread::spawn(move || {
             scheduler::serve_requests(listener, &model, Some(&Codec(1, false)),
@@ -407,6 +415,35 @@ fn tokens(response: &str) -> Vec<u32> {
                 .unwrap()
         })
         .collect()
+}
+
+#[test]
+fn oversized_retention_refuses_before_allocation_and_does_not_block_followers() {
+    for extra in [16385, usize::MAX] {
+        let server = Server::with_retention_bytes(Codec(1, false), true, 0,
+            Limits { generation_timeout: Duration::from_secs(30), ..Limits::default() }, true, extra);
+        let mut response = String::new();
+        let mut socket = server.send(&[1, 2, 3], 1, ",\"cache\":true,\"prompt_lookup\":false");
+        socket.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        socket.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 503 ") && response.contains("capacity_exhausted"), "{response}");
+        assert!(server.ab.as_ref().unwrap().lock().unwrap().is_empty(), "refused request allocated a session");
+        let mut active = server.send(&[1, 2, 4], 32, ",\"cache\":false,\"ignore_eos\":true,\"prompt_lookup\":false");
+        let wait = Instant::now();
+        while server.live.load(Ordering::Relaxed) == 0 {
+            assert!(wait.elapsed() < Duration::from_secs(2));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let mut blocked = server.send(&[1, 2, 3], 1, ",\"cache\":true,\"prompt_lookup\":false");
+        response.clear(); active.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 ") && tokens(&response).len() == 32, "{response}");
+        response.clear(); blocked.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 503 ") && response.contains("capacity_exhausted"), "{response}");
+        assert_eq!(server.ab.as_ref().unwrap().lock().unwrap().len(), 1);
+        let response = server.run(&[1, 2, 4], ",\"cache\":false,\"prompt_lookup\":false");
+        assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+        assert_eq!(server.ab.as_ref().unwrap().lock().unwrap().len(), 2);
+    }
 }
 
 #[test]
@@ -758,6 +795,7 @@ fn sampled_branches_match_full_history_draws_and_sequential_generation() {
         calls: Arc::new(AtomicUsize::new(0)),
         heads: Arc::new(AtomicUsize::new(0)),
         opt_in: false,
+        retention_extra: 0,
     };
     for (temperature, top_k, top_p) in [(0.7, 0, 0.95), (1.3, 3, 0.8), (0.0, 0, 1.0)] {
         let sampling = Sampling {

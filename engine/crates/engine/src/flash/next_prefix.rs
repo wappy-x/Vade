@@ -23,6 +23,7 @@ pub(super) struct Checkpoint<'a> {
     ple: DeviceVector<'a>,
     hash: PleHash,
     last: Option<DeviceVector<'a>>,
+    remote: Option<pp::cache::Lease>,
 }
 
 /// Immutable prompt prefix at a 64-aligned position, independent of any live session.
@@ -37,6 +38,7 @@ pub struct NextPrefix<'a> {
     in_place: bool,
     last: Option<DeviceVector<'a>>,
     bytes: usize,
+    remote: Option<pp::cache::Lease>,
 }
 impl NextPrefix<'_> {
     pub fn position(&self) -> usize {
@@ -46,7 +48,7 @@ impl NextPrefix<'_> {
     pub fn in_place(&self) -> bool {
         self.in_place
     }
-    /// Upper bound of the device bytes this prefix holds.
+    /// Upper bound of this prefix's device bytes on either rank.
     pub fn device_bytes(&self) -> usize {
         self.bytes
     }
@@ -76,14 +78,46 @@ impl<'a, 'w> NextSession<'a, 'w> {
         // Ple::reset: the convolution history holds 9 rows of W.
         crate::flash_next_rows::recurrent_bytes() + (2 * LAYERS + 2) * VECTOR_SLACK + (9 * W + W) * 4
     }
+    /// Current GDN storage can include prompt-chunk history beyond the decode state.
+    pub(super) fn checkpoint_allocation_bytes(&self) -> usize {
+        self.gdn_state.iter().flatten().flat_map(|g| g.storage_lengths()).map(|n| n * 4 + VECTOR_SLACK).sum::<usize>()
+            + self.ple.history_len() * 4 + VECTOR_SLACK
+            + if self.draft.is_some() && self.model.prompt_frontend { W * 4 + VECTOR_SLACK } else { 0 }
+    }
     /// Called before a final partial prompt tile and after an output prefill; acts at
-    /// 64-aligned positions only. Best effort: a failed copy leaves no checkpoint.
-    pub(super) fn capture_checkpoint(&mut self, b: &Backend<'a>) {
-        if self.checkpointing && self.pos != 0 && self.pos.is_multiple_of(64) && self.try_capture(b).is_err() {
+    /// 64-aligned positions only. Preparation drains live draft history: failure invalidates
+    /// the session and reaches the caller. Only local snapshot copies are best effort.
+    pub(super) fn capture_checkpoint(&mut self, b: &Backend<'a>) -> Result<()> {
+        if !self.checkpointing || self.pos == 0 || !self.pos.is_multiple_of(64) { return Ok(()); }
+        let remote = match self.prepare_checkpoint(b) {
+            Ok(remote) => remote,
+            Err(error) => {
+                self.valid = false;
+                self.logits_ready = false;
+                *self.checkpoint.get_mut() = None;
+                return Err(error);
+            }
+        };
+        if self.model.pp_front() && remote.is_none() || self.try_capture(b, remote).is_err() {
             *self.checkpoint.get_mut() = None;
         }
+        Ok(())
     }
-    fn try_capture(&mut self, b: &Backend<'a>) -> Result<()> {
+    /// One Spark: nothing to prepare. Split front: settle the state the ranks owe each other,
+    /// then the worker captures its own rows at the same position (pp_cache_capture).
+    fn prepare_checkpoint(&mut self, b: &Backend<'a>) -> Result<Option<pp::cache::Lease>> {
+        if !self.model.pp_front() { return Ok(None); }
+        // Prompt tiles can leave TP state split by layers, and short passes by GDN heads.
+        // Both settle by copies only (no sum), before the same whole-state checkpoint on each rank.
+        self.model.tp_part(b, &mut [self], &[0..0], true, false)?;
+        self.model.tp_gdn_frame(b, &mut [self], usize::MAX)?;
+        // The ordered capture drains the link, so the kept rows of queued tiles are back.
+        let remote = self.model.pp_cache_capture(self.slot, self.capacity, self.pos)?;
+        self.ingest_kept(b)?;
+        self.flush_draft_feed(b)?;
+        Ok(remote)
+    }
+    fn try_capture(&mut self, b: &Backend<'a>, remote: Option<pp::cache::Lease>) -> Result<()> {
         // A tensor split head half is no prefix of another chat's whole state.
         if self.gdn_state.iter().flatten().any(|g| g.is_half()) { return Err("GDN state holds one split rank's heads".into()); }
         let mut c = match self.checkpoint.get_mut().take() {
@@ -93,12 +127,12 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 // request must not pay a driver allocation per layer.
                 let mut lengths: Vec<usize> = self.gdn_state.iter().flatten().flat_map(|g| g.storage_lengths()).collect();
                 lengths.push(self.ple.history_len());
-                if self.draft.is_some() { lengths.push(W); }
+                if self.draft.is_some() && self.model.prompt_frontend { lengths.push(W); }
                 let mut v = b.vector_arena(&lengths)?.into_iter();
                 let gdn = self.gdn_state.iter()
                     .map(|g| g.as_ref().map(|g| g.with_storage(v.next().unwrap(), v.next().unwrap())))
                     .collect();
-                Checkpoint { position: 0, gdn, ple: v.next().unwrap(), hash: self.hash.clone(), last: v.next() }
+                Checkpoint { position: 0, gdn, ple: v.next().unwrap(), hash: self.hash.clone(), last: v.next(), remote: None }
             }
         };
         for (live, saved) in self.gdn_state.iter().zip(c.gdn.iter_mut()) {
@@ -109,7 +143,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         self.ple.copy_history(b, &mut c.ple)?;
         c.hash = self.hash.clone();
         c.last = match &self.draft {
-            Some(d) => {
+            Some(d) if self.model.prompt_frontend => {
                 let mut last = match c.last.take() {
                     Some(v) => v,
                     None => b.vector(W)?,
@@ -117,9 +151,10 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 b.copy_range(&d.last, &mut last, 0, 0, W)?;
                 Some(last)
             }
-            None => None,
+            _ => None,
         };
         c.position = self.pos;
+        c.remote = remote;
         *self.checkpoint.get_mut() = Some(c);
         Ok(())
     }
@@ -128,7 +163,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         self.checkpoint
             .borrow()
             .as_ref()
-            .filter(|c| self.valid && (c.last.is_some() || self.model.mtp_depth == 0))
+            .filter(|c| self.valid && (c.last.is_some() || self.model.mtp_depth == 0 || !self.model.prompt_frontend))
             .map(|c| c.position)
     }
     /// Device bytes `save_prefix` allocates for the current checkpoint.
@@ -141,8 +176,10 @@ impl<'a, 'w> NextSession<'a, 'w> {
             (Some(d), Some(_)) => d.history_bytes(rows - 1) + W * 4 + VECTOR_SLACK,
             _ => 0,
         };
-        qsa + draft + crate::flash_next_rows::recurrent_bytes() + 2 * LAYERS * VECTOR_SLACK
-            + c.ple.len() * 4 + VECTOR_SLACK
+        let local = qsa + draft + crate::flash_next_rows::recurrent_bytes() + 2 * LAYERS * VECTOR_SLACK
+            + c.ple.len() * 4 + VECTOR_SLACK;
+        // A tensor split charges the larger of the two ranks' copies.
+        local.max(c.remote.as_ref().map_or(0, |r| r.bytes))
     }
     /// Move the checkpoint out with copies of the QSA and draft rows below it (immutable).
     pub fn save_prefix(&self, b: &Backend<'a>) -> Result<NextPrefix<'a>> {
@@ -161,6 +198,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             .collect::<Result<Vec<_>>>()?;
         let draft = draft.map(|d| d.copy_history_into(b, rows - 1, next3())).transpose()?;
         let c = self.checkpoint.borrow_mut().take().ok_or("missing prompt checkpoint")?;
+        if let Some(remote) = &c.remote { self.model.pp_cache_publish(remote)?; }
         Ok(NextPrefix {
             position: rows,
             qsa,
@@ -171,14 +209,16 @@ impl<'a, 'w> NextSession<'a, 'w> {
             in_place: false,
             last: None,
             bytes,
+            remote: c.remote,
         })
     }
     /// Device bytes `save_prefix_in_place` keeps (the checkpoint alone).
     pub fn checkpoint_prefix_bytes(&self) -> usize {
         let held = self.checkpoint.borrow();
         let Some(c) = held.as_ref() else { return 0 };
-        crate::flash_next_rows::recurrent_bytes() + 2 * LAYERS * VECTOR_SLACK + c.ple.len() * 4 + VECTOR_SLACK
-            + c.last.as_ref().map_or(0, |_| W * 4 + VECTOR_SLACK)
+        let local = crate::flash_next_rows::recurrent_bytes() + 2 * LAYERS * VECTOR_SLACK + c.ple.len() * 4 + VECTOR_SLACK
+            + c.last.as_ref().map_or(0, |_| W * 4 + VECTOR_SLACK);
+        local.max(c.remote.as_ref().map_or(0, |r| r.bytes))
     }
     /// Move the checkpoint out without copying rows: they stay in this session's arenas
     /// until `into_storage` hands them to the next turn.
@@ -186,8 +226,9 @@ impl<'a, 'w> NextSession<'a, 'w> {
         let rows = self.checkpoint_position().ok_or("Flash-Next session has no prompt checkpoint")?;
         let bytes = self.checkpoint_prefix_bytes();
         let c = self.checkpoint.borrow_mut().take().ok_or("missing prompt checkpoint")?;
+        if let Some(remote) = &c.remote { self.model.pp_cache_publish(remote)?; }
         Ok(NextPrefix { position: rows, qsa: Vec::new(), gdn: c.gdn, ple: c.ple, hash: c.hash, draft: None,
-            in_place: true, last: c.last, bytes })
+            in_place: true, last: c.last, bytes, remote: c.remote })
     }
     /// The KV arenas of a finished, valid session with no attention in flight.
     pub fn into_storage(mut self) -> Option<NextStorage<'a>> {
@@ -229,9 +270,11 @@ impl<'a> NextModel<'a> {
         s.hash = prefix.hash.clone();
         match (&mut s.draft, &prefix.draft) {
             (Some(d), Some((rows, last))) => d.restore_history(b, rows, last)?,
-            (Some(_), None) => s.disable_mtp(),
+            // Workers own verification state, but no frontend draft history.
+            (Some(_), None) if self.prompt_frontend => s.disable_mtp(),
             _ => {}
         }
+        if let Some(remote) = &prefix.remote { self.pp_cache_restore(remote, s.slot, capacity, prefix.position)?; }
         s.pos = prefix.position;
         s.sync_pool_state(b)?;
         s.logits_ready = false;
@@ -255,6 +298,7 @@ impl<'a> NextModel<'a> {
             return Err("invalid Flash-Next adopted prefix".into());
         }
         crate::flash_next_rows::reservation_rows(capacity, chunk)?;
+        self.pp_cache_releases()?;
         let had_draft = draft.is_some();
         let mut s = NextSession::new_from(b, self, capacity, Some(qsa), draft)?;
         s.chunk_limit = chunk;
@@ -274,9 +318,10 @@ impl<'a> NextModel<'a> {
         s.hash = prefix.hash.clone();
         match (&mut s.draft, &prefix.last) {
             (Some(d), Some(last)) if had_draft => d.adopt_history(b, prefix.position - 1, last)?,
-            (Some(_), _) => s.disable_mtp(),
+            (Some(_), _) if self.prompt_frontend => s.disable_mtp(),
             _ => {}
         }
+        if let Some(remote) = &prefix.remote { self.pp_cache_restore(remote, s.slot, capacity, prefix.position)?; }
         s.pos = prefix.position;
         s.sync_pool_state(b)?;
         s.logits_ready = false;

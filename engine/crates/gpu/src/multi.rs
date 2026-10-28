@@ -484,3 +484,13 @@ impl Backend<'_> {
             &mut [parameter(&mut args)]) }
     }
 }
+
+impl Backend<'_> {
+    /// Release spare buffers before checking room for an optional cache copy.
+    /// Live session buffers and captured execution storage keep their owners.
+    pub fn prepare_cache_allocation(&self, bytes: usize) -> Result<(), String> {
+        self.context.activate()?;
+        self.context.release_deferred();
+        self.context.make_room(bytes).and_then(|()| self.fatal_error().map_or(Ok(()), Err))
+    }
+}

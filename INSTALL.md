@@ -1041,8 +1041,10 @@ a refusal is reported and the context is not lowered.
 ### Turn on the prefix cache
 
 The prefix cache (reusing a cached prompt prefix across requests) is OFF by
-default and supported only on one Spark. To turn it on for **local Route A**,
-restart from the same local environment:
+default. It works on one Spark and on two Sparks (the tensor split). On two
+Sparks, both engine ranks must start with the same value, or the engine
+refuses to start. Three or more Sparks refuse it. To turn it on for **local
+Route A**, restart from the same local environment:
 
 ```sh
 vade down

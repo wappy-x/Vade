@@ -166,8 +166,7 @@ impl<'b, 'a, 'w> FlashNext<'b, 'a, 'w> {
     pub fn with_chunk_experiments(backend: &'b Backend<'a>, model: &'w NextModel<'a>, context: usize,
         eos: Vec<u32>, chunk: usize, experiments: crate::mtp_batch::Experiments) -> Result<Self,String> {
         let prefix_cache = prefix_cache()?;
-        // A pipeline front holds its own layers only (refuse_on_pipeline); run_pp refused first.
-        if model.pp_front() { refuse_on_pipeline(prefix_cache)?; }
+        if model.pp_front() { refuse_on_pipeline(prefix_cache, model.tp_prefix_supported())?; }
         // The prompt checkpoint borrows the MTP rollback storage's funding (next_prefix.rs);
         // a model without MTP funds it here.
         let reservation = model.session_reservation_bytes_for_chunk(context, chunk)?
@@ -810,7 +809,8 @@ impl<'b, 'a, 'w> Engine for FlashNext<'b, 'a, 'w> {
     /// before new request allocations. Unused spare-buffer capacity needs no extra funding.
     fn cache_free_physical_bytes(&self, _live_reserved: usize) -> Result<Option<(i128, usize)>, String> {
         if !self.cache_yield { return Ok(None); }
-        Ok(crate::prefix_switch::cache_physical_room(self.backend.kv_reserve_room()?, CACHE_YIELD_SLACK_BYTES))
+        let local = crate::prefix_switch::cache_physical_room(self.backend.kv_reserve_room()?, CACHE_YIELD_SLACK_BYTES);
+        Ok(crate::prefix_switch::cache_rank_room(local, self.model.pp_cache_room()?, CACHE_YIELD_SLACK_BYTES))
     }
     fn request_option_bytes(&self, request: &crate::protocol::Request) -> usize {
         if !request.prompt_lookup {
@@ -842,6 +842,7 @@ impl<'b, 'a, 'w> Engine for FlashNext<'b, 'a, 'w> {
     /// VADE_FLASHNEXT_KV_RESERVE=0: nothing runs, without a KV reserve (unless the vector
     /// pool is configured: the same calls maintain it).
     fn maintain_memory(&self, idle: bool) -> Result<(), String> {
+        if self.prefix_cache { self.model.pp_cache_maintain(idle)?; }
         if !spark_engine::flash::qsa::kv_reserve() && !self.backend.vector_pool_configured() { return Ok(()); }
         self.backend.maintain_kv_reserve(idle)?;
         self.backend.kv_conversation_ended(self.reservation);

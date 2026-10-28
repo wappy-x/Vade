@@ -10,7 +10,7 @@ cannot enable a server feature that was disabled at startup.
 | Direct and native agent harness | Request `cache:true` when supported; keep a stable session key when advertised | Permission for the engine to reuse a prefix, with exact admission seeing the same decorated request |
 | `VADE_HARNESS_PREFIX_CACHE=0` | Unset | Request `cache:false`; keep the transcript and advertised affinity key unchanged |
 | Gateway | Preserve caller cache fields | `--stable-prefix` explicitly enables supported request decoration; routing affinity alone is not a cache hit |
-| FP4-Local engine `VADE_FLASHNEXT_PREFIX_CACHE` | Unset or `0`: retention off | `1` enables the optional one-Spark retained cache; the layer pipeline refuses it |
+| FP4-Local engine `VADE_FLASHNEXT_PREFIX_CACHE` | Unset or `0`: retention off | `1` enables the optional retained cache on one Spark and on the two-Spark tensor split; the layer chain (three or more Sparks) refuses it |
 
 The request rules are in [contract.rs](../src/contract.rs); the server defaults
 and pipeline refusal are in [prefix_switch.rs](../../engine/crates/serve/src/prefix_switch.rs).

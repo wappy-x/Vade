@@ -10,6 +10,12 @@ Changes that are merged but not yet released are under Unreleased.
   streams (4 x 2560 features x 2 planes x 2 bytes = 40,960 bytes per token);
   the HC down projection forms the same words from the residual rows instead.
   Token IDs do not change. (own-read-scale)
+- When enabled, the Flash-Next prefix cache can restore a prompt on the tensor
+  split. Each rank keeps and restores its own matching state. The layer chain
+  still refuses the cache. A second question on a 100K-token chat restores when
+  the front snapshot fits the free memory; at `--context 131072` the 6.2 GB
+  snapshot does not fit the 5.3 to 6.0 GB that stays free, so that turn reads
+  the prompt again.
 
 - When enabled, the Flash-Next prefix cache can use free memory that an empty
   spare-buffer reserve has not allocated. Cache retention still yields to live

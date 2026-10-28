@@ -3,7 +3,7 @@
 # Run: sh examples/openai_client.sh [stream|tools|cache ...]
 # Needs: Rust 1.99.0, curl, and a running engine. No packages to install.
 # VADE_API_URL selects the endpoint. VADE_API_KEY_FILE selects a bearer-key file.
-# The cache demo needs VADE_FLASHNEXT_PREFIX_CACHE=1 on a one-Spark engine.
+# The cache demo needs an engine started with VADE_FLASHNEXT_PREFIX_CACHE=1 (one Spark or two).
 set -eu
 . "$(dirname -- "$0")/api-common.sh"
 BASE=${VADE_API_URL:-http://127.0.0.1:18080}

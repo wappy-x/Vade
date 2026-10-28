@@ -646,8 +646,15 @@ Retention is elastic: by default cached prefixes may use up to half the
 session pool, and admission reclaims them before it refuses a live
 request
 ([`next_batched_service.rs`](../engine/crates/tp/src/flash/next_batched_service.rs)).
-The cache works on one Spark only. The layer pipeline refuses it at startup,
-because the back ranks keep no checkpoints of their own layers yet
+The cache works locally and on the tensor split. Each split rank saves its
+own state. A shared prefix ID ties the saved states together. The existing
+ordered control link completes the worker restore before the next prompt
+rows run. The cache uses the larger rank charge and the smaller available
+memory bound. A snapshot that does not fit that bound is not kept, and the
+next turn reads its prompt again. For example, on two Sparks at
+`--context 131072` a 100K-token prompt needs a 6.2 GB front snapshot, but the
+live request leaves 5.3 to 6.0 GB, so its second turn reads the whole prompt
+again. At `--context 110592` the same snapshot fits. The layer chain still refuses the cache at startup
 ([`prefix_switch.rs`](../engine/crates/serve/src/prefix_switch.rs)).
 
 ## Ranks, memory and ownership
@@ -811,7 +818,7 @@ qualification ([FP4-Local launch](../cli/docs/fp4-local.md)). The other model
 parsers, servers and protocol routes in the source are not qualified to the
 same level.
 
-- The prefix cache is off by default and works on one Spark only.
+- The prefix cache is off by default. It works locally and on the tensor split.
 - `"temperature": 0` alone is not greedy; it brings in the checkpoint's other
   sampling settings.
 - A cancel is handled by the scheduler between model steps, so it waits for

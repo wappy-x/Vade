@@ -5,7 +5,7 @@ use super::*;
 impl<'a, 'w> NextSession<'a, 'w> {
     /// Pipeline front: the chat's kept rows (its queued prompt tiles) enter its draft
     /// history before any newer row, on the pooled path as on the tile path (backlog first).
-    pub(super) fn ingest_kept(&mut self, b: &Backend<'a>) -> Result<()> {
+    pub(in crate::flash) fn ingest_kept(&mut self, b: &Backend<'a>) -> Result<()> {
         if self.draft.is_none() || !self.model.pp_has_kept(self.slot) {
             return Ok(());
         }

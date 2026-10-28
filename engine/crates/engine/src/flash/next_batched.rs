@@ -777,7 +777,7 @@ impl<'a> NextModel<'a> {
         chunk: usize,
     ) -> Result<NextSession<'a, 'w>> {
         crate::flash_next_rows::reservation_rows(capacity, chunk)?;
-        let mut session = NextSession::new(b, self, capacity)?;
+        self.pp_cache_releases()?; let mut session = NextSession::new(b, self, capacity)?;
         session.chunk_limit = chunk;
         session.chunk = chunk;
         Ok(session)
@@ -1129,7 +1129,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         while start < tokens.len() {
             // Prefix cache: the last 64-aligned row before the final partial tile.
             if output && tokens.len() - start < 64 {
-                self.capture_checkpoint(b);
+                self.capture_checkpoint(b)?;
             }
             let mut n = self.model.tp_seq_cut(self, output, tokens.len() - start, chunk)
                 .unwrap_or_else(|| crate::flash_next_rows::prompt_rows(self.pos, tokens.len() - start, chunk));
@@ -1150,7 +1150,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             start += n;
         }
         if output {
-            self.capture_checkpoint(b);
+            self.capture_checkpoint(b)?;
         }
         Ok(())
     }
@@ -1188,7 +1188,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             // before a final partial tile consumes its recurrent state.
             for &i in &live {
                 if tokens[i].len() - offsets[i] < 64 {
-                    sessions[i].capture_checkpoint(b);
+                    sessions[i].capture_checkpoint(b)?;
                 }
             }
             // VADE_PROMPT_TILE=auto: each chat's tile follows where its prompt work ends.
@@ -1243,7 +1243,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             }
         }
         for session in sessions.iter_mut() {
-            session.capture_checkpoint(b);
+            session.capture_checkpoint(b)?;
         }
         sessions.iter().map(|s| s.logits(b)).collect()
     }

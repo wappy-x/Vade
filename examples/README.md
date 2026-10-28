@@ -126,8 +126,8 @@ Whispers deep thoughts out.
 [turn 2] prompt 2040 tokens, cached 0: 19
 ```
 
-The prefix cache works on one Spark only, and you turn it on from the Spark
-itself, with local Route A: `vade down`, then
+The prefix cache works on one Spark and on two Sparks (the tensor split). On one
+Spark you turn it on from the Spark itself, with local Route A: `vade down`, then
 `VADE_FLASHNEXT_PREFIX_CACHE=1 vade up` on the Spark. Set on a controller, the
 variable does not reach the Spark it drives, so the cache stays off and the
 counts above stay at 0. A `--cache-bytes 0` you saved earlier wins over the

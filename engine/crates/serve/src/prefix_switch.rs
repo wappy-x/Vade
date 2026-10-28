@@ -1,5 +1,5 @@
 //! The Flash-Next prefix cache's startup switches (FlashNext reads them; flashnext builds on
-//! Linux only, so they live here, host-tested) and the layer pipeline's refusal of the cache.
+//! Linux only, so they live here, host-tested) and the cache's topology guard.
 
 /// VADE_FLASHNEXT_PREFIX_CACHE: 1 = on (requests with `cache:true` or a `prompt_cache_key`
 /// retain their prompt); unset or 0 = off (no snapshots, main's path). Default off until a
@@ -18,21 +18,26 @@ pub fn cache_yield() -> Result<bool, String> {
 pub(crate) fn cache_physical_room(reserve: Option<(i128, usize)>, slack: usize) -> Option<(i128, usize)> {
     reserve.map(|(room, _unused_capacity)| (room, slack))
 }
+/// Independent memories must each have room for a retained prefix.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn cache_rank_room(local: Option<(i128, usize)>, peer: Option<i128>, slack: usize) -> Option<(i128, usize)> {
+    match (local, peer) {
+        (Some((room, margin)), Some(peer)) => Some((room.min(peer), margin.max(slack))),
+        (None, Some(peer)) => Some((peer, slack)),
+        (local, None) => local,
+    }
+}
 /// VADE_FLASHNEXT_ADOPT: 1 = a finished request's KV arenas stay with the prompt prefix it
 /// published in place (no row copies), and the conversation's next turn builds its session
 /// on them (next_prefix.rs); unset or 0 = copies (default). Needs the prefix cache.
 pub fn adopt() -> Result<bool, String> {
     switch(ADOPT, std::env::var(ADOPT.0))
 }
-/// The pipeline service (the tensor split and the layer chain) refuses VADE_FLASHNEXT_PREFIX_CACHE=1: run_pp on both ranks
-/// before they link, FlashNext again on a configured front. A retained prefix, copied or
-/// adopted, holds the front rank's layers [0, split) only. The back keeps no checkpoint of
-/// its layers and accepts a slot by position, so a restored prompt would resume on whatever
-/// state that slot last held: another prompt's KV and GDN rows. World 1 only until the back
-/// checkpoints and restores its own layers.
-pub fn refuse_on_pipeline(prefix_cache: bool) -> Result<(), String> {
-    if prefix_cache {
-        return Err("VADE_FLASHNEXT_PREFIX_CACHE=1 serves world 1 only: the back rank of two or more Sparks keeps no prefix checkpoints; unset it or set 0 there".into());
+/// A tensor split restores a matching prefix on each rank. The layer chain still has no
+/// cache contract. Check before connecting ranks and again on the configured front.
+pub fn refuse_on_pipeline(prefix_cache: bool, tensor_split: bool) -> Result<(), String> {
+    if prefix_cache && !tensor_split {
+        return Err("VADE_FLASHNEXT_PREFIX_CACHE=1 needs local execution or the tensor split: the layer chain has no prefix restore contract; unset it or set 0 there".into());
     }
     Ok(())
 }
@@ -62,6 +67,10 @@ mod tests {
             assert_eq!(cache_physical_room(Some((-1, unused)), 1024), Some((-1, 1024)));
             assert_eq!(cache_physical_room(Some((4096, unused)), 1024), Some((4096, 1024)));
         }
+        assert_eq!(cache_rank_room(None, None, 1024), None);
+        assert_eq!(cache_rank_room(None, Some(-1), 1024), Some((-1, 1024)));
+        assert_eq!(cache_rank_room(Some((4096, 2048)), Some(1024), 512), Some((1024, 2048)));
+        assert_eq!(cache_rank_room(Some((-1, 512)), Some(4096), 1024), Some((-1, 1024)));
     }
 
     #[test]
@@ -87,10 +96,10 @@ mod tests {
     }
 
     #[test]
-    fn the_pipeline_refuses_the_prefix_cache() {
-        // Off: the pipeline starts as before. On: refused, naming the switch and the pipeline.
-        assert_eq!(refuse_on_pipeline(false), Ok(()));
-        let refusal = refuse_on_pipeline(true).unwrap_err();
-        assert!(refusal.contains("VADE_FLASHNEXT_PREFIX_CACHE=1") && refusal.contains("back rank"), "{refusal}");
+    fn the_split_accepts_cache_and_the_layer_chain_refuses_it() {
+        for tensor in [false, true] { assert_eq!(refuse_on_pipeline(false, tensor), Ok(())); }
+        assert_eq!(refuse_on_pipeline(true, true), Ok(()));
+        let refusal = refuse_on_pipeline(true, false).unwrap_err();
+        assert!(refusal.contains("VADE_FLASHNEXT_PREFIX_CACHE=1") && refusal.contains("layer chain"), "{refusal}");
     }
 }

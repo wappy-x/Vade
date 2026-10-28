@@ -1,6 +1,7 @@
 //! Pipeline numerical recipe before either rank loads weights. Prompt options
 //! use the owning parser's configured booleans: unset equals explicit default.
 //! Cohort settings come from the executable's already-parsed route recipe.
+//! The prefix cache also compares its effective value: unset is off.
 //! Other settings retain raw presence/value identities. Rank-local frontend
 //! suppression is applied after verification and is not part of this recipe.
 //! Paths, authentication, endpoints, logging and memory ceilings are excluded.
@@ -9,6 +10,7 @@ use spark_serve::mtp_batch::{Experiments, Mode};
 
 const COHORT_NAMES: [&str; 6] = ["pipeline cohort guard (route)", "VADE_MTP_BATCH/VADE_MTP_C8 (effective)",
     "VADE_POOL_GRAPH_FALLBACK", "VADE_MTP_COHORT_ADAPT", "VADE_C8_GUARD_ROBUST", "VADE_MTP_COHORT"];
+const PREFIX_CACHE: &str = "VADE_FLASHNEXT_PREFIX_CACHE";
 
 pub(super) fn names() -> Vec<&'static str> {
     // flash/settings.rs pipeline companions; model/flash and engine/flash load,
@@ -16,7 +18,7 @@ pub(super) fn names() -> Vec<&'static str> {
     let mut names = vec![
         "FLASH_NVFP4", "FLASH_BF16_EXPERTS", "FLASH_VERIFY_FULL", "FLASH_MTP_SAMPLED",
         "SPARK_KV_BF16", "SPARK_ADAPTIVE_PREFILL",
-        "VADE_PROMPT_TILE",
+        "VADE_PROMPT_TILE", PREFIX_CACHE,
         "VADE_FLASHNEXT_MTP_DEPTH", "VADE_FLASHNEXT_MX8", "VADE_FLASHNEXT_DRAFT_MX8",
         "VADE_FLASHNEXT_DRAFT_FP4", "VADE_FLASHNEXT_DRAFT_VOCAB", "VADE_MTP_CONF",
         "VADE_QSA_TC", "VADE_GDN_CHUNK", "VADE_GDN_PREP_SPLIT", "VADE_GDN_VERIFY_COPY",
@@ -53,6 +55,15 @@ pub(super) fn fingerprints(experiments: Experiments, mut read: impl FnMut(&str) 
         } else if let Some(i) = Options::NAMES.iter().position(|v| *v == name) {
             let value = if prompt[i] { b"1" } else { b"0" };
             bytes.extend_from_slice(super::sha256::digest(value).as_bytes());
+        } else if name == PREFIX_CACHE {
+            let value = read(name);
+            let value = match value.as_deref() {
+                None => b"0",
+                Some(v) if v == "0" => b"0",
+                Some(v) if v == "1" => b"1",
+                _ => return Err(format!("{name} must be 0 or 1")),
+            };
+            bytes.extend_from_slice(super::sha256::digest(value).as_bytes());
         } else {
             match read(name) {
                 None => bytes.extend_from_slice(&[0; 64]),
@@ -70,7 +81,7 @@ pub(super) fn describe(name: &str, value: &[u8]) -> String {
             if value == super::sha256::digest(word.as_bytes()).as_bytes() { return word.into(); }
         }
     }
-    if spark_engine::flash_prompt_options::Options::NAMES.contains(&name) {
+    if name == PREFIX_CACHE || spark_engine::flash_prompt_options::Options::NAMES.contains(&name) {
         for (word, description) in [(b"0", "0 (off)"), (b"1", "1 (on)")] {
             if value == super::sha256::digest(word).as_bytes() { return description.into(); }
         }
@@ -93,4 +104,24 @@ fn cohort_identity_uses_the_frozen_recipe_without_rereading_its_switches() {
     }).unwrap();
     assert_eq!(identity.len(), names().len() * 64);
     assert!(fingerprints(Experiments::default(), |_| None).unwrap_err().contains("parsed startup"));
+    let cache_identity = |value: Option<&str>| {
+        let mut bytes = vec![b'a'; super::identity_names(2).len() * 64];
+        bytes.extend(fingerprints(parsed, |name| if name == PREFIX_CACHE { value.map(Into::into) } else { None }).unwrap());
+        bytes
+    };
+    for (left, right, accepted) in [(None, Some("0"), true), (Some("0"), Some("1"), false), (Some("1"), Some("1"), true)] {
+        let (left, right) = (cache_identity(left), cache_identity(right));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut front = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut back, _) = listener.accept().unwrap();
+        std::thread::scope(|scope| {
+            let limit = std::time::Duration::from_secs(2);
+            let peer = scope.spawn(move || super::exchange_pipeline_identity(&mut back, 2, &right, limit));
+            for result in [super::exchange_pipeline_identity(&mut front, 2, &left, limit), peer.join().unwrap()] {
+                if accepted { assert!(result.is_ok(), "{result:?}"); }
+                else { let error = result.unwrap_err(); assert!(error.contains(PREFIX_CACHE) && error.contains("refusing startup"), "{error}"); }
+            }
+        });
+    }
+    assert!(fingerprints(parsed, |name| (name == PREFIX_CACHE).then(|| "yes".into())).unwrap_err().contains(PREFIX_CACHE));
 }

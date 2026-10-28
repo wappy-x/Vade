@@ -263,6 +263,13 @@ impl<'a> NextModel<'a> {
     pub(super) fn tp_on(&self) -> bool {
         self.tp.borrow().is_some()
     }
+    /// A restored prefix is whole on both ranks. Its slot has no earlier transfer debt.
+    pub(super) fn tp_prefix_restored(&self, slot: u32) {
+        if let Some(s) = self.tp.borrow_mut().as_mut() {
+            s.handoff.retain(|&held| held != slot);
+            s.seq.chats.settled(&[slot]);
+        }
+    }
     /// The proxy thread's endpoint of this rank's mailbox (handed out once).
     pub fn tp_mailbox_host(&self) -> Option<spark_gpu_probe::driver::TpMailboxHost<'_>> {
         self.tp_box.get().and_then(|m| m.take_host())
