@@ -1280,12 +1280,12 @@ fn pp_kept_row_accounting_fails_before_payload_is_consumed() {
 
 #[test]
 fn pp_kept_rows_are_bounded_while_retained_and_released_with_their_chat() {
-    // KEEP_ROWS counts every retained tile (owed or back on the front, not yet observed);
+    // keep_rows counts every retained tile (owed or back on the front, not yet observed);
     // a chat that ends drops its spans, and a tile leaves once no chat holds a span in it.
     let (near, _far) = pair();
     let mut link = front(near, Duration::from_secs(2));
     let part = |slot, pos, n, start| KeepPart { slot, pos, tokens: vec![7; n], start };
-    let big = KEEP_ROWS - 200;
+    let big = link.keep_rows() - 200;
     link.kept.push(KeptTile { parts: vec![part(1, 0, 64, 0), part(2, 0, 64, 64)], rows: big, data: Some(Vec::new()) });
     link.kept.push(KeptTile { parts: vec![part(3, 0, 64, 0)], rows: 64, data: None });
     assert!(link.has_kept(1) && link.has_kept(2) && link.has_kept(3) && !link.has_kept(4));
@@ -1296,7 +1296,7 @@ fn pp_kept_rows_are_bounded_while_retained_and_released_with_their_chat() {
     link.drop_kept(2);
     // The first tile left with its last span; the owed tile stays until its rows come back.
     assert_eq!(link.kept.len(), 1);
-    assert!(link.keep_room(KEEP_ROWS - 64) && !link.keep_room(KEEP_ROWS - 63));
+    assert!(link.keep_room(link.keep_rows() - 64) && !link.keep_room(link.keep_rows() - 63));
     link.drop_kept(3);
     assert_eq!(link.kept.len(), 1);
     assert!(!link.has_kept(3));
@@ -1304,25 +1304,32 @@ fn pp_kept_rows_are_bounded_while_retained_and_released_with_their_chat() {
 
 #[test]
 fn pp_taking_kept_rows_for_room_takes_the_oldest_returned_tiles_only() {
-    // Past KEEP_ROWS the drafter takes the oldest rows that came back, only until the next tile
+    // Past keep_rows the drafter takes the oldest rows that came back, only until the next tile
     // fits; later returned tiles wait for the final tile and the owed tile keeps counting.
     let (near, _far) = pair();
     let mut link = front(near, Duration::from_secs(2));
     let part = |pos, n| KeepPart { slot: 1, pos, tokens: vec![7; n], start: 0 };
-    let half = KEEP_ROWS / 2 - 64;
+    let half = link.keep_rows() / 2 - 64;
     link.kept.push(KeptTile { parts: vec![part(0, 64)], rows: half, data: Some(vec![1.0; 64 * W]) });
     link.kept.push(KeptTile { parts: vec![part(64, 64)], rows: half, data: Some(vec![2.0; 64 * W]) });
     link.kept.push(KeptTile { parts: vec![part(128, 64)], rows: 128, data: None });
-    let room = KEEP_ROWS / 2 - 64;
+    let room = link.keep_rows() / 2 - 64;
     assert!(!link.keep_room(room));
     let taken = link.take_kept_room(1, Some(room));
     assert_eq!(taken.iter().map(|t| (t.0, t.2[0])).collect::<Vec<_>>(), vec![(0, 1.0)]);
     assert!(link.keep_room(room) && link.kept.len() == 2);
     assert_eq!(link.take_kept_room(1, Some(room)).len(), 0);
     assert_eq!(link.take_kept(1).iter().map(|t| t.0).collect::<Vec<_>>(), vec![64]);
-    assert!(link.keep_room(KEEP_ROWS - 128) && !link.keep_room(KEEP_ROWS - 127));
+    assert!(link.keep_room(link.keep_rows() - 128) && !link.keep_room(link.keep_rows() - 127));
 }
 
+#[test]
+fn pp_kept_row_limit_by_link_and_the_chain_reply_length_boundary() {
+    // Direct front: KEEP_ROWS; chain front or middle: CHAIN_KEEP_ROWS + widest tile fit a u32 reply.
+    let mut link = front(pair().0, Duration::from_secs(2));
+    let limits = [(false, None), (true, None), (true, Some(Vec::new()))].map(|(i, r)| { (link.inline_kept, link.relay_kept) = (i, r); link.keep_rows() });
+    assert!(limits == [CHAIN_KEEP_ROWS, KEEP_ROWS, CHAIN_KEEP_ROWS] && reply_len((CHAIN_KEEP_ROWS + 8192) * W).is_some() && reply_len(104_857 * W).is_some() && reply_len(104_858 * W).is_none() && reply_len(usize::MAX).is_none());
+}
 #[test]
 fn pp_peer_error_text_is_sanitized() {
     assert_eq!(peer_text(b"bad\x1b[31m\nrow"), "bad?[31m?row");

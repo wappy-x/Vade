@@ -85,10 +85,21 @@ pub(super) const KIND_ROWS_FINAL: u32 = 6;
 /// request (TCP or wire), after earlier queued work and before this request's work.
 /// It also covers a filtered single row: request shape alone is not authorization.
 const RELEASE_POOLED: u32 = 1 << 31;
-/// Kept rows retained at most, on the back and on the front until their chats observe them
-/// (32768 rows = 1.25 GiB of host memory); past it the front runs the tile synchronously, so
-/// its rows enter the draft history at once (pp_keep_room).
-const KEEP_ROWS: usize = 32768;
+/// Kept rows retained at most on a front linked directly to the last rank, until their chats
+/// observe them (W * 4 bytes of host memory per row, held per kept tile while a drafting prompt
+/// runs); past it the front runs the tile synchronously, so its rows enter the draft history at
+/// once (pp_keep_room). Below it the front observes them in the final tile's wait, where it is
+/// idle while the back runs the last tiles; past it that observe runs between the front's tiles.
+/// Each ack on that link carries one tile, so no reply holds more than one tile's rows.
+const KEEP_ROWS: usize = 131072;
+/// The same limit on a chain: a middle rank returns every kept row with the final tile in one
+/// reply, whose length is a u32 of bytes (reply_len), so these rows plus the widest tile must fit.
+const CHAIN_KEEP_ROWS: usize = 32768;
+const _: () = assert!((CHAIN_KEEP_ROWS + 8192) * W * 4 <= u32::MAX as usize);
+/// Bytes of a reply carrying `floats` row values, if the u32 length field can hold them.
+fn reply_len(floats: usize) -> Option<u32> {
+    floats.checked_mul(4).and_then(|n| u32::try_from(n).ok())
+}
 
 /// One chat's span of a kept tile: its slot, position, tokens and rows within the tile.
 pub(super) struct KeepPart {
@@ -567,7 +578,7 @@ impl Link {
         Ok(())
     }
     /// Queue a non-final prompt tile (rows already copied to `rows`) for the sender thread.
-    /// `keep`: the back keeps the tile's rows for these chats' drafters (within KEEP_ROWS).
+    /// `keep`: the back keeps the tile's rows for these chats' drafters (within keep_rows).
     pub(super) fn post(&mut self, meta: &[[u32; 4]], rows: Vec<f32>, keep: Option<Vec<KeepPart>>) -> Result<()> {
         if rows.len() % W != 0 || meta.is_empty() || meta.len() > POOL_SIZE {
             return Err("invalid pipeline exchange shape".into());
@@ -708,6 +719,7 @@ impl Link {
             self.enqueue(KIND_ROWS_FINAL, meta, buffer)?;
             self.finish_final(rows)?;
             if let Some(kept) = self.relay_kept.as_mut() && !kept.is_empty() {
+                if reply_len(kept.len() + rows.len()).is_none() { return Err("pipeline kept reply past the reply length".into()); }
                 out.append(kept);
                 out.extend_from_slice(rows);
             }
@@ -716,7 +728,7 @@ impl Link {
         if matches!(kind, KIND_ROWS_ASYNC | KIND_ROWS_KEEP) {
             let n = rows.len() / W;
             if kind == KIND_ROWS_KEEP {
-                if self.owed + n > KEEP_ROWS { return Err("pipeline kept rows past the limit".into()); }
+                if self.owed + n > self.keep_rows() { return Err("pipeline kept rows past the limit".into()); }
                 self.owed += n;
             }
             let mut buffer = self.spare(rows.len());
@@ -727,6 +739,7 @@ impl Link {
         } else {
             self.exchange(kind, meta, rows)?;
             if let Some(kept) = self.relay_kept.as_mut() && !kept.is_empty() {
+                if reply_len(kept.len() + rows.len()).is_none() { return Err("pipeline kept reply past the reply length".into()); }
                 out.append(kept);
                 out.extend_from_slice(rows);
             }
@@ -857,13 +870,13 @@ impl Link {
     fn take_kept(&mut self, slot: u32) -> Vec<(usize, Vec<u32>, Vec<f32>)> {
         self.take_kept_room(slot, None)
     }
-    /// take_kept; with `room`, it also stops once `room` more rows fit in KEEP_ROWS (oldest
+    /// take_kept; with `room`, it also stops once `room` more rows fit in keep_rows (oldest
     /// tiles first; the later ones wait for the final tile).
     fn take_kept_room(&mut self, slot: u32, room: Option<usize>) -> Vec<(usize, Vec<u32>, Vec<f32>)> {
         let mut out = Vec::new();
-        let mut held: usize = self.kept.iter().map(|t| t.rows).sum();
+        let (mut held, limit): (usize, _) = (self.kept.iter().map(|t| t.rows).sum(), self.keep_rows());
         for t in self.kept.iter_mut() {
-            if room.is_some_and(|n| held + n <= KEEP_ROWS) {
+            if room.is_some_and(|n| held + n <= limit) {
                 break;
             }
             if !t.parts.iter().any(|p| p.slot == slot) {
@@ -903,7 +916,12 @@ impl Link {
     }
     /// Room for `n` more kept rows: every retained tile counts (owed or back, not yet taken).
     fn keep_room(&self, n: usize) -> bool {
-        self.kept.iter().map(|t| t.rows).sum::<usize>() + n <= KEEP_ROWS
+        self.kept.iter().map(|t| t.rows).sum::<usize>() + n <= self.keep_rows()
+    }
+    /// KEEP_ROWS on a front linked directly to the last rank, else CHAIN_KEEP_ROWS (a chain's
+    /// front, and a middle's link to the last rank, which relays the rows in one reply).
+    fn keep_rows(&self) -> usize {
+        if self.inline_kept && self.relay_kept.is_none() { KEEP_ROWS } else { CHAIN_KEEP_ROWS }
     }
     fn account(&mut self, started: Instant, bytes: u64, rows: usize) {
         self.exchanges += 1;

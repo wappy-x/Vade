@@ -5,6 +5,19 @@ Changes that are merged but not yet released are under Unreleased.
 
 ## Unreleased
 
+- With drafting on, prompts longer than 32K tokens on two Sparks reach the
+  first token sooner. The first Spark now keeps up to 131,072 prompt rows for
+  the drafter (KEEP_ROWS in engine/crates/engine/src/flash/next_pp.rs) and
+  reads them while it waits for the second Spark's last tile, as it already
+  did below 32K rows. Before, past 32,768 rows it read them between its own
+  prompt tiles and slowed both Sparks. While a long drafting prompt runs, the
+  first Spark holds its kept rows in host memory until the drafter reads them;
+  the second Spark returns each tile's rows with its acknowledgment and does
+  not hold them. A chain of three or more Sparks keeps the old 32,768-row
+  limit (CHAIN_KEEP_ROWS): its middle rank returns all kept rows in one reply,
+  and the reply length is a 32-bit byte count. Token IDs and the drafter's
+  history do not change.
+
 - Long prompts move fewer bytes in the hyper-connection mix. On fused prompt
   tiles, the norm no longer writes the BF16 hi/lo copy of the four residual
   streams (4 x 2560 features x 2 planes x 2 bytes = 40,960 bytes per token);
