@@ -6,14 +6,11 @@
 
 | Model | Sparks | Path | Drafting | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) | IDs saved / responses |
 | --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| qwen3.8-flash-next-fp4-local | 2 | tensor split | OFF | 35.106 | 35.258 | 35.437 | 33.941 | 82.095 | 124.336 | 2.165 | 66/66 |
-| qwen3.8-flash-next-fp4-local | 2 | tensor split | ON | 54.304 | 100.748 | 129.336 | 79.358 | 165.752 | 217.525 | 2.186 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 2 | tensor split | ON | 53.657 | 99.805 | 128.09 | 78.626 | 163.704 | 228.245 | 2.166 | 66/66 |
 
-Measured main revision: `bb24e80054b30964b43ea147cdd50d25a51a1a3c`.
+Measured main revision: `8b7b866746452c01d60985f4649a588cd080c7bf`.
 
-2 Sparks, tensor split, drafting OFF: finished `2026-10-28T11:40:21.174381+00:00`; card SHA256 `0e3a6064222a39e8cbbc1b46ede2a184e509ce8e039296ef24a6d0e07f9b74a9`.
-
-2 Sparks, tensor split, drafting ON: finished `2026-10-28T11:34:48.775524+00:00`; card SHA256 `19b449c722e1d9d3e039bb02426bd2f984e7b4df817e69467078ef8d884e972a`.
+2 Sparks, tensor split, drafting ON: finished `2026-10-28T15:34:33.951536+00:00`; card SHA256 `dc73321898778eebf0f364a01f05a84ce41c9dcd16e6ec76c6ac587a80ae1eed`.
 
 Rates are card medians in tok/s. C1, C4 and C8 cover all chats together.
 Cold 8K is the median time to the first token. IDs saved counts responses
@@ -38,7 +35,11 @@ apply only to those measurements.
 This page has every speed we have published for Vade, newest first, and how
 to measure your own:
 
-- [2026-10-28 morning cards](#current-2026-10-28-morning-main-bb24e80-home-dgx-sparks):
+- [2026-10-28 cards after #139 and #140](#current-2026-10-28-main-8b7b866-and-104205a-home-dgx-sparks):
+  two DGX Sparks on one pair, one drafting-ON card at main `8b7b866` (#140),
+  and before it drafting ON and OFF at main `104205a`, with eight chats
+  faster after the arena reuse change.
+- [2026-10-28 morning cards](#previous-2026-10-28-morning-main-bb24e80-home-dgx-sparks):
   two DGX Sparks at main `bb24e80`, drafting ON on one pair and OFF on the
   other, first-token times for 32K, 64K and 128K prompts, and a second
   question on a long chat with the prefix cache on one Spark.
@@ -71,11 +72,116 @@ machines appear as home-1 to home-6 and the rented ones as vm-a to vm-d. The
 [receipt status](../bench/receipts/README.md) page says what is public. The
 2026-10-25 to 2026-10-28 cards are not in the repository yet; each row names
 its result folder. The 2026-10-27 and 2026-10-28 folder names end in a pair
-suffix that uses internal machine names (and `-final` or `-am`), so those
+suffix that uses internal machine names (and `-final`, `-am`, `-139` or
+`-139-c140`), so those
 names are given here without the suffix; the time, commit and
-drafting setting in each name still identify the card.
+drafting setting in each name still identify the card. The first-token,
+prefix-cache and repeated cold-prompt timings of 2026-10-28 after #139 come
+from separate runs, not from the cards. Each of those tables or sentences
+names its run folder, such as `c139-l32`. These folders are not in the
+repository yet either.
 
-## Current (2026-10-28 morning, main bb24e80, home DGX Sparks)
+<a id="current-2026-10-28-after-139-main-104205a-home-dgx-sparks"></a>
+
+## Current (2026-10-28, main 8b7b866 and 104205a, home DGX Sparks)
+
+The newest card is one drafting-ON card at main `8b7b866` (#140), in the
+first row below. It is the card in the latest measured table at the top of
+this page. No drafting-OFF card ran at `8b7b866`, so that table has no OFF
+row. The two cards before it ran at main `104205a`, after the merge of #139,
+which lets eight chats reuse their attention arenas. All three ran on one
+pair of our own DGX Sparks, home-3 + home-4. The recipe is the same as the
+[morning cards](#previous-2026-10-28-morning-main-bb24e80-home-dgx-sparks):
+context 32768, output 8192, MTP 3, greedy, cache off, thinking OFF, and no
+`VADE_W2_*` name at any server start. Each card passed its **15/15** basic
+output checks and ran a prebuilt payload of its commit, installed and
+hash-checked on both Sparks. The serving receipts record the tensor split
+with the same four levels as before. Each card had its own server start.
+The `104205a` cards ran first, ON and then OFF, and the `8b7b866` card ran
+right after them.
+
+| Path | Drafting | Commit | Sparks | Prose | Code | Structured | C1 | C2 | C4 | C8 | Cold 8K prompt (s) | Result folder |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Tensor split | ON | `8b7b866` | home-3 + home-4 | 53.7 | 99.8 | 128.1 | 78.6 | 101.9 | 163.7 | 228.2 | 2.17 | `2026-10-28_1034_qwen3.8-flash-next-nvfp4_local-2spark_8b7b866-drafting-on-thinking-off-split` |
+| Tensor split | ON | `104205a` | home-3 + home-4 | 53.8 | 100.2 | 128.7 | 78.9 | 102.3 | 165.3 | 229.6 | 2.19 | `2026-10-28_1009_qwen3.8-flash-next-nvfp4_local-2spark_104205a-drafting-on-thinking-off-split` |
+| Tensor split | OFF | `104205a` | home-3 + home-4 | 35.0 | 35.0 | 35.3 | 34.1 | 49.1 | 82.7 | 125.4 | 2.21 | `2026-10-28_1027_qwen3.8-flash-next-nvfp4_local-2spark_104205a-drafting-off-thinking-off-split` |
+
+The next part compares the `104205a` cards with the morning cards. The
+`8b7b866` card has its own part after it.
+
+### What changed since the morning cards
+
+**Eight chats with drafting ON are faster.** C8 reached 229.6 tok/s against
+217.5 in the morning card (+12.0 tok/s, +5.5 %). The three rounds were
+187.1, 229.6 and 230.9 tok/s, against 199.1, 218.9 and 217.5. The first
+round is still low. In the server log, the first eight-chat round allocates
+arenas for the four chats that the card had not run before, and the later
+rounds reuse them. Over each card, 8 admissions allocated 96 arenas, the
+other 58 admissions reused 696, and no arena was freed directly. With drafting OFF,
+C8 reached 125.4 against 124.3 on the same pair (+1.1 tok/s, +0.9 %).
+
+**The other rates are the same.** With drafting OFF, on the same pair as the
+morning OFF card, every other rate is within 0.8 % of it. With drafting ON,
+the other rates are 0.3 % to 0.9 % lower than the morning ON card, which ran
+on home-1 + home-2. The last earlier ON card on home-3 + home-4 (2026-10-27
+morning) had prose at 53.5, so this pair runs a little lower on one chat.
+The cold 8K prompt of the OFF card took 2.21 s against 2.17 s on the same
+pair in the morning. The ON card took 2.19 s, as in the morning.
+
+**The answers did not change.** The token IDs matched in 66 of 66 responses:
+the ON card against the OFF card, and each card against the morning cards.
+
+**Long prompts and the prefix cache did not change.** The 32K, 64K and 128K
+cells ran on home-3 + home-4 with the morning recipe, one server start per
+prompt. All four runs of a prompt gave the same token IDs as the morning
+runs. Every median is within 0.19 s of the morning. The receipts are the run
+folders `c139-l32`, `c139-l64` and `c139-l128`, one for each prompt.
+
+| Prompt | Tokens | First token, drafting ON (s) | First token, drafting OFF (s) |
+| --- | ---: | ---: | ---: |
+| 32K | 32,099 | 10.07, 10.14 | 10.28, 10.07 |
+| 64K | 64,217 | 19.95, 20.09 | 19.38, 19.31 |
+| 128K | 129,220 | 42.48, 42.56 | 40.34, 40.17 |
+
+On one DGX Spark (home-3) with context 65536 and the prefix cache on, the
+second question on the 32,103-token chat reused 32,064 tokens and gave its
+first token in 0.63 s. With the cache off it took 16.23 s. Both answers have
+the same token IDs as the morning cell. The receipt is the run folder
+`c139-warm`.
+
+### The card at main 8b7b866 (#140)
+
+#140 forms the prompt HC down projection from the residual rows. One
+drafting-ON card ran at main `8b7b866` on home-3 + home-4, right after the
+cards above. Its token IDs matched the `104205a` card and the morning card in
+66 of 66 responses. Its rates are 0.3 % to 1.0 % lower than the `104205a`
+card from one server start each; #140 does not change decode.
+
+The first-token cells used the same recipe, one server start per prompt. The
+receipts are the run folders `c140-l8`, `c140-l32`, `c140-l64` and
+`c140-l128`. Each prompt ran four times, and all four runs of a prompt gave
+the same token IDs, in 16 of 16 runs. Only the 32K, 64K and 128K prompts
+also ran at `104205a`. Their 12 runs match the `104205a` runs. The 8K prompt
+did not run at `104205a`. Its token IDs match a separate 8K check at main
+`05a1251` on another pair.
+
+| Prompt | Tokens | First token, drafting ON (s) | First token, drafting OFF (s) | `104205a`, drafting ON (s) | `104205a`, drafting OFF (s) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 8K | 8,009 | 2.34, 2.38 | 2.38, 2.25 | not measured | not measured |
+| 32K | 32,099 | 10.01, 9.98 | 10.14, 9.92 | 10.07, 10.14 | 10.28, 10.07 |
+| 64K | 64,217 | 19.87, 19.84 | 19.15, 19.14 | 19.95, 20.09 | 19.38, 19.31 |
+| 128K | 129,220 | 43.54, 42.74 | 39.93, 39.73 | 42.48, 42.56 | 40.34, 40.17 |
+
+The 32K and 64K prompts and the 128K prompt with drafting OFF reached their
+first token 0.8 % to 1.5 % sooner. The 128K prompt with drafting ON was
+slower on this start; its first run took 43.54 s, 0.8 s to 1.1 s more than
+the other 128K runs with drafting ON that day. One start does not show if
+this is a change or a slow request. Twenty cold 8K prompts on one server
+start gave a median of 2.18 s (receipt: the run folder `c140-c8x20`).
+
+<a id="current-2026-10-28-morning-main-bb24e80-home-dgx-sparks"></a>
+
+## Previous (2026-10-28 morning, main bb24e80, home DGX Sparks)
 
 These are the morning RigMark cards of 2026-10-28, measured on the same two
 pairs of our own DGX Sparks as the

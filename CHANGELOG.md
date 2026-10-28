@@ -169,6 +169,23 @@ Changes that are merged but not yet released are under Unreleased.
   memory and TCP. The state words are copied as they are, so the tokens do not
   change.
 
+The cards of October 28, 2026 after #139 measured main `104205a` on one pair
+of DGX Sparks, with the recipe of that morning. Rates below are tokens per
+second.
+
+- With drafting ON, eight chats reached 229.6, against 217.5 in the morning
+  card (+12.0, +5.5 %). Eight chats now reuse their attention arenas. With
+  drafting OFF, eight chats reached 125.4 against 124.3 on the same pair.
+- With drafting ON, one chat wrote prose at 53.8, code at 100.2 and
+  structured output at 128.7. With drafting OFF, prose was 35.0. The other
+  rates are within 1 % of the morning cards. The 32K, 64K and 128K
+  first-token cells and the one-Spark prefix-cache cell did not change.
+- Token IDs matched in 66 of 66 responses between the ON and OFF cards and
+  against the morning cards. A drafting-ON card at main `8b7b866` (#140)
+  matched them too, and its 32K and 64K prompts reached their first token
+  0.8 % to 1.5 % sooner. See the
+  [benchmarks page](docs/benchmarks.md#current-2026-10-28-main-8b7b866-and-104205a-home-dgx-sparks).
+
 The morning cards of October 28, 2026 measured main `bb24e80` (#136) with the
 same recipe and the same two pairs of DGX Sparks as the final cards of
 October 27. Rates below are tokens per second.
@@ -187,7 +204,7 @@ October 27. Rates below are tokens per second.
 - On one Spark with context 65536 and the prefix cache on, the second question
   on a 32,103-token chat reused 32,064 tokens and gave its first token in
   0.62 s. With the cache off it took 16.29 s. See the
-  [benchmarks page](docs/benchmarks.md#current-2026-10-28-morning-main-bb24e80-home-dgx-sparks).
+  [benchmarks page](docs/benchmarks.md#previous-2026-10-28-morning-main-bb24e80-home-dgx-sparks).
 
 The final cards of October 27, 2026 measured main `09e1fc4` (#131) with the
 FP4-Local checkpoint on two pairs of DGX Sparks, greedy decoding, thinking off

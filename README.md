@@ -214,7 +214,7 @@ and how to change it. The ones you meet first:
   starts like an earlier one skip reading that start again. On one Spark with
   context 65536, the second question on a 32K-token chat reused 32,064 tokens
   and gave its first token in 0.62 s, against 16.29 s with the cache off
-  ([benchmarks](docs/benchmarks.md#current-2026-10-28-morning-main-bb24e80-home-dgx-sparks)).
+  ([benchmarks](docs/benchmarks.md#previous-2026-10-28-morning-main-bb24e80-home-dgx-sparks)).
   See [turn on the prefix cache](INSTALL.md#turn-on-the-prefix-cache).
 
 ## Exactness
@@ -231,10 +231,15 @@ tokens. It covers the requests it sent, not every mix of batching and caching.
 
 What we have checked so far covers drafting ON against OFF:
 
+- On main `104205a` (the 2026-10-28 cards after #139), the drafting-ON card
+  matched the drafting-OFF card on the same pair in 66 of 66 responses. Both
+  also matched the 2026-10-28 morning cards at `bb24e80`, and a drafting-ON
+  card at `8b7b866` (#140) matched them too
+  ([benchmarks](docs/benchmarks.md#current-2026-10-28-main-8b7b866-and-104205a-home-dgx-sparks)).
 - On main `bb24e80` (the 2026-10-28 morning cards), the drafting-ON card on
   one pair matched the drafting-OFF card on the other pair in 66 of 66
   responses. Both also matched the final 2026-10-27 cards at `09e1fc4`
-  ([benchmarks](docs/benchmarks.md#current-2026-10-28-morning-main-bb24e80-home-dgx-sparks)).
+  ([benchmarks](docs/benchmarks.md#previous-2026-10-28-morning-main-bb24e80-home-dgx-sparks)).
 - On main `09e1fc4` (the final 2026-10-27 cards), the drafting-ON card on one
   pair matched the drafting-OFF card on the other pair in 66 of 66 responses.
   Both also matched that morning's cards at `12142bb`
@@ -274,14 +279,11 @@ explains the full rule and what each check proves.
 
 | Model | Sparks | Path | Drafting | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) | IDs saved / responses |
 | --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| qwen3.8-flash-next-fp4-local | 2 | tensor split | OFF | 35.106 | 35.258 | 35.437 | 33.941 | 82.095 | 124.336 | 2.165 | 66/66 |
-| qwen3.8-flash-next-fp4-local | 2 | tensor split | ON | 54.304 | 100.748 | 129.336 | 79.358 | 165.752 | 217.525 | 2.186 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 2 | tensor split | ON | 53.657 | 99.805 | 128.09 | 78.626 | 163.704 | 228.245 | 2.166 | 66/66 |
 
-Measured main revision: `bb24e80054b30964b43ea147cdd50d25a51a1a3c`.
+Measured main revision: `8b7b866746452c01d60985f4649a588cd080c7bf`.
 
-2 Sparks, tensor split, drafting OFF: finished `2026-10-28T11:40:21.174381+00:00`; card SHA256 `0e3a6064222a39e8cbbc1b46ede2a184e509ce8e039296ef24a6d0e07f9b74a9`.
-
-2 Sparks, tensor split, drafting ON: finished `2026-10-28T11:34:48.775524+00:00`; card SHA256 `19b449c722e1d9d3e039bb02426bd2f984e7b4df817e69467078ef8d884e972a`.
+2 Sparks, tensor split, drafting ON: finished `2026-10-28T15:34:33.951536+00:00`; card SHA256 `dc73321898778eebf0f364a01f05a84ce41c9dcd16e6ec76c6ac587a80ae1eed`.
 
 Rates are card medians in tok/s. C1, C4 and C8 cover all chats together.
 Cold 8K is the median time to the first token. IDs saved counts responses
@@ -309,6 +311,22 @@ a run, and every number here comes from one. The
 [benchmarks page](docs/benchmarks.md) has every card, the full recipe and the
 caveats.
 
+### Two Sparks, 2026-10-28, after #139 and #140
+
+The latest measured table above is one drafting-ON card at main `8b7b866`
+(#140). No drafting-OFF card ran at that revision, so the table has no OFF
+row. Its token IDs match the `104205a` card in 66 of 66 responses, and its
+rates are within 1 % of that card.
+
+The cards before it ran at main `104205a`, after #139. With #139, eight
+chats reuse their attention arenas. Eight chats with drafting ON reached
+229.6 tok/s, against 217.5 in the morning card (+12.0 tok/s, +5.5 %). With
+drafting OFF, eight chats reached 125.4 against 124.3 on the same pair. The
+other rates are within 1 % of the morning cards. The long-prompt cells and
+the one-Spark prefix-cache cell did not change, and the token IDs match the
+morning cards in 66 of 66 responses. The full tables are on the
+[benchmarks page](docs/benchmarks.md#current-2026-10-28-main-8b7b866-and-104205a-home-dgx-sparks).
+
 ### Two Sparks, 2026-10-28
 
 The morning RigMark cards of 2026-10-28 ran at main `bb24e80` on the same two
@@ -319,7 +337,7 @@ prompt of 32K tokens or more in wider passes. With drafting ON, a
 64,217-token prompt reached its first token in 20.04 s instead of 21.06 s,
 and a 129,220-token prompt in 42.47 s. A 32,099-token prompt took 10.03 s,
 as before. The full tables are on the
-[benchmarks page](docs/benchmarks.md#current-2026-10-28-morning-main-bb24e80-home-dgx-sparks).
+[benchmarks page](docs/benchmarks.md#previous-2026-10-28-morning-main-bb24e80-home-dgx-sparks).
 
 ### Two Sparks, 2026-10-27
 
