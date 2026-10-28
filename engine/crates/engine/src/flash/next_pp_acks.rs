@@ -53,5 +53,17 @@ impl Link {
         })
     }
 }
+#[cfg(target_os = "linux")]
+impl NextModel<'_> {
+    /// Front: read the queued-tile acks already on the socket (never waits), so the rows they
+    /// carry are back for observe_kept.
+    pub(in crate::flash) fn pp_read_acks(&self) -> Result<()> {
+        let mut guard = self.pp.borrow_mut();
+        let link = guard.as_mut().filter(|l| !l.poisoned).ok_or("pipeline link failed earlier; the front is stopping")?;
+        let mut heard = Instant::now();
+        let read = link.read_ready(&mut heard);
+        read.map_err(|e| link.fail(e))
+    }
+}
 /// How often the front looks for an ack while it waits for its GPU.
 const ACK_POLL: Duration = Duration::from_micros(500);

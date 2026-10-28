@@ -5,6 +5,12 @@ Changes that are merged but not yet released are under Unreleased.
 
 ## Unreleased
 
+- Two Sparks read a cold prompt of 2K to 8K tokens faster. Each Spark reads
+  half of the prompt, and the answer stays the same, token for token. A cold
+  8K prompt now gives its first token in about 2.20 s instead of 2.79 s.
+  Longer prompts read as before. In exchange, two Sparks hold one chat fewer at
+  a 32K context: 8 instead of 9.
+
 - `vade doctor` now shows the binary version, four launch defaults, model file
   counts and sizes, and Spark listener ports before startup.
 
@@ -20,6 +26,12 @@ Changes that are merged but not yet released are under Unreleased.
   the output head by vocabulary halves across the two Sparks, as drafted
   verification already does. Each Spark computes half of the head. Token IDs
   do not change. Sampled steps and prompts still use the whole head.
+
+- On two Sparks, a long prompt with drafting on no longer stops halfway. Past
+  32768 prompt tokens, the first Spark used to wait for the second Spark to
+  finish every queued part of the prompt. Now the drafter reads only the
+  oldest returned rows that it needs, and the rest waits for the end of the
+  prompt. The token IDs do not change.
 
 ### Repository tools
 

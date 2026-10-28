@@ -197,7 +197,7 @@ fn run() -> Result<(), String> {
         // Startup is still single-threaded and nothing has read these yet: every unset companion
         // takes its pipeline default (settings::PIPELINE_DEFAULTS), so both ranks and every reader
         // see one recipe; a set one ("0", another tile) stays as given.
-        for (name, value) in settings::pipeline_pins(|name| std::env::var_os(name).is_some()) {
+        for (name, value) in settings::pipeline_pins(tp, |name| std::env::var_os(name).is_some()) {
             unsafe { std::env::set_var(name, value); }
         }
     }

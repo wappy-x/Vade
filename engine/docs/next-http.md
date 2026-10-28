@@ -158,9 +158,11 @@ layer 2:
   split step. A later request for that step's logits (for example when the
   chosen token is not in the tokenizer) projects the whole head again from it.
   Token IDs do not change.
-- A prompt pass whose every chat spans at least half the prompt tile (1024 rows at
-  the 2048-row tile that two Sparks use) runs as a pipeline tile
-  (rank 0 layers 0-23, rank 1 layers 24-47, exactly as the pipeline). The rest of
+- A prompt pass whose every chat spans at least half of the 2048-row pipeline tile
+  (1024 rows) runs as a pipeline tile (rank 0 layers 0-23, rank 1 layers 24-47,
+  exactly as the pipeline). Two Sparks use a 4096-row prompt workspace for the
+  token split below, but the serve still hands other prompts to the engine in
+  2048-row tiles. The rest of
   such a prompt (its later, shorter passes up to the first token) also runs as
   pipeline tiles. Before the chat's next split pass, the ranks swap the session
   state the other did not compute (GDN state and history, QSA keys, values and
@@ -168,6 +170,20 @@ layer 2:
   one slot; the TCP link carries only each layer's row count and vector sizes,
   which both ranks check. Shorter prompts run on both ranks. A failed swap stops
   the link and leaves the chats' sessions unusable (they are not reused).
+- A cold one-chat prompt of 2048 to 8192 rows (two prompt workspaces) runs as a
+  token split instead ([`next_tp_seq.rs`](../crates/engine/src/flash/next_tp_seq.rs)).
+  The serve hands the whole prompt in one call, and the engine runs it as two
+  parts. First part, rows 0..P (P is half the prompt, rounded up to 64): rank 0
+  runs layers 0-1 and posts the rows as a pipeline tile; rank 1 runs layers 2-47
+  and, after each layer, puts that layer's state at row P in the mailbox. Second
+  part, rows P..N: rank 0 runs every layer and, before each layer from 2, takes
+  rank 1's state of that layer. These are the words a prefix-cache resume at P
+  installs, so token IDs do not change. A tail under 64 rows also runs on rank 0.
+  Before the chat's next pass, rank 0 sends rank 1 layers 2-47 one way, and
+  decode runs on the split. If a different pass comes before the second part,
+  rank 0 first takes and drops the rest of rank 1's state, so the link does not
+  stop; that chat's later passes then fail with an error. Longer prompts keep
+  the pipeline tiles.
 - Plain (drafting-off) steps use the session path instead of pooled decode.
 - The serving metadata (`vade.numerics`) of two or more ranks names the path the
   engine chose in `"path"` and why in `"path_reason"`: `"tensor_split"` (FP4-Local

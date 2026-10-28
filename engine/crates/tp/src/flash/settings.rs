@@ -103,9 +103,17 @@ pub const PIPELINE_DEFAULTS: [(&str, &str); 2] = [
     ("VADE_HEAD_BOUNDS", "1"),
 ];
 
-/// The companions a pipeline rank pins: those `set` reports unset, at their defaults.
-pub fn pipeline_pins(set: impl Fn(&str) -> bool) -> Vec<(&'static str, &'static str)> {
-    PIPELINE_DEFAULTS.into_iter().filter(|&(name, _)| !set(name)).collect()
+/// The tensor split's prompt workspace (rows) instead of the pipeline's 2048: a cold prompt of up
+/// to twice this many rows runs as the token split's two parts (spark_engine
+/// flash_tp_switch::seq_first), each at most one workspace. It funds one chat fewer at context
+/// 32768 (8 instead of 9) for a cold 8K first token of about 2.20 s instead of 2.79 s.
+pub const SPLIT_PROMPT_TILE: &str = "4096";
+
+/// The companions a pipeline rank pins: those `set` reports unset, at their defaults (the tensor
+/// split's prompt tile is SPLIT_PROMPT_TILE).
+pub fn pipeline_pins(tp: bool, set: impl Fn(&str) -> bool) -> Vec<(&'static str, &'static str)> {
+    PIPELINE_DEFAULTS.into_iter().map(|(name, value)| (name, if tp && name == "VADE_PROMPT_TILE" { SPLIT_PROMPT_TILE } else { value }))
+        .filter(|&(name, _)| !set(name)).collect()
 }
 
 /// The transport between Sparks, SEQPAR_RDMA: unset, 1 or auto is RDMA, 0 is TCP. The
@@ -573,10 +581,14 @@ fn pipeline_mtp_accepts_explicit_depths() {
 fn the_pipeline_service_drafts_and_pins_its_companions() {
     // Every unset companion is pinned at the measured recipe; a set one is kept as given.
     let all = [("VADE_PROMPT_TILE", "2048"), ("VADE_HEAD_BOUNDS", "1")];
-    assert_eq!(pipeline_pins(|_| false), all);
-    assert_eq!(pipeline_pins(|name| name == "VADE_PROMPT_TILE"), all[1..]);
-    assert_eq!(pipeline_pins(|name| name == "VADE_HEAD_BOUNDS"), all[..1]);
-    assert!(pipeline_pins(|_| true).is_empty());
+    assert_eq!(pipeline_pins(false, |_| false), all);
+    assert_eq!(pipeline_pins(false, |name| name == "VADE_PROMPT_TILE"), all[1..]);
+    assert_eq!(pipeline_pins(false, |name| name == "VADE_HEAD_BOUNDS"), all[..1]);
+    assert!(pipeline_pins(false, |_| true).is_empty());
+    // The tensor split pins its larger prompt tile (two pipeline tiles); a set one stays as given.
+    assert_eq!(pipeline_pins(true, |_| false), [("VADE_PROMPT_TILE", SPLIT_PROMPT_TILE), all[1]]);
+    assert_eq!(pipeline_pins(true, |name| name == "VADE_PROMPT_TILE"), all[1..]);
+    assert_eq!(SPLIT_PROMPT_TILE.parse::<usize>(), Ok(2 * spark_engine::flash_tp_switch::PIPELINE_TILE));
     for depth in 0..=3 {
         for rank in 0..2 {
             // The pipeline service: an explicit depth is checked as world 1 checks it.

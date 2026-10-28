@@ -424,9 +424,12 @@ impl Session for Chat<'_, '_> {
         if let Some(s) = &self.live { s.read_ahead(tokens) }
     }
     fn prefill_chunk_size(&self, prompt_end: usize) -> usize {
-        // Preserve main's automatic prompt tile for live and lazily restored chats.
-        spark_engine::flash_next_rows::prompt_tile_for(prompt_end,
-            self.live.as_ref().map_or(self.chunk, |s| s.chunk_size()))
+        let chunk = self.live.as_ref().map_or(self.chunk, |s| s.chunk_size());
+        // Two Sparks: a cold 2K..8K prompt whole (the engine runs the token split's two parts),
+        // others in pipeline tiles; elsewhere main's automatic prompt tile for live and lazily
+        // restored chats.
+        self.model.prompt_slice(self.live.as_ref(), prompt_end, chunk)
+            .unwrap_or_else(|| spark_engine::flash_next_rows::prompt_tile_for(prompt_end, chunk))
     }
     /// Prefix cache: only the 64-aligned checkpoint restores exactly (recurrent GDN state).
     fn can_fork(&self) -> bool {

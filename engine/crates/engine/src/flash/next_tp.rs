@@ -13,10 +13,12 @@
 //! TpMailbox), so split passes keep their captured verify segments. All widths come from
 //! the checkpoint (flash_tp_switch::TpLayout).
 use super::*;
-use crate::flash_tp_switch::TpLayout;
+use crate::flash_tp_switch::{SeqMode, TpLayout};
 use std::time::Instant;
 #[path = "next_tp_heads.rs"]
 mod heads;
+#[path = "next_tp_seq.rs"]
+mod seq;
 
 pub(super) use crate::flash_tp_switch::SPLIT;
 
@@ -81,6 +83,8 @@ pub(super) struct Swap<'a> {
     /// The current pass verifies (rank 0: tp_part's flag; rank 1: the request kind), so it splits
     /// up to TpLayout::ROWS rows instead of TpLayout::PROMPT_ROWS.
     verify_pass: bool,
+    /// Token-split prompt passes (next_tp_seq.rs).
+    seq: seq::Seq<'a>,
 }
 
 /// One routed MoE layer's split on this rank (Workspace::moe_at offsets and swaps).
@@ -155,14 +159,14 @@ impl<'a> NextModel<'a> {
         if layout.hidden != H || layout.residual != W || layout.experts != EXPERTS {
             return Err(format!("tensor split geometry {layout:?} differs from the loaded world-one layout"));
         }
-        if self.tp_box.set(b.tp_mailbox(layout.slot_bytes())?).is_err() {
+        if self.tp_box.set(b.tp_mailbox(seq::slot_bytes(layout.slot_bytes()))?).is_err() {
             return Err("the tensor split mailbox is already set".into());
         }
         let twins = self.tp_half_twins(b, rank)?;
         let heads = Some(heads::GdnHeads::new(self, b, rank)?);
         *self.tp.borrow_mut() = Some(Swap { rank, layout, sent: 0, taken: 0, limit_ns: pp::LINK_TIMEOUT.as_nanos() as u64,
             mail_pass: false, tile_pass: false, link, handoff: Vec::new(), front_tile: false, _twins: twins, heads, heads_pass: false,
-            head_pass: false, verify_pass: false });
+            head_pass: false, verify_pass: false, seq: Default::default() });
         eprintln!("flashnext tp rank={rank} split={SPLIT} rows<={} (verify) <={} (other) layout={layout:?}", TpLayout::ROWS,
             TpLayout::PROMPT_ROWS);
         Ok(())
@@ -275,9 +279,11 @@ impl<'a> NextModel<'a> {
     }
     /// The pass's rows cross in the mailbox and its layers split: at most TpLayout::split_rows
     /// rows (verify passes 32, others 16), and not a pipeline prompt tile (rank 0's front_tile,
-    /// rank 1's TILE bit), whose layers run whole on one rank each.
+    /// rank 1's TILE bit), whose layers run whole on one rank each, nor a token-split pass that
+    /// rank 0 runs alone (next_tp_seq.rs).
     fn tp_split_rows(&self, count: usize) -> bool {
-        self.tp.borrow().as_ref().is_some_and(|s| count <= TpLayout::split_rows(s.verify_pass) && !s.front_tile && !s.tile_pass)
+        self.tp.borrow().as_ref().is_some_and(|s| count <= TpLayout::split_rows(s.verify_pass) && !s.front_tile && !s.tile_pass
+            && !matches!(s.seq.chats.mode, SeqMode::Import(_) | SeqMode::Alone))
     }
     /// Rank 1, per request: the residual arrives in the mailbox (MAIL bit), or the request is
     /// a pipeline tile for layers 24..48 (TILE bit).
@@ -286,9 +292,10 @@ impl<'a> NextModel<'a> {
         let tile = kind & crate::flash_tp_switch::TILE != 0;
         let heads = kind & crate::flash_tp_switch::HEADS != 0;
         let head = kind & crate::flash_tp_switch::HEAD != 0;
-        let flags = crate::flash_tp_switch::MAIL | crate::flash_tp_switch::TILE | crate::flash_tp_switch::HEADS | crate::flash_tp_switch::HEAD;
+        let flags = crate::flash_tp_switch::MAIL | crate::flash_tp_switch::TILE | crate::flash_tp_switch::HEADS | crate::flash_tp_switch::HEAD | crate::flash_tp_switch::SEQ;
         let verify = kind & !flags == crate::flash_tp_switch::KIND_VERIFY;
         if let Some(s) = self.tp.borrow_mut().as_mut() { s.mail_pass = mail; s.tile_pass = tile; s.heads_pass = heads; s.head_pass = head; s.verify_pass = verify; }
+        self.tp_seq_mail(tile && kind & crate::flash_tp_switch::SEQ != 0);
     }
     /// The current plain pass splits its greedy head (head_split): rank 0 sets it before each
     /// pass's post, rank 1 from the request's HEAD bit.
@@ -300,26 +307,32 @@ impl<'a> NextModel<'a> {
     }
     /// Rank 1: the first layer of the current request (24 for a pipeline tile, else SPLIT).
     pub(super) fn tp_back_split(&self) -> Option<usize> {
-        self.tp.borrow().as_ref().filter(|s| s.tile_pass).map(|_| LAYERS / 2)
+        self.tp.borrow().as_ref().filter(|s| s.tile_pass).map(|s| if s.seq.chats.mode == SeqMode::Export { SPLIT } else { LAYERS / 2 })
     }
     /// Rank 0, before a pass. Mailbox mode: a prompt tile of more than ROWS rows runs as a
     /// pipeline tile (Part::Front at layer 24; returns Some(24)) and its chats owe a state
     /// handoff; any other pass first settles the handoffs its chats owe (KIND_HANDOFF).
-    pub(super) fn tp_part<'w>(&self, b: &Backend<'a>, sessions: &mut [&mut NextSession<'a, 'w>], spans: &[std::ops::Range<usize>], verify: bool) -> Result<Option<usize>> {
+    pub(super) fn tp_part<'w>(&self, b: &Backend<'a>, sessions: &mut [&mut NextSession<'a, 'w>], spans: &[std::ops::Range<usize>], verify: bool, output: bool) -> Result<Option<usize>> {
         if self.tp_rank() != Some(0) {
             return Ok(None);
+        }
+        // Token split (next_tp_seq.rs): its prompt passes, or its handoffs before any other pass.
+        if let Some(tile) = self.tp_seq_plan(b, sessions, spans, verify, output)? {
+            if let Some(link) = self.pp.borrow_mut().as_mut() { (link.tp_tile, link.tp_seq) = (tile, tile); }
+            if let Some(s) = self.tp.borrow_mut().as_mut() { (s.front_tile, s.verify_pass) = (tile, false); }
+            return Ok(tile.then_some(SPLIT));
         }
         let mut guard = self.tp.borrow_mut();
         let s = guard.as_mut().ok_or("tensor split missing")?;
         // A prompt pass runs as a pipeline tile when every chat's span fills at least half of
-        // the engine's prompt tile (the pipeline's unit of work, an operator setting, not a
-        // checkpoint figure), or continues a prompt that ran as tiles (the chat owes a handoff
+        // the pipeline's prompt tile (its unit of work, an operator figure, not a checkpoint
+        // one), or continues a prompt that ran as tiles (the chat owes a handoff
         // and its last pass gave no logits): so the prompt's last rows and its first token run
         // on the pipeline path, and the handoff waits for the chat's next pass. Shorter
         // prompts stay in the lockstep and owe no state handoff.
-        let tile = tile_pass(verify, crate::flash_next_rows::prompt_tile(), sessions.iter().zip(spans)
+        let tile = tile_pass(verify, crate::flash_tp_switch::PIPELINE_TILE, sessions.iter().zip(spans)
             .map(|(chat, span)| (span.len(), chat.pos > 0 && !chat.logits_ready && s.handoff.contains(&chat.slot))));
-        if let Some(link) = self.pp.borrow_mut().as_mut() { link.tp_tile = tile; }
+        if let Some(link) = self.pp.borrow_mut().as_mut() { (link.tp_tile, link.tp_seq) = (tile, false); }
         s.front_tile = tile;
         s.verify_pass = verify;
         if tile {
@@ -358,6 +371,7 @@ impl<'a> NextModel<'a> {
         // Rank 0 asks for these chats' GDN whole rebuild (next_tp_heads.rs).
         if !lens.is_empty() && lens.iter().all(|&n| n == heads::GDN_WHOLE as usize) { return self.tp_gdn_frame(b, sessions, usize::MAX); }
         if !lens.is_empty() && lens.iter().all(|&n| n == heads::GDN_PROBE as usize) { return self.tp_gdn_probe(); }
+        if self.tp_seq_handoff_back(b, sessions, lens)? { return Ok(()); }
         let link = self.tp.borrow().as_ref().map(|s| s.link.try_clone()).ok_or("tensor split missing")?.map_err(err)?;
         let swapped = self.tp_swap_state(b, sessions, LAYERS / 2..LAYERS, SPLIT..LAYERS / 2, link);
         if swapped.is_err() { sessions.iter_mut().for_each(|chat| chat.valid = false); }
@@ -489,8 +503,9 @@ impl<'a> NextModel<'a> {
     pub(super) fn tp_post<'w>(&self, b: &Backend<'a>, sessions: &[&mut NextSession<'a, 'w>], spans: &[std::ops::Range<usize>],
         residual: &DeviceVector<'a>, count: usize, verify: bool, li: usize) -> Result<()> {
         let mail = !self.tp_host_pass(count);
-        // A pipeline prompt tile (tp_part) posts through the pipeline's own front path.
-        if self.tp.borrow().as_ref().is_some_and(|s| s.front_tile) { return Ok(()); }
+        // A pipeline prompt tile (tp_part) posts through the pipeline's own front path; a token-split
+        // second slice runs here alone.
+        if self.tp.borrow().as_ref().is_some_and(|s| s.front_tile || matches!(s.seq.chats.mode, SeqMode::Import(_) | SeqMode::Alone)) { return Ok(()); }
         if self.tp_rank() != Some(0) || li != if mail { 0 } else { SPLIT } {
             if mail && li == SPLIT && self.tp_rank() == Some(0) {
                 let mut guard = self.tp.borrow_mut();

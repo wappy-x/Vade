@@ -851,7 +851,7 @@ fn front(stream: TcpStream, limit: Duration) -> Link {
         message: Vec::new(),
         carried: 0,
         down: &DOWN,
-        poisoned: false, tp: false, tp_verify: false, tp_mail: false, tp_handoff: false, tp_tile: false, tp_heads: false, tp_head: false,
+        poisoned: false, tp: false, tp_verify: false, tp_mail: false, tp_handoff: false, tp_tile: false, tp_heads: false, tp_head: false, tp_seq: false,
         sent: 0,
         replied: 0,
         limit,
@@ -1299,6 +1299,27 @@ fn pp_kept_rows_are_bounded_while_retained_and_released_with_their_chat() {
     link.drop_kept(3);
     assert_eq!(link.kept.len(), 1);
     assert!(!link.has_kept(3));
+}
+
+#[test]
+fn pp_taking_kept_rows_for_room_takes_the_oldest_returned_tiles_only() {
+    // Past KEEP_ROWS the drafter takes the oldest rows that came back, only until the next tile
+    // fits; later returned tiles wait for the final tile and the owed tile keeps counting.
+    let (near, _far) = pair();
+    let mut link = front(near, Duration::from_secs(2));
+    let part = |pos, n| KeepPart { slot: 1, pos, tokens: vec![7; n], start: 0 };
+    let half = KEEP_ROWS / 2 - 64;
+    link.kept.push(KeptTile { parts: vec![part(0, 64)], rows: half, data: Some(vec![1.0; 64 * W]) });
+    link.kept.push(KeptTile { parts: vec![part(64, 64)], rows: half, data: Some(vec![2.0; 64 * W]) });
+    link.kept.push(KeptTile { parts: vec![part(128, 64)], rows: 128, data: None });
+    let room = KEEP_ROWS / 2 - 64;
+    assert!(!link.keep_room(room));
+    let taken = link.take_kept_room(1, Some(room));
+    assert_eq!(taken.iter().map(|t| (t.0, t.2[0])).collect::<Vec<_>>(), vec![(0, 1.0)]);
+    assert!(link.keep_room(room) && link.kept.len() == 2);
+    assert_eq!(link.take_kept_room(1, Some(room)).len(), 0);
+    assert_eq!(link.take_kept(1).iter().map(|t| t.0).collect::<Vec<_>>(), vec![64]);
+    assert!(link.keep_room(KEEP_ROWS - 128) && !link.keep_room(KEEP_ROWS - 127));
 }
 
 #[test]

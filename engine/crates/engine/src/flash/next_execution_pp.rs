@@ -13,17 +13,18 @@ impl<'a, 'w> NextSession<'a, 'w> {
         let mut work = model.take_work(b, self.capacity, crate::flash_next_rows::prompt_tile())?;
         let d = self.draft.as_mut().unwrap();
         let result = Self::flush_into(b, model, d, &mut work)
-            .and_then(|()| Self::observe_kept(b, model, d, &mut work, self.slot, self.pos, self.batch_drafts));
+            .and_then(|()| Self::observe_kept(b, model, d, &mut work, self.slot, self.pos, self.batch_drafts, None));
         model.return_work(work);
         result
     }
     /// Pipeline front: kept rows of the chat's queued prompt tiles enter its draft
     /// history first, in order, as world 1 observes each tile; uploaded through the MoE output
-    /// buffer (idle once the layers ran) in chunks of the workspace's rows.
+    /// buffer (idle once the layers ran) in chunks of the workspace's rows. `room`: only the
+    /// oldest tiles until that many more rows fit in KEEP_ROWS (Link::take_kept_room).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn observe_kept(b: &Backend<'a>, model: &NextModel<'a>, d: &mut mtp::Draft<'a, 'w>, work: &mut Workspace<'a>,
-        slot: u32, pos: usize, batch: bool) -> Result<()> {
-        let kept = model.pp_take_kept(slot);
+        slot: u32, pos: usize, batch: bool, room: Option<usize>) -> Result<()> {
+        let kept = model.pp_take_kept(slot, room);
         if kept.is_empty() {
             return Ok(());
         }
@@ -50,6 +51,21 @@ impl<'a, 'w> NextSession<'a, 'w> {
         // The uploads read `kept` (host memory) until they complete.
         b.synchronize()
     }
+    /// Pipeline front, a kept tile of `count` rows past KEEP_ROWS: read the acks already on the
+    /// socket, and let each drafter observe only the oldest kept rows that came back until the
+    /// tile fits, in order (the rows, chunks and order the synchronous path observes after its
+    /// reply). The back keeps its queue, and the rest waits for the final tile, where this rank
+    /// is idle while the back runs the last tiles.
+    pub(super) fn observe_returned(b: &Backend<'a>, model: &NextModel<'a>, sessions: &mut [&mut Self], work: &mut Workspace<'a>, count: usize) -> Result<()> {
+        model.pp_read_acks()?;
+        for s in sessions.iter_mut() {
+            if let Some(d) = s.draft.as_mut() {
+                Self::flush_into(b, model, d, work)?;
+                Self::observe_kept(b, model, d, work, s.slot, s.pos, s.batch_drafts, Some(count))?;
+            }
+        }
+        Ok(())
+    }
     /// Final prompt tile. On a direct last rank, kept rows arrive per tile during the wait
     /// and are observed while the back still runs the later tiles. Other pipelines keep one
     /// exchange and observe afterwards.
@@ -70,7 +86,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 for s in sessions.iter_mut() {
                     if s.draft.is_some() {
                         let d = s.draft.as_mut().unwrap();
-                        Self::observe_kept(b, model, d, work, s.slot, s.pos, s.batch_drafts)?;
+                        Self::observe_kept(b, model, d, work, s.slot, s.pos, s.batch_drafts, None)?;
                     }
                 }
             }

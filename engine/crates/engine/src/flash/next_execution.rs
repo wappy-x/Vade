@@ -677,7 +677,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         tokens: &[&[u32]],
         output: bool,
     ) -> Result<crate::flash_next_rows::ResultSource> {
-        Self::run_rows_inner(b, sessions, tokens, output, false, false)
+        Self::run_rows_inner(b, sessions, tokens, output, false, false).inspect_err(|_| if let Some(s) = sessions.first() { s.model.tp_seq_abandon(b) })
     }
     pub(super) fn run_rows_inner(
         b: &Backend<'a>,
@@ -729,7 +729,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             return Err("Flash-Next execution tile exceeds the prompt tile".into());
         }
         // Pipeline front: layers [split, 48) run on the back rank (MTP verify included).
-        let part = match model.pp_front_split().or(model.tp_part(b, sessions, &spans, verify)?) {
+        let part = match model.pp_front_split().or(model.tp_part(b, sessions, &spans, verify, output)?) {
             None => Part::Whole,
             Some(_) if verify && !model.pp_mtp() => return Err("this pipeline serves plain decoding only (MTP verify=0)".into()),
             Some(split) => Part::Front(split),
@@ -925,7 +925,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         // Passes above 16 rows come only from a 32-row tick (VADE_VERIFY_ROWS): stage PLE at once.
         let ple_rows = blocks::PLE_PASS_ROWS;
         let split = model.tp_on();
-        for li in first..end { model.tp_post(b, sessions, spans, &work.residual, count, verify, li)?;
+        for li in first..end { model.tp_seq_layer(b, sessions, li, count)?; model.tp_post(b, sessions, spans, &work.residual, count, verify, li)?;
             if let Some((entry, start)) = graphed.zip(segment_start(li, split)) {
                 if let Some(slot) = open.take() {
                     let updated = unsafe { b.end_segment(&mut work.verify_graphs[entry].1[slot])? };
@@ -1300,6 +1300,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 }
             }
         }
+        model.tp_seq_layer(b, sessions, end, count)?;
         // A captured segment closes before a pipeline stage hands its rows on (exchange, return).
         if let (Some(entry), Some(slot)) = (graphed, open.take()) {
             let updated = unsafe { b.end_segment(&mut work.verify_graphs[entry].1[slot])? };
@@ -1333,14 +1334,15 @@ impl<'a, 'w> NextSession<'a, 'w> {
                     let keep = sessions.iter().zip(tokens).zip(spans).filter(|((s, _), _)| model.pp_mtp() && s.draft.is_some())
                         .map(|((s, t), span)| super::pp::KeepPart { slot: s.slot, pos: s.pos, tokens: t.to_vec(), start: span.start })
                         .collect::<Vec<_>>();
-                    // Past KEEP_ROWS retained rows the tile runs synchronously below instead.
+                    // Past KEEP_ROWS kept rows the drafters first observe the oldest returned rows (observe_returned); no room freed: synchronous tile.
+                    if !keep.is_empty() && !model.pp_keep_room(count) { Self::observe_returned(b, model, sessions, work, count)?; }
                     if keep.is_empty() || model.pp_keep_room(count) {
-                        return model.pp_post(b, &meta, &work.residual, count, Some(keep).filter(|k| !k.is_empty()));
+                        return model.pp_post(b, &meta, &work.residual, count, Some(keep).filter(|k| !k.is_empty())).and_then(|()| model.tp_seq_posted());
                     }
                 }
                 Self::pp_return_and_observe(b, model, sessions, work, output, verify, &meta, count)?;
             }
-            Part::Whole => (),
+            Part::Whole => model.tp_seq_drain()?,
         }
         for ((s, input), span) in sessions.iter_mut().zip(tokens).zip(spans) {
             if verify {
@@ -1362,7 +1364,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             if let Some(d) = &mut s.draft {
                 Self::flush_into(b, model, d, work)?;
                 if (matches!(part, Part::Front(_)) || model.tp_on()) && model.pp_mtp() {
-                    Self::observe_kept(b, model, d, work, s.slot, s.pos, s.batch_drafts)?;
+                    Self::observe_kept(b, model, d, work, s.slot, s.pos, s.batch_drafts, None)?;
                 }
                 if tiled {
                     d.observe_rows(b, model, &work.mixed16, &mut work.hc, &mut work.qsa, s.pos, input,

@@ -1131,8 +1131,8 @@ impl<'a, 'w> NextSession<'a, 'w> {
             if output && tokens.len() - start < 64 {
                 self.capture_checkpoint(b);
             }
-            let mut n =
-                crate::flash_next_rows::prompt_rows(self.pos, tokens.len() - start, chunk);
+            let mut n = self.model.tp_seq_cut(self, output, tokens.len() - start, chunk)
+                .unwrap_or_else(|| crate::flash_next_rows::prompt_rows(self.pos, tokens.len() - start, chunk));
             // Debug dumps retain all per-token head/stage records. Custom hooks
             // that change selection inside a tile also keep their token contract.
             if self.dump.is_some()

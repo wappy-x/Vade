@@ -540,6 +540,19 @@ the layer pipeline's links, recipe and session protocol, so the pipeline
 below is also its frame. The engine reference describes the split and its
 limits ([two-Spark tensor split](../engine/docs/next-http.md)). It needs RDMA.
 
+Two Sparks read a cold prompt of 2,048 to 8,192 tokens with a token split
+([`next_tp_seq.rs`](../engine/crates/engine/src/flash/next_tp_seq.rs)).
+The first Spark reads the first half of the prompt through the first two
+layers and hands it on. The second Spark reads it through the other 46 layers.
+At the same time the first Spark reads the second half through every layer, one
+layer behind. Before each layer it takes the second Spark's attention and
+linear-attention state, so each token's math is the same as on one Spark. After the first token, the first Spark sends the
+rest of the state back, and decode runs on the tensor split. Longer prompts
+still run as two-stage pipeline tiles of 2,048 tokens. The token split needs a
+prompt workspace of 4,096 rows on each Spark instead of 2,048. So two Sparks
+now hold one chat fewer at a 32,768-token context (8 instead of 9), and in
+exchange the first token after a cold 8K prompt comes about 0.6 s sooner.
+
 A Spark has one GPU and one pool of memory. To use three or more, Vade splits
 the model by layers, not by matrices. Each Spark runs one
 engine process, called a *[rank](GLOSSARY.md#pr)*, and the ranks form a chain

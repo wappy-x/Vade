@@ -345,7 +345,7 @@ pub(super) struct Link {
     down: &'static AtomicBool,
     /// After any failure the link is never used again (a late reply could pair with the
     /// wrong request).
-    pub(super) poisoned: bool, pub(super) tp: bool, pub(super) tp_verify: bool, pub(super) tp_mail: bool, pub(super) tp_handoff: bool, pub(super) tp_tile: bool, pub(super) tp_heads: bool, pub(super) tp_head: bool,
+    pub(super) poisoned: bool, pub(super) tp: bool, pub(super) tp_verify: bool, pub(super) tp_mail: bool, pub(super) tp_handoff: bool, pub(super) tp_tile: bool, pub(super) tp_heads: bool, pub(super) tp_head: bool, pub(super) tp_seq: bool,
     /// Exchange ids: the last request sent and the last reply read (replies come in order).
     sent: u32,
     replied: u32,
@@ -443,7 +443,7 @@ impl Link {
             message: Vec::new(),
             carried: 0,
             down,
-            poisoned: false, tp: recipe.tp, tp_verify: false, tp_mail: false, tp_handoff: false, tp_tile: false, tp_heads: false, tp_head: false,
+            poisoned: false, tp: recipe.tp, tp_verify: false, tp_mail: false, tp_handoff: false, tp_tile: false, tp_heads: false, tp_head: false, tp_seq: false,
             sent: 0,
             replied: 0,
             limit,
@@ -664,7 +664,7 @@ impl Link {
     /// Queue the exact kind and metadata; used on every forward edge.
     fn enqueue(&mut self, kind: u32, meta: &[[u32; 4]], rows: Vec<f32>) -> Result<()> {
         self.sent = self.sent.wrapping_add(1);
-        let flagged = kind | if self.release_pool { RELEASE_POOLED } else { 0 } | if self.tp_tile { crate::flash_tp_switch::TILE } else { 0 };
+        let flagged = kind | if self.release_pool { RELEASE_POOLED } else { 0 } | if self.tp_tile { crate::flash_tp_switch::TILE } else { 0 } | if self.tp_seq { crate::flash_tp_switch::SEQ } else { 0 };
         let head = request_head(flagged, rows.len() / W, meta, self.sent);
         self.bytes += (rows.len() * 4) as u64;
         let queue = self.queue.clone().ok_or("pipeline queue missing")?;
@@ -741,7 +741,7 @@ impl Link {
         let started = Instant::now();
         self.drain()?;
         self.sent = self.sent.wrapping_add(1);
-        let flagged = kind | if self.release_pool { RELEASE_POOLED } else { 0 } | if self.tp_tile { crate::flash_tp_switch::TILE } else { 0 };
+        let flagged = kind | if self.release_pool { RELEASE_POOLED } else { 0 } | if self.tp_tile { crate::flash_tp_switch::TILE } else { 0 } | if self.tp_seq { crate::flash_tp_switch::SEQ } else { 0 };
         let head = request_head(flagged, residual.len() / W, meta, self.sent);
         let bytes = std::mem::size_of_val(residual);
         // Both directions must fit, including every kept row returned before current rows.
@@ -849,9 +849,19 @@ impl Link {
     }
     /// Kept rows of `slot` that came back, in post order: (position, tokens, rows). Stops at
     /// the first of its tiles still on the back, so the history keeps its order.
+    #[cfg(test)]
     fn take_kept(&mut self, slot: u32) -> Vec<(usize, Vec<u32>, Vec<f32>)> {
+        self.take_kept_room(slot, None)
+    }
+    /// take_kept; with `room`, it also stops once `room` more rows fit in KEEP_ROWS (oldest
+    /// tiles first; the later ones wait for the final tile).
+    fn take_kept_room(&mut self, slot: u32, room: Option<usize>) -> Vec<(usize, Vec<u32>, Vec<f32>)> {
         let mut out = Vec::new();
+        let mut held: usize = self.kept.iter().map(|t| t.rows).sum();
         for t in self.kept.iter_mut() {
+            if room.is_some_and(|n| held + n <= KEEP_ROWS) {
+                break;
+            }
             if !t.parts.iter().any(|p| p.slot == slot) {
                 continue;
             }
@@ -871,6 +881,7 @@ impl Link {
                     i += 1;
                 }
             }
+            if t.parts.is_empty() { held -= t.rows; }
         }
         self.kept.retain(|t| !t.parts.is_empty() || t.data.is_none());
         out
@@ -1029,9 +1040,9 @@ impl<'a> NextModel<'a> {
             self.pp_exchange(b, kind, meta, vector, count)
         }
     }
-    /// Front: the kept rows of `slot` that came back (see Link::take_kept).
-    pub(super) fn pp_take_kept(&self, slot: u32) -> Vec<(usize, Vec<u32>, Vec<f32>)> {
-        self.pp.borrow_mut().as_mut().map_or_else(Vec::new, |l| l.take_kept(slot))
+    /// Front: the kept rows of `slot` that came back (see Link::take_kept_room).
+    pub(super) fn pp_take_kept(&self, slot: u32, room: Option<usize>) -> Vec<(usize, Vec<u32>, Vec<f32>)> {
+        self.pp.borrow_mut().as_mut().map_or_else(Vec::new, |l| l.take_kept_room(slot, room))
     }
     /// Front: forget `slot`'s kept spans (a new chat starts on it, or its
     /// chat ended). Never panics: a link borrowed elsewhere keeps the spans until slot reuse.
@@ -1081,7 +1092,7 @@ impl<'a> NextModel<'a> {
             |n| self.set_session_limit(n),
             || self.release_pooled_decode(b),
             |kind, count, meta, residual| { self.tp_mail_next(kind);
-                self.pp_back_step(b, &mut sessions, kind & !crate::flash_tp_switch::MAIL & !crate::flash_tp_switch::TILE & !crate::flash_tp_switch::HEADS & !crate::flash_tp_switch::HEAD, count, meta, tile, context, residual) })
+                self.pp_back_step(b, &mut sessions, kind & !crate::flash_tp_switch::MAIL & !crate::flash_tp_switch::TILE & !crate::flash_tp_switch::HEADS & !crate::flash_tp_switch::HEAD & !crate::flash_tp_switch::SEQ, count, meta, tile, context, residual) })
     }
     #[allow(clippy::too_many_arguments)]
     fn pp_back_step<'w>(
@@ -1349,7 +1360,7 @@ fn serve_stage(
             prefetch.recycle(request.rows)?;
             (request.kind, request.count, request.meta)
         };
-        let release = kind & RELEASE_POOLED != 0; let tp_bits = kind & (crate::flash_tp_switch::MAIL | crate::flash_tp_switch::TILE | crate::flash_tp_switch::HEADS | crate::flash_tp_switch::HEAD);
+        let release = kind & RELEASE_POOLED != 0; let tp_bits = kind & (crate::flash_tp_switch::MAIL | crate::flash_tp_switch::TILE | crate::flash_tp_switch::HEADS | crate::flash_tp_switch::HEAD | crate::flash_tp_switch::SEQ);
         let kind = kind & !RELEASE_POOLED & !tp_bits;
         if !matches!(kind, KIND_ROWS | KIND_POOLED | KIND_ROWS_ASYNC | KIND_ROWS_KEEP | KIND_ROWS_FINAL | KIND_VERIFY | crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF)
             || matches!(kind, KIND_VERIFY | KIND_ROWS_KEEP | crate::flash_tp_switch::KIND_VERIFY) && !recipe.mtp || matches!(kind, crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF) && !recipe.tp
