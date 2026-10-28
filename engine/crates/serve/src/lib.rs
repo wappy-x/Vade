@@ -2,6 +2,7 @@
 //! Mutable KV belongs to one request; retained conversation snapshots fork into
 //! independently writable sessions within an explicit aggregate memory budget.
 pub mod budget;
+pub mod kv_pages;
 pub mod contract;
 pub mod metadata;
 #[cfg(test)] #[path = "../build.rs"] #[allow(dead_code)] mod build_metadata;
