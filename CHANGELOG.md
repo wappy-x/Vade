@@ -16,7 +16,15 @@ Changes that are merged but not yet released are under Unreleased.
   still refuses the cache. A second question on a 100K-token chat restores when
   the front snapshot fits the free memory; at `--context 131072` the 6.2 GB
   snapshot does not fit the 5.3 to 6.0 GB that stays free, so that turn reads
-  the prompt again.
+  the prompt again. On two Sparks at main `9d2ec6c`, with the cache on, the
+  second question on a 32,103-token chat gave its first token in 0.75 to
+  0.77 s, against 9.98 to 10.01 s with the cache off. On a 100,364-token
+  chat at `--context 110592` it took 1.60 to 1.62 s, against 31.79 to
+  31.86 s. The first question takes longer with the cache on, because the
+  engine saves the prompt state: the medians are 11.07 s against 10.38 s
+  at 32K, and 33.07 s against 31.81 s at 100K. Each range covers three
+  server starts. Token IDs do not change
+  ([benchmarks](docs/benchmarks.md#the-prefix-cache-on-two-sparks)).
 
 - When enabled, the Flash-Next prefix cache can use free memory that an empty
   spare-buffer reserve has not allocated. Cache retention still yields to live

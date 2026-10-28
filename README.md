@@ -210,11 +210,16 @@ and how to change it. The ones you meet first:
   [FP4-Local guide](cli/docs/fp4-local.md) describes chains of 2 to 24 Sparks.
   We have run at most four: four DGX Sparks at `6cb46bf` on 2026-10-25, and
   four cloud GB10 VMs at v0.1.0 on 2026-10-24.
-- **The prefix cache is opt-in and one-Spark only.** It lets a request that
-  starts like an earlier one skip reading that start again. On one Spark with
-  context 65536, the second question on a 32K-token chat reused 32,064 tokens
-  and gave its first token in 0.62 s, against 16.29 s with the cache off
+- **The prefix cache is off by default.** It lets a request that starts
+  like an earlier one skip reading that start again. It works on one Spark
+  and on two Sparks (the tensor split). On one Spark with context 65536, the
+  second question on a 32K-token chat reused 32,064 tokens and gave its first
+  token in 0.62 s, against 16.29 s with the cache off
   ([benchmarks](docs/benchmarks.md#previous-2026-10-28-morning-main-bb24e80-home-dgx-sparks)).
+  On two Sparks with context 131072, the same second question took 0.75 to
+  0.77 s, against 9.98 to 10.01 s. With the cache on, the first question
+  takes 0.67 to 0.73 s longer at 32K and 0.92 to 1.26 s longer at 100K
+  ([benchmarks](docs/benchmarks.md#the-prefix-cache-on-two-sparks)).
   See [turn on the prefix cache](INSTALL.md#turn-on-the-prefix-cache).
 
 ## Exactness
@@ -231,11 +236,15 @@ tokens. It covers the requests it sent, not every mix of batching and caching.
 
 What we have checked so far covers drafting ON against OFF:
 
+- On main `9d2ec6c` (the 2026-10-28 cards after #142), the drafting-ON card
+  matched the drafting-OFF card on the same pair in 66 of 66 responses. Both
+  also matched the `8b7b866` card
+  ([benchmarks](docs/benchmarks.md#current-2026-10-28-after-142-main-9d2ec6c-home-dgx-sparks)).
 - On main `104205a` (the 2026-10-28 cards after #139), the drafting-ON card
   matched the drafting-OFF card on the same pair in 66 of 66 responses. Both
   also matched the 2026-10-28 morning cards at `bb24e80`, and a drafting-ON
   card at `8b7b866` (#140) matched them too
-  ([benchmarks](docs/benchmarks.md#current-2026-10-28-main-8b7b866-and-104205a-home-dgx-sparks)).
+  ([benchmarks](docs/benchmarks.md#previous-2026-10-28-main-8b7b866-and-104205a-home-dgx-sparks)).
 - On main `bb24e80` (the 2026-10-28 morning cards), the drafting-ON card on
   one pair matched the drafting-OFF card on the other pair in 66 of 66
   responses. Both also matched the final 2026-10-27 cards at `09e1fc4`
@@ -279,11 +288,14 @@ explains the full rule and what each check proves.
 
 | Model | Sparks | Path | Drafting | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) | IDs saved / responses |
 | --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| qwen3.8-flash-next-fp4-local | 2 | tensor split | ON | 53.657 | 99.805 | 128.09 | 78.626 | 163.704 | 228.245 | 2.166 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 1 | local | OFF | 27.573 | 27.619 | 27.908 | 26.961 | 83.889 | 137.585 | 3.806 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 1 | local | ON | 42.007 | 80.378 | 100.327 | 64.182 | 142.468 | 176.388 | 3.76 | 66/66 |
 
-Measured main revision: `8b7b866746452c01d60985f4649a588cd080c7bf`.
+Measured main revision: `6926aaa6c571b4a0dd9ab845dbb93f9049de67e5`.
 
-2 Sparks, tensor split, drafting ON: finished `2026-10-28T15:34:33.951536+00:00`; card SHA256 `dc73321898778eebf0f364a01f05a84ce41c9dcd16e6ec76c6ac587a80ae1eed`.
+1 Sparks, local, drafting OFF: finished `2026-10-28T18:02:53.546070+00:00`; card SHA256 `c692b08b3133403559aed5dc2798d22b859a98ba0321350349c15fea2f2090eb`.
+
+1 Sparks, local, drafting ON: finished `2026-10-28T17:56:23.865775+00:00`; card SHA256 `dbbb938750bc1e309f2553a2a16e77720538d2150aaac928f55eba41b5e0f9ad`.
 
 Rates are card medians in tok/s. C1, C4 and C8 cover all chats together.
 Cold 8K is the median time to the first token. IDs saved counts responses
@@ -311,12 +323,29 @@ a run, and every number here comes from one. The
 [benchmarks page](docs/benchmarks.md) has every card, the full recipe and the
 caveats.
 
+### Two Sparks, 2026-10-28, after #142
+
+Two-Spark cards ran at main `9d2ec6c` (#142). With #142, the prefix cache
+can restore a prompt on both Sparks of the tensor split. The cache is still
+off by default, so these cards measure the default path. The latest
+measured table above shows only the newest measured revision, so it does not
+show these cards. Their token IDs match the `8b7b866` card in 66 of 66
+responses. With drafting ON, every rate is within 0.4 % of that card. With
+drafting OFF, two server starts average within 0.7 % of the `104205a` OFF
+card, and code is 1.3 % faster.
+
+With the cache on, the second question on a 32K-token chat took 0.75 to
+0.77 s instead of 9.98 to 10.01 s. On a 100K-token chat at context 110592,
+it took 1.60 to 1.62 s instead of 31.79 to 31.86 s. The first question took
+0.67 to 1.26 s longer, because the engine saves the prompt state. The full
+tables are on the
+[benchmarks page](docs/benchmarks.md#current-2026-10-28-after-142-main-9d2ec6c-home-dgx-sparks).
+
 ### Two Sparks, 2026-10-28, after #139 and #140
 
-The latest measured table above is one drafting-ON card at main `8b7b866`
-(#140). No drafting-OFF card ran at that revision, so the table has no OFF
-row. Its token IDs match the `104205a` card in 66 of 66 responses, and its
-rates are within 1 % of that card.
+One drafting-ON card ran at main `8b7b866` (#140). No drafting-OFF card ran
+at that revision. Its token IDs match the `104205a` card in 66 of 66
+responses, and its rates are within 1 % of that card.
 
 The cards before it ran at main `104205a`, after #139. With #139, eight
 chats reuse their attention arenas. Eight chats with drafting ON reached
@@ -325,7 +354,7 @@ drafting OFF, eight chats reached 125.4 against 124.3 on the same pair. The
 other rates are within 1 % of the morning cards. The long-prompt cells and
 the one-Spark prefix-cache cell did not change, and the token IDs match the
 morning cards in 66 of 66 responses. The full tables are on the
-[benchmarks page](docs/benchmarks.md#current-2026-10-28-main-8b7b866-and-104205a-home-dgx-sparks).
+[benchmarks page](docs/benchmarks.md#previous-2026-10-28-main-8b7b866-and-104205a-home-dgx-sparks).
 
 ### Two Sparks, 2026-10-28
 

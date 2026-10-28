@@ -6,11 +6,14 @@
 
 | Model | Sparks | Path | Drafting | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) | IDs saved / responses |
 | --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| qwen3.8-flash-next-fp4-local | 2 | tensor split | ON | 53.657 | 99.805 | 128.09 | 78.626 | 163.704 | 228.245 | 2.166 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 1 | local | OFF | 27.573 | 27.619 | 27.908 | 26.961 | 83.889 | 137.585 | 3.806 | 66/66 |
+| qwen3.8-flash-next-fp4-local | 1 | local | ON | 42.007 | 80.378 | 100.327 | 64.182 | 142.468 | 176.388 | 3.76 | 66/66 |
 
-Measured main revision: `8b7b866746452c01d60985f4649a588cd080c7bf`.
+Measured main revision: `6926aaa6c571b4a0dd9ab845dbb93f9049de67e5`.
 
-2 Sparks, tensor split, drafting ON: finished `2026-10-28T15:34:33.951536+00:00`; card SHA256 `dc73321898778eebf0f364a01f05a84ce41c9dcd16e6ec76c6ac587a80ae1eed`.
+1 Sparks, local, drafting OFF: finished `2026-10-28T18:02:53.546070+00:00`; card SHA256 `c692b08b3133403559aed5dc2798d22b859a98ba0321350349c15fea2f2090eb`.
+
+1 Sparks, local, drafting ON: finished `2026-10-28T17:56:23.865775+00:00`; card SHA256 `dbbb938750bc1e309f2553a2a16e77720538d2150aaac928f55eba41b5e0f9ad`.
 
 Rates are card medians in tok/s. C1, C4 and C8 cover all chats together.
 Cold 8K is the median time to the first token. IDs saved counts responses
@@ -35,7 +38,10 @@ apply only to those measurements.
 This page has every speed we have published for Vade, newest first, and how
 to measure your own:
 
-- [2026-10-28 cards after #139 and #140](#current-2026-10-28-main-8b7b866-and-104205a-home-dgx-sparks):
+- [2026-10-28 cards after #142](#current-2026-10-28-after-142-main-9d2ec6c-home-dgx-sparks):
+  two DGX Sparks on one pair at main `9d2ec6c`, drafting ON and OFF, and the
+  second question on a 32K and a 100K chat with the prefix cache on and off.
+- [2026-10-28 cards after #139 and #140](#previous-2026-10-28-main-8b7b866-and-104205a-home-dgx-sparks):
   two DGX Sparks on one pair, one drafting-ON card at main `8b7b866` (#140),
   and before it drafting ON and OFF at main `104205a`, with eight chats
   faster after the arena reuse change.
@@ -72,23 +78,97 @@ machines appear as home-1 to home-6 and the rented ones as vm-a to vm-d. The
 [receipt status](../bench/receipts/README.md) page says what is public. The
 2026-10-25 to 2026-10-28 cards are not in the repository yet; each row names
 its result folder. The 2026-10-27 and 2026-10-28 folder names end in a pair
-suffix that uses internal machine names (and `-final`, `-am`, `-139` or
-`-139-c140`), so those
+suffix that uses internal machine names (and `-final`, `-am`, `-139`,
+`-139-c140` or `-142`), so those
 names are given here without the suffix; the time, commit and
 drafting setting in each name still identify the card. The first-token,
-prefix-cache and repeated cold-prompt timings of 2026-10-28 after #139 come
-from separate runs, not from the cards. Each of those tables or sentences
-names its run folder, such as `c139-l32`. These folders are not in the
-repository yet either.
+prefix-cache and repeated cold-prompt timings of 2026-10-28 after #139 and
+after #142 come from separate runs, not from the cards. Each of those tables
+or sentences names its run folder, such as `c139-l32` or `r142-wtT-x1`.
+These folders are not in the repository yet either.
+
+## Current (2026-10-28 after #142, main 9d2ec6c, home DGX Sparks)
+
+These cards ran at main `9d2ec6c`, after the merge of #142. With #142, the
+prefix cache can restore a prompt on both Sparks of the tensor split. The
+cache stays off unless `VADE_FLASHNEXT_PREFIX_CACHE=1` is set, so the cards
+measure the default path. All cards ran on home-3 + home-4 with the recipe
+of the [cards after #139](#previous-2026-10-28-main-8b7b866-and-104205a-home-dgx-sparks):
+context 32768, output 8192, MTP 3, greedy, cache off, thinking OFF, and no
+`VADE_` name at any server start. Each card passed its **15/15** basic
+output checks and ran the prebuilt payload of `9d2ec6c`, installed and
+hash-checked on both Sparks. Each card had its own server start. The
+drafting-ON card ran first, then the drafting-OFF card, then the prefix-cache
+runs below, then a second drafting-OFF card. The latest measured table at the
+top of this page shows only the newest measured revision, so it does not
+show these cards.
+
+| Path | Drafting | Commit | Sparks | Prose | Code | Structured | C1 | C2 | C4 | C8 | Cold 8K prompt (s) | Result folder |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Tensor split | ON | `9d2ec6c` | home-3 + home-4 | 53.8 | 100.0 | 128.5 | 78.9 | 102.2 | 164.1 | 227.4 | 2.14 | `2026-10-28_1228_qwen3.8-flash-next-nvfp4_local-2spark_9d2ec6c-drafting-on-thinking-off-split` |
+| Tensor split | OFF | `9d2ec6c` | home-3 + home-4 | 35.2 | 35.5 | 35.6 | 34.2 | 48.5 | 82.0 | 126.0 | 2.16 | `2026-10-28_1239_qwen3.8-flash-next-nvfp4_local-2spark_9d2ec6c-drafting-off-thinking-off-split` |
+| Tensor split | OFF, second start | `9d2ec6c` | home-3 + home-4 | 35.1 | 35.5 | 35.4 | 34.3 | 49.1 | 82.4 | 125.3 | 2.17 | `2026-10-28_1311_qwen3.8-flash-next-nvfp4_local-2spark_9d2ec6c-drafting-off-thinking-off-split` |
+
+**The answers did not change.** The token IDs matched in 66 of 66
+responses: the ON card against each OFF card, and every card against the
+`8b7b866` card. The first OFF card also matched the `104205a` OFF card.
+
+**The rates did not change.** With drafting ON, every rate is within 0.4 %
+of the `8b7b866` card on the same pair. C8 reached 227.4 tok/s against
+228.2, and the cold 8K prompt took 2.14 s against 2.17 s. With drafting OFF,
+the first start had C2 at 48.5 tok/s and C4 at 82.0. These are 1.2 % and
+0.9 % below the `104205a` OFF card (49.1 and 82.7). The second start had
+49.1 and 82.4. Over the two starts, every OFF rate is within 0.7 % of the
+`104205a` card, except code at 35.5 against 35.0 (1.3 % faster). The cold
+8K prompt took 2.16 s and 2.17 s, against 2.21 s.
+
+### The prefix cache on two Sparks
+
+These runs used the gate driver of #142 on home-3 + home-4 at main
+`9d2ec6c`, one fresh server per run, drafting ON. Each run asked a first
+question on a long chat. Then it asked a second question on the same chat
+with the cache allowed, and the same second question again with `cache` set
+to false. Three runs had the cache on (`VADE_FLASHNEXT_PREFIX_CACHE=1`), and
+three ran the default path, in the order default, on, on, default, default,
+on. The driver also sets `VADE_W2_PP_RDMA=1`, which this engine does not
+read. The receipts are the run folders `r142-wtT-a1` to `r142-wtT-a3` and
+`r142-wtT-x1` to `r142-wtT-x3` for 32K, and `r142-wtV-a1` to `r142-wtV-a3`
+and `r142-wtV-x1` to `r142-wtV-x3` for 100K. Each cell gives the three runs
+in order. Times are seconds to the first token.
+
+| Chat | Context | Cache | First question | Second question | Reused tokens | Second question, cache false |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| 32K (32,103 tokens) | 131072 | off (default) | 10.38, 10.40, 10.34 | 10.01, 9.98, 9.98 | 0 | 10.02, 9.99, 9.99 |
+| 32K (32,103 tokens) | 131072 | on | 11.09, 11.07, 11.07 | 0.77, 0.76, 0.75 | 32,064 | 9.99, 9.98, 9.99 |
+| 100K (100,364 tokens) | 110592 | off (default) | 31.75, 32.22, 31.81 | 31.84, 31.86, 31.79 | 0 | 31.87, 31.96, 31.79 |
+| 100K (100,364 tokens) | 110592 | on | 32.97, 33.14, 33.07 | 1.62, 1.62, 1.60 | 100,352 | 32.15, 31.80, 31.85 |
+
+In every run with the cache on, the second Spark restored the same number of
+tokens that the first Spark reused. In both arms, every first question gave
+the same token IDs, and so did every second question, in 18 of 18 requests
+at each size.
+
+**The cache costs time on the first question.** While it reads the first
+question, the engine saves the prompt state on both Sparks. At 32K the
+median first question took 11.07 s with the cache on, against 10.38 s
+(+0.69 s, +6.7 %). At 100K it took 33.07 s, against 31.81 s (+1.26 s,
++4.0 %). In each pair of neighboring runs, the cost was 0.67 to 0.73 s at
+32K and 0.92 to 1.26 s at 100K.
+
+**At 100K, only the second question gains.** To save the second question,
+the cache drops the saved first question. Then memory pressure drops the new
+copy too, and the server log shows 0 retained bytes. So a third question on
+the same chat would read the whole prompt again. These runs did not measure
+100K at context 131072.
 
 <a id="current-2026-10-28-after-139-main-104205a-home-dgx-sparks"></a>
+<a id="current-2026-10-28-main-8b7b866-and-104205a-home-dgx-sparks"></a>
 
-## Current (2026-10-28, main 8b7b866 and 104205a, home DGX Sparks)
+## Previous (2026-10-28, main 8b7b866 and 104205a, home DGX Sparks)
 
-The newest card is one drafting-ON card at main `8b7b866` (#140), in the
-first row below. It is the card in the latest measured table at the top of
-this page. No drafting-OFF card ran at `8b7b866`, so that table has no OFF
-row. The two cards before it ran at main `104205a`, after the merge of #139,
+The newest card of this set is one drafting-ON card at main `8b7b866`
+(#140), in the first row below. No drafting-OFF card ran at `8b7b866`. The
+two cards before it ran at main `104205a`, after the merge of #139,
 which lets eight chats reuse their attention arenas. All three ran on one
 pair of our own DGX Sparks, home-3 + home-4. The recipe is the same as the
 [morning cards](#previous-2026-10-28-morning-main-bb24e80-home-dgx-sparks):
