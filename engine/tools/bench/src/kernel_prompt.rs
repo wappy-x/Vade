@@ -1,4 +1,4 @@
-//! prefill_gemm owner cases (kinds 60..68): production prompt GEMM fixtures and launches,
+//! prefill_gemm owner cases (kinds 60..69 and 74): production prompt GEMM fixtures and launches,
 //! split from kernel_cuda.rs (mechanical; same code).
 use super::*;
 
@@ -184,7 +184,7 @@ fn pack_fixture(g: &mut Gpu, c: &Case) -> Result<Fixture> {
     (v.stored, v.flops) = (c.m * c.k * 4 + plane * 2 * 4, 0);
     Ok(v)
 }
-/// Fixtures of kinds 60..68 except 63 (the caller routes only those here).
+/// Fixtures of kinds 60..69 except 63, and 74 (the caller routes only those here).
 pub(super) fn fixture(g: &mut Gpu, c: &Case) -> Result<Fixture> {
     match c.kind {
         64 => hc_norm_fixture(g, c),
@@ -193,6 +193,7 @@ pub(super) fn fixture(g: &mut Gpu, c: &Case) -> Result<Fixture> {
         67 => hc_finish_fixture(g, c),
         68 => hc_low_fixture(g, c),
         69 => pack_fixture(g, c),
+        74 => hc_rows_fixture(g, c),
         _ => prompt_fixture(g, c),
     }
 }
@@ -225,6 +226,15 @@ pub(super) fn prepare(g: &mut Gpu, modules: [H; 2], c: &Case, v: &mut Fixture) -
             Some([g.function(modules[0],if prod {c.kernel}else{"flash_next_hc_up_latency4"})?,g.function(modules[1],x)?])
         },
         69 => Some([g.function(modules[0], c.kernel)?, g.function(modules[1], c.kernel)?]),
+        // A = main's token-pair norm (scales + planes) and tiled HC down on the planes; X = the
+        // norm writing scales only and the HC down on the residual rows (norm != 0). Both
+        // restore the residual first with kb_copy (v.pack). The norms' shared: extra_shared.
+        74 => {
+            let m = g.module(copy_ptx().as_bytes()).map_err(|e| format!("copy PTX: {e}"))?;
+            v.pack = g.function(m, "kb_copy")?;
+            v.norms = [g.function(modules[0], "flash_next_hc_add_norm")?, g.function(modules[1], "flash_next_hc_add_norm")?];
+            Some([g.function(modules[0], c.kernel)?, g.function(modules[1], c.kernel)?])
+        }
         // A = main's tiled HC down (+ activate + pack below), X = the fused HC down.
         68 => Some([g.function(modules[0], c.kernel)?, g.function(modules[1], "flash_bf16_mma_prefill_tiled_hc")?]),
         63 => {
@@ -341,7 +351,45 @@ fn hc_finish_fixture(g: &mut Gpu, c: &Case) -> Result<Fixture> {
     v.stored += m * 11 * h * 4 + m * 10 * 8;
     Ok(v)
 }
-/// Launches of kinds 60..68 (the caller routes only those here).
+/// Dynamic shared bytes of the token-pair flash_next_hc_add_norm (rows t, t + 8 of 4 streams).
+const HC_PAIR_SHARED: usize = 8 * 2560 * 4 + 32;
+/// Helper launches that need dynamic shared bytes above 48 KiB, set with the arms' entries.
+pub(super) fn extra_shared(c: &Case, v: &Fixture) -> Vec<(H, u32)> {
+    if c.kind == 74 { v.norms.iter().map(|&f| (f, HC_PAIR_SHARED as u32)).collect() } else { Vec::new() }
+}
+/// kind 74 (prefill_gemm owner): prompt HC combine + norm + HC down on M tokens (M % 16 == 0),
+/// c.mats = [low rows, injection rows]: residual [M][4H] restored from a pristine copy each
+/// launch, block [M][H], gates [M][4], F32 norm weights [4H], BF16 down + injection weights
+/// [low + injection][4H] (two rotating copies). A = flash_next_hc_add_norm writing the scales
+/// and the packed planes, then flash_bf16_mma_prefill_tiled_hc on the planes; X = the norm
+/// writing the scales only, then the same entry with norm != 0 on the residual rows.
+/// Hash: [residual | scales | low planes | injection]. Floor: X's bytes as stored.
+fn hc_rows_fixture(g: &mut Gpu, c: &Case) -> Result<Fixture> {
+    let (m, w, h, low, inject) = (c.m, 10240usize, 2560usize, c.mats[0], c.mats[1]);
+    if m % 16 != 0 || low % 16 != 0 { return Err(format!("{}: M and low rows must be multiples of 16", c.name)); }
+    // Kind 66's inputs: raw = residual, rows.weight = block, rows.weight2 = gates, rows.output2 = norm,
+    // rows.input = packed planes [M][4H] (A's scratch).
+    let mut v = hc_add_fixture(g, &Case { kind: 66, ..c.clone() })?;
+    v.ring_x = vec![v.rows.weight, v.rows.weight2, v.rows.output2];
+    let weights: Vec<u8> = (0..(low + inject) * w).flat_map(|i| {
+        let x = (((i * 7 + i / 64 * 11) % 251) as f32 - 125.) / 1024.;
+        ((x.to_bits() >> 16) as u16).to_le_bytes()
+    }).collect();
+    v.ring = vec![g.upload(&weights)?, g.upload(&weights)?];
+    v.weight_bytes = weights.len();
+    let plane = m.div_ceil(16) * (low / 16) * 128;
+    v.out_bytes = m * w * 4 + m * 4 * 4 + 2 * plane * 4 + m * inject * 4;
+    v.out = g.alloc(v.out_bytes)?;
+    v.written = Vec::new();
+    // X as stored: the restore (read + write), the norm (residual and block in, residual and
+    // scales out), HC down (FP32 residual, scales and weights in, low planes and injection out).
+    v.stored = 2 * m * w * 4 + (2 * m * w * 4 + m * h * 4 + m * 16) + (m * w * 4 + m * 16 + v.weight_bytes + 2 * plane * 4 + m * inject * 4);
+    v.flops = 4 * m * (low + inject) * w;
+    // Both arms launch with the engine's allocation (A's planes form needs FLASH_BF16_PREFILL_TILED_SHARED).
+    v.shared = params::FLASH_BF16_PREFILL_ROWS_SHARED as u32;
+    Ok(v)
+}
+/// Launches of kinds 60..69 and 74 (the caller routes only those here).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn launch(g: &Gpu, f: H, merge: H, c: &Case, v: &mut Fixture, i: usize, arm: usize, shared: Option<u32>) -> Result<()> {
     let arm = if c.name.starts_with("hcnorm-prod-") { 1 } else { arm };
@@ -401,7 +449,9 @@ pub(super) fn launch(g: &Gpu, f: H, merge: H, c: &Case, v: &mut Fixture, i: usiz
         let mut tp = params::Bf16Rows { weight: w, output: if arm == 0 { v.aux } else { planes }, rows: low as u32, stride: low as u32,
             weight2: w + (low * c.k * 2) as u64, output2: injection, rows2: inject as u32, stride2: inject as u32, ..v.rows };
         let grid = [m.div_ceil(64) as u32, (low + inject).div_ceil(128) as u32, 1];
-        g.launch(f, grid, v.threads, shared.unwrap_or(v.shared), &mut [ptr(&mut tp)])?;
+        // X's scales / norm = 0: the planes form (A's entry ignores them).
+        let (mut s, mut n) = (0u64, 0u64);
+        g.launch(f, grid, v.threads, shared.unwrap_or(v.shared), &mut [ptr(&mut tp), ptr(&mut s), ptr(&mut n)])?;
         if arm == 0 {
             let (mut x, mut n) = (v.aux, (m * low) as u32);
             g.launch(v.norms[0], [(m * low).div_ceil(128) as u32, 1, 1], 128, 0, &mut [ptr(&mut x), ptr(&mut n)])?;
@@ -409,6 +459,30 @@ pub(super) fn launch(g: &Gpu, f: H, merge: H, c: &Case, v: &mut Fixture, i: usiz
             g.launch(v.pack, [(plane / 128 * 32).div_ceil(128) as u32, 1, 1], 128, 0, &mut [ptr(&mut q)])?;
         }
         return Ok(());
+    }
+    if c.kind == 74 {
+        let (m, w, low, inject) = (c.m, 10240usize, c.mats[0], c.mats[1]);
+        let plane = m.div_ceil(16) * (low / 16) * 128;
+        let residual = v.out;
+        let scales = residual + (m * w * 4) as u64;
+        let planes = scales + (m * 4 * 4) as u64;
+        let injection = planes + (2 * plane * 4) as u64;
+        let (mut dst, mut src, mut words) = (residual, v.raw, (m * w / 4) as u32);
+        g.launch(v.pack, [words.div_ceil(256), 1, 1], 256, 0, &mut [ptr(&mut dst), ptr(&mut src), ptr(&mut words)])?;
+        // As the engine's prompt mix_chunk: A writes the planes for HC down, X only the scales.
+        let packed = if arm == 0 { v.rows.input } else { 0 };
+        let mut p = params::FlashHcAddNorm { residual, block: v.ring_x[0], gates: v.ring_x[1], weight: v.ring_x[2], output: scales, packed, scales };
+        let mut rows = m as u32;
+        g.launch(v.norms[arm], [1, (m.div_ceil(16) * 8) as u32, 1], 256, HC_PAIR_SHARED as u32, &mut [ptr(&mut p), ptr(&mut rows)])?;
+        let w0 = v.ring[i];
+        let mut tp = params::Bf16Rows { weight: w0, output: planes, rows: low as u32, stride: low as u32,
+            weight2: w0 + (low * w * 2) as u64, output2: injection, rows2: inject as u32, stride2: inject as u32,
+            input: if arm == 0 { v.rows.input } else { residual }, cols: w as u32, tokens: m as u32, input_bf16: 1, hc_silu: 0,
+            input_plane_words: (m.div_ceil(16) * (w / 16) * 128) as u64 };
+        let grid = [m.div_ceil(64) as u32, (low + inject).div_ceil(128) as u32, 1];
+        // A: the planes form (main's one-parameter entry ignores the zeros).
+        let (mut s, mut n) = if arm == 0 { (0u64, 0u64) } else { (scales, v.ring_x[2]) };
+        return g.launch(f, grid, v.threads, shared.unwrap_or(v.shared), &mut [ptr(&mut tp), ptr(&mut s), ptr(&mut n)]);
     }
     if c.kind == 62 {
         // Columns and weight copies in mats order: big1 | small1 | big2 | small2.

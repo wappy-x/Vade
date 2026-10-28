@@ -795,12 +795,15 @@ pub const FLASH_BF16_MIXED_BYTES: usize = 4096 * 2560 * 2 * TERMS;
 /// flash_bf16_mma_prefill_tiled: three 32 KiB stages (hi/lo A planes 16 KiB + B 16 KiB) and,
 /// after them, the stages' full/empty mbarriers (6 x 8 bytes, padded to 64).
 pub const FLASH_BF16_PREFILL_TILED_SHARED: usize = 3 * 32768 + 64;
+/// flash_bf16_mma_prefill_tiled_hc (its norm != 0 form fills it; the planes form fits): two
+/// stages of A planes 16 KiB + B 16 KiB + the FP32 A tile 16 KiB + its 64 norm weights (256 bytes).
+pub const FLASH_BF16_PREFILL_ROWS_SHARED: usize = 2 * (3 * 16384 + 256);
 /// Feature slices per prompt HC up CTA (flash_next_hc_up_tiled; H/32 = 80 is a multiple).
 pub const FLASH_HC_UP_SLICES: usize = 1;
 pub const FLASH_BF16_WIDE_STAGE: usize = TERMS * 8192 + 4096;
 pub const FLASH_BF16_WIDE_SHARED: usize = 3 * FLASH_BF16_WIDE_STAGE;
 const _: () = assert!(TERMS == 2 && FLASH_BF16_WIDE_SHARED <= 101376 && FLASH_BF16_MMA_SHARED <= 101376
-    && FLASH_BF16_PREFILL_TILED_SHARED <= 101376);
+    && FLASH_BF16_PREFILL_TILED_SHARED <= FLASH_BF16_PREFILL_ROWS_SHARED && FLASH_BF16_PREFILL_ROWS_SHARED <= 101376);
 pub const fn flash_bf16_decode_split(rows: usize, cols: usize) -> bool {
     rows < 1024 && cols > 512 || cols == 320 && rows >= 1024
 }

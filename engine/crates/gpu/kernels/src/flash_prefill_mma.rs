@@ -89,23 +89,26 @@ unsafe fn bar_wait(bar: u32, parity: u32) {
         }
     }
 }
+/// ROWS: the caller copies A as FP32 rows (tile_hc), so only B is staged here.
 #[inline(always)]
-unsafe fn stage<const TAIL: bool>(p: Bf16Rows, sh: u32, mt: usize, nt: usize, k: usize, tid: usize) {
+unsafe fn stage<const TAIL: bool, const ROWS: bool>(p: Bf16Rows, sh: u32, mt: usize, nt: usize, k: usize, tid: usize) {
     let kt = p.cols as usize / 16;
-    unroll!(2, step, {
-        let i = tid + step * 256;
-        let row = mt + i / 128;
-        let valid = row * 16 < p.tokens as usize;
-        let at = ((row * kt + k + i % 128 / 32) * 32 + i % 32) * 4;
-        unroll!(2, plane, {
-            let x = (p.input as *const u32).add(if valid {
-                at + plane * p.input_plane_words as usize
-            } else {
-                0
+    if !ROWS {
+        unroll!(2, step, {
+            let i = tid + step * 256;
+            let row = mt + i / 128;
+            let valid = row * 16 < p.tokens as usize;
+            let at = ((row * kt + k + i % 128 / 32) * 32 + i % 32) * 4;
+            unroll!(2, plane, {
+                let x = (p.input as *const u32).add(if valid {
+                    at + plane * p.input_plane_words as usize
+                } else {
+                    0
+                });
+                copy(sh + (plane * PLANE + i * 16) as u32, x, valid);
             });
-            copy(sh + (plane * PLANE + i * 16) as u32, x, valid);
         });
-    });
+    }
     unroll!(4, step, {
         let i = tid + step * 256;
         let row = nt + i / 64;
@@ -182,16 +185,19 @@ fn plan(p: Bf16Rows, mt: usize, groups: impl Fn(usize) -> usize, tid: usize) -> 
     });
     Plan { a, b }
 }
+/// ROWS: as in `stage`, B only.
 #[inline(always)]
-unsafe fn stage_plan(p: Bf16Rows, plan: &Plan, sh: u32, k: usize, tid: usize) {
+unsafe fn stage_plan<const ROWS: bool>(p: Bf16Rows, plan: &Plan, sh: u32, k: usize, tid: usize) {
     let (input, plane) = (p.input as *const u32, p.input_plane_words as usize);
-    unroll!(2, step, {
-        let i = tid + step * 256;
-        let at = plan.a[step].map_or(0, |a| a + k * 128);
-        unroll!(2, half, {
-            copy(sh + (half * PLANE + i * 16) as u32, input.add(at + half * plane * usize::from(plan.a[step].is_some())), plan.a[step].is_some());
+    if !ROWS {
+        unroll!(2, step, {
+            let i = tid + step * 256;
+            let at = plan.a[step].map_or(0, |a| a + k * 128);
+            unroll!(2, half, {
+                copy(sh + (half * PLANE + i * 16) as u32, input.add(at + half * plane * usize::from(plan.a[step].is_some())), plan.a[step].is_some());
+            });
         });
-    });
+    }
     unroll!(4, step, {
         let i = tid + step * 256;
         let dst = sh + (2 * PLANE + i * 16) as u32;
@@ -282,8 +288,8 @@ unsafe fn tile<const TAIL: bool>(p: Bf16Rows, mt: usize, nt: usize, tid: usize) 
     // others keep the inline first-matrix addressing.
     let tail = if TAIL { Some(plan(p, mt, |g| nt + g, tid)) } else { None };
     let issue = |sh: u32, k: usize| match &tail {
-        Some(plan) => stage_plan(p, plan, sh, k, tid),
-        None => stage::<false>(p, sh, mt, nt, k, tid),
+        Some(plan) => stage_plan::<false>(p, plan, sh, k, tid),
+        None => stage::<false, false>(p, sh, mt, nt, k, tid),
     };
     // A tail tile with one live N8 tile (the MoE shared gate's row): only its warps' first
     // fragments compute, without a per-fragment branch in the K16 loop.
@@ -325,8 +331,13 @@ unsafe fn write_pair(p: Bf16Rows, value: Acc, token: usize, row: usize) {
 /// features) leave as flash_next_hc_activate's SiLU(x/4), written only as the HC up operand's
 /// dense hi/lo planes at p.output (K = rows, flash_bf16_input's layout; rows past M are left
 /// unwritten, so M % 16 == 0); the second matrix (HC injection) stays FP32 rows.
+/// norm != 0: p.input is the FP32 residual [M][cols] and A is formed in shared memory, not read
+/// from the norm's packed planes: `scales` = the norm's scales [M][4] (flash_next_hc_add_norm
+/// with scales != 0), `norm` = its F32 weights [cols]. Each A word is the norm's: residual *
+/// scale * (1 + weight) in that order, then split2_pair, so every output keeps its K16 graph.
+/// Dynamic shared FLASH_BF16_PREFILL_ROWS_SHARED (it covers both forms).
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn flash_bf16_mma_prefill_tiled_hc(p: Bf16Rows) {
+pub unsafe extern "ptx-kernel" fn flash_bf16_mma_prefill_tiled_hc(p: Bf16Rows, scales: u64, norm: u64) {
     let tid = _thread_idx_x() as usize;
     let (mut mi, mut ni) = (_block_idx_x() as usize, _block_idx_y() as usize);
     let mt_count = (p.tokens as usize).div_ceil(64);
@@ -348,23 +359,109 @@ pub unsafe extern "ptx-kernel" fn flash_bf16_mma_prefill_tiled_hc(p: Bf16Rows) {
         ni = within / rows;
     }
     let (mt, nt) = (mi * 4, ni * 16);
-    if (nt + 16) * 8 > p.rows as usize {
-        tile_hc::<true>(p, mt, nt, tid);
+    let tail = (nt + 16) * 8 > p.rows as usize;
+    if norm != 0 {
+        if tail {
+            tile_hc::<true, true>(p, scales, norm, mt, nt, tid);
+        } else {
+            tile_hc::<false, true>(p, scales, norm, mt, nt, tid);
+        }
+    } else if tail {
+        tile_hc::<true, false>(p, scales, norm, mt, nt, tid);
     } else {
-        tile_hc::<false>(p, mt, nt, tid);
+        tile_hc::<false, false>(p, scales, norm, mt, nt, tid);
     }
 }
+/// One ROWS stage of tile_hc: the A planes and B as in `stage`, then the FP32 A tile
+/// [64 tokens][64 K] (16-byte chunks XOR-swizzled by token % 8), then the stage's 64 norm weights.
+const ROWS_A: usize = STAGE;
+const ROWS_W: usize = STAGE + 16384;
+const ROWS_STAGE: usize = ROWS_W + 256;
+const _: () = assert!(2 * ROWS_STAGE == crate::kernel_params::FLASH_BF16_PREFILL_ROWS_SHARED);
 #[inline(always)]
-unsafe fn tile_hc<const TAIL: bool>(p: Bf16Rows, mt: usize, nt: usize, tid: usize) {
+unsafe fn tile_hc<const TAIL: bool, const ROWS: bool>(p: Bf16Rows, scales: u64, norm: u64, mt: usize, nt: usize, tid: usize) {
     let (lane, warp) = (tid % 32, tid / 32);
     let (wm, wn) = (warp / 4 * 2, warp % 4 * 4);
     // Tail tiles stage from a copy plan computed once (second-matrix sources); the
     // others keep the inline first-matrix addressing.
     let tail = if TAIL { Some(plan(p, mt, |g| nt + g, tid)) } else { None };
-    let out = product::<3>(p, tid, |sh: u32, k: usize| match &tail {
-        Some(plan) => stage_plan(p, plan, sh, k, tid),
-        None => stage::<false>(p, sh, mt, nt, k, tid),
-    });
+    let issue = |sh: u32, k: usize| {
+        if ROWS {
+            // Token mt * 16 + r, 16-byte chunk c of the stage's 64 K at chunk c ^ (r % 8) of row
+            // r (zero-filled past the tokens); then the 64 norm weights of those K, four bytes
+            // each (the weights need no 16-byte alignment).
+            unroll!(4, step, {
+                let i = tid + step * 256;
+                let (r, c) = (i / 16, i % 16);
+                let token = mt * 16 + r;
+                let valid = token < p.tokens as usize;
+                let at = if valid { token * p.cols as usize + k * 16 + c * 4 } else { 0 };
+                copy(sh + (ROWS_A + (r * 16 + (c ^ (r % 8))) * 16) as u32, (p.input as *const u32).add(at), valid);
+            });
+            if tid < 64 {
+                copy4(sh + (ROWS_W + tid * 4) as u32, (norm as *const u32).add(k * 16 + tid), true);
+            }
+        }
+        match &tail {
+            Some(plan) => stage_plan::<ROWS>(p, plan, sh, k, tid),
+            None => stage::<false, ROWS>(p, sh, mt, nt, k, tid),
+        }
+    };
+    // ROWS: the stage's A planes from its FP32 tile, word for word as flash_next_hc_add_norm
+    // packs them: chunk i = (M16 tile i / 128, K16 tile i % 128 / 32, lane i % 32) holds words
+    // (t; c, c+1), (t + 8; c, c+1), (t; c+8, c+9), (t + 8; c+8, c+9) of both planes.
+    let convert = |sh: u32, k: usize| {
+        let group = p.cols as usize / 4;
+        let (a32, w32) = (sh + ROWS_A as u32, sh + ROWS_W as u32);
+        unroll!(2, step, {
+            let i = tid + step * 256;
+            let (m, kk, g, q) = (i / 128, i % 128 / 32, i % 32 / 4, i % 4);
+            let r = m * 16 + g;
+            let token = mt * 16 + r;
+            let (mut hi, mut lo) = ([0u32; 4], [0u32; 4]);
+            // M % 16 == 0: row t + 8 is live with row t.
+            if token < p.tokens as usize {
+                let (local, c) = (kk * 16 + q * 2, (k + kk) * 16 + q * 2);
+                let stream = c / group;
+                let (w0, w1) = (ptx::load2(w32 + (local * 4) as u32), ptx::load2(w32 + ((local + 8) * 4) as u32));
+                let weight = [w0[0], w0[1], w1[0], w1[1]].map(f32::from_bits);
+                let mut a = [[0.0f32; 4]; 2];
+                unroll!(2, half, {
+                    let row = r + half * 8;
+                    let scale = *(scales as *const f32).add((token + half * 8) * 4 + stream);
+                    let at = |x: usize| a32 + ((row * 16 + ((x / 4) ^ (row % 8))) * 16 + x % 4 * 4) as u32;
+                    let v = [ptx::load2(at(local)), ptx::load2(at(local + 8))];
+                    let v = [f32::from_bits(v[0][0]), f32::from_bits(v[0][1]), f32::from_bits(v[1][0]), f32::from_bits(v[1][1])];
+                    let mut j = 0;
+                    while j < 4 {
+                        a[half][j] = v[j] * scale * (1.0 + weight[j]);
+                        j += 1;
+                    }
+                });
+                (hi[0], lo[0]) = crate::gemm::split2_pair(a[0][0], a[0][1]);
+                (hi[1], lo[1]) = crate::gemm::split2_pair(a[1][0], a[1][1]);
+                (hi[2], lo[2]) = crate::gemm::split2_pair(a[0][2], a[0][3]);
+                (hi[3], lo[3]) = crate::gemm::split2_pair(a[1][2], a[1][3]);
+            }
+            let at = sh + (i * 16) as u32;
+            asm!("st.shared.v4.b32 [{p}], {{{a}, {b}, {c}, {d}}};", p = in(reg32) at,
+                a = in(reg32) hi[0], b = in(reg32) hi[1], c = in(reg32) hi[2], d = in(reg32) hi[3]);
+            asm!("st.shared.v4.b32 [{p}], {{{a}, {b}, {c}, {d}}};", p = in(reg32) at + PLANE as u32,
+                a = in(reg32) lo[0], b = in(reg32) lo[1], c = in(reg32) lo[2], d = in(reg32) lo[3]);
+        });
+    };
+    let out = if ROWS {
+        // product_hc's two stages, both issued first (an empty group when K has one stage).
+        issue(0, 0);
+        if p.cols as usize / 16 > 4 {
+            issue(ROWS_STAGE as u32, 4);
+        } else {
+            ptx::commit();
+        }
+        product_hc::<true>(p, tid, issue, convert)
+    } else {
+        product::<3>(p, tid, issue)
+    };
     unroll!(2, i, {
         unroll!(4, j, {
             let (token, col) = ((mt + wm + i) * 16 + lane / 4, (nt + wn + j) * 8 + lane % 4 * 2);
@@ -568,7 +665,7 @@ pub unsafe extern "ptx-kernel" fn flash_next_hc_up_tiled(p: Bf16Rows, normalized
             a = in(reg64) (_block_idx_x() as usize * 4) as u64, b = in(reg64) (nj * slices + r) as u64);
         let (mt, ni) = (mt as usize, ni as usize);
         let issue = |sh: u32, k: usize| stage_hc_up(p, sh, mt, ni, k, tid);
-        let gates = if ring { product::<3>(p, tid, issue) } else { product_hc(p, tid, issue) };
+        let gates = if ring { product::<3>(p, tid, issue) } else { product_hc::<false>(p, tid, issue, |_, _| {}) };
         // Every reader of the stage buffers retires before the next slice refills them.
         ptx::sync();
         unroll!(2, i, {
@@ -660,8 +757,11 @@ pub unsafe extern "ptx-kernel" fn flash_next_hc_up_tiled(p: Bf16Rows, normalized
 /// product::<2> for prompt HC up with stages 0 and 1 already issued (stage s in buffer s % 2):
 /// stage 0 computes while stage 1 may still land; from stage 1 on, the refill of stage s + 1
 /// follows the barrier that retires stage s - 1's readers, as in product.
+/// ROWS (tile_hc on the residual rows): stages of ROWS_STAGE bytes; after each stage's barrier
+/// `convert(sh, t)` forms the stage's A planes and a second barrier publishes them.
 #[inline(always)]
-unsafe fn product_hc(p: Bf16Rows, tid: usize, issue: impl Fn(u32, usize)) -> [[Acc; 4]; 2] {
+unsafe fn product_hc<const ROWS: bool>(p: Bf16Rows, tid: usize, issue: impl Fn(u32, usize), convert: impl Fn(u32, usize)) -> [[Acc; 4]; 2] {
+    let size = if ROWS { ROWS_STAGE } else { STAGE };
     let (lane, warp) = (tid % 32, tid / 32);
     let (wm, wn) = (warp / 4 * 2, warp % 4 * 4);
     let kt = p.cols as usize / 16;
@@ -680,9 +780,13 @@ unsafe fn product_hc(p: Bf16Rows, tid: usize, issue: impl Fn(u32, usize)) -> [[A
                     }
                     ptx::sync();
                     if s > 0 && t + 4 < kt {
-                        issue(((s + 1) % 2 * STAGE) as u32, t + 4);
+                        issue(((s + 1) % 2 * size) as u32, t + 4);
                     }
-                    current = s % 2 * STAGE;
+                    current = s % 2 * size;
+                    if ROWS {
+                        convert(current as u32, t);
+                        ptx::sync();
+                    }
                 }
                 let a = current + wm * 2048 + t % 4 * 512 + lane * 16;
                 let b = current + 2 * PLANE + wn * 1024 + t % 4 * 256 + lane * 8;
@@ -837,7 +941,7 @@ pub unsafe extern "ptx-kernel" fn flash_next_hc_up_tiled_a16(p: Bf16Rows, normal
             a = in(reg64) (_block_idx_x() as usize * 4) as u64, b = in(reg64) (nj * slices + r) as u64);
         let (mt, ni) = (mt as usize, ni as usize);
         let issue = |sh: u32, k: usize| stage_hc_up(p, sh, mt, ni, k, tid);
-        let gates = if ring { product::<3>(p, tid, issue) } else { product_hc(p, tid, issue) };
+        let gates = if ring { product::<3>(p, tid, issue) } else { product_hc::<false>(p, tid, issue, |_, _| {}) };
         // Every reader of the stage buffers retires before the next slice refills them.
         ptx::sync();
         unroll!(2, i, {

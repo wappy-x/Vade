@@ -1096,12 +1096,13 @@ impl<'w> Hc<'w> {
             // HC up operand's planes in low's own words, offered to its pack.
             let hc_planes = tokens >= TILED_HC_UP_ROWS && tokens.is_multiple_of(16) && tokens <= HcScratch::workspace_tokens()
                 && rows.iter().all(|r| r.0.is_multiple_of(16));
-            // Fused prompt tiles whose HC down reads the planes and whose HC up is tiled: the norm
-            // writes its scales into u and HC up forms the streams from the residual rows.
+            // Fused prompt tiles whose HC down is tiled and whose HC up is tiled: the norm writes
+            // only the residual rows and its scales into u; HC down forms its planes and HC up
+            // the streams from them.
             let on_read = fused.is_some() && prepacked.is_some() && hc_planes;
             if let (Some((block, finish)), Some(packed)) = (fused, prepacked) {
                 let mut p = spark_gpu_probe::kernel_params::FlashHcAddNorm { residual: r, block, gates: injection,
-                    weight: self.norm, output: u, packed, scales: if on_read { u } else { 0 } };
+                    weight: self.norm, output: u, packed: if on_read { 0 } else { packed }, scales: if on_read { u } else { 0 } };
                 unsafe {
                     match finish {
                         // One CTA per token pair (t, t + 8) of each 16-row group.
@@ -1128,12 +1129,15 @@ impl<'w> Hc<'w> {
                     &mut [(&mut p as *mut FlashHcNorm).cast()])?; }
             }
             if let (true, Some(packed)) = (hc_planes, prepacked) {
-                let mut p = row_params(packed, W, tokens, rows[1], rows[0], true, false);
+                // on_read: the same A words, formed from the residual rows, the scales and the
+                // norm weights; otherwise the norm's packed planes (scales and weights 0).
+                let mut p = row_params(if on_read { r } else { packed }, W, tokens, rows[1], rows[0], true, false);
+                let (mut scales, mut weight) = if on_read { (u, self.norm) } else { (0u64, 0u64) };
                 unsafe {
                     b.launch_flash_rows("flash_bf16_mma_prefill_tiled_hc", tokens.div_ceil(64) as u32,
                         (LOW + rows[0].2).div_ceil(128) as u32, 256,
-                        spark_gpu_probe::kernel_params::FLASH_BF16_PREFILL_TILED_SHARED as u32,
-                        &mut [(&mut p as *mut Bf16Rows).cast()])?;
+                        spark_gpu_probe::kernel_params::FLASH_BF16_PREFILL_ROWS_SHARED as u32,
+                        &mut [(&mut p as *mut Bf16Rows).cast(), (&mut scales as *mut u64).cast(), (&mut weight as *mut u64).cast()])?;
                 }
                 b.offer_dense_planes(low, LOW, tokens, low);
             } else {

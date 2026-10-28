@@ -400,7 +400,7 @@ fn fixture(g: &mut Gpu, c: &Case, order: bool) -> Result<Fixture> {
     if c.kind == 13 {
         return mxgroup_fixture(g, c, order);
     }
-    if (60..=69).contains(&c.kind) && c.kind != 63 {
+    if ((60..=69).contains(&c.kind) && c.kind != 63) || c.kind == 74 {
         return prompt::fixture(g, c);
     }
     if c.kind == 9 || c.kind == 10 {
@@ -1006,7 +1006,7 @@ fn launch(g: &Gpu, f: H, merge: H, c: &Case, v: &mut Fixture, i: usize, arm: usi
             ptr(&mut t.tokens), ptr(&mut t.stride), ptr(&mut t.slow)]);
     }
     // An arm whose module exports <KERNEL>_SHARED launches with its own dynamic shared bytes.
-    if (60..=69).contains(&c.kind) {
+    if (60..=69).contains(&c.kind) || c.kind == 74 {
         return prompt::launch(g, f, merge, c, v, i, arm, shared);
     }
     if c.kind == 12 {
@@ -1232,7 +1232,7 @@ pub(super) fn run(o: &Options, cases: &[Case]) -> Result<()> {
         if c.kind == 9 || c.kind == 10 || c.kind == 12 {
             v.pack = g.function(modules[0], "flash_bf16_input")?;
         }
-        let prompt_functions = if (60..=69).contains(&c.kind) { prompt::prepare(&mut g, modules, c, &mut v)? } else { None };
+        let prompt_functions = if (60..=69).contains(&c.kind) || c.kind == 74 { prompt::prepare(&mut g, modules, c, &mut v)? } else { None };
         if c.kind == 35 || c.kind == 31 { qsa::chains(&g, c, modules[1], v.qsa.as_mut().ok_or("QSA fixture")?)?; }
         if c.kind == 36 { qsa::ssm_chain(&g, modules[1], v.qsa.as_mut().ok_or("QSA fixture")?)?; }
         let times = g.alloc(16)?;
@@ -1292,11 +1292,12 @@ pub(super) fn run(o: &Options, cases: &[Case]) -> Result<()> {
                 check((g.d.func_attr)(functions[1], 8, 101_376))?;
             }
         }
-        if v.shared > 48 * 1024 {
-            for f in functions {
+        // The arms' entries, then any helper launch above 48 KiB (prompt::extra_shared).
+        for (f, bytes) in functions.into_iter().map(|f| (f, v.shared)).chain(prompt::extra_shared(c, &v)) {
+            if bytes > 48 * 1024 {
                 // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, as the engine sets it.
                 unsafe {
-                    check((g.d.func_attr)(f, 8, v.shared as i32))?;
+                    check((g.d.func_attr)(f, 8, bytes as i32))?;
                 }
             }
         }
@@ -1433,7 +1434,7 @@ pub(super) fn run(o: &Options, cases: &[Case]) -> Result<()> {
             let cv = (e.iter().map(|v| (v - avg).powi(2)).sum::<f64>() / e.len() as f64).sqrt() / avg * 100.;
             let (stored, basis) = if matches!(c.kind,71..=73) {(v.stored,fp8group::basis())} else {super::floor::account(c, arm, v.stored)};
             let bw = stored as f64 / mid / 1000.;
-            let floor = (stored as f64 / (std::env::var("KBENCH_READ_GBPS").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(230.) * 1000.)).max(if prefill(c.kind) || (60..=69).contains(&c.kind) { v.flops as f64 / 90e6 } else { 0. });
+            let floor = (stored as f64 / (std::env::var("KBENCH_READ_GBPS").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(230.) * 1000.)).max(if prefill(c.kind) || (60..=69).contains(&c.kind) || c.kind == 74 { v.flops as f64 / 90e6 } else { 0. });
             let pct = floor / mid * 100.;
             println!(
                 concat!(

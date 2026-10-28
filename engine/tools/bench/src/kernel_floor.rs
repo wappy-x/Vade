@@ -37,6 +37,7 @@ pub(super) fn account(c: &Case, arm: usize, legacy: usize) -> (usize, String) {
         32 => "FP32 index query + pooled keys + scores",
         33 => "FP32 gather: selected 1024-byte rows per KV head and token",
         40..=45 => "FP32 q/k/v/output + beta/g + state read/write per piece + metadata",
+        74 => "X as stored: FP32 residual restore + HC norm (residual, block in; residual, scales out) + HC down (FP32 residual, scales, BF16 weights in; low planes, injection out)",
         9 | 10 => "legacy BF16 floor: 2 B/elem x N x K + FP32 input + reserved packed input + FP32 output",
         _ => "legacy BF16 floor: 2 B/elem x N x K + reserved packed input + FP32 output + head/HC scratch",
     }.to_owned());

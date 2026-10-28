@@ -559,7 +559,9 @@ pub unsafe extern "ptx-kernel" fn flash_hc_norm_f32(p: crate::kernel_params::Fla
 /// Warp w forms row (t0 + 8(w / 4), stream w % 4) exactly as add_norm does; then every lane
 /// writes whole outputs and hi/lo chunks of both rows. scales != 0: each row's scale goes to
 /// scales[token * 4 + stream] and the normalized output is not written (prompt HC up forms it
-/// from the residual, flash_next_hc_up_tiled with residual != 0).
+/// from the residual, flash_next_hc_up_tiled with residual != 0); with packed == 0 too, the
+/// residual rows and the scales are all it writes (HC down forms the planes from them,
+/// flash_bf16_mma_prefill_tiled_hc with norm != 0).
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_next_hc_add_norm(p: crate::kernel_params::FlashHcAddNorm, rows: u32) {
     let b = core::arch::nvptx::_block_idx_y() as usize;
@@ -606,6 +608,8 @@ unsafe fn add_norm_pair(p: crate::kernel_params::FlashHcAddNorm, rows: usize, bl
             }
         }
     }
+    // Scales and no planes (flash_bf16_mma_prefill_tiled_hc with norm != 0 forms them): nothing more to write.
+    if p.scales != 0 && p.packed == 0 { return; }
     crate::ptx::sync();
     let kt = groups * group / 16;
     let plane = rows.div_ceil(16) * kt * 128;

@@ -5,6 +5,12 @@ Changes that are merged but not yet released are under Unreleased.
 
 ## Unreleased
 
+- Long prompts move fewer bytes in the hyper-connection mix. On fused prompt
+  tiles, the norm no longer writes the BF16 hi/lo copy of the four residual
+  streams (4 x 2560 features x 2 planes x 2 bytes = 40,960 bytes per token);
+  the HC down projection forms the same words from the residual rows instead.
+  Token IDs do not change. (own-read-scale)
+
 - When enabled, the Flash-Next prefix cache can use free memory that an empty
   spare-buffer reserve has not allocated. Cache retention still yields to live
   requests and physical memory pressure.

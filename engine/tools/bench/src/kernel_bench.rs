@@ -633,6 +633,21 @@ fn cases() -> Vec<Case> {
             ..Default::default()
         });
     }
+    // kind 74 (pgr-: prompt GEMM on the residual rows): prompt HC norm + HC down (low 320 +
+    // injection 4), main's norm planes through memory vs the scales-only norm and
+    // flash_bf16_mma_prefill_tiled_hc with norm != 0; all bytes A==X.
+    for m in [2048, 64, 4096] {
+        out.push(Case {
+            name: if m == 2048 { "pgr-hc".into() } else { format!("pgr-hc-m{m}") },
+            kernel: "flash_bf16_mma_prefill_tiled_hc",
+            m,
+            n: 324,
+            k: 10240,
+            kind: 74,
+            mats: [320, 4, 0, 0],
+            ..Default::default()
+        });
+    }
     // Production HC entry in both arms; includes identical residual reset overhead.
     // Opt-in diagnostic cases avoid changing the historical emulation cases.
     if std::env::var("KBENCH_HCNORM_PRODUCTION").is_ok_and(|v| v == "1") {
@@ -885,8 +900,11 @@ fn run() -> Result<()> {
                 + 8
                 + 39 // FP8 grouped decode and prompt gate fixtures.
                 + 1 // Plain C1 route and shared-input pack.
+                + 3 // pgr-hc M2048 / M64 / M4096 (kind 74).
                 ;
             assert_eq!(cases().len(), expect);
+            // --case selects by name: every name names one case.
+            assert_eq!(cases().iter().map(|c| c.name.as_str()).collect::<std::collections::BTreeSet<_>>().len(), expect);
             println!("PASS host SHA/statistics/shape self-test; GPU A==A requires --a PTX --x SAME_PTX");
             return Ok(());
         }
