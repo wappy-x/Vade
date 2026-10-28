@@ -9,6 +9,7 @@ model checks them in one pass.
 
 This page walks through checking a change on your own computer, the house
 rules, what exactness asks of engine changes, and how to send a pull request.
+[Local CI](docs/ci.md) gives the current CI status and public host commands.
 [AGENTS.md](AGENTS.md) has the full rules and every CI command; read it before
 you change code. The [glossary](docs/GLOSSARY.md) explains the terms used
 here.
@@ -94,9 +95,10 @@ It is part of the maintainers' private lab, so it is not in this repository.
 Contributors can run the commands on this page and the full host checks in
 [AGENTS.md](AGENTS.md). Keep the logs with the commit ID in the PR.
 
-A `ci-local` pass is part of the proof. It does not replace the checks in
-[CI](.github/workflows/ci.yml) or the Spark gate below. If the source changes
-after a check, run the affected checks on the new commit.
+A `ci-local` pass is part of the proof. It does not cover every check in the
+[workflow](.github/workflows/ci.yml) or the Spark gate below.
+[Local CI](docs/ci.md) lists the script's steps and omissions. If the source
+changes after a check, run the affected checks on the new commit.
 
 ### Build the CLI
 
@@ -230,8 +232,10 @@ Unreleased section of [CHANGELOG.md](CHANGELOG.md).
 
 ### How a pull request lands
 
-1. **CI passes.** [CI](.github/workflows/ci.yml) runs the host checks above
-   on every pull request against `main`. A red run blocks the change.
+1. **Host checks pass.** The [workflow](.github/workflows/ci.yml) defines
+   GitHub checks for pull requests against `main`. If account limits stop a
+   job before it starts, use the committed-revision logs and the additional
+   checks in [Local CI](docs/ci.md). A failed build or test blocks the change.
 2. **A maintainer reviews it.** [CODEOWNERS](.github/CODEOWNERS) requests
    the review automatically. Expect questions about exactness, the house
    rules and anything the PR says it didn't check.

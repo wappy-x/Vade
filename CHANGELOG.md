@@ -47,6 +47,10 @@ Changes that are merged but not yet released are under Unreleased.
 
 ### Repository tools
 
+- The README states that CI runs locally. A new CI guide gives public host
+  build and test commands and explains the private CI script's coverage.
+- The security policy states which engine routes local gateway callers can
+  reach. It lists access refusals and host tests for the gateway checks.
 - The README states the engine's scope and limits. Contribution and security
   guides explain the proof and report steps. Issue forms ask for checkpoint
   details and token IDs. Agent rules now state the same proof and writing

@@ -1,5 +1,7 @@
 # Vade
 
+CI: local, see [docs/ci.md](docs/ci.md).
+
 Vade runs a large language model on your own NVIDIA DGX Spark. You get a
 coding agent in your terminal, a plain chat and an OpenAI-compatible API.
 
