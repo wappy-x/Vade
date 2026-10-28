@@ -170,7 +170,10 @@ arithmetic, scheduling, caching or transport must pass a gate on real hardware
 before they merge: run the change at least three times, and compare the
 results across at least two Sparks with the same setup. If you have one
 Spark, run the repeats on it and say so in the PR. The change can't merge
-until the comparison on a second Spark is done.
+until the comparison on a second Spark is done. One exception: a gated change
+rebased onto a moved main can merge on its gate with an identical patch,
+disjoint files and a passing pre-merge screen on the Sparks (see
+[Which proof a change needs](#exactness-and-evidence)).
 
 - If your change leaves the arithmetic order alone, it must keep main's
   results: the same token IDs.
@@ -181,10 +184,48 @@ until the comparison on a second Spark is done.
   against main and reviewed updates to any goldens (saved reference answers)
   that change. An ID change needs the project owner's approval before merge.
 
-Run the Spark proof on the exact commit that will merge. Keep the token ID
-arrays, the requests and the effective settings in its receipts. Show the
-result of each comparison, including failed or missing checks. The card must
-cover the change's affected cases as well as the required exactness cases.
+Run the Spark proof on the exact commit that will merge, except in cases 1
+and 2 below. Keep the token ID arrays, the requests and the effective settings
+in its receipts. Show the result of each comparison, including failed or
+missing checks. The card must cover the change's affected cases as well as the
+required exactness cases.
+
+Which proof a change needs:
+
+1. **A docs-only change needs no device proof.** A change is docs-only when
+   every file it changes is a Markdown or plain-text page that no build, test,
+   CI job or script reads. Files such as `rust-toolchain.toml`, CI files,
+   build scripts and shell scripts are executable changes, also when they are
+   text.
+2. **An engine change that was gated and then rebased onto a moved main can
+   merge on that gate only when all three of these conditions are true:**
+   - The patch is identical. `git range-diff <gate base>..<proved commit>
+     <new main>..<rebased commit>` shows each commit as `=`.
+   - The files are disjoint. No file that the change touches is in
+     `git diff --name-only <gate base> <new main>`.
+   - The rebased commit passes a screen on the Sparks before it merges: the
+     first-token cells at 8K and 32K and one round of the card cells. Each
+     cell must stay inside the band, and the token IDs must be identical to
+     the gated run.
+
+   If the screen fails, run the full gate on the rebased commit. After the
+   merge, a full confirm card runs on the merged main within one hour. If the
+   confirm card fails, or does not run within the hour, the merge is reverted.
+3. **Any other change needs the full gate.** Rebase it and run the Spark proof
+   again on the rebased commit.
+
+The band is 0.8 % per cell against the A arms of the gate's A X X A block: a
+cell passes when it is at most 0.8 % slower than the A value of that cell.
+The gate card records the A value of each cell, so the limits are known before
+the screen and the confirm card run. Token IDs must be identical in every run.
+
+The gate base is the main commit that the proof compared against. Each card
+and host log names the revision that it tested. Do not relabel old evidence
+as a new run. For a merge under case 2, the gate card names the gated
+(proved) commit, and the screen and the confirm card name the revisions that
+they tested. The merge record lists the proved commit, the gate base, the new
+main, the rebased commit, the range-diff output, the two file lists, the gate
+card, the screen and the confirm card.
 
 ### Tools for the checks
 
@@ -242,7 +283,11 @@ Unreleased section of [CHANGELOG.md](CHANGELOG.md).
 3. **Engine changes pass the device gate.** A change to engine arithmetic,
    scheduling, caching or transport also needs the runs on real Sparks
    described under [exactness](#exactness-and-evidence) before it can land.
-   The commit, host logs and Spark card must name the same source revision.
+   The commit, host logs and Spark card name the same source revision. One
+   exception: a gated change rebased onto a moved main can merge on its gate
+   with an identical patch, disjoint files and a passing pre-merge screen on
+   the Sparks; its cards name the revisions they tested (see
+   [exactness](#exactness-and-evidence)).
 4. **The maintainer applies it.** `main` here is published from the
    maintainers' development tree, one commit per update, so the merge
    button isn't used. The maintainer applies the accepted change there, CI

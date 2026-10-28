@@ -9,7 +9,8 @@ Changes that are merged but not yet released are under Unreleased.
   tiles, the norm no longer writes the BF16 hi/lo copy of the four residual
   streams (4 x 2560 features x 2 planes x 2 bytes = 40,960 bytes per token);
   the HC down projection forms the same words from the residual rows instead.
-  Token IDs do not change. (own-read-scale)
+  Token IDs do not change.
+
 - When enabled, the Flash-Next prefix cache can restore a prompt on the tensor
   split. Each rank keeps and restores its own matching state. The layer chain
   still refuses the cache. A second question on a 100K-token chat restores when
@@ -25,7 +26,7 @@ Changes that are merged but not yet released are under Unreleased.
   of the prompt now runs in passes of the whole prompt workspace (4096 rows by
   default) instead of 2048 rows, so the experts run fewer, larger batches. The
   start and the end of the prompt keep 2048-row passes. Shorter prompts read as
-  before. Token IDs do not change. (own-read-profile)
+  before. Token IDs do not change.
 
 - Two Sparks read a cold prompt of 2K to 8K tokens faster. Each Spark reads
   half of the prompt, and the answer stays the same, token for token. In the
@@ -94,7 +95,6 @@ Changes that are merged but not yet released are under Unreleased.
 
 - A one-token decode pass packs the shared expert's input during routing.
   This removes one GPU launch per layer. The math keeps the same order.
-  (own-moe-step)
 
 - **The tensor split is the only two-Spark path, and the engine chooses each
   path itself.** No `VADE_W2_*` switch remains: `VADE_W2_PATH`, `VADE_W2_TP`,
@@ -126,9 +126,9 @@ Changes that are merged but not yet released are under Unreleased.
   exchanges between the Sparks keep their order. Token IDs do not change.
   There is no setting. A first step of each shape, a segment that the graph
   budget cannot fund, or a step that a decode profile reads back from runs
-  eagerly as before. The engine log line `flash_next segment_graph` (before:
-  `flash_next mtp_graph`) now shows `verify=true` or `verify=false`.
-  (own-decode-graph)
+  eagerly as before. The pass-count engine log line `flash_next segment_graph`
+  (before: `flash_next mtp_graph`) now shows `verify=true` or `verify=false`.
+  The deferred-free log line keeps the `flash_next mtp_graph` prefix.
 
 - **Two Sparks run the tensor split by default.** `vade up --sparks 2` now
   runs the tensor split, with every proven level on: both Sparks work on every

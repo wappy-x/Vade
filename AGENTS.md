@@ -55,10 +55,13 @@ setup**. The same request and settings must also give the same IDs across
 supported Spark counts. Similar text is not proof. Greedy decoding is the
 default when a request leaves sampling unspecified. Before you merge a change
 to engine arithmetic, scheduling, caching or transport, run it at least three
-times and compare the results across at least two Sparks. For the same
-request and settings, the answer must not depend on how it ran. Alone,
-batched, cached and chunked runs must all match. Drafting (multi-token
-prediction, MTP) ON and OFF must match too.
+times and compare the results across at least two Sparks. One exception: a
+gated change rebased onto a moved main can merge on its gate with an
+identical patch, disjoint files and a passing pre-merge screen on the Sparks
+(see `CONTRIBUTING.md`, Exactness and evidence). For the same request and
+settings, the answer must not depend on how it ran. Alone, batched, cached
+and chunked runs must all match. Drafting (multi-token prediction, MTP) ON
+and OFF must match too.
 
 Don't introduce floating-point atomics, reductions that depend on arrival
 order, or reduction splits that change with batch size, prompt length or
