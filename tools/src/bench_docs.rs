@@ -177,25 +177,39 @@ fn cell(s: &str) -> String {
     s.replace('&',"&amp;").replace('<',"&lt;").replace('>',"&gt;").replace('|',"&#124;")
         .replace('`',"&#96;").replace(['\n','\r']," ")
 }
-fn render(cards: &[Card]) -> String {
-    let mut out = String::from("\n\n### Latest measured main\n\n| Model | Sparks | Path | Drafting | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) | IDs saved / responses |\n| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
+fn sparks(n: u64) -> String { format!("{n} {}",if n == 1 {"Spark"} else {"Sparks"}) }
+fn table(cards: &[Card]) -> String {
+    let mut out = String::from("| Model | Sparks | Path | Drafting | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) | IDs saved / responses |\n| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
     for c in cards {
         out.push_str(&format!("| {} | {} | {} | {} | {} | {}/{} |\n",cell(&c.model),c.key.0,cell(&c.key.1),
             if c.key.2 {"ON"} else {"OFF"},c.metrics.join(" | "),c.ids,c.responses));
     }
-    out.push_str(&format!("\nMeasured main revision: `{}`.\n",cards[0].sha));
+    out
+}
+const RATES: &str = concat!("Rates are card medians in completion tokens per second. Prose, code and\n",
+    "structured output each use one chat. C1, C4 and C8 give the total rates for\n",
+    "one, four and eight concurrent chats. Cold 8K is the median time to the first\n",
+    "token after an uncached 8192-token prompt. IDs saved counts responses with\n",
+    "recorded token IDs. This count does not prove that the IDs match.\n\n");
+// The README gets the short body; the benchmark page keeps card hashes, finish times and the refresh command.
+fn readme(cards: &[Card]) -> String {
+    let last = cards.iter().max_by_key(|c| c.time).map_or("",|c| &c.finished[..10]);
+    format!(concat!("\n\n### Latest measured main\n\nThese cards measured main revision\n`{}`.\nThe last card finished on {}. They do not measure later engine changes\non main.\n\n{}\n{}",
+        "The [benchmark history](docs/benchmarks.md) gives the card identities,\n",
+        "settings, exactness comparisons, methods, receipt status and limits.\n\n"),cards[0].sha,last,table(cards),RATES)
+}
+fn page(cards: &[Card]) -> String {
+    let mut out = format!("\n\n### Latest measured main\n\n{}\nMeasured main revision: `{}`.\nThese cards do not measure later engine changes on main.\n",table(cards),cards[0].sha);
     for c in cards {
-        out.push_str(&format!("\n{} Sparks, {}, drafting {}: finished `{}`; card SHA256 `{}`.\n",
-            c.key.0,cell(&c.key.1),if c.key.2 {"ON"} else {"OFF"},c.finished,c.hash));
+        out.push_str(&format!("\n{}, {}, drafting {}: finished `{}`; card SHA256 `{}`.\n",
+            sparks(c.key.0),cell(&c.key.1),if c.key.2 {"ON"} else {"OFF"},c.finished,c.hash));
     }
-    out.push_str(concat!("\nRates are card medians in tok/s. C1, C4 and C8 cover all chats together.\n",
-        "Cold 8K is the median time to the first token. IDs saved counts responses\n",
-        "with recorded token IDs. This count does not prove that the IDs match.\n\n",
-        "Only the newest measured revision in main's first-parent history appears.\n",
+    out.push('\n'); out.push_str(RATES);
+    out.push_str(concat!("Only the newest measured revision in main's first-parent history appears.\n",
         "Each row uses the last finished, complete, passing, thinking-OFF card for\n",
         "its Spark count, path and drafting setting. Older revisions do not fill gaps.\n\n",
-        "From the repository root, refresh both tables with this command.\n",
-        "Replace the quoted path with the folder that holds the cards.\n\n```sh\n",
+        "From the repository root, refresh this table and the README table with this\n",
+        "command. Replace the quoted path with the folder that holds the cards.\n\n```sh\n",
         "cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- bench-docs '<cards-dir>' .\n```\n\n",
         "The sections below are historical results. Their dates and revision names\n",
         "apply only to those measurements.\n\n"));
@@ -210,9 +224,9 @@ fn replace(source: &str, body: &str) -> Result<String> {
     Ok(format!("{}{body}{}",&source[..start],&source[end..]))
 }
 pub fn run(cards: &Path, repo: &Path) -> Result<()> {
-    let body = render(&select(cards,repo)?); let mut updates = Vec::new();
+    let cards = select(cards,repo)?; let mut updates = Vec::new();
     // Validate both documents before the first write.
-    for name in ["README.md","docs/benchmarks.md"] {
+    for (name,body) in [("README.md",readme(&cards)),("docs/benchmarks.md",page(&cards))] {
         let path = repo.join(name);
         if !fs::symlink_metadata(&path)?.file_type().is_file() { return Err(format!("document must be a regular file: {name}").into()); }
         let source = fs::read_to_string(&path)?;

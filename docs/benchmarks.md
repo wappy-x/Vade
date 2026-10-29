@@ -18,10 +18,11 @@
 | qwen3.8-flash-next-fp4-local | 4 | pipeline | ON | 42.758 | 81.287 | 101.673 | 65.82 | 145.757 | 192.895 | 2.176 | 66/66 |
 
 Measured main revision: `76977dff88d36a85a8bfeaff6725d169e8a44845`.
+These cards do not measure later engine changes on main.
 
-1 Sparks, local, drafting OFF: finished `2026-10-28T18:43:01.904860+00:00`; card SHA256 `257c5dcf80ed8ad1cdbd266735e3eba7dd9a7ad02e15ae4cf1e55dad3ef3ea54`.
+1 Spark, local, drafting OFF: finished `2026-10-28T18:43:01.904860+00:00`; card SHA256 `257c5dcf80ed8ad1cdbd266735e3eba7dd9a7ad02e15ae4cf1e55dad3ef3ea54`.
 
-1 Sparks, local, drafting ON: finished `2026-10-28T18:36:30.110067+00:00`; card SHA256 `e1f30da8e92d727a5f49c9493b0acdb4a4ea6f86d4937444e7ff4741b7a11221`.
+1 Spark, local, drafting ON: finished `2026-10-28T18:36:30.110067+00:00`; card SHA256 `e1f30da8e92d727a5f49c9493b0acdb4a4ea6f86d4937444e7ff4741b7a11221`.
 
 2 Sparks, ring, drafting OFF: finished `2026-10-28T19:44:41.463006+00:00`; card SHA256 `1ee05800f41f2424e80de00ca1c09dacdc3c899ccbce6cbbc494c2801964f69e`.
 
@@ -39,16 +40,18 @@ Measured main revision: `76977dff88d36a85a8bfeaff6725d169e8a44845`.
 
 4 Sparks, pipeline, drafting ON: finished `2026-10-28T19:17:33.795856+00:00`; card SHA256 `d7c59327f7f1686889a753ccda4ece58d850abf6bc3f482d88a453ef9487ab11`.
 
-Rates are card medians in tok/s. C1, C4 and C8 cover all chats together.
-Cold 8K is the median time to the first token. IDs saved counts responses
-with recorded token IDs. This count does not prove that the IDs match.
+Rates are card medians in completion tokens per second. Prose, code and
+structured output each use one chat. C1, C4 and C8 give the total rates for
+one, four and eight concurrent chats. Cold 8K is the median time to the first
+token after an uncached 8192-token prompt. IDs saved counts responses with
+recorded token IDs. This count does not prove that the IDs match.
 
 Only the newest measured revision in main's first-parent history appears.
 Each row uses the last finished, complete, passing, thinking-OFF card for
 its Spark count, path and drafting setting. Older revisions do not fill gaps.
 
-From the repository root, refresh both tables with this command.
-Replace the quoted path with the folder that holds the cards.
+From the repository root, refresh this table and the README table with this
+command. Replace the quoted path with the folder that holds the cards.
 
 ```sh
 cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- bench-docs '<cards-dir>' .
@@ -62,6 +65,9 @@ apply only to those measurements.
 This page has every speed we have published for Vade, newest first, and how
 to measure your own:
 
+- [Confirm run on main `285fa8a`](#confirm-run-main-285fa8a): two DGX Sparks,
+  drafting ON, the new main against the main before it, after the end-of-day
+  cards.
 - [2026-10-28 end-of-day cards](#current-2026-10-28-end-of-day-main-76977df-home-dgx-sparks):
   one, two and four DGX Sparks at main `76977df`, FP4-Local and FP8,
   drafting ON and OFF, and the second question on a 32K chat with the prefix
@@ -117,14 +123,73 @@ or sentences names its run folder, such as `c139-l32`, `r142-wtT-x1` or
 `eod-wtT-x1`.
 These folders are not in the repository yet either.
 
+<a id="confirm-run-main-285fa8a"></a>
+## Confirm run (main 285fa8a, after the end-of-day cards)
+
+Main `285fa8a` changed the engine after the end-of-day cards at `76977df`.
+With drafting on, two Sparks now keep up to 131,072 prompt rows for the
+drafter. Before, they kept 32,768. The
+[changelog](../CHANGELOG.md) describes the change. The table at the top of
+this page still measures `76977df`. It does not measure `285fa8a`.
+
+A confirm run on 2026-10-28 compared `285fa8a` with the main before it,
+`54392da`. Its record is `2026-10-28_1713_confirm_285fa8a-vs-54392da`. The
+record is not in the repository yet. The run used one pair of home DGX
+Sparks, two Sparks on the tensor split, with drafting ON. It used the RigMark
+card recipe of the end-of-day cards, with five cold 8K prompt runs per server
+start. Each card had its own server start. The four card starts ran in this
+order: `a1` (old main), `x1` (new main), `x2` (new main), `a2` (old main).
+Then a 129,220-token prompt ran on its own server start for each main:
+`t128-x1` (new main), then `t128-a1` (old main).
+
+Card medians per start (rates in tok/s, cold 8K in seconds). The change
+compares the mean of the two new-main starts with the mean of the two
+old-main starts:
+
+| Cell | `a1` old | `a2` old | `x1` new | `x2` new | Change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Prose | 54.862 | 55.015 | 54.378 | 55.014 | -0.44 % |
+| Code | 99.259 | 98.661 | 98.790 | 98.890 | -0.12 % |
+| Structured | 124.354 | 124.763 | 124.225 | 124.630 | -0.11 % |
+| C1 | 64.794 | 64.461 | 64.475 | 64.549 | -0.18 % |
+| C4 | 146.941 | 147.217 | 146.599 | 147.113 | -0.15 % |
+| C8, all rounds | 206.735 | 205.135 | 205.594 | 195.717 | -2.56 % |
+| Cold 8K prompt, first token (s) | 2.183 | 2.182 | 2.167 | 2.181 | 0.39 % less time |
+| Responses with token IDs | 64 | 64 | 64 | 64 | IDs identical in all four starts |
+
+The C8 loss comes from one slow start. In `x2`, the three C8 rounds reached
+177.5, 195.7 and 210.7 tok/s. The other starts had a middle round between
+205.1 and 206.7 tok/s. We have seen this slow-start mode on main before. The
+confirm read also compared C8 on the rounds where all eight chats started
+together: the first outputs of the chats came within 0.5 s of each other.
+It kept 5 of 6 rounds on each main and gave 206.735 tok/s on the old main and
+205.594 on the new main (-0.55 %).
+
+The 129,220-token prompt ran three requests per start: drafting ON, drafting
+OFF, then drafting ON again. Times are seconds to the first token:
+
+| Request | `t128-a1` old | `t128-x1` new | Change |
+| --- | ---: | ---: | ---: |
+| Drafting ON, first and second request | 42.086, 42.094 | 40.426, 40.305 | -4.10 % (means 42.090 and 40.366) |
+| Drafting OFF | 39.659 | 39.700 | +0.10 % |
+
+All six long-prompt replies had the same token IDs, on both mains, with
+drafting ON and OFF.
+
+Limits of this run:
+
+- One pair, two starts per main for the card, and one start per main for the
+  long prompt. This is a check that nothing got worse, not a full card.
+- The records of this run are not in the repository yet.
+
 ## Current (2026-10-28 end of day, main 76977df, home DGX Sparks)
 
-These cards ran at main `76977df`. It changes only documentation after
-`9d2ec6c` (#142), so the engine is the same as in the cards after #142. Every
-card ran the prebuilt payload of `76977df` (flash-serve `4dedff9d`, PTX
-`4288b2a8`), with context 32768, greedy decoding, thinking OFF and no
-`VADE_` name at any server start. Each card passed its **15/15** basic output
-checks and had its own server start. Drafting OFF sends `draft: plain` on
+These cards ran at main `76977df`. They do not measure later engine changes
+on main. Main `76977df` changes only documentation after `9d2ec6c`
+(#142), so the engine is the same as in the cards after #142. Every card ran
+the prebuilt payload of `76977df` (flash-serve `4dedff9d`, PTX `4288b2a8`),
+with context 32768, greedy decoding, thinking OFF and no `VADE_` name at
+any server start. Each card passed its **15/15** basic output checks and had its own server start. Drafting OFF sends `draft: plain` on
 every request. The one-Spark cards used `vade install` and
 `vade up --sparks 1` from a bundle of the same payload. The two-Spark and
 four-Spark cards used the lab launcher. FP4-Local used MTP 3 and output 8192.
@@ -1243,6 +1308,205 @@ the same machine.
   establish exactness (identical token IDs on every run and every Spark) or
   model quality. Replay TTFT is an immediate repeat, not proof of a cache hit.
 
+## Summaries moved from the README
+
+These dated summaries were in the README until 2026-10-28. They are kept here
+as they were. Their dates and revision names apply only to those
+measurements.
+
+### One, two and four Sparks, 2026-10-28, end of day
+
+Cards ran at main `76977df` on one, two and four Sparks, with FP4-Local on
+each and FP8 on two and four. The engine is the same as in the cards after
+#142. All ten cards are in the latest measured table above. With drafting
+ON, FP4-Local reached these rates (tok/s, from the cards):
+
+| Sparks | Prose | Code | Structured | C8 | Cold 8K prompt (s) |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 42.0 | 80.5 | 99.9 | 177.5 | 3.76 |
+| 2 | 53.8 | 100.0 | 128.4 | 229.5 | 2.19 |
+| 4 | 42.8 | 81.3 | 101.7 | 192.9 | 2.18 |
+
+On a 32K-token chat with the prefix cache on, the second question took
+0.63 s on one Spark and 0.76 s on two. The full tables are on the
+[benchmarks page](#current-2026-10-28-end-of-day-main-76977df-home-dgx-sparks).
+
+### Two Sparks, 2026-10-28, after #142
+
+Two-Spark cards ran at main `9d2ec6c` (#142). With #142, the prefix cache
+can restore a prompt on both Sparks of the tensor split. The cache is still
+off by default, so these cards measure the default path. The latest
+measured table above shows only the newest measured revision, so it does not
+show these cards. Their token IDs match the `8b7b866` card in 66 of 66
+responses. With drafting ON, every rate is within 0.4 % of that card. With
+drafting OFF, two server starts average within 0.7 % of the `104205a` OFF
+card, and code is 1.3 % faster.
+
+With the cache on, the second question on a 32K-token chat took 0.75 to
+0.77 s instead of 9.98 to 10.01 s. On a 100K-token chat at context 110592,
+it took 1.60 to 1.62 s instead of 31.79 to 31.86 s. The first question took
+0.67 to 1.26 s longer, because the engine saves the prompt state. The full
+tables are on the
+[benchmarks page](#previous-2026-10-28-after-142-main-9d2ec6c-home-dgx-sparks).
+
+### Two Sparks, 2026-10-28, after #139 and #140
+
+One drafting-ON card ran at main `8b7b866` (#140). No drafting-OFF card ran
+at that revision. Its token IDs match the `104205a` card in 66 of 66
+responses, and its rates are within 1 % of that card.
+
+The cards before it ran at main `104205a`, after #139. With #139, eight
+chats reuse their attention arenas. Eight chats with drafting ON reached
+229.6 tok/s, against 217.5 in the morning card (+12.0 tok/s, +5.5 %). With
+drafting OFF, eight chats reached 125.4 against 124.3 on the same pair. The
+other rates are within 1 % of the morning cards. The long-prompt cells and
+the one-Spark prefix-cache cell did not change, and the token IDs match the
+morning cards in 66 of 66 responses. The full tables are on the
+[benchmarks page](#previous-2026-10-28-main-8b7b866-and-104205a-home-dgx-sparks).
+
+### Two Sparks, 2026-10-28
+
+The morning RigMark cards of 2026-10-28 ran at main `bb24e80` on the same two
+pairs and with the same recipe as the final 2026-10-27 cards below. Every
+rate is within 0.9 % of those cards, and the token IDs match them in 66 of 66
+responses. Long prompts read faster: two Sparks now read the middle of a
+prompt of 32K tokens or more in wider passes. With drafting ON, a
+64,217-token prompt reached its first token in 20.04 s instead of 21.06 s,
+and a 129,220-token prompt in 42.47 s. A 32,099-token prompt took 10.03 s,
+as before. The full tables are on the
+[benchmarks page](#previous-2026-10-28-morning-main-bb24e80-home-dgx-sparks).
+
+### Two Sparks, 2026-10-27
+
+`vade up --sparks 2` runs the tensor split by default. You set nothing. The
+final RigMark cards of 2026-10-27 ran on two pairs of our DGX Sparks at main
+`09e1fc4`, with no split settings in the environment, context 32768, greedy
+decoding and thinking OFF. One pair ran drafting ON (the default). The other
+pair ran drafting OFF. Each card had its own server start. The two cards
+match each other in 66 of 66 responses, and they match that morning's cards
+at `12142bb`.
+
+| Two DGX Sparks | Drafting | Prose tok/s | Code tok/s | Structured tok/s | 1 chat tok/s | 4 chats tok/s | 8 chats tok/s | First token, cold 8192-token prompt (s) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Tensor split (the default), home-1 + home-2 | ON | 54.1 | 100.6 | 129.6 | 79.0 | 165.2 | 218.8 | 2.19 |
+| Tensor split (the default), home-3 + home-4 | OFF | 35.2 | 35.4 | 35.1 | 33.8 | 82.6 | 123.9 | 2.17 |
+
+Prose, code and structured are one chat at a time, 5 runs each with an
+8192-token cap. The 1-, 4- and 8-chat rates cover all chats together, 3 rounds
+with a 256-token cap. Structured output is a predictable JSON workload, not a
+measure of general agent performance.
+
+Against that morning's cards, a cold 8K prompt now reaches its first token
+in 2.19 s instead of 2.80 s with drafting ON, and in 2.17 s instead of 2.77 s
+with drafting OFF: each Spark reads half of a cold prompt of 2K to 8K tokens.
+Drafting OFF is faster: on the same pair, one chat wrote code at 35.4 tok/s
+instead of 29.6, and eight chats reached 123.9 instead of 110.8. With
+drafting ON, prose, code and structured output stay within 1 tok/s of the
+morning cards.
+
+Long prompts reach their first token sooner than they did on the 2026-10-26
+builds, for two reasons. The first token no longer waits while the two Sparks
+swap a long prompt's layer state, and that swap now goes GPU to GPU over the
+RDMA link (#114). And the first Spark now reads the second Spark's
+prompt-tile replies as they arrive, so a long prompt from a chat that drafts
+no longer stalls in the middle of the read (#120). On a second start of the
+drafting-ON pair with context 69632, a 32,099-token prompt reached its first
+token in 10.24 s, and a 64,217-token prompt took 21.06 s. The morning cards,
+the drafting-OFF details and the full tables are on the
+[benchmarks page](#current-2026-10-27-final-main-09e1fc4-home-dgx-sparks).
+
+### Two Sparks, 2026-10-26
+
+`vade up --sparks 2` runs the tensor split. These RigMark cards ran on two of
+our DGX Sparks on 2026-10-26, drafting ON (the default), context 32768,
+greedy decoding and thinking OFF. The split row is main `262b0c3` with the
+split's four levels set by hand, the same four that are now the only code. The
+pipeline row is the path two Sparks ran before, measured on main `99e8f62`
+the same afternoon. That path no longer exists: the tensor split is the only
+two-Spark path.
+
+| Two DGX Sparks | Prose tok/s | Code tok/s | Structured tok/s | 1 chat tok/s | 4 chats tok/s | 8 chats tok/s | First token, cold 8192-token prompt (s) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Tensor split (the default) | 54.2 | 100.9 | 130.4 | 76.8 | 161.4 | 220.0 | 2.81 |
+| Layer pipeline (before) | 42.2 | 80.3 | 100.8 | 61.9 | 143.2 | 201.7 | 2.78 |
+
+Prose, code and structured are one chat at a time, 5 runs each with an
+8192-token cap. The 1-, 4- and 8-chat rates cover all chats together, 3 rounds
+with a 256-token cap. Structured output is a predictable JSON workload, not a
+measure of general agent performance. The drafting-OFF cards and a second pair
+are on the [benchmarks page](#previous-2026-10-26-main-262b0c3-home-dgx-sparks).
+
+### The v0.1.0 release, 2026-10-24
+
+These are the RigMark cards for the v0.1.0 release (commit `5a22651`),
+measured on 2026-10-24, when two Sparks ran the layer pipeline.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/benchmarks-2026-10-24-dark.svg">
+  <img src="assets/benchmarks-2026-10-24-light.svg" width="100%" alt="Bar chart comparing one DGX Spark with two, drafting ON (the default). In the 2026-10-24 runs, a second Spark answered a long prompt faster, but one chat did not write faster. Code, one chat: 76.7 tok/s on 1 Spark, 65.1 on 2 Sparks. Prose, one chat: 41.7 and 38.3. Eight chats together: 173.9 and 168.6. First reply after a cold 8192-token prompt: 3.86 s on 1 Spark, 2.79 s on 2 Sparks. Across all our runs, eight chats gave 130.6 to 173.9 tok/s on six single Sparks and 167.6 to 168.7 on three pairs.">
+</picture>
+
+The chart compares one of our Sparks with two, drafting ON.
+`cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- benchmarks-chart` redraws it from the
+[2026-10-24 receipts](../bench/receipts/2026-10-24/README.md). The table adds
+drafting OFF and the cloud VMs.
+
+How to read it:
+
+- Every card used context 32768, greedy decoding and thinking OFF. In the OFF
+  rows, every request sent `"draft":"plain"`.
+- Code and prose are one chat at a time, 5 runs each with an 8192-token cap.
+  The 8-chat rate covers all eight chats together, 3 rounds with a 256-token
+  cap, so 24 streams in all; the table says how many of them the engine served
+  without drafting. The first-token time is after a cold 8192-token prompt, 3
+  runs.
+- Tok/s is completion tokens per second of wall-clock time.
+  [Client time and server time](#client-time-and-server-time)
+  explains where that clock can start.
+- We have not run another engine on this checkpoint, so this is not a
+  head-to-head comparison.
+
+| Setup | Drafting | Code tok/s | Prose tok/s | 8 chats tok/s | 8-chat streams served without drafting | First token, cold 8192-token prompt (s) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| One DGX Spark | OFF | 27.8 | 27.8 | 136.1 | all (OFF) | 3.82 |
+| One DGX Spark | ON | 76.7 | 41.7 | 173.9 | 10/24 | 3.86 |
+| Two DGX Sparks | OFF | 27.9 | 27.9 | 135.1 | all (OFF) | 2.80 |
+| Two DGX Sparks | ON | 65.1 | 38.3 | 168.6 | 12/24 | 2.79 |
+| One cloud GB10 VM | OFF | 24.4 | 22.5 | 73.3 | all (OFF) | 3.99 |
+| One cloud GB10 VM | ON | 61.1 | 31.6 | 97.5 | 10/24 | 3.98 |
+| Two cloud GB10 VMs | OFF | 24.4 | 22.9 | 112.2 | all (OFF) | 2.95 |
+| Two cloud GB10 VMs | ON | 54.7 | 30.5 | 138.3 | 11/24 | 2.95 |
+| Four cloud GB10 VMs | OFF | 21.9 | 20.7 | 104.2 | all (OFF) | 2.38 |
+| Four cloud GB10 VMs | ON | 51.6 | 29.0 | 104.2 | 24/24 | 2.42 |
+
+What stands out:
+
+- **One chat runs at the same speed on every Spark we tried.** On six of our
+  Sparks, one at a time, drafting OFF gave 27.6 to 27.8 tok/s on prose and
+  27.7 to 27.8 on code; drafting ON gave 41.3 to 41.7 on prose and 76.1 to
+  76.7 on code.
+- **The 8-chat rate moves more.** Under that load the engine serves some chats
+  without drafting, so with drafting ON it ranged from 130.6 to 173.9 tok/s
+  across the six Sparks; the one-Spark ON row is the top of that range. One
+  drafting-OFF run on one of the six landed at 86.6
+  ([receipt](../bench/receipts/2026-10-24/2026-10-24_1941_qwen3.8-flash-next-nvfp4_local-1spark_5a22651-drafting-off-thinking-off-home-6/)),
+  a drop we have not reproduced or explained.
+- **Four cloud VMs did not make one chat faster.** They run as one engine,
+  each VM holding a slice of the layers. A chain is meant for models too big
+  for one machine. In its drafting-ON run the engine served all eight chats
+  without drafting, so both four-VM rows show the same 8-chat rate.
+
+Each row has its own receipt, named by the time of its run:
+
+- One DGX Spark: [OFF (1937)](../bench/receipts/2026-10-24/2026-10-24_1937_qwen3.8-flash-next-nvfp4_local-1spark_5a22651-drafting-off-thinking-off/), [ON (1943)](../bench/receipts/2026-10-24/2026-10-24_1943_qwen3.8-flash-next-nvfp4_local-1spark_5a22651-drafting-on-thinking-off/)
+- Two DGX Sparks: [OFF (2012)](../bench/receipts/2026-10-24/2026-10-24_2012_qwen3.8-flash-next-nvfp4_local-2spark_5a22651-drafting-off-thinking-off/), [ON (2019)](../bench/receipts/2026-10-24/2026-10-24_2019_qwen3.8-flash-next-nvfp4_local-2spark_5a22651-drafting-on-thinking-off/)
+- One cloud GB10 VM: [OFF (1946)](../bench/receipts/2026-10-24/2026-10-24_1946_qwen3.8-flash-next-nvfp4_local-1spark_5a22651-drafting-off-thinking-off-cloud-a-vma/), [ON (1954)](../bench/receipts/2026-10-24/2026-10-24_1954_qwen3.8-flash-next-nvfp4_local-1spark_5a22651-drafting-on-thinking-off-cloud-a-vma/)
+- Two cloud GB10 VMs: [OFF (2027)](../bench/receipts/2026-10-24/2026-10-24_2027_qwen3.8-flash-next-nvfp4_local-2spark_5a22651-drafting-off-thinking-off-cloud-a/), [ON (2035)](../bench/receipts/2026-10-24/2026-10-24_2035_qwen3.8-flash-next-nvfp4_local-2spark_5a22651-drafting-on-thinking-off-cloud-a/)
+- Four cloud GB10 VMs: [OFF (2204)](../bench/receipts/2026-10-24/2026-10-24_2204_qwen3.8-flash-next-nvfp4_local-4spark_5a22651-drafting-off-thinking-off-cloud-a/), [ON (2213)](../bench/receipts/2026-10-24/2026-10-24_2213_qwen3.8-flash-next-nvfp4_local-4spark_5a22651-drafting-on-thinking-off-cloud-a/)
+
+Raw benchmark output stays private until it has been reviewed for publication;
+[the receipts list](../bench/receipts/README.md) says what is public.
+
 ## Reproduce a measurement in detail
 
 To compare your Spark with the tables, run RigMark as the next section shows.
@@ -1714,9 +1978,10 @@ the client. Measure only on Sparks with no other GPU work running.
 
 The older public FP8 summaries have been removed; the
 [historical section](#historical-fp8-measurements) below still cites some of
-them as retired receipts. The current tables above quote card folders and
-timing READMEs. Their sanitized copies are in
-[bench/receipts/2026-10-24](../bench/receipts/2026-10-24/README.md): cards,
+them as retired receipts. The tables name their source cards and timing
+records. Sanitized receipts for the 2026-10-24 tables are in
+[bench/receipts/2026-10-24](../bench/receipts/2026-10-24/README.md). Receipts
+for the later tables are not published here. The 2026-10-24 receipts are cards,
 READMEs and small JSON receipts, with hostnames, addresses and private paths
 replaced by neutral tokens. Original prompts, replies, logits and the full card
 JSON receipts are not included. See the

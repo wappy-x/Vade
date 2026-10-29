@@ -240,8 +240,10 @@ format, `vade-prebuilt-v1`. The `make-bundle.sh` script above builds only the
 launcher bundle (`vade-launch-bundle-v1`). It doesn't build a controller
 bundle.
 
-The release's launcher bundle also serves a controller. Unpack it on the
-controller and set `prebuilt_dir` to that folder (or unpack it into
+A launcher bundle can also serve a controller. The v0.1.0 release bundle
+cannot: the v0.1.0 CLI does not read launcher bundles, and a newer checkout is
+a different commit. To use a launcher bundle from the same commit, unpack it on
+the controller and set `prebuilt_dir` to that folder (or unpack it into
 `<prebuilt_dir>/<engine-sha40>-<cli-sha40>`). `vade install` then reads its
 `launcher-bundle.conf`, checks the same three Spark files against their
 SHA-256 hashes and copies them, when the bundle's `engine_sha` and `cli_sha`

@@ -10,8 +10,9 @@ model checks them in one pass.
 This page walks through checking a change on your own computer, the house
 rules, what exactness asks of engine changes, and how to send a pull request.
 [Local CI](docs/ci.md) gives the current CI status and public host commands.
-[AGENTS.md](AGENTS.md) has the full rules and every CI command; read it before
-you change code. The [glossary](docs/GLOSSARY.md) explains the terms used
+Read [AGENTS.md](AGENTS.md) for the project rules. Run the affected host
+checks in [Local CI](docs/ci.md) and the [workflow](.github/workflows/ci.yml),
+including doctests and Rustdoc. The [glossary](docs/GLOSSARY.md) explains the terms used
 here.
 
 ## Build and validate
@@ -60,7 +61,9 @@ That block checks the CLI, the harness and the benchmark tools, runs the
 ratchet test (explained under [rules](#rules-and-formatting)) and checks the
 documentation links. `--locked` makes Cargo use the committed `Cargo.lock`
 files as they are, the way CI does. If you changed the engine, check and test
-the engine workspace too. Pass `--workspace` as CI does; a plain `cargo test`
+its workspace. On Linux without a GPU, first prepare the link-only CUDA stub
+with the commands in [AGENTS.md](AGENTS.md#engine-and-full-ci-checks). Then
+run the block below. Pass `--workspace` as CI does; a plain `cargo test`
 only covers the default members and skips some crates. `--all-targets` doesn't
 run doc tests, so CI runs them in a separate step, which is the last line here:
 
@@ -82,22 +85,13 @@ performance.
 
 ### Check the committed revision
 
-Commit the change before its final checks. Maintainers run the private
-`ci-local.sh` tool against that exact commit:
+Commit the change before its final checks. Run the public host commands
+against the committed revision. Save the commit ID, commands and results with
+the change review.
 
-```sh
-ci-local.sh "$WORKTREE" "$COMMIT"
-```
-
-`WORKTREE` is the source checkout. `COMMIT` is its full commit ID. The tool
-checks out that commit in a separate worktree and saves the host test logs.
-It is part of the maintainers' private lab, so it is not in this repository.
-Contributors can run the commands on this page and the full host checks in
-[AGENTS.md](AGENTS.md). Keep the logs with the commit ID in the PR.
-
-A `ci-local` pass is part of the proof. It does not cover every check in the
-[workflow](.github/workflows/ci.yml) or the Spark gate below.
-[Local CI](docs/ci.md) lists the script's steps and omissions. If the source
+Local checks can cover less than the [workflow](.github/workflows/ci.yml),
+and they do not replace the Spark gate below. [Local CI](docs/ci.md) lists
+the host commands and what they leave out. If the source
 changes after a check, run the affected checks on the new commit.
 
 ### Build the CLI
@@ -211,8 +205,9 @@ Which proof a change needs:
    If the screen fails, run the full gate on the rebased commit. After the
    merge, a full confirm card runs on the merged main within one hour. If the
    confirm card fails, or does not run within the hour, the merge is reverted.
-3. **Any other change needs the full gate.** Rebase it and run the Spark proof
-   again on the rebased commit.
+3. **Any other change to engine arithmetic, scheduling, caching or transport
+   needs the full device gate.** Rebase it and run that proof again.
+   Host-only changes use the host checks described above.
 
 The band is 0.8 % per cell against the A arms of the gate's A X X A block: a
 cell passes when it is at most 0.8 % slower than the A value of that cell.

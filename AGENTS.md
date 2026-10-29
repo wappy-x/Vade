@@ -190,8 +190,11 @@ CI also checks the Linux target from both `cli/` and `harness/`:
 cargo +1.99.0 check --offline --all-targets --target aarch64-unknown-linux-gnu
 ```
 
-The workflow file [.github/workflows/ci.yml](.github/workflows/ci.yml) is the
-authority. See [engine validation](engine/docs/validation.md) for where host
+The workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) is the full
+check list. The commands above omit doctests, Rustdoc and the tools test
+suite; [docs/ci.md](docs/ci.md) gives those commands. Use `--locked` in host
+Cargo commands to preserve the committed lockfiles. See
+[engine validation](engine/docs/validation.md) for where host
 checks end and device checks begin.
 
 ## Ratchet

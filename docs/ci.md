@@ -9,19 +9,16 @@ The [workflow](../.github/workflows/ci.yml) defines the GitHub host checks.
 It also builds GPU kernels without a GPU. This page explains the local checks
 and the commands a contributor can run without the private CI script.
 
-## What `ci-local.sh` runs
+## What the maintainers' local CI runs
 
-Maintainers have a private script with this interface:
+Maintainers run a private script against each committed revision. It is not
+in this repository, and contributors do not need it. Contributors run the
+public commands in the next section instead.
 
-```sh
-ci-local.sh "$WORKTREE" "$COMMIT"
-```
-
-`WORKTREE` is the source checkout. `COMMIT` is its full commit ID. Commit the
-change first. The script checks out that commit in a separate, detached Git
-worktree. It uses the host toolchain pinned in
-[rust-toolchain.toml](../rust-toolchain.toml). It denies compiler warnings and
-saves a log for each step. It fails if any step fails.
+The script checks out the commit in a separate, detached Git worktree. It
+uses the host toolchain pinned in [rust-toolchain.toml](../rust-toolchain.toml).
+It denies compiler warnings and saves a log for each step. It fails if any
+step fails.
 
 | Workspace | Commands in the private script |
 | --- | --- |
@@ -33,10 +30,6 @@ saves a log for each step. It fails if any step fails.
 The CLI tests include the repository ratchet. The engine commands exclude the
 NVPTX kernel crate, which must be built separately. Device tests can remain
 ignored. That is not a device pass.
-
-For a change that leaves `engine/` unchanged, maintainers can set
-`CI_SKIP_ENGINE=1`. This skips the engine check and engine tests. Name that
-skip in the result. Never use it to validate an engine change.
 
 The script does not build kernels, run doctests, build Rustdoc, check
 documentation links, test the separate benchmark and tools workspaces, or run

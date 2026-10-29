@@ -1,29 +1,51 @@
 # Install Vade
 
-This page gets Vade **v0.1.0** running and serving
-**nvidia/Qwen3.8-Flash-Next-FP4-Local** as text-only chat. You start with one
-Spark and no other computer.
+This guide installs Vade for text-only chat with the supported FP4-Local
+checkpoint, **nvidia/Qwen3.8-Flash-Next-FP4-Local**. The source commands
+build main, including the Unreleased changes in the
+[changelog](CHANGELOG.md). The prebuilt bundle contains the older v0.1.0
+release. You start with one Spark and no other computer.
+
+**How long it takes.** We timed the source steps of this page on a DGX Spark
+with no Rust, no checkout and no Vade files. The run was on 2026-10-28 at
+main `285fa8a`. The model was already on the Spark. The times come from the
+timing log of record `2026-10-28_1744_source-install_285fa8a` and its
+`Launch ready` line. The record is not in the repository yet.
+
+| Step | Time (s) |
+| --- | ---: |
+| [Install Rust](#install-rust) and the two pinned toolchains | 16.7 |
+| Clone ([step 2](#step-2-get-the-code)), [one kernel build](#run-one-kernel-build-source-builds-only) and the [Route A](#route-a-on-this-spark) CLI build | 62.2 |
+| First `vade launch`, to `Launch ready in 149.4 s.` | 149.4 |
+| Total | 228.2 |
+
+The total does not include the model download (102.26 GB). It also does not
+include a network fetch of the source: the clone came from a local copy of
+the repository. Download times depend on your network.
 
 If your checkpoint is already under `~/models`, use the
-[quick start](#quick-start-with-an-existing-model). Otherwise, do steps 1 to 3:
+[quick start](#quick-start-with-an-existing-model). If not, do steps 1 to 3:
 prerequisites, the code and the model. Then pick a route:
 
-- [Route A](#route-a-on-this-spark) runs everything on the Spark itself. Start
-  here.
+- [Route A](#route-a-on-this-spark) runs everything on the Spark itself.
+  Start here.
 - [Route B](#route-b-from-a-controller) adds a controller: a second Linux or
   macOS computer that drives the Spark over SSH.
 - [Linked Sparks](#two-and-more-sparks) build on Route B.
 
-New terms are explained where they first appear, and the
+This guide explains each new term where it first appears. The
 [glossary](docs/GLOSSARY.md) has the rest.
 
 ## Quick start with an existing model
 
-You need an idle DGX Spark with Git, `cc`, curl, a working NVIDIA driver and
-the complete checkpoint under `~/models`. (For another location, first set
-`VADE_MODELS` to the checkpoint folder.) During the private preview the clone
-also needs access to the repository; the private-preview note in
-[Step 2](#step-2-get-the-code) gives the two ways in.
+You need an idle DGX Spark with Git, `cc`, curl and a working NVIDIA driver.
+You also need the complete checkpoint under `~/models`. Before the first
+launch, set `VADE_MODELS` to use a checkpoint outside `~/models`. A valid
+saved checkpoint takes precedence; see
+[use a different checkpoint folder](#use-a-different-checkpoint-folder).
+During the private preview, the clone also needs access to the repository.
+The private-preview note in [step 2](#step-2-get-the-code) gives the two
+ways in.
 
 Paste this block as one shell command:
 
@@ -40,34 +62,35 @@ sh scripts/install.sh
 ./cli/target/release/vade launch
 ```
 
-The installer runs only on Linux `aarch64`. It:
+The installer runs only on Linux `aarch64`. It does these steps:
 
-1. finds Rust in `~/.cargo/bin` and installs any missing pinned toolchains and
-   GPU components;
-2. builds the CLI and runs preflight checks;
-3. fills the compiler cache and runs local `vade install`, which also compiles
-   the GPU code into Vade's private startup cache, so the first `up` doesn't
-   have to;
-4. with `--launch`, starts the engine and opens chat in the folder you started
-   from. Without that flag, it stops after install.
+1. It finds Rust in `~/.cargo/bin`. It installs any missing pinned
+   toolchains and GPU components.
+2. It builds the CLI and runs preflight checks.
+3. It fills the compiler cache and runs local `vade install`. This also
+   compiles the GPU code into Vade's private startup cache, so the first `up`
+   does not have to.
+4. With `--launch`, it starts the engine and opens chat in the folder where
+   you started. Without that flag, it stops after the install.
 
-It doesn't download or edit models, change shell profiles or run sudo. Every
-failed stage prints its cause and a next step. Read the script first if you
-want to see what it runs.
+The installer does not download or edit models. It does not change shell
+profiles or run sudo. Every failed stage prints its cause and a next step.
+Read the script first if you want to see what it runs.
 
 The first run needs internet access for missing Rust and `build-std` files.
-Once those are cached, `CARGO_NET_OFFLINE=true sh scripts/install.sh` works
-offline from the checkout and reuses the tools it finds without asking rustup
-to update them. We haven't measured how long toolchain and model downloads
-take.
+When those are cached, `CARGO_NET_OFFLINE=true sh scripts/install.sh` works
+offline from the checkout. It reuses the tools it finds and does not ask
+rustup to update them. In record `2026-10-28_1744_source-install_285fa8a`,
+the Rust download and install took 16.7 s. We have not timed the model
+download, and we did not time `install.sh` itself.
 
-**After launch.** Chat can edit files in the folder it opens in, so ask it
-only to say hello, then type `/exit`; the engine keeps running. Run later
+**After launch.** Chat can edit files in the folder where it opens. So ask it
+only to say hello, then type `/exit`. The engine keeps running. Run later
 commands by their full path, `"$HOME/vade/cli/target/release/vade"`, or add
-that folder to `PATH`. Then `up` starts the engine without chat, `chat`
-connects again and `down` stops this installation's engine. Run from a script
-without a terminal, `launch` prints readiness and exits, and the engine keeps
-running.
+that folder to `PATH`. Then `up` starts the engine without chat. `chat`
+connects again. `down` stops this installation's engine. When you run
+`launch` from a script without a terminal, it prints readiness and exits. The
+engine keeps running.
 
 **If something goes wrong:**
 
@@ -183,12 +206,12 @@ There are two ways to get the Vade programs:
   program.
 - **Use the prebuilt launcher bundle** from the v0.1.0 release (see
   [Optional release bundle](#optional-release-bundle) in step 2). The bundle is
-  for running Vade on the Spark itself. Route B can also use its engine files
-  through `prebuilt_dir`, as described below.
+  only for running Vade on the Spark itself (Route A). A controller
+  (Route B) cannot use the v0.1.0 bundle; see the note in that section.
 
 Source builds need both pinned Rust toolchains. The model download helper
-needs host Rust 1.99.0. Bundle users with an existing verified checkpoint can
-skip Rust setup.
+needs host Rust 1.99.0. Route A bundle users with an existing verified
+checkpoint can skip Rust setup.
 
 <a id="1-prepare-the-sparks"></a>
 On the Spark, install any missing Ubuntu packages (this needs `sudo`):
@@ -299,8 +322,9 @@ cd ~ && git clone --branch main https://github.com/wappy-x/vade.git && cd ~/vade
 ```
 
 This gives you the latest `main`: v0.1.0 plus the changes listed under
-Unreleased in the [changelog](CHANGELOG.md). For the v0.1.0 release exactly,
-clone with `--branch v0.1.0` instead.
+Unreleased in the [changelog](CHANGELOG.md). Build main to use the Unreleased
+changes. Clone the v0.1.0 tag (`--branch v0.1.0`) to build the same release
+as the bundle.
 
 Once the repository is public, this clone needs no account or token. Do not
 put credentials in the clone URL. We recommend cloning, but a downloaded source
@@ -331,8 +355,13 @@ them, the first launch on a fresh machine fails at the kernel build.
 
 The [release workflow](.github/workflows/release.yml) builds a Linux aarch64
 launcher bundle and `SHA256SUMS`. Both are on the
-[v0.1.0 release page](https://github.com/wappy-x/vade/releases/tag/v0.1.0);
-building from source, as above, is the alternative.
+[v0.1.0 release page](https://github.com/wappy-x/vade/releases/tag/v0.1.0).
+The bundle is optional. It is an older build: v0.1.0, from 2026-10-24. It
+does not have the speed and prefix-cache fixes merged since then. In our
+replay of these steps, with the model already on the Spark, the first command
+to `Launch ready` took 101.262 s (record
+`2026-10-28_1305_bundle-install_5a22651`, not in the repository yet). Build
+main to use the Unreleased changes.
 
 Download them into a new, empty folder of their own, outside the checkout. The
 command below uses `~/vade-launch`. The checksum file gives you the exact
@@ -380,11 +409,14 @@ it.
 
 The launcher reads `launcher-bundle.conf`, the file next to `./vade` that
 records the hashes of the engine, the GPU kernels, the chat program and the
-launcher itself. A controller (Route B) can use the same unpacked bundle: set
-`prebuilt_dir` in its config to that folder, and `vade install` copies the
-bundle's engine, GPU kernels and helper to each Spark instead of building them,
-as long as the bundle was built from the controller checkout's commit. The
-controller still builds its own CLI and chat program. See
+launcher itself.
+
+Use the v0.1.0 release bundle only on the Spark itself (Route A). A controller
+(Route B) cannot use it. The v0.1.0 CLI does not read this bundle format. A
+newer CLI reads a launcher bundle only from the controller checkout's own
+commit. So with either checkout, `vade install` ignores the v0.1.0 bundle and
+builds the engine from source on each Spark. That build needs the pinned Rust
+toolchains. See
 [bundle details](cli/docs/prebuilt.md) and [first run](harness/docs/first-run.md).
 
 ## Step 3: get the model
@@ -514,7 +546,9 @@ launch took.
 Run from a script, where standard input is not a terminal, `launch` skips
 chat: after the ready line it prints
 `Standard input is not a terminal, so chat was not opened. Chat: vade chat`
-and exits.
+and exits. The v0.1.0 bundle is older and prints
+`Chat: open local chat; /exit leaves the engine running.` and then
+`Chat: done in ...` instead.
 
 Chat opens in the checkout, and the agent can edit files there, so ask it only
 to say hello. Then type `/exit` to get back to your shell. The engine keeps
@@ -609,10 +643,11 @@ cd ~/vade-launch && unset VADE_CONFIG
 ```
 
 Use `./vade` for the lifecycle commands that follow, or add that folder to your
-`PATH`. Status hints repeat the command the way you typed it, such as
-`Chat: ./vade chat`. A few messages still name the bare `vade`, such as the
-port error's `retry vade launch`; from the bundle folder, type `./vade` for
-those too.
+`PATH`. On main, status hints repeat the command the way you typed it, such
+as `Chat: ./vade chat`. The v0.1.0 bundle is older and prints the bare
+`vade`, such as `Chat: vade chat` and `Start: vade launch`. A few messages
+on main still name the bare `vade`, such as the port error's
+`retry vade launch`. From the bundle folder, type `./vade` for those too.
 
 ### What `vade verify` checks
 
@@ -931,9 +966,10 @@ vade up --sparks 2
 ```
 
 `vade install` builds from source on each Spark, unless `prebuilt_dir` points
-at a matching [release bundle](#optional-release-bundle). After `vade up --sparks 2`,
-`vade verify` reports `1 machine`, because the two ranks form one engine, not
-two separate engines.
+at a bundle from the controller checkout's own commit (see
+[bundle details](cli/docs/prebuilt.md)). The v0.1.0 release bundle does not
+qualify. After `vade up --sparks 2`, `vade verify` reports `1 machine`,
+because the two ranks form one engine, not two separate engines.
 
 There are two ways to choose the Sparks. Use one or the other, not both:
 
@@ -1013,10 +1049,11 @@ with the flags you want. Supported local overrides are saved in
 launch.
 
 <a id="defaults-by-route"></a>
-These are the defaults when you pass no flags and haven't set `MTP` or the
-prefix-cache variable (`VADE_FLASHNEXT_PREFIX_CACHE`) in your shell. Context
-covers both the input and the generated output; `/health` reports the limits
-that actually apply to a request.
+These defaults apply when no saved override, launch flag or environment
+setting replaces them. The environment settings are `MTP` and the
+prefix-cache variable (`VADE_FLASHNEXT_PREFIX_CACHE`). Context covers both
+the input and the generated output. `/health` reports the limits that apply
+to a request.
 
 | How you start | Context (tokens) | Output (tokens) | Drafting (multi-token prediction, MTP) | Prefix cache |
 | --- | --- | --- | --- | --- |
@@ -1033,7 +1070,7 @@ a refusal is reported and the context is not lowered.
 | --- | --- |
 | `--context` | How many tokens the prompt and reply can use together. On the Spark, the value must fit the checkpoint's limit and pass the engine's memory check. If the engine refuses a value you set, you get an error; Vade does not lower it. Defaults are in the table above. |
 | `--output` | The most tokens a reply can use. It can't be larger than the context or the FP4-Local limit of 16384. |
-| `--mtp` | Asks for a specific drafting depth. `0` turns drafting off. It overrides the `MTP` variable. Without either, the engine chooses. |
+| `--mtp` | Asks for a specific drafting depth. `0` turns drafting off. It overrides the `MTP` variable. A local launch saves the selected drafting depth for later starts. To restore engine-selected drafting, stop the engine, remove the `mtp=` line from `${VADE_HOME:-$HOME/.vade}/config`, unset `MTP`, and restart without `--mtp`. A controller uses the engine default when neither the flag nor `MTP` is set. |
 | `--chats` | Works only from a controller; on the Spark itself it is refused. Vade records it and passes it on, but FP4-Local sets the chat count from context and memory, so it changes neither the context nor how many chats run at once. (With legacy FP8, `--chats N` reserves room for N chats.) |
 | `--memory-bytes` | Sets a memory budget. The engine's memory check and the memory actually free still apply. |
 | `--cache-bytes 0` | Turns the prefix cache off for a local install. Any local size above zero is refused. |
@@ -1051,10 +1088,26 @@ vade down
 VADE_FLASHNEXT_PREFIX_CACHE=1 vade up
 ```
 
-If you saved `--cache-bytes 0` earlier, it wins over this variable. Setting
-the variable on a controller does not reach the Sparks it drives. The engine
-makes the final decision ([source](engine/crates/serve/src/prefix_switch.rs)).
-Sending `cache:true` in a request does not turn the cache on by itself.
+If you saved `--cache-bytes 0`, stop the engine and remove the
+`cache_bytes=0` line from `${VADE_HOME:-$HOME/.vade}/config` before you
+enable the cache. Set `VADE_FLASHNEXT_PREFIX_CACHE=1` each time you start
+the engine with the cache on. The environment setting is not saved.
+
+Route B has no launcher flag that enables the FP4-Local prefix cache. The
+variable must already be set in the noninteractive SSH environment on every
+selected Spark. Setting it only in the controller shell has no effect. The
+engine ranks must receive the same value. The engine makes the final
+decision ([source](engine/crates/serve/src/prefix_switch.rs)). Sending
+`cache:true` in a request does not turn the cache on by itself.
+
+### Use a different checkpoint folder
+
+Before the first launch, set `VADE_MODELS` to use a checkpoint outside
+`~/models`. A valid saved checkpoint takes precedence. To replace it, run
+`vade down` with the current `VADE_HOME`. Then set `VADE_MODELS` to the new
+checkpoint folder and choose an unused `VADE_HOME` before you run
+`vade launch`. Use that new `VADE_HOME` for later commands. This route
+supports only the documented FP4-Local checkpoint.
 
 ## Client gateway
 

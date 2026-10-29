@@ -182,7 +182,10 @@ fn body(page: &str) -> &str { page.split_once(START).unwrap().1.split_once(END).
     write(&f.cards.join("not-a-card.json"),"not JSON");
     let before = f.pages(); let result = f.run(); assert!(result.status.success(),"{}",String::from_utf8_lossy(&result.stderr));
     let pages = f.pages(); let readme = String::from_utf8(pages[0].clone()).unwrap(); let benchmark = String::from_utf8(pages[1].clone()).unwrap();
-    assert_eq!(body(&readme),body(&benchmark));
+    assert_ne!(body(&readme),body(&benchmark));
+    assert!(body(&readme).contains("[benchmark history](docs/benchmarks.md)")); assert!(!body(&readme).contains("card SHA256")); assert!(!body(&readme).contains("bench-docs '<cards-dir>'"));
+    assert!(body(&readme).contains("The last card finished on 2026-10-26. They do not measure later engine changes\non main."));
+    for expected in ["2 Sparks, tensor split, drafting ON: finished","card SHA256","bench-docs '<cards-dir>'","These cards do not measure later engine changes on main."] { assert!(body(&benchmark).contains(expected),"missing {expected}"); }
     for page in [&readme,&benchmark] {
         for expected in ["54.153","100.924","130.372","75.389","149.833","176.303","2.788","29.146","42.157","example/model","2026-10-26",&f.measured] { assert!(page.contains(expected),"missing {expected} in {page}"); }
         for excluded in ["901.001","902.002","903.003","905.005","999.777"] { assert!(!page.contains(excluded),"included {excluded}"); }
@@ -268,4 +271,10 @@ fn body(page: &str) -> &str { page.split_once(START).unwrap().1.split_once(END).
     ]);
     let result = f.run(); assert!(result.status.success(),"{}",String::from_utf8_lossy(&result.stderr));
     let page = String::from_utf8(f.pages()[0].clone()).unwrap(); assert!(page.contains("6/7")); assert!(!page.contains("7/7"));
+}
+#[test] fn one_spark_card_uses_the_singular_noun() {
+    let f = Fixture::new(); f.card("one.card.json",&f.measured,&[(&["health","vade","numerics","world_size"],number("1"))]);
+    let result = f.run(); assert!(result.status.success(),"{}",String::from_utf8_lossy(&result.stderr));
+    let page = String::from_utf8(f.pages()[1].clone()).unwrap();
+    assert!(page.contains("\n1 Spark, tensor split, drafting ON: finished")); assert!(!page.contains("1 Sparks"));
 }
