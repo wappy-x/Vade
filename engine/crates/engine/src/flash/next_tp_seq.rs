@@ -15,6 +15,8 @@
 use super::*;
 use crate::flash_tp_switch::{SeqChats, SeqMode, SeqPlan};
 use spark_gpu_probe::driver::TP_MAILBOX_SLOTS;
+#[path = "next_tp_split.rs"]
+mod split;
 
 /// KIND_HANDOFF length field of SEQ_PUSH or more: rank 1 receives layers SPLIT..L whole and
 /// advances by the field minus SEQ_PUSH rows. Tile handoffs send 1 and next_tp_heads' requests 2 and 3.
@@ -143,8 +145,9 @@ impl<'a> NextModel<'a> {
         if !put && li + 1 == LAYERS && let Some(s) = self.tp.borrow_mut().as_mut() { s.seq.chats.imported(sessions[0].slot); }
         Ok(())
     }
-    /// Rank 1, after its last layer: take the credits of the messages still unconfirmed.
-    fn tp_seq_credits(&self, b: &Backend<'a>) -> Result<()> {
+    /// Rank 1, after its last layer (and rank 0 after a transaction's seeds, next_split.rs):
+    /// take the credits of the messages still unconfirmed.
+    pub(in crate::flash) fn tp_seq_credits(&self, b: &Backend<'a>) -> Result<()> {
         let mailbox = self.tp_box.get().ok_or("tensor split mailbox missing")?;
         let mut guard = self.tp.borrow_mut();
         let s = guard.as_mut().ok_or("tensor split missing")?;
@@ -157,7 +160,7 @@ impl<'a> NextModel<'a> {
         Ok(())
     }
     /// One layer's state at row `rows`: rank 1 puts it (`put`), rank 0 takes it.
-    fn tp_seq_state<'w>(&self, b: &Backend<'a>, sessions: &mut [&mut NextSession<'a, 'w>], layer: usize, rows: usize, put: bool) -> Result<()> {
+    pub(in crate::flash) fn tp_seq_state<'w>(&self, b: &Backend<'a>, sessions: &mut [&mut NextSession<'a, 'w>], layer: usize, rows: usize, put: bool) -> Result<()> {
         let [chat] = sessions else { return Err("token split pass with more than one chat".into()) };
         let mailbox = self.tp_box.get().ok_or("tensor split mailbox missing")?;
         let slot = mailbox.slot_bytes() / 4;

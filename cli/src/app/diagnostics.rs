@@ -54,7 +54,7 @@ impl<R: Runner> App<R> {
         let mut report = Report::new("controller", self.dry);
         crate::doctor::binary(&mut report)?;
         let mut arguments = vec!["up".into()];
-        if self.config.model.ends_with("-fp8") { arguments.push("--fp8-legacy".into()); }
+        if self.config.model.ends_with("-fp8") { arguments.push("--fp8".into()); }
         let options = match crate::cli::parse(&arguments) {
             Ok(crate::cli::Cli { command: Command::Up(options), .. }) => {
                 crate::doctor::generation_defaults(&mut report, options.context, options.output, options.mtp_explicit.then_some(options.mtp))?;

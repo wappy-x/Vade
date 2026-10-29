@@ -78,7 +78,7 @@ serves the model `qwen3.8-flash-next-fp4-local`. Wherever a command below says
 - The engine keeps running until you type `vade down`. On a controller, the
   network tunnel to the Spark stays open until then too. Any client, direct or
   through a gateway, can connect while the engine is up.
-- The [legacy FP8 connection
+- The [FP8 connection
   guide](../engine/docs/flash-server.md#run-the-native-coding-agent) uses its
   own model ID and profile.
 
@@ -157,7 +157,7 @@ saved by an earlier version still lists the tool, but a call returns
 hides the tool on macOS too, which is how the tests cover the Linux shape on a
 Mac.
 
-The legacy two-Spark FP8 setup has its own
+The FP8 setup on 2, 4 or 6 Sparks has its own
 [connection and run recipe](../engine/docs/flash-server.md#run-the-native-coding-agent).
 
 ### Search and read
@@ -483,29 +483,35 @@ An absolute path inside a pasted log stays text.
 - Tab completes a simple `@path` common prefix, and a second Tab lists matches
   from a bounded directory listing.
 - Names must be visible ASCII.
-- Symlinks, binary files, images and PDFs cannot be attached. Clipboard images
-  and PDF extraction are not supported.
+- Symlinks, binary files, images and PDFs cannot be attached to a message.
+  Clipboard images are not supported. The agent can still read a PDF in the
+  workspace with `workspace_read`.
 - Messages that include files are capped at 64 KiB. A refusal keeps your draft.
 - Input recall stores the names you typed, while the journal saves the exact
   file bytes once.
 
 ## Commands and keys
 
+Use [chat hooks](docs/hooks.md) to run your host commands before tools, after tools, or when a native turn ends.
+Use [slash command templates](docs/slash-commands.md) for named prompts; `/clear` starts a fresh conversation.
+
 | Command | What it does |
 | --- | --- |
 | `/help` | Show commands and keyboard controls |
 | `/children` | Show native child IDs and states; `on`/`off` before the first prompt; `cancel ID`/`cancel all` during work |
 | `/status` | Show mode, request state, queues, history bytes/turns, and metadata status |
-| `/new` | Create a new native journal, reset direct/demo history, or start a fresh external session; waits for cleanup |
+| `/new`, `/clear` | Create a new native journal, reset direct/demo history, or start a fresh external session; waits for cleanup |
+| `/memory` | Report that saved memory is unavailable in this build; use `/instructions` for saved rules |
 | `/sessions`, `/resume NAME`, `/switch NAME` | List or explicitly select native journals |
 | `/fork NAME [TASK_LABEL]`, `/branch` | Fork a transcript, or inspect ancestry and file changes |
-| `/context` | Show native full-request estimates, margin, reserve and bytes, plus parent/child admission and reported cache usage |
+| `/context` | Show the token budget after each turn, native full-request estimates, margin, reserve and bytes, plus parent/child admission and reported cache usage |
 | `/output ID OFFSET LENGTH` | Inspect a retained output range locally |
-| `/compact-preview KEEP SUMMARY` | Preview a compaction without changing context |
-| `/compact [KEEP SUMMARY]` | Compact older context automatically, or with your own summary; constraints, receipts and recent turns stay verbatim |
+| `/compact-preview [KEEP SUMMARY]` | Preview the local excerpt plan, or your own summary, without changing context |
+| `/compact [KEEP SUMMARY]` | The model summarizes older turns and the last 2 turns stay verbatim, or use your own summary; see [context and compaction](../docs/context-and-compaction.md) |
 | `/compaction` | Inspect the summary, source range, generation and KV invalidation |
 | `/journal RECORD OFFSET LENGTH` | Read a raw journal range locally |
 | `/project`, `/project-rules` | Inspect frozen project context and rules |
+| `/instructions` | List the [project instruction](docs/project-instructions.md) files that loaded or were skipped, with size, path and reason; `--no-instructions` at start loads none |
 | `/skill NAME` | Inspect a catalog skill locally; no scripts execute |
 | `/map [PATH]`, `/symbols PATH` | Show bounded repository names, or lexical hints |
 | `/approve`, `/deny` | Answer a pending one-time native tool approval; `y`/`n` on an empty line do the same |
@@ -585,17 +591,19 @@ the gateway:
 
 `vade-harness setup codex --endpoint http://127.0.0.1:18080 --model MODEL`
 
-Besides `codex`, it supports `hermes`, `opencode`, `pi` and `generic`. It works
-offline, and it writes nothing unless you pass `--write PATH` plus a chosen
-`--target direct|gateway`. Codex needs Responses support on the upstream,
-because the gateway does not translate between APIs.
+Besides `codex`, it supports `claude`, `hermes`, `opencode`, `pi`, `aider`,
+`continue`, `open-webui` and `generic`. It works offline, and it writes nothing
+unless you pass `--write PATH` plus a chosen `--target direct|gateway`. Codex
+needs Responses support on the upstream, because the gateway does not
+translate between APIs.
 
-There is no Claude Code setup or delegation mode in the harness. The CLI's
-single-Spark workflow does print an environment command for Claude Code, but
-live Claude Code chat and tool compatibility have not been qualified there yet;
-see the [CLI guide](../cli/README.md).
+`setup claude` prints the gateway settings for Claude Code. The harness has no
+Claude Code delegation mode: Claude Code runs as its own program against the
+gateway. The [client matrix](docs/passthrough-matrix.md#claude-code) gives
+what was checked.
 
-For a complete, isolated configuration, add `--dedicated-home --write DIR`,
+For a complete, isolated configuration for `claude`, `codex`, `hermes`,
+`opencode` or `pi`, add `--dedicated-home --write DIR`,
 `--context-window N` and `--max-output-tokens N`, using upstream limits you have
 verified. Setup then creates a new private directory with the client's own
 instruction file and a `launch.sh`. The launcher keeps HOME, XDG and client
@@ -650,6 +658,8 @@ first run:
 Longer guides sit in `harness/docs/`:
 
 - [Native agent tools and limits](docs/agent-tools.md)
+- [Project instructions](docs/project-instructions.md): the AGENTS.md, CLAUDE.md
+  and .vade/instructions.md files that go into the system prompt
 - [How the harness talks to the engine](docs/engine-contract.md)
 - [Gateway routing](docs/gateway-routing.md) and the [standalone
   gateway](docs/invisible-gateway.md)
@@ -660,6 +670,9 @@ Longer guides sit in `harness/docs/`:
 - [Child agents](docs/child-agents.md), [context, project rules and
   branches](docs/context-and-projects.md) and [engine
   checkpoints](docs/engine-checkpoints.md)
+- [Context and compaction](../docs/context-and-compaction.md): the token
+  budget after each turn, the model-written rollover at the window edge and
+  the hard stop
 - [Workload guide](docs/workload.md) and the [bridge
   contract](docs/bridge-contract.md)
 
@@ -1290,9 +1303,12 @@ it: older turns are replaced with a shorter version so the next request fits.
 - `/compact-preview` shows the plan first.
 - `/compact KEEP SUMMARY` uses your own summary.
 
-Your messages, instructions, recent tool rounds, the latest edit for each file,
-the latest run of each check, and the last answer stay word for word. No model
-writes the summary.
+First the model summarizes the older turns into one state block, and the
+newest 2 turns stay word for word (see [context and
+compaction](../docs/context-and-compaction.md)). If that is not possible, the
+older local planner runs: your messages, instructions, recent tool rounds, the
+latest edit for each file, the latest run of each check, and the last answer
+stay word for word, and no model writes that summary.
 
 Compaction has a cost. The engine's cache holds the conversation as one
 unbroken sequence, so changing anything in the middle means everything after it
@@ -1326,12 +1342,13 @@ Each saved capture is an **artifact**. Their limits:
 
 A saved artifact never replays a tool.
 
-**Project rules.** Native project context loads the root `AGENTS.md`. For each
-repeated `--rules-scope PATH`, it also loads only that directory's chain of
-AGENTS.md ancestors inside the workspace (at most eight scopes, depth eight).
+**Project rules.** The system prompt carries the [project
+instructions](docs/project-instructions.md), and the root `AGENTS.md` is one of
+them. For each repeated `--rules-scope PATH`, native project context also loads
+that directory's chain of AGENTS.md ancestors below the workspace root (at most eight scopes, depth eight).
 Root rules apply everywhere. Deeper rules apply only in their subtree and take
-precedence there. Discovery is explicit: no recursive scan, and no search above
-the workspace. At most 16 rule files, 16 KiB each and 24 KiB in total, go into a
+precedence there. Scope discovery is explicit: no recursive scan, and no scope
+above the workspace. At most 16 rule files, 16 KiB each and 24 KiB in total, go into a
 frozen prefix in a deterministic order. Rules never grant executor capabilities
 or override explicit user requests.
 

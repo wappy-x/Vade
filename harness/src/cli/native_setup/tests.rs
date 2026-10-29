@@ -592,7 +592,7 @@ fn sessions_saved_with_the_shell_still_resume_where_it_is_unavailable() {
     std::fs::create_dir(&path).unwrap();
     let workspace = Workspace::new(&path).unwrap();
     let (grants, limits) = (BTreeMap::new(), Limits::default());
-    let project = native_conversation("mock", &workspace, &[], false, &grants, limits).unwrap().messages()[1].value().clone();
+    let project = native_conversation("mock", &workspace, &[], "", false, &grants, limits).unwrap().messages()[1].value().clone();
     let saved = |shell: bool| Conversation::from_request(
         Value::Object(vec![
             ("model".into(), Value::String("mock".into())),
@@ -613,5 +613,65 @@ fn sessions_saved_with_the_shell_still_resume_where_it_is_unavailable() {
     assert!(validate_resumed_in(&saved(true), "mock", false, &grants, limits, &[true]).is_ok());
     let refused = validate_resumed_in(&saved(false), "mock", false, &grants, limits, &[true]).unwrap_err().to_string();
     assert!(refused.contains("different tool set"), "{refused}");
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn model_rollover_shows_one_status_line_and_journals_the_summary() {
+    struct Host(usize, usize);
+    impl context::ContextHost for Host {
+        fn count(&mut self, c: &Conversation) -> io::Result<context::Usage> {
+            let tokens = (c.serialized_bytes() / 4) as u64;
+            context::Usage::for_conversation(c).with_count(&vade_harness::contract::InputCount::Exact {
+                prompt_tokens: tokens, output_tokens: 128, context_limit: self.0 as u64, admitted: tokens + 128 <= self.0 as u64,
+            })
+        }
+        fn summarize(&mut self, _: &Conversation) -> io::Result<String> {
+            self.1 += 1;
+            Ok("Plan: ship it.\nOpen tasks: none.".into())
+        }
+    }
+    let path = std::env::temp_dir().join(format!("vade-model-rollover-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir(&path).unwrap();
+    let workspace = Workspace::new(&path).unwrap();
+    let request = format!(
+        r#"{{"model":"mock","messages":[{{"role":"system","content":"stable"}},{{"role":"user","content":"old ask"}},{{"role":"assistant","content":"{}"}},{{"role":"user","content":"recent"}},{{"role":"assistant","content":"latest answer"}},{{"role":"user","content":"{{}}"}}]}}"#,
+        "old resolved prose ".repeat(400)
+    );
+    for (window, current, rolled) in [(2048, "current".to_owned(), true), (1100, "current ".repeat(600), false)] {
+        let request = request.replace("{}", &current);
+        let limits = Limits { max_context_tokens: window, output_reserve_tokens: 128, ..Limits::default() };
+        let mut c = Conversation::from_request(json::parse(&request).unwrap(), Limits::default()).unwrap();
+        let journal = Arc::new(Mutex::new(Journal::create(&workspace, &format!("rollover-{window}"), &c).unwrap()));
+        let (tx, rx) = crate::interaction::lanes();
+        let mut observer = CompactingJournal {
+            answer: String::new(),
+            tool_prose: Arc::default(),
+            cancel: Arc::default(),
+            inner: SharedJournal(Arc::clone(&journal)),
+            events: Arc::new(tx),
+            enabled: true,
+            trigger: Arc::new(Mutex::new(context::AutoCompaction::default())),
+        };
+        let mut host = Host(window, 0);
+        let before = context::ContextHost::count(&mut host, &c).unwrap();
+        let result = observer.before_hosted_request(&mut c, limits, &AtomicBool::new(false), &before, &mut host).unwrap();
+        assert_eq!(result, rolled);
+        let event = rx.fact().unwrap();
+        let super::super::events::WorkerEvent::ToolPreview { detail, .. } = event else { panic!("expected one context line") };
+        if rolled {
+            assert_eq!(host.1, 1);
+            assert!(detail.starts_with("[context compacted: kept 2 turns, summary ") && detail.ends_with(" tokens]"), "{detail}");
+            assert_eq!(journal.lock().unwrap().generation(), 1);
+            assert!(journal.lock().unwrap().compaction_status().contains("Model-written (kept 2 turns"));
+            assert_eq!(c.messages().len(), 5, "prefix, state block, two kept turns of three messages");
+        } else {
+            // Neither a rollover nor local excerpts fit: the hard stop, no model request.
+            assert_eq!(host.1, 0);
+            assert!(detail.contains("This chat cannot continue: even after compaction"), "{detail}");
+            assert_eq!(journal.lock().unwrap().generation(), 0);
+        }
+    }
     std::fs::remove_dir_all(path).unwrap();
 }

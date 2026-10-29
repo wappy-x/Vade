@@ -121,7 +121,7 @@ impl Config {
     /// `--chats` or a nonzero `--cache-bytes`.
     pub fn validate_options(options: &UpOptions) -> Result<(), String> {
         if !options.fp4_local || options.sparks.is_some_and(|n| n != 1) || !options.hosts.is_empty() {
-            return Err("Local launch serves FP4-Local on one Spark; set VADE_CONFIG and use vade up for multiple Sparks, or vade up --fp8-legacy for FP8.".into());
+            return Err("Local launch serves FP4-Local on one Spark; set VADE_CONFIG and use vade up for multiple Sparks, or vade up --fp8 for FP8.".into());
         }
         Self::supported_controls(options.chats, options.cache_bytes)
     }

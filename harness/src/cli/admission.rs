@@ -24,6 +24,51 @@ enum Candidate {
         retrying: bool,
     },
     Compaction(CompactionPlan),
+    /// Manual /compact: the model writes the summary on the worker, which
+    /// then counts it like any other compaction plan.
+    Rollover,
+}
+
+/// Counts and summaries through the chat's own native client.
+struct NativeHost<'a> {
+    model: &'a mut transport::NativeModel,
+    limits: Limits,
+    cancel: &'a AtomicBool,
+}
+impl context::ContextHost for NativeHost<'_> {
+    fn count(&mut self, c: &Conversation) -> io::Result<Usage> {
+        count_before_save(self.model, c, self.limits, self.cancel)
+    }
+    fn summarize(&mut self, request: &Conversation) -> io::Result<String> {
+        context::summarize_with(self.model, request, self.limits.wire, self.cancel)
+    }
+}
+
+/// The rollover plan for manual /compact with its final count, or the local
+/// excerpt plan (to be counted) when the model cannot write one. Nothing is
+/// saved here.
+fn rollover_candidate(
+    model: &mut transport::NativeModel,
+    c: &Conversation,
+    limits: Limits,
+    cancel: &AtomicBool,
+    context_limit: Option<u64>,
+) -> Result<(CompactionPlan, Option<Usage>), String> {
+    let before = count_before_save(model, c, limits, cancel)
+        .map_err(|error| format!("Compaction refused: count failed ({}); history and journal unchanged.", error_category(&error)))?;
+    let counted = Limits {
+        max_context_tokens: usize::try_from(model.context().token_limit(context_limit)).unwrap_or(usize::MAX),
+        output_reserve_tokens: model.output_reserve_tokens(limits.output_reserve_tokens),
+        ..limits
+    };
+    let mut host = NativeHost { model, limits, cancel };
+    match context::rollover(c, context::KEEP_TURNS, counted, &before, &mut host) {
+        Ok((plan, after)) => Ok((plan, Some(after))),
+        Err(_) if cancel.load(Ordering::Relaxed) => Err("Compaction cancelled; history and journal unchanged.".into()),
+        Err(error) => context::auto_plan(c, 2, Limits { max_context_tokens: usize::MAX, ..limits })
+            .map(|plan| (plan, None))
+            .map_err(|fallback| format!("Compaction refused: the model summary failed ({error}) and local excerpts failed ({fallback})."))
+    }
 }
 
 pub(crate) struct Counted {
@@ -57,6 +102,13 @@ impl App {
         )
     }
 
+    pub(crate) fn start_rollover(&mut self, limits: Limits) -> io::Result<()> {
+        let Some(model) = self.native_model.take() else {
+            return self.notice("Compaction refused: native client unavailable.");
+        };
+        self.start_count(String::new(), model, Candidate::Rollover, limits, false)
+    }
+
     pub(crate) fn start_compaction_count(
         &mut self,
         plan: CompactionPlan,
@@ -84,18 +136,36 @@ impl App {
     ) -> io::Result<()> {
         // The live history and journal stay on the UI until the worker returns
         // an admitted candidate and the UI checks cancellation before saving.
-        let before = matches!(candidate, Candidate::Compaction(_))
+        let before = matches!(candidate, Candidate::Compaction(_) | Candidate::Rollover)
             .then(|| self.native.as_ref().expect("native count history").clone());
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
-        let budget = matches!(candidate, Candidate::Prompt { .. })
+        // A model summary is generation too, so the run time limit applies.
+        let prompt = matches!(candidate, Candidate::Prompt { .. });
+        let budget = (prompt || matches!(candidate, Candidate::Rollover))
             .then(|| RunBudget::new(limits.max_run_time));
         let ui_budget = budget.clone();
         let (tx, rx) = interaction::lanes();
-        tx.state(RunState::Counting);
+        tx.state(if matches!(candidate, Candidate::Rollover) { RunState::Compacting } else { RunState::Counting });
         let (controls, _) = mpsc::sync_channel(1);
         let context_limit = self.config.generation.context_limit;
         let worker = std::thread::spawn(move || {
+            // A model plan arrives already counted; an excerpt plan is counted below.
+            let mut early = None;
+            if matches!(candidate, Candidate::Rollover) {
+                let mut roll = || rollover_candidate(&mut model, before.as_ref().unwrap(), limits, &worker_cancel, context_limit);
+                let rolled = match &budget {
+                    Some(budget) => budget.with_cancellation(&worker_cancel, roll),
+                    None => roll(),
+                };
+                match rolled {
+                    Ok((plan, after)) => {
+                        candidate = Candidate::Compaction(plan);
+                        early = after.map(Ok);
+                    }
+                    Err(message) => early = Some(Err(message)),
+                }
+            }
             let mut count = || {
                 match &mut candidate {
                 Candidate::Prompt { conversation, .. } => {
@@ -112,11 +182,31 @@ impl App {
                                 ..limits
                             };
                             let fits = usage.fits(limits.max_context_tokens, limits.output_reserve_tokens);
-                            let recoverable = !fits && can_compact
-                                && context::auto_plan_fitting(conversation, 2, limits, &usage, &mut |candidate| {
-                                    model.count_input(candidate.request(limits.wire), &worker_cancel)
-                                        .and_then(|input| Usage::for_conversation(candidate).with_count(&input))
-                                }).is_ok_and(|plan| plan.is_some());
+                            let mut count = |candidate: &Conversation| {
+                                model.count_input(candidate.request(limits.wire), &worker_cancel)
+                                    .and_then(|input| Usage::for_conversation(candidate).with_count(&input))
+                            };
+                            // The run's observer performs the rewrite; here only
+                            // check that a rollover or local excerpts can fit.
+                            let room = (!fits && can_compact).then(|| {
+                                context::rollover_room(conversation, context::KEEP_TURNS, limits, &usage, &mut context::CountOnly(&mut count))
+                            });
+                            let recoverable = match room {
+                                Some(Ok(_)) => true,
+                                Some(Err(_)) => context::auto_plan_fitting(conversation, 2, limits, &usage, &mut count).is_ok_and(|plan| plan.is_some()),
+                                None => false,
+                            };
+                            // Even a compacted prompt does not fit: say so plainly. An
+                            // admission issue or an unknown outcome gets the general text.
+                            let window = usage.context_limit(limits.max_context_tokens);
+                            match room {
+                                _ if recoverable || usage.admission_issue.is_some() => (),
+                                Some(Err(context::RolloverError::NoRoom { needed, window })) => return Err(context::hard_stop(needed, window)),
+                                // The newest turn alone is the floor: its count is what any compaction keeps.
+                                Some(Err(context::RolloverError::NotApplicable("no older turns to summarize"))) => return Err(context::hard_stop(
+                                    context::needed_tokens(&usage, window, limits), window)),
+                                _ => (),
+                            }
                             if !fits && !recoverable {
                                 return Err(format!("The message would not fit in the model's context (or its size could not be estimated); it was not sent. {}. Use /compact to shrink older turns, or /new to start over.", usage.summary(limits.max_context_tokens, limits.output_reserve_tokens)));
                             }
@@ -142,11 +232,13 @@ impl App {
                             Ok(after)
                         })
                 }
+                Candidate::Rollover => Err("Compaction refused.".into()),
             }
             };
-            let result = match &budget {
-                Some(budget) => budget.with_cancellation(&worker_cancel, count),
-                None => count(),
+            let result = match (early, &budget) {
+                (Some(result), _) => result,
+                (None, Some(budget)) => budget.with_cancellation(&worker_cancel, count),
+                (None, None) => count(),
             };
             tx.finish(WorkerResult {
                 http: None,
@@ -160,7 +252,7 @@ impl App {
             });
         });
         self.pending = Some(Pending {
-            native_progress: ui_budget.as_ref().map(|_| super::events::NativeProgress {
+            native_progress: ui_budget.as_ref().filter(|_| prompt).map(|_| super::events::NativeProgress {
                 rounds: 0, limits, context: None,
             }),
             budget: ui_budget,
@@ -205,6 +297,10 @@ impl App {
         self.native_model = Some(model);
         self.dirty = true;
         if !pending.canceled && budget.as_ref().is_some_and(RunBudget::expired) {
+            if !matches!(candidate, Candidate::Prompt { .. }) {
+                self.last_state = Some(RunState::Failed);
+                return self.notice(&format!("Compaction stopped at the {} s run time limit; history and journal unchanged.", self.config.max_run_time.unwrap_or_default().as_secs()));
+            }
             self.failed = true;
             self.queue_paused = true;
             self.last_success = false;
@@ -283,7 +379,7 @@ impl App {
                 self.last_state = Some(RunState::Failed);
                 return match candidate {
                     Candidate::Prompt { .. } => { let kept = self.keep_draft(&pending.user); self.run_notice(&format!("{message}{kept}")) },
-                    Candidate::Compaction(_) => self.notice(&message),
+                    Candidate::Compaction(_) | Candidate::Rollover => self.notice(&message),
                 };
             }
         };
@@ -335,13 +431,18 @@ impl App {
                     .lock()
                     .map_err(|_| io::Error::other("journal lock failed"))?
                     .compact(&plan)?;
+                let line = plan.status_line();
                 self.replace_native(
                     plan.into_conversation(),
                     vade_harness::contract::PromptBoundary::Compaction,
                 )?;
-                self.notice("Context compacted. Older turns are summarized; the full record stays on disk (/compaction shows it). The next reply rebuilds the cache, so it may start slower.")?;
+                match line {
+                    Some(line) => self.notice(&line)?,
+                    None => self.notice("Context compacted. Older turns are summarized; the full record stays on disk (/compaction shows it). The next reply rebuilds the cache, so it may start slower.")?,
+                }
                 self.start_compaction_warm()
             }
+            Candidate::Rollover => self.notice("Compaction refused; history and journal unchanged."),
         }
     }
 }
@@ -406,12 +507,14 @@ mod tests {
     fn stalled_presave_counts_cancel_promptly_without_persistence() {
         // Prompt admission, its reducing auto-plan count, and both manual
         // compaction counts all use the same UI-controlled cancellation flag.
+        // Case 5: the run time limit also stops a manual model rollover.
         for (case, compact, stall_at, interrupt) in [
             (0, false, 0, false),
             (1, false, 1, true),
             (2, true, 0, true),
             (3, true, 1, false),
             (4, false, 0, false),
+            (5, true, 1, false),
         ] {
             let path = std::env::temp_dir()
                 .join(format!("vade-presave-cancel-{}-{case}", std::process::id()));
@@ -461,6 +564,7 @@ mod tests {
                     }
                 }
             });
+            let limit = if case == 5 { &["--agent-time-limit-seconds", "1"][..] } else { &[] };
             let super::super::args::Parsed::Run(config) = super::super::args::Config::parse(
                 [
                     "agent",
@@ -479,6 +583,7 @@ mod tests {
                     "32",
                 ]
                 .into_iter()
+                .chain(limit.iter().copied())
                 .map(str::to_owned),
             )
             .unwrap() else {
@@ -544,17 +649,19 @@ mod tests {
                 "UI waited for admission"
             );
             ready.recv_timeout(Duration::from_secs(2)).unwrap();
-            assert_eq!(app.pending.as_ref().unwrap().rx.state(), RunState::Counting);
+            // Manual /compact asks the model for a summary: it shows as compacting.
+            assert_eq!(app.pending.as_ref().unwrap().rx.state(), if compact { RunState::Compacting } else { RunState::Counting });
             assert_eq!(RunState::Counting.label(), "counting tokens");
             app.key(Key::Text("draft while counting".into())).unwrap();
             assert_eq!(app.input.text(), "draft while counting");
             let cancel_start = Instant::now();
             if interrupt {
                 app.key(Key::Interrupt).unwrap();
-            } else if case != 4 {
+            } else if case < 4 {
                 app.line_input("/cancel".into()).unwrap();
             }
-            while app.pending.is_some() && cancel_start.elapsed() < Duration::from_secs(1) {
+            let wait = Duration::from_secs(if case == 5 { 3 } else { 1 });
+            while app.pending.is_some() && cancel_start.elapsed() < wait {
                 app.poll_worker().unwrap();
                 std::thread::park_timeout(Duration::from_millis(5));
             }
@@ -562,8 +669,8 @@ mod tests {
                 app.pending.is_none(),
                 "cancel did not clean up within a second"
             );
-            assert!(cancel_start.elapsed() < Duration::from_secs(1));
-            assert_eq!(app.last_state, Some(if case == 4 { RunState::Failed } else { RunState::LocalCancelled })); if case == 4 { assert_eq!(app.input.text(), "draft while counting"); assert_eq!(app.input.history(app.input.history_len() - 1), Some("new prompt")); }
+            assert!(cancel_start.elapsed() < wait);
+            assert_eq!(app.last_state, Some(if case >= 4 { RunState::Failed } else { RunState::LocalCancelled })); if case == 4 { assert_eq!(app.input.text(), "draft while counting"); assert_eq!(app.input.history(app.input.history_len() - 1), Some("new prompt")); }
             assert_eq!(
                 app.native
                     .as_ref()

@@ -1,11 +1,13 @@
 //! File failures must be actionable before a listener, workspace or request exists.
+#[path = "support/home.rs"]
+mod home;
 #[path = "support/cli.rs"]
 #[allow(dead_code)]
 mod cli;
 use std::{fs, net::TcpListener, path::Path, process::Command};
 
 fn command(mode: &str, endpoint: &str, workspace: &Path) -> Command {
-    let mut cmd = Command::new(if mode == "standalone" || mode == "replay" {
+    let mut cmd = home::command(if mode == "standalone" || mode == "replay" {
         env!("CARGO_BIN_EXE_vade-gateway")
     } else { env!("CARGO_BIN_EXE_vade-harness") });
     cmd.env_remove("VADE_API_KEY_FILE");
@@ -74,7 +76,7 @@ fn credential_argument_errors_recover_and_offline_help_never_reads_the_file() {
     let missing = std::env::temp_dir().join(format!("missing-help-key-{}", std::process::id()));
     for binary in [env!("CARGO_BIN_EXE_vade-harness"), env!("CARGO_BIN_EXE_vade-gateway")] {
         for args in [vec!["--api-key-file"], vec!["--api-key-file", ""], vec!["--api-key-file", "one", "--api-key-file", "two"]] {
-            let mut cmd = Command::new(binary);
+            let mut cmd = home::command(binary);
             cmd.args(args).env_remove("VADE_API_KEY_FILE");
             let output = cli::Cli::start(&mut cmd).finish();
             assert!(!output.status.success());
@@ -83,7 +85,7 @@ fn credential_argument_errors_recover_and_offline_help_never_reads_the_file() {
         }
     }
     for mode in ["direct", "agent", "gateway", "standalone", "doctor", "setup", "workload"] {
-        let mut cmd = Command::new(if mode == "standalone" || mode == "replay" { env!("CARGO_BIN_EXE_vade-gateway") } else { env!("CARGO_BIN_EXE_vade-harness") });
+        let mut cmd = home::command(if mode == "standalone" || mode == "replay" { env!("CARGO_BIN_EXE_vade-gateway") } else { env!("CARGO_BIN_EXE_vade-harness") });
         if mode != "standalone" { cmd.arg(mode); }
         cmd.arg("--help").env("VADE_API_KEY_FILE", &missing);
         let output = cli::Cli::start(&mut cmd).finish();

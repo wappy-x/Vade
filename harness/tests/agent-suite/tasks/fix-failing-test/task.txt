@@ -1,0 +1,15 @@
+id: fix-failing-test
+title: Fix a failing test in a small Rust crate
+inputs: Cargo.toml src/lib.rs tests/balance.rs
+budget_seconds: 600
+
+step: new
+prompt:
+  The tests of this Rust crate fail. Run `cargo test --offline`, find the bug in
+  the library code under src/ and fix it. Do not change any file under tests/.
+  Finish when `cargo test --offline` passes.
+
+check: last-exit-zero
+check: unchanged tests
+check: unchanged Cargo.toml
+check: run cargo test --offline --quiet

@@ -7,6 +7,7 @@
 | [First run](first-run.md) | First chat on one Spark from one terminal: launch with existing model files, saved defaults and repeat runs. |
 | [Agent tools](agent-tools.md) | The native agent's tools and session contract: read, list, exact edits, approved commands. |
 | [Context and projects](context-and-projects.md) | Project rules files, context limits and how long sessions are kept in bounds. |
+| [Project instructions](project-instructions.md) | The AGENTS.md, CLAUDE.md and .vade/instructions.md files that go into the system prompt. |
 | [Child agents](child-agents.md) | Bounded helper agents a native session can start, list and stop. |
 | [Engine contract](engine-contract.md) | Capabilities, admission and cache reporting agreed with the engine. |
 | [Engine checkpoints](engine-checkpoints.md) | Optional saved prompt states on the engine, to skip re-reading. |

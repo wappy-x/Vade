@@ -43,8 +43,12 @@ Pooled row decode always stages the sixteen packed PLE rows per live chat
 through reusable pinned storage before graph replay. Padded rows remain zero.
 Prompt tiles of at least 64 rows fuse BF16 input conversion into grouped
 projection staging and build stable compact routes cooperatively. Expert
-GEMMs retain the qualified prefill TC tiles. Explicit chunks may use up to
-2048 rows. The PLE_STAGE and PREFILL_DENSE switches and their replaced
+GEMMs retain the qualified prefill TC tiles. Explicit chunks may use 1 through
+the session's admitted `chunk_limit`, as checked by
+[`set_chunk_size`](../crates/engine/src/flash/next_batched.rs). The default limit
+comes from [`prompt_tile()`](../crates/engine/src/flash/next_rows.rs), which funds
+8192 rows when `VADE_PROMPT_TILE` is unset. A session admitted with a smaller
+chunk keeps that smaller limit. The PLE_STAGE and PREFILL_DENSE switches and their replaced
 paths are removed; the exact reference adapter remains available.
 
 Host CI builds real stamped PTX and every workspace host crate on Linux.

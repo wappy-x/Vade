@@ -6,6 +6,7 @@ Run them all with `cargo test --offline`.
 
 | Item | What it covers |
 | --- | --- |
+| `agent_suite_fixtures.rs` | The agent suite fixtures are complete in Git: every input and fixture file that a task names exists and is tracked, and no suite file is untracked or ignored. |
 | `coding_cli.rs` | The native coding agent in temporary workspaces: tools, approvals, cutoffs, resume and child grants. |
 | `coding_context_cli.rs` | The native coding agent's context handling: budgets, compaction, journaled tool output, project rules, forks and continuation. |
 | `contract_admission.rs` | Exact admission against loopback fixtures: affinity, cache counts, refusals and transport failures. |
@@ -18,6 +19,7 @@ Run them all with `cargo test --offline`.
 | `setup_doctor.rs` | Client setup and the endpoint doctor. |
 | `ui_mock.rs` | The terminal interface's lifecycle, against scripted sockets. |
 | `workload_mock.rs` | The workload driver and its reports, against loopback fixtures. |
+| [`agent-suite/`](agent-suite/README.md) | Fixtures for the agent task suite: 12 mixed tasks with exact checks. A suite runner drives them against a live server; `cargo test` checks only that their files are complete. |
 | [`fixtures/`](fixtures/README.md) | Stand-in peers and sample data. |
 | [`goldens/`](goldens/README.md) | Expected terminal screens. |
 | [`support/`](support/README.md) | Shared test helpers. |

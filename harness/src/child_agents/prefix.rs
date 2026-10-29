@@ -3,8 +3,9 @@ use crate::agent::{Conversation, Limits};
 use crate::json::{self, Value};
 use std::io;
 
-/// Frozen parent system/developer messages (including project rules) and exact
-/// tool schemas. A child's task and scope are appended as fresh user content.
+/// Frozen parent system/developer messages (including project rules), the
+/// parent's latest project instructions update, and exact tool schemas. A
+/// child's task and scope are appended as fresh user content.
 /// No parent transcript, previous-response ID, or checkpoint handle is inherited.
 #[derive(Clone)]
 pub struct StablePrefix {
@@ -65,10 +66,13 @@ impl StablePrefix {
                 .cloned()
                 .collect(),
         );
-        let messages = parent.messages()[..parent.prefix_len()]
+        let mut messages: Vec<Value> = parent.messages()[..parent.prefix_len()]
             .iter()
             .map(|m| m.value().clone())
             .collect();
+        // The frozen system section can be out of date. The parent's latest
+        // project instructions update goes too; no other history is copied.
+        messages.extend(crate::instructions::latest_update(parent).cloned());
         let advertised = match parent.options().get("tools") {
             Some(Value::Array(tools)) => tools
                 .iter()

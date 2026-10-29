@@ -197,6 +197,33 @@ fn child_fresh_context_preserves_exact_system_rules_and_tools() {
     );
 }
 
+
+/// Review finding 5: a child started after the parent's instruction files
+/// changed follows the new rules, not only the frozen system section.
+#[test]
+fn child_gets_the_parents_latest_project_instructions_update() {
+    let mut parent = parent();
+    let child = |parent: &Conversation, goal: &str| {
+        let prefix = StablePrefix::from_parent(parent).unwrap();
+        let scope = ToolPolicy::default().read_scope(&prefix.advertised);
+        prefix.conversation(&Task::read_only(goal), &scope, Limits::default()).unwrap()
+    };
+    assert_eq!(child(&parent, "first").messages().len(), 3, "no update yet: the frozen prefix only");
+    let update = |section: &str| crate::instructions::update_message(section, true);
+    parent.push_user(update("# Project instructions\n\n## AGENTS.md\nold-rule-marker\n"), Limits::default()).unwrap();
+    parent.push_user(update("# Project instructions\n\n## AGENTS.md\nnew-rule-marker\n"), Limits::default()).unwrap();
+    parent.push_user(val(r#"{"role":"user","content":"later parent history"}"#), Limits::default()).unwrap();
+    let first = child(&parent, "investigate");
+    let wire = first.request(WireLimits::default()).to_json().unwrap();
+    assert!(wire.contains("new-rule-marker") && wire.contains(crate::instructions::UPDATE_NAME));
+    assert!(!wire.contains("old-rule-marker") && !wire.contains("later parent history") && !wire.contains("private parent history"));
+    assert_eq!(first.messages().len(), 4);
+    // A removed section reaches the child as a removal.
+    parent.push_user(update(""), Limits::default()).unwrap();
+    let wire = child(&parent, "again").request(WireLimits::default()).to_json().unwrap();
+    assert!(wire.contains("No instruction file is found now") && !wire.contains("new-rule-marker"));
+}
+
 #[test]
 fn parent_cache_identity_is_not_inherited_and_checkpoints_fail_closed() {
     let mut request =

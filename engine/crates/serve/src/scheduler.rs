@@ -585,6 +585,12 @@ impl Reading {
             responding: false,
         })
     }
+    /// Burst intake: this connection still sends its request. A connection
+    /// that has sent no bytes counts only for `window` after its accept, so an
+    /// idle preconnect does not hold every lone first prompt pass.
+    fn arriving(&self, window: Duration) -> bool {
+        !self.responding && (!self.data.is_empty() || self.wire.received.elapsed() < window)
+    }
     fn read(&mut self, limits: &Limits, access: &http::AccessPolicy) -> Result<Option<http::HttpRequest>, String> {
         if !self.wire.bytes.is_empty() {
             self.wire.flush()?;

@@ -27,6 +27,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
     // Collect only the initial burst before a cold short prompt starts prefill.
     // Cached suffixes, decoding and long prompts retain their existing paths.
     let min_prompt_age = crate::intake_grace::minimum_prompt_age(crate::intake_grace::load()?);
+    let mut burst = crate::intake_burst::Burst::new(crate::intake_burst::load()?.unwrap_or(limits.intake_burst));
     // Retirement/admission gate passed; default on, explicit zero disables it.
     // Read once, before serving.
     let mut refresh_retired = super::retirement_refresh_hook(
@@ -1185,6 +1186,10 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
             && j.generation.state.tokens.len() < j.ready.prompt.len()
             && (j.generation.state.tokens.len() > 0
                 || (!collecting && j.admitted.elapsed() >= min_prompt_age)));
+        // Burst intake (intake_burst.rs): when every live job is a cold cohort candidate, the first pass (shared or serial) waits for late chats.
+        let live: Vec<_> = jobs.iter().zip(&errors).filter(|(j, e)| e.is_none() && !j.done).map(|(j, _)| j).collect();
+        let (idle, oldest) = (engine.shared_batch() && active.iter().all(|j| j.done || j.generation.state.tokens.is_empty()) && live.iter().all(|j| j.generation.state.tokens.is_empty() && j.prefill_rows == 0 && j.long_prefill.is_none() && j.ready.prompt.len() <= shared_prefill_max_tokens && prompt_cohort_candidate(j.ready.prompt.len(), 0, shared_prefill_limit, chunk_rows)), live.iter().map(|j| j.ready.enqueued.elapsed()).max().unwrap_or_default());
+        let prompt_ready = burst.ready(Instant::now(), idle, prompt_ready || !intake_pending && live.iter().any(|j| !shared_prompt(j) && j.ready.wire.bytes.is_empty()), crate::intake_burst::View { oldest, cold: live.len(), room: active.len() + jobs.len() < config.active, arriving: preparing > 0 || !queued.is_empty() || reading.iter().any(|r| r.arriving(burst.window())) }) && prompt_ready;
         if engine.shared_batch() && prompt_ready {
             plans.iter_mut().for_each(|p| *p = None);
             let mut prompt_rows = if foreground.is_some() { shared_prefill_limit } else { shared_prompt_rows };
@@ -1199,7 +1204,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 prompt_rows -= count;
             }
             let indices: Vec<_> = plans.iter().enumerate().filter_map(|(i, p)| p.as_ref().map(|_| i)).collect();
-            if !indices.is_empty() {
+            if !indices.is_empty() { if idle { engine_model::events::note_line("intake_burst", &burst.started(Instant::now(), indices.len(), oldest).1); }
                 let mut rows: Vec<_> = jobs.iter_mut().zip(&plans).filter_map(|(job, plan)| plan.as_ref().map(|p|
                     crate::BatchRows { session: &mut job.generation.state.session, tokens: p.tokens(), output: p.output(),
                         greedy: job.key.is_none() && !job.ready.request.kv_checkpoint
@@ -1240,7 +1245,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 && errors[*i].is_none() && !j.done && j.ready.wire.bytes.is_empty()))
                 && !shared_prompt(j) && tick.saturating_sub(j.last_tick) >= 4
         }).min_by_key(|(_, j)| (j.last_tick, j.id)).map(|(_, j)| j.id);
-        let prefill = jobs.iter().enumerate().filter(|(i, j)| !intake_pending && errors[*i].is_none()
+        let prefill = jobs.iter().enumerate().filter(|(i, j)| !intake_pending && !burst.holding() && errors[*i].is_none()
             && !j.done && j.ready.wire.bytes.is_empty()
             && j.generation.state.tokens.len() < j.ready.prompt.len() && !shared_prompt(j))
             .min_by_key(|(_, j)| (Some(j.id) != aged_prefill, Some(j.id) != foreground, j.last_tick, j.id))
@@ -1281,7 +1286,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 let started = Instant::now();
                 job.echo.prefill.as_mut().unwrap().begin(started);
                 if !job.prefill_started {
-                    job.prefill_started = true;
+                    job.prefill_started = true; if idle { engine_model::events::note_line("intake_burst", &burst.started(started, 1, oldest).1); }
                     if context == 0 {
                         job.long_prefill = engine.prefill_long(&job.generation.state.session, &job.ready.prompt)?;
                     }
@@ -1415,6 +1420,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 active.len(), retired.len(), active_charge + retired_charge - reserved, pages.len(),
                 cache.retained_bytes(), cache.unfunded_bytes());
         }
+        if let Some(wait) = burst.park() { std::thread::park_timeout(wait); }
     }
     fatal = fatal.or_else(|| engine.fatal_error());
     if fatal.is_some() {

@@ -249,8 +249,8 @@ This is a **legacy route**. The supported model in v0.1.0 is
 nvidia/Qwen3.8-Flash-Next-FP4-Local (Part 1). We keep this part because it
 shows how to build the engine from source. It uses the small Qwen3-8B model,
 and its download and disk notes apply only to that model. (Looking for
-Flash-Next FP8 on two Sparks? See
-[the legacy FP8 installation](install-legacy-fp8.md), which has its own
+Flash-Next FP8 on 2, 4 or 6 Sparks? See
+[the FP8 installation](install-fp8.md), which has its own
 checkpoint helper.)
 
 In this part you build Vade, serve the official Qwen3-8B BF16, and check that
@@ -706,7 +706,7 @@ tensor-parallel server:
 | --- | --- |
 | `spark-serve` | `--context-tokens`, `--output-tokens`, `--max-active` |
 | Flash-Next FP4-Local | CLI `--context` and `--output`, or the native server's positional context and `FLASH_SERVE_OUTPUT_TOKENS`; memory admission chooses the chat count |
-| Legacy Flash-Next FP8 | The same context and output controls, plus `--chats` or `FLASH_SERVE_MAX_ACTIVE` |
+| Flash-Next FP8 | The same context and output controls, plus `--chats` or `FLASH_SERVE_MAX_ACTIVE` |
 | `tp-serve` | Positional `CONTEXT`, `TP_SERVE_MAX_ACTIVE` |
 | A logical cap on the KV cache (which holds each chat's attention state) or on sessions | `--kv-budget-mib`, `--session-budget-mib` |
 

@@ -11,6 +11,9 @@ fn replay_compaction(messages: &str, resume: bool) {
     impl Model for Replay {
         fn complete(&mut self, request: ModelRequest<'_>, _: &AtomicBool, _: &mut dyn FnMut(&str) -> io::Result<()>) -> io::Result<AssistantTurn> {
             let text = request.to_json()?;
+            if text.contains("Write a compact state block") {
+                return Err(io::Error::other("this mock writes no summaries; local excerpts are the fallback"));
+            }
             assert!(text.contains("lossy historical data"), "must compact before generation");
             assert!(request.messages.iter().any(|m| m.value().get("content").and_then(Value::as_str) == Some("Continue")));
             self.0 += 1;
@@ -60,7 +63,7 @@ fn resumed_sessions_accept_previous_write_guidance() {
     let workspace = Workspace::new(&path).unwrap();
     let limits = Limits::default();
     let grants = BTreeMap::new();
-    let current = native_conversation("mock", &workspace, &[], false, &grants, limits).unwrap();
+    let current = native_conversation("mock", &workspace, &[], "", false, &grants, limits).unwrap();
     assert!(native_system_prompt(false, &grants, limits).contains("~40 lines"));
     assert!(validate_resumed(&current, "mock", false, &grants, limits).is_ok());
     let legacy_prompt = native_system_prompt(false, &grants, limits).replace(

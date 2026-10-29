@@ -12,7 +12,7 @@ pub fn longctx(command: Option<&str>) -> &'static str {
                                  [--checkpoint-hash CHECKPOINT_HASH]
                                  [--max-tokens MAX_TOKENS]
 
-Prepare the pinned legacy Flash-Next FP8 suite. This does not qualify FP4-Local.
+Prepare the pinned Flash-Next FP8 suite. This does not qualify FP4-Local.
 --checkpoint-hash changes manifest metadata. Run and compare accept only the
 pinned FP8 checkpoint hash.
 
@@ -38,7 +38,7 @@ options:
                              [--api-key-env API_KEY_ENV] [--a-build A_BUILD]
                              [--b-build B_BUILD] [--c-build C_BUILD]
 
-Requires the pinned legacy Flash-Next FP8 manifest and compatible FP8 servers.
+Requires the pinned Flash-Next FP8 manifest and compatible FP8 servers.
 This command does not qualify FP4-Local.
 
 options:
@@ -65,7 +65,7 @@ options:
                                  [--report REPORT] --a-dumps A_DUMPS
                                  --b-dumps B_DUMPS [--c-dumps C_DUMPS]
 
-Requires the pinned legacy Flash-Next FP8 manifest.
+Requires the pinned Flash-Next FP8 manifest.
 This command does not qualify FP4-Local.
 
 options:
@@ -83,7 +83,7 @@ options:
             r#"usage: vade test longctx [-h] {prepare,run,compare} ...
 
 Deterministic long-context split/floor evaluation; Rust standard library.
-This is the pinned legacy Flash-Next FP8 suite. It does not qualify FP4-Local.
+This is the pinned Flash-Next FP8 suite. It does not qualify FP4-Local.
 prepare uses the existing CPU tokenizer example; capture uses /v1/score and
 /v1/completions; compare also reads native full-vocabulary FP32 dump
 directories. Generated prompts and captures are runtime artifacts, never

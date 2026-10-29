@@ -1,15 +1,19 @@
 # Vade
 
-CI: local, see [docs/ci.md](docs/ci.md).
+Tests run locally with the commands in [docs/ci.md](docs/ci.md#run-checks-from-a-public-checkout) before every merge.
 
 Vade runs a large language model on your own NVIDIA DGX Spark. You get a
 coding agent in your terminal, a plain chat and an OpenAI-compatible API.
 
-- **One model today:** `nvidia/Qwen3.8-Flash-Next-FP4-Local`, text only.
+- **One model, two checkpoints:** Qwen3.8 Flash-Next, text only.
+  `nvidia/Qwen3.8-Flash-Next-FP4-Local` runs on one Spark or more.
+  `Qwen/Qwen3.8-Flash-Next-FP8` runs on 2, 4 or 6.
 - **One Spark or several:** Vade runs on one Spark by default. You can link
   more.
-- **Exact by design:** the same request on the same setup returns the same
-  token IDs on every run. `vade verify` checks part of this on your own
+- **Exact by design:** the same greedy request on the same setup returns the
+  same token IDs on every run. On FP8, a greedy request must send every
+  sampling field, and 2 and 4 Sparks give different IDs today; see
+  [exactness](#exactness). `vade verify` checks part of this on your own
   engine.
 - **Plain Rust:** the Rust code, GPU kernels included, uses no third-party
   crates. The repository tools also use only Rust and its standard library.
@@ -20,10 +24,12 @@ Unreleased.
 
 ## What it is
 
-Vade is an exact inference engine for NVIDIA FP4-Local checkpoints on DGX
-Spark. It runs on one Spark, or it splits the work across linked Sparks. A
-request gives identical token IDs with drafting on or off. The
-[exactness section](#exactness) gives the rule and the checks we ran.
+Vade is an exact inference engine for Qwen3.8 Flash-Next on DGX Spark. It
+serves the NVIDIA FP4-Local checkpoint and the publisher's FP8 checkpoint. It
+runs on one Spark, or it splits the work across linked Sparks. On a given
+Spark count, a greedy request gives identical token IDs with drafting on or
+off. The [exactness section](#exactness) gives the rule, the checks we ran and
+the FP8 exceptions.
 
 The engine and its GPU kernels use only Rust and its standard library. Vade
 has no third-party Rust dependencies and needs no Python.
@@ -31,8 +37,8 @@ has no third-party Rust dependencies and needs no Python.
 ## What it is not
 
 Vade does not train models. It is not a general server for GPUs from several
-vendors. It does not support every NVIDIA FP4-Local checkpoint yet. The
-supported model is the one above.
+vendors. It does not support every checkpoint yet. The supported checkpoints
+are the two above.
 
 The engine is not a chat UI. A separate harness supplies the terminal chat
 and the coding agent. Both use the engine's API.
@@ -90,6 +96,18 @@ In each new shell, put `cargo` and `vade` on your `PATH` first:
 export PATH="$HOME/.cargo/bin:$HOME/vade/cli/target/release:$PATH"
 ```
 
+**No model yet?** The script builds the `vade` command first, then checks the
+model with `vade detect`. Without the model it stops at that check. Put `vade`
+on your `PATH` as above, download and check the model, then run the script
+again:
+
+```sh
+vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300
+```
+
+[Download models](docs/pull-models.md) explains resume, the file checks,
+`vade models` and the commands for the FP8 and Qwen3-8B checkpoints.
+
 **How long it takes.** We timed the manual source steps of INSTALL.md on a
 DGX Spark with no Rust, no checkout and no Vade files. The run was on
 2026-10-28 at main `285fa8a`. The times come from the timing log of record
@@ -142,6 +160,16 @@ more Sparks run the layer pipeline. They read a long prompt faster, but one
 chat does not write faster yet. See
 [what works today](#supported-systems).
 
+### FP8 on 2, 4 or 6 Sparks
+
+The FP8 checkpoint does not fit on one Spark, so it always runs on linked
+Sparks. It uses the same controller setup as above. Start it with
+`vade up --fp8` on two Sparks or `vade up --fp8 --sparks 4` on four. Both
+Spark counts run tensor parallel: every Spark works on every token, so four
+Sparks write faster than two.
+[Install FP8 on 2, 4 or 6 Sparks](docs/install-fp8.md) gives the steps,
+the config and the measured speeds.
+
 ### From Windows
 
 Windows can't run Vade, but it can drive a Spark. Connect to the Spark with
@@ -193,17 +221,26 @@ and how to change it. These are the defaults you meet first:
 - **Context 32768 tokens, output up to 8192.** On the Spark, Vade lowers the
   context (to 16384, then 8192, then 4096) only if the engine refuses it for
   lack of memory. Vade tells you when it does this. `--context 262144` asks
-  for a larger context. We have no published measurement at that size yet.
+  for a larger context. One Spark served `--context 131072` and two Sparks
+  served `--context 262144` in a test at main `285fa8a`. One Spark also
+  served `--context 262144` at main `250fb49`: a 201,654-token prompt gave
+  its first token in 120.3 s and 120.8 s, with the same token IDs in both
+  runs ([context windows](docs/benchmarks.md#context-windows-main-285fa8a)).
 - **Chats at once** follow from the context and the memory the engine has.
 
 <a id="supported-systems"></a>
 ## What works today, and what doesn't yet
 
-- **One model.** `nvidia/Qwen3.8-Flash-Next-FP4-Local` at its pinned
-  publisher revision, text only. Two older routes are still in the tree, but
-  v0.1.0 does not support them: Flash-Next FP8 on two Sparks
-  ([legacy install](docs/install-legacy-fp8.md)) and the small Qwen3-8B BF16
-  model (`vade run qwen3-8b`, in the
+- **Two checkpoints, both supported.** Each one is used at its pinned
+  publisher revision, text only.
+  - FP4-Local (`nvidia/Qwen3.8-Flash-Next-FP4-Local`) is the one-Spark route
+    and the default. It also runs on 2 to 24 linked Sparks.
+  - FP8 (`Qwen/Qwen3.8-Flash-Next-FP8`) runs on 2, 4 or 6 linked Sparks.
+    Its weights do not fit on one Spark. Start it with `vade up --fp8`
+    ([FP8 install](docs/install-fp8.md)).
+
+  One older route is still in the tree, but v0.1.0 does not support it: the
+  small Qwen3-8B BF16 model (`vade run qwen3-8b`, in the
   [legacy quickstart](docs/quickstart-one-spark.md#qwen3-8b-bf16-ubuntu-to-a-first-answer)).
   [Adding a model](docs/adding-a-model.md) says what a new model must pass.
 - **DGX Spark only.** The engine runs only on DGX Spark (NVIDIA GB10) with
@@ -221,13 +258,18 @@ and how to change it. These are the defaults you meet first:
   [the controller notes](INSTALL.md#route-b-from-a-controller).
 - **The agent needs 8192 tokens of context.** Below that, chat on the Spark
   falls back to plain chat. Chat from a controller stops with an error.
-- **Two Sparks make one chat faster. Four do not yet.** Two Sparks run the
-  tensor split, the only two-Spark path. Both Sparks work on every token.
-  Four or more Sparks run the layer pipeline. Each Spark holds a run of the
-  model's layers and passes its work to the next. So one chat uses one GPU at
-  a time. Two or more Sparks read prompts faster than one. The end-of-day
-  cards compare the same measured build on each tested Spark count. See
-  [measured results](#measured-results).
+- **FP4-Local: two Sparks make one chat faster. Four do not yet.** Two
+  Sparks run the tensor split, the only two-Spark path. Both Sparks work on
+  every token. Four or more Sparks run the layer pipeline. Each Spark holds a
+  run of the model's layers and passes its work to the next. So one chat uses
+  one GPU at a time. Two or more Sparks read prompts faster than one. The
+  end-of-day cards compare the same measured build on each tested Spark
+  count. See [measured results](#measured-results).
+- **FP8: four Sparks write faster than two.** FP8 runs tensor parallel on two
+  and on four Sparks, so every Spark works on every token. With drafting ON,
+  prose went from 36.6 tok/s on two Sparks to 46.7 on four, at main
+  `76977df`. But two and four Sparks give different token IDs (see
+  [exactness](#exactness)).
 - **Chains are measured up to four machines.** The
   [FP4-Local guide](cli/docs/fp4-local.md) describes chains of 2 to 24
   Sparks. We have run at most four: four DGX Sparks at `6cb46bf` on
@@ -250,7 +292,9 @@ The rule: the same request on the same build, checkpoint and settings gives
 identical token IDs on every run and every Spark. Supported Spark counts
 must agree too. This holds when the request runs alone, batched or chunked,
 and when it hits or misses the cache. With greedy decoding, it also holds
-with drafting ON or OFF.
+with drafting ON or OFF. On FP8, a request is greedy only when it sends every
+sampling field. A request that leaves fields out samples with a new seed
+([FP8 install](docs/install-fp8.md#defaults-and-drafting)).
 
 `vade verify` checks the drafting part on your own engine. A pass prints
 `IDENTICAL: 20/20 runs, 1 machine, N tokens`, where N is the reply's length
@@ -263,9 +307,13 @@ Our latest checks compare drafting ON against OFF:
   same token IDs on one, two and four Sparks, with drafting ON and OFF. It
   matched in 66 of 66 responses in every compare
   ([benchmarks](docs/benchmarks.md#current-2026-10-28-end-of-day-main-76977df-home-dgx-sparks)).
-- On the same main, legacy FP8 matched drafting ON against OFF on each Spark
-  count. But its two-Spark and four-Spark cards matched each other in only 7
-  of 66 responses. This is a known limit of the legacy FP8 route.
+- On the same main, FP8 matched drafting ON against OFF in 66 of 66
+  responses on each Spark count. But its two-Spark and four-Spark cards
+  matched each other in only 7 of 66 responses. This is an exception to the
+  rule above. A host test found the cause, the order in which the ranks add
+  their parts, and a fix is in screening. Until it is on main, compare FP8
+  results only at the same Spark count
+  ([benchmarks](docs/benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)).
 - On main `285fa8a`, a confirm run gave the same token IDs as the main
   before it, `54392da`, in all four server starts. See
   [measured results](#measured-results).
@@ -322,8 +370,13 @@ settings, exactness comparisons, methods, receipt status and limits.
 
 <!-- bench-docs:end -->
 
-FP4-Local is the supported release checkpoint. The FP8 rows are legacy
-tests.
+Both checkpoints are supported. The FP8 cards used context 32768, output
+16384 and MTP 2. FP8 on four Sparks runs tensor parallel on a path ("path" in
+the table), not the layer pipeline. The
+[FP8 install](docs/install-fp8.md#what-to-expect) explains the FP8 rows.
+Every card sends its cold 8K prompt with drafting OFF
+(`"draft": "plain"`), in the drafting ON rows too. So the Cold 8K column and
+the cold 8K times below measure drafting OFF.
 
 **After these cards.** Main `285fa8a` changed the engine after the cards
 above. With drafting on, two Sparks now keep more prompt rows for the drafter
@@ -342,6 +395,15 @@ took 2.167 and 2.181 s, against 2.183 and 2.182 s (0.39 % less time).
 [The confirm run](docs/benchmarks.md#confirm-run-main-285fa8a) gives the
 conditions and the limits.
 
+Main `250fb49` then changed how a chat reserves memory: a chat now reserves
+only the memory for the rows it uses. At a 131,072-token context, a capacity
+test sent 16 short chats to two Sparks, one each second, and all 16 were
+active together, against 2 on main `54392da`. A card at `250fb49` on one
+pair of DGX Sparks, with drafting ON and three server starts, gave prose
+54.119, code 100.621, structured 129.514 and eight chats 224.065 tok/s. The
+first token after a cold 8K prompt, sent with drafting OFF, took 2.142 s. See
+[the card at main 250fb49](docs/benchmarks.md#card-at-main-250fb49).
+
 ## License
 
 Vade's code is licensed under [Apache-2.0](LICENSE). The bundled tokenizer and
@@ -355,7 +417,9 @@ and [Credits](CREDITS.md) keeps the source attribution.
 | Guide | What it covers |
 | --- | --- |
 | [INSTALL.md](INSTALL.md) | The whole install, starting with one Spark |
+| [FP8 install](docs/install-fp8.md) | The FP8 checkpoint on 2, 4 or 6 Sparks: build, weights, config, start and measured speeds |
 | [First run](harness/docs/first-run.md) | The launcher on your Spark, saved settings and later runs |
+| [Download models](docs/pull-models.md) | `vade pull` and `vade models`: download a checkpoint from Hugging Face with resume and file checks, then see what can serve it |
 | [CLI reference](cli/README.md) | Commands, configuration and recovery |
 | [Examples](examples/README.md) | Short examples you can run: curl, a Rust API client, Claude Code, Codex, vade bench and a two-Spark launch |
 | [Benchmarks](docs/benchmarks.md) | Measured results, receipts and how to reproduce them |

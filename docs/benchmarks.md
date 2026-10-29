@@ -165,15 +165,16 @@ together: the first outputs of the chats came within 0.5 s of each other.
 It kept 5 of 6 rounds on each main and gave 206.735 tok/s on the old main and
 205.594 on the new main (-0.55 %).
 
-The 129,220-token prompt ran three requests per start: drafting ON, drafting
-OFF, then drafting ON again. Times are seconds to the first token:
+The 129,220-token prompt ran four requests per start, in this order:
+drafting OFF, drafting ON, drafting OFF, drafting ON. Times are seconds to
+the first token:
 
 | Request | `t128-a1` old | `t128-x1` new | Change |
 | --- | ---: | ---: | ---: |
 | Drafting ON, first and second request | 42.086, 42.094 | 40.426, 40.305 | -4.10 % (means 42.090 and 40.366) |
-| Drafting OFF | 39.659 | 39.700 | +0.10 % |
+| Drafting OFF, first and second request | 39.784, 39.659 | 39.756, 39.700 | +0.02 % (means 39.722 and 39.728) |
 
-All six long-prompt replies had the same token IDs, on both mains, with
+All eight long-prompt replies had the same token IDs, on both mains, with
 drafting ON and OFF.
 
 Limits of this run:
@@ -181,6 +182,91 @@ Limits of this run:
 - One pair, two starts per main for the card, and one start per main for the
   long prompt. This is a check that nothing got worse, not a full card.
 - The records of this run are not in the repository yet.
+
+<a id="context-windows-main-285fa8a"></a>
+## Context windows (main 285fa8a)
+
+On 2026-10-28, a context test checked that the large context windows start
+and answer. It used a build of main `285fa8a` (flash-serve
+`320bcc58`, PTX `4288b2a8`) on home DGX Sparks, with FP4-Local, drafting ON
+(depth 3), greedy decoding and thinking OFF. Each setup had a fresh server
+start and two cold requests (`cache` false), each with a 64-token reply. The
+one-Spark setup ran on two Sparks, each as its own server.
+
+| Setup | Context | Prompt tokens | First token (s) | Writing speed (tok/s) | GPU memory peak per process |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| One Spark (first) | 131,072 | 120,624 | 66.31, 66.47 | 48.81, 49.69 | 95,653 MiB |
+| One Spark (second) | 131,072 | 120,624 | 66.23, 66.45 | 48.27, 49.38 | 95,653 MiB |
+| Two Sparks, tensor split | 262,144 | 201,654 | 68.02, 68.10 | 42.69, 41.22 | 101,474 and 101,399 MiB |
+
+The engine refused no request and did not lower either context. Each setup
+gave the same token IDs in both runs, and the two one-Spark servers gave the
+same IDs. The memory peaks are samples of each engine process's GPU memory,
+taken about once a second.
+
+Limits of this test:
+
+- The prompts did not fill the whole window. The test did not run several
+  long chats at once, drafting OFF or the full exactness gate.
+- The one-Spark and two-Spark prompts have different lengths, so their IDs
+  do not compare one Spark with two for the same request.
+- Main `250fb49` changed how chats reserve memory after this test. The test
+  did not run on that main.
+- The records of this test are not in the repository yet.
+
+**One Spark at 262,144.** On 2026-10-29, a second context test (run
+`c262144`) served `--context 262144` on one Spark at main `250fb49`
+(flash-serve `284f0570`, PTX `4288b2a8`), after the change to memory
+reservation. It sent the same 201,654-token request as the two-Spark setup
+above, twice, on one server start, with the same settings.
+
+| Setup | Context | Prompt tokens | First token (s) | Writing speed (tok/s) | GPU memory peak per process |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| One Spark | 262,144 | 201,654 | 120.32, 120.78 | 48.39, 50.02 | 100,786 MiB |
+
+The engine refused no request. Both runs gave the same token IDs. The
+records of this run are not in the repository yet.
+
+<a id="card-at-main-250fb49"></a>
+## Card at main 250fb49 (after the change to memory reservation)
+
+Main `250fb49` changed how a Flash-Next chat reserves memory: a chat now
+reserves only the KV pages for the rows it uses, not the pages for the
+whole context. The [changelog](../CHANGELOG.md) describes the change.
+
+**Capacity.** A capacity test on 2026-10-28 started the engine with
+`--context 131072` on two Sparks and sent 16 short chats (1,247 and 1,248
+tokens), one each second; each asks for 1,200 output tokens, so all 16 are
+sent before the first one ends. All 16 were active together, against 2 on
+main `54392da`. The
+median queue wait was 0.16 s for chats 1 to 9 and 1.01 s for chats 10 to
+16, against 44.8 s and 128.9 s on `54392da`. The 0.16 s and 1.01 s come
+from run `cap-r3-x`, which measured the change of main `250fb49` before it
+merged, on a patch commit that is not public. The `54392da` figures come
+from run `cap-c2b-a`, on a different pair of Sparks. An earlier run of the
+change on that pair, `cap-c2b-x`, gave 1.02 s for chats 10 to 16; the
+changelog entry quotes that run. The token IDs did not change.
+
+**Speed.** On 2026-10-28, a card measured main `250fb49` on one pair of
+home DGX Sparks (tensor split), in three fresh server starts. It used our
+own card client, with context 32768, output 8192, drafting ON (depth 3),
+thinking OFF and five cold 8K prompt runs per start. The client sends the
+cold 8K prompt with drafting OFF (`"draft": "plain"`). Medians in tok/s:
+
+| Prose | Code | Structured | C1 | C4 | C8 | Cold 8K prompt, first token (s) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 54.119 | 100.621 | 129.514 | 78.927 | 165.061 | 224.065 | 2.142 |
+
+Every start gave the same token IDs, and they matched the cards before the
+change. C8 is the median of all nine rounds. On the seven rounds where all
+eight chats started together, C8 was 230.531.
+
+Limits of this card:
+
+- It uses a different client and a different pair from the end-of-day
+  cards, so it does not compare speeds with them.
+- The records of this card and of the capacity test are not in the
+  repository yet.
 
 ## Current (2026-10-28 end of day, main 76977df, home DGX Sparks)
 
@@ -214,8 +300,8 @@ responses).
 | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | 2 | ring | ON | home-1 + home-2 | 36.6 | 50.9 | 52.7 | 45.1 | 41.9 | 66.5 | 98.3 | 5.97 | `2026-10-28_1440_qwen3.8-flash-next-fp8_local-2spark_76977df-drafting-on-thinking-off` |
 | 2 | ring | OFF | home-3 + home-4 | 26.8 | 26.7 | 26.9 | 25.8 | 41.7 | 66.6 | 99.3 | 6.01 | `2026-10-28_1444_qwen3.8-flash-next-fp8_local-2spark_76977df-drafting-off-thinking-off` |
-| 4 | layer chain | ON | home-1 + home-2 + home-3 + home-4 | 46.7 | 65.1 | 68.0 | 58.5 | 55.0 | 86.4 | 128.8 | 6.91 | `2026-10-28_1452_qwen3.8-flash-next-fp8_local-4spark_76977df-drafting-on-thinking-off-chain` |
-| 4 | layer chain | OFF | home-1 + home-2 + home-3 + home-4 | 35.3 | 34.7 | 35.3 | 33.9 | 55.6 | 88.2 | 128.2 | 6.95 | `2026-10-28_1503_qwen3.8-flash-next-fp8_local-4spark_76977df-drafting-off-thinking-off-chain` |
+| 4 | path | ON | home-1 + home-2 + home-3 + home-4 | 46.7 | 65.1 | 68.0 | 58.5 | 55.0 | 86.4 | 128.8 | 6.91 | `2026-10-28_1452_qwen3.8-flash-next-fp8_local-4spark_76977df-drafting-on-thinking-off-chain` |
+| 4 | path | OFF | home-1 + home-2 + home-3 + home-4 | 35.3 | 34.7 | 35.3 | 33.9 | 55.6 | 88.2 | 128.2 | 6.95 | `2026-10-28_1503_qwen3.8-flash-next-fp8_local-4spark_76977df-drafting-off-thinking-off-chain` |
 
 The cards ran in pairs at the same time on separate machines: the one-Spark
 cards together, the two-Spark FP4-Local cards together, and the two-Spark
@@ -235,7 +321,14 @@ and the four-Spark cards matched the 2026-10-25 four-Spark FP8 cards in 62 of
 62 (those cards have one cold 8K pair, not three). But the two-Spark and
 four-Spark cards matched in only 7 of 66 responses. The 2026-10-25 FP8 cards
 show the same gap: 5 of 62. This is a known limit of FP8 on this main. It is
-not a change of this main.
+not a change of this main. See
+[the cause](#fp8-on-two-and-four-sparks-different-token-ids) below.
+
+**FP8 on four Sparks is not the layer chain.** FP8 runs tensor parallel on
+two Sparks (a ring) and on four Sparks (a path): every Spark runs every layer
+and holds a quarter of each one. Only FP4-Local uses the layer chain on four
+Sparks. The four-Spark FP8 result folder names end in `-chain`. That suffix
+names the four-Spark set of cards, not the FP8 layout.
 
 **Four Sparks run one chat at the speed of one Spark.** The layer chain
 passes each token through the four Sparks in turn, so one chat does not get
@@ -254,6 +347,37 @@ drafting OFF (66.6 and 99.3).
 reached 130.6 tok/s, against 137.6 on the same machine at 13:02 the same day
 (main `6926aaa`, the same engine). The best of the three rounds was 137.9 in
 both cards, so this is the spread between server starts.
+
+### FP8 on two and four Sparks: different token IDs
+
+FP8 is a supported route on two and on four Sparks
+([FP8 install](install-fp8.md)). But today the two Spark counts give
+different token IDs for the same request and settings:
+
+| Cards | Main | Two-Spark against four-Spark responses with identical token IDs |
+| --- | --- | ---: |
+| 2026-10-28 end of day | `76977df` | 7 of 66 |
+| 2026-10-25 | `6cb46bf` | 5 of 62 |
+
+On each Spark count alone, FP8 is stable. At `76977df`, drafting ON and OFF
+matched in 66 of 66 responses on two Sparks and on four. The two-Spark cards
+matched the 2026-10-27 FP8 cards in 66 of 66. The four-Spark cards matched the
+2026-10-25 four-Spark cards in 62 of 62.
+
+The [exactness rule](architecture.md#exactness-and-model-quality) asks for the
+same token IDs on every supported Spark count. FP4-Local meets it on one, two
+and four Sparks. FP8 does not meet it yet.
+
+A host test found the cause: the order of additions differs between the two
+rank counts. On four Sparks, the output projections of attention and of the
+linear-attention layers, and the shared expert's down projection, split their
+inner sum across the ranks. The ranks then add their parts in a different order
+than on two Sparks, and the routed experts group their blocks differently. The
+results differ in the last bits, and greedy decoding can then pick a different
+token. A fix is in screening on Sparks. It is not on main.
+
+Until the fix is on main, compare FP8 results only at the same Spark count.
+`vade verify` checks one running engine, so it does not show this difference.
 
 ### A long chat and its second question
 
@@ -2132,7 +2256,7 @@ this repository (the monorepo). A result holds only for the build and workload
 named in its receipt; it does not carry over to a later merge or a
 documentation change.
 
-The legacy FP8 Flash-Next output default is 65,536 tokens, with context
+The FP8 Flash-Next output default is 65,536 tokens, with context
 131,072. The October 12 measurements above used an 8,192-token output cap, so
 they do not cover the new output default. The earlier timing and installation
 results used 32,768 context tokens. Keep `--context 32768 --output 8192`

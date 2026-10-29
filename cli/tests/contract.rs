@@ -61,7 +61,7 @@ fn text(bytes: &[u8]) -> String { String::from_utf8(bytes.to_vec()).unwrap() }
 
 const PAGES: &[&str] = &[
     "launch", "up", "down", "chat", "status", "config", "doctor", "detect", "logs", "verify", "bench", "test", "install",
-    "update", "run", "version",
+    "update", "run", "version", "pull", "models",
 ];
 
 #[test]
@@ -300,5 +300,32 @@ fn config_errors_name_the_encoding_and_the_current_example() {
     std::fs::write(&config, "[global]\nmodle = qwen3.8-flash-next-fp4-local\n").unwrap();
     let stderr = text(&controller(&["status"], &home).stderr);
     assert!(stderr.contains("Unknown config key modle in global") && stderr.contains("cli/examples/fp4-local.conf"), "{stderr}");
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[test]
+fn models_json_failures_are_objects_and_the_table_survives_a_malformed_record() {
+    let home = home("models");
+    // A failure after the arguments parse is the vade.models.v1 object on stdout.
+    let file = home.join("not-a-folder");
+    std::fs::write(&file, "x").unwrap();
+    let output = vade(&["models", file.to_str().unwrap(), "--json"], &home);
+    let stdout = text(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "{stdout}");
+    assert!(output.stderr.is_empty(), "{}", text(&output.stderr));
+    assert!(stdout.starts_with("{\"schema\":\"vade.models.v1\",\"error\":\"Cannot read the model folder") && stdout.ends_with("}\n") && stdout.lines().count() == 1, "{stdout}");
+    // A usage error still goes to stderr.
+    let output = vade(&["models", "--bogus", "--json"], &home);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty() && text(&output.stderr).contains("Unexpected argument"), "{}", text(&output.stderr));
+    // A record with a malformed commit prints the table with no commit.
+    let model = home.join("models/org/model");
+    std::fs::create_dir_all(&model).unwrap();
+    std::fs::write(model.join(".vade-model.json"), r#"{"repo":"org/name","commit":"0123456789aé0123456789"}"#).unwrap();
+    std::fs::write(model.join("config.json"), "{}").unwrap();
+    let output = vade(&["models"], &home);
+    let stdout = text(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert!(stdout.lines().any(|line| line.starts_with("  org/model ") && line.contains(" org/name@? ")), "{stdout}");
     let _ = std::fs::remove_dir_all(home);
 }

@@ -33,6 +33,7 @@ pub(crate) enum WorkerEvent {
     ToolCall(String, String, usize),
     AutoContinued(usize),
     Notice,
+    HookNotice(String),
     ThreadReady(String),
     ToolApprovalClosed,
     ToolPreview {
@@ -385,6 +386,7 @@ impl App {
                         self.stream_dirty = true;
                     }
                 }
+                WorkerEvent::HookNotice(text) => { self.run_notice(&text)?; }
                 WorkerEvent::Notice => {
                     if self.quiet {
                         vade_harness::diagnostics::stderr_line(format_args!(

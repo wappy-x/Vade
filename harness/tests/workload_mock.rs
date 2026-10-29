@@ -1,5 +1,7 @@
 //! The workload driver against first-party loopback fixtures: concurrent
 //! sessions, per-role reports, telemetry gaps, refusals and the JSON/table CLI.
+#[path = "support/home.rs"]
+mod home;
 #[allow(dead_code)]
 #[path = "support/cli.rs"]
 mod cli;
@@ -433,7 +435,6 @@ fn workload_reasoning_only_replies_round_trip_eight_turns_with_exact_prefixes() 
 
 #[test]
 fn workload_cli_writes_private_json_and_one_table_without_clobbering() {
-    use std::process::Command;
     let (listener, endpoint) = listen();
     let server = thread::spawn(move || {
         let mut reader = accept(&listener);
@@ -478,7 +479,7 @@ fn workload_cli_writes_private_json_and_one_table_without_clobbering() {
         "--json",
         file.to_str().unwrap(),
     ];
-    let output = Command::new(env!("CARGO_BIN_EXE_vade-harness"))
+    let output = home::harness()
         .args(args)
         .output()
         .unwrap();
@@ -503,7 +504,7 @@ fn workload_cli_writes_private_json_and_one_table_without_clobbering() {
         );
     }
     // No server remains. Existing-file rejection must occur before any network.
-    let rejected = Command::new(env!("CARGO_BIN_EXE_vade-harness"))
+    let rejected = home::harness()
         .args(args)
         .output()
         .unwrap();

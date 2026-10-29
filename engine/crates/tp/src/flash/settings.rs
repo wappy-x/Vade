@@ -249,7 +249,7 @@ impl Generation {
         let object = value.object().map_err(|e| e.to_string())?;
         let mut sampling = Sampling { temperature: 1.0, top_k: 50, ..Sampling::greedy() };
         for (name, target) in [("temperature", &mut sampling.temperature), ("top_p", &mut sampling.top_p),
-            ("repetition_penalty", &mut sampling.repetition_penalty)] {
+            ("min_p", &mut sampling.min_p), ("repetition_penalty", &mut sampling.repetition_penalty)] {
             if let Some(value) = object.get(name) { *target = value.f64().map_err(|e| e.to_string())?; }
         }
         if let Some(value) = object.get("top_k") {

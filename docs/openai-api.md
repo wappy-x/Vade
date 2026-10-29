@@ -150,9 +150,9 @@ gives `context_length`, `max_model_len`, `max_output_tokens` and
 | `tools` | Up to 64 function tools. |
 | `tool_choice` | `auto` (the default), `none`, `required`, or `{"type": "function", "function": {"name": ...}}`. |
 | `parallel_tool_calls` | `false` allows one call per reply. The default is `true`. |
-| `temperature`, `top_p`, `top_k`, `seed`, `presence_penalty`, `frequency_penalty`, `repetition_penalty` | Used as sent. See [Sampling and exactness](#sampling-and-exactness). |
+| `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `presence_penalty`, `frequency_penalty`, `repetition_penalty` | Used as sent. See [Sampling and exactness](#sampling-and-exactness) and [Sampling](sampling.md). |
 | `response_format` | Ignored. See [Structured output](#structured-output). |
-| `min_p`, `typical_p`, `logit_bias`, `best_of` | Ignored by the engine. They still count as sampling fields. |
+| `typical_p`, `logit_bias`, `best_of` | Ignored by the engine. They still count as sampling fields. |
 | `logprobs`, `top_logprobs`, `user`, `metadata`, `store` | Ignored. |
 | `enable_thinking`, `reasoning_effort`, `chat_template_kwargs` | Vade fields that turn thinking on or off. See the [engine server reference](../engine/docs/server.md). |
 
@@ -278,6 +278,9 @@ client that sends only `top_p` gets a sampled reply.
   `X-Sampling-Seed` header. Every reply reports it in `vade.sampling.seed`.
 - Many chat apps send `temperature`, and some send `"n": 1`, by default. Set
   `temperature` to 0 in the app if you want exact replies.
+- A sampled reply is also repeatable: send the same request with the same
+  `seed`. [Sampling](sampling.md) gives the order of the filters, where
+  sampling runs on two or more Sparks, and what is exact.
 
 ## Errors
 

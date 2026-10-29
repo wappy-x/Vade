@@ -1,5 +1,7 @@
 //! The native coding agent's context handling through the real CLI: budgets,
 //! compaction, journaled tool output, project rules, forks and continuation.
+#[path = "support/home.rs"]
+mod home;
 #[allow(dead_code)]
 #[path = "support/cli.rs"]
 mod cli;
@@ -254,8 +256,15 @@ fn frozen_project_prefix_and_lazy_skill_body_survive_followup_and_resume() {
     );
     let wire = json::stringify(&resumed[1]).unwrap();
     assert!(wire.contains("skill revision changed"));
-    assert!(!wire.contains("root-rule-changed"));
     assert!(!wire.contains("changed body"));
+    // The root AGENTS.md is read again: the system prefix stays frozen and the
+    // changed text goes with the turn in one named update message.
+    let update = json::stringify(&resumed[0]).unwrap();
+    assert!(update.contains(r#""name":"vade_project_instructions""#));
+    assert!(update.contains("root-rule-changed"));
+    assert!(!json::stringify(&Value::Array(first[..2].to_vec())).unwrap().contains("root-rule-changed"));
+    let shown = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(shown.contains("Project instructions changed; reloaded AGENTS.md."), "{shown}");
     assert!(!f.0.join("should-not-exist").exists());
 }
 #[test]
@@ -533,6 +542,27 @@ fn compaction_request_options(request: &Value) -> String {
     ))
     .unwrap()
 }
+/// A summary reply with a tool call: the harness refuses it and falls back to
+/// local excerpts.
+fn refused_summary() -> String {
+    tools(vec![call("summary-tool", "workspace_read", json::parse(r#"{"path":"x"}"#).unwrap())])
+}
+
+/// Drop the rollover summary requests, after checking that there are `expected`
+/// of them and that each keeps the chat's options and first message bytes.
+fn without_summary_requests(requests: Vec<Value>, initial: &Value, expected: usize) -> Vec<Value> {
+    let (summary, chat): (Vec<_>, Vec<_>) = requests
+        .into_iter()
+        .partition(|request| json::stringify(request).unwrap().contains("Write a compact state block"));
+    assert_eq!(summary.len(), expected);
+    let first = |request: &Value| request.get("messages").unwrap().as_array().unwrap()[0].clone();
+    for request in &summary {
+        assert_eq!(compaction_request_options(request), compaction_request_options(initial));
+        assert_eq!(first(request), first(initial));
+    }
+    chat
+}
+
 #[test]
 fn automatic_cli_compaction_observes_incoming_user_and_preserves_prior_summaries() {
     use vade_harness::{
@@ -580,7 +610,14 @@ fn automatic_cli_compaction_observes_incoming_user_and_preserves_prior_summaries
         let incoming =
             compaction_text_to_threshold(&initial, "user", "incoming-long-user-marker", 81, budget);
         let raw_before = std::fs::read(f.0.join(".vade/sessions/automatic.journal")).unwrap();
-        let (url, server) = mock(vec![answer(), answer()]);
+        // The model is asked for a rollover summary first. This mock answers
+        // with a tool call, which the harness refuses, so this test covers the
+        // local excerpt fallback; the rollover has its own test below.
+        let mut replies = vec![answer(), answer()];
+        if !disabled {
+            replies.insert(0, refused_summary());
+        }
+        let (url, server) = mock(replies);
         let mut command = compaction_cli_command(&f, &url);
         command.args([
             "--resume",
@@ -600,7 +637,7 @@ fn automatic_cli_compaction_observes_incoming_user_and_preserves_prior_summaries
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let requests = server.join().unwrap();
+        let requests = without_summary_requests(server.join().unwrap(), &initial_requests[0], usize::from(!disabled));
         let notice = String::from_utf8_lossy(&output.stderr);
         assert_eq!(notice.contains("Auto-compacted older results:"), !disabled);
         assert_eq!(
@@ -718,6 +755,7 @@ fn automatic_cli_compaction_observes_incoming_user_and_preserves_prior_summaries
         let (url, server) = mock(vec![
             answer().replace("mock complete", &first_growth),
             answer().replace("mock complete", &second_growth),
+            refused_summary(),
             answer(),
             answer(),
         ]);
@@ -738,7 +776,7 @@ fn automatic_cli_compaction_observes_incoming_user_and_preserves_prior_summaries
         let notice = String::from_utf8_lossy(&output.stderr);
         assert_eq!(notice.matches("Auto-compacted older results:").count(), 1);
         assert!(notice.contains("later admission overflow attempts another safe rewrite"));
-        let requests = server.join().unwrap();
+        let requests = without_summary_requests(server.join().unwrap(), &initial_requests[0], 1);
         for request in &requests {
             assert_eq!(compaction_request_options(request), initial_options);
             let messages = request.get("messages").unwrap().as_array().unwrap();
@@ -783,4 +821,151 @@ fn automatic_cli_compaction_observes_incoming_user_and_preserves_prior_summaries
                 .any(|m| m.value() == &summaries[0])
         );
     }
+}
+#[test]
+fn project_instructions_join_the_system_prompt_once_and_list_with_a_command() {
+    let f = Fixture::new();
+    std::fs::write(f.0.join("AGENTS.md"), "agents-rule-marker").unwrap();
+    std::fs::write(f.0.join("CLAUDE.md"), "claude-rule-marker").unwrap();
+    // The user-level file comes from the fixture HOME, never the developer's.
+    std::fs::create_dir(f.home().join(".vade")).unwrap();
+    std::fs::write(f.home().join(".vade/instructions.md"), "home-rule-marker").unwrap();
+    for off in [false, true] {
+        let (url, handle) = mock(vec![answer()]);
+        let mut command = f.command(&url);
+        command.args(["--plain", "--approval", "never"]);
+        if off {
+            command.arg("--no-instructions");
+        }
+        let output = run_bounded(&mut command, "/instructions\nhello\n/quit\n");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let requests = handle.join().unwrap();
+        let wire = json::stringify(&requests[0]).unwrap();
+        let system = requests[0].get("messages").unwrap().as_array().unwrap()[0].get("content").unwrap().as_str().unwrap().to_owned();
+        let shown = String::from_utf8_lossy(&output.stdout);
+        // The first name in a folder wins; CLAUDE.md beside AGENTS.md is not read.
+        assert!(!wire.contains("claude-rule-marker"));
+        if off {
+            assert!(!wire.contains("agents-rule-marker") && !wire.contains("home-rule-marker"));
+            assert!(shown.contains("Project instructions are off (--no-instructions)."), "{shown}");
+        } else {
+            assert!(system.contains("\n\n# Project instructions\n"));
+            assert!(system.contains("\n## AGENTS.md\nagents-rule-marker\n"));
+            assert!(system.contains("\n## ~/.vade/instructions.md\nhome-rule-marker\n"));
+            // The frozen project rules do not repeat the root file.
+            assert_eq!(wire.matches("agents-rule-marker").count(), 1);
+            assert!(shown.contains("loaded AGENTS.md · 18 bytes"), "{shown}");
+            assert!(shown.contains("loaded ~/.vade/instructions.md · 16 bytes"), "{shown}");
+        }
+    }
+}
+/// Review finding 3: --no-instructions on resume withdraws the saved
+/// instructions once, and /instructions agrees with the request.
+#[test]
+fn resume_with_no_instructions_withdraws_the_saved_section() {
+    let f = Fixture::new();
+    std::fs::write(f.0.join("AGENTS.md"), "saved-rule-marker").unwrap();
+    let (url, handle) = mock(vec![answer()]);
+    let output = run_bounded(f.command(&url).args(["--session", "keep", "--plain", "--approval", "never"]), "hello\n/quit\n");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(json::stringify(&handle.join().unwrap()[0]).unwrap().contains("saved-rule-marker"));
+    let (url, handle) = mock(vec![answer(), answer()]);
+    let output = run_bounded(
+        f.command(&url).args(["--resume", "keep", "--no-instructions", "--plain", "--approval", "never"]),
+        "/instructions\nagain\nonce more\n/quit\n",
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let requests = handle.join().unwrap();
+    let off = "Project instructions are off for this session (--no-instructions).";
+    let updates = |request: &Value| {
+        request.get("messages").unwrap().as_array().unwrap().iter()
+            .filter(|m| m.get("name").and_then(Value::as_str) == Some("vade_project_instructions"))
+            .map(|m| m.get("content").unwrap().as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    // The frozen system message keeps its bytes; one update withdraws it.
+    assert_eq!(updates(&requests[0]).len(), 1);
+    assert!(updates(&requests[0])[0].starts_with(off), "{:?}", updates(&requests[0]));
+    assert_eq!(updates(&requests[1]).len(), 1, "the second turn sends no new update");
+    let shown = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(shown.contains("Project instructions are off (--no-instructions)."), "{shown}");
+    assert!(shown.contains("the saved instructions no longer apply"), "{shown}");
+}
+/// Review 2 finding 4: every test launcher gives the binary the fixture HOME,
+/// so a developer's ~/.vade/instructions.md never changes a test request.
+#[test]
+fn every_test_launcher_isolates_home() {
+    let fixture = home::path();
+    assert!(fixture.starts_with(env!("CARGO_TARGET_TMPDIR")) && !fixture.join(".vade/instructions.md").exists());
+    for command in [home::harness(), home::command(env!("CARGO_BIN_EXE_vade-gateway"))] {
+        assert!(command.get_envs().any(|(key, value)| key == "HOME" && value == Some(fixture.as_os_str())));
+    }
+    // No launcher starts a first-party binary around the helper.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut checked = 0;
+    for dir in [root.clone(), root.join("support")] {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "rs") && path.file_name().is_some_and(|n| n != "home.rs") {
+                let text = std::fs::read_to_string(&path).unwrap();
+                for line in text.lines().filter(|l| l.contains("Command::new(") && !l.contains("Command::new(\"") && !l.contains("Command::new(compiler)")) {
+                    assert!(line.contains("CARGO_BIN_EXE_vade-gateway\"))"), "{}: {line}", path.display());
+                }
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 20);
+}
+
+#[test]
+fn automatic_cli_rollover_writes_a_model_summary_and_keeps_two_turns() {
+    use vade_harness::{agent::Limits, context::Usage};
+    let f = Fixture::new();
+    let old_answer = format!("old-result-marker {} old-result-tail", "resolved ".repeat(1000));
+    let (url, server) = mock(vec![
+        answer().replace("mock complete", &old_answer),
+        answer().replace("mock complete", &old_answer),
+        answer(),
+    ]);
+    let output = run_bounded(
+        compaction_cli_command(&f, &url).args(["--session", "rollover"]),
+        "old constraints\nsecond constraints\nlatest constraints\n/quit\n",
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let initial_requests = server.join().unwrap();
+    let workspace = vade_harness::tools::Workspace::new(&f.0).unwrap();
+    let (journal, initial, _) = vade_harness::journal::Journal::resume(&workspace, "rollover", Limits::default()).unwrap();
+    drop(journal);
+    let budget = Usage::for_conversation(&initial).required(128).saturating_mul(10).div_ceil(7).max(8192);
+    let incoming = compaction_text_to_threshold(&initial, "user", "incoming-long-user-marker", 81, budget);
+    let summary = answer().replace("mock complete", "Plan: keep going.\\nOpen tasks: none.");
+    let (url, server) = mock(vec![summary, answer(), answer()]);
+    let output = run_bounded(
+        compaction_cli_command(&f, &url).args(["--resume", "rollover", "--context-tokens", &budget.to_string()]),
+        &format!("{incoming}\nsmall followup\n/quit\n"),
+    );
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let notice = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(notice.matches("[context compacted: kept 2 turns, summary ").count(), 1, "{notice}");
+    assert!(!notice.contains("Auto-compacted older results:"));
+    let requests = without_summary_requests(server.join().unwrap(), &initial_requests[0], 1);
+    assert_eq!(requests.len(), 2);
+    let messages = requests[0].get("messages").unwrap().as_array().unwrap();
+    let prefix: Vec<_> = initial.messages()[..initial.prefix_len()].iter().map(|m| m.value().clone()).collect();
+    assert_eq!(messages[..initial.prefix_len()], prefix[..], "frozen prefix bytes unchanged");
+    let block = messages[initial.prefix_len()].clone();
+    assert_eq!(block.get("name").and_then(Value::as_str), Some("vade_context_summary"));
+    let text = block.get("content").and_then(Value::as_str).unwrap();
+    assert!(text.contains("Plan: keep going.") && text.ends_with("--- ask, 15 bytes ---\nold constraints\n--- ask, 18 bytes ---\nsecond constraints\n"), "{text}");
+    let contents: Vec<_> = messages.iter().filter_map(|m| m.get("content").and_then(Value::as_str)).collect();
+    assert!(contents.contains(&"latest constraints") && contents.contains(&incoming.as_str()));
+    assert!(!contents.iter().any(|c| c.contains("old-result-marker")), "summarized answers left the prompt");
+    assert!(requests[1].get("messages").unwrap().as_array().unwrap().contains(&block), "the block stays for the next turn");
+    let raw = std::fs::read(f.0.join(".vade/sessions/rollover.journal")).unwrap();
+    assert!(raw.windows(old_answer.len()).any(|bytes| bytes == old_answer.as_bytes()), "the journal keeps the originals");
+    let origin = br#""summary_origin":"model""#;
+    assert!(raw.windows(origin.len()).any(|bytes| bytes == origin));
+    let (journal, _, _) = vade_harness::journal::Journal::resume(&workspace, "rollover", Limits::default()).unwrap();
+    assert_eq!(journal.generation(), 1);
 }

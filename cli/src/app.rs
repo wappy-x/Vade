@@ -41,7 +41,7 @@ pub struct App<R> {
 
 impl<R: Runner> App<R> {
     fn start_command(&self) -> &'static str {
-        if self.config.model == "qwen3.8-flash-next-fp8" { "vade up --fp8-legacy" } else { "vade up" }
+        if self.config.model == "qwen3.8-flash-next-fp8" { "vade up --fp8" } else { "vade up" }
     }
 
     /// Run one lifecycle command against the configured machines.

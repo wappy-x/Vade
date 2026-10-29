@@ -9,6 +9,7 @@ pub(crate) mod commands;
 pub(crate) mod delegated;
 pub(crate) mod events;
 pub(crate) mod help;
+mod hooks;
 pub(crate) mod native_setup;
 pub(crate) mod ui;
 pub(crate) mod worker;
@@ -42,9 +43,14 @@ pub(crate) struct App {
     timed_out_prompt: Option<String>,
     answers: answers::Answers,
     auto_compaction: Arc<Mutex<vade_harness::context::AutoCompaction>>,
+    // Prompt tokens against the window after every turn; /context shows it.
+    budget: vade_harness::context::BudgetTracker,
     terminal: Terminal,
     workspace: Arc<Workspace>,
     pub(crate) session: Session,
+    /// Project instruction files; read again before a turn when they change.
+    pub(crate) instructions: vade_harness::instructions::Instructions,
+    hooks: vade_harness::hooks::Hooks,
     // Authoritative native context never comes from Session's text-pair recall.
     // While running, the worker exclusively owns it and must return it intact.
     pub(crate) native: Option<Conversation>,
@@ -116,6 +122,13 @@ impl App {
             },
         ).map_err(|error| startup_error("--session", error,
             "Keep the saved metadata. Choose another --session NAME or omit --session for an in-memory chat; check workspace storage permissions."))?;
+        let instructions = if config.instructions && matches!(config.mode, Mode::Agent | Mode::Direct) {
+            // Tests never read the developer's own user-level file.
+            let home = std::env::var_os("HOME").filter(|_| !cfg!(test)).map(std::path::PathBuf::from);
+            vade_harness::instructions::Instructions::load(workspace.root(), home.as_deref())
+        } else {
+            vade_harness::instructions::Instructions::disabled()
+        };
         let (native, journal) = if config.mode == Mode::Agent {
             let (store, conversation) = if let Some(name) = &config.resume {
                 let (mut store, mut conversation, torn) =
@@ -143,6 +156,7 @@ impl App {
                     config.model.as_deref().unwrap(),
                     &workspace,
                     &config.rules_scopes,
+                    instructions.section(),
                     config.children,
                     &config.child_grants,
                     Limits { max_run_time: config.max_run_time, ..Limits::default() },
@@ -174,8 +188,18 @@ impl App {
         }
         let quiet = !terminal.interactive() || config.prompt.is_some();
         let approval_input_closed = config.prompt.is_some();
+        let hooks = if config.mode == Mode::Agent {
+            match vade_harness::hooks::Hooks::load(&workspace) {
+                Ok(hooks) => hooks,
+                Err(error) => {
+                    terminal.note(&format!("hooks.conf ignored for this chat: {error}"))?;
+                    vade_harness::hooks::Hooks::default()
+                }
+            }
+        } else { vade_harness::hooks::Hooks::default() };
         let mut app = Self {
             answers: answers::Answers::new(config.generation),
+            budget: Default::default(),
             auto_compaction: Arc::new(Mutex::new(vade_harness::context::AutoCompaction::default())),
             config,
             attachment_completion: Default::default(),
@@ -183,6 +207,8 @@ impl App {
             terminal,
             workspace,
             session,
+            instructions,
+            hooks,
             native,
             journal,
             approval_reply: None,

@@ -839,6 +839,11 @@ impl RunReport {
 /// Called before each tool (with an unknown-outcome marker), after each tool,
 /// and before committing final answers. Errors stop execution immediately.
 pub trait RunObserver {
+    /// Explicit chat policy after the unknown-outcome checkpoint. A returned
+    /// receipt blocks dispatch. Other hosts keep these callbacks inert.
+    fn before_tool(&mut self, _call: &ToolCall, _arguments: &Value, _cancel: &AtomicBool) -> Option<String> { None }
+    /// A dispatched tool's bounded receipt, before it enters the journal.
+    fn after_tool(&mut self, _call: &ToolCall, _arguments: &Value, _content: &mut String, _cap: usize, _cancel: &AtomicBool) {}
     /// Presentation only: loop-owned rounds and authoritative token counts.
     fn progress(
         &mut self,
@@ -861,6 +866,18 @@ pub trait RunObserver {
         _: &mut dyn FnMut(&Conversation) -> io::Result<crate::context::Usage>,
     ) -> io::Result<bool> {
         self.before_request(c, limits, cancel)
+    }
+    /// Like `before_counted_request`, with a host that can also ask the model
+    /// for a rollover summary. The default only counts.
+    fn before_hosted_request(
+        &mut self,
+        c: &mut Conversation,
+        limits: Limits,
+        cancel: &AtomicBool,
+        usage: &crate::context::Usage,
+        host: &mut dyn crate::context::ContextHost,
+    ) -> io::Result<bool> {
+        self.before_counted_request(c, limits, cancel, usage, &mut |c| host.count(c))
     }
     /// A host may durably compact closed history between requests. Return true
     /// only after the replacement is persisted; stable options/prefix stay exact.

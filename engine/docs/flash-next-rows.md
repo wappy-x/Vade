@@ -1,20 +1,36 @@
 # Flash-Next rows
 
 `NextSession` has one execution path for a prompt tile or one token from each
-of up to sixteen independent chats. Prompts default to 2048 tokens per tile;
-`set_chunk_size(1..=2048)` changes scheduling only. Multi-token tiles start at
+of up to sixteen independent chats. On one Spark, unset `VADE_PROMPT_TILE`
+allocates memory for an 8192-row prompt workspace. Automatic tiles use 4096 rows
+for prompts ending below 8192 tokens. Prompts ending at or beyond that boundary
+use 8192 rows. An explicit value
+of `2048`, `4096` or `8192` selects a fixed tile size. See
+[`prompt_tile` and `prompt_tile_for`](../crates/engine/src/flash/next_rows.rs).
+[`set_chunk_size`](../crates/engine/src/flash/next_batched.rs) accepts 1 through
+the session's admitted `chunk_limit`. The default limit comes from `prompt_tile()`;
+`session_with_chunk` can set a smaller limit. This changes scheduling only.
+Multi-token tiles start at
 absolute positions divisible by 64; unaligned continuations use single rows. `step` is the same path with
 one row, including a cold sequence. Sparse QSA is the default indexer.
 
 The world-one `flash-serve` bootstrap selects mixed checkpoints before creating
 rank transport. It uses `spark_serve::flashnext::FlashNext`, the existing HTTP
-scheduler and sampler, 2048-token prompt slices and up to sixteen memory-admitted chats.
-Strict greedy MTP defaults to k=3 with prompt lookup; requests may set `mtp_depth` to 0..=3.
-World sizes above one are refused. Session reservations include
-FP32 KV, recurrent matrices, funded prompt scratch, norms, head and PLE. Native
-`session_reservation_bytes` covers all 2048 rows. HTTP uses
-`session_reservation_bytes_for_chunk(context, 2048)` and `session_with_chunk`
-to cap each session at its admitted 2048 rows. Sixteen
+scheduler and sampler, automatic prompt tiles and up to sixteen memory-admitted chats.
+Strict greedy MTP defaults to request depth 3 with prompt lookup; requests may
+set `mtp_depth` to 0..=3. The resident ceiling is separate, as described below.
+The [launcher](../crates/tp/src/bin/flash-serve.rs) accepts world sizes 1 through
+64. FP4-Local uses the tensor split on two Sparks and the layer chain on three
+or more. Those routes call the mixed loader as world one. The
+[`vade up` limit](../../cli/src/config.rs) is 24 Sparks. Accepted launch sizes
+do not establish device qualification. The
+[startup settings](../crates/tp/src/flash/settings.rs) fund a 4096-row prompt
+workspace for the tensor split and pin layer-chain tiles to 2048 rows by default.
+Session reservations cover KV, recurrent state and draft state. The model funds
+shared prompt scratch once. HTTP passes the admitted chunk to
+`session_reservation_bytes_for_chunk` and `session_with_chunk`; see the
+[row model](../crates/engine/src/flash/next_batched.rs) and
+[HTTP adapter](../crates/serve/src/flashnext.rs). Sixteen
 128K sessions are not assumed to fit; the scheduler admits within the pool.
 
 Arithmetic and ownership:
@@ -135,7 +151,7 @@ Unmasked prompt expert prefill above sixteen rows always uses the M32/N128/K64
 tensor-core kernels. Each M128 task executes four M32 planes with ascending K16
 accumulation and unchanged BF16 boundaries. Small cohorts and masked decode keep
 compact kernels. The tiled PLE schedule is unconditional.
-`NextSession::prefill_batch` shares up to the funded chunk limit (at most 2048 rows) from at most eight live
+`NextSession::prefill_batch` shares up to the funded chunk limit from at most eight live
 prompts at a time; a sixteen-chat cohort uses two groups. Each chat retains its
 own causal histories and final logits. Existing GDN/QSA/HC/PLE work is reused;
 PLE reuses its existing 64-row gate/convolution path and canonical projections;
@@ -167,7 +183,8 @@ the BATCHED_ROWS switch and former M=1 service are deleted. Row execution
 rejects FAST_PROJ/FAST_FRONTEND. Device row
 frontend, compact readback, cached prompt uploads and pinned PLE staging are defaults.
 Prompt BF16 input/route fusion is always selected above its 64-row threshold;
-it composes with the existing expert TC tiles. Chunks accept 1..=2048 rows.
+it composes with the existing expert TC tiles. Chunks accept 1 through the
+admitted limit described above.
 
 Unmasked expert prefill above sixteen rows always uses the GPU-qualified
 M32/N128/K64 W4A16 tensor-core tile from 1f4d01d. There is no TC switch.
@@ -195,30 +212,46 @@ Legacy nonmixed Flash NVFP4 retains main's 320,000 limit in both loader and rece
 MTP retains one recurrent entry snapshot, projection tapes and small PLE/hash/
 hidden prefixes. Verification scans every causal GDN row in one pass. Rollback
 selects the entry owner and replays only the accepted GDN projection prefix.
-`mtp_depth:0` requests plain; k=1..3 selects the MTP proposal limit. The server
-keeps depth3 resident. `--mtp` sets the request default; omitted world-one Next
-uses k3, following the supplied lookup tuning report's best-default line. FP8
-keeps k2 and rank Next keeps plain. The existing single-chat cohort gate applies
-regardless of an explicit positive request depth.
+`mtp_depth:0` requests plain. `--mtp` sets the request default, which is 3 for
+one-Spark Next and the pipeline service. The
+[draft settings](../crates/engine/src/flash/draft_stack.rs) keep depth 7 resident
+by default on these routes. For a chat running alone, omitted request depth or
+depth 3 allows the adaptive chooser to use that resident ceiling.
+Request depths 1 and 2 keep their own limits. Cohorts keep the request depth,
+subject to the row budget. `VADE_MTP_ADAPT=0` disables adaptive depth. See the
+[request setup and depth selection](../crates/serve/src/flashnext.rs).
+Native rank Next keeps plain decoding, as defined
+in the [startup settings](../crates/tp/src/flash/settings.rs).
 
 Prompt lookup uses exact 8-token keys to copy up to 15 proposed tokens, then
 verifies every proposal against the target. A miss falls back to the configured
 MTP depth. Its admission increment funds GDN projection tapes, small prefixes,
 replacement verification logits and a bounded host index. The resident MTP
 reservation already funds the single recurrent snapshot; there are no fifteen
-full GDN snapshots. There is no HTTP or environment lookup selector. The integration measurement
+full GDN snapshots. [`VADE_MTP_LOOKUP=0`](../crates/engine/src/flash/next_lookup.rs)
+turns lookup off. Unset or any other value leaves it enabled. There is no separate
+HTTP lookup selector. The integration measurement
 wrapper retains an MTP-only oracle for byte and speed comparisons. Existing
 `mtp_depth:0` / `draft:"plain"` controls select plain output.
 The integration handoff qualifies the composed implementation through HTTP;
 earlier isolated measurements do not replace that gate.
 
-World-one strict greedy serving defaults to MTP k3 plus prompt lookup with at
-most 16 verification rows, only while exactly one chat is active. Every proposed
-token is target-verified. Cohorts suspend both lookup and MTP and resume when one
-chat remains. Verification scans GDN once for all rows, including lookup rows;
-rejected prefixes replay only retained GDN projections. No arithmetic switch.
+The [launcher cohort policy](../crates/serve/src/mtp_batch.rs) selects `Auto8`
+on one Spark and on the two-Spark tensor split. Greedy cohorts of one through
+eight chats can draft. The cost controller can choose plain steps. One Spark
+defaults to a 16-row verify budget. The tensor split enables wide ticks by
+default, so five through eight chats can share up to 32 verification rows.
+`VADE_MTP_COHORT=off` restores its 16-row controller unless `VADE_VERIFY_ROWS`
+overrides that budget. The [request parser](../crates/serve/src/protocol.rs)
+allows lookup for greedy requests with drafting enabled, nonzero depth and
+`draft` other than `"plain"`. Cohort size does not clear that request setting.
+Every proposed token is target-verified. Verification scans GDN once for all
+rows, including lookup rows; rejected prefixes replay only retained GDN projections.
 
-HTTP keeps its configured 2048-row prompt chunk when other chats decode.
+The [HTTP scheduler](../crates/serve/src/scheduler/dispatch.rs) uses its configured
+prompt chunk while other chats decode. Otherwise it can use the
+[adapter's `prefill_chunk_size`](../crates/serve/src/flashnext.rs), which follows
+the admitted workspace and the route's prompt policy.
 The long-context C8 receipt measured chunk shrinking but supplied no measured
 decode-latency reason to preserve it. Existing layer-boundary yielding remains.
 The active cap is a ceiling: memory admission can queue peers (seven 32K chats

@@ -217,6 +217,11 @@ impl App {
                 self.timed_out_prompt = None;
                 user
             };
+        // One status line when a file changed since the last turn. Agent mode
+        // shows it when the changed text joins the turn, which covers resume.
+        if let Some(line) = self.instructions.refresh().filter(|_| self.config.mode != Mode::Agent) {
+            self.notice(&line)?;
+        }
         let retrying = std::mem::take(&mut self.answers.retrying);
         let mut generation = self.answer_generation();
         generation.disable_tools = retrying;
@@ -253,6 +258,19 @@ impl App {
             // Stage the complete candidate without changing the live history or
             // durable journal. Exact admission must precede token-fit decisions.
             let mut candidate = conversation.clone();
+            // The system message is frozen; a changed section goes with this turn.
+            // With --no-instructions the section is empty, so a resumed session
+            // withdraws the saved instructions here too.
+            let section = self.instructions.section();
+            if !retrying && vade_harness::instructions::stale(&candidate, section) {
+                let update = vade_harness::instructions::update_message(section, self.instructions.enabled());
+                if candidate.push_user(update, Limits::default()).is_err() {
+                    self.failed = true;
+                    return self.run_notice("The conversation is full; the changed project instructions were not sent. Use /new to start over.");
+                }
+                let line = self.instructions.status();
+                self.notice(&line)?;
+            }
             if !retrying
                 && candidate
                     .push_user(native_message("user", &user), Limits::default())
@@ -308,7 +326,7 @@ impl App {
         let messages = if matches!(mode, Mode::Codex | Mode::Hermes | Mode::Agent) {
             Vec::new()
         } else {
-            prompt::build_messages(&format!("{SYSTEM_PROMPT}\n{}", vade_harness::session::model_identity(self.config.model.as_deref().unwrap_or("unspecified"))), self.session.history(), &user)
+            prompt::build_messages(&prompt::with_instructions(&format!("{SYSTEM_PROMPT}\n{}", vade_harness::session::model_identity(self.config.model.as_deref().unwrap_or("unspecified"))), self.instructions.section()), self.session.history(), &user)
         };
         let endpoint = self.config.endpoint.clone().unwrap_or_default();
         let model = self.config.model.clone().unwrap_or_default();
@@ -411,6 +429,7 @@ impl App {
             .take()
             .map(|m| m.with_server_cancellation().with_generation_options(generation));
         let workspace = Arc::clone(&self.workspace);
+        let hooks = self.hooks.clone();
         let journal = self.journal.clone();
         let policy = self.config.approval;
         let check = self
@@ -508,6 +527,7 @@ impl App {
                         worker_cancel.store(true, Ordering::Relaxed);
                     }
                 };
+                let mut hook_observer = super::hooks::Observer { inner: &mut observer, hooks: &hooks, events: &tx };
                 let (report, children) = if let Some(scheduler) = scheduler.as_mut() {
                     let result = child_agents::run_parent_observed_with_budget(
                         &mut conversation,
@@ -527,7 +547,7 @@ impl App {
                         },
                         scheduler,
                         &mut on_text,
-                        &mut observer,
+                        &mut hook_observer,
                         &budget,
                     );
                     (result.report, result.children)
@@ -551,12 +571,13 @@ impl App {
                             },
                             &worker_cancel,
                             &mut on_text,
-                            &mut observer,
+                            &mut hook_observer,
                             &budget,
                         ),
                         Vec::new(),
                     )
                 };
+                hooks.stop(&mut |text| super::hooks::notice(&tx, text));
                 model.set_progress_observer(None);
                 model.set_thinking_observer(None);
                 tx.finish(WorkerResult {

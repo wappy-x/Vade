@@ -297,7 +297,7 @@ are not byte references for four Sparks.
    location. Don't compare one rank's files with another rank's files, and
    don't normalize differences away.
 7. Start the matching four-rank server with `vade up --sparks 4` (add
-   `--fp8-legacy` if the native run used the FP8 checkpoint). Keep all four
+   `--fp8` if the native run used the FP8 checkpoint). Keep all four
    startup logs and run the HTTP phase from rank zero:
 
    ```sh

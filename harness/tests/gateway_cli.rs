@@ -1,9 +1,11 @@
 //! Actual repeated-upstream CLI wiring; all peers are first-party loopback mocks.
 #![cfg(target_os = "macos")]
+#[path = "support/home.rs"]
+mod home;
 use std::{
     io::{BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -125,7 +127,7 @@ fn cli_routes_repeated_upstreams_and_exposes_local_stats_without_logging_payload
     let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = reservation.local_addr().unwrap();
     drop(reservation);
-    let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+    let mut command = home::harness();
     command.args(["gateway", "--bind", &address.to_string()]);
     // An inherited client token would answer these unauthenticated calls with 401.
     command.env_remove("VADE_GATEWAY_TOKEN");

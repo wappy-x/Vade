@@ -33,6 +33,8 @@ This page explains new terms where they first come up. The
 | `vade bench` | Measures the wait before output starts and the answer speed |
 | `vade doctor` | Prints one line per check, then PASS or FAIL. On the Spark itself, checks the config, `VADE_HOME`, the driver, memory, disk, model, installation, port and engine health. From a controller, checks local tools, then SSH, `nvidia-smi`, GPU use (the busy rule `vade up` applies), disk, memory, model files and the staged build hashes on the active Sparks or the default `vade up` selection (and the pinned Rust toolchains when no `prebuilt_dir` is set), then the fabric, port and engine. Add `--json` for scripts |
 | `vade logs` | Shows recent engine logs |
+| `vade pull` | Downloads a model from the Hugging Face Hub with resume, size and hash checks and a progress line; see [Download models](../docs/pull-models.md) |
+| `vade models` | Lists the models under `~/models` with their size, source and which command can serve them; add `--json` for scripts |
 | `vade detect` | Shows this Spark's memory, disk, driver and model, and changes nothing; add `--json` for scripts |
 | `vade install` | Saves local defaults and installs the engine and chat on this Spark. With `VADE_CONFIG` set, installs on your Sparks from a controller |
 | `vade update` | On the Spark itself, restages the current bundle or rebuilds the current source. From a controller, it first updates clean Git checkouts, then rebuilds and restages |
@@ -73,7 +75,7 @@ through it. Add `--dry-run` to see what it would do, the default limits and
 any limits you passed, without changing any files, processes or connections.
 
 FP4-Local is the default, so you don't need a flag for it (`--fp4-local` names
-it explicitly if you like). The legacy FP8 model needs `--fp8-legacy` and a
+it explicitly if you like). The FP8 model needs `--fp8`, two or more Sparks and a
 controller (see [Multi-Spark source setup](#multi-spark-source-setup)).
 
 MTP (multi-token prediction) is the model's built-in drafting: the model
@@ -372,7 +374,7 @@ Choose the checkpoint profile deliberately:
 | Profile | Example config | How to start |
 | --- | --- | --- |
 | Current FP4-Local model on 1–24 Sparks | [fp4-local.conf](examples/fp4-local.conf) | `vade up` (add `--sparks N` or ordered `--hosts` for a chain, or `--replicas N` for independent one-Spark copies) |
-| Legacy FP8 model on 2, 4 or 6 machines | [vade.conf](examples/vade.conf) | `vade up --fp8-legacy` |
+| FP8 model on 2, 4 or 6 machines ([FP8 install](../docs/install-fp8.md)) | [vade.conf](examples/vade.conf) | `vade up --fp8` (the older spelling `--fp8-legacy` also works) |
 
 A chain is several Sparks linked one after another, serving one model together.
 With `--replicas`, each replica is a full, separate copy of the model on its own
@@ -568,8 +570,8 @@ With `VADE_CONFIG` set, the lifecycle commands work like this:
 | `vade` | Short status and four choices: start, chat, stop, doctor. |
 | `vade up` (also `--fp4-local`) | Starts FP4-Local on one configured Spark. Add `--sparks N` for 2–24 or ordered `--hosts` for a chain. Larger chains need a current staged build, and each must still pass its own live checks on real Sparks. |
 | `vade up --replicas N` | FP4-Local only, N = 2–16: one independent one-Spark server on each of the first N configured machines (or the N `--hosts`), behind a local gateway. Details below the table. |
-| `vade up --fp8-legacy` | Legacy FP8: starts on the first two configured machines. |
-| `vade up --fp8-legacy --sparks 4` | Legacy FP8: builds a four-machine path in config order. This path still has to pass its own checks on real machines. |
+| `vade up --fp8` | FP8: starts on the first two configured machines, tensor parallel on a ring. |
+| `vade up --fp8 --sparks 4` | FP8: four machines in config order, tensor parallel on a path. Its token IDs differ from two Sparks ([benchmarks](../docs/benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)). |
 | `vade up --hosts machine-a,machine-b` | Selects connected machines in the given order. |
 | `vade status` | Machines, model, source build, MTP, context, output limit, how many chats the engine allows at once, memory/cache bytes per rank, ranks, tunnel, health, and speed when health reports it. |
 | `vade down` | Stops only the ranks Vade recorded and the SSH control connection it opened. |
@@ -581,7 +583,7 @@ With `VADE_CONFIG` set, the lifecycle commands work like this:
 
 With `--replicas N`, each replica sits behind its own tunnel on the N local
 ports after `local_port`, and the local gateway listens on `local_port`. It needs
-no `fabric.*` entries and can't be combined with `--sparks` or `--fp8-legacy`.
+no `fabric.*` entries and can't be combined with `--sparks` or `--fp8`.
 `vade down` stops the gateway, the tunnels and every replica. See
 [Replicas](../INSTALL.md#serve-many-chats-with-replicas).
 
@@ -628,7 +630,7 @@ How the ranks connect:
 - One FP4 rank needs no fabric.
 - Two ranks link to each other.
 - Larger FP4 chains use an open path in the host order you picked.
-- The legacy FP8 profile separately supports 2, 4 or 6 machines (two in a ring,
+- The FP8 profile separately supports 2, 4 or 6 machines (two in a ring,
   four or six on a path).
 
 Each `fabric.<peer>` value is this machine's own address on its link to that
@@ -654,9 +656,9 @@ launches any rank, `vade up` expands and compares both paths on every selected
 machine and rejects a mismatch; matching artifact hashes are not enough. Dry-run
 previews skip this remote check.
 
-### Legacy FP8 limits and drafting
+### FP8 limits and drafting
 
-For the legacy FP8 profile, the defaults are strict MTP 2 for a cold standalone
+For the FP8 profile, the defaults are strict MTP 2 for a cold standalone
 chat, context 131072, and output `min(65536, context)`.
 
 - `--context N` accepts 4096..262144.
@@ -674,7 +676,7 @@ Manifests record whether the engine supports `FLASH_SERVE_OUTPUT_TOKENS`, a
 settable output limit. Older builds accept only their fixed `min(context,8192)`
 limit.
 
-In the legacy FP8 profile, the model proposes up to two tokens ahead and checks
+In the FP8 profile, the model proposes up to two tokens ahead and checks
 each one against ordinary decoding before keeping it. When chats overlap, they
 run without drafting (plain) until they finish, even if the other chats end
 first. A chat continued from the cache without its saved draft history also runs
@@ -682,7 +684,7 @@ plain.
 
 To control drafting depth:
 
-- `MTP=0 vade up --fp8-legacy` or `vade up --fp8-legacy --mtp 0` turns drafting
+- `MTP=0 vade up --fp8` or `vade up --fp8 --mtp 0` turns drafting
   off, and `--mtp 0..3` overrides the `MTP` environment setting.
 - The chosen depth is saved and passed explicitly to every rank, including zero,
   and a restart keeps the saved depth.
@@ -711,7 +713,7 @@ The harness and engine agree on each reply's output size automatically
 That agreement has host tests only so far; the one-Spark live test above didn't
 check these limits.
 
-For the legacy FP8 profile, the engine sizes its session pool from the context
+For the FP8 profile, the engine sizes its session pool from the context
 and the lowest safe capacity across ranks, after shared workspaces and a safety
 reserve are set aside. Startup must have room for at least one full-context
 session, and exits with a plain memory message if that reservation cannot fit.
@@ -735,7 +737,7 @@ Two optional flags set memory and cache sizes:
 
 - `--memory-bytes N` sets a per-rank memory ceiling and overrides
   `SEQPAR_MEMORY_BYTES`.
-- In legacy FP8, `--cache-bytes N` sets the retained cache capacity through
+- In FP8, `--cache-bytes N` sets the retained cache capacity through
   `FLASH_SERVE_KV_BYTES`, including `0` to turn retention off. Local FP4-Local
   supports only `--cache-bytes 0`, which it translates to its own prefix-cache
   switch; a positive capacity is refused.
@@ -749,7 +751,7 @@ count and cache capability instead of treating these saved flags as limits.
 For FP4-Local, the retained prefix cache stays off unless it was switched on at
 startup (see [the prompt cache](#chats-at-once-and-the-prompt-cache)); a request
 that sends `cache:true` doesn't turn it on by itself. The harness still sends
-negotiated cache hints. For legacy FP8, leaving memory and retention unset
+negotiated cache hints. For FP8, leaving memory and retention unset
 means automatic sizing. The engine still checks that the model, shared
 workspaces and full-context live reservations fit before it reports ready.
 

@@ -36,7 +36,7 @@ and the [Glossary](GLOSSARY.md) has them all.
 
 | Item | How many | Notes |
 | --- | --- | --- |
-| **NVIDIA DGX Spark** | 2 or more | GB10 chip, 128 GB memory shared by CPU and GPU. FP4-Local fits on one Spark; more Sparks read long prompts faster. The legacy FP8 checkpoint needs a pair. |
+| **NVIDIA DGX Spark** | 2 or more | GB10 chip, 128 GB memory shared by CPU and GPU. FP4-Local fits on one Spark; more Sparks read long prompts faster. The FP8 checkpoint needs 2, 4 or 6. |
 | **QSFP cable, 200 Gb/s** | 1 per link | Direct-attach copper (DAC), QSFP56 200G or QSFP112. Short runs (about 1 m or less) are typical for passive copper. Check NVIDIA's [Spark clustering page](https://docs.nvidia.com/dgx/dgx-spark/spark-clustering.html) for its current cable list. |
 | **Ordinary network** | 1 | The Sparks' normal Ethernet or Wi-Fi, for SSH and downloads. Keep it separate from the QSFP links. |
 | **A controller** (optional) | 0 or 1 | A Linux or macOS computer that runs the `vade` command, the SSH tunnel and the coding assistant, and drives the Sparks. A Spark can also act as its own controller. |
@@ -112,22 +112,23 @@ prove that a cabling layout we have not tested gives the same tokens on every
 Spark, so test yours before you rely on it. The steps are in
 [INSTALL.md, Two and more Sparks](../INSTALL.md#two-and-more-sparks).
 
-### Legacy FP8
+### FP8
 
-The older Flash-Next FP8 checkpoint needs at least two Sparks. It splits the
+The Flash-Next FP8 checkpoint needs at least two Sparks. It splits the
 model with **tensor parallelism (TP)**: every layer is cut into equal slices,
 and the Sparks work on each token together. Its layer sizes divide evenly by
 2, 4 or 8, but not by 3 or 6.
 
-Every legacy FP8 launch needs the `--fp8-legacy` flag, on four Sparks too.
-Without it, `vade up` stops and tells you to add it.
+A new FP8 start needs the `--fp8` flag, on four Sparks too. Without it,
+`vade up` stops and tells you to add it. When Vade already has a recorded
+FP8 launch, `vade up` with no options keeps that launch.
 
 | Sparks | Layout | Cables | Status |
 | --- | --- | --- | --- |
-| **2** | 2-way TP, ring | 1 | `vade up --fp8-legacy`. Two is the legacy default. |
-| **4** | 4-way TP, path (chain) | 3 (a ring of 4 also works) | `vade up --fp8-legacy --sparks 4`; use the [four-Spark guide](four-sparks.md). We do not compare its speed on this page. |
-| **6** | 6-way TP, path | 5 (a ring of 6 also works) | `vade up --fp8-legacy --sparks 6` starts it, but the model splits unevenly. **Not recommended.** |
-| **1, 3, 5, 7+** | none | none | `vade up --fp8-legacy` refuses: "Legacy FP8 needs 2, 4, or 6 machines." |
+| **2** | 2-way TP, ring | 1 | `vade up --fp8`. Two is the FP8 default. |
+| **4** | 4-way TP, path (chain) | 3 (a ring of 4 also works) | `vade up --fp8 --sparks 4`; use the [four-Spark guide](four-sparks.md). Its measured speeds are in the [FP8 install](install-fp8.md#what-to-expect). |
+| **6** | 6-way TP, path | 5 (a ring of 6 also works) | `vade up --fp8 --sparks 6` starts it, but the model splits unevenly. **Not recommended.** |
+| **1, 3, 5, 7+** | none | none | `vade up --fp8` refuses: "FP8 needs 2, 4, or 6 machines." |
 
 **Ring or path?** Here two ranks use a **ring**, where data goes around in a
 loop. Four and six ranks use a **path**, a chain with two open ends, so you do
@@ -405,7 +406,7 @@ its rank, the number of ranks (`world`), the block of layers it runs, and
 whether it receives from a previous Spark (`upstream`) and sends to a next one
 (`downstream`).
 
-On legacy FP8, each rank prints a line that starts like
+On FP8, each rank prints a line that starts like
 `flash_serve transport rank=0 world=2 rdma=true`, and a `seqpar_links` line.
 `rdma=false` means that rank is on TCP.
 On two Sparks, `rails=2` means Vade is using both halves of the cable;
@@ -452,7 +453,7 @@ ICMP, SSH, **RoCE v2 (UDP 4791)** and **Vade's TCP ports 29960 and 29961**
 | Ping fails completely | Address on the wrong interface (case labels ≠ Linux names), or subnets differ at the two ends | Run `ibdev2netdev` and `ip -br address` on both ends. Move the address to the interface that is Up. |
 | Small ping works, `-s 8972 -M do` fails | MTU is not 9000 somewhere | Set MTU 9000 on both ends of that rail. |
 | `ib_write_bw` cannot open the device or register memory | Not in the RDMA group, or memlock limited | Run the `rdma` setup step, then **log out and back in**. Check `ulimit -l`. |
-| Bandwidth about half of 196 Gb/s per cable | Only one rail configured or used | Give rail 1 its own subnet at both ends. On legacy FP8, check `vade logs` for `rails=2`. |
+| Bandwidth about half of 196 Gb/s per cable | Only one rail configured or used | Give rail 1 its own subnet at both ends. On FP8, check `vade logs` for `rails=2`. |
 | Bandwidth about 185, not 196 Gb/s | MTU 1500 | Set MTU 9000. |
 | `vade up`: "RDMA launch needs unlimited soft and hard memlock in this SSH session" | The SSH alias Vade uses does not get unlimited locked memory (some routes, such as Tailscale SSH, skip login limits) | Point the config's `ssh =` at an OpenSSH alias over the LAN that prints `unlimited` for `ulimit -Sl` and `ulimit -Hl`. Or use TCP mode (`export SEQPAR_RDMA=0` on the controller). |
 | Engine log: "RDMA socket has no QSFP interface" or "no IPv4 RoCE-v2 GID on neighbour interface" | `fabric.<peer>` is not an address on a 100 Gb/s-or-faster ConnectX-7 interface, or that interface has no RoCE v2 GID yet (link down) | Use the Spark's own fabric address on that cable. Check carrier. |
@@ -467,4 +468,4 @@ Still stuck? Before you ask for help, collect `ibdev2netdev`, `ip -br address`,
 
 <br>
 
-**Back:** [README](../README.md) · **Next:** [INSTALL.md, Route B](../INSTALL.md#route-b-from-a-controller) and [Two and more Sparks](../INSTALL.md#two-and-more-sparks) → · Legacy FP8 only: [legacy fresh install](fresh-install.md)
+**Back:** [README](../README.md) · **Next:** [INSTALL.md, Route B](../INSTALL.md#route-b-from-a-controller) and [Two and more Sparks](../INSTALL.md#two-and-more-sparks) → · FP8: [FP8 install](install-fp8.md) and [fresh install](fresh-install.md)

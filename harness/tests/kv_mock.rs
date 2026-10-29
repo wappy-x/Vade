@@ -1,5 +1,7 @@
 //! First-party stateful loopback model of the checkpoint wire contract. No
 //! Engine code, model, tokenizer, GPU, or remote endpoint is used by these tests.
+#[path = "support/home.rs"]
+mod home;
 use std::{
     collections::VecDeque,
     io::{self, BufRead, BufReader, Read, Write},
@@ -633,7 +635,7 @@ mod cli;
 fn cli_fork_switch_context_and_exit_use_checkpoint_lifecycle() {
     let mock = Mock::new();
     let temp = Temp::new();
-    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+    let mut command = home::harness();
     command
         .args([
             "agent",

@@ -1,0 +1,10 @@
+id: structured-output
+title: One chat request with response_format json_object
+mode: direct
+request: request.json
+needs: response_format json_object on the server (structured output, phase 1)
+
+# A server that ignores response_format can still pass when the model follows
+# the system message; the card notes the server build. A 400, 404, 422 or 501
+# reply counts as unsupported.
+check: json-equals reply.json expected/reply.json

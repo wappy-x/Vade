@@ -207,7 +207,7 @@ fn changed_transport_refuses_reuse_after_loading_the_saved_record() {
     if let Ok(previous) = std::env::var(CASE) {
         // An FP8 pair: two FP4-Local Sparks refuse TCP before any launch (tests/two_spark.rs).
         let mut f = Fixture::new(2, false);
-        let options = legacy_options();
+        let options = fp8_options();
         // Construct the launch under the other transport without mutating the
         // test process environment shared by parallel tests.
         let mut session = f

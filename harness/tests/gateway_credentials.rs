@@ -1,4 +1,6 @@
 //! File credential selection at the two actual gateway process boundaries.
+#[path = "support/home.rs"]
+mod home;
 #[path = "support/cli.rs"]
 #[allow(dead_code)] // This process matrix needs only the bounded start/finish driver.
 mod cli;
@@ -111,7 +113,7 @@ impl Drop for Gateway {
 }
 fn free_address() -> SocketAddr { TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap() }
 fn command(standalone: bool) -> Command {
-    let mut command = Command::new(if standalone { env!("CARGO_BIN_EXE_vade-gateway") } else { env!("CARGO_BIN_EXE_vade-harness") });
+    let mut command = home::command(if standalone { env!("CARGO_BIN_EXE_vade-gateway") } else { env!("CARGO_BIN_EXE_vade-harness") });
     if !standalone { command.arg("gateway"); }
     // An inherited client token would answer these unauthenticated calls with 401.
     command.env_remove("VADE_API_KEY_FILE").env_remove("VADE_GATEWAY_UPSTREAM").env_remove("VADE_GATEWAY_TOKEN");

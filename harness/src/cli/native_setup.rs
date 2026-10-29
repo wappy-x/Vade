@@ -142,6 +142,7 @@ impl App {
             self.timed_out_prompt = None;
             self.reset_answers();
             self.auto_compaction = Arc::new(Mutex::new(context::AutoCompaction::default()));
+            self.budget = Default::default();
         }
         self.native_report = None;
         self.native = Some(conversation);
@@ -246,6 +247,9 @@ impl App {
         let summary = native_summary(&native, pending.canceled, success);
         self.context = native.model.context().clone();
         self.terminal.discard_preview();
+        if native.report.model_turns > 0 {
+            self.record_budget(&native.conversation);
+        }
         let mut status = self
             .context
             .reply_speed(pending.started.elapsed(), self.config.context_budget(&self.context) as u64, true);
@@ -304,9 +308,15 @@ impl App {
                 "Vade stopped and kept the reply.",
                 "Say continue to keep going with a fresh budget.",
             )?;
+        } else if native.report.reason == StopReason::Limit(agent::LimitKind::Context) && self.config.auto_compact {
+            self.warn(
+                "The next reply does not fit in the model's context, and automatic compaction could not make room.",
+                "Vade stopped, sent nothing more and kept the history.",
+                "Use /compact to try again, /new to start over, or send a shorter message.",
+            )?;
         } else if native.report.reason == StopReason::Limit(agent::LimitKind::Context) {
             self.warn(
-                "The next reply would not fit in the model's context.",
+                "The next reply would not fit in the model's context. Automatic compaction is off (--no-compact).",
                 "Vade stopped and kept the history.",
                 "Use /compact to shrink older turns, or /new to start over.",
             )?;
@@ -452,6 +462,30 @@ impl App {
         );
         parts.join(" · ")
     }
+    /// One budget entry per turn: the engine's reported tokens of the last
+    /// response when it gave them, otherwise the local estimate.
+    pub(crate) fn record_budget(&mut self, c: &Conversation) {
+        let window = self.config.context_budget(&self.context);
+        let output = self.config.output_reserve(&self.context);
+        // A response already recorded (no new reply in this run) gives no
+        // exact count, so the local estimate stands in for this turn.
+        let last = self.context.turns.back().filter(|t| !t.invalid);
+        let reported = last
+            .filter(|t| self.budget.new_source(t.sequence))
+            .and_then(|t| t.usage.prompt_tokens.zip(t.usage.completion_tokens))
+            .map(|(prompt, reply)| usize::try_from(prompt.saturating_add(reply)).unwrap_or(usize::MAX));
+        match reported {
+            Some(tokens) => {
+                self.budget.record(tokens, window, output, true);
+            }
+            None => {
+                self.budget.observe(&context::Usage::for_conversation(c), window, output);
+            }
+        }
+    }
+    pub(crate) fn budget_lines(&self) -> Vec<String> {
+        self.budget.turns().rev().take(8).map(context::Budget::line).collect()
+    }
 }
 pub(crate) fn display_content(value: &Value) -> String {
     match value {
@@ -522,11 +556,13 @@ pub(crate) fn native_conversation(
     model: &str,
     workspace: &Workspace,
     scopes: &[String],
+    instructions: &str,
     children: bool,
     grants: &BTreeMap<String, child_agents::Scope>,
     limits: Limits,
 ) -> io::Result<Conversation> {
-    let project = project::Snapshot::discover(workspace, scopes)?;
+    // The Project instructions section carries the root folder's files.
+    let project = project::Snapshot::discover_with(workspace, scopes, false)?;
     Conversation::from_request(
         Value::Object(vec![
             ("model".into(), Value::String(model.into())),
@@ -535,7 +571,7 @@ pub(crate) fn native_conversation(
             (
                 "messages".into(),
                 Value::Array(vec![
-                    native_message("system", &format!("{}\n{}", native_system_prompt(children, grants, limits), vade_harness::session::model_identity(model))),
+                    native_message("system", &vade_harness::prompt::with_instructions(&format!("{}\n{}", native_system_prompt(children, grants, limits), vade_harness::session::model_identity(model)), instructions)),
                     project.message()?,
                 ]),
             ),
@@ -724,6 +760,16 @@ impl RunObserver for CompactingJournal {
         usage: &context::Usage,
         count: &mut dyn FnMut(&Conversation) -> io::Result<context::Usage>,
     ) -> io::Result<bool> {
+        self.before_hosted_request(c, limits, cancel, usage, &mut context::CountOnly(count))
+    }
+    fn before_hosted_request(
+        &mut self,
+        c: &mut Conversation,
+        limits: Limits,
+        cancel: &std::sync::atomic::AtomicBool,
+        usage: &context::Usage,
+        host: &mut dyn context::ContextHost,
+    ) -> io::Result<bool> {
         Self::check_cancel(cancel)?;
         let crossed = self
             .trigger
@@ -743,24 +789,61 @@ impl RunObserver for CompactingJournal {
         }
         // A fresh chat has nothing compaction may remove; retry quietly next turn.
         if context::nothing_to_compact(c) { self.trigger.lock().map_err(|_| io::Error::other("compaction lock failed"))?.plan_failed(); return Ok(false); }
-        // Byte/structure limits still apply; real admission replaces only the
-        // heuristic fit check. Count the candidate before journal persistence.
-        let (plan, after) = match context::auto_plan_fitting(c, 2, limits, usage, &mut |candidate| {
-            Self::check_cancel(cancel)?;
-            let after = count(candidate)?;
-            Self::check_cancel(cancel)?;
-            Ok(after)
-        }) {
-            Ok(Some(result)) => result,
-            Ok(None) => return self.failed_plan(
-                "safe compaction cannot fit a useful reply reservation; history retained", cancel,
-            ),
-            Err(error) => {
-                self.failed_plan("candidate admission failed", cancel)?;
+        // First the model-written rollover; local excerpts are the fallback.
+        let mut no_room = None;
+        let mut model_failure = None;
+        let rolled = match context::rollover(c, context::KEEP_TURNS, limits, usage, host) {
+            Ok(result) => Some(result),
+            Err(context::RolloverError::Failed(error))
+                if cancel.load(std::sync::atomic::Ordering::Relaxed)
+                    || error.kind() == io::ErrorKind::Interrupted =>
+            {
+                self.trigger.lock().map_err(|_| io::Error::other("compaction lock failed"))?.plan_failed();
                 return Err(error);
             }
+            Err(context::RolloverError::Failed(error)) if error.kind() == io::ErrorKind::Unsupported => None,
+            // The hard stop applies only when the request really does not fit.
+            Err(error @ context::RolloverError::NoRoom { needed, window }) => {
+                model_failure = Some(error.to_string());
+                no_room = (!usage.fits(limits.max_context_tokens, limits.output_reserve_tokens)).then_some((needed, window));
+                None
+            }
+            Err(error) => {
+                model_failure = Some(error.to_string());
+                None
+            }
         };
-        let notice = if let Some((before, _, _, _)) = usage.exact {
+        if let Err(error) = Self::check_cancel(cancel) {
+            self.trigger.lock().map_err(|_| io::Error::other("compaction lock failed"))?.plan_failed();
+            return Err(error);
+        }
+        // Byte/structure limits still apply; real admission replaces only the
+        // heuristic fit check. Count the candidate before journal persistence.
+        let (plan, after) = match rolled {
+            Some(result) => result,
+            None => match context::auto_plan_fitting(c, 2, limits, usage, &mut |candidate| {
+                Self::check_cancel(cancel)?;
+                let after = host.count(candidate)?;
+                Self::check_cancel(cancel)?;
+                Ok(after)
+            }) {
+                Ok(Some(result)) => result,
+                Ok(None) => return self.failed_plan(
+                    &no_room.map_or_else(
+                        || "safe compaction cannot fit a useful reply reservation; history retained".into(),
+                        |(needed, window)| context::hard_stop(needed, window),
+                    ),
+                    cancel,
+                ),
+                Err(error) => {
+                    self.failed_plan("candidate admission failed", cancel)?;
+                    return Err(error);
+                }
+            },
+        };
+        let notice = if let Some(line) = plan.status_line() {
+            line
+        } else if let Some((before, _, _, _)) = usage.exact {
             format!(
                 "Auto-compacted older results: {before} → {} exact input tokens; reply reservation {} tokens fits. System/tools bytes unchanged; oversized reasoning/prose and refused edits may be excerpted. Raw journal retained.",
                 after.exact.map_or(after.estimated, |n| n.0),
@@ -768,6 +851,10 @@ impl RunObserver for CompactingJournal {
             )
         } else {
             compaction_notice(&plan, &after, limits)
+        };
+        let notice = match model_failure {
+            Some(reason) if plan.status_line().is_none() => format!("Model summary not used ({reason}); local excerpts instead. {notice}"),
+            _ => notice,
         };
         let mut journal = self
             .inner
@@ -899,10 +986,7 @@ impl RunObserver for SharedJournal {
     }
 }
 pub(crate) fn append_resume_note(store: &mut Journal, c: &mut Conversation) -> io::Result<()> {
-    let note = native_message(
-        "user",
-        "Transcript resumed or forked. Workspace files are shared and may have changed. Historical tool results and file revisions are not current file contents. Re-read relevant files before acting on old facts. No tools were replayed and no files restored. KV hints are optional; KV reuse unknown until a subsequent Engine response reports it.",
-    );
+    let note = native_message("user", vade_harness::context::RESUME_NOTE);
     c.push_user(note, Limits::default())?;
     store.save(c)
 }
@@ -986,6 +1070,7 @@ fn validate_resumed_in(
         .and_then(Value::as_str)
         .is_some_and(|stored| {
             let identity = format!("\n{}", vade_harness::session::model_identity(model));
+            let stored = vade_harness::prompt::split_instructions(stored).0;
             let stored = stored.strip_suffix(&identity).unwrap_or(stored);
             variants.iter().any(|&shell| {
                 let current = native_system_prompt_for(children, grants, limits, shell);

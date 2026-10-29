@@ -22,7 +22,7 @@ itself there is no tunnel. Replace `MODEL` below with
 [`cli/examples/fp4-local.conf`](../../cli/examples/fp4-local.conf), or the exact
 model ID your configured endpoint advertises. The older [manual FP8 tunnel
 instructions](../../engine/docs/flash-server.md#connect-an-existing-agent) and
-the `qwen3.8-flash-next-fp8` model ID apply only to legacy FP8 deployments. If
+the `qwen3.8-flash-next-fp8` model ID apply only to FP8 deployments. If
 the harness is not on your PATH, use the built
 `harness/target/release/vade-harness` from the monorepo root.
 

@@ -1,0 +1,15 @@
+id: implement-from-spec
+title: Implement a function from a Markdown spec
+inputs: Cargo.toml src/lib.rs SPEC.md
+budget_seconds: 900
+
+step: new
+prompt:
+  Implement `parse_duration` in src/lib.rs exactly as SPEC.md describes. Keep
+  the signature and the `DurationError` type as they are. Add tests that
+  cover the examples in SPEC.md, and finish when `cargo test --offline` passes.
+
+check: last-exit-zero
+check: unchanged SPEC.md
+check: run cargo test --offline --quiet
+check: run-with hidden/spec_tests.rs tests/hidden_spec_tests.rs -- cargo test --offline --quiet --test hidden_spec_tests

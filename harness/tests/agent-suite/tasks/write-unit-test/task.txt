@@ -1,0 +1,23 @@
+id: write-unit-test
+title: Write and run a unit test
+inputs: Cargo.toml src/lib.rs
+budget_seconds: 900
+
+step: new
+prompt:
+  Write an integration test file tests/slugify.rs for `slug::slugify` in
+  this crate. Write at least four `#[test]` functions. Together they must
+  cover: upper-case letters, a run of several spaces or punctuation
+  characters between words, separators at the start, and separators at the
+  end. Assert exact output strings. Do not change any file under src/. Run
+  `cargo test --offline` and finish when it passes.
+
+check: last-exit-zero
+check: exists tests/slugify.rs
+check: count-min tests/slugify.rs 4 #[test]
+check: unchanged src
+check: run cargo test --offline --quiet --test slugify
+check: fails-with mutants/no_lowercase.rs src/lib.rs -- cargo test --offline --quiet --test slugify
+check: fails-with mutants/no_collapse.rs src/lib.rs -- cargo test --offline --quiet --test slugify
+check: fails-with mutants/leading_dash.rs src/lib.rs -- cargo test --offline --quiet --test slugify
+check: fails-with mutants/trailing_dash.rs src/lib.rs -- cargo test --offline --quiet --test slugify

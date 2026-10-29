@@ -145,8 +145,8 @@ fn inspections_precede_stops(calls: &[Exec], count: usize) {
     assert_eq!(calls.iter().filter(|e| e.label.ends_with(" inspect")).count(), count);
     assert!(calls.iter().enumerate().filter(|(_, e)| e.label.ends_with(" inspect")).all(|(i, _)| i < stop));
 }
-fn legacy_options() -> UpOptions {
-    let Command::Up(options) = crate::cli::parse(&["up".into(), "--fp8-legacy".into()]).unwrap().command else { panic!() };
+fn fp8_options() -> UpOptions {
+    let Command::Up(options) = crate::cli::parse(&["up".into(), "--fp8".into()]).unwrap().command else { panic!() };
     options
 }
 fn fp4_options(extra: &[&str]) -> UpOptions {
@@ -358,7 +358,7 @@ fn install_records_chain_support_from_the_built_source_and_old_sources_stay_off(
 #[test]
 fn old_ownership_records_keep_the_legacy_launch_recipe() {
     let f = Fixture::new(2, false);
-    let session = Session::new(&f.app.config, &legacy_options(), &f.app.manifest().unwrap(), "a".repeat(64)).unwrap();
+    let session = Session::new(&f.app.config, &fp8_options(), &f.app.manifest().unwrap(), "a".repeat(64)).unwrap();
     let encoded = session.encode().lines().filter(|line| !line.starts_with("fp4_local=") && !line.starts_with("mtp_explicit=")).collect::<Vec<_>>().join("\n");
     text::atomic_write(&f.app.config.state_dir.join("session.conf"), &encoded).unwrap();
     let restored = Session::load(&f.app.config.state_dir).unwrap().unwrap();
@@ -373,7 +373,7 @@ fn credentials_precede_side_effects_and_open_health_ignores_them() {
         if case == "health" {
             crate::auth::configure(&mut Vec::new()).unwrap();
             let mut f = Fixture::new(2, false);
-            f.app.up(&legacy_options()).unwrap();
+            f.app.up(&fp8_options()).unwrap();
             assert_eq!(Session::load(&f.app.config.state_dir).unwrap().unwrap().phase, "running");
             for command in [Command::Status, Command::Menu, Command::Down] { f.app.execute(command).unwrap(); }
         } else {
@@ -396,7 +396,7 @@ fn credentials_precede_side_effects_and_open_health_ignores_them() {
 }
 #[test]
 fn dead_tunnel_socket_does_not_block_owned_cleanup() {
-    let mut f = Fixture::new(2, false); f.app.up(&legacy_options()).unwrap();
+    let mut f = Fixture::new(2, false); f.app.up(&fp8_options()).unwrap();
     let session = Session::load(&f.app.config.state_dir).unwrap().unwrap(); let socket = session.socket(&f.app.config.state_dir);
     drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
     assert!(socket.exists()); f.app.runner.tunnel_bad = true; f.app.runner.calls.clear();
@@ -407,7 +407,7 @@ fn dead_tunnel_socket_does_not_block_owned_cleanup() {
 #[test]
 fn unverified_listening_or_foreign_socket_blocks_all_stops() {
     use std::os::unix::fs::symlink;
-    let mut f = Fixture::new(2, false); f.app.up(&legacy_options()).unwrap();
+    let mut f = Fixture::new(2, false); f.app.up(&fp8_options()).unwrap();
     let session = Session::load(&f.app.config.state_dir).unwrap().unwrap(); let socket = session.socket(&f.app.config.state_dir);
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap(); f.app.runner.tunnel_bad = true; f.app.runner.calls.clear();
     assert!(f.app.execute(Command::Down).unwrap_err().contains("Recovery in cli/README.md"));
@@ -422,7 +422,7 @@ fn unverified_listening_or_foreign_socket_blocks_all_stops() {
 }
 #[test]
 fn recovery_errors_keep_files_before_any_stop() {
-    let mut f = Fixture::new(2, false); f.app.up(&legacy_options()).unwrap();
+    let mut f = Fixture::new(2, false); f.app.up(&fp8_options()).unwrap();
     let session = Session::load(&f.app.config.state_dir).unwrap().unwrap(); let socket = session.socket(&f.app.config.state_dir);
     drop(std::os::unix::net::UnixListener::bind(&socket).unwrap()); f.app.runner.tunnel_bad = true; f.app.runner.foreign = Some("b".into());
     for reason in ["This machine rebooted after launch.", "Start was interrupted before the process was saved."] {
@@ -437,7 +437,7 @@ fn recovery_errors_keep_files_before_any_stop() {
 #[test]
 fn secret_never_reaches_mac_disk_even_when_start_and_cleanup_fail() {
     let mut f = Fixture::new(2, false); f.app.runner.fail = Some("b start".into()); f.app.runner.foreign = Some("b".into());
-    assert!(f.app.up(&legacy_options()).is_err()); assert!(f.recorded());
+    assert!(f.app.up(&fp8_options()).is_err()); assert!(f.recorded());
     assert!(!f.app.runner.mac_secret_seen);
     assert!(!fs::read_dir(&f.app.config.state_dir).unwrap().any(|entry| entry.unwrap().file_name().to_string_lossy().starts_with("env-")));
     f.app.runner.foreign = None; f.app.execute(Command::Down).unwrap();
@@ -445,7 +445,7 @@ fn secret_never_reaches_mac_disk_even_when_start_and_cleanup_fail() {
 #[test]
 fn foreign_start_with_nothing_written_rolls_back_only_owned_ranks() {
     let mut f = Fixture::new(2, false); f.app.runner.refused_start = Some("b".into());
-    assert!(f.app.up(&legacy_options()).unwrap_err().contains("another recorded owner"));
+    assert!(f.app.up(&fp8_options()).unwrap_err().contains("another recorded owner"));
     inspections_precede_stops(&f.app.runner.calls, 1);
     assert!(f.app.runner.started.is_empty() && !f.recorded());
     assert!(!f.app.runner.calls.iter().any(|e| ["b inspect", "b stop", "b gpu", "b clean"].contains(&e.label.as_str())));
@@ -491,7 +491,7 @@ fn staged_hashes_survive_changed_build_outputs_and_guard_every_harness_use() {
     let manifest = text::parse(&fs::read_to_string(&f.app.config.build_manifest).unwrap()).unwrap(); assert_eq!(manifest["harness_sha256"], "4".repeat(64)); assert_eq!(manifest["local_cli_sha256"], "5".repeat(64));
     let hash = f.app.runner.calls.iter().find(|e| e.label == "controller binary hashes").unwrap(); assert_eq!(hash.args[2], f.app.config.stage_dir.join("vade-harness").to_string_lossy()); assert_eq!(hash.args[3], f.app.config.stage_dir.join("vade").to_string_lossy());
     assert_eq!(fs::read(f.app.config.harness_source.join("target/release/vade-harness")).unwrap(), b"Changed after staging.\n");
-    f.app.up(&legacy_options()).unwrap(); fs::write(f.app.config.stage_dir.join("vade-harness"), "Changed staged harness.").unwrap();
+    f.app.up(&fp8_options()).unwrap(); fs::write(f.app.config.stage_dir.join("vade-harness"), "Changed staged harness.").unwrap();
     for command in [Command::Chat, Command::Doctor] {
         // Chat stops at the hash; doctor reports it as its harness row's FAIL.
         f.app.runner.calls.clear(); let doctor = command == Command::Doctor; let error = f.app.execute(command).unwrap_err();
@@ -507,7 +507,7 @@ fn staged_hashes_survive_changed_build_outputs_and_guard_every_harness_use() {
 fn fake_full_lifecycle_and_recorded_targets() {
     let mut f = Fixture::new(2, false);
     f.app.execute(Command::Menu).unwrap(); assert!(f.app.runner.calls.is_empty());
-    f.app.up(&UpOptions { mtp: 2, chats: Some(3), ..legacy_options() }).unwrap(); assert!(f.recorded());
+    f.app.up(&UpOptions { mtp: 2, chats: Some(3), ..fp8_options() }).unwrap(); assert!(f.recorded());
     assert_eq!(Session::load(&f.app.config.state_dir).unwrap().unwrap().phase, "running");
     assert_eq!(f.app.runner.ports, vec![f.app.config.local_port]);
     let launch = f.app.runner.calls.iter().find(|e| e.label == "a start").unwrap();
@@ -533,23 +533,23 @@ fn fake_full_lifecycle_and_recorded_targets() {
     assert!(!f.recorded());
     for context in [4096, 131072] {
         let mut old = Fixture::new(2, false); let mut manifest = old.app.manifest().unwrap(); manifest.supports_output = false; text::atomic_write(&old.app.config.build_manifest, &manifest.encode()).unwrap();
-        assert!(old.app.up(&UpOptions { context, output_explicit: true, ..legacy_options() }).unwrap_err().contains("fixed output limit")); old.app.up(&UpOptions { context, ..legacy_options() }).unwrap(); assert_eq!(Session::load(&old.app.config.state_dir).unwrap().unwrap().output, context.min(8192));
+        assert!(old.app.up(&UpOptions { context, output_explicit: true, ..fp8_options() }).unwrap_err().contains("fixed output limit")); old.app.up(&UpOptions { context, ..fp8_options() }).unwrap(); assert_eq!(Session::load(&old.app.config.state_dir).unwrap().unwrap().output, context.min(8192));
     }
 }
 #[test]
 fn hash_failure_never_launches_and_lost_reply_rolls_back() {
     let mut f = Fixture::new(2, false); f.app.runner.bad_hash = true;
-    assert!(f.app.up(&legacy_options()).unwrap_err().contains("hashes differ"));
+    assert!(f.app.up(&fp8_options()).unwrap_err().contains("hashes differ"));
     assert!(!f.recorded() && !f.app.runner.calls.iter().any(|e| e.label.ends_with(" start")));
     f.app.runner.bad_hash = false; f.app.runner.calls.clear(); f.app.runner.fail = Some("b start".into());
-    assert!(f.app.up(&legacy_options()).is_err()); inspections_precede_stops(&f.app.runner.calls, 2);
+    assert!(f.app.up(&fp8_options()).is_err()); inspections_precede_stops(&f.app.runner.calls, 2);
     assert!(f.app.runner.started.is_empty()); assert!(!f.recorded());
-    f.app.runner.calls.clear(); f.app.runner.exit_on_health = Some("b".into()); let error = f.app.up(&legacy_options()).unwrap_err(); assert!(error.contains("b (rank 1) exited") && error.contains("Fake engine log."));
+    f.app.runner.calls.clear(); f.app.runner.exit_on_health = Some("b".into()); let error = f.app.up(&fp8_options()).unwrap_err(); assert!(error.contains("b (rank 1) exited") && error.contains("Fake engine log."));
     assert!(!f.recorded() && f.app.runner.started.is_empty() && !f.app.runner.calls.iter().any(|e| e.label == "controller tunnel start"));
 }
 #[test]
 fn foreign_identity_blocks_every_stop_and_partial_cleanup_retries() {
-    let mut f = Fixture::new(2, false); f.app.up(&legacy_options()).unwrap();
+    let mut f = Fixture::new(2, false); f.app.up(&fp8_options()).unwrap();
     f.app.runner.calls.clear(); f.app.runner.foreign = Some("b".into());
     assert!(f.app.execute(Command::Down).is_err()); assert!(f.recorded());
     assert!(!f.app.runner.calls.iter().any(|e| e.label.ends_with(" stop") || e.label == "controller tunnel exit"));
@@ -561,7 +561,7 @@ fn foreign_identity_blocks_every_stop_and_partial_cleanup_retries() {
 }
 #[test]
 fn unavailable_rank_cleanup_keeps_evidence_and_cleans_reachable_owner() {
-    let mut f = Fixture::new(2, false); f.app.up(&legacy_options()).unwrap();
+    let mut f = Fixture::new(2, false); f.app.up(&fp8_options()).unwrap();
     f.app.runner.calls.clear(); f.app.runner.fail = Some("a inspect".into());
     assert!(f.app.execute(Command::Down).unwrap_err().contains("Transport:"));
     let session = Session::load(&f.app.config.state_dir).unwrap().unwrap();
@@ -576,31 +576,53 @@ fn activation_failure_keeps_previous_generation() {
     f.app.execute(Command::Install).unwrap(); let active = fs::read(&f.app.config.activation).unwrap(); let old = f.app.config.stage_dir.clone();
     f.app.runner.fail = Some("controller binary hashes".into()); assert!(f.app.execute(Command::Install).is_err());
     assert_eq!(fs::read(&f.app.config.activation).unwrap(), active); f.app.config.resolve_generation().unwrap(); assert_eq!(f.app.config.stage_dir, old);
-    f.app.up(&legacy_options()).unwrap();
+    f.app.up(&fp8_options()).unwrap();
     for call in f.app.runner.calls.iter().filter(|e| e.label.ends_with(" start") && !e.stdin.is_empty()) { let request = text::parse(&String::from_utf8_lossy(&call.stdin)).unwrap(); for key in ["arg.2", "arg.3"] { assert!(request[key].parse::<std::net::SocketAddr>().is_ok()); } }
     f.app.execute(Command::Down).unwrap();
 }
 #[test]
 fn topology_addresses_and_six_ranks() {
     let mut f = Fixture::new(6, true); let manifest = f.app.manifest().unwrap();
-    let ring = Session::new(&f.app.config, &legacy_options(), &manifest, "a".repeat(64)).unwrap();
+    let ring = Session::new(&f.app.config, &fp8_options(), &manifest, "a".repeat(64)).unwrap();
     assert_eq!(ring.topology(), "ring"); assert_eq!(ring.ranks[0].next, ring.ranks[1].listen);
     f.app.config.machines[0].fabric.insert("b".into(), std::net::Ipv6Addr::LOCALHOST.to_string());
-    let path = Session::new(&f.app.config, &UpOptions { sparks: Some(4), ..legacy_options() }, &manifest, "a".repeat(64)).unwrap();
+    let path = Session::new(&f.app.config, &UpOptions { sparks: Some(4), ..fp8_options() }, &manifest, "a".repeat(64)).unwrap();
     assert_eq!(path.topology(), "path"); assert!(path.ranks[0].listen.starts_with('['));
     assert_eq!(path.ranks[1].next, path.ranks[2].listen); assert!(path.ranks[1].next.starts_with("fabric-c-to-b:"));
     assert_eq!(path.ranks[3].next, path.ranks[0].listen);
-    let six = Session::new(&f.app.config, &UpOptions { sparks: Some(6), ..legacy_options() }, &manifest, "a".repeat(64)).unwrap();
+    let six = Session::new(&f.app.config, &UpOptions { sparks: Some(6), ..fp8_options() }, &manifest, "a".repeat(64)).unwrap();
     assert_eq!(six.ranks[5].next, six.ranks[0].listen);
     let mut changed = manifest.clone(); changed.artifacts.get_mut("d").unwrap().ptx_sha256 = "9".repeat(64);
-    assert!(Session::new(&f.app.config, &UpOptions { sparks: Some(4), ..legacy_options() }, &changed, "a".repeat(64)).unwrap_err().contains("different engine or PTX hashes"));
-    let mut live = Fixture::new(4, false); live.app.up(&UpOptions { sparks: Some(4), ..legacy_options() }).unwrap();
+    assert!(Session::new(&f.app.config, &UpOptions { sparks: Some(4), ..fp8_options() }, &changed, "a".repeat(64)).unwrap_err().contains("different engine or PTX hashes"));
+    let mut live = Fixture::new(4, false); live.app.up(&UpOptions { sparks: Some(4), ..fp8_options() }).unwrap();
     let starts = live.app.runner.calls.iter().filter(|e| e.label.ends_with(" start") && !e.stdin.is_empty()).collect::<Vec<_>>(); assert_eq!(starts.len(), 4);
     for (rank, call) in starts.iter().enumerate() {
         let request = text::parse(&String::from_utf8_lossy(&call.stdin)).unwrap();
         assert_eq!(request["env.TP_TOPOLOGY"], "path"); assert_eq!(request["arg.0"], rank.to_string()); assert_eq!(request["arg.1"], "4");
     }
     live.app.execute(Command::Down).unwrap(); assert!(live.app.runner.started.is_empty());
+}
+#[test]
+fn fp8_card_settings_reach_every_rank_on_two_and_four_sparks() {
+    // The settings of the published FP8 cards: context 32768, output 16384, MTP 2, ring on 2 and path on 4.
+    for (sparks, topology) in [("2", "ring"), ("4", "path")] {
+        let args = ["up", "--fp8", "--sparks", sparks, "--context", "32768", "--output", "16384", "--mtp", "2"].map(str::to_owned);
+        let Command::Up(options) = crate::cli::parse(&args).unwrap().command else { panic!() };
+        let mut f = Fixture::new(4, false); f.app.up(&options).unwrap();
+        let session = Session::load(&f.app.config.state_dir).unwrap().unwrap();
+        assert!(!session.fp4_local && session.mtp_explicit); assert_eq!((session.context, session.output, session.mtp), (32768, 16384, 2));
+        let starts = f.app.runner.calls.iter().filter(|e| e.label.ends_with(" start") && !e.stdin.is_empty()).collect::<Vec<_>>();
+        assert_eq!(starts.len().to_string(), sparks);
+        for (rank, call) in starts.iter().enumerate() {
+            let request = text::parse(&String::from_utf8_lossy(&call.stdin)).unwrap();
+            assert_eq!((&*request["arg.0"], &*request["arg.1"], &*request["arg.6"]), (&*rank.to_string(), sparks, "32768"));
+            assert_eq!(session.engine_args(rank)[9..], ["--mtp", "2"], "FP8 ranks never get --fp4-local");
+            assert_eq!((&*request["env.TP_TOPOLOGY"], &*request["env.FLASH_SERVE_OUTPUT_TOKENS"]), (topology, "16384"));
+            assert!(!request.contains_key("model_receipt") && request.keys().all(|key| !key.contains("VADE_")));
+        }
+        assert_eq!(session.ranks.last().unwrap().next, session.ranks[0].listen);
+        f.app.execute(Command::Down).unwrap();
+    }
 }
 #[test]
 fn dry_install_update_doctor_plan_builds_without_downloads() {
@@ -622,7 +644,7 @@ fn fake_install_and_update_stage_fresh_builds_keep_a_running_engine() {
     for (key, value) in [("engine_sha", "a".repeat(40)), ("cli_sha", "b".repeat(40)), ("harness_source_sha", "c".repeat(40)), ("harness_sha256", "4".repeat(64)), ("local_cli_sha256", "5".repeat(64))] { assert_eq!(fields[key], value); }
     for name in ["a", "b"] { for (key, digit) in [("binary_sha256", "1"), ("ptx_sha256", "2"), ("worker_sha256", "3")] { assert_eq!(fields[&format!("machine.{name}.{key}")], digit.repeat(64)); } }
     assert!(f.app.config.stage_dir.join("vade-harness").is_file() && f.app.config.stage_dir.join("vade").is_file());
-    let first_worker = fields["machine.a.worker"].clone(); f.app.up(&legacy_options()).unwrap();
+    let first_worker = fields["machine.a.worker"].clone(); f.app.up(&fp8_options()).unwrap();
     let owned_record = fs::read(f.app.config.state_dir.join("session.conf")).unwrap(); f.app.runner.doctor_bad = true;
     assert!(f.app.harness_doctor(true).is_err()); f.app.runner.calls.clear();
     // Piped test stdin avoids any real restart choice; the running engine is retained.
@@ -639,14 +661,14 @@ fn fake_install_and_update_stage_fresh_builds_keep_a_running_engine() {
 
 #[test]
 fn update_restart_hints_parse_back_to_the_running_or_configured_profile() {
-    for (mut f, options) in [(Fixture::new(2, false), legacy_options()), (Fixture::fp4(1, false), fp4_options(&["--mtp", "0", "--context", "8192", "--output", "4096"]))] {
+    for (mut f, options) in [(Fixture::new(2, false), fp8_options()), (Fixture::fp4(1, false), fp4_options(&["--mtp", "0", "--context", "8192", "--output", "4096"]))] {
         f.app.up(&options).unwrap();
         let session = Session::load(&f.app.config.state_dir).unwrap().unwrap();
         let capture = crate::output::testing::Capture::default();
         crate::output::with_writer(capture.clone(), || f.app.update().unwrap());
         let output = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
         let command = output.lines().find_map(|line| line.trim().strip_prefix("vade up ")).unwrap();
-        assert!(command.contains(if session.fp4_local { "--fp4-local" } else { "--fp8-legacy" }));
+        assert!(command.contains(if session.fp4_local { "--fp4-local" } else { "--fp8" }));
         let args = std::iter::once("up").chain(command.split_whitespace()).map(str::to_string).collect::<Vec<_>>();
         let Command::Up(restart) = crate::cli::parse(&args).unwrap().command else { panic!() };
         assert_eq!((restart.fp4_local, restart.context, restart.output, restart.mtp, restart.mtp_explicit),
@@ -670,7 +692,7 @@ fn update_restart_hints_parse_back_to_the_running_or_configured_profile() {
 fn every_tunnel_operation_uses_the_same_private_directory_and_short_name() {
     let f = Fixture::new(2, false);
     let manifest = Manifest::load(&f.app.config.build_manifest).unwrap();
-    let session = Session::new(&f.app.config, &legacy_options(), &manifest, "a".repeat(64)).unwrap();
+    let session = Session::new(&f.app.config, &fp8_options(), &manifest, "a".repeat(64)).unwrap();
     for operation in [None, Some("check"), Some("exit")] {
         let exec = f.app.tunnel_at(&session, 0, operation);
         assert_eq!(exec.cwd.as_ref(), Some(&f.app.config.state_dir));

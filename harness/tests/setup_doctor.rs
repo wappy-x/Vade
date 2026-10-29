@@ -1,5 +1,7 @@
 //! CLI fixtures: Rust-only loopback mocks, no installed clients or Engine.
 #![cfg(target_os = "macos")]
+#[path = "support/home.rs"]
+mod home;
 #[path = "support/cli.rs"]
 #[allow(dead_code)]
 mod cli;
@@ -43,7 +45,7 @@ impl Drop for Temp {
     }
 }
 fn command() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+    let mut command = home::harness();
     command.env_clear();
     command
 }

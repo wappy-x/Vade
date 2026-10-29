@@ -337,7 +337,7 @@ fn cli_scope_grant_never_overrides_never_or_noninteractive_ask_approval() {
             reply(&mut parent, answer("parent done"), Some(0));
             journal
         });
-        let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+        let mut command = crate::home::harness();
         command
             .args([
                 "agent",

@@ -615,7 +615,7 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
                 },
                 options.memory_bytes.map(|bytes| format!(" --memory-bytes {bytes}")).unwrap_or_default(),
                 options.cache_bytes.map(|bytes| format!(" --cache-bytes {bytes}")).unwrap_or_default(),
-                if options.fp4_local { " --fp4-local" } else { " --fp8-legacy" }
+                if options.fp4_local { " --fp4-local" } else { " --fp8" }
             ))?;
         } else {
             crate::output::line(format_args!("Start the new build: {}", self.start_command()))?;

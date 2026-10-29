@@ -20,10 +20,11 @@
 //! | Machine and artifacts | [`detect`], [`prebuilt`], [`build_job`], [`sha256`] |
 //! | Processes and files | [`runner`] (every subprocess), [`control_socket`], [`unix_file`], [`unix_flags`] |
 //! | Output | [`output`] (fallible stdout), [`style`] (color, errors, tables and help layout), [`status`] (`status --json` schema), [`text`] (terminal-safe text and `key=value` records), [`json`] (health replies) |
-//! | Client tools | [`bench`](mod@bench), [`verify`] (exact token IDs, drafting ON and OFF) |
+//! | Client tools | [`bench`](mod@bench), [`verify`] (exact token IDs, drafting ON and OFF), [`pull`] (`vade pull` and `vade models`: Hugging Face downloads) |
 //! | Local checks | [`test_gate`] (`vade test build` and `determinism`), [`evals`] (long-context, GDN and ABI checks) |
 mod output;
 mod prebuilt;
+mod pull;
 mod repository;
 mod sha256;
 mod app;
@@ -150,6 +151,12 @@ fn run_main(mut args: Vec<String>) {
     let parsed = cli::parse(&args).unwrap_or_else(|error| fail(&error));
     if let cli::Command::Help(command) = parsed.command {
         public_output(&cli::help(command.as_deref()));
+        return;
+    }
+    // Downloads and the model list need no setup.
+    if let cli::Command::Pull(arguments) | cli::Command::Models(arguments) = &parsed.command {
+        let result = if matches!(parsed.command, cli::Command::Pull(_)) { pull::run(arguments, parsed.dry_run) } else { pull::models(arguments) };
+        if let Err(error) = result { fail(&error); }
         return;
     }
     // From here every error of a --json command still ends in its one object

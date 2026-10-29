@@ -1,5 +1,7 @@
 //! Real CLI against local HTTP mocks and temporary workspaces only: tools,
 //! approvals, cutoffs, resume and child grants.
+#[path = "support/home.rs"]
+mod home;
 #[allow(dead_code)]
 #[path = "support/cli.rs"]
 mod cli;

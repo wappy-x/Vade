@@ -5,35 +5,209 @@ Changes that are merged but not yet released are under Unreleased.
 
 ## Unreleased
 
-- The agent can read text-based PDF files. `workspace_read` on a PDF of up to
-  50 MiB returns the text of each page under a `page N of M` line, and its
-  offset and limit page through that text. The harness parses the file itself
-  with the Rust standard library: cross-reference tables and streams, object
-  streams, Flate, LZW, ASCII85, ASCIIHex and run-length data, and fonts with
-  ToUnicode maps, standard encodings or `/Differences`. Encrypted files are
-  refused, and scanned pages get a note that there is no text layer. Each read
-  has one work budget for bytes read and decoded, parsed objects, cached data,
-  tables, font entries, work steps and nesting depth. Every parser and decoder
-  charges it before the work, so a hostile file stops at a limit, and a note
-  names the limit and the page. A cancelled tool call stops the read, also in
-  a child agent.
+- Native chat supports [host hooks](harness/docs/hooks.md), and chat supports [user slash commands](harness/docs/slash-commands.md) and `/clear`.
+- GitHub workflows now run only by hand; tests run locally before every merge, as [Local CI](docs/ci.md) describes.
 
+- New `vade pull <org>/<name>[@revision]` downloads a model from the Hugging
+  Face Hub into `~/models/<org>/<name>`. It takes the weights, configs,
+  tokenizer files, chat template, README and license, continues interrupted
+  downloads, and checks each file's size and hash. It writes
+  `.vade-model.json` in the folder and a `<folder>.sha256` list beside it,
+  which `vade launch` and `vade up` check before they serve an FP4-Local
+  checkpoint. New
+  `vade models` lists local models with their size and the command that can
+  serve them. See [Download models](docs/pull-models.md).
+
+## v0.2.0 - not released yet
+
+v0.2.0 makes two Sparks much faster than v0.1.0. Two Sparks also admit more
+chats at once, and both one and two Sparks serve larger context windows. The
+answers do not change: FP4-Local gives the same token IDs on one, two and
+four Sparks. The [v0.2.0 release notes](docs/release-notes/0.2.0.md) explain
+each change in plain words and list the known limits. The detailed list of
+changes follows the highlights.
+
+Each number below names its source. "The end-of-day cards" are the RigMark
+cards of 2026-10-28 at main `76977df`
+([benchmarks](docs/benchmarks.md#current-2026-10-28-end-of-day-main-76977df-home-dgx-sparks)).
+"The v0.1.0 cards" are the release cards of 2026-10-24
+([receipts](bench/receipts/2026-10-24/README.md)). Rates are completion
+tokens per second, with drafting ON (the default) unless a line says
+otherwise. Each card sends its cold 8K prompt with drafting OFF
+(`"draft": "plain"`), so the cold 8K times below are drafting OFF.
+
+### Highlights
+
+- **Two Sparks write faster.** Two Sparks now run the tensor split: both
+  Sparks work on every token. You set nothing, but the split needs RDMA. On
+  two Sparks, one chat writes code at 100.0 in the end-of-day cards, against
+  65.1 in the v0.1.0 cards. Prose went from 38.3 to 53.8, and eight chats
+  together went from 168.6 to 229.5.
+- **Plain decoding is faster on two Sparks too.** With drafting OFF, two
+  Sparks write prose at 35.1 in the end-of-day cards, against 27.9 in the
+  v0.1.0 cards.
+- **Long prompts give their first token sooner.** On two Sparks, a cold
+  8K-token prompt sent with drafting OFF gives its first token in 2.19 s in
+  the end-of-day cards, against 2.79 s in the v0.1.0 cards. With drafting
+  ON, a 129,220-token prompt took 40.37 s at main `285fa8a`, against
+  42.09 s on the main before it, `54392da`
+  ([confirm run](docs/benchmarks.md#confirm-run-main-285fa8a)).
+- **Two Sparks admit 16 chats where they admitted 2.** A chat now reserves
+  only the memory for the rows it uses, not for the whole context. At a
+  131,072-token context, a test sent 16 short chats, one each second, and
+  all 16 were active together, against 2 on main `54392da`. The median
+  queue wait of the first nine chats fell from 44.8 s to 0.16 s (capacity
+  test of 2026-10-28; the same 0.16 s in both runs of the change).
+- **Larger context windows, measured.** At main `285fa8a`, one Spark served
+  a 131,072-token context: a 120,624-token prompt gave its first token in
+  66.2 to 66.5 s. Two Sparks served a 262,144-token context: a
+  201,654-token prompt gave its first token in 68.0 to 68.1 s. At main
+  `250fb49`, one Spark also served the 262,144-token context, with the same
+  prompt, in 120.3 to 120.8 s. The token IDs were the same in every run of
+  each setup. The default context stays 32,768. Ask for more
+  with `--context`.
+- **The prefix cache works on two Sparks.** With the cache on, the second
+  question on a long chat does not read the whole chat again. On a
+  32K-token chat in the end-of-day runs, the second question gave its first
+  token in 0.76 s on two Sparks (9.95 s with the cache off) and in 0.63 s on
+  one Spark (16.03 s with the cache off)
+  ([benchmarks](docs/benchmarks.md#a-long-chat-and-its-second-question)).
+  The cache is still off by default.
+- **The OpenAI-compatible API has a guide.** The new
+  [API page](docs/openai-api.md) lists the routes and fields that work and
+  where Vade differs from OpenAI. The core gateway answers `/v1/embeddings`
+  with HTTP 501 and a reason, and its errors carry `param` and `code`. Both
+  gateways accept a chat history in which the openai-python stream helper
+  sent `"role": null`. Host tests replay 15 client request shapes; 9 of them
+  were captured from openai-python 3.41.0.
+- **The agent reads PDF files.** When the agent reads a text-based PDF of up
+  to 50 MiB in your project, it gets the text of each page under a
+  `page N of M` line. It refuses encrypted files, and a scanned page gets a
+  note that it has no text layer. You cannot attach a PDF to a chat message
+  yet.
+- **The agent reads your project instructions.** In direct and agent mode,
+  at the start of a chat, it puts `AGENTS.md`, `CLAUDE.md` or
+  `.vade/instructions.md` from each folder between the git root and the
+  workspace into its system prompt, up to 32 KiB per file. `/instructions`
+  lists the files.
+- **FP8 is a supported route.** `vade up --fp8` starts the FP8 checkpoint
+  on 2, 4 or 6 Sparks; no card has measured six. In the end-of-day cards,
+  FP8 wrote prose at 36.6 on two Sparks and at 46.7 on four. FP8 is the one
+  model in these cards for which four Sparks write faster than two. See
+  [the FP8 install](docs/install-fp8.md).
+- **Download a model with `vade pull`.** `vade pull <org>/<name>[@revision]`
+  downloads a checkpoint from the Hugging Face Hub, continues an interrupted
+  download and checks the size and hash of each file. The FP4-Local
+  checkpoint is 32 files and 102.26 GB (`vade pull --dry-run`, 2026-10-29).
+  `vade models` lists the local models. See
+  [Download models](docs/pull-models.md).
+- **Install and commands are easier to follow.** `sh scripts/install.sh`
+  sets up the tools and the source build on one Spark. A plain-text error
+  starts with `error:` and adds a `hint:` line when there is a next step.
+  `vade doctor` runs every check and gives the fix under each failed row.
+  `vade-harness setup claude` prints the settings for Claude Code.
+- **A long chat rolls over instead of stopping.** When the next turn would
+  not fit, or at 80% of the context window, the model writes one summary of
+  the older turns. The last 2 turns stay word for word when they fit, else
+  the last turn only. See
+  [context and compaction](docs/context-and-compaction.md).
+- **`min_p` sampling.** The engine applies `min_p` after top-k and top-p,
+  on every request surface. See [sampling](docs/sampling.md).
+
+### In progress for v0.2.0
+
+This work was not merged when these notes were written. It is not part of
+v0.2.0 until it merges.
+
+- The prefix cache on by default.
+- Document reading for more formats: office files (Word, Excel and
+  PowerPoint), EPUB, HTML and CSV. PDF reading has merged.
+- A `vade sessions` command and a resume option for `vade chat`. The agent
+  already lists and resumes sessions with `/sessions` and `/resume`.
+- MCP: the agent uses the tools of MCP servers that you set up.
+- Shell safety: lists of allowed commands that you keep for a project or
+  for your user, and a refusal of the most dangerous commands. On macOS,
+  the agent already asks before a command outside its fixed read-only
+  list.
+- Structured output, phase 1: JSON mode.
+
+### Known limits
+
+- Four Sparks do not make one chat faster. With FP4-Local, they wrote prose
+  at 42.8 in the end-of-day cards, against 42.0 on one Spark. Chains are
+  measured up to four Sparks.
+- Text only. Vade does not read images.
+- With FP4-Local, greedy decoding is the default, and the exactness checks
+  cover only greedy requests. A request that sets a sampling field takes the
+  checkpoint's defaults for the fields it leaves out, so its reply is
+  sampled. An explicit `"temperature": 0` stays greedy. FP4-Local's
+  penalties are neutral, so it gives the greedy token IDs. Another
+  checkpoint can have penalties that change the answer.
+- A sampled request on Flash-Next does not draft by default: it decodes
+  plain. `typical_p`, `logit_bias` and `best_of` are ignored. See
+  [sampling](docs/sampling.md).
+- The engine ignores `response_format`. There is no structured output mode
+  yet.
+- With FP8, a request is greedy only when it sends every sampling field.
+  The gateways add those fields to a request that sends none.
+- With FP8, two Sparks and four Sparks give different token IDs: 7 of 66
+  responses matched in the end-of-day cards. A fix is in screening.
+
+### Engine
+
+These entries were written as each change merged. Some name a `VADE_W2_*`
+switch that a later entry removed: in v0.2.0 no `VADE_W2_*` switch has an
+effect, and the engine chooses the path for each number of Sparks.
+
+- Chats that arrive together can now start their prompts together. Before, the
+  server could start the first chat's prompt while the request bytes of the
+  other chats were still on the way, and those chats waited for that whole
+  prompt pass. This split happened in 15 of 122 four- and eight-chat rounds
+  of 21 two-Spark card runs of main `285fa8a` (the first
+  `request_prefill_cohort` width of each chat in the first Spark's server
+  log). Now the first prompt pass of an idle server waits for a burst when no
+  chat decodes and every waiting chat is a new prompt that can join a shared
+  prompt pass (on Flash-Next, up to 512 tokens). This includes a first chat
+  that would start alone on the serial prompt path. A longer prompt is not
+  held and starts as before. The hold ends at the latest 10 ms after the
+  oldest chat connected. The waits that applied before still apply after it:
+  up to 100 ms while requests are in preparation, one loop turn for unread
+  request bytes, and admission. A lone request with nothing else arriving
+  does not wait. `VADE_INTAKE_BURST_MS` sets the window (0 to 100 ms, 0 = no
+  hold), and each such pass logs an `intake_burst` line. Token IDs do not
+  change.
+- `min_p` (0 to 1) keeps the tokens whose probability is at least `min_p`
+  times the best token's. The engine applies it after top-k and top-p, as
+  Hugging Face `transformers` does. Chat, completions, Responses and
+  Messages read it, and replies echo it in `vade.sampling` when its value in
+  effect is above 0. See [sampling](docs/sampling.md).
+- A sampled request on Flash-Next decodes plain (no drafting) unless
+  `flash-serve` runs with `VADE_MTP_SAMPLED=1` or `2`; with `2`, sampled
+  rows also join a cohort's batched verify pass. Greedy requests still
+  draft.
+- Chat and completions refuse any `n` other than 1
+  (`only n=1 is supported`).
+  Responses and Messages ignore `n` and give one reply.
 - Flash-Next on two Sparks admits more short chats at once. A chat now
   reserves only the KV pages its rows use. Before, every chat reserved the
   pages for the whole context (8,231,544,132 bytes at `--context 131072`,
   whatever the prompt length). The second Spark keeps the buffers of a chat
   that ends and gives them to the next chat in the slot. At
-  `--context 131072`, all 16 chats of a 16-chat test (1,247 to 1,248 tokens
-  each) started at once, against 2 on main `54392da`. Their median wait in the
-  queue was 0.16 s for chats 1 to 9 and 1.02 s for chats 10 to 16, against
-  44.8 s and 128.9 s. Two 100,378-token chats still start together, but they
-  reach the first token later, because the engine now creates their KV pages
-  when they start: 76.9 s and 91.7 s, against 74.8 s and 88.9 s (+2.9 % and
-  +3.1 %). Each figure comes from one server start per build, in the
-  `cap-c2b` capacity test of 2026-10-28: the byte count from the main
-  server's `request_admitted` lines (`reserved_bytes`), and the chat counts,
-  queue waits and first-token times from the test client's log of each build.
-  Token IDs do not change.
+  `--context 131072`, a test sent 16 short chats (1,247 to 1,248 tokens
+  each), one each second, and all 16 were active together, against 2 on main
+  `54392da`. Their median wait in the
+  queue was 0.16 s for chats 1 to 9 and 1.02 s for chats 10 to 16 (run
+  `cap-c2b-x`; run `cap-r3-x` on the final patch gave 0.16 s and 1.01 s, see
+  [benchmarks](docs/benchmarks.md#card-at-main-250fb49-after-the-change-to-memory-reservation)),
+  against 44.8 s and 128.9 s. Two 100,378-token chats, sent 8 s apart, are
+  still active together, but they reach the first token later, because the
+  engine now creates their KV pages when they start: 76.9 s and 91.7 s,
+  against 74.8 s and 88.9 s (+2.9 % and +3.1 %). Each figure comes from
+  one server start per build, in the `cap-c2b` capacity test of 2026-10-28:
+  the byte count
+  from the main server's `request_admitted` lines (`reserved_bytes`), and
+  the chat counts, queue waits and first-token times from the test client's
+  log of each build. Token IDs do not change.
 
 - With drafting on, prompts longer than 32K tokens on two Sparks reach the
   first token sooner. The first Spark now keeps up to 131,072 prompt rows for
@@ -82,21 +256,13 @@ Changes that are merged but not yet released are under Unreleased.
 - Two Sparks read a cold prompt of 2K to 8K tokens faster. Each Spark reads
   half of the prompt, and the answer stays the same, token for token. In the
   final 2026-10-27 cards, a cold 8K prompt gave its first token in 2.19 s
-  with drafting ON and 2.17 s with drafting OFF, against 2.80 s and 2.77 s in
-  that morning's cards.
+  in the drafting ON card and 2.17 s in the drafting OFF card, against
+  2.80 s and 2.77 s in that morning's cards. Every card sends this prompt
+  with drafting OFF.
   Longer prompts read as before. In exchange, two Sparks hold one chat fewer at
   a 32K context: 8 instead of 9.
 
-- `vade doctor` now shows the binary version, four launch defaults, model file
-  counts and sizes, and Spark listener ports before startup.
-
-- `vade install` and `vade up` no longer refuse on a stale GPU utilization
-  counter. A GPU counts as busy only when a compute app is listed or power
-  draw is at least 30 W. A stale counter prints a notice and the command
-  continues.
-
 - Checkpoint indexes now reject fractional byte counts that rounded to integers.
-  The agent harness now rejects replies with an empty finish reason.
 
 - On two FP4-Local Sparks, a greedy decode step with drafting OFF now splits
   the output head by vocabulary halves across the two Sparks, as drafted
@@ -108,31 +274,6 @@ Changes that are merged but not yet released are under Unreleased.
   finish every queued part of the prompt. Now the drafter reads only the
   oldest returned rows that it needs, and the rest waits for the end of the
   prompt. The token IDs do not change.
-
-### Repository tools
-
-- The README states that CI runs locally. A new CI guide gives public host
-  build and test commands and explains the private CI script's coverage.
-- The security policy states which engine routes local gateway callers can
-  reach. It lists access refusals and host tests for the gateway checks.
-- The README states the engine's scope and limits. Contribution and security
-  guides explain the proof and report steps. Issue forms ask for checkpoint
-  details and token IDs. Agent rules now state the same proof and writing
-  rules. The benchmark page adds one-Spark results and repeat commands.
-- `vade-tools bench-docs <cards-dir> <repo-dir>` refreshes the marked benchmark
-  tables from the newest measured main revision. It keeps the raw card values,
-  measurement times and revision in both pages. It resolves drafting from the
-  request and the recorded server default. An effective depth of 0 means OFF.
-  It refuses an unknown drafting mode or depth.
-- All repository tools now use Rust and the standard library. There are no
-  Python files or Python setup requirements. The tools crate checks links and
-  release bundles, tests shell examples, builds CI CUDA linkage stubs and draws
-  the release figure. The model helper uses Rust validation and curl. API
-  examples are available in shell and Rust. Interrupted model downloads release
-  their lock after curl stops. Stalled transfers fail with a time limit. The
-  shell API example reports stream errors and incomplete streams as failures.
-
-### Engine
 
 - **A chat alone drafts the same depths every run.** The depth chooser no
   longer reads the time of single passes. On FP4-Local it prices verify rows
@@ -423,6 +564,48 @@ and thinking off. Rates below are tokens per second.
 
 ### CLI
 
+- New `vade pull <org>/<name>[@revision]` downloads a model from the Hugging
+  Face Hub into `~/models/<org>/<name>`. It takes the weights, configs,
+  tokenizer files, chat template, README and license, continues interrupted
+  downloads, and checks each file's size and hash. It writes
+  `.vade-model.json` in the folder and a `<folder>.sha256` list beside it,
+  which `vade launch` and `vade up` check before they serve an FP4-Local
+  checkpoint. New `vade models` lists local models with their size. For a
+  supported model it gives the command that can serve it; for another model
+  it gives a recovery step or the reason. See
+  [Download models](docs/pull-models.md).
+- FP8 is a supported route, not a legacy one. `vade up --fp8` starts
+  `Qwen/Qwen3.8-Flash-Next-FP8` on two Sparks, and `vade up --fp8 --sparks 4`
+  on four. Six Sparks start too, but no card has measured six. The older flag
+  `--fp8-legacy` still works and does the same thing.
+  The CLI help and messages now name `--fp8`. The install guide moved to
+  [docs/install-fp8.md](docs/install-fp8.md). It gives the current steps and
+  the 2026-10-28 cards at main `76977df`: with drafting ON, prose reached
+  36.6 tok/s on two Sparks and 46.7 tok/s on four. FP8 on two and on four
+  Sparks gives different token IDs: 7 of 66 responses matched in those cards.
+  The ranks add their parts in a different order on four Sparks, and a fix is
+  in screening
+  ([benchmarks](docs/benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)).
+  FP8 requests are greedy only when they send every sampling field. The engine
+  does not change.
+- From a controller, `vade doctor` checks more before a start. It shows a
+  GPU use row with the rule that `vade up` applies (a listed compute
+  process, or a power draw of 30 W or more). It checks the pinned Rust
+  toolchains before a source build, as `vade install` now does too. It
+  checks each Spark's staged engine, PTX and helper against the manifest,
+  as `vade up` does.
+- Controller calls to curl ignore your `~/.curlrc`, so its options cannot
+  change the replies that `status`, `up` and `doctor` read.
+- More messages name the cause: a negative number or `--flag=value` in an
+  option, a controller config that is not UTF-8 text, and the file that a
+  failed staging step copied. `vade install` says when `prebuilt_dir` serves
+  no bundle, before it falls back to a source build.
+- `vade doctor` now shows the binary version, four launch defaults, model file
+  counts and sizes, and Spark listener ports before startup.
+- `vade install` and `vade up` no longer refuse on a stale GPU utilization
+  counter. A GPU counts as busy only when a compute app is listed or power
+  draw is at least 30 W. A stale counter prints a notice and the command
+  continues.
 - `sh scripts/install.sh` sets up the pinned Rust tools and source build on
   one Spark, checks an existing checkpoint, and prints recovery steps on failure.
 - On a Spark, `vade install` now compiles the GPU code into Vade's private
@@ -477,6 +660,40 @@ and thinking off. Rates below are tokens per second.
 
 ### Harness
 
+- A long chat no longer stops at the end of the context window. When the next
+  turn would not fit, or at 80% of the window, the model writes one state block
+  for the older turns (plan, decisions, open tasks, files, facts), the last 2
+  turns stay word for word when they fit (else the last turn only), and tool
+  outputs stay as references (path and line ranges). The chat shows one line:
+  `[context compacted: kept N turns, summary M tokens]`. `/compact` does the
+  same on request, `/context` shows the token budget after each turn, and
+  `vade-harness agent --no-compact` turns the automatic step off. The journal
+  records each compaction, so a resumed chat continues from it. If even a
+  compacted prompt does not fit, nothing is sent and the chat says so. The
+  engine and its token IDs do not change; see
+  [context and compaction](docs/context-and-compaction.md).
+- The harness now reads your project rules when a chat starts. In direct and
+  agent mode, it puts `AGENTS.md`, `CLAUDE.md` or `.vade/instructions.md` from
+  each folder between the git root and the workspace, and
+  `~/.vade/instructions.md`, into the system prompt. It reads them again
+  before a turn when they change. `/instructions` lists the files, and
+  `--no-instructions` turns them off. A link can point only down to a file inside
+  the project folder that a workspace read would allow, and a cut file is
+  always marked. See
+  [project instructions](harness/docs/project-instructions.md).
+- The agent can read text-based PDF files. `workspace_read` on a PDF of up to
+  50 MiB returns the text of each page under a `page N of M` line, and its
+  offset and limit page through that text. The harness parses the file itself
+  with the Rust standard library: cross-reference tables and streams, object
+  streams, Flate, LZW, ASCII85, ASCIIHex and run-length data, and fonts with
+  ToUnicode maps, standard encodings or `/Differences`. Encrypted files are
+  refused, and scanned pages get a note that there is no text layer. Each read
+  has one work budget for bytes read and decoded, parsed objects, cached data,
+  tables, font entries, work steps and nesting depth. Every parser and decoder
+  charges it before the work, so a hostile file stops at a limit, and a note
+  names the limit and the page. A cancelled tool call stops the read, also in
+  a child agent.
+- The agent harness now rejects replies with an empty finish reason.
 - New `vade-harness quality-card` measures answer quality and the cost of
   exactness. It runs one fixed set of 12 prompts (code, structured output,
   prose) against a served model and prints two cards: quality scores from
@@ -636,6 +853,26 @@ and thinking off. Rates below are tokens per second.
 
 ### Tools
 
+- The README states that CI runs locally. A new CI guide gives public host
+  build and test commands and explains the private CI script's coverage.
+- The security policy states which engine routes local gateway callers can
+  reach. It lists access refusals and host tests for the gateway checks.
+- The README states the engine's scope and limits. Contribution and security
+  guides explain the proof and report steps. Issue forms ask for checkpoint
+  details and token IDs. Agent rules now state the same proof and writing
+  rules. The benchmark page adds one-Spark results and repeat commands.
+- `vade-tools bench-docs <cards-dir> <repo-dir>` refreshes the marked benchmark
+  tables from the newest measured main revision. It keeps the raw card values,
+  measurement times and revision in both pages. It resolves drafting from the
+  request and the recorded server default. An effective depth of 0 means OFF.
+  It refuses an unknown drafting mode or depth.
+- All repository tools now use Rust and the standard library. There are no
+  Python files or Python setup requirements. The tools crate checks links and
+  release bundles, tests shell examples, builds CI CUDA linkage stubs and draws
+  the release figure. The model helper uses Rust validation and curl. API
+  examples are available in shell and Rust. Interrupted model downloads release
+  their lock after curl stops. Stalled transfers fail with a time limit. The
+  shell API example reports stream errors and incomplete streams as failures.
 - The chart tool `vade-tools benchmarks-chart` reads the release-card
   numbers from the committed receipts, reads and writes UTF-8, names a
   missing receipt folder, and stops if the cards stop supporting the
@@ -650,6 +887,11 @@ and thinking off. Rates below are tokens per second.
 
 ### Project
 
+- A new agent task suite under
+  [harness/tests/agent-suite](harness/tests/agent-suite/README.md) holds
+  12 mixed tasks for the coding agent, each with a deterministic check.
+  `cargo test` checks that every file a task names exists and is tracked;
+  it does not run the tasks.
 - Bug reports and feature requests now use issue forms. The bug form asks for
   the version, model, number of Sparks, how you run Vade, the exact command
   and the full error, plus `vade verify` output when answers are wrong.

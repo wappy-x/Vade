@@ -111,7 +111,9 @@ impl Engine for Model {
 }
 // Typed hybrid scheduling contract, without GPU arithmetic or per-token sleeps.
 type PrefillTrace = Arc<Mutex<Vec<Vec<usize>>>>;
-struct Tiled(Model, Option<PrefillTrace>);
+/// The model, its prompt pass trace and the start of its last loop turn.
+type LastTurn = Arc<Mutex<Option<Instant>>>;
+struct Tiled(Model, Option<PrefillTrace>, LastTurn);
 struct TileKv(Kv);
 struct TileLong(Vec<u32>);
 impl spark_serve::LongPrefill<TileKv> for TileLong {
@@ -135,6 +137,7 @@ impl Engine for Tiled {
     fn shared_prefill_limit(&self) -> usize { 512 }
     fn shared_prefill_rows(&self) -> usize { if self.1.is_some() { 1024 } else { 256 } }
     fn shared_prefill_chunk_rows(&self) -> usize { if self.1.is_some() { 256 } else { 0 } }
+    fn profile_tick_begin(&self, _: u64) { *self.2.lock().unwrap() = Some(Instant::now()); }
     fn prefill_long<'s>(&'s self, _: &TileKv, tokens: &[u32])
         -> Result<Option<Box<dyn spark_serve::LongPrefill<TileKv> + 's>>, String> {
         if let Some(trace) = &self.1 {
@@ -309,18 +312,21 @@ impl Server {
         Self::tiled_observed(requests, None)
     }
     fn tiled_observed(requests: usize, observation: Option<(PrefillTrace, Arc<AtomicBool>)>) -> Self {
+        Self::tiled_burst(requests, observation, Limits::default().intake_burst, LastTurn::default())
+    }
+    fn tiled_burst(requests: usize, observation: Option<(PrefillTrace, Arc<AtomicBool>)>, intake_burst: Duration, turn: LastTurn) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let (live, calls, heads) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        let model = Tiled(Model { ab: None, cohort: None, live: live.clone(), calls: calls.clone(), heads: heads.clone(), opt_in: false, retention_extra: 0 }, observation.as_ref().map(|o| o.0.clone()));
+        let model = Tiled(Model { ab: None, cohort: None, live: live.clone(), calls: calls.clone(), heads: heads.clone(), opt_in: false, retention_extra: 0 }, observation.as_ref().map(|o| o.0.clone()), turn);
         let shutdown = stop.clone();
         let worker = std::thread::spawn(move || {
             if let Some((_, start)) = observation {
                 while !start.load(Ordering::Acquire) { std::thread::sleep(Duration::from_millis(1)); }
             }
             scheduler::serve_requests(listener, &model, Some(&Codec(1, false)),
-            &Limits { input_tokens: 8192, context_tokens: 8192, generation_timeout: Duration::from_secs(2), ..Limits::default() },
+            &Limits { input_tokens: 8192, context_tokens: 8192, generation_timeout: Duration::from_secs(2), intake_burst, ..Limits::default() },
             &CacheLimits { entries: 32, retained_bytes: 1 << 20, tokens_per_entry: 8192,
                 logits_per_entry: 8, idle_ttl: Duration::from_secs(60) },
             &scheduler::Config { active: 8, connections: 16, prefill_chunk: 256,
@@ -483,6 +489,69 @@ fn typed_prefill_cohort_requires_prompt_peers() {
             let expected = if length == 32 { short[0].clone() } else { run(&[length]).0[0].clone() };
             assert_eq!(ids, &expected);
         }
+    }
+}
+
+#[test]
+fn burst_intake_late_request_bytes_join_the_first_prompt_pass() {
+    // The split pattern of the two-Spark cards: every connection of a burst is
+    // accepted at once, but some request bytes come after the first prompt
+    // pass could start (main starts a shared pass at a 2 ms prompt age, and a
+    // lone prompt above the shared prefill limit on the serial path at once).
+    // Probes order the steps: the late bytes go out only after the loop
+    // admitted the early chats (their sessions are live) and, under the hold,
+    // after a loop turn that began 3 ms later, with no prompt pass yet.
+    assert!(std::env::var_os("VADE_INTAKE_BURST_MS").is_none(), "unset VADE_INTAKE_BURST_MS for this test");
+    let greedy = ",\"cache\":false,\"ignore_eos\":true,\"top_k\":1,\"top_p\":1,\"seed\":0,\"repetition_penalty\":1,\"presence_penalty\":0,\"frequency_penalty\":0";
+    let until = |done: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() { assert!(Instant::now() < deadline, "probe timed out"); std::thread::sleep(Duration::from_micros(100)); }
+    };
+    // Returns the token IDs, the first prompt pass and whether the run can
+    // judge the hold: a host stall past the window ends the hold by design.
+    let burst = |window: Duration, prompt_tokens: usize, early: usize| {
+        let body = format!("{{\"stream\":true,\"temperature\":0,\"prompt_token_ids\":{:?},\"max_tokens\":3{greedy}}}", vec![1; prompt_tokens]);
+        let (trace, turn) = (Arc::new(Mutex::new(Vec::new())), LastTurn::default());
+        let server = Server::tiled_burst(4, Some((trace.clone(), Arc::new(AtomicBool::new(true)))), window, turn.clone());
+        let request = format!("POST /v1/completions HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            server.address, body.len());
+        let connected = Instant::now();
+        let mut sockets: Vec<_> = (0..4).map(|_| TcpStream::connect(server.address).unwrap()).collect();
+        for socket in &mut sockets[..early] { socket.write_all(request.as_bytes()).unwrap(); }
+        until(&|| server.live.load(Ordering::Relaxed) == early);
+        let admitted = Instant::now();
+        if window.is_zero() {
+            // No hold: the first pass starts without the late chats.
+            until(&|| !trace.lock().unwrap().is_empty());
+        } else {
+            until(&|| turn.lock().unwrap().is_some_and(|at| at >= admitted + Duration::from_millis(3)));
+        }
+        let held = trace.lock().unwrap().is_empty();
+        // Late bytes sent in the first half of the window reach the loop inside it.
+        let judged = window.is_zero() || connected.elapsed() < window / 2;
+        assert!(held || window.is_zero() || !judged, "a prompt pass started before the late bytes");
+        for socket in &mut sockets[early..] { socket.write_all(request.as_bytes()).unwrap(); }
+        let ids: Vec<_> = sockets.into_iter().map(|mut socket| {
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut reply = String::new();
+            socket.read_to_string(&mut reply).unwrap();
+            assert!(reply.ends_with("data: [DONE]\n\n") && !reply.contains("generation_error"), "{reply}");
+            tokens(&reply)
+        }).collect();
+        let first = trace.lock().unwrap()[0].clone();
+        (ids, first, judged)
+    };
+    // Two early short chats share a pass; one early 600-token chat alone is
+    // above the shared prefill limit (512) and would run on the serial path.
+    for (prompt_tokens, early, pass) in [(32, 2, [32; 4]), (600, 1, [256; 4])] {
+        let (main_ids, main_first, _) = burst(Duration::ZERO, prompt_tokens, early);
+        assert!(main_first.len() < 4, "without the hold the late chats miss the first pass: {main_first:?}");
+        // Three attempts: a run that stalled past half the 100 ms window cannot judge the hold.
+        let (ids, first, _) = (0..3).map(|_| burst(Duration::from_millis(100), prompt_tokens, early)).find(|run| run.2)
+            .expect("every run stalled past the window");
+        assert_eq!(first, pass, "the four chats share one first prompt pass");
+        // Batch membership does not change token IDs.
+        assert!(ids.iter().chain(&main_ids).all(|i| *i == main_ids[0]), "{ids:?} {main_ids:?}");
     }
 }
 
@@ -802,6 +871,7 @@ fn sampled_branches_match_full_history_draws_and_sequential_generation() {
             temperature,
             top_k,
             top_p,
+            min_p: 0.0,
             seed: 912,
             repetition_penalty: 1.2,
             presence_penalty: 0.4,

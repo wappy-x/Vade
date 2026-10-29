@@ -142,7 +142,7 @@ fn alternate_start_and_every_lifecycle_command_keep_the_explicit_controller() {
                 fs::canonicalize(&f.dir).unwrap().join("config"),
             );
         }
-        let args = ["up", "--fp8-legacy", "--context", "8192"].map(str::to_owned);
+        let args = ["up", "--fp8", "--context", "8192"].map(str::to_owned);
         let start = crate::cli::parse(&args).unwrap().command;
         let mut commands = vec![
             start,

@@ -44,6 +44,7 @@ Options:
   --approval POLICY     Agent: ask (default), auto, never
                         Cancel may not stop programs that daemonize; they stay sandboxed
   --context-tokens N    Agent: override server context budget; default from capabilities
+  --no-compact          Agent: no automatic compaction; /compact still works
   --prewarm-compaction  Agent: opt-in one-token cache warm after compaction; reply discarded
   --reply-tokens N      Agent: estimated prose budget; 0 disables local budgeting
                         Default: measured decode × min(120s, remaining task time / 8)
@@ -51,6 +52,8 @@ Options:
                         Oversized unfinished tool proposals are discarded whole
   --max-output-tokens N Direct/agent: 1 through the advertised Engine output limit
   --no-auto-continue    Direct/agent: wait for /continue after an output cutoff
+  --no-instructions     Direct/agent: no automatic instruction files, root AGENTS.md too;
+                        explicit --rules-scope files stay active
   --greedy              Temperature 0 on every turn; enables exact greedy drafting
   --temperature T       Explicit sampling temperature (0..2)
   --seed N              Pinned seed; preserved unchanged on retry and resume
@@ -60,7 +63,7 @@ Options:
                         Requires macOS; noninteractive runs require --approval auto
   --no-check            Agent: ignore the workspace .vade/check file
   Environment          VADE_HARNESS_PREFIX_CACHE=0 disables negotiated shared-prefix caching
-  --rules-scope PATH    Agent: include AGENTS.md ancestor chain (repeat ≤8); root always included
+  --rules-scope PATH    Agent: freeze the AGENTS.md chain below the root to PATH (repeat ≤8)
   --shell-exclude NAME  Agent: extra inaccessible unscanned directory name (repeat ≤8)
   --shell-toolchain DIR Agent: owner-selected Rust distribution; bin/lib read-only
   --plain               Line input; no raw terminal/color
@@ -78,9 +81,12 @@ Options:
 
 Agent writes private journals under VADE_HOME/projects/NAME-HASH/sessions by default
 (~/.vade without VADE_HOME), never inside the workspace. --session names a
-new journal; root AGENTS.md and explicit --rules-scope ancestor chains are frozen
-with a small skills/catalog.json. Skill bodies load lazily; no scripts autorun.
---resume loads the frozen rules and the same model/tool definitions. /new starts
+new journal; explicit --rules-scope ancestor chains are frozen with a small
+skills/catalog.json. Skill bodies load lazily; no scripts autorun. Automatic
+instruction files (AGENTS.md, CLAUDE.md or .vade/instructions.md from the git root
+down, and ~/.vade/instructions.md, root AGENTS.md included) are read again before
+each ordinary turn; --no-instructions turns them off, and the --rules-scope files
+stay. --resume loads the frozen rules and the same model/tool definitions. /new starts
 a new journal and preserves the old one. No automatic retry or tool replay.
 Conversation commands:
   /help                 Common commands, grouped with one-line descriptions
@@ -105,12 +111,14 @@ commands; workspace reads and patches remain available, and --check and
 --child-shell are refused. VADE_HARNESS_SHELL=off gives macOS the same shape.
 No TLS or permission escalation.
 
-/context shows per-message estimates plus the last request's contract admission
-and reported usage. The runtime warns at 80% and stops above the local budget.
-/compact KEEP_TURNS SUMMARY replaces older assistant prose, preserving all user
-constraints, instructions, tool pairs and recent context. /compact-preview previews
-it; /compaction inspects its source and KV impact. All later KV is invalidated.
-Original journal records remain on disk; native history is never silently pruned.
+/context shows the token budget after each turn, per-message estimates, and the
+last request's contract admission and reported usage. At 80% of the window, or
+when the next turn would not fit, the model summarizes older turns into one state
+block and the last 2 turns stay verbatim; local excerpts are the fallback.
+/compact runs the same rollover on request; /compact KEEP_TURNS SUMMARY uses your
+own summary. /compact-preview previews the local excerpt plan; /compaction
+inspects the latest compaction. All later KV is invalidated. Journal records
+remain on disk.
 
 Direct/native chat: input during a reply interrupts it, keeps the partial answer marked
 [interrupted] in context, and sends the new message after cancellation. Vade Engine
@@ -163,6 +171,9 @@ Usage: vade-harness agent --endpoint URL --model NAME --workspace PATH [OPTIONS]
   --config PATH         Native JSON config; time limit and auto_continue settings
   --max-output-tokens N Output reservation; positive, within upstream limit
   --no-auto-continue    Wait for /continue after an output cutoff
+  --no-compact          No automatic compaction; /compact still works
+  --no-instructions     Skip automatic instruction files (root AGENTS.md too);
+                        --rules-scope files stay; /instructions lists them
   --greedy              Temperature 0 on every turn; enables exact greedy drafting
   --temperature T       Explicit sampling temperature (0..2)
   --seed N              Pinned seed; preserved unchanged on retry and resume
@@ -174,7 +185,7 @@ Usage: vade-harness agent --endpoint URL --model NAME --workspace PATH [OPTIONS]
                         Default: first line of WORKSPACE/.vade/check, if present
                         Requires macOS; noninteractive runs require --approval auto
   --no-check            Ignore .vade/check
-  --rules-scope PATH    Include AGENTS.md ancestor chain (repeat up to 8)
+  --rules-scope PATH    Freeze the AGENTS.md chain below the root to PATH (repeat up to 8)
   --shell-exclude NAME  Block another directory name (repeat up to 8)
   --shell-toolchain DIR Owner-selected Rust distribution; bin/lib read-only
   --children            Enable bounded children; default scopes are read-only
@@ -216,6 +227,8 @@ Usage: vade-harness direct --endpoint URL --model NAME [OPTIONS]
   --state-in-project    Counter/recall in WORKSPACE/.vade, with a .gitignore
   --max-output-tokens N Output reservation; positive, within upstream limit
   --no-auto-continue    Wait for /continue after an output cutoff
+  --no-instructions     Skip automatic instruction files (root AGENTS.md too);
+                        --rules-scope files stay; /instructions lists them
   --greedy              Temperature 0 on every turn; enables exact greedy drafting
   --temperature T       Explicit sampling temperature (0..2)
   --seed N              Pinned seed; preserved unchanged on retry and resume

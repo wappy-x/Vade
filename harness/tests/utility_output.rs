@@ -1,10 +1,12 @@
 //! Public utility output must remain usable when a pipeline consumer exits.
+#[path = "support/home.rs"]
+mod home;
 #[cfg(unix)]
 #[test]
 fn utility_output_survives_a_closed_consumer_without_panicking() {
     use std::{
         os::{fd::OwnedFd, unix::net::UnixStream},
-        process::{Command, Stdio},
+        process::Stdio,
         thread,
         time::{Duration, Instant},
     };
@@ -32,7 +34,7 @@ fn utility_output_survives_a_closed_consumer_without_panicking() {
         let (writer, reader) = UnixStream::pair().unwrap();
         drop(reader);
         let fd: OwnedFd = writer.into();
-        let mut child = Command::new(binary)
+        let mut child = home::command(binary)
             .args(*args)
             .env_remove("VADE_API_KEY_FILE")
             .env_remove("VADE_HARNESS_EFFORT")
@@ -60,7 +62,7 @@ fn utility_output_survives_a_closed_consumer_without_panicking() {
 #[cfg(unix)]
 #[test]
 fn diagnostics_are_best_effort_when_stderr_and_stdout_are_closed() {
-    use std::{os::{fd::OwnedFd, unix::net::UnixStream}, process::{Command, Stdio}};
+    use std::{os::{fd::OwnedFd, unix::net::UnixStream}, process::Stdio};
     fn closed() -> Stdio {
         let (writer, reader) = UnixStream::pair().unwrap(); drop(reader);
         let fd: OwnedFd = writer.into(); Stdio::from(fd)
@@ -74,7 +76,7 @@ fn diagnostics_are_best_effort_when_stderr_and_stdout_are_closed() {
         (env!("CARGO_BIN_EXE_vade-gateway"), &["--upstream", "http://127.0.0.1:1", "--api-key-file", "/missing-synthetic-key"], 1),
     ];
     for (binary, args, code) in cases {
-        let output = Command::new(binary).args(*args).env_remove("VADE_API_KEY_FILE")
+        let output = home::command(binary).args(*args).env_remove("VADE_API_KEY_FILE")
             .stdin(Stdio::null()).stdout(closed()).stderr(closed()).output().unwrap();
         assert_eq!(output.status.code(), Some(*code), "{args:?}: {:?}", output.status);
     }

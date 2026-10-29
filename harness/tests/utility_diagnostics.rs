@@ -1,11 +1,13 @@
 //! Public utility diagnostics identify options and remedies without dispatch.
+#[path = "support/home.rs"]
+mod home;
 #[path = "support/cli.rs"]
 #[allow(dead_code)]
 mod cli;
-use std::{fs, net::TcpListener, process::Command};
+use std::{fs, net::TcpListener};
 
 fn failure(args: &[&str], mode: &str) -> String {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+    let mut cmd = home::harness();
     cmd.args(args).env_remove("VADE_API_KEY_FILE");
     let output = cli::Cli::start(&mut cmd).finish();
     assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
@@ -84,7 +86,7 @@ fn utility_output_failures_preserve_existing_files_and_explain_a_new_destination
         (keep.join("output"), "under an existing directory"),
     ] {
         for mode in ["setup", "workload"] {
-            let mut cmd = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+            let mut cmd = home::harness();
             cmd.arg(mode).env_remove("VADE_API_KEY_FILE");
             if mode == "setup" { cmd.args(["generic", "--target", "direct"]); }
             cmd.args(["--endpoint", &endpoint, "--model", "mock", if mode == "setup" { "--write" } else { "--json" }]).arg(&path);

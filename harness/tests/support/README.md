@@ -5,6 +5,7 @@
 | File | What it does |
 | --- | --- |
 | `cli.rs` | Runs the CLI with time limits. |
+| `home.rs` | Starts the harness and gateway binaries with a fixture HOME, so a developer's `~/.vade` files never reach a test. Every harness launcher uses it. |
 | `raw_ui.rs` | A shared macOS terminal (PTY) fixture for interface checks. |
 | `coding.rs` | Temporary workspaces and a scripted chat-completions mock for the coding-agent tests. |
 | `contract.rs` | Loopback engine fixtures shared by the contract, workload and CLI contract tests. |

@@ -7,8 +7,10 @@ pub(crate) fn bytes(lengths: &[usize]) -> usize {
     lengths.iter().map(|n| (n * 4).div_ceil(64) * 64).sum()
 }
 /// Next HC-up computes gates in registers. Only injection survives attention.
+/// HC injection words per row: one gate per residual stream.
+pub(crate) const HC_INJECT_WORDS: usize = 4;
 pub(crate) fn hc_lengths(width: usize, low: usize, hidden: usize, rows: usize) -> [usize; 4] {
-    [width * rows, low * rows, 4 * rows, hidden]
+    [width * rows, low * rows, HC_INJECT_WORDS * rows, hidden]
 }
 /// qkv retains a slice of HC normalization; Next always projects to work.block.
 /// Keep one-word sentinels for the generic scratch structure, never kernel data.

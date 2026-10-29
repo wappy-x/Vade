@@ -33,6 +33,8 @@ controller, the checkpoint's location and identity go in the deployment config;
 see [the FP4-Local example](../cli/examples/fp4-local.conf). Record the
 publisher's revision, the license and file hashes you trust. Keep weights and
 credentials outside the source tree, and never commit them.
+[`vade pull`](pull-models.md) downloads a checkpoint from the Hub and runs the
+same launcher checks on it. A pass there is not qualification; see section 5.
 
 ## 2. Add only the metadata support that is missing
 

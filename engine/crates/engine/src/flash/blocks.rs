@@ -940,6 +940,9 @@ impl<'a> HcScratch<'a> {
             inject: vectors.next().unwrap(), mixed: vectors.next().unwrap(), tokens })
     }
     pub(super) fn normalized_workspace(&self) -> &DeviceVector<'a> { &self.normalized }
+    /// Swap in other rows' injection words (a bank tile, flash/next_split_bank.rs); returns the
+    /// words it held. The caller swaps them back before the scratch serves another pass.
+    pub(super) fn swap_inject(&mut self, inject: DeviceVector<'a>) -> DeviceVector<'a> { std::mem::replace(&mut self.inject, inject) }
     pub fn device_bytes(&self) -> usize {
         if self.gates.is_none() {
             crate::flash_next_workspace::bytes(&crate::flash_next_workspace::hc_lengths(W, LOW, H, self.tokens))

@@ -71,6 +71,8 @@ pub(crate) struct Config {
     pub(crate) prewarm_compaction: bool,
     pub(crate) generation: vade_harness::contract::GenerationOptions,
     pub(crate) rules_scopes: Vec<String>,
+    /// Direct and agent: load project instruction files (`--no-instructions` clears it).
+    pub(crate) instructions: bool,
     pub(crate) shell_exclusions: vade_harness::shell::Exclusions,
     pub(crate) shell_toolchain: Option<PathBuf>,
     /// Agent: user check command run after rounds that changed files, and its source.
@@ -189,6 +191,7 @@ impl Config {
             prewarm_compaction: false,
             generation: vade_harness::contract::GenerationOptions::default(),
             rules_scopes: Vec::new(),
+            instructions: true,
             shell_exclusions: vade_harness::shell::Exclusions::default(),
             shell_toolchain: None,
             check: None,
@@ -248,11 +251,17 @@ impl Config {
                     config.plain = true;
                     used.push("plain");
                 }
-                "--no-auto-compact" => {
+                "--no-compact" | "--no-auto-compact" => {
                     if !config.auto_compact {
-                        return Err("--no-auto-compact was specified more than once");
+                        return Err("--no-compact was specified more than once");
                     }
                     config.auto_compact = false;
+                }
+                "--no-instructions" => {
+                    if !config.instructions {
+                        return Err("--no-instructions was specified more than once");
+                    }
+                    config.instructions = false;
                 }
                 "--no-auto-continue" => {
                     if !config.auto_continue {
@@ -613,6 +622,9 @@ impl Config {
         if !config.auto_continue && !matches!(config.mode, Mode::Agent | Mode::Direct) {
             return Err("--no-auto-continue requires direct or agent mode");
         }
+        if !config.instructions && !matches!(config.mode, Mode::Agent | Mode::Direct) {
+            return Err("--no-instructions requires direct or agent mode");
+        }
         if config.resume.is_some() && !config.rules_scopes.is_empty() {
             return Err(
                 "resume preserves frozen project scopes; use a new session to select different scopes",
@@ -630,7 +642,7 @@ impl Config {
             }
         }
         if !config.auto_compact && config.mode != Mode::Agent {
-            return Err("--no-auto-compact requires agent mode");
+            return Err("--no-compact requires agent mode");
         }
         if config.prewarm_compaction && config.mode != Mode::Agent {
             return Err("--prewarm-compaction requires agent mode");

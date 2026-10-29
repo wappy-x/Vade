@@ -366,7 +366,7 @@ impl Fixture {
         }
     }
     fn command(&self, enabled: bool) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+        let mut command = crate::home::harness();
         // These macOS-only scenarios grant and expect workspace_shell.
         command.env_remove("VADE_HARNESS_SHELL");
         command
@@ -709,7 +709,7 @@ fn cli_without_children_flag_rejects_model_spawn_and_never_starts_a_child() {
             std::io::ErrorKind::WouldBlock
         );
     });
-    let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+    let mut command = crate::home::harness();
     command.args([
         "agent",
         "--state-in-project",
@@ -790,7 +790,7 @@ fn cli_child_missing_exact_admission_fails_without_generation_or_fabricated_cach
             Some(0),
         );
     });
-    let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+    let mut command = crate::home::harness();
     command.args([
         "agent",
         "--state-in-project",

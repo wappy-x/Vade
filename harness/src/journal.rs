@@ -520,10 +520,10 @@ impl Journal {
                 .and_then(|v| crate::json::stringify(v).ok())
                 .unwrap_or_else(|| "null".into()),
             crate::context::KV_COMPACTION_NOTICE,
-            if m.get("summary_origin").and_then(Value::as_str) == Some("local excerpts") {
-                "Local excerpt"
-            } else {
-                "User-supplied"
+            match m.get("summary_origin").and_then(Value::as_str) {
+                Some("local excerpts") => "Local excerpt".into(),
+                Some("model") => format!("Model-written (kept {} turns, {} tokens)", field("kept_turns"), field("summary_tokens")),
+                _ => "User-supplied".into(),
             },
             m.get("summary")
                 .and_then(Value::as_str)

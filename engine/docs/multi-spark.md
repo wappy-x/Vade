@@ -1,5 +1,12 @@
 # Multiple Sparks
 
+This page covers the older BF16 `tp-serve` path. FP4-Local uses `flash-serve`
+instead. The [launcher](../crates/tp/src/bin/flash-serve.rs) selects the tensor
+split on two Sparks and the layer chain on three or more. The
+[`vade up` configuration limit](../../cli/src/config.rs) allows up to 24 Sparks.
+These are code paths and launch limits, not device test results. See
+[FP4-Local serving](next-http.md) for that path's settings.
+
 **Qwen3-8B and Qwen3-32B, official BF16, can be split across several DGX Sparks joined by their QSFP network cables.**
 
 Checked on this build: Qwen3-8B gives the same tokens on one and on two
@@ -12,8 +19,8 @@ by hand or with a coding agent; start with [Install](install.md) on each.
 - **Server:** `tp-serve`, separate from the single-Spark `spark-serve`.
 - **Groups:** lines, rings and odd counts, up to 64 ranks.
 - **Transport:** RDMA over the QSFP cables, or TCP.
-- **One Spark only:** Qwen3-30B-A3B, Qwen3.8-27B (BF16 and FP8) and Gemma 4
-  31B, the other models in main.
+- **Outside this `tp-serve` path:** Qwen3-30B-A3B, Qwen3.8-27B (BF16 and FP8)
+  and Gemma 4 31B.
 
 <details>
 <summary><b>Terms on this page</b>: dense model, tensor parallelism, rank, QSFP, rail, line, ring, RDMA, PTX, KV cache, prefill</summary>
@@ -50,7 +57,7 @@ network stack.</dd>
 
 ## What has been tested
 
-**Only the Qwen3-8B token check is current on this build.**
+**The checks below apply to the older BF16 `tp-serve` path.**
 
 | Item | On this build |
 | --- | --- |
@@ -58,7 +65,7 @@ network stack.</dd>
 | Qwen3-32B across ranks | Not requalified |
 | More than two physical ranks | Not requalified |
 | Speed across ranks | Not measured |
-| Expert, Qwen3.8, Gemma models | Not supported |
+| Expert, Qwen3.8, Gemma models | Not supported by these `tp-serve` adapters; FP4-Local uses `flash-serve` |
 
 - **Same tokens:** on the retained short, medium and long checks.
 - **Qwen3-32B:** the loader and TP path exist. **More than two ranks:**
@@ -66,8 +73,8 @@ network stack.</dd>
 - **Speed:** earlier results are [historical](../crates/tp/MEASUREMENTS.md).
   More ranks mean fewer weight bytes per rank, but more communication. Any
   speedup must be measured on the actual group.
-- **Other models:** expert, Qwen3.8 and Gemma serving across ranks is not
-  supported by these adapters.
+- **Other models:** these `tp-serve` adapters do not serve expert, Qwen3.8 or
+  Gemma models across ranks. FP4-Local uses the separate path described above.
 
 ## What you need
 

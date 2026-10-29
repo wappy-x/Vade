@@ -107,6 +107,7 @@ fn run() -> Result<(), String> {
     }
     spark_engine::flash_prompt_options::load()?;
     spark_serve::intake_grace::load()?;
+    spark_serve::intake_burst::load()?;
     let (mut mtp, mut nvfp4, mut verify_full) = (None, false, false);
     let mut api_key_file = None;
     let mut allow_remote = false;

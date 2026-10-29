@@ -8,6 +8,8 @@ Vade's main pages, grouped by what you want to do.
 - **Two or more Sparks:** do INSTALL's steps 1 to 3 on every Spark, cable them
   with [network setup](network-setup.md), then drive them from a controller as
   INSTALL's [two and more Sparks](../INSTALL.md#two-and-more-sparks) shows.
+- **The FP8 checkpoint:** it needs 2, 4 or 6 Sparks. Follow the
+  [FP8 install](install-fp8.md).
 
 ## Install and operate
 
@@ -17,9 +19,11 @@ Vade's main pages, grouped by what you want to do.
 | --- | --- |
 | [Installation](../INSTALL.md) | What you need first, downloading the model at its pinned revision, and launching it on the Spark. It also covers the optional controller and linked-Spark routes |
 | [First chat on one Spark](../harness/docs/first-run.md) | What `vade launch` does: release bundle or source build, how it finds the model you downloaded, the settings it saves, and how to start and stop later |
+| [Download models](pull-models.md) | `vade pull`: download a checkpoint from Hugging Face with resume and file checks. `vade models`: list local models and what can serve them |
 | [CLI reference](../cli/README.md) | The `vade` commands: install, start, chat, check exactness, benchmark, diagnose, recover and stop |
 | [Examples](../examples/README.md) | Short examples you can run: curl against the OpenAI and Anthropic APIs, a Rust client, Claude Code, Codex, `vade bench` and a two-Spark launch |
 | [OpenAI-compatible API](openai-api.md) | Base URLs, a curl and a Python example, the chat fields Vade accepts, streaming, tool calls, errors, API keys and the known gaps. It also has notes for Continue and Open WebUI |
+| [Sampling](sampling.md) | Greedy as the default, the sampling fields and their order, seeds and how to repeat a sampled reply, where sampling runs on two or more Sparks, drafting, and what is exact |
 
 ### From a controller, or with more Sparks
 
@@ -36,14 +40,15 @@ the other terms.
 | [Spark setup](spark-setup.md) | The OS and network preparation for each linked Spark, and what its checks can and cannot confirm |
 | [FP4-Local on Vade's own server](../engine/docs/next-http.md) | For advanced use: starting the Flash-Next server by hand, without `vade up`, and the ways to arrange your Sparks. It is an engine reference, not a first guide |
 
-### Legacy models
+### FP8 on 2, 4 or 6 Sparks
 
-These pages cover the older FP8 checkpoint. A new install does not need them.
+These pages cover the FP8 checkpoint, `Qwen/Qwen3.8-Flash-Next-FP8`. It is a
+supported route on 2, 4 or 6 linked Sparks.
 
 | Guide | What it covers |
 | --- | --- |
-| [Legacy FP8 installation](install-legacy-fp8.md) | The older FP8 install, which has its own checkpoint and launcher profile |
-| [Fresh install](fresh-install.md) | A step-by-step checklist and CLI configuration for the FP8 install on two Sparks |
+| [FP8 install](install-fp8.md) | The FP8 route: build, weights, config, `vade up --fp8` on two and four Sparks, and the measured speeds |
+| [Fresh install](fresh-install.md) | A longer step-by-step checklist and CLI configuration for FP8 on two Sparks |
 | [Four Sparks](four-sparks.md) | Recabling two FP8 pairs into one group of four |
 
 ## Understand and extend
@@ -56,6 +61,8 @@ How Vade works, and how to change it. These pages are for contributors.
 - **How the parts fit together:** [architecture](architecture.md),
   [glossary](GLOSSARY.md), [engine documentation](../engine/docs/README.md)
   and [harness documentation](../harness/README.md)
+- **Long chats:** [context and compaction](context-and-compaction.md) (how a
+  chat continues past the context window)
 - **Adding a model:** [adding a model](adding-a-model.md), the
   [model plan](model-plan.md) (reads the checkpoint's layout without loading
   weights) and the [splitter](splitter.md) (plans how the model's tensors are
@@ -70,6 +77,7 @@ How Vade works, and how to change it. These pages are for contributors.
 
 What we measured, what backs it up, and who we credit.
 
+- [What is new in v0.2.0, in plain words](release-notes/0.2.0.md)
 - [How we benchmark, the current results and older results](benchmarks.md)
 - [Which run records (receipts) are public](../bench/receipts/README.md)
 - [Engine validation](../engine/docs/validation.md)

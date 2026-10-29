@@ -248,6 +248,11 @@ fn locate(root: &Path) -> Result<Model, String> {
         })
 }
 
+/// Whether launch would serve the checkpoint in `path`: `Ok(true)` for
+/// FP4-Local, `Ok(false)` for the legacy FP8 format, else the refusal. Reads
+/// metadata only, never weight payloads.
+pub(crate) fn serving_format(path: &Path) -> Result<bool, String> { inspect(path).map(|model| model.fp4_local) }
+
 fn inspect(path: &Path) -> Result<Model, String> {
     let path = fs::canonicalize(path)
         .map_err(|_| format!("Saved model folder {} is unavailable.", display(path)))?;
@@ -664,6 +669,14 @@ pub(super) fn test_write_serving_metadata(path: &Path) {
     fs::write(path.join("generation_config.json"), test_generation_config()).unwrap();
     fs::write(path.join("tokenizer_config.json"), test_tokenizer_config()).unwrap();
     fs::write(path.join("tokenizer.json"), test_tokenizer_json()).unwrap();
+}
+
+/// The files of the smallest legacy FP8 checkpoint that discovery accepts.
+#[cfg(test)]
+pub(crate) fn test_checkpoint() -> Vec<(&'static str, Vec<u8>)> {
+    vec![("config.json", test_config(8192).into()), ("generation_config.json", test_generation_config().into()),
+        ("tokenizer_config.json", test_tokenizer_config().into()), ("tokenizer.json", test_tokenizer_json().into()),
+        ("model.safetensors", vec![0; 16]), ("model.safetensors.index.json", test_index().into())]
 }
 
 #[cfg(test)]

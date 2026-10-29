@@ -32,6 +32,9 @@ impl<'a> Backend<'a> {
     pub fn offer_dense_planes(&self, input: u64, cols: usize, tokens: usize, planes: u64) {
         self.dense_offer.set(Some((input, cols, tokens, planes)));
     }
+    /// Drop an offer whose input rows leave the workspace (a bank tile, swapped out before its
+    /// next pack): the next pack then forms its planes from the FP32 rows.
+    pub fn drop_dense_offer(&self) { self.dense_offer.set(None); }
     pub fn pack_flash_dense_input(&self, input: u64, cols: usize, tokens: usize) -> Result<u64, String> {
         self.pack_flash_input(input, cols, tokens, false, 32)
     }

@@ -103,7 +103,7 @@ impl Config {
         let path = config_path()?;
         let text = fs::read_to_string(&path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
-                format!("Config is missing: {}. Copy cli/examples/fp4-local.conf for FP4-Local (or cli/examples/vade.conf for legacy FP8), edit the placeholders, and set VADE_CONFIG. See INSTALL.md.", crate::text::quoted(&path.to_string_lossy()))
+                format!("Config is missing: {}. Copy cli/examples/fp4-local.conf for FP4-Local (or cli/examples/vade.conf for FP8), edit the placeholders, and set VADE_CONFIG. See INSTALL.md.", crate::text::quoted(&path.to_string_lossy()))
             } else if error.kind() == std::io::ErrorKind::InvalidData {
                 format!("Config {} is not UTF-8 text. Save it as plain UTF-8 text, then retry.", crate::text::quoted(&path.to_string_lossy()))
             } else {
@@ -124,7 +124,7 @@ impl Config {
         {
             return Ok(());
         }
-        let start = if self.model.ends_with("-fp8") { "vade up --fp8-legacy" } else { "vade up" };
+        let start = if self.model.ends_with("-fp8") { "vade up --fp8" } else { "vade up" };
         Err(format!("Set model_revision to a verified immutable 40-hex publisher revision or local-sha256-<64-hex manifest digest>; missing values, placeholders such as REPLACE_WITH_VERIFIED_IMMUTABLE_REVISION, and mutable tags are refused for installation and startup. See INSTALL.md, then run {start}."))
     }
 
@@ -335,10 +335,10 @@ impl Config {
     }
     fn selected_machines(&self, options: &UpOptions) -> Result<Vec<Machine>, String> {
         if options.fp4_local && self.model.ends_with("-fp8") {
-            return Err("Your config selects legacy FP8. Run vade up --fp8-legacy, or select the FP4-Local checkpoint in VADE_CONFIG and run vade up.".into());
+            return Err("Your config selects FP8. Run vade up --fp8, or select the FP4-Local checkpoint in VADE_CONFIG and run vade up.".into());
         }
         if !options.fp4_local && self.model.ends_with("-fp4-local") {
-            return Err("Your config selects FP4-Local. Run vade up without --fp8-legacy, or select a legacy FP8 config with VADE_CONFIG.".into());
+            return Err("Your config selects FP4-Local. Run vade up without --fp8, or select an FP8 config with VADE_CONFIG.".into());
         }
         let requested = if options.hosts.is_empty() {
             options.sparks.unwrap_or(if options.fp4_local { 1 } else { 2 })
@@ -357,13 +357,13 @@ impl Config {
                 return Err(format!(
                     "Your config has {} machine{}. Choose fewer supported machines with --sparks or add machine sections, then retry {}. For one Spark, select an FP4-Local config with VADE_CONFIG and run vade up.",
                     self.machines.len(), if self.machines.len() == 1 { "" } else { "s" },
-                    if options.fp4_local { "vade up" } else { "vade up --fp8-legacy" }
+                    if options.fp4_local { "vade up" } else { "vade up --fp8" }
                 ));
             }
             self.machines[..count].to_vec()
         };
         if !options.fp4_local && !matches!(selected.len(), 2 | 4 | 6) {
-            return Err("Legacy FP8 needs 2, 4, or 6 machines. Run vade up --fp8-legacy --sparks 2, 4, or 6, or list that many --hosts. For one Spark, select an FP4-Local config with VADE_CONFIG and run vade up.".into());
+            return Err("FP8 needs 2, 4, or 6 machines. Run vade up --fp8 --sparks 2, 4, or 6, or list that many --hosts. For one Spark, select an FP4-Local config with VADE_CONFIG and run vade up.".into());
         }
         let names: BTreeSet<&str> = selected
             .iter()
@@ -491,7 +491,7 @@ impl Values {
     fn finish(self, section: &str) -> Result<(), String> {
         match self.0.first_key_value() {
             Some((key, _)) => Err(format!(
-                "Unknown config key {key} in {section}. Check cli/examples/fp4-local.conf (or cli/examples/vade.conf for legacy FP8) for supported keys."
+                "Unknown config key {key} in {section}. Check cli/examples/fp4-local.conf (or cli/examples/vade.conf for FP8) for supported keys."
             )),
             None => Ok(()),
         }

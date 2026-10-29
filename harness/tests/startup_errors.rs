@@ -1,4 +1,6 @@
 //! Local initialization errors identify the setting and preserve saved sessions.
+#[path = "support/home.rs"]
+mod home;
 #[path = "support/cli.rs"]
 #[allow(dead_code)]
 mod cli;
@@ -14,7 +16,7 @@ impl Root {
 }
 impl Drop for Root { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
 fn command(mode: &str, workspace: &Path, peer: &TcpListener) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+    let mut command = home::harness();
     command.args([mode, "--state-in-project", "--endpoint", &format!("http://{}/v1", peer.local_addr().unwrap()), "--model", "mock", "--prompt", "fixture", "--workspace"])
         .arg(workspace).env_remove("VADE_API_KEY_FILE").env_remove("VADE_HARNESS_EFFORT").env_remove("VADE_HARNESS_THINKING");
     command

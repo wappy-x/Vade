@@ -18,6 +18,7 @@
 | [`edit.rs`](edit.rs) | Exact, bounded text patches. |
 | [`gateway.rs`](gateway.rs) | Bounded loopback-only chat and Responses relay. |
 | [`gateway_conformance.rs`](gateway_conformance.rs) | Local, first-party gateway conformance fixtures. |
+| [`instructions.rs`](instructions.rs) | Project instruction files: one per directory, from the user level down to the workspace root, joined into one bounded prompt section. |
 | [`interaction.rs`](interaction.rs) | Bounded UI lanes. |
 | [`journal.rs`](journal.rs) | Private, locked, append-only native sessions. |
 | [`json.rs`](json.rs) | First-party, bounded JSON parsing. |

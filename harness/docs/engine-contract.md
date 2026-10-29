@@ -280,16 +280,22 @@ render lengths improve U without claiming an exact token LCP.
 
 ## What the gateway passes through unchanged
 
-The gateway does not rewrite your request or the engine's reply. It never
-swaps the model, adds prompt text, makes up a cache key or repairs a dialect.
-In practice:
+The gateway preserves the engine's reply body. It changes request role values
+on specific routes and inserts greedy defaults when sampling fields are absent.
+It does not swap the model, add prompt text or make up a cache key. In practice:
 
 - Requests are checked as JSON (up to 8 MiB, with the usual depth, value and
-  duplicate-key limits) but forwarded with their original bytes: spacing, key
-  order, escapes, unknown fields and number spelling are kept. The only
-  addition is for a generation request that sets no sampling field: it gets
-  the greedy defaults (see the [harness
-  README](../README.md#gateway-relay-codex-and-hermes-in-detail)).
+  duplicate-key limits). On POST Messages routes, including token counting,
+  `messages[i].role: "system"` becomes `"user"`. The top-level `system` field
+  stays unchanged. On POST chat completions routes, `messages[i].role: null`
+  becomes `"assistant"`. These changes apply with or without the `/v1` prefix.
+  See the [role rules](../src/gateway/system_turns.rs).
+- A generation request that sets no sampling field gets the greedy defaults.
+  Any explicit sampling field suppresses that insertion, including a field
+  set to `null`. The gateway applies the
+  [sampling rules](../src/gateway/sampling.rs) after the role changes in
+  [`prepare_dispatch`](../src/gateway.rs). All other body bytes stay unchanged,
+  including spacing, key order, escapes, unknown fields and number spelling.
 - Replies, error bodies and stream events pass through exactly, including
   binary bytes, comments, unknown events, multiline data, event order and
   Unicode split across chunks. Only HTTP framing and header spelling are
@@ -349,18 +355,19 @@ for checkpoint work.
 
 ## Prompt-cache fields on the FP4-Local server
 
-This section covers the one-Spark FP4-Local server: `flash-serve ...
---fp4-local` with world size 1 (a single rank), serving the
-`nvidia/Qwen3.8-Flash-Next-FP4-Local` checkpoint. It was written against
-source `26b1692` (2026-10-19).
+This section covers the FP4-Local server: `flash-serve ... --fp4-local`, serving
+the `nvidia/Qwen3.8-Flash-Next-FP4-Local` checkpoint. The
+[cache switch and topology guard](../../engine/crates/serve/src/prefix_switch.rs)
+define where prefix reuse is available.
 
 - **Prefix cache.** Started with `VADE_FLASHNEXT_PREFIX_CACHE=1`, the server
   restores exact prompt prefixes from its cache. The default is off: no reuse
-  at all, and capabilities report `prefix_cache:false`, as on main 26b1692 and
-  earlier.
-- **Two or more ranks.** The pipeline service (the tensor split and the layer chain)
-  refuses the switch at startup on both ranks: a restored prefix would hold the
-  front rank's layers only, while the back rank keeps no prefix checkpoints.
+  through this cache, and capabilities report `prefix_cache:false`.
+- **Two Sparks.** The tensor split allows the prefix cache and restores a
+  matching prefix on each rank. The [HTTP adapter](../../engine/crates/serve/src/flashnext.rs)
+  checks `tp_prefix_supported` before it allows the switch.
+- **Layer chain.** The chain used on three or more Sparks refuses
+  `VADE_FLASHNEXT_PREFIX_CACHE=1`. It has no prefix restore contract.
 - **Host memory.** When the KV reserve needs host memory for spare session
   pages, saved prefixes give it up before the reserve's pressure rule applies
   (`VADE_FLASHNEXT_CACHE_YIELD`, default on; `0` means only the session pool

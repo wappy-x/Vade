@@ -1,5 +1,7 @@
 //! Opt-in Mac PTY latency benchmark; no model or accelerator required.
 #![cfg(target_os = "macos")]
+#[path = "support/home.rs"]
+mod home;
 #[path = "support/raw_ui.rs"]
 mod raw_ui;
 use std::{io::{Read, Write}, net::{Ipv4Addr, TcpListener}, sync::mpsc, thread, time::{Duration, Instant}};

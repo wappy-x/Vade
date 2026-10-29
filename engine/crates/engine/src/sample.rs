@@ -7,6 +7,8 @@ pub struct Sampling {
     /// Zero disables top-k.
     pub top_k: usize,
     pub top_p: f64,
+    /// Keeps tokens at least this fraction of the best token's probability; zero disables it.
+    pub min_p: f64,
     pub repetition_penalty: f64,
     pub presence_penalty: f64,
     pub frequency_penalty: f64,
@@ -18,6 +20,7 @@ impl Sampling {
             temperature: if thinking { 0.6 } else { 0.7 },
             top_k: 20,
             top_p: if thinking { 0.95 } else { 0.8 },
+            min_p: 0.0,
             repetition_penalty: 1.0,
             presence_penalty: 0.0,
             frequency_penalty: 0.0,
@@ -25,7 +28,7 @@ impl Sampling {
         }
     }
     pub const fn greedy() -> Self {
-        Self { temperature: 0.0, top_k: 0, top_p: 1.0, repetition_penalty: 1.0,
+        Self { temperature: 0.0, top_k: 0, top_p: 1.0, min_p: 0.0, repetition_penalty: 1.0,
             presence_penalty: 0.0, frequency_penalty: 0.0, seed: 0 }
     }
     /// GenerationConfig defaults match the checkpoint; requests override fields later.
@@ -40,7 +43,7 @@ impl Sampling {
         let object = value.object().map_err(|e| e.to_string())?;
         let mut sampling = Self { temperature: 1.0, top_k: 50, ..Self::greedy() };
         for (name, target) in [("temperature", &mut sampling.temperature), ("top_p", &mut sampling.top_p),
-            ("repetition_penalty", &mut sampling.repetition_penalty)] {
+            ("min_p", &mut sampling.min_p), ("repetition_penalty", &mut sampling.repetition_penalty)] {
             if let Some(value) = object.get(name) { *target = value.f64().map_err(|e| e.to_string())?; }
         }
         if let Some(value) = object.get("top_k") {
@@ -55,6 +58,7 @@ impl Sampling {
     pub fn validate(&self) -> Result<(), String> {
         if !self.temperature.is_finite() || self.temperature < 0.0
             || !self.top_p.is_finite() || self.top_p <= 0.0 || self.top_p > 1.0
+            || !(0.0..=1.0).contains(&self.min_p)
             || !self.repetition_penalty.is_finite() || self.repetition_penalty <= 0.0
             || !self.presence_penalty.is_finite() || !(-2.0..=2.0).contains(&self.presence_penalty)
             || !self.frequency_penalty.is_finite() || !(-2.0..=2.0).contains(&self.frequency_penalty)
@@ -121,6 +125,11 @@ impl Distribution {
 }
 fn order(a: &(u32, f64), b: &(u32, f64)) -> std::cmp::Ordering {
     b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0))
+}
+/// After top-k and top-p, as in transformers. Weights are exp((logit - best) / T), so the
+/// best token weighs exactly 1 and always stays; each test reads one weight, never a sum.
+fn min_p(candidates: &mut Vec<(u32, f64)>, min_p: f64) {
+    if min_p > 0.0 { candidates.retain(|v| v.1 >= min_p); }
 }
 
 /// Request-owned scratch; options are validated once, buffers reused each draw.
@@ -201,6 +210,7 @@ impl Sampler {
             }
             candidates.truncate(keep);
         }
+        min_p(candidates, p.min_p);
         let mass: f64 = candidates.iter().map(|v| v.1).sum();
         let draw = uniform(p.seed, position) * mass;
         let mut cumulative = 0.0;
@@ -288,6 +298,7 @@ impl Sampler {
             }
             candidates.truncate(lo.max(1));
         }
+        min_p(candidates, p.min_p);
         if p.top_k > 0 { candidates.sort_unstable_by(order); }
         let mass: f64 = candidates.iter().map(|v| v.1).sum();
         let draw = uniform(p.seed, position) * mass;
@@ -347,6 +358,120 @@ mod tests {
                     assert!(s.candidates == expected, "nucleus differs: top_k={top_k} top_p={top_p}");
                 }
             }
+        }
+    }
+    /// Probabilities 0.5, 0.25, 0.15, 0.1 at temperature 1: weights to the best 1, 0.5, 0.3, 0.2.
+    fn known() -> Vec<f32> { [0.5f64, 0.25, 0.15, 0.1].iter().map(|p| p.ln() as f32).collect() }
+    #[test]
+    fn top_k_top_p_and_min_p_on_known_logits() {
+        let logits = known();
+        let pairs: Vec<_> = logits.iter().enumerate().map(|(i, &v)| (i as u32, v)).collect();
+        let base = Sampling { temperature: 1.0, seed: 5, ..Sampling::greedy() };
+        let cases: &[(usize, f64, f64, &[u32])] = &[
+            (0, 1.0, 0.0, &[0, 1, 2, 3]), (2, 1.0, 0.0, &[0, 1]), (1, 1.0, 0.0, &[0]),
+            (0, 0.3, 0.0, &[0]), (0, 0.7, 0.0, &[0, 1]), (0, 0.8, 0.0, &[0, 1, 2]),
+            (0, 1.0, 0.1, &[0, 1, 2, 3]), (0, 1.0, 0.25, &[0, 1, 2]), (0, 1.0, 0.4, &[0, 1]), (0, 1.0, 1.0, &[0]),
+            (3, 0.8, 0.4, &[0, 1]), (4, 0.95, 0.25, &[0, 1, 2]),
+        ];
+        for &(top_k, top_p, min_p, expected) in cases {
+            let p = Sampling { top_k, top_p, min_p, ..base };
+            let mut s = Sampler::new(p).unwrap();
+            let mut support: Vec<_> = s.distribution(&logits, &[], 0, |_| true).unwrap().0.iter().map(|v| v.0).collect();
+            support.sort_unstable();
+            assert_eq!(support, expected, "top_k={top_k} top_p={top_p} min_p={min_p}");
+            // Every kept token is drawn and no other: the filters shape the draws, not only the support.
+            let mut seen = std::collections::BTreeSet::new();
+            for position in 0..512 {
+                let id = s.sample(&logits, &[], 0, position, |_| true).unwrap();
+                // The compact device top-k path draws the same id at the same position.
+                if top_k > 0 { assert_eq!(s.sample_top_k(&pairs, position, |_| true), Some(id)); }
+                seen.insert(id);
+            }
+            assert!(seen.iter().copied().eq(expected.iter().copied()), "draws {seen:?} for {expected:?}");
+        }
+        // min_p has no effect on greedy decoding.
+        for min_p in [0.0, 0.5, 1.0] {
+            let mut s = Sampler::new(Sampling { min_p, ..Sampling::greedy() }).unwrap();
+            assert_eq!(s.sample(&[1., 3., 2.], &[], 0, 9, |_| true).unwrap(), 1);
+        }
+        for min_p in [-0.01, 1.01, f64::NAN] {
+            assert!(Sampler::new(Sampling { min_p, ..base }).is_err());
+        }
+    }
+    #[test]
+    fn same_seed_gives_same_ids_on_any_instance_and_in_any_order() {
+        let logits: Vec<f32> = (0..4096).map(|i| ((i * 37 % 1009) as f32 - 504.) / 90.).collect();
+        let p = Sampling { temperature: 0.8, top_k: 40, top_p: 0.9, min_p: 0.05, seed: 20261029, ..Sampling::greedy() };
+        let run = |s: &mut Sampler| (0..128).map(|position| s.sample(&logits, &[], 0, position, |_| true).unwrap()).collect::<Vec<_>>();
+        let first = run(&mut Sampler::new(p).unwrap());
+        assert_eq!(first, run(&mut Sampler::new(p).unwrap()));
+        assert!(first.iter().collect::<std::collections::BTreeSet<_>>().len() > 1);
+        // A sampler that served another seed keeps no state between draws.
+        let mut reused = Sampler::new(Sampling { seed: 1, ..p }).unwrap();
+        let other = run(&mut reused);
+        assert_ne!(first, other);
+        reused.options.seed = p.seed;
+        assert_eq!(first, run(&mut reused));
+        // Replay after a rejected draft draws positions out of order: each position keeps its id.
+        let mut s = Sampler::new(p).unwrap();
+        let reversed: Vec<_> = (0..128).rev().map(|position| s.sample(&logits, &[], 0, position, |_| true).unwrap()).collect();
+        assert!(first.iter().eq(reversed.iter().rev()));
+    }
+    /// Host model of the tensor split's head: rank 0 holds rows [0, start), rank 1 the rest.
+    /// A greedy pass merges the halves' argmax rows; a sampled pass runs the whole head on
+    /// rank 0, and rank 1 only receives the chosen id as its next input.
+    #[test]
+    fn rank_simulation_split_head_and_rank_zero_sampling() {
+        let vocabulary = 997;
+        let start = crate::flash_head_options::split_rows(vocabulary);
+        assert!((1..vocabulary).contains(&start));
+        let argmax = |row: &[f32]| row.iter().enumerate()
+            .fold((0, f32::NEG_INFINITY), |best, (i, &v)| if v > best.1 { (i as u32, v) } else { best });
+        let p = Sampling { temperature: 0.7, top_k: 20, top_p: 0.95, min_p: 0.02, seed: 77, ..Sampling::greedy() };
+        let run = || {
+            let (mut rank0, mut again) = (Sampler::new(p).unwrap(), Sampler::new(p).unwrap());
+            let mut greedy = Sampler::new(Sampling::greedy()).unwrap();
+            let mut history = vec![3u32];
+            for step in 0..64 {
+                let whole: Vec<f32> = (0..vocabulary).map(|i| (((i * 131 + step * 17) % 997) as f32 - 498.) / 60.).collect();
+                let (own, peer) = whole.split_at(start);
+                let merged = crate::flash_head_options::merge_split(&[argmax(own)], &[argmax(peer)], start as u32).unwrap();
+                assert_eq!(merged[0].0, greedy.sample(&whole, &history, 1, history.len(), |_| true).unwrap());
+                let id = rank0.sample(&whole, &history, 1, history.len(), |_| true).unwrap();
+                // Rows rebuilt from the two halves give the same draw on any rank that samples them.
+                assert_eq!(id, again.sample(&[own, peer].concat(), &history, 1, history.len(), |_| true).unwrap());
+                history.push(id);
+            }
+            history
+        };
+        let first = run();
+        assert_eq!(first, run(), "a second run with the same seed");
+        assert!(first[1..].iter().collect::<std::collections::BTreeSet<_>>().len() > 8);
+    }
+    /// Ids pinned from main 586d87947 before min_p existed: greedy, the checkpoint's sampling
+    /// and penalized nucleus sampling draw the same ids with min_p unset.
+    #[test]
+    fn unset_min_p_keeps_main_ids() {
+        let pins: [(Sampling, [u32; 32]); 3] = [
+            (Sampling::greedy(), [1998, 1474, 950, 426, 3995, 3471, 2947, 2423, 1899, 1375, 851, 327, 3896, 3372, 2848, 2324,
+                1800, 1276, 752, 228, 3797, 3273, 2749, 2225, 1701, 1177, 653, 129, 3698, 3174, 2650, 2126]),
+            (Sampling { temperature: 1.0, top_k: 20, top_p: 0.95, seed: 20260905, ..Sampling::greedy() },
+                [1319, 892, 2754, 3646, 3219, 3277, 2656, 3936, 1705, 1181, 2461, 1840, 1801, 2790, 559, 1548,
+                3313, 1276, 2265, 3545, 1702, 984, 1876, 4029, 3602, 3078, 556, 2030, 1215, 3174, 4066, 2029]),
+            (Sampling { temperature: 0.8, top_p: 0.9, repetition_penalty: 1.1, presence_penalty: 0.3, seed: 11, ..Sampling::greedy() },
+                [3937, 1046, 1432, 1764, 1783, 3839, 869, 4089, 211, 2946, 2732, 1840, 2789, 171, 1955, 3641,
+                3176, 73, 1022, 1508, 1061, 33, 964, 382, 1836, 1408, 3077, 1118, 1795, 1466, 3365, 2940]),
+        ];
+        for (p, pin) in pins {
+            assert_eq!(p.min_p, 0.0);
+            let mut s = Sampler::new(p).unwrap();
+            let mut history = vec![5u32, 9];
+            for step in 0..32usize {
+                let logits: Vec<f32> = (0..4093usize).map(|i| (((i * 211 + step * 53) % 4093) as f32 - 2046.) / 400.).collect();
+                let id = s.sample(&logits, &history, 2, history.len(), |id| id != 7).unwrap();
+                history.push(id);
+            }
+            assert_eq!(history[2..], pin, "{p:?}");
         }
     }
 }

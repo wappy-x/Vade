@@ -1,4 +1,4 @@
-# Legacy FP8 fresh install: from zero to a first answer
+# FP8 fresh install: from zero to a first answer
 
 **Installing Vade for the first time? Start with [INSTALL.md](../INSTALL.md).**
 The current model, [FP4-Local](GLOSSARY.md#dg), runs on a single Spark: you
@@ -7,15 +7,15 @@ computer. [First run](../harness/docs/first-run.md) walks you through that
 launcher. Driving Sparks from another computer, the
 [controller](GLOSSARY.md#ac) route, comes after that.
 
-This page keeps the older checklist for the FP8 model. It needs **two** DGX
+This page is a longer checklist for the FP8 model. It needs **two** DGX
 Sparks, yours or rented: the FP8 checkpoint does not fit on one. It takes them
 to a working Vade server that you drive with the `vade` command from a Mac
-(or a Linux computer; see step 0), which acts as the controller. FP8 is no
-longer the default, so every start needs the explicit `--fp8-legacy` flag. The
-history and evidence behind FP8 are in
-[Legacy FP8 installation](install-legacy-fp8.md).
+(or a Linux computer; see step 0), which acts as the controller. FP4-Local is
+the default, so every FP8 start needs the explicit `--fp8` flag. The shorter
+guide, with the measured speeds, is
+[Install FP8 on 2, 4 or 6 Sparks](install-fp8.md).
 
-> **Heads-up:** nobody has yet run this legacy route end to end from a blank
+> **Heads-up:** nobody has yet run this route end to end from a blank
 > machine. If a step doesn't match what you see, please open an issue.
 
 <br>
@@ -88,7 +88,7 @@ Ask the provider before you pay:
 - You will not see the cable. Trust `ibdev2netdev`, `ethtool` and the
   [link checks](network-setup.md#7-check-every-link), not a diagram.
 - Your Mac reaches the Sparks over the internet or a VPN. Make SSH aliases for
-  them (step 3). `vade up --fp8-legacy` opens its own SSH tunnel; no ports
+  them (step 3). `vade up --fp8` opens its own SSH tunnel; no ports
   need to be public.
 - Download the weights **on the Sparks**: data-center internet is usually
   faster than home internet.
@@ -108,7 +108,7 @@ Ask the provider before you pay:
 
 Vade uses RDMA by default. On Sparks joined only by ordinary Ethernet (common
 with rentals), switch to **TCP mode** on the Mac before `vade install`,
-`vade up --fp8-legacy` and `vade doctor`:
+`vade up --fp8` and `vade doctor`:
 
 ```sh
 export SEQPAR_RDMA=0
@@ -123,12 +123,12 @@ Unset it to go back to the RDMA default.
 | `fabric.<peer>` in the config | Own address on the QSFP cable | Own ordinary address that the other Spark can reach |
 | Unlimited locked memory, RDMA setup | Required | Not needed |
 | Open between the Sparks | TCP 29960, 29961, RoCE UDP 4791, ping | TCP 29960, 29961 |
-| `vade up --fp8-legacy` says | `… on 2 machines using RDMA.` | `… on 2 machines using TCP.` |
+| `vade up --fp8` says | `… on 2 machines using RDMA.` | `… on 2 machines using TCP.` |
 | Rank logs show | `rdma=true` | `rdma=false` |
 | Speed | See [dated receipts](benchmarks.md) | No current measurement published here |
 
 The setting is **not saved** in the config. Export it again in every new
-terminal before `vade install`, `vade up --fp8-legacy` (including restarts) and
+terminal before `vade install`, `vade up --fp8` (including restarts) and
 `vade doctor`.
 
 <br>
@@ -411,8 +411,8 @@ Harness: available. Engine check needs vade up, then vade doctor.
 ```
 
 `<sha>` is the full 40-character Git revision of the engine source that was
-built. The second line is normal: nothing is running yet. For this legacy setup, start the server
-with `vade up --fp8-legacy`, shown below.
+built. The second line is normal: nothing is running yet. For this FP8 setup, start the server
+with `vade up --fp8`, shown below.
 
 Install refuses a checkout with uncommitted changes or untracked files. Your
 `.local/` folder is ignored by Git, so it does not count.
@@ -420,7 +420,7 @@ Install refuses a checkout with uncommitted changes or untracked files. Your
 **Start the server.**
 
 ```sh
-vade up --fp8-legacy
+vade up --fp8
 ```
 
 ```text
@@ -429,7 +429,7 @@ qwen3.8-flash-next-fp8: ready on 2 machines. MTP 2, context 131072.
 Chat here: vade chat
 ```
 
-Loading the weights takes minutes. `vade up --fp8-legacy` waits up to
+Loading the weights takes minutes. `vade up --fp8` waits up to
 `health_timeout_secs` (360 s by default). If it stops with "Requested size
 does not fit.", see the note at the end of step 8.
 
@@ -459,7 +459,7 @@ machine checks still decide PASS or FAIL.
 
 In TCP mode the fabric row says `TCP; engine startup checks the addresses`.
 
-Right after `vade up --fp8-legacy`, look for `rdma=true` (or `rdma=false` in
+Right after `vade up --fp8`, look for `rdma=true` (or `rdma=false` in
 TCP mode) in `vade logs`. Check soon: `vade logs` shows only the last 64 KiB of
 each rank's log, so the startup lines scroll away later.
 
@@ -469,7 +469,7 @@ each rank's log, so the startup lines scroll away later.
 
 ## 8. First answer, chat, stop
 
-**Health and model** (through the tunnel that `vade up --fp8-legacy` opened):
+**Health and model** (through the tunnel that `vade up --fp8` opened):
 
 ```sh
 curl -s http://localhost:18080/health
@@ -492,7 +492,7 @@ curl -s http://localhost:18080/v1/chat/completions \
 You get JSON back, with the answer in `choices[0].message.content` and token
 counts in `usage`.
 
-**Send every sampling field, as above.** On this legacy FP8 server, any
+**Send every sampling field, as above.** On this FP8 server, any
 sampling field you leave out falls back to the checkpoint's own sampled
 settings (top_k 20, top_p 0.95, from its `generation_config.json`). That holds
 even when you send no sampling fields at all, so the answer can change from run
@@ -516,7 +516,7 @@ vade down
 Vade: stopped. Its owned ranks and tunnel are closed.
 ```
 
-> **If it doesn't fit.** Does `vade up --fp8-legacy` stop with "Requested
+> **If it doesn't fit.** Does `vade up --fp8` stop with "Requested
 > size does not fit."? Lower `--context` or `--chats` and run it again. If it
 > still fails, something else is holding memory: check `free -g` and
 > `nvidia-smi` and stop what you find. Dropping the page cache won't help, because the

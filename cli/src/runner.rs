@@ -633,7 +633,7 @@ unsafe extern "C" {
     fn kill(pid: i32, signal: i32) -> i32;
     fn signal(number: i32, handler: usize) -> usize;
 }
-fn owned_command(exec: &Exec) -> Command {
+pub(crate) fn owned_command(exec: &Exec) -> Command {
     let mut command = exec.command();
     #[cfg(target_os = "linux")]
     let parent = std::process::id() as i32;
@@ -654,7 +654,7 @@ fn owned_command(exec: &Exec) -> Command {
     }
     command
 }
-fn stop_job(child: &mut std::process::Child) {
+pub(crate) fn stop_job(child: &mut std::process::Child) {
     // Called before wait/reap: this group ID belongs to our isolated child.
     unsafe {
         kill(-(child.id() as i32), 9);

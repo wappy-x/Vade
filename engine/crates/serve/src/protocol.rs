@@ -144,7 +144,9 @@ impl SamplingEcho {
     }
     fn sampling_json(&self, seed: &str) -> String {
         let s = self.sampling;
-        format!("{{\"temperature\":{},\"top_k\":{},\"top_p\":{},\"repetition_penalty\":{},\"presence_penalty\":{},\"frequency_penalty\":{},\"seed\":{seed}}}",
+        // min_p appears only when set, so replies without it keep their bytes.
+        let min_p = if s.min_p > 0.0 { format!("\"min_p\":{},", s.min_p) } else { String::new() };
+        format!("{{\"temperature\":{},\"top_k\":{},\"top_p\":{},{min_p}\"repetition_penalty\":{},\"presence_penalty\":{},\"frequency_penalty\":{},\"seed\":{seed}}}",
             s.temperature, s.top_k, s.top_p, s.repetition_penalty, s.presence_penalty, s.frequency_penalty)
     }
     pub fn json(&self) -> String {
@@ -193,7 +195,7 @@ impl SamplingEcho {
     }
 }
 
-pub(crate) const SUPPORTED_SAMPLING_FIELDS: &[&str] = &["temperature", "top_p", "top_k", "seed",
+pub(crate) const SUPPORTED_SAMPLING_FIELDS: &[&str] = &["temperature", "top_p", "top_k", "min_p", "seed",
     "repetition_penalty", "presence_penalty", "frequency_penalty"];
 
 fn default_sampling(limits: &Limits, thinking: bool, named: bool) -> spark_engine::sample::Sampling {
@@ -429,6 +431,7 @@ pub(crate) fn parse_with_reservation(body: &[u8], chat: bool, limits: &Limits, m
     for (key, target) in [
         ("temperature", &mut sampling.temperature),
         ("top_p", &mut sampling.top_p),
+        ("min_p", &mut sampling.min_p),
         ("repetition_penalty", &mut sampling.repetition_penalty),
         ("presence_penalty", &mut sampling.presence_penalty),
         ("frequency_penalty", &mut sampling.frequency_penalty),
@@ -843,6 +846,7 @@ mod sampling_tests {
                 temperature: 0.9,
                 top_k: 7,
                 top_p: 0.75,
+                min_p: 0.0,
                 repetition_penalty: 1.1,
                 presence_penalty: 1.5,
                 frequency_penalty: 0.25,
@@ -969,6 +973,7 @@ fn greedy_default_applies_only_when_no_sampling_field_is_named_on_every_surface(
                 "temperature" => assert_eq!(request.sampling.temperature, 0.7),
                 "top_k" => assert_eq!(request.sampling.top_k, 3),
                 "top_p" => assert_eq!(request.sampling.top_p, 0.7),
+                "min_p" => assert_eq!(request.sampling.min_p, 0.7, "surface={surface}"),
                 "repetition_penalty" => assert_eq!(request.sampling.repetition_penalty, 0.7),
                 "presence_penalty" => assert_eq!(request.sampling.presence_penalty, 0.7),
                 "frequency_penalty" => assert_eq!(request.sampling.frequency_penalty, 0.7),
@@ -977,6 +982,7 @@ fn greedy_default_applies_only_when_no_sampling_field_is_named_on_every_surface(
             if *field != "temperature" { assert_eq!(request.sampling.temperature, checkpoint.temperature, "{field}"); }
             if *field != "top_k" { assert_eq!(request.sampling.top_k, checkpoint.top_k); }
             if *field != "top_p" { assert_eq!(request.sampling.top_p, checkpoint.top_p); }
+            if *field != "min_p" { assert_eq!(request.sampling.min_p, checkpoint.min_p); }
             if *field != "repetition_penalty" { assert_eq!(request.sampling.repetition_penalty, checkpoint.repetition_penalty); }
             if *field != "presence_penalty" { assert_eq!(request.sampling.presence_penalty, checkpoint.presence_penalty); }
             if *field != "frequency_penalty" { assert_eq!(request.sampling.frequency_penalty, checkpoint.frequency_penalty); }
@@ -1016,5 +1022,29 @@ fn greedy_default_applies_only_when_no_sampling_field_is_named_on_every_surface(
                 assert_eq!(request.sampling.repetition_penalty, checkpoint.repetition_penalty);
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn min_p_parses_and_echoes_only_when_set_and_greedy_keeps_its_bytes() {
+    use spark_engine::sample::Sampling;
+    let checkpoint = Sampling { temperature: 1.0, top_k: 20, top_p: 0.95, ..Sampling::greedy() };
+    let limits = Limits { default_sampling: Some(checkpoint), greedy_if_unsampled: true, ..Default::default() };
+    let body = |fields: &str| format!(r#"{{"prompt_token_ids":[1],"max_tokens":4{fields}}}"#);
+    // No sampling field: the greedy settings and today's echo bytes, with no min_p key.
+    let unset = parse(body("").as_bytes(), false, &limits).unwrap();
+    assert_eq!(unset.sampling, Sampling { seed: unset.sampling.seed, ..Sampling::greedy() });
+    assert_eq!(SamplingEcho::new(&unset, DraftMode::Plain, 0).sampling_json("7"),
+        r#"{"temperature":0,"top_k":0,"top_p":1,"repetition_penalty":1,"presence_penalty":0,"frequency_penalty":0,"seed":7}"#);
+    let sampled = parse(body(r#","seed":3"#).as_bytes(), false, &limits).unwrap();
+    assert_eq!(SamplingEcho::new(&sampled, DraftMode::Plain, 0).sampling_json("3"),
+        r#"{"temperature":1,"top_k":20,"top_p":0.95,"repetition_penalty":1,"presence_penalty":0,"frequency_penalty":0,"seed":3}"#);
+    let set = parse(body(r#","min_p":0.05,"seed":3"#).as_bytes(), false, &limits).unwrap();
+    assert_eq!(set.sampling, Sampling { min_p: 0.05, seed: 3, ..checkpoint });
+    assert_eq!(SamplingEcho::new(&set, DraftMode::Plain, 0).sampling_json("3"),
+        r#"{"temperature":1,"top_k":20,"top_p":0.95,"min_p":0.05,"repetition_penalty":1,"presence_penalty":0,"frequency_penalty":0,"seed":3}"#);
+    for bad in ["-0.1", "1.5", "\"x\""] {
+        assert!(parse(body(&format!(r#","min_p":{bad}"#)).as_bytes(), false, &limits).is_err(), "{bad}");
     }
 }

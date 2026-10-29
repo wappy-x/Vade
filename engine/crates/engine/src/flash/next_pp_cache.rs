@@ -311,7 +311,7 @@ impl<'a> NextModel<'a> {
                 for s in ordered.iter_mut() { s.fit_kv(b, s.pos + 1)?; }
                 NextSession::pp_back_pooled(b, &mut ordered, count, residual)
             }
-            crate::flash_tp_switch::KIND_HANDOFF => self.tp_handoff(b, &mut ordered, &lens), _ => Err("pipeline request kind unknown".into()),
+            crate::flash_tp_switch::KIND_HANDOFF => if self.tp_split_back(b, &mut ordered, &lens, residual)? { Ok(()) } else { self.tp_handoff(b, &mut ordered, &lens) }, _ => Err("pipeline request kind unknown".into()),
         }
     }
 }

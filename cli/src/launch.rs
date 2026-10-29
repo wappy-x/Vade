@@ -24,7 +24,8 @@ mod config;
 mod install;
 mod model;
 #[cfg(test)]
-pub(crate) use model::{test_config, test_mixed_config};
+pub(crate) use model::{test_checkpoint, test_config, test_mixed_config};
+pub(crate) use model::serving_format;
 mod status;
 mod doctor;
 mod chat;
@@ -57,6 +58,13 @@ fn owner_home() -> Result<PathBuf, String> {
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .ok_or_else(|| "Cannot find your home folder.".into())
+}
+
+/// The checkpoint `vade launch` serves before any VADE_MODELS: the one saved in
+/// `root`, while it still passes the launch checks.
+pub(crate) fn saved_model(root: &Path) -> Option<PathBuf> {
+    let model = Config::load(root).ok().flatten()?.model;
+    serving_format(&model).is_ok().then_some(model)
 }
 
 /// Whether the local home has saved defaults or an owned engine.
@@ -449,7 +457,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
     fn identify(&mut self, model: &model::Model, install_space: u64) -> Result<detect::Identity, String> {
         let identity = self.detector.detect(&self.root, &model.path)?;
         if !model.fp4_local {
-            return Err("Local launch needs nvidia/Qwen3.8-Flash-Next-FP4-Local. Set VADE_MODELS to that checkpoint and choose a fresh VADE_HOME before vade launch if defaults were already saved. For FP8, set VADE_CONFIG and use vade up --fp8-legacy.".into());
+            return Err("Local launch needs nvidia/Qwen3.8-Flash-Next-FP4-Local. Set VADE_MODELS to that checkpoint and choose a fresh VADE_HOME before vade launch if defaults were already saved. FP8 needs 2, 4, or 6 machines: set VADE_CONFIG and use vade up --fp8.".into());
         }
         identity.check_resources(model.bytes, install_space)?;
         Ok(identity)

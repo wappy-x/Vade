@@ -22,13 +22,14 @@ against local mocks.
 
 ### Rules files (`AGENTS.md`)
 
-A new native session loads the root `AGENTS.md`. To add rules from deeper
-folders, pass `--rules-scope PATH`, once per folder. Each one adds that
-directory's chain of ancestors, from the root down.
+The root `AGENTS.md` goes into the system prompt with the other [project
+instructions](project-instructions.md), and Vade reads it again when it changes.
+To add rules from deeper folders, pass `--rules-scope PATH`, once per folder.
+Each one adds that directory's chain of ancestors, from the first folder below
+the root down.
 
 - You can select up to eight paths, each with at most eight components.
-- The harness does not discover other subtrees recursively, and it does not read
-  a home directory.
+- The harness does not discover other subtrees recursively.
 - Only the scopes you select are active, so pick the relevant subdirectories
   before you start work.
 
@@ -82,7 +83,9 @@ message is at most 48 KiB serialized, and it counts toward full-request
 
 - `/project` explains why each item was included.
 - `/project-rules` shows the frozen text.
-- Resume does not reread the instructions or the catalog.
+- Resume does not reread the frozen scope rules or the catalog. The [project
+  instructions](project-instructions.md) section, with the root `AGENTS.md`, is
+  read again before each turn.
 - `/new` deliberately refreshes them, and starts a new prefix (the fixed start
   of every request) and a new session.
 
@@ -169,7 +172,7 @@ the next request fits. You can run it by hand, or let it run
 | --- | --- |
 | `/compact-preview KEEP SUMMARY` | Shows the plan and changes nothing. |
 | `/compact KEEP SUMMARY` | Applies the plan while the agent is idle. |
-| `/compact` on its own | Uses the automatic planner. |
+| `/compact` on its own | The model summarizes older turns; the automatic planner is the fallback. |
 
 `KEEP` is how many of the newest user turns to keep, and `SUMMARY` is your own
 text. No model writes the summary, and there are no retries or scripts. Your
@@ -273,6 +276,11 @@ Automatic compaction triggers when the conversation reaches 80% of the context
 window. After that, optional rewrites wait for the 60% low watermark. A next
 request that really does not fit tries another safe plan, even above that
 watermark.
+
+First the model writes a state block for the older turns and the newest turns
+stay exact; [context and compaction](../../docs/context-and-compaction.md)
+describes it. The planner on this page is the fallback when that rollover
+cannot run.
 
 Each attempt is checked before anything is saved or sent:
 

@@ -1098,8 +1098,8 @@ impl Guard {
         }
         if p.temperature == 0.0 { return best - second > 2.0*delta; }
         // The shared sampler's top_k=0 partition order is not stable under
-        // perturbation. It requires exact recomputation, as do unbounded errors.
-        if p.top_k == 0 { return false; }
+        // perturbation. It requires exact recomputation, as do unbounded errors and min_p.
+        if p.top_k == 0 || p.min_p > 0.0 { return false; }
         let count = p.top_k.min(self.ranked.len());
         let cmp = |a: &(u32,f64), b: &(u32,f64)| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0));
         if count < self.ranked.len() {
@@ -1176,7 +1176,7 @@ mod tests {
     fn cycles_equal_serial_with_sampling_penalties_eos_caps_and_resume() {
         let prompt: Vec<u32> = (0..35).map(|i|i%7).collect();
         for sampled in [false,true] {
-            let options = Sampling { seed:42, temperature:if sampled {0.8} else {0.0}, top_k:4, top_p:0.85,
+            let options = Sampling { seed:42, temperature:if sampled {0.8} else {0.0}, top_k:4, top_p:0.85, min_p:0.0,
                 repetition_penalty:1.1, presence_penalty:0.2, frequency_penalty:0.15 };
             let mut reference = toy(&prompt);
             let mut sample = Sampler::new(options).unwrap();
@@ -1469,6 +1469,8 @@ mod tests {
                     let changed: Vec<f32> = logits.iter().enumerate().map(|(i,&v)|v+if mask&(1<<i)==0 {-0.01} else {0.01}).collect();
                     assert_eq!(selected,sampler.sample(&changed,&[0,1],2,2, |_|true).unwrap());
                 }
+                // The guard has no min_p bound, so min_p always takes the exact path.
+                assert!(!guard.safe(&logits,&[0,1],2,Sampling { min_p:0.01,..p },0.01,selected));
             }
         }
         let mut certified = 0;

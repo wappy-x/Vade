@@ -66,6 +66,11 @@ impl Snapshot {
     /// The root is always considered. Extra scopes add only their ancestor
     /// chain, never recursive filesystem discovery or paths above the root.
     pub fn discover(workspace: &Workspace, scopes: &[String]) -> io::Result<Self> {
+        Self::discover_with(workspace, scopes, true)
+    }
+    /// As `discover`, but the root AGENTS.md is left out when the system
+    /// prompt carries it in its Project instructions section.
+    pub fn discover_with(workspace: &Workspace, scopes: &[String], root_rules: bool) -> io::Result<Self> {
         if scopes.len() > MAX_SCOPES {
             return Err(err("at most eight explicit project scopes"));
         }
@@ -94,7 +99,7 @@ impl Snapshot {
         candidates.sort_by_key(|p| (if p == "." { 0 } else { p.split('/').count() }, p.clone()));
         let mut rules = Vec::new();
         let mut total = 0;
-        for scope in candidates {
+        for scope in candidates.into_iter().filter(|s| root_rules || s != ".") {
             let path = if scope == "." {
                 "AGENTS.md".into()
             } else {
@@ -231,6 +236,11 @@ impl Snapshot {
             ("role".into(), Value::String("developer".into())),
             ("content".into(), Value::String(text)),
         ]))
+    }
+    /// True when the snapshot holds the root AGENTS.md. Sessions made before
+    /// the Project instructions section froze it here.
+    pub fn has_root_rule(&self) -> bool {
+        self.rules.iter().any(|r| r.scope == ".")
     }
     pub fn from_conversation(c: &Conversation) -> io::Result<Self> {
         let mut found = None;

@@ -1,6 +1,8 @@
 //! Real `vade-harness` processes against first-party loopback fixtures: context
 //! and cache reporting, compaction, fork and resume, generation flags, cache
 //! permission and unspecified sampling.
+#[path = "support/home.rs"]
+mod home;
 #[allow(dead_code)]
 #[path = "support/cli.rs"]
 mod cli;
@@ -13,7 +15,6 @@ mod sampling_policy;
 
 #[test]
 fn cli_shows_exact_context_and_cached_tokens_and_new_resets_affinity() {
-    use std::process::Command;
     for mode in ["direct", "agent"] {
         let workspace = WorkspaceFixture::new();
         let (listener, endpoint) = listen();
@@ -52,7 +53,7 @@ fn cli_shows_exact_context_and_cached_tokens_and_new_resets_affinity() {
                 );
             }
         });
-        let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+        let mut command = home::harness();
         command.args([
             mode,
             "--state-in-project",
@@ -96,7 +97,6 @@ fn cli_shows_exact_context_and_cached_tokens_and_new_resets_affinity() {
 
 #[test]
 fn cli_compaction_fork_switch_and_resume_reestablish_admitted_prefixes_and_report_cache_drop() {
-    use std::process::Command;
     let workspace = WorkspaceFixture::new();
     let (listener, endpoint) = listen();
     let server = thread::spawn(move || {
@@ -216,7 +216,7 @@ fn cli_compaction_fork_switch_and_resume_reestablish_admitted_prefixes_and_repor
         }
     });
     let launch = |resume: bool, input: &str| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+        let mut command = home::harness();
         command
             .args([
                 "agent",
@@ -313,7 +313,7 @@ fn cli_generation_flags_override_env_and_output_limit_refuses_before_generation(
                     &format!("{ANSWER}{}{DONE}", usage(100, 0)),
                 );
             });
-            let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+            let mut command = home::harness();
             command
                 .args([
                     mode,
@@ -353,7 +353,7 @@ fn cli_generation_flags_override_env_and_output_limit_refuses_before_generation(
                 "no admission or generation after oversized output"
             );
         });
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+        let mut command = home::harness();
         command
             .args([
                 mode,
@@ -379,7 +379,6 @@ fn cli_generation_flags_override_env_and_output_limit_refuses_before_generation(
 
 #[test]
 fn both_cli_modes_negotiate_cache_permission_and_honor_the_opt_out() {
-    use std::process::Command;
     // Retention and affinity are independent advertised capabilities. The live
     // default engine has retention=false and affinity=true; a request cannot
     // turn retention on. Each environment setting lives in its own process.
@@ -418,7 +417,7 @@ fn both_cli_modes_negotiate_cache_permission_and_honor_the_opt_out() {
                     }
                     generations
                 });
-                let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+                let mut command = home::harness();
                 command.args([mode, "--state-in-project", "--endpoint", &endpoint, "--model", "mock", "--workspace"])
                     .arg(&workspace.0).args(["--plain", "--verbose", "--prompt", "hello", "--max-output-tokens", "17"])
                     .env_remove("VADE_API_KEY_FILE").env_remove("VADE_HARNESS_PREFIX_CACHE");
@@ -454,7 +453,6 @@ fn both_cli_modes_negotiate_cache_permission_and_honor_the_opt_out() {
 
 #[test]
 fn cli_unspecified_sampling_stays_unspecified_across_retries_and_resume() {
-    use std::process::Command;
     for mode in ["direct", "agent"] {
         for (flags, seed, temperature, resumed_flags) in [
             (&[][..], None, None, &[][..]),
@@ -510,7 +508,7 @@ fn cli_unspecified_sampling_stays_unspecified_across_retries_and_resume() {
                 captured
             });
             let make = |resume: bool| {
-                let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+                let mut command = home::harness();
                 command.args([mode, "--state-in-project", "--endpoint", &endpoint, "--model", "mock", "--workspace"])
                     .arg(&workspace.0).args(["--plain", "--verbose", "--max-output-tokens", "17", "--no-auto-continue"])
                     .args(if resume { &["--resume", "sampler"][..] } else { &["--session", "sampler"][..] })

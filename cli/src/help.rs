@@ -43,6 +43,10 @@ fn top(on: bool) -> String {
         ("down", "Stop what vade started"),
     ], 7);
     out += &group("Use:", &[("chat", "Chat with the running engine")], 7);
+    out += &group("Models:", &[
+        ("pull", "Download a model from Hugging Face, with resume and checks"),
+        ("models", "List the models on this machine and what can serve them"),
+    ], 7);
     out += &group("Look:", &[
         ("status", "Show what is running and whether it is healthy"),
         ("config", "Show which setup is selected and what it holds"),
@@ -103,14 +107,14 @@ fn page(command: &str) -> Option<Page<'static>> {
             usage: &["vade up [OPTIONS]"],
             options: &[
                 ("--fp4-local", "Qwen3.8 Flash-Next FP4-Local (the default; optional)"),
-                ("--fp8-legacy", "Legacy FP8 on 2, 4 or 6 Sparks: context 131072, output min(65536, context), MTP 2; output ceiling 262144"),
+                ("--fp8", "Qwen3.8 Flash-Next FP8 on 2, 4 or 6 Sparks (older spelling: --fp8-legacy): context 131072, output min(65536, context), MTP 2; output ceiling 262144"),
                 ("--sparks N", "Number of Sparks; FP4 supports 1..24"),
                 ("--hosts a,b", "Machine names in cable order, separated by commas"),
                 ("--replicas N", "2..16 independent one-Spark FP4-Local servers behind a local gateway"),
                 MTP, CONTEXT, OUTPUT,
-                ("--chats N", "Concurrent legacy FP8 chats, 1..32 (controller)"),
+                ("--chats N", "Concurrent FP8 chats, 1..32 (controller)"),
                 ("--memory-bytes N", "Memory budget per rank, in bytes"),
-                ("--cache-bytes N", "Legacy FP8 retained prompt cache, in bytes; 0 disables it. Local FP4 accepts only 0"),
+                ("--cache-bytes N", "FP8 retained prompt cache, in bytes; 0 disables it. Local FP4 accepts only 0"),
                 DRY_RUN,
             ],
             examples: &["vade up", "vade up --context 262144 --output 16384", "VADE_CONFIG=cluster.conf vade up --sparks 2"],
@@ -119,8 +123,9 @@ fn page(command: &str) -> Option<Page<'static>> {
                 "Local up and launch start with context 32768 and output min(8192, context). They reuse saved limits. A memory refusal lowers a default or saved context to a smaller size from 32768, 16384, 8192 and 4096. The first size that starts is saved. A refused explicit --context is an error. Local --chats and positive --cache-bytes are refused; --cache-bytes 0 disables retention.",
                 "Controller FP4 defaults match local ones on any Spark count: context 32768, output min(8192, context). --context 262144 requests a larger context. The engine still sets the chat count from context and memory.",
                 "Controller FP4 ignores --chats and --cache-bytes. Its engine admits chats from memory and uses its own prefix cache setting.",
-                "MTP is engine-selected. FP4-Local one-Spark concurrent chats can draft; the default request depth is 3 with strict verification. Legacy FP8 concurrent chats decode plainly. Per-request draft=plain disables drafting; draft=strict requests it when supported. --mtp overrides MTP, and 0 disables server drafting.",
+                "MTP is engine-selected. FP4-Local one-Spark concurrent chats can draft; the default request depth is 3 with strict verification. FP8 concurrent chats decode plainly. Per-request draft=plain disables drafting; draft=strict requests it when supported. --mtp overrides MTP, and 0 disables server drafting.",
                 "Two FP4-Local Sparks run the tensor split, the only two-Spark path for FP4-Local: both Sparks work on every token. It needs RDMA, so vade up refuses SEQPAR_RDMA=0 (TCP) for two FP4-Local Sparks. FP8 on two Sparks keeps its ring and may use TCP.",
+                "FP8 needs an FP8 config such as cli/examples/vade.conf. In our checks, FP8 gave the same token IDs on each Spark count, but 2 and 4 Sparks gave different IDs. See docs/benchmarks.md.",
                 "Spark counts above 2 require a current install and linked hosts in cable order.",
                 "--replicas N starts one independent one-Spark server on each of the first N machines (or the N --hosts) and a local gateway on local_port; replica tunnels use the next N local ports. Each replica uses the FP4 defaults above. Use it when the model fits one Spark and many chats run at once; answers are the same on every replica.",
                 "One Spark needs no fabric. Linked Sparks use RDMA by default. SEQPAR_RDMA=0 selects TCP, except for two FP4-Local Sparks. Keep VADE_CONFIG and VADE_HOME consistent through chat, status and down.",
@@ -244,6 +249,36 @@ fn page(command: &str) -> Option<Page<'static>> {
                 "Reads only. To change local limits, run vade down, then vade launch with the new flags. To change controller settings, stop the engine with its current config, then edit the file shown here.",
             ],
         },
+        "pull" => Page {
+            summary: "Download a model from the Hugging Face Hub.",
+            usage: &["vade pull <org>/<name>[@revision] [OPTIONS]"],
+            options: &[
+                ("--include PATTERN", "Download only matching paths; repeat for more (* matches any text, / too)"),
+                ("--to DIR", "Model folder (default ~/models/<org>/<name>)"),
+                ("--dry-run", "List the files and sizes; download nothing"),
+            ],
+            examples: &[
+                "vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local",
+                "vade pull Qwen/Qwen3-8B --dry-run",
+                "vade pull org/name --include '*.json' --to ~/models/org/name-metadata",
+            ],
+            notes: &[
+                "Without --include, pull takes the weights (*.safetensors and the index), every JSON config, the tokenizer files, the chat template, the README and the license. The revision is a branch, tag or commit; the default is main. docs/pull-models.md gives the pinned command for each checkpoint Vade serves.",
+                "Every file is checked after download: size, then the SHA-256 the Hub lists for large files or the Git blob ID for small ones. Run the same command again to continue an interrupted pull; partial files resume.",
+                "Writes .vade-model.json in the folder (repository, commit, files, sizes, hashes, time, license and support state) and <folder>.sha256 beside it, which vade launch and vade up check before they serve FP4-Local. Ctrl-C stops the pull and writes no records.",
+                "For a gated or private model, accept its terms on the model page, then set HF_TOKEN or save the token in ~/.vade/hf-token. The token is never printed or passed on the command line. HF_ENDPOINT names a mirror. Transfers use curl from PATH.",
+            ],
+        },
+        "models" => Page {
+            summary: "List the models on this machine and what can serve them.",
+            usage: &["vade models [DIR] [--json]"],
+            options: &[("--json", "Print one vade.models.v1 object")],
+            examples: &["vade models", "vade models /data/models --json"],
+            notes: &[
+                "Looks three folders deep under DIR (default ~/models). Each row shows the size on disk, the repository and commit from .vade-model.json and the support state.",
+                "The support state comes from the same metadata checks vade launch runs; no weights are read. A folder with partial files from vade pull shows as incomplete.",
+            ],
+        },
         "bench" => Page {
             summary: "Measure a running server from this client.",
             usage: &["vade bench [OPTIONS]"],
@@ -291,7 +326,7 @@ mod tests {
     #[test]
     fn every_page_fits_the_width_and_names_its_usage() {
         for command in [None, Some("launch"), Some("up"), Some("down"), Some("status"), Some("logs"), Some("chat"), Some("doctor"),
-            Some("install"), Some("update"), Some("detect"), Some("version"), Some("run"), Some("verify"), Some("config"), Some("bench"), Some("test")] {
+            Some("install"), Some("update"), Some("detect"), Some("version"), Some("run"), Some("verify"), Some("config"), Some("bench"), Some("test"), Some("pull"), Some("models")] {
             let text = help(command);
             assert!(text.lines().all(|line| line.chars().count() <= style::WIDTH), "{command:?}:\n{text}");
             assert!(text.contains(&format!("Usage: vade {}", command.unwrap_or("<COMMAND>").replace("version", "--version"))), "{command:?}:\n{text}");

@@ -1,0 +1,15 @@
+id: long-context-digest
+title: Answer questions about a repository digest of 241,865 bytes
+inputs: QUESTIONS.md
+budget_seconds: 1200
+generate: repo-digest-v1
+
+step: new
+prompt:
+  DIGEST.md is a digest of a whole repository, about 240 KB of text. Answer
+  the questions in QUESTIONS.md and write ANSWERS.txt exactly in the form
+  that QUESTIONS.md asks for.
+
+check: last-exit-zero
+check: file-equals ANSWERS.txt expected/ANSWERS.txt
+check: unchanged DIGEST.md

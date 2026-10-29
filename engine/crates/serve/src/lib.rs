@@ -384,6 +384,9 @@ pub struct Limits {
     pub greedy_if_unsampled: bool,
     /// Only FlashNext accepts per-request depth; other engines ignore the field.
     pub next_mtp_depth: Option<usize>,
+    /// Burst intake window (see `intake_burst`); zero keeps the first prompt
+    /// pass of an idle batch unheld. VADE_INTAKE_BURST_MS overrides it.
+    pub intake_burst: Duration,
 }
 impl Default for Limits {
     fn default() -> Self {
@@ -408,6 +411,7 @@ impl Default for Limits {
             default_sampling: None,
             greedy_if_unsampled: false,
             next_mtp_depth: None,
+            intake_burst: intake_burst::DEFAULT_WINDOW,
         }
     }
 }
@@ -446,6 +450,7 @@ impl Limits {
             ]
             .iter()
             .any(|d| d.is_zero() || *d > Duration::from_secs(3600))
+            || self.intake_burst > intake_burst::MAX_WINDOW
         {
             return Err("invalid service limits".into());
         }
@@ -462,3 +467,5 @@ pub mod gemma4;
 
 /// Strict startup switch for collecting an initial burst of short prompts.
 pub mod intake_grace;
+/// Burst intake: an idle batch waits a bounded window for the rest of a chat burst.
+pub mod intake_burst;

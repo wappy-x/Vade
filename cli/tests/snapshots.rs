@@ -22,6 +22,8 @@ const CASES: &[(&str, &[&str])] = &[
     ("help-config", &["config", "--help"]),
     ("help-bench", &["bench", "--help"]),
     ("help-test", &["test", "--help"]),
+    ("help-pull", &["pull", "--help"]),
+    ("help-models", &["models", "--help"]),
     ("error-config-argument", &["config", "--all"]),
     ("error-json-elsewhere", &["down", "--json"]),
     ("error-unknown-command", &["frobnicate"]),

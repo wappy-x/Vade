@@ -153,7 +153,7 @@ pub(crate) fn parse(body: &[u8], limits: &Limits, model: &str,
     // Messages model names are client aliases; only the loaded model performs inference.
     let requested_model = present(object, "model").map(Value::string).transpose()
         .map_err(|e| e.to_string())?.map(str::to_owned);
-    for key in ["max_tokens", "stream", "temperature", "top_p", "top_k", "seed",
+    for key in ["max_tokens", "stream", "temperature", "top_p", "top_k", "min_p", "seed",
         "repetition_penalty", "presence_penalty", "frequency_penalty", "chat_template_kwargs",
         "cache", "cache_salt", "ignore_eos", "session", "cancel", "priority", "fork", "draft", "mtp_depth", "prompt_cache_key",
         "include_usage_timing", "kv_checkpoint", "kv_handle"] {

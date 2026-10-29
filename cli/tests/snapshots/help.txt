@@ -17,6 +17,10 @@ Start and stop:
 Use:
   chat     Chat with the running engine
 
+Models:
+  pull     Download a model from Hugging Face, with resume and checks
+  models   List the models on this machine and what can serve them
+
 Look:
   status   Show what is running and whether it is healthy
   config   Show which setup is selected and what it holds

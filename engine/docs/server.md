@@ -485,6 +485,10 @@ when <code>temperature</code> is above 0.</dd>
 <dt><code>top_k</code></dt>
 <dd>A whole number; 0 turns the cap off. Omission uses the server/model default above.
 Applies only when <code>temperature</code> is above 0.</dd>
+<dt><code>min_p</code></dt>
+<dd>0 to 1. Default 0 (off). Keeps the tokens whose probability is at least
+<code>min_p</code> times the best token's, after top-k and top-p. Applies only when
+<code>temperature</code> is above 0. The echo shows it only when it is above 0.</dd>
 <dt><code>seed</code></dt>
 <dd>Unsigned 64-bit number. Random if left out; streamed responses report it in
 the <code>X-Sampling-Seed</code> header and the <code>vade.sampling.seed</code> field.</dd>

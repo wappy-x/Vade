@@ -47,9 +47,11 @@ pub const WIDE_MIN_CHUNKS: usize = 8;
 /// PIPELINE_TILE rows remain (the routed experts see twice the rows per expert in a 4096-row
 /// tile, at about 0.6 of the cost per row); the first slice keeps the pipeline's fill short and
 /// the last rows its drain. Every other slice, and every slice of a workspace of at most
-/// PIPELINE_TILE rows, stays PIPELINE_TILE.min(chunk) rows.
-pub fn seq_slice(pos: usize, end: usize, chunk: usize) -> usize {
-    if seq_first(pos, end, chunk).is_some() { return end - pos; }
+/// PIPELINE_TILE rows, stays PIPELINE_TILE.min(chunk) rows. A prompt the layer-major transaction
+/// takes (split_rows) comes whole too.
+pub fn seq_slice(pos: usize, end: usize, chunk: usize) -> usize { seq_slice_if(long_split(), pos, end, chunk) }
+fn seq_slice_if(on: bool, pos: usize, end: usize, chunk: usize) -> usize {
+    if seq_first(pos, end, chunk).is_some() || split_rows_if(on, pos, end, chunk).is_some() { return end - pos; }
     if pos > 0 && end >= WIDE_MIN_CHUNKS * chunk && end - pos > chunk + PIPELINE_TILE { return chunk; }
     PIPELINE_TILE.min(chunk)
 }
@@ -59,6 +61,46 @@ pub fn seq_slice(pos: usize, end: usize, chunk: usize) -> usize {
 /// workspace that is not a multiple of 64 rows (the prompt then keeps the pipeline tiles).
 pub fn seq_first(pos: usize, end: usize, chunk: usize) -> Option<usize> {
     (pos == 0 && (2 * SEQ_MIN_ROWS..=2 * chunk).contains(&end)).then(|| end.div_ceil(2).div_ceil(64) * 64).filter(|&p| p <= chunk)
+}
+
+/// KIND_HANDOFF length field of SPLIT_PROMPT plus a row count (below SPLIT_PROMPT): rank 1 runs the
+/// layer-major prompt transaction's worker for that many rows (flash/next_split.rs).
+pub const SPLIT_PROMPT: u32 = 1 << 25;
+/// VADE_LONG_SPLIT (on unless 0): a cold prompt whose transaction has up to LONG_SPLIT_MAX rows
+/// takes the layer-major transaction (B8 round 2).
+pub fn long_split() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VADE_LONG_SPLIT").map_or(true, |v| v != "0"))
+}
+/// The most rows the transaction takes (prompts up to LONG_SPLIT_MAX + 64 tokens): the longest
+/// measured transaction whose first token still wins at least 1 % (20,416 rows of a 20,417-token
+/// prompt; 8K to 20K win 1 to 5 %, 24K and 32K lose 1 to 4 %). Longer prompts keep the pipeline
+/// path unchanged.
+pub const LONG_SPLIT_MAX: usize = 20_416;
+const _: () = assert!(LONG_SPLIT_MAX % 64 == 0 && LONG_SPLIT_MAX < SPLIT_PROMPT as usize);
+/// The transaction's cut as a share of its rows, in permille (the measured best).
+pub const LONG_SPLIT_CUT: usize = 500;
+/// VADE_LONG_SPLIT_CUT=<permille>: a screen setting that places the cut at that share instead.
+pub fn long_split_cut() -> usize {
+    static CUT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CUT.get_or_init(|| std::env::var("VADE_LONG_SPLIT_CUT").ok().and_then(|v| v.parse().ok()).filter(|&p| (1..1000).contains(&p)).unwrap_or(LONG_SPLIT_CUT))
+}
+/// Whether a session's prompt call may take the layer-major transaction: the call gives output,
+/// the session is valid at position 0 and owns its state, and no debug dump or layer check is on.
+/// A failed session stays refused until reset: it keeps the usual path, which refuses it.
+pub fn split_session(output: bool, valid: bool, pos: usize, diagnostics: bool, owns_state: bool) -> bool {
+    output && valid && pos == 0 && !diagnostics && owns_state
+}
+/// Rows of a cold prompt at `pos` ending at `end` that the layer-major transaction runs (tiles
+/// of PIPELINE_TILE rows on both ranks), if it takes the prompt: past the bounded token split
+/// (more than 2 chunk rows), at least four tiles and at most LONG_SPLIT_MAX rows; it stops at
+/// the last 64-row edge before `end`. A tail of 1 to 63 rows then gives the first token on rank 0
+/// alone (as after the token split) after the prefix-cache checkpoint; a prompt that ends on a
+/// 64-row edge leaves a 64-row tail, which pushes the owed state first.
+pub fn split_rows(pos: usize, end: usize, chunk: usize) -> Option<usize> { split_rows_if(long_split(), pos, end, chunk) }
+fn split_rows_if(on: bool, pos: usize, end: usize, chunk: usize) -> Option<usize> {
+    let rows = end.checked_sub(1)? / 64 * 64;
+    (on && pos == 0 && end > 2 * chunk && rows >= 4 * PIPELINE_TILE && rows <= LONG_SPLIT_MAX).then_some(rows)
 }
 
 /// A token-split chat's stage on rank 0.
@@ -274,6 +316,52 @@ impl TpLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_split_cuts_cold_long_prompts_before_a_short_tail() {
+        // Off: never. On: cold prompts past 2 chunk rows and four tiles, to the last 64-row edge
+        // before the end (at most LONG_SPLIT_MAX rows), so the tail of 1 to 64 rows gives the
+        // first token.
+        assert_eq!(split_rows_if(false, 0, 12_100, 4096), None);
+        assert_eq!(split_rows_if(true, 0, 12_100, 4096), Some(12_096));
+        assert_eq!(split_rows_if(true, 0, 20_417, 4096), Some(20_416));
+        assert_eq!(split_rows_if(true, 0, LONG_SPLIT_MAX + 64, 4096), Some(LONG_SPLIT_MAX));
+        assert_eq!(split_rows_if(true, 0, LONG_SPLIT_MAX + 65, 4096), None);
+        assert_eq!(split_rows_if(true, 0, 32_100, 4096), None);
+        assert_eq!(split_rows_if(true, 64, 12_100, 4096), None);
+        assert_eq!(split_rows_if(true, 0, 8_192, 4096), None);
+        assert_eq!(split_rows_if(true, 0, 8_193, 2048), Some(8_192));
+        assert_eq!(split_rows_if(true, 0, 8_192, 2048), None);
+        assert_eq!(split_rows_if(true, 0, 0, 2048), None);
+        for end in [8_193, 12_100, LONG_SPLIT_MAX + 64] {
+            let rows = split_rows_if(true, 0, end, 2048).unwrap();
+            assert!(rows % 64 == 0 && (1..=64).contains(&(end - rows)));
+        }
+    }
+    /// Astra 5e48233, the trigger in its order: check_layers on a directory that is then removed;
+    /// prefill_advance of 64 valid tokens (no output, too short for the transaction) fails at the
+    /// first layer-output open and leaves the session invalid at position 0 with the link usable;
+    /// stop_layer_check; then an eligible long prompt. The transaction must not be entered until
+    /// reset, so the prompt keeps the usual path, which refuses the failed session.
+    #[test]
+    fn a_failed_session_never_takes_the_transaction_until_reset() {
+        let (mut valid, pos, mut layer_check, owns) = (true, 0, true, true);
+        // prefill_advance(64 tokens) with the layer check on: not a transaction call.
+        assert_eq!(split_rows_if(true, pos, 64, 4096), None);
+        assert!(!split_session(false, valid, pos, layer_check, owns));
+        valid = false;
+        // stop_layer_check, then a long prompt whose rows the transaction would take.
+        layer_check = false;
+        assert_eq!(split_rows_if(true, pos, 12_100, 4096), Some(12_096));
+        assert!(!split_session(true, valid, pos, layer_check, owns));
+        // reset: valid again at position 0, so the same prompt may take it.
+        valid = true;
+        assert!(split_session(true, valid, pos, layer_check, owns));
+        // A session that does not own its state, one past position 0, or a call without output never does.
+        assert!(!split_session(true, true, 0, false, false));
+        assert!(!split_session(true, true, 64, false, true));
+        assert!(!split_session(false, true, 0, false, true));
+    }
     /// flash_next_k16_finish's addressing (slot rows of `hidden` FP32-sized words, routed BF16
     /// at u16 index row*2*(top_k+1)*hidden + rank*2*hidden + col, shared FP32 at word
     /// (row*(top_k+1)+top_k)*hidden + col, output at row*hidden + col) and fp4_bw_down's
@@ -336,20 +424,25 @@ mod tests {
     /// of 64, at least half), every other prompt in pipeline tiles; for other workspaces too.
     #[test]
     fn token_split_slices_follow_the_prompt_and_the_workspace() {
-        assert_eq!(seq_slice(0, 8192, 4096), 8192);
-        assert_eq!(seq_slice(0, 8009, 4096), 8009);
+        assert_eq!(seq_slice_if(false, 0, 8192, 4096), 8192);
+        assert_eq!(seq_slice_if(false, 0, 8009, 4096), 8009);
         assert_eq!(seq_first(0, 8009, 4096), Some(4032));
-        assert_eq!(seq_slice(0, 2048, 4096), 2048);
+        assert_eq!(seq_slice_if(false, 0, 2048, 4096), 2048);
         assert_eq!(seq_first(0, 2048, 4096), Some(1024));
-        assert_eq!(seq_slice(0, 2047, 4096), PIPELINE_TILE);
-        assert_eq!(seq_slice(0, 8193, 4096), PIPELINE_TILE);
-        assert_eq!(seq_slice(0, 32768, 4096), PIPELINE_TILE);
-        assert_eq!(seq_slice(4096, 12288, 4096), PIPELINE_TILE);
+        assert_eq!(seq_slice_if(false, 0, 2047, 4096), PIPELINE_TILE);
+        assert_eq!(seq_slice_if(false, 0, 8193, 4096), PIPELINE_TILE);
+        assert_eq!(seq_slice_if(false, 0, 32768, 4096), PIPELINE_TILE);
+        assert_eq!(seq_slice_if(false, 4096, 12288, 4096), PIPELINE_TILE);
         assert_eq!(seq_first(0, 16384, 8192), Some(8192));
-        assert_eq!(seq_slice(0, 3000, 1024), 1024);
+        assert_eq!(seq_slice_if(false, 0, 3000, 1024), 1024);
+        // With the transaction on, a prompt it takes comes whole; longer ones keep the tiles.
+        assert_eq!(seq_slice_if(true, 0, 8193, 4096), 8193);
+        assert_eq!(seq_slice_if(true, 0, LONG_SPLIT_MAX + 64, 4096), LONG_SPLIT_MAX + 64);
+        assert_eq!(seq_slice_if(true, 0, 32768, 4096), PIPELINE_TILE);
+        assert_eq!(seq_slice_if(true, 4096, 12288, 4096), PIPELINE_TILE);
         // A workspace that is not a multiple of 64: a cut past it keeps the pipeline tiles.
         assert_eq!(seq_first(0, 2200, 1100), None);
-        assert_eq!(seq_slice(0, 2200, 1100), 1100);
+        assert_eq!(seq_slice_if(false, 0, 2200, 1100), 1100);
         assert_eq!(seq_first(0, 2176, 1100), Some(1088));
         for end in (2048..=8192).step_by(37) {
             let p = seq_first(0, end, 4096).unwrap();
@@ -366,11 +459,15 @@ mod tests {
     /// every cut stays a multiple of 64 and the token split does not change.
     #[test]
     fn long_prompts_take_the_workspace_in_the_middle() {
-        let walk = |end: usize, chunk: usize| {
+        let walk_if = |on: bool, end: usize, chunk: usize| {
             let (mut pos, mut cuts) = (0, vec![]);
-            while pos < end { let n = seq_slice(pos, end, chunk).min(end - pos); cuts.push(n); pos += n; }
+            while pos < end { let n = seq_slice_if(on, pos, end, chunk).min(end - pos); cuts.push(n); pos += n; }
             cuts
         };
+        let walk = |end: usize, chunk: usize| walk_if(false, end, chunk);
+        // With the transaction on: prompts it takes come whole, longer ones walk as with it off.
+        assert_eq!(walk_if(true, 12000, 4096), [12000]);
+        assert_eq!(walk_if(true, 32768, 4096), walk(32768, 4096));
         assert_eq!(walk(32768, 4096), [2048, 4096, 4096, 4096, 4096, 4096, 4096, 2048, 2048, 2048]);
         assert_eq!(walk(40000, 4096), [[2048].as_slice(), &[4096; 8], &[2048, 2048, 1088]].concat());
         assert_eq!(walk(32099, 4096), [[2048; 15].as_slice(), &[1379]].concat());
@@ -383,8 +480,8 @@ mod tests {
             assert!(cuts.iter().all(|&n| n <= chunk) && cuts[..cuts.len() - 1].iter().all(|n| n % 64 == 0), "{end} {chunk}");
             assert!(cuts.iter().rev().take_while(|&&n| n < chunk).sum::<usize>() <= chunk + PIPELINE_TILE, "{end} {chunk}");
         }
-        assert_eq!((seq_slice(4096, 32768, 4096), seq_slice(4096, 32767, 4096)), (4096, PIPELINE_TILE));
-        assert_eq!(seq_slice(26624, 32768, 4096), PIPELINE_TILE);
+        assert_eq!((seq_slice_if(false, 4096, 32768, 4096), seq_slice_if(false, 4096, 32767, 4096)), (4096, PIPELINE_TILE));
+        assert_eq!(seq_slice_if(false, 26624, 32768, 4096), PIPELINE_TILE);
     }
     /// First part, second part, a tail alone, then the push before decode; only an expected first
     /// part splits; a slot reused from position 0 drops its state; short or final parts stay normal.

@@ -128,6 +128,61 @@
     }
 
     #[test]
+    fn chat_hooks_block_dispatch_and_save_notes_after_the_effect_checkpoint() {
+        struct HookJournal {
+            hooks: crate::hooks::Hooks,
+            fixture: crate::test_workspace::Fixture,
+            staged: Vec<Vec<Message>>,
+        }
+        impl RunObserver for HookJournal {
+            fn before_tool(&mut self, call: &ToolCall, args: &Value, cancel: &AtomicBool) -> Option<String> {
+                assert!(self.staged.last().unwrap()[1].serialized_json().contains("unknown_outcome"));
+                self.hooks.before(&call.name, args, cancel, &mut |_| panic!("unexpected hook warning"))
+            }
+            fn after_tool(&mut self, call: &ToolCall, args: &Value, content: &mut String, cap: usize, cancel: &AtomicBool) {
+                self.hooks.after(&call.name, args, content, cap, cancel, &mut |_| panic!("unexpected hook warning"));
+            }
+            fn checkpoint(&mut self, _: &Conversation, staged: &[Message]) -> io::Result<()> {
+                self.staged.push(staged.to_vec()); Ok(())
+            }
+        }
+        for (blocked, background) in [(false, false), (true, false), (false, true), (true, true)] {
+            let fixture = crate::test_workspace::Fixture::new();
+            fixture.workspace().state_dir().unwrap();
+            let child = if background { "sleep 30 &\n" } else { "" };
+            fixture.write("before.sh", &format!("{child}{}", if blocked { "printf 'project rule' >&2; exit 2" } else { "exit 0" }));
+            fixture.write("after.sh", "printf 'test note'; touch after-ran");
+            fixture.write(".vade/hooks.conf", r#"{"hooks":[{"point":"before-tool","command":"/bin/sh before.sh","timeout_ms":5000},{"point":"after-tool","command":"/bin/sh after.sh"}]}"#);
+            let hooks = crate::hooks::Hooks::load(&fixture.workspace()).unwrap();
+            let mut observer = HookJournal { hooks, fixture, staged: Vec::new() };
+            let mut c = conversation();
+            let mut model = MockModel::new(vec![response(calls(&["hook-call"]), "tool_calls"), answer()]);
+            let mut tools = MockTools::default();
+            let report = run_observed(&mut c, &mut model, &mut tools, Limits::default(), &AtomicBool::new(false), &mut |_| {}, &mut observer);
+            assert_eq!(report.reason, StopReason::Finished(FinishReason::Stop));
+            assert_eq!(tools.ids.is_empty(), blocked);
+            assert_eq!(observer.fixture.0.join("after-ran").exists(), !blocked);
+            let receipt = c.messages().iter().find(|m| m.role() == "tool").unwrap().serialized_json();
+            assert!(receipt.contains(if blocked { "Hook blocked read: project rule" } else { "[after-tool hook note]" }));
+            assert!(observer.staged.iter().flatten().any(|m| m.serialized_json() == receipt));
+        }
+    }
+
+    #[test]
+    fn generic_conformance_loop_does_not_load_project_hooks() {
+        let fixture = crate::test_workspace::Fixture::new();
+        fixture.workspace().state_dir().unwrap();
+        fixture.write("hook.sh", "touch hook-ran; exit 2");
+        fixture.write(".vade/hooks.conf", r#"{"hooks":[{"point":"before-tool","command":"/bin/sh hook.sh"},{"point":"after-tool","command":"/bin/sh hook.sh"},{"point":"on-stop","command":"/bin/sh hook.sh"}]}"#);
+        let mut c = conversation();
+        let mut model = MockModel::new(vec![response(calls(&["ordinary"]), "tool_calls"), answer()]);
+        let mut tools = MockTools::default();
+        run(&mut c, &mut model, &mut tools, Limits::default(), &AtomicBool::new(false), &mut |_| {});
+        assert_eq!(tools.ids, ["ordinary"]);
+        assert!(!fixture.0.join("hook-ran").exists());
+    }
+
+    #[test]
     fn exact_counts_control_both_tool_guards_despite_large_local_estimates() {
         struct ExactModel {
             inner: MockModel,
@@ -1159,6 +1214,64 @@
         struct Counted(MockModel); impl Model for Counted { fn complete(&mut self, r: ModelRequest<'_>, c: &AtomicBool, f: &mut dyn FnMut(&str)->io::Result<()>) -> io::Result<AssistantTurn> { self.0.complete(r,c,f) } fn count_input(&mut self, r: ModelRequest<'_>, _: &AtomicBool) -> io::Result<crate::contract::InputCount> { Ok(crate::contract::InputCount::Exact { prompt_tokens: r.to_json()?.len() as u64 / 4, output_tokens: 128, context_limit: 9000, admitted: true }) } }
         struct Compact(crate::journal::Journal, usize); impl RunObserver for Compact { fn checkpoint(&mut self, c: &Conversation, m: &[Message]) -> io::Result<()> { self.0.checkpoint(c,m) } fn before_counted_request(&mut self, c: &mut Conversation, l: Limits, _: &AtomicBool, u: &crate::context::Usage, count: &mut dyn FnMut(&Conversation)->io::Result<crate::context::Usage>) -> io::Result<bool> { if u.fits(l.max_context_tokens,l.output_reserve_tokens) { return Ok(false); } let (p, _) = crate::context::auto_plan_fitting(c,2,l,u,count)?.expect("fitting closed rounds"); self.0.compact(&p)?; *c=p.into_conversation(); self.1+=1; Ok(true) } }
         let mut c = conversation(); for i in 0..10 { let call = Message::from_value(calls(&[&format!("old{i}")]), WireLimits::default()).unwrap(); c.commit(vec![call, Message::tool_result(&format!("old{i}"), "x".repeat(if i<7 {4000} else {4}), WireLimits::default()).unwrap()]); } let mut big = calls(&["new"]); if let Value::Object(ref mut fields) = big { fields.iter_mut().find(|(k,_)| k=="content").unwrap().1=Value::String("p".repeat(10000)); } let f=crate::test_workspace::Fixture::new(); let w=f.workspace(); let mut observer=Compact(crate::journal::Journal::create(&w,"pressure",&c).unwrap(),0); let mut model=Counted(MockModel::new(vec![response(big,"tool_calls"),answer()])); let mut tools=MockTools::default(); let r=run_observed(&mut c,&mut model,&mut tools,Limits { max_context_tokens:9000,output_reserve_tokens:128,..Limits::default() },&AtomicBool::new(false),&mut |_|{},&mut observer); assert_eq!(r.reason,StopReason::Finished(FinishReason::Stop)); assert_eq!((observer.1,tools.ids.len()),(1,1)); assert_closed(&c); drop(observer); let (_, resumed, _)=crate::journal::Journal::resume(&w,"pressure",Limits::default()).unwrap(); assert_eq!(resumed.messages(),c.messages());
+    }
+
+    /// An automatic reply: the count gives the reply all the room the window
+    /// leaves, so a smaller candidate count chooses a larger reply.
+    struct Clamped { inner: MockModel, window: usize, chosen: usize }
+    impl Model for Clamped {
+        fn complete(&mut self, r: ModelRequest<'_>, c: &AtomicBool, f: &mut dyn FnMut(&str) -> io::Result<()>) -> io::Result<AssistantTurn> { self.inner.complete(r, c, f) }
+        fn count_input(&mut self, r: ModelRequest<'_>, _: &AtomicBool) -> io::Result<crate::contract::InputCount> {
+            let tokens = r.to_json()?.len() / 4;
+            self.chosen = self.window.saturating_sub(tokens + 256).min(16_384);
+            Ok(crate::contract::InputCount::Exact { prompt_tokens: tokens as u64, output_tokens: self.chosen as u64, context_limit: self.window as u64, admitted: tokens + self.chosen <= self.window })
+        }
+        fn output_reserve_tokens(&self, _: usize) -> usize { self.chosen.max(crate::context::reply_reservation(self.window, 16_384)) }
+        fn reply_limit_tokens(&self, _: usize) -> usize { self.chosen }
+    }
+
+    #[test]
+    fn a_declined_compaction_keeps_the_reply_room_of_the_real_count() {
+        // The observer counts a small candidate and then keeps the history. The
+        // fit check must use the reply room of the real prompt's count, not the
+        // larger one the candidate count chose.
+        struct Probe; impl RunObserver for Probe { fn checkpoint(&mut self, _: &Conversation, _: &[Message]) -> io::Result<()> { Ok(()) } fn before_hosted_request(&mut self, _: &mut Conversation, _: Limits, _: &AtomicBool, _: &crate::context::Usage, host: &mut dyn crate::context::ContextHost) -> io::Result<bool> { host.count(&conversation())?; Ok(false) } }
+        let mut c = conversation();
+        c.push_user(value(&format!(r#"{{"role":"user","content":"{}"}}"#, "p".repeat(40_000))), Limits::default()).unwrap();
+        let tokens = c.request(WireLimits::default()).to_json().unwrap().len() / 4;
+        let window = tokens + 1256;
+        let mut model = Clamped { inner: MockModel::new(vec![answer()]), window, chosen: 0 };
+        let limits = Limits { max_context_tokens: window, output_reserve_tokens: 128, ..Limits::default() };
+        let r = run_observed(&mut c, &mut model, &mut MockTools::default(), limits, &AtomicBool::new(false), &mut |_| {}, &mut Probe);
+        assert_eq!(r.reason, StopReason::Finished(FinishReason::Stop));
+    }
+
+    #[test]
+    fn a_failed_summary_in_the_observer_is_a_model_error() {
+        // A summary that fails without a cancel is a model error, not a failed save.
+        struct Summary; impl RunObserver for Summary { fn checkpoint(&mut self, _: &Conversation, _: &[Message]) -> io::Result<()> { Ok(()) } fn before_hosted_request(&mut self, c: &mut Conversation, _: Limits, _: &AtomicBool, _: &crate::context::Usage, host: &mut dyn crate::context::ContextHost) -> io::Result<bool> { host.summarize(c).map(|_| false) } }
+        struct Fails; impl Model for Fails {
+            fn complete(&mut self, _: ModelRequest<'_>, _: &AtomicBool, _: &mut dyn FnMut(&str) -> io::Result<()>) -> io::Result<AssistantTurn> { Err(io::Error::new(io::ErrorKind::Interrupted, "time limit")) }
+            fn count_input(&mut self, r: ModelRequest<'_>, _: &AtomicBool) -> io::Result<crate::contract::InputCount> { Ok(crate::contract::InputCount::Exact { prompt_tokens: r.to_json()?.len() as u64 / 4, output_tokens: 128, context_limit: 90_000, admitted: true }) }
+        }
+        let r = run_observed(&mut conversation(), &mut Fails, &mut MockTools::default(), Limits::default(), &AtomicBool::new(false), &mut |_| {}, &mut Summary);
+        assert_eq!(r.reason, StopReason::ModelError(io::ErrorKind::Interrupted));
+    }
+
+    #[test]
+    fn a_failed_summary_before_staged_tools_is_a_model_error() {
+        // The first observer call keeps the history; the second one, with the
+        // proposed calls staged, asks for a summary that fails.
+        struct Second(usize); impl RunObserver for Second { fn checkpoint(&mut self, _: &Conversation, _: &[Message]) -> io::Result<()> { Ok(()) } fn before_hosted_request(&mut self, c: &mut Conversation, _: Limits, _: &AtomicBool, _: &crate::context::Usage, host: &mut dyn crate::context::ContextHost) -> io::Result<bool> { self.0 += 1; if self.0 == 1 { Ok(false) } else { host.summarize(c).map(|_| false) } } }
+        struct Once(MockModel, usize); impl Model for Once {
+            fn complete(&mut self, r: ModelRequest<'_>, c: &AtomicBool, f: &mut dyn FnMut(&str) -> io::Result<()>) -> io::Result<AssistantTurn> { self.1 += 1; if self.1 == 1 { self.0.complete(r, c, f) } else { Err(io::Error::new(io::ErrorKind::Interrupted, "time limit")) } }
+            // Every count is near the window and still fits.
+            fn count_input(&mut self, r: ModelRequest<'_>, _: &AtomicBool) -> io::Result<crate::contract::InputCount> { let tokens = r.to_json()?.len() as u64 / 4; Ok(crate::contract::InputCount::Exact { prompt_tokens: tokens, output_tokens: 128, context_limit: tokens + 140, admitted: true }) }
+        }
+        let mut model = Once(MockModel::new(vec![response(calls(&["a"]), "tool_calls")]), 0);
+        let mut tools = MockTools::default();
+        let r = run_observed(&mut conversation(), &mut model, &mut tools, Limits { output_reserve_tokens: 128, ..Limits::default() }, &AtomicBool::new(false), &mut |_| {}, &mut Second(0));
+        assert_eq!((r.reason, tools.ids.len()), (StopReason::ModelError(io::ErrorKind::Interrupted), 0));
     }
 
     #[path = "recovery_tests.rs"]

@@ -5,6 +5,8 @@ use std::io;
 
 mod retention;
 use retention::*;
+mod rollover;
+pub use rollover::{Budget, BudgetTracker, ContextHost, CountOnly, KEEP_TURNS, RESUME_NOTE, RolloverError, hard_stop, needed_tokens, rollover, rollover_room, status_line, summarize_with, summary_cap, turn_starts};
 
 pub const DEFAULT_CONTEXT_TOKENS: usize = 131_072;
 pub const DEFAULT_RESERVE: usize = 4096;
@@ -312,6 +314,8 @@ pub struct CompactionPlan {
     automatic: bool,
     in_task: bool,
     exact_counts: Option<(usize, usize)>,
+    /// A model-written rollover: (kept user turns, summary tokens).
+    rollover: Option<(usize, usize)>,
 }
 impl CompactionPlan {
     pub fn conversation(&self) -> &Conversation {
@@ -322,6 +326,14 @@ impl CompactionPlan {
     }
     pub fn record_counts(&mut self, before: &Usage, after: &Usage) {
         self.exact_counts = before.exact.zip(after.exact).map(|(a, b)| (a.0, b.0));
+    }
+    /// (kept user turns, summary tokens) for a model-written rollover.
+    pub fn rollover(&self) -> Option<(usize, usize)> {
+        self.rollover
+    }
+    /// The one status line for a model-written rollover.
+    pub fn status_line(&self) -> Option<String> {
+        self.rollover.map(|(kept, tokens)| status_line(kept, tokens))
     }
     pub fn auto_notice(&self) -> String {
         format!(
@@ -397,10 +409,14 @@ impl CompactionPlan {
             ),
             ("summary".into(), Value::String(self.summary.clone())),
             ("in_task".into(), Value::Bool(self.in_task)),
+            ("kept_turns".into(), self.rollover.map_or(Value::Null, |(kept, _)| n(kept))),
+            ("summary_tokens".into(), self.rollover.map_or(Value::Null, |(_, tokens)| n(tokens))),
             (
                 "summary_origin".into(),
                 Value::String(
-                    if self.automatic {
+                    if self.rollover.is_some() {
+                        "model"
+                    } else if self.automatic {
                         "local excerpts"
                     } else {
                         "user"
@@ -813,6 +829,7 @@ fn finish_plan(
         automatic,
         in_task: false,
         exact_counts: None,
+        rollover: None,
     })
 }
 /// [`plan`], applied: the compacted conversation.

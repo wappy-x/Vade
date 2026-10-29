@@ -205,7 +205,18 @@ Which proof a change needs:
    If the screen fails, run the full gate on the rebased commit. After the
    merge, a full confirm card runs on the merged main within one hour. If the
    confirm card fails, or does not run within the hour, the merge is reverted.
-3. **Any other change to engine arithmetic, scheduling, caching or transport
+3. **A screened change that was rebased keeps the Spark proof of the screened
+   commit when its engine patch did not change.** Both of these conditions
+   must be true:
+   - The engine patch is the same. `git diff <base> <commit> -- engine |
+     git patch-id --stable` gives the same ID for the screened commit on its
+     base and for the rebased commit on the new main. Files outside `engine/`,
+     such as `CHANGELOG.md`, can differ.
+   - The READY FOR MERGE line names the screened commit and its screen
+     receipts: each screen of that commit and its result.
+
+   If the patch IDs differ, screen the rebased commit again.
+4. **Any other change to engine arithmetic, scheduling, caching or transport
    needs the full device gate.** Rebase it and run that proof again.
    Host-only changes use the host checks described above.
 
@@ -268,10 +279,10 @@ Unreleased section of [CHANGELOG.md](CHANGELOG.md).
 
 ### How a pull request lands
 
-1. **Host checks pass.** The [workflow](.github/workflows/ci.yml) defines
-   GitHub checks for pull requests against `main`. If account limits stop a
-   job before it starts, use the committed-revision logs and the additional
-   checks in [Local CI](docs/ci.md). A failed build or test blocks the change.
+1. **Host checks pass.** Run the checks in [Local CI](docs/ci.md) before
+   every merge. Save the logs for the committed revision. The
+   [GitHub workflow](.github/workflows/ci.yml) runs only by hand and can give
+   optional evidence. A failed build or test blocks the change.
 2. **A maintainer reviews it.** [CODEOWNERS](.github/CODEOWNERS) requests
    the review automatically. Expect questions about exactness, the house
    rules and anything the PR says it didn't check.
@@ -285,8 +296,8 @@ Unreleased section of [CHANGELOG.md](CHANGELOG.md).
    [exactness](#exactness-and-evidence)).
 4. **The maintainer applies it.** `main` here is published from the
    maintainers' development tree, one commit per update, so the merge
-   button isn't used. The maintainer applies the accepted change there, CI
-   runs again on the result, and the change reaches `main` in the next
+   button isn't used. The maintainer applies the accepted change there, runs
+   local CI again on the result, and the change reaches `main` in the next
    published update. The PR is then closed, not merged.
 
 If you haven't measured performance, don't make a speed claim. A performance

@@ -272,15 +272,31 @@ maker's own forward pass.
 
 ## Flash-Next sampled MTP
 
-`flash-serve --mtp 3` allows the official Flash-Next MTP head to propose for
-sampled requests as well as greedy ones. The target verifier samples its own
-canonical logits with the request's original seed, absolute position, and
-committed history. A rejected guess consumes no random state. Draft argmax
-choices never replace target samples.
+`flash-serve --mtp 3` sets the request's default draft depth. It does not enable
+sampled drafting. The [sampled drafting switch](../crates/serve/src/mtp_batch.rs)
+defaults to off on one Spark and on the two-Spark tensor split.
+`VADE_MTP_SAMPLED=1` allows a sampled chat to draft while it runs alone.
+`VADE_MTP_SAMPLED=2` also allows sampled chats to draft in cohorts. The
+[scheduler](../crates/serve/src/scheduler/dispatch.rs) keeps sampled cohort rows
+plain unless that switch is `2`.
 
-The configured depth is a ceiling, bounded by remaining output and context.
-Two or more active chats still suspend MTP, and resuming preserves the pending
-target sample. `draft: "plain"` disables proposals for an individual request.
+Greedy cohorts can draft by default on both routes. The launcher selects
+`Auto8`, which allows drafting with one through eight active chats. The cost
+controller can choose plain steps. On the tensor split, five through eight
+chats can share a verify pass of up to 32 rows by default. See the
+[cohort policy](../crates/serve/src/mtp_batch.rs) and
+[row budget](../crates/serve/src/flashnext.rs).
+
+For sampled drafting, the target verifier samples its own canonical logits
+with the request's original seed, absolute position, and committed history.
+A rejected guess consumes no random state. Draft argmax choices never replace
+target samples. Remaining output and context bound the proposal count.
+For a chat running alone, the adaptive chooser can exceed request depth 3,
+up to the default resident ceiling of 7. Request depths 1 and 2 keep their limits;
+cohorts keep the request depth, subject to the row budget. See
+[depth selection](../crates/serve/src/flashnext.rs) and
+[resident settings](../crates/engine/src/flash/draft_stack.rs).
+`draft: "plain"` disables proposals for an individual request.
 Sampling can lower draft acceptance enough to make plain decoding faster;
 measure the intended workload with its actual sampling settings.
 

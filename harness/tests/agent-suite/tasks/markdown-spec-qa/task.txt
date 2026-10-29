@@ -1,0 +1,14 @@
+id: markdown-spec-qa
+title: Read a Markdown spec and answer questions
+inputs: SPEC.md QUESTIONS.md
+budget_seconds: 600
+
+step: new
+prompt:
+  Read SPEC.md and answer the questions in QUESTIONS.md. Write ANSWERS.txt
+  exactly in the form that QUESTIONS.md asks for.
+
+check: last-exit-zero
+check: file-equals ANSWERS.txt expected/ANSWERS.txt
+check: unchanged SPEC.md
+check: unchanged QUESTIONS.md

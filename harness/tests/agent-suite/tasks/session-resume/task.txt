@@ -1,0 +1,24 @@
+id: session-resume
+title: Continue a resumed session with a fact that only the first run read
+inputs: README.md notes/release.txt
+budget_seconds: 600
+
+# The code name is only in notes/release.txt. The first run reads it and must
+# write nothing. The runner deletes the note before the resumed run, and the
+# second prompt does not hold the name, so a pass needs the session history.
+step: new
+prompt:
+  Read notes/release.txt and remember the release code name in it for later.
+  Do not create, change or delete any file. Reply with the word OK only.
+step_check: last-exit-zero
+step_check: unchanged .
+
+step: resume
+remove_before: notes/release.txt
+prompt:
+  The release files are ready now. Write the release code name that you read
+  earlier in this session to RELEASE.txt, as the only line of the file.
+
+check: last-exit-zero
+check: file-equals RELEASE.txt expected/RELEASE.txt
+check: unchanged README.md

@@ -1,10 +1,12 @@
 //! Independent HTTP reference clients, real gateway processes, synthetic peers.
 //! These fixtures prove wire compatibility; they are not installed-vendor proofs.
+#[path = "support/home.rs"]
+mod home;
 use std::{
     collections::BTreeMap,
     io::{self, BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -311,7 +313,7 @@ impl Gateway {
         let reserve = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = reserve.local_addr().unwrap();
         drop(reserve);
-        let mut command = Command::new(if standalone {
+        let mut command = home::command(if standalone {
             env!("CARGO_BIN_EXE_vade-gateway")
         } else {
             env!("CARGO_BIN_EXE_vade-harness")

@@ -1,5 +1,7 @@
 //! First-party loopback fixtures only. No Engine binary, model, delegate or GPU.
 //! Contract negotiation, compaction, native prompt resets and response timing.
+#[path = "support/home.rs"]
+mod home;
 #[allow(dead_code)]
 #[path = "support/cli.rs"]
 mod cli;
@@ -93,7 +95,6 @@ fn cutoff_only_recovery_requires_a_tool_and_releases_policy_after_progress() {
 
 #[test]
 fn oversized_prompt_is_counted_before_save_and_resume_accepts_next_prompt() {
-    use std::process::Command;
     let workspace = WorkspaceFixture::new();
     let (listener, endpoint) = listen();
     let oversized = "oversize-marker-".to_owned() + &"x".repeat(32_000 - 16);
@@ -133,7 +134,7 @@ fn oversized_prompt_is_counted_before_save_and_resume_accepts_next_prompt() {
         generations
     });
     let launch = |resume: bool, prompt: &str| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+        let mut command = home::harness();
         command
             .args([
                 "agent",
@@ -181,7 +182,6 @@ fn oversized_prompt_is_counted_before_save_and_resume_accepts_next_prompt() {
 
 #[test]
 fn presave_exact_count_accepts_a_prompt_that_the_local_estimate_would_veto() {
-    use std::process::Command;
     let workspace = WorkspaceFixture::new();
     let (listener, endpoint) = listen();
     let server = thread::spawn(move || {
@@ -200,7 +200,7 @@ fn presave_exact_count_accepts_a_prompt_that_the_local_estimate_would_veto() {
             &format!("{ANSWER}{DONE}"),
         );
     });
-    let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+    let mut command = home::harness();
     command
         .args([
             "agent",
@@ -451,7 +451,7 @@ fn assert_native_capability_reconcile(initial: String, old_epoch: &str, new_epoc
 
 #[test]
 fn manual_compaction_counts_before_save_and_warm_failure_allows_real_followup() {
-    use std::{process::Command, sync::Arc};
+    use std::sync::Arc;
     // Oversized candidate, non-shrinking exact count, and successful compaction
     // followed by an HTTP-failed opt-in warm request.
     for scenario in 0..3 {
@@ -540,7 +540,7 @@ fn manual_compaction_counts_before_save_and_warm_failure_allows_real_followup() 
             }
             (generations, failed_warms)
         });
-        let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+        let mut command = home::harness();
         command
             .args([
                 "agent",

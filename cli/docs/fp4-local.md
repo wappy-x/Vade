@@ -69,7 +69,8 @@ larger count before it contacts any machine; run `vade install` from current
 source to fix that. Vade never falls back to the older tensor-map rank path
 on its own.
 
-The legacy FP8 profile needs `vade up --fp8-legacy` and its own FP8 config;
+The FP8 profile needs `vade up --fp8` and its own FP8 config (see
+[the FP8 install](../../docs/install-fp8.md));
 a bare `vade up` always means FP4-Local.
 
 ## What has been tested

@@ -30,11 +30,23 @@ Current defaults are defined by the
 - Startup/request MTP depth defaults to 3. The resident draft ceiling is 7 on
   one Spark and on the pipeline. The adaptive chooser is enabled by default;
   request depth and resident ceiling are distinct. `--mtp 0` selects plain decoding.
-- Automatic cohort drafting covers up to five active chats; larger cohorts use
-  pooled plain steps. `VADE_MTP_BATCH` and `VADE_MTP_C8` are explicit overrides.
+- The launcher selects `Auto8` for one Spark, the two-Spark tensor split and
+  the four-Spark layer chain. This mode allows greedy drafting with one through
+  eight active chats. Larger cohorts use pooled plain steps. The cost controller
+  can also choose plain steps. With `VADE_MTP_C8=0`, the automatic table allows
+  drafting through five chats. The three-Spark chain uses that table by default.
+  `VADE_MTP_BATCH` can override the automatic table.
+- The two-Spark tensor split and four-Spark layer chain use a larger shared
+  token-checking pass by default. Five through eight chats can share a pass of
+  up to 32 rows.
+  `VADE_MTP_COHORT=off` restores the 16-row controller unless
+  `VADE_VERIFY_ROWS` overrides the row budget. One Spark defaults to 16 rows;
+  `VADE_MTP_COHORT=wide` enables the larger shared pass.
 - Local prompt tiles are automatic: shorter prompts use 4096 rows, while
-  prompts ending at or beyond 8192 tokens use 8192 rows. The pipeline defaults
-  to 2048-row tiles. `VADE_PROMPT_TILE` can select a fixed supported tile size.
+  prompts ending at or beyond 8192 tokens use 8192 rows. The layer chain defaults
+  to 2048-row tiles. The tensor split funds a 4096-row prompt workspace, as set
+  by the [startup settings](../crates/tp/src/flash/settings.rs).
+  `VADE_PROMPT_TILE` can select a fixed supported tile size.
 - Prompt lookup is controlled separately by `VADE_MTP_LOOKUP`; startup with
   MTP disabled also disables lookup.
 - On the pipeline, each rank allocates chat state (GDN and attention memory)
@@ -97,6 +109,46 @@ by a live owner. These counters do not include segmented KV pages.
 `request_admitted` also gives `admitted_at_ms`, measured from one monotonic
 clock at the start of the serving loop. Subtract these timestamps to measure
 the interval between admissions. Queue wait times have different start times.
+A queue wait starts when the serving loop accepts the connection.
+
+## Burst intake
+
+A client that sends several chats at once connects them within a few
+milliseconds. The request bytes of a chat can come later than its
+connection. The first prompt pass waits for the rest of such a burst only
+when no chat decodes and every job of the server is a new prompt that can
+join a shared prompt pass. Such a prompt is not longer than the shared
+prefill maximum (`VADE_BATCH_PREFILL_MAX_TOKENS` on Flash-Next, 512 tokens by
+default), and it is not longer than the shared prefill limit or the engine
+splits prompts into tiles. Alone, such a prompt can start on the serial
+prompt path, and the first chat of a burst is often admitted alone, so the
+wait holds the serial path too. A longer prompt, such as a cold 8K prompt on
+Flash-Next, is not held.
+
+The pass waits only while two or more new prompts wait, or while another
+request is still arriving: a connection that has not sent its whole request,
+a request in preparation or a request that waits for admission. An open
+connection that has sent no bytes counts only until it is one window old, so
+an idle preconnect does not hold every lone request. The pass does not wait
+when no session slot is free. A lone request with nothing else arriving does
+not wait. Token IDs do not change: a prompt gives the same IDs alone and in a
+batch.
+
+The window bounds the hold only: the hold ends when the oldest waiting
+chat's connection is 10 ms old (the default). The first pass can wait longer
+for the waits that apply without the hold: up to 100 ms after admission while
+requests are in preparation, one loop turn when a connection has unread
+request bytes, the 2 ms prompt age, and the admission of each chat that the
+server has read. While only the hold keeps the pass back, the serving loop
+sleeps for up to 1 ms per turn, and it does not sleep past the window.
+
+`VADE_INTAKE_BURST_MS` sets the window in whole milliseconds, from 0 to 100.
+0 starts the first pass as soon as a prompt is ready, as before. Other values
+stop the server at startup. Each first prompt pass of an idle server logs one
+`intake_burst` line: `chats` in the pass, `waited_ms` since the oldest chat's
+connection, `held_ms` that the wait added, and `window_ms`. A late chat that
+missed the pass shows as a `request_admitted` line with a long `queue_ms`
+after an `intake_burst` line with fewer chats.
 
 <a id="two-spark-tensor-split-opt-in"></a><a id="one-spark-and-the-two-spark-pipeline"></a>
 
@@ -245,8 +297,23 @@ layer 2:
   Before the chat's next pass, rank 0 sends rank 1 layers 2-47 one way, and
   decode runs on the split. If a different pass comes before the second part,
   rank 0 first takes and drops the rest of rank 1's state, so the link does not
-  stop; that chat's later passes then fail with an error. Longer prompts keep
-  the pipeline tiles.
+  stop; that chat's later passes then fail with an error.
+- A cold one-chat prompt past two prompt workspaces, of at least four 2048-row
+  tiles, whose rows up to its last 64-row edge number at most 20416 (prompts up
+  to 20480 tokens), runs as a layer-major transaction
+  ([`next_split.rs`](../crates/engine/src/flash/next_split.rs)), with a prompt
+  workspace of 2048 rows or more. The cut is half the rows, on a 64-row edge.
+  Rank 0 runs layers 0-1 of every row and sends the rows before the cut to rank
+  1 tile by tile; rank 1 runs layers 2-47 of those rows and, after each layer,
+  puts that layer's state at the cut in the mailbox; rank 0 takes each layer's
+  state before it runs that layer for the rows after the cut. Each row and layer
+  computes the same words, so token IDs do not change. Before either starts,
+  each rank maps the KV pages of every row it writes (rank 1 the rows before the
+  cut, rank 0 every row, its drafter included) and funds its extra rows; if a
+  rank cannot, the prompt keeps the pipeline tiles. The tail after the last 64-row edge (1 to 64 rows) runs as after the
+  token split. `VADE_LONG_SPLIT=0` turns the transaction off;
+  `VADE_LONG_SPLIT_CUT=<permille>` (1 to 999) places the cut at that share of
+  the rows (a measurement setting). Longer prompts keep the pipeline tiles.
 - Plain (drafting-off) steps use the session path instead of pooled decode.
 - The serving metadata (`vade.numerics`) of two or more ranks names the path the
   engine chose in `"path"` and why in `"path_reason"`: `"tensor_split"` (FP4-Local
@@ -299,7 +366,9 @@ it has no request parser or serve loop. Its original positional form and
 `--mtp 0`. Install both binaries together. Worlds 2/4 retain the pinned native
 greedy defaults even when checkpoint metadata requests sampling. World one and
 FP8 retain their checkpoint generation defaults. Qualification requests send
-all greedy fields explicitly.
+all greedy fields explicitly. This greedy-only rule binds this native rank
+backend only. One Spark, the two-Spark tensor split and the chain sample on
+rank 0 ([Sampling](../../docs/sampling.md)).
 
 Worlds 2/4 refuse `--verify-full` and `FLASH_VERIFY_FULL=1` before rank startup:
 the native shard loader does not implement full payload verification. Use world

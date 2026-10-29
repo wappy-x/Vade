@@ -1124,7 +1124,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         )?;
         // VADE_PROMPT_TILE=auto: the tile follows where this prompt work ends.
         let chunk = crate::flash_next_rows::prompt_tile_for(self.pos + tokens.len(), self.chunk);
-        let mut start = 0;
+        let mut start = self.split_prompt(b, tokens, output, chunk)?;
         while start < tokens.len() {
             // Prefix cache: the last 64-aligned row before the final partial tile.
             if output && tokens.len() - start < 64 {

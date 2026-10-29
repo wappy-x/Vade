@@ -173,7 +173,7 @@ project. Only one is the release path.
 
 | Program | What it is |
 | --- | --- |
-| [`flash-serve`](../engine/crates/tp/src/bin/flash-serve.rs) | **The release server.** Serves FP4-Local on one Spark, across two Sparks, or as a longer chain. It also serves the legacy Flash-Next FP8 checkpoint. `vade launch` and `vade up` start it. |
+| [`flash-serve`](../engine/crates/tp/src/bin/flash-serve.rs) | **The release server.** Serves FP4-Local on one Spark, across two Sparks, or as a longer chain. It also serves the Flash-Next FP8 checkpoint on 2, 4 or 6 Sparks. `vade launch` and `vade up` start it. |
 | [`spark-serve`](../engine/crates/serve/src/bin/spark-serve.rs) | The original one-Spark server for earlier models (Qwen3, Qwen3.8-27B, Gemma 4). It shares the HTTP and scheduler library with `flash-serve` but is not a v0.1.0 route; see [its README](../engine/crates/serve/README.md). |
 | [`next-http`](../engine/crates/tp/src/bin/next-http.rs) | A compatibility launcher that hands off to `flash-serve` on the older tensor-map rank path, with drafting off. |
 | [`next-tp`](../engine/crates/tp/src/bin/next-tp.rs) | The rank qualification tool, not an HTTP service. |
@@ -338,17 +338,16 @@ needs the full exactness gate, quality evidence against main and a reviewed
 card before it can become the default. Keep one production path, as required
 by [AGENTS.md](../AGENTS.md#exactness-law-and-merge-gate).
 
-### The legacy FP8 checkpoint
+### The FP8 checkpoint
 
-Before FP4-Local, Vade served `Qwen/Qwen3.8-Flash-Next-FP8` across two Sparks.
+Vade also serves `Qwen/Qwen3.8-Flash-Next-FP8`, on 2, 4 or 6 Sparks.
 That checkpoint stores FP8 weights in 128×128 blocks with dynamic activation
 scales ([`flash/mod.rs`](../engine/crates/model/src/flash/mod.rs)), and its
 experts follow the reference W8A8 arithmetic recorded in
-[Flash arithmetic](../engine/docs/flash-fp8-math.md). `flash-serve` still
-serves it with tensor parallelism, where both Sparks run every layer and each
-holds its share of each one, and `vade up --fp8-legacy` selects it.
-It is kept as a legacy configuration with its own
-[installation notes](install-legacy-fp8.md); it is not a v0.1.0 route.
+[Flash arithmetic](../engine/docs/flash-fp8-math.md). `flash-serve`
+serves it with tensor parallelism, where every Spark runs every layer and each
+holds its share of each one, and `vade up --fp8` selects it. It is a supported
+route with its own [installation guide](install-fp8.md).
 
 ## The kernels and the as-stored floor
 
@@ -547,8 +546,16 @@ layers and hands it on. The second Spark reads it through the other 46 layers.
 At the same time the first Spark reads the second half through every layer, one
 layer behind. Before each layer it takes the second Spark's attention and
 linear-attention state, so each token's math is the same as on one Spark. After the first token, the first Spark sends the
-rest of the state back, and decode runs on the tensor split. Longer prompts
-still run as two-stage pipeline tiles of 2,048 tokens. The token split needs a
+rest of the state back, and decode runs on the tensor split. A cold prompt of
+more than 8,192 and at most 20,480 tokens runs layer by layer on both Sparks
+([`next_split.rs`](../engine/crates/engine/src/flash/next_split.rs)): the
+first Spark reads every token through the first two layers; the second Spark
+reads the first half through the other 46 layers, in tiles of 2,048 tokens, and
+hands on each layer's state; the first Spark reads the second half through each
+layer after it takes that state, so the first token comes sooner. Longer
+prompts, and prompts on a Spark that cannot hold the extra rows, still run as
+two-stage pipeline tiles of 2,048 tokens. `VADE_LONG_SPLIT=0` turns the
+layer-by-layer path off. The token split needs a
 prompt workspace of 4,096 rows on each Spark instead of 2,048. So two Sparks
 now hold one chat fewer at a 32,768-token context (8 instead of 9), and in
 exchange the first token after a cold 8K prompt comes about 0.6 s sooner.

@@ -285,6 +285,7 @@ fn alternate_starts_require_a_consistent_installation_selector() {
     let f = Fixture::new(true);
     f.configure_owner();
     for args in [
+        vec!["up", "--fp8"],
         vec!["up", "--fp8-legacy"],
         vec!["run", "qwen3-8b"],
     ] {

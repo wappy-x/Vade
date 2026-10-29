@@ -17,6 +17,28 @@ pub fn build_messages(system: &str, history: &[Message], user: &str) -> Vec<Mess
     messages
 }
 
+const INSTRUCTIONS_BREAK: &str = "\n\n# Project instructions\n";
+
+/// The system prompt with the project instructions section as one fixed
+/// block after the built-in text. Built-in bytes stay first, so the shared
+/// prefix does not depend on the project. An empty section changes nothing.
+pub fn with_instructions(system: &str, section: &str) -> String {
+    if section.is_empty() {
+        system.to_owned()
+    } else {
+        format!("{system}\n\n{section}")
+    }
+}
+
+/// Splits a system prompt made by `with_instructions` into the built-in text
+/// and the section ("" when there is none).
+pub fn split_instructions(content: &str) -> (&str, &str) {
+    match content.find(INSTRUCTIONS_BREAK) {
+        Some(at) => (&content[..at], &content[at + 2..]),
+        None => (content, ""),
+    }
+}
+
 /// Exact shared-prefix metadata for callers retaining successive request lists.
 /// This describes request equality, not an inference engine's cache state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -214,6 +236,15 @@ mod tests {
         assert_eq!(metadata.total_messages, 4);
         let changed_system = build_messages("different", &history, "next");
         assert_eq!(prefix_metadata(&next, &changed_system).shared_messages, 0);
+    }
+    #[test]
+    fn instructions_are_one_block_after_the_built_in_prompt() {
+        let section = "# Project instructions\nlead\n\n## AGENTS.md\nrule\n\n# Project instructions\n";
+        let system = with_instructions("Built in.\nidentity", section);
+        assert!(system.starts_with("Built in.\nidentity\n\n# Project instructions\n"));
+        assert_eq!(split_instructions(&system), ("Built in.\nidentity", section));
+        assert_eq!(with_instructions("Built in.", ""), "Built in.");
+        assert_eq!(split_instructions("Built in."), ("Built in.", ""));
     }
     #[test]
     fn append_only_records_refuse_rewrites_without_mutating_previous_bytes() {

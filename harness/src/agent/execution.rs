@@ -23,6 +23,38 @@ pub fn run(
     )
 }
 
+/// Counts and rollover summaries for the observer, through the run's own
+/// model. Counts include the staged tool calls that are not committed yet.
+struct LoopHost<'a> {
+    model: &'a mut dyn Model,
+    staged: &'a [Message],
+    wire: WireLimits,
+    cancel: &'a AtomicBool,
+    error: Option<io::ErrorKind>,
+}
+impl crate::context::ContextHost for LoopHost<'_> {
+    fn count(&mut self, c: &Conversation) -> io::Result<crate::context::Usage> {
+        let result = if self.staged.is_empty() {
+            self.model.count_input(c.request(self.wire), self.cancel)
+        } else {
+            let messages: Vec<_> = c.messages.iter().chain(self.staged).cloned().collect();
+            self.model.count_input(ModelRequest { messages: &messages, ..c.request(self.wire) }, self.cancel)
+        }
+        .and_then(|n| crate::context::Usage::with_appended(c, self.staged).with_count(&n));
+        if let Err(error) = &result {
+            self.error = Some(error.kind());
+        }
+        result
+    }
+    fn summarize(&mut self, request: &Conversation) -> io::Result<String> {
+        let result = crate::context::summarize_with(self.model, request, self.wire, self.cancel);
+        if let Err(error) = &result {
+            self.error = Some(error.kind());
+        }
+        result
+    }
+}
+
 fn appended_context_stop(
     conversation: &mut Conversation,
     staged: &[Message],
@@ -54,17 +86,16 @@ fn appended_context_stop(
         && usage.near_limit(limits.max_context_tokens, reserve)
     {
         let counted_limits = Limits { output_reserve_tokens: reserve, ..limits };
-        let mut count_candidate = |c: &Conversation| {
-            let messages: Vec<_> = c.messages.iter().chain(staged).cloned().collect();
-            let request = ModelRequest { messages: &messages, ..c.request(limits.wire) };
-            model.count_input(request, cancel).and_then(|n| crate::context::Usage::with_appended(c, staged).with_count(&n))
-        };
-        match observer.before_counted_request(conversation, counted_limits, cancel, usage, &mut count_candidate) {
+        let mut host = LoopHost { model: &mut *model, staged, wire: limits.wire, cancel, error: None };
+        let rewrite = observer.before_hosted_request(conversation, counted_limits, cancel, usage, &mut host);
+        let model_error = host.error;
+        match rewrite {
             Ok(true) => {
                 model.prompt_rewritten();
                 return appended_context_stop(conversation, staged, observer, false, model, limits, cancel);
             }
-            Err(_) => return Some(if cancelled(cancel) { StopReason::Cancelled } else { StopReason::JournalError }),
+            // A failed count or summary is a model error; only a failed save is a journal error.
+            Err(_) => return Some(if cancelled(cancel) { StopReason::Cancelled } else { model_error.map_or(StopReason::JournalError, StopReason::ModelError) }),
             Ok(false) => (),
         }
     }
@@ -249,28 +280,20 @@ fn run_observed_inner(
                 });
             }
         };
-        let counted_limits = Limits {
-            output_reserve_tokens: model.output_reserve_tokens(limits.output_reserve_tokens),
-            ..limits
-        };
-        let mut count_error = None;
-        let mut count = |c: &Conversation| {
-            let result = model
-                .count_input(c.request(limits.wire), cancel)
-                .and_then(|input| crate::context::Usage::for_conversation(c).with_count(&input));
-            if let Err(error) = &result {
-                count_error = Some(error.kind());
-            }
-            result
-        };
-        let rewrite = observer.before_counted_request(
+        // Read the reply room of this count now: the observer's candidate
+        // counts and summary request change the model's chosen output.
+        let mut reserve = model.output_reserve_tokens(limits.output_reserve_tokens);
+        let mut reply_cap = model.reply_limit_tokens(limits.output_reserve_tokens);
+        let counted_limits = Limits { output_reserve_tokens: reserve, ..limits };
+        let mut host = LoopHost { model: &mut *model, staged: &[], wire: limits.wire, cancel, error: None };
+        let rewrite = observer.before_hosted_request(
             conversation,
             counted_limits,
             cancel,
             &usage,
-            &mut count,
+            &mut host,
         );
-        drop(count);
+        let count_error = host.error;
         let rewritten = match rewrite {
             Ok(rewritten) => rewritten,
             Err(_) => {
@@ -297,12 +320,10 @@ fn run_observed_inner(
                     });
                 }
             };
+            reserve = model.output_reserve_tokens(limits.output_reserve_tokens);
+            reply_cap = model.reply_limit_tokens(limits.output_reserve_tokens);
         }
-        if !usage.fits_with_reply_cap(
-            limits.max_context_tokens,
-            model.output_reserve_tokens(limits.output_reserve_tokens),
-            model.reply_limit_tokens(limits.output_reserve_tokens),
-        ) {
+        if !usage.fits_with_reply_cap(limits.max_context_tokens, reserve, reply_cap) {
             return report.stopped(StopReason::Limit(LimitKind::Context));
         }
         observer.progress(
@@ -602,6 +623,7 @@ fn run_observed_inner(
                         .min(available)
                         .min(receipt_capacity);
                     let mut uncertain = false;
+                    let mut dispatched = None;
                     let result = if receipt_capacity < 128 {
                         // Even the minimum useful receipt cannot be retained.
                         // Refuse before executing rather than losing evidence
@@ -626,22 +648,29 @@ fn run_observed_inner(
                                     report.answer_cut_off = false;
                                     return report.stopped(StopReason::JournalError);
                                 }
-                                report.tool_calls += 1;
-                                let result = executor.execute(
-                                    ToolInvocation {
-                                        call,
-                                        arguments: &arguments,
-                                        max_output_bytes: output_limit,
-                                    },
-                                    cancel,
-                                );
-                                uncertain = executor.last_side_effect_uncertain();
-                                result
+                                if let Some(reason) = observer.before_tool(call, &arguments, cancel) {
+                                    Ok(crate::user_files::prefix(&reason, output_limit).to_owned())
+                                } else if cancelled(cancel) {
+                                    Err(ToolError::Cancelled)
+                                } else {
+                                    report.tool_calls += 1;
+                                    let result = executor.execute(
+                                        ToolInvocation {
+                                            call,
+                                            arguments: &arguments,
+                                            max_output_bytes: output_limit,
+                                        },
+                                        cancel,
+                                    );
+                                    uncertain = executor.last_side_effect_uncertain();
+                                    dispatched = Some(arguments);
+                                    result
+                                }
                             }
                             _ => Err(ToolError::InvalidArguments("arguments must be a JSON object")),
                         }
                     };
-                    let output = match result {
+                    let mut output = match result {
                         Ok(output) if output.len() <= output_limit => output,
                         Ok(_) | Err(ToolError::OutputLimit) => {
                             if stop.is_none() {
@@ -661,6 +690,9 @@ fn run_observed_inner(
                         Err(ToolError::Denied) => error_content("denied"),
                         Err(ToolError::InvalidArguments(reason)) => invalid_arguments_content(reason, output_limit),
                     };
+                    if let Some(arguments) = dispatched {
+                        observer.after_tool(call, &arguments, &mut output, output_limit, cancel);
+                    }
                     if uncertain {
                         stop = Some(StopReason::ToolFailed);
                         uncertain_content(&output, output_limit)
@@ -896,20 +928,28 @@ fn auto_check(
         conversation.commit(staged);
         return Some(StopReason::JournalError);
     }
-    report.tool_calls += 1;
-    report.auto_checks += 1;
-    let result = executor.execute(
-        ToolInvocation {
-            call: &call,
-            arguments,
-            max_output_bytes: cap,
-        },
-        cancel,
-    );
+    let blocked = observer.before_tool(&call, arguments, cancel);
+    let dispatched = blocked.is_none() && !cancelled(cancel);
+    let result = if let Some(reason) = blocked {
+        Ok(crate::user_files::prefix(&reason, cap).to_owned())
+    } else if cancelled(cancel) {
+        Err(ToolError::Cancelled)
+    } else {
+        report.tool_calls += 1;
+        report.auto_checks += 1;
+        executor.execute(
+            ToolInvocation {
+                call: &call,
+                arguments,
+                max_output_bytes: cap,
+            },
+            cancel,
+        )
+    };
     // A timeout is an ordinary partial-check receipt; only local I/O failure
     // after spawning or cancellation stops the request.
     let mut stop = None;
-    let content = match result {
+    let mut content = match result {
         Ok(output) if output.len() <= cap => output,
         Ok(_) | Err(ToolError::OutputLimit) => error_content("output_limit"),
         Err(ToolError::Cancelled) => {
@@ -923,6 +963,7 @@ fn auto_check(
         Err(ToolError::Denied) => error_content("denied"),
         Err(_) => error_content("invalid_arguments"),
     };
+    if dispatched { observer.after_tool(&call, arguments, &mut content, cap, cancel); }
     if let Ok(result) = Message::tool_result(&id, content.clone(), limits.wire) {
         report.output_bytes += content.len();
         staged[1] = result;

@@ -6,10 +6,14 @@ four for the official Flash-Next FP8 checkpoint.
 **This build has not yet passed its qualification checks running natively on
 four Sparks.** We have measured FP8 on four of our Sparks: the 2026-10-25
 [benchmark cards](benchmarks.md#fp8) at `6cb46bf`, whose drafting ON and OFF
-cards returned identical token IDs in 62 of 62 responses. Those cards measure
-speed; they are not the four-Spark qualification. Keep the official precision and the legacy FP8
-defaults: a 131,072-token context and an output limit of `min(65536, context)`
-(see [Legacy FP8 limits](../cli/README.md#legacy-fp8-limits-and-drafting)). If
+cards returned identical token IDs in 62 of 62 responses, and the 2026-10-28
+cards at `76977df`, which matched in 66 of 66. Four Sparks give different token
+IDs than two
+([cause and fix](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)).
+Those cards measure speed; they are not the four-Spark qualification. Keep
+the official precision and the FP8 defaults: a 131,072-token context and an
+output limit of `min(65536, context)` (see
+[FP8 limits](../cli/README.md#fp8-limits-and-drafting)). If
 you choose a smaller context on purpose, that is a separate configuration; it
 is not a way to qualify the default.
 
@@ -185,8 +189,8 @@ same model path and the same staged PTX path, each written out in full
 (expanded and absolute), and their artifact hashes must match. The
 [CLI setup](../cli/README.md#multi-spark-source-setup) shows how.
 
-`vade up --fp8-legacy --sparks 4` takes the first four configured machines, in
-order; without `--fp8-legacy`, `vade up` refuses an FP8 config. If the
+`vade up --fp8 --sparks 4` takes the first four configured machines, in
+order; without `--fp8`, `vade up` refuses an FP8 config. If the
 configuration lists other machines too, prefer an explicit ordered `--hosts`
 list. Preview with `--dry-run`, then launch with the same settings while no one
 else is using the four Sparks. For the first smoke request, launch with

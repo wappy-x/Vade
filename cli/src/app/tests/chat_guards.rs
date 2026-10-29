@@ -11,8 +11,8 @@ fn refused(f: &mut Fixture, expected: &str) {
 #[test]
 fn chat_refuses_each_unhealthy_state_before_opening_the_harness() {
     let mut f = Fixture::new(2, false);
-    refused(&mut f, "Vade is stopped. Run vade up --fp8-legacy, then vade chat.");
-    f.app.up(&legacy_options()).unwrap();
+    refused(&mut f, "Vade is stopped. Run vade up --fp8, then vade chat.");
+    f.app.up(&fp8_options()).unwrap();
     f.app.runner.calls.clear();
     f.app.execute(Command::Chat).unwrap();
     assert!(f.app.runner.calls.iter().any(|e| e.label == "Vade chat"));

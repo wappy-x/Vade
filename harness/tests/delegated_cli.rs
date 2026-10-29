@@ -1,6 +1,8 @@
 //! End-to-end CLI checks with an explicitly selected first-party Rust peer.
 //! No installed external agent, account files, shell, or network is used.
 #![cfg(unix)]
+#[path = "support/home.rs"]
+mod home;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -64,7 +66,7 @@ fn hermes_command() -> Command {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir_all(&workspace).unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+    let mut command = home::harness();
     command
         .args([
             "hermes",
@@ -87,7 +89,7 @@ fn base_command(plain: bool) -> Command {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     fs::create_dir_all(&workspace).unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+    let mut command = home::harness();
     command
         .args(["codex", "--state-in-project", "--permission", "read-only", "--codex-bin"])
         .arg(mock())

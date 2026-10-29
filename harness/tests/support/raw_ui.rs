@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -106,7 +106,7 @@ impl Ui {
         // unread output on the last slave close, even after a successful flush.
         let keep_slave = slave.try_clone().unwrap();
         // The PTY fixtures run only on macOS and keep its shell-capable shape.
-        let child = Command::new(env!("CARGO_BIN_EXE_vade-harness"))
+        let child = crate::home::harness()
             .env_remove("VADE_HARNESS_SHELL")
             .args([
                 mode,

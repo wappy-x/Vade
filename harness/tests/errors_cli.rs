@@ -1,4 +1,6 @@
 //! Public process-level diagnostics against bounded, first-party loopback peers.
+#[path = "support/home.rs"]
+mod home;
 #[path = "support/cli.rs"]
 mod cli;
 use std::{
@@ -93,7 +95,7 @@ fn direct_http_failures_offer_specific_recovery_without_body_disclosure_or_retry
         (504, "HTTP 504", "timed out"),
     ] {
         let mock = Mock::status(status);
-        let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+        let mut command = home::harness();
         command.args(["direct", "--state-in-project", "--endpoint", &mock.endpoint, "--model", "mock", "--plain", "--prompt", "hello", "--max-output-tokens", "32", "--workspace"])
             .arg(&root).env_remove("VADE_API_KEY_FILE");
         let mut process = cli::Cli::start(&mut command);
@@ -117,7 +119,7 @@ fn direct_http_failures_offer_specific_recovery_without_body_disclosure_or_retry
 fn both_gateway_entry_points_explain_an_occupied_port() {
     let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
     for standalone in [false, true] {
-        let mut command = Command::new(if standalone {
+        let mut command = home::command(if standalone {
             env!("CARGO_BIN_EXE_vade-gateway")
         } else {
             env!("CARGO_BIN_EXE_vade-harness")
@@ -136,7 +138,7 @@ fn both_gateway_entry_points_explain_an_occupied_port() {
 #[test]
 fn argument_errors_name_options_and_mode_help_without_echoing_values() {
     fn failure(args: &[&str]) -> String {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+        let mut command = home::harness();
         command.args(args).env_remove("VADE_API_KEY_FILE")
             .env_remove("VADE_HARNESS_EFFORT");
         let output = cli::Cli::start(&mut command).finish();
@@ -192,7 +194,7 @@ fn argument_errors_name_options_and_mode_help_without_echoing_values() {
 #[test]
 fn child_shell_is_refused_where_the_shell_is_not_offered() {
     // VADE_HARNESS_SHELL=off gives macOS the Linux shape; on Linux it changes nothing.
-    let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+    let mut command = home::harness();
     command
         .args(["agent", "--children", "--child-shell", "checks", "--endpoint",
             "http://127.0.0.1:9/v1/chat/completions", "--model", "mock", "--prompt", "x"])

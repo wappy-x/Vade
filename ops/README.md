@@ -101,11 +101,11 @@ the machines to use with `--sparks` or `--hosts`.
 [Two and more Sparks](../INSTALL.md#two-and-more-sparks) walks through the
 whole setup.
 
-### The older FP8 profile
+### The FP8 profile
 
-The older [vade.conf](../cli/examples/vade.conf) template is for the separate
-[FP8 profile](../docs/install-legacy-fp8.md). Vade uses that profile only when
-you ask for it with `vade up --fp8-legacy`.
+The [vade.conf](../cli/examples/vade.conf) template is for the
+[FP8 profile](../docs/install-fp8.md) on 2, 4 or 6 Sparks. Vade uses that
+profile only when you ask for it with `vade up --fp8`.
 
 ## Context size
 
@@ -127,7 +127,7 @@ or from a controller. The two routes differ only when memory is short:
 [Context size on one Spark](../INSTALL.md#context-size-on-one-spark),
 [Defaults on a controller](../INSTALL.md#defaults-on-a-controller) and the
 [settings guide](../INSTALL.md#settings-you-may-change) list the current
-values. The values in the legacy FP8 guide don't apply here.
+values. The values in the FP8 guide don't apply here.
 
 ## Setup and test guides
 

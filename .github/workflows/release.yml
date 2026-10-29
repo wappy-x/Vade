@@ -1,8 +1,7 @@
 name: Release bundle
 
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -24,8 +23,15 @@ jobs:
     env:
       CARGO_TERM_COLOR: never
     steps:
+      - name: Require a version tag
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/v*) ;;
+            *) printf '%s\n' 'Select an existing tag with the v prefix for a release.' >&2; exit 1 ;;
+          esac
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ github.ref }}
           persist-credentials: false
       - name: Install pinned Rust
         run: |

@@ -663,6 +663,21 @@ pub(crate) mod anchored {
             self.0.try_clone()
         }
     }
+    #[cfg(target_os = "macos")]
+    const LOOP: i32 = 62;
+    #[cfg(target_os = "linux")]
+    const LOOP: i32 = 40;
+    /// One directory entry, opened relative to its directory handle without
+    /// following a link and without waiting on a FIFO or device.
+    pub(crate) enum Entry {
+        Missing,
+        Link,
+        Dir(Dir),
+        /// A regular file or a special file; callers check the descriptor.
+        Other(File),
+        /// The name is not the exact directory entry, or the policy refuses it.
+        Alias,
+    }
     impl Dir {
         pub fn open_root(path: &Path) -> io::Result<Self> {
             OpenOptions::new()
@@ -704,31 +719,50 @@ pub(crate) mod anchored {
             // SAFETY: openat returned a new owned descriptor.
             Ok(unsafe { File::from_raw_fd(fd) })
         }
+        /// Opens `name` in this directory as it is now. A link is reported,
+        /// never followed, so a name replaced after a check cannot lead out.
+        /// The actual directory entry must have exactly these bytes (a folding
+        /// filesystem cannot open an alias) and pass `allowed`; else `Alias`.
+        pub(crate) fn entry(&self, name: &str, allowed: fn(&str) -> bool) -> io::Result<Entry> {
+            let (inode, entry) = match self.open(name, NONBLOCK) {
+                Ok(file) => {
+                    let meta = file.metadata()?;
+                    (Some(meta.ino()), if meta.is_dir() { Entry::Dir(Self(file)) } else { Entry::Other(file) })
+                }
+                Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => return Ok(Entry::Missing),
+                Err(e) if e.raw_os_error() == Some(LOOP) => (None, Entry::Link),
+                Err(e) => return Err(e),
+            };
+            Ok(if allowed(name) && self.exact_entry(name, inode, allowed).is_ok() { entry } else { Entry::Alias })
+        }
         pub fn child(&self, name: &str) -> io::Result<Self> {
             self.open(name, DIRECTORY)
                 .map(Self)
                 .map_err(|_| error("directory is unavailable or is a symlink"))
         }
         fn verify_workspace_entry(&self, name: &str, file: &File) -> io::Result<()> {
-            // Checking only the requested spelling is insufficient on folding
-            // filesystems: ASCII input can resolve to a non-ASCII entry too.
-            // Require the actual entry's exact bytes and the opened inode to
-            // agree before reading content or traversing another component.
             if !super::allowed_component(name) {
                 return Err(error(
                     "non-ASCII, hidden or credential-related paths are blocked",
                 ));
             }
-            let inode = file.metadata()?.ino();
+            self.exact_entry(name, Some(file.metadata()?.ino()), super::allowed_component)
+        }
+        /// Checking only the requested spelling is insufficient on folding
+        /// filesystems: ASCII input can resolve to a non-ASCII entry too.
+        /// Require the actual entry's exact bytes and the opened inode to agree
+        /// before reading content or traversing another component. A link has
+        /// no opened inode (`None`); its entry must then match by exact bytes.
+        fn exact_entry(&self, name: &str, inode: Option<u64>, allowed: fn(&str) -> bool) -> io::Result<()> {
             let mut entries = Entries::open(self)?;
             for _ in 0..16384 {
                 let Some((entry_inode, bytes)) = entries.next()? else {
                     return Err(error("opened file has no matching directory entry"));
                 };
-                if entry_inode == inode {
+                if inode.map_or(bytes == name.as_bytes(), |inode| entry_inode == inode) {
                     let actual = std::str::from_utf8(bytes)
                         .map_err(|_| error("non-UTF-8 directory entry is blocked"))?;
-                    if actual != name || !super::allowed_component(actual) {
+                    if actual != name || !allowed(actual) {
                         return Err(error(
                             "filename alias or protected directory entry is blocked",
                         ));

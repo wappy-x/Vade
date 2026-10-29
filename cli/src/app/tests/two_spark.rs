@@ -24,7 +24,7 @@ fn up_with_two_sparks_runs_the_split_over_rdma_only() {
             }
             // FP8 keeps its ring on two Sparks, and TCP serves it.
             let mut fp8 = Fixture::new(2, false);
-            fp8.app.up(&legacy_options()).unwrap();
+            fp8.app.up(&fp8_options()).unwrap();
             let requests = starts(&fp8);
             assert_eq!(requests.len(), 2);
             assert!(requests.iter().all(|request| request["env.SEQPAR_RDMA"] == "0"), "{requests:?}");
@@ -79,7 +79,7 @@ fn status_names_every_multi_spark_path_and_its_reason() {
         ("chain", || Fixture::fp4(4, false), fp4_options(&["--sparks", "4"]), CHAIN,
             "layer chain (FP4-Local on three or more Sparks)".into(),
             r#"{"path":"layer_pipeline","path_reason":"FP4-Local on three or more Sparks","projection_level":null,"wire":null,"head":null}"#),
-        ("FP8 ring", || Fixture::new(2, false), legacy_options(), RING,
+        ("FP8 ring", || Fixture::new(2, false), fp8_options(), RING,
             "ring (FP8: the tensor split does not serve FP8)".into(),
             r#"{"path":"ring","path_reason":"FP8: the tensor split does not serve FP8","projection_level":null,"wire":null,"head":null}"#),
         ("older engine", || Fixture::fp4(2, false), fp4_options(&["--sparks", "2"]), "", "not reported by this engine".into(), "null"),

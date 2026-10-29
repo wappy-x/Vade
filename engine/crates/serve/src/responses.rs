@@ -229,7 +229,7 @@ pub(crate) fn parse(body: &[u8], limits: &Limits, model: &str,
     }
     let mut translated = vec![format!("\"messages\":[{}]", messages.join(",")),
         format!("\"tools\":[{}]", functions.join(",")), format!("\"tool_choice\":{chat_choice}")];
-    for key in ["model", "stream", "temperature", "top_p", "top_k", "seed", "stop",
+    for key in ["model", "stream", "temperature", "top_p", "top_k", "min_p", "seed", "stop",
         "repetition_penalty", "presence_penalty", "frequency_penalty", "chat_template_kwargs",
         "enable_thinking", "cache", "cache_salt", "ignore_eos", "session", "cancel", "priority", "fork", "draft", "mtp_depth",
         "prompt_cache_key", "include_usage_timing", "kv_checkpoint", "kv_handle", "parallel_tool_calls"] {

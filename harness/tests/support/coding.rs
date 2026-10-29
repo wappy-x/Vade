@@ -19,10 +19,19 @@ impl Fixture {
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir(&path).unwrap();
-        Self(path)
+        let fixture = Self(path);
+        std::fs::create_dir(fixture.home()).unwrap();
+        fixture
+    }
+    /// The HOME of every command: a developer's own ~/.vade/instructions.md
+    /// never reaches a test prompt.
+    pub fn home(&self) -> std::path::PathBuf {
+        let mut name = self.0.as_os_str().to_owned();
+        name.push("-home");
+        name.into()
     }
     pub fn command(&self, url: &str) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+        let mut c = crate::home::harness();
         c.args([
             "agent",
             "--state-in-project",
@@ -34,13 +43,15 @@ impl Fixture {
             "--workspace",
         ])
         .arg(&self.0)
-        .env("NO_COLOR", "1");
+        .env("NO_COLOR", "1")
+        .env("HOME", self.home());
         c
     }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+        let _ = std::fs::remove_dir_all(self.home());
     }
 }
 pub fn request(stream: &mut TcpStream) -> Value {

@@ -8,6 +8,8 @@ impl<R: Runner> Local<R> {
         text::reject_symlinks(checkpoint)?;
         for entry in fs::read_dir(checkpoint).map_err(|_| "Cannot inspect model inventory.")? {
             let path = entry.map_err(|_| "Cannot inspect model entry.")?.path();
+            // vade pull's record of the folder is not a model payload.
+            if path.file_name().is_some_and(|name| name == crate::pull::MANIFEST) { continue; }
             if path.extension().is_some_and(|ext| {
                 matches!(ext.to_str(), Some("safetensors" | "json" | "jinja" | "txt"))
             }) && !MODEL_FILES

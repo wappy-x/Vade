@@ -46,6 +46,10 @@ pub enum Command {
     Help(Option<String>),
     /// `vade --version`.
     Version,
+    /// `vade pull`, with its arguments (parsed by [`crate::pull`]).
+    Pull(Vec<String>),
+    /// `vade models`, with its arguments.
+    Models(Vec<String>),
     /// The private `__worker` helper, with its arguments.
     Worker(Vec<String>),
 }
@@ -205,6 +209,9 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
             return Err("Choose --release or source checkouts.".into());
         }
         Command::Run(options)
+    } else if matches!(command, "pull" | "models") {
+        let rest = args[1..].iter().map(|arg| (*arg).to_owned()).collect();
+        if command == "pull" { Command::Pull(rest) } else { Command::Models(rest) }
     } else if command == "status" && args.get(1) == Some(&"--json") {
         if args.len() != 2 { return Err("Use vade status --json [--dry-run]. No other status options are supported.".into()); }
         Command::StatusJson
@@ -242,6 +249,7 @@ fn known_command(command: &str) -> bool {
     matches!(
         command,
         "run" | "up" | "down" | "status" | "logs" | "chat" | "doctor" | "install" | "update" | "version" | "detect" | "launch" | "config"
+            | "pull" | "models"
     )
 }
 
@@ -251,13 +259,14 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
     let mut replicas = 0;
     let mut index = 0;
     while index < args.len() {
-        let flag = args[index];
+        // --fp8-legacy is the older spelling of --fp8; both name the same profile.
+        let flag = if args[index] == "--fp8-legacy" { "--fp8" } else { args[index] };
         if !seen.insert(flag) {
             return Err(format!("Use {flag} only once. Run vade up --help."));
         }
-        if matches!(flag, "--fp4-local" | "--fp8-legacy") {
-            if seen.contains("--fp4-local") && seen.contains("--fp8-legacy") {
-                return Err("Choose --fp4-local or --fp8-legacy. Run vade up --help.".into());
+        if matches!(flag, "--fp4-local" | "--fp8") {
+            if seen.contains("--fp4-local") && seen.contains("--fp8") {
+                return Err("Choose --fp4-local or --fp8. Run vade up --help.".into());
             }
             options.fp4_local = flag == "--fp4-local";
             index += 1;
@@ -470,7 +479,7 @@ mod tests {
     #[test]
     fn parser_records_every_supplied_launch_option() {
         for args in [
-            "--sparks 2", "--hosts a,b", "--mtp 2", "--fp4-local", "--fp8-legacy",
+            "--sparks 2", "--hosts a,b", "--mtp 2", "--fp4-local", "--fp8",
             "--context 131072", "--output 16384", "--chats 1", "--fast-prompts",
             "--memory-bytes 128000000000", "--cache-bytes 0",
         ] {
@@ -483,8 +492,13 @@ mod tests {
     #[test]
     fn defaults_and_global_flag() {
         assert_eq!(cli("").unwrap().command, Command::Menu);
-        let Command::Up(legacy) = cli("up --fp8-legacy").unwrap().command else { panic!() };
-        assert!(!legacy.fp4_local); assert_eq!((legacy.context, legacy.output), (131072, 65536));
+        let Command::Up(fp8) = cli("up --fp8").unwrap().command else { panic!() };
+        assert!(!fp8.fp4_local); assert_eq!((fp8.context, fp8.output), (131072, 65536));
+        // The older spelling selects the same FP8 profile and records the same option.
+        for args in ["up --fp8-legacy", "launch --fp8-legacy"] {
+            let (Command::Up(older) | Command::Launch(older)) = cli(args).unwrap().command else { panic!("{args}") };
+            assert_eq!(older, fp8, "{args}");
+        }
         let Command::Launch(local) = cli("launch --context 65536 --output 16384").unwrap().command else { panic!() };
         assert!(local.fp4_local && local.supplied_options.contains("--context")); assert_eq!((local.context, local.output), (65536, 16384));
         assert_eq!(cli("--dry-run up --mtp 3 --dry-run").unwrap(), Cli {
@@ -494,12 +508,29 @@ mod tests {
         assert!(cli("launch --context").unwrap_err().contains("vade launch --help"));
     }
     #[test]
+    fn fp8_default_depth_is_two_without_mtp() {
+        // MTP overrides the default depth, so check the default in a child process without MTP.
+        const CASE: &str = "VADE_TEST_FP8_DEPTH";
+        if std::env::var_os(CASE).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "cli::tests::fp8_default_depth_is_two_without_mtp", "--nocapture"])
+                .env(CASE, "1").env_remove("MTP").output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success() && stdout.contains("1 passed"), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        for args in ["up --fp8", "up --fp8-legacy"] {
+            let Command::Up(fp8) = cli(args).unwrap().command else { panic!("{args}") };
+            assert_eq!((fp8.mtp, fp8.mtp_explicit), (2, false), "{args}");
+        }
+    }
+    #[test]
     fn bad_options_are_actionable() {
         for args in [
             "up --hosts a,a", "up --hosts a,", "up --sparks 2 --hosts a,b", "up --mtp 4",
             "up --context 4095", "up --output 262145", "up --mtp", "up --mtp 1 --mtp 2", "down --force", "unknown",
-            "up --output 1023", "up --context 4096 --output 8192", "up --fp4-local --fp8-legacy",
-            "up --replicas 1", "up --replicas 17", "up --replicas 2 --sparks 2", "up --replicas 3 --hosts a,b", "up --fp8-legacy --replicas 2",
+            "up --output 1023", "up --context 4096 --output 8192", "up --fp4-local --fp8", "up --fp4-local --fp8-legacy", "up --fp8 --fp8-legacy",
+            "up --replicas 1", "up --replicas 17", "up --replicas 2 --sparks 2", "up --replicas 3 --hosts a,b", "up --fp8 --replicas 2",
         ] { assert!(cli(args).is_err(), "{args}"); }
         assert_eq!(cli("up --hosts a,b --chats 3 --fast-prompts").unwrap().command, Command::Up(UpOptions {
             supplied_options: ["--hosts".into(), "--chats".into(), "--fast-prompts".into()].into(),

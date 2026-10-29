@@ -2,10 +2,11 @@
 //! shapes, token-id comparison, draft receipt matching and card output.
 //! The CLI test runs the real binary so the shared credential path in
 //! `main` (`auth::configure` before dispatch) is covered, not only `run()`.
+#[path = "support/home.rs"]
+mod home;
 use std::{
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
-    process::Command,
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -290,7 +291,7 @@ fn quality_card_cli_sends_the_configured_api_key() {
     let json_path = root.join("receipt.json");
     let key = mock_api_key();
     std::fs::write(&key_path, format!("{key}\n")).expect("write key");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_vade-harness"))
+    let mut child = home::harness()
         .args([
             "quality-card",
             "--endpoint",
@@ -417,7 +418,7 @@ fn quality_card_cli_retry_works_after_a_blocked_card_file() {
     let json_path = root.join("receipt.json");
     let card_path = root.join("card.txt");
     std::fs::write(&card_path, "already here\n").expect("seed card file");
-    let blocked = Command::new(env!("CARGO_BIN_EXE_vade-harness"))
+    let blocked = home::harness()
         .args([
             "quality-card",
             "--endpoint",
@@ -442,7 +443,7 @@ fn quality_card_cli_retry_works_after_a_blocked_card_file() {
     let endpoint = format!("http://{}", listener.local_addr().expect("addr"));
     let server = thread::spawn(move || serve(listener, 36, Mock::default(), None));
     let retry_card = root.join("retry-card.txt");
-    let output = Command::new(env!("CARGO_BIN_EXE_vade-harness"))
+    let output = home::harness()
         .args([
             "quality-card",
             "--endpoint",

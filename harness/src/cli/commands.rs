@@ -34,12 +34,15 @@ pub(crate) const COMMANDS: &[Command] = &[
     Command::new("read", "PATH", "Preview a local UTF-8 file.", "At most 64 KiB inside the workspace. Preview text is not added to model context.", "Workspace", "all", true),
     Command::new("children", "[on|off|cancel ID|all]", "Inspect or cancel native children.", "Enable before the first prompt. Child scope and approvals remain bounded by host grants.", "Workspace", "agent", false),
     Command::new("output", "ID OFFSET LENGTH", "Inspect captured tool output.", "Local UTF-8 byte range; length 1–4096. Wait for worker cleanup.", "Workspace", "agent", false),
+    Command::new("instructions", "", "Show which project instruction files loaded.", "Lists AGENTS.md, CLAUDE.md and .vade/instructions.md files from the git root down to the workspace, and ~/.vade/instructions.md, in prompt order. Vade reads them again before a turn when they change. --no-instructions turns them off.", "Workspace", "answers", false),
     Command::new("project", "", "Inspect frozen project rules and catalog.", "Rules and catalog are frozen per native session; no scripts run.", "Workspace", "agent", false),
     Command::new("project-rules", "", "Read exact frozen rules.", "Shows the native session rules snapshot locally.", "Workspace", "agent", false),
     Command::new("skill", "NAME", "Inspect a catalog skill body.", "Loads from the frozen catalog locally; no scripts run.", "Workspace", "agent", false),
     Command::new("map", "[PATH]", "Inspect bounded repository names.", "On-demand manifest inside the selected workspace.", "Workspace", "agent", false),
     Command::new("symbols", "PATH", "Inspect lexical symbol hints.", "Bounded local inspection; hints are not a compiler index.", "Workspace", "agent", false),
     Command::new("new", "", "Start a fresh conversation.", "Wait for cleanup. Native mode keeps the old journal; delegated mode starts a fresh external session.", "Sessions", "all", true),
+    Command::new("clear", "", "Clear the conversation.", "Alias for /new. Keeps old native journals and waits for worker cleanup.", "Sessions", "all", false),
+    Command::new("memory", "", "Show memory support.", "Saved memory is not available in this build. Use project instructions for saved rules.", "Context", "all", false),
     Command::new("quit", "", "Exit the harness.", "Active native or delegated work is cancelled and cleaned up before exit. Alias: /exit.", "Sessions", "all", true),
     Command::new("exit", "", "Exit the harness.", "Alias for /quit.", "Sessions", "all", false),
     Command::new("undo", "", "Remove the last chat exchange.", "Direct/demo only; tool and delegated histories cannot be spliced.", "Sessions", "chat", false),
@@ -50,8 +53,8 @@ pub(crate) const COMMANDS: &[Command] = &[
     Command::new("switch", "NAME", "Switch to a private native session.", "Alias for /resume.", "Sessions", "agent", false),
     Command::new("fork", "NAME [TASK_LABEL]", "Fork the journal and select it.", "Copies transcript/artifacts and shares the workspace. No inference or file restore.", "Sessions", "agent", false),
     Command::new("branch", "", "Inspect ancestry and checkpoint changes.", "Local inspection after worker cleanup.", "Sessions", "agent", false),
-    Command::new("compact", "[KEEP_TURNS SUMMARY]", "Compact older context.", "Without arguments keeps the last two turns and replaces older results with bounded excerpts, as auto-compaction does. KEEP_TURNS SUMMARY supplies your own summary instead. Lossy in model context; the journal keeps originals.", "Context", "agent", false),
-    Command::new("compact-preview", "[KEEP_TURNS SUMMARY]", "Preview context compaction.", "Previews the same operation without applying it.", "Context", "agent", false),
+    Command::new("compact", "[KEEP_TURNS SUMMARY]", "Compact older context.", "Without arguments the model summarizes older turns into one state block and the last two turns stay verbatim, as auto-compaction does; bounded local excerpts are the fallback. KEEP_TURNS SUMMARY supplies your own summary instead. Lossy in model context; the journal keeps originals.", "Context", "agent", false),
+    Command::new("compact-preview", "[KEEP_TURNS SUMMARY]", "Preview context compaction.", "Previews the local excerpt plan, or your own summary, without applying it.", "Context", "agent", false),
     Command::new("compaction", "", "Inspect the latest compaction.", "Shows source records, summary and KV impact.", "Context", "agent", false),
     Command::new("journal", "RECORD OFFSET LENGTH", "Inspect raw journal bytes.", "Local inspection after worker cleanup.", "Context", "agent", false),
 ];
@@ -91,10 +94,7 @@ impl App {
                     return self.children_command(text.strip_prefix("/children").unwrap().trim());
                 }
                 text if text == "/help" || text.starts_with("/help ") => {
-                    return self.terminal.line(&help::command_help(
-                        text.strip_prefix("/help").unwrap().trim(),
-                        self.config.mode,
-                    ));
+                    return self.command_help(text.strip_prefix("/help").unwrap().trim());
                 }
                 "/status" => return self.status(),
                 text if text == "/copy" || text.starts_with("/copy ") => {
@@ -195,9 +195,9 @@ impl App {
                     return self.cancel();
                 }
                 "/help" => {
-                    self.terminal
-                        .line(&help::command_help(rest, self.config.mode))?;
+                    self.command_help(rest)?;
                 }
+                "/memory" if rest.is_empty() => self.notice("Saved memory is not available in this build. Use /instructions to inspect saved project rules.")?,
                 "/status" if rest.is_empty() => self.status()?,
                 "/children" => self.children_command(rest)?,
                 "/sessions" if rest.is_empty() && self.config.mode == Mode::Agent => {
@@ -276,6 +276,13 @@ impl App {
                         Err(e) => self.notice(&format!("Branch unavailable: {e}"))?,
                     }
                 }
+                "/instructions" if rest.is_empty() && matches!(self.config.mode, Mode::Direct | Mode::Agent) => {
+                    if let Some(line) = self.instructions.refresh() {
+                        self.notice(&line)?;
+                    }
+                    let text = self.instructions.inspect();
+                    self.terminal.line(text.trim_end())?;
+                }
                 "/project" | "/project-rules" | "/skill" | "/map" | "/symbols"
                     if self.config.mode == Mode::Agent =>
                 {
@@ -333,6 +340,9 @@ impl App {
                         self.notice("These numbers are from the previous request; the current one reports when it finishes.")?;
                     }
                     self.terminal.line(&self.context.describe())?;
+                    for line in self.budget_lines() {
+                        self.terminal.line(&line)?;
+                    }
                     if self.config.children {
                         self.notice(&child_agents::ui::context(&self.children.snapshots()))?;
                     }
@@ -423,6 +433,12 @@ impl App {
                         output_reserve_tokens: self.config.output_reserve(&self.context),
                         ..Limits::default()
                     };
+                    if rest.is_empty() && command == "/compact" {
+                        // The model writes the summary on the count worker;
+                        // local excerpts are its fallback.
+                        let limits = Limits { max_context_tokens: self.config.context_budget(&self.context), max_run_time: self.config.max_run_time, ..limits };
+                        return self.start_rollover(limits);
+                    }
                     let plan = if rest.is_empty() {
                         // Same bounded-excerpt plan as automatic compaction;
                         // the user never has to write the summary.
@@ -461,7 +477,7 @@ impl App {
                         self.notice("Context and cache numbers are not available in this mode.")?;
                     }
                 }
-                "/new" if rest.is_empty() => {
+                "/new" | "/clear" if rest.is_empty() => {
                     if self.pending.is_some() {
                         return self.notice("Wait for request cleanup before /new.");
                     }
@@ -473,6 +489,9 @@ impl App {
                     if let Some(http) = self.http.as_mut() {
                         http.reset_context();
                     }
+                    if let Some(line) = self.instructions.refresh() {
+                        self.notice(&line)?;
+                    }
                     if self.config.mode == Mode::Agent {
                         let build_session = Arc::new(vade_harness::shell::BuildSession::new(
                             self.config.shell_toolchain.as_deref(),
@@ -481,6 +500,7 @@ impl App {
                             self.config.model.as_deref().unwrap(),
                             &self.workspace,
                             &self.config.rules_scopes,
+                            self.instructions.section(),
                             self.config.children,
                             &self.config.child_grants,
                             Limits { max_run_time: self.config.max_run_time, ..Limits::default() },
@@ -494,6 +514,7 @@ impl App {
                         self.native = Some(conversation);
                         self.auto_compaction =
                             Arc::new(Mutex::new(context::AutoCompaction::default()));
+                        self.budget = Default::default();
                         self.native_completed = 0;
                         self.native_report = None;
                         self.native_model = None;
@@ -565,12 +586,55 @@ impl App {
                     self.multiline_lines = 0;
                     self.notice("Multiline input · /end sends · /cancel discards")?;
                 }
-                _ => self.notice(&help::unknown_command(command, self.config.mode))?,
+                _ => {
+                    if help::lookup(command).is_some() { return self.notice(&help::unknown_command(command, self.config.mode)); }
+                    match self.user_commands() {
+                        Ok(commands) => {
+                            if let Some(template) = commands.iter().find(|c| c.name == command[1..]) {
+                                return match template.expand(raw_rest) {
+                                    Ok(prompt) => self.start(prompt),
+                                    Err(error) => self.notice(&error.to_string()),
+                                };
+                            }
+                            self.notice(&format!("{}\nAvailable commands: {}", help::unknown_command(command, self.config.mode), self.command_names(&commands)))?;
+                        }
+                        Err(error) => self.notice(&format!("Cannot read user commands: {error}"))?,
+                    }
+                }
             }
             self.dirty = true;
             return Ok(());
         }
         self.start_input(line)
+    }
+    fn user_commands(&self) -> io::Result<Vec<vade_harness::slash_commands::Template>> {
+        let home = vade_harness::slash_commands::home(self.config.state.as_ref());
+        // Unit fixtures never read the developer's command directory.
+        let home = home.filter(|_| !cfg!(test) || matches!(self.config.state, Some(vade_harness::tools::StateLocation::Home(_))));
+        vade_harness::slash_commands::load(&self.workspace, home.as_deref())
+    }
+    fn command_names(&self, commands: &[vade_harness::slash_commands::Template]) -> String {
+        let mut names: Vec<_> = COMMANDS.iter().filter(|c| c.available(self.config.mode)).map(|c| format!("/{}", c.name))
+            .chain(commands.iter().filter(|c| help::lookup(&c.name).is_none()).map(|c| format!("/{}", c.name))).collect();
+        names.sort();
+        names.join(", ")
+    }
+    fn command_help(&mut self, query: &str) -> io::Result<()> {
+        let commands = match self.user_commands() {
+            Ok(commands) => commands,
+            Err(error) => { self.notice(&format!("Cannot read user commands: {error}"))?; Vec::new() }
+        };
+        let name = query.trim_start_matches('/');
+        if !query.is_empty() && query != "all" && help::lookup(name).is_none()
+            && let Some(command) = commands.iter().find(|c| c.name == name)
+        { return self.terminal.line(&format!("/{} [ARGUMENTS]\n{}", command.name, command.description)); }
+        self.terminal.line(&help::command_help(query, self.config.mode))?;
+        if query.is_empty() || query == "all" {
+            for command in commands.iter().filter(|c| help::lookup(&c.name).is_none()) {
+                self.terminal.line(&format!("  /{} [ARGUMENTS]  {}", command.name, command.description))?;
+            }
+        }
+        Ok(())
     }
     fn copy_answer(&mut self, rest: &str) -> io::Result<()> {
         let code = rest == "code";
@@ -735,6 +799,7 @@ impl App {
                     self.config.model.as_deref().unwrap(),
                     &self.workspace,
                     &self.config.rules_scopes,
+                    self.instructions.section(),
                     enabled,
                     &self.config.child_grants,
                     Limits { max_run_time: self.config.max_run_time, ..Limits::default() },

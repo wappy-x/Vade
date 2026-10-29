@@ -135,8 +135,9 @@ Use INSTALL's [model download and manifest check](../../INSTALL.md#step-3-get-th
 to put the checkpoint in `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local`. The
 engine serves it under the folder's name in lower case,
 `qwen3.8-flash-next-fp4-local`.
-The local launcher serves FP4-Local only; for older models, see
-[INSTALL's legacy models](../../INSTALL.md#legacy-models).
+The local launcher serves FP4-Local only. For FP8 on 2, 4 or 6 Sparks, see
+[INSTALL's FP8 section](../../INSTALL.md#fp8-on-2-4-or-6-sparks); for
+older models, see [INSTALL's legacy models](../../INSTALL.md#legacy-models).
 
 Vade picks the checkpoint in this order:
 
@@ -205,9 +206,15 @@ change:
 - **`--context`** must fit the checkpoint and the measured memory. If the
   engine refuses the size you asked for, you get an error.
 - **`--output`** can go up to 16384 tokens if context and memory allow.
-- **`--mtp N`** sets how many tokens the engine drafts ahead (0 turns drafting
-  off, 3 is the most). Watch out: an `MTP` variable left in your shell also
-  changes drafting, even on a bare `vade up`, unless you pass `--mtp`.
+- **`--mtp N`** accepts 0 through 3 and sets the request's default draft depth.
+  Zero turns drafting off. Depths 1 and 2 keep those limits. On one Spark,
+  omitted depth or depth 3 lets a chat running alone use adaptive drafting.
+  `VADE_MTP_ADAPT` is on by default. It can draft up to the resident ceiling,
+  which defaults to 7. See the [flag parser](../../cli/src/cli.rs),
+  [depth selection](../../engine/crates/serve/src/flashnext.rs) and
+  [resident settings](../../engine/crates/engine/src/flash/draft_stack.rs).
+  An `MTP` variable in your shell also changes drafting on a bare `vade up`,
+  unless you pass `--mtp`.
 - **`--memory-bytes`** sets a memory budget; the engine's memory check still
   applies.
 

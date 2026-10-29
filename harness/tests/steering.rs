@@ -1,7 +1,9 @@
 //! Interactive steering uses the real CLI and cancellation HTTP route.
+#[path = "support/home.rs"]
+mod home;
 #[path = "support/cli.rs"]
 mod cli;
-use std::{io::{BufRead, BufReader, Read, Write}, net::{TcpListener, TcpStream}, process::Command,
+use std::{io::{BufRead, BufReader, Read, Write}, net::{TcpListener, TcpStream},
     sync::mpsc::{self, Receiver}, thread, time::Duration};
 use vade_harness::json;
 
@@ -102,7 +104,7 @@ impl Mock {
         }
     }
     fn cli(&self) -> cli::Cli {
-        cli::Cli::start(Command::new(env!("CARGO_BIN_EXE_vade-harness"))
+        cli::Cli::start(home::harness()
             .args(["direct", "--state-in-project", "--endpoint", &self.endpoint, "--model", "mock", "--plain"]))
     }
     /// Stop accepting new connections, as if the server died; generation

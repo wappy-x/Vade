@@ -1,13 +1,32 @@
 # Local CI
 
-CI currently runs locally. GitHub Actions can refuse to start jobs because of
-account billing or spending limits. A refused run has no build or test result.
-The README therefore uses a plain local CI line. It does not claim that a
-GitHub build passed. Account settings are outside this repository.
+Tests run locally before every merge. Use the public commands below.
+Vade does not pay for GitHub Actions minutes. GitHub Actions can refuse to
+start jobs because of account billing or spending limits. A refused run has
+no build or test result.
 
-The [workflow](../.github/workflows/ci.yml) defines the GitHub host checks.
-It also builds GPU kernels without a GPU. This page explains the local checks
-and the commands a contributor can run without the private CI script.
+The [CI workflow](../.github/workflows/ci.yml) runs only when a maintainer
+starts it by hand with `workflow_dispatch`. It defines the GitHub host checks
+and builds GPU kernels without a GPU. The
+[release workflow](../.github/workflows/release.yml) also runs only by hand.
+Select an existing tag with the `v` prefix when you start a release run.
+The release job rejects other refs before checkout or toolchain setup.
+Pushes, pull requests, merge queues and schedules do not start these workflows.
+
+This page explains the local checks and the commands a contributor can run
+without the private CI script. There is no `scripts/ci-local.sh` in this
+repository.
+
+## What local checks cover and how long they take
+
+The public commands check and test the CLI, harness, engine, benchmark tools
+and repository tools. They also check documentation links, run doctests,
+build CLI and harness Rustdoc, and check Linux targets. Engine host checks
+need a kernel build first. These checks do not require a Spark.
+
+The repository does not publish a measured time for a full local CI run.
+Run time depends on the host and cached build files. The first setup also
+needs downloads. Record the elapsed time with the command logs for your run.
 
 ## What the maintainers' local CI runs
 
@@ -85,6 +104,15 @@ cargo +1.99.0 test --offline --locked --all-targets --manifest-path engine/tools
 cargo +1.99.0 test --offline --locked --doc --manifest-path engine/tools/bench/Cargo.toml
 ```
 
+The release ref check runs offline. It tests the release workflow's guard
+with branch refs and tag refs. From the repository root, run:
+
+```sh
+mkdir -p .local
+rustc +1.99.0 -D warnings --test .github/workflows/release-ref-tests.rs -o .local/release-ref-tests
+.local/release-ref-tests
+```
+
 For engine host checks, first build and stamp the kernels on every host OS.
 On Linux without a GPU, prepare the link-only CUDA stub too. Use the commands
 in [AGENTS.md](../AGENTS.md#engine-and-full-ci-checks) and
@@ -100,5 +128,5 @@ cargo +1.99.0 test --offline --locked --doc --workspace --exclude spark-rust-ker
 ```
 
 Report the commit ID, commands, pass and fail totals, ignored tests and skips.
-Attach the logs to the change review. A local pass does not make the GitHub
-badge green. A new GitHub run must finish before anyone can claim that result.
+Attach the logs to the change review. A local pass is evidence for the local
+checks only. A manual GitHub run must finish before anyone can claim its result.

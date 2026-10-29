@@ -1,5 +1,7 @@
 //! Actual CLI/raw-terminal lifecycle checks against local scripted sockets only.
 #![cfg(target_os = "macos")]
+#[path = "support/home.rs"]
+mod home;
 #[path = "support/cli.rs"]
 mod cli;
 #[path = "support/raw_ui.rs"]
@@ -7,7 +9,7 @@ mod raw_ui;
 use raw_ui::Ui;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -328,7 +330,7 @@ fn cli_reuses_native_and_direct_clients_across_user_prompts() {
                 write!(reader.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n\r\n{response}", response.len()).unwrap();
             }
         });
-        let mut child = Command::new(env!("CARGO_BIN_EXE_vade-harness"))
+        let mut child = home::harness()
             .args([
                 mode,
                 "--state-in-project",
@@ -393,7 +395,7 @@ fn direct_budget_requires_explicit_new_before_prefix_rewrite() {
             write!(reader.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{response}", response.len()).unwrap();
         }
     });
-    let mut command = Command::new(env!("CARGO_BIN_EXE_vade-harness"));
+    let mut command = home::harness();
     command.args([
         "direct",
         "--state-in-project",

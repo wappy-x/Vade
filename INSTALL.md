@@ -6,6 +6,11 @@ build main, including the Unreleased changes in the
 [changelog](CHANGELOG.md). The prebuilt bundle contains the older v0.1.0
 release. You start with one Spark and no other computer.
 
+Vade also supports the FP8 checkpoint, **Qwen/Qwen3.8-Flash-Next-FP8**, on
+2, 4 or 6 linked Sparks. Its weights do not fit on one Spark. It uses
+[Route B](#route-b-from-a-controller) and its own config, and it starts with
+`vade up --fp8`. See [Install FP8 on 2, 4 or 6 Sparks](docs/install-fp8.md).
+
 **How long it takes.** We timed the source steps of this page on a DGX Spark
 with no Rust, no checkout and no Vade files. The run was on 2026-10-28 at
 main `285fa8a`. The model was already on the Spark. The times come from the
@@ -977,10 +982,12 @@ There are two ways to choose the Sparks. Use one or the other, not both:
 - `vade up --hosts spark-a,spark-b,spark-c` picks named machines in cable
   order.
 
-Two Sparks run the tensor split, the only two-Spark path: both Sparks work on
-every token, each on half of the experts and of most projections. With three or
-more Sparks, Vade uses the layer chain, which spreads the layers across all the
-Sparks you chose.
+With FP4-Local, two Sparks run the tensor split, the only two-Spark path: both
+Sparks work on every token, each on half of the experts and of most
+projections. With three or more Sparks, Vade uses the layer chain, which
+spreads the layers across all the Sparks you chose. FP8 runs tensor parallel on
+two and on four Sparks instead; see
+[FP8 on 2, 4 or 6 Sparks](#fp8-on-2-4-or-6-sparks).
 
 List both end addresses for every cable between neighboring Sparks. You don't
 need a cable that closes the chain into a ring.
@@ -1071,7 +1078,7 @@ a refusal is reported and the context is not lowered.
 | `--context` | How many tokens the prompt and reply can use together. On the Spark, the value must fit the checkpoint's limit and pass the engine's memory check. If the engine refuses a value you set, you get an error; Vade does not lower it. Defaults are in the table above. |
 | `--output` | The most tokens a reply can use. It can't be larger than the context or the FP4-Local limit of 16384. |
 | `--mtp` | Asks for a specific drafting depth. `0` turns drafting off. It overrides the `MTP` variable. A local launch saves the selected drafting depth for later starts. To restore engine-selected drafting, stop the engine, remove the `mtp=` line from `${VADE_HOME:-$HOME/.vade}/config`, unset `MTP`, and restart without `--mtp`. A controller uses the engine default when neither the flag nor `MTP` is set. |
-| `--chats` | Works only from a controller; on the Spark itself it is refused. Vade records it and passes it on, but FP4-Local sets the chat count from context and memory, so it changes neither the context nor how many chats run at once. (With legacy FP8, `--chats N` reserves room for N chats.) |
+| `--chats` | Works only from a controller; on the Spark itself it is refused. Vade records it and passes it on, but FP4-Local sets the chat count from context and memory, so it changes neither the context nor how many chats run at once. (With FP8, `--chats N` reserves room for N chats.) |
 | `--memory-bytes` | Sets a memory budget. The engine's memory check and the memory actually free still apply. |
 | `--cache-bytes 0` | Turns the prefix cache off for a local install. Any local size above zero is refused. |
 
@@ -1247,11 +1254,19 @@ Leave chat, keep the same `VADE_HOME` / `VADE_CONFIG`, and run `vade down`.
 It stops the engine this installation started and, on Route B, its SSH tunnel.
 Run `vade status` to confirm it is down.
 
+## FP8 on 2, 4 or 6 Sparks
+
+The FP8 checkpoint is a supported route. It runs on 2, 4 or 6 linked Sparks,
+from a controller, with its own config (`cli/examples/vade.conf`). Start it
+with `vade up --fp8` or `vade up --fp8 --sparks 4`. The older spelling
+`--fp8-legacy` still works. Follow
+[Install FP8 on 2, 4 or 6 Sparks](docs/install-fp8.md). Do not mix FP8 and
+FP4-Local weights, model IDs or defaults.
+
 ## Legacy models
 
-The older Flash-Next FP8 profile and the separate Qwen3-8B catalog use
-different checkpoints and launch differently. Start with
-[legacy installation](docs/install-legacy-fp8.md) and the
-[CLI reference](cli/README.md). The Qwen3-8B source recipe is in the
-[legacy one-Spark quickstart](docs/quickstart-one-spark.md). Do not mix those
-weights, model IDs or defaults with this FP4-Local route.
+The separate Qwen3-8B catalog uses a different checkpoint and launches
+differently. Its source recipe is in the
+[legacy one-Spark quickstart](docs/quickstart-one-spark.md) and the
+[CLI reference](cli/README.md). Do not mix its weights, model IDs or defaults
+with the Flash-Next routes.
