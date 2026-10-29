@@ -99,8 +99,8 @@ impl<'m> TpRdma<'m> {
     }
 }
 impl TpDoorbell for TpRdma<'_> {
-    /// Two chained RC writes: the payload (unsignalled), then the staged sequence word
-    /// (signalled, completion id `id`). One RC queue pair executes them in order.
+    /// Two chained RC writes: the payload (unsignaled), then the staged sequence word
+    /// (signaled, completion id `id`). One RC queue pair executes them in order.
     fn post(&mut self, from: Range<usize>, to: usize, flag: usize, flag_to: usize, id: u64) -> Result<(), String> {
         let (address, key) = self.peer.ok_or("tensor split write wire not ready")?;
         let [payload, seq] = chain(self.words.len(), from, to, flag, flag_to)?;

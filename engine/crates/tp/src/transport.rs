@@ -503,7 +503,7 @@ impl Ring {
         }
         let _=(base,block);Ok(())
     }
-    /// Prefix writes are unsignalled; only the final tail carries a completion.
+    /// Prefix writes are unsignaled; only the final tail carries a completion.
     pub unsafe fn write_peer_prefix(&mut self,base:*mut f32,block:usize,prefix:usize)->Result<()> {
         #[cfg(target_os="linux")]
         if self.link.is_pair()&&self.uses_rdma() {

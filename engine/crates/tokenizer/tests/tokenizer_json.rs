@@ -1,4 +1,4 @@
-//! Public loader and codec behaviour through a real-format tokenizer.json:
+//! Public loader and codec behavior through a real-format tokenizer.json:
 //! a byte-level BPE with the hybrid split pattern, four merges and the three
 //! hybrid control tokens. No checkpoint is needed.
 use engine_tokenizer::{Limits, Tokenizer};

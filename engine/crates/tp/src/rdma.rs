@@ -109,7 +109,7 @@ impl Endpoint {
         let post:unsafe extern "C" fn(*mut Qp,*mut Recv,*mut *mut Recv)->i32=std::mem::transmute((*self.context).ops[26]);
         code(post(self.qp,&mut wr,&mut bad),"post write completion")?;self.pending+=1;Ok(())
     }}
-    /// An unsignalled prefix may be posted while the GPU finishes the tail.
+    /// An unsignaled prefix may be posted while the GPU finishes the tail.
     /// The final write generates one CQ completion at each endpoint.
     pub unsafe fn write(&mut self,base:*mut u8,bytes:usize,range:Range<usize>,destination:usize,last:bool)->Result<()> {
         let peer=self.peers.iter().find(|p|p.base==base as usize&&p.bytes==bytes).ok_or("unprepared mapped write")?;

@@ -1,4 +1,4 @@
-//! Public fabric behaviour without a peer: link layout, the profiling wrapper
+//! Public fabric behavior without a peer: link layout, the profiling wrapper
 //! around an Exchange, and the fixed size of a collective profile.
 use engine_fabric::{exchange::{Exchange, ExchangeStats, Profiled}, layout::PeerLayout,
     profile::{Bytes, Kind, Parts, Path, Profile}};

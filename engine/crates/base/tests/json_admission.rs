@@ -1,4 +1,4 @@
-//! Public behaviour of the bounded JSON reader and the admission diagnostics.
+//! Public behavior of the bounded JSON reader and the admission diagnostics.
 use engine_base::{admission, json::{self, Limits, Value}};
 
 fn parse(text: &str) -> Value { json::parse(text.as_bytes(), Limits::default()).unwrap() }

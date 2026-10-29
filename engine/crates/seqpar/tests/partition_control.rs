@@ -1,4 +1,4 @@
-//! Public sequence-parallel behaviour that needs no GPU: prompt partitions and
+//! Public sequence-parallel behavior that needs no GPU: prompt partitions and
 //! the challenge-response rank admission, run over loopback TCP.
 use spark_seqpar::{Partition, control};
 use std::{io::Write, net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream}, thread, time::{Duration, Instant}};

@@ -171,7 +171,7 @@ impl Endpoint {
         unsafe{let post:unsafe extern "C" fn(*mut Qp,*mut Recv,*mut *mut Recv)->i32=std::mem::transmute((*self.context).ops[26]);
             let mut bad=ptr::null_mut();code(post(self.qp,&mut wr,&mut bad),"post mailbox receive")}
     }
-    /// One signalled send from the mailbox send slot (completion id 0).
+    /// One signaled send from the mailbox send slot (completion id 0).
     pub unsafe fn post_slot_send(&mut self,base:*mut u8,bytes:usize)->Result<()> {
         let key=self.key(base,bytes)?;
         let mut sg=Sge{address:base as u64,length:bytes as u32,key};
