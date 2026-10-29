@@ -190,7 +190,7 @@ fn run_main(mut args: Vec<String>) {
     // owner-launch selections (dry runs never read the file).
     if matches!(
         parsed.command,
-        cli::Command::Run(_) | cli::Command::Chat | cli::Command::Doctor
+        cli::Command::Run(_) | cli::Command::Chat(_) | cli::Command::Doctor
     ) {
         auth::validate(parsed.dry_run).unwrap_or_else(|error| fail(&error));
     }

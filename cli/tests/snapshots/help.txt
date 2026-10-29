@@ -10,34 +10,35 @@ Examples:
 Usage: vade <COMMAND> [OPTIONS]
 
 Start and stop:
-  launch   Install if missing, start on this Spark, then chat
-  up       Start without chat (this Spark, or Sparks from a controller)
-  down     Stop what vade started
+  launch    Install if missing, start on this Spark, then chat
+  up        Start without chat (this Spark, or Sparks from a controller)
+  down      Stop what vade started
 
 Use:
-  chat     Chat with the running engine
+  chat      Chat with the running engine
+  sessions  List, export or delete saved chat sessions
 
 Models:
-  pull     Download a model from Hugging Face, with resume and checks
-  models   List the models on this machine and what can serve them
+  pull      Download a model from Hugging Face, with resume and checks
+  models    List the models on this machine and what can serve them
 
 Look:
-  status   Show what is running and whether it is healthy
-  config   Show which setup is selected and what it holds
-  doctor   Check the setup: one line per check, then PASS or FAIL
-  detect   Show this Spark's machine, memory, disk, driver and model
-  logs     Show recent engine logs
+  status    Show what is running and whether it is healthy
+  config    Show which setup is selected and what it holds
+  doctor    Check the setup: one line per check, then PASS or FAIL
+  detect    Show this Spark's machine, memory, disk, driver and model
+  logs      Show recent engine logs
 
 Prove:
-  verify   Check exact token IDs across runs, drafting ON and OFF
-  bench    Measure a running server from this client
-  test     Run the build, determinism and long-context gate checks
+  verify    Check exact token IDs across runs, drafting ON and OFF
+  bench     Measure a running server from this client
+  test      Run the build, determinism and long-context gate checks
 
 Maintain:
-  install  Save local defaults and install the engine and chat
-  update   Refresh the installed engine and chat
-  run      Run the separate legacy Qwen3-8B BF16 workflow
-  version  Print the CLI version
+  install   Save local defaults and install the engine and chat
+  update    Refresh the installed engine and chat
+  run       Run the separate legacy Qwen3-8B BF16 workflow
+  version   Print the CLI version
 
 Options:
   --json               JSON output for status, doctor, config, detect, version

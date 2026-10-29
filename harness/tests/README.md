@@ -16,6 +16,7 @@ Run them all with `cargo test --offline`.
 | `gateway_cli.rs` | The gateway across repeated upstreams. |
 | `kv_mock.rs` | The engine checkpoint wire contract, with a stateful mock. |
 | `route_a_check.rs` | `scripts/route-a-check.sh` against command mocks: the private home, endpoint and CLI each step uses, model-path checks, launch and stop failures, concurrent runs and interrupts. |
+| `sessions_cli.rs` | Saved sessions: a named chat, the session list, a resume by name, the Markdown export and delete. |
 | `setup_doctor.rs` | Client setup and the endpoint doctor. |
 | `ui_mock.rs` | The terminal interface's lifecycle, against scripted sockets. |
 | `workload_mock.rs` | The workload driver and its reports, against loopback fixtures. |

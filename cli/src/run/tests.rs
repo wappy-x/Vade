@@ -190,7 +190,11 @@
         assert_eq!(request["arg.3"], "127.0.0.1:8080"); assert_eq!(request["arg.5"], "plain");
         f.app.runner.calls.clear(); f.launch().unwrap(); assert!(!f.app.runner.calls.iter().any(|e| e.label == "local start" || e.label == "model download"));
         assert!(f.app.runner.calls.iter().filter(|e| e.label == "payload SHA256").count() >= MODEL_FILES.len());
-        for command in [Command::Status, Command::Doctor, Command::Chat, Command::Down, Command::Down] { f.app.execute(command).unwrap(); }
+        // The qwen3-8b chat is direct text chat: it saves no transcript, so it refuses --resume and --name before any call.
+        for options in [crate::cli::ChatOptions { resume: Some("last".into()), name: None }, crate::cli::ChatOptions { resume: None, name: Some("n".into()) }] {
+            f.app.runner.calls.clear(); assert!(f.app.execute(Command::Chat(options)).unwrap_err().contains("saves no transcript")); assert!(f.app.runner.calls.is_empty());
+        }
+        for command in [Command::Status, Command::Doctor, Command::Chat(Default::default()), Command::Down, Command::Down] { f.app.execute(command).unwrap(); }
         assert!(f.app.record().unwrap().is_none()); f.launch().unwrap(); assert_eq!(f.app.record().unwrap().unwrap()["generation"], record["generation"]);
     }
     #[test] fn interrupted_download_and_doctor_resume_without_duplicate_start() {

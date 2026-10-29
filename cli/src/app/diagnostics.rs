@@ -615,7 +615,7 @@ fi"#, host = HOST_TOOLCHAIN.replace('.', "[.]")) } else { String::new() },
             text::private_dir(&self.config.stage_dir)?;
             text::reject_symlinks(&self.config.stage_dir.join("vade-harness"))?;
             Some(Manifest::load(&self.config.build_manifest)?.harness_sha256
-                .ok_or("The staged harness has no saved hash. Run vade install before chat or doctor.")?)
+                .ok_or("The staged harness has no saved hash. Run vade install before chat, sessions or doctor.")?)
         };
         let output = self.checked(
             Exec::new(
@@ -631,7 +631,7 @@ fi"#, host = HOST_TOOLCHAIN.replace('.', "[.]")) } else { String::new() },
                         .into_owned(),
                 ],
             ),
-            "Cannot check the staged harness. Run vade install before chat or doctor.",
+            "Cannot check the staged harness. Run vade install before chat, sessions or doctor.",
         )?;
         if let Some(expected) = expected {
             let hashes = output
@@ -640,7 +640,7 @@ fi"#, host = HOST_TOOLCHAIN.replace('.', "[.]")) } else { String::new() },
                 .filter_map(|line| line.split_whitespace().next())
                 .collect::<Vec<_>>();
             if hashes != [expected.as_str()] {
-                return Err("The staged harness differs from its saved hash. Run vade install before chat or doctor.".into());
+                return Err("The staged harness differs from its saved hash. Run vade install before chat, sessions or doctor.".into());
             }
         }
         Ok(())

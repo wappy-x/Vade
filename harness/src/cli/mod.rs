@@ -130,9 +130,11 @@ impl App {
             vade_harness::instructions::Instructions::disabled()
         };
         let (native, journal) = if config.mode == Mode::Agent {
-            let (store, conversation) = if let Some(name) = &config.resume {
+            let (mut store, conversation) = if let Some(query) = &config.resume {
+                let name = vade_harness::saved_sessions::resolve(&workspace, query, true).map_err(|error|
+                    startup_error("--resume", error, "Check --workspace and the saved --resume NAME; vade sessions lists the saved IDs and names."))?;
                 let (mut store, mut conversation, torn) =
-                    Journal::resume(&workspace, name, Limits::default()).map_err(|error|
+                    Journal::resume(&workspace, &name, Limits::default()).map_err(|error|
                         startup_error("--resume", error,
                             "Check --workspace and the saved --resume NAME. Keep the original journal; use a new --session NAME if it is corrupt."))?;
                 prepare_resumed(
@@ -162,13 +164,17 @@ impl App {
                     Limits { max_run_time: config.max_run_time, ..Limits::default() },
                 )?;
                 let name = config.session.clone().unwrap_or_else(journal::fresh_name);
-                (
-                    Journal::create(&workspace, &name, &conversation).map_err(|error|
-                        startup_error("--session", error,
-                            "Use --resume NAME for an existing session or choose a new --session NAME. Keep existing files and check workspace storage permissions."))?,
-                    conversation,
-                )
+                let mut store = Journal::create(&workspace, &name, &conversation).map_err(|error|
+                    startup_error("--session", error,
+                        "Use --resume NAME for an existing session or choose a new --session NAME. Keep existing files and check workspace storage permissions."))?;
+                store.record_details(config.name.as_deref(), Some(vade_harness::saved_sessions::now_ms())).map_err(|error|
+                    startup_error("--name", error, "Check workspace storage permissions."))?;
+                (store, conversation)
             };
+            if config.resume.is_some() && config.name.is_some() {
+                store.record_details(config.name.as_deref(), None).map_err(|error|
+                    startup_error("--name", error, "Keep the saved journal; check workspace storage permissions."))?;
+            }
             (Some(conversation), Some(Arc::new(Mutex::new(store))))
         } else {
             (None, None)

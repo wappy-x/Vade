@@ -48,9 +48,9 @@ pub(crate) const COMMANDS: &[Command] = &[
     Command::new("undo", "", "Remove the last chat exchange.", "Direct/demo only; tool and delegated histories cannot be spliced.", "Sessions", "chat", false),
     Command::new("paste", "", "Collect multiline input.", "Line mode: /end sends, /cancel discards. Raw mode: pasted text waits for Enter.", "Sessions", "all", false),
     Command::new("end", "", "Send collected multiline input.", "Available while /paste is collecting lines.", "Sessions", "all", false),
-    Command::new("sessions", "", "List private native sessions.", "Lists at most 256 session-directory entries.", "Sessions", "agent", false),
-    Command::new("resume", "NAME", "Resume a private native session.", "Wait for cleanup. No files restored, tools replayed or prompts sent. Alias: /switch.", "Sessions", "agent", false),
-    Command::new("switch", "NAME", "Switch to a private native session.", "Alias for /resume.", "Sessions", "agent", false),
+    Command::new("sessions", "", "List private native sessions.", "Newest first, with name, start, last turn, turns and model. vade sessions lists them outside chat.", "Sessions", "agent", false),
+    Command::new("resume", "ID|NAME|last", "Resume a private native session.", "Wait for cleanup. A shared name picks the newest. No files restored, tools replayed or prompts sent. Alias: /switch.", "Sessions", "agent", false),
+    Command::new("switch", "ID|NAME|last", "Switch to a private native session.", "Alias for /resume.", "Sessions", "agent", false),
     Command::new("fork", "NAME [TASK_LABEL]", "Fork the journal and select it.", "Copies transcript/artifacts and shares the workspace. No inference or file restore.", "Sessions", "agent", false),
     Command::new("branch", "", "Inspect ancestry and checkpoint changes.", "Local inspection after worker cleanup.", "Sessions", "agent", false),
     Command::new("compact", "[KEEP_TURNS SUMMARY]", "Compact older context.", "Without arguments the model summarizes older turns into one state block and the last two turns stay verbatim, as auto-compaction does; bounded local excerpts are the fallback. KEEP_TURNS SUMMARY supplies your own summary instead. Lossy in model context; the journal keeps originals.", "Context", "agent", false),
@@ -201,15 +201,14 @@ impl App {
                 "/status" if rest.is_empty() => self.status()?,
                 "/children" => self.children_command(rest)?,
                 "/sessions" if rest.is_empty() && self.config.mode == Mode::Agent => {
-                    for name in journal::list(&self.workspace)? {
-                        self.terminal.line(&name)?;
-                    }
+                    let list = vade_harness::saved_sessions::list(&self.workspace)?;
+                    self.terminal.line(vade_harness::saved_sessions::table(&list).trim_end())?;
                 }
                 "/resume" | "/switch" if !rest.is_empty() && self.config.mode == Mode::Agent => {
                     if self.pending.is_some() {
                         return self.notice("Wait for worker cleanup before resuming a session.");
                     }
-                    match Journal::resume(&self.workspace, rest, Limits::default()).and_then(|(mut store, mut c, torn)| { prepare_resumed(&mut store, &mut c, &self.workspace, self.config.model.as_deref().unwrap(), self.config.children, &self.config.child_grants, Limits { max_run_time: self.config.max_run_time, ..Limits::default() })?; Ok((store, c, torn)) }) {
+                    match vade_harness::saved_sessions::resolve(&self.workspace, rest, true).and_then(|id| Journal::resume(&self.workspace, &id, Limits::default())).and_then(|(mut store, mut c, torn)| { prepare_resumed(&mut store, &mut c, &self.workspace, self.config.model.as_deref().unwrap(), self.config.children, &self.config.child_grants, Limits { max_run_time: self.config.max_run_time, ..Limits::default() })?; Ok((store, c, torn)) }) {
                         Ok((store, conversation, torn)) => {
                             self.replace_native(conversation, vade_harness::contract::PromptBoundary::Resume)?;
                             self.journal = Some(Arc::new(Mutex::new(store)));

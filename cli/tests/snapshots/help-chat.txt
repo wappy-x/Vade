@@ -3,13 +3,19 @@ Chat with the running engine.
 
 Examples:
   vade chat
+  vade chat --name "login bug"
+  vade chat --resume last
   VADE_CONFIG=cluster.conf vade chat
 
-Usage: vade chat [--api-key-file PATH] [--dry-run]
+Usage: vade chat [--resume ID|NAME|last] [--name NAME] [--api-key-file PATH]
+       [--dry-run]
 
 Options:
-  --api-key-file PATH  Bearer credential file (or VADE_API_KEY_FILE)
-  --dry-run            Show what would happen; change nothing
+  --resume ID|NAME|last  Continue a saved session of this folder; last is the
+                         newest one with a turn
+  --name NAME            Give this session a name (renames a resumed one)
+  --api-key-file PATH    Bearer credential file (or VADE_API_KEY_FILE)
+  --dry-run              Show what would happen; change nothing
 
 Notes:
   - Opens the Vade agent on the resident engine. Start the engine once with vade
@@ -21,6 +27,9 @@ Notes:
     engine running.
   - Chat history is kept in ~/.vade/projects (VADE_HOME changes the root), never
     in this folder; VADE_CHAT_IN_PROJECT=1 keeps it in a git-ignored ./.vade.
+  - Each agent chat is a saved session; direct text chat saves none. vade
+    sessions lists them. A resume replays the saved history into the context; it
+    reruns no tools and restores no files.
   - Explicit VADE_CONFIG selects the controller; otherwise generated local setup
     wins. Keep the same VADE_CONFIG and VADE_HOME from start through chat,
     status, logs and down.

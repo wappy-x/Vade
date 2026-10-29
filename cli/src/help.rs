@@ -41,30 +41,30 @@ fn top(on: bool) -> String {
         ("launch", "Install if missing, start on this Spark, then chat"),
         ("up", "Start without chat (this Spark, or Sparks from a controller)"),
         ("down", "Stop what vade started"),
-    ], 7);
-    out += &group("Use:", &[("chat", "Chat with the running engine")], 7);
+    ], 8);
+    out += &group("Use:", &[("chat", "Chat with the running engine"), ("sessions", "List, export or delete saved chat sessions")], 8);
     out += &group("Models:", &[
         ("pull", "Download a model from Hugging Face, with resume and checks"),
         ("models", "List the models on this machine and what can serve them"),
-    ], 7);
+    ], 8);
     out += &group("Look:", &[
         ("status", "Show what is running and whether it is healthy"),
         ("config", "Show which setup is selected and what it holds"),
         ("doctor", "Check the setup: one line per check, then PASS or FAIL"),
         ("detect", "Show this Spark's machine, memory, disk, driver and model"),
         ("logs", "Show recent engine logs"),
-    ], 7);
+    ], 8);
     out += &group("Prove:", &[
         ("verify", "Check exact token IDs across runs, drafting ON and OFF"),
         ("bench", "Measure a running server from this client"),
         ("test", "Run the build, determinism and long-context gate checks"),
-    ], 7);
+    ], 8);
     out += &group("Maintain:", &[
         ("install", "Save local defaults and install the engine and chat"),
         ("update", "Refresh the installed engine and chat"),
         ("run", "Run the separate legacy Qwen3-8B BF16 workflow"),
         ("version", "Print the CLI version"),
-    ], 7);
+    ], 8);
     out += &group("Options:", &[
         ("--json", "JSON output for status, doctor, config, detect, version"),
         ("--dry-run", "Preview a lifecycle command; nothing changes"),
@@ -158,15 +158,35 @@ fn page(command: &str) -> Option<Page<'static>> {
         },
         "chat" => Page {
             summary: "Chat with the running engine.",
-            usage: &["vade chat [--api-key-file PATH] [--dry-run]"],
-            options: &[API_KEY, DRY_RUN],
-            examples: &["vade chat", "VADE_CONFIG=cluster.conf vade chat"],
+            usage: &["vade chat [--resume ID|NAME|last] [--name NAME] [--api-key-file PATH] [--dry-run]"],
+            options: &[
+                ("--resume ID|NAME|last", "Continue a saved session of this folder; last is the newest one with a turn"),
+                ("--name NAME", "Give this session a name (renames a resumed one)"),
+                API_KEY, DRY_RUN,
+            ],
+            examples: &["vade chat", "vade chat --name \"login bug\"", "vade chat --resume last", "VADE_CONFIG=cluster.conf vade chat"],
             notes: &[
                 "Opens the Vade agent on the resident engine. Start the engine once with vade launch or vade up.",
                 "Local contexts below 8192 tokens use direct text chat. Local Linux agent mode disables automatic workspace checks with a notice.",
                 "Typing during a reply interrupts it and keeps its partial answer in context. /queue on queues follow-ups; /queue off restores steering. /exit leaves the engine running.",
                 "Chat history is kept in ~/.vade/projects (VADE_HOME changes the root), never in this folder; VADE_CHAT_IN_PROJECT=1 keeps it in a git-ignored ./.vade.",
+                "Each agent chat is a saved session; direct text chat saves none. vade sessions lists them. A resume replays the saved history into the context; it reruns no tools and restores no files.",
                 LIFECYCLE,
+            ],
+        },
+        "sessions" => Page {
+            summary: "List, export or delete saved chat sessions.",
+            usage: &["vade sessions [list] [--all]", "vade sessions export ID|NAME|last [--markdown]", "vade sessions delete ID"],
+            options: &[
+                ("--all", "List the sessions of every project, not only this folder"),
+                ("--markdown", "Export a readable Markdown transcript (the only format)"),
+            ],
+            examples: &["vade sessions", "vade sessions export last --markdown > chat.md", "vade sessions delete session-1793250720000-4242-0"],
+            notes: &[
+                "Rows show the ID, name, start, last turn, turn count, model and project, newest first. Times are UTC.",
+                "Sessions belong to the folder where vade chat ran. Run export and delete from that folder.",
+                "No engine is needed. delete refuses a session that a chat has open.",
+                "Direct text chat (contexts below 8192 tokens) saves no transcript, so it has no sessions.",
             ],
         },
         "doctor" => Page {
@@ -325,7 +345,7 @@ mod tests {
     use super::*;
     #[test]
     fn every_page_fits_the_width_and_names_its_usage() {
-        for command in [None, Some("launch"), Some("up"), Some("down"), Some("status"), Some("logs"), Some("chat"), Some("doctor"),
+        for command in [None, Some("launch"), Some("up"), Some("down"), Some("status"), Some("logs"), Some("chat"), Some("sessions"), Some("doctor"),
             Some("install"), Some("update"), Some("detect"), Some("version"), Some("run"), Some("verify"), Some("config"), Some("bench"), Some("test"), Some("pull"), Some("models")] {
             let text = help(command);
             assert!(text.lines().all(|line| line.chars().count() <= style::WIDTH), "{command:?}:\n{text}");

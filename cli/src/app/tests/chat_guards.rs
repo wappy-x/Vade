@@ -4,7 +4,7 @@ use super::*;
 
 fn refused(f: &mut Fixture, expected: &str) {
     f.app.runner.calls.clear();
-    assert_eq!(f.app.execute(Command::Chat).unwrap_err(), expected);
+    assert_eq!(f.app.execute(Command::Chat(Default::default())).unwrap_err(), expected);
     assert!(!f.app.runner.calls.iter().any(|e| e.label == "Vade chat"), "chat opened despite: {expected}");
 }
 
@@ -14,7 +14,7 @@ fn chat_refuses_each_unhealthy_state_before_opening_the_harness() {
     refused(&mut f, "Vade is stopped. Run vade up --fp8, then vade chat.");
     f.app.up(&fp8_options()).unwrap();
     f.app.runner.calls.clear();
-    f.app.execute(Command::Chat).unwrap();
+    f.app.execute(Command::Chat(Default::default())).unwrap();
     assert!(f.app.runner.calls.iter().any(|e| e.label == "Vade chat"));
 
     let mut session = Session::load(&f.app.config.state_dir).unwrap().unwrap();
@@ -36,7 +36,7 @@ fn chat_refuses_each_unhealthy_state_before_opening_the_harness() {
     refused(&mut f, "The engine is not ready. Run vade status or vade doctor.");
     f.app.runner.ready_model = None;
 
-    f.app.execute(Command::Chat).unwrap();
+    f.app.execute(Command::Chat(Default::default())).unwrap();
     f.app.execute(Command::Down).unwrap();
     assert!(!f.recorded());
 }

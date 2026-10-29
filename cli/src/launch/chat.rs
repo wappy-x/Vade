@@ -23,6 +23,30 @@ pub(super) fn arguments(endpoint: &str, model: &str, workspace: &Path, context: 
     args
 }
 
+/// The harness arguments for `vade chat --resume` and `--name`. The harness
+/// checks the values and resolves an ID, a name or `last`.
+pub(crate) fn session_arguments(options: &crate::cli::ChatOptions) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(query) = &options.resume { args.extend(["--resume".into(), query.clone()]); }
+    if let Some(name) = &options.name { args.extend(["--name".into(), name.clone()]); }
+    args
+}
+
+pub(crate) const SESSIONS_FAILED: &str = "vade sessions did not finish; see the message above.";
+
+/// `vade sessions`: the staged harness reads the saved sessions of the current
+/// folder from the same state root that vade chat uses. No engine is needed.
+pub(crate) fn sessions(harness: &str, action: &[String]) -> Result<crate::runner::Exec, String> {
+    let workspace = std::env::current_dir().map_err(|_| "Open an existing project folder, then run vade sessions.")?;
+    let mut args = vec!["sessions".to_string()];
+    args.extend(action.iter().cloned());
+    args.extend(["--workspace".into(), workspace.to_string_lossy().into_owned()]);
+    args.extend(state_arguments()?);
+    let mut exec = crate::runner::Exec::new("saved sessions", harness, args);
+    exec.cwd = Some(workspace);
+    Ok(exec)
+}
+
 /// Chat journals and input recall stay out of the project: the harness keeps
 /// them in `<Vade home>/projects/<name>-<hash>`. VADE_CHAT_IN_PROJECT=1 opts into
 /// the project's own git-ignored .vade folder instead.

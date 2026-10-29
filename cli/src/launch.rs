@@ -33,6 +33,7 @@ use config::Config;
 pub(crate) use status::snapshot;
 pub(crate) use chat::state_arguments as chat_state_arguments;
 pub(crate) use chat::setup as chat_setup;
+pub(crate) use chat::{session_arguments as chat_session_arguments, sessions as sessions_exec, SESSIONS_FAILED};
 
 const INSTALL_SPACE: u64 = 8 * 1024 * 1024 * 1024;
 
@@ -140,7 +141,8 @@ pub fn handles(command: &Command) -> bool {
         // Route conflicting local starts here so run() can refuse them before
         // a flag silently changes the installation selected by later commands.
         Command::Up(_) => configured || fresh || legacy,
-        Command::Chat
+        Command::Chat(_)
+        | Command::Sessions(_)
         | Command::Down
         | Command::Status
         | Command::StatusJson
@@ -218,7 +220,8 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             ))?;
             let action = match command {
                 Command::Down => "Stop the owned local engine",
-                Command::Chat => "Attach chat to the owned local engine",
+                Command::Chat(_) => "Attach chat to the owned local engine",
+                Command::Sessions(_) => "List, export or delete saved chat sessions",
                 Command::Logs => "Read the owned local engine log",
                 Command::Install => "Detect this Spark and model; save defaults; install locally; prepare the private GPU startup cache",
                 Command::Up(_) => "Start or attach to the local FP4-Local engine; use saved defaults or detect a first setup",
@@ -354,7 +357,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                     ))?;
                     let record = record.as_ref().ok_or("Launch did not produce an engine record.")?;
                     if self.runner.terminal() {
-                        self.chat(&config, &artifacts, record)?;
+                        self.chat(&config, &artifacts, record, &crate::cli::ChatOptions::default())?;
                     } else {
                         // Unattended (script, pipe, /dev/null): finish cleanly and leave the engine running.
                         output::line(format_args!("Standard input is not a terminal, so chat was not opened. Chat: {}", text::command("chat")))?;
@@ -362,13 +365,18 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                 }
                 Ok(())
             }
-            Command::Chat => {
+            Command::Chat(options) => {
                 let config = Config::load(&self.root)?
                     .ok_or("Run vade launch to install and start Vade.")?;
                 let artifacts = install::load(&self.root)?.ok_or("Run vade install first.")?;
                 let record = self.record()?.ok_or("Vade is stopped; run vade launch.")?;
                 self.ready(&config, &record)?;
-                self.chat(&config, &artifacts, &record)
+                self.chat(&config, &artifacts, &record, &options)
+            }
+            Command::Sessions(action) => {
+                let artifacts = install::load(&self.root)?.ok_or("Run vade install first.")?;
+                let exec = chat::sessions(required(&artifacts, "harness")?, &action)?;
+                if self.runner.interactive(&exec)? { Ok(()) } else { Err(chat::SESSIONS_FAILED.into()) }
             }
             Command::Down => {
                 let _lock = crate::state::Lock::acquire(&self.root)?;
@@ -910,10 +918,13 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         })
     }
 
-    fn chat(&mut self, config: &Config, artifacts: &Fields, record: &Fields) -> Result<(), String> {
+    fn chat(&mut self, config: &Config, artifacts: &Fields, record: &Fields, options: &crate::cli::ChatOptions) -> Result<(), String> {
         let context = record.get("context_tokens").and_then(|value| value.parse::<u32>().ok())
             .filter(|value| (4096..=262144).contains(value))
             .ok_or("Invalid or missing recorded context; run vade down, then vade launch.")?;
+        if context < chat::AGENT_MIN_CONTEXT && *options != crate::cli::ChatOptions::default() {
+            return Err(format!("Context {context} is below the agent minimum of {}, so vade chat opens direct text chat, which saves no transcript. --resume and --name need the agent.", chat::AGENT_MIN_CONTEXT));
+        }
         if context < chat::AGENT_MIN_CONTEXT {
             output::line(format_args!("Context {context} is below the agent minimum of {}; opening direct text chat.", chat::AGENT_MIN_CONTEXT))?;
         } else if cfg!(target_os = "linux") {
@@ -923,6 +934,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         let workspace = std::env::current_dir().map_err(|_| "Open an existing workspace and run vade chat.")?;
         let mut exec = Exec::new("local chat", required(artifacts, "harness")?,
             chat::arguments(&config.endpoint(), required(record, "endpoint_model")?, &workspace, context, chat::state_arguments()?));
+        exec.args.extend(chat::session_arguments(options));
         clear_credentials(&mut exec);
         exec.env.insert("VADE_CHAT_SETUP".into(), chat::setup(1, config.drafting()));
         let success = self.runner.interactive(&exec)?;

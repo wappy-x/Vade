@@ -30,6 +30,7 @@
 | [`project.rs`](project.rs) | Bounded project instructions and declarative skills. |
 | [`prompt.rs`](prompt.rs) | Stable message ordering and exact contents; no hidden prompt rewriting. |
 | [`protocol.rs`](protocol.rs) | Minimal OpenAI-compatible text chat wire types. |
+| [`saved_sessions.rs`](saved_sessions.rs) | Saved native sessions: list, resolve, delete and export the private journals. |
 | [`session.rs`](session.rs) | In-memory conversation and optional content-free, private session metadata. |
 | [`setup.rs`](setup.rs) | Offline, original configuration templates based on the credited client docs. |
 | [`shell.rs`](shell.rs) | Bounded macOS command execution. |

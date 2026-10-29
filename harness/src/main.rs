@@ -31,6 +31,7 @@ fn run_main(mut arguments: Vec<String>) -> ExitCode {
         Some("quality-card") => return vade_harness::quality::cli(args),
         Some("setup") => return vade_harness::setup::cli(args),
         Some("doctor") => return vade_harness::doctor::cli(args),
+        Some("sessions") => return vade_harness::saved_sessions::cli(args),
         // The staged harness carries the standalone relay, e.g. for vade up --replicas.
         Some("vade-gateway") => return vade_harness::gateway::invisible::exit(args),
         Some("demo-compaction") => {

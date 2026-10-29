@@ -30,6 +30,7 @@ mod patch_feedback;
 mod submission;
 pub(crate) use edit::line_edit;
 pub mod journal;
+pub mod saved_sessions;
 pub mod kv;
 pub mod project;
 pub mod shell;

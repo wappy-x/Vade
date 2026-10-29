@@ -6,7 +6,7 @@ fn assert_refused_without_touching_resident(f: &mut Fixture, options: &UpOptions
     for command in [
         Command::Up(options.clone()),
         Command::Up(UpOptions::default()),
-        Command::Chat,
+        Command::Chat(Default::default()),
     ] {
         f.app.runner.calls.clear();
         let error = f.app.execute(command).unwrap_err();
@@ -168,7 +168,7 @@ fn unchanged_resident_preserves_nondefault_options_and_expanded_paths() {
     for command in [
         Command::Up(UpOptions::default()),
         Command::Up(options),
-        Command::Chat,
+        Command::Chat(Default::default()),
     ] {
         f.app.execute(command).unwrap();
     }

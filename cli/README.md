@@ -26,7 +26,8 @@ This page explains new terms where they first come up. The
 | `vade` | Shows a short status and four choices: Start, Chat, Stop and Check (which runs `vade doctor`) |
 | `vade launch` | Starts the engine on the Spark itself |
 | `vade up` | From a controller with a config file, runs the model on one or more Sparks. On the Spark itself, it also starts the local engine |
-| `vade chat` | Opens chat with the running engine |
+| `vade chat` | Opens chat with the running engine. Add `--resume ID\|NAME\|last` to continue a saved session, or `--name NAME` to name this one |
+| `vade sessions` | Lists, exports or deletes saved chat sessions; see [saved chat sessions](../docs/sessions.md) |
 | `vade status` | Shows what is running; add `--json` for scripts |
 | `vade config` | Shows which setup the other commands will use (local, controller, legacy or none) and what it holds; add `--json` for scripts |
 | `vade verify` | Runs the same greedy prompt with drafting off and on, and checks that every run returns the same token IDs byte for byte |
@@ -163,6 +164,10 @@ If you want the old in-project location back, set `VADE_CHAT_IN_PROJECT=1`:
   `vade chat`) has matching flags: `--vade-home DIR` and `--state-in-project`.
 - Chats that older versions saved in `./.vade` stay there. Resume them with
   `VADE_CHAT_IN_PROJECT=1`.
+
+Each agent chat is a saved session; direct text chat saves none. `vade sessions`
+lists the sessions of the current folder, and `vade chat --resume last` continues the newest one. See [saved chat
+sessions](../docs/sessions.md).
 
 ## Install from source or a bundle
 

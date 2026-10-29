@@ -316,14 +316,16 @@ a `.gitignore` of `*` (except `check`) so git ignores it. Every state folder
 gets that `.gitignore`. Journals that older versions wrote to `WORKSPACE/.vade`
 stay there; resume them with `--state-in-project`.
 
-**Naming, resuming and switching.** `--session NAME` creates a named session;
-otherwise a name is generated. `--resume NAME` explicitly restores a past
-session, and the model and tool definitions must match. A session belongs to
+**Naming, resuming and switching.** `--session ID` creates a session with that
+ID; otherwise an ID is generated. `--name NAME` gives the session a display
+name. `--resume ID|NAME|last` explicitly restores a past session (`last` is the
+newest one with a turn that no chat has open), and the model and tool
+definitions must match. A session belongs to
 its workspace folder: a copy or a fresh clone is a different folder, and resume
 refuses it. If you move or re-clone the workspace, start a new session there.
 
-- `/sessions` lists sessions.
-- `/resume NAME` or `/switch NAME` switches after cleanup.
+- `/sessions` lists sessions, newest first.
+- `/resume ID|NAME|last` or `/switch ID|NAME|last` switches after cleanup.
 - `/new` creates a fresh journal without deleting old sessions.
 - `/undo` is still unavailable for tool histories.
 
@@ -341,6 +343,10 @@ A journal failure stops execution, and no further prompt runs against a failed
 journal. Journals are capped at 64 MiB/8,192 records; start a new session when
 one is full. The journal keeps old records even after you deliberately compact
 the context.
+
+`vade-harness sessions` lists, exports (as Markdown) or deletes saved sessions
+without an engine. [Saved chat sessions](../docs/sessions.md) describes it and
+`vade sessions`, the CLI command that runs it.
 
 Forks, branches and the journal format are covered further down, under
 [Forks, branches and the journal](#forks-branches-and-the-journal).

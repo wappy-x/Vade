@@ -94,7 +94,7 @@ impl Runner for FakeRunner {
         } else if exec.label.ends_with("revision") { match exec.label.as_str() { "CLI revision" => "b", "harness revision" => "c", _ => "a" }.repeat(40) } else { String::new() };
         Ok(Output { success: true, stdout })
     }
-    fn interactive(&mut self, exec: &Exec) -> Result<bool, String> { self.calls.push(exec.clone()); Ok(true) }
+    fn interactive(&mut self, exec: &Exec) -> Result<bool, String> { self.calls.push(exec.clone()); Ok(self.fail.as_deref() != Some(exec.label.as_str())) }
     fn port_free(&mut self, port: u16) -> Result<(), String> { self.ports.push(port); Ok(()) }
     fn pause(&mut self, _: Duration) {}
 }
@@ -492,14 +492,16 @@ fn staged_hashes_survive_changed_build_outputs_and_guard_every_harness_use() {
     let hash = f.app.runner.calls.iter().find(|e| e.label == "controller binary hashes").unwrap(); assert_eq!(hash.args[2], f.app.config.stage_dir.join("vade-harness").to_string_lossy()); assert_eq!(hash.args[3], f.app.config.stage_dir.join("vade").to_string_lossy());
     assert_eq!(fs::read(f.app.config.harness_source.join("target/release/vade-harness")).unwrap(), b"Changed after staging.\n");
     f.app.up(&fp8_options()).unwrap(); fs::write(f.app.config.stage_dir.join("vade-harness"), "Changed staged harness.").unwrap();
-    for command in [Command::Chat, Command::Doctor] {
-        // Chat stops at the hash; doctor reports it as its harness row's FAIL.
+    for command in [Command::Chat(Default::default()), Command::Sessions(vec!["list".into()]), Command::Doctor] {
+        // Chat and sessions stop at the hash; doctor reports it as its harness row's FAIL.
         f.app.runner.calls.clear(); let doctor = command == Command::Doctor; let error = f.app.execute(command).unwrap_err();
         assert!(if doctor { error.starts_with("1 doctor check(s) failed.") } else { error.contains("differs from its saved hash") }, "{error}");
-        assert!(f.app.runner.calls.iter().any(|e| e.label == "harness hash")); assert!(!f.app.runner.calls.iter().any(|e| e.label == "Vade chat" || e.label.starts_with("harness doctor")));
+        assert!(f.app.runner.calls.iter().any(|e| e.label == "harness hash")); assert!(!f.app.runner.calls.iter().any(|e| ["Vade chat", "saved sessions"].contains(&e.label.as_str()) || e.label.starts_with("harness doctor")));
     }
     f.app.execute(Command::Down).unwrap(); f.app.runner.calls.clear(); assert!(f.app.harness_doctor(true).unwrap_err().contains("differs from its saved hash"));
     assert!(!f.app.runner.calls.iter().any(|e| e.label.starts_with("harness doctor")));
+    // Sessions need no running engine, but the stopped controller still checks the staged harness.
+    f.app.runner.calls.clear(); assert!(f.app.execute(Command::Sessions(vec!["list".into()])).unwrap_err().contains("differs from its saved hash")); assert!(!f.app.runner.calls.iter().any(|e| e.label == "saved sessions"));
     fs::write(f.app.config.stage_dir.join("vade-harness"), b"Inert fake build artifact.\n").unwrap(); let mut fields = manifest; fields.remove("harness_sha256"); text::atomic_write(&f.app.config.build_manifest, &text::encode(&fields)).unwrap();
     assert!(f.app.harness_doctor(true).unwrap_err().contains("no saved hash"));
 }
@@ -519,12 +521,21 @@ fn fake_full_lifecycle_and_recorded_targets() {
     let first_start = f.app.runner.calls.iter().position(|e| e.label.ends_with(" start")).unwrap(); assert_eq!(f.app.runner.calls[..first_start].iter().filter(|e| e.label.ends_with(" paths")).count(), 2);
     assert_eq!(request["env_unset.FLASH_BF16_MMA"], "1"); assert_eq!(request["env.TP_WATCH_STDIN"], "0"); let secret = &request["env.SEQPAR_CONTROL_SECRET"]; assert!(!launch.args.iter().any(|a| a.contains(secret)) && !fs::read_to_string(f.app.config.state_dir.join("session.conf")).unwrap().contains(secret));
     assert!(!fs::read_dir(&f.app.config.state_dir).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("env-")));
-    f.app.execute(Command::Menu).unwrap(); f.app.execute(Command::Status).unwrap(); f.app.execute(Command::Chat).unwrap();
+    f.app.execute(Command::Menu).unwrap(); f.app.execute(Command::Status).unwrap(); f.app.execute(Command::Chat(Default::default())).unwrap();
     let mut starting = Session::load(&f.app.config.state_dir).unwrap().unwrap(); starting.phase = "starting".into(); starting.save(&f.app.config.state_dir).unwrap(); f.app.runner.started.remove("b"); assert!(f.app.execute(Command::Status).unwrap_err().contains("stopped or missing ranks"));
     f.app.runner.started.insert("b".into()); starting.phase = "running".into(); starting.save(&f.app.config.state_dir).unwrap();
     let chat = f.app.runner.calls.iter().find(|e| e.label == "Vade chat").unwrap();
     assert_eq!(chat.args[0], "agent"); assert!(!chat.args.contains(&"--plain".into()) && chat.unset.contains(&"OPENAI_API_KEY".into()));
     assert_eq!(chat.args.contains(&"--no-check".into()), cfg!(target_os = "linux"));
+    f.app.execute(Command::Chat(crate::cli::ChatOptions { resume: Some("last".into()), name: Some("bug fix".into()) })).unwrap();
+    let resumed = f.app.runner.calls.iter().rev().find(|e| e.label == "Vade chat").unwrap();
+    assert!(resumed.args.windows(2).any(|p| p == ["--resume", "last"]) && resumed.args.windows(2).any(|p| p == ["--name", "bug fix"]));
+    f.app.execute(Command::Sessions(vec!["list".into(), "--all".into()])).unwrap();
+    let sessions = f.app.runner.calls.last().unwrap();
+    assert_eq!((sessions.label.as_str(), &sessions.args[..3]), ("saved sessions", &["sessions".to_string(), "list".into(), "--all".into()][..]));
+    assert!(sessions.program.ends_with("/vade-harness") && sessions.args.windows(2).any(|p| p[0] == "--workspace"));
+    // A harness that exits with a failure is reported, not taken as success.
+    f.app.runner.fail = Some("saved sessions".into()); assert_eq!(f.app.execute(Command::Sessions(vec!["list".into()])).unwrap_err(), crate::launch::SESSIONS_FAILED); f.app.runner.fail = None;
     for machine in &mut f.app.config.machines { machine.ssh = "replacement-ssh".into(); machine.stage_dir = "~/replacement-stage".into(); }
     let start = f.app.runner.calls.len(); f.app.execute(Command::Down).unwrap();
     inspections_precede_stops(&f.app.runner.calls[start..], 2);

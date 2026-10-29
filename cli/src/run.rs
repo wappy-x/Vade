@@ -56,7 +56,7 @@ pub fn handles(command: &Command, root: &Path) -> bool {
                     | Command::Down
                     | Command::Doctor
                     | Command::Logs
-                    | Command::Chat
+                    | Command::Chat(_)
             )
             && (root.join("setup.conf").exists()
                 || root.join("run.conf").exists()
@@ -108,7 +108,10 @@ impl<R: Runner> Local<R> {
                 Ok(())
             }
             Command::Doctor if crate::checks::json() => self.doctor_json(),
-            Command::Doctor | Command::Chat => {
+            Command::Doctor | Command::Chat(_) => {
+                if matches!(&command, Command::Chat(options) if *options != crate::cli::ChatOptions::default()) {
+                    return Err("The qwen3-8b chat is direct text chat and saves no transcript, so --resume and --name do not apply. Use vade launch for saved sessions.".into());
+                }
                 let record = self.record()?.ok_or("Start with vade run qwen3-8b.")?;
                 self.ready(&record)?;
                 let generation = self.generation(&record["generation"])?;

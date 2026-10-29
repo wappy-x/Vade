@@ -12,6 +12,7 @@ Usage:
   vade-harness quality-card --endpoint URL --model NAME --json FILE [OPTIONS]
   vade-harness setup CLIENT --endpoint URL --model NAME [OPTIONS]
   vade-harness doctor URL [--model NAME] [--max-seconds N]
+  vade-harness sessions [list|export ID|delete ID] [--all] [OPTIONS]
   vade-harness hermes --workspace PATH --permission deny-callbacks [OPTIONS]
 
 Modes:
@@ -26,6 +27,7 @@ Modes:
   quality-card          Answer quality and exactness cost cards; see quality-card --help
   setup                 Print offline client configuration; see setup --help
   doctor                Probe capabilities, admission and two-turn cache reuse
+  sessions              List, export or delete saved agent sessions; see sessions --help
   hermes                Delegate exact prompts to optional Hermes ACP v1 agent
 
 Options:
@@ -40,7 +42,8 @@ Options:
                         and input recall go to DIR/projects/NAME-HASH, outside the project
   --state-in-project    Keep journals and recall in WORKSPACE/.vade (git-ignored) instead
   --verbose             Show run diagnostics after each answer
-  --resume NAME         Agent: resume a past journal without replaying tools
+  --resume ID|NAME|last Agent: resume a saved journal without replaying tools
+  --name NAME           Agent: a display name for this session (also renames on --resume)
   --approval POLICY     Agent: ask (default), auto, never
                         Cancel may not stop programs that daemonize; they stay sandboxed
   --context-tokens N    Agent: override server context budget; default from capabilities
@@ -163,7 +166,8 @@ Usage: vade-harness agent --endpoint URL --model NAME --workspace PATH [OPTIONS]
   --vade-home DIR       Journals/recall in DIR/projects/NAME-HASH (default VADE_HOME or ~/.vade)
   --state-in-project    Journals/recall in WORKSPACE/.vade, with a .gitignore
   --verbose             Show run diagnostics after each answer
-  --resume NAME         Resume a journal without replaying tools
+  --resume ID|NAME|last Resume a saved journal without replaying tools
+  --name NAME           Display name for this session; renames a resumed one
   --approval POLICY     ask (default), auto, never
                         Cancel may not stop programs that daemonize; they stay sandboxed
   --context-tokens N    Override server context budget (fallback 131072)

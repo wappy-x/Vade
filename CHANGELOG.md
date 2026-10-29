@@ -18,6 +18,16 @@ Changes that are merged but not yet released are under Unreleased.
   `vade models` lists local models with their size and the command that can
   serve them. See [Download models](docs/pull-models.md).
 
+- Chat sessions can be listed, continued, exported and deleted. Each agent
+  chat is a saved session (direct text chat saves none); `--name NAME` names
+  it. `vade sessions` lists the sessions of the current folder (ID, name,
+  start, last turn, turn count, model and project), newest first, and `--all`
+  lists every project.
+  `vade chat --resume ID|NAME|last` replays a saved session into the context
+  without running tools again. `vade sessions export ID --markdown` prints a
+  readable transcript, and `vade sessions delete ID` removes a closed one. See
+  [saved chat sessions](docs/sessions.md).
+
 ## v0.2.0 - not released yet
 
 v0.2.0 makes two Sparks much faster than v0.1.0. Two Sparks also admit more

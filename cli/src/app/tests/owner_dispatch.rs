@@ -146,7 +146,7 @@ fn alternate_start_and_every_lifecycle_command_keep_the_explicit_controller() {
         let start = crate::cli::parse(&args).unwrap().command;
         let mut commands = vec![
             start,
-            Command::Chat,
+            Command::Chat(Default::default()),
             Command::Status,
             Command::Logs,
             Command::Down,
@@ -227,7 +227,7 @@ fn alternate_start_and_every_lifecycle_command_keep_the_explicit_controller() {
         record
     );
     assert!(!crate::launch::handles(&Command::Install));
-    for command in [Command::Chat, Command::Status, Command::Logs, Command::Down] {
+    for command in [Command::Chat(Default::default()), Command::Status, Command::Logs, Command::Down] {
         assert!(!crate::launch::handles(&command));
         assert!(!crate::run::handles(&command, &local));
         f.app.execute(command).unwrap();

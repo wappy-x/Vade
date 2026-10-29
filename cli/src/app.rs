@@ -58,7 +58,8 @@ impl<R: Runner> App<R> {
             Command::Down => self.down(),
             Command::Status => self.status(),
             Command::Logs => self.logs(),
-            Command::Chat => self.chat(),
+            Command::Chat(options) => self.chat(&options),
+            Command::Sessions(action) => self.sessions(&action),
             Command::Doctor => self.doctor(),
             Command::Install => self.install(),
             Command::Update => self.update(),
@@ -625,7 +626,7 @@ impl<R: Runner> App<R> {
         Ok(())
     }
 
-    fn chat(&mut self) -> Result<(), String> {
+    fn chat(&mut self, options: &crate::cli::ChatOptions) -> Result<(), String> {
         let session = Session::load(&self.config.state_dir)?
             .ok_or_else(|| format!("Vade is stopped. Run {}, then vade chat.", self.start_command()))?;
         if session.phase != "running" || session.ranks.iter().any(|r| !r.attempted) {
@@ -664,6 +665,7 @@ impl<R: Runner> App<R> {
             "--context-tokens".into(),
             session.context.to_string(),
         ];
+        args.extend(crate::launch::chat_session_arguments(options));
         args.extend(crate::launch::chat_state_arguments()?);
         let mut exec = Exec::new(
             "Vade chat",
@@ -677,6 +679,15 @@ impl<R: Runner> App<R> {
         exec.env.insert("VADE_CHAT_SETUP".into(), crate::launch::chat_setup(session.ranks.len(), !(session.mtp_explicit && session.mtp == 0)));
         if !self.runner.interactive(&exec)? {
             return Err("Chat ended with an error. Run vade doctor for the next step.".into());
+        }
+        Ok(())
+    }
+
+    fn sessions(&mut self, action: &[String]) -> Result<(), String> {
+        self.verify_harness()?;
+        let exec = crate::launch::sessions_exec(&self.config.stage_dir.join("vade-harness").to_string_lossy(), action)?;
+        if !self.runner.interactive(&exec)? {
+            return Err(crate::launch::SESSIONS_FAILED.into());
         }
         Ok(())
     }

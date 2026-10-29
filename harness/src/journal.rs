@@ -8,14 +8,15 @@ use crate::tools::Workspace;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
-const MAX_JOURNAL: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_JOURNAL: u64 = 64 * 1024 * 1024;
 const MAX_RECORDS: u64 = 8192;
 /// A native session's private, locked, append-only record of every committed
 /// message, compaction and checkpoint, used to resume or fork it exactly.
 pub struct Journal {
     name: String,
     file: File,
-    _lock: crate::tools::anchored::Lock,
+    /// None only for a read-only check of a saved journal.
+    lock: Option<crate::tools::anchored::Lock>,
     seq: u64,
     len: usize,
     bytes: u64,
@@ -74,6 +75,43 @@ pub fn list(workspace: &Workspace) -> io::Result<Vec<String>> {
     }
     Ok(names)
 }
+/// The record checks that replay and the saved-session reader share: version 1,
+/// the expected sequence, a keep count inside the history, options in the
+/// first record only, and a message array. Other keys are not checked here, so
+/// a reader still accepts record kinds and metadata keys it does not know.
+/// Returns the keep count and the appended messages.
+pub(crate) fn envelope(record: &Value, seq: u64, history: usize) -> io::Result<(usize, &[Value])> {
+    let number = |key| match record.get(key) {
+        Some(Value::Number(n)) => n.parse::<u64>().map_err(|_| error("invalid journal number")),
+        _ => Err(error("missing journal number")),
+    };
+    if number("v")? != 1 || number("seq")? != seq {
+        return Err(error("journal version/sequence mismatch"));
+    }
+    let keep = usize::try_from(number("keep")?).map_err(|_| error("invalid journal keep"))?;
+    if keep > history {
+        return Err(error("journal references missing history"));
+    }
+    match (seq, record.get("options")) {
+        (0, None) => return Err(error("journal has no options")),
+        (1.., Some(_)) => return Err(error("journal options changed")),
+        _ => {}
+    }
+    let append = record.get("messages").and_then(Value::as_array).ok_or_else(|| error("journal has no messages"))?;
+    Ok((keep, append))
+}
+/// A compaction record replaces the whole view of the record before it and
+/// starts the next context generation. Other metadata keys are not checked.
+pub(crate) fn compaction_source(metadata: &Value, seq: u64, keep: usize, generation: u64, history: usize) -> io::Result<()> {
+    let n = |key| match metadata.get(key) {
+        Some(Value::Number(n)) => n.parse::<u64>().map_err(|_| error("invalid compaction metadata")),
+        _ => Err(error("missing compaction metadata")),
+    };
+    if seq == 0 || keep != 0 || n("generation")? != generation + 1 || n("source_record")? != seq - 1 || n("source_messages")? != history as u64 {
+        return Err(error("compaction source/generation mismatch"));
+    }
+    Ok(())
+}
 impl Journal {
     fn open(workspace: &Workspace, name: &str) -> io::Result<Self> {
         if !valid_name(name) {
@@ -84,12 +122,12 @@ impl Journal {
         let dir = workspace.session_dir()?;
         let lock = dir.lock(&format!("{name}.journal-lock"))?;
         let file = dir.journal_file(&format!("{name}.journal"))?;
-        Self::from_locked_file(name, file, lock, crate::branch::workspace_id(workspace)?)
+        Self::from_locked_file(name, file, Some(lock), crate::branch::workspace_id(workspace)?)
     }
     fn from_locked_file(
         name: &str,
         file: File,
-        lock: crate::tools::anchored::Lock,
+        lock: Option<crate::tools::anchored::Lock>,
         workspace_id: String,
     ) -> io::Result<Self> {
         if file.metadata()?.len() > MAX_JOURNAL {
@@ -98,7 +136,7 @@ impl Journal {
         Ok(Self {
             name: name.into(),
             file,
-            _lock: lock,
+            lock,
             seq: 0,
             len: 0,
             bytes: 0,
@@ -156,6 +194,12 @@ impl Journal {
         }
         Self::replay(Self::open(workspace, name)?, limits)
     }
+    /// Run the resume checks on a saved journal without its lock: the list then
+    /// accepts exactly what a resume accepts. A torn final record is left in
+    /// place. `workspace_id` is the identity of the folder that would resume it.
+    pub(crate) fn check_saved(name: &str, file: File, workspace_id: String) -> io::Result<()> {
+        Self::replay(Self::from_locked_file(name, file, None, workspace_id)?, Limits::default()).map(|_| ())
+    }
     fn replay(mut s: Self, limits: Limits) -> io::Result<(Self, Conversation, bool)> {
         let file_len = s.file.metadata()?.len();
         let mut options = None;
@@ -196,36 +240,18 @@ impl Journal {
                     Err(error("missing journal number"))
                 }
             };
-            if number("v")? != 1 || number("seq")? != s.seq {
-                return Err(error("journal version/sequence mismatch"));
-            }
-            let keep =
-                usize::try_from(number("keep")?).map_err(|_| error("invalid journal keep"))?;
-            if keep > messages.len() {
-                return Err(error("journal references missing history"));
-            }
+            let (keep, append) = envelope(&record, s.seq, messages.len())?;
             if let Some(identity) = record.get("workspace") {
                 if s.seq != 0 || identity.as_str() != Some(&s.workspace_id) {
                     return Err(error("journal belongs to a different workspace directory"));
                 }
             }
             if s.seq == 0 {
-                options = Some(
-                    record
-                        .get("options")
-                        .cloned()
-                        .ok_or_else(|| error("journal has no options"))?,
-                );
-            } else if record.get("options").is_some() {
-                return Err(error("journal options changed"));
+                options = record.get("options").cloned();
             }
             if record.get("generation_seed").is_some() {
                 s.generation_seed = Some(number("generation_seed")?);
             }
-            let append = record
-                .get("messages")
-                .and_then(Value::as_array)
-                .ok_or_else(|| error("journal has no messages"))?;
             // Include legacy journal markers in the local notice, while
             // Message ingestion removes them from all replayed wire messages.
             if record.get("reply_cutoff") == Some(&Value::Bool(true))
@@ -236,22 +262,7 @@ impl Journal {
                 s.reply_cutoffs += 1;
             }
             if let Some(metadata) = record.get("compaction") {
-                let n = |key: &str| -> io::Result<u64> {
-                    match metadata.get(key) {
-                        Some(Value::Number(n)) => {
-                            n.parse().map_err(|_| error("invalid compaction metadata"))
-                        }
-                        _ => Err(error("missing compaction metadata")),
-                    }
-                };
-                if s.seq == 0
-                    || keep != 0
-                    || n("generation")? != s.generation + 1
-                    || n("source_record")? != s.seq - 1
-                    || n("source_messages")? != messages.len() as u64
-                {
-                    return Err(error("compaction source/generation mismatch"));
-                }
+                compaction_source(metadata, s.seq, keep, s.generation, messages.len())?;
                 s.generation += 1;
                 s.last_compaction = Some((s.seq, metadata.clone()));
             }
@@ -334,7 +345,7 @@ impl Journal {
         let mut conversation = Conversation::from_request(Value::Object(fields), limits)?;
         conversation.kv_hints = s.kv_hints.clone();
         s.len = conversation.messages().len();
-        if torn {
+        if torn && s.lock.is_some() {
             s.file.set_len(s.bytes)?;
             s.file.sync_all()?;
         }
@@ -343,6 +354,11 @@ impl Journal {
     }
     pub fn name(&self) -> &str {
         &self.name
+    }
+    /// Record the display name and, for a new session, the start time. Older
+    /// readers ignore this record kind.
+    pub fn record_details(&mut self, name: Option<&str>, started_ms: Option<u64>) -> io::Result<()> {
+        self.append_record(self.len, &[], None, Some(("session", crate::saved_sessions::record(name, started_ms))))
     }
     pub fn poisoned(&self) -> bool {
         self.poisoned
@@ -763,7 +779,7 @@ impl Journal {
         let child = Self::from_locked_file(
             name,
             dir.journal_file(&filename)?,
-            lock,
+            Some(lock),
             self.workspace_id.clone(),
         )?;
         let (child, conversation, torn) = Self::replay(child, limits)?;

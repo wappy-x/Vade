@@ -64,6 +64,7 @@ pub(crate) struct Config {
     pub(crate) permission: Option<Permission>,
     pub(crate) approval: ApprovalPolicy,
     pub(crate) resume: Option<String>,
+    pub(crate) name: Option<String>,
     pub(crate) context_tokens: usize,
     pub(crate) max_run_time: Option<Duration>,
     pub(crate) auto_compact: bool,
@@ -184,6 +185,7 @@ impl Config {
             permission: None,
             approval: ApprovalPolicy::Ask,
             resume: None,
+            name: None,
             context_tokens: context::DEFAULT_CONTEXT_TOKENS,
             max_run_time: vade_harness::agent::Limits::default().max_run_time,
             auto_compact: true,
@@ -314,6 +316,7 @@ impl Config {
                 | "--permission"
                 | "--approval"
                 | "--resume"
+                | "--name"
                 | "--context-tokens"
                 | "--agent-time-limit-seconds"
                 | "--config"
@@ -423,8 +426,8 @@ impl Config {
                             used.push("--approval");
                         }
                         "--resume" => {
-                            if !journal::valid_name(&value) {
-                                return Err("invalid session name");
+                            if !journal::valid_name(&value) && !vade_harness::saved_sessions::valid_display_name(&value) {
+                                return Err("--resume needs a session ID, a session name or last");
                             }
                             config.resume = Some(value);
                             used.push("--resume");
@@ -468,6 +471,13 @@ impl Config {
                                     .map_err(|_| "--vade-home must be an absolute path without '..'")?,
                             );
                             used.push("--vade-home");
+                        }
+                        "--name" => {
+                            if !vade_harness::saved_sessions::valid_display_name(&value) {
+                                return Err("--name needs 1 to 64 characters with no control characters or slashes, no leading hyphen, and not last");
+                            }
+                            config.name = Some(value);
+                            used.push("--name");
                         }
                         "--session" => {
                             config.session = Some(value);
@@ -554,6 +564,7 @@ impl Config {
         if config.mode != Mode::Agent
             && (used.contains(&"--approval")
                 || used.contains(&"--resume")
+                || used.contains(&"--name")
                 || used.contains(&"--context-tokens")
                 || used.contains(&"--agent-time-limit-seconds")
                 || used.contains(&"--config")
@@ -564,7 +575,7 @@ impl Config {
                 || used.contains(&"--no-check"))
         {
             return Err(
-                "--approval, --resume, --context-tokens, --agent-time-limit-seconds, --config, --rules-scope, --shell-exclude, --shell-toolchain, --check and --no-check require agent mode",
+                "--approval, --resume, --name, --context-tokens, --agent-time-limit-seconds, --config, --rules-scope, --shell-exclude, --shell-toolchain, --check and --no-check require agent mode",
             );
         }
         if used.contains(&"--vade-home") && used.contains(&"--state-in-project") {

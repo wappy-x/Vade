@@ -277,7 +277,8 @@ impl Runner for MockRunner {
     fn interactive(&mut self, exec: &Exec) -> Result<bool, String> {
         self.calls.push(exec.clone());
         self.chats += 1;
-        assert!(matches!(exec.args[0].as_str(), "agent" | "direct"));
+        assert!(matches!(exec.args[0].as_str(), "agent" | "direct" | "sessions"));
+        if exec.args[0] == "sessions" { return Ok(true); }
         assert!(
             exec.args
                 .windows(2)
@@ -387,7 +388,7 @@ fn small_context_launch_and_saved_chat_use_direct_mode() {
         } else { vec!["launch".into()] };
         launcher.execute(crate::cli::parse(&args).unwrap().command, false).unwrap();
         assert_eq!(Config::load(&fixture.root).unwrap().unwrap().context, 4096);
-        launcher.execute(Command::Chat, false).unwrap();
+        launcher.execute(Command::Chat(Default::default()), false).unwrap();
         launcher.execute(Command::Launch(Default::default()), false).unwrap();
         assert_eq!(launcher.runner.starts, 1);
         assert_eq!(launcher.runner.chats, 3);
@@ -395,6 +396,8 @@ fn small_context_launch_and_saved_chat_use_direct_mode() {
             assert_eq!(call.args[0], "direct");
             assert!(!call.args.iter().any(|a| a == "--context-tokens" || a == "--no-check"));
         }
+        let resume = crate::cli::ChatOptions { resume: Some("last".into()), name: None };
+        assert!(launcher.execute(Command::Chat(resume), false).unwrap_err().contains("--resume and --name need the agent"));
         launcher.execute(Command::Down, false).unwrap();
     }
 }
@@ -415,9 +418,32 @@ fn launch_without_a_terminal_reports_ready_and_leaves_chat_closed() {
     assert!(!launcher.runner.calls.iter().any(|e| e.label == "local chat"));
     // The engine stays up for a later chat; the interactive path is unchanged.
     launcher.runner.terminal = true;
-    launcher.execute(Command::Chat, false).unwrap();
+    launcher.execute(Command::Chat(Default::default()), false).unwrap();
     assert_eq!((launcher.runner.starts, launcher.runner.chats), (1, 1));
     launcher.execute(Command::Down, false).unwrap();
+}
+
+#[test]
+fn chat_resume_and_sessions_reach_the_staged_harness() {
+    let fixture = Fixture::new();
+    fixture.installed();
+    let mut launcher = fixture.launcher();
+    launcher.runner.terminal = false;
+    launcher.execute(Command::Launch(Default::default()), false).unwrap();
+    let options = crate::cli::ChatOptions { resume: Some("login bug".into()), name: Some("login bug v2".into()) };
+    launcher.execute(Command::Chat(options), false).unwrap();
+    let chat = launcher.runner.calls.iter().rev().find(|e| e.label == "local chat").unwrap().clone();
+    assert_eq!(chat.args[0], "agent");
+    assert!(chat.args.windows(2).any(|p| p == ["--resume", "login bug"]) && chat.args.windows(2).any(|p| p == ["--name", "login bug v2"]));
+    // Sessions need the installed harness, not a running engine.
+    launcher.execute(Command::Down, false).unwrap();
+    launcher.execute(Command::Sessions(vec!["export".into(), "last".into(), "--markdown".into()]), false).unwrap();
+    let sessions = launcher.runner.calls.last().unwrap();
+    assert_eq!(sessions.label, "saved sessions");
+    assert_eq!(sessions.args[..4], ["sessions", "export", "last", "--markdown"]);
+    assert_eq!(sessions.program, chat.program);
+    let workspace = sessions.args.iter().position(|a| a == "--workspace").unwrap();
+    assert_eq!(sessions.cwd.as_deref(), Some(Path::new(&sessions.args[workspace + 1])));
 }
 
 #[test]

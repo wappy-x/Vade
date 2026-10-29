@@ -28,8 +28,10 @@ pub enum Command {
     StatusJson,
     /// `vade logs`.
     Logs,
-    /// `vade chat`.
-    Chat,
+    /// `vade chat`, with an optional saved session to resume and a name.
+    Chat(ChatOptions),
+    /// `vade sessions`: the harness arguments for list, export or delete.
+    Sessions(Vec<String>),
     /// `vade doctor`.
     Doctor,
     /// `vade install`.
@@ -52,6 +54,14 @@ pub enum Command {
     Models(Vec<String>),
     /// The private `__worker` helper, with its arguments.
     Worker(Vec<String>),
+}
+
+/// Options for `vade chat`: a saved session to resume (ID, name or `last`)
+/// and a display name for the session. The harness checks both values.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChatOptions {
+    pub resume: Option<String>,
+    pub name: Option<String>,
 }
 
 /// Options for `vade run qwen3-8b`: source checkouts or a release, local
@@ -215,6 +225,10 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
     } else if command == "status" && args.get(1) == Some(&"--json") {
         if args.len() != 2 { return Err("Use vade status --json [--dry-run]. No other status options are supported.".into()); }
         Command::StatusJson
+    } else if command == "chat" {
+        Command::Chat(parse_chat(&args[1..])?)
+    } else if command == "sessions" {
+        Command::Sessions(parse_sessions(&args[1..])?)
     } else if matches!(command, "up" | "launch") {
         let options = parse_up(&args[1..]).map_err(|error| error.replace("vade up", &format!("vade {command}")))?;
         if command == "launch" { Command::Launch(options) } else { Command::Up(options) }
@@ -229,7 +243,6 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
             "down" => Command::Down,
             "status" => Command::Status,
             "logs" => Command::Logs,
-            "chat" => Command::Chat,
             "doctor" => Command::Doctor,
             "install" => Command::Install,
             "detect" => Command::Detect,
@@ -248,9 +261,41 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
 fn known_command(command: &str) -> bool {
     matches!(
         command,
-        "run" | "up" | "down" | "status" | "logs" | "chat" | "doctor" | "install" | "update" | "version" | "detect" | "launch" | "config"
+        "run" | "up" | "down" | "status" | "logs" | "chat" | "sessions" | "doctor" | "install" | "update" | "version" | "detect" | "launch" | "config"
             | "pull" | "models"
     )
+}
+
+fn parse_chat(args: &[&str]) -> Result<ChatOptions, String> {
+    let mut options = ChatOptions::default();
+    let mut rest = args.iter();
+    while let Some(&flag) = rest.next() {
+        let slot = match flag {
+            "--resume" => &mut options.resume,
+            "--name" => &mut options.name,
+            _ => return Err(format!("Unknown option {} for vade chat. Run vade chat --help.", crate::text::argument(flag))),
+        };
+        let value = rest.next().filter(|v| !v.is_empty() && !v.starts_with("--"))
+            .ok_or_else(|| format!("Give {flag} a value. Run vade chat --help."))?;
+        if slot.replace((*value).into()).is_some() {
+            return Err(format!("Use {flag} only once. Run vade chat --help."));
+        }
+    }
+    Ok(options)
+}
+
+/// The harness arguments for `vade sessions`: `list [--all]` (the default),
+/// `export ID [--markdown]` or `delete ID`.
+fn parse_sessions(args: &[&str]) -> Result<Vec<String>, String> {
+    let usage = "Use vade sessions [list] [--all], vade sessions export ID|NAME|last [--markdown] or vade sessions delete ID. Run vade sessions --help.";
+    let id = |value: Option<&&str>| value.filter(|v| !v.is_empty() && !v.starts_with('-')).map(|v| (*v).to_string()).ok_or(usage);
+    Ok(match args {
+        [] | ["list"] => vec!["list".into()],
+        ["--all"] | ["list", "--all"] => vec!["list".into(), "--all".into()],
+        ["export", rest @ ..] if matches!(rest.get(1..), Some([]) | Some(["--markdown"])) => vec!["export".into(), id(rest.first())?, "--markdown".into()],
+        ["delete", value] => vec!["delete".into(), id(Some(value))?],
+        _ => return Err(usage.into()),
+    })
 }
 
 fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
@@ -440,6 +485,29 @@ pub use crate::help::help;
 mod tests {
     use super::*;
     fn cli(args: &str) -> Result<Cli, String> { parse(&args.split_whitespace().map(str::to_owned).collect::<Vec<_>>()) }
+    #[test]
+    fn chat_and_sessions_options_pass_to_the_harness() {
+        let chat = |args: &[&str]| parse(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>()).map(|c| c.command);
+        assert_eq!(chat(&["chat"]).unwrap(), Command::Chat(ChatOptions::default()));
+        assert_eq!(chat(&["chat", "--resume", "last", "--name", "bug fix", "--dry-run"]).unwrap(),
+            Command::Chat(ChatOptions { resume: Some("last".into()), name: Some("bug fix".into()) }));
+        for bad in [&["chat", "--resume"][..], &["chat", "--resume", "a", "--resume", "b"], &["chat", "--name", "--resume"], &["chat", "extra"]] {
+            assert!(chat(bad).unwrap_err().contains("vade chat --help"), "{bad:?}");
+        }
+        let sessions = |args: &str| match cli(args).map(|c| c.command) { Ok(Command::Sessions(a)) => Ok(a.join(" ")), Ok(other) => panic!("{other:?}"), Err(e) => Err(e) };
+        assert_eq!(sessions("sessions").unwrap(), "list");
+        assert_eq!(sessions("sessions list --all").unwrap(), "list --all");
+        assert_eq!(sessions("sessions --all").unwrap(), "list --all");
+        assert_eq!(sessions("sessions export last").unwrap(), "export last --markdown");
+        assert_eq!(sessions("sessions export session-1-2-3 --markdown").unwrap(), "export session-1-2-3 --markdown");
+        assert_eq!(sessions("sessions delete session-1-2-3").unwrap(), "delete session-1-2-3");
+        for bad in ["sessions delete", "sessions export", "sessions export --markdown", "sessions delete a b", "sessions export a --json", "sessions rm a", "sessions delete -x", "sessions export -x"] {
+            assert!(sessions(bad).unwrap_err().contains("vade sessions --help"), "{bad}");
+        }
+        assert_eq!(cli("sessions --help").unwrap().command, Command::Help(Some("sessions".into())));
+        // -h as a target is vade sessions help, never the harness help.
+        for help in ["sessions delete -h", "sessions export -h"] { assert_eq!(cli(help).unwrap().command, Command::Help(Some("sessions".into())), "{help}"); }
+    }
     #[test]
     fn fp4_profile_uses_current_limits_and_keeps_explicit_choices() {
         let Command::Up(options) = cli("up").unwrap().command else { panic!() };

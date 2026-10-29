@@ -350,6 +350,8 @@ fn native_policy_and_session_flags_are_explicit_and_mode_scoped() {
         vec!["--approval", "bad"],
         vec!["--context-tokens", "4096"],
         vec!["--resume", "../bad"],
+        vec!["--name", "-h"],
+        vec!["--name", "last"],
         vec!["--session", "one", "--resume", "one"],
         vec!["--shell-exclude", "../escape"],
         vec!["--shell-exclude", "build|src"],
