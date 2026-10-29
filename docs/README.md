@@ -22,6 +22,7 @@ Vade's main pages, grouped by what you want to do.
 | [Download models](pull-models.md) | `vade pull`: download a checkpoint from Hugging Face with resume and file checks. `vade models`: list local models and what can serve them |
 | [CLI reference](../cli/README.md) | The `vade` commands: install, start, chat, check exactness, benchmark, diagnose, recover and stop |
 | [Saved chat sessions](sessions.md) | List, resume, export and delete your `vade chat` sessions |
+| [Reading files](reading-files.md) | How `vade read` and the agent turn documents (text, HTML, CSV, RTF, data, code) into Markdown with a header line |
 | [Examples](../examples/README.md) | Short examples you can run: curl against the OpenAI and Anthropic APIs, a Rust client, Claude Code, Codex, `vade bench` and a two-Spark launch |
 | [OpenAI-compatible API](openai-api.md) | Base URLs, a curl and a Python example, the chat fields Vade accepts, streaming, tool calls, errors, API keys and the known gaps. It also has notes for Continue and Open WebUI |
 | [Sampling](sampling.md) | Greedy as the default, the sampling fields and their order, seeds and how to repeat a sampled reply, where sampling runs on two or more Sparks, drafting, and what is exact |

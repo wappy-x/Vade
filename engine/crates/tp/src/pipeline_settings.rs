@@ -1,7 +1,8 @@
 //! Pipeline numerical recipe before either rank loads weights. Prompt options
 //! use the owning parser's configured booleans: unset equals explicit default.
 //! Cohort settings come from the executable's already-parsed route recipe.
-//! The prefix cache also compares its effective value: unset is off.
+//! The prefix cache also compares its effective value: unset is on for the
+//! tensor split and off for the layer chain.
 //! Other settings retain raw presence/value identities. Rank-local frontend
 //! suppression is applied after verification and is not part of this recipe.
 //! Paths, authentication, endpoints, logging and memory ceilings are excluded.
@@ -38,7 +39,9 @@ pub(super) fn names() -> Vec<&'static str> {
     names
 }
 
-pub(super) fn fingerprints(experiments: Experiments, mut read: impl FnMut(&str) -> Option<OsString>) -> Result<Vec<u8>, String> {
+/// `prefix_restore`: this topology has a prefix restore (the tensor split), so an unset cache
+/// switch means on; the layer chain resolves it as off (prefix_switch::prefix_cache).
+pub(super) fn fingerprints(experiments: Experiments, prefix_restore: bool, mut read: impl FnMut(&str) -> Option<OsString>) -> Result<Vec<u8>, String> {
     let bit = |value| if value { "1" } else { "0" };
     let mode = match experiments.batch_mode.ok_or("pipeline identity requires parsed startup cohort settings")? {
         Mode::Auto => "auto", Mode::Auto8 => "auto8", Mode::Off => "off", Mode::On => "on",
@@ -58,6 +61,7 @@ pub(super) fn fingerprints(experiments: Experiments, mut read: impl FnMut(&str) 
         } else if name == PREFIX_CACHE {
             let value = read(name);
             let value = match value.as_deref() {
+                None if prefix_restore => b"1",
                 None => b"0",
                 Some(v) if v == "0" => b"0",
                 Some(v) if v == "1" => b"1",
@@ -97,20 +101,23 @@ pub(super) fn describe(name: &str, value: &[u8]) -> String {
 #[test]
 fn cohort_identity_uses_the_frozen_recipe_without_rereading_its_switches() {
     let parsed = Experiments::startup_with(2, true, |_| Ok(None)).unwrap();
-    let identity = fingerprints(parsed, |name| {
+    let identity = fingerprints(parsed, true, |name| {
         assert!(!["VADE_MTP_BATCH", "VADE_MTP_C8", "VADE_POOL_GRAPH_FALLBACK",
             "VADE_MTP_COHORT_ADAPT", "VADE_C8_GUARD_ROBUST", "VADE_MTP_COHORT"].contains(&name), "reread {name}");
         None
     }).unwrap();
     assert_eq!(identity.len(), names().len() * 64);
-    assert!(fingerprints(Experiments::default(), |_| None).unwrap_err().contains("parsed startup"));
-    let cache_identity = |value: Option<&str>| {
+    assert!(fingerprints(Experiments::default(), true, |_| None).unwrap_err().contains("parsed startup"));
+    let cache_identity = |split: bool, value: Option<&str>| {
         let mut bytes = vec![b'a'; super::identity_names(2).len() * 64];
-        bytes.extend(fingerprints(parsed, |name| if name == PREFIX_CACHE { value.map(Into::into) } else { None }).unwrap());
+        bytes.extend(fingerprints(parsed, split, |name| if name == PREFIX_CACHE { value.map(Into::into) } else { None }).unwrap());
         bytes
     };
-    for (left, right, accepted) in [(None, Some("0"), true), (Some("0"), Some("1"), false), (Some("1"), Some("1"), true)] {
-        let (left, right) = (cache_identity(left), cache_identity(right));
+    // Unset is on for the tensor split and off for the layer chain, as each rank resolves it.
+    for (split, left, right, accepted) in [(true, None, Some("1"), true), (true, None, Some("0"), false),
+        (false, None, Some("0"), true), (false, None, Some("1"), false),
+        (true, Some("0"), Some("1"), false), (false, Some("0"), Some("0"), true)] {
+        let (left, right) = (cache_identity(split, left), cache_identity(split, right));
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let mut front = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (mut back, _) = listener.accept().unwrap();
@@ -123,5 +130,5 @@ fn cohort_identity_uses_the_frozen_recipe_without_rereading_its_switches() {
             }
         });
     }
-    assert!(fingerprints(parsed, |name| (name == PREFIX_CACHE).then(|| "yes".into())).unwrap_err().contains(PREFIX_CACHE));
+    assert!(fingerprints(parsed, true, |name| (name == PREFIX_CACHE).then(|| "yes".into())).unwrap_err().contains(PREFIX_CACHE));
 }

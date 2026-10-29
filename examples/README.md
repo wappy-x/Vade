@@ -126,12 +126,10 @@ Whispers deep thoughts out.
 [turn 2] prompt 2040 tokens, cached 0: 19
 ```
 
-The prefix cache works on one Spark and on two Sparks (the tensor split). On one
-Spark you turn it on from the Spark itself, with local Route A: `vade down`, then
-`VADE_FLASHNEXT_PREFIX_CACHE=1 vade up` on the Spark. Set on a controller, the
-variable does not reach the Spark it drives, so the cache stays off and the
-counts above stay at 0. A `--cache-bytes 0` you saved earlier wins over the
-variable; [turn on the prefix cache](../INSTALL.md#turn-on-the-prefix-cache)
+The output above was recorded with the prefix cache off, so both counts are
+0. The cache is now on by default on one Spark and on two Sparks (the tensor
+split). `VADE_FLASHNEXT_PREFIX_CACHE=0` at the engine start, or a saved
+`--cache-bytes 0`, turns it off; [the prefix cache](../INSTALL.md#the-prefix-cache)
 explains both. With the cache on, the second turn reads 1984 of its 2040
 prompt tokens from the cache. A second run of the script finds the first
 turn's prefix already there too. The answers are the same with the cache on

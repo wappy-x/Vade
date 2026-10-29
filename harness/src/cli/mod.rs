@@ -33,7 +33,7 @@ use crate::{
 };
 use args::{Config, Mode};
 use events::Pending;
-use native_setup::{native_conversation, prepare_resumed};
+use native_setup::{chat_conversation, prepare_resumed};
 
 const MAX_DISPLAY_BYTES: usize = 1024 * 1024;
 pub(crate) struct App {
@@ -51,6 +51,7 @@ pub(crate) struct App {
     /// Project instruction files; read again before a turn when they change.
     pub(crate) instructions: vade_harness::instructions::Instructions,
     hooks: vade_harness::hooks::Hooks,
+    memory: String,
     // Authoritative native context never comes from Session's text-pair recall.
     // While running, the worker exclusively owns it and must return it intact.
     pub(crate) native: Option<Conversation>,
@@ -129,6 +130,7 @@ impl App {
         } else {
             vade_harness::instructions::Instructions::disabled()
         };
+        let memory = if config.memory { vade_harness::memory::Memory::load(&workspace)?.content() } else { String::new() };
         let (native, journal) = if config.mode == Mode::Agent {
             let (mut store, conversation) = if let Some(query) = &config.resume {
                 let name = vade_harness::saved_sessions::resolve(&workspace, query, true).map_err(|error|
@@ -137,6 +139,7 @@ impl App {
                     Journal::resume(&workspace, &name, Limits::default()).map_err(|error|
                         startup_error("--resume", error,
                             "Check --workspace and the saved --resume NAME. Keep the original journal; use a new --session NAME if it is corrupt."))?;
+                native_setup::check_memory_resume(&conversation, config.memory)?;
                 prepare_resumed(
                     &mut store,
                     &mut conversation,
@@ -154,11 +157,12 @@ impl App {
                 }
                 (store, conversation)
             } else {
-                let conversation = native_conversation(
+                let conversation = chat_conversation(
                     config.model.as_deref().unwrap(),
                     &workspace,
                     &config.rules_scopes,
                     instructions.section(),
+                    config.memory.then_some(memory.as_str()),
                     config.children,
                     &config.child_grants,
                     Limits { max_run_time: config.max_run_time, ..Limits::default() },
@@ -215,6 +219,7 @@ impl App {
             session,
             instructions,
             hooks,
+            memory,
             native,
             journal,
             approval_reply: None,
@@ -273,3 +278,5 @@ fn startup_error(option: &str, error: io::Error, remedy: &str) -> io::Error {
 
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod memory_tests;

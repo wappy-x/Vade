@@ -397,7 +397,7 @@ every Spark count, with the cache on or off.
 | 4 | 65536 | off | 10.77 | 10.33 | 0 | 10.90 | `long32k` |
 
 The prefix cache was turned on with `VADE_FLASHNEXT_PREFIX_CACHE=1` at the
-server start, as [turn on the prefix cache](../INSTALL.md#turn-on-the-prefix-cache)
+server start, as [the prefix cache](../INSTALL.md#the-prefix-cache)
 says. These runs did not try the cache on four Sparks, and did not measure
 FP8.
 

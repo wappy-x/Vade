@@ -55,6 +55,7 @@ Options:
                         Oversized unfinished tool proposals are discarded whole
   --max-output-tokens N Direct/agent: 1 through the advertised Engine output limit
   --no-auto-continue    Direct/agent: wait for /continue after an output cutoff
+  --no-memory           Direct/agent: no project memory (also VADE_MEMORY=0)
   --no-instructions     Direct/agent: no automatic instruction files, root AGENTS.md too;
                         explicit --rules-scope files stay active
   --greedy              Temperature 0 on every turn; enables exact greedy drafting
@@ -176,6 +177,7 @@ Usage: vade-harness agent --endpoint URL --model NAME --workspace PATH [OPTIONS]
   --max-output-tokens N Output reservation; positive, within upstream limit
   --no-auto-continue    Wait for /continue after an output cutoff
   --no-compact          No automatic compaction; /compact still works
+  --no-memory           Skip project memory (also VADE_MEMORY=0)
   --no-instructions     Skip automatic instruction files (root AGENTS.md too);
                         --rules-scope files stay; /instructions lists them
   --greedy              Temperature 0 on every turn; enables exact greedy drafting
@@ -231,6 +233,7 @@ Usage: vade-harness direct --endpoint URL --model NAME [OPTIONS]
   --state-in-project    Counter/recall in WORKSPACE/.vade, with a .gitignore
   --max-output-tokens N Output reservation; positive, within upstream limit
   --no-auto-continue    Wait for /continue after an output cutoff
+  --no-memory           Skip project memory (also VADE_MEMORY=0)
   --no-instructions     Skip automatic instruction files (root AGENTS.md too);
                         --rules-scope files stay; /instructions lists them
   --greedy              Temperature 0 on every turn; enables exact greedy drafting

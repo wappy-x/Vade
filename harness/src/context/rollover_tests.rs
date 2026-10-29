@@ -164,7 +164,7 @@ fn a_count_only_host_cannot_summarize() {
     let c = chat(3);
     let window = c.serialized_bytes() / 4;
     let mut count = |c: &Conversation| exact(c, window);
-    let error = rollover(&c, KEEP_TURNS, limits(window), &exact(&c, window).unwrap(), &mut CountOnly(&mut count)).unwrap_err();
+    let error = rollover(&c, KEEP_TURNS, limits(window), &exact(&c, window).unwrap(), &mut CountOnly(&mut count, false)).unwrap_err();
     assert!(matches!(error, RolloverError::Failed(ref e) if e.kind() == io::ErrorKind::Unsupported), "{error}");
 }
 
@@ -370,6 +370,41 @@ impl ContextHost for AutoReply {
     fn summarize(&mut self, _: &Conversation) -> io::Result<String> {
         Ok(SUMMARY.into())
     }
+    fn automatic_output(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn a_byte_read_names_its_range_and_a_search_does_not() {
+    let read = |args: &str| call_paths("workspace_read", args);
+    assert_eq!(read(r#"{"path":"a.rs","limit":256}"#), vec![("a.rs".to_owned(), Some("bytes 0+256".to_owned()))]);
+    assert_eq!(read(r#"{"path":"a.rs","offset":64}"#), vec![("a.rs".to_owned(), Some("bytes from 64".to_owned()))]);
+    assert_eq!(read(r#"{"path":"a.rs","offset":64,"limit":16}"#), vec![("a.rs".to_owned(), Some("bytes 64+16".to_owned()))]);
+    assert_eq!(read(r#"{"path":"a.rs"}"#), vec![("a.rs".to_owned(), Some("bytes from 0".to_owned()))]);
+    // Search paging uses offset and limit too; they are not bytes of the file.
+    assert_eq!(call_paths("workspace_search", r#"{"path":"src","literal":"x","offset":0,"limit":16}"#), vec![("src".to_owned(), None)]);
+}
+
+#[test]
+fn the_reply_room_follows_the_output_mode_not_the_count() {
+    let c = chat(1);
+    let count = |prompt: usize, output: usize, window: usize| Usage::for_conversation(&c).with_count(&InputCount::Exact {
+        prompt_tokens: prompt as u64,
+        output_tokens: output as u64,
+        context_limit: window as u64,
+        admitted: true,
+    }).unwrap();
+    // Automatic: a 114,000-token floor whose count chose the full 16,384-token
+    // reply. With a 3,000-token block the reply shrinks to 13,816, so only the
+    // 8,192-token reservation and 256 tokens are needed, as for a larger floor.
+    let automatic = Limits { max_context_tokens: 131_072, output_reserve_tokens: 8192, ..Limits::default() };
+    assert_eq!(needed_with(&count(114_000, 16_384, 131_072), 3000, 131_072, automatic, true), 125_448);
+    assert_eq!(needed_with(&count(115_000, 15_816, 131_072), 3000, 131_072, automatic, true), 126_448);
+    // Explicit 20,000-token reply whose count fills the window exactly: the
+    // reply keeps all of its room.
+    let explicit = Limits { max_context_tokens: 32_768, output_reserve_tokens: 20_000, ..Limits::default() };
+    assert_eq!(needed_tokens(&count(12_512, 20_000, 32_768), 32_768, explicit, false), 32_512);
 }
 
 #[test]
@@ -428,7 +463,7 @@ fn an_explicit_reply_keeps_its_full_room_in_the_kept_turns_rule() {
     assert_eq!(host.summaries, 1, "the rule picks one turn before the model writes");
     assert!(after.fits(window, RESERVE));
     // The hard stop names the full reply room: more than the window.
-    assert!(needed_tokens(&before, window, limits(window)) > window);
+    assert!(needed_tokens(&before, window, limits(window), false) > window);
 }
 
 /// A host with no exact count: every count is the local estimate.

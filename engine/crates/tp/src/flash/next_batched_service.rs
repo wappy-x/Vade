@@ -40,7 +40,7 @@ pub fn run(
         .map_err(|e| e.to_string())?;
     let ab_ptx = spark_gpu_probe::driver::ab_ptx_from_env()?;
     if let Some((stream, _)) = pp.as_mut() {
-        spark_tp::runtime::verify_pipeline_artifacts(stream, &ptx, root, ab_ptx.as_deref(), experiments,
+        spark_tp::runtime::verify_pipeline_artifacts(stream, &ptx, root, ab_ptx.as_deref(), experiments, tp.is_some(),
             spark_engine::flash::next_batched::PP_LINK_TIMEOUT)?;
     }
     let ceiling = std::env::var("SEQPAR_MEMORY_BYTES")
@@ -108,10 +108,15 @@ pub fn run(
             // Slots and pool for chats charged by their own KV pages (flashnext::kv_charge): the
             // smallest chat funds a slot. Live sessions stop TRANSIENT_RESERVE short of the ceiling.
             let smallest = slot_bytes(&model, context, needed as usize, pp.is_some() && tp.is_none())?;
-            // Live sessions stop TRANSIENT_RESERVE short of the allocator ceiling.
+            // The prefix cache: on unless set to 0, where a prefix restore exists (one Spark,
+            // the tensor split); the layer chain runs without it.
+            let prefix_cache = spark_serve::prefix_switch::prefix_cache(pp.is_none() || tp.is_some())?;
+            // Live sessions stop TRANSIENT_RESERVE short of the allocator ceiling. With the cache
+            // on, the full chat the pool must hold carries the room floor (prefix_switch::plan_room).
+            let full = (needed as usize).saturating_add(spark_serve::prefix_switch::plan_room(prefix_cache, spark_serve::prefix_switch::cache_room_setting()?));
             let (active, pool, shared) = model.session_pool_plan(
                 context, 1 + usize::from(limits.ab_ptx),
-                spark_serve::budget::after_transient_reserve(budget.saturating_sub(resident)), resident_tiles, [smallest, needed as usize])?;
+                spark_serve::budget::after_transient_reserve(budget.saturating_sub(resident)), resident_tiles, [smallest, full])?;
             // The prompt workspace is part of `shared`: allocate it before the first request.
             model.prepare_prompt_workspace(backend, context)?;
             if needed > pool as u128 {
@@ -135,6 +140,14 @@ pub fn run(
                 eprintln!("flashnext tp session_pool rank0={active} rank1={peer} chosen={chosen} pool_bytes rank0={pool} rank1={peer_pool} chosen={agreed} context={context}");
                 (chosen, agreed)
             } else { (active, pool) };
+            // The retained cache's own room comes out of the pool; admission uses the rest
+            // (prefix_switch::cache_room). TP ranks keep the smaller room.
+            let room = if prefix_cache { spark_serve::prefix_switch::cache_room(spark_serve::prefix_switch::cache_room_setting()?, pool, active, needed as usize, tp.is_some()) } else { 0 };
+            let room = match pp.as_mut() {
+                Some((stream, _)) if prefix_cache && tp.is_some() => spark_tp::startup_pool::agree_room(stream, room, load_deadline, shutdown)?,
+                _ => room,
+            };
+            let admission = pool - room;
             model.set_session_limit(active)?;
             // VADE_VECTOR_POOL (default on; =0 off): a request's freed device vectors (GDN
             // states, rollback storage, draft and head arenas, workspaces) wait in a size-keyed
@@ -147,7 +160,8 @@ pub fn run(
             }
             // Under host memory pressure, the reserves keep returned buffers inside this plan.
             backend.fund_session_reserves(active);
-            backend.fund_kv_pages(pool);
+            // Page spares stay inside what admission uses, so they never hold the cache's room.
+            backend.fund_kv_pages(admission);
             // Every worker must fund the front's admitted chats before serving begins.
             if let Some((stream, stage)) = pp {
                 model.set_pp_front(stream, fast, stage, context, active, tile, shutdown)?;
@@ -162,16 +176,16 @@ pub fn run(
             let (identity, metadata) = receipts.join().map_err(|_| "startup receipt worker panicked")??;
             limits.identity = Some(identity);
             limits.metadata = Some(metadata.clone());
-            let engine = FlashNext::with_experiments(backend, &model, context, eos, experiments)?;
-            // VADE_FLASHNEXT_PREFIX_CACHE (default off; 1 = on): exact 64-aligned prompt prefixes,
+            let engine = FlashNext::with_experiments(backend, &model, context, eos, experiments)?.with_cache_room(room);
+            // VADE_FLASHNEXT_PREFIX_CACHE (unset = on; 0 = off): exact 64-aligned prompt prefixes,
             // on one Spark and on the tensor split, where each rank keeps its own copy (next_pp_cache.rs).
-            // Retention is elastic: admission reclaims it before any live reservation.
+            // Beyond its startup room, retention is elastic: admission reclaims it before any live reservation.
             // VADE_FLASHNEXT_ADOPT: an adopted entry holds a whole session arena (16 GB at
             // CONTEXT 262144), so retention may use the pool; admission still reclaims first.
             let prefix_cache = engine.prefix_cache();
             let cache = CacheLimits {
                 entries: if prefix_cache { 16 } else { 1 },
-                retained_bytes: if !prefix_cache { 0 } else if engine.adopt() { pool } else { pool / 2 },
+                retained_bytes: if !prefix_cache { 0 } else if engine.adopt() { pool } else { spark_serve::prefix_switch::retained_ceiling(pool, room) },
                 tokens_per_entry: context,
                 logits_per_entry: vocab,
                 idle_ttl: Duration::from_secs(if prefix_cache { 3600 } else { 60 }),
@@ -182,8 +196,8 @@ pub fn run(
                 prefill_chunk: tile,
                 foreground_rows: active * (model.mtp_depth() + 1),
                 background_rows: active * (model.mtp_depth() + 1),
-                active_bytes: pool,
-                session_budget_bytes: pool,
+                active_bytes: admission,
+                session_budget_bytes: admission,
                 draft: if mtp == 0 {
                     spark_serve::protocol::DraftMode::Plain
                 } else {
@@ -203,7 +217,7 @@ pub fn run(
             metadata.start();
             let name = spark_tp::next::model_id(root)?;
             eprintln!(
-                "flashnext ready world={world} model={name} context={context} concurrency=rows active={active} connections={POOL_SIZE} mtp_depth={mtp} resident_bytes={resident} session_pool_bytes={pool} session_reservation_bytes={needed} shared_pool_reservation_bytes={shared} transient_reserve_bytes={} prefix_cache={prefix_cache}",
+                "flashnext ready world={world} model={name} context={context} concurrency=rows active={active} connections={POOL_SIZE} mtp_depth={mtp} resident_bytes={resident} session_pool_bytes={pool} prefix_cache_room_bytes={room} session_reservation_bytes={needed} shared_pool_reservation_bytes={shared} transient_reserve_bytes={} prefix_cache={prefix_cache}",
                 spark_serve::budget::TRANSIENT_RESERVE
             );
             let worker = tp_wire.zip(model.tp_mailbox_host()).map(|(wire, host)| wire.bind(host, true)).transpose()?;
@@ -271,11 +285,11 @@ pub fn run_back(
     // Check the downstream edge first, then upstream: admission propagates toward
     // the front, which cannot finish its identity handshake after a tail mismatch.
     if let Some((stream, _)) = next.as_mut() {
-        spark_tp::runtime::verify_pipeline_artifacts(stream, &ptx, root, None, experiments,
+        spark_tp::runtime::verify_pipeline_artifacts(stream, &ptx, root, None, experiments, tp.is_some(),
             spark_engine::flash::next_batched::PP_LINK_TIMEOUT)?;
     }
     // Workers have no A/B cohort scheduler; the front's fingerprint includes its A/B PTX.
-    spark_tp::runtime::verify_pipeline_artifacts(&mut stream, &ptx, root, None, experiments,
+    spark_tp::runtime::verify_pipeline_artifacts(&mut stream, &ptx, root, None, experiments, tp.is_some(),
         spark_engine::flash::next_batched::PP_LINK_TIMEOUT)?;
     let ceiling = std::env::var("SEQPAR_MEMORY_BYTES")
         .ok()
@@ -311,7 +325,10 @@ pub fn run_back(
         let resident = backend.allocated_bytes();
         let resident_tiles = backend.flash_dense_bytes() + backend.flash_mixed_bytes();
         let smallest = slot_bytes(&model, context, needed as usize, tp.is_none())?;
-        let (active, pool, _shared) = model.session_pool_plan(context, 1, spark_serve::budget::after_transient_reserve(budget.saturating_sub(resident)), resident_tiles, [smallest, needed as usize])?;
+        // The same plan as the front: with the cache on, one full chat plus the room floor.
+        let prefix_cache = spark_serve::prefix_switch::prefix_cache(tp.is_some())?;
+        let full = (needed as usize).saturating_add(spark_serve::prefix_switch::plan_room(prefix_cache, spark_serve::prefix_switch::cache_room_setting()?));
+        let (active, pool, _shared) = model.session_pool_plan(context, 1, spark_serve::budget::after_transient_reserve(budget.saturating_sub(resident)), resident_tiles, [smallest, full])?;
         model.prepare_prompt_workspace(backend, context)?;
         // A workspace allocation under host pressure can clear the reserve before the session
         // plan exists. Restore the session bound so the funded plan below holds.
@@ -324,6 +341,9 @@ pub fn run_back(
             let (_, chosen) = spark_tp::startup_pool::agree(&mut stream, active, load_deadline, shutdown)?;
             (chosen, spark_tp::startup_pool::agree(&mut stream, pool, load_deadline, shutdown)?.1)
         } else { (active, pool) };
+        // The same room as the front (prefix_switch::cache_room): the smaller of the two.
+        let room = if prefix_cache { spark_serve::prefix_switch::cache_room(spark_serve::prefix_switch::cache_room_setting()?, pool, active, needed as usize, tp.is_some()) } else { 0 };
+        let room = if prefix_cache && tp.is_some() { spark_tp::startup_pool::agree_room(&mut stream, room, load_deadline, shutdown)? } else { room };
         // VADE_VECTOR_POOL, as on the front: a chat that ends drops its back session (its slot's
         // release bit), and the next chat on the slot takes the freed vectors from the pool
         // instead of cuMemAlloc. Outside the plan, spares go under host pressure.
@@ -332,9 +352,9 @@ pub fn run_back(
             backend.kv_conversation_ended(needed as usize);
         }
         backend.fund_session_reserves(active);
-        backend.fund_kv_pages(pool);
+        backend.fund_kv_pages(pool - room);
         backend.synchronize()?;
-        eprintln!("flashnext pp back loaded context={context} active={active} resident_bytes={resident} session_pool_bytes={pool}");
+        eprintln!("flashnext pp back loaded context={context} active={active} resident_bytes={resident} session_pool_bytes={pool} prefix_cache_room_bytes={room}");
         let (_link, tp_wire) = match tp {
             Some((link, swap)) => { model.set_tp(backend, 1, link)?; (None::<std::net::TcpStream>, Some(swap)) }
             None => (None, None),
@@ -343,7 +363,7 @@ pub fn run_back(
         let (proxy_stop, attached) = (AtomicBool::new(false), AtomicBool::new(false));
         let served = std::thread::scope(|scope| {
             let proxy = worker.map(|worker| super::tp_proxy::spawn(scope, worker, &proxy_stop, &attached, shutdown)).transpose()?;
-            let prefix_budget = if spark_serve::prefix_switch::prefix_cache()? { pool / 2 } else { 0 };
+            let prefix_budget = if prefix_cache { (spark_serve::prefix_switch::retained_ceiling(pool, room), room) } else { (0, 0) };
             let served = model.serve_pp_back(backend, stream, fast, next, stage, context, active, tile, prefix_budget, shutdown);
             proxy_stop.store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(p) = &proxy { p.thread().unpark(); }

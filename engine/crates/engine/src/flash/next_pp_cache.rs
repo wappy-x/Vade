@@ -136,7 +136,7 @@ impl<'a> NextModel<'a> {
         Ok(())
     }
     pub(in super::super) fn pp_cache_step<'w>(&'w self, b: &Backend<'a>, sessions: &mut BTreeMap<u32, NextSession<'a, 'w>>,
-        prefixes: &mut BTreeMap<u32, Saved<'a>>, budget: usize, kind: u32, count: usize, meta: &[[u32; 4]], rows: &mut [f32], tile: usize, context: usize) -> Result<()> {
+        prefixes: &mut BTreeMap<u32, Saved<'a>>, (budget, room): (usize, usize), kind: u32, count: usize, meta: &[[u32; 4]], rows: &mut [f32], tile: usize, context: usize) -> Result<()> {
         if count != 1 || meta.len() != 1 || meta[0][3] == 0 { return Err("invalid pipeline prefix command".into()); }
         let [slot, capacity, position, id] = meta[0];
         let (capacity, position) = (capacity as usize, position as usize);
@@ -166,14 +166,17 @@ impl<'a> NextModel<'a> {
                 if s.retained > 0 && s.valid { s.commit_back(b, position)?; }
                 if !s.valid || s.pos != position || s.capacity != capacity { return Err("pipeline prefix source position differs".into()); }
                 let checkpoint_bytes = s.checkpoint_allocation_bytes();
-                if !cache_room_for(b, checkpoint_bytes, checkpoint_bytes)? { return cache_reply(b, rows, 0); }
+                // Against the whole room: the front evicts older prefixes for this one only when it
+                // publishes (pp_cache_publish sends their releases first), where the rest is checked.
+                if !cache_room_for(b, checkpoint_bytes, checkpoint_bytes, room as i128)? { return cache_reply(b, rows, 0); }
                 s.set_prefix_checkpoint(true);
                 let captured = s.capture_checkpoint(b).map(|()| s.prefix_bytes());
                 let checkpoint = s.checkpoint.borrow_mut().take();
                 s.set_prefix_checkpoint(false);
                 let bytes = captured?;
                 match checkpoint {
-                    Some(checkpoint) if prefixes.values().try_fold(checkpoint_bytes, |n, p| n.checked_add(p.bytes())).is_some_and(|n| n <= budget) => {
+                    // Older prefixes count only at PUBLISH, after the front's releases for this one.
+                    Some(checkpoint) if checkpoint_bytes <= budget => {
                         prefixes.insert(id, Saved::Pending { slot, checkpoint, bytes: checkpoint_bytes }); bytes
                     }
                     Some(_) => 0,
@@ -188,7 +191,7 @@ impl<'a> NextModel<'a> {
                         let bytes = s.prefix_bytes();
                         if !s.valid || s.pos < position || s.capacity != capacity
                             || prefixes.values().try_fold(bytes, |n, p| n.checked_add(p.bytes())).is_none_or(|n| n > budget)
-                            || !cache_room_for(b, bytes, s.checkpoint_allocation_bytes())? {
+                            || !cache_room_for(b, bytes, s.checkpoint_allocation_bytes(), owned_room(room, prefixes))? {
                             s.checkpoint.borrow_mut().take();
                             return cache_reply(b, rows, 0);
                         }
@@ -224,12 +227,21 @@ fn cache_room(b: &Backend<'_>) -> Result<i128> {
     let allocator = b.allocation_budget() as i128 - b.accounted_bytes() as i128;
     Ok(b.kv_reserve_room()?.map_or(allocator, |(room, _)| room.min(allocator)))
 }
+/// What is left of the startup room (prefix_switch::cache_room) after the prefixes held.
 #[cfg(target_os = "linux")]
-fn cache_room_for(b: &Backend<'_>, bytes: usize, slack: usize) -> Result<bool> {
+fn owned_room(room: usize, prefixes: &BTreeMap<u32, Saved<'_>>) -> i128 {
+    room as i128 - prefixes.values().map(Saved::bytes).sum::<usize>() as i128
+}
+/// Host pressure bounds retention, except inside the startup room (`owned`: what is left of
+/// it): the plan funds those bytes. The allocator bounds both, with the slack.
+#[cfg(target_os = "linux")]
+fn cache_room_for(b: &Backend<'_>, bytes: usize, slack: usize, owned: i128) -> Result<bool> {
     b.prepare_cache_allocation(bytes.saturating_add(slack))?;
     let room = cache_room(b)?;
-    let fits = bytes as i128 <= room.saturating_sub(slack as i128);
-    if !fits { engine_model::events::note("prefix_cache_worker_refused", format_args!("reason=no_room bytes={bytes} slack_bytes={slack} room_bytes={room}")); }
+    let allocator = b.allocation_budget() as i128 - b.accounted_bytes() as i128;
+    let fits = bytes as i128 <= room.saturating_sub(slack as i128)
+        || bytes as i128 <= owned && bytes.saturating_add(slack) as i128 <= allocator;
+    if !fits { engine_model::events::note("prefix_cache_worker_refused", format_args!("reason=no_room bytes={bytes} slack_bytes={slack} room_bytes={room} owned_room_bytes={owned}")); }
     Ok(fits)
 }
 #[cfg(target_os = "linux")]
@@ -252,7 +264,7 @@ impl<'a> NextModel<'a> {
         b: &Backend<'a>,
         sessions: &mut BTreeMap<u32, NextSession<'a, 'w>>,
         prefixes: &mut BTreeMap<u32, Saved<'a>>,
-        prefix_budget: usize,
+        prefix_budget: (usize, usize),
         kind: u32,
         count: usize,
         meta: &[[u32; 4]],

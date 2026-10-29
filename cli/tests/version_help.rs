@@ -129,3 +129,19 @@ fn failed_status_and_helper_reports_keep_their_status_when_stdout_is_closed() {
         assert_eq!(closed.status.code(), normal.status.code(), "{args:?}: {closed:?}");
     }
 }
+/// Argon review of 7c9881a, item 6: `vade read` needs no key, so the key
+/// settings do not apply to it and its own parser refuses the key option.
+#[test]
+fn read_ignores_key_settings_and_refuses_the_key_option() {
+    let dir = std::env::temp_dir().join(format!("vade-read-key-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("notes.txt");
+    std::fs::write(&file, "hello\n").unwrap();
+    let output = command().env("VADE_API_KEY_FILE", "").arg("read").arg(&file).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8(output.stdout).unwrap().ends_with("\nhello\n"));
+    let output = command().args(["read", "--api-key-file", "key.txt"]).arg(&file).output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

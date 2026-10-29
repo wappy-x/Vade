@@ -332,6 +332,7 @@ fn limits() -> Limits {
     }
 }
 fn conversation(config: &Config, role: Role, session: usize) -> io::Result<Conversation> {
+    // Project memory is always off for this benchmark. No chat startup runs.
     let mut messages = vec![message(
         "system",
         format!(

@@ -193,6 +193,19 @@ impl Engine for Reserved {
     fn eos_token_ids(&self) -> &[u32] { &[7] }
     fn session_reservation_bytes(&self) -> Option<usize> { self.0.session_reservation_bytes() }
 }
+/// Host memory pressure leaves no physical room; `.1` bytes are the startup cache room.
+struct Pressured(Model, usize);
+impl Engine for Pressured {
+    type Session<'a> = Kv;
+    fn session(&self) -> Result<Kv, String> { self.0.session() }
+    fn prefix_cache_opt_in(&self) -> bool { true }
+    fn context_limit(&self) -> usize { self.0.context_limit() }
+    fn vocab_size(&self) -> usize { 8 }
+    fn eos_token_ids(&self) -> &[u32] { &[7] }
+    fn session_reservation_bytes(&self) -> Option<usize> { self.0.session_reservation_bytes() }
+    fn cache_free_physical_bytes(&self, _: usize) -> Result<Option<(i128, usize)>, String> { Ok(Some((-1, 1 << 20))) }
+    fn cache_room_bytes(&self) -> usize { self.1 }
+}
 struct Codec(usize, bool);
 impl Decoder for Codec {
     fn push(&mut self, _: u32) -> Result<String, String> {
@@ -335,6 +348,29 @@ impl Server {
                 draft_global_bank: false, prefix_cache: true,
                 sharing: scheduler::Sharing { report_prefix_reuse: true, client_priority_cap: 1, ..Default::default() } },
             &shutdown, "tiled", requests).unwrap()
+        });
+        Self { ab: None, cohort: None, address, stop, live, calls, heads, worker: Some(worker) }
+    }
+    /// Production sets the active and session budgets equal (next_batched_service.rs): both are
+    /// `admission`, the pool less the `room`. `retained`: the retained-bytes ceiling.
+    fn pressured(room: usize, admission: usize, retained: usize) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (live, calls, heads) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let model = Pressured(Model { ab: None, cohort: None, live: live.clone(), calls: calls.clone(), heads: heads.clone(), opt_in: true, retention_extra: 0 }, room);
+        let shutdown = stop.clone();
+        let worker = std::thread::spawn(move || {
+            scheduler::serve(listener, &model, Some(&Codec(1, false)),
+            &Limits { output_bytes: 16 * 1024 * 1024, ..Limits::default() },
+            &CacheLimits { entries: 32, retained_bytes: retained, tokens_per_entry: 1024,
+                logits_per_entry: 8, idle_ttl: Duration::from_secs(60) },
+            &scheduler::Config { active: 3, connections: 16, prefill_chunk: 1,
+                foreground_rows: 8, background_rows: 16, active_bytes: admission,
+                session_budget_bytes: admission, draft: protocol::DraftMode::Strict, mtp_depth: 0,
+                draft_global_bank: false, prefix_cache: true,
+                sharing: scheduler::Sharing { report_prefix_reuse: true, ..Default::default() } },
+            &shutdown).unwrap()
         });
         Self { ab: None, cohort: None, address, stop, live, calls, heads, worker: Some(worker) }
     }
@@ -781,6 +817,52 @@ fn sampling_echo_on_scheduler_responses() {
         assert_eq!(value.object().unwrap().get("vade"), Some(&expected), "{reply}");
     } }
     drop(server); std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_second_turn_hits_under_host_pressure_with_a_startup_room() {
+    // In a two-Spark soak with no physical room, every snapshot was skipped (no_room). The
+    // startup room keeps the first turn, so the second turn reuses it; /health counts both.
+    for (room, reused, counts) in [(0, "0", r#""prefix_cache":{"hits":0,"misses":2,"reused_tokens":0,"snapshots":0,"#),
+        (1 << 20, "3", r#""prefix_cache":{"hits":1,"misses":1,"reused_tokens":3,"snapshots":1,"#)] {
+        let server = Server::pressured(room, 2 << 20, 1 << 20);
+        let send = || {
+            let body = r#"{"stream":true,"temperature":0,"prompt_token_ids":[1,2,3],"max_tokens":1,"prompt_cache_key":"k"}"#;
+            let mut reply = String::new();
+            server.send_body(body).read_to_string(&mut reply).unwrap();
+            assert!(reply.ends_with("data: [DONE]\n\n"), "{reply}");
+            header(&reply, "X-Prefix-Reused-Tokens:").to_owned()
+        };
+        assert_eq!(send(), "0");
+        assert_eq!(send(), reused);
+        let mut health = String::new();
+        server.send_route("GET", "/health", "", "").read_to_string(&mut health).unwrap();
+        assert!(health.contains(counts) && health.contains(&format!("\"room_bytes\":{room},")), "{health}");
+        let skipped = if room == 0 { r#""skipped":{"no_room":2,"# } else { r#""skipped":{"no_room":0,"# };
+        assert!(health.contains(skipped), "{health}");
+    }
+}
+
+#[test]
+fn a_room_entry_beside_admitted_requests_keeps_the_server_serving() {
+    // The startup room is outside admission, so live requests may use every admission byte
+    // beside a prefix the room keeps. Retained ceilings: the admission bytes, then the whole
+    // pool (adoption). Each turn has its own prompt, so the first entry is unrelated.
+    const CHAT: usize = 16384;
+    for retained in [2 * CHAT, 4 * CHAT] {
+        let server = Server::pressured(2 * CHAT, 2 * CHAT, retained);
+        for (prompt, key) in [("1,2,3", "k"), ("4,5,6", "j")] {
+            let body = format!(r#"{{"stream":true,"temperature":0,"prompt_token_ids":[{prompt}],"max_tokens":1,"prompt_cache_key":"{key}"}}"#);
+            let mut reply = String::new();
+            server.send_body(&body).read_to_string(&mut reply).unwrap();
+            assert!(reply.ends_with("data: [DONE]\n\n"), "retained {retained}: {reply}");
+            assert_eq!(header(&reply, "X-Prefix-Reused-Tokens:"), "0");
+        }
+        let mut health = String::new();
+        server.send_route("GET", "/health", "", "").read_to_string(&mut health).unwrap();
+        assert!(health.contains(r#""status":"ready""#) && health.contains(r#""prefix_cache":{"hits":0,"misses":2,"#)
+            && health.contains(&format!("\"room_bytes\":{},", 2 * CHAT)), "{health}");
+    }
 }
 
 #[test]

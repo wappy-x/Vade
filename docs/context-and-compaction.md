@@ -88,12 +88,12 @@ The state block has four parts:
    window token, from 1 KiB to 8 KiB. A longer reply is cut, and a note says
    so.
 3. **Tool outputs by reference.** The harness writes this part, not the
-   model. Each file gets one line with the line or byte ranges that were read
-   ("listed or searched" for a read with no range, a listing or a search)
-   and the number of edit calls and applied edits. Each of the last 8
-   commands gets its arguments and its status line, also when the output
-   was captured to an artifact. No tool output text is copied. This part is
-   at most 3 KiB.
+   model. Each file gets one line with the line ranges and byte ranges that
+   were read ("bytes from 0" for a byte read with no range; "listed or
+   searched" for a listing or a search) and the number of edit calls and
+   applied edits. Each of the last 8 commands gets its arguments and its
+   status line, also when the output was captured to an artifact. No tool
+   output text is copied. This part is at most 3 KiB.
 4. **The user asks.** The user messages of the summarized turns, word for
    word, oldest first, up to 4 KiB in total. The harness note of a resumed
    or forked chat is not an ask and is left out. Asks that an earlier state

@@ -81,7 +81,7 @@ pub struct OwnedChild {
 impl OwnedChild {
     pub fn spawn(command: &mut Command) -> io::Result<Self> {
         Ok(Self {
-            child: command.env_remove("VADE_API_KEY_FILE").spawn()?,
+            child: command.env_remove("VADE_API_KEY_FILE").env("VADE_MEMORY", "0").spawn()?,
             reaped: false,
         })
     }

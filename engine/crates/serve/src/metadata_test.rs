@@ -36,7 +36,7 @@ fn health_uses_serving_default_depth_in_both_modes() {
         let limits = Limits { metadata: Some(fixture.metadata.clone()), next_mtp_depth: resident, ..Limits::default() };
         for (mode, depth, expected) in [(DraftMode::Strict, default, default),
             (DraftMode::Plain, 0, 0), (DraftMode::Plain, default, 0), (DraftMode::Strict, 0, 0)] {
-            let health = model_response("/health", "ready", "test", 0, 0, None, &limits, 2048, Some((mode, depth))).unwrap();
+            let health = model_response("/health", "ready", "test", 0, 0, None, &limits, 2048, Some((mode, depth)), None).unwrap();
             let health = parse(&health);
             assert_drafting(&health.object().unwrap()["vade"], mode, expected, false);
         }

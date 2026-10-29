@@ -137,6 +137,43 @@ impl Workspace {
         if let Some(text) = self.pdf_text(path, &mut file, &stamp, cancel)? {
             return text_range(&text, offset, limit, stamp.bytes);
         }
+        // Other documents (office, RTF) and text in another encoding (UTF-16,
+        // Latin-1) are read as Markdown; UTF-8 text files keep the byte-exact
+        // path below. UTF-16 with no byte order mark can also be valid UTF-8,
+        // so its zero-byte pattern is tested before the UTF-8 test. The PDF
+        // test above decides what a PDF is: a file it did not take, even one
+        // named .pdf, is text or is refused.
+        let scan = MAX_TEXT_BYTES.max(crate::readers::MAX_FILE_BYTES) as u64;
+        if stamp.bytes > scan {
+            return Err(error(&format!(
+                "source file is {} bytes; ranged-read source limit is {MAX_TEXT_BYTES} bytes (4 MiB) for UTF-8 text and {scan} bytes for other files",
+                stamp.bytes
+            )));
+        }
+        file.seek(SeekFrom::Start(0))?;
+        let mut head = Vec::new();
+        (&mut file).take(4096).read_to_end(&mut head)?;
+        file.seek(SeekFrom::Start(0))?;
+        let format = crate::readers::sniff(&head, path).map(|(format, _)| format);
+        let pdf = format == Some(crate::readers::Format::Pdf);
+        let not_pdf = || error(&format!("{path}: the file has no PDF header (%PDF-) at its start and is not UTF-8 text; no text was read"));
+        let utf16 = crate::readers::is_utf16(&head);
+        if pdf && utf16 {
+            return Err(not_pdf());
+        }
+        if !(pdf || format.is_some_and(|format| format.is_plain_text())) || utf16 {
+            return self.read_document(file, stamp, path, offset, limit);
+        }
+        // The encoding selects the path before a size limit applies, so
+        // legacy text converts within the reader limit and every range of
+        // one file uses one form. UTF-8 text keeps the 4 MiB limit.
+        if !utf8_prefix(&mut file, stamp.bytes, scan)? {
+            if pdf {
+                return Err(not_pdf());
+            }
+            file.seek(SeekFrom::Start(0))?;
+            return self.read_document(file, stamp, path, offset, limit);
+        }
         if stamp.bytes > MAX_TEXT_BYTES as u64 {
             return Err(error(&format!(
                 "source file is {} bytes; ranged-read source limit is {MAX_TEXT_BYTES} bytes (4 MiB)",
@@ -213,6 +250,59 @@ impl Workspace {
         let text: std::sync::Arc<str> = crate::pdf::text(&bytes, cancel).map_err(|e| error(&e))?.into();
         *cache() = Some((path.to_owned(), stamp.clone(), text.clone()));
         Ok(Some(text))
+    }
+
+    /// A file that is not UTF-8 text, converted by [`crate::readers`] to
+    /// Markdown with its header line. `offset` and `limit` apply to the
+    /// Markdown, and a partial result names the source format.
+    fn read_document(
+        &self,
+        file: std::fs::File,
+        stamp: FileStamp,
+        path: &str,
+        offset: usize,
+        limit: usize,
+    ) -> io::Result<String> {
+        use std::io::Read;
+        let caps = crate::readers::Caps::default();
+        if stamp.bytes > caps.max_bytes as u64 {
+            return Err(error(&format!(
+                "{path}: {}",
+                crate::readers::ReadError::TooLarge { bytes: stamp.bytes, cap: caps.max_bytes }
+            )));
+        }
+        let mut bytes = Vec::new();
+        (&file).take(stamp.bytes + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != stamp.bytes || FileStamp::from_metadata(&file.metadata()?) != stamp {
+            return Err(error("source file changed during read"));
+        }
+        let (format, doc) = crate::readers::read(&bytes, path, &caps).map_err(|e| error(&format!("{path}: {e}")))?;
+        let markdown = crate::readers::render(path, format, &doc);
+        if offset > markdown.len() {
+            return Err(error(&format!(
+                "read offset is {offset} bytes; the Markdown from this {format} file is {} bytes",
+                markdown.len()
+            )));
+        }
+        if !markdown.is_char_boundary(offset) {
+            return Err(error("read offset must be a UTF-8 byte boundary of the Markdown"));
+        }
+        let mut end = (offset + limit).min(markdown.len());
+        while !markdown.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == offset && end < markdown.len() {
+            return Err(error("read limit must fit one character of the Markdown"));
+        }
+        if offset == 0 && end == markdown.len() {
+            return Ok(markdown);
+        }
+        Ok(format!(
+            "Read Markdown bytes {offset}..{end} of {}, converted from {format} ({} bytes; range limit {limit}; next offset {end}).\n{}",
+            markdown.len(),
+            end - offset,
+            &markdown[offset..end]
+        ))
     }
 
     /// Uses the same anchored boundary as tools; a missing leaf is distinct from
@@ -369,6 +459,33 @@ impl Workspace {
     pub(crate) fn session_dir(&self) -> io::Result<anchored::Dir> {
         self.state_dir()?.private_child("sessions")
     }
+}
+
+/// True when the first `scan` of the file's `bytes` bytes (read from the
+/// current position) are UTF-8. A character cut at `scan` counts as UTF-8;
+/// one cut at the end of the file does not.
+fn utf8_prefix(file: &mut std::fs::File, bytes: u64, scan: u64) -> io::Result<bool> {
+    use std::io::Read;
+    let mut chunk = vec![0u8; 64 * 1024];
+    let (mut carry, mut left) = (0usize, bytes.min(scan));
+    while left > 0 {
+        let want = (chunk.len() - carry).min(usize::try_from(left).unwrap_or(usize::MAX));
+        let n = file.read(&mut chunk[carry..carry + want])?;
+        if n == 0 {
+            break;
+        }
+        left -= n as u64;
+        let filled = carry + n;
+        match std::str::from_utf8(&chunk[..filled]) {
+            Ok(_) => carry = 0,
+            Err(e) if e.error_len().is_none() => {
+                chunk.copy_within(e.valid_up_to()..filled, 0);
+                carry = filled - e.valid_up_to();
+            }
+            Err(_) => return Ok(false),
+        }
+    }
+    Ok(carry == 0 || bytes > scan)
 }
 
 fn error(message: &str) -> io::Error {
@@ -1109,6 +1226,83 @@ mod tests {
     }
     #[test]
     #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn ranged_reads_convert_documents_and_keep_utf8_text_exact() {
+        let f = Fixture::new();
+        let html = "<!DOCTYPE html><h1>T</h1><p>x</p>";
+        fs::write(f.0.join("page.html"), html).unwrap();
+        fs::write(f.0.join("note.rtf"), r"{\rtf1\ansi{\fonttbl{\f0 Arial;}}Hello\par caf\'e9}").unwrap();
+        fs::write(f.0.join("latin.txt"), b"caf\xe9\n").unwrap();
+        let w = f.workspace();
+        assert_eq!(w.read_range("page.html", 0, 4096).unwrap(), html);
+        let rtf = w.read_range("note.rtf", 0, 4096).unwrap();
+        assert_eq!(rtf, "<!-- vade read: note.rtf | RTF | pages 1 | chars 11 | skipped: none -->\nHello\ncaf\u{e9}\n");
+        let part = w.read_range("note.rtf", 0, 20).unwrap();
+        assert!(part.starts_with(&format!("Read Markdown bytes 0..20 of {}, converted from RTF", rtf.len())), "{part}");
+        assert!(part.ends_with("\n<!-- vade read: note"));
+        assert!(w.read_range("note.rtf", rtf.len() + 1, 8).is_err());
+        let latin = w.read_range("latin.txt", 0, 4096).unwrap();
+        assert!(latin.contains("skipped: decoded as Windows-1252") && latin.contains("\ncaf\u{e9}\n"), "{latin}");
+    }
+    /// Argon review of 7c9881a, items 4 and 7: a .pdf file that the PDF test
+    /// does not take is text or one clear line, and a file over the largest
+    /// limit is refused before its bytes are scanned.
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn pdf_named_files_without_a_header_and_files_over_every_limit() {
+        let f = Fixture::new();
+        fs::write(f.0.join("notes.pdf"), "plain notes\n").unwrap();
+        // The first 1,024 bytes are UTF-8, so the PDF test leaves the file.
+        let mut late = b"\n%PDF-1.7\n".to_vec();
+        late.resize(1100, b'a');
+        late.extend_from_slice(&[0xff, 0x00, 0x9c, 0x80]);
+        fs::write(f.0.join("late.pdf"), &late).unwrap();
+        let w = f.workspace();
+        assert_eq!(w.read_range("notes.pdf", 0, 4096).unwrap(), "plain notes\n");
+        let e = w.read_range("late.pdf", 0, 4096).unwrap_err().to_string();
+        assert_eq!(e, "late.pdf: the file has no PDF header (%PDF-) at its start and is not UTF-8 text; no text was read");
+        // UTF-16 text named .pdf, with and without a byte order mark.
+        for (name, bytes) in [("marked.pdf", &b"\xff\xfeh\0i\0"[..]), ("bare.pdf", b"h\0e\0l\0l\0o\0")] {
+            fs::write(f.0.join(name), bytes).unwrap();
+            let e = w.read_range(name, 0, 4096).unwrap_err().to_string();
+            assert_eq!(e, format!("{name}: the file has no PDF header (%PDF-) at its start and is not UTF-8 text; no text was read"));
+        }
+        let huge = fs::File::create(f.0.join("huge.txt")).unwrap();
+        huge.set_len(crate::readers::MAX_FILE_BYTES as u64 + 1).unwrap();
+        let e = w.read_range("huge.txt", 0, 16).unwrap_err().to_string();
+        assert!(e.contains("4194304 bytes (4 MiB) for UTF-8 text and 52428800 bytes for other files"), "{e}");
+    }
+    /// Astra review of 075165a, BLOCK 4 and SHOULD-FIX 5: UTF-16 with no byte
+    /// order mark is also valid UTF-8, and legacy text over 4 MiB converts.
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn ranged_reads_decode_bare_utf16_and_large_legacy_text() {
+        let f = Fixture::new();
+        let le: Vec<u8> = "hello\n".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let be: Vec<u8> = "hello\n".encode_utf16().flat_map(u16::to_be_bytes).collect();
+        assert!(std::str::from_utf8(&le).is_ok() && std::str::from_utf8(&be).is_ok());
+        fs::write(f.0.join("le.txt"), &le).unwrap();
+        fs::write(f.0.join("be.txt"), &be).unwrap();
+        let w = f.workspace();
+        for (name, order) in [("le.txt", "LE"), ("be.txt", "BE")] {
+            let note = format!("decoded from UTF-16 {order} (no byte order mark)");
+            let whole = w.read_range(name, 0, 4096).unwrap();
+            assert_eq!(whole, format!("<!-- vade read: {name} | text | pages 1 | chars 6 | skipped: {note} -->\nhello\n\n<!-- vade read: skipped: {note} -->\n"));
+            assert!(!whole.contains('\0'));
+            let part = w.read_range(name, whole.find("hello").unwrap(), 5).unwrap();
+            assert!(part.ends_with("\nhello") && part.contains("converted from text"), "{part:?}");
+        }
+        let mut legacy = vec![b'a'; MAX_TEXT_BYTES];
+        legacy.extend_from_slice(b"caf\xe9\n");
+        fs::write(f.0.join("legacy.txt"), &legacy).unwrap();
+        let part = w.read_range("legacy.txt", 0, 128).unwrap();
+        assert!(part.starts_with("Read Markdown bytes 0..128 of ") && part.contains("Windows-1252"), "{part:?}");
+        let mut utf8 = vec![b'a'; MAX_TEXT_BYTES];
+        utf8.push(b'\n');
+        fs::write(f.0.join("big.txt"), &utf8).unwrap();
+        assert!(w.read_range("big.txt", 0, 16).unwrap_err().to_string().contains("ranged-read source limit is 4194304 bytes"));
+    }
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn bounded_text_reads_and_repeatable_listings() {
         let f = Fixture::new();
         fs::write(f.0.join("ok.txt"), "hello\nworld").unwrap();
@@ -1139,6 +1333,8 @@ mod tests {
         assert!(w.read_range("utf8", 2, 3).is_err());
         assert!(w.read_range(".env", 0, 16).is_err());
         assert!(w.read("binary").is_err());
+        fs::write(f.0.join("blob"), [0, 1, 2, 3, 0, 0, 16]).unwrap();
+        assert!(w.read_range("blob", 0, 16).unwrap_err().to_string().contains("binary file with no known format"));
         assert!(w.read(".").is_err());
         let names = w.list(".").unwrap();
         assert!(!names.iter().any(|n| n == ".env"));

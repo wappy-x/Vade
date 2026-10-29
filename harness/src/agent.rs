@@ -668,6 +668,11 @@ pub trait Model {
         None
     }
     fn prompt_rewritten(&mut self) {}
+    /// True when the adapter picks each reply size from the room the window
+    /// leaves after the prompt, so a smaller prompt gets a larger reply.
+    fn automatic_output(&self) -> bool {
+        false
+    }
     /// Latest reservation selected by an adaptive adapter during token counting.
     /// Other adapters retain the caller's fixed reservation.
     fn output_reserve_tokens(&self, fallback: usize) -> usize {
@@ -985,7 +990,7 @@ impl<R, L> WorkspaceTools<R, L> {
 
     pub fn definitions(&self) -> Value {
         json::parse(r#"[
-            {"type":"function","function":{"name":"workspace_read","description":"Read a UTF-8 byte range inside the approved workspace. Source ≤4 MiB; a PDF (≤50 MiB) reads as its extracted text layer and offsets index that text; offset is zero-based (default 0), limit 1–65536 bytes (default bounded by tool output). Partial results state actual bytes and next offset. Offset must be a UTF-8 boundary.","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":65536}},"required":["path"],"additionalProperties":false}}},
+            {"type":"function","function":{"name":"workspace_read","description":"Read a UTF-8 byte range inside the approved workspace. Source ≤4 MiB for UTF-8 text and ≤50 MiB for other files; a PDF reads as its extracted text layer and offsets index that text; offset is zero-based (default 0), limit 1–65536 bytes (default bounded by tool output). Partial results state actual bytes and next offset. Offset must be a UTF-8 boundary. Files that are not UTF-8 text (RTF, other encodings) are read as Markdown with a header line; offset/limit then apply to the Markdown.","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":65536}},"required":["path"],"additionalProperties":false}}},
             {"type":"function","function":{"name":"workspace_list","description":"List a bounded directory inside the approved workspace.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}}}
         ]"#).expect("static tool definitions are valid JSON")
     }

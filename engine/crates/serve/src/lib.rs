@@ -120,6 +120,10 @@ pub trait Session {
     fn retire(&mut self) {}
     /// Private scratch/state bound in addition to enumerated shared allocations.
     fn retained_private_bytes(&self) -> usize { 0 }
+    /// Storage a fork adds that `retained_allocations` does not list yet: a snapshot copy the
+    /// backend funds from its own retained budget only when it forks. The cache makes room
+    /// for these bytes before it forks.
+    fn fork_storage_bytes(&self) -> usize { 0 }
     /// Prefix guaranteed reusable on append; recurrent backends replay a tail.
     fn checkpoint_reusable_tokens(&self, tokens: usize) -> usize { tokens }
     /// Actual immutable allocation bound after completion, including scratch.
@@ -303,6 +307,9 @@ pub trait Engine {
     /// stays free, so admission never waits on memory a full cache took from the engine's spare
     /// session pages. None: the session pool bounds the cache alone.
     fn cache_free_physical_bytes(&self, _live_reserved: usize) -> Result<Option<(i128, usize)>, String> { Ok(None) }
+    /// Bytes the startup plan sets aside for retained prefixes alone: admission does not
+    /// use them, so neither admission nor host memory pressure reclaims them.
+    fn cache_room_bytes(&self) -> usize { 0 }
 }
 
 pub struct DraftRows<'s, S> {

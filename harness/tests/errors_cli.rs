@@ -184,6 +184,11 @@ fn argument_errors_name_options_and_mode_help_without_echoing_values() {
     }
     let text = failure(&["direct", "--seed", "713", "--seed", "PRIVATE_VALUE"]);
     assert!(text.contains("--seed: an option was specified more than once"), "{text}");
+    // The older flag name is named too, in both errors.
+    let text = failure(&["agent", "--no-compact", "--no-auto-compact"]);
+    assert!(text.contains("--no-compact or --no-auto-compact was specified more than once"), "{text}");
+    let text = failure(&["direct", "--no-auto-compact"]);
+    assert!(text.contains("--no-compact and --no-auto-compact require agent mode"), "{text}");
     let text = failure(&["direct", "--greedy", "--temperature", "0.5", "--plain"]);
     assert!(text.starts_with("vade: choose --greedy or --temperature"), "{text}");
     assert!(!text.contains("--plain:"), "cross-option error blamed final flag: {text}");

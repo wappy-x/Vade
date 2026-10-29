@@ -1019,7 +1019,16 @@ fn status_prints_the_engine_retention_state() {
     assert!(printed.contains(") scheduler_pool active=8 connections=16\n"), "{printed}");
     let mut session = Session::load(&f.app.config.state_dir).unwrap().unwrap();
     assert_eq!(retention_label(&session, Some(true)), "on (engine report)");
-    assert_eq!(retention_label(&session, None), "off by default; engine not checked");
+    assert_eq!(retention_label(&session, None), "on by default; engine not checked");
+    // The default follows the topology: on for the tensor split, off on the layer chain.
+    let one = session.ranks[0].clone();
+    session.ranks = vec![one.clone(); 2];
+    assert_eq!(retention_label(&session, None), "on by default; engine not checked");
+    session.ranks = vec![one.clone(); 3];
+    assert_eq!(retention_label(&session, None), "off by default on the layer chain; engine not checked");
+    session.replicas = true;
+    assert_eq!(retention_label(&session, None), "on by default; engine not checked");
+    (session.ranks, session.replicas) = (vec![one], false);
     session.cache_bytes = Some(0);
     assert_eq!(retention_label(&session, None), "off (--cache-bytes 0)");
     session.fp4_local = false;

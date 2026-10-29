@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 engine-model = { path = "../engine/crates/model" }
 engine-tokenizer = { path = "../engine/crates/tokenizer" }
+vade-harness = { path = "../harness" }
 vade-bench = { path = "../engine/tools/bench" }
 
 [[bench]]

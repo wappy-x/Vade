@@ -25,6 +25,7 @@
 mod output;
 mod prebuilt;
 mod pull;
+mod read;
 mod repository;
 mod sha256;
 mod app;
@@ -139,6 +140,19 @@ fn run_main(mut args: Vec<String>) {
             }
         }
         return;
+    }
+    // vade read needs no engine and no key, so key options and
+    // VADE_API_KEY_FILE do not apply to it; read::parse refuses them.
+    if args.len() == 2 && matches!(args[0].as_str(), "help" | "--help" | "-h") && args[1] == "read" {
+        public_output(&read::help());
+        return;
+    }
+    if args.first().is_some_and(|arg| arg == "read") {
+        if args[1..].iter().any(|arg| matches!(arg.as_str(), "--help" | "-h")) {
+            public_output(&read::help());
+            return;
+        }
+        std::process::exit(read::run(&args[1..]));
     }
     auth::configure(&mut args).unwrap_or_else(|error| fail(&error));
     if args.len() == 2 && matches!(args[0].as_str(), "help" | "--help" | "-h") && args[1] == "verify" {

@@ -23,6 +23,7 @@ pub struct CodingTools<'a, F> {
     shell_exclusions: shell::Exclusions,
     build_session: Option<&'a shell::BuildSession>,
     uncertain: bool,
+    memory: bool,
     check: Option<AutoCheck>,
     /// Last failing command (argv, exit and output) since the last file change.
     failed_command: Option<(Vec<String>, String)>,
@@ -122,7 +123,7 @@ pub fn definitions_for(reply_limit: usize, shell: bool) -> Value {
             .and_then(Value::as_str)
             != Some("workspace_read")
     });
-    tools.push(json::parse(r#"{"type":"function","function":{"name":"workspace_read","description":"Read a small UTF-8 byte range inside the approved workspace (source ≤4 MiB). A PDF (≤50 MiB) reads as its extracted text layer, page by page; offsets index that text. Prefer workspace_search then workspace_read_lines for code; do not page whole files without a concrete need. offset is zero-based (default 0), limit 1–4096 (default bounded by a 4096-byte inline output including path/provenance). Partial results give actual bytes and next offset. Offset must be a UTF-8 boundary.","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":4096}},"required":["path"],"additionalProperties":false}}}"#).expect("native read schema"));
+    tools.push(json::parse(r#"{"type":"function","function":{"name":"workspace_read","description":"Read a small UTF-8 byte range inside the approved workspace (source ≤4 MiB for UTF-8 text, ≤50 MiB for other files). A PDF reads as its extracted text layer, page by page; offsets index that text. Prefer workspace_search then workspace_read_lines for code; do not page whole files without a concrete need. offset is zero-based (default 0), limit 1–4096 (default bounded by a 4096-byte inline output including path/provenance). Partial results give actual bytes and next offset. Offset must be a UTF-8 boundary. Non-UTF-8 files (RTF, other encodings) read as Markdown; offset/limit apply to it.","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":4096}},"required":["path"],"additionalProperties":false}}}"#).expect("native read schema"));
     tools.extend(extra);
     if !shell {
         tools.retain(|tool| tool.get("function").and_then(|f| f.get("name")).and_then(Value::as_str) != Some("workspace_shell"));
@@ -166,12 +167,15 @@ where
             shell_exclusions: shell::Exclusions::default(),
             build_session: None,
             uncertain: false,
+            memory: false,
             check: None,
             failed_command: None,
             rejected_add: None,
             line_read: None,
         }
     }
+    /// Project notes are off for library, card and benchmark callers.
+    pub fn with_memory(mut self, enabled: bool) -> Self { self.memory = enabled; self }
     /// Run the check in the same sandbox; Rust compiler/doc warnings fail it.
     pub fn with_check(mut self, command: Option<&str>) -> Self {
         self.check = command.map(|command| AutoCheck {
@@ -547,6 +551,26 @@ where
         cancel: &AtomicBool,
     ) -> Result<String, ToolError> {
         match invocation.call.name.as_str() {
+            "memory_save" | "memory_forget" => {
+                if !self.memory { return Err(ToolError::InvalidArguments("project memory is off")); }
+                let save = invocation.call.name == "memory_save";
+                let Value::Object(fields) = invocation.arguments else {
+                    return Err(ToolError::InvalidArguments("memory arguments must be an object"));
+                };
+                if fields.len() != if save { 2 } else { 1 }
+                    || fields.iter().any(|(key, _)| key != "key" && !(save && key == "text")) {
+                    return Err(ToolError::InvalidArguments("use the memory tool schema"));
+                }
+                let key = invocation.arguments.get("key").and_then(Value::as_str)
+                    .ok_or(ToolError::InvalidArguments("key must be a string"))?;
+                let text = if save { Some(invocation.arguments.get("text").and_then(Value::as_str)
+                    .ok_or(ToolError::InvalidArguments("text must be a string"))?) } else { None };
+                let count = crate::memory::change(self.workspace, key, text).map_err(|error| match error {
+                    crate::memory::ChangeError::InvalidArguments(reason) => ToolError::InvalidArguments(reason),
+                    crate::memory::ChangeError::Storage(_) => ToolError::Failed,
+                })?;
+                Ok(format!("{{\"entries\":{count}}}"))
+            }
             "workspace_search" | "workspace_read_lines" => {
                 let Value::Object(fields) = invocation.arguments else {
                     return Err(ToolError::InvalidArguments("arguments must be a JSON object"));

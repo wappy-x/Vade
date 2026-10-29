@@ -275,16 +275,21 @@ and how to change it. These are the defaults you meet first:
   Sparks. We have run at most four: four DGX Sparks at `6cb46bf` on
   2026-10-25 and at `76977df` on 2026-10-28, and four cloud GB10 VMs at
   v0.1.0 on 2026-10-24.
-- **The prefix cache is off by default.** With the cache, a request that
+- **The prefix cache is on by default.** With the cache, a request that
   starts like an earlier one does not read that start again. The cache works
-  on one Spark and on two Sparks (the tensor split). In the end-of-day runs
+  on one Spark and on two Sparks (the tensor split); three or more Sparks run
+  without it. It keeps prompts only for requests that send `cache:true` or a
+  `prompt_cache_key`. At startup it takes a memory room of its own; on one
+  Spark the room never lowers the number of full-context chats, and on two
+  Sparks it can lower it by one so a copy of up to 4 GiB fits (a full
+  32,768-token context). Set `VADE_FLASHNEXT_PREFIX_CACHE=0`
+  to turn it off ([settings](INSTALL.md#the-prefix-cache)). In the end-of-day runs
   at `76977df`, the second question on a 32K-token chat reused 32,064 tokens.
   It gave its first token in 0.63 s on one Spark (16.03 s with the cache
   off) and in 0.76 s on two Sparks (9.95 s with the cache off). The first
   question takes longer with the cache on: 16.23 s against 16.04 s on one
   Spark, and 11.09 s against 10.31 s on two
   ([benchmarks](docs/benchmarks.md#a-long-chat-and-its-second-question)).
-  See [turn on the prefix cache](INSTALL.md#turn-on-the-prefix-cache).
 
 ## Exactness
 
@@ -426,6 +431,7 @@ and [Credits](CREDITS.md) keeps the source attribution.
 | [Architecture](docs/architecture.md) | How requests reach the engine, and the exactness rule |
 | [Glossary](docs/GLOSSARY.md) | The serving terms these docs use |
 | [Harness](harness/README.md) | The coding agent, its tools, and the gateway for other clients |
+| [Reading files](docs/reading-files.md) | How `vade read` and the agent turn documents into Markdown: formats, the header line and caps |
 | [Engine docs](engine/docs/README.md) | How the engine runs, its GPU kernels and how it is validated |
 | [All documentation](docs/README.md) | Guides for deploying and developing Vade |
 | [Contributing](CONTRIBUTING.md) and [agent rules](AGENTS.md) | How to change Vade: house rules, validation and review |

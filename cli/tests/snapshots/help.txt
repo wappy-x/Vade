@@ -17,6 +17,7 @@ Start and stop:
 Use:
   chat      Chat with the running engine
   sessions  List, export or delete saved chat sessions
+  read      Print a file as Markdown (text, HTML, CSV, RTF, data, code)
 
 Models:
   pull      Download a model from Hugging Face, with resume and checks

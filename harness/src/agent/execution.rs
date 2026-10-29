@@ -41,17 +41,23 @@ impl crate::context::ContextHost for LoopHost<'_> {
             self.model.count_input(ModelRequest { messages: &messages, ..c.request(self.wire) }, self.cancel)
         }
         .and_then(|n| crate::context::Usage::with_appended(c, self.staged).with_count(&n));
-        if let Err(error) = &result {
-            self.error = Some(error.kind());
-        }
+        // The error of the last count: a later count that works clears it.
+        self.error = result.as_ref().err().map(io::Error::kind);
         result
     }
     fn summarize(&mut self, request: &Conversation) -> io::Result<String> {
         let result = crate::context::summarize_with(self.model, request, self.wire, self.cancel);
+        // Only an interrupted summary stops the observer; any other failure
+        // falls back to local excerpts and is not the run's error.
         if let Err(error) = &result {
-            self.error = Some(error.kind());
+            if error.kind() == io::ErrorKind::Interrupted {
+                self.error = Some(error.kind());
+            }
         }
         result
+    }
+    fn automatic_output(&self) -> bool {
+        self.model.automatic_output()
     }
 }
 

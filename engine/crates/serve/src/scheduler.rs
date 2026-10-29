@@ -108,13 +108,13 @@ impl ModelAdmin {
         Ok(path)
     }
 }
-fn model_response(path: &str, state: &str, model: &str, active: usize, queued: usize, device_bytes: Option<usize>, limits: &Limits, context: usize, drafting: Option<(protocol::DraftMode, usize)>) -> Option<String> {
+fn model_response(path: &str, state: &str, model: &str, active: usize, queued: usize, device_bytes: Option<usize>, limits: &Limits, context: usize, drafting: Option<(protocol::DraftMode, usize)>, cache: Option<String>) -> Option<String> {
     let model = protocol::quote(model);
     match path {
         "/cors" => Some(String::new()),
         "/v1/models" if state == "failed" || state == "poisoned" => Some(format!("{{\"object\":\"list\",\"status\":\"{state}\",\"data\":[]}}")),
-        "/health" => Some(format!("{{\"status\":\"{state}\",\"model\":{model},\"active\":{active},\"queued\":{queued},\"device_bytes\":{},\"vade\":{},\"events\":{},\"caps\":{{\"context_limit\":{},\"input_limit\":{},\"output_limit\":{}}}}}",
-            device_bytes.map_or_else(|| "null".to_owned(), |n| n.to_string()),
+        "/health" => Some(format!("{{\"status\":\"{state}\",\"model\":{model},\"active\":{active},\"queued\":{queued},\"device_bytes\":{},\"prefix_cache\":{},\"vade\":{},\"events\":{},\"caps\":{{\"context_limit\":{},\"input_limit\":{},\"output_limit\":{}}}}}",
+            device_bytes.map_or_else(|| "null".to_owned(), |n| n.to_string()), cache.as_deref().unwrap_or("null"),
             limits.metadata.as_ref().map_or_else(|| "null".into(), |m| drafting
                 .map_or_else(|| m.json().to_owned(), |(mode, depth)| m.json_with_drafting(mode, depth))),
             engine_model::events::counts_json(), context.min(limits.context_tokens), limits.input_tokens, limits.output_limit(context))),
@@ -132,7 +132,7 @@ fn model_listing_reports_effective_limits() {
     for (configured, engine, output) in [(32768, 65536, 16384), (65536, 32768, 65536)] {
         let limits = Limits { context_tokens: configured, output_tokens: output, ..Limits::default() };
         for state in ["ready", "loading"] {
-            let body = model_response("/v1/models", state, "model", 0, 0, None, &limits, engine, None).unwrap();
+            let body = model_response("/v1/models", state, "model", 0, 0, None, &limits, engine, None, None).unwrap();
             let value = json::parse(body.as_bytes(), Default::default()).unwrap();
             let entry = value.object().unwrap()["data"].array().unwrap()[0].object().unwrap();
             for key in ["context_length", "max_model_len"] {
@@ -142,7 +142,7 @@ fn model_listing_reports_effective_limits() {
             assert_eq!(entry["input_modalities"], Value::Array(vec![Value::String("text".into())]));
         }
         for state in ["failed", "poisoned"] {
-            assert!(model_response("/v1/models", state, "model", 0, 0, None, &limits, engine, None).unwrap().contains("\"data\":[]"));
+            assert!(model_response("/v1/models", state, "model", 0, 0, None, &limits, engine, None, None).unwrap().contains("\"data\":[]"));
         }
     }
 }
@@ -206,7 +206,7 @@ fn unavailable(listener: &TcpListener, limits: &Limits, model: &str, stop: &Atom
                             }
                         }
                     }
-                    (if http.path == "/cors" { 204 } else { 503 }, model_response(&http.path, state, model, 0, 0, None, limits, limits.context_tokens, None)
+                    (if http.path == "/cors" { 204 } else { 503 }, model_response(&http.path, state, model, 0, 0, None, limits, limits.context_tokens, None, None)
                         .unwrap_or_else(|| protocol::error_json("model_unavailable", "retry when ready")))
                 }
                 Err(error) => crate::auth::request_error(&error),
@@ -273,7 +273,9 @@ pub struct Config {
     pub background_rows: usize,
 }
 impl Config {
-    fn validate(&self, cache: &CacheLimits) -> Result<(), String> {
+    /// `room`: the startup cache room (Engine::cache_room_bytes). The plan funds it beside the
+    /// session budget, so the retained ceiling may use both.
+    fn validate(&self, cache: &CacheLimits, room: usize) -> Result<(), String> {
         if self.active == 0 || self.active == usize::MAX
             || self.sharing.client_priority_cap == 255
             || self.connections < self.active
@@ -284,7 +286,7 @@ impl Config {
             || !(1..=self.active.max(512)).contains(&self.background_rows)
             || self.active_bytes == 0
             || self.active_bytes > self.session_budget_bytes
-            || cache.retained_bytes > self.session_budget_bytes
+            || cache.retained_bytes > self.session_budget_bytes.saturating_add(room)
         {
             return Err("invalid scheduler capacity or aggregate session budget".into());
         }
@@ -1036,9 +1038,12 @@ fn balance_cache<'s, S: Session + 's>(cache: &mut SessionCache<S>, budget: usize
     let (reserved, pages) = reservations(states);
     let accounting_ms = started.elapsed().as_secs_f64()*1000.0;
     let available = budget.checked_sub(reserved).ok_or_else(|| crate::budget::session_refusal(reserved as u128, budget, "live request reservations; CONTEXT and session count not supplied to cache balancing", "the scheduler session pool after weights and shared workspace"))?;
+    if reserved != 0 { cache.note_busy(Instant::now()); }
     cache.rebalance_within(available.saturating_sub(hold), free(reserved)?, pages, Instant::now());
-    if reserved.checked_add(cache.unfunded_bytes()).is_none_or(|bytes| bytes > budget) {
-        return Err(crate::budget::session_refusal(reserved as u128 + cache.unfunded_bytes() as u128, budget, &format!("live request reservations {reserved} bytes + unfunded retained cache {} bytes; CONTEXT not supplied to cache balancing", cache.unfunded_bytes()), "the scheduler session pool after weights and shared workspace"));
+    // The startup room is funded beside the budget: retention inside it never refuses admission.
+    let funded = budget.saturating_add(cache.room());
+    if reserved.checked_add(cache.unfunded_bytes()).is_none_or(|bytes| bytes > funded) {
+        return Err(crate::budget::session_refusal(reserved as u128 + cache.unfunded_bytes() as u128, funded, &format!("live request reservations {reserved} bytes + unfunded retained cache {} bytes; CONTEXT not supplied to cache balancing", cache.unfunded_bytes()), "the scheduler session pool after weights and shared workspace"));
     }
     if std::env::var("SPARK_PROFILE").as_deref() == Ok("1") && started.elapsed().as_micros() >= 100 {
         eprintln!("cache_balance_profile accounting_ms={accounting_ms:.3} total_ms={:.3}", started.elapsed().as_secs_f64()*1000.0);
@@ -1461,7 +1466,18 @@ fn serve_inner<'e, E: Engine, T: Tokenizer>(
     assert_eq!((cache.len(), cache.retained_bytes()), (1, retained));
     cache.snapshot_scoped(SessionKey::generate().unwrap(), None, &state(4096), now, true);
     assert_eq!((cache.len(), cache.retained_bytes()), (1, retained));
-    // One byte short of the spare pages' room: the entry yields; admission is unchanged.
+    // One byte short of the spare pages' room: beside a live request the reserves keep what an
+    // eviction returns, so the entry stays; 30 s after the last live request it yields.
     assert_eq!(balance_cache(&mut cache, 4096 + (1 << 19), std::iter::once(&live), 0, |_| Ok(Some((-1, 0)))).unwrap(), 4096);
+    assert_eq!((cache.len(), cache.retained_bytes()), (1, retained));
+    cache.rebalance_within(1 << 19, Some((-1, 0)), Default::default(), Instant::now() + Duration::from_secs(30));
     assert_eq!((cache.len(), cache.retained_bytes()), (0, 0));
+    // The startup room is funded beside the budget: under the same pressure, an unfunded
+    // entry inside it stays beside a live reservation that fills the budget.
+    let mut cache = SessionCache::new(CacheLimits { entries: 4, retained_bytes: 1 << 20, tokens_per_entry: 16,
+        logits_per_entry: 16, idle_ttl: Duration::from_secs(60) }).unwrap().with_room(1 << 19);
+    cache.snapshot_scoped(SessionKey::generate().unwrap(), None, &state(4096), now, true);
+    let retained = cache.retained_bytes();
+    assert_eq!(balance_cache(&mut cache, 4096, std::iter::once(&live), 0, |_| Ok(Some((-1, 0)))).unwrap(), 4096);
+    assert_eq!((cache.len(), cache.retained_bytes(), cache.unfunded_bytes()), (1, retained, retained));
 }

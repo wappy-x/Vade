@@ -74,6 +74,7 @@ pub(crate) struct Config {
     pub(crate) rules_scopes: Vec<String>,
     /// Direct and agent: load project instruction files (`--no-instructions` clears it).
     pub(crate) instructions: bool,
+    pub(crate) memory: bool,
     pub(crate) shell_exclusions: vade_harness::shell::Exclusions,
     pub(crate) shell_toolchain: Option<PathBuf>,
     /// Agent: user check command run after rounds that changed files, and its source.
@@ -194,6 +195,7 @@ impl Config {
             generation: vade_harness::contract::GenerationOptions::default(),
             rules_scopes: Vec::new(),
             instructions: true,
+            memory: vade_harness::memory::enabled(false, std::env::var("VADE_MEMORY").ok().as_deref()),
             shell_exclusions: vade_harness::shell::Exclusions::default(),
             shell_toolchain: None,
             check: None,
@@ -255,9 +257,14 @@ impl Config {
                 }
                 "--no-compact" | "--no-auto-compact" => {
                     if !config.auto_compact {
-                        return Err("--no-compact was specified more than once");
+                        return Err("--no-compact or --no-auto-compact was specified more than once");
                     }
                     config.auto_compact = false;
+                }
+                "--no-memory" => {
+                    if used.contains(&"--no-memory") { return Err("--no-memory was specified more than once"); }
+                    config.memory = false;
+                    used.push("--no-memory");
                 }
                 "--no-instructions" => {
                     if !config.instructions {
@@ -633,6 +640,10 @@ impl Config {
         if !config.auto_continue && !matches!(config.mode, Mode::Agent | Mode::Direct) {
             return Err("--no-auto-continue requires direct or agent mode");
         }
+        if used.contains(&"--no-memory") && !matches!(config.mode, Mode::Agent | Mode::Direct) {
+            return Err("--no-memory requires direct or agent mode");
+        }
+        config.memory &= matches!(config.mode, Mode::Agent | Mode::Direct);
         if !config.instructions && !matches!(config.mode, Mode::Agent | Mode::Direct) {
             return Err("--no-instructions requires direct or agent mode");
         }
@@ -653,7 +664,7 @@ impl Config {
             }
         }
         if !config.auto_compact && config.mode != Mode::Agent {
-            return Err("--no-compact requires agent mode");
+            return Err("--no-compact and --no-auto-compact require agent mode");
         }
         if config.prewarm_compaction && config.mode != Mode::Agent {
             return Err("--prewarm-compaction requires agent mode");

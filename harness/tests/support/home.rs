@@ -23,5 +23,8 @@ pub fn command(program: &str) -> Command {
     command
 }
 pub fn harness() -> Command {
-    command(env!("CARGO_BIN_EXE_vade-harness"))
+    let mut command = command(env!("CARGO_BIN_EXE_vade-harness"));
+    // Conformance requests must not inherit notes or memory tools from chat.
+    command.env("VADE_MEMORY", "0");
+    command
 }

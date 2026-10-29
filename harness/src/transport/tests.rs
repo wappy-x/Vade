@@ -329,6 +329,31 @@
         });
     }
 
+    #[test]
+    fn reply_after_peer_reset_is_still_read() {
+        // A server that answers without reading the whole request (a 401, say)
+        // resets the connection. macOS then refuses socket options with EINVAL,
+        // but the reply is still in the buffer and must reach the client.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let probe = client.try_clone().unwrap();
+        let mut socket = DeadlineStream::new(client, None).unwrap();
+        socket.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\nunread").unwrap();
+        server.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 5\r\n\r\nhello").unwrap();
+        drop(server);
+        let started = Instant::now();
+        while probe.set_read_timeout(Some(POLL_TIMEOUT)).is_ok() && started.elapsed() < Duration::from_millis(500) {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let mut reader = BufReader::new(socket);
+        let head = read_head(&mut reader).unwrap();
+        assert!(head.first.starts_with("HTTP/1.1 401 "), "{}", head.first);
+        let mut body = Vec::new();
+        BodyReader::new(reader, &head, false, MAX_BODY).unwrap().read_to_end(&mut body).unwrap();
+        assert_eq!(body, b"hello");
+    }
+
     fn mock_response(bytes: Vec<u8>, on_delta: &mut dyn FnMut(&str)) -> io::Result<Completion> {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();

@@ -9,6 +9,28 @@ mod cli;
 mod coding;
 use coding::*;
 #[test]
+fn conformance_prompt_and_tools_ignore_project_memory() {
+    let fixture = Fixture::new();
+    let workspace = vade_harness::tools::Workspace::new(&fixture.0).unwrap();
+    let mut captured = Vec::new();
+    for populated in [false, true] {
+        if populated {
+            vade_harness::memory::change(&workspace, "conformance-sentinel", Some("This note must stay out of the request.")).unwrap();
+        }
+        let (url, server) = mock(vec![answer()]);
+        let output = run_bounded(fixture.command(&url).args(["--plain", "--prompt", "hello"]), "");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let requests = server.join().unwrap();
+        let request = requests.last().unwrap();
+        let body = json::stringify(request).unwrap();
+        assert!(!body.contains("conformance-sentinel"));
+        assert!(!body.contains("memory_save"));
+        assert!(!body.contains(vade_harness::memory::LABEL));
+        captured.push((request.get("messages").cloned(), request.get("tools").cloned()));
+    }
+    assert_eq!(captured[0], captured[1]);
+}
+#[test]
 fn context_budget_refuses_prompt_without_contacting_mock() {
     let f = Fixture::new();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

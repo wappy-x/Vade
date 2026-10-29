@@ -86,6 +86,42 @@ fn resumed_sessions_accept_previous_write_guidance() {
     assert!(validate_resumed(&legacy, "mock", false, &grants, limits).is_ok());
     std::fs::remove_dir_all(path).unwrap();
 }
+/// A session saved before workspace_read named converted files (main
+/// 9fbf673 wording) still resumes; another description does not.
+#[test]
+fn resumed_sessions_accept_previous_read_description() {
+    let path = std::env::temp_dir().join(format!("vade-legacy-read-{}", std::process::id()));
+    std::fs::create_dir(&path).unwrap();
+    let workspace = Workspace::new(&path).unwrap();
+    let (limits, grants) = (Limits::default(), BTreeMap::new());
+    let current = native_conversation("mock", &workspace, &[], "", false, &grants, limits).unwrap();
+    let with_read = |text: &str| {
+        let reply = vade_harness::contract::guaranteed_native_reply_tokens();
+        let Value::Array(mut tools) = native_definitions_with(false, reply, vade_harness::coding_tools::SHELL_AVAILABLE) else { panic!("tool list") };
+        for tool in &mut tools {
+            if tool.get("function").and_then(|f| f.get("name")).and_then(Value::as_str) == Some("workspace_read")
+                && let Value::Object(fields) = tool
+                && let Some((_, Value::Object(function))) = fields.iter_mut().find(|(key, _)| key == "function")
+                && let Some((_, description)) = function.iter_mut().find(|(key, _)| key == "description")
+            {
+                *description = Value::String(text.into());
+            }
+        }
+        Conversation::from_request(
+            Value::Object(vec![
+                ("model".into(), Value::String("mock".into())),
+                ("stream".into(), Value::Bool(true)),
+                ("tools".into(), Value::Array(tools)),
+                ("messages".into(), Value::Array(current.messages().iter().map(|m| m.value().clone()).collect())),
+            ]),
+            Limits::default(),
+        )
+        .unwrap()
+    };
+    assert!(validate_resumed(&with_read(LEGACY_READ_DESCRIPTION), "mock", false, &grants, limits).is_ok());
+    assert!(validate_resumed(&with_read("Read a file."), "mock", false, &grants, limits).is_err());
+    std::fs::remove_dir_all(path).unwrap();
+}
 #[test]
 fn no_edit_compaction_reduces_protected_command_reasoning_before_limit() {
     replay_compaction(&format!(r#"{{"role":"assistant","reasoning_content":{},"tool_calls":[{{"id":"check","type":"function","function":{{"name":"workspace_shell","arguments":"{{}}"}}}}]}},{{"role":"tool","tool_call_id":"check","content":"status: Exited(Some(0))"}}"#, json::quote(&"thinking ".repeat(6900))), false);

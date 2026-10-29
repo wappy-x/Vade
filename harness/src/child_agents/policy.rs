@@ -8,6 +8,8 @@ use std::io;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Access {
     Read,
+    /// Private parent state. Children cannot receive this capability.
+    ParentOnly,
     /// A boundary-enforcing, single-target tool. No shell or multi-path edits.
     Write {
         path_argument: String,
@@ -54,6 +56,8 @@ impl ToolPolicy {
                 ("apply_patch".into(), Access::Patch),
                 ("workspace_edit_lines".into(), Access::Write { path_argument: "path".into() }),
                 ("workspace_shell".into(), Access::Shell),
+                ("memory_save".into(), Access::ParentOnly),
+                ("memory_forget".into(), Access::ParentOnly),
             ]
             .into(),
         )
@@ -69,6 +73,7 @@ impl ToolPolicy {
                 || name == "apply_patch" && *access != Access::Patch
                 || name == "workspace_edit_lines" && *access != (Access::Write { path_argument: "path".into() })
                 || name == "workspace_shell" && *access != Access::Shell
+                || matches!(name.as_str(), "memory_save" | "memory_forget") && *access != Access::ParentOnly
                 || matches!(access, Access::Write { path_argument } if !identifier(path_argument))
         }) {
             return Err(invalid());
@@ -88,7 +93,7 @@ impl ToolPolicy {
             || scope
                 .tools
                 .iter()
-                .any(|name| !self.tools.contains_key(name) || !advertised.contains(name))
+                .any(|name| !self.tools.contains_key(name) || self.parent_only(name) || !advertised.contains(name))
         {
             return Err(invalid());
         }
@@ -152,8 +157,12 @@ impl ToolPolicy {
                     .map_err(|_| ToolError::InvalidArguments("patch must use the canonical patch format"))
             }
             Some(Access::Shell) => Ok(Targets::Workspace),
-            None => Err(ToolError::Denied),
+            Some(Access::ParentOnly) | None => Err(ToolError::Denied),
         }
+    }
+
+    pub(crate) fn parent_only(&self, name: &str) -> bool {
+        self.tools.get(name) == Some(&Access::ParentOnly)
     }
 
     pub(crate) fn shell(&self, scope: &Scope) -> bool {

@@ -304,6 +304,7 @@ fn opt_b(value: Option<bool>) -> Value {
 }
 
 /// Build one chat request body. `draft` is None for the served quality card.
+/// Project memory is always off here. Use only the fixed card prompt.
 pub fn request_body(
     config: &Config,
     case: &Case,

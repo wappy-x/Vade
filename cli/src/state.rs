@@ -319,6 +319,11 @@ impl Session {
     pub fn two_sparks(&self) -> bool {
         self.fp4_local && self.chained() && self.ranks.len() == 2
     }
+    /// Whether the engine has a prefix restore here (one Spark, replicas, the tensor split),
+    /// so an unset VADE_FLASHNEXT_PREFIX_CACHE means on. The layer chain has none: off.
+    pub fn prefix_restore(&self) -> bool {
+        !self.chained() || self.two_sparks()
+    }
     /// The engine's own rank and world size for this machine.
     pub fn engine_slot(&self, index: usize) -> (usize, usize) {
         if self.replicas { (0, 1) } else { (index, self.ranks.len()) }

@@ -1274,5 +1274,18 @@
         assert_eq!((r.reason, tools.ids.len()), (StopReason::ModelError(io::ErrorKind::Interrupted), 0));
     }
 
+    #[test]
+    fn a_handled_summary_failure_does_not_hide_a_failed_save() {
+        // The summary reply is refused and local excerpts take over; the save
+        // then fails. That is a journal error, not the summary's model error.
+        struct Refused; impl RunObserver for Refused { fn checkpoint(&mut self, _: &Conversation, _: &[Message]) -> io::Result<()> { Ok(()) } fn before_hosted_request(&mut self, c: &mut Conversation, _: Limits, _: &AtomicBool, _: &crate::context::Usage, host: &mut dyn crate::context::ContextHost) -> io::Result<bool> { assert!(host.summarize(c).is_err()); Err(io::Error::other("disk full")) } }
+        struct Fails; impl Model for Fails {
+            fn complete(&mut self, _: ModelRequest<'_>, _: &AtomicBool, _: &mut dyn FnMut(&str) -> io::Result<()>) -> io::Result<AssistantTurn> { Err(io::Error::other("the summary reply called a tool")) }
+            fn count_input(&mut self, r: ModelRequest<'_>, _: &AtomicBool) -> io::Result<crate::contract::InputCount> { Ok(crate::contract::InputCount::Exact { prompt_tokens: r.to_json()?.len() as u64 / 4, output_tokens: 128, context_limit: 90_000, admitted: true }) }
+        }
+        let r = run_observed(&mut conversation(), &mut Fails, &mut MockTools::default(), Limits::default(), &AtomicBool::new(false), &mut |_| {}, &mut Refused);
+        assert_eq!(r.reason, StopReason::JournalError);
+    }
+
     #[path = "recovery_tests.rs"]
     mod recovery;

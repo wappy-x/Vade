@@ -40,4 +40,9 @@ dependencies = [
  "engine-model",
  "engine-tokenizer",
  "vade-bench",
+ "vade-harness",
 ]
+
+[[package]]
+name = "vade-harness"
+version = "0.1.0"

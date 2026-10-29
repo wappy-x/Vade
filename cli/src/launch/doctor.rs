@@ -47,12 +47,13 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         if let Some(path) = &known_model { crate::doctor::local_model(&mut report, path)?; }
         match crate::doctor::start_options() {
             Ok(options) => {
+                // vade launch serves one Spark, where an unset prefix cache switch means on.
                 let (context, output, mtp, cache) = if let Some(config) = &config {
                     let planned = config.planned(&options);
-                    (planned.context, planned.output, planned.mtp(), planned.prefix_cache().map(|value| value.as_deref() == Some("1")))
+                    (planned.context, planned.output, planned.mtp(), planned.prefix_cache().map(|value| Some(value.as_deref() != Some("0"))))
                 } else {
                     let context = model.as_ref().map_or(options.context, |model| options.context.min(model.context_limit));
-                    (context, options.output.min(context), options.mtp_explicit.then_some(options.mtp), crate::doctor::prefix_cache())
+                    (context, options.output.min(context), options.mtp_explicit.then_some(options.mtp), crate::doctor::prefix_cache().map(|value| Some(value.unwrap_or(true))))
                 };
                 crate::doctor::defaults(&mut report, context, output, mtp, cache)?;
             }

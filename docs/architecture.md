@@ -628,11 +628,22 @@ a single machine
 ([reading these cards](benchmarks.md#reading-these-cards)).
 
 ## The prefix cache
-
 The prefix cache lets a new request skip reading the start of its prompt when
-an earlier request began the same way. It is **off by default**.
-`VADE_FLASHNEXT_PREFIX_CACHE=1` turns it on, and then requests that send
-`cache:true` or a `prompt_cache_key` keep their prompt for reuse
+an earlier request began the same way. It is **on by default** on one Spark
+and on the tensor split; the layer chain runs without it. Requests that send
+`cache:true` or a `prompt_cache_key` keep their prompt for reuse;
+`VADE_FLASHNEXT_PREFIX_CACHE=0` turns the cache off
+([`prefix_switch.rs`](../engine/crates/serve/src/prefix_switch.rs)). At
+startup the cache takes a room of its own from the session pool: half of the
+bytes no full-context chat can use, 512 MiB to 4 GiB, never more than those
+bytes. On the tensor split, where each rank keeps a copy, the room is at least
+one full-context chat (up to 4 GiB). Admission never uses the room and host memory pressure does not
+reclaim it, so a snapshot fits even after a burst of chats fills the spare
+buffers. Beyond the room the cache uses pool bytes live chats leave free and
+gives them back first. Under host memory pressure it gives them back 30
+seconds after the last live request: before then the funded reserves keep
+what an eviction returns, so evicting frees no host memory. A restored prefix holds the same state a cold prompt
+computes, so the token IDs do not change.
 ([`prefix_switch.rs`](../engine/crates/serve/src/prefix_switch.rs)).
 
 A hybrid model makes this harder than usual. In a pure attention model, a
@@ -825,7 +836,7 @@ qualification ([FP4-Local launch](../cli/docs/fp4-local.md)). The other model
 parsers, servers and protocol routes in the source are not qualified to the
 same level.
 
-- The prefix cache is off by default. It works locally and on the tensor split.
+- The prefix cache is on by default. It works locally and on the tensor split.
 - `"temperature": 0` alone is not greedy; it brings in the checkpoint's other
   sampling settings.
 - A cancel is handled by the scheduler between model steps, so it waits for

@@ -756,6 +756,7 @@ impl Scheduler {
     /// Parent tool guard; the enclosing `run_parent` calls this for every
     /// non-scheduler tool. No write may overlap an uncollected child assignment.
     fn check_parent(&self, call: &ToolInvocation<'_>) -> Result<(), ToolError> {
+        if self.config.policy.parent_only(&call.call.name) { return Ok(()); }
         let targets = self.config.policy.targets(call)?;
         if matches!(targets, policy::Targets::Read) {
             return Ok(());

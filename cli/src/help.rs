@@ -18,6 +18,7 @@ pub fn help(command: Option<&str>) -> String {
     match command.and_then(page) {
         Some(page) => page.render(on),
         None if command == Some("verify") => crate::verify::help(),
+        None if command == Some("read") => crate::read::help(),
         None => top(on),
     }
 }
@@ -42,7 +43,11 @@ fn top(on: bool) -> String {
         ("up", "Start without chat (this Spark, or Sparks from a controller)"),
         ("down", "Stop what vade started"),
     ], 8);
-    out += &group("Use:", &[("chat", "Chat with the running engine"), ("sessions", "List, export or delete saved chat sessions")], 8);
+    out += &group("Use:", &[
+        ("chat", "Chat with the running engine"),
+        ("sessions", "List, export or delete saved chat sessions"),
+        ("read", "Print a file as Markdown (text, HTML, CSV, RTF, data, code)"),
+    ], 8);
     out += &group("Models:", &[
         ("pull", "Download a model from Hugging Face, with resume and checks"),
         ("models", "List the models on this machine and what can serve them"),
@@ -346,7 +351,7 @@ mod tests {
     #[test]
     fn every_page_fits_the_width_and_names_its_usage() {
         for command in [None, Some("launch"), Some("up"), Some("down"), Some("status"), Some("logs"), Some("chat"), Some("sessions"), Some("doctor"),
-            Some("install"), Some("update"), Some("detect"), Some("version"), Some("run"), Some("verify"), Some("config"), Some("bench"), Some("test"), Some("pull"), Some("models")] {
+            Some("install"), Some("update"), Some("detect"), Some("version"), Some("run"), Some("verify"), Some("read"), Some("config"), Some("bench"), Some("test"), Some("pull"), Some("models")] {
             let text = help(command);
             assert!(text.lines().all(|line| line.chars().count() <= style::WIDTH), "{command:?}:\n{text}");
             assert!(text.contains(&format!("Usage: vade {}", command.unwrap_or("<COMMAND>").replace("version", "--version"))), "{command:?}:\n{text}");

@@ -879,6 +879,11 @@ impl spark_serve::Session for RemoteSession<'_, '_, '_, '_> {
         self.tokens.capacity() * 4 + self.saved.capacity() * std::mem::size_of::<Rc<Saved<'_, '_, '_, '_>>>()
             + std::mem::size_of::<Self>()
     }
+    // A fork saves the live state as a new snapshot inside cache_budget (save), the same bytes.
+    fn fork_storage_bytes(&self) -> usize {
+        self.local.borrow().as_ref().map_or(0, |local| local.snapshot_bytes() + self.tokens.len() * 4
+            + std::mem::size_of::<Saved<'_, '_, '_, '_>>())
+    }
     // Retained snapshots no longer receive active-reservation funding credit.
     fn funded_snapshot_allocations(&self, _tokens: Option<usize>) -> Vec<(usize, usize)> { Vec::new() }
     // The scheduler's existing successful-completion hook publishes a response

@@ -42,6 +42,9 @@ impl context::ContextHost for NativeHost<'_> {
     fn summarize(&mut self, request: &Conversation) -> io::Result<String> {
         context::summarize_with(self.model, request, self.limits.wire, self.cancel)
     }
+    fn automatic_output(&self) -> bool {
+        vade_harness::agent::Model::automatic_output(&*self.model)
+    }
 }
 
 /// The rollover plan for manual /compact with its final count, or the local
@@ -182,6 +185,7 @@ impl App {
                                 ..limits
                             };
                             let fits = usage.fits(limits.max_context_tokens, limits.output_reserve_tokens);
+                            let automatic = vade_harness::agent::Model::automatic_output(&model);
                             let mut count = |candidate: &Conversation| {
                                 model.count_input(candidate.request(limits.wire), &worker_cancel)
                                     .and_then(|input| Usage::for_conversation(candidate).with_count(&input))
@@ -189,7 +193,7 @@ impl App {
                             // The run's observer performs the rewrite; here only
                             // check that a rollover or local excerpts can fit.
                             let room = (!fits && can_compact).then(|| {
-                                context::rollover_room(conversation, context::KEEP_TURNS, limits, &usage, &mut context::CountOnly(&mut count))
+                                context::rollover_room(conversation, context::KEEP_TURNS, limits, &usage, &mut context::CountOnly(&mut count, automatic))
                             });
                             let recoverable = match room {
                                 Some(Ok(_)) => true,
@@ -204,7 +208,7 @@ impl App {
                                 Some(Err(context::RolloverError::NoRoom { needed, window })) => return Err(context::hard_stop(needed, window)),
                                 // The newest turn alone is the floor: its count is what any compaction keeps.
                                 Some(Err(context::RolloverError::NotApplicable("no older turns to summarize"))) => return Err(context::hard_stop(
-                                    context::needed_tokens(&usage, window, limits), window)),
+                                    context::needed_tokens(&usage, window, limits, automatic), window)),
                                 _ => (),
                             }
                             if !fits && !recoverable {

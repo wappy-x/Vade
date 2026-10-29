@@ -386,6 +386,9 @@ impl Model for NativeModel {
     fn output_reserve_tokens(&self, fallback: usize) -> usize {
         self.contract.output_reserve_tokens(fallback)
     }
+    fn automatic_output(&self) -> bool {
+        self.contract.automatic_reservation()
+    }
     fn prompt_rewritten(&mut self) {
         self.reestablish_prompt(crate::contract::PromptBoundary::Compaction);
         // Automatic rewrites already lead directly to this prompt's real

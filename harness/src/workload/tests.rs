@@ -1,6 +1,20 @@
 use super::report::percentile;
 use super::*;
 #[test]
+fn project_memory_does_not_change_workload_requests() {
+    let fixture = crate::test_workspace::Fixture::new();
+    let workspace = fixture.workspace();
+    let config = Config::default();
+    for role in [Role::Main, Role::Subordinate] {
+        let before = conversation(&config, role, 0).unwrap().request(limits().wire).to_json().unwrap();
+        crate::memory::change(&workspace, "workload-sentinel", Some("Keep this out of benchmark prompts.")).unwrap();
+        let after = conversation(&config, role, 0).unwrap().request(limits().wire).to_json().unwrap();
+        assert_eq!(before, after);
+        assert!(!after.contains("workload-sentinel"));
+        assert!(!after.contains(crate::memory::LABEL));
+    }
+}
+#[test]
 fn seeds_sizes_and_closed_synthetic_history_are_repeatable() {
     let c = Config {
         model: "mock".into(),

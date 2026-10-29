@@ -7,6 +7,7 @@ Changes that are merged but not yet released are under Unreleased.
 
 - Native chat supports [host hooks](harness/docs/hooks.md), and chat supports [user slash commands](harness/docs/slash-commands.md) and `/clear`.
 - GitHub workflows now run only by hand; tests run locally before every merge, as [Local CI](docs/ci.md) describes.
+- Chat keeps private project notes across sessions; `VADE_MEMORY=0` turns memory off.
 
 - New `vade pull <org>/<name>[@revision]` downloads a model from the Hugging
   Face Hub into `~/models/<org>/<name>`. It takes the weights, configs,
@@ -27,6 +28,16 @@ Changes that are merged but not yet released are under Unreleased.
   without running tools again. `vade sessions export ID --markdown` prints a
   readable transcript, and `vade sessions delete ID` removes a closed one. See
   [saved chat sessions](docs/sessions.md).
+
+- `vade read <path>` prints a local file as Markdown with a header line
+  (name, format, pages, characters, what was skipped). It reads plain text in
+  UTF-8, UTF-16 or Windows-1252, Markdown, HTML, CSV and TSV (as tables),
+  JSON, YAML, TOML, XML and source files (as code blocks) and RTF. Other
+  known formats print one line that names them, and other binary files one
+  line that says so. The agent's `workspace_read` uses
+  the same readers for RTF and for text that is not UTF-8; UTF-8 text files
+  are returned byte for byte, as before. See
+  [reading files](docs/reading-files.md).
 
 ## v0.2.0 - not released yet
 
@@ -218,6 +229,32 @@ effect, and the engine chooses the path for each number of Sparks.
   from the main server's `request_admitted` lines (`reserved_bytes`), and
   the chat counts, queue waits and first-token times from the test client's
   log of each build. Token IDs do not change.
+
+- The FP4-Local prefix cache is on by default on one Spark and on the tensor
+  split; the layer chain (three or more Sparks) runs without it.
+  `VADE_FLASHNEXT_PREFIX_CACHE=0` turns it off; `1` on the layer chain is still
+  refused. Only requests that send `cache:true` or a `prompt_cache_key` keep
+  their prompt. At startup the cache takes a room of its own from the session
+  pool: half of the bytes no full-context chat can use, 512 MiB to 4 GiB,
+  never more than those bytes. The slot plan keeps at least 512 MiB beside
+  one full-context chat, which near the memory limit gives fewer chat slots
+  (8 instead of 16 at a context of 262,144 on one Spark). On two Sparks the
+  room is at least one full-context chat, up to 4 GiB, so a 32K-token prompt
+  is kept at a context of 32,768. Admission never uses the room and host
+  memory pressure does not reclaim it. Before, a busy server under host
+  memory pressure skipped every snapshot (`reason=no_room`). `VADE_FLASHNEXT_CACHE_ROOM=<bytes>` sets the
+  room (`0`: none). The `flashnext ready` line shows `prefix_cache_room_bytes`.
+  On one Spark a long prompt stays in place when its chat ends (no copy), and
+  the next turn builds on it; `VADE_FLASHNEXT_ADOPT=0` keeps copies only. Two
+  Sparks keep copies. Memory a kept prompt holds beyond the room yields to
+  host memory pressure 30 seconds after the last live chat, when the engine
+  gives spare memory back; before then it would stay with the engine anyway.
+  `GET /health` has a `prefix_cache` object (hits, misses, reused tokens,
+  kept snapshots, entries evicted for memory, expired entries and checkpoints, entries,
+  retained bytes, room and snapshots the cache skipped by reason), and the
+  log prints the same counts on a `prefix_cache_status` line.
+  Token IDs do not change: the cache changes which prompt rows are computed
+  again, not their values.
 
 - With drafting on, prompts longer than 32K tokens on two Sparks reach the
   first token sooner. The first Spark now keeps up to 131,072 prompt rows for

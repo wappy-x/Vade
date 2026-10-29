@@ -269,9 +269,9 @@ impl<'a> DeadlineStream<'a> {
     pub(crate) fn new(stream: TcpStream, cancel: Option<&'a AtomicBool>) -> io::Result<Self> {
         // Accepted sockets can inherit listener flags on some platforms.
         stream.set_nonblocking(false)?;
-        stream.set_read_timeout(Some(POLL_TIMEOUT))?;
-        stream.set_write_timeout(Some(POLL_TIMEOUT))?;
-        stream.set_nodelay(true)?;
+        socket_option(stream.set_read_timeout(Some(POLL_TIMEOUT)))?;
+        socket_option(stream.set_write_timeout(Some(POLL_TIMEOUT)))?;
+        socket_option(stream.set_nodelay(true))?;
         Ok(Self {
             stream,
             start: Instant::now(),
@@ -441,6 +441,17 @@ impl Downstream {
     }
 }
 
+/// macOS refuses socket options with EINVAL once the connection is closed in
+/// both directions, while a reply may still wait unread in the buffer. Such a
+/// socket can take in no more data, so a read or write returns at once
+/// without a timeout; go on and let it report the data or the real error.
+fn socket_option(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(e) if e.kind() == io::ErrorKind::InvalidInput => Ok(()),
+        other => other,
+    }
+}
+
 impl Read for DeadlineStream<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         if buffer.is_empty() {
@@ -460,7 +471,7 @@ impl Read for DeadlineStream<'_> {
                     return Ok(n);
                 }
             }
-            self.stream.set_read_timeout(Some(self.poll_timeout()))?;
+            socket_option(self.stream.set_read_timeout(Some(self.poll_timeout())))?;
             match self.stream.read(buffer) {
                 Ok(n) => {
                     if n > 0 {
@@ -492,7 +503,7 @@ impl Write for DeadlineStream<'_> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         loop {
             self.check()?;
-            self.stream.set_write_timeout(Some(self.poll_timeout()))?;
+            socket_option(self.stream.set_write_timeout(Some(self.poll_timeout())))?;
             match self.stream.write(buffer) {
                 Ok(n) => {
                     if n > 0 {

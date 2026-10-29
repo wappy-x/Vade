@@ -23,7 +23,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
     prepare_rx: &mpsc::Receiver<Result<Prepared, (Wire, String)>>,
 ) -> Result<Option<Swap>, String> {
     limits.validate()?;
-    config.validate(cache_limits)?;
+    config.validate(cache_limits, engine.cache_room_bytes())?;
     // Collect only the initial burst before a cold short prompt starts prefill.
     // Cached suffixes, decoding and long prompts retain their existing paths.
     let min_prompt_age = crate::intake_grace::minimum_prompt_age(crate::intake_grace::load()?);
@@ -54,7 +54,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
     // Reserve both a slot and short-request memory for the authenticated owner.
     let foreground_bytes = if reserve_owner { engine.request_reservation_bytes(64 + config.foreground_rows)
         .ok_or("missing foreground reservation")?.min(config.active_bytes - reservation) } else { 0 };
-    let mut cache = SessionCache::new(cache_limits.clone())?;
+    let mut cache = SessionCache::new(cache_limits.clone())?.with_room(engine.cache_room_bytes());
     let domain = crate::contract::Domain::new()?;
     let handles = engine.kv_branch_handles() && cache_limits.checkpoint_bytes() != 0;
     let retain_prefix = |j: &Ready| {
@@ -193,7 +193,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                             handles, cache_limits))
                     } else { model_response(&http.path, if swap.is_some() { "draining" } else { "ready" },
                         model, active.len(), queued.len(), engine.memory_bytes().map(|m| m.0), limits, engine.context_limit(),
-                        Some((config.draft, limits.next_mtp_depth.map_or(config.mtp_depth, |d| config.mtp_depth.min(d))))) };
+                        Some((config.draft, limits.next_mtp_depth.map_or(config.mtp_depth, |d| config.mtp_depth.min(d)))), config.prefix_cache.then(|| cache.status_json())) };
                     if let Some(body) = service_body {
                         if input.wire.response(if http.path == "/cors" { 204 } else if swap.is_some() { 503 } else { 200 }, &body, limits).is_ok() {
                             input.responding = true;
@@ -623,7 +623,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                     }
                 }
             }
-            let reused = state.as_ref().map_or(0, |s| s.tokens.len());
+            let reused = state.as_ref().map_or(0, |s| s.tokens.len()); if automatic_cache || ready.request.cache && ready.request.session.is_some() { cache.count_lookup(reused); }
             if reused == 0 && (automatic_cache || ready.request.cache && ready.request.session.is_some()) {
                 let (reason, scoped) = cache.miss_reason(ready.scope.as_deref());
                 engine_model::events::note("prefix_cache_miss", format_args!("prompt_tokens={} reason={reason} scoped_entries={scoped}", ready.prompt.len()));

@@ -10,7 +10,7 @@ use super::{App, RunState};
 use super::{
     args::Mode,
     help::{self, Command},
-    native_setup::{append_resume_note, native_conversation, prepare_resumed},
+    native_setup::{append_resume_note, chat_conversation, prepare_resumed},
 };
 use crate::native_children;
 
@@ -208,7 +208,7 @@ impl App {
                     if self.pending.is_some() {
                         return self.notice("Wait for worker cleanup before resuming a session.");
                     }
-                    match vade_harness::saved_sessions::resolve(&self.workspace, rest, true).and_then(|id| Journal::resume(&self.workspace, &id, Limits::default())).and_then(|(mut store, mut c, torn)| { prepare_resumed(&mut store, &mut c, &self.workspace, self.config.model.as_deref().unwrap(), self.config.children, &self.config.child_grants, Limits { max_run_time: self.config.max_run_time, ..Limits::default() })?; Ok((store, c, torn)) }) {
+                    match vade_harness::saved_sessions::resolve(&self.workspace, rest, true).and_then(|id| Journal::resume(&self.workspace, &id, Limits::default())).and_then(|(mut store, mut c, torn)| { super::native_setup::check_memory_resume(&c, self.config.memory)?; prepare_resumed(&mut store, &mut c, &self.workspace, self.config.model.as_deref().unwrap(), self.config.children, &self.config.child_grants, Limits { max_run_time: self.config.max_run_time, ..Limits::default() })?; Ok((store, c, torn)) }) {
                         Ok((store, conversation, torn)) => {
                             self.replace_native(conversation, vade_harness::contract::PromptBoundary::Resume)?;
                             self.journal = Some(Arc::new(Mutex::new(store)));
@@ -480,6 +480,7 @@ impl App {
                     if self.pending.is_some() {
                         return self.notice("Wait for request cleanup before /new.");
                     }
+                    self.memory = if self.config.memory { vade_harness::memory::Memory::load(&self.workspace)?.content() } else { String::new() };
                     self.timed_out_prompt = None;
                     self.reset_recall();
                     self.reset_answers();
@@ -495,11 +496,12 @@ impl App {
                         let build_session = Arc::new(vade_harness::shell::BuildSession::new(
                             self.config.shell_toolchain.as_deref(),
                         )?);
-                        let conversation = native_conversation(
+                        let conversation = chat_conversation(
                             self.config.model.as_deref().unwrap(),
                             &self.workspace,
                             &self.config.rules_scopes,
                             self.instructions.section(),
+                            self.config.memory.then_some(self.memory.as_str()),
                             self.config.children,
                             &self.config.child_grants,
                             Limits { max_run_time: self.config.max_run_time, ..Limits::default() },
@@ -794,11 +796,12 @@ impl App {
                 {
                     return self.notice("Child tools are frozen for this conversation. Use /new, then /children on|off before the first prompt.");
                 }
-                let conversation = native_conversation(
+                let conversation = chat_conversation(
                     self.config.model.as_deref().unwrap(),
                     &self.workspace,
                     &self.config.rules_scopes,
                     self.instructions.section(),
+                    self.config.memory.then_some(self.memory.as_str()),
                     enabled,
                     &self.config.child_grants,
                     Limits { max_run_time: self.config.max_run_time, ..Limits::default() },

@@ -552,26 +552,37 @@ fn native_system_prompt_for(
         prompt
     }
 }
+#[cfg(test)]
 pub(crate) fn native_conversation(
+    model: &str, workspace: &Workspace, scopes: &[String], instructions: &str,
+    children: bool, grants: &BTreeMap<String, child_agents::Scope>, limits: Limits,
+) -> io::Result<Conversation> {
+    chat_conversation(model, workspace, scopes, instructions, None, children, grants, limits)
+}
+pub(crate) fn chat_conversation(
     model: &str,
     workspace: &Workspace,
     scopes: &[String],
     instructions: &str,
+    memory: Option<&str>,
     children: bool,
     grants: &BTreeMap<String, child_agents::Scope>,
     limits: Limits,
 ) -> io::Result<Conversation> {
     // The Project instructions section carries the root folder's files.
     let project = project::Snapshot::discover_with(workspace, scopes, false)?;
+    let mut tools = native_definitions(children);
+    if memory.is_some() { vade_harness::memory::add_tools(&mut tools); }
+    let system = vade_harness::memory::with_memory(&format!("{}\n{}", native_system_prompt(children, grants, limits), vade_harness::session::model_identity(model)), memory.unwrap_or(""));
     Conversation::from_request(
         Value::Object(vec![
             ("model".into(), Value::String(model.into())),
             ("stream".into(), Value::Bool(true)),
-            ("tools".into(), native_definitions(children)),
+            ("tools".into(), tools),
             (
                 "messages".into(),
                 Value::Array(vec![
-                    native_message("system", &vade_harness::prompt::with_instructions(&format!("{}\n{}", native_system_prompt(children, grants, limits), vade_harness::session::model_identity(model)), instructions)),
+                    native_message("system", &vade_harness::prompt::with_instructions(&system, instructions)),
                     project.message()?,
                 ]),
             ),
@@ -760,7 +771,7 @@ impl RunObserver for CompactingJournal {
         usage: &context::Usage,
         count: &mut dyn FnMut(&Conversation) -> io::Result<context::Usage>,
     ) -> io::Result<bool> {
-        self.before_hosted_request(c, limits, cancel, usage, &mut context::CountOnly(count))
+        self.before_hosted_request(c, limits, cancel, usage, &mut context::CountOnly(count, false))
     }
     fn before_hosted_request(
         &mut self,
@@ -990,6 +1001,15 @@ pub(crate) fn append_resume_note(store: &mut Journal, c: &mut Conversation) -> i
     c.push_user(note, Limits::default())?;
     store.save(c)
 }
+/// A disabled chat must never replay notes from a frozen journal prefix.
+pub(crate) fn check_memory_resume(c: &Conversation, enabled: bool) -> io::Result<()> {
+    let has_notes = c.messages().first().and_then(|m| m.value().get("content")).and_then(Value::as_str)
+        .is_some_and(|s| vade_harness::memory::without_memory(s) != s);
+    if !enabled && has_notes {
+        return Err(io::Error::other("This saved session contains project memory. Start a new chat with memory off, or resume with memory on."));
+    }
+    Ok(())
+}
 pub(crate) fn prepare_resumed(
     store: &mut Journal,
     c: &mut Conversation,
@@ -1003,24 +1023,33 @@ pub(crate) fn prepare_resumed(
     store.branch_status(workspace)?; // workspace identity and bounded file checks
     append_resume_note(store, c)
 }
-// Accept only the immediately previous shell and write-guidance wording;
-// stored prompt bytes stay frozen, and executable schemas, model and child
-// scopes still match exactly.
+/// The workspace_read description before converted files and their source
+/// limit were named. A session saved with it still resumes.
+const LEGACY_READ_DESCRIPTION: &str = "Read a small UTF-8 byte range inside the approved workspace (source ≤4 MiB). A PDF (≤50 MiB) reads as its extracted text layer, page by page; offsets index that text. Prefer workspace_search then workspace_read_lines for code; do not page whole files without a concrete need. offset is zero-based (default 0), limit 1–4096 (default bounded by a 4096-byte inline output including path/provenance). Partial results give actual bytes and next offset. Offset must be a UTF-8 boundary.";
+
+// Accept only the immediately previous shell, read and write-guidance
+// wording; stored prompt bytes stay frozen, and executable schemas, model and
+// child scopes still match exactly.
 fn resumed_tools_match(tools: Option<&Value>, children: bool, variants: &[bool]) -> bool {
     const LEGACY_DESCRIPTION: &str = "Supported only on macOS: Linux and other platforms return an unsupported_platform tool result without running commands. Run explicit argv in workspace under macOS OS sandbox, no network, cleared environment, ≤64 KiB output. No implicit shell: for shell syntax explicitly request /bin/sh -c script, which requires approval. timeout_ms 1–120000. Read-only allowlist runs without approval in ask/auto: pwd, true, ls [-1] [relative paths], cat relative paths, git status [--short], git diff [--stat], git log [--oneline|-n 1..100]. Bare names resolve to fixed system executables. Other commands ask. Never denies all commands. Auto also permits patches without asking. Cancellation kills the process group. No credential or workspace hidden-file access. A private session directory supplies CARGO_TARGET_DIR, CARGO_HOME, TMPDIR, HOME and npm cache; Cargo is offline. Pre-existing target/node_modules stay inaccessible. Use cargo build --offline or cargo test --offline with the owner-selected Rust toolchain. Do not retry unknown_outcome tools without inspecting state.";
     for reply_limit in [vade_harness::contract::guaranteed_native_reply_tokens(), vade_harness::contract::AUTOMATIC_OUTPUT_TOKENS as usize] {
-        for (&shell, legacy_shell) in variants.iter().flat_map(|shell| [(shell, false), (shell, true)]) {
+        for (&shell, legacy) in variants.iter().flat_map(|shell| [(shell, 0u8), (shell, 1), (shell, 2), (shell, 3)]) {
             let Value::Array(mut candidate) = native_definitions_with(children, reply_limit, shell) else { return false };
-            if legacy_shell {
-                for tool in &mut candidate {
-                    if tool.get("function").and_then(|f| f.get("name")).and_then(Value::as_str) == Some("workspace_shell")
-                        && let Value::Object(fields) = tool
-                        && let Some((_, Value::Object(function))) = fields.iter_mut().find(|(key, _)| key == "function")
-                        && let Some((_, description)) = function.iter_mut().find(|(key, _)| key == "description")
-                    { *description = Value::String(LEGACY_DESCRIPTION.into()); }
-                }
+            for tool in &mut candidate {
+                let text = match tool.get("function").and_then(|f| f.get("name")).and_then(Value::as_str) {
+                    Some("workspace_shell") if legacy & 1 != 0 => LEGACY_DESCRIPTION,
+                    Some("workspace_read") if legacy & 2 != 0 => LEGACY_READ_DESCRIPTION,
+                    _ => continue,
+                };
+                if let Value::Object(fields) = tool
+                    && let Some((_, Value::Object(function))) = fields.iter_mut().find(|(key, _)| key == "function")
+                    && let Some((_, description)) = function.iter_mut().find(|(key, _)| key == "description")
+                { *description = Value::String(text.into()); }
             }
-            if tools == Some(&Value::Array(candidate)) { return true; }
+            let mut candidate = Value::Array(candidate);
+            if tools == Some(&candidate) { return true; }
+            vade_harness::memory::add_tools(&mut candidate);
+            if tools == Some(&candidate) { return true; }
         }
     }
     false
@@ -1071,6 +1100,7 @@ fn validate_resumed_in(
         .is_some_and(|stored| {
             let identity = format!("\n{}", vade_harness::session::model_identity(model));
             let stored = vade_harness::prompt::split_instructions(stored).0;
+            let stored = vade_harness::memory::without_memory(stored);
             let stored = stored.strip_suffix(&identity).unwrap_or(stored);
             variants.iter().any(|&shell| {
                 let current = native_system_prompt_for(children, grants, limits, shell);

@@ -3,7 +3,7 @@ use crate::runner::{Exec, Output};
 use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::PathBuf, sync::atomic::{AtomicU64, Ordering}, time::Duration};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
-const STATE: RemoteState = RemoteState { owned: false, memory: Some((120 << 30, 100 << 30)), split: false };
+const STATE: RemoteState = RemoteState { owned: false, memory: Some((120 << 30, 100 << 30)), split: false, cache_default: None };
 
 struct FakeSsh { script: PathBuf, tools: PathBuf, destination: String, calls: usize, cache: String, chunk_error: bool }
 impl Runner for FakeSsh {
@@ -18,7 +18,8 @@ impl Runner for FakeSsh {
         let mut fake = exec.clone();
         fake.program = self.script.to_string_lossy().into_owned();
         fake.env.insert("PATH".into(), format!("{}:{}", self.tools.display(), std::env::var("PATH").unwrap()));
-        fake.env.insert("VADE_FLASHNEXT_PREFIX_CACHE".into(), self.cache.clone());
+        if self.cache == "unset" { fake.unset.push("VADE_FLASHNEXT_PREFIX_CACHE".into()); }
+        else { fake.env.insert("VADE_FLASHNEXT_PREFIX_CACHE".into(), self.cache.clone()); }
         runner::SystemRunner { dry: false }.run(&fake)
     }
     fn interactive(&mut self, _: &Exec) -> Result<bool, String> { panic!("Doctor must not start an interactive command.") }
@@ -260,5 +261,13 @@ fn fake_ssh_reads_the_cache_setting_from_the_spark_session() {
         let (result, printed) = captured(|report| machine(report, &mut runner, &machine_config, &[Port::http(18080)], false, STATE));
         assert_eq!(result.is_ok(), value != "bad", "{printed}");
         assert!(printed.contains(expected), "{printed}");
+    }
+    // Unset follows the topology when the session names it.
+    runner.cache = "unset".into();
+    for (default, expected) in [(None, "unset in the Spark SSH session: on for one Spark and the tensor split, off on the layer chain"),
+        (Some(true), "unset in the Spark SSH session: on for this topology"), (Some(false), "unset in the Spark SSH session: off on the layer chain")] {
+        let state = RemoteState { cache_default: default, ..STATE };
+        let (result, printed) = captured(|report| machine(report, &mut runner, &machine_config, &[Port::http(18080)], false, state));
+        assert!(result.is_ok() && printed.contains(expected), "{printed}");
     }
 }

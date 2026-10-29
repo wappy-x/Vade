@@ -22,7 +22,11 @@ that many distinct --hosts."
   once from the context and its memory, and `vade status` prints that count.
   The controller accepts and saves `--chats` and `--cache-bytes`, but the
   current FP4-Local engine ignores them. Its memory admission and separate
-  prefix-cache setting control those limits.
+  prefix-cache settings control those limits: `VADE_FLASHNEXT_PREFIX_CACHE=0`
+  turns the cache off, `VADE_FLASHNEXT_CACHE_ROOM=<bytes>` sets the
+  cache's own memory room, and `VADE_FLASHNEXT_ADOPT=0` keeps copies only
+  ([the prefix cache](../../INSTALL.md#the-prefix-cache)).
+  Set them in the noninteractive SSH environment on every selected Spark.
 - **Your own limits.** A `--context` you pass always wins, up to the engine's
   ceiling of 262,144. This long-context setting still lets the engine decide
   the chat count from memory. `--output` takes 1,024 to 16,384. A request longer

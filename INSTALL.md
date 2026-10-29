@@ -720,7 +720,7 @@ If the engine refuses a `--context` you set yourself, you get an error with the
 engine's message. It is never lowered silently.
 
 Two other defaults: drafting is on, and the engine chooses how far ahead it
-drafts; the prefix cache (reusing the start of an earlier prompt) is off.
+drafts; the prefix cache (reusing the start of an earlier prompt) is on.
 
 Input and output share the context, so the real limit for each depends on the
 other. The engine's `/health` endpoint shows the limits that apply. (`--chats`
@@ -860,7 +860,7 @@ the checkout before your next `vade install`, which refuses untracked files.
 A controller asks for the same defaults as Route A: context **32768** and
 output **min(context, 8192)**. That holds however many Sparks you use, and
 whether or not you pass `--chats`. Drafting is on (the engine picks how far
-ahead), and the prefix cache is off by default.
+ahead), and the prefix cache is on by default (three or more Sparks run without it).
 
 A controller never lowers the context for you. If a Spark lacks the memory for
 32768, the engine refuses it and you choose a smaller `--context`. Only Route A
@@ -1028,8 +1028,8 @@ The gateway also tries to keep each conversation on one replica. Suppose a
 request's messages, up to and including the last user message, start with the
 same 2048 bytes as an earlier request. Then the gateway sends it to the replica
 that handled the latest such request, as long as that replica is one of the
-least busy. Otherwise the least busy replica wins. The prefix cache is off by
-default, so we haven't confirmed that this routing gives cache hits.
+least busy. Otherwise the least busy replica wins. The prefix cache is on by
+default, but we haven't confirmed that this routing gives cache hits.
 
 A single chat runs at one-Spark speed; total throughput grows with the number
 of replicas. Every replica is the same one-Spark engine, so a request gets the
@@ -1064,9 +1064,9 @@ to a request.
 
 | How you start | Context (tokens) | Output (tokens) | Drafting (multi-token prediction, MTP) | Prefix cache |
 | --- | --- | --- | --- | --- |
-| On this Spark: `vade launch` / `vade up` | 32768; lowered through 16384, 8192, 4096 only if the engine refuses it for memory | `min(context, 8192)` | ON, engine-selected | OFF |
-| From a controller: `vade up` on any number of Sparks, with or without `--chats` | 32768 | `min(context, 8192)` | ON, engine-selected | OFF |
-| From a controller: `vade up --replicas N`, each replica | 32768 | `min(context, 8192)` | ON, engine-selected | OFF |
+| On this Spark: `vade launch` / `vade up` | 32768; lowered through 16384, 8192, 4096 only if the engine refuses it for memory | `min(context, 8192)` | ON, engine-selected | ON |
+| From a controller: `vade up` on any number of Sparks, with or without `--chats` | 32768 | `min(context, 8192)` | ON, engine-selected | ON on one or two Sparks; OFF on three or more |
+| From a controller: `vade up --replicas N`, each replica | 32768 | `min(context, 8192)` | ON, engine-selected | ON |
 
 `--context 262144` requests a larger context on either route
 (add `--output 16384` for longer replies). The engine still sets the chat
@@ -1082,30 +1082,86 @@ a refusal is reported and the context is not lowered.
 | `--memory-bytes` | Sets a memory budget. The engine's memory check and the memory actually free still apply. |
 | `--cache-bytes 0` | Turns the prefix cache off for a local install. Any local size above zero is refused. |
 
-### Turn on the prefix cache
+### The prefix cache
 
-The prefix cache (reusing a cached prompt prefix across requests) is OFF by
-default. It works on one Spark and on two Sparks (the tensor split). On two
-Sparks, both engine ranks must start with the same value, or the engine
-refuses to start. Three or more Sparks refuse it. To turn it on for **local
-Route A**, restart from the same local environment:
+The prefix cache (reusing a cached prompt prefix across requests) is ON by
+default on one Spark and on two Sparks (the tensor split). Three or more
+Sparks run without it. The cache keeps prompts only for requests that send
+`cache:true` or a `prompt_cache_key`. Other requests run as before. A cached
+answer has the same token IDs as an uncached one: the cache changes which
+prompt tokens the engine reads again, not how it computes them.
+
+At startup the cache takes a memory room of its own from the chat memory
+(the session pool). The engine plans the chat slots so that the pool holds one
+full-context chat and at least 512 MiB beside it. Near the memory limit this
+can give fewer chat slots: on one Spark at a context of 262,144, a start that
+could fund 16 slots with 38,449,244 bytes left takes 8 slots. The room is
+half of the pool bytes that no full-context chat can use, at least 512 MiB
+and at most 4 GiB, and never more than those bytes. So the room never lowers
+the number of full-context chats in that plan. On two Sparks each engine rank
+keeps a copy of every kept prompt, so there the room is at least the memory
+of one full-context chat, up to 4 GiB: at a context of 32,768 a 32K-token
+prompt (a copy of about 2.1 GB) fits. This can lower the number of
+full-context chats by one. Live chats never use the room, and memory
+pressure does not empty it. The cache also uses memory that live chats leave
+free, and gives that memory back first: memory a kept prompt holds beyond the
+room (a prompt kept in place on one Spark holds a whole chat's memory) yields
+to host memory pressure 30 seconds after the last live chat, when the engine
+gives spare memory back to the host. Before then, the engine would keep that
+memory anyway, so the next turn of a conversation can still use the prompt.
+The engine log line `flashnext ready` shows `prefix_cache_room_bytes`.
+
+| Setting | What it does |
+| --- | --- |
+| `VADE_FLASHNEXT_PREFIX_CACHE=0` | Turns the cache off. `1` turns it on; three or more Sparks refuse `1`. |
+| `VADE_FLASHNEXT_CACHE_ROOM=<bytes>` | Sets the room. The slot plan keeps it beside one full-context chat, which can give fewer chat slots. `0` gives no room and the slot plan of a server without the cache. A room too large to keep beside one full-context chat at two or more slots gives one chat slot. A room that leaves less than one full-context chat is lowered to leave one. |
+| `VADE_FLASHNEXT_ADOPT=0` | Keeps every prompt as a copy on one Spark. `1` keeps long prompts in place on two Sparks too; that mode is not measured on two Sparks. |
+| `--cache-bytes 0` | Turns the cache off for a local install. |
+
+On one Spark, the cache keeps a long prompt in place: when a chat ends, its
+prompt memory stays in the cache, and the next turn of that conversation
+builds on it. The cache can use the whole chat memory for this, and live
+chats take it back first. A short prompt, whose memory is less than a
+quarter of one chat's reservation, is kept as a copy. On two Sparks, every
+kept prompt is a copy.
+
+A copy is made while its chat still holds its memory. The room and the
+memory live chats leave free must hold that copy. At a context of 262,144 on
+one Spark, one full-context chat reserves 16,017,732,932 bytes, and the slot
+plan keeps only the room (at least 512 MiB) beside it. So with copies only
+(`VADE_FLASHNEXT_ADOPT=0`) a 200K-token prompt (a copy of 12,274,478,925
+bytes) is not kept. In place (the default) it is kept.
+
+On two Sparks, both engine ranks must start with the same cache value, or
+the engine refuses to start. To turn the cache off for **local Route A**,
+restart from the same local environment:
 
 ```sh
 vade down
-VADE_FLASHNEXT_PREFIX_CACHE=1 vade up
+VADE_FLASHNEXT_PREFIX_CACHE=0 vade up
 ```
 
-If you saved `--cache-bytes 0`, stop the engine and remove the
-`cache_bytes=0` line from `${VADE_HOME:-$HOME/.vade}/config` before you
-enable the cache. Set `VADE_FLASHNEXT_PREFIX_CACHE=1` each time you start
-the engine with the cache on. The environment setting is not saved.
+The environment setting is not saved: set it each time you start the engine.
+A saved `--cache-bytes 0` stays in `${VADE_HOME:-$HOME/.vade}/config` until
+you remove the `cache_bytes=0` line.
 
-Route B has no launcher flag that enables the FP4-Local prefix cache. The
-variable must already be set in the noninteractive SSH environment on every
-selected Spark. Setting it only in the controller shell has no effect. The
-engine ranks must receive the same value. The engine makes the final
-decision ([source](engine/crates/serve/src/prefix_switch.rs)). Sending
-`cache:true` in a request does not turn the cache on by itself.
+Route B has no launcher flag for the FP4-Local prefix cache. A setting must
+already be in the noninteractive SSH environment on every selected Spark.
+Setting it only in the controller shell has no effect. The engine makes the
+final decision ([source](engine/crates/serve/src/prefix_switch.rs)).
+
+`GET /health` reports the cache in one object, `prefix_cache`: hits, misses,
+reused tokens, kept snapshots, entries evicted for memory (`evicted`: room for
+a new snapshot, memory pressure or the cache limit), entries removed after
+their idle time (`expired`: a checkpoint at its expiry, or an idle prompt when
+the cache must give memory back), entries, retained bytes, the room, and the
+snapshots skipped for each reason (`no_room`, `too_large`, `fork_failed`,
+`insert_refused`). On two Sparks, a prompt the second engine rank could not
+capture is not counted there; the log shows `prefix_cache_worker_refused`.
+The engine log prints the same counts on a
+`prefix_cache_status` line after each lookup and snapshot. After an eviction,
+an expiry or another change to the entries or retained bytes, it prints the
+line at the next scheduler pass.
 
 ### Use a different checkpoint folder
 

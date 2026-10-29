@@ -221,7 +221,24 @@ pub struct SessionCache<S> {
     prefixes: BTreeMap<(u64, usize, u64), Vec<u64>>,
     next_id: u64,
     next_checkpoint_expiry: Option<Instant>,
+    /// Bytes the startup plan sets aside for retention alone (Engine::cache_room_bytes).
+    room: usize,
+    counts: Counts,
+    /// (entries, retained bytes) on the last status line.
+    noted: (usize, usize),
+    /// The last scheduler pass with a live request (note_busy).
+    busy: Option<Instant>,
 }
+/// Idle time after which the backend reserves release spares under host pressure (the gpu
+/// crate's IDLE_RELEASE). Sooner, what the cache evicts stays in them: no host memory is freed.
+const RESERVE_IDLE_RELEASE: Duration = Duration::from_secs(30);
+/// Lookups and snapshot outcomes since startup, for the server status (`/health`) and log.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// `evicted`: entries removed for memory (room for a snapshot, pressure or the ceiling); `expired`:
+/// entries removed after their idle time.
+pub struct Counts { pub hits: usize, pub misses: usize, pub reused_tokens: usize, pub snapshots: usize, pub evicted: usize, pub expired: usize, pub skipped: [usize; 4] }
+/// Why a snapshot was not kept, in Counts::skipped order.
+pub const SKIP_REASONS: [&str; 4] = ["no_room", "too_large", "fork_failed", "insert_refused"];
 impl<S> SessionCache<S> {
     fn valid_allocations(&self, allocations: &[(usize, usize)]) -> bool {
         let mut identities = BTreeSet::new();
@@ -240,7 +257,47 @@ impl<S> SessionCache<S> {
             prefixes: BTreeMap::new(),
             next_id: 0,
             next_checkpoint_expiry: None,
+            room: 0,
+            counts: Counts::default(),
+            noted: (0, 0),
+            busy: None,
         })
+    }
+    /// Keep `room` bytes for retention whatever admission or host pressure needs.
+    pub fn with_room(mut self, room: usize) -> Self {
+        self.room = room;
+        self
+    }
+    /// The startup room in effect: never above the retained-bytes ceiling.
+    pub(crate) fn room(&self) -> usize {
+        self.room.min(self.limits.retained_bytes)
+    }
+    pub fn counts(&self) -> Counts {
+        self.counts
+    }
+    /// A request that asked for the cache found `reused` tokens (0: a miss).
+    pub(crate) fn count_lookup(&mut self, reused: usize) {
+        if reused == 0 { self.counts.misses += 1; } else { self.counts.hits += 1; self.counts.reused_tokens += reused; }
+        self.note_status();
+    }
+    fn skip(&mut self, reason: usize) {
+        self.counts.skipped[reason] += 1;
+        self.note_status();
+    }
+    /// One status line per lookup and snapshot outcome, and per rebalance that changed the
+    /// entries or retained bytes: what the cache holds and why snapshots were skipped.
+    fn note_status(&mut self) {
+        self.noted = (self.entries.len(), self.retained_bytes);
+        let c = &self.counts;
+        engine_model::events::note_line("prefix_cache_status", &format!("prefix_cache_status hits={} misses={} reused_tokens={} snapshots={} evicted={} expired={} entries={} retained_bytes={} room_bytes={} skipped_no_room={} skipped_too_large={} skipped_fork_failed={} skipped_insert_refused={}",
+            c.hits, c.misses, c.reused_tokens, c.snapshots, c.evicted, c.expired, self.entries.len(), self.retained_bytes, self.room, c.skipped[0], c.skipped[1], c.skipped[2], c.skipped[3]));
+    }
+    /// The `/health` object: the same counts as the status line.
+    pub fn status_json(&self) -> String {
+        let c = &self.counts;
+        let skipped = SKIP_REASONS.iter().zip(c.skipped).map(|(r, n)| format!("\"{r}\":{n}")).collect::<Vec<_>>().join(",");
+        format!("{{\"hits\":{},\"misses\":{},\"reused_tokens\":{},\"snapshots\":{},\"evicted\":{},\"expired\":{},\"entries\":{},\"retained_bytes\":{},\"room_bytes\":{},\"skipped\":{{{skipped}}}}}",
+            c.hits, c.misses, c.reused_tokens, c.snapshots, c.evicted, c.expired, self.entries.len(), self.retained_bytes, self.room)
     }
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -261,26 +318,41 @@ impl<S> SessionCache<S> {
     pub(crate) fn fund_pages(&mut self, pages: Vec<(usize, usize)>) {
         self.funded_pages.extend(pages.into_iter().map(|(id, _)| id));
     }
+    /// A scheduler pass with a live request: see rebalance_within.
+    pub(crate) fn note_busy(&mut self, now: Instant) {
+        self.busy = Some(now);
+    }
     #[cfg(test)]
     pub(crate) fn rebalance(&mut self, bytes: usize, pages: BTreeSet<usize>, now: Instant) where S: crate::Session {
         self.rebalance_within(bytes, None, pages, now)
     }
     /// `free`: physical bytes the engine can spare beyond its own needs (negative: short) and its
     /// growth slack (Engine::cache_free_physical_bytes). Unfunded retention yields down to what it
-    /// holds plus the first; inserts must also leave the slack free.
+    /// holds plus the first; inserts must also leave the slack free. `bytes`: the admission pool
+    /// live chats leave free. The startup room (with_room) is outside both: the plan funds it.
     pub(crate) fn rebalance_within(&mut self, bytes: usize, free: Option<(i128, usize)>, pages: BTreeSet<usize>, now: Instant)
         where S: crate::Session {
         let entries = self.entries.len();
         self.expire_checkpoints(now);
         self.funded_pages = pages;
+        let room = self.room();
+        let bytes = bytes.saturating_add(room);
         let physical = free.map(|(free, _)| (self.unfunded_bytes() as i128 + free).clamp(0, usize::MAX as i128) as usize);
-        self.available_bytes = physical.map_or(bytes, |p| p.min(bytes)).min(self.limits.retained_bytes);
-        self.yield_to(bytes, physical, now, entries);
+        // Until the server has been idle for RESERVE_IDLE_RELEASE, what an eviction returns stays
+        // in the funded reserves: yielding then frees no host memory and only drops prefixes.
+        // The insert bound below still follows `physical`, so this changes only the yield.
+        let idle = self.busy.is_none_or(|busy| now.saturating_duration_since(busy) >= RESERVE_IDLE_RELEASE);
+        let yielding = physical.filter(|_| idle);
+        self.available_bytes = yielding.map_or(bytes, |p| p.min(bytes)).max(room).min(self.limits.retained_bytes);
+        self.yield_to(bytes, yielding.map(|p| p.max(room)), now, entries);
         // Retention grows only while the engine's slack also stays free; it yields only past
         // the physical room itself, so pages mapped inside the slack evict nothing.
         if let (Some(p), Some((_, slack))) = (physical, free) {
-            self.available_bytes = self.available_bytes.min(p.saturating_sub(slack));
+            self.available_bytes = self.available_bytes.min(p.saturating_sub(slack).max(room));
         }
+        // Expiry, eviction, draft release and completion-time retention change what the cache
+        // holds outside a lookup or snapshot: the scheduler rebalances on each pass, so report here.
+        if self.noted != (self.entries.len(), self.retained_bytes) { self.note_status(); }
     }
     fn yield_to(&mut self, bytes: usize, physical: Option<usize>, now: Instant, entries: usize) where S: crate::Session {
         if self.unfunded_bytes() <= self.available_bytes { return; }
@@ -297,6 +369,7 @@ impl<S> SessionCache<S> {
         while self.unfunded_bytes() > self.available_bytes {
             let Some(index) = self.entries.iter().position(|e| !e.pinned()) else { break; };
             self.remove(index);
+            self.counts.evicted += 1;
         }
         if self.entries.len() != entries {
             engine_model::events::note_line("prefix_cache_pressure", &format!("prefix_cache_pressure evicted_entries={} retained_bytes={} unfunded_bytes={} available_bytes={}",
@@ -333,6 +406,7 @@ impl<S> SessionCache<S> {
             let retained = self.retained_bytes;
             let Some(index) = self.entries.iter().position(|e| !e.pinned()) else { return false; };
             let victim = self.remove(index);
+            self.counts.evicted += 1;
             engine_model::events::note_line("prefix_cache_make_room", &format!("prefix_cache_make_room evicted_id={} evicted_tokens={} freed_bytes={} retained_bytes={} incoming_bytes={charge}",
                 victim.id, victim.state.tokens.len(), retained - self.retained_bytes, self.retained_bytes));
         }
@@ -368,6 +442,7 @@ impl<S> SessionCache<S> {
             if !self.entries[i].pinned() && self.entries[i].checkpoint.map_or_else(|| now.saturating_duration_since(self.entries[i].saved) >= ttl,
                 |expiry| now >= expiry) {
                 self.remove(i);
+                self.counts.expired += 1;
             } else {
                 i += 1;
             }
@@ -378,7 +453,10 @@ impl<S> SessionCache<S> {
         self.next_checkpoint_expiry = None;
         let mut i = 0;
         while i < self.entries.len() {
-            if !self.entries[i].pinned() && self.entries[i].checkpoint.is_some_and(|expiry| now >= expiry) { self.remove(i); }
+            if !self.entries[i].pinned() && self.entries[i].checkpoint.is_some_and(|expiry| now >= expiry) {
+                self.remove(i);
+                self.counts.expired += 1;
+            }
             else {
                 if let Some(expiry) = self.entries[i].checkpoint { self.track_checkpoint_expiry(expiry); }
                 i += 1;
@@ -791,9 +869,12 @@ impl<S: crate::Session> SessionCache<S> {
             .saturating_add(state.next_logits.len().saturating_mul(4))
             .saturating_add(index_charge(state.tokens.len(), scope))
             .saturating_add(allocations.as_ref().map_or(0, |a| a.len() * 96));
-        if charge > self.limits.retained_bytes {
-            engine_model::events::note("prefix_cache_snapshot_skipped", format_args!("reason=too_large tokens={} charge_bytes={charge} limit_bytes={}",
+        // Room for the copy the fork itself funds (Session::fork_storage_bytes); 0 for most backends.
+        let incoming = charge.saturating_add(state.session.fork_storage_bytes());
+        if incoming > self.limits.retained_bytes {
+            engine_model::events::note("prefix_cache_snapshot_skipped", format_args!("reason=too_large tokens={} charge_bytes={incoming} limit_bytes={}",
                 state.tokens.len(), self.limits.retained_bytes));
+            self.skip(1);
             return;
         }
         // A new prompt replaces older turns; its completion keeps this prompt's
@@ -802,15 +883,17 @@ impl<S: crate::Session> SessionCache<S> {
         // Credit it before make_room, not only after the snapshot has forked.
         self.fund_pages(state.session.funded_snapshot_allocations(None));
         self.drop_prefixes(&key, scope, &state.tokens, prompt_end && !state.next_logits.is_empty());
-        if !self.make_room(charge, &allocations.unwrap_or_default()) {
-            engine_model::events::note("prefix_cache_snapshot_skipped", format_args!("reason=no_room tokens={} charge_bytes={charge} retained_bytes={} available_bytes={}",
+        if !self.make_room(incoming, &allocations.unwrap_or_default()) {
+            engine_model::events::note("prefix_cache_snapshot_skipped", format_args!("reason=no_room tokens={} charge_bytes={incoming} retained_bytes={} available_bytes={}",
                 state.tokens.len(), self.retained_bytes, self.available_bytes));
+            self.skip(0);
             return;
         }
         let session = match state.session.fork() {
             Ok(session) => session,
             Err(error) => {
                 engine_model::events::note("prefix_cache_snapshot_skipped", format_args!("reason=fork_failed tokens={} error={error}", state.tokens.len()));
+                self.skip(2);
                 return;
             }
         };
@@ -829,6 +912,10 @@ impl<S: crate::Session> SessionCache<S> {
             now,
         ) {
             engine_model::events::note("prefix_cache_snapshot_skipped", format_args!("reason=insert_refused tokens={} error={error}", state.tokens.len()));
+            self.skip(3);
+        } else {
+            self.counts.snapshots += 1;
+            self.note_status();
         }
     }
 }
@@ -900,6 +987,136 @@ mod tests {
         let free = crate::prefix_switch::cache_physical_room(Some((-1, ROOM_RESERVE_CAP)), ROOM_SLACK);
         cache.rebalance_within(ROOM_POOL, free, BTreeSet::new(), now);
         assert_eq!((cache.len(), cache.retained_bytes()), (0, 0));
+    }
+    #[test]
+    fn startup_room_keeps_a_snapshot_under_pressure_and_a_full_pool() {
+        // A two-Spark soak under host pressure (no physical room) skipped every snapshot.
+        let (cache, state) = room_fixture();
+        let mut cache = cache.with_room(ROOM_CHARGE);
+        let now = Instant::now();
+        let pressure = crate::prefix_switch::cache_physical_room(Some((-1, ROOM_RESERVE_CAP)), ROOM_SLACK);
+        cache.rebalance_within(0, pressure, BTreeSet::new(), now);
+        cache.snapshot(SessionKey::generate().unwrap(), &state, now);
+        assert_eq!((cache.len(), cache.retained_bytes(), state.session.forks.get()), (1, ROOM_CHARGE, 1));
+        // Neither admission (no pool bytes left) nor pressure reclaims the room.
+        cache.rebalance_within(0, pressure, BTreeSet::new(), now);
+        assert_eq!((cache.len(), cache.retained_bytes()), (1, ROOM_CHARGE));
+        // The room holds one such snapshot: a new conversation replaces the older one.
+        let second = CachedSession { checkpoint_lease: None, session: state.session.clone(),
+            tokens: std::iter::once(2).chain(state.tokens[1..].iter().copied()).collect(),
+            next_logits: state.next_logits.clone(), reserved_session_bytes: state.reserved_session_bytes };
+        cache.snapshot(SessionKey::generate().unwrap(), &second, now);
+        assert_eq!((cache.len(), cache.retained_bytes(), state.session.forks.get()), (1, ROOM_CHARGE, 2));
+        cache.count_lookup(32_064);
+        cache.count_lookup(0);
+        assert_eq!(cache.counts(), Counts { hits: 1, misses: 1, reused_tokens: 32_064, snapshots: 2, evicted: 1, expired: 0, skipped: [0; 4] });
+        let status = cache.status_json();
+        assert!(status.starts_with(r#"{"hits":1,"misses":1,"reused_tokens":32064,"snapshots":2,"evicted":1,"expired":0,"entries":1,"#)
+            && status.ends_with(r#""skipped":{"no_room":0,"too_large":0,"fork_failed":0,"insert_refused":0}}"#), "{status}");
+        // Without a room the same pressure keeps nothing.
+        let (mut plain, state) = room_fixture();
+        plain.rebalance_within(0, pressure, BTreeSet::new(), now);
+        plain.snapshot(SessionKey::generate().unwrap(), &state, now);
+        assert_eq!((plain.len(), plain.counts().skipped), (0, [1, 0, 0, 0]));
+    }
+    #[test]
+    fn the_status_line_follows_an_eviction_outside_a_snapshot() {
+        // A rebalance that changes the entries or retained bytes prints a new status line.
+        let (mut cache, state) = room_fixture();
+        let now = Instant::now();
+        cache.snapshot(SessionKey::generate().unwrap(), &state, now);
+        assert_eq!(cache.noted, (1, ROOM_CHARGE));
+        let pressure = crate::prefix_switch::cache_physical_room(Some((-1, ROOM_RESERVE_CAP)), ROOM_SLACK);
+        cache.rebalance_within(0, pressure, BTreeSet::new(), now);
+        assert_eq!((cache.len(), cache.noted), (0, (0, 0)));
+        // Health says the entry was evicted for memory, not that it expired.
+        assert_eq!((cache.counts().evicted, cache.counts().expired), (1, 0));
+        assert!(cache.status_json().contains("\"evicted\":1,\"expired\":0,"), "{}", cache.status_json());
+        cache.rebalance_within(ROOM_RETAINED, None, BTreeSet::new(), now);
+        cache.snapshot(SessionKey::generate().unwrap(), &state, now);
+        cache.expire(now + Duration::from_secs(3600 * 24));
+        assert_eq!((cache.len(), cache.counts().evicted, cache.counts().expired), (0, 1, 1));
+        // A checkpoint removed at its expiry on a scheduler pass counts as expired too.
+        cache.checkpoint(None, None, &state, now).unwrap();
+        cache.rebalance_within(ROOM_RETAINED, None, BTreeSet::new(), now + Duration::from_secs(3600));
+        assert_eq!((cache.len(), cache.counts().evicted, cache.counts().expired), (0, 1, 2));
+    }
+    #[test]
+    fn an_in_place_entry_yields_to_pressure_only_after_the_server_is_idle() {
+        // own-cache-screen-x4 1s-p1 (one Spark, context 32768): under host pressure each retired
+        // turn-1 entry was evicted at the next pass, but device_bytes did not move: the funded
+        // reserves kept its arenas, so the yield freed no host memory and the next turn missed.
+        const RESERVATION: usize = 2_276_963_652;
+        const ROOM: usize = 916_359_676;
+        const ARENA: usize = 7;
+        #[derive(Clone)]
+        struct InPlace;
+        impl crate::Session for InPlace {
+            fn step(&mut self, _: u32) -> Result<Vec<f32>, String> { unreachable!() }
+            fn fork(&self) -> Result<Self, String> { Ok(Self) }
+            fn retained_allocations(&self) -> Option<Vec<(usize, usize)>> { Some(vec![(ARENA, RESERVATION)]) }
+            fn retained_private_bytes(&self) -> usize { 196_725_164 }
+        }
+        let mut cache = SessionCache::new(CacheLimits { entries: 16, retained_bytes: ROOM_RETAINED,
+            tokens_per_entry: 65_536, logits_per_entry: 1, idle_ttl: Duration::from_secs(3600) }).unwrap().with_room(ROOM);
+        let state = CachedSession { checkpoint_lease: None, session: InPlace, tokens: vec![1; 32_099],
+            next_logits: vec![1.], reserved_session_bytes: RESERVATION };
+        let pressure = crate::prefix_switch::cache_physical_room(Some((-1, ROOM_RESERVE_CAP)), ROOM_SLACK);
+        let now = Instant::now();
+        // Turn 1 is live: its request funds the arena; the entry's own state fits the room.
+        cache.note_busy(now);
+        cache.rebalance_within(ROOM_POOL - RESERVATION, pressure, BTreeSet::from([ARENA]), now);
+        cache.snapshot_scoped(SessionKey::generate().unwrap(), None, &state, now, true);
+        assert_eq!(cache.len(), 1);
+        // Turn 1 retires: what an eviction returns stays in the reserves, so the entry stays.
+        for idle in [1, 29] {
+            cache.rebalance_within(ROOM_POOL, pressure, BTreeSet::new(), now + Duration::from_secs(idle));
+            assert_eq!((cache.len(), cache.counts().evicted), (1, 0), "idle {idle} s");
+        }
+        // After 30 s with no live request the reserves release spares: the entry yields.
+        cache.rebalance_within(ROOM_POOL, pressure, BTreeSet::new(), now + Duration::from_secs(30));
+        assert_eq!((cache.len(), cache.retained_bytes(), cache.counts().evicted), (0, 0, 1));
+    }
+    #[test]
+    fn a_snapshot_evicts_for_the_storage_its_fork_adds() {
+        // The FP8 ring session funds a new snapshot copy from its own budget (the cache ceiling,
+        // reserved at launch) only when it forks. After a long served run, a card's entries fill
+        // the cache (FP8 screen: 10 entries, 8,705,753,848 of 8,883,411,194 bytes); a long chat's
+        // snapshot must still be funded, by evicting older entries first. Bytes scaled by 10^4.
+        const LIMIT: usize = 888_341;
+        struct Store { used: Cell<usize>, next: Cell<usize> }
+        struct Held(Rc<Store>, usize, usize);
+        impl Drop for Held { fn drop(&mut self) { self.0.used.set(self.0.used.get() - self.2); } }
+        #[derive(Clone)]
+        struct Ring { store: Rc<Store>, copy: usize, saved: Vec<Rc<Held>> }
+        impl crate::Session for Ring {
+            fn step(&mut self, _: u32) -> Result<Vec<f32>, String> { unreachable!() }
+            fn fork(&self) -> Result<Self, String> {
+                let s = &self.store;
+                if s.used.get() + self.copy > LIMIT { return Err("Flash snapshot cache is unfunded".into()); }
+                s.used.set(s.used.get() + self.copy);
+                s.next.set(s.next.get() + 1);
+                let mut saved = self.saved.clone();
+                saved.push(Rc::new(Held(s.clone(), s.next.get(), self.copy)));
+                Ok(Self { store: s.clone(), copy: 0, saved })
+            }
+            fn retained_allocations(&self) -> Option<Vec<(usize, usize)>> { Some(self.saved.iter().map(|h| (h.1, h.2)).collect()) }
+            fn fork_storage_bytes(&self) -> usize { self.copy }
+        }
+        let store = Rc::new(Store { used: Cell::new(0), next: Cell::new(0) });
+        let mut cache = SessionCache::new(CacheLimits { entries: 128, retained_bytes: LIMIT, tokens_per_entry: 16,
+            logits_per_entry: 1, idle_ttl: Duration::from_secs(3600) }).unwrap();
+        let now = Instant::now();
+        let chat = |token, copy| CachedSession { checkpoint_lease: None, session: Ring { store: store.clone(), copy, saved: Vec::new() },
+            tokens: vec![token], next_logits: vec![1.], reserved_session_bytes: copy };
+        for token in 1..=10 { cache.snapshot(SessionKey::generate().unwrap(), &chat(token, 87_000), now); }
+        assert_eq!((cache.len(), store.used.get()), (10, 870_000));
+        // The long chat: the oldest card entries yield, the chat is kept, the budget holds.
+        cache.snapshot(SessionKey::generate().unwrap(), &chat(11, 300_000), now);
+        assert_eq!((cache.counts().snapshots, cache.counts().skipped), (11, [0; 4]));
+        assert!(cache.entries.iter().any(|e| e.state.tokens == [11]) && cache.len() < 10);
+        assert_eq!(cache.counts().evicted, 11 - cache.len());
+        assert!(store.used.get() <= LIMIT && cache.retained_bytes() <= LIMIT, "{} {}", store.used.get(), cache.retained_bytes());
     }
     #[test]
     fn snapshot_credits_live_storage_revealed_at_prompt_end() {

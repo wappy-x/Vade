@@ -119,6 +119,14 @@ fn session_pool_funds_graph_cliffs_and_refuses_shortfall() {
     // below the 9..16 storage width: the plan takes 8 slots, which pass the startup check.
     assert_eq!(fit_session_pool(20000, 1000, 18000, shared).unwrap(), (16, 18040, 1960));
     assert_eq!(fit_session_pool(20000, 1000, 18100, shared).unwrap(), (8, 18520, 1480));
+    // One Spark at context 262144 (a flashnext ready line at 250fb49): 16 slots leave 38,449,244
+    // bytes above one full chat. With the cache on, the full chat carries the 512 MiB room floor
+    // (prefix_switch::plan_room): the plan takes 8 slots and the room is funded.
+    let wide = |n: usize| Ok(if n > 8 { 10_181_195_164 } else { 9_223_978_116 });
+    let (available, full) = (16_056_182_176 + 10_181_195_164, 16_017_732_932);
+    assert_eq!(fit_session_pool(available, 1_000_000_000, full, wide).unwrap(), (16, 16_056_182_176, 10_181_195_164));
+    let (sessions, pool, _) = fit_session_pool(available, 1_000_000_000, full + (512 << 20), wide).unwrap();
+    assert_eq!((sessions, pool - full), (8, 995_666_292));
 }
 /// Missing owners cannot be reconstructed while published pool addresses remain live.
 /// Such a session must be replaced; reset and pooled admission share this check.

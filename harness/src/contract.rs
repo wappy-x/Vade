@@ -910,6 +910,10 @@ impl Contract {
         self.chosen_output.or(self.options.max_output_tokens)
             .map_or(fallback, |n| usize::try_from(n).unwrap_or(usize::MAX))
     }
+    /// The last admission chose the reply size from the room left.
+    pub(crate) fn automatic_reservation(&self) -> bool {
+        self.automatic_reservation
+    }
     pub(crate) fn output_reserve_tokens(&self, fallback: usize) -> usize {
         let reserve = self.chosen_output
             .or(self.options.max_output_tokens)

@@ -104,10 +104,16 @@ pub trait ContextHost {
     fn can_summarize(&self) -> bool {
         true
     }
+    /// True when the model picks each reply size from the room the window
+    /// leaves (`Model::automatic_output`).
+    fn automatic_output(&self) -> bool {
+        false
+    }
 }
 
-/// A host that only counts, for callers that have no model at hand.
-pub struct CountOnly<'a>(pub &'a mut dyn FnMut(&Conversation) -> io::Result<Usage>);
+/// A host that only counts, for callers that have no model at hand. The flag
+/// is the model's `automatic_output`.
+pub struct CountOnly<'a>(pub &'a mut dyn FnMut(&Conversation) -> io::Result<Usage>, pub bool);
 impl ContextHost for CountOnly<'_> {
     fn count(&mut self, c: &Conversation) -> io::Result<Usage> {
         (self.0)(c)
@@ -117,6 +123,9 @@ impl ContextHost for CountOnly<'_> {
     }
     fn can_summarize(&self) -> bool {
         false
+    }
+    fn automatic_output(&self) -> bool {
+        self.1
     }
 }
 
@@ -209,13 +218,12 @@ fn input(usage: &Usage) -> usize {
 /// Prompt tokens plus `extra` plus the reply room that `Usage::fits` asks for.
 /// An estimate keeps the full reserve and an exact count its counted reply, so
 /// an explicit `--max-output-tokens` keeps all of its room. An automatic reply
-/// that the window clamps (contract.rs `admit_adjusted`: all the room left, 256
-/// below the window, or no room at all) shrinks with the prompt, so it needs
-/// only the protected reservation and those 256 tokens.
-fn needed_with(usage: &Usage, extra: usize, window: usize, limits: Limits) -> usize {
-    let clamped = |input: usize, output: usize| input.saturating_add(output).saturating_add(256) == window || input.saturating_add(256) >= window;
+/// (contract.rs `admit_adjusted`: all the room left, 256 below the window)
+/// shrinks with the prompt, so it needs only the protected reservation and
+/// those 256 tokens, whatever the count of a smaller prompt chose.
+fn needed_with(usage: &Usage, extra: usize, window: usize, limits: Limits, automatic: bool) -> usize {
     let reply = match usage.exact {
-        Some((input, output, _, _)) if clamped(input, output) => reply_reservation(window, limits.output_reserve_tokens).saturating_add(256),
+        Some(_) if automatic => reply_reservation(window, limits.output_reserve_tokens).saturating_add(256),
         Some((_, output, _, _)) => output,
         None => limits.output_reserve_tokens.max(usage.requested_output),
     };
@@ -223,8 +231,9 @@ fn needed_with(usage: &Usage, extra: usize, window: usize, limits: Limits) -> us
 }
 
 /// The tokens a prompt needs with its reply room, as the hard stop reports it.
-pub fn needed_tokens(usage: &Usage, window: usize, limits: Limits) -> usize {
-    needed_with(usage, 0, window, limits)
+/// `automatic` is the model's `automatic_output`.
+pub fn needed_tokens(usage: &Usage, window: usize, limits: Limits, automatic: bool) -> usize {
+    needed_with(usage, 0, window, limits, automatic)
 }
 
 /// Why a rollover could not run. The caller falls back to local excerpts and
@@ -276,7 +285,7 @@ fn choose(c: &Conversation, keep: usize, limits: Limits, before: &Usage, host: &
         }
         let floor = host.count(&bare(c, cut, limits)?)?;
         let block = (state_block(c, cut, "").len() + cap).div_ceil(3) + 16;
-        needed = needed_with(&floor, block, window, limits);
+        needed = needed_with(&floor, block, window, limits, host.automatic_output());
         let admitted = floor.admission_issue.is_none() && floor.exact.is_none_or(|e| e.3);
         if admitted && needed <= window {
             if input(&floor).saturating_add(block) < input(before) {
@@ -299,7 +308,7 @@ pub fn rollover_room(c: &Conversation, keep: usize, limits: Limits, before: &Usa
     choose(c, keep, limits, before, host).map(|(kept, _, _)| kept)
 }
 
-/// Plan a rollover. [`choose`] picks the kept turns, the model writes the
+/// Plan a rollover. `choose` picks the kept turns, the model writes the
 /// block, and the final plan is counted again. It must fit and it must be
 /// smaller than `before`. Nothing is saved here.
 pub fn rollover(c: &Conversation, keep: usize, limits: Limits, before: &Usage, host: &mut dyn ContextHost) -> Result<(CompactionPlan, Usage), RolloverError> {
@@ -325,7 +334,7 @@ pub fn rollover(c: &Conversation, keep: usize, limits: Limits, before: &Usage, h
             break (kept, floor, plan, after);
         }
         if kept == 1 {
-            return Err(RolloverError::NoRoom { needed: needed_with(&after, 0, window, limits), window });
+            return Err(RolloverError::NoRoom { needed: needed_with(&after, 0, window, limits, host.automatic_output()), window });
         }
         keep = kept - 1;
     };
@@ -379,7 +388,7 @@ pub(crate) fn digest(c: &Conversation, cut: usize, cap: usize) -> String {
                     entries.push((false, format!("[assistant]\n{}\n", excerpt(&text, 1536))));
                 }
                 for call in m.tool_calls() {
-                    entries.push((false, format!("[tool call {}] {}\n", call.name, call_reference(&call.arguments))));
+                    entries.push((false, format!("[tool call {}] {}\n", call.name, call_reference(&call.name, &call.arguments))));
                 }
             }
             "tool" => {
@@ -422,8 +431,9 @@ fn number(value: &Value, key: &str) -> Option<String> {
     }
 }
 
-/// Paths touched by a call, with line ranges where the call names them.
-fn call_paths(arguments: &str) -> Vec<(String, Option<String>)> {
+/// Paths touched by a call, with line ranges where the call names them and
+/// the byte range of a `workspace_read` (offset 0 and its own limit by default).
+fn call_paths(name: &str, arguments: &str) -> Vec<(String, Option<String>)> {
     let Ok(value) = crate::json::parse(arguments) else { return Vec::new() };
     let mut paths = Vec::new();
     if let Some(path) = value.get("path").and_then(Value::as_str) {
@@ -434,8 +444,9 @@ fn call_paths(arguments: &str) -> Vec<(String, Option<String>)> {
         if let Some(ranges) = value.get("ranges").and_then(Value::as_array) {
             lines.extend(ranges.iter().filter_map(|r| Some(format!("{}-{}", number(r, "start_line")?, number(r, "end_line")?))));
         }
-        if let Some(offset) = number(&value, "offset").filter(|_| value.get("limit").is_some()) {
-            lines.push(format!("bytes {offset}+{}", number(&value, "limit").unwrap_or_default()));
+        if name == "workspace_read" {
+            let offset = number(&value, "offset").unwrap_or_else(|| "0".into());
+            lines.push(number(&value, "limit").map_or_else(|| format!("bytes from {offset}"), |limit| format!("bytes {offset}+{limit}")));
         }
         paths.push((path.to_owned(), (!lines.is_empty()).then(|| lines.join(","))));
     }
@@ -451,8 +462,8 @@ fn call_paths(arguments: &str) -> Vec<(String, Option<String>)> {
     paths
 }
 
-fn call_reference(arguments: &str) -> String {
-    let paths = call_paths(arguments);
+fn call_reference(name: &str, arguments: &str) -> String {
+    let paths = call_paths(name, arguments);
     if !paths.is_empty() {
         return paths.iter().map(|(path, lines)| lines.as_ref().map_or_else(|| path.clone(), |l| format!("{path}:{l}"))).collect::<Vec<_>>().join(" ");
     }
@@ -499,7 +510,7 @@ fn state_block(c: &Conversation, cut: usize, model_text: &str) -> String {
     for call in c.messages()[prefix..cut].iter().flat_map(|m| m.tool_calls()) {
         let result = results.get(call.id.as_str()).map_or("", String::as_str);
         let edit = matches!(call.name.as_str(), "apply_patch" | "workspace_edit_lines");
-        for (path, lines) in call_paths(&call.arguments) {
+        for (path, lines) in call_paths(&call.name, &call.arguments) {
             let entry = files.entry(path).or_default();
             if edit {
                 entry.1 += 1;
@@ -513,7 +524,7 @@ fn state_block(c: &Conversation, cut: usize, model_text: &str) -> String {
             }
         }
         if call.name == "workspace_shell" {
-            commands.push(format!("- {} -> {}\n", call_reference(&call.arguments), excerpt(result.lines().next().unwrap_or("no result"), 120)));
+            commands.push(format!("- {} -> {}\n", call_reference(&call.name, &call.arguments), excerpt(result.lines().next().unwrap_or("no result"), 120)));
             if commands.len() > 8 {
                 commands.remove(0);
             }

@@ -9,6 +9,16 @@ const POLL: Duration = Duration::from_millis(100);
 /// the fixed frame fits in the TCP buffer. Restore timeouts before the next protocol.
 /// `deadline` starts before model loading. Socket timeouts only pace stop/deadline checks.
 pub fn agree(link: &mut TcpStream, local: usize, deadline: Instant, stop: &AtomicBool) -> Result<(usize, usize), String> {
+    let peer = exchange(link, local, deadline, stop)?;
+    if local == 0 || peer == 0 { return Err("session pool agreement requires a positive count on each rank".into()); }
+    Ok((peer, local.min(peer)))
+}
+/// The cache room: the smaller of the two ranks' bytes. Zero is valid (no room).
+pub fn agree_room(link: &mut TcpStream, local: usize, deadline: Instant, stop: &AtomicBool) -> Result<usize, String> {
+    Ok(local.min(exchange(link, local, deadline, stop)?))
+}
+/// Send `local` and return the peer's value, the same frame for every agreement.
+fn exchange(link: &mut TcpStream, local: usize, deadline: Instant, stop: &AtomicBool) -> Result<usize, String> {
     let before = (link.read_timeout().map_err(err)?, link.write_timeout().map_err(err)?);
     let agreed = (|| {
         let mut frame = [0u8; 16];
@@ -36,10 +46,8 @@ pub fn agree(link: &mut TcpStream, local: usize, deadline: Instant, stop: &Atomi
         }
         remaining(deadline, stop)?;
         if &frame[..8] != b"VDPOOL01" { return Err("session pool agreement: invalid frame".into()); }
-        let peer = usize::try_from(u64::from_le_bytes(frame[8..].try_into().unwrap()))
-            .map_err(|_| "session pool peer count exceeds usize")?;
-        if local == 0 || peer == 0 { return Err("session pool agreement requires a positive count on each rank".into()); }
-        Ok((peer, local.min(peer)))
+        usize::try_from(u64::from_le_bytes(frame[8..].try_into().unwrap()))
+            .map_err(|_| "session pool peer count exceeds usize".into())
     })();
     let restored = link.set_read_timeout(before.0).and_then(|()| link.set_write_timeout(before.1)).map_err(err);
     agreed.and_then(|counts| restored.map(|()| counts))
@@ -94,6 +102,17 @@ mod tests {
             let worker = std::thread::spawn(move || agree(&mut back, counts.1, deadline(), &STOP));
             assert!(agree(&mut front, counts.0, deadline(), &STOP).unwrap_err().contains("positive count"));
             assert!(worker.join().unwrap().unwrap_err().contains("positive count"));
+            assert_eq!(front.read_timeout().unwrap(), None);
+            assert_eq!(front.write_timeout().unwrap(), None);
+        }
+    }
+    #[test]
+    fn a_zero_room_on_either_rank_agrees_on_zero() {
+        for (front_room, back_room, agreed) in [(0, 4096, 0), (4096, 0, 0), (0, 0, 0), (4096, 8192, 4096)] {
+            let (mut front, mut back) = pair();
+            let worker = std::thread::spawn(move || agree_room(&mut back, back_room, deadline(), &STOP));
+            assert_eq!(agree_room(&mut front, front_room, deadline(), &STOP), Ok(agreed));
+            assert_eq!(worker.join().unwrap(), Ok(agreed));
             assert_eq!(front.read_timeout().unwrap(), None);
             assert_eq!(front.write_timeout().unwrap(), None);
         }

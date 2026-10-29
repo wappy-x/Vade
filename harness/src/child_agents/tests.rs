@@ -697,6 +697,8 @@ mod http;
 mod quota;
 #[path = "scope_tests.rs"]
 mod scope;
+#[path = "memory_tests.rs"]
+mod memory;
 #[path = "lifecycle_tests.rs"]
 mod lifecycle;
 

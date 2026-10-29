@@ -4,7 +4,7 @@ use crate::{BatchError, BatchOutput, BatchRows, Engine, Predictions, Session};
 use spark_engine::flash::next_batched::{NextModel, NextPrefix, NextSession, NextStorage};
 use spark_gpu_probe::driver::Backend;
 use std::{cell::RefCell, rc::{Rc, Weak}, sync::atomic::{AtomicUsize, Ordering}};
-use crate::prefix_switch::{adopt, cache_yield, prefix_cache, refuse_on_pipeline};
+use crate::prefix_switch::{adopt, cache_yield, prefix_cache};
 use crate::kv_pages::Geometry;
 
 /// The KV page: one GB10 virtual-memory granule (segments.rs maps divisors of it).
@@ -67,13 +67,16 @@ pub struct FlashNext<'b, 'a, 'w> {
     sampled_cohort: bool,
     /// VADE_MTP_SAMPLED_TOPK=1: compact exact verifier readback (default off).
     sampled_top_k: bool,
-    /// VADE_FLASHNEXT_PREFIX_CACHE (default off = main's no-reuse path; 1 = on): exact prompt
+    /// VADE_FLASHNEXT_PREFIX_CACHE (unset = on where supported; 0 = off, the no-reuse path): exact prompt
     /// prefixes at 64-aligned checkpoints for the serving cache.
     prefix_cache: bool,
     /// VADE_FLASHNEXT_ADOPT (default off).
     adopt: bool,
     /// VADE_FLASHNEXT_CACHE_YIELD (default on): retention yields to host memory pressure.
     cache_yield: bool,
+    /// The retained cache's own room (prefix_switch::cache_room): set at startup, outside
+    /// admission and host pressure.
+    cache_room: usize,
 }
 /// Device bytes a live request holds above its admitted bound besides the chunk-form GDN
 /// tails, measured at CONTEXT 262144 with the KV reserve off: session state steps up once a
@@ -188,8 +191,7 @@ impl<'b, 'a, 'w> FlashNext<'b, 'a, 'w> {
     }
     pub fn with_chunk_experiments(backend: &'b Backend<'a>, model: &'w NextModel<'a>, context: usize,
         eos: Vec<u32>, chunk: usize, experiments: crate::mtp_batch::Experiments) -> Result<Self,String> {
-        let prefix_cache = prefix_cache()?;
-        if model.pp_front() { refuse_on_pipeline(prefix_cache, model.tp_prefix_supported())?; }
+        let prefix_cache = prefix_cache(!model.pp_front() || model.tp_prefix_supported())?;
         // The prompt checkpoint borrows the MTP rollback storage's funding (next_prefix.rs);
         // a model without MTP funds it here.
         let reservation = model.session_reservation_bytes_for_chunk(context, chunk)?
@@ -227,7 +229,8 @@ impl<'b, 'a, 'w> FlashNext<'b, 'a, 'w> {
                 .ok_or("VADE_BATCH_PREFILL_MAX_TOKENS must be a positive integer")?,
             Err(_) => return Err("VADE_BATCH_PREFILL_MAX_TOKENS must be a positive integer".into()),
         };
-        let adopt = prefix_cache && adopt()?;
+        // In place on one Spark; the tensor split's front copies like its back rank.
+        let adopt = prefix_cache && adopt(!model.pp_front())?;
         let cache_yield = prefix_cache && cache_yield()?;
         Ok(Self {
             backend,
@@ -259,7 +262,13 @@ impl<'b, 'a, 'w> FlashNext<'b, 'a, 'w> {
             prefix_cache,
             adopt,
             cache_yield,
+            cache_room: 0,
         })
+    }
+    /// The room the startup plan took from the session pool for retained prefixes.
+    pub fn with_cache_room(mut self, bytes: usize) -> Self {
+        self.cache_room = if self.prefix_cache { bytes } else { 0 };
+        self
     }
     /// Whether the serving cache may retain and restore Flash-Next prompt prefixes.
     pub fn prefix_cache(&self) -> bool {
@@ -844,6 +853,7 @@ impl<'b, 'a, 'w> Engine for FlashNext<'b, 'a, 'w> {
         };
         tails + CACHE_REQUEST_MARGIN_BYTES
     }
+    fn cache_room_bytes(&self) -> usize { self.cache_room }
     /// Current physical room bounds retention. The scheduler also reclaims retained entries
     /// before new request allocations. Unused spare-buffer capacity needs no extra funding.
     fn cache_free_physical_bytes(&self, _live_reserved: usize) -> Result<Option<(i128, usize)>, String> {

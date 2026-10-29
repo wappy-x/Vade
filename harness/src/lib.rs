@@ -9,6 +9,7 @@ pub mod diagnostics;
 pub mod gateway;
 pub mod json;
 pub mod prompt;
+pub mod memory;
 pub mod protocol;
 pub mod session;
 pub mod setup;
@@ -37,6 +38,7 @@ pub mod shell;
 #[cfg(test)]
 mod test_workspace;
 pub mod quality;
+pub mod readers;
 pub mod wake;
 pub mod workload;
 

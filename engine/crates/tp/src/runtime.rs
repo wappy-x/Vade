@@ -286,17 +286,19 @@ fn artifact_fingerprints(
 /// Refuse a pipeline link before either rank loads weights or serves requests.
 /// The caller passes the same PTX buffers it will load, not paths to reread.
 /// Like native rank verification, this compares manifests, not tensor payloads.
+/// `prefix_restore`: the link is a tensor split, where an unset prefix cache means on.
 pub fn verify_pipeline_artifacts(
     stream: &mut std::net::TcpStream,
     ptx: &std::ffi::CStr,
     root: &std::path::Path,
     ab_ptx: Option<&std::ffi::CStr>,
     experiments: spark_serve::mtp_batch::Experiments,
+    prefix_restore: bool,
     limit: std::time::Duration,
 ) -> Result<()> {
     let format = artifact_format(root)?;
     let mut local = artifact_fingerprints(ptx, root, ab_ptx, format)?;
-    local.extend(pipeline_settings::fingerprints(experiments, |name| std::env::var_os(name))?);
+    local.extend(pipeline_settings::fingerprints(experiments, prefix_restore, |name| std::env::var_os(name))?);
     exchange_pipeline_identity(stream, format, &local, limit)?;
     eprintln!("pipeline content identity passed (executable, loaded PTX, checkpoint metadata, numerical settings; weight payloads not hashed)");
     Ok(())
@@ -455,8 +457,8 @@ mod identity_tests {
             "VADE_VERIFY_MX4", "VADE_FLASHNEXT_DRAFT_FP4", "VADE_MTP_SAMPLED"] {
             let mut a = vec![b'a'; super::identity_names(2).len() * 64];
             let mut b = a.clone();
-            a.extend(super::pipeline_settings::fingerprints(experiments(), |_| None).unwrap());
-            b.extend(super::pipeline_settings::fingerprints(experiments(), |name|
+            a.extend(super::pipeline_settings::fingerprints(experiments(), true, |_| None).unwrap());
+            b.extend(super::pipeline_settings::fingerprints(experiments(), true, |name|
                 (name == setting).then(|| "0".into())).unwrap());
             let (front, back) = exchange(2, a, 2, b);
             for error in [front.unwrap_err(), back.unwrap_err()] {
@@ -470,7 +472,7 @@ mod identity_tests {
         for setting in spark_engine::flash_prompt_options::Options::NAMES {
             let identity = |value: Option<&str>| {
                 let mut bytes = vec![b'a'; super::identity_names(2).len() * 64];
-                bytes.extend(super::pipeline_settings::fingerprints(experiments(), |name| {
+                bytes.extend(super::pipeline_settings::fingerprints(experiments(), true, |name| {
                     if name == setting { value.map(Into::into) }
                     // Both recipes must remain valid when FRONTEND_GPU is off.
                     else if setting == "VADE_PROMPT_FRONTEND_GPU" && name == "VADE_PROMPT_FRONTEND_DEDUP" { Some("0".into()) }
@@ -498,7 +500,7 @@ mod identity_tests {
             let parsed = spark_serve::mtp_batch::Experiments::startup_with(2, true, |name|
                 Ok(values.iter().find(|(key, _)| *key == name).map(|(_, value)| value.to_string()))).unwrap();
             let mut bytes = vec![b'a'; super::identity_names(2).len() * 64];
-            bytes.extend(super::pipeline_settings::fingerprints(parsed, |_| None).unwrap());
+            bytes.extend(super::pipeline_settings::fingerprints(parsed, true, |_| None).unwrap());
             bytes
         };
         for setting in ["VADE_MTP_C8", "VADE_MTP_COHORT_ADAPT", "VADE_C8_GUARD_ROBUST"] {
@@ -533,8 +535,8 @@ mod identity_tests {
         assert_eq!(configured.packed_workspace_bytes(8192, false), 0);
         let mut front = vec![b'a'; super::identity_names(2).len() * 64];
         let mut back = front.clone();
-        front.extend(super::pipeline_settings::fingerprints(experiments(), |_| None).unwrap());
-        back.extend(super::pipeline_settings::fingerprints(experiments(), |name|
+        front.extend(super::pipeline_settings::fingerprints(experiments(), true, |_| None).unwrap());
+        back.extend(super::pipeline_settings::fingerprints(experiments(), true, |name|
             Options::NAMES.contains(&name).then(|| "1".into())).unwrap());
         let (front, back) = exchange(2, front, 2, back);
         assert!(front.is_ok() && back.is_ok());
@@ -543,11 +545,11 @@ mod identity_tests {
     #[test]
     fn pipeline_identity_rejects_invalid_prompt_recipe_before_exchange() {
         for setting in spark_engine::flash_prompt_options::Options::NAMES {
-            let error = super::pipeline_settings::fingerprints(experiments(), |name|
+            let error = super::pipeline_settings::fingerprints(experiments(), true, |name|
                 (name == setting).then(|| "yes".into())).unwrap_err();
             assert!(error.contains(setting) && error.contains("must be 0 or 1"));
         }
-        let error = super::pipeline_settings::fingerprints(experiments(), |name|
+        let error = super::pipeline_settings::fingerprints(experiments(), true, |name|
             (name == "VADE_PROMPT_FRONTEND_GPU").then(|| "0".into())).unwrap_err();
         assert!(error.contains("requires"));
     }
@@ -630,7 +632,7 @@ mod identity_tests {
         assert_ne!(&a[384..], &manifest[384..]);
         for mut b in [ptx, manifest] {
             let mut a = a.clone();
-            let settings = super::pipeline_settings::fingerprints(experiments(), |_| None).unwrap();
+            let settings = super::pipeline_settings::fingerprints(experiments(), true, |_| None).unwrap();
             a.extend_from_slice(&settings);
             b.extend_from_slice(&settings);
             let (front, back) = exchange(2, a, 2, b);

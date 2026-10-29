@@ -13,9 +13,10 @@ pub(crate) fn binary(report: &mut Report) -> Result<(), String> {
 }
 
 /// Show the four settings that affect the first launch.
-pub(crate) fn defaults(report: &mut Report, context: u32, output: u32, mtp: Option<u32>, cache: Result<bool, String>) -> Result<(), String> {
+/// `cache`: None when the switch is unset and the topology is not known.
+pub(crate) fn defaults(report: &mut Report, context: u32, output: u32, mtp: Option<u32>, cache: Result<Option<bool>, String>) -> Result<(), String> {
     generation_defaults(report, context, output, mtp)?;
-    report.check("default prefix cache", cache, |enabled| if *enabled { "on" } else { "off" }.into(),
+    report.check("default prefix cache", cache, |enabled| match enabled { Some(true) => "on", Some(false) => "off", None => UNSET_CACHE }.into(),
         "Set VADE_FLASHNEXT_PREFIX_CACHE to 0 or 1, then run vade doctor.")?;
     Ok(())
 }
@@ -39,12 +40,15 @@ pub(crate) fn start_options() -> Result<cli::UpOptions, String> {
     }
 }
 
-/// The retained-prefix setting passed to the engine. The engine defaults off.
-pub(crate) fn prefix_cache() -> Result<bool, String> {
+/// What the engine does with the prefix cache switch unset.
+const UNSET_CACHE: &str = "unset: on for one Spark and the tensor split, off on the layer chain";
+
+/// The retained-prefix setting passed to the engine (None: unset, see UNSET_CACHE).
+pub(crate) fn prefix_cache() -> Result<Option<bool>, String> {
     match std::env::var("VADE_FLASHNEXT_PREFIX_CACHE") {
-        Ok(value) if value == "1" => Ok(true),
-        Ok(value) if value == "0" => Ok(false),
-        Err(std::env::VarError::NotPresent) => Ok(false),
+        Ok(value) if value == "1" => Ok(Some(true)),
+        Ok(value) if value == "0" => Ok(Some(false)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
         _ => Err("VADE_FLASHNEXT_PREFIX_CACHE must be 0 or 1.".into()),
     }
 }
@@ -57,6 +61,8 @@ pub(crate) struct RemoteState {
     pub owned: bool,
     pub memory: Option<(u64, u64)>,
     pub split: bool,
+    /// The prefix cache default for the selected topology, when known (Session::prefix_restore).
+    pub cache_default: Option<bool>,
 }
 
 /// One address and TCP port that this rank must bind.
@@ -96,6 +102,11 @@ pub(crate) fn machine<R: Runner>(report: &mut Report, runner: &mut R, machine: &
     match fields.get("prefix_cache").map(String::as_str) {
         Some("0") => report.ok(&name("default prefix cache"), "off in the Spark SSH session")?,
         Some("1") => report.ok(&name("default prefix cache"), "on in the Spark SSH session")?,
+        Some("unset") => report.ok(&name("default prefix cache"), match state.cache_default {
+            Some(true) => "unset in the Spark SSH session: on for this topology",
+            Some(false) => "unset in the Spark SSH session: off on the layer chain",
+            None => "unset in the Spark SSH session: on for one Spark and the tensor split, off on the layer chain",
+        })?,
         _ => report.fail(&name("default prefix cache"), "The Spark prefix cache setting is invalid or unavailable.",
             "Set VADE_FLASHNEXT_PREFIX_CACHE to 0 or 1 in the Spark SSH session, then run vade doctor.")?,
     }
@@ -170,7 +181,7 @@ fn extra_script(machine: &Machine, ports: &[Port]) -> String {
     script += "else\n";
     for port in ports { script += &format!("  printf 'port_{}=unknown\\n'\n", port.number); }
     script += "fi\n";
-    script += "case \"${VADE_FLASHNEXT_PREFIX_CACHE-0}\" in 0) printf 'prefix_cache=0\\n';; 1) printf 'prefix_cache=1\\n';; *) printf 'prefix_cache=invalid\\n';; esac\n";
+    script += "if test -z \"${VADE_FLASHNEXT_PREFIX_CACHE+set}\"; then printf 'prefix_cache=unset\\n'; else case \"$VADE_FLASHNEXT_PREFIX_CACHE\" in 0) printf 'prefix_cache=0\\n';; 1) printf 'prefix_cache=1\\n';; *) printf 'prefix_cache=invalid\\n';; esac; fi\n";
     script
 }
 

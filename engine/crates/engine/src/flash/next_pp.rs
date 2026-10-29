@@ -1126,7 +1126,7 @@ impl<'a> NextModel<'a> {
         result.map_err(|e| link.fail(e))
     }
     /// Worker: mirror the front's sessions and execute just this stage's layer range.
-    pub fn serve_pp_back(&self, b: &Backend<'a>, stream: TcpStream, fast: Option<Box<dyn PpWire>>, next: Option<(TcpStream, Option<Box<dyn PpWire>>)>, stage: Stage, context: usize, active: usize, tile: usize, prefix_budget: usize, stop: &'static AtomicBool) -> Result<()> {
+    pub fn serve_pp_back(&self, b: &Backend<'a>, stream: TcpStream, fast: Option<Box<dyn PpWire>>, next: Option<(TcpStream, Option<Box<dyn PpWire>>)>, stage: Stage, context: usize, active: usize, tile: usize, prefix_budget: (usize, usize), stop: &'static AtomicBool) -> Result<()> {
         self.pp_split.set(stage.first);
         self.pp_end.set(stage.end);
         let mut sessions = BTreeMap::new();

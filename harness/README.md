@@ -17,6 +17,7 @@ It gives you:
 - direct streaming **text chat**. Its only tools are local commands you type,
   such as `/ls` and `/read`;
 - an offline **demo**;
+- [project memory](docs/memory.md) for facts, preferences, decisions, and corrections across chats;
 - a **gateway** command that sits between another client and the engine;
 - a hand-off of each turn to **Codex** (through its app-server) or to a
   **Hermes** agent (over ACP v1), if you have one installed.
@@ -822,8 +823,8 @@ servers running the same one-Spark model (for example from
 - Requests whose `messages` (or Responses `input` array) share their first 2048
   bytes up to the last user message prefer the upstream that served the
   previous one, as long as it is among the least busy. `--no-sticky` turns that
-  off. FP4-Local prefix retention is OFF by default, so any cache hits from this
-  are unverified.
+  off. FP4-Local prefix retention is ON by default, but cache hits from this
+  routing are unverified.
 - `GET /health` then reports every upstream, and fails when their model IDs
   differ.
 - A failed upstream is retried on another one only while nothing has been
@@ -974,10 +975,10 @@ output and thinking settings they use.
 
 ### Caching and the engine contract
 
-The harness asks for caching whenever the engine supports it, but the current
-FP4-Local engine keeps prefix retention off by default: unless the server is
-started with retention on, it does not keep the start of earlier prompts cached
-for reuse. [Cache defaults and measured tradeoffs](docs/cache-defaults.md)
+The harness asks for caching whenever the engine supports it. The FP4-Local
+engine keeps prefix retention on by default on one and two Sparks: unless the
+server is started with retention off, it keeps the start of earlier prompts
+cached for reuse. [Cache defaults and measured tradeoffs](docs/cache-defaults.md)
 explains the difference between what a request asks for and what the server
 does.
 

@@ -326,7 +326,8 @@ impl App {
         let messages = if matches!(mode, Mode::Codex | Mode::Hermes | Mode::Agent) {
             Vec::new()
         } else {
-            prompt::build_messages(&prompt::with_instructions(&format!("{SYSTEM_PROMPT}\n{}", vade_harness::session::model_identity(self.config.model.as_deref().unwrap_or("unspecified"))), self.instructions.section()), self.session.history(), &user)
+            let system = vade_harness::memory::with_memory(&format!("{SYSTEM_PROMPT}\n{}", vade_harness::session::model_identity(self.config.model.as_deref().unwrap_or("unspecified"))), &self.memory);
+            prompt::build_messages(&prompt::with_instructions(&system, self.instructions.section()), self.session.history(), &user)
         };
         let endpoint = self.config.endpoint.clone().unwrap_or_default();
         let model = self.config.model.clone().unwrap_or_default();
@@ -432,6 +433,7 @@ impl App {
         let hooks = self.hooks.clone();
         let journal = self.journal.clone();
         let policy = self.config.approval;
+        let memory = self.config.memory;
         let check = self
             .config
             .check
@@ -504,6 +506,7 @@ impl App {
                     },
                 )
                 .with_artifacts(&mut artifacts)
+                .with_memory(memory)
                 .with_shell_exclusions(shell_exclusions)
                 .with_build_session(&build_session)
                 .with_project(&project)

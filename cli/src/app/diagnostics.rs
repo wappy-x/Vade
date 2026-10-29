@@ -84,6 +84,7 @@ impl<R: Runner> App<R> {
         let replicas = session.as_ref().is_some_and(|session| session.replicas);
         let split = session.as_ref().map_or(machines.len() > 1, Session::chained);
         let fp4_local = session.as_ref().map_or(options.as_ref().is_some_and(|options| options.fp4_local), |session| session.fp4_local);
+        let cache_default = session.as_ref().filter(|session| session.fp4_local).map(Session::prefix_restore);
         let transport = if split { transport } else { Ok(false) };
         let owned = session.is_some();
         // Doctor reads the active manifest only when one exists; a fresh controller has none.
@@ -140,7 +141,7 @@ impl<R: Runner> App<R> {
                 }
             }
             crate::doctor::machine(&mut report, &mut self.runner, machine, &ports, self.dry,
-                crate::doctor::RemoteState { owned, memory, split })?;
+                crate::doctor::RemoteState { owned, memory, split, cache_default })?;
         }
         match transport {
             _ if machines.is_empty() => report.skip("fabric", "needs a valid launch topology")?,

@@ -28,6 +28,7 @@ This page explains new terms where they first come up. The
 | `vade up` | From a controller with a config file, runs the model on one or more Sparks. On the Spark itself, it also starts the local engine |
 | `vade chat` | Opens chat with the running engine. Add `--resume ID\|NAME\|last` to continue a saved session, or `--name NAME` to name this one |
 | `vade sessions` | Lists, exports or deletes saved chat sessions; see [saved chat sessions](../docs/sessions.md) |
+| `vade read` | Prints a local file as Markdown with a header line: text, HTML, CSV, RTF, data and source files. It needs no engine; see [reading files](../docs/reading-files.md) |
 | `vade status` | Shows what is running; add `--json` for scripts |
 | `vade config` | Shows which setup the other commands will use (local, controller, legacy or none) and what it holds; add `--json` for scripts |
 | `vade verify` | Runs the same greedy prompt with drafting off and on, and checks that every run returns the same token IDs byte for byte |
@@ -108,9 +109,11 @@ refuses a `--context` you passed, you get an error with its memory message.
 On the Spark itself, the engine works out from the context and its memory how
 many chats it can run at once.
 
-The prompt cache is off by default. To keep the start of earlier prompts cached
-between turns, set `VADE_FLASHNEXT_PREFIX_CACHE=1` before `vade launch` (unset
-or `0` keeps it off).
+The prompt cache is on by default: requests that send `cache:true` or a
+`prompt_cache_key` keep the start of their prompt cached between turns. Set
+`VADE_FLASHNEXT_PREFIX_CACHE=0` before `vade launch` to turn it off. The cache
+takes its own memory room at startup; see
+[the prefix cache](../INSTALL.md#the-prefix-cache).
 
 The local launcher sizes both for you, so it refuses `--chats` and any
 `--cache-bytes` above zero before it saves anything. `--cache-bytes 0` is
@@ -753,7 +756,7 @@ but the current FP4-Local engine does not use those values. This includes
 separate prefix-cache setting controls retention. Check the admitted chat
 count and cache capability instead of treating these saved flags as limits.
 
-For FP4-Local, the retained prefix cache stays off unless it was switched on at
+For FP4-Local, the retained prefix cache is on unless it was switched off at
 startup (see [the prompt cache](#chats-at-once-and-the-prompt-cache)); a request
 that sends `cache:true` doesn't turn it on by itself. The harness still sends
 negotiated cache hints. For FP8, leaving memory and retention unset

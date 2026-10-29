@@ -533,6 +533,16 @@ tools are read-only data operations: no skill scripts or installers run
 automatically, and project text cannot grant tool permissions. Fork and switch
 change transcripts, never the files in the workspace.
 
+## Project memory tools
+
+`memory_save {key, text}` saves or replaces a durable project note.
+`memory_forget {key}` removes it. Each returns the entry count after the change.
+Keep user facts and preferences, decisions, and corrections from the user.
+Do not save code structure, repo facts, secrets, or one-off details.
+These tools are on in native chat unless memory is off. They write private
+notes without a workspace edit approval. Cards and library tools keep them
+off. See [project memory](memory.md) for the file format and switches.
+
 ## Conceptual references
 
 The harness README credits Codex, Pi and Hermes for high-level coding-agent and

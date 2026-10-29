@@ -360,14 +360,33 @@ the `nvidia/Qwen3.8-Flash-Next-FP4-Local` checkpoint. The
 [cache switch and topology guard](../../engine/crates/serve/src/prefix_switch.rs)
 define where prefix reuse is available.
 
-- **Prefix cache.** Started with `VADE_FLASHNEXT_PREFIX_CACHE=1`, the server
-  restores exact prompt prefixes from its cache. The default is off: no reuse
-  through this cache, and capabilities report `prefix_cache:false`.
-- **Two Sparks.** The tensor split allows the prefix cache and restores a
-  matching prefix on each rank. The [HTTP adapter](../../engine/crates/serve/src/flashnext.rs)
-  checks `tp_prefix_supported` before it allows the switch.
-- **Layer chain.** The chain used on three or more Sparks refuses
-  `VADE_FLASHNEXT_PREFIX_CACHE=1`. It has no prefix restore contract.
+- **Prefix cache.** The server restores exact prompt prefixes from its cache.
+  The default is on, on one Spark and on the tensor split.
+  `VADE_FLASHNEXT_PREFIX_CACHE=0` turns it off: no reuse at all, and
+  capabilities report `prefix_cache:false`. The cache keeps prompts only for
+  requests that send `cache:true` or a `prompt_cache_key`.
+- **Two Sparks.** On the tensor split each rank keeps its own copy of a prefix.
+  The [HTTP adapter](../../engine/crates/serve/src/flashnext.rs) checks
+  `tp_prefix_supported` before it allows the cache.
+- **Layer chain.** The chain used on three or more Sparks runs without the
+  cache and refuses `VADE_FLASHNEXT_PREFIX_CACHE=1`. It has no prefix restore
+  contract.
+- **Cache room.** At startup the cache takes a room of its own from the session
+  pool (`prefix_cache_room_bytes` on the `flashnext ready` line;
+  `VADE_FLASHNEXT_CACHE_ROOM` sets it, `0` gives none). The startup slot plan
+  keeps the room (at least 512 MiB) beside one full-context chat, which can
+  give fewer chat slots. On the tensor split the automatic room is at least
+  one full-context chat, up to 4 GiB. Each kept copy must fit that room: at a
+  context of 32,768 (2.28 GB per chat) one copy of the longest prompt fits on
+  each rank; at larger contexts only prompts whose copy fits 4 GiB are kept. Admission never uses the room, and host memory pressure does
+  not reclaim it.
+- **In place.** On one Spark a long prompt stays in place when its chat ends,
+  and the cache may use the whole session pool; live chats take it back first,
+  and what it holds beyond the room yields to host memory pressure 30 seconds
+  after the last live request (when the engine reserves give spares back).
+  A prompt whose memory is under a quarter of one chat's reservation is kept as
+  a copy. `VADE_FLASHNEXT_ADOPT=0` keeps copies only. The tensor split keeps
+  copies unless `VADE_FLASHNEXT_ADOPT=1`.
 - **Host memory.** When the KV reserve needs host memory for spare session
   pages, saved prefixes give it up before the reserve's pressure rule applies
   (`VADE_FLASHNEXT_CACHE_YIELD`, default on; `0` means only the session pool
