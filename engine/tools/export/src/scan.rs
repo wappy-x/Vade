@@ -16,10 +16,10 @@ pub fn scan(name: &str, data: &[u8], denylist: &[String]) -> Result<(), String> 
         return Err(format!("private identifier detected: {name}"));
     }
     if fixture {
-        if data.len() % 4 != 0
+        if !data.len().is_multiple_of(4)
             || data.len() < 32_000 * 4
-            || data.chunks_exact(4).any(|chunk| {
-                let value = f32::from_le_bytes(chunk.try_into().unwrap());
+            || data.as_chunks::<4>().0.iter().any(|chunk| {
+                let value = f32::from_le_bytes(*chunk);
                 !value.is_finite() || value.abs() > 1e6
             })
         {

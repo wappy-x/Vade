@@ -1,4 +1,4 @@
-//! Golden output for help pages, common errors and the colour switches.
+//! Golden output for help pages, common errors and the color switches.
 //! Each case runs the real binary with a fixed environment and compares
 //! stdout, stderr and the exit code with `tests/snapshots/<name>.txt`.
 //! After an intended change, rerun with VADE_UPDATE_SNAPSHOTS=1 and review the diff.
@@ -72,7 +72,7 @@ fn help_and_errors_match_their_snapshots() {
 }
 
 #[test]
-fn colour_is_opt_in_for_pipes_and_no_color_always_wins() {
+fn color_is_opt_in_for_pipes_and_no_color_always_wins() {
     let mut failures = Vec::new();
     for (name, args) in [("color-error", &["up", "--bogus"][..]), ("color-help", &["status", "--help"])] {
         check(name, &render(args, command(args).env("CLICOLOR_FORCE", "1")), &mut failures);
@@ -81,7 +81,7 @@ fn colour_is_opt_in_for_pipes_and_no_color_always_wins() {
         assert_eq!(plain, render(args, &mut command(args)), "piped output is plain by default");
     }
     for args in [&["status", "--json"][..], &["--version"]] {
-        assert!(!render(args, command(args).env("CLICOLOR_FORCE", "1")).contains('\x1b'), "machine output is never coloured: {args:?}");
+        assert!(!render(args, command(args).env("CLICOLOR_FORCE", "1")).contains('\x1b'), "machine output is never colored: {args:?}");
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

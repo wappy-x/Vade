@@ -246,15 +246,15 @@ impl Config {
                 .find(|(key, _)| key == "VADE_API_KEY_FILE")
                 .map(|(_, value)| value.clone());
         }
-        if !c.self_test {
-            if let Some(file) = key_file {
-                c.api_key = Some(
-                    fs::read_to_string(file)
-                        .map_err(|e| format!("cannot read bearer file: {e}"))?
-                        .trim()
-                        .to_string(),
-                );
-            }
+        if !c.self_test
+            && let Some(file) = key_file
+        {
+            c.api_key = Some(
+                fs::read_to_string(file)
+                    .map_err(|e| format!("cannot read bearer file: {e}"))?
+                    .trim()
+                    .to_string(),
+            );
         }
         Ok(c)
     }
@@ -302,7 +302,7 @@ fn median(values: &[f64]) -> Value {
     let mut sorted = values.to_vec();
     sorted.sort_by(f64::total_cmp);
     let middle = sorted.len() / 2;
-    n(if sorted.len() % 2 == 0 {
+    n(if sorted.len().is_multiple_of(2) {
         (sorted[middle - 1] + sorted[middle]) / 2.
     } else {
         sorted[middle]

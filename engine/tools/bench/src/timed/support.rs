@@ -66,10 +66,10 @@ fn reported_build_sha(health: &Value) -> Value {
 
 pub fn resolve_model(args: &Config, health: &Value) -> Config {
     let mut resolved = args.clone();
-    if !resolved.model_explicit {
-        if let Some(model) = health.get("model").str().filter(|id| !id.trim().is_empty()) {
-            resolved.model = model.to_owned();
-        }
+    if !resolved.model_explicit
+        && let Some(model) = health.get("model").str().filter(|id| !id.trim().is_empty())
+    {
+        resolved.model = model.to_owned();
     }
     resolved
 }
@@ -258,22 +258,21 @@ pub fn load_prompts(args: &Config) -> Result<(Vec<Value>, Value), String> {
             .and_then(|(_, digits)| digits.strip_suffix('.'))
             .filter(|digits| !digits.is_empty() && digits.bytes().all(|x| x.is_ascii_digit()))
             .and_then(|digits| digits.parse::<usize>().ok());
-        if let Some(reader) = reader {
-            if text.starts_with(stem)
-                && [("temperature", 0.0), ("top_p", 1.0), ("top_k", 0.0)]
-                    .into_iter()
-                    .all(|(key, value)| numeric(body.get(key)) == Some(value))
-            {
-                readers.entry(reader).or_insert_with(|| {
-                    (
-                        body,
-                        o([
-                            ("file", s(path.to_string_lossy())),
-                            ("sha256", s(digest(&data))),
-                        ]),
-                    )
-                });
-            }
+        if let Some(reader) = reader
+            && text.starts_with(stem)
+            && [("temperature", 0.0), ("top_p", 1.0), ("top_k", 0.0)]
+                .into_iter()
+                .all(|(key, value)| numeric(body.get(key)) == Some(value))
+        {
+            readers.entry(reader).or_insert_with(|| {
+                (
+                    body,
+                    o([
+                        ("file", s(path.to_string_lossy())),
+                        ("sha256", s(digest(&data))),
+                    ]),
+                )
+            });
         }
     }
     if (1..=16).any(|i| !readers.contains_key(&i)) {
@@ -360,11 +359,10 @@ pub fn read_batches(path: Option<&str>, mark: &Value) -> Value {
                         .chars()
                         .next()
                         .is_none_or(|c| !word_char(c))
+                    && let Ok(value) = digits.parse::<u64>()
                 {
-                    if let Ok(value) = digits.parse::<u64>() {
-                        rows.push(n(value));
-                        break;
-                    }
+                    rows.push(n(value));
+                    break;
                 }
             }
             // Match the existing log counter grammar: lowercase/underscore names,

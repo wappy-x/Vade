@@ -234,9 +234,16 @@ pub fn random_hex(bytes: usize) -> Result<String, String> {
     Ok(to_hex(&value))
 }
 
-/// `bytes` as lowercase hex, two digits per byte.
+/// `bytes` as lowercase hex, two digits per byte. One allocation: the model
+/// doctor encodes up to 6 MiB of hex with it.
 pub fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(char::from(DIGITS[usize::from(byte >> 4)]));
+        out.push(char::from(DIGITS[usize::from(byte & 15)]));
+    }
+    out
 }
 
 /// A field that a saved record must have.
@@ -248,7 +255,7 @@ pub fn required<'a>(fields: &'a Fields, key: &str) -> Result<&'a str, String> {
 }
 
 /// Whether `value` is exactly `length` lowercase hex digits.
-pub fn hex(value: &str, length: usize) -> bool {
+pub fn is_lower_hex(value: &str, length: usize) -> bool {
     value.len() == length
         && value
             .bytes()
@@ -264,6 +271,11 @@ mod tests {
         assert_eq!(parse(&encode(&fields)).unwrap(), fields);
         assert!(parse("a=1\na=2\n").is_err());
         assert!(parse("a=bad\\x\n").is_err());
+    }
+    #[test]
+    fn to_hex_is_two_lowercase_digits_per_byte() {
+        assert_eq!(to_hex(&[]), "");
+        assert_eq!(to_hex(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
     }
     #[test]
     fn newly_created_directories_are_private_and_existing_ancestors_keep_their_mode() {

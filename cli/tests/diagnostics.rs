@@ -12,7 +12,7 @@ impl Fixture {
         let mut command = Command::new(env!("CARGO_BIN_EXE_vade"));
         command.env("VADE_HOME", self.0.join("home")).env("VADE_CONFIG", self.0.join("missing-config"))
             .env_remove("VADE_API_KEY_FILE").env_remove("VADE_API_KEY")
-            // CLICOLOR_FORCE colours even captured output; safe() rejects every ESC byte.
+            // CLICOLOR_FORCE colors even captured output; safe() rejects every ESC byte.
             .env_remove("CLICOLOR_FORCE");
         command
     }

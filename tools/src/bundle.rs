@@ -1,6 +1,6 @@
 //! Check tar headers and manifests without extracting archive members.
 use std::{collections::BTreeMap, fs::{self,File}, io::Read, path::{Path,PathBuf}, process::{Command,Stdio}};
-use crate::{Result,sha256};
+use crate::{Result,is_lower_hex,sha256};
 const REQUIRED: &[&str] = &["LICENSE","NOTICE","flash-serve","flash.ptx","vade","vade-harness","launcher-bundle.conf",
     "engine/LICENSE","engine/NOTICE","engine/crates/tokenizer/UNICODE-NOTICE.txt","engine/crates/tokenizer/QWEN-NOTICE.txt"];
 const ARTIFACTS: &[(&str,&str)] = &[("engine","flash-serve"),("ptx","flash.ptx"),("harness","vade-harness"),("vade","vade")];
@@ -72,7 +72,7 @@ pub fn check_tar(mut input: impl Read, short: &str, forbidden: &[String]) -> Res
     if fields.len() != expected.len() || expected.iter().any(|k| !fields.contains_key(k)) { return Err("invalid manifest fields".into()); }
     if fields["format"] != "vade-launch-bundle-v1" || fields["target"] != "aarch64-unknown-linux-gnu" { return Err("wrong bundle format or target".into()); }
     let revision = fields["engine_sha"];
-    if revision.len() != 40 || !hex(revision) || !revision.starts_with(short) { return Err("invalid source revision".into()); }
+    if !is_lower_hex(revision,40) || !revision.starts_with(short) { return Err("invalid source revision".into()); }
     if fields["cli_sha"] != revision || fields["harness_sha"] != revision { return Err("source revisions differ".into()); }
     for (key,name) in ARTIFACTS {
         let m = &members[*name];
@@ -81,13 +81,12 @@ pub fn check_tar(mut input: impl Read, short: &str, forbidden: &[String]) -> Res
         if m.retained || members["launcher-bundle.conf"].retained { return Err(format!("producer path retained: {name}").into()); }
     } Ok(())
 }
-fn hex(s: &str) -> bool { s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) }
 pub fn checksum(text: &str) -> Result<(&str,&str,&str)> {
     let invalid = || "invalid SHA256SUMS";
     let line = text.strip_suffix('\n').ok_or_else(invalid)?;
     let (digest,name) = line.split_once("  ").ok_or_else(invalid)?;
     let short = name.strip_prefix("vade-launch-bundle-v1-").and_then(|s| s.strip_suffix("-aarch64.tar.zst")).ok_or_else(invalid)?;
-    if digest.len() != 64 || !hex(digest) || short.len() != 7 || !hex(short) { return Err(invalid().into()); } Ok((digest,name,short))
+    if !is_lower_hex(digest,64) || !is_lower_hex(short,7) { return Err(invalid().into()); } Ok((digest,name,short))
 }
 pub fn check(directory: &Path, forbidden: &[String]) -> Result<PathBuf> {
     let text = fs::read_to_string(directory.join("SHA256SUMS"))?;

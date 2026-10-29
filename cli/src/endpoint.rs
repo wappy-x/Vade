@@ -100,7 +100,7 @@ fn owner_endpoint(root: &Path) -> Result<String, String> {
     if config.get("format").map(String::as_str) != Some("vade-owner-v1")
         || record.get("version").map(String::as_str) != Some("1")
         || record.get("phase").map(String::as_str) != Some("running")
-        || !record.get("token").is_some_and(|token| crate::text::hex(token, 64))
+        || !record.get("token").is_some_and(|token| crate::text::is_lower_hex(token, 64))
         || port.is_none()
         || config.get("port") != record.get("port")
     {

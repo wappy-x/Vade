@@ -1,6 +1,6 @@
-//! Human output tokens: colour, error blocks, key/value tables and help pages.
+//! Human output tokens: color, error blocks, key/value tables and help pages.
 //!
-//! Colour is decided per stream: on only when that stream is a terminal,
+//! Color is decided per stream: on only when that stream is a terminal,
 //! `NO_COLOR` is unset or empty and `TERM` is not `dumb`. `CLICOLOR_FORCE`
 //! (non-empty, not `0`) turns it on for pipes; `NO_COLOR` still wins. Every
 //! token carries its meaning in words too, so plain output reads the same.
@@ -45,14 +45,14 @@ impl Token {
     }
 }
 
-/// The colour decision from the environment and whether the stream is a terminal.
+/// The color decision from the environment and whether the stream is a terminal.
 pub fn decide(no_color: Option<OsString>, force: Option<OsString>, term: Option<OsString>, terminal: bool) -> bool {
     if no_color.is_some_and(|value| !value.is_empty()) { return false; }
     if force.is_some_and(|value| !value.is_empty() && value != "0") { return true; }
     terminal && term.is_none_or(|term| term != "dumb")
 }
 
-/// Whether text written to `stream` is coloured. Unit tests always print plain.
+/// Whether text written to `stream` is colored. Unit tests always print plain.
 pub fn color(stream: Stream) -> bool {
     static OUT: OnceLock<bool> = OnceLock::new();
     static ERR: OnceLock<bool> = OnceLock::new();
@@ -150,7 +150,7 @@ pub fn error_block(message: &str, on: bool) -> String {
 }
 
 /// An error split the way [`error_block`] shows it, without labels or
-/// colour: what happened (one line), and the next step if it names one.
+/// color: what happened (one line), and the next step if it names one.
 pub fn split(message: &str) -> (String, Option<String>) {
     let block = error_block(message, false);
     let (fact, hint) = match block.split_once("\n hint: ") { Some((fact, hint)) => (fact, Some(hint.to_owned())), None => (block.as_str(), None) };
@@ -241,7 +241,7 @@ impl Page<'_> {
 mod tests {
     use super::*;
     #[test]
-    fn colour_follows_no_color_force_term_and_terminal() {
+    fn color_follows_no_color_force_term_and_terminal() {
         let s = |v: &str| Some(OsString::from(v));
         assert!(decide(None, None, s("xterm-256color"), true));
         assert!(decide(None, None, None, true));

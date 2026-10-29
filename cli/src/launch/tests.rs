@@ -120,7 +120,7 @@ impl Runner for MockRunner {
         self.calls.push(exec.clone());
         if exec.args == ["__worker"] {
             let request = text::parse(std::str::from_utf8(&exec.stdin).unwrap()).unwrap();
-            assert!(text::hex(&request["token"], 64));
+            assert!(text::is_lower_hex(&request["token"], 64));
             assert_eq!(
                 request["state_dir"],
                 self.root.join("state/worker").to_string_lossy()

@@ -25,7 +25,7 @@ fn connect(path: &Path) -> Option<bool> {
 /// Private subprocess entry. A live socket or any uncertainty refuses cleanup.
 pub fn probe(name: &str) -> i32 {
     let valid = name.strip_prefix("tunnel-").and_then(|s| s.strip_suffix(".sock"))
-        .is_some_and(|token| crate::text::hex(token, 16));
+        .is_some_and(|token| crate::text::is_lower_hex(token, 16));
     if valid && connect(Path::new(name)) == Some(true) { 0 } else { 1 }
 }
 

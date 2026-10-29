@@ -51,13 +51,13 @@ impl Manifest {
         }
         let engine_sha = required(&fields, "engine_sha")?.to_string();
         let cli_sha = required(&fields, "cli_sha")?.to_string();
-        if !text::hex(&engine_sha, 40) || !text::hex(&cli_sha, 40) {
+        if !text::is_lower_hex(&engine_sha, 40) || !text::is_lower_hex(&cli_sha, 40) {
             return Err("Build manifest needs full source revisions. Run vade install.".into());
         }
         let harness_sha256 = fields.get("harness_sha256").cloned();
         if harness_sha256
             .as_ref()
-            .is_some_and(|hash| !text::hex(hash, 64))
+            .is_some_and(|hash| !text::is_lower_hex(hash, 64))
         {
             return Err("Harness SHA256 is invalid. Run vade install.".into());
         }
@@ -120,7 +120,7 @@ impl Artifact {
             &result.ptx_sha256,
             &result.worker_sha256,
         ] {
-            if !text::hex(value, 64) {
+            if !text::is_lower_hex(value, 64) {
                 return Err(
                     "Artifact SHA256 is invalid. Run vade install to rebuild the manifest.".into(),
                 );
@@ -196,7 +196,7 @@ impl Session {
         manifest: &Manifest,
         token: String,
     ) -> Result<Self, String> {
-        if !text::hex(&token, 64) {
+        if !text::is_lower_hex(&token, 64) {
             return Err("A full ownership token is required. Retry vade up.".into());
         }
         if options.output > options.context {
@@ -458,7 +458,7 @@ impl Session {
             return Err("Unknown ownership record version. Keep it and run vade doctor.".into());
         }
         let token = get("token")?;
-        if !text::hex(&token, 64) {
+        if !text::is_lower_hex(&token, 64) {
             return Err("Ownership token is invalid. Keep the record for manual review.".into());
         }
         let phase = get("phase")?;
@@ -538,9 +538,9 @@ impl Session {
                 _ => None,
             },
         };
-        if session.launch_fingerprint.as_ref().is_some_and(|value| !text::hex(value, 64))
-            || !text::hex(&session.build, 40)
-            || !text::hex(&session.cli_build, 40)
+        if session.launch_fingerprint.as_ref().is_some_and(|value| !text::is_lower_hex(value, 64))
+            || !text::is_lower_hex(&session.build, 40)
+            || !text::is_lower_hex(&session.cli_build, 40)
             || session.local_port == 0
             || session.serve_port == 0
             || (session.replicas && (!session.fp4_local || usize::from(u16::MAX - session.local_port) < session.ranks.len()))

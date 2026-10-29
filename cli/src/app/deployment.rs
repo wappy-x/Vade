@@ -33,7 +33,7 @@ impl<R: Runner> App<R> {
             return Ok("0".repeat(40));
         }
         let revision = output.stdout.trim();
-        if !text::hex(revision, 40) {
+        if !text::is_lower_hex(revision, 40) {
             return Err(format!(
                 "{label} source revision is invalid. Use a Git checkout with a full revision."
             ));
@@ -490,7 +490,7 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
                 .stdout
                 .lines()
                 .filter_map(|l| l.split_whitespace().next())
-                .filter(|h| text::hex(h, 64))
+                .filter(|h| text::is_lower_hex(h, 64))
                 .collect::<Vec<_>>();
             if hashes.len() != 2 {
                 return Err(
@@ -728,7 +728,7 @@ fn artifact_hashes(output: &str) -> Result<[String; 3], String> {
     let hashes = output
         .lines()
         .filter_map(|line| line.split_whitespace().next())
-        .filter(|value| text::hex(value, 64))
+        .filter(|value| text::is_lower_hex(value, 64))
         .map(str::to_owned)
         .collect::<Vec<_>>();
     hashes.try_into().map_err(|_| "Build did not return all three artifact SHA256s. Run vade install again; no manifest was changed.".into())

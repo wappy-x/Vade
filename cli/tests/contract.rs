@@ -4,7 +4,7 @@
 //! what to run next.
 use std::process::{Command, Output};
 
-/// The binary in a sealed environment: no config, no saved setup, no colour,
+/// The binary in a sealed environment: no config, no saved setup, no color,
 /// and stub ssh, rsync and curl that succeed ahead of the host's PATH ([`home`]).
 /// On a fresh home Linux selects the local owner and macOS selects none, so
 /// tests of the controller rows name its config explicitly ([`controller`]).

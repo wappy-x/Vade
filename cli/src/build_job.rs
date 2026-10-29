@@ -195,7 +195,7 @@ pub fn recover(root: &Path) -> Result<(), String> {
         text::reject_symlinks(&job)?;
         let intent =
             read(&job, "intent.conf")?.ok_or("Build job intent is missing; keep its evidence.")?;
-        if !text::hex(required(&intent, "token")?, 64) {
+        if !text::is_lower_hex(required(&intent, "token")?, 64) {
             return Err("Invalid build ownership token.".into());
         }
         if read(&job, "stopped.conf")?.is_some() {
@@ -254,7 +254,7 @@ pub fn recover(root: &Path) -> Result<(), String> {
 /// exits. The record is stale only when no recorded process can still run: the
 /// supervisor identity is not alive, and the anchor's process group (the anchor
 /// leads it) has no live member or belongs to an earlier boot. Nothing is
-/// signalled here.
+/// signaled here.
 fn lost_and_stopped(job: &Path, supervisor: &Fields) -> Result<bool, String> {
     let alive = supervisor.get("pid").and_then(|pid| pid.parse::<u32>().ok()).is_none_or(|pid| {
         snapshot(pid).is_ok_and(|now| ["boot", "birth"].iter().all(|k| supervisor.get(*k) == now.get(*k)))
@@ -275,7 +275,7 @@ fn lost_and_stopped(job: &Path, supervisor: &Fields) -> Result<bool, String> {
 pub fn helper(mode: &str, job: &Path) -> Result<(), String> {
     text::private_dir(job)?;
     let intent = read(job, "intent.conf")?.ok_or("No durable build intent; nothing executed.")?;
-    if !text::hex(required(&intent, "token")?, 64) {
+    if !text::is_lower_hex(required(&intent, "token")?, 64) {
         return Err("Invalid build token.".into());
     }
     if mode == "__build-anchor" {

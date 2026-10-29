@@ -10,6 +10,8 @@ pub mod bench_docs;
 #[path = "../../engine/tools/export/src/sha256.rs"]
 pub mod sha256;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+/// Whether `s` is exactly `len` lowercase hex digits.
+pub fn is_lower_hex(s: &str, len: usize) -> bool { s.len() == len && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) }
 pub fn root() -> std::path::PathBuf { std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().into() }
 pub fn output(command: &mut std::process::Command) -> Result<Vec<u8>> {
     let result = command.output()?;

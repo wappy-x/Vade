@@ -671,10 +671,10 @@ pub fn get_health_with_cancel(
     {
         return Err(format!("/health is not ready (HTTP {status})"));
     }
-    if let Some(state) = value.path("vade.checkpoint.hash_state").str() {
-        if ["pending", "failed", "failed-stale", "stale"].contains(&state) {
-            return Err(format!("/health checkpoint hash {state}"));
-        }
+    if let Some(state) = value.path("vade.checkpoint.hash_state").str()
+        && ["pending", "failed", "failed-stale", "stale"].contains(&state)
+    {
+        return Err(format!("/health checkpoint hash {state}"));
     }
     Ok(value)
 }

@@ -1060,9 +1060,9 @@ fn replicas_down_never_signals_a_reused_gateway_pid() {
     // The recorded PID now belongs to a process that started later (same command line).
     f.app.runner.gateway_start = Some("Sun Oct 25 10:00:00 2026".into());
     f.app.down().unwrap();
-    assert!(f.app.runner.signals.is_empty() && f.app.runner.gateway.is_some(), "a reused PID is never signalled");
+    assert!(f.app.runner.signals.is_empty() && f.app.runner.gateway.is_some(), "a reused PID is never signaled");
     assert!(f.app.runner.started.is_empty() && !f.recorded(), "down still stops the replicas and clears the record");
-    // A reused PID running another program is never signalled either.
+    // A reused PID running another program is never signaled either.
     let mut f = Fixture::fp4(2, false);
     f.app.up(&fp4_options(&["--replicas", "2"])).unwrap();
     f.app.runner.gateway = Some("--other-tool".into());
@@ -1071,14 +1071,14 @@ fn replicas_down_never_signals_a_reused_gateway_pid() {
 }
 
 #[test]
-fn replicas_gateway_that_exits_at_startup_is_reported_and_never_signalled() {
+fn replicas_gateway_that_exits_at_startup_is_reported_and_never_signaled() {
     // An exited gateway stays a zombie while up runs: ps answers with `<defunct>`.
     let mut f = Fixture::fp4(2, false);
     f.app.runner.gateway_exits = true;
     let error = f.app.up(&fp4_options(&["--replicas", "2"])).unwrap_err();
     assert!(error.contains("The replica gateway exited at startup") && error.contains("-gateway.log"), "{error}");
     assert!(!f.app.runner.calls.iter().any(|e| e.label == "controller health"), "up fails at once, not after the tunnel wait");
-    assert!(!f.app.runner.calls.iter().any(|e| e.label == "replica gateway stop"), "a defunct gateway is never signalled");
+    assert!(!f.app.runner.calls.iter().any(|e| e.label == "replica gateway stop"), "a defunct gateway is never signaled");
     assert!(f.app.runner.started.is_empty() && !f.recorded(), "the failed launch still stops both replicas and clears the record");
 }
 

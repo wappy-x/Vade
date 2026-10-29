@@ -701,7 +701,7 @@ fn cases() -> Vec<Case> {
                 out.push(Case {
                     name: format!("mx-{n}x{k}-m{m}"),
                     // Matches kernel_params::latency_mx8_widen with N > 640 (the engine's 128-thread launches, _r)
-                    kernel: if n > 640 && k <= 6144 && k % 256 == 0 && (m >= 9 && m <= 32 || m >= 5 && m <= 8 && k > 2560) { "flash_mx8_mma_latency_r" } else { "flash_mx8_mma_latency" },
+                    kernel: if n > 640 && k <= 6144 && k % 256 == 0 && ((9..=32).contains(&m) || (5..=8).contains(&m) && k > 2560) { "flash_mx8_mma_latency_r" } else { "flash_mx8_mma_latency" },
                     m,
                     n,
                     k,

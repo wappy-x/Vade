@@ -290,10 +290,10 @@ fn export(source: &Path, destination: &Path, denyfile: &Path, preview: bool) -> 
         }
         let data = fs::read(path)?;
         scan::scan(name, &data, &denied).map_err(invalid)?;
-        if let Some(revision) = &snapshot_revision {
-            if git(&source, &["show", &format!("{revision}:{git_name}")])? != data {
-                return Err(invalid(format!("source changed during snapshot: {name}")));
-            }
+        if let Some(revision) = &snapshot_revision
+            && git(&source, &["show", &format!("{revision}:{git_name}")])? != data
+        {
+            return Err(invalid(format!("source changed during snapshot: {name}")));
         }
         contents.insert(name.to_owned(), data);
     }
@@ -311,10 +311,10 @@ fn export(source: &Path, destination: &Path, denyfile: &Path, preview: bool) -> 
         let mut parts = name.split('/').peekable();
         while let Some(part) = parts.next() {
             path.push(part);
-            if let Ok(meta) = fs::symlink_metadata(&path) {
-                if meta.file_type().is_symlink() || (parts.peek().is_some() != meta.is_dir()) {
-                    return Err(invalid(format!("destination path conflict: {name}")));
-                }
+            if let Ok(meta) = fs::symlink_metadata(&path)
+                && (meta.file_type().is_symlink() || (parts.peek().is_some() != meta.is_dir()))
+            {
+                return Err(invalid(format!("destination path conflict: {name}")));
             }
         }
     }

@@ -515,7 +515,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         let record = read_fields(&self.root.join("state/run.conf"))?;
         if let Some(record) = &record {
             if required(record, "version")? != "1"
-                || !text::hex(required(record, "token")?, 64)
+                || !text::is_lower_hex(required(record, "token")?, 64)
                 || !matches!(
                     required(record, "phase")?,
                     "starting" | "running" | "stopping"

@@ -438,7 +438,7 @@ pub(crate) fn run(arguments: &[String]) -> Result<()> {
                             barrier.wait();
                             http::request(
                                 endpoint,
-                                &body,
+                                body,
                                 request_deadline,
                                 Arc::new(AtomicBool::new(false)),
                                 None,

@@ -36,7 +36,7 @@ pub struct AttentionReference {
 }
 impl AttentionReference {
     pub fn new(heads: usize, keys: usize, theta: f32, epsilon: f32) -> Result<Self> {
-        if heads==0 || keys==0 || heads%keys!=0 || heads/keys>16 || heads.checked_mul(512).is_none()
+        if heads==0 || keys==0 || !heads.is_multiple_of(keys) || heads/keys>16 || heads.checked_mul(512).is_none()
             || !theta.is_finite() || theta<=0.0 || !epsilon.is_finite() || epsilon<=0.0 { return Err("attention geometry"); }
         Ok(Self { heads,keys_per_row:keys,epsilon,frequencies:(0..32).map(|i| 1.0/theta.powf(i as f32/32.0)).collect(),
             keys:Vec::new(),values:Vec::new(),positions:Vec::new() })

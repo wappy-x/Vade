@@ -107,7 +107,7 @@ pub fn engine() -> Result<(), String> {
     }
     let request = crate::text::parse(&input)?;
     let token = required(&request, "token")?;
-    if !crate::text::hex(token, 64) {
+    if !crate::text::is_lower_hex(token, 64) {
         return Err("Invalid launch token.".into());
     }
     let root = expanded_path(required(&request, "state_dir")?)?;
@@ -154,7 +154,7 @@ impl Store {
 
     fn lock(request: &Fields) -> Result<Self, String> {
         let token = required(request, "token")?;
-        if !crate::text::hex(token, 64) {
+        if !crate::text::is_lower_hex(token, 64) {
             return Err("Ownership token is invalid. Run vade status.".into());
         }
         let root = expanded_path(required(request, "state_dir")?)?;
@@ -232,7 +232,7 @@ impl Store {
             let Some(name) = name.to_str() else {
                 continue;
             };
-            if crate::text::hex(name, 64) {
+            if crate::text::is_lower_hex(name, 64) {
                 let kind = entry
                     .file_type()
                     .map_err(|_| "Cannot inspect saved run files. Leave these files in place; see Recovery in cli/README.md.".to_string())?;
@@ -683,7 +683,7 @@ impl Drop for IgnoreDisconnect {
 // CUDA keys entries by device/driver internally. Keep the directory across
 // launches and installs with identical PTX; never put it in a disposable run.
 fn persistent_cuda_cache(root: &Path, ptx_hash: &str, environment: &mut Fields) -> Result<(), String> {
-    if !crate::text::hex(ptx_hash, 64) { return Err("Invalid PTX cache identity; run vade install.".into()); }
+    if !crate::text::is_lower_hex(ptx_hash, 64) { return Err("Invalid PTX cache identity; run vade install.".into()); }
     let path = root.join("cuda-cache").join(ptx_hash);
     crate::text::private_dir(&path)?;
     environment.insert("env.CUDA_CACHE_PATH".into(), path.to_string_lossy().into_owned());
@@ -697,7 +697,7 @@ fn persistent_cuda_cache(root: &Path, ptx_hash: &str, environment: &mut Fields) 
 }
 
 fn check_hash(path: &Path, expected: &str) -> Result<(), String> {
-    if !crate::text::hex(expected, 64) {
+    if !crate::text::is_lower_hex(expected, 64) {
         return Err("Artifact manifest needs SHA-256 hashes. Run vade install.".into());
     }
     let path = path

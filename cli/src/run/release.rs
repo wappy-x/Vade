@@ -49,7 +49,7 @@ impl<R: Runner> Local<R> {
             }
             for name in ["engine_revision", "harness_revision"] {
                 let revision = required(&supplied, name)?;
-                if !text::hex(revision, 40) {
+                if !text::is_lower_hex(revision, 40) {
                     return Err("Release source revision must be a full Git SHA.".into());
                 }
                 manifest.insert(name.into(), revision.into());
@@ -190,7 +190,7 @@ impl<R: Runner> Local<R> {
             .stdout
             .trim()
             .to_owned();
-        if !text::hex(&head, 40) {
+        if !text::is_lower_hex(&head, 40) {
             return Err("Source needs a full commit SHA.".into());
         }
         let key = format!("{label}_revision");
@@ -281,7 +281,7 @@ impl<R: Runner> Local<R> {
     }
 
     pub(super) fn generation(&mut self, id: &str) -> Result<Fields, String> {
-        if !text::hex(id, 24) {
+        if !text::is_lower_hex(id, 24) {
             return Err("Invalid generation identity. Keep the record.".into());
         }
         let directory = self.root.join("generations").join(id);

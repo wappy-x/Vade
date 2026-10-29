@@ -34,14 +34,14 @@ fn inspect(root: &Path) -> Result<Installed, String> {
         return Err("Installed artifact record is invalid; keep it for inspection.".into());
     }
     let id = text::required(&fields, "generation")?;
-    if !text::hex(id, 24) {
+    if !text::is_lower_hex(id, 24) {
         return Err("Installed generation is invalid; keep it for inspection.".into());
     }
     let generation = root.join("stage/builds").join(id);
     for (key, name) in FILES {
         let path = generation.join(name);
         if fields.get(key).map(String::as_str) != path.to_str()
-            || !fields.get(&format!("{key}_sha256")).is_some_and(|s| text::hex(s, 64))
+            || !fields.get(&format!("{key}_sha256")).is_some_and(|s| text::is_lower_hex(s, 64))
         {
             return Err("Installed artifact paths or checksums are invalid; keep the record for inspection.".into());
         }
@@ -122,7 +122,7 @@ fn bundle_fields(bundle: &Path) -> Result<Fields, String> {
         return Err("The local bundle needs the Linux ARM64 launcher format.".into());
     }
     for (key, _) in FILES {
-        if !fields.get(&format!("{key}_sha256")).is_some_and(|s| text::hex(s, 64)) {
+        if !fields.get(&format!("{key}_sha256")).is_some_and(|s| text::is_lower_hex(s, 64)) {
             return Err("The local bundle is missing a SHA256 checksum.".into());
         }
     }
@@ -161,7 +161,7 @@ fn snapshot<R: Runner>(source: &Path, stage: &Path, runner: &mut R) -> Result<Pa
     let git_tree = probe == build_id::Probe::Git;
     let (revision, files) = if git_tree {
         let revision = git(runner, source, &["rev-parse", "HEAD"])?.trim().to_owned();
-        if !text::hex(&revision, 40) { return Err("Vade source has no complete Git revision.".into()); }
+        if !text::is_lower_hex(&revision, 40) { return Err("Vade source has no complete Git revision.".into()); }
         clean_source(runner, source)?;
         let files = git(runner, source, &["ls-files", "--cached", "-z", "--", "engine", "harness", "rust-toolchain.toml"])?;
         (revision, files.split('\0').filter(|s| !s.is_empty()).map(str::to_owned).collect())

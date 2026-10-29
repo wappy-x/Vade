@@ -117,8 +117,8 @@ impl Config {
 
     /// Require a pinned model revision: a 40-digit commit or `local-sha256-<64 hex>`.
     pub fn validate_model_revision(&self) -> Result<(), String> {
-        if crate::text::hex(&self.model_revision, 40)
-            || self.model_revision.strip_prefix("local-sha256-").is_some_and(|hash| crate::text::hex(hash, 64))
+        if crate::text::is_lower_hex(&self.model_revision, 40)
+            || self.model_revision.strip_prefix("local-sha256-").is_some_and(|hash| crate::text::is_lower_hex(hash, 64))
         {
             return Ok(());
         }
@@ -308,7 +308,7 @@ impl Config {
         let fields = crate::text::parse(&data)?;
         if let Some(id) = fields.get("generation") {
             if fields.get("activation_version").map(String::as_str) != Some("1")
-                || !crate::text::hex(id, 24)
+                || !crate::text::is_lower_hex(id, 24)
             {
                 return Err(
                     "Invalid install generation. Leave the activation record in place.".into(),

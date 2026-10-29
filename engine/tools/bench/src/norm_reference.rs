@@ -2,8 +2,6 @@
 //! This specifies ordering and BF16 boundaries; host sqrt is not a native bit proof.
 use crate::fp8_reference::{round_bf16, widen_bf16};
 pub type Result<T> = std::result::Result<T, &'static str>;
-pub const THREADS: usize = 128;
-pub const ORDER: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SquareTrace { pub lanes: [f32; 32], pub warp: [[f32; 32]; 5], pub sum: f32 }
@@ -49,7 +47,7 @@ pub fn square_trace(input: &[f32]) -> Result<SquareTrace> {
 /// The same row function handles input, post-attention, next-layer and final norms.
 pub fn normalize(input: &[f32], residual: Option<&[f32]>, weights: &[u16], epsilon: f32) -> Result<Normalized> {
     let width = weights.len();
-    if width == 0 || width > 5120 || input.is_empty() || input.len() % width != 0
+    if width == 0 || width > 5120 || input.is_empty() || !input.len().is_multiple_of(width)
         || residual.is_some_and(|r| r.len() != input.len() || r.iter().any(|x| !x.is_finite()))
         || !epsilon.is_finite() || epsilon <= 0.0 || input.iter().any(|x| !x.is_finite())
         || weights.iter().any(|&w| !widen_bf16(w).is_finite()) { return Err("norm operands or epsilon"); }

@@ -48,13 +48,13 @@ pub fn metadata(health: &Value, requested: Option<&str>) -> Result<Value, String
             let current = enabled(value).ok_or_else(|| format!("invalid /health {field}"))?;
             agree(&mut server_enabled, current, field)?;
             // A numeric legacy `mtp` field denotes depth; a boolean does not.
-            if field == "mtp" {
-                if let Some(current) = depth(value) {
-                    agree(&mut server_depth, current, field)?;
-                    if reported_depth == Value::Null {
-                        reported_depth = value.clone();
-                        depth_field = s(field);
-                    }
+            if field == "mtp"
+                && let Some(current) = depth(value)
+            {
+                agree(&mut server_depth, current, field)?;
+                if reported_depth == Value::Null {
+                    reported_depth = value.clone();
+                    depth_field = s(field);
                 }
             }
         }

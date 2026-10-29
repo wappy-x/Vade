@@ -19,7 +19,7 @@
 //! | Configuration and records | [`config`] (controller config), [`state`] (controller ownership records and locks), [`catalog`], [`repository`] |
 //! | Machine and artifacts | [`detect`], [`prebuilt`], [`build_job`], [`sha256`] |
 //! | Processes and files | [`runner`] (every subprocess), [`control_socket`], [`unix_file`], [`unix_flags`] |
-//! | Output | [`output`] (fallible stdout), [`style`] (colour, errors, tables and help layout), [`status`] (`status --json` schema), [`text`] (terminal-safe text and `key=value` records), [`json`] (health replies) |
+//! | Output | [`output`] (fallible stdout), [`style`] (color, errors, tables and help layout), [`status`] (`status --json` schema), [`text`] (terminal-safe text and `key=value` records), [`json`] (health replies) |
 //! | Client tools | [`bench`](mod@bench), [`verify`] (exact token IDs, drafting ON and OFF) |
 //! | Local checks | [`test_gate`] (`vade test build` and `determinism`), [`evals`] (long-context, GDN and ABI checks) |
 mod output;

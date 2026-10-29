@@ -1,6 +1,6 @@
 //! `vade up --replicas N`: independent one-Spark servers, one tunnel each, and a
 //! local vade-gateway on local_port. The gateway is an owned process: it is
-//! signalled only while its PID still has the recorded start time and command.
+//! signaled only while its PID still has the recorded start time and command.
 use super::*;
 
 impl<R: Runner> App<R> {
@@ -97,7 +97,7 @@ impl<R: Runner> App<R> {
         })))
     }
 
-    /// Stop exactly the recorded gateway; an exited or reused PID is never signalled.
+    /// Stop exactly the recorded gateway; an exited or reused PID is never signaled.
     pub(super) fn stop_gateway(&mut self, session: &mut Session) -> Result<(), String> {
         let Some((pid, _)) = session.gateway.clone() else { return Ok(()) };
         for signal in ["-TERM", "-KILL"] {

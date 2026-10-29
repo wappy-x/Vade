@@ -114,10 +114,10 @@ impl Value {
     }
     /// Python's nonnegative int shape, without imposing a machine-word limit.
     pub fn nonnegative_integer(&self) -> Option<&str> {
-        if let Self::Number(text) = self {
-            if !text.contains(['.', 'e', 'E', '-']) {
-                return Some(text);
-            }
+        if let Self::Number(text) = self
+            && !text.contains(['.', 'e', 'E', '-'])
+        {
+            return Some(text);
         }
         None
     }

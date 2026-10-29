@@ -471,8 +471,8 @@ impl<R: Runner> Local<R> {
         let record = read_fields(&self.root.join("run.conf"))?;
         if let Some(record) = &record {
             if required(record, "version")? != "1"
-                || !text::hex(required(record, "token")?, 64)
-                || !text::hex(required(record, "generation")?, 24)
+                || !text::is_lower_hex(required(record, "token")?, 64)
+                || !text::is_lower_hex(required(record, "generation")?, 24)
                 || !matches!(
                     required(record, "phase")?,
                     "starting" | "running" | "stopping"
@@ -737,13 +737,13 @@ impl<R: Runner> Local<R> {
             .split_whitespace()
             .next()
             .ok_or("SHA256 command returned no digest. Check sha256sum and the retained command log before retrying.")?;
-        if !text::hex(hash, 64) {
+        if !text::is_lower_hex(hash, 64) {
             return Err("SHA256 command returned an invalid digest. Check sha256sum and the retained command log before retrying.".into());
         }
         Ok(hash.into())
     }
     fn verify_hash(&mut self, path: &Path, expected: &str) -> Result<(), String> {
-        if !text::hex(expected, 64) {
+        if !text::is_lower_hex(expected, 64) {
             return Err("Manifest digest must be a full SHA256. Restore the manifest from the verified release or rebuild it.".into());
         }
         if self.hash(path)? != expected {

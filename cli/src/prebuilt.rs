@@ -58,7 +58,7 @@ impl Bundle {
         }
         let mut hashes = Vec::new();
         for name in FILES {
-            let expected = fields.get(&format!("{name}.sha256")).filter(|s| text::hex(s, 64))
+            let expected = fields.get(&format!("{name}.sha256")).filter(|s| text::is_lower_hex(s, 64))
                 .ok_or("Prebuilt manifest is missing an artifact SHA256.")?;
             let path = dir.join(name);
             if !fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() > 0) {
@@ -90,7 +90,7 @@ impl Bundle {
         }
         let mut hashes = Vec::new();
         for name in ["host-vade-harness", "host-vade"] {
-            let expected = self.fields.get(&format!("{name}.sha256")).filter(|s| text::hex(s, 64))
+            let expected = self.fields.get(&format!("{name}.sha256")).filter(|s| text::is_lower_hex(s, 64))
                 .ok_or("Prebuilt host artifact SHA256 is missing.")?;
             let path = self.dir.join(name);
             if !fs::metadata(&path).is_ok_and(|meta| meta.is_file()) {

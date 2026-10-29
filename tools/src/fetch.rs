@@ -1,7 +1,6 @@
 //! Public, pinned model downloads. curl supplies HTTPS; all validation is Rust.
 use std::{collections::BTreeSet, fs::{self,File}, io::{Read,Write}, path::{Component,Path}, process::{Command,Stdio}};
-use crate::{Result,json,sha256};
-fn hex(s: &str, len: usize) -> bool { s.len() == len && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) }
+use crate::{Result,json,is_lower_hex,sha256};
 fn safe_path(name: &str) -> bool {
     !name.is_empty() && !name.chars().any(char::is_control) && !name.contains('\\') && !name.starts_with('/')
         && name.split('/').all(|s| !s.is_empty() && s != "." && s != "..")
@@ -38,7 +37,7 @@ pub fn entries(text: &str, revision: &str) -> Result<Vec<Entry>> {
         if !safe_path(&name) || name == ".cache" || name.starts_with(".cache/") || !names.insert(name.clone()) { return Err("unsafe or duplicate model path".into()); }
         let lfs = file.get("lfs") != &json::Value::Null;
         let digest = if lfs { file.get("lfs").get("sha256") } else { file.get("blobId") }.text()?.to_owned();
-        if !hex(&digest,if lfs {64} else {40}) { return Err("invalid model file digest".into()); }
+        if !is_lower_hex(&digest,if lfs {64} else {40}) { return Err("invalid model file digest".into()); }
         entries.push(Entry { name, size: file.get("size").text()?.parse()?, digest, lfs });
     }
     if entries.is_empty() { return Err("model metadata has no files".into()); }
@@ -86,7 +85,7 @@ fn inventory(path: &Path, base: &Path, names: &mut BTreeSet<String>) -> Result<(
     } Ok(())
 }
 pub fn run(repo: &str, revision: &str, model: &Path) -> Result<()> {
-    if !safe_path(repo) || repo.split('/').count() != 2 || !hex(revision,40) { return Err("supply a repository and full revision hash".into()); }
+    if !safe_path(repo) || repo.split('/').count() != 2 || !is_lower_hex(revision,40) { return Err("supply a repository and full revision hash".into()); }
     no_links(model)?; fs::create_dir_all(model)?; let model = model.canonicalize()?;
     if model.parent().is_none() { return Err("model directory must not be the filesystem root".into()); }
     let state = model.with_file_name(format!("{}.fetch",model.file_name().unwrap().to_string_lossy())); no_links(&state)?;
