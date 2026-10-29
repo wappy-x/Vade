@@ -4,7 +4,7 @@
 use super::query;
 use std::time::{Duration, Instant};
 
-const BUSY_POWER_WATTS: f64 = 30.0;
+pub(crate) const BUSY_POWER_WATTS: f64 = 30.0;
 
 #[derive(Debug, PartialEq)]
 enum GpuState { Idle, Stale(u32), BusyPower, Apps }

@@ -87,7 +87,7 @@ impl<R: Runner> App<R> {
     }
 }
 
-fn recorded_options(session: &Session) -> UpOptions {
+pub(super) fn recorded_options(session: &Session) -> UpOptions {
     UpOptions {
         supplied_options: Default::default(),
         sparks: None,

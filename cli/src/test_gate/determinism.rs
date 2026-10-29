@@ -476,7 +476,7 @@ fn execute(o: &Options, r: &mut Receipt) -> Result<i32, String> {
             let log = tmp.path.join("health.log");
             let health = super::exec_stdout(
                 Command::new("curl")
-                    .args(["--noproxy", "*", "--fail", "--silent", "--max-time", "2"])
+                    .args(["-q", "--noproxy", "*", "--fail", "--silent", "--max-time", "2"])
                     .arg(format!(
                         "{}/health",
                         o.url.strip_suffix('/').unwrap_or(&o.url)

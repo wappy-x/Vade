@@ -29,7 +29,7 @@ use model::check_model;
 pub(crate) use model::receipt;
 mod prepare;
 use gpu::{gpu_empty, gpu_settled};
-pub(crate) use gpu::stale_line;
+pub(crate) use gpu::{stale_line, BUSY_POWER_WATTS};
 mod process;
 use process::*;
 

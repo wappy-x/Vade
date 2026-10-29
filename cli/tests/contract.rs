@@ -287,3 +287,18 @@ fn errors_say_what_failed_and_name_the_next_command() {
     }
     let _ = std::fs::remove_dir_all(home);
 }
+
+/// A config that is not UTF-8 or names an unknown key says what to fix, not
+/// a permission problem, and points at the current example.
+#[test]
+fn config_errors_name_the_encoding_and_the_current_example() {
+    let home = home("config-content");
+    let config = home.join("cluster.conf");
+    std::fs::write(&config, b"[global]\nmodel = \xff\xfe\n").unwrap();
+    let stderr = text(&controller(&["status"], &home).stderr);
+    assert!(stderr.contains("is not UTF-8 text") && !stderr.contains("permissions"), "{stderr}");
+    std::fs::write(&config, "[global]\nmodle = qwen3.8-flash-next-fp4-local\n").unwrap();
+    let stderr = text(&controller(&["status"], &home).stderr);
+    assert!(stderr.contains("Unknown config key modle in global") && stderr.contains("cli/examples/fp4-local.conf"), "{stderr}");
+    let _ = std::fs::remove_dir_all(home);
+}

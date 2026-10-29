@@ -104,6 +104,8 @@ impl Config {
         let text = fs::read_to_string(&path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 format!("Config is missing: {}. Copy cli/examples/fp4-local.conf for FP4-Local (or cli/examples/vade.conf for legacy FP8), edit the placeholders, and set VADE_CONFIG. See INSTALL.md.", crate::text::quoted(&path.to_string_lossy()))
+            } else if error.kind() == std::io::ErrorKind::InvalidData {
+                format!("Config {} is not UTF-8 text. Save it as plain UTF-8 text, then retry.", crate::text::quoted(&path.to_string_lossy()))
             } else {
                 format!("Cannot read config {}. Check its path and permissions.", crate::text::quoted(&path.to_string_lossy()))
             }
@@ -489,7 +491,7 @@ impl Values {
     fn finish(self, section: &str) -> Result<(), String> {
         match self.0.first_key_value() {
             Some((key, _)) => Err(format!(
-                "Unknown config key {key} in {section}. Check examples/vade.conf for supported keys."
+                "Unknown config key {key} in {section}. Check cli/examples/fp4-local.conf (or cli/examples/vade.conf for legacy FP8) for supported keys."
             )),
             None => Ok(()),
         }

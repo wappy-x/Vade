@@ -996,6 +996,24 @@ fn status_prints_the_engine_retention_state() {
     assert_eq!(retention_label(&session, None), "4096 bytes/rank");
 }
 
+/// A user's ~/.curlrc (for example `--include` or `--output`) must not change any reply
+/// the controller parses: every curl call, local or on a Spark, starts with -q.
+#[test]
+fn every_controller_curl_ignores_the_user_curl_config() {
+    for replicas in [false, true] {
+        let mut f = Fixture::fp4(2, false);
+        f.app.up(&if replicas { fp4_options(&["--replicas", "2"]) } else { fp4_options(&[]) }).unwrap();
+        crate::output::with_writer(crate::output::testing::Capture::default(), || f.app.execute(Command::Status)).unwrap();
+        f.app.down().unwrap();
+        let local = f.app.runner.calls.iter().filter(|e| e.program == "curl").collect::<Vec<_>>();
+        let remote = f.app.runner.calls.iter().filter(|e| e.program == "ssh" && e.args.last().is_some_and(|a| a.contains("curl "))).collect::<Vec<_>>();
+        assert!(local.iter().any(|e| e.label == "controller health") && local.iter().any(|e| e.label == "controller capabilities")
+            && local.iter().any(|e| e.label == "controller events") && !remote.is_empty(), "replicas={replicas}");
+        for exec in local { assert_eq!(exec.args.first().map(String::as_str), Some("-q"), "{}", exec.label); }
+        for exec in remote { assert!(exec.args.last().unwrap().starts_with("curl -q "), "{}", exec.label); }
+    }
+}
+
 #[test]
 fn silent_pre_start_probe_claims_no_ownership_record() {
     let mut f = Fixture::fp4(1, false);
@@ -1136,6 +1154,31 @@ fn doctor_skips_checks_an_earlier_failure_hid() {
     let (_, printed) = rows(Some((false, "reached=1\n")), 1, Ok(false));
     assert!(row(&printed, "a ssh").starts_with("ok") && row(&printed, "a check script").starts_with("FAIL"), "{printed}");
     assert!(row(&printed, "a nvidia-smi").starts_with("skip"), "{printed}");
+    // A missing pinned toolchain keeps every earlier row, then fails its own row.
+    let found = "reached=1\ngpu=GB10\ndisk_kb=99999999\nmem_total_kb=127608480\nmem_available_kb=115343360\nweights=present\n";
+    let (result, printed) = rows(Some((false, Box::leak(format!("{found}failed=kernel-toolchain\n").into_boxed_str()))), 1, Ok(false));
+    assert!(result.is_err() && row(&printed, "a nvidia-smi").contains("GB10") && row(&printed, "a disk").starts_with("ok"), "{printed}");
+    assert!(row(&printed, "a model files").starts_with("ok") && row(&printed, "a toolchains").starts_with("FAIL"), "{printed}");
+    assert!(printed.contains("rustup toolchain install nightly-2026-10-01 --profile minimal --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda"), "{printed}");
+    let (_, printed) = rows(Some((false, Box::leak(format!("{found}failed=toolchain\n").into_boxed_str()))), 1, Ok(false));
+    assert!(row(&printed, "a toolchains").contains("no Rust 1.99.0 toolchain"), "{printed}");
+    let (_, printed) = rows(Some((true, Box::leak(format!("{found}toolchains=ok\nrust=ok\ndriver=ok\n").into_boxed_str()))), 1, Ok(false));
+    assert!(row(&printed, "a toolchains").starts_with("ok"), "{printed}");
+    // GPU use follows the rule vade up applies, so doctor names what up would refuse.
+    let gpu = |sample: &str, machines: usize| {
+        let (result, printed) = rows(Some((true, Box::leak(format!("{found}{sample}rust=ok\ndriver=ok\n").into_boxed_str()))), machines, Ok(true));
+        (result.is_ok(), row(&printed, "a GPU use"))
+    };
+    assert_eq!(gpu("gpu_apps=0\ngpu_watts=18.25\n", 1), (true, "ok    a GPU use             no compute processes; 18.2 W".into()));
+    let (passed, line) = gpu("gpu_apps=2\ngpu_watts=41.5\n", 1);
+    assert!(!passed && line.starts_with("FAIL") && line.contains("2 compute process(es) use the GPU."), "{line}");
+    let (passed, line) = gpu("gpu_apps=0\ngpu_watts=30\n", 1);
+    assert!(!passed && line.contains("draws 30.0 W with no compute process listed"), "{line}");
+    let (passed, line) = gpu("gpu_apps=0\ngpu_watts=\n", 1);
+    assert!(!passed && line.contains("did not report the GPU power draw"), "{line}");
+    assert!(gpu("", 1).1.starts_with("skip"));
+    // A recorded engine holds its own GPU.
+    assert!(gpu("gpu_apps=1\ngpu_watts=60\n", 2).1.contains("a recorded engine can hold the GPU"));
     // The complete script still reports the files it found.
     let (result, printed) = rows(None, 1, Ok(false));
     result.unwrap();
@@ -1273,4 +1316,80 @@ fn prerequisite_script_marks_failed_driver_queries_and_tool_versions() {
     assert_eq!(run("nvidia-smi"), "reached=1\nfailed=driver\n");
     assert_eq!(run("cargo"), "reached=1\nfailed=cargo\n");
     assert_eq!(run("rustc"), "reached=1\nfailed=rustc\n");
+    // Source builds also need the pinned host and kernel toolchains. The stub df
+    // reports ample room; the stub rustup answers its installed lists.
+    fs::write(bin.join("df"), "#!/bin/sh\nprintf 'Filesystem 1024-blocks Used Available\\nstub 1 1 99999999\\n'\n").unwrap();
+    for tool in ["cargo", "rustc"] { fs::write(bin.join(tool), "#!/bin/sh\nexit 0\n").unwrap(); }
+    fs::set_permissions(bin.join("df"), fs::Permissions::from_mode(0o700)).unwrap();
+    let toolchains = |rustup: Option<(&str, &str)>, kernel_bin: &str| {
+        let _ = fs::remove_file(bin.join("rustup"));
+        if let Some((toolchains, components)) = rustup {
+            fs::write(bin.join("rustup"), format!("#!/bin/sh\ntest \"$RUSTUP_AUTO_INSTALL\" = 0 || exit 9\ncase \"$1\" in\ntoolchain) printf '{toolchains}';;\n\
+                component) test -n '{components}' || exit 1; printf '{components}';;\n*) exit 1;;\nesac\n")).unwrap();
+            fs::set_permissions(bin.join("rustup"), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let output = std::process::Command::new("sh").args(["-c", script]).env("HOME", &f.dir).env("KERNEL_BIN", kernel_bin)
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display())).output().unwrap();
+        (output.status.success(), String::from_utf8(output.stdout).unwrap())
+    };
+    let host = "stable-aarch64-unknown-linux-gnu (default)\\n1.99.0-aarch64-unknown-linux-gnu (active)\\n";
+    let kernel = "cargo-aarch64-unknown-linux-gnu\\nllvm-bitcode-linker-aarch64-unknown-linux-gnu\\nllvm-tools-aarch64-unknown-linux-gnu\\nrust-src\\nrust-std-nvptx64-nvidia-cuda\\n";
+    let (ok, out) = toolchains(None, "");
+    assert!(!ok && out.ends_with("weights=missing\nfailed=rustup\n"), "{out}");
+    let (ok, out) = toolchains(Some(("stable-aarch64-unknown-linux-gnu (default)\\n1.99.01-aarch64-unknown-linux-gnu\\n", kernel)), "");
+    assert!(!ok && out.ends_with("failed=toolchain\n"), "{out}");
+    let (ok, out) = toolchains(Some((host, "")), "");
+    assert!(!ok && out.ends_with("failed=kernel-toolchain\n"), "{out}");
+    let (ok, out) = toolchains(Some((host, &kernel.replace("rust-src\\n", ""))), "");
+    assert!(!ok && out.ends_with("failed=kernel-toolchain\n"), "{out}");
+    let (ok, out) = toolchains(Some((host, kernel)), "");
+    assert!(ok && out.ends_with("toolchains=ok\nrust=ok\ndriver=ok\n"), "{out}");
+    // KERNEL_BIN names the kernel compiler itself; rustup is then not required.
+    let (ok, out) = toolchains(None, "/opt/kernel/bin");
+    assert!(ok && !out.contains("toolchains="), "{out}");
+    // The GPU use row reads the compute process count and the highest power draw.
+    fs::write(bin.join("nvidia-smi"), "#!/bin/sh\ncase \"$1\" in\n--query-gpu=name,driver_version) echo 'NVIDIA GB10, 580.95';;\n--query-compute-apps=pid) printf '12\\n34\\n';;\n--query-gpu=power.draw) printf '19.5\\n41.25\\n';;\nesac\n").unwrap();
+    let (ok, out) = toolchains(None, "/opt/kernel/bin");
+    assert!(ok && out.contains("gpu=NVIDIA GB10, 580.95\ngpu_apps=2\ngpu_watts=41.25\n"), "{out}");
+}
+
+/// The toolchain pins doctor checks are the ones the build uses.
+#[test]
+fn doctor_toolchain_pins_match_the_repository() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let toolchain = fs::read_to_string(root.join("rust-toolchain.toml")).unwrap();
+    assert!(toolchain.contains(&format!("channel = \"{}\"", diagnostics::HOST_TOOLCHAIN)), "{toolchain}");
+    let kernels = fs::read_to_string(root.join("engine/crates/gpu/build-kernels/src/main.rs")).unwrap();
+    assert!(kernels.contains(&format!("const NIGHTLY: &str = \"{}\";", diagnostics::KERNEL_TOOLCHAIN)));
+    assert!(include_str!("deployment.rs").contains(&format!("export RUSTUP_TOOLCHAIN={}\n", diagnostics::HOST_TOOLCHAIN)));
+}
+
+/// Doctor hashes the staged files vade up would run, so a build that vanished
+/// or changed on a Spark fails doctor, not the next start.
+#[test]
+fn doctor_checks_each_spark_staged_build_against_the_manifest() {
+    let doctor = |f: &mut Fixture| {
+        let capture = crate::output::testing::Capture::default();
+        let result = crate::output::with_writer(capture.clone(), || f.app.doctor_with(Ok(false)));
+        let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+        let row = printed.lines().find(|line| line[6..].starts_with("a staged build")).unwrap_or_else(|| panic!("{printed}")).to_owned();
+        (result.is_ok(), row)
+    };
+    let mut f = Fixture::fp4(1, false);
+    let (passed, row) = doctor(&mut f);
+    assert!(passed && row.ends_with("engine, PTX and helper match the build manifest"), "{row}");
+    let hashed = f.app.runner.calls.iter().find(|e| e.label == "a artifact hashes").unwrap();
+    assert_eq!(hashed.args.last().unwrap(), "sha256sum \"$HOME\"/stage/a/flash-serve \"$HOME\"/stage/flash.ptx \"$HOME\"/stage/a/vade");
+    f.app.runner.bad_hash = true;
+    let (passed, row) = doctor(&mut f);
+    assert!(!passed && row.starts_with("FAIL") && row.contains("staged hashes differ from the manifest"), "{row}");
+    // No manifest yet: nothing to hash, and doctor says what to run.
+    let mut f = Fixture::fp4(1, false);
+    fs::remove_file(&f.app.config.build_manifest).unwrap();
+    assert!(doctor(&mut f).1.contains("skip  a staged build        no build manifest; run vade install"));
+    assert!(!f.app.runner.calls.iter().any(|e| e.label == "a artifact hashes"));
+    // SSH that never ran the check script hides the hash check too.
+    let mut f = Fixture::fp4(1, false);
+    f.app.runner.probe = Some((false, ""));
+    assert!(doctor(&mut f).1.contains("needs SSH"));
 }

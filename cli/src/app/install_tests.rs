@@ -523,3 +523,25 @@ fn build_gpu_check_judges_recorded_samples() {
     assert!(!run("", "N/A\n", "0\n").0);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn a_prebuilt_dir_that_serves_nothing_is_named_before_the_source_build() {
+    let mut f = with_bundle();
+    let root = f.app.config.prebuilt_dir.clone().unwrap();
+    fs::rename(root.join(format!("{}-{}", "a".repeat(40), "b".repeat(40))), root.join("another-revision")).unwrap();
+    let install = |f: &mut Fixture| {
+        f.app.runner.calls.clear();
+        let capture = crate::output::testing::Capture::default();
+        crate::output::with_writer(capture.clone(), || f.app.execute(Command::Install)).unwrap();
+        assert!(f.app.runner.calls.iter().any(|e| e.label == "a build and stage"), "a source build follows");
+        String::from_utf8(capture.bytes.borrow().clone()).unwrap()
+    };
+    let printed = install(&mut f);
+    assert!(printed.contains(&format!("No prebuilt bundle in {} matches engine {} and CLI {}; building from source.\n", root.display(), "a".repeat(40), "b".repeat(40))), "{printed}");
+    f.app.config.prebuilt_dir = Some(root.join("missing"));
+    let printed = install(&mut f);
+    assert!(printed.contains(&format!("prebuilt_dir {} is not a folder; building from source.\n", root.join("missing").display())), "{printed}");
+    f.app.config.prebuilt_dir = None;
+    let printed = install(&mut f);
+    assert!(!printed.contains("prebuilt"), "no prebuilt_dir, no note: {printed}");
+}

@@ -182,14 +182,12 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
         while index < args.len() {
             let flag = args[index];
             if !matches!(flag, "--engine-source" | "--harness-source" | "--weights-source" | "--release" | "--port") {
-                return Err(format!("Unknown option {} for vade run. Run vade run --help.", crate::text::argument(flag)));
+                return Err(unknown_option(flag, "run", &["--engine-source", "--harness-source", "--weights-source", "--release", "--port"]));
             }
             if !seen.insert(flag) {
                 return Err(format!("Use {flag} only once. Run vade run --help."));
             }
-            let value = args
-                .get(index + 1)
-                .filter(|v| !v.starts_with('-'))
+            let value = option_value(&args, index)
                 .ok_or_else(|| format!("Give {flag} a value. Run vade run --help."))?;
             match flag {
                 "--engine-source" => options.engine_source = Some(value.into()),
@@ -270,16 +268,10 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
             index += 1;
             continue;
         }
-        if !matches!(
-            flag,
-            "--sparks" | "--hosts" | "--replicas" | "--mtp" | "--context" | "--output" | "--chats" | "--memory-bytes" | "--cache-bytes"
-        ) {
-            return Err(format!("Unknown option {} for vade up. Run vade up --help.", crate::text::argument(flag)));
+        if !UP_VALUE_OPTIONS.contains(&flag) {
+            return Err(unknown_option(flag, "up", &UP_VALUE_OPTIONS));
         }
-        let value = args
-            .get(index + 1)
-            .copied()
-            .filter(|value| !value.starts_with('-'))
+        let value = option_value(&args, index)
             .ok_or_else(|| format!("Give {flag} a value. Run vade up --help."))?;
         match flag {
             "--sparks" => options.sparks = Some(number(value, flag, 1, 64)? as usize),
@@ -390,6 +382,24 @@ fn bytes(value: &str, flag: &str) -> Result<u64, String> {
     Err(format!(
         "Set {flag} to a whole number of bytes that fits in 64 bits."
     ))
+}
+
+/// The `vade up` options that take a value.
+const UP_VALUE_OPTIONS: [&str; 9] = ["--sparks", "--hosts", "--replicas", "--mtp", "--context", "--output", "--chats", "--memory-bytes", "--cache-bytes"];
+
+/// The word after the option at `index`. A word that starts with `-` is the
+/// next option, unless a digit follows: `--context -5` then names the range.
+fn option_value<'a>(args: &[&'a str], index: usize) -> Option<&'a str> {
+    args.get(index + 1).copied().filter(|value| !value.starts_with('-') || value[1..].starts_with(|c: char| c.is_ascii_digit()))
+}
+
+/// The error for an unknown option of `vade <command>`. `--context=32768`
+/// names the known option and asks for a space.
+fn unknown_option(flag: &str, command: &str, known: &[&str]) -> String {
+    match flag.split_once('=') {
+        Some((name, _)) if known.contains(&name) => format!("Unknown option {} for vade {command}. Put a space between {name} and its value, not an equals sign. Run vade {command} --help.", crate::text::argument(flag)),
+        _ => format!("Unknown option {} for vade {command}. Run vade {command} --help.", crate::text::argument(flag)),
+    }
 }
 
 fn number(value: &str, flag: &str, min: u32, max: u32) -> Result<u32, String> {
@@ -517,5 +527,18 @@ mod tests {
         assert_eq!((options.release.as_deref(), options.port), (Some(std::path::Path::new("r")), 9000));
         let Command::Up(options) = cli("up --memory-bytes 100 --cache-bytes 0").unwrap().command else { panic!() };
         assert_eq!((options.memory_bytes, options.cache_bytes), (Some(100), Some(0)));
+    }
+    #[test]
+    fn negative_numbers_and_equals_signs_get_the_error_that_names_the_fix() {
+        // A negative number is a bad value, not a missing one; the next option is still missing.
+        assert_eq!(cli("up --context -5").unwrap_err(), "Set --context to a whole number from 4096 to 262144.");
+        assert_eq!(cli("up --mtp -1").unwrap_err(), "Set --mtp to a whole number from 0 to 3.");
+        assert_eq!(cli("run qwen3-8b --port -1").unwrap_err(), "Set --port to a whole number from 1024 to 65535.");
+        assert_eq!(cli("up --context --fp4-local").unwrap_err(), "Give --context a value. Run vade up --help.");
+        assert_eq!(cli("up --context -").unwrap_err(), "Give --context a value. Run vade up --help.");
+        assert_eq!(cli("up --context=32768").unwrap_err(),
+            "Unknown option \"--context=32768\" for vade up. Put a space between --context and its value, not an equals sign. Run vade up --help.");
+        assert!(cli("run qwen3-8b --port=9000").unwrap_err().contains("Put a space between --port and its value"));
+        assert_eq!(cli("up --nope=1").unwrap_err(), "Unknown option \"--nope=1\" for vade up. Run vade up --help.");
     }
 }

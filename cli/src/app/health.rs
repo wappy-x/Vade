@@ -51,7 +51,7 @@ impl<R: Runner> App<R> {
         runner::ssh(
             &session.ranks[index].machine.ssh,
             format!(
-                "curl --noproxy '*' --fail --silent --show-error --max-time 5 {}",
+                "curl -q --noproxy '*' --fail --silent --show-error --max-time 5 {}",
                 quote(&format!("http://127.0.0.1:{}/health", session.serve_port))
             ),
             "engine health",
@@ -63,27 +63,11 @@ impl<R: Runner> App<R> {
     }
     pub(super) fn local_health_response(&mut self, session: &Session) -> Result<Output, String> {
         self.verify_listener(session)?;
-        self.runner.run(&Exec::new(
-            "controller health",
-            "curl",
-            vec![
-                "--noproxy".into(),
-                "*".into(),
-                "--fail".into(),
-                "--silent".into(),
-                "--show-error".into(),
-                "--max-time".into(),
-                "5".into(),
-                format!("{}/health", session.endpoint()),
-            ],
-        ))
+        self.runner.run(&get("controller health", format!("{}/health", session.endpoint())))
     }
     /// The engine's own prefix-retention switch, from its capabilities.
     pub(super) fn engine_prefix_cache(&mut self, session: &Session) -> Result<Option<bool>, String> {
-        let output = self.runner.run(&Exec::new("controller capabilities", "curl", vec![
-            "--noproxy".into(), "*".into(), "--fail".into(), "--silent".into(), "--show-error".into(),
-            "--max-time".into(), "5".into(), format!("{}/v1/capabilities", session.endpoint()),
-        ]))?;
+        let output = self.runner.run(&get("controller capabilities", format!("{}/v1/capabilities", session.endpoint())))?;
         if !output.success { return Ok(None); }
         Ok(match crate::evals::json::parse(&output.stdout) {
             Ok(value) => match value["prefix_cache"] { crate::evals::json::Value::Bool(on) => Some(on), _ => None },
@@ -148,20 +132,7 @@ impl<R: Runner> App<R> {
             let mut exec = if remote {
                 self.remote_health_at(session, pending[0])
             } else {
-                Exec::new(
-                    "controller health",
-                    "curl",
-                    vec![
-                        "--noproxy".into(),
-                        "*".into(),
-                        "--fail".into(),
-                        "--silent".into(),
-                        "--show-error".into(),
-                        "--max-time".into(),
-                        "5".into(),
-                        format!("{}/health", session.endpoint()),
-                    ],
-                )
+                get("controller health", format!("{}/health", session.endpoint()))
             };
             exec.timeout = exec
                 .timeout
@@ -201,6 +172,15 @@ impl<R: Runner> App<R> {
             text::terminal_text(&diagnostic.to_string_lossy())
         ))
     }
+}
+
+/// A bounded GET of one controller URL. `-q` must come first: it makes curl
+/// ignore `~/.curlrc`, so output or write-out options there cannot change the reply.
+pub(super) fn get(label: &str, url: String) -> Exec {
+    Exec::new(label, "curl", vec![
+        "-q".into(), "--noproxy".into(), "*".into(), "--fail".into(), "--silent".into(), "--show-error".into(),
+        "--max-time".into(), "5".into(), url,
+    ])
 }
 
 /// The path the engine's receipt names in a health reply (`vade.numerics.path`) for Sparks that

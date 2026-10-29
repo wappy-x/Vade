@@ -23,10 +23,7 @@ impl<R: Runner> App<R> {
 
 /// The `GET /v1/events` read; `endpoint` has no trailing slash.
 pub(crate) fn read(endpoint: String, label: &str) -> Exec {
-    Exec::new(label, "curl", vec![
-        "-q".into(), "--noproxy".into(), "*".into(), "--fail".into(), "--silent".into(), "--show-error".into(),
-        "--max-time".into(), "5".into(), format!("{endpoint}/v1/events"),
-    ])
+    super::health::get(label, format!("{endpoint}/v1/events"))
 }
 pub(crate) fn now_ms() -> i64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64) }
 

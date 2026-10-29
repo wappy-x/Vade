@@ -18,7 +18,19 @@ pub(super) struct Probe {
     missing: Option<String>,
     /// The message `vade install` stops with for `missing`.
     error: Option<String>,
+    /// Whether the pinned toolchains a source build needs are installed;
+    /// `None` when the script did not check them.
+    toolchains: Option<bool>,
+    /// Compute processes on the GPU and its highest power draw in watts.
+    gpu_use: Option<(usize, Option<f64>)>,
 }
+
+/// The host toolchain every source build pins, as in `rust-toolchain.toml`.
+pub(super) const HOST_TOOLCHAIN: &str = "1.99.0";
+/// The nightly toolchain `cargo kernels` drives for the NVPTX build.
+pub(super) const KERNEL_TOOLCHAIN: &str = "nightly-2026-10-01";
+/// The `failed=` values of the source-build toolchain checks.
+const TOOLCHAIN_FAILURES: [&str; 3] = ["rustup", "toolchain", "kernel-toolchain"];
 
 /// One row for a whole stage whose own output was captured: `planned` in a
 /// dry run, `passed` when it passed, its error when it failed.
@@ -74,6 +86,8 @@ impl<R: Runner> App<R> {
         let fp4_local = session.as_ref().map_or(options.as_ref().is_some_and(|options| options.fp4_local), |session| session.fp4_local);
         let transport = if split { transport } else { Ok(false) };
         let owned = session.is_some();
+        // Doctor reads the active manifest only when one exists; a fresh controller has none.
+        let built = self.config.build_manifest.is_file().then(|| Manifest::load(&self.config.build_manifest));
         // A split run needs a valid SEQPAR_RDMA before its probes can run.
         // Report it once and skip what it hides.
         if let Err(error) = &transport {
@@ -81,12 +95,29 @@ impl<R: Runner> App<R> {
         }
         for (index, machine) in machines.iter().enumerate() {
             if transport.is_err() {
-                for check in ["ssh", "nvidia-smi", "disk", "free memory", "model files"] { report.skip(&format!("{} {check}", machine.name), "needs a valid SEQPAR_RDMA")?; }
+                for check in ["ssh", "nvidia-smi", "GPU use", "disk", "free memory", "model files", "staged build"] { report.skip(&format!("{} {check}", machine.name), "needs a valid SEQPAR_RDMA")?; }
                 continue;
             }
             let (probe, _) = crate::output::buffered(|| self.probe_machine_with_rdma(machine, self.config.prebuilt_dir.is_none(), transport.as_ref().copied().unwrap_or(false)));
             let memory = probe.as_ref().ok().and_then(|probe| probe.memory);
-            self.machine_rows(&mut report, machine, probe)?;
+            let reached = probe.as_ref().is_ok_and(|probe| probe.missing.as_deref() != Some("ssh"));
+            self.machine_rows(&mut report, machine, probe, owned)?;
+            // The files vade up runs: the recorded rank's, else the active build's.
+            let staged = match (&session, &built) { (Some(session), _) => Ok(Some(Some(session.ranks[index].artifact.clone()))),
+                (None, None) => Ok(None), (None, Some(Err(error))) => Err(error.clone()),
+                (None, Some(Ok(manifest))) => Ok(Some(manifest.artifacts.get(&machine.name).cloned())) };
+            let row = format!("{} staged build", machine.name);
+            match staged {
+                _ if self.dry => report.plan(&row, "hash the engine, PTX and helper against the build manifest")?,
+                _ if !reached => report.skip(&row, "needs SSH")?,
+                Err(error) => report.fail(&row, &error, "Run vade install, then run vade doctor.")?,
+                Ok(None) => report.skip(&row, "no build manifest; run vade install")?,
+                Ok(Some(None)) => report.fail(&row, "The build manifest has no build for this machine.", "Run vade install, then run vade doctor.")?,
+                Ok(Some(Some(artifact))) => {
+                    let (result, _) = crate::output::buffered(|| self.verify_staged(machine, &artifact));
+                    report.check(&row, result, |_| "engine, PTX and helper match the build manifest".into(), "Run vade install, then run vade doctor.")?;
+                }
+            }
             let mut ports = Vec::new();
             if session.as_ref().map_or(index == 0, |session| session.servers().contains(&index)) {
                 ports.push(crate::doctor::Port::http(session.as_ref().map_or(self.config.serve_port, |session| session.serve_port)));
@@ -149,36 +180,36 @@ impl<R: Runner> App<R> {
 
     /// The rows for one Spark's probe: SSH, nvidia-smi, disk, free memory and
     /// model files. An earlier failure skips the rows it hides.
-    fn machine_rows(&self, report: &mut Report, machine: &Machine, probe: Result<Probe, String>) -> Result<(), String> {
+    fn machine_rows(&self, report: &mut Report, machine: &Machine, probe: Result<Probe, String>, owned: bool) -> Result<(), String> {
         let name = |check: &str| format!("{} {check}", machine.name);
         let rerun = "then run vade doctor.";
         if self.dry {
             report.plan(&name("ssh"), &format!("ssh {} runs one read-only check script", machine.ssh))?;
-            for check in ["nvidia-smi", "disk", "free memory", "model files"] { report.plan(&name(check), "read by that script")?; }
+            for check in ["nvidia-smi", "GPU use", "disk", "free memory", "model files"] { report.plan(&name(check), "read by that script")?; }
             return Ok(());
         }
         let probe = match probe {
             Ok(probe) => probe,
             Err(error) => {
                 report.fail(&name("ssh"), &error, &format!("Run ssh {} true to see the SSH error, {rerun}", machine.ssh))?;
-                for check in ["nvidia-smi", "disk", "free memory", "model files"] { report.skip(&name(check), "needs SSH")?; }
+                for check in ["nvidia-smi", "GPU use", "disk", "free memory", "model files"] { report.skip(&name(check), "needs SSH")?; }
                 return Ok(());
             }
         };
         let missing = probe.missing.as_deref();
         if missing == Some("ssh") {
             report.fail(&name("ssh"), &probe.error.clone().unwrap_or_default(), &format!("Run ssh {} true to see the SSH error, {rerun}", machine.ssh))?;
-            for check in ["nvidia-smi", "disk", "free memory", "model files"] { report.skip(&name(check), "needs SSH")?; }
+            for check in ["nvidia-smi", "GPU use", "disk", "free memory", "model files"] { report.skip(&name(check), "needs SSH")?; }
             return Ok(());
         }
         report.ok(&name("ssh"), &format!("reached {}", machine.ssh))?;
         match missing {
             Some("script") => {
                 report.fail(&name("check script"), &probe.error.clone().unwrap_or_default(), &format!("Rerun vade doctor; if this repeats, check the login shell with ssh {} true.", machine.ssh))?;
-                for check in ["nvidia-smi", "disk", "free memory", "model files"] { report.skip(&name(check), "not checked; the script stopped early")?; }
+                for check in ["nvidia-smi", "GPU use", "disk", "free memory", "model files"] { report.skip(&name(check), "not checked; the script stopped early")?; }
                 return Ok(());
             }
-            Some(tool) if tool != "disk" && !tool.starts_with("rdma") => {
+            Some(tool) if tool != "disk" && !tool.starts_with("rdma") && !TOOLCHAIN_FAILURES.contains(&tool) => {
                 let error = probe.error.clone().unwrap_or_default();
                 if tool == "nvidia-smi" || tool == "driver" {
                     report.fail(&name("nvidia-smi"), &error, &format!("Run ssh {} nvidia-smi to inspect the driver, {rerun}", machine.ssh))?;
@@ -188,10 +219,21 @@ impl<R: Runner> App<R> {
                     else { report.ok(&name("nvidia-smi"), "present")?; }
                     report.fail(&name("tools"), &error, &format!("Install {tool} on {}, {rerun}", machine.name))?;
                 }
-                for check in ["disk", "free memory", "model files"] { report.skip(&name(check), "needs the tool checks")?; }
+                for check in ["GPU use", "disk", "free memory", "model files"] { report.skip(&name(check), "needs the tool checks")?; }
                 return Ok(());
             }
             _ => report.ok(&name("nvidia-smi"), probe.gpu.as_deref().unwrap_or("driver answered"))?,
+        }
+        // The rule vade up applies: any listed compute process, or 30 W or more, is a busy GPU.
+        let busy = "Stop that job with its own launcher; vade up refuses a busy GPU. Then run vade doctor.";
+        match probe.gpu_use {
+            _ if owned => report.skip(&name("GPU use"), "a recorded engine can hold the GPU; use vade status")?,
+            Some((0, Some(watts))) if watts < crate::worker::BUSY_POWER_WATTS => report.ok(&name("GPU use"), &format!("no compute processes; {watts:.1} W"))?,
+            Some((0, Some(watts))) => report.fail(&name("GPU use"), &format!("The GPU draws {watts:.1} W with no compute process listed."), busy)?,
+            Some((0, None)) => report.fail(&name("GPU use"), "nvidia-smi did not report the GPU power draw, so vade up cannot judge the GPU idle.",
+                &format!("Run ssh {} nvidia-smi to inspect the driver, {rerun}", machine.ssh))?,
+            Some((apps, _)) => report.fail(&name("GPU use"), &format!("{apps} compute process(es) use the GPU."), busy)?,
+            None => report.skip(&name("GPU use"), "nvidia-smi did not list compute processes")?,
         }
         let gib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0 * 1024.0);
         let free = probe.disk_kb.map_or_else(|| "free space unknown".into(), |kb| format!("{:.1} GiB free in the home folder", gib(kb.saturating_mul(1024))));
@@ -206,7 +248,7 @@ impl<R: Runner> App<R> {
         }
         if let Some(error) = probe.error.as_ref().filter(|_| missing.is_some_and(|m| m.starts_with("rdma"))) {
             report.fail(&name("rdma"), error, "Have the administrator prepare RDMA, or set SEQPAR_RDMA=0 for TCP, then run vade doctor.")?;
-        } else if probe.rdma && missing.is_none() {
+        } else if probe.rdma && missing.is_none_or(|missing| TOOLCHAIN_FAILURES.contains(&missing)) {
             report.ok(&name("rdma"), "verbs device, library and memory lock limit are ready")?;
         } else if probe.rdma {
             report.skip(&name("rdma"), "needs the earlier prerequisite checks")?;
@@ -216,6 +258,12 @@ impl<R: Runner> App<R> {
             Some(false) => report.fail(&name("model files"), &format!("missing or incomplete at {}", machine.model_path),
                 &format!("Copy {} at {} there (INSTALL.md step 3), then run vade install.", self.config.model_repo, self.config.model_revision))?,
             None => report.skip(&name("model files"), &format!("not checked; the script stopped at {}", missing.unwrap_or("an earlier check")))?,
+        }
+        match probe.toolchains {
+            Some(true) => report.ok(&name("toolchains"), &format!("Rust {HOST_TOOLCHAIN} and {KERNEL_TOOLCHAIN} with the NVPTX target for the source build"))?,
+            Some(false) => report.fail(&name("toolchains"), &probe.error.clone().unwrap_or_default(),
+                &format!("Install the pinned toolchains on {} (INSTALL.md), or set prebuilt_dir to a matching bundle, {rerun}", machine.name))?,
+            None => {}
         }
         Ok(())
     }
@@ -269,6 +317,8 @@ done
 {compiler_versions}
 gpu=$(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader) || {{ printf 'failed=driver\n'; exit 1; }}
 printf 'gpu=%s\n' "$(printf '%s\n' "$gpu" | head -n 1)"
+apps=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null) && printf 'gpu_apps=%s\n' "$(printf '%s\n' "$apps" | awk 'NF {{n++}} END {{print n + 0}}')"
+power=$(nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits 2>/dev/null) && printf 'gpu_watts=%s\n' "$(printf '%s\n' "$power" | awk '$1 ~ /^[0-9]+([.][0-9]+)?$/ {{n++; if ($1 + 0 > max) max = $1 + 0}} END {{if (n) print max}}')"
 available=$(df -Pk "$HOME" | awk 'NR == 2 {{print $4}}')
 printf 'disk_kb=%s\n' "$available"
 awk '/^MemTotal:/ {{print "mem_total_kb=" $2}} /^MemAvailable:/ {{print "mem_available_kb=" $2}}' /proc/meminfo 2>/dev/null || true
@@ -287,8 +337,22 @@ if test -d {model} && test -f {model}/config.json && test -f {model}/tokenizer.j
 else
   printf 'weights=missing\n'
 fi
+{toolchains}
 printf 'rust=ok\ndriver=ok\n'
 "#,
+            // A source build pins the host toolchain, and `cargo kernels` asks rustup
+            // for the nightly NVPTX toolchain unless KERNEL_BIN names one. Read the
+            // installed lists only: a toolchain name never starts a download here.
+            toolchains = if source_build { format!(r#"if test -z "${{KERNEL_BIN-}}"; then
+  export RUSTUP_AUTO_INSTALL=0
+  command -v rustup >/dev/null 2>&1 || {{ printf 'failed=rustup\n'; exit 1; }}
+  rustup toolchain list 2>/dev/null | /usr/bin/grep -q '^{host}-' || {{ printf 'failed=toolchain\n'; exit 1; }}
+  vade_kernel=$(rustup component list --toolchain {KERNEL_TOOLCHAIN} --installed 2>/dev/null) || {{ printf 'failed=kernel-toolchain\n'; exit 1; }}
+  for vade_component in rust-src llvm-tools llvm-bitcode-linker rust-std-nvptx64-nvidia-cuda; do
+    printf '%s\n' "$vade_kernel" | awk -v c="$vade_component" '$1 == c || index($1, c "-") == 1 {{f = 1}} END {{exit !f}}' || {{ printf 'failed=kernel-toolchain\n'; exit 1; }}
+  done
+  printf 'toolchains=ok\n'
+fi"#, host = HOST_TOOLCHAIN.replace('.', "[.]")) } else { String::new() },
             compiler_tools = if source_build { "cargo rustc" } else { "" },
             compiler_versions = if source_build {
                 "cargo --version >/dev/null 2>&1 || { printf 'failed=cargo\\n'; exit 1; }\nrustc --version >/dev/null 2>&1 || { printf 'failed=rustc\\n'; exit 1; }"
@@ -317,6 +381,10 @@ printf 'rust=ok\ndriver=ok\n'
             rdma,
             missing: None,
             error: None,
+            gpu_use: fields.get("gpu_apps").and_then(|apps| apps.parse().ok())
+                .map(|apps| (apps, fields.get("gpu_watts").and_then(|watts| watts.parse::<f64>().ok()).filter(|watts| watts.is_finite()))),
+            toolchains: (fields.get("toolchains").map(String::as_str) == Some("ok")).then_some(true)
+                .or_else(|| fields.get("failed").filter(|failed| TOOLCHAIN_FAILURES.contains(&failed.as_str())).map(|_| false)),
         };
         if !output.success {
             let failed = fields.get("failed").map(String::as_str);
@@ -353,6 +421,9 @@ printf 'rust=ok\ndriver=ok\n'
                 _ => match missing {
                     "driver" => format!("{} has nvidia-smi, but its GPU query failed. Run ssh {} nvidia-smi to see the driver error, then run vade doctor.", machine.name, machine.ssh),
                     tool @ ("cargo" | "rustc") => format!("{} has {tool}, but {tool} --version failed there. Repair that Rust toolchain, then run vade doctor.", machine.name),
+                    "rustup" => format!("{} has no rustup. A source build needs rustup with Rust {HOST_TOOLCHAIN} and {KERNEL_TOOLCHAIN} for the GPU kernels. Install them there (INSTALL.md), or set prebuilt_dir to a matching bundle, then run vade doctor.", machine.name),
+                    "toolchain" => format!("{} has no Rust {HOST_TOOLCHAIN} toolchain. Run rustup toolchain install {HOST_TOOLCHAIN} --profile minimal there, or set prebuilt_dir to a matching bundle, then run vade doctor.", machine.name),
+                    "kernel-toolchain" => format!("{} lacks the {KERNEL_TOOLCHAIN} toolchain for the GPU kernels. Run rustup toolchain install {KERNEL_TOOLCHAIN} --profile minimal --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda there, or set prebuilt_dir to a matching bundle, then run vade doctor.", machine.name),
                     "ssh" => format!("ssh {} did not run the check script. Run ssh {} true to see the SSH error, then run vade doctor.", machine.ssh, machine.ssh),
                     _ => format!("{}'s check script stopped before naming a failed check. Rerun vade doctor; if this repeats, check the login shell with ssh {} true.", machine.name, machine.ssh),
                 },

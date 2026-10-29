@@ -242,6 +242,17 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
                 Ok((bundle, host))
             });
         let (bundle, host_bundle) = match selected {
+            Ok((None, _)) if self.config.prebuilt_dir.is_some() => {
+                // A set prebuilt_dir that serves nothing is named, so a source build is never a surprise.
+                let dir = self.config.prebuilt_dir.clone().unwrap_or_default();
+                let shown = text::terminal_text(&dir.to_string_lossy()).into_owned();
+                crate::output::line(format_args!("{}", if dir.is_dir() {
+                    format!("No prebuilt bundle in {shown} matches engine {engine_sha} and CLI {cli_sha}; building from source.")
+                } else {
+                    format!("prebuilt_dir {shown} is not a folder; building from source.")
+                }))?;
+                (None, None)
+            }
             Ok(bundle) => bundle,
             Err(error) => {
                 crate::output::line(format_args!("Prebuilt bundle rejected: {}; building from source.", text::terminal_text(&error)))?;
@@ -582,26 +593,7 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
         }
         self.install()?;
         if let Some(session) = Session::load(&self.config.state_dir)? {
-            let options = UpOptions {
-                supplied_options: Default::default(),
-                hosts: session
-                    .ranks
-                    .iter()
-                    .map(|r| r.machine.name.clone())
-                    .collect(),
-                sparks: None,
-                replicas: session.replicas,
-                mtp: session.mtp,
-                mtp_explicit: session.mtp_explicit,
-                fp4_local: session.fp4_local,
-                context: session.context,
-                output: session.output,
-                output_explicit: true,
-                chats: session.chats,
-                fast_prompts: session.fast_prompts,
-                memory_bytes: session.memory_bytes,
-                cache_bytes: session.cache_bytes,
-            };
+            let options = super::resident::recorded_options(&session);
             if !self.dry && self.runner.confirm_restart()? {
                 self.down()?;
                 return self.up(&options);
@@ -767,28 +759,42 @@ fn chain_capability_marker_matches_the_real_engine_startup_contract() {
     assert!(source_contains(&engine, "next_service::run_pp(rank, world,").unwrap());
 }
 
+#[cfg(test)]
+#[test]
+fn staging_errors_name_the_program_that_failed() {
+    let dir = Path::new("target").join(format!("vade-stage-local-{}", text::random_hex(8).unwrap()));
+    for name in ["vade", "vade-harness"] {
+        let error = stage_local(&dir.join("missing-build-output"), &dir.join("generation").join(name)).unwrap_err();
+        assert_eq!(error, format!("Cannot stage {name}. Check its build output, disk space and stage_dir permissions."));
+    }
+    assert!(fs::read_dir(dir.join("generation")).unwrap().next().is_none(), "no temporary copy is left behind");
+    fs::remove_dir_all(dir).unwrap();
+}
+
+/// Copy one controller program (the harness or the CLI) into a generation; errors name it.
 fn stage_local(source: &Path, destination: &Path) -> Result<(), String> {
+    let what = destination.file_name().map_or_else(|| "program".into(), |name| name.to_string_lossy().into_owned());
     let parent = destination
         .parent()
-        .ok_or("Staged harness needs a parent directory. Check stage_dir in config.")?;
+        .ok_or_else(|| format!("Staged {what} needs a parent directory. Check stage_dir in config."))?;
     text::private_dir(parent)?;
     text::reject_symlinks(destination)?;
-    let temp = parent.join(format!(".harness-{}", text::random_hex(12)?));
+    let temp = parent.join(format!(".stage-{}", text::random_hex(12)?));
     let result = (|| {
         fs::copy(source, &temp).map_err(
-            |_| "Cannot stage harness. Check target output, disk, and stage_dir permissions.",
+            |_| format!("Cannot stage {what}. Check its build output, disk space and stage_dir permissions."),
         )?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&temp, fs::Permissions::from_mode(0o700))
-                .map_err(|_| "Cannot protect staged harness.")?;
+                .map_err(|_| format!("Cannot protect staged {what}."))?;
         }
         fs::File::open(&temp)
             .and_then(|f| f.sync_all())
-            .map_err(|_| "Cannot sync staged harness. Check disk space.")?;
+            .map_err(|_| format!("Cannot sync staged {what}. Check disk space."))?;
         fs::rename(&temp, destination)
-            .map_err(|_| "Cannot publish staged harness. Check stage_dir permissions.")?;
+            .map_err(|_| format!("Cannot publish staged {what}. Check stage_dir permissions."))?;
         Ok(())
     })();
     if result.is_err() {

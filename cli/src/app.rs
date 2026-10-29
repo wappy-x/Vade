@@ -305,7 +305,11 @@ impl<R: Runner> App<R> {
     }
 
     fn verify_artifacts(&mut self, rank: &Rank) -> Result<(), String> {
-        let a = &rank.artifact;
+        self.verify_staged(&rank.machine, &rank.artifact)
+    }
+
+    /// Hash the staged engine, PTX and helper on `machine` against `a`.
+    pub(super) fn verify_staged(&mut self, machine: &Machine, a: &Artifact) -> Result<(), String> {
         let command = format!(
             "sha256sum {} {} {}",
             remote_path(&a.binary),
@@ -314,9 +318,9 @@ impl<R: Runner> App<R> {
         );
         let output = self.checked(
             runner::ssh(
-                &rank.machine.ssh,
+                &machine.ssh,
                 command,
-                &format!("{} artifact hashes", rank.machine.name),
+                &format!("{} artifact hashes", machine.name),
             ),
             "Cannot verify staged artifacts. Run vade install, then try vade up.",
         )?;
@@ -335,7 +339,7 @@ impl<R: Runner> App<R> {
             {
                 return Err(format!(
                     "{}: staged hashes differ from the manifest. Nothing started; run vade install.",
-                    rank.machine.name
+                    machine.name
                 ));
             }
         }
