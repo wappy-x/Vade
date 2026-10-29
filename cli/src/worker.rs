@@ -7,6 +7,7 @@
 //! - `logs`: bounded engine-log tails and credential redaction.
 //! - `gpu`: idle-GPU checks before start and after stop.
 //! - `prepare`: install preparation without a resident owner.
+use crate::text::to_hex;
 use crate::unix_file::{AnchoredPath, OpenMode, same_regular_file};
 use crate::unix_flags::{LOCK_EX, LOCK_NB};
 use std::collections::{BTreeMap, BTreeSet};
@@ -381,7 +382,7 @@ fn start(store: &Store, request: &Fields) -> Result<Fields, String> {
             && !environment.contains_key(&format!("env_unset.{name}"))
         {
             private_environment.insert(
-                format!("redact.secret.{}", hex(name.as_bytes())),
+                format!("redact.secret.{}", to_hex(name.as_bytes())),
                 value.to_string_lossy().into_owned(),
             );
         }
@@ -945,9 +946,6 @@ fn reply(record: &Fields, alive: bool) -> Fields {
         response.insert("pid".into(), pid.clone());
     }
     response
-}
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 fn unhex(value: &str) -> Result<Vec<u8>, String> {
     if !value.len().is_multiple_of(2) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {

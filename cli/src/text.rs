@@ -231,7 +231,12 @@ pub fn random_hex(bytes: usize) -> Result<String, String> {
         .map_err(
             |_| "Cannot create a safe ownership token. Check the operating system random source.",
         )?;
-    Ok(value.iter().map(|b| format!("{b:02x}")).collect())
+    Ok(to_hex(&value))
+}
+
+/// `bytes` as lowercase hex, two digits per byte.
+pub fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A field that a saved record must have.

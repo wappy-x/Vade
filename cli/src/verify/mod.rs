@@ -3,6 +3,7 @@
 mod http;
 
 use crate::evals::json::{self, Value};
+use crate::text::quoted;
 use std::{
     fs,
     io::Write,
@@ -201,9 +202,6 @@ fn targets(options: &Options) -> Result<Vec<Target>, String> {
 
 fn id_bytes(ids: &[u32]) -> Vec<u8> {
     ids.iter().flat_map(|id| id.to_le_bytes()).collect()
-}
-fn quoted(value: &str) -> String {
-    crate::text::quoted(value)
 }
 
 struct Receipt {

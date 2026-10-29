@@ -17,9 +17,9 @@ impl Identity {
         record.insert("boot_id".into(), self.boot.clone());
         record.insert(
             "exe_hex".into(),
-            hex(self.exe.as_os_str().as_encoded_bytes()),
+            to_hex(self.exe.as_os_str().as_encoded_bytes()),
         );
-        record.insert("cmdline_hex".into(), hex(&self.command));
+        record.insert("cmdline_hex".into(), to_hex(&self.command));
     }
 
     pub(super) fn from_record(record: &Fields) -> Result<Option<Self>, String> {

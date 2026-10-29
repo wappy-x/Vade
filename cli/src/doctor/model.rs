@@ -1,5 +1,5 @@
 //! Model file checks read JSON and file sizes. They do not read tensor data.
-use crate::{checks::Report, text::Fields};
+use crate::{checks::Report, text::{Fields, to_hex}};
 use engine_model::json::{self, Value};
 use std::{collections::{BTreeMap, BTreeSet}, fs, io::Read, path::{Component, Path}};
 
@@ -35,7 +35,7 @@ pub(super) fn local(report: &mut Report, folder: &Path) -> Result<(), String> {
                     Ok(bytes)
                 }) {
                     Ok(bytes) if bytes.len() as u64 <= JSON_LIMIT => {
-                        fields.insert(format!("model_{key}_hex"), hex(&bytes));
+                        fields.insert(format!("model_{key}_hex"), to_hex(&bytes));
                         "present"
                     }
                     _ => "unreadable",
@@ -175,7 +175,7 @@ pub(super) fn remote<R: crate::runner::Runner>(runner: &mut R, machine: &crate::
             if name.len() > 16 * 1024 { offset += 1; continue; }
             let quoted = crate::runner::quote(name);
             if command.len() + quoted.len() > 24 * 1024 && offset > first { break; }
-            command += &format!("if vade_model_file \"$vade_model\"/{quoted}; then printf 'model_shard.{}={}:%s\\n' \"$(vade_model_size \"$vade_resolved\")\"; fi\n", offset - first, hex(name.as_bytes()));
+            command += &format!("if vade_model_file \"$vade_model\"/{quoted}; then printf 'model_shard.{}={}:%s\\n' \"$(vade_model_size \"$vade_resolved\")\"; fi\n", offset - first, to_hex(name.as_bytes()));
             offset += 1;
         }
         let result = runner.run(&crate::runner::ssh(&machine.ssh, command, &format!("{} doctor indexed files", machine.name)))
@@ -238,7 +238,7 @@ pub(super) fn rows(report: &mut Report, prefix: &str, folder: &str, fields: &Fie
 
 fn inventory_fields(fields: &mut Fields, shards: &[(String, u64)], complete: bool) {
     for (index, (name, bytes)) in shards.iter().enumerate() {
-        fields.insert(format!("model_shard.{index}"), format!("{}:{bytes}", hex(name.as_bytes())));
+        fields.insert(format!("model_shard.{index}"), format!("{}:{bytes}", to_hex(name.as_bytes())));
     }
     fields.insert("model_shards".into(), shards.len().to_string());
     let total = shards.iter().try_fold(0u64, |total, (_, bytes)| total.checked_add(*bytes));
@@ -298,21 +298,14 @@ fn shard_name(value: &str) -> bool {
 fn index_names(index: &Value) -> Result<BTreeSet<String>, String> {
     let Some(Value::Object(map)) = index.object().ok().and_then(|object| object.get("weight_map")) else { return Err("The model index has no weight_map object.".into()); };
     if map.is_empty() { return Err("The model index has no tensor entries.".into()); }
-    map.iter().map(|(_, value)| value.string().ok().filter(|name| shard_name(name)).map(str::to_string)
+    map.values().map(|value| value.string().ok().filter(|name| shard_name(name)).map(str::to_string)
         .ok_or_else(|| "The model index has an invalid shard name.".into())).collect()
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const DIGITS: &[u8] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes { out.push(DIGITS[(byte >> 4) as usize] as char); out.push(DIGITS[(byte & 15) as usize] as char); }
-    out
 }
 
 fn unhex(value: &str) -> Result<String, String> {
     let digit = |byte: u8| match byte { b'0'..=b'9' => Some(byte - b'0'), b'a'..=b'f' => Some(byte - b'a' + 10), b'A'..=b'F' => Some(byte - b'A' + 10), _ => None };
     if !value.len().is_multiple_of(2) { return Err("The model file record has invalid text.".into()); }
-    let bytes = value.as_bytes().chunks_exact(2).map(|pair| digit(pair[0]).zip(digit(pair[1])).map(|(a, b)| a * 16 + b))
+    let bytes = value.as_bytes().as_chunks::<2>().0.iter().map(|[high, low]| digit(*high).zip(digit(*low)).map(|(a, b)| a * 16 + b))
         .collect::<Option<Vec<_>>>().ok_or("The model file record has invalid text.")?;
     String::from_utf8(bytes).map_err(|_| "The model file record is not UTF-8 text.".into())
 }

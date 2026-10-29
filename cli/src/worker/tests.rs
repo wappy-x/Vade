@@ -48,7 +48,7 @@ fn stat_handles_parentheses_and_zombies() {
 fn arguments_are_numeric_contiguous_and_binary_identity_roundtrips() {
     assert!(arguments(&fields(&[("arg.1", "missing zero")])).is_err());
     let bytes = b"engine\0arg\xff";
-    assert_eq!(unhex(&hex(bytes)).unwrap(), bytes);
+    assert_eq!(unhex(&to_hex(bytes)).unwrap(), bytes);
     assert!(unhex("a").is_err());
     assert!(environment(&fields(&[("env.KEY", "one"), ("env_unset.KEY", "1")])).is_err());
 }

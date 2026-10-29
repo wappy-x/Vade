@@ -159,7 +159,7 @@ fn install_manifest_round_trips_seeded_artifacts_and_rejects_corrupt_fields() {
             ("binary_sha256=", "binary_sha256=z", "Artifact SHA256 is invalid"),
             ("worker=/fixture/0/vade", "worker=/fixture/../vade", "no parent traversal"),
         ] {
-            let error = Manifest::parse(&encoded.replacen(from, to, 1)).err().expect("corrupt manifest must fail");
+            let error = Manifest::parse(&encoded.replacen(from, to, 1)).expect_err("corrupt manifest must fail");
             assert!(error.contains(expected), "{error}");
         }
     }
