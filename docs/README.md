@@ -19,6 +19,7 @@ Vade's main pages, grouped by what you want to do.
 | [First chat on one Spark](../harness/docs/first-run.md) | What `vade launch` does: release bundle or source build, how it finds the model you downloaded, the settings it saves, and how to start and stop later |
 | [CLI reference](../cli/README.md) | The `vade` commands: install, start, chat, check exactness, benchmark, diagnose, recover and stop |
 | [Examples](../examples/README.md) | Short examples you can run: curl against the OpenAI and Anthropic APIs, a Rust client, Claude Code, Codex, `vade bench` and a two-Spark launch |
+| [OpenAI-compatible API](openai-api.md) | Base URLs, a curl and a Python example, the chat fields Vade accepts, streaming, tool calls, errors, API keys and the known gaps. It also has notes for Continue and Open WebUI |
 
 ### From a controller, or with more Sparks
 

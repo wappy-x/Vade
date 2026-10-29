@@ -48,6 +48,11 @@ pub const ROUTES: &[&str] = &[
     "/v1/kv/release",
     "/health",
 ];
+/// OpenAI routes this text-only engine does not serve. The gateway answers them
+/// itself with 501 and a plain reason, so a client does not read a bare 404 as
+/// a wrong base URL.
+const UNSERVED_ROUTES: &[&str] = &["/v1/embeddings", "/embeddings"];
+const UNSERVED_MESSAGE: &str = "embeddings are not implemented: Vade serves text generation only; use a separate embedding server";
 /// The read-only routes; every other accepted route takes POST.
 const GET_ROUTES: &[&str] = &["/v1/capabilities", "/v1/models", "/models", "/health"];
 /// `vade-gateway --help`; `vade-harness gateway --help` states the same rules.
@@ -303,6 +308,7 @@ fn reject_busy(socket: TcpStream) -> io::Result<()> {
 /// The body of an error the gateway answers itself. Messages routes get the
 /// Anthropic shape; every other route gets the OpenAI shape with a `type`, as
 /// the engine's own errors carry, so SDKs can tell throttling from failure.
+/// The OpenAI shape also carries `param` and `code`, as the OpenAI schema does.
 pub(crate) fn error_body(messages: bool, status: u16, message: &str) -> String {
     let kind = match status {
         401 => "authentication_error",
@@ -310,16 +316,22 @@ pub(crate) fn error_body(messages: bool, status: u16, message: &str) -> String {
         404 => "not_found_error",
         413 => "request_too_large",
         429 => "rate_limit_error",
+        501 => "invalid_request_error",
         503 | 529 if messages => "overloaded_error",
         503 | 529 => "overloaded",
         500..=599 if messages => "api_error",
         500..=599 => "server_error",
         _ => "invalid_request_error",
     };
+    let code = match status {
+        401 => "\"invalid_api_key\"",
+        501 => "\"unsupported_endpoint\"",
+        _ => "null",
+    };
     if messages {
         format!("{{\"type\":\"error\",\"error\":{{\"type\":\"{kind}\",\"message\":{}}}}}", json::quote(message))
     } else {
-        format!("{{\"error\":{{\"type\":\"{kind}\",\"message\":{}}}}}", json::quote(message))
+        format!("{{\"error\":{{\"type\":\"{kind}\",\"message\":{},\"param\":null,\"code\":{code}}}}}", json::quote(message))
     }
 }
 
@@ -431,6 +443,9 @@ fn handle_target(
     let local_stats = path == STATS_PATH && matches!(upstream, Upstream::Cluster(_));
     // One engine's /health is its own; a cluster reports per endpoint in its stats.
     let cluster_health = path == "/health" && matches!(upstream, Upstream::Cluster(_));
+    if UNSERVED_ROUTES.contains(&path) {
+        return reject(&mut reader, messages, 501, UNSERVED_MESSAGE);
+    }
     if !local_stats
         && (!ROUTES.contains(&path) || cluster_health)
     {

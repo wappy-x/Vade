@@ -254,7 +254,8 @@ Routes: POST /v1/completions /completions /v1/chat/completions /chat/completions
   /v1/kv/release; GET /v1/capabilities /v1/models /models /health.
 Other paths receive 404 before any upstream contact, except that cluster mode
 (multiple upstreams) also exposes GET /_vade/gateway/stats and answers 404 to
-/health, which is per endpoint.
+/health, which is per endpoint. /v1/embeddings and /embeddings receive 501: the
+engine serves text generation only.
 One upstream uses the plain relay. In cluster mode /v1/cancel and /v1/kv/release go to
 every upstream; the reply is the first that reports success, else the first reply. Explicit caller fields retain their bytes.
 Generation defaults: temperature=0 (greedy), seed=20260905, top_p=1.0, top_k=0,

@@ -7,6 +7,7 @@
 | `codex_child.rs`, `hermes_child.rs` | First-party stand-ins that speak the Codex and Hermes protocols, so delegation is tested without installing them. |
 | `codex-v2-items.jsonl` | Sample protocol items. |
 | `engine-capabilities-v1.json` | A sample engine capabilities reply (`vade.engine.v1`). |
+| `openai-clients.json` | Requests from the openai Python client (captured), Continue and Open WebUI (from memory) and curl, with engine-format replies; see [OpenAI-compatible API](../../../docs/openai-api.md#how-this-page-is-tested). |
 | `lock_spawn_probe.rs` | A standalone Mac diagnostic, not part of the test run. |
 
 **How it fits:** read by the tests in [`tests/`](../README.md).

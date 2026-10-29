@@ -112,8 +112,9 @@ Pick the way that fits how you work:
    `vade-harness gateway --upstream http://127.0.0.1:18080`. It serves only the
    API routes listed under [Gateway relay, Codex and Hermes in
    detail](#gateway-relay-codex-and-hermes-in-detail), including the model
-   list that Open WebUI, Continue and the OpenAI SDKs read first, and answers
-   404 to any other path.
+   list that Open WebUI, Continue and the OpenAI SDKs read first. It answers
+   501 to `/v1/embeddings` and 404 to any other path. The [OpenAI-compatible
+   API](../docs/openai-api.md) page lists what each route accepts.
 
 3. **Hand turns to Codex or Hermes (Vade UI + installed agent).** You keep the
    Vade UI, and the installed agent owns each turn.
@@ -873,10 +874,17 @@ gateways relabel `role: "system"` entries inside `messages` as `"user"`. The
 engine refuses such entries, and Claude Code sends one with every request.
 Only those role strings change; every other byte is forwarded as sent.
 
+**Streamed replies in chat history.** On `/v1/chat/completions`, both gateways
+relabel a message `role` of `null` as `"assistant"`. The openai Python client
+sends that null when code adds a message it built from a stream, because the
+engine's deltas carry no role. See [Streamed tool calls in
+history](../docs/openai-api.md#streamed-tool-calls-in-history).
+
 **Errors the gateway answers itself.** Refusals such as these, a busy
 gateway or an unreachable upstream come back in the route's own dialect:
 `{"type":"error","error":{"type":"authentication_error","message":...}}` on
-Messages routes, and `{"error":{"type":"authentication_error","message":...}}`
+Messages routes, and
+`{"error":{"type":"authentication_error","message":...,"param":null,"code":"invalid_api_key"}}`
 everywhere else, so Anthropic and OpenAI SDKs can tell a rate limit from a
 server failure. Upstream errors are relayed unchanged.
 

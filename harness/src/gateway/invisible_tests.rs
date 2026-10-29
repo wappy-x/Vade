@@ -211,7 +211,7 @@ fn local_errors_speak_the_dialect_of_the_route() {
         (&locked, "/v1/messages?beta=true", r#"{"type":"error","error":{"type":"authentication_error","message":"#),
         (&locked, "/v1/chat/completions", r#"{"error":{"type":"authentication_error","message":"#),
         (&Access::default(), "/v1/messages", r#"{"type":"error","error":{"type":"api_error","message":"upstream connection failed; request not replayed"}}"#),
-        (&Access::default(), "/v1/responses", r#"{"error":{"type":"server_error","message":"upstream connection failed; request not replayed"}}"#),
+        (&Access::default(), "/v1/responses", r#"{"error":{"type":"server_error","message":"upstream connection failed; request not replayed","param":null,"code":null}}"#),
     ] {
         let reply = guarded(&runtime, access, &post(path));
         let (_, actual) = reply.split_once("\r\n\r\n").unwrap();

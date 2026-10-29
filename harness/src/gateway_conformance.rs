@@ -549,9 +549,10 @@ fn gateway_errors_carry_a_type_in_both_dialects() {
         (400, "invalid_request_error", "invalid_request_error"), (401, "authentication_error", "authentication_error"),
         (403, "permission_error", "permission_error"), (404, "not_found_error", "not_found_error"),
         (413, "request_too_large", "request_too_large"), (429, "rate_limit_error", "rate_limit_error"),
-        (502, "server_error", "api_error"), (503, "overloaded", "overloaded_error"),
+        (501, "invalid_request_error", "invalid_request_error"), (502, "server_error", "api_error"), (503, "overloaded", "overloaded_error"),
     ] {
-        assert_eq!(error_body(false, status, "m\"x"), format!(r#"{{"error":{{"type":"{openai}","message":"m\"x"}}}}"#));
+        let code = match status { 401 => "\"invalid_api_key\"", 501 => "\"unsupported_endpoint\"", _ => "null" };
+        assert_eq!(error_body(false, status, "m\"x"), format!(r#"{{"error":{{"type":"{openai}","message":"m\"x","param":null,"code":{code}}}}}"#));
         assert_eq!(error_body(true, status, "m"), format!(r#"{{"type":"error","error":{{"type":"{anthropic}","message":"m"}}}}"#));
     }
 }
@@ -560,7 +561,8 @@ fn gateway_errors_carry_a_type_in_both_dialects() {
 fn unsupported_routes_methods_encodings_and_ambiguous_framing_are_explicit() {
     for (request, status) in [
         (b"GET /v1/responses HTTP/1.1\r\nHost: localhost\r\n\r\n".as_slice(), 405),
-        (b"POST /v1/embeddings HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 404),
+        (b"POST /v1/embeddings HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 501),
+        (b"POST /v1/audio/speech HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 404),
         (b"POST /v1/capabilities HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 405),
         (b"POST /v1/models HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}".as_slice(), 405),
         (b"GET /v1/models/mock HTTP/1.1\r\nHost: localhost\r\n\r\n".as_slice(), 404),
@@ -764,4 +766,213 @@ fn opaque_completions_sse_survives_bytewise_http_chunks_on_both_gateways() {
             server.join().unwrap();
         }
     }
+}
+
+// Requests from the clients people point at Vade, replayed through every gateway
+// lane. Each case says whether its request was captured from the real client or
+// written from memory; the engine replies follow the engine's own wire format.
+// A case passes when the gateway forwards what the engine expects and the client
+// can read everything it needs from the relayed reply.
+fn client_cases() -> Vec<json::Value> {
+    let value = json::parse(include_str!("../tests/fixtures/openai-clients.json")).unwrap();
+    assert_eq!(value.get("schema").unwrap().as_str(), Some("vade.openai-clients.v1"));
+    value.get("cases").unwrap().as_array().unwrap().to_vec()
+}
+fn text(value: &json::Value, key: &str) -> String { value.get(key).and_then(json::Value::as_str).unwrap_or_else(|| panic!("{key}")).into() }
+fn number(value: Option<&json::Value>) -> u64 { json::stringify(value.unwrap()).unwrap().parse().unwrap() }
+
+fn client_call(endpoint: Endpoint, lane: u8, access: Access, case: &json::Value, extra: &str) -> (transport::Head, Vec<u8>) {
+    let gateway = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = gateway.local_addr().unwrap();
+    let relay = thread::spawn(move || {
+        let socket = gateway.accept().unwrap().0;
+        let result = if lane == 0 { handle_target(socket, &Upstream::Single(endpoint.clone()), None, &ConnectionPool::default(), &access) } else {
+            invisible::handle_conformance(socket, &format!("http://{}", endpoint.authority), lane == 2, None)
+        };
+        if let Err(e) = result { assert_eq!(e.kind(), io::ErrorKind::ConnectionAborted, "relay failed: {e}"); }
+    });
+    let payload = text(case, "request");
+    let mut request = format!("{} {} HTTP/1.1\r\nHost: localhost:{}\r\n", text(case, "method"), text(case, "path"), address.port());
+    for pair in case.get("headers").unwrap().as_array().unwrap() {
+        let pair = pair.as_array().unwrap();
+        if extra.is_empty() || pair[0].as_str() != Some("authorization") {
+            request.push_str(&format!("{}: {}\r\n", pair[0].as_str().unwrap(), pair[1].as_str().unwrap()));
+        }
+    }
+    if !payload.is_empty() { request.push_str(&format!("Content-Length: {}\r\n", payload.len())); }
+    request.push_str(extra);
+    let mut socket = DeadlineStream::new(TcpStream::connect(address).unwrap(), None).unwrap();
+    write!(socket, "{request}\r\n{payload}").unwrap();
+    let mut reader = BufReader::new(socket);
+    let head = transport::read_head(&mut reader).unwrap();
+    let mut body = BodyReader::new(reader, &head, false, transport::MAX_BODY).unwrap();
+    let mut bytes = Vec::new();
+    body.read_to_end(&mut bytes).unwrap();
+    relay.join().unwrap();
+    (head, bytes)
+}
+
+/// What a client reads from a reply: text, tool calls rebuilt from deltas the way
+/// the OpenAI SDKs rebuild them, the finish reason, usage, model ids and errors.
+#[derive(Debug, Default, PartialEq)]
+struct ClientView { content: String, reasoning: String, text: String, finish: String,
+    calls: Vec<(String, String, String)>, usage: Vec<u64>, models: Vec<String>, error: Vec<String> }
+
+fn client_view(bytes: &[u8], stream: bool) -> ClientView {
+    let body = std::str::from_utf8(bytes).unwrap();
+    let mut view = ClientView::default();
+    let read = |value: &json::Value, view: &mut ClientView| {
+        if let Some(usage) = value.get("usage").filter(|u| **u != json::Value::Null) {
+            view.usage = vec![number(usage.get("prompt_tokens")), number(usage.get("completion_tokens")), number(usage.get("total_tokens")),
+                number(usage.get("prompt_tokens_details").and_then(|d| d.get("cached_tokens")))];
+            assert_eq!(view.usage[0] + view.usage[1], view.usage[2]);
+        }
+        let object = text(value, "object");
+        assert!(value.get("id").and_then(json::Value::as_str).is_some() && value.get("created").is_some() && value.get("model").is_some());
+        for choice in value.get("choices").unwrap().as_array().unwrap() {
+            assert_eq!(number(choice.get("index")), 0);
+            if let Some(reason) = choice.get("finish_reason").and_then(json::Value::as_str) {
+                assert!(["stop", "length", "tool_calls"].contains(&reason), "{reason}");
+                view.finish = reason.into();
+            }
+            if object == "text_completion" { view.text.push_str(&text(choice, "text")); continue; }
+            let message = if stream { assert_eq!(object, "chat.completion.chunk"); choice.get("delta").unwrap() } else {
+                assert_eq!(object, "chat.completion");
+                let message = choice.get("message").unwrap();
+                assert_eq!(message.get("role").and_then(json::Value::as_str), Some("assistant"));
+                message
+            };
+            view.content.push_str(message.get("content").and_then(json::Value::as_str).unwrap_or(""));
+            view.reasoning.push_str(message.get("reasoning_content").and_then(json::Value::as_str).unwrap_or(""));
+            for (position, call) in message.get("tool_calls").and_then(json::Value::as_array).unwrap_or(&[]).iter().enumerate() {
+                let index = if stream { number(call.get("index")) as usize } else { position };
+                let function = call.get("function").unwrap();
+                if let Some(id) = call.get("id").and_then(json::Value::as_str) {
+                    // A new call opens with its id, type and name, as the SDKs require.
+                    assert_eq!((index, text(call, "type")), (view.calls.len(), "function".into()));
+                    view.calls.push((id.into(), text(function, "name"), String::new()));
+                }
+                view.calls[index].2.push_str(&text(function, "arguments"));
+            }
+        }
+    };
+    if stream {
+        let events: Vec<&str> = body.split("\n\n").filter(|event| !event.is_empty()).collect();
+        assert_eq!(events.last(), Some(&"data: [DONE]"), "a stream ends with [DONE]");
+        for event in &events[..events.len() - 1] {
+            read(&json::parse(event.strip_prefix("data: ").unwrap()).unwrap(), &mut view);
+        }
+        for call in &view.calls { assert!(json::parse(&call.2).is_ok_and(|args| matches!(args, json::Value::Object(_))), "{}", call.2); }
+        return view;
+    }
+    let value = json::parse(body).unwrap();
+    if let Some(error) = value.get("error") {
+        view.error = vec![text(error, "type"), text(error, "message")];
+        if let Some(code) = error.get("code").and_then(json::Value::as_str) { view.error.push(code.into()); }
+    } else if value.get("object").and_then(json::Value::as_str) == Some("list") {
+        view.models = value.get("data").unwrap().as_array().unwrap().iter().map(|model| text(model, "id")).collect();
+    } else { read(&value, &mut view); }
+    view
+}
+
+fn expected_view(expect: &json::Value) -> ClientView {
+    let field = |key: &str| expect.get(key).and_then(json::Value::as_str).unwrap_or("").to_owned();
+    let list = |key: &str| expect.get(key).and_then(json::Value::as_array).unwrap_or(&[]).to_vec();
+    let error = ["error_type", "error_message", "error_code"].iter().map(|key| field(key)).filter(|s| !s.is_empty()).collect();
+    ClientView { content: field("content"), reasoning: field("reasoning"), text: field("text"), finish: field("finish_reason"),
+        calls: list("tool_calls").iter().map(|call| { let call = call.as_array().unwrap();
+            (call[0].as_str().unwrap().into(), call[1].as_str().unwrap().into(), call[2].as_str().unwrap().into()) }).collect(),
+        usage: list("usage").iter().map(|n| number(Some(n))).collect(),
+        models: list("models").iter().map(|m| m.as_str().unwrap().into()).collect(), error }
+}
+
+fn effective_request(case: &json::Value) -> Option<Vec<u8>> {
+    let mut body = text(case, "request");
+    if let Some(fold) = case.get("fold").and_then(json::Value::as_array) {
+        body = body.replace(fold[0].as_str().unwrap(), fold[1].as_str().unwrap());
+    }
+    match text(case, "upstream").as_str() {
+        "none" => None,
+        "same" => Some(body.into_bytes()),
+        "defaults" => {
+            let end = body.rfind('}').unwrap();
+            Some(format!("{},{}{}", &body[..end], &sampling::DEFAULTS_JSON[1..sampling::DEFAULTS_JSON.len() - 1], &body[end..]).into_bytes())
+        }
+        other => panic!("unknown upstream expectation {other}"),
+    }
+}
+
+/// One mock engine answering one request with the case's reply; returns what it received.
+fn engine_for(case: &json::Value) -> (Endpoint, thread::JoinHandle<Option<(transport::Head, Vec<u8>)>>) {
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = Endpoint::parse(&format!("http://{}/v1", upstream.local_addr().unwrap())).unwrap();
+    let reply = case.get("reply").map(|reply| (number(case.get("reply_status")), text(case, "reply_type"), reply.as_str().unwrap().to_owned()));
+    let server = thread::spawn(move || {
+        let (status, kind, reply) = reply?;
+        let mut reader = BufReader::new(DeadlineStream::new(upstream.accept().unwrap().0, None).unwrap());
+        let received = receive(&mut reader);
+        write!(reader.get_mut(), "HTTP/1.1 {status} Engine\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len()).unwrap();
+        Some(received)
+    });
+    (endpoint, server)
+}
+
+#[test]
+fn recorded_client_requests_reach_the_engine_and_clients_read_the_replies() {
+    let cases = client_cases();
+    assert!(cases.len() >= 15);
+    for client in ["openai Python client", "Continue", "Open WebUI", "curl"] {
+        assert!(cases.iter().any(|case| text(case, "client").starts_with(client)), "{client}");
+    }
+    for case in &cases {
+        let name = text(case, "name");
+        let provenance = text(case, "provenance");
+        assert!(["verified:", "from memory:", "from docs:"].iter().any(|p| provenance.starts_with(p)), "{name}: {provenance}");
+        let expected = effective_request(case);
+        // The standalone gateway passes every path through, so only the core answers 501 itself.
+        // Its opt-in policies (lane 2) add cache fields on purpose and are covered above.
+        let lanes = if expected.is_none() { 0..1 } else { 0..2 };
+        for lane in lanes {
+            let (endpoint, server) = engine_for(case);
+            let (head, bytes) = client_call(endpoint, lane, Access::default(), case, "");
+            let received = server.join().unwrap();
+            let expect = case.get("expect").unwrap();
+            assert!(head.first.starts_with(&format!("HTTP/1.1 {} ", number(expect.get("status")))), "{name} lane {lane}: {}", head.first);
+            match (&expected, received) {
+                (Some(body), Some((upstream, forwarded))) => {
+                    assert_eq!(upstream.first, format!("{} {} HTTP/1.1", text(case, "method"), text(case, "path")), "{name} lane {lane}");
+                    assert_eq!(String::from_utf8(forwarded).unwrap(), String::from_utf8(body.clone()).unwrap(), "{name} lane {lane}");
+                    assert_eq!(bytes, text(case, "reply").as_bytes(), "{name} lane {lane}: the reply is relayed byte for byte");
+                }
+                (None, None) => {}
+                _ => panic!("{name} lane {lane}: upstream expectation mismatch"),
+            }
+            let stream = expect.get("stream").is_some_and(|s| *s == json::Value::Bool(true));
+            assert_eq!(client_view(&bytes, stream), expected_view(expect), "{name} lane {lane}");
+        }
+    }
+}
+
+#[test]
+fn optional_bearer_token_gates_client_requests_and_stays_local() {
+    let case = client_cases().into_iter().find(|case| text(case, "name") == "openai-python-chat").unwrap();
+    let mut access = Access::default();
+    access.require_token("sk-local").unwrap();
+    // The SDK's own Authorization header carries the configured key.
+    let (endpoint, server) = engine_for(&case);
+    let (head, _) = client_call(endpoint, 0, access.clone(), &case, "");
+    assert!(head.first.starts_with("HTTP/1.1 200 "));
+    let (upstream, _) = server.join().unwrap().unwrap();
+    assert_eq!(upstream.get("authorization"), None, "the gateway token is not forwarded");
+    for wrong in ["Authorization: Bearer other\r\n", "Authorization: Basic c2stbG9jYWw=\r\n", "X-Unrelated: 1\r\n"] {
+        let (endpoint, _) = engine_for(&json::Value::Object(Vec::new()));
+        let (head, bytes) = client_call(endpoint, 0, access.clone(), &case, wrong);
+        assert!(head.first.starts_with("HTTP/1.1 401 "), "{wrong}");
+        let view = client_view(&bytes, false);
+        assert_eq!((view.error[0].as_str(), view.error.last().unwrap().as_str()), ("authentication_error", "invalid_api_key"));
+    }
+    // Off by default: any client key, or none, passes through to the engine unchanged.
+    let (endpoint, server) = engine_for(&case);
+    assert!(client_call(endpoint, 0, Access::default(), &case, "").0.first.starts_with("HTTP/1.1 200 "));
+    assert_eq!(server.join().unwrap().unwrap().0.get("authorization"), Some("Bearer sk-local"));
 }
