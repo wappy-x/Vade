@@ -28,9 +28,9 @@ pub fn read_only_http_factory(
             journal_name: None,
             model: Box::new(HttpChildModel::new(&endpoint)?),
             tools: Box::new(crate::agent::WorkspaceTools::new(
-                move |path: &str, offset, limit| {
+                move |path: &str, offset, limit, cancel: &AtomicBool| {
                     Ok(read
-                        .read_range(path, offset, limit)
+                        .read_range_cancellable(path, offset, limit, cancel)
                         .unwrap_or_else(|e| format!("Read refused: {e}")))
                 },
                 move |path: &str| list.list(path),

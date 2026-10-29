@@ -5,6 +5,19 @@ Changes that are merged but not yet released are under Unreleased.
 
 ## Unreleased
 
+- The agent can read text-based PDF files. `workspace_read` on a PDF of up to
+  50 MiB returns the text of each page under a `page N of M` line, and its
+  offset and limit page through that text. The harness parses the file itself
+  with the Rust standard library: cross-reference tables and streams, object
+  streams, Flate, LZW, ASCII85, ASCIIHex and run-length data, and fonts with
+  ToUnicode maps, standard encodings or `/Differences`. Encrypted files are
+  refused, and scanned pages get a note that there is no text layer. Each read
+  has one work budget for bytes read and decoded, parsed objects, cached data,
+  tables, font entries, work steps and nesting depth. Every parser and decoder
+  charges it before the work, so a hostile file stops at a limit, and a note
+  names the limit and the page. A cancelled tool call stops the read, also in
+  a child agent.
+
 - Flash-Next on two Sparks admits more short chats at once. A chat now
   reserves only the KV pages its rows use. Before, every chat reserved the
   pages for the whole context (8,231,544,132 bytes at `--context 131072`,

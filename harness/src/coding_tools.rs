@@ -103,7 +103,7 @@ pub fn definitions_with_reply_limit(reply_limit: usize) -> Value {
 /// other definitions are byte-identical either way.
 pub fn definitions_for(reply_limit: usize, shell: bool) -> Value {
     let base = WorkspaceTools::new(
-        |_: &str, _: usize, _: usize| Ok::<_, std::io::Error>(String::new()),
+        |_: &str, _: usize, _: usize, _: &AtomicBool| Ok::<_, std::io::Error>(String::new()),
         |_: &str| Ok::<_, std::io::Error>(Vec::<String>::new()),
     );
     let Value::Array(mut tools) = base.definitions() else {
@@ -122,7 +122,7 @@ pub fn definitions_for(reply_limit: usize, shell: bool) -> Value {
             .and_then(Value::as_str)
             != Some("workspace_read")
     });
-    tools.push(json::parse(r#"{"type":"function","function":{"name":"workspace_read","description":"Read a small UTF-8 byte range inside the approved workspace (source ≤4 MiB). Prefer workspace_search then workspace_read_lines for code; do not page whole files without a concrete need. offset is zero-based (default 0), limit 1–4096 (default bounded by a 4096-byte inline output including path/provenance). Partial results give actual bytes and next offset. Offset must be a UTF-8 boundary.","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":4096}},"required":["path"],"additionalProperties":false}}}"#).expect("native read schema"));
+    tools.push(json::parse(r#"{"type":"function","function":{"name":"workspace_read","description":"Read a small UTF-8 byte range inside the approved workspace (source ≤4 MiB). A PDF (≤50 MiB) reads as its extracted text layer, page by page; offsets index that text. Prefer workspace_search then workspace_read_lines for code; do not page whole files without a concrete need. offset is zero-based (default 0), limit 1–4096 (default bounded by a 4096-byte inline output including path/provenance). Partial results give actual bytes and next offset. Offset must be a UTF-8 boundary.","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":4096}},"required":["path"],"additionalProperties":false}}}"#).expect("native read schema"));
     tools.extend(extra);
     if !shell {
         tools.retain(|tool| tool.get("function").and_then(|f| f.get("name")).and_then(Value::as_str) != Some("workspace_shell"));
@@ -697,13 +697,13 @@ where
                     }
                 }
                 WorkspaceTools::new(
-                    |p: &str, offset, limit: usize| {
+                    |p: &str, offset, limit: usize, cancel: &AtomicBool| {
                         let source_cap = invocation
                             .max_output_bytes
                             .min(crate::artifacts::INLINE_BYTES)
                             .saturating_sub(p.len() + 512)
                             .max(1);
-                        Ok(match self.workspace.read_range(p, offset, limit.min(source_cap)) {
+                        Ok(match self.workspace.read_range_cancellable(p, offset, limit.min(source_cap), cancel) {
                             Ok(text) => format!("Path: {p}\n{text}"),
                             Err(error) => format!("Read refused: {error}"),
                         })

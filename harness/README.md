@@ -188,6 +188,12 @@ Native `workspace_read` accepts a zero-based byte `offset` and a byte `limit`
 total size and the next offset. Reads keep the hidden/credential path and
 directory-handle protections.
 
+A PDF file (up to 50 MiB) reads as the text of its text layer, page by page,
+and `offset` and `limit` then index that text. The reader is part of the
+harness and uses only the Rust standard library. It does not decrypt files or
+run OCR, so scanned pages and encrypted files give a short note instead of
+text. See [the PDF reader](src/pdf.rs) for what it reads and what it skips.
+
 `workspace_shell` accepts a named offline `check_profile` (`engine-host`,
 `engine-bench-host`, `harness-host`, `cli-host`) instead of argv, with a
 `--shell-toolchain` you picked. Profiles keep command approval and the

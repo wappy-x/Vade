@@ -13,6 +13,7 @@ pub mod protocol;
 pub mod session;
 pub mod setup;
 pub mod terminal;
+pub mod pdf;
 pub mod tools;
 pub mod transport;
 

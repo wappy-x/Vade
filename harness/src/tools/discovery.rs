@@ -53,6 +53,10 @@ impl Workspace {
         {
             return Err(error("source changed during discovery"));
         }
+        // Check the header first: an ASCII-only PDF is valid UTF-8 too.
+        if crate::pdf::is_pdf(&bytes[..bytes.len().min(1024)]) {
+            return Err(error("source is a PDF; read its extracted text with workspace_read"));
+        }
         String::from_utf8(bytes).map_err(|_| error("source is not UTF-8 text"))
     }
 

@@ -56,6 +56,9 @@ impl FileStamp {
 pub struct Workspace {
     root: PathBuf,
     state: StateLocation,
+    /// The last PDF read as text, keyed by path and file stamp, so paging
+    /// through one PDF parses it once.
+    pdf: std::sync::Mutex<Option<(String, FileStamp, std::sync::Arc<str>)>>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     dir: anchored::Dir,
 }
@@ -85,6 +88,7 @@ impl Workspace {
         Ok(Self {
             root,
             state,
+            pdf: std::sync::Mutex::new(None),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             dir,
         })
@@ -113,6 +117,11 @@ impl Workspace {
     /// Byte ranges use the same anchored path checks as whole-file reads.
     /// Partial results state the actual half-open range and total source size.
     pub fn read_range(&self, path: &str, offset: usize, limit: usize) -> io::Result<String> {
+        self.read_range_cancellable(path, offset, limit, &std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// `read_range`; a set `cancel` flag stops PDF text extraction early.
+    pub fn read_range_cancellable(&self, path: &str, offset: usize, limit: usize, cancel: &std::sync::atomic::AtomicBool) -> io::Result<String> {
         use std::io::{Read, Seek, SeekFrom};
         if !(1..=MAX_READ_BYTES).contains(&limit) {
             return Err(error(&format!(
@@ -124,6 +133,9 @@ impl Workspace {
             .ok_or_else(|| error("file not found"))?;
         if stamp.directory {
             return Err(error("read requires a regular file"));
+        }
+        if let Some(text) = self.pdf_text(path, &mut file, &stamp, cancel)? {
+            return text_range(&text, offset, limit, stamp.bytes);
         }
         if stamp.bytes > MAX_TEXT_BYTES as u64 {
             return Err(error(&format!(
@@ -169,6 +181,38 @@ impl Workspace {
             stamp.bytes,
             text.len()
         ))
+    }
+
+    /// The extracted text when `file` is a PDF; `None` for any other file.
+    /// The cache lock is not held during extraction, so one slow read does
+    /// not block another.
+    fn pdf_text(&self, path: &str, file: &mut std::fs::File, stamp: &FileStamp, cancel: &std::sync::atomic::AtomicBool) -> io::Result<Option<std::sync::Arc<str>>> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut head = Vec::new();
+        (&mut *file).take(1024).read_to_end(&mut head)?;
+        if !crate::pdf::is_pdf(&head) {
+            return Ok(None);
+        }
+        if stamp.bytes > crate::pdf::MAX_PDF_BYTES {
+            return Err(error(&format!(
+                "PDF file is {} bytes; PDF read limit is {} bytes (50 MiB)",
+                stamp.bytes,
+                crate::pdf::MAX_PDF_BYTES
+            )));
+        }
+        let cache = || self.pdf.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((p, s, text)) = cache().as_ref() && p == path && s == stamp {
+            return Ok(Some(text.clone()));
+        }
+        file.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::new();
+        (&mut *file).take(crate::pdf::MAX_PDF_BYTES + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != stamp.bytes || FileStamp::from_metadata(&file.metadata()?) != *stamp {
+            return Err(error("source file changed during PDF read"));
+        }
+        let text: std::sync::Arc<str> = crate::pdf::text(&bytes, cancel).map_err(|e| error(&e))?.into();
+        *cache() = Some((path.to_owned(), stamp.clone(), text.clone()));
+        Ok(Some(text))
     }
 
     /// Uses the same anchored boundary as tools; a missing leaf is distinct from
@@ -329,6 +373,33 @@ impl Workspace {
 
 fn error(message: &str) -> io::Error {
     io::Error::other(message)
+}
+
+/// A byte range of text extracted from a PDF of `source` bytes, with the same
+/// UTF-8 boundary rules as a ranged read of a text file.
+fn text_range(text: &str, offset: usize, limit: usize, source: u64) -> io::Result<String> {
+    if offset > text.len() {
+        return Err(error(&format!("read offset is {offset} bytes; extracted PDF text is {} bytes", text.len())));
+    }
+    if !text.is_char_boundary(offset) {
+        return Err(error("offset must be a UTF-8 byte boundary of the extracted PDF text"));
+    }
+    let mut end = offset.saturating_add(limit).min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end == offset && offset < text.len() {
+        return Err(error("limit must fit one character of the extracted PDF text"));
+    }
+    if offset == 0 && end == text.len() {
+        return Ok(text.to_owned());
+    }
+    Ok(format!(
+        "Read bytes {offset}..{end} of {} of extracted PDF text (source PDF {source} bytes; {} bytes; range limit {limit}; next offset {end}).\n{}",
+        text.len(),
+        end - offset,
+        &text[offset..end]
+    ))
 }
 
 pub(crate) const CREDENTIAL_NAMES: &[&str] = &[
@@ -974,6 +1045,33 @@ mod tests {
             assert!(safe_parts(path).is_err(), "{path:?}");
         }
         assert_eq!(safe_parts("./src/main.rs").unwrap(), ["src", "main.rs"]);
+    }
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn pdf_reads_as_extracted_text_ranges() {
+        let f = Fixture::new();
+        fs::write(f.0.join("spec.pdf"), crate::pdf::tests::sample(&["First page", "Second page"])).unwrap();
+        fs::write(f.0.join("mentions.rs"), "const HEADER: &[u8] = b\"%PDF-1.7\";\n").unwrap();
+        let w = f.workspace();
+        let whole = w.read_range("spec.pdf", 0, MAX_READ_BYTES).unwrap();
+        assert!(whole.starts_with("PDF text layer extracted by Vade: 2 pages."), "{whole}");
+        assert!(whole.ends_with("page 1 of 2\nFirst page\n\npage 2 of 2\nSecond page\n"), "{whole}");
+        let at = whole.find("Second").unwrap();
+        let part = w.read_range("spec.pdf", at, 6).unwrap();
+        assert!(part.starts_with(&format!("Read bytes {at}..{} of {} of extracted PDF text", at + 6, whole.len())), "{part}");
+        assert!(part.ends_with(").\nSecond"), "{part}");
+        // The cached text follows a file change.
+        fs::write(f.0.join("spec.pdf"), crate::pdf::tests::sample(&["Changed"])).unwrap();
+        assert!(w.read_range("spec.pdf", 0, MAX_READ_BYTES).unwrap().contains("page 1 of 1\nChanged\n"));
+        assert!(w.read_range("spec.pdf", 1 << 20, 4).unwrap_err().to_string().contains("extracted PDF text is"));
+        assert_eq!(w.read_range("mentions.rs", 0, 4096).unwrap(), "const HEADER: &[u8] = b\"%PDF-1.7\";\n");
+        use std::io::Write;
+        let big = fs::File::create(f.0.join("big.pdf")).unwrap();
+        (&big).write_all(b"%PDF-1.7\n").unwrap();
+        big.set_len(crate::pdf::MAX_PDF_BYTES + 1).unwrap();
+        assert!(w.read_range("big.pdf", 0, 16).unwrap_err().to_string().contains("PDF read limit is 52428800 bytes (50 MiB)"));
+        fs::write(f.0.join("bad.pdf"), b"%PDF-1.7\nnothing else").unwrap();
+        assert!(w.read_range("bad.pdf", 0, 16).unwrap_err().to_string().contains("no readable document catalog"));
     }
     #[test]
     #[cfg(any(target_os = "macos", target_os = "linux"))]

@@ -952,7 +952,9 @@ fn invalid_arguments_content(reason: &'static str, cap: usize) -> String {
 }
 
 /// A small adapter for the UI worker's existing workspace-bound read/list API:
-/// `WorkspaceTools::new(|path, offset, limit| workspace.read_range(path, offset, limit), |path| workspace.list(path))`.
+/// `WorkspaceTools::new(|path, offset, limit, cancel| workspace.read_range_cancellable(path, offset, limit, cancel), |path| workspace.list(path))`.
+/// The read callback receives the tool call's cancel flag, so a long read (a
+/// PDF text extraction) stops when the call is cancelled.
 /// The supplied callbacks MUST already enforce workspace/credential boundaries.
 pub struct WorkspaceTools<R, L> {
     read: R,
@@ -966,7 +968,7 @@ impl<R, L> WorkspaceTools<R, L> {
 
     pub fn definitions(&self) -> Value {
         json::parse(r#"[
-            {"type":"function","function":{"name":"workspace_read","description":"Read a UTF-8 byte range inside the approved workspace. Source ≤4 MiB; offset is zero-based (default 0), limit 1–65536 bytes (default bounded by tool output). Partial results state actual bytes and next offset. Offset must be a UTF-8 boundary.","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":65536}},"required":["path"],"additionalProperties":false}}},
+            {"type":"function","function":{"name":"workspace_read","description":"Read a UTF-8 byte range inside the approved workspace. Source ≤4 MiB; a PDF (≤50 MiB) reads as its extracted text layer and offsets index that text; offset is zero-based (default 0), limit 1–65536 bytes (default bounded by tool output). Partial results state actual bytes and next offset. Offset must be a UTF-8 boundary.","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":65536}},"required":["path"],"additionalProperties":false}}},
             {"type":"function","function":{"name":"workspace_list","description":"List a bounded directory inside the approved workspace.","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}}}
         ]"#).expect("static tool definitions are valid JSON")
     }
@@ -974,7 +976,7 @@ impl<R, L> WorkspaceTools<R, L> {
 
 impl<R, L> ToolExecutor for WorkspaceTools<R, L>
 where
-    R: FnMut(&str, usize, usize) -> io::Result<String>,
+    R: FnMut(&str, usize, usize, &AtomicBool) -> io::Result<String>,
     L: FnMut(&str) -> io::Result<Vec<String>>,
 {
     fn execute(
@@ -1016,7 +1018,7 @@ where
                 } else {
                     limit
                 };
-                (self.read)(path, offset, limit).map_err(|_| ToolError::Denied)
+                (self.read)(path, offset, limit, cancel).map_err(|_| ToolError::Denied)
             }
             "workspace_list" => {
                 let names = (self.list)(path).map_err(|_| ToolError::Denied)?;

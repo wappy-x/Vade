@@ -163,6 +163,36 @@ Whole-file local previews, project rules, skills and symbol scans keep their own
 independent read bounds. Limit errors name the actual size and the bound that
 applies.
 
+A file that starts with `%PDF-` reads as extracted text. PDF files may be up to
+50 MiB. The text starts with a summary line, then gives each page as a
+`page N of M` line and the page text, with one blank line between pages. Text
+follows the order of the content stream, so multi-column pages and tables can
+interleave. `offset` and `limit` index the extracted text, and partial reads
+name its size and the source PDF size. The reader reads at most 2,000 pages and
+4 MiB of text, and a note names the page where it stopped. Encrypted files are
+refused. A file with no text layer, such as a scan, gives one line that says so.
+When the page limit stops the read first, that line covers only the pages read
+and keeps the page-limit note. When a work limit skipped content and no text
+was found, the line says that the PDF may still have a text layer. The last
+extracted text is kept for the same path and file revision, so paging through a
+PDF parses it once.
+
+Each PDF read has one work budget, and every parser and decoder charges it
+before the work. The budget allows 1 GiB of bytes lexed or scanned, 512 MiB of
+stream data decoded or copied (every use of a stream counts), 64 Mi parsed
+objects, 256 MiB of cached data, 1 Mi built tables (Huffman tables,
+cross-reference sections, CMaps), 4 Mi font entries, 256 Mi other work steps and
+a nesting depth of 64. When one of these runs out, the read stops, and a note
+names the limit and the page. Stream bytes are not copied until a charged
+decode reads them. Some limits apply to one page and skip only part of it: one
+page's content may join up to 128 MiB from at most 4,096 `/Contents` entries,
+one content-stream operand may hold 65,536 objects, and Form XObjects may run
+2,000 times and 32 MiB of content on one page, and 100,000 times in one file. A
+note names the pages where such a limit skipped content. An inline image is
+skipped by its own data size or encoding; when its end cannot be found, the rest
+of that content stream is skipped and the page is noted. A cancelled or
+timed-out tool call stops the parse, also in a child agent's read.
+
 Each file is written through an exclusive temporary file in the same directory,
 fsync, and an atomic rename. An existing file keeps its mode bits, but its ACLs,
 extended attributes and old file identity are not kept. Add and move

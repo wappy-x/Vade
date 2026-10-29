@@ -936,7 +936,7 @@
     #[test]
     fn workspace_adapter_delegates_only_read_list_and_redacts_errors() {
         let mut tools = WorkspaceTools::new(
-            |path: &str, _: usize, _: usize| {
+            |path: &str, _: usize, _: usize, _: &AtomicBool| {
                 if path == "safe.rs" {
                     Ok("safe text".to_owned())
                 } else {
