@@ -2,10 +2,10 @@
 use super::*;
 use spark_gpu_probe::driver::MoeBatchScratch;
 
-/// Typed forward binding; lane11 supplies resident descriptors and funded route/work spans.
+/// The hybrid forward pass supplies resident descriptors and allocated routing and work buffers.
 /// # Safety
 /// Retain all allocations and the matching descriptor table through stream completion.
-#[allow(dead_code)] // Staged API: target serving refusal remains until common forward integration.
+#[allow(dead_code)] // Called by the hybrid forward pass.
 pub(super) unsafe fn run_fp8(b: &Backend<'_>, p: spark_gpu_probe::fp8_abi::RoutedParams,
     experts: &[spark_gpu_probe::fp8_abi::ExpertProjection], global_intermediate: u64, work: [u64; 6],
     routing: Option<spark_gpu_probe::kernel_params::MoeRouteBatch>) -> Result<()> {
@@ -94,11 +94,11 @@ impl<'a> Workspace<'a> {
     }
 }
 
-/// Finish call site for lane05's FP32 routed rows and the reduced shared-last row.
+/// Combine the FP32 routed expert rows with the reduced shared expert row.
 /// # Safety
 /// Retain valid disjoint input/output spans in this backend; IDs are unique, weights finite,
 /// partials ID-ordered and rank-folded. Residual=0 lets the next norm add it once.
-#[allow(dead_code)] // Lane11 connects this binding after the execution barriers are satisfied.
+#[allow(dead_code)] // Called by the hybrid forward pass.
 pub(super) unsafe fn finish_fp8(b: &Backend<'_>, p: spark_gpu_probe::fp8_abi::OrderedFinishParams) -> Result<()> {
     use spark_gpu_probe::fp8_abi::OrderedFinishParams;
     let shared=p.shared;

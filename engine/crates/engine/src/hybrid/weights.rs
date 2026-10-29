@@ -161,7 +161,7 @@ impl<'p> LoadPlan<'p> {
 pub struct Resident<'a> {
     pub arena: spark_gpu_probe::driver::WeightArena<'a>,
     pub matrices: BTreeMap<String, spark_gpu_probe::driver::Matrix<'a>>,
-    /// Contiguous block-aligned projections retain the lane01 ABI.
+    /// Contiguous block-aligned projections use the ExpertProjection ABI.
     pub fp8: BTreeMap<String, spark_gpu_probe::fp8_abi::ExpertProjection>,
     /// Disjoint original row groups have separate descriptors in local row order.
     pub fp8_segments: BTreeMap<String, Vec<spark_gpu_probe::fp8_abi::ExpertProjection>>,

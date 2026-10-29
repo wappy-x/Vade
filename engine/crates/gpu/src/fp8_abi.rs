@@ -102,7 +102,7 @@ impl RoutingLayout {
         row
     }
 }
-/// Same grouped scratch ABI, with three lane01 ExpertProjection records per expert.
+/// Use the grouped scratch ABI with three ExpertProjection records per expert.
 /// Generic codes/scales have fixed intermediate row pitch, including zero padding.
 #[repr(C)]
 #[derive(Clone, Copy)]

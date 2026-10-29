@@ -8,7 +8,7 @@ fn reply_json(reply: &Reply) -> Value {
         ("reasoning", s(&reply.reasoning)),
         (
             "token_ids",
-            Value::Array(reply.token_ids.iter().map(|id| n(id)).collect()),
+            Value::Array(reply.token_ids.iter().map(n).collect()),
         ),
         ("finish_reason", opt_s(&reply.finish_reason)),
         ("saw_terminal_event", Value::Bool(reply.saw_done)),

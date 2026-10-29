@@ -265,7 +265,7 @@ pub fn markdown(text: &str, color: bool) -> String {
 }
 
 /// The bar in front of every row you wrote. It carries speaker identity
-/// without colour too: the model's answer never has a bar.
+/// without color too: the model's answer never has a bar.
 pub const USER_BAR: &str = "▌";
 /// The dim dotted bar in front of expanded thinking rows, so a thought never
 /// reads as part of the answer.
@@ -287,7 +287,7 @@ pub fn reply(text: &str, color: bool) -> String {
 }
 
 /// A warning block: what happened, what Vade is doing, what you can do.
-/// The `▲ Warning` label carries the meaning without colour; colour adds yellow.
+/// The `▲ Warning` label carries the meaning without color; color adds yellow.
 pub fn warning(what: &str, doing: &str, next: &str, color: bool) -> String {
     let mut text = style("▲ Warning", "1;33", color);
     for part in [what, doing, next].into_iter().filter(|p| !p.is_empty()) {
@@ -547,7 +547,7 @@ pub fn approval(color: bool) -> String {
     )
 }
 
-/// Colour a unified diff: additions green, removals red, hunk headers cyan,
+/// Color a unified diff: additions green, removals red, hunk headers cyan,
 /// file headers bold, truncation notices dim. Input is sanitized text.
 pub fn diff(text: &str, color: bool) -> String {
     text.lines()
@@ -606,7 +606,7 @@ mod tests {
         assert_eq!(thought, ["▾ thinking 10:00:00–10:00:02 · 9 tokens · Ctrl+T collapse", "┆ step one", "┆ step two"]);
     }
     #[test]
-    fn diff_lines_are_coloured_by_kind_and_stay_literal_without_colour() {
+    fn diff_lines_are_colored_by_kind_and_stay_literal_without_color() {
         let sample = "*** Update File: a.rs\n--- a.rs\n+++ a.rs\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n[context line truncated: 9 bytes]";
         assert_eq!(render::diff(sample, false), sample);
         let styled = render::diff(sample, true);

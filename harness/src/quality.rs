@@ -579,17 +579,6 @@ pub fn score_rules(case: &Case, answer: &str) -> Vec<Check> {
     }
 }
 
-/// Remove one surrounding code fence, when the whole answer is fenced.
-pub fn strip_fence(text: &str) -> &str {
-    let Some(rest) = text.strip_prefix("```") else {
-        return text;
-    };
-    let Some((_, body)) = rest.split_once('\n') else {
-        return text;
-    };
-    body.strip_suffix("```").map_or(text, |inner| inner.trim_end())
-}
-
 /// The first fenced block in an answer, with its fence language.
 pub fn first_fence(answer: &str) -> Option<(String, String)> {
     let start = answer.find("```")?;

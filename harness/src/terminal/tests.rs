@@ -239,7 +239,7 @@
                 assert!(lines.iter().all(|line| render::width(line) < width));
                 screens.push(mask(&lines.join("\n")));
             }
-            // Labels alone separate the blocks when colour is off.
+            // Labels alone separate the blocks when color is off.
             assert_eq!(render::plain(&screens[0]), screens[1]);
             // The plain golden drops trailing spaces (the empty `› ` prompt).
             let plain = screens[1].lines().map(str::trim_end).collect::<Vec<_>>().join("\n");

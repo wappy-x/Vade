@@ -87,7 +87,7 @@ pub fn block_gemm(input: &Quantized, weights: &[u8], inverse_scales: &[u16],
     })
 }
 
-/// Historical lane07 scalar FP32 dot, retained for receipt/error comparisons.
+/// Historical scalar FP32 dot product, retained to compare recorded results and errors.
 pub fn block_gemm_scalar(input: &Quantized, weights: &[u8], inverse_scales: &[u16],
     outputs: usize, blocks: Range<usize>) -> Result<Vec<f32>> {
     block_gemm_with(input, weights, inverse_scales, outputs, blocks, |a, b|

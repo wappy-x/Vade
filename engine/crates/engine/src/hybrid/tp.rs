@@ -1,6 +1,6 @@
 //! Shape-driven collectives; Exchange::reduce binds the existing rank-ordered ring.
-//! FP32 partials survive transport. Mixer outputs round once; MoE finish owns
-//! routed down rounding and shared-last arithmetic (lane06), after the rank sum.
+//! Transport preserves FP32 partials. Mixer outputs round once. After the rank sum,
+//! MoE finish rounds the routed down projection and adds the shared expert last.
 use engine_fabric::exchange::Exchange;
 use engine_model::{plan::ModelPlan, safetensors::Dtype, shapes::*, split::{Reduction, Selection, SplitPlan}};
 use std::ops::Range;
@@ -190,7 +190,7 @@ impl<'p> Binding<'p> {
         }
         Ok(())
     }
-    /// Caller retains the correctly selected lane18 local matrix/context through completion.
+    /// Caller retains the correctly selected local matrix/context through completion.
     #[cfg(target_os = "linux")]
     pub fn project_partial(&self, b: &spark_gpu_probe::driver::Backend<'_>, place: Place, part: Part,
         weights: &spark_gpu_probe::driver::Matrix<'_>, input: &spark_gpu_probe::driver::DeviceVector<'_>,

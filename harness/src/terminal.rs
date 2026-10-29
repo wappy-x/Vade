@@ -239,7 +239,7 @@ impl Terminal {
     pub fn note(&mut self, text: &str) -> io::Result<()> {
         self.styled_line(text, "2")
     }
-    /// A one-line outcome that needs attention (yellow when colour is on).
+    /// A one-line outcome that needs attention (yellow when color is on).
     pub fn alert(&mut self, text: &str) -> io::Result<()> {
         self.flush_stream()?;
         self.styled_line(text, "33")
@@ -435,7 +435,7 @@ impl Terminal {
             self.line(&format!("  {summary}"))
         }
     }
-    /// A unified diff preview with coloured +/- lines (raw mode only).
+    /// A unified diff preview with colored +/- lines (raw mode only).
     pub fn diff(&mut self, text: &str) -> io::Result<()> {
         if self.raw() {
             let text = render::diff(&sanitize(text), self.color);
