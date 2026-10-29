@@ -79,6 +79,11 @@ pub(crate) struct Config {
     pub(crate) shell_toolchain: Option<PathBuf>,
     /// Agent: user check command run after rounds that changed files, and its source.
     pub(crate) check: Option<(String, &'static str)>,
+    /// Agent: start MCP servers from the config files; `main` turns it on.
+    pub(crate) mcp: bool,
+    /// The Vade home that holds the user MCP list when chat state is not in
+    /// a Vade home (`--state-in-project`).
+    pub(crate) mcp_home: Option<PathBuf>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Permission {
@@ -199,6 +204,8 @@ impl Config {
             shell_exclusions: vade_harness::shell::Exclusions::default(),
             shell_toolchain: None,
             check: None,
+            mcp: false,
+            mcp_home: None,
         };
         let mut no_check = false;
         let mut selected = None;
@@ -311,6 +318,7 @@ impl Config {
                 | "--workspace"
                 | "--session"
                 | "--vade-home"
+                | "--mcp-home"
                 | "--bind"
                 | "--upstream"
                 | "--allow-origin"
@@ -485,6 +493,14 @@ impl Config {
                             }
                             config.name = Some(value);
                             used.push("--name");
+                        }
+                        "--mcp-home" => {
+                            let home = PathBuf::from(value);
+                            if !home.is_absolute() || home.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                                return Err("--mcp-home must be an absolute path without '..'");
+                            }
+                            config.mcp_home = Some(home);
+                            used.push("--mcp-home");
                         }
                         "--session" => {
                             config.session = Some(value);

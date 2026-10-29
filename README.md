@@ -182,6 +182,8 @@ there. See [from a Windows computer](INSTALL.md#from-a-windows-computer).
   coding agent in the folder where you start it. The agent can read, search
   and edit files. On Linux, the Spark included, it can't run shell commands
   yet.
+- **Your own tools in chat.** `vade mcp add` connects an MCP server, so
+  chat can call the tools you already use. See [MCP tools in chat](docs/mcp.md).
 - **An OpenAI-compatible API** at `http://127.0.0.1:18080/v1`. It listens
   only on the Spark's loopback address. If Vade had to pick another port,
   `vade status` prints the address. From another computer, forward the port

@@ -39,6 +39,16 @@ Changes that are merged but not yet released are under Unreleased.
   are returned byte for byte, as before. See
   [reading files](docs/reading-files.md).
 
+- Chat can use your MCP tool servers. `vade mcp add NAME -- COMMAND` adds a
+  stdio server to `mcp.json` in the Vade home, and `vade mcp list`, `test`,
+  `remove` and `trust` manage the list. Agent chat starts each server and
+  offers its tools to the model as `<server>__<tool>`, after the native tools,
+  under the `--approval` setting. Calls have a time limit and a size limit, and
+  a server that stops is started again once. A server in a project's
+  `.vade/mcp.json` starts only after `vade mcp trust NAME`. Resources and
+  prompts are listed only. `vade tools` lists the native and MCP tools, and
+  `VADE_MCP=off` starts no server. See [MCP tools in chat](docs/mcp.md).
+
 ## v0.2.0 - not released yet
 
 v0.2.0 makes two Sparks much faster than v0.1.0. Two Sparks also admit more

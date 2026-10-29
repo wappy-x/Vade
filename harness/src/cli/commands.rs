@@ -10,7 +10,7 @@ use super::{App, RunState};
 use super::{
     args::Mode,
     help::{self, Command},
-    native_setup::{append_resume_note, chat_conversation, prepare_resumed},
+    native_setup::{append_resume_note, chat_conversation_with_mcp, prepare_resumed},
 };
 use crate::native_children;
 
@@ -496,7 +496,7 @@ impl App {
                         let build_session = Arc::new(vade_harness::shell::BuildSession::new(
                             self.config.shell_toolchain.as_deref(),
                         )?);
-                        let conversation = chat_conversation(
+                        let conversation = chat_conversation_with_mcp(
                             self.config.model.as_deref().unwrap(),
                             &self.workspace,
                             &self.config.rules_scopes,
@@ -505,6 +505,7 @@ impl App {
                             self.config.children,
                             &self.config.child_grants,
                             Limits { max_run_time: self.config.max_run_time, ..Limits::default() },
+                            self.mcp_definitions(),
                         )?;
                         let store = Journal::create(
                             &self.workspace,
@@ -796,7 +797,7 @@ impl App {
                 {
                     return self.notice("Child tools are frozen for this conversation. Use /new, then /children on|off before the first prompt.");
                 }
-                let conversation = chat_conversation(
+                let conversation = chat_conversation_with_mcp(
                     self.config.model.as_deref().unwrap(),
                     &self.workspace,
                     &self.config.rules_scopes,
@@ -805,6 +806,7 @@ impl App {
                     enabled,
                     &self.config.child_grants,
                     Limits { max_run_time: self.config.max_run_time, ..Limits::default() },
+                    self.mcp_definitions(),
                 )?;
                 let store =
                     Journal::create(&self.workspace, &journal::fresh_name(), &conversation)?;

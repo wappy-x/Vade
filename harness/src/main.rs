@@ -32,6 +32,8 @@ fn run_main(mut arguments: Vec<String>) -> ExitCode {
         Some("setup") => return vade_harness::setup::cli(args),
         Some("doctor") => return vade_harness::doctor::cli(args),
         Some("sessions") => return vade_harness::saved_sessions::cli(args),
+        Some("mcp") => return vade_harness::mcp::cli::cli(args),
+        Some("tools") => return vade_harness::mcp::cli::tools_cli(args),
         // The staged harness carries the standalone relay, e.g. for vade up --replicas.
         Some("vade-gateway") => return vade_harness::gateway::invisible::exit(args),
         Some("demo-compaction") => {
@@ -96,6 +98,7 @@ fn run_main(mut arguments: Vec<String>) -> ExitCode {
             }
         }
     }
+    config.mcp = true;
     let result = App::new(config).and_then(|mut app| app.run());
     match result {
         Ok(code) => code,

@@ -52,6 +52,10 @@ pub(crate) fn tool_label(name: &str, args: &vade_harness::json::Value) -> String
         "workspace_manifest" => "List workspace files".into(),
         "workspace_symbols" => format!("Read symbols {path}"),
         "tool_output_read" => "Read tool output".into(),
+        name if name.contains(vade_harness::mcp::SEPARATOR) => {
+            let (server, tool) = name.split_once(vade_harness::mcp::SEPARATOR).unwrap_or((name, ""));
+            format!("MCP {server}: {tool}")
+        }
         _ => name.replace('_', " "),
     };
     // Command labels may already contain JSON escapes; preserve those and show

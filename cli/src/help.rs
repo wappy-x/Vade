@@ -47,6 +47,8 @@ fn top(on: bool) -> String {
         ("chat", "Chat with the running engine"),
         ("sessions", "List, export or delete saved chat sessions"),
         ("read", "Print a file as Markdown (text, HTML, CSV, RTF, data, code)"),
+        ("tools", "List the tools chat offers: native and MCP"),
+        ("mcp", "Add, list, test, trust or remove MCP tool servers"),
     ], 8);
     out += &group("Models:", &[
         ("pull", "Download a model from Hugging Face, with resume and checks"),

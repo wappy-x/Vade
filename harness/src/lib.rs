@@ -33,6 +33,7 @@ pub(crate) use edit::line_edit;
 pub mod journal;
 pub mod saved_sessions;
 pub mod kv;
+pub mod mcp;
 pub mod project;
 pub mod shell;
 #[cfg(test)]

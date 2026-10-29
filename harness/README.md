@@ -263,6 +263,10 @@ There are three approval policies:
 | `--approval auto` | Validated exact patches and all validated commands, inside the existing macOS sandbox, after preview. That includes programs inside the workspace, such as `./scripts/build.sh`, and explicit `/bin/sh -c` commands. |
 | `--approval never` | Nothing: it denies both writes and commands. |
 
+MCP tool calls follow the same policy: `ask` asks before each call, `auto`
+runs it after preview, and `never` denies it. See [MCP tools in
+chat](../docs/mcp.md).
+
 **Answering a prompt.** Under `ask`, type `y` or `n` on an empty line (or
 `/approve` / `/deny`) in the terminal. The patch preview shows additions and
 removals in color.

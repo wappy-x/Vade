@@ -56,14 +56,24 @@ pub(crate) fn setup(sparks: usize, drafting: bool) -> String {
     format!("{sparks} Spark{}, drafting {}", if sparks == 1 { "" } else { "s" }, if drafting { "on" } else { "off" })
 }
 
+/// Where saved sessions are kept, for `vade sessions`.
 pub(crate) fn state_arguments() -> Result<Vec<String>, String> {
-    state_arguments_for(std::env::var_os("VADE_CHAT_IN_PROJECT"), super::root)
+    state_arguments_for(std::env::var_os("VADE_CHAT_IN_PROJECT"), super::root, false)
 }
 
-fn state_arguments_for(opt_in: Option<OsString>, root: impl FnOnce() -> Result<PathBuf, String>) -> Result<Vec<String>, String> {
+/// The state arguments for chat, which also reads the user MCP list.
+pub(crate) fn chat_state_arguments() -> Result<Vec<String>, String> {
+    state_arguments_for(std::env::var_os("VADE_CHAT_IN_PROJECT"), super::root, true)
+}
+
+fn state_arguments_for(opt_in: Option<OsString>, root: impl FnOnce() -> Result<PathBuf, String>, chat: bool) -> Result<Vec<String>, String> {
     match opt_in.as_ref().map(|value| value.to_str()) {
         None | Some(Some("0")) => Ok(vec!["--vade-home".into(), root()?.to_string_lossy().into_owned()]),
-        Some(Some("1")) => Ok(vec!["--state-in-project".into()]),
+        // Chat reads the user MCP list from the Vade home; the launcher clears VADE_HOME.
+        Some(Some("1")) => Ok(match root().ok().filter(|_| chat) {
+            Some(root) => vec!["--state-in-project".into(), "--mcp-home".into(), root.to_string_lossy().into_owned()],
+            None => vec!["--state-in-project".into()],
+        }),
         _ => Err("Set VADE_CHAT_IN_PROJECT to 1 to keep chat history in the project's .vade folder, or unset it (or 0) for the Vade home.".into()),
     }
 }
@@ -142,6 +152,21 @@ mod tests {
         // Agent journals land in the Vade home; the project keeps only its own .vade/check.
         assert_eq!(fs::read_dir(vade_home.join("projects")).unwrap().count(), 1);
         assert!(!workspace.join(".vade/sessions").exists() && !workspace.join(".vade/history").exists());
+        // With history in the project, chat still reads the user MCP list from the Vade home.
+        fs::write(vade_home.join("mcp.json"), r#"{"mcpServers":{"absent":{"command":"/nonexistent/mcp-server"}}}"#).unwrap();
+        let state = state_arguments_for(Some("1".into()), || Ok(vade_home.clone()), true).unwrap();
+        let mut args = arguments("http://127.0.0.1:0", "parser-boundary", &workspace, 262144, state);
+        args.extend(["--prompt".into(), "hello".into()]);
+        let output = run_harness(&binary, &workspace, &args);
+        let diagnostics = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert_eq!(output.status.code(), Some(1), "{diagnostics}");
+        assert!(diagnostics.contains("starting 1 MCP server"), "{diagnostics}");
+        // vade sessions gets only the state arguments, which its parser takes.
+        let mut args = vec!["sessions".to_string(), "--workspace".into(), workspace.to_string_lossy().into_owned()];
+        args.extend(state_arguments_for(Some("1".into()), || Ok(vade_home.clone()), false).unwrap());
+        let output = run_harness(&binary, &workspace, &args);
+        let diagnostics = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert_eq!(output.status.code(), Some(0), "{diagnostics}");
         fs::remove_dir_all(workspace).unwrap();
         fs::remove_dir_all(vade_home).unwrap();
     }
@@ -149,11 +174,16 @@ mod tests {
     #[test]
     fn chat_state_defaults_to_the_vade_home_and_opts_into_the_project() {
         let root = || Ok(PathBuf::from("/home/owner/.vade"));
-        assert_eq!(state_arguments_for(None, root).unwrap(), ["--vade-home", "/home/owner/.vade"]);
-        assert_eq!(state_arguments_for(Some("0".into()), root).unwrap(), ["--vade-home", "/home/owner/.vade"]);
-        assert_eq!(state_arguments_for(Some("1".into()), || Err("unused".into())).unwrap(), ["--state-in-project"]);
-        assert!(state_arguments_for(Some("yes".into()), root).unwrap_err().contains("VADE_CHAT_IN_PROJECT"));
-        assert!(state_arguments_for(None, || Err("Cannot find your home folder.".into())).is_err());
+        for chat in [false, true] {
+            assert_eq!(state_arguments_for(None, root, chat).unwrap(), ["--vade-home", "/home/owner/.vade"]);
+            assert_eq!(state_arguments_for(Some("0".into()), root, chat).unwrap(), ["--vade-home", "/home/owner/.vade"]);
+            assert_eq!(state_arguments_for(Some("1".into()), || Err("no home".into()), chat).unwrap(), ["--state-in-project"]);
+            assert!(state_arguments_for(Some("yes".into()), root, chat).unwrap_err().contains("VADE_CHAT_IN_PROJECT"));
+            assert!(state_arguments_for(None, || Err("Cannot find your home folder.".into()), chat).is_err());
+        }
+        // Only chat reads the MCP list; vade sessions takes no --mcp-home.
+        assert_eq!(state_arguments_for(Some("1".into()), root, true).unwrap(), ["--state-in-project", "--mcp-home", "/home/owner/.vade"]);
+        assert_eq!(state_arguments_for(Some("1".into()), root, false).unwrap(), ["--state-in-project"]);
         let args = arguments("http://127.0.0.1:18080", "m", Path::new("/w"), 4096, vec!["--state-in-project".into()]);
         assert_eq!(args.last().map(String::as_str), Some("--state-in-project"));
     }

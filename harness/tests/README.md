@@ -15,6 +15,7 @@ Run them all with `cargo test --offline`.
 | `delegated_cli.rs` | Handing turns to a first-party stand-in for an outside agent. |
 | `gateway_cli.rs` | The gateway across repeated upstreams. |
 | `kv_mock.rs` | The engine checkpoint wire contract, with a stateful mock. |
+| `mcp.rs` | The MCP client against a fake stdio server in the same test program: handshake, lists, calls, progress, time limits, malformed JSON, restarts, `vade mcp` and an agent turn that calls an MCP tool. |
 | `route_a_check.rs` | `scripts/route-a-check.sh` against command mocks: the private home, endpoint and CLI each step uses, model-path checks, launch and stop failures, concurrent runs and interrupts. |
 | `sessions_cli.rs` | Saved sessions: a named chat, the session list, a resume by name, the Markdown export and delete. |
 | `setup_doctor.rs` | Client setup and the endpoint doctor. |

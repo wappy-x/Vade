@@ -41,6 +41,8 @@ Options:
   --vade-home DIR       Private state root (default VADE_HOME, else ~/.vade); journals
                         and input recall go to DIR/projects/NAME-HASH, outside the project
   --state-in-project    Keep journals and recall in WORKSPACE/.vade (git-ignored) instead
+  --mcp-home DIR        Agent: read the user MCP list from DIR/mcp.json when state is
+                        not in a Vade home (default VADE_HOME, else ~/.vade)
   --verbose             Show run diagnostics after each answer
   --resume ID|NAME|last Agent: resume a saved journal without replaying tools
   --name NAME           Agent: a display name for this session (also renames on --resume)

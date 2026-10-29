@@ -447,6 +447,7 @@ impl App {
         let output_reserve_tokens = self.config.output_reserve(&self.context);
         let shell_exclusions = self.config.shell_exclusions.clone();
         let build_session = Arc::clone(&self.build_session);
+        let mcp = self.mcp.clone();
         let backend = self.backend.take();
         let turns = self.session.turns();
         self.answers.begin(&user, turns);
@@ -511,6 +512,9 @@ impl App {
                 .with_build_session(&build_session)
                 .with_project(&project)
                 .with_check(check.as_deref());
+                let executor = vade_harness::mcp::McpTools::new(executor, mcp.as_deref(), policy, |preview: coding_tools::Preview<'_>, cancel: &AtomicBool| {
+                    previews.show(None, preview, cancel)
+                });
                 let mut executor = ActiveTools {
                     inner: executor,
                     events: &tx,

@@ -29,6 +29,8 @@ This page explains new terms where they first come up. The
 | `vade chat` | Opens chat with the running engine. Add `--resume ID\|NAME\|last` to continue a saved session, or `--name NAME` to name this one |
 | `vade sessions` | Lists, exports or deletes saved chat sessions; see [saved chat sessions](../docs/sessions.md) |
 | `vade read` | Prints a local file as Markdown with a header line: text, HTML, CSV, RTF, data and source files. It needs no engine; see [reading files](../docs/reading-files.md) |
+| `vade tools` | Lists the tools chat offers the model: the native workspace and memory tools, then the tools of your MCP servers |
+| `vade mcp` | Adds, lists, tests, trusts or removes MCP servers for chat; see [MCP tools in chat](../docs/mcp.md) |
 | `vade status` | Shows what is running; add `--json` for scripts |
 | `vade config` | Shows which setup the other commands will use (local, controller, legacy or none) and what it holds; add `--json` for scripts |
 | `vade verify` | Runs the same greedy prompt with drafting off and on, and checks that every run returns the same token IDs byte for byte |

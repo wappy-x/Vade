@@ -593,7 +593,7 @@ pub fn first_fence(answer: &str) -> Option<(String, String)> {
 /// starts as group leader, so the group id is the child pid. Group stop
 /// needs the system `kill` tool; the standard library stops one process
 /// only. A failure here falls back to stopping the direct child.
-fn kill_group(child: &mut std::process::Child) {
+pub(crate) fn kill_group(child: &mut std::process::Child) {
     #[cfg(unix)]
     {
         let _ = Command::new("/bin/kill")

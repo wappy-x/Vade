@@ -31,7 +31,7 @@ mod doctor;
 mod chat;
 use config::Config;
 pub(crate) use status::snapshot;
-pub(crate) use chat::state_arguments as chat_state_arguments;
+pub(crate) use chat::chat_state_arguments;
 pub(crate) use chat::setup as chat_setup;
 pub(crate) use chat::{session_arguments as chat_session_arguments, sessions as sessions_exec, SESSIONS_FAILED};
 
@@ -71,6 +71,11 @@ pub(crate) fn saved_model(root: &Path) -> Option<PathBuf> {
 /// Whether the local home has saved defaults or an owned engine.
 pub(crate) fn owner_configured() -> bool {
     root().is_ok_and(|p| p.join("config").exists() || p.join("state/run.conf").exists())
+}
+
+/// The installed harness of the local owner flow, if the install is complete.
+pub(crate) fn installed_harness() -> Result<Option<PathBuf>, String> {
+    Ok(install::load(&root()?)?.and_then(|artifacts| artifacts.get("harness").map(PathBuf::from)))
 }
 
 /// `vade config` rows for the saved local defaults: (label, text, JSON key,
@@ -933,7 +938,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         let start = phase("Chat", "open local chat; /exit leaves the engine running")?;
         let workspace = std::env::current_dir().map_err(|_| "Open an existing workspace and run vade chat.")?;
         let mut exec = Exec::new("local chat", required(artifacts, "harness")?,
-            chat::arguments(&config.endpoint(), required(record, "endpoint_model")?, &workspace, context, chat::state_arguments()?));
+            chat::arguments(&config.endpoint(), required(record, "endpoint_model")?, &workspace, context, chat::chat_state_arguments()?));
         exec.args.extend(chat::session_arguments(options));
         clear_credentials(&mut exec);
         exec.env.insert("VADE_CHAT_SETUP".into(), chat::setup(1, config.drafting()));
@@ -966,6 +971,8 @@ fn clear_credentials(exec: &mut Exec) {
         "COLORTERM",
         "COLUMNS",
         "LINES",
+        // A switch, not a secret: VADE_MCP=off turns MCP servers off in chat.
+        "VADE_MCP",
     ];
     exec.unset
         .extend(std::env::vars_os().filter_map(|(name, _)| {

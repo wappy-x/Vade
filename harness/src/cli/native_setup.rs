@@ -559,6 +559,9 @@ pub(crate) fn native_conversation(
 ) -> io::Result<Conversation> {
     chat_conversation(model, workspace, scopes, instructions, None, children, grants, limits)
 }
+/// [`chat_conversation_with_mcp`] without MCP tools, for tests.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn chat_conversation(
     model: &str,
     workspace: &Workspace,
@@ -569,10 +572,27 @@ pub(crate) fn chat_conversation(
     grants: &BTreeMap<String, child_agents::Scope>,
     limits: Limits,
 ) -> io::Result<Conversation> {
+    chat_conversation_with_mcp(model, workspace, scopes, instructions, memory, children, grants, limits, Vec::new())
+}
+/// A fresh conversation. Its tool list is the native tools, the memory tools
+/// when memory is on, then the chat's MCP tools.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn chat_conversation_with_mcp(
+    model: &str,
+    workspace: &Workspace,
+    scopes: &[String],
+    instructions: &str,
+    memory: Option<&str>,
+    children: bool,
+    grants: &BTreeMap<String, child_agents::Scope>,
+    limits: Limits,
+    mcp: Vec<Value>,
+) -> io::Result<Conversation> {
     // The Project instructions section carries the root folder's files.
     let project = project::Snapshot::discover_with(workspace, scopes, false)?;
     let mut tools = native_definitions(children);
     if memory.is_some() { vade_harness::memory::add_tools(&mut tools); }
+    if let Value::Array(tools) = &mut tools { tools.extend(mcp); }
     let system = vade_harness::memory::with_memory(&format!("{}\n{}", native_system_prompt(children, grants, limits), vade_harness::session::model_identity(model)), memory.unwrap_or(""));
     Conversation::from_request(
         Value::Object(vec![
@@ -1031,6 +1051,13 @@ const LEGACY_READ_DESCRIPTION: &str = "Read a small UTF-8 byte range inside the 
 // wording; stored prompt bytes stay frozen, and executable schemas, model and
 // child scopes still match exactly.
 fn resumed_tools_match(tools: Option<&Value>, children: bool, variants: &[bool]) -> bool {
+    // MCP tools (`<server>__<tool>`) follow the native list and are not compared.
+    let native = tools.and_then(Value::as_array).map(|tools| {
+        Value::Array(tools.iter().filter(|tool| {
+            !tool.get("function").and_then(|f| f.get("name")).and_then(Value::as_str).is_some_and(|name| name.contains(vade_harness::mcp::SEPARATOR))
+        }).cloned().collect())
+    });
+    let tools = native.as_ref().or(tools);
     const LEGACY_DESCRIPTION: &str = "Supported only on macOS: Linux and other platforms return an unsupported_platform tool result without running commands. Run explicit argv in workspace under macOS OS sandbox, no network, cleared environment, ≤64 KiB output. No implicit shell: for shell syntax explicitly request /bin/sh -c script, which requires approval. timeout_ms 1–120000. Read-only allowlist runs without approval in ask/auto: pwd, true, ls [-1] [relative paths], cat relative paths, git status [--short], git diff [--stat], git log [--oneline|-n 1..100]. Bare names resolve to fixed system executables. Other commands ask. Never denies all commands. Auto also permits patches without asking. Cancellation kills the process group. No credential or workspace hidden-file access. A private session directory supplies CARGO_TARGET_DIR, CARGO_HOME, TMPDIR, HOME and npm cache; Cargo is offline. Pre-existing target/node_modules stay inaccessible. Use cargo build --offline or cargo test --offline with the owner-selected Rust toolchain. Do not retry unknown_outcome tools without inspecting state.";
     for reply_limit in [vade_harness::contract::guaranteed_native_reply_tokens(), vade_harness::contract::AUTOMATIC_OUTPUT_TOKENS as usize] {
         for (&shell, legacy) in variants.iter().flat_map(|shell| [(shell, 0u8), (shell, 1), (shell, 2), (shell, 3)]) {

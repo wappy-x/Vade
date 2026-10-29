@@ -23,6 +23,7 @@
 | [`journal.rs`](journal.rs) | Private, locked, append-only native sessions. |
 | [`json.rs`](json.rs) | First-party, bounded JSON parsing. |
 | [`kv.rs`](kv.rs) | Optional Engine-owned KV hints. |
+| [`mcp.rs`](mcp.rs) | A std-only Model Context Protocol client for stdio servers. |
 | [`lib.rs`](lib.rs) | Vade's terminal harness. |
 | [`main.rs`](main.rs) | The program's entry point. |
 | [`native_children.rs`](native_children.rs) | Native CLI ownership of the current/last activation's bounded children. |
@@ -44,6 +45,7 @@
 | [`child_agents/`](child_agents/README.md) | Folder: see its README. |
 | [`cli/`](cli/README.md) | Folder: see its README. |
 | [`gateway/`](gateway/README.md) | Folder: see its README. |
+| [`mcp/`](mcp/README.md) | Folder: see its README. |
 | [`setup/`](setup/README.md) | Folder: see its README. |
 | [`shell/`](shell/README.md) | Folder: see its README. |
 | [`terminal/`](terminal/README.md) | Folder: see its README. |

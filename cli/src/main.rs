@@ -40,6 +40,7 @@ mod help;
 mod detect;
 mod doctor;
 mod launch;
+mod mcp;
 mod control_socket;
 mod evals;
 mod endpoint;
@@ -161,6 +162,12 @@ fn run_main(mut args: Vec<String>) {
     }
     if args.first().is_some_and(|arg| arg == "verify") {
         std::process::exit(verify::run(&args[1..]));
+    }
+    if let Some(forward) = mcp::arguments(&args) {
+        match mcp::run(forward) {
+            Ok(code) => std::process::exit(code),
+            Err(error) => fail(&error),
+        }
     }
     let parsed = cli::parse(&args).unwrap_or_else(|error| fail(&error));
     if let cli::Command::Help(command) = parsed.command {

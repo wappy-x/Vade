@@ -33,7 +33,7 @@ use crate::{
 };
 use args::{Config, Mode};
 use events::Pending;
-use native_setup::{chat_conversation, prepare_resumed};
+use native_setup::{chat_conversation_with_mcp, prepare_resumed};
 
 const MAX_DISPLAY_BYTES: usize = 1024 * 1024;
 pub(crate) struct App {
@@ -78,6 +78,8 @@ pub(crate) struct App {
     tool_started: Option<std::time::Instant>,
     // Verbose logs show the command sandbox description once, then only changes.
     sandbox_note: String,
+    /// MCP servers for this chat; the worker borrows it for each run.
+    mcp: Option<Arc<Mutex<vade_harness::mcp::Hub>>>,
     backend: Option<delegation::Backend>,
     delegated_id: Option<String>,
     pub(crate) input: Editor,
@@ -131,6 +133,16 @@ impl App {
             vade_harness::instructions::Instructions::disabled()
         };
         let memory = if config.memory { vade_harness::memory::Memory::load(&workspace)?.content() } else { String::new() };
+        // The MCP user list lives in the same Vade home as chat state, or in
+        // --mcp-home when chat state is in the project.
+        let home = match &config.state {
+            Some(vade_harness::tools::StateLocation::Home(home)) => Some(home.as_path()),
+            _ => config.mcp_home.as_deref(),
+        };
+        let mcp = (config.mode == Mode::Agent && config.mcp).then(|| {
+            Arc::new(Mutex::new(vade_harness::mcp::Hub::from_config(workspace.root(), home, vade_harness::mcp::cli::starting)))
+        });
+        let mcp_tools = mcp.as_ref().and_then(|hub| hub.lock().ok().map(|hub| hub.definitions())).unwrap_or_default();
         let (native, journal) = if config.mode == Mode::Agent {
             let (mut store, conversation) = if let Some(query) = &config.resume {
                 let name = vade_harness::saved_sessions::resolve(&workspace, query, true).map_err(|error|
@@ -157,7 +169,7 @@ impl App {
                 }
                 (store, conversation)
             } else {
-                let conversation = chat_conversation(
+                let conversation = chat_conversation_with_mcp(
                     config.model.as_deref().unwrap(),
                     &workspace,
                     &config.rules_scopes,
@@ -166,6 +178,7 @@ impl App {
                     config.children,
                     &config.child_grants,
                     Limits { max_run_time: config.max_run_time, ..Limits::default() },
+                    mcp_tools,
                 )?;
                 let name = config.session.clone().unwrap_or_else(journal::fresh_name);
                 let mut store = Journal::create(&workspace, &name, &conversation).map_err(|error|
@@ -192,6 +205,10 @@ impl App {
         } else {
             None
         };
+        // MCP notes follow the startup errors above, which end the program first.
+        for note in mcp.iter().filter_map(|hub| hub.lock().ok()).flat_map(|hub| hub.notes.clone()) {
+            vade_harness::diagnostics::stderr_line(format_args!("vade: {}", vade_harness::terminal::sanitize(&note)));
+        }
         let mut terminal = Terminal::open(config.plain || config.prompt.is_some());
         if matches!(config.mode, Mode::Codex | Mode::Hermes | Mode::Agent) {
             terminal.watch_exit_signals();
@@ -240,6 +257,7 @@ impl App {
             tool_started: None,
             sandbox_note: String::new(),
             backend: None,
+            mcp,
             delegated_id: None,
             input: Editor::default(),
             queued: interaction::WorkQueue::default(),
@@ -267,6 +285,13 @@ impl App {
         }
         app.resumed_answers();
         Ok(app)
+    }
+}
+
+impl App {
+    /// The MCP tools a fresh conversation in this chat offers, after the native tools.
+    pub(crate) fn mcp_definitions(&self) -> Vec<vade_harness::json::Value> {
+        self.mcp.as_ref().and_then(|hub| hub.lock().ok().map(|hub| hub.definitions())).unwrap_or_default()
     }
 }
 

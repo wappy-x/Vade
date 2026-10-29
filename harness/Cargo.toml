@@ -10,3 +10,7 @@ description = "A Rust agent harness and gateway for Vade Engine"
 default-run = "vade-harness"
 
 [dependencies]
+
+[[test]]
+name = "mcp"
+harness = false

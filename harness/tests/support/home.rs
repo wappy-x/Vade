@@ -1,5 +1,6 @@
 //! A fixture HOME for every first-party binary a test starts, so a developer's
-//! ~/.vade (instruction file, saved defaults, chat state) never reaches a test.
+//! ~/.vade (instruction file, saved defaults, chat state, MCP servers) never
+//! reaches a test.
 // Each test file uses a different subset of these helpers.
 #![allow(dead_code)]
 use std::path::PathBuf;
@@ -19,7 +20,8 @@ pub fn path() -> &'static PathBuf {
 }
 pub fn command(program: &str) -> Command {
     let mut command = Command::new(program);
-    command.env("HOME", path());
+    // VADE_HOME can name the developer's own MCP list, so MCP stays off.
+    command.env("HOME", path()).env("VADE_MCP", "off");
     command
 }
 pub fn harness() -> Command {
