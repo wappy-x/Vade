@@ -418,6 +418,8 @@ impl<'a> NextModel<'a> {
                 let mut field = || fields.next().ok_or("tensor split handoff head too short");
                 let flag = field()?;
                 let peer = [field()?, field()?, field()?];
+                // The installed rows need their KV pages first.
+                if li % 4 == 3 { chat.fit_kv(b, flag)?; }
                 let (_, words) = layer_words(chat, li, Some(flag))?;
                 if words != peer {
                     return Err("tensor split handoff: the peer's state sizes differ from this rank's".into());
@@ -525,7 +527,7 @@ impl<'a> NextModel<'a> {
             return Ok(());
         }
         let meta: Vec<[u32; 4]> = sessions.iter().zip(spans)
-            .map(|(s, span)| [s.slot, s.capacity as u32, s.pos as u32, span.len() as u32]).collect();
+            .map(|(s, span)| [s.slot, super::pp::capacity_word(s.capacity, s.kv_rows()), s.pos as u32, span.len() as u32]).collect();
         let mut guard = self.pp.borrow_mut();
         let link = guard.as_mut().filter(|l| !l.poisoned).ok_or("tensor split link failed earlier; the front is stopping")?;
         let (heads, head) = self.tp.borrow().as_ref().map_or((false, false), |s| (s.heads_pass, s.head_pass));

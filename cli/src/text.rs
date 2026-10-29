@@ -234,8 +234,8 @@ pub fn random_hex(bytes: usize) -> Result<String, String> {
     Ok(to_hex(&value))
 }
 
-/// `bytes` as lowercase hex, two digits per byte. One allocation: the model
-/// doctor encodes up to 6 MiB of hex with it.
+/// `bytes` as lowercase hex, two digits per byte, in one allocation: the
+/// model doctor passes whole metadata files of up to 64 MiB (`JSON_LIMIT`).
 pub fn to_hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);

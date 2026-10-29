@@ -105,10 +105,13 @@ pub fn run(
             if kv_reserve { backend.kv_conversation_ended(needed as usize); }
             let resident = backend.allocated_bytes();
             let resident_tiles = backend.flash_dense_bytes() + backend.flash_mixed_bytes();
+            // Slots and pool for chats charged by their own KV pages (flashnext::kv_charge): the
+            // smallest chat funds a slot. Live sessions stop TRANSIENT_RESERVE short of the ceiling.
+            let smallest = slot_bytes(&model, context, needed as usize, pp.is_some() && tp.is_none())?;
             // Live sessions stop TRANSIENT_RESERVE short of the allocator ceiling.
             let (active, pool, shared) = model.session_pool_plan(
                 context, 1 + usize::from(limits.ab_ptx),
-                spark_serve::budget::after_transient_reserve(budget.saturating_sub(resident)), resident_tiles)?;
+                spark_serve::budget::after_transient_reserve(budget.saturating_sub(resident)), resident_tiles, [smallest, needed as usize])?;
             // The prompt workspace is part of `shared`: allocate it before the first request.
             model.prepare_prompt_workspace(backend, context)?;
             if needed > pool as u128 {
@@ -124,13 +127,13 @@ pub fn run(
                 ));
             }
             // TP ranks can see different free memory. Agree before the existing serving hello.
+            // The pages rank 0 admits must fit on rank 1 too: both take the smaller pool.
             let (active, pool) = if tp.is_some() {
                 let (stream, _) = pp.as_mut().ok_or("tensor split has no control link")?;
                 let (peer, chosen) = spark_tp::startup_pool::agree(stream, active, load_deadline, shutdown)?;
-                eprintln!("flashnext tp session_pool rank0={active} rank1={peer} chosen={chosen} context={context}");
-                // Retention charges both ranks the same entries: bound it by the smaller pool.
-                let pool = if spark_serve::prefix_switch::prefix_cache()? { spark_tp::startup_pool::agree(stream, pool, load_deadline, shutdown)?.1 } else { pool };
-                (chosen, pool)
+                let (peer_pool, agreed) = spark_tp::startup_pool::agree(stream, pool, load_deadline, shutdown)?;
+                eprintln!("flashnext tp session_pool rank0={active} rank1={peer} chosen={chosen} pool_bytes rank0={pool} rank1={peer_pool} chosen={agreed} context={context}");
+                (chosen, agreed)
             } else { (active, pool) };
             model.set_session_limit(active)?;
             // VADE_VECTOR_POOL (default on; =0 off): a request's freed device vectors (GDN
@@ -144,6 +147,7 @@ pub fn run(
             }
             // Under host memory pressure, the reserves keep returned buffers inside this plan.
             backend.fund_session_reserves(active);
+            backend.fund_kv_pages(pool);
             // Every worker must fund the front's admitted chats before serving begins.
             if let Some((stream, stage)) = pp {
                 model.set_pp_front(stream, fast, stage, context, active, tile, shutdown)?;
@@ -306,7 +310,8 @@ pub fn run_back(
         if kv_reserve { backend.kv_conversation_ended(needed as usize); }
         let resident = backend.allocated_bytes();
         let resident_tiles = backend.flash_dense_bytes() + backend.flash_mixed_bytes();
-        let (active, pool, _shared) = model.session_pool_plan(context, 1, spark_serve::budget::after_transient_reserve(budget.saturating_sub(resident)), resident_tiles)?;
+        let smallest = slot_bytes(&model, context, needed as usize, tp.is_none())?;
+        let (active, pool, _shared) = model.session_pool_plan(context, 1, spark_serve::budget::after_transient_reserve(budget.saturating_sub(resident)), resident_tiles, [smallest, needed as usize])?;
         model.prepare_prompt_workspace(backend, context)?;
         // A workspace allocation under host pressure can clear the reserve before the session
         // plan exists. Restore the session bound so the funded plan below holds.
@@ -314,12 +319,20 @@ pub fn run_back(
         if needed > pool as u128 {
             return Err(format!("pipeline back cannot fund one session: needed {needed} bytes, pool {pool} bytes"));
         }
+        // The same order as the front: the slot count, then the smaller pool.
         let (active, pool) = if tp.is_some() {
             let (_, chosen) = spark_tp::startup_pool::agree(&mut stream, active, load_deadline, shutdown)?;
-            let pool = if spark_serve::prefix_switch::prefix_cache()? { spark_tp::startup_pool::agree(&mut stream, pool, load_deadline, shutdown)?.1 } else { pool };
-            (chosen, pool)
+            (chosen, spark_tp::startup_pool::agree(&mut stream, pool, load_deadline, shutdown)?.1)
         } else { (active, pool) };
+        // VADE_VECTOR_POOL, as on the front: a chat that ends drops its back session (its slot's
+        // release bit), and the next chat on the slot takes the freed vectors from the pool
+        // instead of cuMemAlloc. Outside the plan, spares go under host pressure.
+        if spark_gpu_probe::driver::vector_pool_from_env()? {
+            backend.configure_vector_pool(available.saturating_sub(budget).max(1 << 30));
+            backend.kv_conversation_ended(needed as usize);
+        }
         backend.fund_session_reserves(active);
+        backend.fund_kv_pages(pool);
         backend.synchronize()?;
         eprintln!("flashnext pp back loaded context={context} active={active} resident_bytes={resident} session_pool_bytes={pool}");
         let (_link, tp_wire) = match tp {
@@ -342,4 +355,14 @@ pub fn run_back(
         }
         served
     })
+}
+
+/// Bytes the slot plan funds per slot: the smallest chat (one token) charged by KV pages. A layer
+/// chain (`chain`) agrees on no byte pool, only on the slot count in its hello (a stage refuses more
+/// slots than its own), so each of its slots funds a full-window session on every stage, as before
+/// paging: the front's admitted charges then fit every stage's pool.
+fn slot_bytes(model: &NextModel<'_>, context: usize, full: usize, chain: bool) -> Result<usize, String> {
+    if chain { return model.session_reservation_bytes(context).map_err(|e| e.to_string()); }
+    let pages = spark_serve::flashnext::kv_geometry(model, context, full)?;
+    spark_serve::flashnext::kv_charge(&pages, spark_serve::flashnext::kv_ahead(model), 1).ok_or_else(|| "KV page charge overflows".into())
 }

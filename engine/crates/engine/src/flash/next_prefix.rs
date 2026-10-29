@@ -66,6 +66,24 @@ pub struct NextStorage<'a> {
 }
 
 impl<'a, 'w> NextSession<'a, 'w> {
+    /// Physical KV pages for rows 0..rows of every attention layer this rank keeps, and for
+    /// the draft layer up to its verify rows further. Call before a pass, a prefix restore or a
+    /// state install writes rows (run_rows_inner, pp_back_step, tp_swap_state); mapped pages
+    /// stay until the session drops. Shapes and addresses never change (QsaState::paged).
+    pub(super) fn fit_kv(&mut self, b: &Backend<'a>, rows: usize) -> Result<()> {
+        for state in self.qsa_state.iter_mut().flatten() { state.fit(b, rows)?; }
+        if let Some(d) = &mut self.draft { d.fit(b, rows.saturating_add(self.verify_rows))?; }
+        Ok(())
+    }
+    /// Release the KV pages above rows 0..rows (whole pages; the draft layer keeps its verify
+    /// rows further): an adopted session maps no more than its rewound rows, below its charge.
+    fn trim_kv(&mut self, b: &Backend<'a>, rows: usize) -> Result<()> {
+        for state in self.qsa_state.iter_mut().flatten() { state.trim(b, rows)?; }
+        if let Some(d) = &mut self.draft { d.trim(b, rows.saturating_add(self.verify_rows))?; }
+        Ok(())
+    }
+    /// Rows the attention states have pages for: the back maps as many when it builds the chat.
+    pub(super) fn kv_rows(&self) -> usize { self.qsa_state.iter().flatten().map(|q| q.mapped_rows()).min().unwrap_or(0) }
     /// Capture a checkpoint at the last 64-aligned row of each output prefill (per request).
     pub fn set_prefix_checkpoint(&mut self, on: bool) {
         self.checkpointing = on;
@@ -239,6 +257,17 @@ impl<'a, 'w> NextSession<'a, 'w> {
     }
 }
 impl<'a> NextModel<'a> {
+    /// Rows the next fresh session maps at creation on this thread (0: one row).
+    pub fn set_kv_rows_hint(&self, rows: usize) { super::super::qsa::set_paged_rows(rows) }
+    /// Bytes per token of each paged KV vector of one session on this rank: keys, values and
+    /// index rows of every attention layer it keeps, then the draft layer's (fit_kv).
+    pub fn kv_page_widths(&self) -> Vec<usize> {
+        let config = &self.checkpoint.config;
+        let layers = config.layers.iter().enumerate()
+            .filter(|&(li, &kind)| kind == engine_model::flash::LayerKind::SparseAttention && self.owns_state(li)).count() + usize::from(self.mtp_depth != 0);
+        let widths = super::super::qsa::page_widths(&self.weights.plan, config.index_dim as usize);
+        (0..layers).flat_map(|_| widths).filter(|&w| w != 0).collect()
+    }
     /// A fresh session holding `prefix`; prefill continues at its 64-aligned position.
     pub fn session_from_prefix<'w>(
         &'w self,
@@ -252,6 +281,7 @@ impl<'a> NextModel<'a> {
         }
         let mut s = self.session_with_chunk(b, capacity, chunk)?;
         s.valid = false;
+        s.fit_kv(b, prefix.position)?;
         for (live, saved) in s.qsa_state.iter_mut().zip(&prefix.qsa) {
             match (live, saved) {
                 (Some(live), Some(saved)) => live.restore_rows(b, saved)?,
@@ -307,6 +337,9 @@ impl<'a> NextModel<'a> {
         for q in s.qsa_state.iter_mut().flatten() {
             q.rewind(prefix.position);
         }
+        // The previous request mapped pages for its own charge; this request's charge funds
+        // the rows it fits from here.
+        s.trim_kv(b, prefix.position)?;
         for (live, saved) in s.gdn_state.iter_mut().zip(&prefix.gdn) {
             match (live, saved) {
                 (Some(live), Some(saved)) => saved.copy_into(b, live)?,

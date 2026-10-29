@@ -17,11 +17,19 @@ fn pool(window: u64, bytes: u64, slots: usize) -> Pool {
 }
 
 #[test]
-fn switch_is_off_unless_one() {
-    assert_eq!(parse_switch(None), Ok(false));
-    assert_eq!(parse_switch(Some("0")), Ok(false));
-    assert_eq!(parse_switch(Some("1")), Ok(true));
-    assert!(parse_switch(Some("on")).is_err() && parse_switch(Some("")).is_err());
+fn a_chat_charges_its_own_pages_not_the_window() {
+    // The 10-27 two-Spark plan at 131072: 8,165,864,772 bytes per session, pool 21,279,044,229.
+    let (full, pool, ahead) = (8_165_864_772u64, 21_279_044_229u64, 64 + 7 + 1);
+    let g = Geometry::new(PAGE, (0..13).flat_map(|_| Geometry::attention(2, 256, 128, Format::Fp32)).collect(), full - 59_904 * 131072, 131072).unwrap();
+    assert_eq!(pool / full, 2);
+    // 1,275 tokens: 150 fixed pages and 2048 rows (2, 2 and 1 pages in each of 13 layers).
+    assert_eq!(g.charge(1275, ahead), Some(215 * PAGE));
+    assert!(pool / (215 * PAGE) >= 16);
+    // A 100,378-token prompt with 2048 output tokens: 103,424 rows (101, 101 and 26 pages).
+    assert_eq!(g.charge(100_378 + 2048, ahead), Some(3114 * PAGE));
+    assert_eq!(pool / (3114 * PAGE), 3);
+    // A full window never charges less than the window session did.
+    assert!(g.charge(131072, ahead).unwrap() >= full && g.charge(u64::MAX, ahead).is_none());
 }
 
 #[test]

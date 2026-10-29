@@ -5,6 +5,26 @@ use spark_engine::flash::next_batched::{NextModel, NextPrefix, NextSession, Next
 use spark_gpu_probe::driver::Backend;
 use std::{cell::RefCell, rc::{Rc, Weak}, sync::atomic::{AtomicUsize, Ordering}};
 use crate::prefix_switch::{adopt, cache_yield, prefix_cache, refuse_on_pipeline};
+use crate::kv_pages::Geometry;
+
+/// The KV page: one GB10 virtual-memory granule (segments.rs maps divisors of it).
+const KV_PAGE: u64 = 2 << 20;
+/// Page geometry of one chat on this rank: the paged keys, values and index rows of every
+/// attention layer it keeps and of the draft layer; fixed bytes = `full` (the full-window
+/// session charge) less those rows at the window.
+pub fn kv_geometry(model: &NextModel<'_>, context: usize, full: usize) -> Result<Geometry, String> {
+    let widths: Vec<u64> = model.kv_page_widths().into_iter().map(|w| w as u64).collect();
+    let window = widths.iter().sum::<u64>().checked_mul(context as u64).ok_or("KV page geometry overflows")?;
+    Geometry::new(KV_PAGE, widths, (full as u64).saturating_sub(window), context as u64)
+}
+/// Rows a chat charges past its scheduler tokens: the draft layer's verify rows
+/// (NextSession::fit_kv) and 64 rows of margin.
+pub fn kv_ahead(model: &NextModel<'_>) -> u64 { 64 + model.mtp_depth() as u64 + 1 }
+/// Bytes a chat of `tokens` charges: whole pages of its rows (window at most) and its
+/// fixed state. The session maps at most these pages (NextSession::fit_kv).
+pub fn kv_charge(pages: &Geometry, ahead: u64, tokens: usize) -> Option<usize> {
+    usize::try_from(pages.charge(tokens as u64, ahead)?).ok()
+}
 
 pub struct FlashNext<'b, 'a, 'w> {
     backend: &'b Backend<'a>,
@@ -12,6 +32,9 @@ pub struct FlashNext<'b, 'a, 'w> {
     context: usize,
     eos: Vec<u32>,
     reservation: usize,
+    /// Admission charges each chat its own KV pages (kv_charge), not the window.
+    pages: Geometry,
+    ahead: u64,
     chunk: usize,
     /// VADE_BATCH_PREFILL=0 disables guarded independent prompt spans.
     batch_prefill: bool,
@@ -171,6 +194,8 @@ impl<'b, 'a, 'w> FlashNext<'b, 'a, 'w> {
         // a model without MTP funds it here.
         let reservation = model.session_reservation_bytes_for_chunk(context, chunk)?
             + if prefix_cache && model.mtp_depth() == 0 { NextSession::checkpoint_bytes() } else { 0 };
+        let pages = kv_geometry(model, context, reservation)?;
+        let ahead = kv_ahead(model);
         let batch_on = match experiments.batch_mode { Some(mode) => mode, None => crate::mtp_batch::switch()? };
         let cohort_cost_control = experiments.cohort_cost;
         let guard_robust = experiments.guard_robust;
@@ -210,6 +235,8 @@ impl<'b, 'a, 'w> FlashNext<'b, 'a, 'w> {
             context,
             eos,
             reservation,
+            pages,
+            ahead,
             chunk,
             batch_prefill,
             batch_prefill_max_tokens,
@@ -587,6 +614,14 @@ impl<'b, 'a, 'w> Engine for FlashNext<'b, 'a, 'w> {
         self.backend.select_arm(request.arm_x)?;
         self.session()
     }
+    /// The session maps the KV pages its admission charge covers at once (kv_charge's extent),
+    /// so it reuses a kept range of that size without trimming and mapping it page by page.
+    fn session_for_admission(&self, request: &crate::protocol::Request, tokens: usize) -> Result<Self::Session<'_>, String> {
+        self.model.set_kv_rows_hint(self.pages.extent((tokens as u64).saturating_add(self.ahead)) as usize);
+        let session = self.session_for_request(request);
+        self.model.set_kv_rows_hint(0);
+        session
+    }
     fn session(&self) -> Result<Self::Session<'_>, String> {
         let before = self.backend.kv_reserve_stats();
         let mut session = self.model.session_with_chunk(self.backend, self.context, self.chunk)?;
@@ -777,15 +812,19 @@ impl<'b, 'a, 'w> Engine for FlashNext<'b, 'a, 'w> {
     fn reserve_foreground_slot(&self) -> bool {
         false
     }
+    /// The smallest chat: one token.
     fn session_reservation_bytes(&self) -> Option<usize> {
-        Some(self.reservation)
+        kv_charge(&self.pages, self.ahead, 1)
     }
-    fn request_reservation_bytes_with_retention(&self, _tokens: usize, _plain: bool,
+    fn request_reservation_bytes(&self, tokens: usize) -> Option<usize> {
+        kv_charge(&self.pages, self.ahead, tokens)
+    }
+    fn request_reservation_bytes_with_retention(&self, tokens: usize, _plain: bool,
         _cached: Option<usize>, retain: bool) -> Option<usize> {
         let extra = if retain && self.prefix_cache {
             spark_engine::flash_next_rows::prefix_retention_extra_bytes(self.model.mtp_depth() > 0)
         } else { 0 };
-        self.reservation.checked_add(extra)
+        self.request_reservation_bytes(tokens)?.checked_add(extra)
     }
     /// Verify-segment captures (VADE_MTP_GRAPH) take free device bytes above the decode
     /// graph allowance the shared reservation funds; retained cache yields those bytes.

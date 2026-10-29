@@ -651,7 +651,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                     state.reserved_session_bytes = request_bytes;
                     Ok(state)
                 }
-                None => engine.session_for_request(&ready.request).map(|session| CachedSession {
+                None => engine.session_for_admission(&ready.request, tokens).map(|session| CachedSession {
                     checkpoint_lease: None,
                     session,
                     tokens: Vec::new(),

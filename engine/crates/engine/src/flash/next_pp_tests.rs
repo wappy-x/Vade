@@ -836,7 +836,7 @@ fn pair() -> (TcpStream, TcpStream) {
 fn front(stream: TcpStream, limit: Duration) -> Link {
     static DOWN: AtomicBool = AtomicBool::new(false);
     Link {
-        release_pool: false,
+        release_pool: false, released: 0,
         cache: cache::Tickets::default(),
         stream,
         split: LAYERS / 2,

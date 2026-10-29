@@ -5,6 +5,23 @@ Changes that are merged but not yet released are under Unreleased.
 
 ## Unreleased
 
+- Flash-Next on two Sparks admits more short chats at once. A chat now
+  reserves only the KV pages its rows use. Before, every chat reserved the
+  pages for the whole context (8,231,544,132 bytes at `--context 131072`,
+  whatever the prompt length). The second Spark keeps the buffers of a chat
+  that ends and gives them to the next chat in the slot. At
+  `--context 131072`, all 16 chats of a 16-chat test (1,247 to 1,248 tokens
+  each) started at once, against 2 on main `54392da`. Their median wait in the
+  queue was 0.16 s for chats 1 to 9 and 1.02 s for chats 10 to 16, against
+  44.8 s and 128.9 s. Two 100,378-token chats still start together, but they
+  reach the first token later, because the engine now creates their KV pages
+  when they start: 76.9 s and 91.7 s, against 74.8 s and 88.9 s (+2.9 % and
+  +3.1 %). Each figure comes from one server start per build, in the
+  `cap-c2b` capacity test of 2026-10-28: the byte count from the main
+  server's `request_admitted` lines (`reserved_bytes`), and the chat counts,
+  queue waits and first-token times from the test client's log of each build.
+  Token IDs do not change.
+
 - With drafting on, prompts longer than 32K tokens on two Sparks reach the
   first token sooner. The first Spark now keeps up to 131,072 prompt rows for
   the drafter (KEEP_ROWS in engine/crates/engine/src/flash/next_pp.rs) and

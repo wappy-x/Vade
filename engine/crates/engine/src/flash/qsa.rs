@@ -640,78 +640,141 @@ pub struct QsaState<'a> {
     values: DeviceVector<'a>,
     raw_index: DeviceVector<'a>,
     capacity: usize,
+    /// K or V row width in FP32 words (this rank's KV heads x DIM); paged vectors map fewer rows.
+    width: usize,
+    /// Raw index row width in FP32 words (the loaded indexer key norm: indexer_head_dim).
+    index_width: usize,
     past: usize,
     pending: Option<usize>,
 }
 impl<'a> QsaState<'a> {
+    /// Paged rows: one virtual range per vector for the whole capacity (the addresses, capacity
+    /// and grids every kernel sees, so no arithmetic changes), with physical pages mapped by
+    /// `fit` before a pass writes rows. Kernels read only rows below past + tokens.
+    /// It maps the rows set_paged_rows gave (the chat's admission charge; one row without it).
+    pub(super) fn paged(b: &Backend<'a>, layer: usize, plan: &RankPlan, capacity: usize, index_width: usize) -> Result<Self> {
+        let (rank, width) = (plan.rank, (plan.kv_heads.end - plan.kv_heads.start) as usize * DIM);
+        let rows = PAGED_ROWS.with(|r| r.get()).clamp(1, capacity.max(1));
+        let vector = |w: usize| b.segmented_vector((capacity * w).max(1), (rows * w).max(1));
+        Ok(Self { layer, rank, keys: vector(width)?, values: vector(width)?, raw_index: vector(index_width)?, capacity, width, index_width, past: 0, pending: None })
+    }
+    /// Map pages for rows 0..rows (the capacity at most). Pages stay until the state drops.
+    pub(super) fn fit(&mut self, b: &Backend<'a>, rows: usize) -> Result<()> {
+        fit_rows(b, [&mut self.keys, &mut self.values, &mut self.raw_index], [self.width, self.width, self.index_width], rows.min(self.capacity))
+    }
+    /// Release whole pages above rows 0..rows (the committed rows at least).
+    pub(super) fn trim(&mut self, b: &Backend<'a>, rows: usize) -> Result<()> {
+        trim_rows(b, [&mut self.keys, &mut self.values, &mut self.raw_index], [self.width, self.width, self.index_width], rows.max(self.past))
+    }
+    /// Paged storage. all_rows: pages for every row at once, for callers that never call fit.
+    fn storage(b: &Backend<'a>, layer: usize, plan: &RankPlan, capacity: usize, index_width: usize, all_rows: bool) -> Result<Self> {
+        let mut state = Self::paged(b, layer, plan, capacity, index_width)?;
+        if all_rows { state.fit(b, capacity)?; }
+        Ok(state)
+    }
+    /// Rows all three vectors have pages for (all rows when not paged).
+    pub(super) fn mapped_rows(&self) -> usize {
+        let rows = (self.raw_index.len() / self.index_width.max(1)).min(self.capacity);
+        if self.width == 0 { rows } else { rows.min(self.keys.len() / self.width).min(self.values.len() / self.width) }
+    }
     pub(super) fn pool_addresses(&self) -> [u64;3] { [self.keys.device_address(),self.values.device_address(),self.raw_index.device_address()] }
     pub(super) fn commit_next(&mut self) { self.past+=1; }
 
     pub(super) fn snapshot(&self, b: &Backend<'a>, capacity: usize) -> Result<Self> {
         if self.pending.is_some() || capacity < self.past { return Err("invalid QSA snapshot capacity".into()); }
-        let width = if self.keys.len() < DIM { 0 } else { self.keys.len() / self.capacity };
+        let width = self.width;
         let mut next = Self { layer: self.layer, rank: self.rank,
             keys: b.vector((capacity * width).max(1))?, values: b.vector((capacity * width).max(1))?,
-            raw_index: b.vector(capacity * 128)?, capacity, past: self.past, pending: None };
+            raw_index: b.vector(capacity * self.index_width)?, capacity, width, index_width: self.index_width, past: self.past, pending: None };
         if width != 0 {
             b.copy_range(&self.keys, &mut next.keys, 0, 0, self.past * width)?;
             b.copy_range(&self.values, &mut next.values, 0, 0, self.past * width)?;
         }
-        b.copy_range(&self.raw_index, &mut next.raw_index, 0, 0, self.past * 128)?;
+        b.copy_range(&self.raw_index, &mut next.raw_index, 0, 0, self.past * self.index_width)?;
         Ok(next)
     }
     pub(super) fn rewind(&mut self, position: usize) { self.past = position; self.pending = None; }
     /// Tensor split state handoff: keys, values and raw index rows 0..past, the row widths, and `past`.
     pub(super) fn handoff(&mut self) -> Result<([&mut DeviceVector<'a>; 3], [usize; 3], &mut usize)> {
         if self.pending.is_some() { return Err("QSA handoff with a pending write".into()); }
-        let width = if self.keys.len() < DIM { 0 } else { self.keys.len() / self.capacity };
-        let index = self.raw_index.len().checked_div(self.capacity).unwrap_or(0);
-        Ok(([&mut self.keys, &mut self.values, &mut self.raw_index], [width, width, index], &mut self.past))
+        Ok(([&mut self.keys, &mut self.values, &mut self.raw_index], [self.width, self.width, self.index_width], &mut self.past))
     }
     /// No attention write in flight (a finished session's arena may be adopted).
     pub(super) fn idle(&self) -> bool { self.pending.is_none() }
     pub(super) fn device_bytes(&self) -> usize { (self.keys.len() + self.values.len() + self.raw_index.len()) * 4 }
     /// Prefix cache: FP32 lengths of `copy_rows_into`'s keys, values and raw index.
     pub(super) fn rows_lengths(&self, rows: usize) -> [usize; 3] {
-        let width = if self.keys.len() < DIM { 0 } else { self.keys.len() / self.capacity };
-        [(rows * width).max(1), (rows * width).max(1), (rows * 128).max(1)]
+        let width = self.width;
+        [(rows * width).max(1), (rows * width).max(1), (rows * self.index_width).max(1)]
     }
     /// Prefix cache: an independent copy of committed rows 0..rows in caller-allocated
     /// vectors of `rows_lengths(rows)` (one arena per prefix).
     pub(super) fn copy_rows_into(&self, b: &Backend<'a>, rows: usize, [keys, values, raw_index]: [DeviceVector<'a>; 3]) -> Result<Self> {
         if self.pending.is_some() || rows > self.past { return Err("QSA prefix copy exceeds committed rows".into()); }
-        let width = if self.keys.len() < DIM { 0 } else { self.keys.len() / self.capacity };
+        let width = self.width;
         if [keys.len(), values.len(), raw_index.len()] != self.rows_lengths(rows) { return Err("QSA prefix storage shape".into()); }
         let mut next = Self { layer: self.layer, rank: self.rank, keys, values,
-            raw_index, capacity: rows.max(1), past: rows, pending: None };
+            raw_index, capacity: rows.max(1), width, index_width: self.index_width, past: rows, pending: None };
         if width != 0 && rows != 0 {
             b.copy_range(&self.keys, &mut next.keys, 0, 0, rows * width)?;
             b.copy_range(&self.values, &mut next.values, 0, 0, rows * width)?;
         }
-        if rows != 0 { b.copy_range(&self.raw_index, &mut next.raw_index, 0, 0, rows * 128)?; }
+        if rows != 0 { b.copy_range(&self.raw_index, &mut next.raw_index, 0, 0, rows * self.index_width)?; }
         Ok(next)
     }
     /// Bytes `copy_rows` allocates for `rows` rows of a state with this capacity.
     pub(super) fn rows_bytes(&self, rows: usize) -> usize {
-        let width = if self.keys.len() < DIM { 0 } else { self.keys.len() / self.capacity };
-        (2 * (rows * width).max(1) + (rows * 128).max(1)) * 4 + 3 * 256
+        let width = self.width;
+        (2 * (rows * width).max(1) + (rows * self.index_width).max(1)) * 4 + 3 * 256
     }
     /// Install a `copy_rows` prefix into this (fresh) state of the same layer and width.
     pub(super) fn restore_rows(&mut self, b: &Backend<'a>, prefix: &Self) -> Result<()> {
-        let width = if self.keys.len() < DIM { 0 } else { self.keys.len() / self.capacity };
-        let source = if prefix.keys.len() < DIM { 0 } else { prefix.keys.len() / prefix.capacity };
+        let width = self.width;
+        let source = prefix.width;
         if prefix.layer != self.layer || prefix.rank != self.rank || prefix.past > self.capacity
-            || prefix.pending.is_some() || (prefix.past != 0 && source != width) {
+            || prefix.pending.is_some() || (prefix.past != 0 && (source != width || prefix.index_width != self.index_width)) {
             return Err("QSA prefix differs in layer, rank, width or capacity".into());
         }
         if width != 0 && prefix.past != 0 {
             b.copy_range(&prefix.keys, &mut self.keys, 0, 0, prefix.past * width)?;
             b.copy_range(&prefix.values, &mut self.values, 0, 0, prefix.past * width)?;
         }
-        if prefix.past != 0 { b.copy_range(&prefix.raw_index, &mut self.raw_index, 0, 0, prefix.past * 128)?; }
+        if prefix.past != 0 { b.copy_range(&prefix.raw_index, &mut self.raw_index, 0, 0, prefix.past * self.index_width)?; }
         self.rewind(prefix.past);
         Ok(())
     }
+}
+
+thread_local! {
+    /// Rows a fresh paged state maps at once on this thread: rank 0 sets the chat's charged
+    /// rows before it builds the session, so a kept range of that size is reused whole.
+    static PAGED_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+pub(super) fn set_paged_rows(rows: usize) { PAGED_ROWS.with(|r| r.set(rows)); }
+/// Bytes per token of a paged state's keys, values and raw index rows on this rank
+/// (`index_width`: the checkpoint's indexer_head_dim).
+pub(super) fn page_widths(plan: &RankPlan, index_width: usize) -> [usize; 3] {
+    let width = (plan.kv_heads.end - plan.kv_heads.start) as usize * DIM * 4;
+    [width, width, index_width * 4]
+}
+/// Raw index row width in FP32 words of the attention at `prefix`: its loaded indexer key norm.
+pub(super) fn index_width(w: &Weights<'_>, prefix: &str) -> Result<usize> {
+    let width = w.tensor(&format!("{prefix}indexer.k_layernorm.weight"))?.tensor.shape.iter().product::<u64>() as usize;
+    if width == 0 { return Err("QSA indexer key norm has no width".into()); }
+    Ok(width)
+}
+fn fit_rows<'a>(b: &Backend<'a>, vectors: [&mut DeviceVector<'a>; 3], widths: [usize; 3], rows: usize) -> Result<()> {
+    for (v, w) in vectors.into_iter().zip(widths) {
+        if v.is_segmented() && v.len() < rows * w { b.grow_vector(v, rows * w)?; }
+    }
+    Ok(())
+}
+fn trim_rows<'a>(b: &Backend<'a>, vectors: [&mut DeviceVector<'a>; 3], widths: [usize; 3], rows: usize) -> Result<()> {
+    for (v, w) in vectors.into_iter().zip(widths) {
+        let keep = (rows * w).max(1);
+        if v.is_segmented() && v.len() > keep { b.trim_vector(v, keep)?; }
+    }
+    Ok(())
 }
 
 /// VADE_FLASHNEXT_KV_RESERVE (default on; =0 off): Flash-Next session KV arenas come from
@@ -748,6 +811,8 @@ pub struct Qsa<'a, 'w> {
     values: DeviceVector<'a>,
     raw_index: DeviceVector<'a>,
     capacity: usize,
+    /// Raw index row width in FP32 words (QsaState::index_width).
+    index_width: usize,
     past: usize,
     pending: Option<usize>,
     weight_bytes: usize,
@@ -768,16 +833,17 @@ impl<'a, 'w> Qsa<'a, 'w> {
         let heads = (w.plan.query_heads.end - w.plan.query_heads.start) as usize;
         let keys = (w.plan.kv_heads.end - w.plan.kv_heads.start) as usize;
         let get = |part: &str, shape: &[u64], elements| bf16(w, &format!("{p}{part}"), shape, elements);
+        let index_width = index_width(w, p)?;
         let cache = if let Some(cache) = cached {
             if cache.layer != layer || cache.rank != w.plan.rank || cache.capacity != capacity
-                || cache.keys.len() != (capacity * keys * DIM).max(1) {
+                || cache.width != keys * DIM || cache.index_width != index_width {
                 return Err("QSA cache does not belong to this layer, rank and capacity".into());
             }
             if cache.pending.is_some() { return Err("finish QSA attention before detaching its weights".into()); }
             cache
         } else {
-            let mut v = b.vector_arena(&[(capacity * keys * DIM).max(1), (capacity * keys * DIM).max(1), capacity * 128])?.into_iter();
-            QsaState { layer, rank: w.plan.rank, keys: v.next().unwrap(), values: v.next().unwrap(), raw_index: v.next().unwrap(), capacity, past: 0, pending: None }
+            let mut v = b.vector_arena(&[(capacity * keys * DIM).max(1), (capacity * keys * DIM).max(1), capacity * index_width])?.into_iter();
+            QsaState { layer, rank: w.plan.rank, keys: v.next().unwrap(), values: v.next().unwrap(), raw_index: v.next().unwrap(), capacity, width: keys * DIM, index_width, past: 0, pending: None }
         };
         Ok(Self { next: false, draft_mx8: false, layer, plan: w.plan.clone(),
             qg: get("q_proj.weight", &[12288, 2560], heads * 512 * HIDDEN)?,
@@ -786,37 +852,42 @@ impl<'a, 'w> Qsa<'a, 'w> {
             index: get("indexer.index_qk_proj.weight", &[640, 2560], INDEX * HIDDEN)?,
             out: get("o_proj.weight", &[2560, 6144], HIDDEN * heads * DIM)?,
             native: None, keys: cache.keys, values: cache.values, raw_index: cache.raw_index,
-            capacity, past: cache.past, pending: cache.pending,
+            capacity, index_width: cache.index_width, past: cache.past, pending: cache.pending,
             weight_bytes: w.prefix_bytes(&p),
             _weights: PhantomData })
     }
     /// Mixed-checkpoint layer: MXFP8 projections arrive as expanded packed
     /// BF16 addresses [q, k, v, index, o]; norms stay in the resident arena.
+    /// New storage has pages for every row: these callers never call fit.
     pub fn load_next(b: &Backend<'a>, w: &'w Weights<'_>, layer: usize, capacity: usize,
         proj: [u64; 5], cached: Option<QsaState<'a>>) -> Result<Self> {
+        Self::load_next_storage(b, w, layer, capacity, proj, cached, true)
+    }
+    fn load_next_storage(b: &Backend<'a>, w: &'w Weights<'_>, layer: usize, capacity: usize,
+        proj: [u64; 5], cached: Option<QsaState<'a>>, all_rows: bool) -> Result<Self> {
         if layer >= 48 || layer % 4 != 3 || capacity == 0 || capacity > 262144 {
             return Err("invalid indexed layer or cache capacity".into());
         }
         if proj.iter().any(|a| a % 16 != 0) { return Err("expanded QSA projections need 16-byte alignment".into()); }
         let keys = (w.plan.kv_heads.end - w.plan.kv_heads.start) as usize;
+        let index_width = index_width(w, &format!("model.language_model.layers.{layer}.self_attn."))?;
         let cache = if let Some(cache) = cached {
             if cache.layer != layer || cache.rank != w.plan.rank || cache.capacity != capacity
-                || cache.keys.len() != (capacity * keys * DIM).max(1) { return Err("QSA cache does not belong to this layer, rank and capacity".into()); }
+                || cache.width != keys * DIM || cache.index_width != index_width { return Err("QSA cache does not belong to this layer, rank and capacity".into()); }
             if cache.pending.is_some() { return Err("finish QSA attention before detaching its weights".into()); }
-            cache } else {
-            let lengths = [(capacity * keys * DIM).max(1), (capacity * keys * DIM).max(1), capacity * 128];
-            let mut v = if kv_reserve() { b.kv_arena(&lengths)? } else { b.vector_arena(&lengths)? }.into_iter();
-            QsaState { layer, rank: w.plan.rank, keys: v.next().unwrap(), values: v.next().unwrap(), raw_index: v.next().unwrap(), capacity, past: 0, pending: None } };
+            cache } else { QsaState::storage(b, layer, &w.plan, capacity, index_width, all_rows)? };
         let [qg, k, v, index, out] = proj;
         Ok(Self { next: false, draft_mx8: false, layer, plan: w.plan.clone(), qg, k, v, index, out,
             native: None, keys: cache.keys, values: cache.values, raw_index: cache.raw_index,
-            capacity, past: cache.past, pending: cache.pending,
+            capacity, index_width: cache.index_width, past: cache.past, pending: cache.pending,
             weight_bytes: w.prefix_bytes(&format!("model.language_model.layers.{layer}.self_attn.")),
             _weights: PhantomData })
     }
     pub(super) fn load_next_rows(b: &Backend<'a>, w: &'w Weights<'_>, layer: usize, capacity: usize,
         proj: [u64; 5], state: Option<QsaState<'a>>) -> Result<Self> {
-        let mut q = Self::load_next(b, w, layer, capacity, proj, state)?; q.next = true; Ok(q)
+        // New storage has pages for the rows set by set_paged_rows; the caller fits rows
+        // before each pass writes past them.
+        let mut q = Self::load_next_storage(b, w, layer, capacity, proj, state, false)?; q.next = true; Ok(q)
     }
     /// VADE_FLASHNEXT_DRAFT_MX8_LAYER=1: every projection matrix must already have its twin.
     pub(super) fn use_draft_mx8(&mut self) -> Result<()> {
@@ -842,14 +913,25 @@ impl<'a, 'w> Qsa<'a, 'w> {
     }
     pub fn into_state(self) -> QsaState<'a> {
         QsaState { layer: self.layer, rank: self.plan.rank, keys: self.keys, values: self.values,
-            raw_index: self.raw_index, capacity: self.capacity, past: self.past, pending: self.pending }
+            raw_index: self.raw_index, capacity: self.capacity, width: (self.plan.kv_heads.end - self.plan.kv_heads.start) as usize * DIM,
+            index_width: self.index_width, past: self.past, pending: self.pending }
+    }
+    /// Physical pages for rows 0..rows of paged vectors (the draft layer's attention).
+    pub(super) fn fit(&mut self, b: &Backend<'a>, rows: usize) -> Result<()> {
+        let width = (self.plan.kv_heads.end - self.plan.kv_heads.start) as usize * DIM;
+        fit_rows(b, [&mut self.keys, &mut self.values, &mut self.raw_index], [width, width, self.index_width], rows.min(self.capacity))
+    }
+    /// Release whole pages of paged vectors above rows 0..rows (the committed rows at least).
+    pub(super) fn trim(&mut self, b: &Backend<'a>, rows: usize) -> Result<()> {
+        let width = (self.plan.kv_heads.end - self.plan.kv_heads.start) as usize * DIM;
+        trim_rows(b, [&mut self.keys, &mut self.values, &mut self.raw_index], [width, width, self.index_width], rows.max(self.past))
     }
     pub fn reset(&mut self) { self.past = 0; self.pending = None; }
     pub(super) fn rewind(&mut self, position: usize) { self.past = position; self.pending = None; }
     /// Bytes `snapshot_prefix(rows)` allocates.
     pub(super) fn prefix_bytes(&self, rows: usize) -> usize {
         let width = (self.plan.kv_heads.end - self.plan.kv_heads.start) as usize * DIM;
-        (2 * (rows.max(1) * width).max(1) + rows.max(1) * 128) * 4 + 3 * 256
+        (2 * (rows.max(1) * width).max(1) + rows.max(1) * self.index_width) * 4 + 3 * 256
     }
     pub(super) fn snapshot_prefix(&self, b: &Backend<'a>, past: usize) -> Result<QsaState<'a>> {
         if past > self.past { return Err("MTP snapshot exceeds committed attention history".into()); }
@@ -861,21 +943,22 @@ impl<'a, 'w> Qsa<'a, 'w> {
     fn snapshot_rows(&self, b: &Backend<'a>, capacity: usize, past: usize) -> Result<QsaState<'a>> {
         if self.pending.is_some() || capacity < past { return Err("invalid MTP attention snapshot capacity".into()); }
         let width = (self.plan.kv_heads.end - self.plan.kv_heads.start) as usize * DIM;
-        let mut v = b.vector_arena(&[(capacity * width).max(1), (capacity * width).max(1), capacity * 128])?.into_iter();
+        let index_width = self.index_width;
+        let mut v = b.vector_arena(&[(capacity * width).max(1), (capacity * width).max(1), capacity * index_width])?.into_iter();
         let mut state = QsaState { layer: self.layer, rank: self.plan.rank, keys: v.next().unwrap(), values: v.next().unwrap(),
-            raw_index: v.next().unwrap(), capacity, past, pending: None };
+            raw_index: v.next().unwrap(), capacity, width, index_width, past, pending: None };
         if width != 0 && past != 0 {
             b.copy_range(&self.keys, &mut state.keys, 0, 0, past * width)?;
             b.copy_range(&self.values, &mut state.values, 0, 0, past * width)?;
         }
-        if past != 0 { b.copy_range(&self.raw_index, &mut state.raw_index, 0, 0, past * 128)?; }
+        if past != 0 { b.copy_range(&self.raw_index, &mut state.raw_index, 0, 0, past * index_width)?; }
         Ok(state)
     }
     /// Prefix cache: FP32 lengths of `snapshot_prefix_into(past)`'s vectors.
     pub(super) fn prefix_lengths(&self, past: usize) -> [usize; 3] {
         let width = (self.plan.kv_heads.end - self.plan.kv_heads.start) as usize * DIM;
         let capacity = past.max(1);
-        [(capacity * width).max(1), (capacity * width).max(1), capacity * 128]
+        [(capacity * width).max(1), (capacity * width).max(1), capacity * self.index_width]
     }
     /// `snapshot_prefix(past)` in caller-allocated vectors (one arena per prefix).
     pub(super) fn snapshot_prefix_into(&self, b: &Backend<'a>, past: usize, [keys, values, raw_index]: [DeviceVector<'a>; 3])
@@ -883,12 +966,13 @@ impl<'a, 'w> Qsa<'a, 'w> {
         if self.pending.is_some() || past > self.past { return Err("MTP snapshot exceeds committed attention history".into()); }
         if [keys.len(), values.len(), raw_index.len()] != self.prefix_lengths(past) { return Err("MTP prefix storage shape".into()); }
         let width = (self.plan.kv_heads.end - self.plan.kv_heads.start) as usize * DIM;
-        let mut state = QsaState { layer: self.layer, rank: self.plan.rank, keys, values, raw_index, capacity: past.max(1), past, pending: None };
+        let index_width = self.index_width;
+        let mut state = QsaState { layer: self.layer, rank: self.plan.rank, keys, values, raw_index, capacity: past.max(1), width, index_width, past, pending: None };
         if width != 0 && past != 0 {
             b.copy_range(&self.keys, &mut state.keys, 0, 0, past * width)?;
             b.copy_range(&self.values, &mut state.values, 0, 0, past * width)?;
         }
-        if past != 0 { b.copy_range(&self.raw_index, &mut state.raw_index, 0, 0, past * 128)?; }
+        if past != 0 { b.copy_range(&self.raw_index, &mut state.raw_index, 0, 0, past * index_width)?; }
         Ok(state)
     }
     pub(super) fn reserve(&mut self, b: &Backend<'a>, capacity: usize) -> Result<()> {
@@ -901,7 +985,8 @@ impl<'a, 'w> Qsa<'a, 'w> {
         Ok(())
     }
     pub(super) fn restore(&mut self, b: &Backend<'a>, state: &QsaState<'a>) -> Result<()> {
-        if state.layer != self.layer || state.rank != self.plan.rank || state.past > self.capacity || state.pending.is_some() {
+        if state.layer != self.layer || state.rank != self.plan.rank || state.past > self.capacity || state.pending.is_some()
+            || state.index_width != self.index_width {
             return Err("MTP attention snapshot differs in layer, rank or capacity".into());
         }
         let width = (self.plan.kv_heads.end - self.plan.kv_heads.start) as usize * DIM;
@@ -909,14 +994,14 @@ impl<'a, 'w> Qsa<'a, 'w> {
             b.copy_range(&state.keys, &mut self.keys, 0, 0, state.past * width)?;
             b.copy_range(&state.values, &mut self.values, 0, 0, state.past * width)?;
         }
-        if state.past != 0 { b.copy_range(&state.raw_index, &mut self.raw_index, 0, 0, state.past * 128)?; }
+        if state.past != 0 { b.copy_range(&state.raw_index, &mut self.raw_index, 0, 0, state.past * self.index_width)?; }
         self.rewind(state.past);
         Ok(())
     }
     pub fn cached_tokens(&self) -> usize { self.past }
     pub fn weight_bytes(&self) -> usize { self.weight_bytes }
     pub fn kv_bytes(&self) -> usize { 2 * (self.capacity * (self.plan.kv_heads.end - self.plan.kv_heads.start) as usize * DIM * 4).max(4).div_ceil(64) * 64 }
-    pub fn index_bytes(&self) -> usize { self.capacity * 128 * 4 }
+    pub fn index_bytes(&self) -> usize { self.capacity * self.index_width * 4 }
     /// The tensor split: project_batch with this rank's row half of the q/gate projection (query
     /// heads [rank * h / 2, (rank + 1) * h / 2), a head's q and gate rows adjacent) into its columns
     /// of the pass's q/gate rows, index, k and v whole, in the Next group's order with its per-row
@@ -1344,4 +1429,39 @@ fn index_pool_append_and_rewind() {
     assert_eq!(decode_shape(2064, 3, 32768), decode_shape(2068, 3, 32768)); // Fixed index score grid.
     assert_eq!(decode_shape(28, 3, 32768), decode_shape(32, 3, 32768)); // Fixed attention score grid.
     for (past, tokens, groups) in [(0, 3, 0..0), (0, 64, 0..16), (3, 1, 0..1), (2047, 5, 511..513), (131071, 1, 32767..32768)] { assert_eq!(index_pool_range(past, tokens), groups); }
+}
+
+#[test]
+#[ignore = "skipped: no GPU; requires CUDA"]
+fn reference_storage_has_every_row_and_served_storage_grows_and_trims() {
+    use spark_gpu_probe::{driver::with_backend, layer_ptx};
+    let (plan, capacity) = (RankPlan::new(0, 1).unwrap(), 4096);
+    with_backend(0, layer_ptx().unwrap(), usize::MAX, |b| {
+        // Rows 1..capacity lie past the one row a state maps without a hint.
+        let rows = |s: &QsaState<'_>| [s.keys.len() / s.width, s.values.len() / s.width, s.raw_index.len() / s.index_width];
+        let fill = |v: &mut DeviceVector<'_>| -> std::result::Result<(), String> {
+            let values: Vec<f32> = (0..v.len()).map(|i| (i % 4093) as f32).collect();
+            b.write_vector(v, &values)?;
+            if b.read_vector(v)? != values { return Err("QSA storage read back".into()); }
+            Ok(())
+        };
+        set_paged_rows(0);
+        let mut reference = QsaState::storage(b, 3, &plan, capacity, 128, true).map_err(|e| e.to_string())?;
+        if rows(&reference).iter().any(|&r| r < capacity) { return Err(format!("reference rows {:?}", rows(&reference))); }
+        for v in [&mut reference.keys, &mut reference.values, &mut reference.raw_index] { fill(v)?; }
+        set_paged_rows(64);
+        let mut served = QsaState::storage(b, 3, &plan, capacity, 128, false).map_err(|e| e.to_string())?;
+        set_paged_rows(0);
+        if rows(&served).iter().all(|&r| r >= capacity) { return Err("served storage mapped every row".into()); }
+        served.fit(b, capacity).map_err(|e| e.to_string())?;
+        if rows(&served).iter().any(|&r| r < capacity) { return Err(format!("served rows {:?}", rows(&served))); }
+        for v in [&mut served.keys, &mut served.values, &mut served.raw_index] { fill(v)?; }
+        // Adoption by a request with a smaller charge: pages above its rewound rows go.
+        served.rewind(100);
+        served.trim(b, 100).map_err(|e| e.to_string())?;
+        if rows(&served)[..2].iter().any(|&r| r < 100 || r >= capacity) { return Err(format!("trimmed rows {:?}", rows(&served))); }
+        served.fit(b, capacity).map_err(|e| e.to_string())?;
+        for v in [&mut served.keys, &mut served.values, &mut served.raw_index] { fill(v)?; }
+        Ok(())
+    }).unwrap();
 }

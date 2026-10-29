@@ -65,8 +65,8 @@ returns to the reserve, not to the device allocator, and the next session uses
 it again without a new allocation. This exception applies to an ordinary buffer
 only. It applies only while the buffers of that kind that the process holds,
 live or spare, are at most the session limit times the largest session
-reservation. Under pressure, a reserve still releases segmented pages and
-spares above that bound. After 30 seconds without a request, each reserve
+reservation. Under pressure, a reserve still releases ordinary spares above
+that bound, and segmented pages outside their own plan (see below). After 30 seconds without a request, each reserve
 releases its spares when it reads pressure. Each reserve reads pressure
 separately. If the first release clears the pressure, the second reserve
 keeps its spares. Without pressure, spares inside the plan stay. A new request
@@ -75,6 +75,16 @@ pressure. A worker Spark has no periodic idle check. It reads pressure when it
 allocates. It also reads pressure when it returns a buffer after device bytes
 fell under pressure, if the buffers held are outside the plan. It keeps spares
 inside the plan.
+
+Flash-Next serving admits a request by the KV pages it can use: its prompt,
+its output allowance, the draft verify rows and 64 more rows, in whole 2 MiB
+pages. Admission charges these bytes to the session pool when the request
+starts. The engine maps the pages when the rows need them. Segmented KV pages
+have their own plan: the session pool bytes. Under pressure, the KV reserve
+keeps spare segmented pages while the segmented pages that the process holds,
+live or spare, are at most that pool. Above it, pressure releases them. If the
+device budget or the driver refuses a page during later growth, the growth
+stops with a capacity error (`KV segment growth` in the log).
 
 The `flashnext kv_arenas` log gives per-operation counts and bytes for ordinary attention
 arena allocations, reuse, reserve returns, direct frees and reserve evictions.

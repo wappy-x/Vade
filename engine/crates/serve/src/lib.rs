@@ -163,6 +163,8 @@ pub trait Engine {
         Self: 'a;
     /// Select test kernels before allocating a fresh request session.
     fn session_for_request(&self, _request: &protocol::Request) -> Result<Self::Session<'_>, String> { self.session() }
+    /// Admission: a fresh session for a request whose reservation covers `tokens` tokens.
+    fn session_for_admission(&self, request: &protocol::Request, _tokens: usize) -> Result<Self::Session<'_>, String> { self.session_for_request(request) }
     fn session(&self) -> Result<Self::Session<'_>, String>;
     /// Canonical prompt snapshots, independent forks and accounted shared KV.
     fn kv_branch_handles(&self) -> bool { false }

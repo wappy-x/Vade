@@ -746,13 +746,12 @@ impl<'a> NextModel<'a> {
         self.pp_release_pooled_decode();
         Ok(())
     }
-    /// Largest affordable slot limit, session pool bytes and still-unallocated shared bytes.
-    /// `resident_tiles` counts backend dense/mixed tiles already deducted from `available`.
-    pub fn session_pool_plan(&self, capacity: usize, arms: usize, available: usize, resident_tiles: usize)
+    /// Largest slot limit at `needed` bytes per slot (the smallest chat's pages) whose pool still holds one `full`
+    /// session, session pool bytes and still-unallocated shared bytes. `resident_tiles`: tiles already out of `available`.
+    pub fn session_pool_plan(&self, capacity: usize, arms: usize, available: usize, resident_tiles: usize, [needed, full]: [usize; 2])
         -> Result<(usize, usize, usize)>
     {
-        let needed = self.session_reservation_bytes(capacity)?;
-        crate::flash_next_rows::fit_session_pool(available, needed, |sessions| {
+        crate::flash_next_rows::fit_session_pool(available, needed, full, |sessions| {
             Ok(self.shared_reservation_bytes_for_sessions(capacity, arms, sessions)?
                 .saturating_sub(resident_tiles))
         })
@@ -1298,8 +1297,9 @@ impl Drop for NextSession<'_, '_> {
     fn drop(&mut self) {
         if self.slot != 0 {
             self.model.pool.borrow_mut().used[self.slot as usize] = false;
-            // Pipeline front: kept rows never outlive their chat.
+            // Pipeline front: kept rows and the back's session (its KV pages) never outlive their chat.
             self.model.pp_drop_kept(self.slot);
+            self.model.pp_release_slot(self.slot);
         }
     }
 }

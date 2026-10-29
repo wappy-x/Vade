@@ -91,16 +91,18 @@ fn capture_pair_releases_partial_storage_and_preserves_fatal_errors() {
     assert_eq!(calls, 1);
     assert_eq!(capture_pair(|head| Ok(Some(if head { 1 } else { 2 }))).unwrap(), Some((1, 2)));
 }
-/// Fund every reachable padded graph width and all admitted sessions together.
-/// The one-slot fallback preserves the caller's normal insufficient-budget refusal.
+/// Fund every reachable padded graph width and all admitted sessions together: `needed` bytes
+/// per slot, and one `full` session in the pool (the startup check), since the shared graph
+/// storage grows with the slot count. The one-slot fallback preserves the caller's normal
+/// insufficient-budget refusal.
 #[cfg(any(target_os = "linux", test))]
-pub(crate) fn fit_session_pool(available: usize, needed: usize, mut shared: impl FnMut(usize) -> Result<usize>)
+pub(crate) fn fit_session_pool(available: usize, needed: usize, full: usize, mut shared: impl FnMut(usize) -> Result<usize>)
     -> Result<(usize, usize, usize)>
 {
     for sessions in (1usize..=16).rev() {
         let reserve = shared(sessions)?;
         let pool = available.saturating_sub(reserve);
-        if sessions == 1 || needed.checked_mul(sessions).is_some_and(|n| n <= pool) {
+        if sessions == 1 || full <= pool && needed.checked_mul(sessions).is_some_and(|n| n <= pool) {
             return Ok((sessions, pool, reserve));
         }
     }
@@ -110,9 +112,13 @@ pub(crate) fn fit_session_pool(available: usize, needed: usize, mut shared: impl
 #[test]
 fn session_pool_funds_graph_cliffs_and_refuses_shortfall() {
     let shared = |n: usize| Ok(1000 + n.next_power_of_two() * 60);
-    assert_eq!(fit_session_pool(20000, 2257, shared).unwrap(), (8, 18520, 1480));
-    assert_eq!(fit_session_pool(100, 2257, shared).unwrap(), (1, 0, 1060));
-    assert_eq!(fit_session_pool(usize::MAX, usize::MAX, |_| Ok(0)).unwrap().0, 1);
+    assert_eq!(fit_session_pool(20000, 2257, 2257, shared).unwrap(), (8, 18520, 1480));
+    assert_eq!(fit_session_pool(100, 2257, 2257, shared).unwrap(), (1, 0, 1060));
+    assert_eq!(fit_session_pool(usize::MAX, usize::MAX, usize::MAX, |_| Ok(0)).unwrap().0, 1);
+    // Small chats fund 16 slots (pool 18040), but one full session of 18100 bytes fits only
+    // below the 9..16 storage width: the plan takes 8 slots, which pass the startup check.
+    assert_eq!(fit_session_pool(20000, 1000, 18000, shared).unwrap(), (16, 18040, 1960));
+    assert_eq!(fit_session_pool(20000, 1000, 18100, shared).unwrap(), (8, 18520, 1480));
 }
 /// Missing owners cannot be reconstructed while published pool addresses remain live.
 /// Such a session must be replaced; reset and pooled admission share this check.

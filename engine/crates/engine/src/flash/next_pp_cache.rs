@@ -261,8 +261,8 @@ impl<'a> NextModel<'a> {
         residual: &mut [f32],
     ) -> Result<()> {
         if command(kind) { return self.pp_cache_step(b, sessions, prefixes, prefix_budget, kind, count, meta, residual, tile, context); }
-        for &[slot, capacity, pos, len] in meta {
-            let (capacity, pos) = (capacity as usize, pos as usize);
+        for &[slot, word, pos, len] in meta {
+            let (capacity, kv_rows, pos) = ((word & ((1 << 19) - 1)) as usize, (word >> 19) as usize * 64, pos as usize);
             if len == 0 || slot == 0 {
                 return Err("pipeline row without a slot".into());
             }
@@ -271,7 +271,10 @@ impl<'a> NextModel<'a> {
             }
             if sessions.get(&slot).is_none_or(|s| s.capacity != capacity) {
                 sessions.remove(&slot);
-                sessions.insert(slot, self.session_with_chunk(b, capacity, tile)?);
+                crate::flash::qsa::set_paged_rows(kv_rows);
+                let session = self.session_with_chunk(b, capacity, tile);
+                crate::flash::qsa::set_paged_rows(0);
+                sessions.insert(slot, session?);
             }
             let s = sessions.get_mut(&slot).unwrap();
             if pos == 0 && (s.pos != 0 || !s.valid) {
@@ -298,12 +301,14 @@ impl<'a> NextModel<'a> {
                 if lens.iter().sum::<usize>() != count {
                     return Err("pipeline rows do not match the residual".into());
                 }
+                for (s, &n) in ordered.iter_mut().zip(&lens) { s.fit_kv(b, s.pos + n)?; }
                 NextSession::pp_back_rows(b, &mut ordered, &lens, residual, matches!(kind, KIND_VERIFY | crate::flash_tp_switch::KIND_VERIFY))
             }
             KIND_POOLED => {
                 if lens.iter().any(|&n| n != 1) {
                     return Err("pipeline pooled step needs one row per chat".into());
                 }
+                for s in ordered.iter_mut() { s.fit_kv(b, s.pos + 1)?; }
                 NextSession::pp_back_pooled(b, &mut ordered, count, residual)
             }
             crate::flash_tp_switch::KIND_HANDOFF => self.tp_handoff(b, &mut ordered, &lens), _ => Err("pipeline request kind unknown".into()),

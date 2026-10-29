@@ -161,6 +161,7 @@ impl<'a> NextModel<'a> {
         let [chat] = sessions else { return Err("token split pass with more than one chat".into()) };
         let mailbox = self.tp_box.get().ok_or("tensor split mailbox missing")?;
         let slot = mailbox.slot_bytes() / 4;
+        if layer % 4 == 3 { chat.fit_kv(b, rows)?; }
         // Rank 0 sets the attention rows and the GDN cached flag as rank 1 holds them after the layer.
         let (_, words) = layer_words(chat, layer, Some(if layer % 4 == 3 { rows } else { 1 }))?;
         let mut parts = Vec::new();

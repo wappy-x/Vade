@@ -85,6 +85,14 @@ pub(super) const KIND_ROWS_FINAL: u32 = 6;
 /// request (TCP or wire), after earlier queued work and before this request's work.
 /// It also covers a filtered single row: request shape alone is not authorization.
 const RELEASE_POOLED: u32 = 1 << 31;
+/// Slots whose chats ended on the front (slot s at bit 8 + s, slots 1..=16), carried with the
+/// next request like RELEASE_POOLED. The back drops those sessions, and so their KV pages,
+/// before this request's work: a later chat in the slot starts from a fresh session.
+const RELEASE_SLOTS: u32 = 0xFFFF << 9;
+/// Pass meta capacity word: the capacity in bits 0..19 (a context is 262,144 at most) and, in
+/// bits 19..32, the KV rows the front has pages for, in whole units of 64 (0: not sent). The back maps
+/// as many rows when it builds the chat's session, so it does not grow page by page.
+pub(super) fn capacity_word(capacity: usize, kv_rows: usize) -> u32 { capacity as u32 | ((kv_rows / 64).min(8191) as u32) << 19 }
 /// Kept rows retained at most on a front linked directly to the last rank, until their chats
 /// observe them (W * 4 bytes of host memory per row, held per kept tile while a drafting prompt
 /// runs); past it the front runs the tile synchronously, so its rows enter the draft history at
@@ -387,6 +395,8 @@ pub(super) struct Link {
     /// A draft transition still has to release downstream pooled decode storage.
     release_pool: bool,
     cache: cache::Tickets,
+    /// RELEASE_SLOTS bits of chats that ended since the last request.
+    released: u32,
 }
 fn request_head(kind: u32, rows: usize, meta: &[[u32; 4]], id: u32) -> Vec<u8> {
     let mut head = Vec::with_capacity(REQUEST_HEAD + meta.len() * 16);
@@ -472,6 +482,7 @@ impl Link {
             inline_kept: stage.rank + 2 == stage.ranks,
             release_pool: false,
             cache: cache::Tickets::default(),
+            released: 0,
         })
     }
     /// Any front-side pipeline error leaves the two ranks' session state unknown: the link is
@@ -679,7 +690,7 @@ impl Link {
     /// Queue the exact kind and metadata; used on every forward edge.
     fn enqueue(&mut self, kind: u32, meta: &[[u32; 4]], rows: Vec<f32>) -> Result<()> {
         self.sent = self.sent.wrapping_add(1);
-        let flagged = kind | if self.release_pool { RELEASE_POOLED } else { 0 } | if self.tp_tile { crate::flash_tp_switch::TILE } else { 0 } | if self.tp_seq { crate::flash_tp_switch::SEQ } else { 0 };
+        let flagged = kind | if self.release_pool { RELEASE_POOLED } else { 0 } | self.released | if self.tp_tile { crate::flash_tp_switch::TILE } else { 0 } | if self.tp_seq { crate::flash_tp_switch::SEQ } else { 0 };
         let head = request_head(flagged, rows.len() / W, meta, self.sent);
         self.bytes += (rows.len() * 4) as u64;
         let queue = self.queue.clone().ok_or("pipeline queue missing")?;
@@ -708,6 +719,7 @@ impl Link {
         self.pending += 1;
         self.posted += 1;
         self.release_pool = false;
+        self.released = 0;
         Ok(())
     }
     /// A middle runs its layers first, then forwards in the same exchange sequence.
@@ -758,7 +770,7 @@ impl Link {
         let started = Instant::now();
         self.drain()?;
         self.sent = self.sent.wrapping_add(1);
-        let flagged = kind | if self.release_pool { RELEASE_POOLED } else { 0 } | if self.tp_tile { crate::flash_tp_switch::TILE } else { 0 } | if self.tp_seq { crate::flash_tp_switch::SEQ } else { 0 };
+        let flagged = kind | if self.release_pool { RELEASE_POOLED } else { 0 } | self.released | if self.tp_tile { crate::flash_tp_switch::TILE } else { 0 } | if self.tp_seq { crate::flash_tp_switch::SEQ } else { 0 };
         let head = request_head(flagged, residual.len() / W, meta, self.sent);
         let bytes = std::mem::size_of_val(residual);
         // Both directions must fit, including every kept row returned before current rows.
@@ -768,6 +780,7 @@ impl Link {
             self.fast = Some(fast);
             result?;
             self.release_pool = false;
+            self.released = 0;
             self.carried += 1;
             return Ok(self.account(started, (head.len() + bytes + wire_reply_size(owed, bytes).unwrap()) as u64, residual.len() / W));
         }
@@ -778,6 +791,7 @@ impl Link {
         sent.map_err(|e| format!("pipeline send: {e}"))?;
         let len = self.take_tcp_reply(residual)?;
         self.release_pool = false;
+        self.released = 0;
         self.account(started, 2 * len as u64, residual.len() / W);
         Ok(())
     }
@@ -975,6 +989,12 @@ impl<'a> NextModel<'a> {
             link.release_pool = true;
         }
     }
+    /// Front: the chat on `slot` ended; the back drops its session with the next request.
+    pub(super) fn pp_release_slot(&self, slot: u32) {
+        if let Ok(mut guard) = self.pp.try_borrow_mut() && let Some(l) = guard.as_mut() && (1..=16).contains(&slot) {
+            l.released |= 1 << (8 + slot);
+        }
+    }
     /// Front: agree admission with every stage before serving any request.
     pub fn set_pp_front(&self, stream: TcpStream, fast: Option<Box<dyn PpWire>>, stage: Stage, context: usize, active: usize, tile: usize, down: &'static AtomicBool) -> Result<()> {
         if stage.rank != 0 { return Err("pipeline front must be rank zero".into()); }
@@ -1114,10 +1134,12 @@ impl<'a> NextModel<'a> {
         serve_stage(stream, fast, next, stage, context, active, tile, stop, Recipe::from_env()?,
             |n| self.set_session_limit(n).map(|()| b.fund_session_reserves(n)),
             || self.release_pooled_decode(b),
+            // Release bits never reach tp_mail_next: it reads a verify pass from the exact kind.
             |kind, count, meta, residual| {
-                let plain = kind & !crate::flash_tp_switch::MAIL & !crate::flash_tp_switch::TILE & !crate::flash_tp_switch::HEADS & !crate::flash_tp_switch::HEAD & !crate::flash_tp_switch::SEQ;
+                (1..=16u32).filter(|s| kind & (1 << (8 + s)) != 0).for_each(|s| { sessions.remove(&s); });
+                let plain = kind & !RELEASE_SLOTS & !crate::flash_tp_switch::MAIL & !crate::flash_tp_switch::TILE & !crate::flash_tp_switch::HEADS & !crate::flash_tp_switch::HEAD & !crate::flash_tp_switch::SEQ;
                 // Prefix commands run no pass: the split's per-pass state stays as the last pass set it.
-                if !cache::command(plain) { self.tp_mail_next(kind); }
+                if !cache::command(plain) { self.tp_mail_next(kind & !RELEASE_SLOTS); }
                 self.pp_back_step(b, &mut sessions, &mut prefixes, prefix_budget, plain, count, meta, tile, context, residual) })
     }
 }
@@ -1327,7 +1349,8 @@ fn serve_stage(
             (request.kind, request.count, request.meta)
         };
         let release = kind & RELEASE_POOLED != 0; let tp_bits = kind & (crate::flash_tp_switch::MAIL | crate::flash_tp_switch::TILE | crate::flash_tp_switch::HEADS | crate::flash_tp_switch::HEAD | crate::flash_tp_switch::SEQ);
-        let kind = kind & !RELEASE_POOLED & !tp_bits;
+        let slots = kind & RELEASE_SLOTS;
+        let kind = kind & !RELEASE_POOLED & !RELEASE_SLOTS & !tp_bits;
         if !(cache::command(kind) || matches!(kind, KIND_ROWS | KIND_POOLED | KIND_ROWS_ASYNC | KIND_ROWS_KEEP | KIND_ROWS_FINAL | KIND_VERIFY | crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF))
             || matches!(kind, KIND_VERIFY | KIND_ROWS_KEEP | crate::flash_tp_switch::KIND_VERIFY) && !recipe.mtp || matches!(kind, crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF) && !recipe.tp
             || matches!(kind, KIND_ROWS_ASYNC | KIND_ROWS_KEEP | KIND_ROWS_FINAL | crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF) && (!recipe.asynchronous || on_wire)
@@ -1348,9 +1371,10 @@ fn serve_stage(
         // Synchronize and drop pooled graphs/scratch before any session rollback,
         // verify allocation or execution. An error must prevent the step as well.
         let mut result = if release { release_pool() } else { Ok(()) }
-            .and_then(|()| step(kind | tp_bits, count, &meta, &mut residual));
+            .and_then(|()| step(kind | tp_bits | slots, count, &meta, &mut residual));
         if result.is_ok() && let Some(link) = downstream.as_mut() {
             link.release_pool |= release;
+            link.released |= slots;
             result = link.forward(kind, &meta, &mut residual, &mut out);
             if result.is_err() { link.poisoned = true; }
         }

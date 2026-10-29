@@ -1,27 +1,12 @@
-//! KV pages: chat memory that grows with use. Host-only ledger: no backend reads it or
-//! VADE_KV_PAGES yet, so setting the switch has no effect today (the startup log's
-//! `kv_pages=on-demand` names the current arena, not this ledger). A chat reserves
-//! nothing for its window at start. Its growing vectors (K, V and index rows of every
-//! attention layer this rank keeps) take pages from one pool per rank as it grows.
-//! Admission counts each chat's claim: the pages for its length plus a fixed look-ahead,
-//! capped by its own request limit, never the window. A slot keeps its mapped pages when
-//! its chat ends, so the next chat in that slot maps nothing until it grows past them
-//! (fresh mappings on the prefill path cost time). Every decision is a pure function of
-//! the page count, the geometry and the operation list: two ranks that agree on the
-//! first two and apply the same operations in the same order hold the same ledger, and
-//! `digest` proves it.
-
-/// VADE_KV_PAGES (default off): unset or 0 off, 1 on; any other value is an error.
-/// Nothing calls `switch` yet; the engine change that uses the ledger reads it at start.
-pub fn parse_switch(value: Option<&str>) -> Result<bool, String> {
-    match value { None | Some("0") => Ok(false), Some("1") => Ok(true), Some(_) => Err("VADE_KV_PAGES must be 0 or 1".into()) }
-}
-pub fn switch() -> Result<bool, String> {
-    match std::env::var("VADE_KV_PAGES") {
-        Ok(v) => parse_switch(Some(&v)), Err(std::env::VarError::NotPresent) => parse_switch(None),
-        Err(_) => Err("VADE_KV_PAGES must be 0 or 1".into()),
-    }
-}
+//! KV pages: chat memory that grows with use. Flash-Next serving reads the `Geometry`:
+//! admission charges each chat `Geometry::charge` for its own tokens (flashnext::kv_charge),
+//! never the window, and the session maps physical pages only for the rows it writes
+//! (NextSession::fit_kv), so the charge bounds its memory. The `Pool` ledger below is the
+//! host model of a per-slot page pool (look-ahead claims, idle-slot trims, park and resume);
+//! serving keeps its own reservations in the scheduler and does not use `Pool` yet.
+//! Every `Pool` decision is a pure function of the page count, the geometry and the
+//! operation list: two ranks that agree on the first two and apply the same operations
+//! in the same order hold the same ledger, and `digest` proves it.
 
 /// Storage of one K or V head row. Fp32 is what the kernels write and read today.
 /// Bf16 and Fp8 round at KV insertion and need new attention reads: a value change,
@@ -76,6 +61,11 @@ impl Geometry {
     /// `tokens` rounded up to the step; the window at most. A window that is not a step
     /// multiple ends in a short step, so each slot's virtual range is the window.
     pub fn extent(&self, tokens: u64) -> u64 { tokens.min(self.window).next_multiple_of(self.step).min(self.window) }
+    /// Bytes one chat of `tokens` charges at admission, `ahead` rows further (the window at
+    /// most): its fixed pages and, per vector, the pages of its extent.
+    pub fn charge(&self, tokens: u64, ahead: u64) -> Option<u64> {
+        self.pages(self.extent(tokens.checked_add(ahead)?)).checked_mul(self.page)
+    }
     /// Identity of the geometry; both ranks must show the same value before serving.
     pub fn digest(&self) -> u64 {
         let mut h = Fnv::new();

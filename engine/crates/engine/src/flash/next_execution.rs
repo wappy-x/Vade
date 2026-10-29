@@ -696,14 +696,13 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 .map_or(0, |s| s.model.checkpoint.config.vocab),
         )?;
         let model = sessions[0].model;
-        if sessions
-            .iter()
-            .any(|s| !s.valid || !std::ptr::eq(s.model, model))
-        {
+        if sessions.iter().any(|s| !s.valid || !std::ptr::eq(s.model, model)) {
             return Err("Flash-Next cohort needs valid sessions of the same model".into());
         }
-        for s in sessions.iter() {
+        // Every row this pass writes has its KV pages before any kernel is queued.
+        for (s, t) in sessions.iter_mut().zip(tokens) {
             crate::flash_next_rows::check_owners(&s.gdn_state, &s.qsa_state, s.model.state_range())?;
+            s.fit_kv(b, s.pos + t.len())?;
         }
         let count = spans.last().unwrap().end;
         let source = crate::flash_next_rows::ResultSource::select_for_policy(
@@ -1320,7 +1319,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 let meta: Vec<[u32; 4]> = sessions
                     .iter()
                     .zip(spans)
-                    .map(|(s, span)| [s.slot, s.capacity as u32, s.pos as u32, span.len() as u32])
+                    .map(|(s, span)| [s.slot, super::pp::capacity_word(s.capacity, s.kv_rows()), s.pos as u32, span.len() as u32])
                     .collect();
                 // A chat at position 0 drops rows a previous chat on its slot left.
                 if model.pp_mtp() {

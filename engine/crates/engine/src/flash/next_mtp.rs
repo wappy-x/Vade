@@ -114,6 +114,10 @@ impl<'a, 'w> Draft<'a, 'w> {
             (depth + 1) * vocabulary,
         ]
     }
+    /// Physical pages of the draft layer's attention rows 0..rows.
+    pub(super) fn fit(&mut self, b: &Backend<'a>, rows: usize) -> Result<()> { self.attention.fit(b, rows) }
+    /// Release the draft layer's attention pages above rows 0..rows.
+    pub(super) fn trim(&mut self, b: &Backend<'a>, rows: usize) -> Result<()> { self.attention.trim(b, rows) }
     pub(super) fn reservation_bytes(model: &NextModel<'a>, capacity: usize) -> Result<usize> {
         let depth = model.mtp_depth;
         if depth == 0 {
@@ -176,7 +180,8 @@ impl<'a, 'w> Draft<'a, 'w> {
             mlp_hc: Hc::load_rows(w, "mtp.layers.0.mlp_hyper_connection")?,
             mixer: Hc::mixer_rows(w, "mtp.hyper_connection_mixer")?,
             attention: {
-                let mut qsa = Qsa::load_prefix(b, w, P, 48, capacity, attention)?;
+                let attention = match attention { Some(a) => a, None => QsaState::paged(b, 48, &w.plan, capacity, super::super::qsa::index_width(w, P)?)? };
+                let mut qsa = Qsa::load_prefix(b, w, P, 48, capacity, Some(attention))?;
                 if !model.draft_layer_mx8.is_empty() { qsa.use_draft_mx8()?; }
                 qsa
             },
