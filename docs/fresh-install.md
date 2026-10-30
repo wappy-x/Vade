@@ -45,7 +45,7 @@ guide, with the measured speeds, is
 - [ ] **One 200 Gb/s QSFP cable** between them ([what to buy](network-setup.md#1-what-to-buy))
 - [ ] **Administrator (sudo) access** on both, for the one-time OS setup
 - [ ] **The same home folder on both Sparks** (`echo $HOME` prints the same path), so `~/models/...` means the same place on both. If they differ, use absolute paths in the config instead of `~/`.
-- [ ] **The standard 128 GB of unified memory on each Spark**, with no other GPU jobs
+- [ ] **The standard 128 GB of unified memory on each Spark** (NVIDIA's specification), with no other GPU jobs
 - [ ] **Plenty of free disk on each Spark** for the checkpoint (see its size on the model page) plus room for the build
 - [ ] **The basic programs and download tools**: `cc`, `curl`, `git`, `rsync`, `ping`, `sha256sum`, Rust 1.99.0. Have them ready before step 5.
 - [ ] **A Mac** with Git and network access to both Sparks
@@ -492,7 +492,7 @@ curl -s http://localhost:18080/v1/chat/completions \
 You get JSON back, with the answer in `choices[0].message.content` and token
 counts in `usage`.
 
-**Send every sampling field, as above.** On this FP8 server, any
+**Send the greedy fields, as above.** On this FP8 server, any
 sampling field you leave out falls back to the checkpoint's own sampled
 settings (top_k 20, top_p 0.95, from its `generation_config.json`). That holds
 even when you send no sampling fields at all, so the answer can change from run

@@ -134,12 +134,16 @@ prompt never holds up GPU work
 ([`scheduler.rs`](../engine/crates/serve/src/scheduler.rs)). The tokenizer is
 Vade's own BPE implementation
 ([tokenizer](../engine/crates/tokenizer/README.md)). Sampling is decided here
-too: a request that names no sampling field is decoded greedily, and a
-request that names any one of them takes the checkpoint's own settings for
-the rest ([`protocol.rs`](../engine/crates/serve/src/protocol.rs)). Note that
-`"temperature": 0` alone counts as naming a field, so it brings in the
-checkpoint's penalties. For a greedy answer, send no sampling fields, or set
-all of them to neutral values (the [README](../README.md) lists them).
+too: on FP4-Local, a request that names no sampling field is decoded
+greedily, and a request that names any one of them takes the checkpoint's
+own settings for the rest
+([`protocol.rs`](../engine/crates/serve/src/protocol.rs)). A step is greedy
+when the temperature is 0 and the penalties are neutral
+([`draft.rs`](../engine/crates/engine/src/draft.rs)). FP4-Local's own
+penalties are neutral, so `"temperature": 0` alone stays greedy. On FP8, a
+field left out takes the checkpoint's sampled value, so send
+`"temperature": 0` with the three neutral penalties
+([OpenAI API](openai-api.md)).
 
 **The scheduler.** Everything that touches the GPU runs on one thread. The
 scheduler loop accepts prepared requests, checks that each one fits in the
@@ -553,8 +557,12 @@ first Spark reads every token through the first two layers; the second Spark
 reads the first half through the other 46 layers, in tiles of 2,048 tokens, and
 hands on each layer's state; the first Spark reads the second half through each
 layer after it takes that state, so the first token comes sooner. Longer
-prompts, and prompts on a Spark that cannot hold the extra rows, still run as
-two-stage pipeline tiles of 2,048 tokens. `VADE_LONG_SPLIT=0` turns the
+prompts, and prompts on a Spark that cannot hold the extra rows, run as
+two-stage pipeline tiles. A prompt of at least seven workspaces (28,672 rows
+with the 4,096-row default) takes whole-workspace tiles in the middle; its
+first and last tiles keep 2,048 rows
+([`tp_switch.rs`](../engine/crates/engine/src/flash/tp_switch.rs)). Other
+prompts run in tiles of 2,048 tokens. `VADE_LONG_SPLIT=0` turns the
 layer-by-layer path off. The token split needs a
 prompt workspace of 4,096 rows on each Spark instead of 2,048. So two Sparks
 now hold one chat fewer at a 32,768-token context (8 instead of 9), and in
@@ -829,16 +837,21 @@ only the processes the CLI recorded, after checking each one's identity.
 
 ## Current limits
 
-This is Vade 0.1.0, an early release. Its default is FP4-Local on one Spark. The
-benchmark page also has results from cabled pairs of Sparks and from rented
-cloud VMs; chains longer than two Sparks need their own live exactness
-qualification ([FP4-Local launch](../cli/docs/fp4-local.md)). The other model
-parsers, servers and protocol routes in the source are not qualified to the
-same level.
+This page describes main after v0.1.0, the latest release. Its default is
+FP4-Local on one Spark. The benchmark page also has results from cabled pairs
+and a group of four Sparks, and from rented cloud VMs. On four Sparks,
+FP4-Local gave the same token IDs as on one and two Sparks in 66 of 66
+responses (the 2026-10-28 cards at `76977df`). Chains longer than four Sparks
+have no live exactness check yet
+([FP4-Local launch](../cli/docs/fp4-local.md)). The other model parsers,
+servers and protocol routes in the source are not qualified to the same
+level.
 
 - The prefix cache is on by default. It works locally and on the tensor split.
-- `"temperature": 0` alone is not greedy; it brings in the checkpoint's other
-  sampling settings.
+- Greedy decoding needs `"temperature": 0` and neutral penalties. On
+  FP4-Local, `"temperature": 0` alone is enough, because the checkpoint's own
+  penalties are neutral. On FP8, send the three neutral penalties too
+  ([OpenAI API](openai-api.md)).
 - A cancel is handled by the scheduler between model steps, so it waits for
   the GPU work already running
   ([`dispatch.rs`](../engine/crates/serve/src/scheduler/dispatch.rs)).

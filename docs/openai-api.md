@@ -253,10 +253,18 @@ at once.
 
 ## Sampling and exactness
 
-When a request sends no sampling field, Vade decodes greedily: it always picks
-the most likely token. Greedy is the default, and it is exact: the same request
-gives the same token IDs on every run. Vade's exactness checks use greedy
-requests.
+On FP4-Local, when a request sends no sampling field, Vade decodes greedily:
+it always picks the most likely token. Greedy is the default, and it is exact:
+the same request gives the same token IDs on every run. Vade's exactness
+checks use greedy requests.
+
+FP8 is different. A request to the FP8 engine that leaves out a sampling
+field takes that field from the checkpoint, even when it sends no sampling
+field at all. The checkpoint's values sample, and a request without `seed`
+gets a new seed. For greedy replies on FP8, send `"temperature": 0` with
+neutral penalties (`repetition_penalty` 1, `presence_penalty` 0,
+`frequency_penalty` 0), send the full greedy set, or go through a gateway
+([FP8 install](install-fp8.md#defaults-and-drafting)).
 
 The gateways make that default explicit. When a request has none of the
 fields `temperature`, `top_p`, `top_k`, `min_p`, `typical_p`, `seed`,
@@ -272,7 +280,9 @@ top-p 0.95 (see [the recorded completions
 fixture](../harness/tests/fixtures/completions-engine-2026-10-23.md)). So a
 client that sends only `top_p` gets a sampled reply.
 
-- To keep replies exact, send `"temperature": 0`, or send no sampling field.
+- To keep replies exact on FP4-Local, send no sampling field, or send
+  `"temperature": 0`. FP4-Local's own penalties are neutral, so that stays
+  greedy. On FP8, send `"temperature": 0` with the three neutral penalties.
 - With `temperature` above 0, the engine draws a random seed for each request
   unless you send `seed`. A streamed reply reports the seed in the
   `X-Sampling-Seed` header. Every reply reports it in `vade.sampling.seed`.

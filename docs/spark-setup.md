@@ -741,8 +741,10 @@ rail checks to show that the setup persists.
 
 **We have not yet run any of these traffic or reboot checks on real Sparks.**
 So far this guide has only been checked on a Mac.
-[Hardware and network setup](network-setup.md) records about 196 Gb/s per
-cable and about 100–109 Gb/s one way for one rail alone. This smoke test runs
+[Hardware and network setup](network-setup.md#numbers-we-measured) records
+196.04 Gb/s one way per cable and about 109 Gb/s one way for one rail
+alone, from our cable tests of 2026-09-22 (setup record *Vade Timeline 02:
+2026-09-22 to 09-24*, not in the repository). This smoke test runs
 one rail at a time and only checks for a positive rate, so do not hold it to
 the per-cable figure. See
 [upstream perftest usage](https://github.com/linux-rdma/perftest/blob/master/README).

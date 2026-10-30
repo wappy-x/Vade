@@ -90,7 +90,7 @@ with a box that explains its own engine terms.
 
 **DGX OS.** NVIDIA's Ubuntu-based operating system for DGX machines, with the GPU and network drivers included.
 
-**DGX Spark.** NVIDIA's desktop AI computer, built around the GB10 chip, with 128 GB of memory shared by CPU and GPU.
+**DGX Spark.** NVIDIA's desktop AI computer, built around the GB10 chip, with 128 GB of memory shared by CPU and GPU (NVIDIA's specification).
 
 **Drafting, speculative decoding.** Something cheap guesses a few tokens ahead, and the main model checks them all in one step. Vade keeps only the guesses the main model would have picked itself, so answers do not change. The drafting depth is how many tokens it guesses ahead. `--mtp N` sets it from 0 to 3, and 0 turns drafting off.
 
@@ -121,7 +121,7 @@ with a box that explains its own engine terms.
 
 **GID (global identifier).** An address entry a RoCE device uses to reach its peer. Each IPv4 address on a fabric interface gets a "RoCE v2" GID, and Vade finds the right one automatically.
 
-**Golden.** A saved reference answer from a qualified build at one setup. It includes the full logits: the model's raw scores for each possible next token. Exactness checks compare new runs with it byte for byte. Vade keeps one set per Spark count.
+**Golden.** A saved reference answer from a qualified build at one setup. It includes the full logits: the model's raw scores for each possible next token. Exactness checks compare new runs with it byte for byte.
 
 **GPU (graphics processing unit).** The processor that does the model's heavy math, as many small calculations at once.
 
@@ -153,7 +153,7 @@ with a box that explains its own engine terms.
 
 **Launcher.** The `vade launch` workflow you run on the Spark. It finds an existing checkpoint, prepares local artifacts, starts or attaches to the engine it owns, and opens chat. See [first run](../harness/docs/first-run.md) and the [launcher implementation](../cli/src/launch.rs).
 
-**Layer pipeline.** A way to run FP4-Local on several Sparks: the model's layers are split into blocks, and each Spark runs its own block with the same arithmetic as the one-Spark engine, passing its result on to the next. Drafted tokens are checked across every stage. It runs as a [chain](#ac) of three or more Sparks. Two Sparks no longer run it: they run the [tensor split](#sz), which keeps the pipeline's links and protocol and still runs long prompts as pipeline tiles.
+**Layer pipeline.** A way to run FP4-Local on several Sparks: the model's layers are split into blocks, and each Spark runs its own block with the same arithmetic as the one-Spark engine, passing its result on to the next. Drafted tokens are checked across every stage. It runs as a [chain](#ac) of three or more Sparks. Two Sparks no longer run it: they run the [tensor split](#sz), which keeps the pipeline's links and protocol. On two Sparks, a cold prompt of 2,048 to 8,192 tokens takes the token split, and one of up to 20,480 tokens runs layer by layer. A longer prompt runs as pipeline tiles of 2,048 rows; from 28,672 tokens, the middle tiles take 4,096 rows. See [several Sparks](architecture.md#several-sparks-the-tensor-split-layer-pipeline-and-chain).
 
 **LLM (large language model).** A model trained on large amounts of text to predict the next token. Chat assistants are built on them.
 
@@ -276,7 +276,7 @@ Under greedy decoding, ON and OFF must return the same token IDs; see [request c
 
 It runs on four Sparks only; see [the rank backend](../engine/docs/next-http.md#native-rank-backend).
 
-**Thinking.** Reasoning text the model can write before its answer. It is off by default; `--thinking on` or `--effort LEVEL` turns it on, and Ctrl+T shows or hides it in chat.
+**Thinking.** Reasoning text the model can write before its answer. In `vade chat` it is off by default; `--thinking on` or `--effort LEVEL` turns it on, and Ctrl+T shows or hides it. An API request to FP4-Local thinks first unless it sends `"enable_thinking": false` or `"reasoning_effort": "none"`.
 
 **Time to first token (TTFT).** Seconds from sending a request to receiving the first piece of the answer.
 

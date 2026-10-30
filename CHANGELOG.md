@@ -144,7 +144,7 @@ otherwise. Each card sends its cold 8K prompt with drafting OFF
   token in 0.76 s on two Sparks (9.95 s with the cache off) and in 0.63 s on
   one Spark (16.03 s with the cache off)
   ([benchmarks](docs/benchmarks.md#a-long-chat-and-its-second-question)).
-  The cache is still off by default.
+  The cache is now on by default on one Spark and on two Sparks.
 - **The OpenAI-compatible API has a guide.** The new
   [API page](docs/openai-api.md) lists the routes and fields that work and
   where Vade differs from OpenAI. The core gateway answers `/v1/embeddings`
@@ -191,23 +191,19 @@ otherwise. Each card sends its cold 8K prompt with drafting OFF
 This work was not merged when these notes were written. It is not part of
 v0.2.0 until it merges.
 
-- The prefix cache on by default.
-- Document reading for more formats: office files (Word, Excel and
-  PowerPoint), EPUB, HTML and CSV. PDF reading has merged.
-- A `vade sessions` command and a resume option for `vade chat`. The agent
-  already lists and resumes sessions with `/sessions` and `/resume`.
-- MCP: the agent uses the tools of MCP servers that you set up.
-- Shell safety: lists of allowed commands that you keep for a project or
-  for your user, and a refusal of the most dangerous commands. On macOS,
-  the agent already asks before a command outside its fixed read-only
-  list.
+- Document reading for office files (Word, Excel and PowerPoint) and
+  EPUB. PDF, HTML, CSV and the formats under Unreleased have merged.
 - Structured output, phase 1: JSON mode.
+
+The prefix cache on by default, `vade sessions`, MCP tool servers and shell
+safety have merged since this list was written; see Unreleased and the
+engine section.
 
 ### Known limits
 
-- Four Sparks do not make one chat faster. With FP4-Local, they wrote prose
-  at 42.8 in the end-of-day cards, against 42.0 on one Spark. Chains are
-  measured up to four Sparks.
+- Four Sparks write one chat at about the speed of one Spark. With
+  FP4-Local, they wrote prose at 42.8 in the end-of-day cards, against 42.0
+  on one Spark and 53.8 on two. Chains are measured up to four Sparks.
 - Text only. Vade does not read images.
 - With FP4-Local, greedy decoding is the default, and the exactness checks
   cover only greedy requests. A request that sets a sampling field takes the
@@ -220,8 +216,10 @@ v0.2.0 until it merges.
   [sampling](docs/sampling.md).
 - The engine ignores `response_format`. There is no structured output mode
   yet.
-- With FP8, a request is greedy only when it sends every sampling field.
-  The gateways add those fields to a request that sends none.
+- With FP8, a request with no sampling field is sampled: each field it
+  leaves out takes the checkpoint's value. Temperature 0 with neutral
+  penalties is greedy. The gateways add a full greedy set to a request that
+  sends none.
 - With FP8, two Sparks and four Sparks give different token IDs: 7 of 66
   responses matched in the end-of-day cards. A fix is in screening.
 
@@ -345,7 +343,9 @@ effect, and the engine chooses the path for each number of Sparks.
   spare-buffer reserve has not allocated. Cache retention still yields to live
   requests and physical memory pressure.
 
-- Two Sparks read a prompt of 32K tokens or more in wider passes. The middle
+- Two Sparks read a prompt of 28,672 tokens or more in wider passes. That is
+  seven 4096-row workspaces (`WIDE_MIN_CHUNKS` in
+  [`tp_switch.rs`](engine/crates/engine/src/flash/tp_switch.rs)). The middle
   of the prompt now runs in passes of the whole prompt workspace (4096 rows by
   default) instead of 2048 rows, so the experts run fewer, larger batches. The
   start and the end of the prompt keep 2048-row passes. Shorter prompts read as
@@ -684,7 +684,8 @@ and thinking off. Rates below are tokens per second.
   The ranks add their parts in a different order on four Sparks, and a fix is
   in screening
   ([benchmarks](docs/benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)).
-  FP8 requests are greedy only when they send every sampling field. The engine
+  FP8 requests take each sampling field they leave out from the checkpoint,
+  so temperature 0 with neutral penalties gives greedy replies. The engine
   does not change.
 - From a controller, `vade doctor` checks more before a start. It shows a
   GPU use row with the rule that `vade up` applies (a listed compute

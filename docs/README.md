@@ -1,6 +1,8 @@
 # Documentation
 
 Vade's main pages, grouped by what you want to do.
+[Why Vade](why-vade.md) says what Vade is, why it exists and what "exact"
+means.
 
 - **One Spark:** start with [INSTALL.md](../INSTALL.md). It takes you from
   prerequisites to `vade launch` and a first chat, and needs no cable between

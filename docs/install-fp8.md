@@ -176,13 +176,16 @@ FP8 drafts only when one chat runs alone. Chats that overlap decode without
 drafting until they finish. The
 [CLI reference](../cli/README.md#fp8-limits-and-drafting) has the details.
 
-**Send every sampling field for greedy decoding.** FP8 is different from
-FP4-Local here. A request to the FP8 server that leaves out a sampling field
-takes that field from the checkpoint's own sampled settings (top_k 20, top_p
-0.95, from its `generation_config.json`). That holds even when the request
-sends no sampling fields at all. The engine then draws a new seed for each
-request, so the answer can change from run to run. The token-ID promises on
-this page apply to greedy requests only. A full greedy request:
+**Send temperature 0 and neutral penalties for greedy decoding.** FP8 is
+different from FP4-Local here. A request to the FP8 server that leaves out a
+sampling field takes that field from the checkpoint's own sampled settings
+(top_k 20, top_p 0.95, from its `generation_config.json`). That holds even
+when the request sends no sampling fields at all. Without `seed`, the engine
+draws a new seed for each sampled request, so the answer can change from run
+to run. A request with `temperature` 0, `repetition_penalty` 1,
+`presence_penalty` 0 and `frequency_penalty` 0 is greedy. The token-ID
+promises on this page apply to greedy requests only. This request sends the
+full greedy set:
 
 ```sh
 curl -s http://localhost:18080/v1/chat/completions \
@@ -195,30 +198,39 @@ The gateways add the greedy fields to a request that sends no sampling field
 
 ## What to expect
 
-These are the 2026-10-28 end-of-day cards at main `76977df`
-([benchmarks](benchmarks.md#fp8)). Rates are completion tokens per second.
-Cold 8K is the time to the first token after an uncached 8192-token prompt.
-Each card had its own server start, context 32768, output 16384, MTP 2,
-greedy decoding and thinking OFF.
+The two-Spark rows are the 2026-10-29 cards at main `cbbb11b`, the mean of
+two server starts
+([benchmarks](benchmarks.md#current-2026-10-29-main-cbbb11b-home-dgx-sparks)).
+The four-Spark rows are the 2026-10-28 end-of-day cards at main `76977df`
+([benchmarks](benchmarks.md#fp8)); four Sparks were not measured again.
+Rates are completion tokens per second. Cold 8K is the time to the first
+token after an uncached 8192-token prompt. Every card used context 32768,
+output 16384, MTP 2, greedy decoding and thinking OFF.
 
-| Sparks | Drafting | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) |
-| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | ON | 36.6 | 50.9 | 52.7 | 45.1 | 66.5 | 98.3 | 5.97 |
-| 2 | OFF | 26.8 | 26.7 | 26.9 | 25.8 | 66.6 | 99.3 | 6.01 |
-| 4 | ON | 46.7 | 65.1 | 68.0 | 58.5 | 86.4 | 128.8 | 6.91 |
-| 4 | OFF | 35.3 | 34.7 | 35.3 | 33.9 | 88.2 | 128.2 | 6.95 |
+| Sparks | Main | Drafting | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) |
+| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | `cbbb11b` | ON | 36.5 | 51.4 | 52.6 | 45.0 | 67.6 | 97.3 | 5.96 |
+| 2 | `cbbb11b` | OFF | 26.9 | 26.7 | 26.9 | 26.1 | 66.7 | 97.4 | 5.97 |
+| 4 | `76977df` | ON | 46.7 | 65.1 | 68.0 | 58.5 | 86.4 | 128.8 | 6.91 |
+| 4 | `76977df` | OFF | 35.3 | 34.7 | 35.3 | 33.9 | 88.2 | 128.2 | 6.95 |
+
+On two Sparks at `cbbb11b`, a 32K-token prompt gave its first token in
+24.05 s. The second question on that chat reused 32,064 tokens from the
+prefix cache and gave its first token in 0.89 s.
 
 - **Four Sparks write faster than two.** Each Spark holds and reads a quarter
-  of each layer for each token, not a half. With drafting ON, prose went from
-  36.6 to 46.7 tok/s and eight chats from 98.3 to 128.8 tok/s.
+  of each layer for each token, not a half. With drafting ON, in the
+  2026-10-28 cards at `76977df`, prose went from 36.6 tok/s on two Sparks to
+  46.7 on four, and eight chats from 98.3 to 128.8 tok/s.
 - **Drafting helps one chat only.** With drafting ON, code went from 26.7 to
-  50.9 tok/s on two Sparks. Overlapping chats almost never draft. In the
-  two-Spark ON card, 1 of 12 C4 streams and 0 of 24 C8 streams used drafting.
-  In the four-Spark ON card, no C4 or C8 stream used drafting. So ON and OFF
-  are close (98.3 and 99.3 tok/s for C8 on two Sparks).
-- **FP8 reads prompts more slowly than FP4-Local.** The cold 8K prompt took
-  5.97 s on two FP8 Sparks, against 2.19 s on two FP4-Local Sparks in the
-  same set of cards.
+  51.4 tok/s on two Sparks. Overlapping chats almost never draft. In the
+  2026-10-28 two-Spark ON card, 1 of 12 C4 streams and 0 of 24 C8 streams
+  used drafting. In the four-Spark ON card, no C4 or C8 stream used drafting.
+  So ON and OFF are close (97.3 and 97.4 tok/s for C8 on two Sparks at
+  `cbbb11b`).
+- **FP8 reads prompts more slowly than FP4-Local.** At main `cbbb11b`, the
+  cold 8K prompt took 5.96 s on two FP8 Sparks, against 2.145 s on two
+  FP4-Local Sparks.
 
 The cards started the engine with our lab launcher, not with `vade up`. That
 launcher gives each rank the same engine arguments as
@@ -233,7 +245,9 @@ on a server that `vade up --fp8` started.
 On each Spark count, FP8 is stable for greedy requests. In the 2026-10-28
 cards, which sent every sampling field, drafting ON and OFF gave the same
 token IDs in 66 of 66 responses, on two and on four Sparks. The cards also
-matched earlier FP8 cards of the same Spark count.
+matched earlier FP8 cards of the same Spark count. On two Sparks at main
+`cbbb11b`, drafting ON and OFF gave the same token IDs in 64 of 64
+responses, in each of two server starts.
 
 **Two and four Sparks give different token IDs.** The two-Spark and
 four-Spark cards matched in only 7 of 66 responses (5 of 62 on 2026-10-25).

@@ -36,7 +36,7 @@ and the [Glossary](GLOSSARY.md) has them all.
 
 | Item | How many | Notes |
 | --- | --- | --- |
-| **NVIDIA DGX Spark** | 2 or more | GB10 chip, 128 GB memory shared by CPU and GPU. FP4-Local fits on one Spark; more Sparks read long prompts faster. The FP8 checkpoint needs 2, 4 or 6. |
+| **NVIDIA DGX Spark** | 2 or more | GB10 chip, 128 GB memory shared by CPU and GPU (NVIDIA's specification). FP4-Local fits on one Spark; more Sparks read long prompts faster. The FP8 checkpoint needs 2, 4 or 6. |
 | **QSFP cable, 200 Gb/s** | 1 per link | Direct-attach copper (DAC), QSFP56 200G or QSFP112. Short runs (about 1 m or less) are typical for passive copper. Check NVIDIA's [Spark clustering page](https://docs.nvidia.com/dgx/dgx-spark/spark-clustering.html) for its current cable list. |
 | **Ordinary network** | 1 | The Sparks' normal Ethernet or Wi-Fi, for SSH and downloads. Keep it separate from the QSFP links. |
 | **A controller** (optional) | 0 or 1 | A Linux or macOS computer that runs the `vade` command, the SSH tunnel and the coding assistant, and drives the Sparks. A Spark can also act as its own controller. |
@@ -66,8 +66,9 @@ This guide calls each half a **rail**.
 | Port 1 | rail 0 | `enp1s0f1np1` | `rocep1s0f1` |
 | Port 1 | rail 1 | `enP2p1s0f1np1` | `roceP2p1s0f1` |
 
-- One rail alone moves about **100–109 Gb/s** one way.
-- Both rails together move about **196 Gb/s** one way. That is the full cable.
+- One rail alone moved about **109 Gb/s** one way in our cable tests.
+- Both rails together moved **196.04 Gb/s** one way. That is the full cable.
+  The [numbers we measured](#numbers-we-measured) name the record.
 - Vade splits each large transfer across both rails of a cable.
 
 **Confirm the names on your machine.** Run `ibdev2netdev` (or `rdma link show`).
@@ -232,8 +233,11 @@ Check the full route list for an overlap with each planned subnet. Avoid your
 home or office LAN, VPN and container networks.
 
 **MTU 9000 on every fabric interface, at both ends.** MTU is the largest packet
-size. 9000 ("jumbo frames") is faster than the default 1500: we measured
-196 Gb/s at 9000 and 185 Gb/s at 1500. With Ethernet MTU 9000, the RDMA path
+size. Use 9000 ("jumbo frames"), not the default 1500. In our cable test of
+2026-09-22, an RDMA write over both rails of one cable, in one direction,
+reached 185.14 Gb/s at MTU 1500 and 196.04 Gb/s at MTU 9000. The source is
+the setup record *Vade Timeline 02: 2026-09-22 to 09-24* (our internal project history, not in the repository). The raw `ib_write_bw` output was not saved.
+With Ethernet MTU 9000, the RDMA path
 MTU shows as **4096**. That is expected.
 
 **What Vade needs from you** is one address per neighbor. In the Vade config,
@@ -391,10 +395,13 @@ timeout 25s ib_write_bw -d rocep1s0f1 -i 1 -x "$GID_INDEX" -p 18515 --bind_sourc
 
 | Test | Our result |
 | --- | --- |
-| One rail, one direction | about 100–109 Gb/s |
-| Both rails of one cable, one direction | **about 196 Gb/s** at MTU 9000 (185 Gb/s at MTU 1500) |
-| Both rails, both directions at once (`ib_write_bw -b`) | about 391 Gb/s total per cable |
-| Six-Spark ring, all six cables | 48 of 48 RDMA tests passed at those speeds |
+| One rail, one direction | about 109 Gb/s |
+| Both rails of one cable, one direction | **196.04 Gb/s** at MTU 9000 (185.14 Gb/s at MTU 1500) |
+
+Both rows come from our cable tests of 2026-09-22 on three Sparks, in
+the setup record *Vade Timeline 02: 2026-09-22 to 09-24* (our internal project history, not in the repository). The raw `ib_write_bw` output was not saved. We have no saved
+measurement of both directions at once (`ib_write_bw -b`) or of a six-Spark
+ring.
 
 `Gb/s` is gigabits per second. Divide by 8 for gigabytes: 196 Gb/s ≈ 24.5 GB/s.
 

@@ -26,7 +26,8 @@ timing log of record `2026-10-28_1744_source-install_285fa8a` and its
 
 The total does not include the model download (102.26 GB). It also does not
 include a network fetch of the source: the clone came from a local copy of
-the repository. Download times depend on your network.
+the repository. Download times depend on your network. We have not timed
+these steps on a later main.
 
 If your checkpoint is already under `~/models`, use the
 [quick start](#quick-start-with-an-existing-model). If not, do steps 1 to 3:
@@ -123,9 +124,9 @@ SSH path.
 You need a DGX Spark (NVIDIA GB10) running Linux `aarch64`. `nvidia-smi` must
 work, and the GPU must be idle.
 
-We tested on the **580.x driver series**. Our published benchmarks used it, and
-so did the install replay (our scripted run-through of this page), which ran
-**580.178.04**. That is the version we tested, not a minimum.
+We tested on the **580.x driver series**. The v0.1.0 benchmark receipts
+record 580.x drivers, and the install replay (our scripted run-through of
+this page) ran **580.178.04**. That is the version we tested, not a minimum.
 
 One Spark needs no fabric cable (the direct high-speed cable between Sparks)
 and no RDMA setup (the fast memory-to-memory transport that linked Sparks use).
@@ -368,8 +369,9 @@ The bundle is optional. It is an older build: v0.1.0, from 2026-10-24. It
 does not have the speed and prefix-cache fixes merged since then. In our
 replay of these steps, with the model already on the Spark, the first command
 to `Launch ready` took 101.262 s (record
-`2026-10-28_1305_bundle-install_5a22651`, not in the repository yet). Build
-main to use the Unreleased changes.
+`2026-10-28_1305_bundle-install_5a22651`, not in the repository yet). That
+time is for the v0.1.0 bundle only. Build main to use the Unreleased
+changes.
 
 Download them into a new, empty folder of their own, outside the checkout. The
 command below uses `~/vade-launch`. The checksum file gives you the exact
@@ -1108,7 +1110,8 @@ and at most 4 GiB, and never more than those bytes. So the room never lowers
 the number of full-context chats in that plan. On two Sparks each engine rank
 keeps a copy of every kept prompt, so there the room is at least the memory
 of one full-context chat, up to 4 GiB: at a context of 32,768 a 32K-token
-prompt (a copy of about 2.1 GB) fits. This can lower the number of
+prompt fits. Its copy was about 2.1 GB in a two-Spark cache test on
+2026-10-29 (lab report `own-cache-screen-x2-r1`, not in the repository). This can lower the number of
 full-context chats by one. Live chats never use the room, and memory
 pressure does not empty it. The cache also uses memory that live chats leave
 free, and gives that memory back first: memory a kept prompt holds beyond the
@@ -1134,10 +1137,13 @@ kept prompt is a copy.
 
 A copy is made while its chat still holds its memory. The room and the
 memory live chats leave free must hold that copy. At a context of 262,144 on
-one Spark, one full-context chat reserves 16,017,732,932 bytes, and the slot
-plan keeps only the room (at least 512 MiB) beside it. So with copies only
-(`VADE_FLASHNEXT_ADOPT=0`) a 200K-token prompt (a copy of 12,274,478,925
-bytes) is not kept. In place (the default) it is kept.
+one Spark, one full-context chat reserves 16,017,732,932 bytes (the
+`flashnext ready` log line of each start at that context in lab report
+`own-cache-screen-1s-b-r1`, not in the repository), and the slot plan
+keeps only the room (at least 512 MiB) beside it. So with copies only
+(`VADE_FLASHNEXT_ADOPT=0`) a 200K-token prompt is not kept: in a test on
+2026-10-29, its copy needed 12,274,478,925 bytes (lab report
+`own-warm-200k-r1`, not in the repository). In place (the default) it is kept.
 
 On two Sparks, both engine ranks must start with the same cache value, or
 the engine refuses to start. To turn the cache off for **local Route A**,

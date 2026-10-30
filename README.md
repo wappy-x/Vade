@@ -1,9 +1,21 @@
 # Vade
 
-Tests run locally with the commands in [docs/ci.md](docs/ci.md#run-checks-from-a-public-checkout) before every merge.
+Vade runs a large language model on your own NVIDIA DGX Spark. It is an
+inference engine, an agent harness and a command-line tool, all written in
+Rust with only the standard library. It is for people who own one or more
+Sparks and want a local model whose answers repeat exactly: the same greedy
+request on the same setup gives the same tokens every time. You get a coding agent in your
+terminal, a plain chat and an OpenAI-compatible API.
 
-Vade runs a large language model on your own NVIDIA DGX Spark. You get a
-coding agent in your terminal, a plain chat and an OpenAI-compatible API.
+On one Spark with the model already in `~/models`, this installs Vade and
+opens a chat ([Install](#pick-your-path) has the details):
+
+```sh
+git clone --branch main https://github.com/wappy-x/vade.git "$HOME/vade" &&
+  sh "$HOME/vade/scripts/install.sh" --launch
+```
+
+[Why Vade](docs/why-vade.md) says why it exists and what "exact" means here.
 
 - **One model, two checkpoints:** Qwen3.8 Flash-Next, text only.
   `nvidia/Qwen3.8-Flash-Next-FP4-Local` runs on one Spark or more.
@@ -11,8 +23,8 @@ coding agent in your terminal, a plain chat and an OpenAI-compatible API.
 - **One Spark or several:** Vade runs on one Spark by default. You can link
   more.
 - **Exact by design:** the same greedy request on the same setup returns the
-  same token IDs on every run. On FP8, a greedy request must send every
-  sampling field, and 2 and 4 Sparks give different IDs today; see
+  same token IDs on every run. On FP8, a request with no sampling field is
+  sampled, and 2 and 4 Sparks give different IDs today; see
   [exactness](#exactness). `vade verify` checks part of this on your own
   engine.
 - **Plain Rust:** the Rust code, GPU kernels included, uses no third-party
@@ -125,7 +137,8 @@ record is not in the repository yet.
 The model was already on the Spark, so the total does not include the
 102.26 GB model download. The clone came from a local copy of the repository,
 so it does not include a network fetch of the source. Download times depend
-on your network. We did not time `install.sh` itself.
+on your network. We did not time `install.sh` itself, and we have not timed
+these steps on a later main.
 
 The [INSTALL quick start](INSTALL.md#quick-start-with-an-existing-model)
 covers an existing checkout, a checkpoint outside `~/models` and what to do
@@ -157,9 +170,9 @@ that reaches each Spark over SSH. One of the Sparks can be the controller.
 
 Two Sparks run the tensor split. You set nothing. Both Sparks work on every
 token, so one chat writes faster and a long prompt is read faster. Four or
-more Sparks run the layer pipeline. They read a long prompt faster, but one
-chat does not write faster yet. See
-[what works today](#supported-systems).
+more Sparks run the layer pipeline. They read a long prompt faster than one
+Spark, but one chat writes at about the speed of one Spark, and slower than
+on two. See [what works today](#supported-systems).
 
 ### FP8 on 2, 4 or 6 Sparks
 
@@ -214,21 +227,24 @@ and how to change it. These are the defaults you meet first:
 - **Drafting is ON.** The model's multi-token prediction (MTP) head guesses a
   few tokens ahead. The full model checks each guess, so greedy answers do
   not change.
-- **Greedy decoding.** A request with no sampling options always gets the
-  most likely next token. If you set even one option, such as
-  `"temperature": 0` alone, the engine takes the rest from the checkpoint's
-  settings. Those settings can include penalties that change the answer. For
-  greedy answers, send no sampling options. Or send all of `temperature: 0`,
-  `top_p: 1`, `top_k: 0`, `repetition_penalty: 1`, `presence_penalty: 0` and
-  `frequency_penalty: 0`.
+- **Greedy decoding.** On FP4-Local, a request with no sampling options
+  always gets the most likely next token. If you set one option, the engine
+  takes the rest from the checkpoint's settings. FP4-Local's own penalties
+  are neutral, so `"temperature": 0` alone stays greedy. You can also send
+  all of `temperature: 0`, `top_p: 1`, `top_k: 0`, `repetition_penalty: 1`,
+  `presence_penalty: 0` and `frequency_penalty: 0`. On FP8, a field that a
+  request leaves out takes the checkpoint's sampled value, so a request with
+  no sampling options is sampled. Send `temperature: 0` with the three
+  neutral penalties, or the full set above. The gateways add the full set
+  when a request sends no sampling option.
 - **Context 32768 tokens, output up to 8192.** On the Spark, Vade lowers the
   context (to 16384, then 8192, then 4096) only if the engine refuses it for
   lack of memory. Vade tells you when it does this. `--context 262144` asks
-  for a larger context. One Spark served `--context 131072` and two Sparks
-  served `--context 262144` in a test at main `285fa8a`. One Spark also
-  served `--context 262144` at main `250fb49`: a 201,654-token prompt gave
-  its first token in 120.3 s and 120.8 s, with the same token IDs in both
-  runs ([context windows](docs/benchmarks.md#context-windows-main-285fa8a)).
+  for a larger context. On main `cbbb11b`, one Spark served
+  `--context 262144`: a 64K-token prompt gave its first token in 33.18 s and
+  a 128K-token prompt in 71.85 s, with the same token IDs on a repeat. Two
+  Sparks served `--context 262144` in a test at main `285fa8a`
+  ([context windows](docs/benchmarks.md#context-on-one-spark-main-cbbb11b)).
 - **Chats at once** follow from the context and the memory the engine has.
 
 <a id="supported-systems"></a>
@@ -261,23 +277,27 @@ and how to change it. These are the defaults you meet first:
   [the controller notes](INSTALL.md#route-b-from-a-controller).
 - **The agent needs 8192 tokens of context.** Below that, chat on the Spark
   falls back to plain chat. Chat from a controller stops with an error.
-- **FP4-Local: two Sparks make one chat faster. Four do not yet.** Two
-  Sparks run the tensor split, the only two-Spark path. Both Sparks work on
-  every token. Four or more Sparks run the layer pipeline. Each Spark holds a
-  run of the model's layers and passes its work to the next. So one chat uses
-  one GPU at a time. Two or more Sparks read prompts faster than one. The
-  end-of-day cards compare the same measured build on each tested Spark
-  count. See [measured results](#measured-results).
+- **FP4-Local: two Sparks make one chat faster. Four Sparks write at about
+  the speed of one.** Two Sparks run the tensor split, the only two-Spark
+  path. Both Sparks work on every token. Four or more Sparks run the layer
+  pipeline. Each Spark holds a run of the model's layers and passes its work
+  to the next. So when one chat writes, each new token passes through the
+  Sparks in turn. In the 2026-10-28 cards at
+  main `76977df`, prose ran at 42.8 tok/s on four Sparks, 42.0 on one and
+  53.8 on two. Two or more Sparks read prompts faster than one. See
+  [measured results](#measured-results).
 - **FP8: four Sparks write faster than two.** FP8 runs tensor parallel on two
   and on four Sparks, so every Spark works on every token. With drafting ON,
-  prose went from 36.6 tok/s on two Sparks to 46.7 on four, at main
-  `76977df`. But two and four Sparks give different token IDs (see
+  prose ran at 36.5 tok/s on two Sparks in the 2026-10-29 cards at main
+  `cbbb11b`, and at 46.7 on four in the 2026-10-28 cards at main `76977df`.
+  But two and four Sparks give different token IDs (see
   [exactness](#exactness)).
 - **Chains are measured up to four machines.** The
   [FP4-Local guide](cli/docs/fp4-local.md) describes chains of 2 to 24
   Sparks. We have run at most four: four DGX Sparks at `6cb46bf` on
   2026-10-25 and at `76977df` on 2026-10-28, and four cloud GB10 VMs at
-  v0.1.0 on 2026-10-24.
+  v0.1.0 on 2026-10-24. One and two Sparks were measured again at main
+  `cbbb11b` on 2026-10-29.
 - **The prefix cache is on by default.** With the cache, a request that
   starts like an earlier one does not read that start again. The cache works
   on one Spark and on two Sparks (the tensor split); three or more Sparks run
@@ -286,13 +306,12 @@ and how to change it. These are the defaults you meet first:
   Spark the room never lowers the number of full-context chats, and on two
   Sparks it can lower it by one so a copy of up to 4 GiB fits (a full
   32,768-token context). Set `VADE_FLASHNEXT_PREFIX_CACHE=0`
-  to turn it off ([settings](INSTALL.md#the-prefix-cache)). In the end-of-day runs
-  at `76977df`, the second question on a 32K-token chat reused 32,064 tokens.
-  It gave its first token in 0.63 s on one Spark (16.03 s with the cache
-  off) and in 0.76 s on two Sparks (9.95 s with the cache off). The first
-  question takes longer with the cache on: 16.23 s against 16.04 s on one
-  Spark, and 11.09 s against 10.31 s on two
-  ([benchmarks](docs/benchmarks.md#a-long-chat-and-its-second-question)).
+  to turn it off ([settings](INSTALL.md#the-prefix-cache)). In the
+  2026-10-29 cards at main `cbbb11b`, the second question on a 32K-token chat
+  reused 32,064 tokens. It gave its first token in 0.53 s on one Spark
+  (16.13 s when the request did not use the cache) and in 0.75 s on two
+  Sparks (9.91 s without the cache). On FP8 with two Sparks it took 0.89 s
+  ([benchmarks](docs/benchmarks.md#current-2026-10-29-main-cbbb11b-home-dgx-sparks)).
 
 ## Exactness
 
@@ -300,8 +319,10 @@ The rule: the same request on the same build, checkpoint and settings gives
 identical token IDs on every run and every Spark. Supported Spark counts
 must agree too. This holds when the request runs alone, batched or chunked,
 and when it hits or misses the cache. With greedy decoding, it also holds
-with drafting ON or OFF. On FP8, a request is greedy only when it sends every
-sampling field. A request that leaves fields out samples with a new seed
+with drafting ON or OFF. On FP8, a request that leaves a sampling field out
+takes the checkpoint's value for it. A request with no sampling field is
+sampled, and without `seed` it gets a new seed. A request with `temperature`
+0 and neutral penalties is greedy
 ([FP8 install](docs/install-fp8.md#defaults-and-drafting)).
 
 `vade verify` checks the drafting part on your own engine. A pass prints
@@ -311,16 +332,19 @@ of batching and caching.
 
 Our latest checks compare drafting ON against OFF:
 
-- On main `76977df` (the 2026-10-28 end-of-day cards), FP4-Local gave the
-  same token IDs on one, two and four Sparks, with drafting ON and OFF. It
-  matched in 66 of 66 responses in every compare
-  ([benchmarks](docs/benchmarks.md#current-2026-10-28-end-of-day-main-76977df-home-dgx-sparks)).
-- On the same main, FP8 matched drafting ON against OFF in 66 of 66
-  responses on each Spark count. But its two-Spark and four-Spark cards
-  matched each other in only 7 of 66 responses. This is an exception to the
-  rule above. A host test found the cause, the order in which the ranks add
-  their parts, and a fix is in screening. Until it is on main, compare FP8
-  results only at the same Spark count
+- On main `cbbb11b` (the 2026-10-29 cards), the FP4-Local cards on one Spark
+  with drafting ON and OFF, and on two Sparks with drafting ON, all gave the
+  same token IDs, in 64 of 64 responses
+  ([benchmarks](docs/benchmarks.md#current-2026-10-29-main-cbbb11b-home-dgx-sparks)).
+  Four Sparks last matched one and two Sparks in 66 of 66 responses, at main
+  `76977df` on 2026-10-28.
+- On main `cbbb11b`, FP8 on two Sparks matched drafting ON against OFF in 64
+  of 64 responses in each of two server starts. On main `76977df`, its
+  two-Spark and four-Spark cards matched each other in only 7 of 66
+  responses. This is an exception to the rule above. A host test found the
+  cause, the order in which the ranks add their parts, and a fix is in
+  screening. Until it is on main, compare FP8 results only at the same Spark
+  count
   ([benchmarks](docs/benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)).
 - On main `285fa8a`, a confirm run gave the same token IDs as the main
   before it, `54392da`, in all four server starts. See
@@ -347,34 +371,38 @@ explains the full rule and what each check proves.
 
 <!-- bench-docs:start -->
 
-### Latest measured main
+### Current main
 
-These cards measured main revision
-`76977dff88d36a85a8bfeaff6725d169e8a44845`.
-The last card finished on 2026-10-28. They do not measure later engine changes
-on main.
+Most rows below measured main `cbbb11b` on our DGX Sparks on 2026-10-29.
+Four Sparks and the two-Spark FP4-Local drafting OFF row were not measured
+again. Those rows come from the 2026-10-28 cards at main `76977df`, as the
+Main column shows.
 
-| Model | Sparks | Path | Drafting | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) | IDs saved / responses |
-| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| qwen3.8-flash-next-fp4-local | 1 | local | OFF | 27.582 | 27.625 | 27.927 | 26.965 | 83.569 | 130.553 | 3.811 | 66/66 |
-| qwen3.8-flash-next-fp4-local | 1 | local | ON | 42.039 | 80.458 | 99.93 | 64.074 | 143.929 | 177.496 | 3.759 | 66/66 |
-| qwen3.8-flash-next-fp8 | 2 | ring | OFF | 26.823 | 26.709 | 26.856 | 25.839 | 66.618 | 99.298 | 6.005 | 66/66 |
-| qwen3.8-flash-next-fp8 | 2 | ring | ON | 36.6 | 50.883 | 52.706 | 45.124 | 66.499 | 98.327 | 5.969 | 66/66 |
-| qwen3.8-flash-next-fp4-local | 2 | tensor split | OFF | 35.071 | 35.375 | 35.487 | 33.814 | 82.476 | 126.344 | 2.153 | 66/66 |
-| qwen3.8-flash-next-fp4-local | 2 | tensor split | ON | 53.792 | 99.972 | 128.426 | 76.87 | 162.493 | 229.457 | 2.186 | 66/66 |
-| qwen3.8-flash-next-fp8 | 4 | path | OFF | 35.266 | 34.722 | 35.284 | 33.9 | 88.201 | 128.203 | 6.948 | 66/66 |
-| qwen3.8-flash-next-fp8 | 4 | path | ON | 46.669 | 65.115 | 68.026 | 58.452 | 86.39 | 128.832 | 6.911 | 66/66 |
-| qwen3.8-flash-next-fp4-local | 4 | pipeline | OFF | 28.157 | 28.177 | 28.503 | 27.642 | 84.974 | 139.335 | 2.177 | 66/66 |
-| qwen3.8-flash-next-fp4-local | 4 | pipeline | ON | 42.758 | 81.287 | 101.673 | 65.82 | 145.757 | 192.895 | 2.176 | 66/66 |
+| Model | Sparks | Path | Drafting | Main | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) |
+| --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| fp4-local | 1 | local | OFF | `cbbb11b` | 27.891 | 27.707 | 27.915 | 27.079 | 85.042 | 138.608 | 3.764 |
+| fp4-local | 1 | local | ON | `cbbb11b` | 41.944 | 80.247 | 99.962 | 64.058 | 145.691 | 176.690 | 3.791 |
+| fp4-local | 2 | tensor split | OFF | `76977df` | 35.071 | 35.375 | 35.487 | 33.814 | 82.476 | 126.344 | 2.153 |
+| fp4-local | 2 | tensor split | ON | `cbbb11b` | 54.299 | 100.418 | 128.086 | 78.009 | 164.517 | 228.004 | 2.145 |
+| fp4-local | 4 | pipeline | OFF | `76977df` | 28.157 | 28.177 | 28.503 | 27.642 | 84.974 | 139.335 | 2.177 |
+| fp4-local | 4 | pipeline | ON | `76977df` | 42.758 | 81.287 | 101.673 | 65.82 | 145.757 | 192.895 | 2.176 |
+| fp8 | 2 | ring | OFF | `cbbb11b` | 26.887 | 26.727 | 26.914 | 26.050 | 66.682 | 97.378 | 5.966 |
+| fp8 | 2 | ring | ON | `cbbb11b` | 36.549 | 51.362 | 52.610 | 44.995 | 67.593 | 97.303 | 5.961 |
+| fp8 | 4 | path | OFF | `76977df` | 35.266 | 34.722 | 35.284 | 33.9 | 88.201 | 128.203 | 6.948 |
+| fp8 | 4 | path | ON | `76977df` | 46.669 | 65.115 | 68.026 | 58.452 | 86.39 | 128.832 | 6.911 |
 
-Rates are card medians in completion tokens per second. Prose, code and
-structured output each use one chat. C1, C4 and C8 give the total rates for
-one, four and eight concurrent chats. Cold 8K is the median time to the first
-token after an uncached 8192-token prompt. IDs saved counts responses with
-recorded token IDs. This count does not prove that the IDs match.
+Rates are in completion tokens per second. Prose, code and structured output
+each use one chat. C1, C4 and C8 give the total rates for one, four and eight
+concurrent chats. Cold 8K is the time to the first token after an uncached
+8192-token prompt. A 32K-token prompt gave its first token in 15.95 s on one
+Spark, 10.09 s on two Sparks and 24.05 s on two Sparks with FP8, all at
+`cbbb11b`.
 
-The [benchmark history](docs/benchmarks.md) gives the card identities,
-settings, exactness comparisons, methods, receipt status and limits.
+The [benchmark history](docs/benchmarks.md#current-2026-10-29-main-cbbb11b-home-dgx-sparks)
+gives the number of server starts per row, how C4 and C8 are averaged, the
+token ID checks and the limits. This table is written by hand, because the
+2026-10-29 runs are not RigMark cards. `vade-tools bench-docs` rewrites it from
+RigMark cards.
 
 <!-- bench-docs:end -->
 
@@ -383,34 +411,11 @@ Both checkpoints are supported. The FP8 cards used context 32768, output
 the table), not the layer pipeline. The
 [FP8 install](docs/install-fp8.md#what-to-expect) explains the FP8 rows.
 Every card sends its cold 8K prompt with drafting OFF
-(`"draft": "plain"`), in the drafting ON rows too. So the Cold 8K column and
-the cold 8K times below measure drafting OFF.
+(`"draft": "plain"`), in the drafting ON rows too. So the Cold 8K column
+measures drafting OFF.
 
-**After these cards.** Main `285fa8a` changed the engine after the cards
-above. With drafting on, two Sparks now keep more prompt rows for the drafter
-on prompts longer than 32K tokens (see the [changelog](CHANGELOG.md)). A
-confirm run on 2026-10-28 compared `285fa8a` with the main before it,
-`54392da`, on one pair of DGX Sparks with drafting ON (record
-`2026-10-28_1713_confirm_285fa8a-vs-54392da`, not in the repository yet). The
-token IDs were identical in all four server starts. A 129,220-token prompt
-reached its first token in 40.366 s, against 42.090 s before (-4.10 %, mean
-of two requests each). Eight chats reached 205.594 tok/s, against 206.735
-(-0.55 %), on rounds where all chats started together. On all rounds, one slow
-new-main start (195.717 tok/s) made eight chats slower: a mean of 200.656
-tok/s against 205.935 (-2.56 %). Prose reached 54.378 and 55.014 tok/s in the
-two new starts, against 54.862 and 55.015 (-0.44 %). The first token after a cold 8K prompt
-took 2.167 and 2.181 s, against 2.183 and 2.182 s (0.39 % less time).
-[The confirm run](docs/benchmarks.md#confirm-run-main-285fa8a) gives the
-conditions and the limits.
-
-Main `250fb49` then changed how a chat reserves memory: a chat now reserves
-only the memory for the rows it uses. At a 131,072-token context, a capacity
-test sent 16 short chats to two Sparks, one each second, and all 16 were
-active together, against 2 on main `54392da`. A card at `250fb49` on one
-pair of DGX Sparks, with drafting ON and three server starts, gave prose
-54.119, code 100.621, structured 129.514 and eight chats 224.065 tok/s. The
-first token after a cold 8K prompt, sent with drafting OFF, took 2.142 s. See
-[the card at main 250fb49](docs/benchmarks.md#card-at-main-250fb49).
+Earlier results, such as the confirm run at main `285fa8a` and the capacity
+test at main `250fb49`, are in the [benchmark history](docs/benchmarks.md).
 
 ## License
 
@@ -424,6 +429,7 @@ and [Credits](CREDITS.md) keeps the source attribution.
 
 | Guide | What it covers |
 | --- | --- |
+| [Why Vade](docs/why-vade.md) | What Vade is, why it exists, what "exact" means and what Vade is not |
 | [INSTALL.md](INSTALL.md) | The whole install, starting with one Spark |
 | [FP8 install](docs/install-fp8.md) | The FP8 checkpoint on 2, 4 or 6 Sparks: build, weights, config, start and measured speeds |
 | [First run](harness/docs/first-run.md) | The launcher on your Spark, saved settings and later runs |
@@ -438,4 +444,5 @@ and [Credits](CREDITS.md) keeps the source attribution.
 | [Engine docs](engine/docs/README.md) | How the engine runs, its GPU kernels and how it is validated |
 | [All documentation](docs/README.md) | Guides for deploying and developing Vade |
 | [Contributing](CONTRIBUTING.md) and [agent rules](AGENTS.md) | How to change Vade: house rules, validation and review |
+| [Local CI](docs/ci.md#run-checks-from-a-public-checkout) | Tests run locally with these commands before every merge |
 | [Security](SECURITY.md) | How to report a vulnerability privately |
