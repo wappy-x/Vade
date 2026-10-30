@@ -246,6 +246,10 @@ pub trait Engine {
     fn fatal_error(&self) -> Option<String> { None }
     /// Return idle KV pages or reclaim them when system memory is under pressure.
     fn maintain_memory(&self, _idle: bool) -> Result<(), String> { Ok(()) }
+    /// Startup, before the first request: backends with reserves build and drop one
+    /// context-size admission session, so the first request reuses its memory as later ones do.
+    /// An error is logged and serving starts anyway.
+    fn warm_admission(&self) -> Result<(), String> { Ok(()) }
     /// Admission of a queued request starts. It runs before the cache balance, cache forks
     /// and session construction, which can allocate or poll memory pressure; it ends an idle
     /// period that maintain_memory(true) started.

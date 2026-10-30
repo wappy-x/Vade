@@ -163,6 +163,14 @@ impl Drop for Chat<'_, '_> {
     }
 }
 impl<'b, 'a, 'w> FlashNext<'b, 'a, 'w> {
+    /// The session maps the KV pages its admission charge covers at once (kv_charge's extent),
+    /// so it reuses a kept range of that size without trimming and mapping it page by page.
+    fn admission_session(&self, tokens: usize) -> Result<Chat<'_, 'a>, String> {
+        self.model.set_kv_rows_hint(self.pages.extent((tokens as u64).saturating_add(self.ahead)) as usize);
+        let session = self.session();
+        self.model.set_kv_rows_hint(0);
+        session
+    }
     /// Rows one cohort tick may spend: VADE_MTP_COHORT=wide keeps four chats on 16.
     fn tick_width(&self, chats: usize) -> usize {
         if self.wide_tick { crate::mtp_batch::tick_width(chats, self.verify_rows) } else { self.verify_rows }
@@ -623,13 +631,9 @@ impl<'b, 'a, 'w> Engine for FlashNext<'b, 'a, 'w> {
         self.backend.select_arm(request.arm_x)?;
         self.session()
     }
-    /// The session maps the KV pages its admission charge covers at once (kv_charge's extent),
-    /// so it reuses a kept range of that size without trimming and mapping it page by page.
     fn session_for_admission(&self, request: &crate::protocol::Request, tokens: usize) -> Result<Self::Session<'_>, String> {
-        self.model.set_kv_rows_hint(self.pages.extent((tokens as u64).saturating_add(self.ahead)) as usize);
-        let session = self.session_for_request(request);
-        self.model.set_kv_rows_hint(0);
-        session
+        self.backend.select_arm(request.arm_x)?;
+        self.admission_session(tokens)
     }
     fn session(&self) -> Result<Self::Session<'_>, String> {
         let before = self.backend.kv_reserve_stats();
@@ -895,6 +899,14 @@ impl<'b, 'a, 'w> Engine for FlashNext<'b, 'a, 'w> {
         if !spark_engine::flash::qsa::kv_reserve() && !self.backend.vector_pool_configured() { return Ok(()); }
         self.backend.maintain_kv_reserve(idle)?;
         self.backend.kv_conversation_ended(self.reservation);
+        Ok(())
+    }
+    /// The first admission otherwise maps its vectors and KV pages inside its first token
+    /// (about 0.12 s at 32K); the dropped session leaves them in the reserves under their cap.
+    fn warm_admission(&self) -> Result<(), String> {
+        if !spark_engine::flash::qsa::kv_reserve() && !self.backend.vector_pool_configured() { return Ok(()); }
+        self.backend.kv_conversation_ended(self.reservation);
+        drop(self.admission_session(self.context)?);
         Ok(())
     }
     /// An idle period started before this request arrived must not release funded spares

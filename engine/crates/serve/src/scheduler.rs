@@ -1406,6 +1406,8 @@ fn serve_inner<'e, E: Engine, T: Tokenizer>(
     protocol::SamplingEcho::log_defaults(limits, config.draft, config.mtp_depth);
     engine_model::events::note("scheduler_pool", format_args!("active={} connections={} active_bytes={} session_budget_bytes={} retained_cache_bytes={} prefix_cache={} draft={} mtp_depth={}",
         config.active, config.connections, config.active_bytes, config.session_budget_bytes, cache_limits.retained_bytes, config.prefix_cache, config.draft.name(), config.mtp_depth));
+    // Best effort: a start without room for it serves as before; the first request then maps its own.
+    if let Err(error) = engine.warm_admission() { engine_model::events::note("warm_admission_failed", format_args!("error={error}")); }
     let (prepare_tx, input_rx) = mpsc::sync_channel(config.connections.max(1));
     let (output_tx, prepare_rx) = mpsc::channel();
     let (context, vocab, eos) = (engine.context_limit(), engine.vocab_size(), engine.eos_token_ids());
