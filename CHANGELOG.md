@@ -5,6 +5,7 @@ Changes that are merged but not yet released are under Unreleased.
 
 ## Unreleased
 
+- When an MCP call does not run, the model now learns why: you declined it, no one could answer in a run without a terminal, or approvals are `never`. It no longer blames the tool server.
 - Native chat supports [host hooks](harness/docs/hooks.md), and chat supports [user slash commands](harness/docs/slash-commands.md) and `/clear`.
 - GitHub workflows now run only by hand; tests run locally before every merge, as [Local CI](docs/ci.md) describes.
 - Chat keeps private project notes across sessions; `VADE_MEMORY=0` turns memory off.

@@ -524,6 +524,10 @@ impl App {
                 let executor = vade_harness::mcp::McpTools::new(executor, mcp.as_deref(), policy, |preview: coding_tools::Preview<'_>, cancel: &AtomicBool| {
                     previews.show(None, preview, cancel)
                 });
+                let executor = match approvals.as_deref() {
+                    Some(approvals) => executor.with_approvals(approvals),
+                    None => executor,
+                };
                 let mut executor = ActiveTools {
                     inner: executor,
                     events: &tx,

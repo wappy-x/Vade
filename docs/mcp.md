@@ -150,6 +150,13 @@ MCP calls follow `--approval`:
 | `auto` | Vade shows the call and runs it. |
 | `never` | Vade denies every MCP call. |
 
+When a call does not run, Vade tells the model why: you declined it, no one
+could answer the question, or the setting is `never`. The server is not asked.
+A run without a terminal (for example `--prompt`, or chat with input from a
+pipe) cannot answer a question. Under `ask`, such a run declines each MCP call
+and the model gets an `approval_required` result. Use `--yes` to let such a
+run make MCP calls.
+
 Vade does not use the tool annotations (for example `readOnlyHint`) to skip
 a question, because the server supplies them.
 

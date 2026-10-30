@@ -150,7 +150,7 @@ fn router_sends_only_prefixed_names_to_mcp() {
         assert!(!tools.last_side_effect_uncertain());
         assert_eq!(tools.inner.0, 1);
         if policy == ApprovalPolicy::Never {
-            assert_eq!(result, Err(ToolError::Denied));
+            assert!(result.unwrap().contains(r#""error":"denied_by_policy""#));
         } else {
             assert!(result.unwrap().contains("mcp_unavailable"));
         }
@@ -162,10 +162,24 @@ fn router_sends_only_prefixed_names_to_mcp() {
         };
         assert_eq!(asked, expected);
     }
-    // A denied preview never reaches the hub; no hub means no MCP tools.
-    let mut denied = McpTools::new(Native(0), Some(&hub), ApprovalPolicy::Ask, |_: Preview<'_>, _: &AtomicBool| false);
+    // A denied preview never reaches the hub, and the model learns who said
+    // no: the user, or no one because no one could answer.
     let remote = call("s__echo");
-    assert_eq!(denied.execute(ToolInvocation { call: &remote, arguments: &arguments, max_output_bytes: 4096 }, &cancel), Err(ToolError::Denied));
+    let approvals = crate::shell::permissions::Approvals::new(None, None, true).unwrap();
+    for (interactive, error, cause) in [(true, "declined_by_user", "the user declined"), (false, "approval_required", "no one can approve it")] {
+        approvals.set_interactive(interactive);
+        let mut denied = McpTools::new(Native(0), Some(&hub), ApprovalPolicy::Ask, |_: Preview<'_>, _: &AtomicBool| false).with_approvals(&approvals);
+        let text = denied.execute(ToolInvocation { call: &remote, arguments: &arguments, max_output_bytes: 4096 }, &cancel).unwrap();
+        assert!(text.contains(&format!(r#""error":"{error}""#)) && text.contains(cause) && !text.contains("tool server"), "{text}");
+        assert_eq!(denied.inner.0, 0);
+    }
+    // Without the session's approval state the decline still names the user.
+    let mut denied = McpTools::new(Native(0), Some(&hub), ApprovalPolicy::Ask, |_: Preview<'_>, _: &AtomicBool| false);
+    assert!(denied.execute(ToolInvocation { call: &remote, arguments: &arguments, max_output_bytes: 4096 }, &cancel).unwrap().contains("declined_by_user"));
+    // A cancel during the question is a cancel, not a denial.
+    let stopped = AtomicBool::new(true);
+    let mut cancelled = McpTools::new(Native(0), Some(&hub), ApprovalPolicy::Ask, |_: Preview<'_>, _: &AtomicBool| false);
+    assert_eq!(cancelled.execute(ToolInvocation { call: &remote, arguments: &arguments, max_output_bytes: 4096 }, &stopped), Err(ToolError::Cancelled));
     let mut off = McpTools::new(Native(0), None, ApprovalPolicy::Auto, |_: Preview<'_>, _: &AtomicBool| true);
     assert!(off.execute(ToolInvocation { call: &remote, arguments: &arguments, max_output_bytes: 4096 }, &cancel).unwrap().contains("off in this chat"));
 }

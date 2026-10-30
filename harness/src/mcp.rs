@@ -464,11 +464,13 @@ impl Hub {
 
 /// A tool executor that sends `<server>__<tool>` calls to the hub and every
 /// other call to `inner`, unchanged. MCP calls follow the approval policy:
-/// `ask` asks before each call, `auto` runs it, `never` denies it.
+/// `ask` asks before each call, `auto` runs it, `never` denies it. A call
+/// that does not run tells the model why, so it does not blame the server.
 pub struct McpTools<'a, E, F> {
     pub inner: E,
     hub: Option<&'a Mutex<Hub>>,
     policy: ApprovalPolicy,
+    approvals: Option<&'a crate::shell::permissions::Approvals>,
     preview: F,
     mcp_last: bool,
     uncertain: bool,
@@ -478,7 +480,12 @@ where
     F: FnMut(Preview<'_>, &AtomicBool) -> bool,
 {
     pub fn new(inner: E, hub: Option<&'a Mutex<Hub>>, policy: ApprovalPolicy, preview: F) -> Self {
-        Self { inner, hub, policy, preview, mcp_last: false, uncertain: false }
+        Self { inner, hub, policy, approvals: None, preview, mcp_last: false, uncertain: false }
+    }
+    /// The session's approval state: it says whether a person can answer.
+    pub fn with_approvals(mut self, approvals: &'a crate::shell::permissions::Approvals) -> Self {
+        self.approvals = Some(approvals);
+        self
     }
 }
 impl<E: ToolExecutor, F> ToolExecutor for McpTools<'_, E, F>
@@ -499,14 +506,21 @@ where
             return Ok(failure("mcp_unavailable", "MCP servers are off in this chat", invocation.max_output_bytes));
         };
         if self.policy == ApprovalPolicy::Never {
-            return Err(ToolError::Denied);
+            return Ok(failure("denied_by_policy", "MCP tool not run: approvals are set to never in this chat, so Vade denies every MCP call. The server was not asked. Tell the user; do not retry it.", invocation.max_output_bytes));
         }
         let arguments = json::stringify(invocation.arguments).map_err(|_| ToolError::InvalidArguments("arguments must be JSON"))?;
         let (server, tool) = name.split_once(SEPARATOR).unwrap_or((name, ""));
         // Bound the preview like the native tools do; the call itself gets every byte.
         let detail = format!("MCP server {server}, tool {tool}\nArguments: {}", truncate(arguments, 4096));
         if !(self.preview)(Preview { title: "MCP tool", detail: &detail, approval_required: self.policy == ApprovalPolicy::Ask }, cancel) {
-            return Err(ToolError::Denied);
+            if cancel.load(Ordering::Relaxed) {
+                return Err(ToolError::Cancelled);
+            }
+            return Ok(if self.approvals.is_some_and(|a| !a.interactive()) {
+                failure("approval_required", "MCP tool not run: it needs the user's approval, and no one can approve it in this non-interactive run. The server was not asked. Do not retry it; tell the user that this call needs approval. The person who runs Vade can allow MCP calls with --yes.", invocation.max_output_bytes)
+            } else {
+                failure("declined_by_user", "MCP tool not run: the user declined this call. The server was not asked. Do not retry it unless the user asks.", invocation.max_output_bytes)
+            });
         }
         let mut hub = hub.lock().map_err(|_| ToolError::Failed)?;
         let (result, uncertain) = hub.call(name, invocation.arguments, invocation.max_output_bytes, cancel);
