@@ -57,7 +57,7 @@ pub fn flash_mixed_reserve_bytes() -> usize {
     flash_dense_reserve_bytes() / kernel_params::FLASH_BF16_INPUT_BYTES * kernel_params::FLASH_BF16_MIXED_BYTES
 }
 
-/// The startup routing hook accepts N:ROW:ROWS[:RANK_MASK], as well as N:ROW.
+/// The startup routing hook accepts `N:ROW:ROWS[:RANK_MASK]`, as well as `N:ROW`.
 pub const TEST_ROUTING_REJECT_WIDTH: bool = true;
 
 /// Exact embedded layer module, without changing the bytes CUDA receives.

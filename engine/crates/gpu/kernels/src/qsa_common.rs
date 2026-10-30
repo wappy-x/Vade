@@ -8,9 +8,9 @@ pub const LIMIT: usize = 1 << 20;
 pub const CHUNK: usize = 1024;
 pub type Rope = [f32; 64]; // cos[32], sin[32], supplied by the architecture layer.
 
-/// Projected Q/K [rows,640], query RoPE [rows,64], completed-group RoPE
-/// [floor((past+rows)/4)-floor(past/4),64], shared norm weights [128].
-/// Ring [4,128] holds raw keys at absolute position % 4. Cache [capacity/4,128].
+/// Projected Q/K `[rows,640]`, query RoPE `[rows,64]`, completed-group RoPE
+/// `[floor((past+rows)/4)-floor(past/4),64]`, shared norm weights `[128]`.
+/// Ring `[4,128]` holds raw keys at absolute position % 4. Cache `[capacity/4,128]`.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct Prepare {
@@ -18,15 +18,15 @@ pub struct Prepare {
     pub qw: u64, pub kw: u64, pub ring: u64, pub cache: u64, pub query: u64,
     pub rows: u32, pub past: u32, pub epsilon: f32,
 }
-/// Prepared queries [rows,4,128]; scores [rows,stride], stride >= last/4.
-/// Selected [rows,2051] is ascending, u32::MAX padded; counts [rows] is u32.
+/// Prepared queries `[rows,4,128]`; scores `[rows,stride]`, stride >= last/4.
+/// Selected `[rows,2051]` is ascending, u32::MAX padded; counts `[rows]` is u32.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct Select {
     pub query: u64, pub cache: u64, pub scores: u64, pub selected: u64, pub counts: u64,
     pub rows: u32, pub past: u32, pub stride: u32,
 }
-/// Q/output [rows,24,256], K/V [capacity,2,256], weights [rows,24,2051].
+/// Q/output `[rows,24,256]`, K/V `[capacity,2,256]`, weights `[rows,24,2051]`.
 /// Main Q/K are already normalized/rotated. Output precedes gate/projection.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]

@@ -81,7 +81,7 @@ pub const LONG_SPLIT_MAX: usize = 20_416;
 const _: () = assert!(LONG_SPLIT_MAX % 64 == 0 && LONG_SPLIT_MAX < SPLIT_PROMPT as usize);
 /// The transaction's cut as a share of its rows, in permille (the measured best).
 pub const LONG_SPLIT_CUT: usize = 500;
-/// VADE_LONG_SPLIT_CUT=<permille>: a screen setting that places the cut at that share instead.
+/// `VADE_LONG_SPLIT_CUT=<permille>`: a screen setting that places the cut at that share instead.
 pub fn long_split_cut() -> usize {
     static CUT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CUT.get_or_init(|| std::env::var("VADE_LONG_SPLIT_CUT").ok().and_then(|v| v.parse().ok()).filter(|&p| (1..1000).contains(&p)).unwrap_or(LONG_SPLIT_CUT))

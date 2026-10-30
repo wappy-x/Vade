@@ -6,7 +6,7 @@ mod params;
 
 pub(super) fn bf16(n: usize, k: usize) -> usize { 2 * n * k }
 /// model/flash/mxfp8.rs: BLOCK=32. blocks::mx8_image stores E4M3 in
-/// flash_bf16_element order, then UE8M0 [row/8][K/32][8]. The kernel
+/// flash_bf16_element order, then UE8M0 `[row/8][K/32][8]`. The kernel
 /// reads all eight scale lanes, including padded rows (not alignment gaps).
 pub(super) fn mxfp8(n: usize, k: usize) -> usize {
     n * k + n.div_ceil(8) * (k / engine_model::flash::mxfp8::BLOCK) * 8

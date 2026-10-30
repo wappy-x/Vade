@@ -71,7 +71,7 @@ pub fn quantize(input: &[f32], cols: usize) -> Result<Quantized> {
     Ok(Quantized { rows: input.len() / cols, cols, codes, scales })
 }
 
-/// Weights [N,K], BF16 multipliers [N/128,K/128], output [M,N] in FP32.
+/// Weights `[N,K]`, BF16 multipliers `[N/128,K/128]`, output `[M,N]` in FP32.
 /// `blocks` retains ORIGINAL K coordinates for a logical rank's partial sum.
 /// fp8.rs:364-395: four dependent K32 MMAs, then dot*(sa*sw), ascending K128.
 /// Empty ranges yield zero partials. Rank folding and BF16 boundaries are separate.
@@ -149,7 +149,7 @@ pub fn canonical_k16_ranges(cols: usize) -> Result<[Range<usize>; 4]> {
     Ok(std::array::from_fn(|part| tiles * part / 4..tiles * (part + 1) / 4))
 }
 
-/// Row-major BF16 weights [N,K], FP32 inputs [M,K], FP32 partials [M,N].
+/// Row-major BF16 weights `[N,K]`, FP32 inputs `[M,K]`, FP32 partials `[M,N]`.
 /// gemm.rs:304-312 splits hi=RN_BF16(x), lo=RN_BF16(x-hi).
 /// flash_bf16.rs:178,229-280 chains K16, hi+lo per range; :407-411 merges
 /// (P0+P1)+(P2+P3). Round the global output separately with round_bf16.

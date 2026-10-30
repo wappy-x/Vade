@@ -1,5 +1,5 @@
 //! Launch payloads shared by the host and Rust NVPTX kernels.
-/// One dense NVFP4 MMA: A [16,64], transposed B [8,64], scales per 16 K.
+/// One dense NVFP4 MMA: A `[16,64]`, transposed B `[8,64]`, scales per 16 K.
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct Fp4MmaTile {
@@ -694,9 +694,9 @@ pub struct FlashHcAdd {
     pub residual: u64, pub block: u64, pub peer: u64, pub gates: u64, pub hidden: u32, pub rank: u32,
 }
 /// Prompt HC combine fused with the next mix's F32 norm (flash_next_hc_add_norm): residual
-/// [M][4H] in place, block [M][H], gates [M][4], F32 norm weights [4H], normalized output
-/// [M][4H] and optional dense hi/lo planes (packed = 0: none). scales != 0: the norm scales
-/// [M][4] go there instead of the normalized output (prompt HC up forms the streams).
+/// `[M][4H]` in place, block `[M][H]`, gates `[M][4]`, F32 norm weights `[4H]`, normalized output
+/// `[M][4H]` and optional dense hi/lo planes (packed = 0: none). scales != 0: the norm scales
+/// `[M][4]` go there instead of the normalized output (prompt HC up forms the streams).
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct FlashHcAddNorm {

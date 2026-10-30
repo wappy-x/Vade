@@ -755,7 +755,7 @@ impl ExpertOracle for Vec<DenseExpert> {
 }
 /// Packed NVFP4 expert set: each projection dequantized row-block by
 /// `nvfp4::dequantize` (the existing oracle entry point), then FP32 matvec.
-/// Layout per expert/projection: packed [r][c/2], scales [r][c/16], global.
+/// Layout per expert/projection: packed `[r][c/2]`, scales `[r][c/16]`, global.
 pub struct Nvfp4Expert {
     pub packed: Vec<u8>,
     pub scales: Vec<u8>,

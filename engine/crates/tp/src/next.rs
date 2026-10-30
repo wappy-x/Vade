@@ -340,7 +340,7 @@ pub trait RankKernels {
     fn finish_chunk(&mut self, _tokens: usize) -> Result<()> {
         Err("no chunk form".into())
     }
-    /// Cohort form (one decode row per session, row r = rows[r]'s session): rows[0] runs the
+    /// Cohort form (one decode row per session, row r = `rows[r]`'s session): `rows[0]` runs the
     /// row-batched chunk hooks above on its chunk buffers; only the attention (whose causal
     /// state is per session) and the final hand-back need every row's kernels. 1 = none.
     fn cohort_rows(&self) -> usize {
@@ -352,7 +352,7 @@ pub trait RankKernels {
     {
         Err("no cohort form".into())
     }
-    /// Row r's final residual becomes rows[r]'s single-token state for its head.
+    /// Row r's final residual becomes `rows[r]`'s single-token state for its head.
     fn cohort_finish(_rows: &mut [&mut Self]) -> Result<()>
     where
         Self: Sized,
