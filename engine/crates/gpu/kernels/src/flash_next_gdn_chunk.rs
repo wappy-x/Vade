@@ -951,19 +951,42 @@ unsafe fn chunk_rows(p: GdnChunkNext) {
         for x in 0..4 { sts(sh + SLOT_KD + (((d4 + x) * (C + 1) + j) * 4) as u32, k4[x]); }
         idx += 128;
     }
+    // Fused prepare (ga != 0): this CTA writes flash_gdn_conv_prepare_tokens_khs'
+    // words for its own value head with prepare_values itself, one warp per row
+    // (lane l holds features l + 32 f): the key group's q/k rows into this head's
+    // slot (not h0's, so no two CTAs write one word), its v row and its beta/g.
+    // The conv reads x rows x_start + r of the conv call (history before row 0).
+    let qh = if p.ga != 0 { h } else { h0 };
+    if p.ga != 0 {
+        let (lane, channels) = (tid % 32, p.channels as usize);
+        let conv = |channel: usize, token: usize| crate::flash_gdn::convolution(p.x as *const f32, p.w as *const u16,
+            p.history as *const f32, channel, token, channels, 0);
+        let mut r = tid / 32;
+        while r < count {
+            let token = p.x_start as usize + r;
+            let load = |at: usize| [conv(at + lane, token), conv(at + lane + 32, token), conv(at + lane + 64, token), conv(at + lane + 96, token)];
+            let (features, gates) = (r * hd, r * heads);
+            crate::flash_gdn::prepare_values(load(kh * D), load((keys + kh) * D), load((2 * keys + h) * D),
+                (p.ga as *const f32).add(gates), (p.gb as *const f32).add(gates), p.alog as *const u16, p.dt as *const u16,
+                (p.q as *mut f32).add(features), (p.k as *mut f32).add(features), (p.v as *mut f32).add(features),
+                (p.beta as *mut f32).add(gates), (p.g as *mut f32).add(gates), h, Some(h), lane, heads, 1, 0, false);
+            r += 4;
+        }
+        sync();
+    }
     for r in 0..count {
         let pos = base + r;
         let i = pos % C;
         let start = pos - i;
         let key = |j: usize, d: usize| -> f32 {
-            if start + j >= base { *k.add((start + j - base) * hd + h0 * D + d) } else { *tk.add(j * D + d) }
+            if start + j >= base { *k.add((start + j - base) * hd + qh * D + d) } else { *tk.add(j * D + d) }
         };
         let at = r * hd;
         let beta = *(p.beta as *const f32).add(r * heads + h);
         let gamma = (if i > 0 { *tg.add(i - 1) } else { 0.0 }) + *(p.g as *const f32).add(r * heads + h);
         let e = exp(gamma);
-        sts(sh + SLOT_Q + (tid * 4) as u32, *q.add(at + h0 * D + tid));
-        sts(sh + SLOT_K + (tid * 4) as u32, *k.add(at + h0 * D + tid));
+        sts(sh + SLOT_Q + (tid * 4) as u32, *q.add(at + qh * D + tid));
+        sts(sh + SLOT_K + (tid * 4) as u32, *k.add(at + qh * D + tid));
         sync();
         if tid < i {
             let (mut kk, mut qk) = (0.0f32, 0.0f32);
@@ -1037,6 +1060,19 @@ unsafe fn chunk_rows(p: GdnChunkNext) {
         }
         d128!(d => scol[d] = *s.add(d * D + tid));
         sync();
+    }
+    // Fused gate (gated != 0 with ga != 0): flash_gdn_gate's words (gate_plain itself)
+    // on this head's out rows, which this CTA wrote before the loop's last barrier;
+    // warp w gates rows w, w + 4.
+    if p.gated != 0 && p.ga != 0 {
+        let mut r = tid / 32;
+        while r < count {
+            let at = r * hd + h * D;
+            crate::flash_gdn::gate_plain(crate::kernel_params::GdnGate { x: (p.out as *const f32).add(at), z: (p.z as *const f32).add(at),
+                norm: p.norm as *const f32, output: (p.gated as *mut f32).add(at), heads: 1, tokens: 1, precision: 0, packed: 0,
+                epsilon: p.epsilon, sessions: 0 }, tid % 32);
+            r += 4;
+        }
     }
 }
 

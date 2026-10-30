@@ -1222,8 +1222,8 @@ pub(super) fn run(o: &Options, cases: &[Case]) -> Result<()> {
     for c in cases {
         eprintln!("prepare {} elapsed_s={:.1}", c.name, started.elapsed().as_secs_f64());
         if c.kind==70 {frontend::run(&mut g,modules,c,o,&hashes,&source)?;continue;}
-        if (40..=53).contains(&c.kind) {
-            // kernel_gdn.rs numbers its cases 7..20.
+        if (40..=55).contains(&c.kind) {
+            // kernel_gdn.rs numbers its cases 7..22.
             gdn::run_case(&mut g, modules, timer, &Case { kind: c.kind - 33, ..c.clone() }, o, &hashes, &source, started)?;
             continue;
         }

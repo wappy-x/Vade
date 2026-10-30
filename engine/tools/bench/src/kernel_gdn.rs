@@ -525,6 +525,223 @@ fn cstep(g: &mut Gpu, modules: [H; 2], rows: usize) -> Result<Fixture> {
     Ok(Fixture { arms, stored, flops: rows * HEADS * D * D * 8, copies })
 }
 
+/// One GDN layer step on one chat (kind 21) as gdn.rs runs it for `rows` rows at chunk
+/// offset `open` (a state whose open chunk holds `open` rows; a window past row 63 is
+/// cut at the chunk end), `keys` key heads and 3 value heads per key head (8 = the
+/// tensor split's rank, 16 = one Spark). A = main's flash_gdn_conv_prepare_tokens_khs,
+/// flash_next_gdn_chunk_rows per chunk piece, flash_gdn_history and flash_gdn_gate;
+/// X = flash_next_gdn_chunk_rows per chunk piece with its fused prepare and gate, then
+/// flash_gdn_history. Non-order: the core and gated rows, the
+/// state and the conv history byte-equal.
+fn fstep(g: &mut Gpu, modules: [H; 2], rows: usize, open: usize, keys: usize) -> Result<Fixture> {
+    use super::params::{GdnGate, GdnHistory, GdnPrepare};
+    let (heads, copies) = (3 * keys, 8);
+    let (width, hd, floats_state) = ((2 * keys + 3 * keys) * D, 3 * keys * D, gdn::chunk_state_floats(3 * keys, keys));
+    let mut r = Rng(0x5eed_2026 + (rows * 64 + open) as u64);
+    let bf = |v: f32| (v.to_bits() >> 16) as u16;
+    let halves = |v: &[u16]| v.iter().flat_map(|h| h.to_le_bytes()).collect::<Vec<u8>>();
+    let x: Vec<f32> = (0..rows * width).map(|_| r.range(-2., 2.)).collect();
+    let w: Vec<u16> = (0..width * 4).map(|_| bf(r.range(-0.6, 0.6))).collect();
+    let ab: Vec<f32> = (0..2 * rows * heads).map(|_| r.range(-3., 3.)).collect();
+    let small: Vec<u16> = (0..2 * heads).map(|_| bf(r.range(-1., 1.))).collect();
+    let hist: Vec<f32> = (0..width * 4).map(|_| r.range(-2., 2.)).collect();
+    let z: Vec<f32> = (0..rows * hd).map(|_| r.range(-4., 4.)).collect();
+    let norm: Vec<f32> = (0..D).map(|_| r.range(0.5, 1.5)).collect();
+    // A chunk-form state with an open chunk of `open` rows (unit key rows, v' in
+    // [-0.5, 0.5], descending gamma).
+    let mut host: Vec<f32> = (0..floats_state).map(|_| r.range(-0.1, 0.1)).collect();
+    let (tk, tw, tg) = (heads * D * D, heads * D * D + keys * C * D, heads * D * D + keys * C * D + heads * C * D);
+    for kh in 0..keys {
+        for j in 0..open {
+            let raw: Vec<f32> = (0..D).map(|_| r.range(-1., 1.)).collect();
+            let n = 1. / (raw.iter().map(|x| x * x).sum::<f32>() + 1e-6).sqrt();
+            for d in 0..D { host[tk + (kh * C + j) * D + d] = raw[d] * n; }
+        }
+    }
+    for h in 0..heads {
+        let mut acc = 0.0f32;
+        for j in 0..open {
+            for d in 0..D { host[tw + (h * C + j) * D + d] = r.range(-0.5, 0.5); }
+            acc -= r.range(0.001, 0.2);
+            host[tg + h * C + j] = acc;
+        }
+    }
+    let base = 10 * C + open;
+    let (xd, wd, ad, sd) = (floats(g, &x)?, g.upload(&halves(&w))?, floats(g, &ab)?, g.upload(&halves(&small))?);
+    let (zd, nd, hp, sp) = (floats(g, &z)?, floats(g, &norm)?, floats(g, &hist)?, floats(g, &host)?);
+    let bd = ad + (rows * heads * 4) as u64;
+    let mut pieces = vec![];
+    let mut done = 0;
+    while done < rows { let n = (rows - done).min(C - (base + done) % C); pieces.push((done, n)); done += n; }
+    let mut arms = [vec![], vec![]];
+    for arm in 0..2 {
+        for _ in 0..copies {
+            let (state, history) = (g.alloc(floats_state * 4)?, g.alloc(width * 16)?);
+            let (core, gated) = (g.alloc(rows * hd * 4)?, g.alloc(rows * hd * 4)?);
+            let mut launches = vec![];
+            if arm == 0 {
+                let (q, k, v) = (g.alloc(rows * hd * 4)?, g.alloc(rows * hd * 4)?, g.alloc(rows * hd * 4)?);
+                let (beta, gg) = (g.alloc(rows * heads * 4)?, g.alloc(rows * heads * 4)?);
+                let desc = g.upload(&[state.to_le_bytes(), history.to_le_bytes(), 0u64.to_le_bytes()].concat())?;
+                let pp = GdnPrepare { x: xd as _, w: wd as _, history: history as _, a: ad as _, b: bd as _, alog: sd as _,
+                    dt: (sd + (heads * 2) as u64) as _, q: q as _, k: k as _, v: v as _, beta: beta as _, g: gg as _,
+                    key_heads: keys as u32, value_heads: heads as u32, key_start: 0, value_start: 0, tokens: rows as u32, precision: 0, scale: 0 };
+                launches.push(Launch { f: function(g, modules[0], "flash_gdn_conv_prepare_tokens_khs", 0)?,
+                    grid: [(keys * rows * 3 * 32).div_ceil(128) as u32, 1, 1], block: 128, shared: 0, params: vec![blob(&pp)] });
+                for &(at, n) in &pieces {
+                    let (f4, h4) = ((at * hd * 4) as u64, (at * heads * 4) as u64);
+                    let c = gdn::GdnChunkNext { q: q + f4, k: k + f4, v: v + f4, beta: beta + h4, g: gg + h4, rows: desc, out: core + f4,
+                        a: 0, p: 0, gamma: 0, k0: 0, heads: heads as u32, keys: keys as u32, count: n as u32, base: (base + at) as u32,
+                        z: 0, norm: 0, gated: 0, epsilon: 1e-6, spare: 0, x: 0, w: 0, history: 0, channels: 0, x_start: 0,
+                        ga: 0, gb: 0, alog: 0, dt: 0, pk: 0, pk_tokens: 0, pk_row0: 0 };
+                    launches.push(Launch { f: function(g, modules[0], "flash_next_gdn_chunk_rows", 0)?, grid: [heads as u32, 1, 1], block: 128, shared: 0, params: vec![blob(&c)] });
+                }
+                let hp = GdnHistory { x: xd as _, history: history as _, rows: 0, channels: width as u32, tokens: rows as u32, precision: 0 };
+                launches.push(Launch { f: function(g, modules[0], "flash_gdn_history", 0)?, grid: [width.div_ceil(128) as u32, 1, 1], block: 128, shared: 0, params: vec![blob(&hp)] });
+                let gp = GdnGate { x: core as _, z: zd as _, norm: nd as _, output: gated as _, heads: (heads * rows) as u32, tokens: 1,
+                    precision: 0, packed: 0, epsilon: 1e-6, sessions: 0 };
+                launches.push(Launch { f: function(g, modules[0], "flash_gdn_gate", 0)?, grid: [(heads * rows * 32).div_ceil(128) as u32, 1, 1], block: 128, shared: 0, params: vec![blob(&gp)] });
+            } else {
+                // X: flash_next_gdn_chunk_rows per chunk piece with the fused prepare (ga) and
+                // gate (gated), then flash_gdn_history once, as gdn.rs launches small windows.
+                let (q, k, v) = (g.alloc(rows * hd * 4)?, g.alloc(rows * hd * 4)?, g.alloc(rows * hd * 4)?);
+                let (beta, gg) = (g.alloc(rows * heads * 4)?, g.alloc(rows * heads * 4)?);
+                let desc = g.upload(&[state.to_le_bytes(), history.to_le_bytes(), 0u64.to_le_bytes()].concat())?;
+                for &(at, n) in &pieces {
+                    let (f4, h4) = ((at * hd * 4) as u64, (at * heads * 4) as u64);
+                    let c = gdn::GdnChunkNext { q: q + f4, k: k + f4, v: v + f4, beta: beta + h4, g: gg + h4, rows: desc, out: core + f4,
+                        a: 0, p: 0, gamma: 0, k0: 0, heads: heads as u32, keys: keys as u32, count: n as u32, base: (base + at) as u32,
+                        z: zd + f4, norm: nd, gated: gated + f4, epsilon: 1e-6, spare: 0, x: xd, w: wd, history, channels: width as u32, x_start: at as u32,
+                        ga: ad + h4, gb: bd + h4, alog: sd, dt: sd + (heads * 2) as u64, pk: 0, pk_tokens: 0, pk_row0: 0 };
+                    launches.push(Launch { f: function(g, modules[1], "flash_next_gdn_chunk_rows", 0)?, grid: [heads as u32, 1, 1], block: 128, shared: 0, params: vec![blob(&c)] });
+                }
+                let hp = GdnHistory { x: xd as _, history: history as _, rows: 0, channels: width as u32, tokens: rows as u32, precision: 0 };
+                launches.push(Launch { f: function(g, modules[1], "flash_gdn_history", 0)?, grid: [width.div_ceil(128) as u32, 1, 1], block: 128, shared: 0, params: vec![blob(&hp)] });
+            }
+            let resets = vec![(state, sp, floats_state * 4), (history, hp, width * 16)];
+            let hashed = vec![(core, rows * hd * 4), (gated, rows * hd * 4), (state, floats_state * 4), (history, width * 16)];
+            arms[arm].push(Arm { resets, launches, hashed, layout: 0 });
+        }
+    }
+    // As stored: x, a/b, z rows; the state's S read (plus the closing step's write) and its
+    // open tail rows; history read + write; core and gated rows written.
+    let stored = rows * (width * 4 + 2 * heads * 4 + 3 * hd * 4) + heads * D * D * 4 + (keys + heads) * open * D * 4 + width * 32 + D * 4;
+    Ok(Fixture { arms, stored, flops: rows * heads * D * D * 4, copies })
+}
+
+/// One cohort verify GDN layer step (kind 22) as gdn_cohort.rs launches it: `chats` chats of
+/// `rows` rows each at chunk offset `open` (a window past row 63 is cut at the chunk end),
+/// 16 key heads and 48 value heads (one Spark), each launch with the chat in grid-Y and its
+/// parameters in a table. A = main's flash_gdn_conv_prepare_tokens_kh_cohort,
+/// flash_next_gdn_chunk_rows_cohort per chunk piece, flash_gdn_history_cohort; X =
+/// flash_next_gdn_chunk_rows_cohort per chunk piece with its fused prepare (ga, gate deferred),
+/// flash_gdn_history_cohort. Both then gate every row in one flash_gdn_gate (Gdn::gate_rows).
+/// Non-order: the core and gated rows, every chat's state and conv history byte-equal.
+fn cfstep(g: &mut Gpu, modules: [H; 2], rows: usize, open: usize, chats: usize) -> Result<Fixture> {
+    use super::params::{GdnGate, GdnHistory, GdnPrepare};
+    let (keys, copies) = (16usize, 4);
+    let heads = 3 * keys;
+    let (width, hd, floats_state) = ((2 * keys + heads) * D, heads * D, gdn::chunk_state_floats(heads, keys));
+    let all = chats * rows;
+    let mut r = Rng(0x5eed_2027 + (all * 64 + open) as u64);
+    let bf = |v: f32| (v.to_bits() >> 16) as u16;
+    let halves = |v: &[u16]| v.iter().flat_map(|h| h.to_le_bytes()).collect::<Vec<u8>>();
+    let table = |g: &mut Gpu, records: Vec<Vec<u64>>| g.upload(&records.concat().iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>());
+    let x: Vec<f32> = (0..all * width).map(|_| r.range(-2., 2.)).collect();
+    let w: Vec<u16> = (0..width * 4).map(|_| bf(r.range(-0.6, 0.6))).collect();
+    let ab: Vec<f32> = (0..2 * all * heads).map(|_| r.range(-3., 3.)).collect();
+    let small: Vec<u16> = (0..2 * heads).map(|_| bf(r.range(-1., 1.))).collect();
+    let z: Vec<f32> = (0..all * hd).map(|_| r.range(-4., 4.)).collect();
+    let norm: Vec<f32> = (0..D).map(|_| r.range(0.5, 1.5)).collect();
+    // Per chat: a conv history and a chunk-form state with an open chunk of `open` rows (unit
+    // key rows, v' in [-0.5, 0.5], descending gamma), as fstep.
+    let (tk, tw, tg) = (heads * D * D, heads * D * D + keys * C * D, heads * D * D + keys * C * D + heads * C * D);
+    let mut pristine = vec![];
+    for _ in 0..chats {
+        let hist: Vec<f32> = (0..width * 4).map(|_| r.range(-2., 2.)).collect();
+        let mut host: Vec<f32> = (0..floats_state).map(|_| r.range(-0.1, 0.1)).collect();
+        for kh in 0..keys {
+            for j in 0..open {
+                let raw: Vec<f32> = (0..D).map(|_| r.range(-1., 1.)).collect();
+                let n = 1. / (raw.iter().map(|x| x * x).sum::<f32>() + 1e-6).sqrt();
+                for d in 0..D { host[tk + (kh * C + j) * D + d] = raw[d] * n; }
+            }
+        }
+        for h in 0..heads {
+            let mut acc = 0.0f32;
+            for j in 0..open {
+                for d in 0..D { host[tw + (h * C + j) * D + d] = r.range(-0.5, 0.5); }
+                acc -= r.range(0.001, 0.2);
+                host[tg + h * C + j] = acc;
+            }
+        }
+        pristine.push((floats(g, &host)?, floats(g, &hist)?));
+    }
+    let base = 10 * C + open;
+    let (xd, wd, ad, sd) = (floats(g, &x)?, g.upload(&halves(&w))?, floats(g, &ab)?, g.upload(&halves(&small))?);
+    let (zd, nd) = (floats(g, &z)?, floats(g, &norm)?);
+    let bd = ad + (all * heads * 4) as u64;
+    let mut pieces = vec![];
+    let mut done = 0;
+    while done < rows { let n = (rows - done).min(C - (base + done) % C); pieces.push((done, n)); done += n; }
+    let mut arms = [vec![], vec![]];
+    for arm in 0..2 {
+        let m = modules[arm];
+        for _ in 0..copies {
+            let chat: Vec<(u64, u64)> = (0..chats).map(|_| Ok((g.alloc(floats_state * 4)?, g.alloc(width * 16)?))).collect::<Result<_>>()?;
+            let (core, gated) = (g.alloc(all * hd * 4)?, g.alloc(all * hd * 4)?);
+            let (q, k, v) = (g.alloc(all * hd * 4)?, g.alloc(all * hd * 4)?, g.alloc(all * hd * 4)?);
+            let (beta, gg) = (g.alloc(all * heads * 4)?, g.alloc(all * heads * 4)?);
+            let mut descs = vec![];
+            for &(state, history) in &chat { descs.push(g.upload(&[state.to_le_bytes(), history.to_le_bytes(), 0u64.to_le_bytes()].concat())?); }
+            let mut launches = vec![];
+            if arm == 0 {
+                let records = (0..chats).map(|c| {
+                    let (f4, h4, x4) = ((c * rows * hd * 4) as u64, (c * rows * heads * 4) as u64, (c * rows * width * 4) as u64);
+                    blob(&GdnPrepare { x: (xd + x4) as _, w: wd as _, history: chat[c].1 as _, a: (ad + h4) as _, b: (bd + h4) as _, alog: sd as _,
+                        dt: (sd + (heads * 2) as u64) as _, q: (q + f4) as _, k: (k + f4) as _, v: (v + f4) as _, beta: (beta + h4) as _, g: (gg + h4) as _,
+                        key_heads: keys as u32, value_heads: heads as u32, key_start: 0, value_start: 0, tokens: rows as u32, precision: 0, scale: 0 })
+                }).collect();
+                let t = table(g, records)?;
+                launches.push(Launch { f: function(g, m, "flash_gdn_conv_prepare_tokens_kh_cohort", 0)?,
+                    grid: [(keys * rows * 32).div_ceil(128) as u32, chats as u32, 1], block: 128, shared: 0, params: vec![vec![t]] });
+            }
+            for &(at, n) in &pieces {
+                let records = (0..chats).map(|c| {
+                    let (f4, h4) = (((c * rows + at) * hd * 4) as u64, ((c * rows + at) * heads * 4) as u64);
+                    let fused = arm == 1;
+                    blob(&gdn::GdnChunkNext { q: q + f4, k: k + f4, v: v + f4, beta: beta + h4, g: gg + h4, rows: descs[c], out: core + f4,
+                        a: 0, p: 0, gamma: 0, k0: 0, heads: heads as u32, keys: keys as u32, count: n as u32, base: (base + at) as u32,
+                        z: 0, norm: 0, gated: 0, epsilon: 1e-6, spare: 0,
+                        x: if fused { xd + (c * rows * width * 4) as u64 } else { 0 }, w: if fused { wd } else { 0 }, history: if fused { chat[c].1 } else { 0 },
+                        channels: if fused { width as u32 } else { 0 }, x_start: if fused { at as u32 } else { 0 },
+                        ga: if fused { ad + h4 } else { 0 }, gb: if fused { bd + h4 } else { 0 }, alog: if fused { sd } else { 0 },
+                        dt: if fused { sd + (heads * 2) as u64 } else { 0 }, pk: 0, pk_tokens: 0, pk_row0: 0 })
+                }).collect();
+                let t = table(g, records)?;
+                launches.push(Launch { f: function(g, m, "flash_next_gdn_chunk_rows_cohort", 0)?, grid: [heads as u32, chats as u32, 1], block: 128, shared: 0, params: vec![vec![t]] });
+            }
+            let records = (0..chats).map(|c| blob(&GdnHistory { x: (xd + (c * rows * width * 4) as u64) as _, history: chat[c].1 as _, rows: 0,
+                channels: width as u32, tokens: rows as u32, precision: 0 })).collect();
+            let t = table(g, records)?;
+            launches.push(Launch { f: function(g, m, "flash_gdn_history_cohort", 0)?, grid: [width.div_ceil(128) as u32, chats as u32, 1], block: 128, shared: 0, params: vec![vec![t]] });
+            let gp = GdnGate { x: core as _, z: zd as _, norm: nd as _, output: gated as _, heads: (heads * all) as u32, tokens: 1,
+                precision: 0, packed: 0, epsilon: 1e-6, sessions: 0 };
+            launches.push(Launch { f: function(g, m, "flash_gdn_gate", 0)?, grid: [(heads * all * 32).div_ceil(128) as u32, 1, 1], block: 128, shared: 0, params: vec![blob(&gp)] });
+            let mut resets = vec![];
+            let mut hashed = vec![(core, all * hd * 4), (gated, all * hd * 4)];
+            for (&(state, history), &(sp, hp)) in chat.iter().zip(&pristine) {
+                resets.extend([(state, sp, floats_state * 4), (history, hp, width * 16)]);
+                hashed.extend([(state, floats_state * 4), (history, width * 16)]);
+            }
+            arms[arm].push(Arm { resets, launches, hashed, layout: 0 });
+        }
+    }
+    // As fstep, per chat.
+    let stored = chats * (rows * (width * 4 + 2 * heads * 4 + 3 * hd * 4) + heads * D * D * 4 + (keys + heads) * open * D * 4 + width * 32) + D * 4;
+    Ok(Fixture { arms, stored, flops: all * heads * D * D * 4, copies })
+}
+
 /// EXACTNESS LAW boundary check (kind 11): the same rows cut into calls at
 /// 63/64/65, 127/128/129, 191/192/193, uneven pieces and one-row (decode) calls
 /// must give the same output and state bytes as one call. A = main over all rows.
@@ -815,6 +1032,8 @@ fn fixture(g: &mut Gpu, modules: [H; 2], c: &Case) -> Result<Fixture> {
     if c.kind == 15 { return cprep(g, modules, c.m); }
     if c.kind == 19 { return cslotg(g, modules, c.k); }
     if c.kind == 20 { return cstep(g, modules, c.k); }
+    if c.kind == 21 { return fstep(g, modules, c.m, c.n, c.k); }
+    if c.kind == 22 { return cfstep(g, modules, c.m, c.n, c.k); }
     let (tokens, pieces, rows) = (c.m, c.n, c.k);
     let x = inputs(tokens * pieces, rows);
     let width = HEADS * D;
@@ -964,7 +1183,10 @@ pub(super) fn run_case(g: &mut Gpu, modules: [H; 2], timer: H, c: &Case, o: &Opt
     }
     let equal = digest[0] == digest[1];
     if !order && !equal {
-        return Err(format!("{} bytes A==X: no A={} X={}", c.name, digest[0], digest[1]));
+        // The first differing FP32 word of the hashed regions, in hashed order.
+        let word = first[0].chunks_exact(4).zip(first[1].chunks_exact(4)).position(|(a, x)| a != x);
+        return Err(format!("{} bytes A==X: no A={} X={} first differing word {word:?} of regions {:?}", c.name, digest[0], digest[1],
+            v.arms[0][0].hashed.iter().map(|h| h.1 / 4).collect::<Vec<_>>()));
     }
     let tokens = c.m * c.n;
     let out_len = tokens * c.k.max(1) * HEADS * D;

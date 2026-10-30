@@ -12,6 +12,8 @@ mod cuda;
 mod sha256;
 #[path = "gdn_cpu_proof.rs"]
 mod gdn_cpu_proof;
+#[path = "gdn_rows_bounds.rs"]
+mod gdn_rows_bounds;
 #[allow(dead_code)]
 #[path = "kernel_floor.rs"]
 mod floor;
@@ -384,6 +386,22 @@ fn cases() -> Vec<Case> {
         out.push(Case { name: format!("gdn_cslotg-c{chats}"), kernel: "flash_next_gdn_chunk_slot", m: 1, n: 1, k: chats, kind: 52, ..Default::default() });
     }
     out.push(Case { name: "gdn_cslot-c8-o63".into(), kernel: "flash_next_gdn_chunk_slot", m: 1, n: 65, k: 8, kind: 45, ..Default::default() });
+    // One GDN layer step (kind 54): main's prepare + rows + history + gate (A) vs the
+    // rows kernel with its fused prepare and gate + history (X); m = rows, n = open chunk
+    // rows, k = key heads (8: the tensor split's rank, 16: one Spark); o0 starts a chunk,
+    // o63 and r8-o56 close it, r4-o62 / r8-o60 cross it.
+    for (rows, open, keys) in [(1usize, 4usize, 8usize), (1, 31, 8), (1, 63, 8), (4, 30, 8), (4, 62, 8), (8, 60, 8), (1, 31, 16), (4, 62, 16),
+        (1, 0, 8), (2, 31, 8), (3, 31, 8), (8, 56, 8),
+        // One Spark at the served verify window sizes (1 to 8 rows).
+        (1, 4, 16), (2, 31, 16), (3, 31, 16), (3, 61, 16), (4, 31, 16), (6, 31, 16), (8, 31, 16), (8, 60, 16)] {
+        out.push(Case { name: format!("gdn_fstep-k{keys}-r{rows}-o{open}"), kernel: "flash_next_gdn_chunk_rows", m: rows, n: open, k: keys, kind: 54, ..Default::default() });
+    }
+    // One cohort verify GDN layer step (kind 55): main's cohort prepare + rows + history (A) vs
+    // the cohort rows kernel with its fused prepare + history (X), then one gate over every
+    // row; m = rows per chat, n = open chunk rows, k = chats (one Spark, 16 key heads).
+    for (rows, open, chats) in [(2usize, 31usize, 4usize), (4, 31, 4), (8, 31, 4), (4, 61, 4), (2, 31, 8), (4, 31, 8), (8, 31, 8), (4, 61, 8)] {
+        out.push(Case { name: format!("gdn_cfstep-c{chats}-r{rows}-o{open}"), kernel: "flash_next_gdn_chunk_rows_cohort", m: rows, n: open, k: chats, kind: 55, ..Default::default() });
+    }
     // Small execute-path calls: an MTP verify window (4 rows) and a one-row
     // replay, chunk prep + scan vs main's sequential scan over the same rows.
     for rows in [4usize, 1] {
@@ -830,6 +848,10 @@ fn run() -> Result<()> {
             let (_, failures) = gdn_cpu_proof::run();
             return if failures == 0 { Ok(()) } else { Err(format!("gdn cpu proof: {failures} mismatches")) };
         }
+        if flag == "--gdn-rows-bounds" {
+            let (_, failures) = gdn_rows_bounds::run();
+            return if failures == 0 { Ok(()) } else { Err(format!("gdn rows bounds: {failures} failures")) };
+        }
         if flag == "--self-test" {
             if sha256::digest(b"abc") != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" {
                 return Err("SHA self-test".into());
@@ -901,6 +923,8 @@ fn run() -> Result<()> {
                 + 39 // FP8 grouped decode and prompt gate fixtures.
                 + 1 // Plain C1 route and shared-input pack.
                 + 3 // pgr-hc M2048 / M64 / M4096 (kind 74).
+                + 20 // gdn_fstep (kind 54).
+                + 8 // gdn_cfstep (kind 55).
                 ;
             assert_eq!(cases().len(), expect);
             // --case selects by name: every name names one case.

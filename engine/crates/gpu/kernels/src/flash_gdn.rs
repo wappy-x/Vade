@@ -78,7 +78,7 @@ pub(super) unsafe fn convolution(x: *const f32, w: *const u16, history: *const f
 }
 
 #[inline(always)]
-unsafe fn prepare_values(query: [f32; 4], key: [f32; 4], value: [f32; 4],
+pub(crate) unsafe fn prepare_values(query: [f32; 4], key: [f32; 4], value: [f32; 4],
     a: *const f32, b: *const f32, alog: *const u16, dt: *const u16,
     q: *mut f32, k: *mut f32, v: *mut f32, beta: *mut f32, g: *mut f32,
     row: usize, qk_row: Option<usize>, lane: usize, heads: usize, tokens: usize, precision: u32, scale: bool) {

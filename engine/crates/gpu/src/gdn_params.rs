@@ -61,23 +61,27 @@ pub struct GdnChunkNext {
     pub rows: u64, pub out: u64,
     pub a: u64, pub p: u64, pub gamma: u64, pub k0: u64,
     pub heads: u32, pub keys: u32, pub count: u32, pub base: u32,
-    /// Fused output gate (flash_next_gdn_chunk_scan only, when gated != 0):
+    /// Fused output gate (flash_next_gdn_chunk_scan when gated != 0;
+    /// flash_next_gdn_chunk_rows when gated != 0 and ga != 0):
     /// gated = rms(o) * norm * sigmoid(z) word for word as flash_gdn_gate
     /// computes it from o, written instead of o. z/gated are token-major
     /// `[rows][heads][128]` like out; norm holds 128 FP32 weights.
     pub z: u64, pub norm: u64, pub gated: u64, pub epsilon: f32, pub spare: u32,
-    /// Fused value convolution (flash_next_gdn_chunk_scan only, when x != 0):
+    /// Fused value convolution (flash_next_gdn_chunk_scan, when x != 0):
     /// v rows are the causal 4-tap conv + SiLU of the call's projection rows
     /// x `[rows][channels]` from the conv call's first row (weights w: BF16
     /// `[channels][4]`, history: FP32 `[channels][4]` for taps before that row);
     /// this call's rows start at x row x_start. Word for word as
     /// flash_gdn_conv_prepare_tokens computes them at precision 0; v unused.
     pub x: u64, pub w: u64, pub history: u64, pub channels: u32, pub x_start: u32,
-    /// Fused q/k/gate prepare (flash_next_gdn_chunk_prep only, when ga != 0, with
+    /// Fused q/k/gate prepare (flash_next_gdn_chunk_prep, when ga != 0, with
     /// x/w/history/channels/x_start set): prep convolves, L2-normalizes and
     /// writes this call's q/k rows (key group head h0) and beta/g from the gate
     /// projections ga/gb `[rows][heads]` and A_log/dt_bias (BF16 `[heads]`), word for
     /// word as flash_gdn_conv_prepare_tokens_kh; the prepare launch is skipped.
+    /// flash_next_gdn_chunk_rows with ga != 0 writes the same words for its own
+    /// value head (q/k into that head's slot, not the group's first) from x rows
+    /// x_start.., then reads them; flash_gdn_history still runs after it.
     pub ga: u64, pub gb: u64, pub alog: u64, pub dt: u64,
     /// Packed out-projection input (flash_next_gdn_chunk_scan_cv with the fused
     /// gate, when pk != 0): instead of the FP32 gated row, write its split2_pair

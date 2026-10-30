@@ -1,7 +1,7 @@
 //! Cohort MTP verify (VADE_GDN_COHORT): one descriptor table and one output gate per
 //! multi-chat verify pass, and (VADE_GDN_COHORT_COPIES) its entry histories and replay
-//! tapes in two launches per GDN layer, and (VADE_GDN_COHORT_KERNELS) its prepare, rows and
-//! history kernels in one launch each. Split from gdn.rs (file-size ratchet).
+//! tapes in two launches per GDN layer, and (VADE_GDN_COHORT_KERNELS) its rows and history
+//! kernels in one launch each. Split from gdn.rs (file-size ratchet).
 use super::{Backend, DeviceVector, Gdn, GdnScratch, GdnState, Result, DIM};
 
 /// VADE_GDN_COHORT (default on; 0 = one descriptor upload and one output gate per chat):
@@ -25,13 +25,13 @@ pub(crate) fn cohort_copies() -> bool {
 }
 
 /// VADE_GDN_COHORT_KERNELS (default on; 0 = per-chat launches): a cohort verify layer
-/// (cohort_verify, every window on the rows kernel) collects each chat's conv-prepare,
-/// rows-kernel and history parameters and runs them as three (four when a window crosses a
-/// chunk end) launches with the chat in grid-Y (flash_gdn_conv_prepare_tokens_kh_cohort,
-/// flash_next_gdn_chunk_rows_cohort, flash_gdn_history_cohort), each CTA the per-chat
-/// kernel's code on its chat's parameters. Per chat the order is unchanged (prepare, rows,
-/// rest rows, history) and no chat touches another's words, so the bytes are the per-chat
-/// launches'. Needs a PTX with those entries.
+/// (cohort_verify, every window on the rows kernel, which convolves and prepares its rows
+/// itself) collects each chat's rows-kernel and history parameters and runs them as two
+/// (three when a window crosses a chunk end) launches with the chat in grid-Y
+/// (flash_next_gdn_chunk_rows_cohort, flash_gdn_history_cohort), each CTA the per-chat
+/// kernel's code on its chat's parameters. Per chat the order is unchanged (rows, rest rows,
+/// history) and no chat touches another's words, so the bytes are the per-chat launches'.
+/// Needs a PTX with those entries.
 pub(crate) fn cohort_kernels() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| !std::env::var("VADE_GDN_COHORT_KERNELS").is_ok_and(|v| v == "0"))
@@ -39,42 +39,21 @@ pub(crate) fn cohort_kernels() -> bool {
 /// Per-chat launch parameters a cohort verify layer collects (cohort_kernels), in chat order.
 #[derive(Default)]
 pub(crate) struct CohortLaunches {
-    pub(super) prepare: Vec<spark_gpu_probe::kernel_params::GdnPrepare>,
     /// Rows-kernel calls: [0] each chat's first (up to the chunk end), [1] the rest past it.
     pub(super) rows: [Vec<spark_gpu_probe::gdn_params::GdnChunkNext>; 2],
     pub(super) history: Vec<spark_gpu_probe::kernel_params::GdnHistory>,
 }
-/// Table bytes of one chat's cohort launches: prepare, two rows calls, history.
-pub(crate) const COHORT_LAUNCH_BYTES: usize = std::mem::size_of::<spark_gpu_probe::kernel_params::GdnPrepare>()
-    + 2 * std::mem::size_of::<spark_gpu_probe::gdn_params::GdnChunkNext>()
+/// Table bytes of one chat's cohort launches: two rows calls, history.
+pub(crate) const COHORT_LAUNCH_BYTES: usize = 2 * std::mem::size_of::<spark_gpu_probe::gdn_params::GdnChunkNext>()
     + std::mem::size_of::<spark_gpu_probe::kernel_params::GdnHistory>();
-const _: () = assert!(COHORT_LAUNCH_BYTES % 8 == 0 && std::mem::size_of::<spark_gpu_probe::kernel_params::GdnPrepare>() % 8 == 0
-    && std::mem::size_of::<spark_gpu_probe::gdn_params::GdnChunkNext>() % 8 == 0);
-use spark_gpu_probe::{gdn_params::GdnChunkNext, kernel_params::{GdnHistory, GdnPrepare}};
+const _: () = assert!(COHORT_LAUNCH_BYTES % 8 == 0 && std::mem::size_of::<spark_gpu_probe::gdn_params::GdnChunkNext>() % 8 == 0);
+use spark_gpu_probe::{gdn_params::GdnChunkNext, kernel_params::GdnHistory};
 /// Writes `bytes` at byte `at` of a launch record.
 fn put(record: &mut [u8], at: usize, bytes: &[u8]) { record[at..at + bytes.len()].copy_from_slice(bytes); }
-/// One chat's GdnPrepare as table bytes: each field's little-endian bytes at its repr(C)
-/// offset and the trailing padding (fields end at byte 124 of 128) zero. Viewing the struct
+/// One chat's GdnHistory as table bytes: each field's little-endian bytes at its repr(C)
+/// offset and the trailing padding (fields end at byte 36 of 40) zero. Viewing the struct
 /// itself as bytes would read its padding, which nothing initializes. The kernel reads the
 /// table entry as the same repr(C) struct and uses named fields only.
-fn prepare_record(p: &GdnPrepare, out: &mut Vec<u8>) {
-    use std::mem::offset_of as at;
-    let mut r = [0u8; std::mem::size_of::<GdnPrepare>()];
-    for (o, a) in [(at!(GdnPrepare, x), p.x as usize), (at!(GdnPrepare, w), p.w as usize), (at!(GdnPrepare, history), p.history as usize),
-        (at!(GdnPrepare, a), p.a as usize), (at!(GdnPrepare, b), p.b as usize), (at!(GdnPrepare, alog), p.alog as usize),
-        (at!(GdnPrepare, dt), p.dt as usize), (at!(GdnPrepare, q), p.q as usize), (at!(GdnPrepare, k), p.k as usize),
-        (at!(GdnPrepare, v), p.v as usize), (at!(GdnPrepare, beta), p.beta as usize), (at!(GdnPrepare, g), p.g as usize)] {
-        put(&mut r, o, &(a as u64).to_le_bytes());
-    }
-    for (o, w) in [(at!(GdnPrepare, key_heads), p.key_heads), (at!(GdnPrepare, value_heads), p.value_heads),
-        (at!(GdnPrepare, key_start), p.key_start), (at!(GdnPrepare, value_start), p.value_start), (at!(GdnPrepare, tokens), p.tokens),
-        (at!(GdnPrepare, precision), p.precision), (at!(GdnPrepare, scale), p.scale)] {
-        put(&mut r, o, &w.to_le_bytes());
-    }
-    out.extend_from_slice(&r);
-}
-/// One chat's GdnHistory as table bytes (fields end at byte 36 of 40, padding zero), as
-/// prepare_record.
 fn history_record(h: &GdnHistory, out: &mut Vec<u8>) {
     use std::mem::offset_of as at;
     let mut r = [0u8; std::mem::size_of::<GdnHistory>()];
@@ -100,15 +79,13 @@ fn chunk_bytes(v: &[GdnChunkNext]) -> &[u8] {
 }
 /// Run a cohort verify layer's collected launches (cohort_kernels): upload the parameter
 /// tables into `table` and launch every non-empty group with the chat in grid-Y, in the
-/// per-chat order (prepare, rows, rest rows, history).
+/// per-chat order (rows, rest rows, history).
 pub(crate) fn launch_cohort(b: &Backend<'_>, s: &GdnScratch<'_>, table: &mut DeviceVector<'_>) -> Result<()> {
     let Some(c) = s.cohort.borrow_mut().take() else { return Ok(()); };
-    let total = c.prepare.len() * std::mem::size_of::<GdnPrepare>() + (c.rows[0].len() + c.rows[1].len()) * std::mem::size_of::<GdnChunkNext>()
-        + c.history.len() * std::mem::size_of::<GdnHistory>();
+    let total = (c.rows[0].len() + c.rows[1].len()) * std::mem::size_of::<GdnChunkNext>() + c.history.len() * std::mem::size_of::<GdnHistory>();
     if total == 0 { return Ok(()); }
     if total > table.len() * 4 { return Err("cohort GDN launches exceed their table".into()); }
     let mut bytes = Vec::with_capacity(total);
-    c.prepare.iter().for_each(|p| prepare_record(p, &mut bytes));
     c.rows.iter().for_each(|r| bytes.extend_from_slice(chunk_bytes(r)));
     c.history.iter().for_each(|h| history_record(h, &mut bytes));
     b.write_vector_bytes(&mut table.slice(0..total.div_ceil(4))?, &bytes)?;
@@ -120,8 +97,6 @@ pub(crate) fn launch_cohort(b: &Backend<'_>, s: &GdnScratch<'_>, table: &mut Dev
         at += (chats * size) as u64;
         Ok(())
     };
-    let prepare_blocks = c.prepare.iter().map(|p| (p.key_heads * p.tokens * 32).div_ceil(128)).max().unwrap_or(0);
-    launch("flash_gdn_conv_prepare_tokens_kh_cohort", prepare_blocks, c.prepare.len(), std::mem::size_of::<spark_gpu_probe::kernel_params::GdnPrepare>())?;
     for rows in &c.rows {
         let heads = rows.iter().map(|r| r.heads).max().unwrap_or(0);
         launch("flash_next_gdn_chunk_rows_cohort", heads, rows.len(), std::mem::size_of::<spark_gpu_probe::gdn_params::GdnChunkNext>())?;
@@ -159,7 +134,7 @@ pub(crate) fn hybrid_copy_rows(b: &Backend<'_>, table: &mut DeviceVector<'_>,
 /// Whether the process's PTX exports the cohort GDN entries (gdn::cohort_kernels).
 pub(crate) fn cohort_kernel_entries(b: &Backend<'_>) -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| ["flash_gdn_conv_prepare_tokens_kh_cohort", "flash_next_gdn_chunk_rows_cohort", "flash_gdn_history_cohort"]
+    *ON.get_or_init(|| ["flash_next_gdn_chunk_rows_cohort", "flash_gdn_history_cohort"]
         .iter().all(|name| b.has_flash(name)))
 }
 
@@ -204,21 +179,11 @@ impl<'a> Gdn<'a, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// The cohort tables carry each record's fields in declaration order at their repr(C)
+    /// The cohort tables carry the history record's fields in declaration order at their repr(C)
     /// offsets and zero padding.
     #[test]
-    fn cohort_records_are_the_field_layout_with_zero_padding() {
+    fn cohort_history_record_is_the_field_layout_with_zero_padding() {
         use std::ptr::{without_provenance as c, without_provenance_mut as m};
-        let p = GdnPrepare { x: c(0x1001), w: c(0x1002), history: c(0x1003), a: c(0x1004), b: c(0x1005), alog: c(0x1006), dt: c(0x1007),
-            q: m(0x1008), k: m(0x1009), v: m(0x100a), beta: m(0x100b), g: m(0x100c),
-            key_heads: 21, value_heads: 22, key_start: 23, value_start: 24, tokens: 25, precision: 26, scale: 27 };
-        let (mut got, mut want) = (Vec::new(), Vec::new());
-        prepare_record(&p, &mut got);
-        (0x1001u64..=0x100c).for_each(|a| want.extend_from_slice(&a.to_le_bytes()));
-        (21u32..=27).for_each(|w| want.extend_from_slice(&w.to_le_bytes()));
-        assert_eq!((want.len(), std::mem::size_of::<GdnPrepare>()), (124, 128));
-        want.resize(128, 0);
-        assert_eq!(got, want);
         let h = GdnHistory { x: c(0x2001), history: m(0x2002), rows: 0x2003, channels: 31, tokens: 32, precision: 33 };
         let (mut got, mut want) = (Vec::new(), Vec::new());
         history_record(&h, &mut got);

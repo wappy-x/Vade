@@ -977,17 +977,16 @@ impl<'a, 'w> Gdn<'a, 'w> {
             sessions: 0,
         };
         unsafe {
-            // Chunk form reads q/k only on each key group's first value head;
-            // fuse_v calls convolve q/k/v and compute the gates in prep + scan.
-            // A cohort verify layer (cohort_kernels) collects rows-kernel windows' launches.
-            let collect = s.cohort.borrow().is_some();
+            // Chunk form reads q/k on each key group's first value head; fuse_v calls convolve q/k/v and compute the gates in prep + scan;
+            // fuse_rows windows do that in each head's rows CTA (own q/k slot, same words), and the output gate unless a cohort verify
+            // pass defers it. A cohort verify layer (cohort_kernels) collects rows-kernel windows' launches (no prepare launch).
+            let (collect, fuse_rows) = (s.cohort.borrow().is_some(), chunked && !fuse_v && tokens <= spark_gpu_probe::gdn_params::CHUNK_ROWS_LIMIT);
+            let fuse_gate = fuse_rows && emit && !s.defer_gate.get();
             if collect && (!chunked || fuse_v || tokens > spark_gpu_probe::gdn_params::CHUNK_ROWS_LIMIT
                 || !(emit && s.defer_gate.get())) {
                 return Err("cohort GDN launches need deferred-gate rows-kernel windows".into());
             }
-            if collect {
-                s.collect(|batch| batch.prepare.push(p))?;
-            } else if !fuse_v {
+            if !fuse_v && !fuse_rows {
                 // VADE_GDN_PREP_SPLIT (default on; =0 off): chunk-form windows of <= 16 rows
                 // (verify) run one warp per value head (_khs), the same words.
                 if chunked && tokens <= 16 && prep_split(b) {
@@ -1006,7 +1005,7 @@ impl<'a, 'w> Gdn<'a, 'w> {
                 // carries across pieces and calls (any cut, same bytes).
                 let (hd4, h4) = ((self.heads * DIM * 4) as u64, (self.heads * 4) as u64);
                 let (z0, gated0) = (at(&s.z, hd), at(&s.gated, hd));
-                let x0 = if fuse_v { at(&s.qkv, width) } else { 0 };
+                let x0 = if fuse_v || fuse_rows { at(&s.qkv, width) } else { 0 };
                 let (a0, b0) = (at(&s.a, self.heads), at(&s.b, self.heads));
                 let mut done = 0;
                 while done < tokens {
@@ -1020,27 +1019,27 @@ impl<'a, 'w> Gdn<'a, 'w> {
                         gamma: s.cumulative.device_address(), k0: s.decayed_keys.device_address(),
                         heads: self.heads as u32, keys: self.keys as u32, count: n as u32,
                         base: u32::try_from(at).map_err(|_| "GDN position past u32")?,
-                        z: 0, norm: 0, gated: 0, epsilon: self.epsilon, spare: 0,
+                        z: if fuse_gate { z0 + done as u64 * hd4 } else { 0 }, norm: if fuse_gate { s.norm.device_address() } else { 0 },
+                        gated: if fuse_gate { gated0 + done as u64 * hd4 } else { 0 }, epsilon: self.epsilon, spare: 0,
                         x: x0, w: self.conv, history: self.history.device_address(),
                         channels: width as u32, x_start: done as u32,
-                        // Fused q/k/gates in prep (fuse_v calls: no prepare launch).
-                        ga: if fuse_v { a0 + done as u64 * h4 } else { 0 }, gb: if fuse_v { b0 + done as u64 * h4 } else { 0 }, alog: self.alog, dt: self.dt,
+                        // Fused q/k/gates (no prepare launch): in prep for fuse_v, in the rows kernel for fuse_rows.
+                        ga: if fuse_v || fuse_rows { a0 + done as u64 * h4 } else { 0 }, gb: if fuse_v || fuse_rows { b0 + done as u64 * h4 } else { 0 }, alog: self.alog, dt: self.dt,
                         pk: packed_out.map_or(0, |o| o.0), pk_tokens: packed_out.map_or(0, |o| o.1 as u32),
                         pk_row0: (start + done) as u32,
                     };
                     if n <= spark_gpu_probe::gdn_params::CHUNK_ROWS_LIMIT {
-                        // Verify windows and replays: the row function, same bytes. One
-                        // launch never runs rows past a chunk's end (row 63): the key
-                        // group's first head would overwrite tail key rows 0.. of the new
-                        // chunk while the group's other CTAs still read the old ones for
-                        // their close. The rest goes in a second launch (cut law).
+                        // Verify windows and replays: the row function, same bytes. One launch never runs rows past a chunk's
+                        // end (row 63): the key group's first head would overwrite tail key rows 0.. of the new chunk while
+                        // the group's other CTAs still read the old ones for their close. The rest goes in a second launch (cut law).
                         let first = n.min(CHUNK - at % CHUNK);
                         c.count = first as u32;
                         let rest = if first < n {
                             let (r, f) = (first as u64 * hd4, first as u64 * h4);
                             Some(spark_gpu_probe::gdn_params::GdnChunkNext { q: c.q + r, k: c.k + r, v: c.v + r,
                                 beta: c.beta + f, g: c.g + f, out: c.out + r, count: (n - first) as u32,
-                                base: c.base + first as u32, x_start: c.x_start + first as u32, pk_row0: c.pk_row0 + first as u32, ..c })
+                                base: c.base + first as u32, x_start: c.x_start + first as u32, pk_row0: c.pk_row0 + first as u32,
+                                ga: c.ga + f * (c.ga != 0) as u64, gb: c.gb + f * (c.gb != 0) as u64, z: c.z + r * (c.z != 0) as u64, gated: c.gated + r * (c.gated != 0) as u64, ..c })
                         } else { None };
                         if collect {
                             s.collect(|batch| { batch.rows[0].push(c); batch.rows[1].extend(rest); })?;
@@ -1050,7 +1049,7 @@ impl<'a, 'w> Gdn<'a, 'w> {
                             }
                         }
                         done += n;
-                        continue;
+                        if fuse_gate { gated_rows = done; } continue;
                     }
                     let chunks = (at % CHUNK + n).div_ceil(CHUNK);
                     if s.system.len() < chunks * self.heads * CHUNK * CHUNK || s.decayed_keys.len() < self.keys * CHUNK * DIM {
@@ -1093,7 +1092,7 @@ impl<'a, 'w> Gdn<'a, 'w> {
                     &mut [(&mut history as *mut GdnHistory).cast()])?;
             }
             if emit && gated_rows < tokens && s.defer_gate.get() {
-                // Cohort verify: Gdn::gate_rows gates the whole pass (no fused rows there).
+                // Cohort verify: Gdn::gate_rows gates the whole pass (no fused gate there).
                 if gated_rows != 0 { return Err("deferred GDN gate after fused rows".into()); }
             } else if emit && gated_rows < tokens {
                 let skip = gated_rows * hd;

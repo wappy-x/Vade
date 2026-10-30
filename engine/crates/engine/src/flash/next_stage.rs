@@ -239,7 +239,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             }
             // gdn::cohort_copies: every chat's entry history and tape, before any of this layer's scans.
             let copies = cohort && gdn::cohort_copies();
-            // gdn::cohort_kernels: every chat's prepare, rows and history in one launch each.
+            // gdn::cohort_kernels: every chat's rows and history in one launch each.
             let kernels = cohort && gdn::cohort_kernels() && gdn::cohort_kernel_entries(b);
             let scans = (|| -> Result<()> {
             if copies {
