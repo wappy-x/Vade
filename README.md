@@ -4,8 +4,15 @@ Vade runs a large language model on your own NVIDIA DGX Spark. It is an
 inference engine, an agent harness and a command-line tool, all written in
 Rust with only the standard library. It is for people who own one or more
 Sparks and want a local model whose answers repeat exactly: the same greedy
-request on the same setup gives the same tokens every time. You get a coding agent in your
-terminal, a plain chat and an OpenAI-compatible API.
+request on the same setup gives the same tokens every time. You get a coding
+agent in your terminal, a plain chat and an OpenAI-compatible API.
+
+<picture>
+  <source media="(prefers-reduced-motion: reduce) and (prefers-color-scheme: dark)" srcset="docs/assets/vade-banner-dark-static.svg">
+  <source media="(prefers-reduced-motion: reduce)" srcset="docs/assets/vade-banner-light-static.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/vade-banner-dark.svg">
+  <img src="docs/assets/vade-banner-light.svg" width="100%" alt="Vade: an inference engine and coding-assistant harness for DGX Spark.">
+</picture>
 
 On one Spark with the model already in `~/models`, this installs Vade and
 opens a chat ([Install](#pick-your-path) has the details):
@@ -54,13 +61,6 @@ are the two above.
 
 The engine is not a chat UI. A separate harness supplies the terminal chat
 and the coding agent. Both use the engine's API.
-
-<picture>
-  <source media="(prefers-reduced-motion: reduce) and (prefers-color-scheme: dark)" srcset="docs/assets/vade-banner-dark-static.svg">
-  <source media="(prefers-reduced-motion: reduce)" srcset="docs/assets/vade-banner-light-static.svg">
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/vade-banner-dark.svg">
-  <img src="docs/assets/vade-banner-light.svg" width="100%" alt="Vade: an inference engine and coding-assistant harness for DGX Spark.">
-</picture>
 
 <a id="pick-your-path"></a>
 ## Install
@@ -138,8 +138,16 @@ record is not in the repository yet.
 The model was already on the Spark, so the total does not include the
 102.26 GB model download. The clone came from a local copy of the repository,
 so it does not include a network fetch of the source. Download times depend
-on your network. We did not time `install.sh` itself, and we have not timed
-these steps on a later main.
+on your network. We have not timed these manual steps on a later main.
+
+**The one-command install** was timed on 2026-10-30 on one DGX Spark with the
+model already on disk. On a Spark with no Rust and no Vade files,
+`sh scripts/install.sh` finished in 227.7 s at main `0bad2e6`. With Rust
+already installed, `sh scripts/install.sh --launch` printed `Install complete`
+at 209.4 s at main `54bcf05`, and chat opened at 228.2 s. At both mains the
+install built the GPU kernels twice, about 51 to 56 s each time. Main
+`5cb08ee` and later build them once. We have not timed the install on those
+mains yet. The run logs are not in the repository yet.
 
 The [INSTALL quick start](INSTALL.md#quick-start-with-an-existing-model)
 covers an existing checkout, a checkpoint outside `~/models` and what to do
@@ -289,22 +297,22 @@ and how to change it. These are the defaults you meet first:
   path. Both Sparks work on every token. Four or more Sparks run the layer
   pipeline. Each Spark holds a run of the model's layers and passes its work
   to the next. So when one chat writes, each new token passes through the
-  Sparks in turn. In the 2026-10-28 cards at
-  main `76977df`, prose ran at 42.8 tok/s on four Sparks, 42.0 on one and
-  53.8 on two. Two or more Sparks read prompts faster than one. See
+  Sparks in turn. In the 2026-10-30 morning cards at main `380d8e5`, prose
+  ran at 43.1 tok/s on four Sparks, 42.6 on one and 54.9 on two (means of
+  two or three server starts). Two or more Sparks read prompts faster than
+  one. See
   [measured results](#measured-results).
 - **FP8: four Sparks write faster than two.** FP8 runs tensor parallel on two
   and on four Sparks, so every Spark works on every token. With drafting ON,
-  prose ran at 36.5 tok/s on two Sparks in the 2026-10-29 cards at main
-  `cbbb11b`, and at 46.7 on four in the 2026-10-28 cards at main `76977df`.
-  But two and four Sparks give different token IDs (see
+  prose ran at 36.6 tok/s on two Sparks and 47.3 on four in the 2026-10-30
+  morning cards at main `380d8e5`. But two and four Sparks give different
+  token IDs (see
   [exactness](#exactness)).
 - **Chains are measured up to four machines.** The
   [FP4-Local guide](cli/docs/fp4-local.md) describes chains of 2 to 24
   Sparks. We have run at most four: four DGX Sparks at `6cb46bf` on
-  2026-10-25 and at `76977df` on 2026-10-28, and four cloud GB10 VMs at
-  v0.1.0 on 2026-10-24. One and two Sparks were measured again at main
-  `cbbb11b` on 2026-10-29.
+  2026-10-25, at `76977df` on 2026-10-28 and at `380d8e5` on 2026-10-30,
+  and four cloud GB10 VMs at v0.1.0 on 2026-10-24.
 - **The prefix cache is on by default.** With the cache, a request that
   starts like an earlier one does not read that start again. The cache works
   on one Spark and on two Sparks (the tensor split); three or more Sparks run
@@ -343,12 +351,13 @@ Our latest checks compare drafting ON against OFF:
   with drafting ON and OFF, and on two Sparks with drafting ON, all gave the
   same token IDs, in 64 of 64 responses
   ([benchmarks](docs/benchmarks.md#current-2026-10-29-main-cbbb11b-home-dgx-sparks)).
-  Four Sparks last matched one and two Sparks in 66 of 66 responses, at main
-  `76977df` on 2026-10-28.
+  On main `380d8e5` (the 2026-10-30 morning cards, drafting ON), one, two
+  and four Sparks gave the same token IDs in 66 of 66 responses in every
+  start ([benchmarks](docs/benchmarks.md#token-ids)).
 - On main `cbbb11b`, FP8 on two Sparks matched drafting ON against OFF in 64
-  of 64 responses in each of two server starts. On main `76977df`, its
-  two-Spark and four-Spark cards matched each other in only 7 of 66
-  responses. This is an exception to the rule above. A host test found the
+  of 64 responses in each of two server starts. On main `380d8e5`, as on
+  `76977df`, its two-Spark and four-Spark cards matched each other in only 7
+  of 66 responses. This is an exception to the rule above. A host test found the
   cause, the order in which the ranks add their parts, and a fix is in
   screening. Until it is on main, compare FP8 results only at the same Spark
   count

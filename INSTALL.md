@@ -104,7 +104,9 @@ When those are cached, `CARGO_NET_OFFLINE=true sh scripts/install.sh` works
 offline from the checkout. It reuses the tools it finds and does not ask
 rustup to update them. In record `2026-10-28_1744_source-install_285fa8a`,
 the Rust download and install took 16.7 s. We have not timed the model
-download, and we did not time `install.sh` itself.
+download. On 2026-10-30, on one Spark with the model on disk, `install.sh`
+took 227.7 s with no Rust (main `0bad2e6`). With Rust already installed and
+`--launch`, it printed `Install complete` at 209.4 s (main `54bcf05`).
 
 **After launch.** Chat can edit files in the folder where it opens. So ask it
 only to say hello, then type `/exit`. The engine keeps running. Run later

@@ -8,7 +8,7 @@
 
 | File | Theme | Motion |
 | --- | --- | --- |
-| [vade-banner-dark.svg](vade-banner-dark.svg) | Dark | The faint field drifts, a soft light passes over the letters, a few letter cells flicker |
+| [vade-banner-dark.svg](vade-banner-dark.svg) | Dark | The letters decode in from noise. Then a light drifts over them and the cells under it scramble and settle. A faint current flows through the field. |
 | [vade-banner-light.svg](vade-banner-light.svg) | Light | The same, on a pale field |
 | [vade-banner-dark-static.svg](vade-banner-dark-static.svg) | Dark | None |
 | [vade-banner-light-static.svg](vade-banner-light-static.svg) | Light | None |
@@ -18,7 +18,7 @@
 ## What it shows
 
 - **VADE**, drawn large in monospace characters, the same letter shapes as on [vade.lol](https://vade.lol).
-- **One line beneath it:** an LLM inference engine and agent harness, written in Rust, built for the DGX Spark.
+- **One line beneath it:** an LLM inference engine and agent harness, written in Rust, built for the DGX Spark. A cursor blinks after it.
 - **The project sites** in the corner: vade.lol and getvade.com.
 
 <br>
@@ -35,10 +35,17 @@
 
 ## Why it looks this way
 
-- It copies the look of [vade.lol](https://vade.lol) as it renders: a deep indigo, nearly black field with a few tiny dots and dashes, violet letters lit from the upper left, a soft veil at the edges.
-- The colors are the site's indigo and violet. The light version keeps the violet letters on a near-white lavender field.
+- It copies the look of [vade.lol](https://vade.lol) as it renders: a deep indigo, nearly black field with tiny dots and dashes, violet letters lit from the upper left, a soft veil at the edges.
+- The colors are the site's "nebula" palette: indigo, violet and a pale blue for lit cells. The light version keeps the violet letters on a near-white lavender field.
 - The type follows the site: monospace for the letters and the corner, a plain sans-serif for the tagline. The files name system fonts only, so nothing is downloaded.
-- The motion is slow and low in contrast: a drift of a few pixels a second, one soft light every twelve seconds, no flashing.
+- The motion follows the site too:
+  - **Intro.** The letters start as noise characters and decode from left to right in under three seconds. The first frame already shows VADE, so a still snapshot never shows an empty banner.
+  - **Light.** A soft light drifts over the letters on a slow path. It crosses the word in 28.6 s and moves up and down in 16.5 s, so the path does not repeat soon. Cells under it change to denser characters and a paler blue (a deeper blue in the light version).
+  - **Churn.** The cells at the center of the light scramble through noise characters, and they settle when the light moves on.
+  - **Depth.** The shadow side of the letters turns away from the light as it moves.
+  - **Field.** Faint stripes of dots and dashes flow through the background in two directions, at about 10 and 9 pixels a second.
+  - **Accents.** A few letter cells flick to noise for 0.7 s, a soft sheen crosses the word every 24 s, and the cursor blinks every 1.1 s.
+- No large area changes brightness quickly. The fast parts, the churn and the sparks, cover only a few cells at a time. The light version uses the same motion.
 
 <br>
 
@@ -59,7 +66,7 @@
 - No `<script>`, no `<foreignObject>`, no links to other files or sites.
 - Keep a still version for every moving one.
 
-The engine and harness banners are the same design: [`engine/docs/assets/`](../../engine/docs/assets/README.md) and [`harness/docs/assets/`](../../harness/docs/assets/README.md). The engine's older logo drawings live in the engine folder too.
+The engine and harness banners still use the earlier, quieter version of this design: [`engine/docs/assets/`](../../engine/docs/assets/README.md) and [`harness/docs/assets/`](../../harness/docs/assets/README.md). The engine's older logo drawings live in the engine folder too.
 
 <br>
 
