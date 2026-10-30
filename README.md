@@ -247,11 +247,11 @@ and how to change it. These are the defaults you meet first:
 - **Context 32768 tokens, output up to 8192.** On the Spark, Vade lowers the
   context (to 16384, then 8192, then 4096) only if the engine refuses it for
   lack of memory. Vade tells you when it does this. `--context 262144` asks
-  for a larger context. On main `cbbb11b`, one Spark served
-  `--context 262144`: a 64K-token prompt gave its first token in 33.18 s and
-  a 128K-token prompt in 71.85 s, with the same token IDs on a repeat. Two
+  for a larger context. On main `380d8e5`, one Spark served
+  `--context 262144`: a 64K-token prompt gave its first token in 32.86 s and
+  a 128K-token prompt in 71.31 s, with the same token IDs on a repeat. Two
   Sparks served `--context 262144` in a test at main `285fa8a`
-  ([context windows](docs/benchmarks.md#context-on-one-spark-main-cbbb11b)).
+  ([context windows](docs/benchmarks.md#context-on-one-spark)).
 - **Chats at once** follow from the context and the memory the engine has.
 
 <a id="supported-systems"></a>
@@ -380,36 +380,37 @@ explains the full rule and what each check proves.
 
 ### Current main
 
-Most rows below measured main `cbbb11b` on our DGX Sparks on 2026-10-29.
-Four Sparks and the two-Spark FP4-Local drafting OFF row were not measured
-again. Those rows come from the 2026-10-28 cards at main `76977df`, as the
-Main column shows.
+The drafting ON rows below measured main `380d8e5` on our DGX Sparks on the
+morning of 2026-10-30, with RigMark cards. Each row is the mean of two or
+three server starts. The drafting OFF rows were not measured again. They
+come from the 2026-10-29 runs at main `cbbb11b` and the 2026-10-28 cards at
+main `76977df`, as the Main column shows.
 
 | Model | Sparks | Path | Drafting | Main | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) |
 | --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | fp4-local | 1 | local | OFF | `cbbb11b` | 27.891 | 27.707 | 27.915 | 27.079 | 85.042 | 138.608 | 3.764 |
-| fp4-local | 1 | local | ON | `cbbb11b` | 41.944 | 80.247 | 99.962 | 64.058 | 145.691 | 176.690 | 3.791 |
+| fp4-local | 1 | local | ON | `380d8e5` | 42.597 | 81.372 | 100.747 | 65.924 | 144.829 | 179.467 | 3.761 |
 | fp4-local | 2 | tensor split | OFF | `76977df` | 35.071 | 35.375 | 35.487 | 33.814 | 82.476 | 126.344 | 2.153 |
-| fp4-local | 2 | tensor split | ON | `cbbb11b` | 54.299 | 100.418 | 128.086 | 78.009 | 164.517 | 228.004 | 2.145 |
+| fp4-local | 2 | tensor split | ON | `380d8e5` | 54.879 | 102.190 | 129.957 | 79.572 | 166.133 | 231.882 | 2.153 |
 | fp4-local | 4 | pipeline | OFF | `76977df` | 28.157 | 28.177 | 28.503 | 27.642 | 84.974 | 139.335 | 2.177 |
-| fp4-local | 4 | pipeline | ON | `76977df` | 42.758 | 81.287 | 101.673 | 65.82 | 145.757 | 192.895 | 2.176 |
+| fp4-local | 4 | pipeline | ON | `380d8e5` | 43.099 | 82.173 | 102.364 | 66.123 | 145.608 | 228.526 | 2.178 |
 | fp8 | 2 | ring | OFF | `cbbb11b` | 26.887 | 26.727 | 26.914 | 26.050 | 66.682 | 97.378 | 5.966 |
-| fp8 | 2 | ring | ON | `cbbb11b` | 36.549 | 51.362 | 52.610 | 44.995 | 67.593 | 97.303 | 5.961 |
+| fp8 | 2 | ring | ON | `380d8e5` | 36.637 | 51.302 | 52.731 | 45.119 | 65.930 | 98.339 | 5.957 |
 | fp8 | 4 | path | OFF | `76977df` | 35.266 | 34.722 | 35.284 | 33.9 | 88.201 | 128.203 | 6.948 |
-| fp8 | 4 | path | ON | `76977df` | 46.669 | 65.115 | 68.026 | 58.452 | 86.39 | 128.832 | 6.911 |
+| fp8 | 4 | path | ON | `380d8e5` | 47.321 | 66.450 | 69.085 | 59.242 | 86.447 | 129.360 | 6.854 |
 
 Rates are in completion tokens per second. Prose, code and structured output
 each use one chat. C1, C4 and C8 give the total rates for one, four and eight
 concurrent chats. Cold 8K is the time to the first token after an uncached
-8192-token prompt. A 32K-token prompt gave its first token in 15.95 s on one
-Spark, 10.09 s on two Sparks and 24.05 s on two Sparks with FP8, all at
-`cbbb11b`.
+8192-token prompt. At `380d8e5`, a 32K-token prompt gave its first token in
+15.66 s on one Spark, 10.13 s on two Sparks and 10.52 s on four Sparks, and
+in 24.11 s on two Sparks and 27.49 s on four Sparks with FP8.
 
-The [benchmark history](docs/benchmarks.md#current-2026-10-29-main-cbbb11b-home-dgx-sparks)
-gives the number of server starts per row, how C4 and C8 are averaged, the
-token ID checks and the limits. This table is written by hand, because the
-2026-10-29 runs are not RigMark cards. `vade-tools bench-docs` rewrites it from
-RigMark cards.
+The [benchmark history](docs/benchmarks.md#current-2026-10-30-morning-main-380d8e5-home-dgx-sparks)
+gives the number of server starts per row, the 32K chat, the token ID checks
+and the limits. This table is written by hand, because it mixes rows from
+three dates and averages several server starts per row.
+`vade-tools bench-docs` rewrites it from RigMark cards.
 
 <!-- bench-docs:end -->
 
