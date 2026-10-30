@@ -343,8 +343,10 @@ fn auto_patch_allowlisted_command_and_disk_resume_keep_exact_tool_ids() {
     );
 }
 #[test]
-fn noninteractive_ask_runs_reads_and_denies_edits_while_never_denies_both() {
-    for policy in ["ask", "never"] {
+fn noninteractive_ask_denies_commands_unless_the_checker_is_on_while_never_denies_both() {
+    // Every command asks by default; VADE_SHELL_CHECKER=1 lets the checker's
+    // safe class run.
+    for (policy, checker) in [("ask", "0"), ("ask", "1"), ("never", "1")] {
         let f = Fixture::new();
         let (url, handle) = mock(vec![
             tools(vec![
@@ -359,6 +361,7 @@ fn noninteractive_ask_runs_reads_and_denies_edits_while_never_denies_both() {
         ]);
         let output = run_bounded(
             f.command(&url)
+                .env("VADE_SHELL_CHECKER", checker)
                 .args(["--approval", policy, "--prompt", "try edit"]),
             "",
         );
@@ -376,12 +379,50 @@ fn noninteractive_ask_runs_reads_and_denies_edits_while_never_denies_both() {
         // Without the shell (Linux, or VADE_HARNESS_SHELL=off) the tool is not offered.
         let expected = if !vade_harness::coding_tools::shell_offered() {
             "unknown_tool"
-        } else if policy == "ask" {
+        } else if policy == "ask" && checker == "1" {
             "Exited(Some(0))"
+        } else if policy == "ask" {
+            "approval_required"
         } else {
             "denied"
         };
-        assert!(content(1).contains(expected));
+        assert!(content(1).contains(expected), "{policy} {checker}: {}", content(1));
+    }
+}
+/// Astra on aacf3c9, item 1: with chat state in the project, the launcher
+/// removes VADE_HOME and passes the selected home with --mcp-home. The user
+/// allow list comes from that home, never from the default ~/.vade.
+#[test]
+fn project_state_reads_the_allow_list_of_the_selected_home() {
+    if !vade_harness::coding_tools::shell_offered() {
+        return;
+    }
+    for selected in [true, false] {
+        let f = Fixture::new();
+        let default_home = f.home().join(".vade");
+        std::fs::create_dir_all(&default_home).unwrap();
+        std::fs::write(default_home.join("permissions.json"), "{\"version\":1,\"allow\":[\"touch marker\"]}").unwrap();
+        let chosen = f.home().join("selected");
+        std::fs::create_dir_all(&chosen).unwrap();
+        let (url, handle) = mock(vec![
+            tools(vec![call("shell-1", "workspace_shell", json::parse(r#"{"argv":["touch","marker"],"timeout_ms":5000}"#).unwrap())]),
+            answer(),
+        ]);
+        let mut command = f.command(&url);
+        command.env_remove("VADE_HOME").env("VADE_SHELL_CHECKER", "0");
+        if selected {
+            command.arg("--mcp-home").arg(&chosen);
+        }
+        let output = run_bounded(command.args(["--prompt", "touch it"]), "");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let requests = handle.join().unwrap();
+        let messages = requests[1].get("messages").unwrap().as_array().unwrap();
+        let result = messages.iter().rfind(|m| m.get("role").and_then(Value::as_str) == Some("tool")).unwrap();
+        let content = result.get("content").unwrap().as_str().unwrap();
+        // The selected home has no rule: the command asks, and no one can
+        // answer. Without --mcp-home the default home is the selected one.
+        assert_eq!(content.contains("approval_required"), selected, "{content}");
+        assert_eq!(f.0.join("marker").exists(), !selected);
     }
 }
 #[test]
@@ -462,9 +503,11 @@ fn interactive_tty_approval_previews_exact_diff_before_writing() {
             )
             .unwrap();
         }
+        // `touch` needs approval, so the build command still shows a prompt;
+        // cargo build and test alone are safe and run without one.
         let tool = if command_tool {
             call("shell-1", "workspace_shell", Value::Object(vec![
-                ("argv".into(), Value::Array(["/bin/sh", "-c", if build { "cargo build --offline && cargo test --offline" } else { r#"printf '%s' "${VADE_MOCK_SECRET-unset}"; printf shell > shell.txt"# }].into_iter().map(|s| Value::String(s.into())).collect())),
+                ("argv".into(), Value::Array(["/bin/sh", "-c", if build { "touch Cargo.toml && cargo build --offline && cargo test --offline" } else { r#"printf '%s' "${VADE_MOCK_SECRET-unset}"; printf shell > shell.txt"# }].into_iter().map(|s| Value::String(s.into())).collect())),
                 ("timeout_ms".into(), Value::Number(if build { "120000" } else { "1000" }.into()))
             ]))
         } else {

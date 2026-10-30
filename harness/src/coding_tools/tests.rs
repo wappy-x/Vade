@@ -361,15 +361,16 @@ fn adds_and_preserves_sandbox_privacy() {{
         ApprovalPolicy::Ask,
         |preview: Preview<'_>, _: &AtomicBool| {
             if preview.title == "Command" {
-                assert!(preview.approval_required);
                 assert!(
                     preview
                         .detail
                         .contains("private session build/cache/temp area")
                 );
+                // Every command asks by default; the fixture approves each.
+                assert!(preview.approval_required);
                 approvals += 1;
             }
-            true // explicit fixture approval, never an auto-allowlisted build
+            true // explicit fixture approval for the script
         },
     )
     .with_build_session(&session);
@@ -489,4 +490,273 @@ fn workspace_read_lines_names_workspace_read_for_an_ascii_pdf() {
     let mut tools = CodingTools::new(&w, ApprovalPolicy::Auto, |_: Preview<'_>, _: &AtomicBool| true);
     let raw = r#"{"path":"plain.pdf","start_line":1,"end_line":3}"#; let args = json::parse(raw).unwrap(); let call = ToolCall { id: "pdf".into(), name: "workspace_read_lines".into(), arguments: raw.into() };
     assert_eq!(tools.execute(ToolInvocation { call: &call, arguments: &args, max_output_bytes: 4096 }, &AtomicBool::new(false)).unwrap(), "Discovery refused: source is a PDF; read its extracted text with workspace_read");
+}
+/// Keeps every shell approval decision, like a session journal.
+#[derive(Default)]
+struct Decisions(Vec<Value>);
+impl Access for Decisions {
+    fn check_capacity(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+    fn retain(&mut self, _: &str) -> io::Result<String> {
+        Ok("a-0".into())
+    }
+    fn read(&mut self, _: &str, _: usize, _: usize, _: usize) -> io::Result<String> {
+        Err(io::Error::other("none"))
+    }
+    fn record_approval(&mut self, decision: &Value) -> io::Result<()> {
+        self.0.push(decision.clone());
+        Ok(())
+    }
+}
+fn shell_call<F: FnMut(Preview<'_>, &AtomicBool) -> bool>(tools: &mut CodingTools<'_, F>, script: &str) -> Result<String, ToolError> {
+    argv_call(tools, &["/bin/sh", "-c", script])
+}
+fn argv_call<F: FnMut(Preview<'_>, &AtomicBool) -> bool>(tools: &mut CodingTools<'_, F>, argv: &[&str]) -> Result<String, ToolError> {
+    let args = Value::Object(vec![
+        ("argv".into(), Value::Array(argv.iter().map(|s| Value::String((*s).into())).collect())),
+        ("timeout_ms".into(), Value::Number("20000".into())),
+    ]);
+    let call = ToolCall { id: "safety".into(), name: "workspace_shell".into(), arguments: json::stringify(&args).unwrap() };
+    tools.execute(ToolInvocation { call: &call, arguments: &args, max_output_bytes: 4096 }, &AtomicBool::new(false))
+}
+fn decision(record: &Value) -> (&str, &str) {
+    (record.get("decision").and_then(Value::as_str).unwrap(), record.get("class").and_then(Value::as_str).unwrap())
+}
+#[test]
+fn blocked_commands_never_reach_a_preview_even_without_prompts() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let f = Fixture::new();
+    let w = f.workspace();
+    for policy in [ApprovalPolicy::Auto, ApprovalPolicy::Ask, ApprovalPolicy::Never] {
+        let mut log = Decisions::default();
+        let mut tools = CodingTools::new(&w, policy, |_: Preview<'_>, _: &AtomicBool| panic!("blocked commands are refused before any preview")).with_artifacts(&mut log);
+        let out = shell_call(&mut tools, "echo start; rm -rf ~/").unwrap();
+        let out = json::parse(&out).unwrap();
+        assert_eq!(out.get("error").and_then(Value::as_str), Some("blocked"));
+        assert!(out.get("message").and_then(Value::as_str).unwrap().contains("not with --yes"));
+        assert!(!tools.last_side_effect_uncertain());
+        drop(tools);
+        assert_eq!(log.0.iter().map(decision).collect::<Vec<_>>(), [("blocked", "blocked")]);
+    }
+}
+#[test]
+fn non_interactive_runs_deny_commands_that_need_approval_unless_listed_or_prompts_are_off() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let f = Fixture::new();
+    std::fs::create_dir(f.0.join("build")).unwrap();
+    let w = f.workspace();
+    let none = shell::permissions::Approvals::new(None, None, false).unwrap();
+    let mut log = Decisions::default();
+    let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| {
+        assert!(!preview.approval_required, "no prompt without a terminal");
+        true
+    })
+    .with_approvals(&none)
+    .with_artifacts(&mut log);
+    // The error is a tool result the model can read; nothing ran.
+    let refused = json::parse(&shell_call(&mut tools, "rm -rf build").unwrap()).unwrap();
+    assert_eq!(refused.get("error").and_then(Value::as_str), Some("approval_required"));
+    let message = refused.get("message").and_then(Value::as_str).unwrap();
+    assert!(message.contains("deletes files") && message.contains("non-interactive") && message.contains("--yes"), "{message}");
+    assert!(f.0.join("build").is_dir());
+    // A command on the sandbox's read-only list still needs approval when
+    // the checker asks; a computed `find` action and `env -P` ask too, and
+    // so do a program lookup or config setting, a file name slot and
+    // operands that split (Astra on f29e33b). csh, tcsh and fish code and a
+    // zsh `repeat` count that is not a number ask too (Astra on b476cd3).
+    let argvs: [&[&str]; 15] = [
+        &["cat", "permissions.json"],
+        &["cat", "Keychains/file"],
+        &["env", "-P", "./tools", "cat"],
+        &["/bin/sh", "-c", "action=-delete; find build \"$action\""],
+        &["/bin/zsh", "-c", "path=./tools; cat input"],
+        &["/bin/sh", "-c", "RIPGREP_CONFIG_PATH=rg.conf rg needle input"],
+        &["/bin/sh", "-c", "find 'x; touch find-code-marker' -exec sh -c 'echo {}' \\;"],
+        &["/bin/sh", "-c", "find -f -ofind-marker -- -exec sort '{}' input \\;"],
+        &["/bin/sh", "-c", "files='input uniq-marker'; uniq -- $files"],
+        &["/bin/sh", "-c", "printf 'input xargs-marker' | xargs uniq --"],
+        &["/bin/csh", "-f", "-c", "set path = ./tools; cat input"],
+        &["/bin/tcsh", "-f", "-c", "set path=./tools; cat input"],
+        &["fish", "-c", "set PATH ./tools; cat input"],
+        &["/bin/zsh", "-f", "-c", "u='argv[$'; v='(touch repeat-marker)]'; x=$u$v; repeat x; do echo ok; done"],
+        &["/bin/zsh", "-f", "-c", "repeat \"$1\"; do echo ok; done", "_", "argv[$(touch repeat-arg-marker)]"],
+    ];
+    for argv in argvs {
+        let refused = json::parse(&argv_call(&mut tools, argv).unwrap()).unwrap();
+        assert_eq!(refused.get("error").and_then(Value::as_str), Some("approval_required"), "{argv:?}");
+    }
+    assert!(f.0.join("build").is_dir());
+    for marker in ["find-code-marker", "find-marker", "uniq-marker", "xargs-marker", "repeat-marker", "repeat-arg-marker"] {
+        assert!(!f.0.join(marker).exists(), "{marker}");
+    }
+    // By default read-only and build commands ask too. With the
+    // experimental checker on, the commands it reads as safe run.
+    let readonly = ["/bin/sh", "-c", "ls && git status --short 2>/dev/null; true"];
+    assert!(argv_call(&mut tools, &readonly).unwrap().contains("approval_required"));
+    none.set_checker(true);
+    assert!(argv_call(&mut tools, &readonly).unwrap().contains("exit_code: Some(0)"));
+    none.set_checker(false);
+    drop(tools);
+    assert_eq!(log.0.iter().map(decision).collect::<Vec<_>>(), [("denied_no_terminal", "needs approval"); 17]);
+    // A project rule approves the same command without a terminal.
+    let rules = f.0.join("rules.json");
+    std::fs::write(&rules, shell::permissions::render(&[vec!["rm".into(), "-rf".into(), "build".into()]])).unwrap();
+    let listed = shell::permissions::Approvals::new(Some(rules), None, false).unwrap();
+    let mut log = Decisions::default();
+    let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| {
+        assert!(!preview.approval_required && (preview.title != "Command" || preview.detail.contains("allowed by project: rm -rf build")));
+        true
+    })
+    .with_approvals(&listed)
+    .with_artifacts(&mut log);
+    // The rule is the exact argv: the same words as a script still ask.
+    assert!(shell_call(&mut tools, "rm -rf build").unwrap().contains("approval_required"));
+    assert!(f.0.join("build").exists());
+    assert!(argv_call(&mut tools, &["rm", "-rf", "build"]).unwrap().contains("exit_code: Some(0)"));
+    assert!(!f.0.join("build").exists());
+    drop(tools);
+    assert_eq!(log.0.iter().map(decision).collect::<Vec<_>>(), [("denied_no_terminal", "needs approval"), ("allowed_by_rule", "needs approval")]);
+    assert_eq!(log.0[1].get("rules").and_then(Value::as_array).unwrap(), [Value::String("project: rm -rf build".into())]);
+    // --yes (auto) runs it without a rule and records why.
+    std::fs::create_dir(f.0.join("build")).unwrap();
+    let mut log = Decisions::default();
+    let mut tools = CodingTools::new(&w, ApprovalPolicy::Auto, |preview: Preview<'_>, _: &AtomicBool| !preview.approval_required).with_approvals(&none).with_artifacts(&mut log);
+    assert!(shell_call(&mut tools, "rm -rf build").unwrap().contains("exit_code: Some(0)"));
+    drop(tools);
+    assert_eq!(log.0.iter().map(decision).collect::<Vec<_>>(), [("allowed_by_flag", "needs approval")]);
+}
+#[test]
+fn an_always_answer_for_the_session_skips_the_next_prompt() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let f = Fixture::new();
+    let w = f.workspace();
+    let approvals = shell::permissions::Approvals::new(None, None, true).unwrap();
+    let mut prompts = 0;
+    let mut notes = Vec::new();
+    let mut log = Decisions::default();
+    let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| {
+        if preview.approval_required {
+            prompts += 1;
+            assert!(preview.detail.contains("s (this session), p (this project)"), "{}", preview.detail);
+            approvals.choose(shell::permissions::Scope::Session);
+        }
+        if preview.title == "Allow list" {
+            notes.push(preview.detail.to_owned());
+        }
+        true
+    })
+    .with_approvals(&approvals)
+    .with_artifacts(&mut log);
+    for name in ["one.txt", "two.txt"] {
+        assert!(argv_call(&mut tools, &["touch", name]).unwrap().contains("exit_code: Some(0)"));
+    }
+    // `touch one.txt` and `touch two.txt` are different exact rules.
+    assert!(argv_call(&mut tools, &["touch", "one.txt"]).unwrap().contains("exit_code: Some(0)"));
+    drop(tools);
+    assert_eq!(prompts, 2);
+    assert_eq!(notes.len(), 2);
+    assert_eq!(
+        log.0.iter().map(decision).collect::<Vec<_>>(),
+        [("approved", "needs approval"), ("approved", "needs approval"), ("allowed_by_rule", "needs approval")]
+    );
+    assert_eq!(log.0[0].get("rules").and_then(Value::as_array).unwrap(), [Value::String("session: touch one.txt".into())]);
+    // A person's no is recorded too; the command does not run.
+    let mut log = Decisions::default();
+    let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| !preview.approval_required).with_artifacts(&mut log);
+    assert_eq!(shell_call(&mut tools, "git push").unwrap_err(), ToolError::Denied);
+    drop(tools);
+    assert_eq!(log.0.iter().map(decision).collect::<Vec<_>>(), [("denied", "needs approval")]);
+}
+/// Astra on 583ad99, item 2: an approval for one argv never approves a
+/// script whose words expand to other files.
+#[test]
+fn a_rule_never_approves_words_that_expand() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let f = Fixture::new();
+    let w = f.workspace();
+    let approvals = shell::permissions::Approvals::new(None, None, true).unwrap();
+    let mut prompts = 0;
+    let mut notes = Vec::new();
+    let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| {
+        if preview.title == "Allow list" {
+            notes.push(preview.detail.to_owned());
+        }
+        if !preview.approval_required {
+            return true;
+        }
+        prompts += 1;
+        approvals.choose(shell::permissions::Scope::Session);
+        // Approve the first two prompts only.
+        prompts <= 2
+    })
+    .with_approvals(&approvals);
+    // A word with braces gets no rule: approved once, it makes one file.
+    assert!(argv_call(&mut tools, &["touch", "item{1,2}"]).unwrap().contains("exit_code: Some(0)"));
+    assert!(f.0.join("item{1,2}").exists());
+    // A plain word gets the exact rule.
+    assert!(argv_call(&mut tools, &["touch", "item1"]).unwrap().contains("exit_code: Some(0)"));
+    std::fs::remove_file(f.0.join("item1")).unwrap();
+    // Neither approval covers a script: these ask, the person says no, and
+    // no file appears.
+    for script in ["touch item{1,2}", "touch item[12]", "touch item1"] {
+        assert_eq!(argv_call(&mut tools, &["/bin/bash", "-c", script]).unwrap_err(), ToolError::Denied, "{script}");
+    }
+    drop(tools);
+    assert_eq!(prompts, 5);
+    assert!(notes[0].contains("cannot go on an allow list") && notes[1].contains("Added touch item1"), "{notes:?}");
+    for name in ["item1", "item2"] {
+        assert!(!f.0.join(name).exists(), "{name}");
+    }
+}
+#[test]
+fn an_approval_the_journal_cannot_record_saves_no_rule() {
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    struct Broken;
+    impl Access for Broken {
+        fn check_capacity(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+        fn retain(&mut self, _: &str) -> io::Result<String> {
+            Ok("a-0".into())
+        }
+        fn read(&mut self, _: &str, _: usize, _: usize, _: usize) -> io::Result<String> {
+            Err(io::Error::other("none"))
+        }
+        fn record_approval(&mut self, _: &Value) -> io::Result<()> {
+            Err(io::Error::other("disk full"))
+        }
+    }
+    let f = Fixture::new();
+    let w = f.workspace();
+    let approvals = shell::permissions::Approvals::new(None, None, true).unwrap();
+    let mut journal = Broken;
+    let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| {
+        if preview.approval_required {
+            approvals.choose(shell::permissions::Scope::Session);
+        }
+        true
+    })
+    .with_approvals(&approvals)
+    .with_artifacts(&mut journal);
+    // The exact argv qualifies for a rule, so a rule saved before the
+    // journal fails would show (Astra on aacf3c9, item 6).
+    let argv = ["touch", "one.txt"].map(String::from);
+    let verdict = shell::policy::decide(&argv, &f.0, false);
+    assert!(shell::policy::rule_for(&argv, &verdict).is_some());
+    assert_eq!(argv_call(&mut tools, &["touch", "one.txt"]).unwrap_err(), ToolError::Failed);
+    drop(tools);
+    assert!(!f.0.join("one.txt").exists());
+    assert_eq!(approvals.allowed(&argv, &verdict), None);
+    assert!(approvals.summary().contains("0 session"), "{}", approvals.summary());
 }

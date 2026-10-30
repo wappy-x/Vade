@@ -1032,6 +1032,16 @@ pub(crate) mod anchored {
             }
             result
         }
+        /// A regular file in this directory, opened without following a
+        /// link or blocking on a FIFO; `None` when absent.
+        pub(crate) fn regular_file(&self, name: &str) -> io::Result<Option<File>> {
+            match self.open(name, NONBLOCK) {
+                Ok(file) if file.metadata()?.is_file() => Ok(Some(file)),
+                Ok(_) => Err(error("must be a regular file")),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(_) => Err(error("must be a regular file, not a link")),
+            }
+        }
         pub fn optional_file(&self, name: &str) -> io::Result<Option<File>> {
             match self.open(name, NONBLOCK) {
                 Ok(file) => {

@@ -6,6 +6,9 @@ pub(crate) use execution::run_in_session_observing;
 #[cfg(all(test, target_os = "macos"))]
 use execution::{profile, verify_tree};
 mod build;
+pub mod permissions;
+pub mod policy;
+pub mod safety;
 use crate::tools::Workspace;
 pub use build::BuildSession;
 use std::io;
@@ -98,8 +101,10 @@ fn ascii_case_pattern(pattern: &str) -> String {
     result
 }
 
-/// Which edits and commands need the user's approval: `ask` (all but the
-/// read-only allowlist), `auto` (none, still sandboxed) or `never` (all denied).
+/// Which edits and commands need the user's approval: `ask` (all edits,
+/// and all commands that no exact allow-list rule names; the experimental
+/// checker also lets its safe commands run), `auto` (none, still sandboxed;
+/// blocked commands are refused) or `never` (all denied).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApprovalPolicy {
     Ask,
@@ -117,8 +122,8 @@ impl ApprovalPolicy {
     }
     pub fn label(self) -> &'static str {
         match self {
-            Self::Ask => "ask (read-only allowlist runs; ask for edits and other commands)",
-            Self::Auto => "auto (apply patches and run all commands inside the OS sandbox)",
+            Self::Ask => "ask (ask for edits and commands; an exact allow-list rule skips the prompt)",
+            Self::Auto => "auto (apply patches and run all commands but blocked ones inside the OS sandbox)",
             Self::Never => "never (deny edits and commands)",
         }
     }

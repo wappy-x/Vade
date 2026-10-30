@@ -23,6 +23,8 @@ pub struct NativeToolHost {
     pub project: project::Snapshot,
     pub shell_exclusions: shell::Exclusions,
     pub shell_toolchain: Option<PathBuf>,
+    /// The parent session's allow lists and prompt state, if any.
+    pub approvals: Option<Arc<shell::permissions::Approvals>>,
     pub preview: Arc<ChildPreview>,
 }
 
@@ -103,6 +105,9 @@ impl agent::ToolExecutor for NativeTools {
         .with_shell_exclusions(host.shell_exclusions.clone())
         .with_build_session(&self.build)
         .with_artifacts(&mut self.journal);
+        if let Some(approvals) = host.approvals.as_deref() {
+            tools = tools.with_approvals(approvals);
+        }
         tools.line_read = self.line_read.take();
         let result = tools.execute(call, cancel);
         self.line_read = tools.line_read.take();
@@ -163,5 +168,8 @@ impl artifacts::Access for ChildJournal {
     }
     fn read(&mut self, id: &str, offset: usize, length: usize, cap: usize) -> io::Result<String> {
         self.access(|store| store.read(id, offset, length, cap))
+    }
+    fn record_approval(&mut self, decision: &crate::json::Value) -> io::Result<()> {
+        self.access(|store| artifacts::Access::record_approval(store, decision))
     }
 }

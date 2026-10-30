@@ -37,7 +37,7 @@ impl Editor {
     pub fn remember(&mut self, text: &str) {
         if text.trim().is_empty()
             || text.len() > MAX_INPUT_BYTES
-            || matches!(text.trim(), "/approve" | "/deny" | "y" | "n" | "Y" | "N")
+            || matches!(text.trim(), "/approve" | "/deny" | "/approve session" | "/approve project" | "y" | "n" | "Y" | "N")
             || self.history.back().is_some_and(|previous| previous == text)
         {
             return;
@@ -251,7 +251,7 @@ impl Editor {
         let line = &self.text[start..];
         let command = line.trim();
         let offset = start + line.len() - line.trim_start().len();
-        if matches!(command, "/approve" | "/deny")
+        if matches!(command, "/approve" | "/deny" | "/approve session" | "/approve project")
             && self.typed[offset..offset + command.len()]
                 .iter()
                 .all(|typed| *typed)
@@ -526,5 +526,22 @@ mod tests {
         let expected = loaded.history.clone(); drop(loaded);
         let mut loaded = Editor::default(); loaded.load_history(&workspace).unwrap(); assert_eq!(loaded.history, expected);
         assert_eq!(loaded.history.iter().rev().take(3).map(String::as_str).collect::<Vec<_>>(), ["third", "second", "first"]);
+    }
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::Editor;
+
+    #[test]
+    fn only_typed_text_can_answer_an_approval_at_any_scope() {
+        for command in ["/approve", "/deny", "/approve session", "/approve project"] {
+            let mut typed = Editor::default();
+            typed.insert(command);
+            assert_eq!(typed.approval_command().map(|(c, _)| c), Some(command));
+            let mut pasted = Editor::default();
+            pasted.insert_paste(&format!("{command}\n"));
+            assert_eq!(pasted.approval_command(), None, "{command}");
+        }
     }
 }

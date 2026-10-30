@@ -1000,6 +1000,12 @@ impl vade_harness::artifacts::Access for SharedJournal {
             .map_err(|_| io::Error::other("journal lock failed"))?
             .read(id, offset, length, cap)
     }
+    fn record_approval(&mut self, decision: &vade_harness::json::Value) -> io::Result<()> {
+        self.0
+            .lock()
+            .map_err(|_| io::Error::other("journal lock failed"))?
+            .record_approval(decision)
+    }
 }
 impl RunObserver for SharedJournal {
     fn checkpoint(
@@ -1055,9 +1061,9 @@ pub(crate) fn prepare_resumed(
 /// limit were named. A session saved with it still resumes.
 const LEGACY_READ_DESCRIPTION: &str = "Read a small UTF-8 byte range inside the approved workspace (source ≤4 MiB). A PDF (≤50 MiB) reads as its extracted text layer, page by page; offsets index that text. Prefer workspace_search then workspace_read_lines for code; do not page whole files without a concrete need. offset is zero-based (default 0), limit 1–4096 (default bounded by a 4096-byte inline output including path/provenance). Partial results give actual bytes and next offset. Offset must be a UTF-8 boundary.";
 
-// Accept only the immediately previous shell, read and write-guidance
-// wording; stored prompt bytes stay frozen, and executable schemas, model and
-// child scopes still match exactly.
+// Accept only the two previous shell wordings, the previous read wording
+// and the previous write guidance; stored prompt bytes stay frozen, and
+// executable schemas, model and child scopes still match exactly.
 fn resumed_tools_match(tools: Option<&Value>, children: bool, variants: &[bool]) -> bool {
     // MCP tools (`<server>__<tool>`) follow the native list and are not compared.
     let native = tools.and_then(Value::as_array).map(|tools| {
@@ -1066,14 +1072,22 @@ fn resumed_tools_match(tools: Option<&Value>, children: bool, variants: &[bool])
         }).cloned().collect())
     });
     let tools = native.as_ref().or(tools);
-    const LEGACY_DESCRIPTION: &str = "Supported only on macOS: Linux and other platforms return an unsupported_platform tool result without running commands. Run explicit argv in workspace under macOS OS sandbox, no network, cleared environment, ≤64 KiB output. No implicit shell: for shell syntax explicitly request /bin/sh -c script, which requires approval. timeout_ms 1–120000. Read-only allowlist runs without approval in ask/auto: pwd, true, ls [-1] [relative paths], cat relative paths, git status [--short], git diff [--stat], git log [--oneline|-n 1..100]. Bare names resolve to fixed system executables. Other commands ask. Never denies all commands. Auto also permits patches without asking. Cancellation kills the process group. No credential or workspace hidden-file access. A private session directory supplies CARGO_TARGET_DIR, CARGO_HOME, TMPDIR, HOME and npm cache; Cargo is offline. Pre-existing target/node_modules stay inaccessible. Use cargo build --offline or cargo test --offline with the owner-selected Rust toolchain. Do not retry unknown_outcome tools without inspecting state.";
+    // The two previous shell descriptions, newest first.
+    const LEGACY_DESCRIPTIONS: &[&str] = &[
+        "Supported only on macOS: Linux and other platforms return an unsupported_platform tool result without running commands. Use explicit argv. After an edit, check the changed component, inspect failure diagnostics and repair before completion. Read files with workspace_search, workspace_read_lines and workspace_read, not with cat/sed/head/tail/grep here. Run in workspace under macOS OS sandbox, no network, cleared environment, ≤64 KiB output. No implicit shell: for shell syntax explicitly request /bin/sh -c script, which requires approval in ask mode. timeout_ms 1–120000. Read-only allowlist runs without approval in ask: pwd, true, ls [-1] [relative paths], git status [--short], git diff [--stat], git log [--oneline|-n 1..100]. Bare names resolve to fixed system executables. Ask prompts for other commands. Auto runs all validated commands in this same OS sandbox and permits patches without asking; it never enables unsandboxed execution. Never denies all commands. Cancellation kills the process group. No credential or workspace hidden-file access. A private session directory supplies CARGO_TARGET_DIR, CARGO_HOME, TMPDIR, HOME and npm cache; Cargo is offline. Pre-existing target/node_modules stay inaccessible. Use cargo build --offline or cargo test --offline with the owner-selected Rust toolchain. Built binaries are at $CARGO_TARGET_DIR/debug/NAME, not target/debug; use cargo run --offline -q, or /bin/sh -c to expand that path. Do not retry unknown_outcome tools without inspecting state.",
+        "Supported only on macOS: Linux and other platforms return an unsupported_platform tool result without running commands. Run explicit argv in workspace under macOS OS sandbox, no network, cleared environment, ≤64 KiB output. No implicit shell: for shell syntax explicitly request /bin/sh -c script, which requires approval. timeout_ms 1–120000. Read-only allowlist runs without approval in ask/auto: pwd, true, ls [-1] [relative paths], cat relative paths, git status [--short], git diff [--stat], git log [--oneline|-n 1..100]. Bare names resolve to fixed system executables. Other commands ask. Never denies all commands. Auto also permits patches without asking. Cancellation kills the process group. No credential or workspace hidden-file access. A private session directory supplies CARGO_TARGET_DIR, CARGO_HOME, TMPDIR, HOME and npm cache; Cargo is offline. Pre-existing target/node_modules stay inaccessible. Use cargo build --offline or cargo test --offline with the owner-selected Rust toolchain. Do not retry unknown_outcome tools without inspecting state.",
+    ];
     for reply_limit in [vade_harness::contract::guaranteed_native_reply_tokens(), vade_harness::contract::AUTOMATIC_OUTPUT_TOKENS as usize] {
-        for (&shell, legacy) in variants.iter().flat_map(|shell| [(shell, 0u8), (shell, 1), (shell, 2), (shell, 3)]) {
+        let shells: Vec<Option<&str>> = std::iter::once(None).chain(LEGACY_DESCRIPTIONS.iter().map(|text| Some(*text))).collect();
+        for (&shell, legacy_shell, legacy_read) in variants.iter().flat_map(|shell| shells.iter().flat_map(move |&legacy| [(shell, legacy, false), (shell, legacy, true)])) {
             let Value::Array(mut candidate) = native_definitions_with(children, reply_limit, shell) else { return false };
             for tool in &mut candidate {
                 let text = match tool.get("function").and_then(|f| f.get("name")).and_then(Value::as_str) {
-                    Some("workspace_shell") if legacy & 1 != 0 => LEGACY_DESCRIPTION,
-                    Some("workspace_read") if legacy & 2 != 0 => LEGACY_READ_DESCRIPTION,
+                    Some("workspace_shell") => match legacy_shell {
+                        Some(text) => text,
+                        None => continue,
+                    },
+                    Some("workspace_read") if legacy_read => LEGACY_READ_DESCRIPTION,
                     _ => continue,
                 };
                 if let Value::Object(fields) = tool

@@ -258,6 +258,7 @@ impl App {
                         match self.terminal.approval_preview(&title, &detail) {
                             Ok(()) => {
                                 self.approval_reply = Some(reply.clone());
+                                self.approval_command = title == "Command";
                                 if !self.terminal.raw() {
                                     self.approval_presented();
                                 }

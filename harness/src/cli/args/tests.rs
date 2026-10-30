@@ -467,3 +467,24 @@ fn hermes_configuration_requires_selected_scope_and_denial_policy() {
     assert_eq!(config.external_session.as_deref(), Some("saved-session"));
     assert!(config.model.is_none());
 }
+
+#[test]
+fn yes_turns_prompts_off_and_conflicts_with_ask_or_never() {
+    let agent = |extra: &[&str]| {
+        let mut args = vec!["agent", "--endpoint", "http://localhost:1", "--model", "m", "--workspace", ".", "--no-check"];
+        args.extend_from_slice(extra);
+        parse(&args).map(|parsed| match parsed {
+            Parsed::Run(config) => config.approval,
+            _ => panic!(),
+        })
+    };
+    assert_eq!(agent(&[]), Ok(ApprovalPolicy::Ask));
+    assert_eq!(agent(&["--yes"]), Ok(ApprovalPolicy::Auto));
+    assert_eq!(agent(&["--dangerously-skip-prompts"]), Ok(ApprovalPolicy::Auto));
+    assert_eq!(agent(&["--yes", "--approval", "auto"]), Ok(ApprovalPolicy::Auto));
+    for conflict in [&["--yes", "--approval", "ask"][..], &["--approval", "never", "--dangerously-skip-prompts"], &["--yes", "--dangerously-skip-prompts"]] {
+        assert!(agent(conflict).is_err(), "{conflict:?}");
+    }
+    assert!(agent(&["--yes", "--approval", "never"]).unwrap_err().contains("not both"));
+    assert!(parse(&["direct", "--endpoint", "http://localhost:1", "--model", "m", "--yes"]).err().unwrap().contains("require agent mode"));
+}

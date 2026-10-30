@@ -58,6 +58,10 @@ pub(crate) struct App {
     journal: Option<Arc<Mutex<Journal>>>,
     pub(crate) approval_reply: Option<approval::ApprovalReply>,
     approval_input_closed: bool,
+    /// Agent allow lists and prompt state, shared with every tool executor.
+    pub(crate) approvals: Option<Arc<vade_harness::shell::permissions::Approvals>>,
+    /// The pending approval is for a command, so it may go on an allow list.
+    pub(crate) approval_command: bool,
     // When the current approval prompt first appeared; y/n is ignored for a
     // short settle time so a key typed before reading it stays draft text.
     pub(crate) approval_shown: Option<std::time::Instant>,
@@ -133,14 +137,11 @@ impl App {
             vade_harness::instructions::Instructions::disabled()
         };
         let memory = if config.memory { vade_harness::memory::Memory::load(&workspace)?.content() } else { String::new() };
-        // The MCP user list lives in the same Vade home as chat state, or in
-        // --mcp-home when chat state is in the project.
-        let home = match &config.state {
-            Some(vade_harness::tools::StateLocation::Home(home)) => Some(home.as_path()),
-            _ => config.mcp_home.as_deref(),
-        };
+        // The MCP user list and the shell allow list live in the same
+        // selected Vade home (Config::vade_home).
+        let vade_home = config.vade_home();
         let mcp = (config.mode == Mode::Agent && config.mcp).then(|| {
-            Arc::new(Mutex::new(vade_harness::mcp::Hub::from_config(workspace.root(), home, vade_harness::mcp::cli::starting)))
+            Arc::new(Mutex::new(vade_harness::mcp::Hub::from_config(workspace.root(), vade_home.as_deref(), vade_harness::mcp::cli::starting)))
         });
         let mcp_tools = mcp.as_ref().and_then(|hub| hub.lock().ok().map(|hub| hub.definitions())).unwrap_or_default();
         let (native, journal) = if config.mode == Mode::Agent {
@@ -225,6 +226,18 @@ impl App {
                 }
             }
         } else { vade_harness::hooks::Hooks::default() };
+        // Allow lists load at startup and again for each new session; a
+        // broken file stops startup.
+        let approvals = if config.mode == Mode::Agent {
+            let approvals = vade_harness::shell::permissions::Approvals::for_workspace(workspace.root(), vade_home.as_deref(), !quiet)
+                .map_err(|error| io::Error::other(format!("allow list {error}. Fix or remove that file; see docs/shell-safety.md.")))?;
+            // Every command asks unless VADE_SHELL_CHECKER turns on the
+            // experimental checker's safe class.
+            approvals.set_checker(vade_harness::shell::policy::checker_from(std::env::var(vade_harness::shell::policy::CHECKER_ENV).ok().as_deref()));
+            Some(Arc::new(approvals))
+        } else {
+            None
+        };
         let mut app = Self {
             answers: answers::Answers::new(config.generation),
             budget: Default::default(),
@@ -242,7 +255,9 @@ impl App {
             journal,
             approval_reply: None,
             approval_input_closed,
+            approvals,
             approval_shown: None,
+            approval_command: false,
             session_name: std::cell::RefCell::new(String::new()),
             build_session,
             native_model: None,

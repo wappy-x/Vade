@@ -3,7 +3,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use vade_harness::{
     agent::Limits, child_agents, context, journal, journal::Journal, project,
-    session::MAX_PROMPT_BYTES,
+    session::MAX_PROMPT_BYTES, shell::permissions::Scope,
 };
 
 use super::{App, RunState};
@@ -28,7 +28,7 @@ pub(crate) const COMMANDS: &[Command] = &[
     Command::new("next", "", "Start the next held follow-up.", "Waits for active worker cleanup before starting queued work.", "Chat", "all", false),
     Command::new("queue-clear", "", "Discard queued follow-ups.", "Clears only unsent follow-ups.", "Chat", "all", false),
     Command::new("steer", "TEXT", "Send input to the active Codex turn.", "Separate receipts report acceptance, rejection or an unconfirmed outcome.", "Chat", "codex", false),
-    Command::new("approve", "", "Approve the displayed operation once.", "Same as pressing y on an empty line. Authorizes only the pending exact edit or command. Never grants blanket approval.", "Workspace", "agent", true),
+    Command::new("approve", "[session|project]", "Approve the displayed operation.", "Same as pressing y on an empty line: authorizes only the pending exact edit or command. For a command, /approve session (key s) also allows matching commands for the rest of this session, and /approve project (key p) saves a rule to .vade/permissions.json.", "Workspace", "agent", true),
     Command::new("deny", "", "Deny the pending operation.", "Same as pressing n on an empty line. Declines the displayed edit or command.", "Workspace", "agent", true),
     Command::new("ls", "[PATH]", "List local workspace entries.", "Bounded listing inside the selected workspace; no model request.", "Workspace", "all", true),
     Command::new("read", "PATH", "Preview a local UTF-8 file.", "At most 64 KiB inside the workspace. Preview text is not added to model context.", "Workspace", "all", true),
@@ -60,6 +60,14 @@ pub(crate) const COMMANDS: &[Command] = &[
 ];
 
 impl App {
+    /// Session allow-list rules belong to the session that granted them, and
+    /// a new session reads the allow-list files again.
+    fn reset_session_rules(&mut self) -> io::Result<()> {
+        if let Some(Err(error)) = self.approvals.as_ref().map(|approvals| approvals.new_session()) {
+            self.notice(&format!("Allow list not read, so its commands ask: {error}"))?;
+        }
+        Ok(())
+    }
     pub(crate) fn line_input(&mut self, line: String) -> io::Result<()> {
         if self.multiline.is_none() && self.terminal.raw() && !self.quiet && line.starts_with('/') && !line.starts_with("//") && help::lookup(line.split_whitespace().next().unwrap_or("").trim_start_matches('/')).is_some() { self.terminal.user_message(&line)?; }
         if self.multiline.is_none() && line.starts_with('/') && !line.starts_with("//") {
@@ -67,13 +75,46 @@ impl App {
         }
         if self.approval_reply.is_some() {
             match line.trim() {
+                text @ ("/approve session" | "/approve project") => {
+                    let scope = if text.ends_with("session") { Scope::Session } else { Scope::Project };
+                    let Some(approvals) = self.approvals.clone().filter(|_| self.approval_command) else {
+                        return self.notice("Only a command can go on an allow list. Press y or n, or send /approve or /deny.");
+                    };
+                    if let Err(error) = self.terminal.approval_ready() {
+                        return self.notice(&error.to_string());
+                    }
+                    // The reach goes to the tool that asked, not to a slot
+                    // that another tool's approval could read first.
+                    let submitted = self.close_approval().is_some_and(|reply| {
+                        approvals.choose_for(reply.asker(), scope);
+                        let sent = reply.send(true).is_ok();
+                        if !sent {
+                            approvals.withdraw_choice(reply.asker());
+                        }
+                        sent
+                    });
+                    return self.notice(match (submitted, scope) {
+                        (false, _) => "Approval expired or cancelled; no operation authorized.",
+                        (true, Scope::Session) => "Approved. An Allow list notice follows; it says whether a session rule was added.",
+                        (true, _) => "Approved. An Allow list notice follows; it says whether a rule was saved in .vade/permissions.json.",
+                    });
+                }
                 "/approve" => {
                     if let Err(error) = self.terminal.approval_ready() {
                         return self.notice(&error.to_string());
                     }
-                    let submitted = self
-                        .close_approval()
-                        .is_some_and(|reply| reply.send(true).is_ok());
+                    // Record the reach with every yes, so no older answer applies.
+                    let approvals = self.approvals.clone();
+                    let submitted = self.close_approval().is_some_and(|reply| {
+                        if let Some(approvals) = &approvals {
+                            approvals.choose_for(reply.asker(), Scope::Once);
+                        }
+                        let sent = reply.send(true).is_ok();
+                        if let Some(approvals) = approvals.as_ref().filter(|_| !sent) {
+                            approvals.withdraw_choice(reply.asker());
+                        }
+                        sent
+                    });
                     return self.notice(if submitted {
                         "Approved this exact operation once."
                     } else {
@@ -212,6 +253,7 @@ impl App {
                         Ok((store, conversation, torn)) => {
                             self.replace_native(conversation, vade_harness::contract::PromptBoundary::Resume)?;
                             self.journal = Some(Arc::new(Mutex::new(store)));
+                            self.reset_session_rules()?;
                             self.resumed_answers();
                             self.session.clear(); self.native_completed = 0; self.native_report = None;
                             self.reset_recall();
@@ -245,6 +287,7 @@ impl App {
                             }
                             self.replace_native(c, vade_harness::contract::PromptBoundary::Fork)?;
                             self.journal = Some(Arc::new(Mutex::new(store)));
+                            self.reset_session_rules()?;
                             self.resumed_answers();
                             self.native_completed = 0;
                             self.native_report = None;
@@ -514,6 +557,7 @@ impl App {
                             &conversation,
                         )?;
                         self.journal = Some(Arc::new(Mutex::new(store)));
+                        self.reset_session_rules()?;
                         self.native = Some(conversation);
                         self.auto_compaction =
                             Arc::new(Mutex::new(context::AutoCompaction::default()));
@@ -814,6 +858,7 @@ impl App {
                 let store =
                     Journal::create(&self.workspace, &journal::fresh_name(), &conversation)?;
                 self.journal = Some(Arc::new(Mutex::new(store)));
+                self.reset_session_rules()?;
                 self.timed_out_prompt = None;
                 self.native = Some(conversation);
                 self.native_model = None;

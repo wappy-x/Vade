@@ -43,6 +43,7 @@ fn native_factory(
             web: true,
             shell_exclusions: shell::Exclusions::default(),
             shell_toolchain: None,
+            approvals: None,
             preview,
         },
     )

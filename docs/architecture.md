@@ -792,10 +792,10 @@ and the limits of each figure: see
 ### Native agent mode
 
 The harness's native agent works inside a workspace you choose. Reads, search
-and exact patches stay within it. With the default `--approval ask`, edits and
-commands outside the
-[read-only allowlist](../harness/docs/agent-tools.md#commands-and-approvals)
-wait for your approval. A tool's result is written to a private journal and
+and exact patches stay within it. With the default `--approval ask`, edits,
+and every command whose exact argv is not on an allow list, wait for your
+approval (see [shell safety](shell-safety.md)). Blocked commands never
+run. A tool's result is written to a private journal and
 sent back to the engine as part of the next request; the engine never runs a
 tool itself. An engine can advertise the optional `vade.engine.v1` contract,
 which lets the harness ask whether a request will fit before sending it

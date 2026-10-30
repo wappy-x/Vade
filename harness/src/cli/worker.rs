@@ -401,6 +401,7 @@ impl App {
                     project: project::Snapshot::from_conversation(self.native.as_ref().unwrap())?,
                     shell_exclusions: self.config.shell_exclusions.clone(),
                     shell_toolchain: self.config.shell_toolchain.clone(),
+                    approvals: self.approvals.clone(),
                     preview: Arc::new(move |id, preview, cancel| {
                         child_previews.show(Some(id), preview, cancel)
                     }),
@@ -450,6 +451,7 @@ impl App {
         let shell_exclusions = self.config.shell_exclusions.clone();
         let build_session = Arc::clone(&self.build_session);
         let mcp = self.mcp.clone();
+        let approvals = self.approvals.clone();
         let backend = self.backend.take();
         let turns = self.session.turns();
         self.answers.begin(&user, turns);
@@ -515,6 +517,10 @@ impl App {
                 .with_build_session(&build_session)
                 .with_project(&project)
                 .with_check(check.as_deref());
+                let executor = match approvals.as_deref() {
+                    Some(approvals) => executor.with_approvals(approvals),
+                    None => executor,
+                };
                 let executor = vade_harness::mcp::McpTools::new(executor, mcp.as_deref(), policy, |preview: coding_tools::Preview<'_>, cancel: &AtomicBool| {
                     previews.show(None, preview, cancel)
                 });

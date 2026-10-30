@@ -18,6 +18,19 @@ Changes that are merged but not yet released are under Unreleased.
   checkpoint. New
   `vade models` lists local models with their size and the command that can
   serve them. See [Download models](docs/pull-models.md).
+- The agent asks before every shell command. A `workspace_shell` command
+  runs without a prompt only when an allow list names its exact argv of
+  plain literal words; the lists are empty by default. Vade's command
+  checker still blocks fork bombs, `rm -rf /`, disk writes and similar, also
+  inside `sh -c` scripts and with `--yes`. At a prompt, `s` allows that
+  exact command for the session and `p` saves it to
+  `.vade/permissions.json`; the user list is `~/.vade/permissions.json`.
+  `--yes` (or `--dangerously-skip-prompts`) turns prompts off. A run
+  without a terminal returns a tool error for a command that needs
+  approval. Each decision goes to the session journal. The checker's safe
+  class (read-only, build and test commands run at once) is experimental
+  and off; `VADE_SHELL_CHECKER=1` turns it on. See
+  [shell safety](docs/shell-safety.md).
 
 - Chat sessions can be listed, continued, exported and deleted. Each agent
   chat is a saved session (direct text chat saves none); `--name NAME` names

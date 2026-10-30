@@ -15,8 +15,8 @@ search, read and patch files there. Under the default approval policy,
 `--approval ask`, it asks before it applies each patch, and the patch preview
 shows the exact diff. On macOS it can also run commands in a sandbox; on Linux
 it has no command tool. A command's approval shows its arguments and sandbox
-settings, not the files it may change, and a short read-only list runs without
-asking. `--approval auto` applies patches and runs commands without asking,
+settings, not the files it may change. Every command asks unless an allow list
+names its exact argv. `--approval auto` applies patches and runs commands without asking,
 still inside the sandbox. Each request runs under fixed limits
 on rounds, calls and time, and a stopped request keeps its conversation, so
 `continue` picks up where it left off. The sections below give every limit and
@@ -288,10 +288,18 @@ tool round that changed files. It runs as a `workspace_shell` call written by
 the harness (`vade-check-N`), with the same sandbox and approval policy; see the
 [harness README](../README.md).
 
-There is no implicit shell parsing. `/bin/sh -c SCRIPT` is explicit and sits
-outside the read-only command allowlist, so it needs approval in `ask`. In
-`auto`, it runs inside the same OS sandbox without asking, like other validated
-commands. The allowlist accepts only these complete argument forms, with either
+There is no implicit shell: `/bin/sh -c SCRIPT` is explicit. Before any command
+runs, [shell safety](../../docs/shell-safety.md) classes it as safe, needs
+approval or blocked. It parses `sh -c` scripts into simple commands for this.
+In `ask`, every command waits for `y`, `s`, `p` or `n`, unless an allow list
+names its exact argv of plain literal words; then it runs after preview. The
+allow lists are empty by default. The checker's safe class counts only with the
+experimental `VADE_SHELL_CHECKER=1`. In `auto`, every command that is not
+blocked runs inside the same OS sandbox without asking. Blocked commands never
+run.
+
+The read-only list below picks the sandbox only; it never skips a prompt.
+These forms run in a read-only sandbox with fixed executables, with either
 the bare name or the listed system path:
 
 | Command | Fixed executable | Accepted arguments |
@@ -306,16 +314,16 @@ the bare name or the listed system path:
 
 Bare names resolve to these fixed executables, never through PATH. Path
 arguments may be `.`; they cannot start with `-` or contain parent traversal or
-hidden or credential-related components. In `ask`, any other arguments need
-approval, even for a listed executable. An executable in the workspace, shell
+hidden or credential-related components. Other arguments do not get the read-only
+sandbox. Approval is the same for every command. An executable in the workspace, shell
 metacharacters, PATH tricks, a journal or an earlier approval cannot extend the
 allowlist.
 
-| Policy | Exact patch | Allowlisted command | Other sandboxed command |
-| --- | --- | --- | --- |
-| `ask` (default) | Ask once | Execute after preview | Ask once |
-| `auto` | Apply after preview | Execute after preview | Execute after preview |
-| `never` | Deny | Deny | Deny |
+| Policy | Exact patch | Command on an allow list | Any other command | Blocked command |
+| --- | --- | --- | --- | --- |
+| `ask` (default) | Ask once | Execute after preview | Ask (`y`, `s`, `p` or `n`) | Refuse |
+| `auto` (`--yes`) | Apply after preview | Execute after preview | Execute after preview | Refuse |
+| `never` | Deny | Deny | Deny | Refuse |
 
 `auto` covers workspace executables such as `./tools/rgbds/rgbasm`, system
 tools, and explicit shell commands. Every command still runs in the macOS OS

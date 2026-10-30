@@ -410,3 +410,22 @@ fn observer_failure_prevents_any_tool_execution() {
     assert_eq!(report.reason, agent::StopReason::JournalError);
     assert_eq!(report.tool_calls, 0);
 }
+#[test]
+fn shell_approval_records_stay_with_the_session_and_resume_unchanged() {
+    use crate::artifacts::Access;
+    let fixture = Fixture::new();
+    let workspace = fixture.workspace();
+    let mut c = conversation();
+    user(&mut c, "clean the build");
+    let mut journal = Journal::create(&workspace, "approvals", &c).unwrap();
+    let decision = json::parse(r#"{"tool_call_id":"call-1","argv":["rm","-rf","build"],"class":"needs approval","reasons":"deletes files","decision":"approved","rules":["session: rm -rf build"]}"#).unwrap();
+    journal.record_approval(&decision).unwrap();
+    let record = journal.record_count() - 1;
+    let raw = journal.inspect_record(record, 0, 4096).unwrap();
+    assert!(raw.contains("shell_approval") && raw.contains("session: rm -rf build"), "{raw}");
+    drop(journal);
+    let (resumed, history, torn) = Journal::resume(&workspace, "approvals", Limits::default()).unwrap();
+    assert!(!torn);
+    assert_eq!(resumed.record_count(), record + 1);
+    assert_eq!(history.request(Limits::default().wire).to_json().unwrap(), c.request(Limits::default().wire).to_json().unwrap());
+}

@@ -919,6 +919,9 @@ impl crate::artifacts::Access for Journal {
     fn read(&mut self, id: &str, offset: usize, length: usize, cap: usize) -> io::Result<String> {
         self.artifacts.read(id, offset, length, cap)
     }
+    fn record_approval(&mut self, decision: &Value) -> io::Result<()> {
+        self.append_record(self.len, &[], None, Some(("shell_approval", decision.clone())))
+    }
 }
 impl RunObserver for Journal {
     fn checkpoint(&mut self, base: &Conversation, staged: &[Message]) -> io::Result<()> {

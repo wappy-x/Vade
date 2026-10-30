@@ -131,6 +131,8 @@ impl App {
 pub(crate) struct ApprovalReply {
     sender: mpsc::Sender<bool>,
     clock: Arc<ApprovalClock>,
+    /// The tool thread that asked: the reach of a yes goes to it alone.
+    asker: std::thread::ThreadId,
 }
 struct ApprovalClock {
     budget: Option<RunBudget>,
@@ -158,7 +160,12 @@ impl ApprovalReply {
                 budget,
                 state: Mutex::new(ApprovalState::default()),
             }),
+            asker: std::thread::current().id(),
         }
+    }
+
+    pub(crate) fn asker(&self) -> std::thread::ThreadId {
+        self.asker
     }
 
     pub(crate) fn open(&self) -> bool {

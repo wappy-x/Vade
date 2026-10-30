@@ -215,6 +215,9 @@ impl App {
                         Ok(Input::Eof) | Err(mpsc::TryRecvError::Disconnected) => {
                             input_done = true;
                             self.approval_input_closed = true;
+                            if let Some(approvals) = &self.approvals {
+                                approvals.set_interactive(false);
+                            }
                             if self.approval_reply.is_some() {
                                 self.cancel()?;
                             }
@@ -474,7 +477,7 @@ impl App {
             parts.push(folder.to_owned());
         }
         if self.config.mode == Mode::Agent {
-            // "ask (read-only allowlist runs; …)" → "approval: ask".
+            // "ask (ask for edits and commands; …)" → "approval: ask".
             let policy = self.config.approval.label();
             let short = policy.split([' ', '(']).next().unwrap_or(policy);
             parts.push(format!("approval: {short}"));
@@ -620,6 +623,8 @@ impl App {
                 let answer = match text.as_str() {
                     "y" | "Y" => Some("/approve"),
                     "n" | "N" => Some("/deny"),
+                    "s" | "S" if self.approval_command => Some("/approve session"),
+                    "p" | "P" if self.approval_command => Some("/approve project"),
                     _ => None,
                 };
                 if let Some(answer) = answer {
@@ -681,7 +686,7 @@ impl App {
                             self.input.remove_approval_command();
                         }
                     } else if self.input.text().contains('\n')
-                        && matches!(self.input.text().trim(), "/approve" | "/deny")
+                        && matches!(self.input.text().trim(), "/approve" | "/deny" | "/approve session" | "/approve project")
                     {
                         self.notice("Multiline approval text retained as draft. Type /approve or /deny on a new line, or clear the draft and press y or n.")?;
                     } else {

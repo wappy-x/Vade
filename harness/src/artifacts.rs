@@ -18,6 +18,11 @@ pub trait Access {
     fn check_capacity(&mut self) -> io::Result<()>;
     fn retain(&mut self, text: &str) -> io::Result<String>;
     fn read(&mut self, id: &str, offset: usize, length: usize, cap: usize) -> io::Result<String>;
+    /// Keep one shell approval decision with the session. Stores without a
+    /// journal keep nothing.
+    fn record_approval(&mut self, _decision: &Value) -> io::Result<()> {
+        Ok(())
+    }
 }
 #[derive(Default)]
 pub(crate) struct Archive {

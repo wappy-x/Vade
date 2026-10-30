@@ -1,7 +1,7 @@
 //! Native coding adapter. UI approvals are callbacks, never model-supplied flags.
 use crate::agent::{ToolError, ToolExecutor, ToolInvocation, WorkspaceTools, invalid_integer};
 use crate::json::{self, Value};
-use crate::shell::{self, ApprovalPolicy, CommandSpec};
+use crate::shell::{self, ApprovalPolicy, CommandSpec, permissions::Scope, safety::Class};
 use crate::tools::Workspace;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -23,6 +23,9 @@ pub struct CodingTools<'a, F> {
     project: Option<&'a crate::project::Snapshot>,
     shell_exclusions: shell::Exclusions,
     build_session: Option<&'a shell::BuildSession>,
+    /// Allow lists and prompt state shared with the terminal; None keeps the
+    /// preview callback as the only judge of Ask commands.
+    approvals: Option<&'a shell::permissions::Approvals>,
     uncertain: bool,
     memory: bool,
     check: Option<AutoCheck>,
@@ -117,7 +120,7 @@ pub fn definitions_with_web(reply_limit: usize, shell: bool, web: bool) -> Value
     };
     let Value::Array(extra) = json::parse(r#"[
       {"type":"function","function":{"name":"apply_patch","description":"Exact UTF-8 patch text ≤64 KiB/32 files; target and result files ≤4 MiB each. Markers: *** Begin Patch, *** Add File: path (+lines), *** Update File: path (optional *** Move to: path, then @@ with exact space/-/+ lines), *** Delete File: path (no body needed), *** End Patch. One enclosing plain/diff/patch code fence, annotated @@ headers and bare empty update context lines are accepted. Hunk numbers are ignored; old text still determines the target. Missing parent folders inside the workspace are created. Old text must match exactly and uniquely; a unique match that differs only in spaces or tabs is accepted and reported. Backslash No newline at end of file supported. Atomic per file; not a batch transaction. Add requires an absent file; Update requires an existing file. After a refused single-file Add, a retained correction may be offered: pass the JSON object {\"patch\":\"the exact header from the receipt\",\"retry\":true}; retry is a boolean, never an object. Supply only that header, optionally followed by a line ending, without re-emitting content. Retry still previews and checks the captured file state. Build after each patch. Approval policy applies.","parameters":{"type":"object","properties":{"patch":{"type":"string"},"retry":{"type":"boolean"}},"required":["patch"],"additionalProperties":false}}},
-      {"type":"function","function":{"name":"workspace_shell","description":"Supported only on macOS: Linux and other platforms return an unsupported_platform tool result without running commands. Use explicit argv. After an edit, check the changed component, inspect failure diagnostics and repair before completion. Read files with workspace_search, workspace_read_lines and workspace_read, not with cat/sed/head/tail/grep here. Run in workspace under macOS OS sandbox, no network, cleared environment, ≤64 KiB output. No implicit shell: for shell syntax explicitly request /bin/sh -c script, which requires approval in ask mode. timeout_ms 1–120000. Read-only allowlist runs without approval in ask: pwd, true, ls [-1] [relative paths], git status [--short], git diff [--stat], git log [--oneline|-n 1..100]. Bare names resolve to fixed system executables. Ask prompts for other commands. Auto runs all validated commands in this same OS sandbox and permits patches without asking; it never enables unsandboxed execution. Never denies all commands. Cancellation kills the process group. No credential or workspace hidden-file access. A private session directory supplies CARGO_TARGET_DIR, CARGO_HOME, TMPDIR, HOME and npm cache; Cargo is offline. Pre-existing target/node_modules stay inaccessible. Use cargo build --offline or cargo test --offline with the owner-selected Rust toolchain. Built binaries are at $CARGO_TARGET_DIR/debug/NAME, not target/debug; use cargo run --offline -q, or /bin/sh -c to expand that path. Do not retry unknown_outcome tools without inspecting state.","parameters":{"type":"object","properties":{"argv":{"type":"array","items":{"type":"string"}},"timeout_ms":{"type":"integer"}},"required":["argv","timeout_ms"],"additionalProperties":false}}}
+      {"type":"function","function":{"name":"workspace_shell","description":"Supported only on macOS: Linux and other platforms return an unsupported_platform tool result without running commands. Use explicit argv. After an edit, check the changed component, inspect failure diagnostics and repair before completion. Read files with workspace_search, workspace_read_lines and workspace_read, not with cat/sed/head/tail/grep here. Run in workspace under macOS OS sandbox, no network, cleared environment, ≤64 KiB output. No implicit shell: for shell syntax explicitly request /bin/sh -c script; the script is checked like any command. timeout_ms 1–120000. In ask mode, every command asks unless the user's allow list names its exact argv. Commands such as rm -rf / are blocked in every mode. Bare names resolve to fixed system executables. Auto runs all other validated commands in this same OS sandbox and permits patches without asking; it never enables unsandboxed execution. Never denies all commands. Cancellation kills the process group. No credential or workspace hidden-file access. A private session directory supplies CARGO_TARGET_DIR, CARGO_HOME, TMPDIR, HOME and npm cache; Cargo is offline. Pre-existing target/node_modules stay inaccessible. Use cargo build --offline or cargo test --offline with the owner-selected Rust toolchain. Built binaries are at $CARGO_TARGET_DIR/debug/NAME, not target/debug; use cargo run --offline -q, or /bin/sh -c to expand that path. Do not retry unknown_outcome tools without inspecting state.","parameters":{"type":"object","properties":{"argv":{"type":"array","items":{"type":"string"}},"timeout_ms":{"type":"integer"}},"required":["argv","timeout_ms"],"additionalProperties":false}}}
     ]"#).expect("static tool schema") else { unreachable!() };
     // Native code reads stay inline; source discovery should not become a
     // chain of whole-file artifact pages. The generic read-only adapter keeps
@@ -179,6 +182,7 @@ where
             project: None,
             shell_exclusions: shell::Exclusions::default(),
             build_session: None,
+            approvals: None,
             uncertain: false,
             memory: false,
             check: None,
@@ -374,6 +378,10 @@ where
     }
     pub fn with_shell_exclusions(mut self, exclusions: shell::Exclusions) -> Self {
         self.shell_exclusions = exclusions;
+        self
+    }
+    pub fn with_approvals(mut self, approvals: &'a shell::permissions::Approvals) -> Self {
+        self.approvals = Some(approvals);
         self
     }
     pub fn with_build_session(mut self, session: &'a shell::BuildSession) -> Self {
@@ -977,21 +985,53 @@ where
                     return bounded("Host check refused: select the pinned Rust toolchain with --shell-toolchain before using check_profile.".into(), invocation.max_output_bytes);
                 }
                 spec.validate().map_err(|_| ToolError::InvalidArguments("argv must be nonempty and bounded; timeout_ms must be within the command limit"))?;
+                // The class decides who must agree. It never changes the sandbox.
+                // Every command asks unless a rule names its exact argv; the
+                // experimental checker's safe class counts only when it is on.
+                let checker = self.approvals.is_some_and(shell::permissions::Approvals::checker);
+                let verdict = shell::policy::decide(&spec.argv, self.workspace.root(), checker);
+                let reasons = verdict.reasons();
+                let id = invocation.call.id.as_str();
+                if verdict.class == Class::Blocked {
+                    let _ = self.record_shell(id, &spec, &verdict, "blocked", &[]);
+                    return bounded(shell_refusal("blocked", &format!("Command blocked and not run: {reasons}. Vade never runs this command, also not with --yes. Use a command that changes only files inside the workspace.")), invocation.max_output_bytes);
+                }
                 if self.policy == ApprovalPolicy::Never {
+                    let _ = self.record_shell(id, &spec, &verdict, "denied_by_policy", &[]);
                     return Err(ToolError::Denied);
                 }
                 // All commands below use the same OS sandbox, including explicit
                 // shells and workspace binaries. Auto changes approval only;
                 // it cannot widen that boundary or select unsandboxed execution.
                 // Unsupported platforms were refused before this adapter path.
-                let needs_approval = self.policy == ApprovalPolicy::Ask && !spec.allowlisted();
+                // The read-only list picks the sandbox only; it never cancels an Ask.
+                let ask = verdict.class == Class::Ask;
+                let listed = if ask { self.approvals.and_then(|a| a.allowed(&spec.argv, &verdict)) } else { None };
+                let needs_approval = self.policy == ApprovalPolicy::Ask && ask && listed.is_none();
+                if needs_approval && self.approvals.is_some_and(|a| !a.interactive()) {
+                    let _ = self.record_shell(id, &spec, &verdict, "denied_no_terminal", &[]);
+                    return bounded(shell_refusal("approval_required", &format!("Command not run: it needs approval ({reasons}), and no one can approve it in this non-interactive run. Do not retry it; finish without it. The person who runs Vade can allow it with --yes or with an exact rule in .vade/permissions.json.")), invocation.max_output_bytes);
+                }
+                let suggested = shell::policy::rule_for(&spec.argv, &verdict).map(|rule| vec![rule]);
+                let safety = match &listed {
+                    Some(rule) => format!("Safety: {}; allowed by {}", verdict.class.label(), listed_rules(std::slice::from_ref(rule)).join(", ")),
+                    None if needs_approval => format!(
+                        "Safety: needs approval: {reasons}. Answer y (once){}, or n (deny).",
+                        if suggested.is_some() && self.approvals.is_some() { ", s (this session), p (this project)" } else { "" }
+                    ),
+                    None if ask => format!("Safety: needs approval: {reasons}; prompts are off (--yes or --approval auto)"),
+                    None => "Safety: safe (read-only, build or test command)".into(),
+                };
+                // No clear before the prompt: the terminal records the reach of
+                // every yes (once, session or project) just before it replies, so
+                // another agent cannot erase an answer meant for this one.
                 let ephemeral_session = shell::BuildSession::default();
                 let build_session = self.build_session.unwrap_or(&ephemeral_session);
                 if !(self.preview)(
                     Preview {
                         title: "Command",
                         detail: &format!(
-                            "{}\nScan exclusions (no reads or writes, every depth): {}\nBuild environment: {}",
+                            "{}\nScan exclusions (no reads or writes, every depth): {}\nBuild environment: {}\n{safety}",
                             spec.preview(),
                             self.shell_exclusions.describe(),
                             build_session.description()
@@ -1000,7 +1040,26 @@ where
                     },
                     cancel,
                 ) {
+                    if needs_approval {
+                        let _ = self.record_shell(id, &spec, &verdict, "denied", &[]);
+                    }
                     return Err(ToolError::Denied);
+                }
+                if ask {
+                    let scope = if needs_approval { self.approvals.map_or(Scope::Once, |approvals| approvals.take_choice()) } else { Scope::Once };
+                    let (decision, rules) = if needs_approval {
+                        ("approved", approval_entries(scope, suggested.as_deref()))
+                    } else if let Some(rule) = &listed {
+                        ("allowed_by_rule", listed_rules(std::slice::from_ref(rule)))
+                    } else {
+                        ("allowed_by_flag", Vec::new())
+                    };
+                    // An approval that cannot reach the journal does not run,
+                    // and its rule is not saved.
+                    self.record_shell(id, &spec, &verdict, decision, &rules).map_err(|_| ToolError::Failed)?;
+                    if needs_approval {
+                        self.remember_approval(scope, suggested, cancel);
+                    }
                 }
                 let cap = invocation
                     .max_output_bytes
@@ -1078,6 +1137,58 @@ where
             _ => Err(ToolError::UnknownTool),
         }
     }
+}
+impl<F> CodingTools<'_, F>
+where
+    F: FnMut(Preview<'_>, &AtomicBool) -> bool,
+{
+    /// Save the rules for the reach the person chose (session or project),
+    /// after the journal holds the approval, and show where they went.
+    fn remember_approval(&mut self, scope: Scope, suggested: Option<Vec<shell::permissions::Rule>>, cancel: &AtomicBool) {
+        let Some(approvals) = self.approvals else { return };
+        if scope == Scope::Once {
+            return;
+        }
+        let notice = match &suggested {
+            Some(rules) => match approvals.remember(scope, rules) {
+                Ok(place) => {
+                    let text: Vec<String> = rules.iter().map(shell::permissions::rule_text).collect();
+                    format!("Added {} to the allow list for {place}. Matching commands now run without a prompt.", text.join(", "))
+                }
+                Err(error) => format!("Allow list not saved ({error}). The command was approved once."),
+            },
+            None => "This command cannot go on an allow list: a rule names one exact command whose words are plain letters, digits and - _ . , / : = + @, with no root, credentials or code sent into a shell. It was approved once.".into(),
+        };
+        let _ = (self.preview)(Preview { title: "Allow list", detail: &notice, approval_required: false }, cancel);
+    }
+    /// One journal record per approval decision; safe commands need none.
+    fn record_shell(&mut self, id: &str, spec: &CommandSpec, verdict: &shell::safety::Verdict, decision: &str, rules: &[String]) -> std::io::Result<()> {
+        let Some(journal) = self.artifacts.as_mut() else { return Ok(()) };
+        let strings = |items: &[String]| Value::Array(items.iter().cloned().map(Value::String).collect());
+        journal.record_approval(&Value::Object(vec![
+            ("tool_call_id".into(), Value::String(id.into())),
+            ("argv".into(), strings(&spec.argv)),
+            ("class".into(), Value::String(verdict.class.label().into())),
+            ("reasons".into(), Value::String(verdict.reasons())),
+            ("decision".into(), Value::String(decision.into())),
+            ("rules".into(), strings(rules)),
+        ]))
+    }
+}
+/// A refused command's tool result: nothing ran, so it is not an uncertain effect.
+fn shell_refusal(error: &str, message: &str) -> String {
+    format!("{{\"ok\":false,\"error\":{},\"message\":{}}}", json::quote(error), json::quote(message))
+}
+/// The journal's entries for an approval: `once`, or each rule the person
+/// chose to add with its reach. The Allow list notice says if the save failed.
+fn approval_entries(scope: Scope, suggested: Option<&[shell::permissions::Rule]>) -> Vec<String> {
+    match suggested {
+        Some(rules) if scope != Scope::Once => rules.iter().map(|rule| format!("{}: {}", scope.label(), shell::permissions::rule_text(rule))).collect(),
+        _ => vec!["once".into()],
+    }
+}
+fn listed_rules(rules: &[(Scope, shell::permissions::Rule)]) -> Vec<String> {
+    rules.iter().map(|(scope, rule)| format!("{}: {}", scope.label(), shell::permissions::rule_text(rule))).collect()
 }
 fn command_exit(raw: &str) -> Option<i32> {
     raw.lines()

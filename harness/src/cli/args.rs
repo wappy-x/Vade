@@ -82,8 +82,9 @@ pub(crate) struct Config {
     pub(crate) check: Option<(String, &'static str)>,
     /// Agent: start MCP servers from the config files; `main` turns it on.
     pub(crate) mcp: bool,
-    /// The Vade home that holds the user MCP list when chat state is not in
-    /// a Vade home (`--state-in-project`).
+    /// The Vade home that the launcher selected, for the user MCP list and
+    /// the user shell allow list, when chat state is not in a Vade home
+    /// (`--state-in-project`).
     pub(crate) mcp_home: Option<PathBuf>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,6 +141,21 @@ impl fmt::Display for ParseError {
 }
 
 impl Config {
+    /// The selected Vade home for the user's own lists (MCP servers, shell
+    /// allow list): the chat-state home, or with chat state in the project
+    /// the home passed with `--mcp-home`, else `VADE_HOME` or `~/.vade`.
+    /// The launcher removes `VADE_HOME` and passes `--mcp-home`, so a list
+    /// in another home never applies.
+    pub(crate) fn vade_home(&self) -> Option<PathBuf> {
+        match &self.state {
+            Some(vade_harness::tools::StateLocation::Home(home)) => Some(home.clone()),
+            Some(vade_harness::tools::StateLocation::Project) => self.mcp_home.clone().or_else(|| match vade_harness::tools::StateLocation::from_env() {
+                Ok(vade_harness::tools::StateLocation::Home(home)) => Some(home),
+                _ => None,
+            }),
+            None => self.mcp_home.clone(),
+        }
+    }
     pub(crate) fn context_budget(&self, contract: &vade_harness::contract::Context) -> usize {
         usize::try_from(contract.token_limit(self.generation.context_limit)).unwrap_or(usize::MAX)
     }
@@ -299,6 +315,12 @@ impl Config {
                     }
                     used.push("--state-in-project");
                     config.state = Some(vade_harness::tools::StateLocation::Project);
+                }
+                "--yes" | "--dangerously-skip-prompts" => {
+                    if used.contains(&"--yes") {
+                        return Err("--yes (or --dangerously-skip-prompts) was specified more than once");
+                    }
+                    used.push("--yes");
                 }
                 "--no-check" => {
                     if no_check {
@@ -591,8 +613,17 @@ impl Config {
         // unrelated option happened to occur last.
         diagnostic.option = None;
         diagnostic.mode = config.mode;
+        if used.contains(&"--yes") {
+            if used.contains(&"--approval") && config.approval != ApprovalPolicy::Auto {
+                return Err("choose --yes or --approval ask|never, not both");
+            }
+            // Prompts off: edits and commands run without asking, still in the
+            // sandbox. Blocked commands stay blocked.
+            config.approval = ApprovalPolicy::Auto;
+        }
         if config.mode != Mode::Agent
             && (used.contains(&"--approval")
+                || used.contains(&"--yes")
                 || used.contains(&"--resume")
                 || used.contains(&"--name")
                 || used.contains(&"--context-tokens")
@@ -605,7 +636,7 @@ impl Config {
                 || used.contains(&"--no-check"))
         {
             return Err(
-                "--approval, --resume, --name, --context-tokens, --agent-time-limit-seconds, --config, --rules-scope, --shell-exclude, --shell-toolchain, --check and --no-check require agent mode",
+                "--approval, --yes, --resume, --name, --context-tokens, --agent-time-limit-seconds, --config, --rules-scope, --shell-exclude, --shell-toolchain, --check and --no-check require agent mode",
             );
         }
         if used.contains(&"--vade-home") && used.contains(&"--state-in-project") {

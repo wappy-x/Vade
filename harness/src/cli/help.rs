@@ -48,6 +48,8 @@ Options:
   --name NAME           Agent: a display name for this session (also renames on --resume)
   --approval POLICY     Agent: ask (default), auto, never
                         Cancel may not stop programs that daemonize; they stay sandboxed
+  --yes                 Agent: no prompts (same as --approval auto); blocked commands
+                        stay blocked. Alias: --dangerously-skip-prompts
   --context-tokens N    Agent: override server context budget; default from capabilities
   --no-compact          Agent: no automatic compaction; /compact still works
   --prewarm-compaction  Agent: opt-in one-token cache warm after compaction; reply discarded
@@ -107,10 +109,13 @@ Conversation commands:
 Agent tools: workspace_read/list, workspace_search, workspace_read_lines, workspace_edit_lines, apply_patch, workspace_shell (macOS only), tool_output_read,
 skill_read, workspace_manifest, workspace_symbols.
 Patch previews are shown before approval. ask requires y/n (or /approve, /deny) for
-edits and commands outside its read-only allowlist. auto permits validated exact
+edits and for every command; only a command whose exact argv is on an allow list
+runs without asking. For a command of plain words, s allows that exact command for
+the session and p saves it to .vade/permissions.json. Fork bombs and rm -rf / are always blocked. auto permits validated exact
 patches and all commands inside the macOS OS sandbox without asking. It never
 authorizes commands outside the sandbox; no unsandboxed fallback exists.
-never denies edits and commands. Noninteractive runs deny approval requests.
+never denies edits and commands. Noninteractive runs deny approval requests;
+a command that needs approval returns a tool error. See docs/shell-safety.md.
 Commands use explicit argv, cleared environment, macOS sandbox, no network,
 120-second maximum timeout, capped output, and process-group cancellation.
 On Linux the agent is not offered workspace_shell and is told it cannot run
@@ -174,6 +179,8 @@ Usage: vade-harness agent --endpoint URL --model NAME --workspace PATH [OPTIONS]
   --name NAME           Display name for this session; renames a resumed one
   --approval POLICY     ask (default), auto, never
                         Cancel may not stop programs that daemonize; they stay sandboxed
+  --yes                 No prompts (same as --approval auto); blocked commands stay
+                        blocked. Alias: --dangerously-skip-prompts
   --context-tokens N    Override server context budget (fallback 131072)
   --agent-time-limit-seconds N Active work per request (default 1200; 0 disables)
   --config PATH         Native JSON config; time limit and auto_continue settings

@@ -260,13 +260,18 @@ There are three approval policies:
 
 | Policy | What runs without asking |
 | --- | --- |
-| `--approval ask` (default) | Allowlisted forms of `pwd`, `true`, `ls`, `cat`, `git status`, `git diff` and `git log`. Edits, and commands outside the [read-only allowlist](docs/agent-tools.md#commands-and-approvals), wait for you. |
-| `--approval auto` | Validated exact patches and all validated commands, inside the existing macOS sandbox, after preview. That includes programs inside the workspace, such as `./scripts/build.sh`, and explicit `/bin/sh -c` commands. |
+| `--approval ask` (default) | Only commands whose exact argv is on an allow list (empty by default; see [shell safety](../docs/shell-safety.md)). Edits and every other command wait for you. |
+| `--approval auto` | Validated exact patches and all validated commands, inside the existing macOS sandbox, after preview. `--yes` and `--dangerously-skip-prompts` select this policy. That includes programs inside the workspace, such as `./scripts/build.sh`, and explicit `/bin/sh -c` commands. |
 | `--approval never` | Nothing: it denies both writes and commands. |
 
 MCP tool calls follow the same policy: `ask` asks before each call, `auto`
 runs it after preview, and `never` denies it. See [MCP tools in
 chat](../docs/mcp.md).
+
+In every policy, blocked commands (fork bombs, `rm -rf /` and similar) never
+run. [Shell safety](../docs/shell-safety.md) describes the three command
+classes, the `s`/`p` answers and the allow lists in `.vade/permissions.json`
+and `~/.vade/permissions.json`.
 
 **Answering a prompt.** Under `ask`, type `y` or `n` on an empty line (or
 `/approve` / `/deny`) in the terminal. The patch preview shows additions and
@@ -1169,7 +1174,10 @@ used. `--no-check` ignores the file.
 After any tool round whose patches changed files, the harness runs
 `/bin/sh -c COMMAND` as a journaled `workspace_shell` call with ID prefix
 `vade-check-`. It runs under the same approval policy and macOS sandbox, with no
-prompt in `--approval auto`.
+prompt in `--approval auto`. Under the default `--approval ask` it asks each
+time, unless an exact allow-list rule names the whole argv. A check with a
+space in it, such as `cargo test`, never gets a rule: the space is not a
+plain-word character.
 
 - The model gets the exit status, with matching error lines first and then the
   last lines, within about 3.5 KiB. Longer raw output stays in a session

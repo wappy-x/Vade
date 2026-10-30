@@ -20,6 +20,7 @@ Vade's main pages, grouped by what you want to do.
 | [Installation](../INSTALL.md) | What you need first, downloading the model at its pinned revision, and launching it on the Spark. It also covers the optional controller and linked-Spark routes |
 | [First chat on one Spark](../harness/docs/first-run.md) | What `vade launch` does: release bundle or source build, how it finds the model you downloaded, the settings it saves, and how to start and stop later |
 | [Download models](pull-models.md) | `vade pull`: download a checkpoint from Hugging Face with resume and file checks. `vade models`: list local models and what can serve them |
+| [Shell safety](shell-safety.md) | Agent commands ask by default; exact allow-list rules, blocked commands, `--yes`, runs without a terminal and the experimental checker |
 | [CLI reference](../cli/README.md) | The `vade` commands: install, start, chat, check exactness, benchmark, diagnose, recover and stop |
 | [Saved chat sessions](sessions.md) | List, resume, export and delete your `vade chat` sessions |
 | [Reading files](reading-files.md) | How `vade read` and the agent turn documents (text, HTML, CSV, RTF, data, code) into Markdown with a header line |

@@ -135,10 +135,11 @@ Child edits and commands still go through the parent's approval policy
 | `--approval` | Child edits and commands |
 | --- | --- |
 | `never` | Denied. |
-| `ask` | Edits need the terminal's exact one-time approval. So do commands outside the [native read-only allowlist](agent-tools.md#commands-and-approvals); allowlisted commands run after preview without asking. |
-| `auto` | Allowlisted commands run after preview without asking. Validated exact patches are applied, and all other validated commands run inside the same macOS sandbox, after preview. It never grants broader filesystem or network access. |
+| `ask` | Edits need the terminal's exact one-time approval. Commands whose exact argv is on an allow list run after preview; every other command needs approval (see [shell safety](../../docs/shell-safety.md)). Blocked commands are refused. |
+| `auto` | Validated exact patches are applied, and commands that are not blocked run inside the same macOS sandbox, after preview. Blocked commands are refused. It never grants broader filesystem or network access. |
 
-Noninteractive runs deny operations that need approval.
+Noninteractive runs deny operations that need approval, unless an allow
+list approves the command or prompts are off (`--yes`).
 
 Parent and child previews wait in one cancellable queue and are shown one at a
 time, with a single combined 1 MiB display budget. That way concurrent requests
