@@ -71,51 +71,52 @@ and the coding agent. Both use the engine's API.
 > follow the private-preview notes in
 > [INSTALL step 2](INSTALL.md#step-2-get-the-code).
 
-[INSTALL.md](INSTALL.md) is the full guide.
+[INSTALL.md](INSTALL.md) is the full guide. If you are an AI agent setting
+up Vade for someone, read the [agent quickstart](docs/agents/quickstart.md).
 
-### One Spark, from source
-
-This is the main route. It builds the current main, with every change under
-Unreleased in the changelog.
+### Quick start on one Spark
 
 You need an idle DGX Spark with Git, a C linker (`cc`), curl and a working
 NVIDIA driver. You also need the complete 102.26 GB checkpoint under
 `~/models`. INSTALL.md shows how to add missing tools and how to download the
 model.
 
-Open a terminal on the Spark and paste this block:
+Open a terminal on the Spark and run these five commands:
 
 ```sh
-git clone --branch main https://github.com/wappy-x/vade.git "$HOME/vade" &&
-  sh "$HOME/vade/scripts/install.sh" --launch
-```
-
-The script does these steps:
-
-1. It installs the pinned Rust tools that are missing.
-2. It builds Vade.
-3. It checks this Spark and the model.
-4. It starts the engine and opens chat in the current folder.
-
-The script needs no sudo. It does not change shell profiles or model files.
-Chat can edit files in the folder where it opens. So ask it only to say
-hello, then type `/exit`. The engine keeps running until you run
-`vade down`.
-
-In each new shell, put `cargo` and `vade` on your `PATH` first:
-
-```sh
+git clone --branch main https://github.com/wappy-x/vade.git "$HOME/vade"
+sh "$HOME/vade/scripts/install.sh"
 export PATH="$HOME/.cargo/bin:$HOME/vade/cli/target/release:$PATH"
+vade setup
+vade chat
 ```
 
-**No model yet?** The script builds the `vade` command first, then checks the
-model with `vade detect`. Without the model it stops at that check. Put `vade`
-on your `PATH` as above, download and check the model, then run the script
-again (not the clone line, because the folder exists now):
+1. The clone gets the current main, with every change under Unreleased in
+   the changelog.
+2. The script installs the pinned Rust tools that are missing, builds `vade`,
+   checks this Spark and the model, and installs the engine, the GPU kernels
+   and the chat program. It needs no sudo, and it does not change shell
+   profiles or model files.
+3. The `export` line puts `cargo` and `vade` on your `PATH`. It lasts for this
+   shell only, so run it again in each new shell.
+4. `vade setup` uses the model and settings the script saved. It starts the
+   engine, then checks everything with `vade doctor`. Without the script,
+   or from another computer, it first asks a few questions: which Sparks,
+   which checkpoint (for 2, 4 or 6 Sparks) and where the model is.
+5. `vade chat` opens the coding agent in the current folder. The agent can
+   edit files there, so ask it only to say hello. Type `/exit` to leave. The
+   engine keeps running until you run `vade down`.
+
+Each step stops at the first problem and prints what to do next. Run the
+same command again after the fix; work that is already done is reused.
+
+**No model yet?** The script builds `vade` first, then stops at the model
+check. Run the `export` line, download the model, then run the script again
+(not the clone line, because the folder exists now):
 
 ```sh
 vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300
-sh "$HOME/vade/scripts/install.sh" --launch
+sh "$HOME/vade/scripts/install.sh"
 ```
 
 [Download models](docs/pull-models.md) explains resume, the file checks,
@@ -144,6 +145,10 @@ The [INSTALL quick start](INSTALL.md#quick-start-with-an-existing-model)
 covers an existing checkout, a checkpoint outside `~/models` and what to do
 when a step fails.
 
+**Want chat right away?** `sh "$HOME/vade/scripts/install.sh" --launch`
+installs, starts the engine and opens chat in one step. Later,
+`vade launch` does the same.
+
 **Optional: the prebuilt bundle.** The
 [v0.1.0 release page](https://github.com/wappy-x/vade/releases/tag/v0.1.0)
 has a prebuilt launcher bundle and its `SHA256SUMS`. The bundle skips the
@@ -164,9 +169,11 @@ that reaches each Spark over SSH. One of the Sparks can be the controller.
    [steps 1 to 3](INSTALL.md#step-1-prerequisites).
 2. Cable the Sparks and give each link an address. See
    [hardware and network setup](docs/network-setup.md).
-3. Set up the controller with [Route B](INSTALL.md#route-b-from-a-controller).
-   Then follow [two and more Sparks](INSTALL.md#two-and-more-sparks). The
-   start command is `vade up --sparks 2`.
+3. On the controller, build `vade` as in
+   [Route B](INSTALL.md#route-b-from-a-controller). Then run `vade setup`. Give
+   the Sparks in cable order and each Spark's address on each cable. Setup
+   writes the controller config, installs on every Spark and starts them.
+   [Two and more Sparks](INSTALL.md#two-and-more-sparks) has the details.
 
 Two Sparks run the tensor split. You set nothing. Both Sparks work on every
 token, so one chat writes faster and a long prompt is read faster. Four or
@@ -431,6 +438,8 @@ and [Credits](CREDITS.md) keeps the source attribution.
 | --- | --- |
 | [Why Vade](docs/why-vade.md) | What Vade is, why it exists, what "exact" means and what Vade is not |
 | [INSTALL.md](INSTALL.md) | The whole install, starting with one Spark |
+| [Agent quickstart](docs/agents/quickstart.md) | For AI agents: exact commands, exit codes, where the files are and what to do on each error |
+| [Install and flows](docs/design/install-and-flows.md) | One page on the steps from install to a running engine, and what each prints and how it fails |
 | [FP8 install](docs/install-fp8.md) | The FP8 checkpoint on 2, 4 or 6 Sparks: build, weights, config, start and measured speeds |
 | [First run](harness/docs/first-run.md) | The launcher on your Spark, saved settings and later runs |
 | [Download models](docs/pull-models.md) | `vade pull` and `vade models`: download a checkpoint from Hugging Face with resume and file checks, then see what can serve it |

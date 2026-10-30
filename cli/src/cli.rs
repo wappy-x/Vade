@@ -39,6 +39,8 @@ pub enum Command {
     DoctorFabric { ring: bool },
     /// `vade install`.
     Install,
+    /// `vade setup`: ask a few questions, then install, start and check.
+    Setup(SetupOptions),
     /// `vade detect`.
     Detect,
     /// `vade config`: which setup is selected and what it holds.
@@ -65,6 +67,20 @@ pub enum Command {
 pub struct ChatOptions {
     pub resume: Option<String>,
     pub name: Option<String>,
+}
+
+/// Answers for `vade setup` given as flags. `--yes` takes the defaults for
+/// the rest and never asks.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SetupOptions {
+    pub yes: bool,
+    /// SSH destinations in cable order; empty means this Spark (or ask).
+    pub hosts: Vec<String>,
+    /// `Some(true)` for `--fp8`, `Some(false)` for `--fp4-local`.
+    pub fp8: Option<bool>,
+    pub model: Option<String>,
+    /// `--link FROM:TO=ADDRESS`: FROM's own address on its cable to TO.
+    pub links: Vec<(String, String, String)>,
 }
 
 /// Options for `vade run qwen3-8b`: source checkouts or a release, local
@@ -256,6 +272,8 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
         let ring = args.get(2) == Some(&"--ring");
         if args.len() != 2 + usize::from(ring) { return Err("Use vade doctor --fabric [--ring] [--json] [--dry-run]. No other doctor options are supported.".into()); }
         Command::DoctorFabric { ring }
+    } else if command == "setup" {
+        Command::Setup(parse_setup(&args[1..])?)
     } else if matches!(command, "up" | "launch") {
         let options = parse_up(&args[1..]).map_err(|error| error.replace("vade up", &format!("vade {command}")))?;
         if command == "launch" { Command::Launch(options) } else { Command::Up(options) }
@@ -289,7 +307,7 @@ fn known_command(command: &str) -> bool {
     matches!(
         command,
         "run" | "up" | "down" | "status" | "logs" | "chat" | "sessions" | "doctor" | "install" | "update" | "version" | "detect" | "launch" | "config"
-            | "pull" | "models"
+            | "pull" | "models" | "setup"
     )
 }
 
@@ -323,6 +341,53 @@ fn parse_sessions(args: &[&str]) -> Result<Vec<String>, String> {
         ["delete", value] => vec!["delete".into(), id(Some(value))?],
         _ => return Err(usage.into()),
     })
+}
+
+fn parse_setup(args: &[&str]) -> Result<SetupOptions, String> {
+    let mut options = SetupOptions::default();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index];
+        if flag != "--link" && !seen.insert(flag) {
+            return Err(format!("Use {flag} only once. Run vade setup --help."));
+        }
+        match flag {
+            "--yes" => options.yes = true,
+            "--fp8" | "--fp4-local" => {
+                if options.fp8.replace(flag == "--fp8").is_some() { return Err("Choose --fp4-local or --fp8. Run vade setup --help.".into()); }
+            }
+            "--hosts" | "--model" | "--link" => {
+                let value = option_value(args, index).ok_or_else(|| format!("Give {flag} a value. Run vade setup --help."))?;
+                match flag {
+                    "--hosts" => {
+                        options.hosts = value.split(',').map(str::to_owned).collect();
+                        let mut unique = std::collections::BTreeSet::new();
+                        if options.hosts.iter().any(|host| !crate::config::ssh_destination(host) || !unique.insert(host)) {
+                            return Err("Give --hosts distinct SSH destinations (what you type after ssh), separated by commas, with no spaces.".into());
+                        }
+                    }
+                    "--model" => options.model = Some(value.into()),
+                    _ => {
+                        let link = value.split_once('=').and_then(|(ends, address)| ends.split_once(':').map(|(from, to)| (from.to_owned(), to.to_owned(), address.to_owned())));
+                        match link {
+                            Some(link) if crate::config::fabric_address(&link.2) => {
+                                if options.links.iter().any(|(from, to, _)| *from == link.0 && *to == link.1) {
+                                    return Err(format!("Give --link {}:{} only once: each cable end has one address.", link.0, link.1));
+                                }
+                                options.links.push(link);
+                            }
+                            _ => return Err("Give --link as FROM:TO=ADDRESS: FROM's own address on its cable to TO, without a port. Run vade setup --help.".into()),
+                        }
+                    }
+                }
+                index += 1;
+            }
+            _ => return Err(unknown_option(flag, "setup", &["--hosts", "--model", "--link"])),
+        }
+        index += 1;
+    }
+    Ok(options)
 }
 
 fn parse_up(args: &[&str]) -> Result<UpOptions, String> {

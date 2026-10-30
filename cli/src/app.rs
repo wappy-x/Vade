@@ -21,6 +21,8 @@ mod plan;
 mod resident;
 mod replicas;
 use deployment::REMOTE_STORAGE_GUARD;
+/// The pinned Rust toolchains of a source build.
+pub(crate) use diagnostics::{HOST_TOOLCHAIN, KERNEL_TOOLCHAIN};
 use crate::cli::{Command, UpOptions};
 use crate::config::{Config, Machine};
 use crate::runner::{self, Exec, Output, Runner, quote, remote_path};

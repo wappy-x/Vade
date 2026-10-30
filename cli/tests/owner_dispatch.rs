@@ -558,8 +558,14 @@ fn new_local_defaults_cannot_hide_a_default_controller_record() {
     }
     fs::remove_dir(&config).unwrap();
     for command in ["launch", "install", "up"] {
-        let text = stdout(f.command(false).arg(command).bounded_output().unwrap());
-        assert!(text.contains(f.owner.join("config").to_str().unwrap()));
+        let output = f.command(false).arg(command).bounded_output().unwrap();
+        // Off a Spark, a first install is a controller's, which vade setup writes.
+        if command == "install" && !cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+            assert_eq!(output.status.code(), Some(1), "{output:?}");
+            assert!(String::from_utf8_lossy(&output.stderr).contains("hint: Run vade setup"), "{output:?}");
+            continue;
+        }
+        assert!(stdout(output).contains(f.owner.join("config").to_str().unwrap()));
     }
 }
 

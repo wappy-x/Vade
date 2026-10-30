@@ -101,6 +101,25 @@ pub(super) fn refresh<R: Runner>(root: &Path, runner: &mut R) -> Result<Fields, 
     outcome
 }
 
+/// The `vade install --dry-run` rows for the files: where they come from,
+/// the toolchain a build needs, and whether an install is in place.
+pub(super) fn plan(root: &Path) -> Result<Vec<(&'static str, String)>, String> {
+    let shown = |path: &Path| text::terminal_text(&path.to_string_lossy()).into_owned();
+    let prebuilt = "none; the bundle is prebuilt".to_owned();
+    let (files, toolchain) = match bundle_path()? {
+        Some(bundle) if std::env::var_os("VADE_BUNDLE").is_some() => (format!("the bundle in VADE_BUNDLE, {}", shown(&bundle)), prebuilt),
+        Some(bundle) => (format!("the launcher bundle next to vade, {}", shown(&bundle)), prebuilt),
+        None => (source_path().map_or_else(|error| error, |source| format!("a source build of {}", shown(&source))),
+            format!("Rust {} and {}", crate::app::HOST_TOOLCHAIN, crate::app::KERNEL_TOOLCHAIN)),
+    };
+    let installed = match inspect(root)? {
+        Installed::Ready(_) => "yes; files that still match their record are reused".into(),
+        Installed::Changed(name) => format!("yes, but {name} changed, so it is staged again"),
+        Installed::Missing => "not yet".into(),
+    };
+    Ok(vec![("Files", files), ("Toolchain", toolchain), ("Installed", installed)])
+}
+
 fn bundle_path() -> Result<Option<PathBuf>, String> {
     if let Some(path) = std::env::var_os("VADE_BUNDLE") {
         let path = PathBuf::from(path);
@@ -129,7 +148,7 @@ fn bundle_fields(bundle: &Path) -> Result<Fields, String> {
     Ok(fields)
 }
 
-fn source_path() -> Result<PathBuf, String> {
+pub(super) fn source_path() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("VADE_SOURCE") {
         let path = PathBuf::from(path);
         if !path.is_absolute() || !is_source(&path) {

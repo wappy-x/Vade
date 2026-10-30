@@ -32,6 +32,7 @@ fn top(on: bool) -> String {
     };
     let mut out = format!("{} runs Qwen3.8 Flash-Next FP4-Local on your DGX Spark.\n\n{}\n", style::style(Token::Title, "Vade", on), heading("Examples:"));
     out += &style::table(&[
+        ("vade setup", "Answer a few questions, then install and start".into()),
         ("vade launch", "Start on this Spark, then chat".into()),
         ("vade status", "See what is running".into()),
         ("vade doctor", "Check the setup, then PASS or FAIL".into()),
@@ -39,6 +40,7 @@ fn top(on: bool) -> String {
     ], 2);
     out += &format!("\n{} vade <COMMAND> [OPTIONS]\n\n", heading("Usage:"));
     out += &group("Start and stop:", &[
+        ("setup", "Ask which Sparks, checkpoint and model; install, start, check"),
         ("launch", "Install if needed, start on this Spark, then open chat"),
         ("up", "Start without chat (this Spark, or Sparks from a controller)"),
         ("down", "Stop what vade started"),
@@ -216,15 +218,37 @@ fn page(command: &str) -> Option<Page<'static>> {
                 TRANSPORT, LIFECYCLE,
             ],
         },
-        "install" => Page {
-            summary: "Save local defaults and install the engine and chat.",
-            usage: &["vade install [--dry-run]"],
-            options: &[DRY_RUN],
-            examples: &["vade install", "VADE_CONFIG=cluster.conf vade install --dry-run"],
+        "setup" => Page {
+            summary: "Ask a few questions, then install, start and check Vade.",
+            usage: &["vade setup [OPTIONS]"],
+            options: &[
+                ("--yes", "Ask nothing; take the defaults and the flags below"),
+                ("--hosts a,b", "Sparks to drive, as you type them after ssh, in cable order"),
+                ("--fp8", "The FP8 checkpoint (2, 4 or 6 Sparks); --fp4-local is the default"),
+                ("--model PATH", "The model folder, absolute or under ~/ (on each Spark from a controller)"),
+                ("--link FROM:TO=ADDR", "FROM's own address on its cable to TO; once per cable end"),
+                ("--dry-run", "Print the answers, the config and the steps; change nothing"),
+            ],
+            examples: &["vade setup", "vade setup --yes", "vade setup --yes --hosts spark-a", "vade setup --yes --hosts spark-a --dry-run"],
             notes: &[
-                "Model downloads stay in your hands.",
-                "For a fresh local installation or saved owner defaults without VADE_CONFIG: detect existing weights, save defaults once in ~/.vade/config, and stage a local engine and chat program. No hand editing is needed.",
-                "With VADE_CONFIG, or a default controller config before local setup: check prerequisites, copy an exact-source SHA256-verified prebuilt_dir bundle or build source, then check the harness. Model inventory checks overlap copy/build and are cached.",
+                "Asks which Sparks to use (on a Spark the default is this Spark), FP4-Local or FP8 (only for 2, 4 or 6 Sparks), and where the model is. Each question shows its default in brackets; press Enter to take it.",
+                "On this Spark, vade install saves the local defaults in ~/.vade/config. From another computer, setup writes a controller config at the path vade config shows (VADE_CONFIG, else the user config folder). It points at this checkout and keeps Vade's private folders under ~/.vade. Setup never replaces a config.",
+                "Then it runs vade install, vade up and vade doctor, and stops at the first step that fails. Doctor runs last, so it checks the Sparks that up started. Run vade setup again after a fix, without the answer options: it uses the setup it finds and repeats only the work that needs it. When a controller config already has an install, setup skips vade install; after a pull, run vade update.",
+                "Without a terminal, setup asks nothing; add --yes. It does not download models: see vade pull.",
+                LIFECYCLE,
+            ],
+        },
+        "install" => Page {
+            summary: "Install the engine, GPU kernels and chat for this setup.",
+            usage: &["vade install [--dry-run]"],
+            options: &[("--dry-run", "Print the plan: where, which files, model, state; change nothing")],
+            examples: &["vade install", "vade install --dry-run", "VADE_CONFIG=cluster.conf vade install --dry-run"],
+            notes: &[
+                "Files come from the first that applies. On this Spark: the bundle in VADE_BUNDLE, a launcher bundle next to vade, then a source build of the checkout with the pinned Rust toolchains. From a controller: a prebuilt_dir bundle that matches the engine and CLI revisions, then a source build on each Spark.",
+                "On this Spark, running it again is safe: files that still match their record are reused. From a controller, each install builds a new generation that a running engine does not use; while an engine runs, use vade update, which asks before a restart. Model downloads stay in your hands.",
+                "On this Spark (saved local defaults, or no setup yet): find the model, save defaults once in ~/.vade/config, stage the engine, kernels and chat, and fill the GPU startup cache so the first vade up does not compile.",
+                "From a controller (VADE_CONFIG, or the default controller config): check the tools, SSH, GPUs, disks and models, copy or build on each Spark with SHA-256 checks, then build the chat program here.",
+                "On a computer that is not a Spark and has no controller config, run vade setup first.",
                 "A generated run qwen3-8b installation uses run again; install requires an explicit VADE_CONFIG to select a controller.",
                 GPU_BUSY,
                 TRANSPORT, LIFECYCLE,
@@ -360,7 +384,7 @@ mod tests {
     #[test]
     fn every_page_fits_the_width_and_names_its_usage() {
         for command in [None, Some("launch"), Some("up"), Some("down"), Some("status"), Some("logs"), Some("chat"), Some("sessions"), Some("doctor"),
-            Some("install"), Some("update"), Some("detect"), Some("version"), Some("run"), Some("verify"), Some("read"), Some("config"), Some("bench"), Some("test"), Some("pull"), Some("models")] {
+            Some("install"), Some("setup"), Some("update"), Some("detect"), Some("version"), Some("run"), Some("verify"), Some("read"), Some("config"), Some("bench"), Some("test"), Some("pull"), Some("models")] {
             let text = help(command);
             assert!(text.lines().all(|line| line.chars().count() <= style::WIDTH), "{command:?}:\n{text}");
             assert!(text.contains(&format!("Usage: vade {}", command.unwrap_or("<COMMAND>").replace("version", "--version"))), "{command:?}:\n{text}");

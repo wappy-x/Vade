@@ -1,24 +1,34 @@
 $ vade install --help
-Save local defaults and install the engine and chat.
+Install the engine, GPU kernels and chat for this setup.
 
 Examples:
   vade install
+  vade install --dry-run
   VADE_CONFIG=cluster.conf vade install --dry-run
 
 Usage: vade install [--dry-run]
 
 Options:
-  --dry-run  Show what would happen; change nothing
+  --dry-run  Print the plan: where, which files, model, state; change nothing
 
 Notes:
-  - Model downloads stay in your hands.
-  - For a fresh local installation or saved owner defaults without VADE_CONFIG:
-    detect existing weights, save defaults once in ~/.vade/config, and stage a
-    local engine and chat program. No hand editing is needed.
-  - With VADE_CONFIG, or a default controller config before local setup: check
-    prerequisites, copy an exact-source SHA256-verified prebuilt_dir bundle or
-    build source, then check the harness. Model inventory checks overlap
-    copy/build and are cached.
+  - Files come from the first that applies. On this Spark: the bundle in
+    VADE_BUNDLE, a launcher bundle next to vade, then a source build of the
+    checkout with the pinned Rust toolchains. From a controller: a prebuilt_dir
+    bundle that matches the engine and CLI revisions, then a source build on
+    each Spark.
+  - On this Spark, running it again is safe: files that still match their record
+    are reused. From a controller, each install builds a new generation that a
+    running engine does not use; while an engine runs, use vade update, which
+    asks before a restart. Model downloads stay in your hands.
+  - On this Spark (saved local defaults, or no setup yet): find the model, save
+    defaults once in ~/.vade/config, stage the engine, kernels and chat, and
+    fill the GPU startup cache so the first vade up does not compile.
+  - From a controller (VADE_CONFIG, or the default controller config): check the
+    tools, SSH, GPUs, disks and models, copy or build on each Spark with SHA-256
+    checks, then build the chat program here.
+  - On a computer that is not a Spark and has no controller config, run vade
+    setup first.
   - A generated run qwen3-8b installation uses run again; install requires an
     explicit VADE_CONFIG to select a controller.
   - Only a running compute app or power draw of at least 30 W makes a GPU busy;

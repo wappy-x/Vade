@@ -1,10 +1,15 @@
 //! `vade config`: which setup the lifecycle commands will use, and what it
 //! holds. Reads only; the selection order matches `main`'s dispatch.
+//! `vade setup` ([`walk()`]) creates a setup and starts it.
 use crate::{
     evals::json::{self, Value},
     output,
     style,
 };
+
+mod walk;
+/// `vade setup`: the walk-through from the first question to a running engine.
+pub use walk::run as walk;
 
 /// Print the selected setup as an aligned table, or one `vade.config.v1`
 /// object with `json`. A setup that cannot be read is still named, then its

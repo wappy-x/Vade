@@ -30,9 +30,18 @@ struct Prompt {
     // Darwin can discard unread output when the final slave descriptor closes.
     _slave: File,
     transcript: String,
+    question: &'static str,
+    cancelled: &'static str,
 }
 impl Prompt {
     fn start(home: &Path) -> Self {
+        Self::start_with(home, "launch::model::prompt_tests::signals_cancel_model_prompt_without_enter", "VADE_TEST_MODEL_PROMPT",
+            "FP4-Local model folder (existing weights): ", "Model selection interrupted; nothing was installed.")
+    }
+    /// Run the test `test` of this binary on a new PTY, with `key` set to
+    /// `home` so it takes its child branch; `question` shows the prompt is
+    /// open and `cancelled` is the error a signal must print.
+    fn start_with(home: &Path, test: &str, key: &str, question: &'static str, cancelled: &'static str) -> Self {
         let (mut master, mut slave) = (-1, -1);
         assert_eq!(
             unsafe {
@@ -69,12 +78,12 @@ impl Prompt {
         command
             .args([
                 "--exact",
-                "launch::model::prompt_tests::signals_cancel_model_prompt_without_enter",
+                test,
                 "--nocapture",
             ])
             .env_clear()
             .env("HOME", home)
-            .env("VADE_TEST_MODEL_PROMPT", home)
+            .env(key, home)
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
             .stderr(Stdio::from(slave.try_clone().unwrap()));
@@ -99,6 +108,8 @@ impl Prompt {
             master,
             _slave: slave,
             transcript: String::new(),
+            question,
+            cancelled,
         }
     }
     fn drain(&mut self) {
@@ -125,7 +136,7 @@ impl Prompt {
             self.drain();
             if self
                 .transcript
-                .contains("FP4-Local model folder (existing weights): ")
+                .contains(self.question)
             {
                 return;
             }
@@ -159,7 +170,7 @@ impl Prompt {
                 assert_eq!(status.code(), Some(1), "{}", self.transcript);
                 assert!(
                     self.transcript
-                        .contains("Model selection interrupted; nothing was installed."),
+                        .contains(self.cancelled),
                     "{}",
                     self.transcript
                 );
@@ -167,7 +178,7 @@ impl Prompt {
             }
             assert!(
                 Instant::now() < deadline,
-                "signal {signal} did not cancel model prompt: {}",
+                "signal {signal} did not cancel the prompt: {}",
                 self.transcript
             );
             std::thread::sleep(Duration::from_millis(10));
@@ -240,5 +251,25 @@ fn signals_cancel_model_prompt_without_enter() {
         );
         prompt.interrupt(signal);
         let _lock = crate::state::Lock::acquire(&fixture.0.join(".vade")).unwrap();
+    }
+}
+
+#[test]
+fn signals_cancel_the_restart_question_without_enter() {
+    if std::env::var_os("VADE_TEST_RESTART_PROMPT").is_some() {
+        // The question that controller vade update asks after it stages a build.
+        let _interruptions = crate::runner::Interruptions::install();
+        let mut runner = crate::runner::SystemRunner { dry: false };
+        let error = crate::runner::Runner::confirm_restart(&mut runner).unwrap_err();
+        assert!(error.contains("Restart question interrupted"), "{error}");
+        crate::fail(&error);
+    }
+    let _process_guard = crate::runner::process_test_lock();
+    for signal in [2, 15] {
+        let fixture = super::tests::Fixture::new();
+        let mut prompt = Prompt::start_with(&fixture.0, "launch::model::prompt_tests::signals_cancel_the_restart_question_without_enter",
+            "VADE_TEST_RESTART_PROMPT", "Restart the engine with this build? [y/N] ", "Restart question interrupted; the running engine was kept.");
+        prompt.wait_for_prompt();
+        prompt.interrupt(signal);
     }
 }

@@ -26,9 +26,9 @@ pub(super) struct Probe {
 }
 
 /// The host toolchain every source build pins, as in `rust-toolchain.toml`.
-pub(super) const HOST_TOOLCHAIN: &str = "1.99.0";
+pub(crate) const HOST_TOOLCHAIN: &str = "1.99.0";
 /// The nightly toolchain `cargo kernels` drives for the NVPTX build.
-pub(super) const KERNEL_TOOLCHAIN: &str = "nightly-2026-10-01";
+pub(crate) const KERNEL_TOOLCHAIN: &str = "nightly-2026-10-01";
 /// The `failed=` values of the source-build toolchain checks.
 const TOOLCHAIN_FAILURES: [&str; 3] = ["rustup", "toolchain", "kernel-toolchain"];
 

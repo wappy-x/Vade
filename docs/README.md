@@ -20,6 +20,7 @@ means.
 | Guide | What it covers |
 | --- | --- |
 | [Installation](../INSTALL.md) | What you need first, downloading the model at its pinned revision, and launching it on the Spark. It also covers the optional controller and linked-Spark routes |
+| [Agent quickstart](agents/quickstart.md) | For AI agents that set up or run Vade: exact commands, exit codes, where the files are and what to do on each error |
 | [First chat on one Spark](../harness/docs/first-run.md) | What `vade launch` does: release bundle or source build, how it finds the model you downloaded, the settings it saves, and how to start and stop later |
 | [Download models](pull-models.md) | `vade pull`: download a checkpoint from Hugging Face with resume and file checks. `vade models`: list local models and what can serve them |
 | [Shell safety](shell-safety.md) | Agent commands ask by default; what the prompt shows, exact and `<path>` allow-list rules, blocked commands, `--yes`, runs without a terminal and the experimental checker |
@@ -79,6 +80,8 @@ How Vade works, and how to change it. These pages are for contributors.
   GPU kernels that read prompts:
   [prompt weight reuse](prefill-weight-reuse.md) and
   [Flash-Next prompt projections](flashnext-prefill-mma.md)
+- **Install design:** [install and flows](design/install-and-flows.md) (the
+  steps from install to a running engine, as a person or an agent sees them)
 
 ## Evidence and attribution
 

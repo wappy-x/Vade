@@ -505,10 +505,8 @@ impl Runner for SystemRunner {
         std::io::stdout()
             .flush()
             .map_err(|_| "Cannot display restart choice. Run vade down and vade up when ready.")?;
-        let mut answer = String::new();
-        std::io::stdin()
-            .read_line(&mut answer)
-            .map_err(|_| "Cannot read restart choice. Run vade down and vade up when ready.")?;
+        // Ctrl-C or SIGTERM ends the question at once; the engine keeps running.
+        let answer = crate::launch::read_prompt_line("Restart question interrupted; the running engine was kept. Run vade down and vade up when ready.")?;
         Ok(matches!(
             answer.trim().to_ascii_lowercase().as_str(),
             "y" | "yes"

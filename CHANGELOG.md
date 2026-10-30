@@ -24,6 +24,15 @@ Changes that are merged but not yet released are under Unreleased.
   file has page markers only where LibreOffice marked its pages. PNG, JPEG,
   GIF and WebP images read as one line with their size in pixels. See
   [reading files](docs/reading-files.md).
+- New `vade setup` asks which Sparks, which checkpoint (for 2, 4 or 6
+  Sparks) and where the model is, with each default shown, then runs
+  `vade install`, `vade up` and `vade doctor`. `--yes` asks nothing and
+  takes `--hosts`, `--fp8`, `--model` and `--link`. From another computer it
+  writes the controller config and never replaces one.
+  `vade install --dry-run` now starts with a plan: where, which files, the
+  model and where state lives. See the
+  [agent quickstart](docs/agents/quickstart.md) and
+  [install and flows](docs/design/install-and-flows.md).
 - Native chat supports [host hooks](harness/docs/hooks.md), and chat supports [user slash commands](harness/docs/slash-commands.md) and `/clear`.
 - GitHub workflows now run only by hand; tests run locally before every merge, as [Local CI](docs/ci.md) describes.
 - Chat keeps private project notes across sessions; `VADE_MEMORY=0` turns memory off.

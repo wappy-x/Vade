@@ -217,6 +217,10 @@ fn run_main(mut args: Vec<String>) {
         if let Err(error) = setup::show(parsed.json) { fail(&error); }
         return;
     }
+    if let cli::Command::Setup(options) = &parsed.command {
+        if let Err(error) = setup::walk(options, parsed.dry_run) { fail(&error); }
+        return;
+    }
     // Keep every JSON status outcome (including owner-config errors) inside
     // the versioned schema; status::run uses the same owner selector below.
     if parsed.command == cli::Command::StatusJson {
@@ -241,9 +245,13 @@ fn run_main(mut args: Vec<String>) {
         if let Err(error) = launch::run(parsed.command, parsed.dry_run) { fail(&error); }
         return;
     }
+    // Install, update and doctor run their tools, builds and probes in their own
+    // sessions; the handler lets them stop those children before they exit,
+    // also where no parent-death signal exists.
     let _interruptions = if matches!(
         parsed.command,
-        cli::Command::Run(_) | cli::Command::Up(_) | cli::Command::Down
+        cli::Command::Run(_) | cli::Command::Up(_) | cli::Command::Down | cli::Command::Install | cli::Command::Update
+            | cli::Command::Doctor | cli::Command::DoctorFabric { .. }
     ) {
         Some(runner::Interruptions::install())
     } else {

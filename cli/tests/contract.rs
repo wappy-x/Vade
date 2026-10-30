@@ -61,7 +61,7 @@ fn text(bytes: &[u8]) -> String { String::from_utf8(bytes.to_vec()).unwrap() }
 
 const PAGES: &[&str] = &[
     "launch", "up", "down", "chat", "status", "config", "doctor", "detect", "logs", "verify", "bench", "test", "install",
-    "update", "run", "version", "pull", "models",
+    "setup", "update", "run", "version", "pull", "models",
 ];
 
 #[test]

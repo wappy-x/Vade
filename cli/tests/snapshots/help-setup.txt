@@ -1,0 +1,45 @@
+$ vade setup --help
+Ask a few questions, then install, start and check Vade.
+
+Examples:
+  vade setup
+  vade setup --yes
+  vade setup --yes --hosts spark-a
+  vade setup --yes --hosts spark-a --dry-run
+
+Usage: vade setup [OPTIONS]
+
+Options:
+  --yes                Ask nothing; take the defaults and the flags below
+  --hosts a,b          Sparks to drive, as you type them after ssh, in cable
+                       order
+  --fp8                The FP8 checkpoint (2, 4 or 6 Sparks); --fp4-local is the
+                       default
+  --model PATH         The model folder, absolute or under ~/ (on each Spark
+                       from a controller)
+  --link FROM:TO=ADDR  FROM's own address on its cable to TO; once per cable end
+  --dry-run            Print the answers, the config and the steps; change
+                       nothing
+
+Notes:
+  - Asks which Sparks to use (on a Spark the default is this Spark), FP4-Local
+    or FP8 (only for 2, 4 or 6 Sparks), and where the model is. Each question
+    shows its default in brackets; press Enter to take it.
+  - On this Spark, vade install saves the local defaults in ~/.vade/config. From
+    another computer, setup writes a controller config at the path vade config
+    shows (VADE_CONFIG, else the user config folder). It points at this checkout
+    and keeps Vade's private folders under ~/.vade. Setup never replaces a
+    config.
+  - Then it runs vade install, vade up and vade doctor, and stops at the first
+    step that fails. Doctor runs last, so it checks the Sparks that up started.
+    Run vade setup again after a fix, without the answer options: it uses the
+    setup it finds and repeats only the work that needs it. When a controller
+    config already has an install, setup skips vade install; after a pull, run
+    vade update.
+  - Without a terminal, setup asks nothing; add --yes. It does not download
+    models: see vade pull.
+  - Explicit VADE_CONFIG selects the controller; otherwise generated local setup
+    wins. Keep the same VADE_CONFIG and VADE_HOME from start through chat,
+    status, logs and down.
+--- stderr
+--- exit 0

@@ -26,6 +26,7 @@ mod model;
 #[cfg(test)]
 pub(crate) use model::{test_checkpoint, test_config, test_mixed_config};
 pub(crate) use model::serving_format;
+pub(crate) use model::read_prompt_line;
 mod status;
 mod doctor;
 mod chat;
@@ -67,6 +68,10 @@ pub(crate) fn saved_model(root: &Path) -> Option<PathBuf> {
     let model = Config::load(root).ok().flatten()?.model;
     serving_format(&model).is_ok().then_some(model)
 }
+
+/// The Vade checkout a source install builds from: VADE_SOURCE, else the
+/// checkout that holds this vade program or the current folder.
+pub(crate) fn checkout() -> Result<PathBuf, String> { install::source_path() }
 
 /// Whether the local home has saved defaults or an owned engine.
 pub(crate) fn owner_configured() -> bool {
@@ -185,6 +190,10 @@ pub fn run(command: Command, dry: bool) -> Result<(), String> {
     {
         check_default_controller_record()?;
     }
+    // A first install on another computer means a controller, which setup writes.
+    if command == Command::Install && !cfg!(all(target_os = "linux", target_arch = "aarch64")) && !owner_configured() && !legacy_configured() {
+        return Err("This computer is not a Spark, and it has no controller config yet. Run vade setup to drive Sparks from here, or run vade install on the Spark itself.".into());
+    }
     if !dry && !cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         return Err(format!(
             "This command runs only on a DGX Spark (Linux aarch64), and this computer is {} {}. Run it on the Spark, or add --dry-run to preview it here. To drive Sparks from this computer, set VADE_CONFIG (see INSTALL.md).",
@@ -246,7 +255,12 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                     "Detect this Spark and model; save defaults; install locally; start on loopback; open chat"
                 }
             };
-            output::line(format_args!("{action}.\nLocal config: {}", self.root.join("config").display()))?;
+            if command == Command::Install {
+                output::text(format_args!("{}", self.install_plan()?))?;
+            } else {
+                output::line(format_args!("{action}."))?;
+            }
+            output::line(format_args!("Local config: {}", self.root.join("config").display()))?;
             if let Command::Up(options) | Command::Launch(options) = &command {
                 // A start keeps the saved limits unless a flag overrides them.
                 let saved = Config::load(&self.root)?;
@@ -482,6 +496,25 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         }
         identity.check_resources(model.bytes, install_space)?;
         Ok(identity)
+    }
+
+    /// What `vade install` will do on this Spark, for `--dry-run`.
+    fn install_plan(&self) -> Result<String, String> {
+        let shown = |path: &Path| text::terminal_text(&path.to_string_lossy()).into_owned();
+        let model = match (saved_model(&self.root), std::env::var_os("VADE_MODELS").filter(|path| !path.is_empty())) {
+            (Some(model), _) => format!("{} (saved)", shown(&model)),
+            (None, Some(path)) => format!("{} (VADE_MODELS)", shown(Path::new(&path))),
+            (None, None) => format!("the FP4-Local checkpoint under {}, found at install", shown(&self.home.join("models"))),
+        };
+        let mut rows = vec![("Where", "this Spark".to_owned())];
+        rows.extend(install::plan(&self.root)?);
+        rows.extend([
+            ("Model", model),
+            ("State", format!("{}: config, stage and state", shown(&self.root))),
+            ("Steps", "detect this Spark and model, save defaults, stage the engine, kernels and chat, warm the GPU startup cache".into()),
+            ("Next", text::command("install")),
+        ]);
+        Ok(format!("Plan for vade install:\n{}", style::table(&rows, 2)))
     }
 
     /// `vade detect --json`: the same checks and exit code as `vade detect`,

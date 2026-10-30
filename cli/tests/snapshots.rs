@@ -14,6 +14,7 @@ const CASES: &[(&str, &[&str])] = &[
     ("help-chat", &["chat", "--help"]),
     ("help-doctor", &["doctor", "--help"]),
     ("help-install", &["install", "--help"]),
+    ("help-setup", &["setup", "--help"]),
     ("help-update", &["update", "--help"]),
     ("help-detect", &["detect", "--help"]),
     ("help-version", &["version", "--help"]),

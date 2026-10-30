@@ -94,7 +94,7 @@ if ! (cd engine && cargo +1.99.0 kernels) >"$kernel_log" 2>&1; then
 fi
 "$vade" install </dev/null ||
     fail "local install failed. Next: follow the diagnostic above, run \"$vade\" doctor, then retry."
-printf 'Install complete. Start and chat:\n  "%s" launch\nStart only:\n  "%s" up\nTo type vade by name in a new shell, run this there first:\n  export PATH="$HOME/.cargo/bin:%s:$PATH"\n' "$vade" "$vade" "$root/cli/target/release"
+printf 'Install complete. Start and chat:\n  "%s" launch\nCheck and start:\n  "%s" setup\nTo type vade by name in a new shell, run this there first:\n  export PATH="$HOME/.cargo/bin:%s:$PATH"\n' "$vade" "$vade" "$root/cli/target/release"
 if [ "$launch" = true ]; then
     cd "$workspace" || fail 'your starting folder is unavailable. Next: open an existing project folder, then use the launch command above.'
     exec "$vade" launch

@@ -41,7 +41,7 @@ pub(super) fn discover(home: &Path, saved: Option<&Path>) -> Result<Model, Strin
             io::stdout()
                 .flush()
                 .map_err(|_| "Cannot display the model folder prompt.")?;
-            let answer = read_prompt_line()?;
+            let answer = read_prompt_line("Model selection interrupted; nothing was installed.")?;
             let answer = answer.trim();
             if answer.is_empty() || answer.len() > 4096 {
                 return Err("Give one existing model folder; nothing was installed.".into());
@@ -82,15 +82,18 @@ impl Drop for PromptInput {
     }
 }
 
-// Read one bounded line without buffering any following chat input. A signal
-// handler can be restarted by the OS, so every read itself must be nonblocking.
-fn read_prompt_line() -> Result<String, String> {
+/// Read one bounded line from standard input without buffering any following
+/// chat input. A signal handler can be restarted by the OS, so every read is
+/// nonblocking: once [`crate::runner::Interruptions`] records SIGINT or
+/// SIGTERM, this returns `interrupted` as the error, also with no Enter.
+pub(crate) fn read_prompt_line(interrupted: &str) -> Result<String, String> {
+    let check_interrupted = || if crate::runner::interrupted() { Err(interrupted.to_owned()) } else { Ok(()) };
     use crate::unix_flags::{F_GETFL, F_SETFL, O_NONBLOCK};
     let input = io::stdin().lock();
     let fd = input.as_raw_fd();
     let flags = unsafe { fcntl(fd, F_GETFL) };
     if flags < 0 || unsafe { fcntl(fd, F_SETFL, flags | O_NONBLOCK) } < 0 {
-        return Err("Cannot prepare the model folder prompt.".into());
+        return Err("Cannot prepare the question on this terminal.".into());
     }
     let _restore = PromptInput { fd, flags };
     let mut bytes = Vec::new();
@@ -106,7 +109,7 @@ fn read_prompt_line() -> Result<String, String> {
                     std::thread::sleep(Duration::from_millis(25));
                     continue;
                 }
-                _ => return Err("Cannot read the model folder.".into()),
+                _ => return Err("Cannot read the answer from this terminal.".into()),
             }
         }
         if count == 0 || byte == b'\n' {
@@ -115,7 +118,7 @@ fn read_prompt_line() -> Result<String, String> {
         bytes.push(byte);
     }
     check_interrupted()?;
-    String::from_utf8(bytes).map_err(|_| "Use a model folder path in valid text.".into())
+    String::from_utf8(bytes).map_err(|_| "Give the answer in valid text.".into())
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@ $ vade --help
 Vade runs Qwen3.8 Flash-Next FP4-Local on your DGX Spark.
 
 Examples:
+  vade setup   Answer a few questions, then install and start
   vade launch  Start on this Spark, then chat
   vade status  See what is running
   vade doctor  Check the setup, then PASS or FAIL
@@ -10,6 +11,7 @@ Examples:
 Usage: vade <COMMAND> [OPTIONS]
 
 Start and stop:
+  setup     Ask which Sparks, checkpoint and model; install, start, check
   launch    Install if needed, start on this Spark, then open chat
   up        Start without chat (this Spark, or Sparks from a controller)
   down      Stop what vade started

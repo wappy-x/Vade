@@ -1,6 +1,6 @@
 //! Shared text and file helpers: terminal-safe display of untrusted text, the
 //! `key=value` record format ([`parse`] and [`encode`]), private directories,
-//! atomic writes and random hex.
+//! atomic and create-only writes, and random hex.
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -196,11 +196,25 @@ pub fn reject_symlinks(path: &Path) -> Result<(), String> {
 /// Replace `path` with `value` through a synced temporary file and rename, then
 /// sync the directory, so readers see the old or the new contents in full.
 pub fn atomic_write(path: &Path, value: &str) -> Result<(), String> {
+    write_private(path, value, true).map(|_| ())
+}
+
+/// Like [`atomic_write`], but never replace: publish with a hard link, which
+/// fails when `path` exists. `Ok(false)` means it existed and is unchanged.
+/// A missing parent is created private; an existing parent is used as it is,
+/// so a file can go in a shared folder such as the home folder.
+pub fn create_private(path: &Path, value: &str) -> Result<bool, String> {
+    write_private(path, value, false)
+}
+
+fn write_private(path: &Path, value: &str, replace: bool) -> Result<bool, String> {
     reject_symlinks(path)?;
     let parent = path
         .parent()
         .ok_or("State file needs a parent directory. Choose a private state directory in config.")?;
-    private_dir(parent)?;
+    if replace || !parent.is_dir() {
+        private_dir(parent)?;
+    }
     let tmp = parent.join(format!(".write-{}-{}", std::process::id(), random_hex(8)?));
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -213,14 +227,23 @@ pub fn atomic_write(path: &Path, value: &str) -> Result<(), String> {
         file.write_all(value.as_bytes())
             .and_then(|_| file.sync_all())
             .map_err(|_| "Cannot save state. Check free disk space.")?;
-        fs::rename(&tmp, path).map_err(|_| "Cannot publish state. Check directory permissions.")?;
+        if replace {
+            fs::rename(&tmp, path).map_err(|_| "Cannot publish state. Check directory permissions.")?;
+        } else {
+            match fs::hard_link(&tmp, path) {
+                Ok(()) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+                Err(_) => return Err("Cannot publish state. Check directory permissions.".into()),
+            }
+        }
         let directory = fs::File::open(parent).map_err(|_| "Cannot open state directory. Check its path and permissions; keep existing records.")?;
         directory
             .sync_all()
             .map_err(|_| "Cannot sync state directory. Check free space and filesystem health; keep existing records.")?;
-        Ok(())
+        Ok(true)
     })();
-    if outcome.is_err() {
+    // After a hard link, the temporary name is a second name of the published file.
+    if !replace || outcome.is_err() {
         let _ = fs::remove_file(tmp);
     }
     outcome
@@ -268,6 +291,22 @@ pub fn is_lower_hex(value: &str, length: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn create_private_never_replaces_a_file() {
+        let dir = fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("vade-create-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("config");
+        assert!(create_private(&path, "first").unwrap());
+        assert!(!create_private(&path, "second").unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "first");
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "a temporary file stayed");
+        // An existing shared folder is used as it is; only the file is private.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(create_private(&dir.join("other"), "x").unwrap());
+        assert_eq!(fs::metadata(dir.join("other")).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = fs::remove_dir_all(&dir);
+    }
     #[test]
     fn protocol_round_trip() {
         let fields = Fields::from([("log".into(), "a=b\nline\\end\r".into())]);

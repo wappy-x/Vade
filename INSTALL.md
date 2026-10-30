@@ -42,6 +42,13 @@ prerequisites, the code and the model. Then pick a route:
 This guide explains each new term where it first appears. The
 [glossary](docs/GLOSSARY.md) has the rest.
 
+Whatever the route, the steps are the same: get `vade`, then `vade setup`.
+Setup asks a few questions, writes what it needs, then runs `vade install`,
+`vade up` and `vade doctor`. Each step prints what to do when it fails, and
+a second run is safe. [Install and flows](docs/design/install-and-flows.md)
+shows the whole flow on one page. If you are an AI agent, read the
+[agent quickstart](docs/agents/quickstart.md).
+
 ## Quick start with an existing model
 
 You need an idle DGX Spark with Git, `cc`, curl and a working NVIDIA driver.
@@ -53,20 +60,25 @@ During the private preview, the clone also needs access to the repository.
 The private-preview note in [step 2](#step-2-get-the-code) gives the two
 ways in.
 
-Paste this block as one shell command:
+Run these five commands:
 
 ```sh
-git clone --branch main https://github.com/wappy-x/vade.git "$HOME/vade" &&
-  sh "$HOME/vade/scripts/install.sh" --launch
+git clone --branch main https://github.com/wappy-x/vade.git "$HOME/vade"
+sh "$HOME/vade/scripts/install.sh"
+export PATH="$HOME/.cargo/bin:$HOME/vade/cli/target/release:$PATH"
+vade setup
+vade chat
 ```
 
-If you already cloned Vade, open its folder and run these two commands
-instead:
+`vade setup` uses the model and settings that the installer saved. It runs
+`vade install` again (nothing is rebuilt), then `vade up`, then
+`vade doctor`. It ends with `Setup done.` and the commands for chat, status and
+stop. `vade chat` then opens chat in the current folder.
 
-```sh
-sh scripts/install.sh
-./cli/target/release/vade launch
-```
+To install, start and open chat in one step, use
+`sh "$HOME/vade/scripts/install.sh" --launch` instead. If you already cloned
+Vade, open its folder and run `sh scripts/install.sh`, then continue with the
+`export` line.
 
 The installer runs only on Linux `aarch64`. It does these steps:
 
@@ -75,7 +87,9 @@ The installer runs only on Linux `aarch64`. It does these steps:
 2. It builds the CLI and runs preflight checks.
 3. It fills the compiler cache and runs local `vade install`. This also
    compiles the GPU code into Vade's private startup cache, so the first `up`
-   does not have to.
+   does not have to. The kernel build writes its many compiler warnings to
+   `engine/target/install-kernels.log`; the script shows the end of that log
+   only when the build fails.
 4. With `--launch`, it starts the engine and opens chat in the folder where
    you started. Without that flag, it stops after the install.
 
@@ -767,13 +781,38 @@ SSH. Before you start:
 - Each Spark has the verified checkpoint from step 3.
 - The controller can SSH into each Spark without typing a password.
 
-From the controller's checkout root, build the CLI and make a private config
-file:
+From the controller's checkout root, build the CLI, then let `vade setup`
+write the config and start the Spark:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo +1.99.0 build --release --offline --manifest-path cli/Cargo.toml
+cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml
 export PATH="$PWD/cli/target/release:$PATH"
+vade setup
+```
+
+Setup asks for the Sparks (what you type after `ssh`, in cable order), the
+checkpoint (for 2, 4 or 6 Sparks) and the model folder on each Spark. Each question shows its default
+in brackets. For a script or an agent, give the answers as flags:
+
+```sh
+vade setup --dry-run --yes --hosts you@spark-a-address
+vade setup --yes --hosts you@spark-a-address
+```
+
+The dry run prints the config that setup would write and the steps it would
+run, and changes nothing. Setup writes the config at the default path below,
+with this checkout as the source and private folders under `~/.vade`. It
+never replaces a config: a second run uses the file that is there. Then it
+runs `vade install`, `vade up` and `vade doctor`, and stops at the first step
+that fails. Fix the cause, then run `vade setup` again. When the config
+already has an install, the second run skips `vade install`, so `vade up`
+can attach to an engine that runs. After you pull new code, run
+`vade update`.
+
+To write the config by hand instead, start from the example:
+
+```sh
 mkdir -m 700 -p .local
 [ -e .local/fp4-local.conf ] || cp cli/examples/fp4-local.conf .local/fp4-local.conf
 export VADE_CONFIG="$PWD/.local/fp4-local.conf"
@@ -786,7 +825,8 @@ default config: `~/.config/vade/config` on Linux,
 
 ### Edit the config
 
-Edit that private file before you go on.
+If you copied the example, edit that private file before you go on. A config
+that `vade setup` wrote is ready to use; edit it only to change the setup.
 
 **Local folders.**
 
@@ -821,7 +861,8 @@ on the same machine, so set `local_port` to another free port, such as 18181.
 
 ### Install and start
 
-Preview each step with `--dry-run`, then run it:
+`vade setup` runs these steps for you. To run them by hand, preview each step
+with `--dry-run`, then run it:
 
 ```sh
 vade install --dry-run
@@ -965,6 +1006,18 @@ Host spark-b
 ```
 
 ### Install and start the chain
+
+`vade setup` can write the config for a chain. Give the Sparks in cable order
+and, with `--link`, each Spark's own address on each cable:
+
+```sh
+vade setup --hosts spark-a,spark-b \
+  --link spark-a:spark-b=192.0.2.1 --link spark-b:spark-a=192.0.2.2
+```
+
+Without the `--link` flags, setup asks for each address. It then installs and
+starts the chain with `vade up --hosts` in that order. The steps below do the
+same by hand.
 
 Reserve these ports on the chosen Sparks:
 
@@ -1299,6 +1352,9 @@ stop), and run `vade logs` and `vade doctor` before you retry.
 | Message | What to do |
 | --- | --- |
 | `Vade is not set up yet` | Nothing is set up for this user: no local setup in `~/.vade` and no controller config. On a Spark, run `vade launch` (or the installer above). To drive Sparks from another computer, follow [Route B](#route-b-from-a-controller). |
+| `This computer is not a Spark, and it has no controller config yet.` | You ran `vade install` on another computer before any setup. Run `vade setup` there to drive Sparks over SSH, or run `vade install` on the Spark itself. |
+| `Standard input is not a terminal, so setup cannot ask its questions.` | `vade setup` ran from a script. Add `--yes`, plus `--hosts` and `--link` where setup names them. |
+| `vade install failed, so setup stopped.` (or `vade doctor`, `vade up`) | Read the error that step printed just above, fix it, then run `vade setup` again. It reuses the config and the work already done. |
 | `This command runs only on a DGX Spark (Linux aarch64)` | You ran a local command such as `vade launch` on another computer. Run it on the Spark, add `--dry-run` to preview it, or use [Route B](#route-b-from-a-controller) to drive the Spark from this computer. |
 | `engine source has local changes. Commit or preserve them before install/update` | A controller's `vade install` stages only committed source, and an untracked file counts as a local change. The same check covers `harness` and `CLI` source. Nothing was overwritten. Use a clean clone for the controller; `git status` shows what is untracked. |
 | `The engine refused --context N for memory` | `vade launch` or `vade up` on the Spark prints this when the engine refuses a `--context` you set yourself; the engine's own memory message follows. Choose a smaller `--context`, or leave it out next time: Vade then tries the standard sizes (32768, 16384, 8192, 4096) in turn until the engine accepts one. Run `vade doctor` to inspect memory. A context you set yourself is never lowered silently. |

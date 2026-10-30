@@ -210,10 +210,38 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
         Ok((artifact, present))
     }
 
+    /// What `vade install` will do, for `--dry-run`: where, which files, the
+    /// model on each Spark and where state lives. The commands follow it.
+    pub(super) fn install_plan(&self) -> String {
+        let config = &self.config;
+        let shown = |path: &Path| text::terminal_text(&path.to_string_lossy()).into_owned();
+        let names: Vec<&str> = config.machines.iter().map(|machine| machine.name.as_str()).collect();
+        let sparks = if names.len() == 1 { "Spark" } else { "Sparks" };
+        let files = match &config.prebuilt_dir {
+            Some(dir) => format!("a bundle in {} if one matches the engine and CLI revisions, else a source build on each Spark", shown(dir)),
+            None => "a source build on each Spark (the config sets no prebuilt_dir)".into(),
+        };
+        let models = config.machines.iter().map(|machine| format!("{} {}", machine.name, text::terminal_text(&machine.model_path))).collect::<Vec<_>>().join("; ");
+        let rows = [
+            ("Where", format!("{} {sparks} over SSH: {}", names.len(), names.join(", "))),
+            ("Files", files),
+            ("Source", format!("{} (committed files only)", shown(&config.engine_source))),
+            ("Toolchain", format!("Rust {} and {} on each Spark, for a source build", diagnostics::HOST_TOOLCHAIN, diagnostics::KERNEL_TOOLCHAIN)),
+            ("Model", models),
+            ("State", format!("{} and {} here; stage_dir and state_dir on each Spark", shown(&config.state_dir), shown(&config.stage_root))),
+            ("Steps", "check tools, SSH, GPUs, disks and models; copy or build; build chat here; warm the GPU startup cache; switch to the new build".into()),
+            ("Next", text::command("install")),
+        ];
+        format!("Plan for vade install:\n{}", style::table(&rows, 2))
+    }
+
     pub(super) fn install(&mut self) -> Result<(), String> {
         self.config.validate_model_revision()?;
         self.config.validate_control_socket()?;
         rdma_enabled()?;
+        if self.dry && !crate::checks::json() {
+            crate::output::text(format_args!("{}Commands it would run:\n", self.install_plan()))?;
+        }
         if !self.dry {
             text::private_dir(&self.config.stage_root)?;
             text::private_dir(
@@ -602,7 +630,8 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
         self.install()?;
         if let Some(session) = Session::load(&self.config.state_dir)? {
             let options = super::resident::recorded_options(&session);
-            if !self.dry && self.runner.confirm_restart()? {
+            // A stop that came with the answer keeps the engine running.
+            if !self.dry && self.runner.confirm_restart()? && !crate::runner::interrupted() {
                 self.down()?;
                 return self.up(&options);
             }
