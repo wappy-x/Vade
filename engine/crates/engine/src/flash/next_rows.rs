@@ -533,6 +533,16 @@ pub(crate) fn prompt_rows(position: usize, remaining: usize, limit: usize) -> us
         n
     }
 }
+/// A prompt's final tile on one Spark (`keep`): it also takes the rows after its last
+/// 64-aligned row, so they need no whole-model pass of their own. Only when more than
+/// CHUNK_ROWS_LIMIT rows follow that row: both GDN scans of the tile (before and after
+/// the prefix checkpoint row, next_prefix.rs) then stay fully fused.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn final_rows(position: usize, remaining: usize, limit: usize, keep: bool) -> usize {
+    let n = prompt_rows(position, remaining, limit);
+    let tail = remaining - n;
+    if keep && n >= 64 && tail < 64 && tail > spark_gpu_probe::gdn_params::CHUNK_ROWS_LIMIT && remaining <= limit { remaining } else { n }
+}
 #[cfg(test)]
 pub(crate) fn routes(logits: &[f32], experts: usize) -> Result<Vec<Vec<(usize, f32)>>> {
     if experts < 10
@@ -748,6 +758,12 @@ mod tests {
         }
         assert_eq!(prompt_rows(0, 2051, 2048), 2048);
         assert_eq!(prompt_rows(2048, 3, 2048), 3);
+        // The final tile keeps 9..=63 tail rows; it never passes the limit or an unaligned start.
+        assert_eq!(final_rows(24576, 7523, 8192, true), 7523);
+        assert_eq!(final_rows(24576, 7523, 8192, false), 7488);
+        assert_eq!([final_rows(4096, 3912, 4096, true), final_rows(4096, 3913, 4096, true)], [3904, 3913]);
+        assert_eq!([final_rows(0, 8200, 8192, true), final_rows(0, 72, 8192, true), final_rows(0, 73, 8192, true)], [8192, 64, 73]);
+        assert_eq!([final_rows(0, 40, 8192, true), final_rows(1, 100, 8192, true), final_rows(0, 128, 8192, true)], [40, 1, 128]);
         let input: Vec<u32> = (0..513).collect();
         for chunk in [1, 2, 7, 16, 63, 64, 65, 127, 128, 256, 512] {
             let mut pos = 0;

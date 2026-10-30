@@ -1096,8 +1096,10 @@ impl<'w> Hc<'w> {
                 (self.down, low, LOW, LOW), (0, 0, 0, 0), (0, 0, 0, 0)];
             // Prompt tiles: next_prefill_packed's HC down launch (injection in the last N tile)
             // whose epilogue applies flash_next_hc_activate and writes the activated low as the
-            // HC up operand's planes in low's own words, offered to its pack.
-            let hc_planes = tokens >= TILED_HC_UP_ROWS && tokens.is_multiple_of(16) && tokens <= HcScratch::workspace_tokens()
+            // HC up operand's planes in low's own words, offered to its pack. A last partial
+            // 16-row group is safe: these kernels store only rows below `tokens`, and each
+            // output row reads only its own operand row.
+            let hc_planes = tokens >= TILED_HC_UP_ROWS && tokens <= HcScratch::workspace_tokens()
                 && rows.iter().all(|r| r.0.is_multiple_of(16));
             // Fused prompt tiles whose HC down is tiled and whose HC up is tiled: the norm writes
             // only the residual rows and its scales into u; HC down forms its planes and HC up

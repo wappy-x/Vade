@@ -77,6 +77,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                                 first - slice,
                                 end - first,
                             )?;
+                            if s.inside_row() == Some(end - span.start) { s.inside_ple(b)?; }
                         }
                     }
                     continue;
@@ -279,6 +280,11 @@ impl<'a, 'w> NextSession<'a, 'w> {
                         tape,
                         table,
                     )?;
+                } else if let Some(row) = s.inside_row().filter(|&row| row < span.len()) {
+                    // An armed final tile (NextSession::arm_inside): two scans around the checkpoint row.
+                    g.recur_next(b, &work.gdn, span.start, row, &mut work.recurrence, pos)?;
+                    s.inside_gdn(b, li, g)?;
+                    g.recur_next(b, &work.gdn, span.start + row, span.len() - row, &mut work.recurrence, pos + row)?;
                 } else {
                     g.recur_next(b, &work.gdn, span.start, span.len(), &mut work.recurrence, pos)?;
                 }

@@ -838,7 +838,9 @@ impl<'a, 'w> NextSession<'a, 'w> {
         let count = spans.last().unwrap().end;
         let mut frontend = Vec::with_capacity(count);
         for (s, inputs) in sessions.iter_mut().zip(tokens) {
-            for &token in inputs.iter() {
+            let inside = s.inside_row();
+            for (row, &token) in inputs.iter().enumerate() {
+                if inside == Some(row) { s.inside_hash(); }
                 frontend.push((token, s.hash.advance(token)));
             }
         }
@@ -1029,6 +1031,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         let model = sessions[0].model;
         let count = spans.last().unwrap().end;
         for ((s, input), span) in sessions.iter_mut().zip(tokens).zip(spans) {
+            s.inside_last(b, &work.residual, span.start)?;
             if verify {
                 for i in 1..span.len() {
                     b.copy_range(

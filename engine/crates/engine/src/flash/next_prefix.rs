@@ -7,6 +7,8 @@
 //! live session later and moves the checkpoint in. `session_from_prefix` installs the
 //! copies in a fresh session and prefill resumes at that 64-aligned position (an unaligned
 //! resume would run single rows up to the next boundary). No kernel, tile or order change.
+//! On one Spark the final tile can also hold the rows after that position (`arm_inside`):
+//! the pass then copies the same pieces at that row inside the tile.
 //! Adoption (VADE_FLASHNEXT_ADOPT, serve): `save_prefix_in_place` publishes the checkpoint
 //! alone; the finished session's QSA and draft arenas move out with `into_storage` (no pool
 //! slot), and `session_from_storage` builds the next turn's session on them, rewound to the
@@ -24,6 +26,8 @@ pub(super) struct Checkpoint<'a> {
     hash: PleHash,
     last: Option<DeviceVector<'a>>,
     remote: Option<pp::cache::Lease>,
+    /// Armed by `arm_inside`: the running final tile still copies its pieces at `position`.
+    inside: bool,
 }
 
 /// Immutable prompt prefix at a 64-aligned position, independent of any live session.
@@ -140,21 +144,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
     fn try_capture(&mut self, b: &Backend<'a>, remote: Option<pp::cache::Lease>) -> Result<()> {
         // A tensor split head half is no prefix of another chat's whole state.
         if self.gdn_state.iter().flatten().any(|g| g.is_half()) { return Err("GDN state holds one split rank's heads".into()); }
-        let mut c = match self.checkpoint.get_mut().take() {
-            Some(c) => c,
-            None => {
-                // One arena (one allocation, one free) holds the whole checkpoint: a cold
-                // request must not pay a driver allocation per layer.
-                let mut lengths: Vec<usize> = self.gdn_state.iter().flatten().flat_map(|g| g.storage_lengths()).collect();
-                lengths.push(self.ple.history_len());
-                if self.draft.is_some() && self.model.prompt_frontend { lengths.push(W); }
-                let mut v = b.vector_arena(&lengths)?.into_iter();
-                let gdn = self.gdn_state.iter()
-                    .map(|g| g.as_ref().map(|g| g.with_storage(v.next().unwrap(), v.next().unwrap())))
-                    .collect();
-                Checkpoint { position: 0, gdn, ple: v.next().unwrap(), hash: self.hash.clone(), last: v.next(), remote: None }
-            }
-        };
+        let mut c = self.checkpoint_storage(b)?;
         for (live, saved) in self.gdn_state.iter().zip(c.gdn.iter_mut()) {
             if let (Some(live), Some(saved)) = (live, saved) {
                 live.copy_into(b, saved)?;
@@ -177,6 +167,60 @@ impl<'a, 'w> NextSession<'a, 'w> {
         c.remote = remote;
         *self.checkpoint.get_mut() = Some(c);
         Ok(())
+    }
+    fn checkpoint_storage(&mut self, b: &Backend<'a>) -> Result<Checkpoint<'a>> {
+        if let Some(c) = self.checkpoint.get_mut().take() { return Ok(Checkpoint { inside: false, ..c }); }
+        // One arena (one allocation, one free) holds the whole checkpoint: a cold
+        // request must not pay a driver allocation per layer.
+        let mut lengths: Vec<usize> = self.gdn_state.iter().flatten().flat_map(|g| g.storage_lengths()).collect();
+        lengths.push(self.ple.history_len());
+        if self.draft.is_some() && self.model.prompt_frontend { lengths.push(W); }
+        let mut v = b.vector_arena(&lengths)?.into_iter();
+        let gdn = self.gdn_state.iter()
+            .map(|g| g.as_ref().map(|g| g.with_storage(v.next().unwrap(), v.next().unwrap())))
+            .collect();
+        Ok(Checkpoint { position: 0, gdn, ple: v.next().unwrap(), hash: self.hash.clone(), last: v.next(), remote: None, inside: false })
+    }
+    /// One Spark, no debug dump: the final prompt tile keeps its tail rows (next_rows::final_rows).
+    pub(super) fn keeps_tail(&self) -> bool {
+        !self.model.pp_front() && !self.model.tp_on() && self.dump.is_none()
+    }
+    /// A final tile of `rows` rows that keeps its tail: the checkpoint storage exists before
+    /// the pass, and the pass copies each piece at the tile's last 64-aligned row, where a
+    /// shorter tile would have ended: the frontend the PLE hash (`inside_hash`), the PLE
+    /// tiles the history (`inside_ple`), each GDN layer its state between two scans of the
+    /// tile (`inside_gdn`; any cut gives the same bytes) and the end the draft's row
+    /// (`inside_last`). Best effort like `try_capture`: no storage, no checkpoint.
+    pub(super) fn arm_inside(&mut self, b: &Backend<'a>, rows: usize) -> Result<()> {
+        if !self.checkpointing || !self.pos.is_multiple_of(64) || rows <= 64 || rows.is_multiple_of(64) { return Ok(()); }
+        if self.gdn_state.iter().flatten().any(|g| g.is_half()) { return Ok(()); }
+        *self.checkpoint.get_mut() = self.checkpoint_storage(b).ok()
+            .map(|c| Checkpoint { position: self.pos + rows / 64 * 64, remote: None, inside: true, ..c });
+        Ok(())
+    }
+    /// The pass row of an armed checkpoint (`arm_inside`).
+    pub(super) fn inside_row(&self) -> Option<usize> {
+        self.checkpoint.borrow().as_ref().filter(|c| c.inside).map(|c| c.position - self.pos)
+    }
+    pub(super) fn inside_hash(&mut self) {
+        if let Some(c) = self.checkpoint.get_mut().as_mut().filter(|c| c.inside) { c.hash = self.hash.clone(); }
+    }
+    pub(super) fn inside_ple(&mut self, b: &Backend<'a>) -> Result<()> {
+        match self.checkpoint.get_mut().as_mut().filter(|c| c.inside) { Some(c) => self.ple.copy_history(b, &mut c.ple), None => Ok(()) }
+    }
+    pub(super) fn inside_gdn(&mut self, b: &Backend<'a>, layer: usize, live: &Gdn<'a, '_>) -> Result<()> {
+        match self.checkpoint.get_mut().as_mut().filter(|c| c.inside) {
+            Some(c) => live.save_into(b, c.gdn.get_mut(layer).ok_or("checkpoint GDN layer")?),
+            None => Ok(()),
+        }
+    }
+    /// After the layers: the draft's last row is the target row before the checkpoint
+    /// (`hidden` row `start + inside_row() - 1`, the row `observe` would keep there).
+    pub(super) fn inside_last(&mut self, b: &Backend<'a>, hidden: &DeviceVector<'a>, start: usize) -> Result<()> {
+        let pos = self.pos;
+        let Some(c) = self.checkpoint.get_mut().as_mut().filter(|c| c.inside) else { return Ok(()) };
+        c.inside = false;
+        match c.last.as_mut() { Some(last) => b.copy_range(hidden, last, (start + c.position - pos - 1) * W, 0, W), None => Ok(()) }
     }
     /// The restorable prefix length, when a checkpoint with its draft history exists.
     pub fn checkpoint_position(&self) -> Option<usize> {

@@ -1104,7 +1104,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         let chunk = crate::flash_next_rows::prompt_tile_for(self.pos + tokens.len(), self.chunk);
         let slice = tokens.len().min(chunk);
         let rest = (tokens.len() - slice).min(chunk);
-        let tile = crate::flash_next_rows::prompt_rows(self.pos + slice, rest, chunk);
+        let tile = crate::flash_next_rows::final_rows(self.pos + slice, rest, chunk, self.keeps_tail());
         self.model.prefill_reader.read_ahead(
             self.hash.clone(),
             tokens.to_vec(),
@@ -1126,12 +1126,11 @@ impl<'a, 'w> NextSession<'a, 'w> {
         let chunk = crate::flash_next_rows::prompt_tile_for(self.pos + tokens.len(), self.chunk);
         let mut start = self.split_prompt(b, tokens, output, chunk)?;
         while start < tokens.len() {
-            // Prefix cache: the last 64-aligned row before the final partial tile.
-            if output && tokens.len() - start < 64 {
-                self.capture_checkpoint(b)?;
-            }
+            // Prefix cache: the last 64-aligned row before the final partial tile (or inside it, arm_inside).
+            if output && tokens.len() - start < 64 { self.capture_checkpoint(b)?; }
+            let keep = output && self.keeps_tail();
             let mut n = self.model.tp_seq_cut(self, output, tokens.len() - start, chunk)
-                .unwrap_or_else(|| crate::flash_next_rows::prompt_rows(self.pos, tokens.len() - start, chunk));
+                .unwrap_or_else(|| crate::flash_next_rows::final_rows(self.pos, tokens.len() - start, chunk, keep));
             // Debug dumps retain all per-token head/stage records. Custom hooks
             // that change selection inside a tile also keep their token contract.
             if self.dump.is_some()
@@ -1145,6 +1144,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 n = 1;
             }
             let project = output && (start + n == tokens.len() || self.dump.is_some());
+            if keep && start + n == tokens.len() { self.arm_inside(b, n)?; }
             Self::run_rows(b, &mut [self], &[&tokens[start..start + n]], project)?;
             start += n;
         }
