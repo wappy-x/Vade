@@ -155,6 +155,41 @@ the whole input. The cache and its warm state belong to the engine, so these
 figures do not credit them to the gateway. Cached-token counts equal
 `vade.prefill_cache_restored_tokens` throughout.
 
+## Claude Code prefix reuse, 2026-10-30
+
+The engine reuses a cached prefix only for a request that sends `cache: true`
+or a `prompt_cache_key`. Claude Code sends neither. Before this change,
+`--stable-prefix` added those fields only to Chat Completions and Responses
+requests, so each Claude Code turn prefilled its whole prompt again.
+
+Setup:
+
+- Engine: main `a5357b3`, prebuilt, on one DGX Spark (NVIDIA GB10), with the
+  `nvidia/Qwen3.8-Flash-Next-FP4-Local` checkpoint (revision
+  `local-sha256-d99ccbed3a9db8a2f099eca98e17c0bc3a2ebe84df95852f3b07c87c20a32716`).
+  The context was 32768 tokens, the output limit 8192, and the prefix cache
+  was at its default (on).
+- Gateway: `vade-gateway --upstream ENGINE --stable-prefix --stats FILE` on a
+  loopback port. "Before" is the build without this change; "after" has the
+  code of commit `8922b8a`.
+- Client: Claude Code 2.1.314, set up with `vade-harness setup claude
+  --target gateway --dedicated-home`. Two runs of `launch.sh -p PROMPT
+  --output-format json`: "Reply exactly OK." and then "Read marker.txt using a
+  tool and report its exact contents." The second run makes two model calls.
+
+The `--stats` rows for the three Messages requests:
+
+| Request | Before: prompt / cached / first token | After: prompt / cached / first token |
+| --- | --- | --- |
+| Run 1 | 16044 / 0 / 7716 ms | 16044 / 0 / 7927 ms |
+| Run 2, first call | 16051 / 0 / 7785 ms | 16051 / 0 / 8014 ms |
+| Run 2, after the tool result | 16178 / 0 / 7832 ms | 16180 / 16000 / 472 ms |
+
+Each run is a new Claude Code session, so its first call reuses nothing. The
+call after the tool result shares its prefix with the call before it, and only
+the "after" build lets the engine reuse it. This is one run of each build, not
+a repeated benchmark.
+
 ## Other gateway checks
 
 Earlier checks of the gateway's optional flags found:

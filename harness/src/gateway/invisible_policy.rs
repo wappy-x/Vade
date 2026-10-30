@@ -451,6 +451,7 @@ fn key(v: Option<View<'_>>, head: &Head) -> String {
         "session_id",
         "x-session-id",
         "x-codex-session-id",
+        "x-claude-code-session-id",
         "session-id",
     ] {
         if let Some(value) = head.get(header) {
@@ -459,7 +460,8 @@ fn key(v: Option<View<'_>>, head: &Head) -> String {
     }
     let mut prefix = Vec::new();
     if let Some(v) = v {
-        for field in ["model", "instructions", "tools"] {
+        // Messages carries its system prompt as a top-level field.
+        for field in ["model", "instructions", "system", "tools"] {
             if let Some(value) = v.get(field) {
                 prefix.extend_from_slice(field.as_bytes());
                 prefix.push(0);

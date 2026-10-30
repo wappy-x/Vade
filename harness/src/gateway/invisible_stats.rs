@@ -90,12 +90,19 @@ impl Observed {
                 .or_else(|| value.get("vade"))
                 .or_else(|| usage.get("vade"));
             // Messages input_tokens leaves out cache reads and writes: add them
-            // back for the whole prompt, as the engine counts it.
-            let read = integer(usage.get("cache_read_input_tokens"));
-            let (prompt, cached) = match (prompt, read) {
-                (Some(input), Some(read)) => (input.checked_add(read)
-                    .and_then(|n| n.checked_add(integer(usage.get("cache_creation_input_tokens")).unwrap_or(0))), cached.or(Some(read))),
-                _ => (prompt, cached),
+            // back for the whole prompt, as the engine counts it. An absent part
+            // counts 0; a part that is not a count, or a sum that overflows, is invalid.
+            let (read, write) = (usage.get("cache_read_input_tokens"), usage.get("cache_creation_input_tokens"));
+            let (prompt, cached) = if read.is_some() || write.is_some() {
+                let part = |v: Option<View<'_>>| v.map_or(Some(0), |v| integer(Some(v)));
+                let total = prompt.zip(part(read)).zip(part(write))
+                    .and_then(|((input, r), w)| input.checked_add(r)?.checked_add(w));
+                if total.is_none() {
+                    self.invalid = true;
+                }
+                (total, cached.or_else(|| total.and(part(read))))
+            } else {
+                (prompt, cached)
             };
             let restored = integer(vade.and_then(|v| v.get("prefill_cache_restored_tokens")));
             if cached.zip(restored).is_some_and(|(a, b)| a != b) {
@@ -436,6 +443,32 @@ impl Metrics {
                 assert_eq!(m.observed.first.is_some(), stream, "{api} stream={stream} size={size}");
             }
         }
+    }
+    /// Messages cache parts that cannot form the engine's prompt count publish
+    /// no prompt count; an absent part counts 0.
+    #[test]
+    fn messages_cache_parts_that_do_not_add_up_mark_the_row_invalid() {
+        let row = |usage: &str| {
+            let body = format!(r#"{{"type":"message","content":[{{"type":"text","text":"ok"}}],"usage":{usage}}}"#);
+            let mut m = Metrics::new(true);
+            m.response(&Head { first: "HTTP/1.1 200 OK".into(), fields: vec![("content-type".into(), "application/json".into())] }, 200);
+            m.payload(body.as_bytes(), Duration::ZERO);
+            m.finish(true);
+            json::parse(&m.json()).unwrap()
+        };
+        for usage in [
+            r#"{"input_tokens":18446744073709551615,"output_tokens":3,"cache_read_input_tokens":1,"cache_creation_input_tokens":0}"#,
+            r#"{"input_tokens":40,"output_tokens":3,"cache_read_input_tokens":0,"cache_creation_input_tokens":-5}"#,
+            r#"{"output_tokens":3,"cache_read_input_tokens":7}"#,
+        ] {
+            let r = row(usage);
+            assert_eq!(r.get("telemetry_invalid"), Some(&json::Value::Bool(true)), "{usage}");
+            assert_eq!(r.get("prompt_tokens"), Some(&json::Value::Null), "{usage}");
+        }
+        let r = row(r#"{"input_tokens":40,"output_tokens":3,"cache_creation_input_tokens":60}"#);
+        assert_eq!(r.get("telemetry_invalid"), Some(&json::Value::Bool(false)));
+        assert_eq!(r.get("prompt_tokens"), Some(&json::Value::Number("100".into())));
+        assert_eq!(r.get("cached_tokens"), Some(&json::Value::Number("0".into())));
     }
     #[test]
     fn recorded_engine_completions_have_generated_timing_at_every_fragment_size() {

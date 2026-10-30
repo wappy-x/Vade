@@ -170,8 +170,9 @@ routing also applies to the metadata and admission routes.
   The engine reuses a prefix only for a request with one of them. Claude Code
   and OpenCode send neither, so without the flag each of their turns prefills
   the full prompt again. Explicit values, including `cache: false`, survive. Keys come from explicit
-  session headers, or else from a deterministic hash of the model, instructions,
-  tools, system/developer messages and the first user message. Turns that send
+  session headers, Claude Code's `X-Claude-Code-Session-Id` among them, or else
+  from a deterministic hash of the model, instructions, the Messages `system`
+  field, tools, system/developer messages and the first user message. Turns that send
   the full history keep the same key; clients that send only new input must
   supply a stable key or session header. This non-secret hash is a scheduling
   hint, and the engine validates actual prefix reuse.

@@ -343,3 +343,14 @@ fn stable_prefix_gives_messages_the_cache_fields_but_no_limit_changes() {
     assert!(plain.get("cache").is_none() && plain.get("prompt_cache_key").is_none());
     assert_eq!(plain.get("max_tokens").unwrap().raw(), "500");
 }
+
+#[test]
+fn messages_keys_follow_the_system_prompt_and_the_claude_code_session() {
+    let body = |system: &str| format!(r#"{{ "model":"mock", "system":"{system}", "messages":[{{"role":"user","content":"first"}}] }}"#);
+    let (a, b) = (body("one"), body("two"));
+    assert_ne!(key(view(a.as_bytes()), &head()), key(view(b.as_bytes()), &head()));
+    assert_eq!(key(view(a.as_bytes()), &head()), key(view(a.as_bytes()), &head()));
+    let session = |id: &str| Head { fields: vec![("X-Claude-Code-Session-Id".into(), id.into())], ..head() };
+    assert_eq!(key(view(a.as_bytes()), &session("s1")), key(view(b.as_bytes()), &session("s1")));
+    assert_ne!(key(view(a.as_bytes()), &session("s1")), key(view(a.as_bytes()), &session("s2")));
+}

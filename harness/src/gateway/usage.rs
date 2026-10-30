@@ -111,7 +111,8 @@ impl Counts {
             // That alias is not a second snapshot; it must only agree.
             if input == "prompt_tokens" && prompt.is_none() && usage.get("input_tokens").is_some() {
                 let cached = |key| usage.get(key).and_then(|v| v.get("cached_tokens")).map(|v| v.raw().to_owned());
-                if cached(details) != cached("input_tokens_details") {
+                let alias = usage.get(details).filter(|v| v.raw() != "null");
+                if alias.is_some_and(|v| v.fields().is_none()) || cached(details) != cached("input_tokens_details") {
                     self.invalid = true;
                 }
                 continue;
@@ -259,6 +260,12 @@ mod tests {
         let mut tap = UsageTap::new(Some("application/json"), true);
         tap.feed(br#"{"usage":{"input_tokens":1000,"input_tokens_details":{"cached_tokens":960},"prompt_tokens_details":{"cached_tokens":959}}}"#);
         assert_eq!(tap.finish(), None);
+        // So does an alias that is not an object, with or without the main details.
+        for body in [&br#"{"usage":{"input_tokens":1000,"prompt_tokens_details":123}}"#[..], br#"{"usage":{"input_tokens":1000,"input_tokens_details":{"cached_tokens":960},"prompt_tokens_details":[]}}"#] {
+            let mut tap = UsageTap::new(Some("application/json"), true);
+            tap.feed(body);
+            assert_eq!(tap.finish(), None, "{}", String::from_utf8_lossy(body));
+        }
     }
     fn sse(parts: &[&str]) -> String {
         parts.iter().map(|p| format!("data: {p}\r\n\r\n")).collect()
