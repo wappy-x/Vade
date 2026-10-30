@@ -18,6 +18,7 @@
 //! when a server log file is supplied. Without a log it says so; the API
 //! receipt carries no accepted-token or verify-time fields.
 use crate::json::{self, Value};
+use crate::process_group::kill_group;
 use std::{
     fs::OpenOptions,
     io::{self, Read, Write},
@@ -587,24 +588,6 @@ pub fn first_fence(answer: &str) -> Option<(String, String)> {
     let (language, body) = rest.split_once('\n')?;
     let end = body.find("```")?;
     Some((language.trim().to_owned(), body[..end].to_owned()))
-}
-
-/// Stop the whole process group a [`run_bounded`] child leads. The child
-/// starts as group leader, so the group id is the child pid. Group stop
-/// needs the system `kill` tool; the standard library stops one process
-/// only. A failure here falls back to stopping the direct child.
-pub(crate) fn kill_group(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
-        let _ = Command::new("/bin/kill")
-            .arg("-KILL")
-            .arg(format!("-{}", child.id()))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    let _ = child.kill();
 }
 
 /// Run a child to completion with a hard timeout; kill it past the deadline.

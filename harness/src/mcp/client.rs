@@ -379,7 +379,7 @@ impl Connection {
     /// pipes stops too. The direct child is not reaped yet, so its pid is
     /// still the group id.
     fn kill(&mut self) {
-        crate::quality::kill_group(&mut self.child);
+        crate::process_group::kill_group(&mut self.child);
     }
 }
 

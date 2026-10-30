@@ -5,6 +5,7 @@ Changes that are merged but not yet released are under Unreleased.
 
 ## Unreleased
 
+- On Linux, closing an MCP server (chat `/exit`, `vade tools`, `vade mcp test`) no longer stops every process of your user, such as the engine and your SSH session. Vade now stops only the server's own process group, with `kill -KILL -- -<group>`. It never signals its own group or the `0` and `-1` targets. Hooks and code checks use the same stop.
 - When an MCP call does not run, the model now learns why: you declined it, Vade could not show the question, no one could answer in a run without a terminal, or approvals are `never`. It no longer blames the tool server.
 - Chat with input from a pipe treats `/exit` before the provider starts your message like the end of input: the message still runs, and Vade says so on stderr. After the message starts, and during other work such as `/compact`, `/exit` cancels it, as before. Inside `/paste`, `/exit` is text. A sent line of only `y` or `n` answers a pending approval; in the full-screen editor, the key must be typed, not pasted or recalled. `vade mcp test` prints `none` for an empty resource or prompt list.
 - `docs/mcp.md` starts with an example MCP server that needs no token and no extra install ([`examples/mcp_word_count.rs`](examples/mcp_word_count.rs)). `scripts/install.sh` writes the GPU kernel compiler output to a log file and shows its end only when the build fails.

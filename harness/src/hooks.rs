@@ -150,15 +150,13 @@ fn report(result: io::Result<Output>, point: Point, warn: &mut dyn FnMut(String)
     }
 }
 
-// The standard library cannot signal a process group. Use the system utility
-// for our own group only. Drop also covers pipe and wait errors.
+// The standard library cannot signal a process group. The hook leads its
+// own group; stop it with the guarded group stop. Drop also covers pipe and
+// wait errors.
 struct Owned(Child);
 impl Drop for Owned {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        let _ = Command::new("/bin/kill").args(["-KILL", "--", &format!("-{}", self.0.id())])
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
-        let _ = self.0.kill();
+        crate::process_group::kill_group(&mut self.0);
         let _ = self.0.wait();
     }
 }
