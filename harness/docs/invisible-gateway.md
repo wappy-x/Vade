@@ -17,8 +17,9 @@ protocol upgrades need a separate transport.
 Before it contacts any upstream, the gateway checks three things. A Host that is
 not loopback with the listener port gets 421. Any `Origin` header not listed by
 `--allow-origin` gets 403. And with `--token` (or `VADE_GATEWAY_TOKEN`), a
-missing `Authorization: Bearer` gets 401. See the [harness README](../README.md)
-for how to allow a browser client.
+missing `Authorization: Bearer` gets 401. Prefer `VADE_GATEWAY_TOKEN`: other
+local users can read a `--token` value in the process list. See the
+[harness README](../README.md) for how to allow a browser client.
 
 ## What it forwards
 
@@ -37,6 +38,14 @@ client credential headers pass through unchanged, with one exception: under
 `--token`, the gateway consumes the `Authorization` header and never forwards
 it, so use `--api-key-file` to authenticate upstream. This credential choice
 does not change response headers or bodies. Recording metadata leaves out keys.
+
+When a client hangs up before its reply ends, the gateway writes one blank line
+to the upstream, then closes that connection. HTTP servers ignore a blank line
+between requests (RFC 9112, section 2.2), but the Vade engine drops a request
+that bytes follow, so a stream still in the engine queue stops at once. With
+several upstreams, `POST /v1/cancel` and `/v1/kv/release` go to every upstream
+at the same time. The gateway waits at most 1.5 seconds and reads at most 64 KiB
+from each one.
 
 Request bodies are capped at 8 MiB on every route. A body over the cap, whether
 by its declared length or by its chunked total, gets HTTP 413 with the byte
@@ -132,10 +141,16 @@ fields left null.
 final SSE event), `timings.json` in the stats format, and a versioned
 `meta.json`. Reply bytes stream straight to disk after they are forwarded; the
 recorder never holds a whole reply in memory. New directories get owner-only
-permissions, and files get owner read/write permissions. Recording failures are
-reported on stderr and forwarding carries on. Incomplete recordings are left out
-of replay. Bodies can contain session content, so keep recordings outside the
-tracked tree.
+permissions, and files get owner read/write permissions. An existing DIR that
+other users can open gets owner-only permissions at startup, with a note on
+stderr. Only a
+complete request that passed the Host, Origin and `--token` checks gets a
+directory, so a refused request leaves nothing on disk. DIR holds at most
+100,000 request directories, the replay limit. When it is full, the gateway
+says so once on stderr and forwards later requests without recording them.
+Recording failures are reported on stderr and forwarding carries on. Incomplete
+recordings are left out of replay and do not count against its limit. Bodies
+can contain session content, so keep recordings outside the tracked tree.
 
 `vade-gateway replay DIR --upstream HTTP_BASE_URL --concurrency N --stats FILE`
 replays complete recordings, prints a stats row per request, and can also append

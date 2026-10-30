@@ -282,7 +282,8 @@ Usage: vade-harness gateway --upstream URL [--upstream URL ...] [OPTIONS]
   --bind ADDRESS        Listener address (default 127.0.0.1:8787)
   --allow-origin ORIGIN Admit this exact browser Origin, e.g. https://app.example (repeatable)
   --allow-host HOST     Admit another Host name, with or without the port (repeatable)
-  --token TOKEN         Require Authorization: Bearer TOKEN (or VADE_GATEWAY_TOKEN)
+  --token TOKEN         Require Authorization: Bearer TOKEN (or VADE_GATEWAY_TOKEN,
+                        which keeps the token out of the process list)
   -h, --help            Show this help
   --version             Print version
 

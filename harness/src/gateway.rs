@@ -56,7 +56,7 @@ const UNSERVED_MESSAGE: &str = "embeddings are not implemented: Vade serves text
 /// The read-only routes; every other accepted route takes POST.
 const GET_ROUTES: &[&str] = &["/v1/capabilities", "/v1/models", "/models", "/health"];
 /// `vade-gateway --help`; `vade-harness gateway --help` states the same rules.
-const BROWSER_GUARD_HELP: &str = "Browser guard: Host must be 127.0.0.1, localhost or [::1] (with the listener port) or an --allow-host value, else 421.\nAny request with an Origin header gets 403 unless --allow-origin names that exact origin (repeatable); allowed origins get CORS headers.\n--token TOKEN (or VADE_GATEWAY_TOKEN) requires Authorization: Bearer TOKEN, else 401; that header is not forwarded upstream.\n";
+const BROWSER_GUARD_HELP: &str = "Browser guard: Host must be 127.0.0.1, localhost or [::1] (with the listener port) or an --allow-host value, else 421.\nAny request with an Origin header gets 403 unless --allow-origin names that exact origin (repeatable); allowed origins get CORS headers.\n--token TOKEN (or VADE_GATEWAY_TOKEN) requires Authorization: Bearer TOKEN, else 401; that header is not forwarded upstream.\nPrefer VADE_GATEWAY_TOKEN: other local users can read a --token value in the process list.\n";
 /// How long one request may wait out upstream 503 refusals before the gateway
 /// passes the refusal on, and how often the wait checks for a client hang-up.
 const ADMISSION_PATIENCE: Duration = Duration::from_secs(if cfg!(test) { 2 } else { 30 });

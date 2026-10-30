@@ -558,7 +558,7 @@ impl<R: Runner> Local<R> {
         }
         request.timeout = Duration::from_secs(120);
         request.stdin = br#"{"model":"qwen3-8b","messages":[{"role":"user","content":"Explain why ice floats in one sentence."}],"max_tokens":128,"temperature":0,"top_p":1,"top_k":0,"enable_thinking":false,"stream":true}"#.to_vec();
-        let _auth_header = crate::auth::curl_headers(&mut request, self.dry)?;
+        crate::auth::curl_headers(&mut request, self.dry)?;
         let timer = Instant::now();
         let mut first = None;
         let mut content = String::new();

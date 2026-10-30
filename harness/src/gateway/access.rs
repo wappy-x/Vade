@@ -118,7 +118,7 @@ impl Access {
                     .map(|(_, credential)| credential.trim()),
                 _ => None,
             };
-            if !presented.is_some_and(|credential| same(credential.as_bytes(), token.as_bytes())) {
+            if !same(token.as_bytes(), presented.unwrap_or("").as_bytes()) {
                 return Err(Refusal::Status(401, "gateway token required: Authorization: Bearer TOKEN"));
             }
         }
@@ -181,9 +181,14 @@ fn token_list(value: &str) -> bool {
         && value.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~, ".contains(&b))
 }
 
-fn same(a: &[u8], b: &[u8]) -> bool {
-    // Fixed work for equal lengths; only the length is observable.
-    a.len() == b.len() && a.iter().zip(b).fold(0, |diff, (x, y)| diff | (x ^ y)) == 0
+/// Work is fixed by the configured token length, also on a length mismatch,
+/// as in the engine key check. black_box keeps the fold from becoming an early exit.
+fn same(expected: &[u8], supplied: &[u8]) -> bool {
+    let mut difference = expected.len() ^ supplied.len();
+    for (index, byte) in expected.iter().enumerate() {
+        difference |= std::hint::black_box(usize::from(byte ^ supplied.get(index).copied().unwrap_or(0)));
+    }
+    !expected.is_empty() && std::hint::black_box(difference) == 0
 }
 
 #[cfg(test)]

@@ -815,3 +815,23 @@
             io::ErrorKind::WouldBlock
         );
     }
+
+    #[test]
+    fn pipelined_bytes_during_a_reply_hold_one_header_block_at_most() {
+        // Before, each of 64 connections could hold 8 MiB of bytes that are never served.
+        for (extra, refused) in [(MAX_HEADERS, false), (MAX_HEADERS + 1, true)] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let mut server = DeadlineStream::new(listener.accept().unwrap().0, None).unwrap();
+            server.watch_downstream().unwrap();
+            client.write_all(&vec![b'x'; extra]).unwrap();
+            let until = Instant::now() + Duration::from_secs(5);
+            let mut result = server.check();
+            while result.is_ok() && Instant::now() < until {
+                thread::sleep(Duration::from_millis(10));
+                result = server.check();
+                if !refused && Instant::now() + Duration::from_secs(4) > until { break; }
+            }
+            assert_eq!(result.as_ref().err().map(|e| e.to_string()), refused.then(|| "pipelined HTTP input exceeds limit".to_owned()), "{extra}");
+        }
+    }

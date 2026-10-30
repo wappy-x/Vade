@@ -150,3 +150,15 @@ fn token_environment_fallback_is_overridden_by_the_flag() {
         assert!(!none.consumes_authorization());
     }
 }
+
+#[test]
+fn token_compare_has_fixed_work_and_both_gateway_helps_name_the_safe_source() {
+    // The compare runs over the configured token for every length, like the engine key check.
+    assert!(same(b"secret-token", b"secret-token"));
+    for wrong in [&b""[..], b"secret-toke", b"secret-tokenx", b"secret-tokeN", b"\0ecret-token"] {
+        assert!(!same(b"secret-token", wrong), "{wrong:?}");
+    }
+    assert!(!same(b"", b""), "an empty token never matches");
+    // --token is visible to every local user in the process list; help says so.
+    assert!(super::super::BROWSER_GUARD_HELP.contains("Prefer VADE_GATEWAY_TOKEN: other local users can read a --token value in the process list."));
+}

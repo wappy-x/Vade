@@ -9,9 +9,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// The most `request-*` folders one recording folder holds; replay refuses more.
+const MAX_RECORDINGS: usize = 100_000;
 pub(super) struct Recorder {
     root: PathBuf,
     sequence: AtomicUsize,
+    /// New recordings this run may add before the folder reaches [`MAX_RECORDINGS`].
+    room: usize,
 }
 impl Recorder {
     pub(super) fn open(path: &str) -> io::Result<Self> {
@@ -27,10 +31,36 @@ impl Recorder {
         if fs::symlink_metadata(&root)?.file_type().is_symlink() {
             return Err(transport::invalid("record root must be a real directory"));
         }
+        // Recordings hold prompts and replies; an existing folder becomes private too.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&root)?.permissions().mode();
+            if mode & 0o077 != 0 {
+                fs::set_permissions(&root, fs::Permissions::from_mode(mode & 0o7700))?;
+                crate::diagnostics::stderr_line(format_args!("vade-gateway: the --record folder was open to other users; it now has owner-only permissions."));
+            }
+        }
+        let mut existing = 0;
+        for entry in fs::read_dir(&root)? {
+            existing += usize::from(entry?.file_name().to_string_lossy().starts_with("request-"));
+        }
         Ok(Self {
             root,
             sequence: AtomicUsize::new(0),
+            room: MAX_RECORDINGS.saturating_sub(existing),
         })
+    }
+    /// A new recording, or `None` after a report when the folder is full or unwritable.
+    pub(super) fn begin(&self) -> Option<Recording> {
+        match self.start() {
+            Ok(recording) => Some(recording),
+            Err(error) if error.kind() == io::ErrorKind::StorageFull => None,
+            Err(_) => {
+                crate::diagnostics::stderr_line(format_args!("vade-gateway: recorder start failed; this request is forwarded but not recorded. Check the --record folder's permissions and free space."));
+                None
+            }
+        }
     }
     pub(super) fn start(&self) -> io::Result<Recording> {
         let stamp = SystemTime::now()
@@ -38,6 +68,12 @@ impl Recorder {
             .unwrap_or_default()
             .as_nanos();
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
+        if sequence >= self.room {
+            if sequence == self.room {
+                crate::diagnostics::stderr_line(format_args!("vade-gateway: the --record folder holds {MAX_RECORDINGS} recordings, the replay limit; later requests are forwarded but not recorded. Move old recordings out, then restart the gateway."));
+            }
+            return Err(io::Error::new(io::ErrorKind::StorageFull, "recording limit reached"));
+        }
         let dir = self.root.join(format!("request-{stamp:020}-{sequence:08}"));
         let mut builder = fs::DirBuilder::new();
         #[cfg(unix)]
@@ -177,21 +213,20 @@ fn inventory(root: &Path) -> io::Result<Vec<Vec<Saved>>> {
     let mut dirs = Vec::new();
     for entry in fs::read_dir(root)? {
         let entry = entry?;
+        // Incomplete folders have no meta.json; they never count against the limit.
         if entry.file_type()?.is_dir()
             && entry.file_name().to_string_lossy().starts_with("request-")
+            && entry.path().join("meta.json").exists()
         {
             dirs.push(entry.path());
         }
-        if dirs.len() > 100_000 {
+        if dirs.len() > MAX_RECORDINGS {
             return Err(transport::invalid("recording inventory exceeds limit"));
         }
     }
     dirs.sort();
     let mut sessions: BTreeMap<String, Vec<Saved>> = BTreeMap::new();
     for dir in dirs {
-        if !dir.join("meta.json").exists() {
-            continue;
-        }
         let meta = json::parse_bytes(&read_bounded(&dir.join("meta.json"), 64 * 1024)?)?;
         if meta.get("complete") != Some(&Value::Bool(true)) {
             continue;
@@ -422,6 +457,31 @@ write!(body.reader.get_mut(),"HTTP/1.1 200 OK\r\nContent-Type: application/json\
 let stats = dir.join("replay.jsonl"); replay( vec![ dir.to_str().unwrap().into(), "--upstream".into(), url, "--concurrency".into(), "2".into(), "--stats".into(), stats.to_str().unwrap().into(), ] .into_iter(), ) .unwrap();
 server.join().unwrap(); let seen = observed.lock().unwrap(); for session in ["a", "b"] { assert_eq!( seen.iter() .filter(|(s, _)| s == session) .map(|(_, t)| t.clone()) .collect::<Vec<_>>(),
 vec![Value::Number("1".into()), Value::Number("2".into())] ); } assert_eq!(fs::read_to_string(stats).unwrap().lines().count(), 4); fs::remove_dir_all(dir).unwrap(); } }
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    #[test]
+    fn a_full_folder_stops_recording_and_replay_ignores_incomplete_folders() {
+        let dir = std::env::temp_dir().join(format!("vade-record-limit-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let mut recorder = Recorder::open(dir.to_str().unwrap()).unwrap();
+        assert_eq!(recorder.room, MAX_RECORDINGS);
+        // An interrupted request leaves a folder without meta.json.
+        drop(recorder.start().unwrap());
+        assert_eq!(Recorder::open(dir.to_str().unwrap()).unwrap().room, MAX_RECORDINGS - 1);
+        recorder.room = 2;
+        let head = Head { first: "POST /v1/responses HTTP/1.1".into(), fields: Vec::new() };
+        let mut complete = recorder.start().unwrap();
+        complete.request("POST", "/v1/responses", &head, b"{}").unwrap();
+        complete.finish("{\"complete\":true}").unwrap();
+        assert_eq!(recorder.start().err().map(|e| e.kind()), Some(io::ErrorKind::StorageFull));
+        assert!(recorder.begin().is_none());
+        let sessions = inventory(&dir).unwrap();
+        assert_eq!(sessions.iter().map(Vec::len).sum::<usize>(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
 
 #[cfg(test)]
 mod replay_body_tests {

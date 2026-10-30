@@ -515,13 +515,12 @@ fn downstream_disconnect_closes_active_upstream_response() {
             .unwrap();
         socket.write_all(&[b'x'; 65536]).unwrap();
         released.recv_timeout(Duration::from_secs(30)).unwrap();
-        assert_eq!(
-            peer.read(&mut [0; 1]).unwrap_or_else(|e| {
-                assert_eq!(e.kind(), io::ErrorKind::ConnectionReset);
-                0
-            }),
-            0
-        );
+        // A gateway that saw the hang-up first sends one blank line, then closes.
+        let mut after = Vec::new();
+        if let Err(e) = peer.read_to_end(&mut after) {
+            assert_eq!(e.kind(), io::ErrorKind::ConnectionReset);
+        }
+        assert!(after.is_empty() || after == b"\r\n", "{after:?}");
     });
     let gateway = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = gateway.local_addr().unwrap();
@@ -975,4 +974,42 @@ fn optional_bearer_token_gates_client_requests_and_stays_local() {
     let (endpoint, server) = engine_for(&case);
     assert!(client_call(endpoint, 0, Access::default(), &case, "").0.first.starts_with("HTTP/1.1 200 "));
     assert_eq!(server.join().unwrap().unwrap().0.get("authorization"), Some("Bearer sk-local"));
+}
+
+#[test]
+fn client_hang_up_before_the_reply_stops_the_queued_engine_request() {
+    // A queued engine stream survives a closed socket (engine dispatch.rs:317)
+    // but is dropped when bytes follow the request (engine scheduler.rs:507).
+    for lane in 0..3 {
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = Endpoint::parse(&format!("http://{}", upstream.local_addr().unwrap())).unwrap();
+        let (queued, hold) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (socket, _) = upstream.accept().unwrap();
+            let mut peer = socket.try_clone().unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let mut reader = BufReader::new(DeadlineStream::new(socket, None).unwrap());
+            receive(&mut reader);
+            queued.send(()).unwrap();
+            // No reply: the request waits in the engine queue until the client leaves.
+            let mut after = Vec::new();
+            peer.read_to_end(&mut after).unwrap();
+            after
+        });
+        let gateway = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = gateway.local_addr().unwrap();
+        let relay = thread::spawn(move || {
+            let socket = gateway.accept().unwrap().0;
+            let _ = if lane == 0 { handle(socket, &endpoint) } else {
+                invisible::handle_conformance(socket, &format!("http://{}", endpoint.authority), lane == 2, None)
+            };
+        });
+        let payload = r#"{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}"#;
+        let mut client = TcpStream::connect(address).unwrap();
+        write!(client, "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{payload}", payload.len()).unwrap();
+        hold.recv_timeout(Duration::from_secs(10)).unwrap();
+        drop(client);
+        relay.join().unwrap();
+        assert_eq!(server.join().unwrap(), b"\r\n", "lane {lane}: the engine sees a byte after the request, not only a close");
+    }
 }

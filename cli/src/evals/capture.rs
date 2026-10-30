@@ -173,13 +173,7 @@ impl Response {
         Ok(())
     }
 }
-fn curl_quote(text: &str) -> String {
-    text.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
-}
+use crate::auth::curl_quote;
 fn request(
     url: &str,
     path: &str,

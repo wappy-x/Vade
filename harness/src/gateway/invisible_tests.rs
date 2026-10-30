@@ -156,10 +156,14 @@ fn completions_alias_preserves_queries_prefixes_and_custom_routes() {
 }
 
 fn guarded(runtime: &Runtime, access: &Access, request: &str) -> String {
+    guarded_recorded(runtime, access, None, request)
+}
+
+fn guarded_recorded(runtime: &Runtime, access: &Access, recorder: Option<&Recorder>, request: &str) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     thread::scope(|scope| {
-        let gateway = scope.spawn(|| handle_guarded(listener.accept().unwrap().0, runtime, None, None, access));
+        let gateway = scope.spawn(|| handle_guarded(listener.accept().unwrap().0, runtime, None, recorder, access));
         let mut client = TcpStream::connect(address).unwrap();
         client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         client.write_all(request.replace("PORT", &address.port().to_string()).as_bytes()).unwrap();
@@ -332,4 +336,91 @@ fn accept_errors_are_logged_and_the_relay_keeps_serving() {
     client.read_to_string(&mut reply).unwrap();
     assert!(reply.starts_with("HTTP/1.1 200 ") && reply.contains(r#"{"ok":true}"#), "{reply}");
     assert_eq!(fixture.1.join().unwrap(), 1);
+}
+
+#[test]
+fn refused_requests_leave_no_recording_and_a_shared_record_folder_becomes_private() {
+    let dir = std::env::temp_dir().join(format!("vade-record-guard-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let recorder = Recorder::open(dir.to_str().unwrap()).unwrap();
+    let runtime = Runtime::single(Origin::parse("http://127.0.0.1:1").unwrap());
+    let mut locked = Access::default();
+    locked.require_token("t0k").unwrap();
+    let post = |extra: &str| format!("POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n{extra}Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}");
+    let folders = || fs_entries(&dir);
+    // Before the fix each of these left a request-* folder: no token, a wrong
+    // token, no Host, a duplicate Host and a malformed head.
+    for (request, status) in [
+        (post(""), "401"),
+        (post("Authorization: Bearer wrong\r\n"), "401"),
+        ("GET /v1/models HTTP/1.1\r\nAuthorization: Bearer t0k\r\n\r\n".to_owned(), "400"),
+        (post("Authorization: Bearer t0k\r\nHost: evil.example\r\n"), "400"),
+        ("GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\nAuthorization: Bearer t0k\r\nContent-Length: x\r\n\r\n".to_owned(), "400"),
+    ] {
+        let reply = guarded_recorded(&runtime, &locked, Some(&recorder), &request);
+        assert!(reply.starts_with(&format!("HTTP/1.1 {status} ")), "{request:?} -> {reply}");
+        assert_eq!(folders(), 0, "{request:?} left a recording");
+    }
+    // A request that passes the checks is still recorded, with its metadata.
+    let reply = guarded_recorded(&runtime, &locked, Some(&recorder), &post("Authorization: Bearer t0k\r\n"));
+    assert!(reply.starts_with("HTTP/1.1 502 "), "{reply}");
+    assert_eq!(folders(), 1);
+    let saved = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+    assert!(saved.join("meta.json").exists() && saved.join("request.body").exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Recorder::open(dir.to_str().unwrap()).unwrap();
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700, "a shared folder becomes private");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+fn fs_entries(dir: &std::path::Path) -> usize { std::fs::read_dir(dir).unwrap().count() }
+
+#[test]
+fn a_stalled_replica_holds_neither_the_cancel_answer_nor_another_replica() {
+    // Replica 0 takes the connection and never answers; before, the serial
+    // fan-out waited 30 s for it before it asked replica 1.
+    let stalled = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", stalled.local_addr().unwrap());
+    let (release, hold) = mpsc::channel::<()>();
+    let staller = thread::spawn(move || { let socket = stalled.accept().unwrap().0; let _ = hold.recv_timeout(Duration::from_secs(20)); drop(socket); });
+    let live = upstream(vec!["HTTP/1.1 200 OK\r\nContent-Length: 18\r\n\r\n{\"cancelled\":true}"]);
+    let started = Instant::now();
+    let answer = ask(&[url, live.0], "POST /v1/cancel HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}");
+    let took = started.elapsed();
+    let _ = release.send(());
+    staller.join().unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200 ") && answer.contains(r#"{"cancelled":true}"#), "{answer}");
+    assert!(took < Duration::from_secs(4), "{took:?}");
+    assert_eq!(live.1.join().unwrap(), 1);
+    // An oversized control reply is skipped; the bounded one answers.
+    let body = "x".repeat(CONTROL_REPLY_BYTES);
+    let big: &'static str = Box::leak(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len()).into_boxed_str());
+    let (a, b) = (upstream(vec![big]), upstream(vec!["HTTP/1.1 200 OK\r\nContent-Length: 19\r\n\r\n{\"cancelled\":false}"]));
+    let answer = ask(&[a.0, b.0], "POST /v1/cancel HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}");
+    assert!(answer.contains(r#"{"cancelled":false}"#), "{}", &answer[..answer.len().min(200)]);
+    let _ = (a.1.join(), b.1.join());
+}
+
+#[test]
+fn a_head_the_gateway_cannot_forward_gets_a_400_not_a_close_or_a_502() {
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let runtime = Runtime::single(Origin::parse(&format!("http://{}", upstream.local_addr().unwrap())).unwrap());
+    // 101 header lines: before, the relay closed the socket with no reply.
+    let many: String = (0..101).map(|i| format!("X-{i}: 1\r\n")).collect();
+    let reply = guarded(&runtime, &Access::default(), &format!("GET /v1/models HTTP/1.1\r\nHost: localhost:PORT\r\n{many}\r\n"));
+    assert!(reply.starts_with("HTTP/1.1 400 "), "{reply}");
+    // A head just under the limit grows past it with the gateway's own lines:
+    // before, the upstream refused it and the client saw a 502.
+    let mut request = "GET /v1/models HTTP/1.1\r\nHost: localhost:PORT\r\n".to_owned();
+    while request.len() < transport::MAX_HEADERS - 8000 {
+        request.push_str(&format!("X-Pad-{}: {}\r\n", request.len(), "y".repeat(7000)));
+    }
+    request.push_str(&format!("X-Last: {}\r\n\r\n", "z".repeat(transport::MAX_HEADERS - 20 - request.len())));
+    let server = thread::spawn(move || { let mut sent = Vec::new(); upstream.accept().unwrap().0.read_to_end(&mut sent).unwrap(); sent });
+    let reply = guarded(&runtime, &Access::default(), &request);
+    assert!(reply.starts_with("HTTP/1.1 400 ") && reply.contains("oversized HTTP headers"), "{}", &reply[..reply.len().min(200)]);
+    assert!(server.join().unwrap().is_empty(), "no request bytes reached the upstream");
 }

@@ -345,14 +345,8 @@ fn handle_guarded(
     access: &Access,
 ) -> io::Result<()> {
     let mut metrics = Metrics::new(log.is_some() || recorder.is_some());
-    let mut recording = recorder.and_then(|r| match r.start() {
-        Ok(recording) => Some(recording),
-        Err(_) => {
-            crate::diagnostics::stderr_line(format_args!("vade-gateway: recorder start failed; this request is forwarded but not recorded. Check the --record folder's permissions and free space."));
-            None
-        }
-    });
-    let result = forward(socket, runtime, access, &mut metrics, &mut recording);
+    let mut recording = None;
+    let result = forward(socket, runtime, access, &mut metrics, (recorder, &mut recording));
     metrics.finish(result.is_ok());
     let line = metrics.json();
     if let Some(log) = log
@@ -373,11 +367,16 @@ fn forward(
     runtime: &Runtime,
     access: &Access,
     metrics: &mut Metrics,
-    recording: &mut Option<Recording>,
+    (recorder, recording): (Option<&Recorder>, &mut Option<Recording>),
 ) -> io::Result<()> {
     let local = socket.local_addr()?;
     let mut client = BufReader::new(DeadlineStream::new(socket, None)?);
-    let mut request = WireHead::read(&mut client)?;
+    let mut request = match WireHead::read(&mut client) {
+        Ok(request) => request,
+        // A client that sent nothing gets nothing; any other bad head gets a 400.
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Err(error),
+        Err(_) => return local_error(client.get_mut(), false, 400, "invalid or oversized HTTP headers"),
+    };
     let messages = super::messages_route(&request.parsed.first);
     let parts: Vec<_> = request.parsed.first.split(' ').collect();
     if parts.len() != 3
@@ -440,6 +439,8 @@ fn forward(
             if code == 200 { "OK" } else { "Gateway Error" }, document.len())?;
         return writer.flush();
     }
+    // Only a complete request that passed the access checks gets a folder on disk.
+    *recording = recorder.and_then(Recorder::begin);
     record::observe(recording, |r| {
         r.request(method, path, &request.parsed, &body)
     });
@@ -520,8 +521,13 @@ fn broadcast_field(method: &str, path: &str) -> Option<&'static str> {
     }
 }
 
-/// Send one request to every upstream in order, buffering each reply, and answer
-/// once: the first 2xx reply whose `field` is true, otherwise the first reply.
+/// Room for one buffered cancel or release reply, headers included.
+const CONTROL_REPLY_BYTES: usize = 64 * 1024;
+
+/// Send one request to every upstream at once, buffering each bounded reply
+/// within the core gateway's control budget, and answer once: the first 2xx
+/// reply (in upstream order) whose `field` is true, otherwise the first reply.
+/// A stalled or oversized upstream is skipped and holds no other one.
 fn fan_out(
     client: &mut BufReader<DeadlineStream<'_>>,
     runtime: &Runtime,
@@ -530,15 +536,27 @@ fn fan_out(
     metrics: &mut Metrics,
     recording: &mut Option<Recording>,
 ) -> io::Result<()> {
+    let deadline = Instant::now() + super::CONTROL_BUDGET;
+    let replies: Vec<Option<(Vec<u8>, Metrics)>> = thread::scope(|scope| {
+        let calls: Vec<_> = runtime.origins().iter().map(|origin| {
+            let mut attempt = metrics.attempt();
+            scope.spawn(move || {
+                let mut upstream = origin.connect().ok()?;
+                upstream.bound_deadline(deadline);
+                // A full fixed buffer fails the write, so a large reply is skipped.
+                let mut reply = io::Cursor::new(vec![0; CONTROL_REPLY_BYTES].into_boxed_slice());
+                exchange(upstream, Dispatch { origin, ..dispatch }, &mut reply, &mut attempt, &mut None).ok()?;
+                let end = reply.position() as usize;
+                let mut reply = reply.into_inner().into_vec();
+                reply.truncate(end);
+                Some((reply, attempt))
+            })
+        }).collect();
+        calls.into_iter().map(|call| call.join().ok().flatten()).collect()
+    });
+    client.get_ref().check()?;
     let mut chosen: Option<(Vec<u8>, Metrics, bool)> = None;
-    for origin in runtime.origins() {
-        let Ok(mut upstream) = origin.connect() else { continue };
-        upstream.watch_peer(client.get_ref());
-        let (mut reply, mut attempt) = (Vec::new(), metrics.attempt());
-        let dispatch = Dispatch { origin, ..dispatch };
-        if exchange(upstream, dispatch, &mut reply, &mut attempt, &mut None).is_err() {
-            continue;
-        }
+    for (reply, attempt) in replies.into_iter().flatten() {
         let succeeded = buffered(&reply).is_some_and(|(code, body)| {
             (200..300).contains(&code)
                 && std::str::from_utf8(&body).ok().and_then(|text| crate::json::view(text).ok())
@@ -616,8 +634,9 @@ fn exchange(
     let parts: Vec<_> = request.parsed.first.split(' ').collect();
     let (method, path) = (parts[0], parts[1]);
     let first = format!("{method} {} HTTP/1.1", origin.target(path));
+    let mut head = Vec::new();
     request.forward_upstream(
-        &mut upstream,
+        &mut head,
         &first,
         &format!(
             "Host: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
@@ -625,6 +644,12 @@ fn exchange(
             body.len()
         ),
     )?;
+    // The added Host, length and key lines can push a near-limit head past what
+    // the upstream reads; the client gets the 400 it would get for its own head.
+    if head.len() > transport::MAX_HEADERS {
+        return local_error(writer, super::messages_route(&request.parsed.first), 400, "invalid or oversized HTTP headers").map(|_| true);
+    }
+    upstream.write_all(&head)?;
     upstream.write_all(body)?;
     upstream.flush()?;
     upstream.gateway_response(method, path);

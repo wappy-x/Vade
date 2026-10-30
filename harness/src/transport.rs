@@ -302,14 +302,18 @@ impl<'a> DeadlineStream<'a> {
                 "HTTP connection deadline exceeded",
             ));
         }
-        for downstream in [self.downstream.as_ref(), self.buffered_input.as_ref()]
-            .into_iter()
-            .flatten()
+        if let Some(downstream) = &self.downstream
+            && let Err(error) = downstream.lock().unwrap_or_else(|e| e.into_inner()).check()
         {
-            downstream
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .check()?;
+            // The client of this upstream request is gone. The engine keeps a
+            // queued stream whose socket only closed, but it drops any request
+            // that bytes follow. Servers ignore a blank line between requests
+            // (RFC 9112, section 2.2), so it stops that work and nothing else.
+            let _ = (&self.stream).write_all(b"\r\n");
+            return Err(error);
+        }
+        if let Some(input) = &self.buffered_input {
+            input.lock().unwrap_or_else(|e| e.into_inner()).check()?;
         }
         Ok(())
     }
@@ -360,7 +364,8 @@ impl<'a> DeadlineStream<'a> {
 // write-half-closed callers are unsupported. Read and buffer pipelined bytes so
 // they cannot hide EOF or errors, retaining the original absolute deadline.
 // Dispatch, polling and relay share one worker, so temporary nonblocking reads
-// cannot overlap downstream writes. Buffer at most one maximum-sized request.
+// cannot overlap downstream writes. The reply closes the connection, so these
+// bytes are never served: hold at most one header block, not a whole request.
 struct Downstream {
     socket: TcpStream,
     deadline: Instant,
@@ -392,7 +397,7 @@ impl Downstream {
 
     fn buffer_available(&mut self) -> io::Result<()> {
         let mut bytes = [0; READ_BUFFER_BYTES];
-        let limit = MAX_HEADERS + json::MAX_INPUT_BYTES;
+        let limit = MAX_HEADERS;
         loop {
             if Instant::now() >= self.deadline {
                 return Err(io::Error::new(
