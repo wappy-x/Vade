@@ -125,6 +125,8 @@ impl<'a, 'w> NextSession<'a, 'w> {
     /// then the worker captures its own rows at the same position (pp_cache_capture).
     fn prepare_checkpoint(&mut self, b: &Backend<'a>) -> Result<Option<pp::cache::Lease>> {
         if !self.model.pp_front() { return Ok(None); }
+        // The drafter observes the queued tiles' kept rows while the back runs them.
+        self.observe_queued_kept(b)?;
         // Prompt tiles can leave TP state split by layers, and short passes by GDN heads.
         // Both settle by copies only (no sum), before the same whole-state checkpoint on each rank.
         self.model.tp_part(b, &mut [self], &[0..0], true, false)?;

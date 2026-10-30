@@ -17,6 +17,24 @@ impl<'a, 'w> NextSession<'a, 'w> {
         model.return_work(work);
         result
     }
+    /// Pipeline front, before a prefix capture drains the link: the kept rows of the chat's
+    /// queued prompt tiles enter its draft history as each tile's ack comes back, while the
+    /// back still runs the later tiles (as on the final tile, pp_return_and_observe), so the
+    /// drain waits only for the last tiles. The same rows, order and chunks as ingest_kept.
+    pub(in crate::flash) fn observe_queued_kept(&mut self, b: &Backend<'a>) -> Result<()> {
+        if self.draft.is_none() || !self.model.pp_inline_kept() || !self.model.pp_has_kept(self.slot) {
+            return Ok(());
+        }
+        let (model, slot, pos, batch) = (self.model, self.slot, self.pos, self.batch_drafts);
+        let mut work = model.take_work(b, self.capacity, crate::flash_next_rows::prompt_tile())?;
+        let d = self.draft.as_mut().unwrap();
+        let result = Self::flush_into(b, model, d, &mut work).and_then(|()| loop {
+            Self::observe_kept(b, model, d, &mut work, slot, pos, batch, None)?;
+            if !model.pp_has_kept(slot) || !model.pp_pull_kept_ack(0)? { break Ok(()); }
+        });
+        model.return_work(work);
+        result
+    }
     /// Pipeline front: kept rows of the chat's queued prompt tiles enter its draft
     /// history first, in order, as world 1 observes each tile; uploaded through the MoE output
     /// buffer (idle once the layers ran) in chunks of the workspace's rows. `room`: only the
@@ -82,7 +100,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                     Self::flush_into(b, model, d, work)?;
                 }
             }
-            while model.pp_pull_kept_ack()? {
+            while model.pp_pull_kept_ack(1)? {
                 for s in sessions.iter_mut() {
                     if s.draft.is_some() {
                         let d = s.draft.as_mut().unwrap();

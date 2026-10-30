@@ -1019,11 +1019,11 @@ impl<'a> NextModel<'a> {
     pub(super) fn pp_inline_kept(&self) -> bool {
         self.pp.borrow().as_ref().is_some_and(|l| l.inline_kept)
     }
-    /// Read one queued ack. `false` once only the final tile's reply is left.
-    pub(super) fn pp_pull_kept_ack(&self) -> Result<bool> {
+    /// Read one queued ack. `false` once only `left` replies are queued (1: the final tile's).
+    pub(super) fn pp_pull_kept_ack(&self, left: usize) -> Result<bool> {
         let mut guard = self.pp.borrow_mut();
         let link = guard.as_mut().filter(|l| !l.poisoned).ok_or("pipeline link failed earlier; the front is stopping")?;
-        if link.pending <= 1 {
+        if link.pending <= left {
             return Ok(false);
         }
         let mut heard = Instant::now();

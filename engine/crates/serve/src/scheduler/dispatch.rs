@@ -1329,12 +1329,12 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 job.last_tick = tick;
                 let Some(event) = event else { return Ok(()); };
                 job.prefill_rows = 0;
-                job.events(engine, limits, &mut cache, vec![event])?;
+                let mut events = vec![event];
                 if job.generation.state.tokens.len() == job.ready.prompt.len() {
-                    let event = job.generation.next(engine, &job.ready.prompt, job.ready.request.max_tokens,
-                        1, |id| tokenizer.is_none_or(|t| t.has_token(id)))?;
-                    job.events(engine, limits, &mut cache, vec![event])?;
+                    events.push(job.generation.next(engine, &job.ready.prompt, job.ready.request.max_tokens,
+                        1, |id| tokenizer.is_none_or(|t| t.has_token(id)))?);
                 }
+                job.events(engine, limits, &mut cache, events)?;
                 Ok(())
             })().err();
         }

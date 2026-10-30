@@ -1138,6 +1138,14 @@ impl<'e, 't, E: Engine, T: Tokenizer> Active<'e, 't, E, T> {
         }
         self.generation.usage.timing = self.usage_clock.as_ref().map(crate::usage::Clock::elapsed);
     }
+    /// The cache snapshot of a finished prompt (or of a turn that ended on EOS).
+    fn snapshot(&self, engine: &'e E, cache: &mut SessionCache<E::Session<'e>>) {
+        let (Some(key), state) = (self.key, &self.generation.state) else { return };
+        if engine.eos_token_ids().contains(state.tokens.last().unwrap()) || state.tokens.len() == self.ready.prompt.len() {
+            cache.fund_pages(state.session.prefix_allocations(state.tokens.len()).unwrap_or_default());
+            cache.snapshot_scoped(key, self.ready.scope.as_deref(), state, Instant::now(), state.tokens.len() == self.ready.prompt.len());
+        }
+    }
     fn checkpoint(&mut self, cache: &mut SessionCache<E::Session<'e>>) {
         let Some(kv) = &mut self.generation.usage.kv else { return; };
         if kv.retention != "pending" || self.generation.state.tokens.len() != self.ready.prompt.len() { return; }
@@ -1287,22 +1295,15 @@ impl<'e, 't, E: Engine, T: Tokenizer> Active<'e, 't, E, T> {
         }
         {
             let mut prefill = false;
+            // The prompt's cache snapshot copies its checkpoint (on two Sparks with an exchange):
+            // a first token of the same step is written and flushed first. No state changes between.
+            let mut snapshot = false;
             for (index, event) in events.iter().copied().enumerate() { match event {
                 Event::Prefill => {
                     prefill = true;
                     self.checkpoint(cache);
-                    let state = &self.generation.state;
-                    if let Some(key) = self.key {
-                        if engine
-                            .eos_token_ids()
-                            .contains(state.tokens.last().unwrap())
-                            || state.tokens.len() == self.ready.prompt.len()
-                        {
-                            cache.fund_pages(state.session.prefix_allocations(state.tokens.len()).unwrap_or_default());
-                            cache.snapshot_scoped(key, self.ready.scope.as_deref(), state, Instant::now(),
-                                state.tokens.len() == self.ready.prompt.len());
-                        }
-                    }
+                    snapshot = matches!(events.get(index + 1), Some(Event::Token(_)));
+                    if !snapshot { self.snapshot(engine, cache); }
                 }
                 Event::Token(token) => {
                     if !self.first_token_generated {
@@ -1328,6 +1329,7 @@ impl<'e, 't, E: Engine, T: Tokenizer> Active<'e, 't, E, T> {
                                 engine.memory_bytes().map_or(0, |m| m.0));
                         }
                     }
+                    if std::mem::take(&mut snapshot) { self.snapshot(engine, cache); }
                     if self.stop.matched || self.ready.parser.as_ref().is_some_and(|p| p.stopped()) {
                         let extra = events[index + 1..].iter().filter(|e|
                             matches!(e, Event::Token(_) | Event::Finished(FinishReason::Stop, _))).count();
