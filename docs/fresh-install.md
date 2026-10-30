@@ -3,7 +3,7 @@
 **Installing Vade for the first time? Start with [INSTALL.md](../INSTALL.md).**
 The current model, [FP4-Local](GLOSSARY.md#dg), runs on a single Spark: you
 start it on the Spark itself with `vade launch`, and you need no second
-computer. [First run](../harness/docs/first-run.md) walks you through that
+computer. [First run](../harness/docs/first-run.md) explains that
 launcher. Driving Sparks from another computer, the
 [controller](GLOSSARY.md#ac) route, comes after that.
 

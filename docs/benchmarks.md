@@ -215,6 +215,26 @@ without it.
   give different IDs from each other: 7 of 66 responses are the same, as on
   2026-10-28 (see [FP8 on two and four Sparks](#fp8-on-two-and-four-sparks-different-token-ids)).
 
+### Two pairs at once
+
+Later that morning, at main `51dce02` (engine `380d8e5`), we ran the same
+card on two separate FP4-Local pairs, each its own tensor split, alone and
+then both at once. Each pair cell is the mean of two starts. The four-Spark
+chain column is the first start of its morning card, not the two-start mean
+above. Rates in tok/s, cold 8K in seconds.
+
+| Cell | Four-Spark chain | Pair 1 at once | Pair 2 at once | Both pairs, sum |
+| --- | ---: | ---: | ---: | ---: |
+| Prose | 43.117 | 55.811 | 54.812 | 110.623 |
+| Code | 82.140 | 104.906 | 102.487 | 207.394 |
+| C4 | 145.751 | 168.238 | 167.404 | 335.643 |
+| C8 | 228.156 | 233.339 | 231.824 | 465.163 |
+| Cold 8K (s) | 2.171 | 2.148 | 2.140 | |
+
+The two pairs did not slow each other: with eight chats on each, they gave
+465.163 tok/s at once and 464.423 tok/s as the sum of their runs alone. Each
+pair's token IDs matched the morning pair cards in 66 of 66 responses.
+
 ### Limits of the 2026-10-30 runs
 
 - Two or three server starts per card setup. The context row had one start.
@@ -223,6 +243,12 @@ without it.
 - The records of these runs are not in the repository yet. They are the lab
   report `own-rigmark-eod-r2` and twelve card folders dated `2026-10-30`,
   from `0702` to `0804`.
+
+## History
+
+The sections below are older runs, newest first. Each names its date and its
+main, and each stays as it was measured. They are not current: for the
+current numbers, use the [current table](#current-main).
 
 <a id="current-2026-10-29-main-cbbb11b-home-dgx-sparks"></a>
 ## Previous (2026-10-29, main cbbb11b, home DGX Sparks)

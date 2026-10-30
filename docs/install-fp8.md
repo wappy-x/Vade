@@ -6,6 +6,7 @@ Vade serves two checkpoints of the same model. Both are supported:
 | --- | --- | --- |
 | Checkpoint | `nvidia/Qwen3.8-Flash-Next-FP4-Local` | `Qwen/Qwen3.8-Flash-Next-FP8` |
 | Sparks | 1 to 24 | 2, 4 or 6 |
+| Measured in our cards | 1, 2 and 4 Sparks | 2 and 4 Sparks |
 | Two Sparks | The tensor split | Tensor parallel on a ring |
 | Four Sparks | The layer chain | Tensor parallel on a path |
 | Start command | `vade up` | `vade up --fp8` |
@@ -198,39 +199,47 @@ The gateways add the greedy fields to a request that sends no sampling field
 
 ## What to expect
 
-The two-Spark rows are the 2026-10-29 cards at main `cbbb11b`, the mean of
-two server starts
-([benchmarks](benchmarks.md#current-2026-10-29-main-cbbb11b-home-dgx-sparks)).
-The four-Spark rows are the 2026-10-28 end-of-day cards at main `76977df`
-([benchmarks](benchmarks.md#fp8)); four Sparks were not measured again.
+The drafting ON rows are the 2026-10-30 morning cards at main `380d8e5`, the
+mean of two server starts on each Spark count
+([benchmarks](benchmarks.md#current-2026-10-30-morning-main-380d8e5-home-dgx-sparks)).
 Rates are completion tokens per second. Cold 8K is the time to the first
 token after an uncached 8192-token prompt. Every card used context 32768,
 output 16384, MTP 2, greedy decoding and thinking OFF.
 
-| Sparks | Main | Drafting | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) |
-| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | `cbbb11b` | ON | 36.5 | 51.4 | 52.6 | 45.0 | 67.6 | 97.3 | 5.96 |
-| 2 | `cbbb11b` | OFF | 26.9 | 26.7 | 26.9 | 26.1 | 66.7 | 97.4 | 5.97 |
-| 4 | `76977df` | ON | 46.7 | 65.1 | 68.0 | 58.5 | 86.4 | 128.8 | 6.91 |
-| 4 | `76977df` | OFF | 35.3 | 34.7 | 35.3 | 33.9 | 88.2 | 128.2 | 6.95 |
+| Sparks | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 36.6 | 51.3 | 52.7 | 45.1 | 65.9 | 98.3 | 5.96 |
+| 4 | 47.3 | 66.5 | 69.1 | 59.2 | 86.4 | 129.4 | 6.85 |
 
-On two Sparks at `cbbb11b`, a 32K-token prompt gave its first token in
-24.05 s. The second question on that chat reused 32,064 tokens from the
-prefix cache and gave its first token in 0.89 s.
+We did not measure drafting OFF on 2026-10-30. The latest drafting OFF cards
+are older: two Sparks at main `cbbb11b` on 2026-10-29
+([benchmarks](benchmarks.md#current-2026-10-29-main-cbbb11b-home-dgx-sparks))
+and four Sparks at main `76977df` on 2026-10-28
+([benchmarks](benchmarks.md#fp8)).
+
+| Sparks | Main | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | `cbbb11b` | 26.9 | 26.7 | 26.9 | 26.1 | 66.7 | 97.4 | 5.97 |
+| 4 | `76977df` | 35.3 | 34.7 | 35.3 | 33.9 | 88.2 | 128.2 | 6.95 |
+
+At `380d8e5`, a 32K-token prompt gave its first token in 24.11 s on two
+Sparks and 27.49 s on four. The second question on that chat reused 32,064
+tokens from the prefix cache and gave its first token in 0.94 s on two
+Sparks and 1.05 s on four.
 
 - **Four Sparks write faster than two.** Each Spark holds and reads a quarter
   of each layer for each token, not a half. With drafting ON, in the
-  2026-10-28 cards at `76977df`, prose went from 36.6 tok/s on two Sparks to
-  46.7 on four, and eight chats from 98.3 to 128.8 tok/s.
-- **Drafting helps one chat only.** With drafting ON, code went from 26.7 to
-  51.4 tok/s on two Sparks. Overlapping chats almost never draft. In the
-  2026-10-28 two-Spark ON card, 1 of 12 C4 streams and 0 of 24 C8 streams
-  used drafting. In the four-Spark ON card, no C4 or C8 stream used drafting.
-  So ON and OFF are close (97.3 and 97.4 tok/s for C8 on two Sparks at
-  `cbbb11b`).
-- **FP8 reads prompts more slowly than FP4-Local.** At main `cbbb11b`, the
-  cold 8K prompt took 5.96 s on two FP8 Sparks, against 2.145 s on two
-  FP4-Local Sparks.
+  2026-10-30 cards at `380d8e5`, prose went from 36.6 tok/s on two Sparks to
+  47.3 on four, and eight chats from 98.3 to 129.4 tok/s.
+- **Drafting helps one chat only.** On two Sparks at `cbbb11b`, code went
+  from 26.7 tok/s with drafting OFF to 51.4 with drafting ON. Overlapping
+  chats almost never draft. In the 2026-10-28 two-Spark ON card, 1 of 12 C4
+  streams and 0 of 24 C8 streams used drafting. In the four-Spark ON card,
+  no C4 or C8 stream used drafting. So ON and OFF are close (97.3 and 97.4
+  tok/s for C8 on two Sparks at `cbbb11b`).
+- **FP8 reads prompts more slowly than FP4-Local.** At `380d8e5`, the cold
+  8K prompt took 5.96 s on two FP8 Sparks, against 2.15 s on two FP4-Local
+  Sparks.
 
 The cards started the engine with our lab launcher, not with `vade up`. That
 launcher gives each rank the same engine arguments as
@@ -250,7 +259,8 @@ matched earlier FP8 cards of the same Spark count. On two Sparks at main
 responses, in each of two server starts.
 
 **Two and four Sparks give different token IDs.** The two-Spark and
-four-Spark cards matched in only 7 of 66 responses (5 of 62 on 2026-10-25).
+four-Spark cards matched in only 7 of 66 responses, on 2026-10-28 and again
+on 2026-10-30 at `380d8e5` (5 of 62 on 2026-10-25).
 The rule says that supported Spark counts must agree, so this is an exception.
 A host test found the cause: on four Sparks, some projections split their
 inner sum across the ranks, and the ranks add their parts in a different order

@@ -7,8 +7,9 @@ out of the box and can spread across more Sparks when you link them. Drafting
 is on by default: an extra model head guesses the next few tokens, and the
 model checks them in one pass.
 
-This page walks through checking a change on your own computer, the house
-rules, what exactness asks of engine changes, and how to send a pull request.
+This page covers four things: how to check a change on your own computer, the
+house rules, what exactness asks of engine changes, and how to send a pull
+request.
 [Local CI](docs/ci.md) gives the current CI status and public host commands.
 Read [AGENTS.md](AGENTS.md) for the project rules. Run the affected host
 checks in [Local CI](docs/ci.md) and the [workflow](.github/workflows/ci.yml),

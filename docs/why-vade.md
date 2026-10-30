@@ -16,7 +16,8 @@ Spark, or several linked Sparks, into a private model server. You get:
 
 Vade serves one model, Qwen3.8 Flash-Next, text only. The NVIDIA FP4-Local
 checkpoint runs on one Spark or more. The publisher's FP8 checkpoint does not
-fit on one Spark, so it runs on 2, 4 or 6 linked Sparks.
+fit on one Spark, so it runs on 2, 4 or 6 linked Sparks. Our cards cover two
+and four.
 
 ## Why it exists
 
@@ -61,9 +62,10 @@ What our checks show today:
   drafting ON and OFF, and on two Sparks with drafting ON, gave the same token
   IDs in 64 of 64 responses
   ([benchmarks](benchmarks.md#current-2026-10-29-main-cbbb11b-home-dgx-sparks)).
-- On main `76977df` (2026-10-28), four Sparks gave the same FP4-Local token
-  IDs as one and two Sparks, in 66 of 66 responses
-  ([benchmarks](benchmarks.md#current-2026-10-28-end-of-day-main-76977df-home-dgx-sparks)).
+- On main `380d8e5` (2026-10-30 morning), four Sparks gave the same
+  FP4-Local token IDs as one and two Sparks, in 66 of 66 responses in every
+  server start
+  ([benchmarks](benchmarks.md#token-ids)).
 - In the same cards, the second question on a 32K-token chat gave the same
   token IDs with the prefix cache and without it.
 - Before a change to the engine's arithmetic, scheduling, caching or
@@ -78,7 +80,8 @@ Two exceptions apply to FP8 today:
   greedy set when a request sends none
   ([FP8 install](install-fp8.md#defaults-and-drafting)).
 - FP8 on two Sparks and on four Sparks gives different token IDs. Their
-  cards matched in 7 of 66 responses on 2026-10-28. Each Spark count is
+  cards matched in 7 of 66 responses on 2026-10-28, and again on 2026-10-30
+  at main `380d8e5`. Each Spark count is
   stable on its own: on two Sparks at `cbbb11b`, drafting ON and OFF matched
   in 64 of 64 responses. A fix is in screening
   ([benchmarks](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)).
@@ -90,21 +93,23 @@ batching and caching.
 
 ## How fast it is
 
-These are the 2026-10-29 cards at main `cbbb11b`. Prose, code and C8 ran
-with drafting ON. The cards send the cold 8K prompt with drafting OFF. Rates
-are completion tokens per second. C8 is the total rate of eight chats at
-once.
+These are the 2026-10-30 morning cards at main `380d8e5`, the mean of two or
+three server starts per row. Prose, code and C8 ran with drafting ON. The
+cards send the cold 8K prompt with drafting OFF. Rates are completion tokens
+per second. C8 is the total rate of eight chats at once.
 
 | Setup | Prose | Code | C8 | Cold 8K prompt, first token | 32K prompt, first token |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| FP4-Local, one Spark | 41.9 | 80.2 | 176.7 | 3.79 s | 15.95 s |
-| FP4-Local, two Sparks | 54.3 | 100.4 | 228.0 | 2.145 s | 10.09 s |
-| FP8, two Sparks | 36.5 | 51.4 | 97.3 | 5.96 s | 24.05 s |
+| FP4-Local, one Spark | 42.6 | 81.4 | 179.5 | 3.76 s | 15.66 s |
+| FP4-Local, two Sparks | 54.9 | 102.2 | 231.9 | 2.15 s | 10.13 s |
+| FP4-Local, four Sparks | 43.1 | 82.2 | 228.5 | 2.18 s | 10.52 s |
+| FP8, two Sparks | 36.6 | 51.3 | 98.3 | 5.96 s | 24.11 s |
+| FP8, four Sparks | 47.3 | 66.5 | 129.4 | 6.85 s | 27.49 s |
 
-The [benchmarks page](benchmarks.md#current-2026-10-29-main-cbbb11b-home-dgx-sparks)
+The [benchmarks page](benchmarks.md#current-2026-10-30-morning-main-380d8e5-home-dgx-sparks)
 gives the method, the number of server starts and the limits. With the
 prefix cache, the second question on a 32K-token chat gave its first token in
-0.53 s on one Spark and 0.75 s on two.
+0.36 s on one Spark and 0.75 s on two.
 
 ## What it is not
 
@@ -119,8 +124,9 @@ prefix cache, the second question on a 32K-token chat gave its first token in
 - **Not every checkpoint.** Two checkpoints are supported: FP4-Local and FP8
   of Qwen3.8 Flash-Next.
 - **Not faster on four Sparks for one chat.** With FP4-Local, four Sparks
-  wrote prose at 42.8 tok/s in the 2026-10-28 cards, against 42.0 on one
-  Spark and 53.8 on two. Four Sparks read a cold 8K prompt sooner than one.
+  wrote prose at 43.1 tok/s in the 2026-10-30 morning cards at `380d8e5`,
+  against 42.6 on one Spark and 54.9 on two. Four Sparks read a cold 8K
+  prompt sooner than one.
 
 ## Where to go next
 

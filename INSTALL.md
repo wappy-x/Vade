@@ -1144,7 +1144,7 @@ to a request.
 | How you start | Context (tokens) | Output (tokens) | Drafting (multi-token prediction, MTP) | Prefix cache |
 | --- | --- | --- | --- | --- |
 | On this Spark: `vade launch` / `vade up` | 32768; lowered through 16384, 8192, 4096 only if the engine refuses it for memory | `min(context, 8192)` | ON, engine-selected | ON |
-| From a controller: `vade up` on any number of Sparks, with or without `--chats` | 32768 | `min(context, 8192)` | ON, engine-selected | ON on one or two Sparks; OFF on three or more |
+| From a controller: `vade up` on any number of Sparks, with or without `--chats` | 32768 | `min(context, 8192)` | ON, engine-selected | ON on one or two FP4-Local Sparks and on FP8; OFF on the FP4-Local layer chain (three or more Sparks) |
 | From a controller: `vade up --replicas N`, each replica | 32768 | `min(context, 8192)` | ON, engine-selected | ON |
 
 `--context 262144` requests a larger context on either route
@@ -1164,8 +1164,9 @@ a refusal is reported and the context is not lowered.
 ### The prefix cache
 
 The prefix cache (reusing a cached prompt prefix across requests) is ON by
-default on one Spark and on two Sparks (the tensor split). Three or more
-Sparks run without it. The cache keeps prompts only for requests that send
+default on one Spark, on two FP4-Local Sparks (the tensor split) and on FP8.
+The FP4-Local layer chain (three or more Sparks) runs without it. The cache
+keeps prompts only for requests that send
 `cache:true` or a `prompt_cache_key`. Other requests run as before. A cached
 answer has the same token IDs as an uncached one: the cache changes which
 prompt tokens the engine reads again, not how it computes them.
@@ -1193,7 +1194,7 @@ The engine log line `flashnext ready` shows `prefix_cache_room_bytes`.
 
 | Setting | What it does |
 | --- | --- |
-| `VADE_FLASHNEXT_PREFIX_CACHE=0` | Turns the cache off. `1` turns it on; three or more Sparks refuse `1`. |
+| `VADE_FLASHNEXT_PREFIX_CACHE=0` | Turns the cache off. `1` turns it on; the FP4-Local layer chain (three or more Sparks) refuses `1`. |
 | `VADE_FLASHNEXT_CACHE_ROOM=<bytes>` | Sets the room. The slot plan keeps it beside one full-context chat, which can give fewer chat slots. `0` gives no room and the slot plan of a server without the cache. A room too large to keep beside one full-context chat at two or more slots gives one chat slot. A room that leaves less than one full-context chat is lowered to leave one. |
 | `VADE_FLASHNEXT_ADOPT=0` | Keeps every prompt as a copy on one Spark. `1` keeps long prompts in place on two Sparks too; that mode is not measured on two Sparks. |
 | `--cache-bytes 0` | Turns the cache off for a local install. |

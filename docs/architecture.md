@@ -20,10 +20,10 @@ almost every design choice on this page:
   the checkpoint stores it in, and we judge each kernel against the time it
   would take just to move those bytes.
 
-This page follows one request from the network to the GPU and back, then
-explains each part in turn: the model and its number formats, the kernels,
-drafting, several Sparks, the prefix cache, memory, exactness, and how we
-measure all of it. To install Vade, follow [INSTALL.md](../INSTALL.md). For the
+First we follow one request from the network to the GPU and back. Then we
+explain each part: the model and its number formats, the kernels, drafting,
+several Sparks, the prefix cache, memory, exactness, and how we measure
+it. To install Vade, follow [INSTALL.md](../INSTALL.md). For the
 measured results, read [Benchmarks](benchmarks.md).
 
 A few words come up in every section of this page:
@@ -344,7 +344,8 @@ by [AGENTS.md](../AGENTS.md#exactness-law-and-merge-gate).
 
 ### The FP8 checkpoint
 
-Vade also serves `Qwen/Qwen3.8-Flash-Next-FP8`, on 2, 4 or 6 Sparks.
+Vade also serves `Qwen/Qwen3.8-Flash-Next-FP8`, on 2, 4 or 6 Sparks. Our
+cards cover two and four.
 That checkpoint stores FP8 weights in 128×128 blocks with dynamic activation
 scales ([`flash/mod.rs`](../engine/crates/model/src/flash/mod.rs)), and its
 experts follow the reference W8A8 arithmetic recorded in
@@ -370,8 +371,8 @@ code ([`driver.rs`](../engine/crates/gpu/src/driver.rs)).
 
 ### Exact by construction
 
-Exactness is not a test we hope passes; the kernels are built so that a row's
-result cannot depend on what else is running:
+The kernels add each row's terms in a fixed order, so a row's result does not
+depend on what else is running:
 
 - **Fixed reduction trees.** A projection splits its inner dimension into four
   ranges whose boundaries depend only on the matrix shape, and merges them as
@@ -565,8 +566,9 @@ first and last tiles keep 2,048 rows
 prompts run in tiles of 2,048 tokens. `VADE_LONG_SPLIT=0` turns the
 layer-by-layer path off. The token split needs a
 prompt workspace of 4,096 rows on each Spark instead of 2,048. So two Sparks
-now hold one chat fewer at a 32,768-token context (8 instead of 9), and in
-exchange the first token after a cold 8K prompt comes about 0.6 s sooner.
+now hold one chat fewer at a 32,768-token context (8 instead of 9). In
+exchange, both Sparks work together on a cold prompt of 2,048 to 8,192
+tokens.
 
 A Spark has one GPU and one pool of memory. To use three or more, Vade splits
 the model by layers, not by matrices. Each Spark runs one
@@ -608,8 +610,9 @@ available because verification rows cross the pipeline like any other rows.
 **Choosing the layout.** The engine chooses the path itself; no switch selects
 it ([`settings.rs`](../engine/crates/tp/src/flash/settings.rs)). FP4-Local on
 two Sparks runs the tensor split; on three or more it runs the N-stage chain;
-with `--tensor-map` on four Sparks it runs the older rank path. FP8 keeps its
-ring. The serving receipt names the path and why (`vade.numerics.path` and
+with `--tensor-map` on four Sparks it runs the older rank path. FP8 runs
+tensor parallel: on a ring on two Sparks and on a path on four. The serving
+receipt names the path and why (`vade.numerics.path` and
 `path_reason`).
 
 **Transport.** Decode steps and short prompt tiles travel on a polled RDMA
@@ -637,8 +640,9 @@ a single machine
 
 ## The prefix cache
 The prefix cache lets a new request skip reading the start of its prompt when
-an earlier request began the same way. It is **on by default** on one Spark
-and on the tensor split; the layer chain runs without it. Requests that send
+an earlier request began the same way. It is **on by default** on one Spark,
+on the tensor split and on FP8; the layer chain runs without it. Requests
+that send
 `cache:true` or a `prompt_cache_key` keep their prompt for reuse;
 `VADE_FLASHNEXT_PREFIX_CACHE=0` turns the cache off
 ([`prefix_switch.rs`](../engine/crates/serve/src/prefix_switch.rs)). At
@@ -841,13 +845,19 @@ This page describes main after v0.1.0, the latest release. Its default is
 FP4-Local on one Spark. The benchmark page also has results from cabled pairs
 and a group of four Sparks, and from rented cloud VMs. On four Sparks,
 FP4-Local gave the same token IDs as on one and two Sparks in 66 of 66
-responses (the 2026-10-28 cards at `76977df`). Chains longer than four Sparks
+responses (the 2026-10-28 cards at `76977df` and the 2026-10-30 morning cards
+at `380d8e5`). FP8 on two and on four Sparks gave the same token IDs in only
+7 of 66 responses in those same cards, so compare FP8 results only at one
+Spark count
+([benchmarks](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)).
+Chains longer than four Sparks
 have no live exactness check yet
 ([FP4-Local launch](../cli/docs/fp4-local.md)). The other model parsers,
 servers and protocol routes in the source are not qualified to the same
 level.
 
-- The prefix cache is on by default. It works locally and on the tensor split.
+- The prefix cache is on by default. It works locally, on the tensor split
+  and on FP8. The FP4-Local layer chain runs without it.
 - Greedy decoding needs `"temperature": 0` and neutral penalties. On
   FP4-Local, `"temperature": 0` alone is enough, because the checkpoint's own
   penalties are neutral. On FP8, send the three neutral penalties too

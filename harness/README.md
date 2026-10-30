@@ -29,8 +29,8 @@ or fix bugs.
 Already have a coding client you like? You can keep it and put Vade's gateway in
 front of the engine instead; way 2 below shows how.
 
-This page starts with a first run and the four ways to use Vade, then walks
-through the native agent, the terminal and client setup. The finer details
+This page starts with a first run and the four ways to use Vade. Then it
+covers the native agent, the terminal and client setup. The finer details
 (gateway routing, how requests are built, the agent's deeper limits) come after
 [Going deeper](#going-deeper). What has and has not been checked is under
 [What has been validated](#what-has-been-validated).

@@ -1,56 +1,48 @@
 # Assets
 
-**This folder holds the banner at the top of the main README, in four versions, and the benchmark figure, in two.** Each is an SVG file drawn with code, with no outside fonts, images or scripts, and each is under 50 KB.
+**This folder holds the banner at the top of the main README, moving and still, and the benchmark figure, in two themes.**
 
 <br>
 
-## The four files
+## The banner
 
-| File | Theme | Motion |
-| --- | --- | --- |
-| [vade-banner-dark.svg](vade-banner-dark.svg) | Dark | Soft light flows across the field, a shimmer travels through the letters and a highlight sweeps over them. All motion is continuous. |
-| [vade-banner-light.svg](vade-banner-light.svg) | Light | The same, on a pale field |
-| [vade-banner-dark-static.svg](vade-banner-dark-static.svg) | Dark | None |
-| [vade-banner-light-static.svg](vade-banner-light-static.svg) | Light | None |
+| File | What it is |
+| --- | --- |
+| [vade-banner.webp](vade-banner.webp) | The moving banner: 12 seconds, 30 frames per second, a loop, 1280 x 400 pixels, lossless, about 3.3 MB. |
+| [vade-banner-static.png](vade-banner-static.png) | Its first frame, for readers who ask for reduced motion. |
 
-<br>
-
-## What it shows
-
-- **VADE**, drawn large in monospace characters, the same letter shapes as on [vade.lol](https://vade.lol).
-- **One line beneath it:** an LLM inference engine and agent harness, written in Rust, built for the DGX Spark. A still block cursor follows it.
-- **The project sites** in the corner: vade.lol and getvade.com.
+The README uses a `<picture>` element: the browser shows the still frame when your system asks for reduced motion, and the moving banner otherwise. The same dark banner shows in light and dark mode.
 
 <br>
 
-## How the right one is chosen
+## Where it comes from
 
-**The README uses a `<picture>` element, and the browser picks.**
+**The banner is a recording of [vade.lol](https://vade.lol), the project site, rendered by the site's own code.** Nothing is redrawn by hand, so the two match.
 
-- Dark mode shows a dark banner; light mode shows a light one.
-- If your system asks for reduced motion, you get a still version.
-- The moving files also stop moving on their own when reduced motion is on.
+- The site draws VADE on a canvas as a grid of monospace characters over a slow current of dots and dashes. A soft light drifts across the letters, which are lit and beveled; cells under the light change quickly through random characters and settle; small dots far back blink softly. The copy and the footer are the site's own text, so the footer's copyright line is the site's, not this repository's NOTICE.
+- To make the banner, the page is opened in headless Chrome at 1280 x 400 pixels, with the site's nebula palette fixed (the site picks one of its five at random; the choice here is the owner's), the letters sized for a wide banner and the intro skipped. The animation clock is stepped by hand, one thirtieth of a second per frame, and every frame is captured.
+- The loop is made by the renderer, not by cross-fading pictures. Over the last four seconds every continuous quantity (the current, the light's path, the highlight sweep, the blinking dots) is blended toward its value twelve seconds earlier, and the cells that were changing at the start are brought back, so the last frame runs into the first. Measured on this file, decoded frame by frame (mean squared difference between frames): the loop step is 25.7, the median ordinary step is 5.7, the largest ordinary step is 65.2, and 85 of the 420 ordinary steps are larger than the loop step.
+- The frames are encoded as a lossless animated WebP, so every frame is exact and the loop point gets no codec seam (a lossy file softens ordinary frames and restarts sharp at the first frame, which reads as a jump), and the first frame as a PNG.
+
+To make it again: take the page as the site serves it, fix the palette and the letter size, step the clock, blend the last four seconds as above, capture the frames and encode them. The small Chrome DevTools Protocol script that does this is kept with the lab scripts, outside this repository, so the repository stays Rust and docs. The site's renderer is the only source of the look; when the site changes, record the banner again.
 
 <br>
 
-## Why it looks this way
+## Rules for changes
 
-- It copies the look of [vade.lol](https://vade.lol) as it renders: a deep indigo, nearly black field with tiny dots and dashes, violet letters lit from the upper left, a soft veil at the edges.
-- The colors are the site's "nebula" palette: indigo, violet and a pale blue for lit cells. The light version keeps the violet letters on a near-white lavender field.
-- The type follows the site: monospace for the letters and the corner, a plain sans-serif for the tagline. The files name system fonts only, so nothing is downloaded.
-- The motion is continuous, as on the site. Nothing jumps, blinks or swaps frames:
-  - **Current.** Two soft patches of light drift across the field, one to the right (30 s per loop) and one to the left at a slight angle (22 s per loop). Under them, the letters change to denser characters in a paler blue (a deeper blue in the light version), and the background dots get brighter.
-  - **Shimmer.** The letter cells sit in 32 narrow columns. The brightness of each column rises and falls over 10 s. Each column starts a little later than the one on its left, so a soft wave moves through the word from left to right.
-  - **Sweep.** A slanted highlight crosses the letters from left to right every 12 s.
-  - **Tagline.** It fades in once over 1.5 s and then stays.
-- Only position (`transform: translate`) and opacity move. Timing is linear or ease-in-out. Each loop ends where it starts: the moving light patches and the sweep are repeating tiles that move exactly one tile width per loop. No animation is shorter than 6 s, except the one-time fade. There are no filters, no `steps()` timing and no back-and-forth (`alternate`) loops.
-- All loops line up again after 660 s (10, 12, 22 and 30 s). The still files show the first frame of the moving files, with the tagline in place.
+- Do not edit the moving banner by hand; record it again from the site.
+- Keep the loop made by the renderer, never by cross-fading pictures. Measure the loop step against the ordinary frame steps on the committed file and write the numbers here; the loop step must not be larger than the largest ordinary step.
+- Keep 30 frames per second and continuous motion: no frame swaps, steps or blinking.
+- Keep a still frame next to the moving file.
+- Keep the moving file lossless and under 5 MB: the release scan blocks any file over 5 MB, so a larger banner never reaches the public repository. Record at the page's own pixel size (1280 x 400, no 2x capture); a 2x capture scaled down is about twice as large once compressed.
+
+The engine and harness banners use the earlier, quieter drawn design: [`engine/docs/assets/`](../../engine/docs/assets/README.md) and [`harness/docs/assets/`](../../harness/docs/assets/README.md).
 
 <br>
 
 ## The benchmark figure
 
-**[benchmarks-2026-10-24-light.svg](benchmarks-2026-10-24-light.svg) and [benchmarks-2026-10-24-dark.svg](benchmarks-2026-10-24-dark.svg) compare one DGX Spark with two.** Both use drafting ON, the default, on our own Sparks: writing speed for code, prose and eight chats, and the wait for the first reply after an 8K-token prompt. They appear in the main README and in [Benchmarks](../benchmarks.md#current-2026-10-24), chosen by the same `<picture>` light/dark rule; they do not move.
+**[benchmarks-2026-10-24-light.svg](benchmarks-2026-10-24-light.svg) and [benchmarks-2026-10-24-dark.svg](benchmarks-2026-10-24-dark.svg) compare one DGX Spark with two.** Both use drafting ON, the default, on our own Sparks: writing speed for code, prose and eight chats, and the wait for the first reply after an 8K-token prompt. They appear in [Benchmarks](../benchmarks.md#current-2026-10-24), chosen by the same `<picture>` light/dark rule; they do not move.
 
 - Do not edit them by hand. `cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- benchmarks-chart` writes both from the committed receipts, so every number is a value a receipt prints. The Rust SVG writer is under 300 lines.
 - The headline says in words what the bars show. The script checks it against every same-day home card with the same settings, six single Sparks and three pairs, and stops if any of them disagrees. Under the eight-chat bars, a note gives the range those cards show.
