@@ -65,9 +65,11 @@ impl Counts {
                         .flatten()
                 })
             };
+            // As in the --stats rows, an absent cache part counts 0.
+            let part = |key| if usage.get(key).is_none() { Some(0) } else { integer(key) };
             let pair = integer("input_tokens")
-                .zip(integer("cache_read_input_tokens"))
-                .zip(integer("cache_creation_input_tokens"))
+                .zip(part("cache_read_input_tokens"))
+                .zip(part("cache_creation_input_tokens"))
                 .and_then(|((input, read), created)| {
                     input
                         .checked_add(read)?
@@ -266,6 +268,10 @@ mod tests {
             tap.feed(body);
             assert_eq!(tap.finish(), None, "{}", String::from_utf8_lossy(body));
         }
+        // An absent Messages cache part counts 0, as in the --stats rows.
+        let mut tap = UsageTap::new(Some("application/json"), true);
+        tap.feed(br#"{"usage":{"input_tokens":40,"output_tokens":3,"cache_creation_input_tokens":60}}"#);
+        assert_eq!(tap.finish(), Some((100, 0)));
     }
     fn sse(parts: &[&str]) -> String {
         parts.iter().map(|p| format!("data: {p}\r\n\r\n")).collect()

@@ -92,6 +92,7 @@ impl Recording {
                         | "session-id"
                         | "session_id"
                         | "x-codex-session-id"
+                        | "x-claude-code-session-id"
                 )
             })
             .map(|(k, v)| format!("[{},{}]", json::quote(k), json::quote(v)))
@@ -234,6 +235,7 @@ fn inventory(root: &Path) -> io::Result<Vec<Vec<Saved>>> {
                     | "session-id"
                     | "session_id"
                     | "x-codex-session-id"
+                    | "x-claude-code-session-id"
             ) {
                 // Rebuilding HTTP from saved JSON must not turn a newline in
                 // a value into another header. Match the live HTTP validator.

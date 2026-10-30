@@ -15,7 +15,7 @@ use vade_harness::json;
 
 const KEYS: &[&str] = &[
     "content-type", "content-encoding", "accept", "x-session-id",
-    "session-id", "session_id", "x-codex-session-id",
+    "session-id", "session_id", "x-codex-session-id", "x-claude-code-session-id",
 ];
 const BODY: &[u8] = br#"{ "seed":713, "messages":[], "extension":1.20e0 }"#;
 
@@ -73,7 +73,7 @@ fn replay_refuses_recorded_header_controls_before_any_output_or_dispatch() {
         assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
         assert_eq!(fs::read(root.0.join("request-0002/meta.json")).unwrap(), saved);
     }
-    assert_eq!(cases.len(), 39);
+    assert_eq!(cases.len(), 40);
 }
 
 #[test]

@@ -171,10 +171,14 @@ Setup:
   was at its default (on).
 - Gateway: `vade-gateway --upstream ENGINE --stable-prefix --stats FILE` on a
   loopback port. "Before" is the build without this change; "after" has the
-  code of commit `8922b8a`.
+  code merged as commit `802fdb9`. In that build the cache key came from the
+  prompt hash. A later change also hashes the Messages `system` field and uses
+  Claude Code's session header; the key is only a scheduling hint, and the
+  reuse comes from `cache: true`.
 - Client: Claude Code 2.1.314, set up with `vade-harness setup claude
-  --target gateway --dedicated-home`. Two runs of `launch.sh -p PROMPT
-  --output-format json`: "Reply exactly OK." and then "Read marker.txt using a
+  --endpoint ENGINE --model MODEL --target gateway --gateway GATEWAY
+  --dedicated-home --write DIR --context-window 32768 --max-output-tokens
+  8192`. Two runs of `DIR/launch.sh -p PROMPT --output-format json`: "Reply exactly OK." and then "Read marker.txt using a
   tool and report its exact contents." The second run makes two model calls.
 
 The `--stats` rows for the three Messages requests:
