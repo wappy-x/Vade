@@ -14,6 +14,14 @@ const EMBED: &str = "model.language_model.embed_tokens.weight";
 /// Staged bytes per prompt row: 16 PLE rows (80 B nibbles + 10 B scales), then
 /// the BF16 embedding row.
 const STAGED: usize = 16 * 90 + H * 2;
+/// The rows a frontend call reads and writes: both, or one half (a verify pass reads its
+/// embedding rows before layer 0 and its PLE rows after layer 0's launches).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Half {
+    Both,
+    Embedding,
+    Ple,
+}
 /// Experimental prompt input expansion on the GPU; default remains the CPU path.
 pub(crate) fn gpu_prompt() -> bool {
     crate::flash_prompt_options::cached().frontend_gpu
@@ -159,7 +167,7 @@ impl Reader {
     pub(crate) fn hint_rows(&self, rows: &[(u32, Vec<u64>)]) {
         let mut requests = Vec::with_capacity(rows.len() * 33);
         for (i, (token, ple)) in rows.iter().enumerate() {
-            if self.requests(i, *token, ple, &mut requests).is_err() {
+            if self.requests(i, *token, ple, &mut requests, Half::Both).is_err() {
                 return;
             }
         }
@@ -210,7 +218,7 @@ impl Reader {
             let n = key.len();
             let (mut residual, mut lexical) = (vec![0f32; n * H * 4], vec![0f32; n * H]);
             if self
-                .frontend_rows_with(&key, global, &mut residual, &mut lexical, read_plan::readers())
+                .frontend_rows_with(&key, global, &mut residual, &mut lexical, read_plan::readers(), Half::Both)
                 .is_ok()
                 && let Ok(mut slot) = self.prestaged.lock()
             {
@@ -220,7 +228,7 @@ impl Reader {
         let budget = read_ahead_budget();
         let mut requests = Vec::new();
         for (i, (token, ple)) in rows.iter().enumerate().skip(next.end) {
-            if (i - next.end) * STAGED >= budget || self.requests(i, *token, ple, &mut requests).is_err() {
+            if (i - next.end) * STAGED >= budget || self.requests(i, *token, ple, &mut requests, Half::Both).is_err() {
                 break;
             }
         }
@@ -273,8 +281,9 @@ impl Reader {
     }
     /// The reads of one prompt row as read-plan requests into `STAGED` bytes
     /// at row `i`: per head the 80 B nibbles then the 10 B scales (`ple_row`
-    /// layout), then the embedding row (`token`'s read).
-    fn requests(&self, i: usize, token: u32, rows: &[u64], out: &mut Vec<Request>) -> Result<()> {
+    /// layout), then the embedding row (`token`'s read). Every half checks all
+    /// of the row's reads and requests only its own.
+    fn requests(&self, i: usize, token: u32, rows: &[u64], out: &mut Vec<Request>, half: Half) -> Result<()> {
         if rows.len() != 16 {
             return Err("unexpected prefill frontend shape".into());
         }
@@ -285,26 +294,36 @@ impl Reader {
             }
             let pair = &self.ple[(row / PLE_PART_ROWS) as usize];
             let local = row % PLE_PART_ROWS;
-            out.push(pair[0].request(local * 80, 80, base + h * 90)?);
-            out.push(pair[1].request(local * 10, 10, base + h * 90 + 80)?);
+            let reads = [pair[0].request(local * 80, 80, base + h * 90)?, pair[1].request(local * 10, 10, base + h * 90 + 80)?];
+            if half != Half::Embedding {
+                out.extend(reads);
+            }
         }
-        out.push(self.embed.request(u64::from(token) * (H * 2) as u64, H * 2, base + 16 * 90)?);
+        let embedding = self.embed.request(u64::from(token) * (H * 2) as u64, H * 2, base + 16 * 90)?;
+        if half != Half::Ple {
+            out.push(embedding);
+        }
         Ok(())
     }
     /// `token`'s math on staged bytes: dequantize the 16 PLE rows in head order,
-    /// widen the BF16 embedding and copy it to the other three streams.
-    fn decode(staged: &[u8], global: f32, residual: &mut [f32], lexical: &mut [f32]) -> Result<()> {
-        for h in 0..16 {
-            let row = &staged[h * 90..(h + 1) * 90];
-            refcpu::ple_row_nvfp4(&row[..80], &row[80..], global, &mut lexical[h * 160..(h + 1) * 160])
-                .map_err(err)?;
+    /// widen the BF16 embedding and copy it to the other three streams (one half:
+    /// only that half's output).
+    fn decode(staged: &[u8], global: f32, residual: &mut [f32], lexical: &mut [f32], half: Half) -> Result<()> {
+        if half != Half::Embedding {
+            for h in 0..16 {
+                let row = &staged[h * 90..(h + 1) * 90];
+                refcpu::ple_row_nvfp4(&row[..80], &row[80..], global, &mut lexical[h * 160..(h + 1) * 160])
+                    .map_err(err)?;
+            }
         }
-        let raw = &staged[16 * 90..STAGED];
-        for (o, bytes) in residual[..H].iter_mut().zip(raw.chunks_exact(2)) {
-            *o = nvfp4::bf16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
-        }
-        for stream in 1..4 {
-            residual.copy_within(0..H, stream * H);
+        if half != Half::Ple {
+            let raw = &staged[16 * 90..STAGED];
+            for (o, bytes) in residual[..H].iter_mut().zip(raw.chunks_exact(2)) {
+                *o = nvfp4::bf16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
+            }
+            for stream in 1..4 {
+                residual.copy_within(0..H, stream * H);
+            }
         }
         Ok(())
     }
@@ -388,21 +407,26 @@ impl Reader {
         residual: &mut [f32],
         lexical: &mut [f32],
     ) -> Result<()> {
-        self.frontend_rows_with(rows, global, residual, lexical, read_plan::readers())
+        self.frontend_rows_with(rows, global, residual, lexical, read_plan::readers(), Half::Both)
     }
     /// The launch thread's prompt frontend into the workspace staging: a tile
     /// prestaged from the identical (token, rows) list and global scale is
     /// taken (swapped in when the staging has its length, else copied into the
     /// leading rows); otherwise `frontend_rows` runs here. Rows past the tile
-    /// are never uploaded or read.
+    /// are never uploaded or read. One `half` (never prestaged) writes only its
+    /// own output, with the same bytes: a verify pass reads its embedding rows
+    /// before layer 0 and its PLE rows after layer 0's launches (layer 1 reads
+    /// them first), so those preads run while the GPU runs layer 0. The PLE half
+    /// ends the frontend.
     pub(crate) fn frontend_prompt(
         &self,
         rows: &[(u32, Vec<u64>)],
         global: f32,
         prompt: &mut (Vec<f32>, Vec<f32>),
+        half: Half,
     ) -> Result<()> {
         let n = rows.len();
-        let ready = self.prestaged.lock().ok().and_then(|mut slot| {
+        let ready = self.prestaged.lock().ok().filter(|_| half == Half::Both).and_then(|mut slot| {
             slot.take_if(|p| p.global == global.to_bits() && p.key == rows)
         });
         let result = match ready {
@@ -415,12 +439,15 @@ impl Reader {
                 }
                 Ok(())
             }
-            _ => self.frontend_rows(rows, global, &mut prompt.0, &mut prompt.1),
+            _ if half == Half::Both => self.frontend_rows(rows, global, &mut prompt.0, &mut prompt.1),
+            _ => self.frontend_rows_with(rows, global, &mut prompt.0, &mut prompt.1, read_plan::readers(), half),
         };
-        let (count, done) = &*self.finished;
-        if let Ok(mut n) = count.lock() {
-            *n += 1;
-            done.notify_all();
+        if half != Half::Embedding {
+            let (count, done) = &*self.finished;
+            if let Ok(mut n) = count.lock() {
+                *n += 1;
+                done.notify_all();
+            }
         }
         result
     }
@@ -431,6 +458,7 @@ impl Reader {
         residual: &mut [f32],
         lexical: &mut [f32],
         readers: usize,
+        half: Half,
     ) -> Result<()> {
         let n = rows.len();
         if residual.len() < n * H * 4 || lexical.len() < n * H {
@@ -439,7 +467,7 @@ impl Reader {
         let (residual, lexical) = (&mut residual[..n * H * 4], &mut lexical[..n * H]);
         let mut requests = Vec::with_capacity(n * 33);
         for (i, (token, hashes)) in rows.iter().enumerate() {
-            self.requests(i, *token, hashes, &mut requests)?;
+            self.requests(i, *token, hashes, &mut requests, half)?;
         }
         let mut staged = vec![0u8; n * STAGED];
         read_plan::Plan::new(requests)
@@ -453,7 +481,7 @@ impl Reader {
                 .zip(x.chunks_exact_mut(H * 4))
                 .zip(e.chunks_exact_mut(H))
             {
-                Self::decode(s, global, x, e)?;
+                Self::decode(s, global, x, e, half)?;
             }
             Ok(())
         };
@@ -570,7 +598,7 @@ mod tests {
             for readers in [1, 4, 16] {
                 // Oversized staging, as in the workspace: rows past n stay untouched.
                 let (mut x, mut e) = (vec![-1f32; (n + 3) * H * 4], vec![-1f32; (n + 3) * H]);
-                reader.frontend_rows_with(&rows, 0.37, &mut x, &mut e, readers).unwrap();
+                reader.frontend_rows_with(&rows, 0.37, &mut x, &mut e, readers, Half::Both).unwrap();
                 assert!(bits(&x[..n * H * 4]) == bits(&want_x), "residual n {n} readers {readers}");
                 assert!(bits(&e[..n * H]) == bits(&want_e), "lexical n {n} readers {readers}");
                 assert!(x[n * H * 4..].iter().chain(&e[n * H..]).all(|&v| v == -1.0));
@@ -578,7 +606,7 @@ mod tests {
             // Read-ahead and per-row hints change no bytes.
             reader.read_ahead(hash(), vec![1, 2, 3], 1..3, 0.37);
             let mut prompt = (vec![0f32; n * H * 4], vec![0f32; n * H]);
-            reader.frontend_prompt(&rows, 0.37, &mut prompt).unwrap();
+            reader.frontend_prompt(&rows, 0.37, &mut prompt, Half::Both).unwrap();
             assert!(bits(&prompt.0) == bits(&want_x) && bits(&prompt.1) == bits(&want_e), "frontend_prompt n {n}");
             reader.prefetch_ple_rows(&rows[0].1);
             reader.hint_rows(&rows);
@@ -626,14 +654,14 @@ mod tests {
             assert!(!taken(&reader));
             // Wrong key (one row shifted) and wrong global: computed, slot kept.
             let mut prompt = (vec![0f32; staging * H * 4], vec![0f32; staging * H]);
-            reader.frontend_prompt(&rows[63..191], 0.37, &mut prompt).unwrap();
+            reader.frontend_prompt(&rows[63..191], 0.37, &mut prompt, Half::Both).unwrap();
             assert!(bits(&prompt, 128) == oracle(&reader, &rows[63..191], 0.37));
-            reader.frontend_prompt(&rows[next.clone()], 0.5, &mut prompt).unwrap();
+            reader.frontend_prompt(&rows[next.clone()], 0.5, &mut prompt, Half::Both).unwrap();
             assert!(bits(&prompt, 128) == oracle(&reader, &rows[next.clone()], 0.5));
             assert!(!taken(&reader));
             // Exact key: taken, identical bytes, staging length unchanged.
             let mut prompt = (vec![-1f32; staging * H * 4], vec![-1f32; staging * H]);
-            reader.frontend_prompt(&rows[next.clone()], 0.37, &mut prompt).unwrap();
+            reader.frontend_prompt(&rows[next.clone()], 0.37, &mut prompt, Half::Both).unwrap();
             assert!(taken(&reader));
             assert!(bits(&prompt, 128) == want, "staging {staging}");
             assert_eq!((prompt.0.len(), prompt.1.len()), (staging * H * 4, staging * H));
@@ -647,13 +675,51 @@ mod tests {
         let reader = reader();
         let (mut x, mut e) = (vec![0f32; H * 4], vec![0f32; H]);
         let bad_row = vec![(1u32, vec![PLE_ROWS; 16])];
-        assert!(reader.frontend_rows_with(&bad_row, 1.0, &mut x, &mut e, 4).is_err());
+        assert!(reader.frontend_rows_with(&bad_row, 1.0, &mut x, &mut e, 4, Half::Both).is_err());
         let past_tensor = vec![(1u32, vec![LOCAL; 16])];
-        assert!(reader.frontend_rows_with(&past_tensor, 1.0, &mut x, &mut e, 4).is_err());
+        assert!(reader.frontend_rows_with(&past_tensor, 1.0, &mut x, &mut e, 4, Half::Both).is_err());
         let short = vec![(1u32, vec![0; 15])];
-        assert!(reader.frontend_rows_with(&short, 1.0, &mut x, &mut e, 4).is_err());
+        assert!(reader.frontend_rows_with(&short, 1.0, &mut x, &mut e, 4, Half::Both).is_err());
         let past_vocab = vec![(VOCAB as u32, vec![0; 16])];
-        assert!(reader.frontend_rows_with(&past_vocab, 1.0, &mut x, &mut e, 4).is_err());
+        assert!(reader.frontend_rows_with(&past_vocab, 1.0, &mut x, &mut e, 4, Half::Both).is_err());
         assert!(reader.token(VOCAB as u32, &[0; 16], 1.0, &mut x, &mut e).is_err());
+    }
+    /// A verify pass's two frontend halves: the embedding half writes only the
+    /// residual rows and the PLE half only the lexical rows, each with `token`'s
+    /// bytes; neither takes a prestaged tile, each rejects what `token` rejects,
+    /// and only the PLE half counts the frontend finished.
+    #[test]
+    fn frontend_halves_equal_token_and_write_only_their_rows() {
+        let reader = reader();
+        let tokens = [5u32, 7, 7, 300, 11, 2];
+        let mut h = hash();
+        let rows: Vec<(u32, Vec<u64>)> = tokens.iter().map(|&t| (t, h.advance(t))).collect();
+        let n = rows.len();
+        let (want_x, want_e) = oracle(&reader, &rows, 0.37);
+        let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+        let finished = |reader: &Reader| *reader.finished.0.lock().unwrap();
+        let prestaged = |reader: &Reader| reader.prestaged.lock().unwrap().is_some();
+        // The same rows prestaged: only a whole frontend takes them.
+        reader.read_ahead_job(&mut hash(), &tokens, 0..n, 0.37, true);
+        assert!(prestaged(&reader));
+        let before = finished(&reader);
+        // Oversized staging, as in the workspace: rows past n stay untouched.
+        let mut prompt = (vec![-1f32; (n + 2) * H * 4], vec![-1f32; (n + 2) * H]);
+        reader.frontend_prompt(&rows, 0.37, &mut prompt, Half::Embedding).unwrap();
+        assert!(bits(&prompt.0[..n * H * 4]) == want_x);
+        assert!(prompt.0[n * H * 4..].iter().chain(&prompt.1).all(|&v| v == -1.0));
+        assert_eq!(finished(&reader), before);
+        reader.frontend_prompt(&rows, 0.37, &mut prompt, Half::Ple).unwrap();
+        assert!(bits(&prompt.0[..n * H * 4]) == want_x && bits(&prompt.1[..n * H]) == want_e);
+        assert!(prompt.0[n * H * 4..].iter().chain(&prompt.1[n * H..]).all(|&v| v == -1.0));
+        assert_eq!(finished(&reader), before + 1);
+        assert!(prestaged(&reader));
+        let mut whole = (vec![0f32; n * H * 4], vec![0f32; n * H]);
+        reader.frontend_prompt(&rows, 0.37, &mut whole, Half::Both).unwrap();
+        assert!(!prestaged(&reader) && bits(&whole.0) == want_x && bits(&whole.1) == want_e);
+        let bad = [vec![(1u32, vec![PLE_ROWS; 16])], vec![(1, vec![LOCAL; 16])], vec![(1, vec![0; 15])], vec![(VOCAB as u32, vec![0; 16])]];
+        for (rows, half) in bad.iter().flat_map(|rows| [(rows, Half::Embedding), (rows, Half::Ple)]) {
+            assert!(reader.frontend_prompt(rows, 1.0, &mut prompt, half).is_err());
+        }
     }
 }

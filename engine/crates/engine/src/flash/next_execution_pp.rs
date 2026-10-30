@@ -199,13 +199,12 @@ impl<'a, 'w> NextSession<'a, 'w> {
 
 #[cfg(test)]
 mod tests {
-    /// Verify segments start every VERIFY_SEGMENT layers from layer 1 in their own slots; the
-    /// tensor split adds a start at layer 3, after which the slots shift by one.
+    /// Verify segments start every VERIFY_SEGMENT layers from layer 1 in their own slots, plus a
+    /// start at layer 3 on every topology (one Spark and the split), after which the slots shift by one.
     #[test]
     fn verify_segment_starts_and_slots() {
-        let starts = |split| (0..48).filter_map(|li| super::super::segment_start(li, split).map(|s| (li, s))).collect::<Vec<_>>();
-        assert_eq!(starts(false), [(1, 0), (13, 1), (25, 2), (37, 3)]);
-        assert_eq!(starts(true), [(1, 0), (3, 1), (13, 2), (25, 3), (37, 4)]);
+        let starts = (0..48).filter_map(|li| super::super::segment_start(li).map(|s| (li, s))).collect::<Vec<_>>();
+        assert_eq!(starts, [(1, 0), (3, 1), (13, 2), (25, 3), (37, 4)]);
     }
     /// A plain shape never reuses a verify shape's executables of the same rows and chats.
     #[test]

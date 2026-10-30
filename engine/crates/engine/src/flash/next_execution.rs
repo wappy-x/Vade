@@ -1,12 +1,13 @@
 //! One layer traversal for a prompt tile or independent chat rows.
 use super::*;
 use spark_gpu_probe::driver::Fp8RoutingFlag;
+use crate::flash_next_prefill::Half;
 #[path = "next_prompt_route.rs"]
 mod prompt_route;
 
 pub(super) struct Workspace<'a> {
     /// VADE_MTP_GRAPH and flash_tp_switch::plain_segments: per shape (verify or plain, rows, chats, chats whose GDN
-    /// window stays inside its chunk) one retained executable per segment (layers 1-12, 13-24, 25-36, 37-47),
+    /// window stays inside its chunk) one retained executable per segment (layers 1-2, 3-12, 13-24, 25-36, 37-47),
     /// oldest first; shapes seen once (eager); counters (graphed passes, in-place updates,
     /// instantiations, eager passes).
     verify_graphs: Vec<(VerifyShape, [Option<spark_gpu_probe::driver::DecodeGraph<'a>>; 5])>,
@@ -816,7 +817,9 @@ impl<'a, 'w> NextSession<'a, 'w> {
     }
     /// The per-row frontend of a pass that starts at layer 0, for every row of `spans`: hash
     /// each row in order, then PLE hints, preads, dequant and embedding into the residual and
-    /// lexical rows; dump records keep their row order.
+    /// lexical rows; dump records keep their row order. An unobserved verify pass reads its
+    /// embedding rows only and returns its rows: layer 1 reads the PLE rows first, so
+    /// `frontend_ple` reads them after layer 0's launches, while the GPU runs layer 0.
     pub(super) fn frontend(
         b: &Backend<'a>,
         work: &mut Workspace<'a>,
@@ -824,7 +827,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         tokens: &[&[u32]],
         spans: &[std::ops::Range<usize>],
         verify: bool,
-    ) -> Result<()> {
+    ) -> Result<Option<Vec<(u32, Vec<u64>)>>> {
         let model = sessions[0].model;
         let count = spans.last().unwrap().end;
         let mut frontend = Vec::with_capacity(count);
@@ -836,8 +839,8 @@ impl<'a, 'w> NextSession<'a, 'w> {
         if frontend.len() != count {
             return Err("missing hashed prefill row".into());
         }
-        let gpu=crate::flash_next_prefill::gpu_prompt() && !verify
-            && !sessions.iter().any(|s|s.layer_bytes.is_some() || s.dump.is_some());
+        let unobserved = !sessions.iter().any(|s| s.layer_bytes.is_some() || s.dump.is_some());
+        let gpu = crate::flash_next_prefill::gpu_prompt() && !verify && unobserved;
         if gpu {
             let dedup=crate::flash_next_prefill::gpu_prompt_dedup();
             let packed=if dedup {model.prefill_reader.frontend_packed_dedup(&frontend)?}
@@ -850,7 +853,8 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 gdn::Arg::U32(count as u32),gdn::Arg::F32(model.ple_global),
             ])?;
         } else {
-        model.prefill_reader.frontend_prompt(&frontend, model.ple_global, &mut work.prompt)?;
+        let half = if verify && unobserved { Half::Embedding } else { Half::Both };
+        model.prefill_reader.frontend_prompt(&frontend, model.ple_global, &mut work.prompt, half)?;
         for ((s, inputs), span) in sessions.iter_mut().zip(tokens).zip(spans) {
             for (&token, row) in inputs.iter().zip(span.clone()) {
                 if let Some(d) = &mut s.dump {
@@ -859,13 +863,18 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 s.rec("embed", &work.prompt.0[row * W..(row + 1) * W]);
             }
         }
-        {
-            let (x, e) = &work.prompt;
-            b.write_vector(&mut work.residual, &x[..count * W])?;
-            b.write_vector(&mut work.lexical.slice(0..count * H)?, &e[..count * H])?;
+        b.write_vector(&mut work.residual, &work.prompt.0[..count * W])?;
+        if half == Half::Embedding {
+            return Ok(Some(frontend));
         }
+        b.write_vector(&mut work.lexical.slice(0..count * H)?, &work.prompt.1[..count * H])?;
         }
-        Ok(())
+        Ok(None)
+    }
+    /// A verify pass's PLE rows (`frontend`'s second half), read and uploaded before layer 1.
+    fn frontend_ple(b: &Backend<'a>, work: &mut Workspace<'a>, model: &NextModel<'a>, rows: &[(u32, Vec<u64>)]) -> Result<()> {
+        model.prefill_reader.frontend_prompt(rows, model.ple_global, &mut work.prompt, Half::Ple)?;
+        b.write_vector(&mut work.lexical.slice(0..rows.len() * H)?, &work.prompt.1[..rows.len() * H])
     }
     /// GRAPH: built with the VADE_MTP_GRAPH segment captures; `execute::<false>` is the eager pass.
     #[allow(clippy::too_many_arguments)]
@@ -896,14 +905,16 @@ impl<'a, 'w> NextSession<'a, 'w> {
         }
         // Hash every row first (same advance order; spans are consecutive from
         // row 0), then run the per-row frontend (PLE hints, preads, dequant,
-        // embedding) for the whole tile; dump records keep their row order.
-        if first == 0 { Self::frontend(b, work, sessions, tokens, spans, verify)?; }
+        // embedding) for the whole tile; dump records keep their row order. A
+        // verify pass's PLE rows wait for the top of layer 1 (`deferred`).
+        let mut deferred = if first == 0 { Self::frontend(b, work, sessions, tokens, spans, verify)? } else { None };
+        if end <= 1 && let Some(rows) = deferred.take() { Self::frontend_ple(b, work, model, &rows)?; }
         // No session reads the residual between a MoE combine and the next layer's mix:
         // that combine then runs inside the mix's norm (combine_mix_tiled).
         let unobserved = !sessions.iter().any(|s| s.layer_bytes.is_some() || s.dump.is_some());
         let mut pending_moe: Option<usize> = None;
         // VADE_MTP_GRAPH (default on): a verify pass (or a plain one-token pass of the tensor split, flash_tp_switch::plain_segments, under its own shape) whose shape was seen before captures its stage's layers after
-        // the first as segments (one Spark: 1-47 in four; the pipeline: clipped at the split, 24 eager on the back),
+        // the first as segments (one Spark: 1-47 in five; the pipeline: clipped at the split, 24 eager on the back),
         // launching each (updated in place when its topology holds) while the host captures the next. The captured
         // work is the eager work in the same order. A shape's first pass runs eagerly; the oldest shape retires.
         let graphed = if GRAPH && unobserved && !model.tp_host_pass(count) {
@@ -935,14 +946,14 @@ impl<'a, 'w> NextSession<'a, 'w> {
             None
         };
         let mut open: Option<usize> = None;
-        let split = model.tp_on();
         for li in first..end { model.tp_seq_layer(b, sessions, li, count)?; model.tp_post(b, sessions, spans, &work.residual, count, verify, li)?;
-            if let Some((entry, start)) = graphed.zip(segment_start(li, split)) {
+            if li == 1 && let Some(rows) = deferred.take() { Self::frontend_ple(b, work, model, &rows)?; }
+            if let Some((entry, start)) = graphed.zip(segment_start(li)) {
                 if let Some(slot) = open.take() {
                     let updated = unsafe { b.end_segment(&mut work.verify_graphs[entry].1[slot])? };
                     work.verify_counts[if updated { 1 } else { 2 }] += 1;
                 }
-                let next = (li + 1..end).find(|&l| segment_start(l, split).is_some()).unwrap_or(end);
+                let next = (li + 1..end).find(|&l| segment_start(l).is_some()).unwrap_or(end);
                 if b.begin_segment(next - li, count)? {
                     open = Some(start);
                 }
@@ -1108,14 +1119,14 @@ mod split;
 #[path = "head_split.rs"]
 mod head_split;
 pub(super) use pool::Pool;
-/// Layers per captured verify segment (VADE_MTP_GRAPH): segments start at layers 1, 13, 25, 37.
+/// Layers per captured verify segment (VADE_MTP_GRAPH): segments start at layers 1, 3, 13, 25, 37.
 const VERIFY_SEGMENT: usize = 12;
-/// The slot of the verify segment starting at layer `li`, if one does. With the tensor split a
+/// The slot of the verify segment starting at layer `li`, if one does. On every topology a
 /// segment also starts at layer 3: the pass's first segment launch then waits on a two-layer
 /// capture only, and the host captures each later segment while the GPU runs the one before
 /// (the same launches in the same order, so the same words).
-fn segment_start(li: usize, split: bool) -> Option<usize> {
-    if li % VERIFY_SEGMENT == 1 { Some(li / VERIFY_SEGMENT + usize::from(split && li > 1)) } else { (split && li == 3).then_some(1) }
+fn segment_start(li: usize) -> Option<usize> {
+    if li % VERIFY_SEGMENT == 1 { Some(li / VERIFY_SEGMENT + usize::from(li > 1)) } else { (li == 3).then_some(1) }
 }
 /// Verify shapes with retained segments (VADE_MTP_GRAPH), and shapes remembered as seen once.
 const VERIFY_SHAPES: usize = 6;
