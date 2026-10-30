@@ -143,6 +143,7 @@ needs `--endpoint`, `--model` and an **explicit `--workspace`**. The model gets
 these tools: `workspace_read`, `workspace_list`, `apply_patch`,
 `workspace_shell`, `tool_output_read`, `skill_read`, `workspace_manifest`,
 `workspace_symbols`, `workspace_search` and `workspace_read_lines`.
+The [web tools](docs/agent-tools.md#web-reads-and-search) read URLs and search the web; `--no-web` or `VADE_WEB=0` turns both off.
 
 The agent's tools always run on the computer where you start the harness, in
 the workspace you pick there. When you drive the Spark from a controller

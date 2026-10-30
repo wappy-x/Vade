@@ -43,7 +43,12 @@ impl ToolPolicy {
     /// Registration for the real native executor. Schemas alone grant nothing;
     /// unnamed children receive only the registered read capabilities.
     pub fn native() -> Self {
-        Self::new(
+        Self::native_with_web(crate::web::offered())
+    }
+
+    /// Explicit launch policy, shared with the native tool schemas.
+    pub fn native_with_web(web: bool) -> Self {
+        let mut policy = Self::new(
             [
                 ("workspace_read".into(), Access::Read),
                 ("workspace_list".into(), Access::Read),
@@ -53,6 +58,8 @@ impl ToolPolicy {
                 ("workspace_symbols".into(), Access::Read),
                 ("workspace_search".into(), Access::Read),
                 ("workspace_read_lines".into(), Access::Read),
+                ("web_fetch".into(), Access::Read),
+                ("web_search".into(), Access::Read),
                 ("apply_patch".into(), Access::Patch),
                 ("workspace_edit_lines".into(), Access::Write { path_argument: "path".into() }),
                 ("workspace_shell".into(), Access::Shell),
@@ -61,7 +68,12 @@ impl ToolPolicy {
             ]
             .into(),
         )
-        .expect("native tool policy")
+        .expect("native tool policy");
+        if !web {
+            policy.tools.remove("web_fetch");
+            policy.tools.remove("web_search");
+        }
+        policy
     }
 
     /// Only trusted host configuration may declare additional bounded tools.

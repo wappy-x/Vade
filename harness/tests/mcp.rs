@@ -22,7 +22,7 @@ fn main() {
     if let Ok(mode) = std::env::var("FAKE_MCP") {
         return serve(&mode);
     }
-    let tests: [(&str, fn()); 12] = [
+    let tests: [(&str, fn()); 13] = [
         ("initialize_and_list", initialize_and_list),
         ("calls_progress_and_server_requests", calls_progress_and_server_requests),
         ("timeout_and_malformed_json", timeout_and_malformed_json),
@@ -34,7 +34,8 @@ fn main() {
         ("startup_failures_are_reported", startup_failures_are_reported),
         ("cli_manages_and_lists_servers", cli_manages_and_lists_servers),
         ("config_writes_keep_a_readable_file", config_writes_keep_a_readable_file),
-        ("chat_calls_mcp_tools_and_resumes", chat_calls_mcp_tools_and_resumes),
+        ("chat_calls_mcp_tools_and_resumes_web_on", || chat_calls_mcp_tools_and_resumes(true)),
+        ("chat_calls_mcp_tools_and_resumes_web_off", || chat_calls_mcp_tools_and_resumes(false)),
     ];
     let filter: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with('-')).collect();
     let mut passed = 0;
@@ -733,14 +734,15 @@ fn config_writes_keep_a_readable_file() {
     assert!(ok && !err.contains("skipped"), "{out}{err}");
 }
 
-fn chat_calls_mcp_tools_and_resumes() {
+fn chat_calls_mcp_tools_and_resumes(web: bool) {
     use coding::{Fixture, answer, call, mock, run_bounded, tools};
     let home = Temp::new("chat-home");
     std::fs::write(home.0.join("mcp.json"), format!(r#"{{"servers":{{"fake":{{"command":{},"env":{{"FAKE_MCP":"normal"}}}}}}}}"#, json::quote(&exe()))).unwrap();
     let f = Fixture::new();
+    let web_setting = if web { "1" } else { "0" };
     let (url, server) = mock(vec![tools(vec![call("m1", "fake__echo", json::parse(r#"{"text":"from model"}"#).unwrap())]), answer()]);
     let output = run_bounded(
-        f.command(&url).args(["--session", "mcp-chat", "--approval", "auto", "--prompt", "echo it"]).env("VADE_HOME", &home.0).env_remove("VADE_MCP"),
+        f.command(&url).args(["--session", "mcp-chat", "--approval", "auto", "--prompt", "echo it"]).env("VADE_HOME", &home.0).env_remove("VADE_MCP").env("VADE_WEB", web_setting),
         "",
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -753,10 +755,15 @@ fn chat_calls_mcp_tools_and_resumes() {
     };
     let offered = names(&requests[0]);
     // The native list comes first and is unchanged; MCP tools follow it.
-    let native: Vec<String> = vade_harness::coding_tools::definitions().as_array().unwrap().iter()
+    let native: Vec<String> = vade_harness::coding_tools::definitions_with_web(
+        vade_harness::contract::guaranteed_native_reply_tokens(), vade_harness::coding_tools::shell_offered(), web,
+    ).as_array().unwrap().iter()
         .map(|tool| tool.get("function").and_then(|f| f.get("name")).and_then(Value::as_str).unwrap().to_owned())
         .collect();
     assert_eq!(offered[..native.len()], native[..]);
+    for name in ["web_fetch", "web_search"] {
+        assert_eq!(offered.iter().any(|tool| tool == name), web);
+    }
     assert_eq!(offered[native.len()..].len(), 9);
     assert_eq!(offered[native.len()], "fake__echo");
     let result = requests[1].get("messages").and_then(Value::as_array).unwrap().iter()
@@ -766,21 +773,21 @@ fn chat_calls_mcp_tools_and_resumes() {
     // Resume keeps the frozen tool list, MCP tools included.
     let (url, server) = mock(vec![answer()]);
     let output = run_bounded(
-        f.command(&url).args(["--resume", "mcp-chat", "--approval", "auto", "--prompt", "again"]).env("VADE_HOME", &home.0).env_remove("VADE_MCP"),
+        f.command(&url).args(["--resume", "mcp-chat", "--approval", "auto", "--prompt", "again"]).env("VADE_HOME", &home.0).env_remove("VADE_MCP").env("VADE_WEB", web_setting),
         "",
     );
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(names(&server.join().unwrap()[0]), offered);
     // With MCP off, a fresh chat offers the native list only.
     let (url, server) = mock(vec![answer()]);
-    let output = run_bounded(f.command(&url).args(["--prompt", "plain"]).env("VADE_HOME", &home.0).env("VADE_MCP", "off"), "");
+    let output = run_bounded(f.command(&url).args(["--prompt", "plain"]).env("VADE_HOME", &home.0).env("VADE_MCP", "off").env("VADE_WEB", web_setting), "");
     assert!(output.status.success());
     assert_eq!(names(&server.join().unwrap()[0]), native);
     // The launcher passes --vade-home and drops VADE_HOME; the list comes from that home.
     let (url, server) = mock(vec![answer()]);
     let mut command = home::harness();
     command.args(["agent", "--vade-home"]).arg(&home.0).args(["--endpoint", &url, "--model", "mock", "--prompt", "home", "--workspace"]).arg(&f.0)
-        .env("NO_COLOR", "1").env("HOME", f.home()).env_remove("VADE_HOME").env_remove("VADE_MCP");
+        .env("NO_COLOR", "1").env("HOME", f.home()).env_remove("VADE_HOME").env_remove("VADE_MCP").env("VADE_WEB", web_setting);
     let output = run_bounded(&mut command, "");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(names(&server.join().unwrap()[0]), offered);

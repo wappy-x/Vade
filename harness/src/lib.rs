@@ -21,6 +21,7 @@ pub mod transport;
 pub mod artifacts;
 pub mod branch;
 pub mod coding_tools;
+pub mod web;
 pub mod context;
 pub mod edit;
 pub mod instructions;

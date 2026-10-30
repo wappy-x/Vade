@@ -397,6 +397,7 @@ impl App {
                 child_agents::NativeToolHost {
                     workspace: Arc::clone(&self.workspace),
                     approval: self.config.approval,
+                    web: self.config.web,
                     project: project::Snapshot::from_conversation(self.native.as_ref().unwrap())?,
                     shell_exclusions: self.config.shell_exclusions.clone(),
                     shell_toolchain: self.config.shell_toolchain.clone(),
@@ -434,6 +435,7 @@ impl App {
         let journal = self.journal.clone();
         let policy = self.config.approval;
         let memory = self.config.memory;
+        let web = self.config.web;
         let check = self
             .config
             .check
@@ -508,6 +510,7 @@ impl App {
                 )
                 .with_artifacts(&mut artifacts)
                 .with_memory(memory)
+                .with_web(web)
                 .with_shell_exclusions(shell_exclusions)
                 .with_build_session(&build_session)
                 .with_project(&project)

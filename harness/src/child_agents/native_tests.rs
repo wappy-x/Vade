@@ -40,6 +40,7 @@ fn native_factory(
             project: project::Snapshot::discover(&workspace, &[]).unwrap(),
             workspace,
             approval: policy,
+            web: true,
             shell_exclusions: shell::Exclusions::default(),
             shell_toolchain: None,
             preview,
@@ -151,15 +152,18 @@ fn native_registry_matches_schemas_and_side_effects_cannot_be_reclassified() {
     let reply_limit = crate::contract::guaranteed_native_reply_tokens();
     assert_eq!(
         coding_tools::definitions(),
-        coding_tools::definitions_for(reply_limit, coding_tools::shell_offered())
+        coding_tools::definitions_with_web(reply_limit, coding_tools::shell_offered(), crate::web::offered())
     );
-    for shell in SHAPES {
-        let Value::Array(tools) = coding_tools::definitions_for(reply_limit, shell) else {
+    for name in ["web_fetch", "web_search"] {
+        let scope = Scope { tools: vec![name.into()], write_paths: Vec::new() };
+        assert_eq!(policy.validate_scope(&scope).is_ok(), crate::web::offered());
+        assert_eq!(Scope::native_read_only().tools.contains(&name.into()), crate::web::offered());
+    }
+    for (shell, web) in SHAPES.into_iter().flat_map(|shell| [false, true].map(|web| (shell, web))) {
+        let policy = ToolPolicy::native_with_web(web);
+        let Value::Array(tools) = coding_tools::definitions_with_web(reply_limit, shell, web) else {
             unreachable!()
         };
-        let mut all = Scope::native_read_only();
-        all.tools.extend(["apply_patch".into(), "workspace_edit_lines".into()]);
-        all.write_paths.push("output.txt".into());
         let names: Vec<String> = tools
             .iter()
             .map(|v| {
@@ -172,6 +176,14 @@ fn native_registry_matches_schemas_and_side_effects_cannot_be_reclassified() {
                     .into()
             })
             .collect();
+        for name in ["web_fetch", "web_search"] {
+            assert_eq!(names.iter().any(|n| n == name), web);
+            let scope = Scope { tools: vec![name.into()], write_paths: Vec::new() };
+            assert_eq!(policy.validate_scope(&scope).is_ok(), web);
+        }
+        let mut all = policy.read_scope(&names);
+        all.tools.extend(["apply_patch".into(), "workspace_edit_lines".into()]);
+        all.write_paths.push("output.txt".into());
         assert_eq!(names.iter().any(|name| name == "workspace_shell"), shell);
         let mut with_shell = all.clone();
         with_shell.tools.push("workspace_shell".into());

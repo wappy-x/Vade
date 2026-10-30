@@ -49,6 +49,8 @@ Changes that are merged but not yet released are under Unreleased.
   prompts are listed only. `vade tools` lists the native and MCP tools, and
   `VADE_MCP=off` starts no server. See [MCP tools in chat](docs/mcp.md).
 
+- The native agent has `web_fetch` and `web_search`; harness `--no-web` or `VADE_WEB=0` turns both off.
+
 ## v0.2.0 - not released yet
 
 v0.2.0 makes two Sparks much faster than v0.1.0. Two Sparks also admit more

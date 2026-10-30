@@ -175,6 +175,7 @@ impl App {
                     &config.rules_scopes,
                     instructions.section(),
                     config.memory.then_some(memory.as_str()),
+                    config.web,
                     config.children,
                     &config.child_grants,
                     Limits { max_run_time: config.max_run_time, ..Limits::default() },

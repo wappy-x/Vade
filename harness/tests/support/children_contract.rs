@@ -28,6 +28,7 @@ enum Scenario {
 }
 
 struct Fixture {
+    web: bool,
     endpoint: String,
     workspace: PathBuf,
     ready: mpsc::Receiver<Vec<String>>,
@@ -36,7 +37,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn start(scenario: Scenario) -> Self {
+    fn start(scenario: Scenario, web: bool) -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let workspace = std::env::temp_dir().join(format!(
             "vade-children-{}-{}",
@@ -61,7 +62,7 @@ impl Fixture {
                 Some(PROMPT)
             );
             let tools = first.get("tools").unwrap().as_array().unwrap();
-            assert_eq!(tools.len(), 15);
+            assert_eq!(tools.len(), 15 + if web { 2 } else { 0 });
             for name in [
                 "workspace_read",
                 "workspace_list",
@@ -86,6 +87,11 @@ impl Fixture {
                         .and_then(Value::as_str)
                         == Some(name)
                 }));
+            }
+            for name in ["web_fetch", "web_search"] {
+                assert_eq!(tools.iter().any(|tool| {
+                    tool.get("function").unwrap().get("name").and_then(Value::as_str) == Some(name)
+                }), web, "parent schema: {name}");
             }
             stream_reply(
                 &mut parent,
@@ -160,8 +166,12 @@ impl Fixture {
                             .as_array()
                             .unwrap()
                             .len(),
-                        8
+                        8 + if web { 2 } else { 0 }
                     );
+                    for name in ["web_fetch", "web_search"] {
+                        assert_eq!(envelope.get("allowed_tools").unwrap().as_array().unwrap()
+                            .iter().any(|tool| tool.as_str() == Some(name)), web, "child grant: {name}");
+                    }
                     assert!(
                         !envelope
                             .get("allowed_tools")
@@ -358,6 +368,7 @@ impl Fixture {
             }
         });
         Self {
+            web,
             endpoint,
             workspace,
             ready,
@@ -369,6 +380,7 @@ impl Fixture {
         let mut command = crate::home::harness();
         // These macOS-only scenarios grant and expect workspace_shell.
         command.env_remove("VADE_HARNESS_SHELL");
+        command.env("VADE_WEB", if self.web { "1" } else { "0" });
         command
             .args([
                 "agent",
@@ -549,7 +561,16 @@ fn stream_reply(peer: &mut BufReader<TcpStream>, mut message: Value, cached: Opt
 
 #[test]
 fn cli_parent_spawns_three_cancels_one_and_integrates_collected_results() {
-    let mut fixture = Fixture::start(Scenario::ModelCancel);
+    cli_parent_results(true);
+}
+
+#[test]
+fn cli_parent_spawns_and_integrates_with_web_disabled() {
+    cli_parent_results(false);
+}
+
+fn cli_parent_results(web: bool) {
+    let mut fixture = Fixture::start(Scenario::ModelCancel, web);
     let mut child = cli::Cli::start(&mut fixture.command(true));
     child.send(&format!("{PROMPT}\n"));
     fixture.ready();
@@ -573,7 +594,7 @@ fn cli_parent_spawns_three_cancels_one_and_integrates_collected_results() {
 
 #[test]
 fn cli_children_command_enables_tools_and_cancels_without_waiting_for_parent_http() {
-    let mut fixture = Fixture::start(Scenario::UiCancel);
+    let mut fixture = Fixture::start(Scenario::UiCancel, true);
     let mut child = cli::Cli::start(&mut fixture.command(false));
     child.send("/children\n/children on\n");
     child.until(false, "Children enabled");
@@ -604,7 +625,7 @@ fn cli_children_command_enables_tools_and_cancels_without_waiting_for_parent_htt
 
 #[test]
 fn cli_cancel_all_closes_child_admission_and_keeps_parent_live() {
-    let mut fixture = Fixture::start(Scenario::UiCancelAll);
+    let mut fixture = Fixture::start(Scenario::UiCancelAll, true);
     let mut child = cli::Cli::start(&mut fixture.command(true));
     child.send(&format!("{PROMPT}\n"));
     fixture.ready();
@@ -623,7 +644,7 @@ fn cli_cancel_all_closes_child_admission_and_keeps_parent_live() {
 
 #[test]
 fn cli_parent_cancel_joins_all_children_before_new_context() {
-    let mut fixture = Fixture::start(Scenario::ParentCancel);
+    let mut fixture = Fixture::start(Scenario::ParentCancel, false);
     let mut child = cli::Cli::start(&mut fixture.command(true));
     child.send(&format!("{PROMPT}\n"));
     fixture.ready();
@@ -640,13 +661,22 @@ fn cli_parent_cancel_joins_all_children_before_new_context() {
 
 #[test]
 fn raw_tui_live_children_controls_context_and_resize_while_parent_is_stalled() {
-    let mut fixture = Fixture::start(Scenario::UiCancel);
-    let mut ui = raw_ui::Ui::start(
-        "agent",
-        &fixture.endpoint,
-        fixture.workspace.to_str().unwrap(),
-        true,
-    );
+    raw_tui_children_controls(true);
+}
+
+#[test]
+fn raw_tui_children_controls_with_web_disabled() {
+    raw_tui_children_controls(false);
+}
+
+fn raw_tui_children_controls(web: bool) {
+    let mut fixture = Fixture::start(Scenario::UiCancel, web);
+    let workspace = fixture.workspace.to_str().unwrap();
+    let mut ui = if web {
+        raw_ui::Ui::start("agent", &fixture.endpoint, workspace, true)
+    } else {
+        raw_ui::Ui::start_with_args("agent", &fixture.endpoint, workspace, &["--children", "--no-web"])
+    };
     ui.send(format!("{PROMPT}\r").as_bytes());
     let ids = fixture.ready();
     let frame = ui.until(&format!("{}  running", ids[2]), Duration::from_secs(2));
@@ -685,7 +715,10 @@ fn cli_without_children_flag_rejects_model_spawn_and_never_starts_a_child() {
         let body = json::parse(&next_request(&mut parent)).unwrap();
         assert_eq!(
             body.get("tools"),
-            Some(&vade_harness::coding_tools::definitions())
+            Some(&vade_harness::coding_tools::definitions_with_web(
+                vade_harness::contract::guaranteed_native_reply_tokens(),
+                vade_harness::coding_tools::shell_offered(), true,
+            ))
         );
         reply(
             &mut parent,

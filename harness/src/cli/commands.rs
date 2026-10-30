@@ -502,6 +502,7 @@ impl App {
                             &self.config.rules_scopes,
                             self.instructions.section(),
                             self.config.memory.then_some(self.memory.as_str()),
+                            self.config.web,
                             self.config.children,
                             &self.config.child_grants,
                             Limits { max_run_time: self.config.max_run_time, ..Limits::default() },
@@ -756,7 +757,8 @@ impl App {
                 .as_ref()
                 .and_then(|j| j.lock().ok().map(|j| j.name().to_owned()))
                 .unwrap_or_else(|| "unavailable".into());
-            return self.terminal.line(&format!("native agent · {state}\nhistory: {history} · auto-compaction: {}\n{context}\nsuccessful turns since new/resume: {}\ntools: workspace_read/workspace_list/workspace_search/workspace_read_lines/workspace_edit_lines/apply_patch{}/tool_output_read/skill_read/workspace_manifest/workspace_symbols\napproval: {} · {}\nsession: {session} · private durable journal\nlast run: {}", if self.config.auto_compact { "on (80%)" } else { "off" }, self.native_completed, if vade_harness::coding_tools::shell_offered() { "/workspace_shell" } else { "" }, self.config.approval.label(), if vade_harness::coding_tools::shell_offered() { "macOS sandbox · network denied" } else if vade_harness::coding_tools::SHELL_AVAILABLE { "no command tool: VADE_HARNESS_SHELL=off" } else { "no command tool here: workspace_shell needs the macOS sandbox" }, self.native_report.as_deref().unwrap_or("none")));
+            let web_tools = if self.config.web { "/web_fetch/web_search" } else { "" };
+            return self.terminal.line(&format!("native agent · {state}\nhistory: {history} · auto-compaction: {}\n{context}\nsuccessful turns since new/resume: {}\ntools: workspace_read/workspace_list/workspace_search/workspace_read_lines/workspace_edit_lines/apply_patch{}/tool_output_read/skill_read/workspace_manifest/workspace_symbols{web_tools}\napproval: {} · {}\nsession: {session} · private durable journal\nlast run: {}", if self.config.auto_compact { "on (80%)" } else { "off" }, self.native_completed, if vade_harness::coding_tools::shell_offered() { "/workspace_shell" } else { "" }, self.config.approval.label(), if vade_harness::coding_tools::shell_offered() { "macOS sandbox · network denied" } else if vade_harness::coding_tools::SHELL_AVAILABLE { "no command tool: VADE_HARNESS_SHELL=off" } else { "no command tool here: workspace_shell needs the macOS sandbox" }, self.native_report.as_deref().unwrap_or("none")));
         }
         if self.config.mode == Mode::Codex {
             return self.terminal.line(&format!("provider: Codex app-server · {state}\npermission: {} · approval requests: denied by adapter\nread scope: Codex preset; not confined to this workspace\nthread: {}\nmodel override: {}\nlocal recall: {} completed turns / {} bytes (not sent as context)\ncontext and persistence: owned by Codex; no Vade system/history prefix\nVade metadata: completed-turn counter only, {}\ncache identity: separate from provider/model/thread; cache hits unmeasured",
@@ -803,6 +805,7 @@ impl App {
                     &self.config.rules_scopes,
                     self.instructions.section(),
                     self.config.memory.then_some(self.memory.as_str()),
+                    self.config.web,
                     enabled,
                     &self.config.child_grants,
                     Limits { max_run_time: self.config.max_run_time, ..Limits::default() },

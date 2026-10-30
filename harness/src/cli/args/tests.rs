@@ -3,6 +3,16 @@ use super::*;
 use crate::cli::{delegated::executable_path, test_support::parse};
 
 #[test]
+fn no_web_is_a_launch_flag_for_native_chat() {
+    let base = ["agent", "--endpoint", "http://example.org:80", "--model", "mock", "--workspace", ".", "--no-check"];
+    let mut args = base.to_vec(); args.push("--no-web");
+    let Parsed::Run(config) = parse(&args).unwrap() else { panic!() };
+    assert!(!config.web);
+    args.push("--no-web"); assert!(parse(&args).err().unwrap().contains("more than once"));
+    assert!(parse(&["demo", "--no-web"]).is_err());
+}
+
+#[test]
 fn chat_state_flags_select_the_location() {
     use vade_harness::tools::StateLocation;
     let state = |extra: &[&str]| {

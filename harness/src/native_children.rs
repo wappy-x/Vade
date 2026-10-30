@@ -27,13 +27,20 @@ impl Children {
         endpoint: &str,
         host: child_agents::NativeToolHost,
         generation: vade_harness::contract::GenerationOptions,
-        grants: BTreeMap<String, child_agents::Scope>,
+        mut grants: BTreeMap<String, child_agents::Scope>,
         cancel: Arc<AtomicBool>,
     ) -> io::Result<Scheduler> {
+        let web = host.web && vade_harness::web::offered();
+        let advertised = parent.options().get("tools").and_then(vade_harness::json::Value::as_array);
+        for scope in grants.values_mut() {
+            scope.tools.retain(|name| !matches!(name.as_str(), "web_fetch" | "web_search") || (web
+                && advertised.is_some_and(|tools| tools.iter().any(|tool| tool.get("function")
+                    .and_then(|f| f.get("name")).and_then(vade_harness::json::Value::as_str) == Some(name)))));
+        }
         let scheduler = Scheduler::new(
             StablePrefix::from_parent(parent)?,
             child_agents::Config {
-                policy: child_agents::ToolPolicy::native(),
+                policy: child_agents::ToolPolicy::native_with_web(web),
                 grants,
                 ..child_agents::Config::default()
             },

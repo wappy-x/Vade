@@ -19,6 +19,7 @@ pub type ChildPreview =
 pub struct NativeToolHost {
     pub workspace: Arc<Workspace>,
     pub approval: shell::ApprovalPolicy,
+    pub web: bool,
     pub project: project::Snapshot,
     pub shell_exclusions: shell::Exclusions,
     pub shell_toolchain: Option<PathBuf>,
@@ -98,6 +99,7 @@ impl agent::ToolExecutor for NativeTools {
             },
         )
         .with_project(&host.project)
+        .with_web(host.web)
         .with_shell_exclusions(host.shell_exclusions.clone())
         .with_build_session(&self.build)
         .with_artifacts(&mut self.journal);

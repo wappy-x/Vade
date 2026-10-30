@@ -206,6 +206,54 @@ Temporary files from an abrupt crash can be left behind as hidden `.vade-edit-*`
 files; they are not treated as completed edits and are never reused
 automatically.
 
+## Web reads and search
+
+`web_fetch` reads a public HTTP or HTTPS URL. Use it for a URL from the user,
+current documentation, or facts after the model's training. It takes `url`,
+plus optional `max_bytes` and `timeout_s`. The limits in the tool schema are
+262144 bytes and 20 seconds by default. The hard limits are 2097152 bytes and
+60 seconds. Values must be positive whole numbers within those limits.
+
+The result gives the final URL, content type and captured byte count before
+the body. HTML goes through the document reader to Markdown. Plain text,
+Markdown and JSON pass through. PDF and other formats with a registered reader
+use that reader. Other types give `binary <type>, <bytes> bytes`.
+The byte limit applies to both the downloaded body and the converted text.
+A cut result ends with `[truncated at N bytes]`. A reader can refuse an
+incomplete document. When a download cuts a UTF-8 character, HTML and table
+readers get the valid prefix. Earlier characters keep their encoding. A
+complete response with a damaged UTF-8 byte order mark tail gives an error.
+The conversion character cap is set before the reader runs. It uses the
+smaller of the download limit and the retained result room. The calculation
+in `web.rs` reserves the response header and 128 bytes for cut markers.
+
+`web_search` takes `query` and optional `count`. Its schema sets the default
+count to 5 and the hard limit to 10. It reads the DuckDuckGo HTML search page
+through the same fetch path. It returns a numbered list of source titles,
+URLs and snippets. It unwraps DuckDuckGo result links. An empty search or
+failed request gives a short line. The harness does not make up results.
+
+Both tools are on by default. Launch the harness with `--no-web`, or set
+`VADE_WEB=0`, to turn both off. The setting also blocks execution from a saved
+session that still lists the tools. These are read tools, like workspace
+reads. The patch and shell approval policy does not control them. Shell
+commands still have no network access. Fetched text is source data, not
+instructions or permission to run another tool.
+
+The runner uses system curl with no config, credentials, cookies or proxy.
+It allows only HTTP and HTTPS. It checks each redirect before it sends the
+next request. The runner limit is 5 redirects per call. It refuses local
+hosts, loopback, private and link-local address literals, URL credentials,
+and ambiguous numeric host spellings. DNS rebinding is out of scope in r1.
+Missing curl, timeout, HTTP failure and reader failure give explicit errors.
+Cancellation stops and reaps the child process.
+
+Results use the normal retained output path. The existing artifact limits
+in `artifacts.rs` allow 65536 bytes per result and a 4096-byte inline excerpt.
+A cut context result has its own byte marker. Use `tool_output_read` to read
+retained text. Bytes past either cap are not retained. Search queries are
+limited to 2048 bytes, and URLs to 8192 bytes, by `web.rs`.
+
 ## Commands and approvals
 
 `workspace_shell` takes exactly one of `argv` (an array of 1–128 strings, at

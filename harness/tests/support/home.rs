@@ -28,5 +28,7 @@ pub fn harness() -> Command {
     let mut command = command(env!("CARGO_BIN_EXE_vade-harness"));
     // Conformance requests must not inherit notes or memory tools from chat.
     command.env("VADE_MEMORY", "0");
+    // Each launch selects its web policy, independent of the caller.
+    command.env("VADE_WEB", "1");
     command
 }

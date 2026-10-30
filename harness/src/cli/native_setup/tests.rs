@@ -542,6 +542,21 @@ fn tool_names(tools: &Value) -> Vec<String> {
 }
 
 #[test]
+fn web_policy_preserves_saved_tool_shapes() {
+    let on = native_definitions_with(false, vade_harness::contract::guaranteed_native_reply_tokens(), false);
+    let off = web_definitions(on.clone(), false);
+    assert!(tool_names(&on).contains(&"web_fetch".into()));
+    assert!(!tool_names(&off).contains(&"web_fetch".into()));
+    assert!(resumed_tools_match(Some(&on), false, &[false]));
+    assert!(resumed_tools_match(Some(&off), false, &[false]));
+    for mut tools in [on, off] {
+        vade_harness::memory::add_tools(&mut tools);
+        assert!(tool_names(&tools).contains(&"memory_save".into()));
+        assert!(resumed_tools_match(Some(&tools), false, &[false]));
+    }
+}
+
+#[test]
 fn no_shell_edits_each_match_exactly_one_prompt_sentence() {
     for (from, _) in NO_SHELL_EDITS {
         assert_eq!(NATIVE_SYSTEM_PROMPT.matches(from).count() + BUILD_FIRST_PROMPT.matches(from).count(), 1, "{from}");
@@ -580,7 +595,8 @@ fn with_the_shell_the_prompt_and_tools_keep_their_bytes() {
     assert_eq!(native_system_prompt_for(false, &grants, Limits { max_run_time: None, ..limits }, true), frozen);
     if coding_tools::shell_offered() {
         assert_eq!(native_system_prompt(false, &grants, Limits { max_run_time: None, ..limits }), frozen);
-        assert_eq!(native_definitions(false), native_definitions_with(false, vade_harness::contract::guaranteed_native_reply_tokens(), true));
+        assert_eq!(native_definitions(false), coding_tools::definitions_with_web(
+            vade_harness::contract::guaranteed_native_reply_tokens(), true, vade_harness::web::offered()));
     } else {
         assert!(!tool_names(&native_definitions(false)).contains(&"workspace_shell".to_owned()));
     }
@@ -592,7 +608,7 @@ fn sessions_saved_with_the_shell_still_resume_where_it_is_unavailable() {
     std::fs::create_dir(&path).unwrap();
     let workspace = Workspace::new(&path).unwrap();
     let (grants, limits) = (BTreeMap::new(), Limits::default());
-    let project = native_conversation("mock", &workspace, &[], "", false, &grants, limits).unwrap().messages()[1].value().clone();
+    let project = native_conversation("mock", &workspace, &[], "", true, false, &grants, limits).unwrap().messages()[1].value().clone();
     let saved = |shell: bool| Conversation::from_request(
         Value::Object(vec![
             ("model".into(), Value::String("mock".into())),

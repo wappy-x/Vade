@@ -75,6 +75,7 @@ pub(crate) struct Config {
     /// Direct and agent: load project instruction files (`--no-instructions` clears it).
     pub(crate) instructions: bool,
     pub(crate) memory: bool,
+    pub(crate) web: bool,
     pub(crate) shell_exclusions: vade_harness::shell::Exclusions,
     pub(crate) shell_toolchain: Option<PathBuf>,
     /// Agent: user check command run after rounds that changed files, and its source.
@@ -201,6 +202,7 @@ impl Config {
             rules_scopes: Vec::new(),
             instructions: true,
             memory: vade_harness::memory::enabled(false, std::env::var("VADE_MEMORY").ok().as_deref()),
+            web: vade_harness::web::offered(),
             shell_exclusions: vade_harness::shell::Exclusions::default(),
             shell_toolchain: None,
             check: None,
@@ -278,6 +280,11 @@ impl Config {
                         return Err("--no-instructions was specified more than once");
                     }
                     config.instructions = false;
+                }
+                "--no-web" => {
+                    if used.contains(&"--no-web") { return Err("--no-web was specified more than once"); }
+                    config.web = false;
+                    used.push("--no-web");
                 }
                 "--no-auto-continue" => {
                     if !config.auto_continue {
@@ -662,6 +669,9 @@ impl Config {
         config.memory &= matches!(config.mode, Mode::Agent | Mode::Direct);
         if !config.instructions && !matches!(config.mode, Mode::Agent | Mode::Direct) {
             return Err("--no-instructions requires direct or agent mode");
+        }
+        if used.contains(&"--no-web") && !matches!(config.mode, Mode::Agent | Mode::Direct) {
+            return Err("--no-web requires direct or agent mode");
         }
         if config.resume.is_some() && !config.rules_scopes.is_empty() {
             return Err(

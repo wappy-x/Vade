@@ -4,6 +4,23 @@ use crate::artifacts::Access;
 use crate::test_workspace::Fixture;
 use std::io;
 #[test]
+fn web_schemas_and_launch_policy_apply_to_saved_calls() {
+    let names = |web| {
+        let Value::Array(tools) = definitions_with_web(1024, false, web) else { panic!() };
+        tools.iter().map(|t| t.get("function").unwrap().get("name").unwrap().as_str().unwrap().to_owned()).collect::<Vec<_>>()
+    };
+    let on = names(true); let off = names(false);
+    assert!(on.contains(&"web_fetch".into()) && on.contains(&"web_search".into()));
+    assert!(!off.contains(&"web_fetch".into()) && !off.contains(&"web_search".into()));
+    let f = Fixture::new(); let w = f.workspace();
+    let mut tools = CodingTools::new(&w, ApprovalPolicy::Auto, |_, _| panic!("disabled web must not ask for approval")).with_web(false);
+    for name in ["web_fetch", "web_search"] {
+        let args = json::parse("{}").unwrap();
+        let call = ToolCall { id: "saved-web".into(), name: name.into(), arguments: "{}".into() };
+        assert_eq!(tools.execute(ToolInvocation { call: &call, arguments: &args, max_output_bytes: 4096 }, &AtomicBool::new(false)), Err(ToolError::Denied));
+    }
+}
+#[test]
 fn line_edits_guard_visible_ranges_and_retain_exact_bytes() {
     for old in ["", "α\r\nβ", "one\ntwo\n", "🦀"] {
         let f = Fixture::new(); f.write("source", old); let w = f.workspace();

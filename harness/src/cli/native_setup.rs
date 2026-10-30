@@ -506,10 +506,10 @@ pub(crate) fn native_message(role: &str, content: &str) -> Value {
     ])
 }
 pub(crate) fn native_definitions(children: bool) -> Value {
-    native_definitions_with(children, vade_harness::contract::guaranteed_native_reply_tokens(), coding_tools::shell_offered())
+    web_definitions(native_definitions_with(children, vade_harness::contract::guaranteed_native_reply_tokens(), coding_tools::shell_offered()), vade_harness::web::offered())
 }
 fn native_definitions_with(children: bool, reply_limit: usize, shell: bool) -> Value {
-    let Value::Array(mut tools) = coding_tools::definitions_for(reply_limit, shell) else {
+    let Value::Array(mut tools) = coding_tools::definitions_with_web(reply_limit, shell, true) else {
         unreachable!()
     };
     if children {
@@ -554,10 +554,10 @@ fn native_system_prompt_for(
 }
 #[cfg(test)]
 pub(crate) fn native_conversation(
-    model: &str, workspace: &Workspace, scopes: &[String], instructions: &str,
+    model: &str, workspace: &Workspace, scopes: &[String], instructions: &str, web: bool,
     children: bool, grants: &BTreeMap<String, child_agents::Scope>, limits: Limits,
 ) -> io::Result<Conversation> {
-    chat_conversation(model, workspace, scopes, instructions, None, children, grants, limits)
+    chat_conversation(model, workspace, scopes, instructions, None, web, children, grants, limits)
 }
 /// [`chat_conversation_with_mcp`] without MCP tools, for tests.
 #[cfg(test)]
@@ -568,11 +568,12 @@ pub(crate) fn chat_conversation(
     scopes: &[String],
     instructions: &str,
     memory: Option<&str>,
+    web: bool,
     children: bool,
     grants: &BTreeMap<String, child_agents::Scope>,
     limits: Limits,
 ) -> io::Result<Conversation> {
-    chat_conversation_with_mcp(model, workspace, scopes, instructions, memory, children, grants, limits, Vec::new())
+    chat_conversation_with_mcp(model, workspace, scopes, instructions, memory, web, children, grants, limits, Vec::new())
 }
 /// A fresh conversation. Its tool list is the native tools, the memory tools
 /// when memory is on, then the chat's MCP tools.
@@ -583,6 +584,7 @@ pub(crate) fn chat_conversation_with_mcp(
     scopes: &[String],
     instructions: &str,
     memory: Option<&str>,
+    web: bool,
     children: bool,
     grants: &BTreeMap<String, child_agents::Scope>,
     limits: Limits,
@@ -598,7 +600,7 @@ pub(crate) fn chat_conversation_with_mcp(
         Value::Object(vec![
             ("model".into(), Value::String(model.into())),
             ("stream".into(), Value::Bool(true)),
-            ("tools".into(), tools),
+            ("tools".into(), web_definitions(tools, web)),
             (
                 "messages".into(),
                 Value::Array(vec![
@@ -609,6 +611,12 @@ pub(crate) fn chat_conversation_with_mcp(
         ]),
         Limits::default(),
     )
+}
+fn web_definitions(mut tools: Value, web: bool) -> Value {
+    if !web && let Value::Array(tools) = &mut tools {
+        tools.retain(|tool| !matches!(tool.get("function").and_then(|f| f.get("name")).and_then(Value::as_str), Some("web_fetch" | "web_search")));
+    }
+    tools
 }
 pub(crate) fn native_summary(native: &NativeResult, canceled: bool, success: bool) -> String {
     let outcome = if native.display_limited {
@@ -1073,10 +1081,12 @@ fn resumed_tools_match(tools: Option<&Value>, children: bool, variants: &[bool])
                     && let Some((_, description)) = function.iter_mut().find(|(key, _)| key == "description")
                 { *description = Value::String(text.into()); }
             }
+            // Launch policy controls execution. Keep saved schemas unchanged,
+            // including sessions saved before web tools were added.
             let mut candidate = Value::Array(candidate);
-            if tools == Some(&candidate) { return true; }
+            if tools == Some(&candidate) || tools == Some(&web_definitions(candidate.clone(), false)) { return true; }
             vade_harness::memory::add_tools(&mut candidate);
-            if tools == Some(&candidate) { return true; }
+            if tools == Some(&candidate) || tools == Some(&web_definitions(candidate.clone(), false)) { return true; }
         }
     }
     false

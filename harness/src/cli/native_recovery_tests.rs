@@ -63,7 +63,7 @@ fn resumed_sessions_accept_previous_write_guidance() {
     let workspace = Workspace::new(&path).unwrap();
     let limits = Limits::default();
     let grants = BTreeMap::new();
-    let current = native_conversation("mock", &workspace, &[], "", false, &grants, limits).unwrap();
+    let current = native_conversation("mock", &workspace, &[], "", true, false, &grants, limits).unwrap();
     assert!(native_system_prompt(false, &grants, limits).contains("~40 lines"));
     assert!(validate_resumed(&current, "mock", false, &grants, limits).is_ok());
     let legacy_prompt = native_system_prompt(false, &grants, limits).replace(
@@ -94,7 +94,7 @@ fn resumed_sessions_accept_previous_read_description() {
     std::fs::create_dir(&path).unwrap();
     let workspace = Workspace::new(&path).unwrap();
     let (limits, grants) = (Limits::default(), BTreeMap::new());
-    let current = native_conversation("mock", &workspace, &[], "", false, &grants, limits).unwrap();
+    let current = native_conversation("mock", &workspace, &[], "", true, false, &grants, limits).unwrap();
     let with_read = |text: &str| {
         let reply = vade_harness::contract::guaranteed_native_reply_tokens();
         let Value::Array(mut tools) = native_definitions_with(false, reply, vade_harness::coding_tools::SHELL_AVAILABLE) else { panic!("tool list") };

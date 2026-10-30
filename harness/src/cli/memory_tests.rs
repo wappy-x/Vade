@@ -46,9 +46,9 @@ fn chat_memory_startup_switches_new_and_resume() {
     }
     let limits = Default::default();
     let grants = Default::default();
-    let old = native_setup::chat_conversation("mock", &workspace, &[], "", Some(&memory::Memory::load(&workspace).unwrap().content()), false, &grants, limits).unwrap();
+    let old = native_setup::chat_conversation("mock", &workspace, &[], "", Some(&memory::Memory::load(&workspace).unwrap().content()), true, false, &grants, limits).unwrap();
     memory::change(&workspace, "response-style", Some("Explain tradeoffs.")).unwrap();
-    let new = native_setup::chat_conversation("mock", &workspace, &[], "", Some(&memory::Memory::load(&workspace).unwrap().content()), false, &grants, limits).unwrap();
+    let new = native_setup::chat_conversation("mock", &workspace, &[], "", Some(&memory::Memory::load(&workspace).unwrap().content()), true, false, &grants, limits).unwrap();
     assert!(old.request(Default::default()).to_json().unwrap().contains("Use short answers."));
     assert!(new.request(Default::default()).to_json().unwrap().contains("Explain tradeoffs."));
     let journal = Journal::create(&workspace, "memory-round-trip", &new).unwrap();
