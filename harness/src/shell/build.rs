@@ -39,6 +39,16 @@ impl BuildSession {
         }
     }
 
+    /// The environment that each command of this session gets, as
+    /// `NAME=value` words, with `<build>` for the session build folder.
+    pub fn environment_words(&self) -> Vec<String> {
+        #[cfg(target_os = "macos")]
+        let toolchain = self.toolchain.as_deref();
+        #[cfg(not(target_os = "macos"))]
+        let toolchain = None;
+        variables(Path::new("<build>"), toolchain).into_iter().map(|(name, value)| format!("{name}={value}")).collect()
+    }
+
     pub fn description(&self) -> &'static str {
         #[cfg(target_os = "macos")]
         if self.toolchain.is_some() {
@@ -214,42 +224,45 @@ impl Directory {
     }
 
     pub fn environment(&self, command: &mut std::process::Command, toolchain: Option<&Path>) {
-        // Incremental artifacts remain private and subject to the session's
-        // retained-state limits; cap parallel compilers to bound CPU pressure.
-        let jobs = std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(2)
-            .clamp(2, 8);
-        let path = toolchain.map_or_else(
-            || "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin".into(),
-            |root| {
-                format!(
-                    "{}:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
-                    root.join("bin").display()
-                )
-            },
-        );
-        command
-            .env("PATH", path)
-            .env("HOME", self.path.join("home"))
-            .env("TMPDIR", self.path.join("tmp"))
-            .env("CARGO_TARGET_DIR", self.path.join("cargo-target"))
-            .env("CARGO_HOME", self.path.join("cargo-home"))
-            .env("CARGO_NET_OFFLINE", "true")
-            .env("CARGO_BUILD_JOBS", jobs.to_string())
-            .env("CARGO_INCREMENTAL", "1")
-            .env("npm_config_cache", self.path.join("npm-cache"))
-            .env("npm_config_userconfig", self.path.join("npm-user.rc"))
-            .env("npm_config_globalconfig", self.path.join("npm-global.rc"))
-            .env("npm_config_offline", "true")
-            .env("XDG_CACHE_HOME", self.path.join("cache"))
-            .env("XDG_CONFIG_HOME", self.path.join("config"));
-        if let Some(root) = toolchain {
-            command
-                .env("RUSTC", root.join("bin/rustc"))
-                .env("RUSTDOC", root.join("bin/rustdoc"));
-        }
+        command.envs(variables(&self.path, toolchain));
     }
+}
+
+/// The whole environment of a command. Vade clears the parent environment
+/// and sets only these variables; `area` is the session build folder. The
+/// prompt shows this same list.
+pub(super) fn variables(area: &Path, toolchain: Option<&Path>) -> Vec<(&'static str, String)> {
+    // Incremental artifacts remain private and subject to the session's
+    // retained-state limits; cap parallel compilers to bound CPU pressure.
+    let jobs = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(2)
+        .clamp(2, 8);
+    let system = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin";
+    let path = toolchain.map_or_else(|| system.into(), |root| format!("{}:{system}", root.join("bin").display()));
+    let at = |name: &str| area.join(name).display().to_string();
+    let mut list = vec![
+        ("LANG", "en_US.UTF-8".into()),
+        ("PATH", path),
+        ("HOME", at("home")),
+        ("TMPDIR", at("tmp")),
+        ("CARGO_TARGET_DIR", at("cargo-target")),
+        ("CARGO_HOME", at("cargo-home")),
+        ("CARGO_NET_OFFLINE", "true".into()),
+        ("CARGO_BUILD_JOBS", jobs.to_string()),
+        ("CARGO_INCREMENTAL", "1".into()),
+        ("npm_config_cache", at("npm-cache")),
+        ("npm_config_userconfig", at("npm-user.rc")),
+        ("npm_config_globalconfig", at("npm-global.rc")),
+        ("npm_config_offline", "true".into()),
+        ("XDG_CACHE_HOME", at("cache")),
+        ("XDG_CONFIG_HOME", at("config")),
+    ];
+    if let Some(root) = toolchain {
+        list.push(("RUSTC", root.join("bin/rustc").display().to_string()));
+        list.push(("RUSTDOC", root.join("bin/rustdoc").display().to_string()));
+    }
+    list
 }
 
 #[cfg(target_os = "macos")]

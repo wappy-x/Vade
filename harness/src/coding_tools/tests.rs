@@ -644,7 +644,16 @@ fn an_always_answer_for_the_session_skips_the_next_prompt() {
     let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| {
         if preview.approval_required {
             prompts += 1;
-            assert!(preview.detail.contains("s (this session), p (this project)"), "{}", preview.detail);
+            assert!(preview.detail.contains("s (this exact argv, for this session), p (this exact argv, in .vade/permissions.json)"), "{}", preview.detail);
+            // The prompt shows what runs: the folder, the whole environment
+            // (the list the command gets) and the timeout.
+            let root = shell::visible_json(&[w.root().display().to_string()]);
+            assert!(preview.detail.contains(&format!("\nFolder: {root}\n")), "{}", preview.detail);
+            let environment = preview.detail.lines().find_map(|line| line.strip_prefix("Environment (only these; <build> is the session build folder): ")).unwrap();
+            let names: Vec<String> = crate::json::parse(environment).unwrap().as_array().unwrap().iter().map(|w| w.as_str().unwrap().split('=').next().unwrap().to_owned()).collect();
+            assert_eq!(names[..3], ["LANG", "PATH", "HOME"]);
+            assert!(names.contains(&"CARGO_NET_OFFLINE".to_owned()) && environment.contains("HOME=<build>/home"), "{environment}");
+            assert!(preview.detail.contains("timeout=20000ms") && !preview.detail.contains("Runs as:"), "{}", preview.detail);
             approvals.choose(shell::permissions::Scope::Session);
         }
         if preview.title == "Allow list" {
@@ -673,6 +682,16 @@ fn an_always_answer_for_the_session_skips_the_next_prompt() {
     assert_eq!(shell_call(&mut tools, "git push").unwrap_err(), ToolError::Denied);
     drop(tools);
     assert_eq!(log.0.iter().map(decision).collect::<Vec<_>>(), [("denied", "needs approval")]);
+    // A read-only command shows the fixed system form that really runs.
+    let mut shown = String::new();
+    let mut tools = CodingTools::new(&w, ApprovalPolicy::Ask, |preview: Preview<'_>, _: &AtomicBool| {
+        shown = preview.detail.to_owned();
+        false
+    });
+    assert_eq!(argv_call(&mut tools, &["git", "status"]).unwrap_err(), ToolError::Denied);
+    drop(tools);
+    let runs = shown.lines().find_map(|line| line.strip_prefix("Runs as: ")).unwrap_or_else(|| panic!("{shown}"));
+    assert!(runs.starts_with("[\"/usr/bin/git\",\"--no-pager\"") && runs.contains("\"status\"") && runs.contains("core.hooksPath=/dev/null"), "{runs}");
 }
 /// Astra on 583ad99, item 2: an approval for one argv never approves a
 /// script whose words expand to other files.
@@ -757,6 +776,6 @@ fn an_approval_the_journal_cannot_record_saves_no_rule() {
     assert_eq!(argv_call(&mut tools, &["touch", "one.txt"]).unwrap_err(), ToolError::Failed);
     drop(tools);
     assert!(!f.0.join("one.txt").exists());
-    assert_eq!(approvals.allowed(&argv, &verdict), None);
+    assert_eq!(approvals.allowed(&argv, &verdict, &f.0), None);
     assert!(approvals.summary().contains("0 session"), "{}", approvals.summary());
 }

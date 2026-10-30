@@ -514,9 +514,9 @@ fn sixth_review_probes() {
         let verdict = sh(&format!("{pushes}{last}"));
         assert_eq!(verdict.class, Ask, "{last}");
         let script = ["/bin/sh".to_owned(), "-c".to_owned(), format!("{pushes}{last}")];
-        assert_eq!(approvals.allowed(&script, &verdict), None, "{last}");
+        assert_eq!(approvals.allowed(&script, &verdict, Path::new(ROOT)), None, "{last}");
         assert_eq!(verdict.suggested_rules(), None, "{last}");
     }
     let one = words("git push origin b1");
-    assert!(approvals.allowed(&one, &super::super::policy::decide(&one, Path::new(ROOT), false)).is_some());
+    assert!(approvals.allowed(&one, &super::super::policy::decide(&one, Path::new(ROOT), false), Path::new(ROOT)).is_some());
 }

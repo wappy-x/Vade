@@ -113,7 +113,7 @@ Agent tools: workspace_read/list, workspace_search, workspace_read_lines,
 workspace_edit_lines, apply_patch, workspace_shell (macOS only), tool_output_read,
 skill_read, workspace_manifest, workspace_symbols.
 Patch previews are shown before approval. ask requires y/n (or /approve, /deny) for
-edits and for every command; only a command whose exact argv is on an allow list
+edits and for every command; only a command that an allow-list rule matches
 runs without asking. For a command of plain words, s allows that exact command for
 the session and p saves it to .vade/permissions.json. Fork bombs and rm -rf / are always blocked. auto permits validated exact
 patches and all commands inside the macOS OS sandbox without asking. It never

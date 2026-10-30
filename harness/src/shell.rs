@@ -280,34 +280,40 @@ impl CommandSpec {
         }
         Some(argv)
     }
+    /// The argv that the sandbox starts: the argv itself, or the fixed
+    /// system form of a read-only command (`git status` gets
+    /// `/usr/bin/git --no-pager ...`).
+    pub fn executed_argv(&self) -> Vec<String> {
+        self.read_only_argv().unwrap_or_else(|| self.argv.clone())
+    }
     pub fn preview(&self) -> String {
-        let json = crate::json::stringify(&crate::json::Value::Array(
-            self.argv
-                .iter()
-                .cloned()
-                .map(crate::json::Value::String)
-                .collect(),
-        ))
-        .expect("bounded command arguments");
-        let mut visible = String::new();
-        for c in json.chars() {
-            // JSON already escapes C0 and literal backslashes. Escape other
-            // nonprinting Unicode as UTF-16 so the displayed JSON still decodes
-            // to the exact argv, including supplementary variation selectors.
-            if crate::terminal::preview_char_needs_escape(c) {
-                let mut units = [0u16; 2];
-                for unit in c.encode_utf16(&mut units) {
-                    visible.push_str(&format!("\\u{unit:04x}"));
-                }
-            } else {
-                visible.push(c);
-            }
-        }
         format!(
             "command argv={} · timeout={}ms · display≤64KiB (head/tail; truncation does not stop command) · network denied",
-            visible, self.timeout_ms
+            visible_json(&self.argv), self.timeout_ms
         )
     }
+}
+/// Words as one JSON array that a terminal shows as written: JSON already
+/// escapes C0 and literal backslashes. Other nonprinting Unicode is escaped
+/// as UTF-16, so the shown JSON still decodes to the exact words, including
+/// supplementary variation selectors.
+pub fn visible_json(words: &[String]) -> String {
+    let json = crate::json::stringify(&crate::json::Value::Array(
+        words.iter().cloned().map(crate::json::Value::String).collect(),
+    ))
+    .expect("bounded command arguments");
+    let mut visible = String::new();
+    for c in json.chars() {
+        if crate::terminal::preview_char_needs_escape(c) {
+            let mut units = [0u16; 2];
+            for unit in c.encode_utf16(&mut units) {
+                visible.push_str(&format!("\\u{unit:04x}"));
+            }
+        } else {
+            visible.push(c);
+        }
+    }
+    visible
 }
 /// How a command ended.
 #[derive(Debug, PartialEq, Eq)]

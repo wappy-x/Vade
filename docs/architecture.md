@@ -793,7 +793,7 @@ and the limits of each figure: see
 
 The harness's native agent works inside a workspace you choose. Reads, search
 and exact patches stay within it. With the default `--approval ask`, edits,
-and every command whose exact argv is not on an allow list, wait for your
+and every command that no allow-list rule matches, wait for your
 approval (see [shell safety](shell-safety.md)). Blocked commands never
 run. A tool's result is written to a private journal and
 sent back to the engine as part of the next request; the engine never runs a

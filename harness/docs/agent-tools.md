@@ -15,8 +15,8 @@ search, read and patch files there. Under the default approval policy,
 `--approval ask`, it asks before it applies each patch, and the patch preview
 shows the exact diff. On macOS it can also run commands in a sandbox; on Linux
 it has no command tool. A command's approval shows its arguments and sandbox
-settings, not the files it may change. Every command asks unless an allow list
-names its exact argv. `--approval auto` applies patches and runs commands without asking,
+settings, the folder and every environment variable, not the files it may
+change. Every command asks unless an allow-list rule matches its argv. `--approval auto` applies patches and runs commands without asking,
 still inside the sandbox. Each request runs under fixed limits
 on rounds, calls and time, and a stopped request keeps its conversation, so
 `continue` picks up where it left off. The sections below give every limit and
@@ -291,8 +291,9 @@ the harness (`vade-check-N`), with the same sandbox and approval policy; see the
 There is no implicit shell: `/bin/sh -c SCRIPT` is explicit. Before any command
 runs, [shell safety](../../docs/shell-safety.md) classes it as safe, needs
 approval or blocked. It parses `sh -c` scripts into simple commands for this.
-In `ask`, every command waits for `y`, `s`, `p` or `n`, unless an allow list
-names its exact argv of plain literal words; then it runs after preview. The
+In `ask`, every command waits for `y`, `s`, `p` or `n`, unless an allow-list
+rule matches its argv of plain literal words (word for word, with `<path>`
+slots for workspace paths); then it runs after preview. The
 allow lists are empty by default. The checker's safe class counts only with the
 experimental `VADE_SHELL_CHECKER=1`. In `auto`, every command that is not
 blocked runs inside the same OS sandbox without asking. Blocked commands never

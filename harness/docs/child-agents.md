@@ -135,7 +135,7 @@ Child edits and commands still go through the parent's approval policy
 | `--approval` | Child edits and commands |
 | --- | --- |
 | `never` | Denied. |
-| `ask` | Edits need the terminal's exact one-time approval. Commands whose exact argv is on an allow list run after preview; every other command needs approval (see [shell safety](../../docs/shell-safety.md)). Blocked commands are refused. |
+| `ask` | Edits need the terminal's exact one-time approval. Commands that an allow-list rule matches run after preview; every other command needs approval (see [shell safety](../../docs/shell-safety.md)). Blocked commands are refused. |
 | `auto` | Validated exact patches are applied, and commands that are not blocked run inside the same macOS sandbox, after preview. Blocked commands are refused. It never grants broader filesystem or network access. |
 
 Noninteractive runs deny operations that need approval, unless an allow

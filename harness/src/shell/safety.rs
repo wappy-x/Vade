@@ -573,8 +573,8 @@ impl Ctx {
         let Some(name) = program_name(&first.text) else {
             return self.add(Class::Ask, format!("runs a program by path: {}", first.text), display, true);
         };
-        resolved.downloads |= matches!(name, "curl" | "wget" | "fetch");
-        self.program(name, args, display, resolved);
+        resolved.downloads |= matches!(name.as_str(), "curl" | "wget" | "fetch");
+        self.program(&name, args, display, resolved);
     }
 
     /// A word outside any command (a loop or `case` header, a `repeat`
@@ -817,7 +817,7 @@ struct Resolved {
 
 /// Folder names that hold keys or tokens, in addition to the workspace tools'
 /// credential names and suffixes.
-const SECRET_DIRS: &[&str] = &[
+pub(crate) const SECRET_DIRS: &[&str] = &[
     ".ssh", ".gnupg", ".aws", ".azure", ".netrc", ".npmrc", ".pypirc", ".git-credentials",
     ".docker", ".kube", "keychains", ".password-store", ".vault-token", ".gcloud",
 ];
@@ -1062,14 +1062,19 @@ fn raw_disk_one(path: &str) -> bool {
 }
 
 /// The program's name, or None for a path that is not a fixed system folder.
-fn program_name(text: &str) -> Option<&str> {
+/// A path is read with `.`, `..` and repeated `/` resolved (`/bin//rm`,
+/// `/bin/./sh`), and a name in lower case: the macOS file system does not
+/// tell case apart, so `RM` and `/BIN/RM` run `/bin/rm` (Argon on 729a44c
+/// and beacb8e, item 1).
+fn program_name(text: &str) -> Option<String> {
+    let text = normalize(text).to_ascii_lowercase();
     if !text.contains('/') {
         return Some(text);
     }
     for dir in ["/bin/", "/usr/bin/", "/sbin/", "/usr/sbin/", "/usr/local/bin/", "/opt/homebrew/bin/"] {
         if let Some(name) = text.strip_prefix(dir) {
             if !name.is_empty() && !name.contains('/') {
-                return Some(name);
+                return Some(name.to_owned());
             }
         }
     }

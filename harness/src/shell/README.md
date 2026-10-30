@@ -6,7 +6,7 @@
 | --- | --- |
 | [`build.rs`](build.rs) | Fresh build state, separate from uninspected workspace artifacts. |
 | [`permissions.rs`](permissions.rs) | Allow lists of exact commands of plain words: this session (memory only), the project and the user. |
-| [`policy.rs`](policy.rs) | The shipped policy: every command asks unless a rule names its exact argv; blocked commands never run. |
+| [`policy.rs`](policy.rs) | The shipped policy: every command asks unless a rule matches its argv (plain words, `<path>` slots); blocked commands never run. |
 | [`safety.rs`](safety.rs) | The command checker: blocked, needs approval, or an experimental safe class that counts only with `VADE_SHELL_CHECKER=1`. Its `safety/` folder holds the lexer, the program table and the pattern matcher. |
 
 **Why a folder:** Rust keeps one module per file; this folder groups the modules that belong to `shell`.

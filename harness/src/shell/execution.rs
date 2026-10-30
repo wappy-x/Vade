@@ -220,7 +220,6 @@ pub(crate) fn run_in_session_observing(
             .args(read_only_argv.as_ref().unwrap_or(&spec.argv))
             .current_dir(workspace.root())
             .env_clear()
-            .env("LANG", "en_US.UTF-8")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

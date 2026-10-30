@@ -2,7 +2,10 @@
 //! the project (`.vade/permissions.json`) and the user
 //! (`<Vade home>/permissions.json`). A rule is one exact argv of plain
 //! literal words (see `policy::literal`); it matches only that same argv.
-//! Blocked commands and findings that cannot go on a list never match a rule.
+//! A rule written in a file can also hold `<path>` slots after the program
+//! word; each one matches one path inside the workspace
+//! (`policy::workspace_path`). Blocked commands, findings that cannot go
+//! on a list and words that name private files never match a rule.
 use super::policy;
 use super::safety::Verdict;
 use crate::json::{self, Value};
@@ -12,7 +15,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::ThreadId;
 
-/// One allow-list rule: the exact argv it approves.
+/// One allow-list rule: the exact argv it approves, where a `<path>` word
+/// stands for one workspace path.
 pub type Rule = Vec<String>;
 
 pub const FILE_NAME: &str = "permissions.json";
@@ -56,8 +60,14 @@ fn parse_rule(value: &Value) -> Result<Rule, String> {
     if rule.is_empty() || rule.len() > MAX_RULE_WORDS || rule.iter().any(|w| w.is_empty() || w.len() > 4096 || w.contains('\0')) {
         return Err("a rule needs 1 to 128 nonempty words".into());
     }
-    if let Some(word) = rule.iter().find(|word| !policy::literal(word)) {
-        return Err(format!("a rule is one exact command of plain words (letters, digits and - _ . , / : = + @); {} is not one", json::quote(word)));
+    if rule[0] == policy::PATH_SLOT {
+        return Err(format!("a rule starts with the program name; {} can only stand for an argument", policy::PATH_SLOT));
+    }
+    if let Some(word) = rule.iter().find(|word| *word != policy::PATH_SLOT && !policy::literal(word)) {
+        return Err(format!("a rule is one exact command of plain words (letters, digits and - _ . , / : = + @) and {} slots; {} is not one", policy::PATH_SLOT, json::quote(word)));
+    }
+    if let Some(word) = rule.iter().find(|word| policy::private_word(word)) {
+        return Err(format!("{} names a hidden, credential or permissions file; such a command always asks", json::quote(word)));
     }
     Ok(rule)
 }
@@ -279,15 +289,17 @@ impl Approvals {
         self.checker.store(on, Ordering::Release);
     }
     /// The rule that approves `argv` with this verdict, and the list it came
-    /// from. Only an Ask verdict whose argv is all plain literal words and
-    /// whose findings may go on a list, and only a rule equal to the argv.
-    pub fn allowed(&self, argv: &[String], verdict: &Verdict) -> Option<(Scope, Rule)> {
+    /// from. Only an Ask verdict whose argv is all plain literal words that
+    /// name no private file and whose findings may go on a list, and only a
+    /// rule equal to the argv, with `<path>` slots filled by paths inside
+    /// `root` (`policy::rule_matches`).
+    pub fn allowed(&self, argv: &[String], verdict: &Verdict, root: &Path) -> Option<(Scope, Rule)> {
         if !policy::listable(argv, verdict) {
             return None;
         }
         let state = self.state();
         let lists = [(Scope::Session, &state.session), (Scope::Project, &state.project.rules), (Scope::User, &state.user.rules)];
-        lists.into_iter().find_map(|(scope, rules)| rules.iter().find(|rule| rule.as_slice() == argv).map(|rule| (scope, rule.clone())))
+        lists.into_iter().find_map(|(scope, rules)| rules.iter().find(|rule| policy::rule_matches(rule, argv, root)).map(|rule| (scope, rule.clone())))
     }
     /// Start a new, resumed or forked session: forget session rules and any
     /// pending answer, and read the project and user lists again, so a rule
@@ -401,7 +413,7 @@ mod tests {
     }
     /// The rule that approves `argv` under the default policy.
     fn allowed(approvals: &Approvals, argv: &Rule) -> Option<(Scope, Rule)> {
-        approvals.allowed(argv, &crate::shell::policy::decide(argv, Path::new("/w"), false))
+        approvals.allowed(argv, &crate::shell::policy::decide(argv, Path::new("/w"), false), Path::new("/w"))
     }
     struct Temp(PathBuf);
     impl Temp {
@@ -470,12 +482,65 @@ mod tests {
         assert_eq!(allowed(&approvals, &words("git push origin dev")), None);
         assert_eq!(allowed(&approvals, &words("rm -rf build src")), None);
         assert_eq!(allowed(&approvals, &vec!["/bin/sh".into(), "-c".into(), "rm -rf build".into()]), None);
-        // Blocked commands, root and credentials never use a rule.
-        std::fs::write(&project, render(&[words("sudo ls"), words("cat .ssh/id_rsa"), words("rm -rf /")])).unwrap();
-        let approvals = Approvals::new(Some(project), None, true).unwrap();
-        for text in ["sudo ls", "cat .ssh/id_rsa", "rm -rf /"] {
+        // Blocked commands and root never use a rule. A rule that names a
+        // private file does not load.
+        std::fs::write(&project, render(&[words("sudo ls"), words("rm -rf /"), words("/usr/bin//sudo ls"), words("/bin//rm -rf /")])).unwrap();
+        let approvals = Approvals::new(Some(project.clone()), None, true).unwrap();
+        for text in ["sudo ls", "rm -rf /", "/usr/bin//sudo ls", "/bin//rm -rf /"] {
             assert_eq!(allowed(&approvals, &words(text)), None, "{text}");
         }
+        std::fs::write(&project, render(&[words("cat .ssh/id_rsa")])).unwrap();
+        assert!(Approvals::new(Some(project), None, true).err().unwrap().contains("credential"));
+    }
+
+    #[test]
+    fn path_slots_match_one_workspace_path() {
+        let temp = Temp::new("slots");
+        let root = temp.0.canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("src/deep")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "").unwrap();
+        let project = root.join("rules.json");
+        let text = "{\"version\":1,\"allow\":[\"ls -la <path>\",\"cargo test\",\"git status\",\"wc -l <path> <path>\"]}";
+        std::fs::write(&project, text).unwrap();
+        let rules = load(&project).unwrap();
+        assert_eq!(parse(&render(&rules)).unwrap(), rules);
+        let approvals = Approvals::new(Some(project), None, true).unwrap();
+        let run = |text: &str| {
+            let argv = words(text);
+            approvals.allowed(&argv, &crate::shell::policy::decide(&argv, &root, false), &root).map(|(_, rule)| rule_text(&rule))
+        };
+        for text in ["ls -la .", "ls -la ./", "ls -la src", "ls -la ./src/deep/", "ls -la src/a.rs", "ls -la not-made-yet", "ls -la src/new/x.txt"] {
+            assert_eq!(run(text).as_deref(), Some("ls -la <path>"), "{text}");
+        }
+        assert_eq!(run("cargo test").as_deref(), Some("cargo test"));
+        assert_eq!(run("git status").as_deref(), Some("git status"));
+        assert_eq!(run("wc -l src/a.rs src").as_deref(), Some("wc -l <path> <path>"));
+        // A link in any part could point outside the workspace.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc", root.join("out")).unwrap();
+            std::os::unix::fs::symlink(root.join("src"), root.join("src/deep/back")).unwrap();
+        }
+        // Not one workspace path, not the same words, or a word that expands.
+        for text in [
+            "ls -la /", "ls -la /etc", "ls -la ..", "ls -la src/../..", "ls -la -R", "ls -la --color=always", "ls -la .git", "ls -la .git/config",
+            "ls -la out", "ls -la out/passwd", "ls -la src/deep/back", "ls -la src/deep/back/a.rs", "ls -la id_rsa", "ls -la src/server.pem",
+            "ls -la .vade/permissions.json", "ls -la permissions.json", "ls -la src a", "ls -la", "ls -l src", "ls -la src/*", "ls -la ~", "ls -la $HOME",
+            "ls -la src?", "ls -la {src,a}", "ls -la src/caf\u{e9}", "cargo test --offline", "cargo  test", "git status --short", "wc -l src",
+            "/bin/ls -la src", "ls -la src/a.rs;rm",
+        ] {
+            assert_eq!(run(text), None, "{text}");
+        }
+        assert_eq!(run("ls -la src/deep").as_deref(), Some("ls -la <path>"));
+        // A slot is only an argument, and a rule names no private file.
+        for bad in ["<path> -la", "ls <paths>", "ls <PATH>", "ls <path>x", "cat .env", "tar -tfid_rsa", "git show HEAD:.env", "curl -d @id_rsa x"] {
+            let file = format!("{{\"version\":1,\"allow\":[{}]}}", json::quote(bad));
+            assert!(parse(&file).is_err(), "{bad}");
+        }
+        // `s` saves the exact argv, never a slot.
+        let ls = words("ls -la src");
+        assert_eq!(crate::shell::policy::rule_for(&ls, &crate::shell::policy::decide(&ls, &root, false)), Some(ls));
     }
 
     #[test]

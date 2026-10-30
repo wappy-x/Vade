@@ -260,7 +260,7 @@ There are three approval policies:
 
 | Policy | What runs without asking |
 | --- | --- |
-| `--approval ask` (default) | Only commands whose exact argv is on an allow list (empty by default; see [shell safety](../docs/shell-safety.md)). Edits and every other command wait for you. |
+| `--approval ask` (default) | Only commands that an allow-list rule matches (empty by default; see [shell safety](../docs/shell-safety.md)). Edits and every other command wait for you. |
 | `--approval auto` | Validated exact patches and all validated commands, inside the existing macOS sandbox, after preview. `--yes` and `--dangerously-skip-prompts` select this policy. That includes programs inside the workspace, such as `./scripts/build.sh`, and explicit `/bin/sh -c` commands. |
 | `--approval never` | Nothing: it denies both writes and commands. |
 

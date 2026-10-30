@@ -1006,7 +1006,7 @@ where
                 // Unsupported platforms were refused before this adapter path.
                 // The read-only list picks the sandbox only; it never cancels an Ask.
                 let ask = verdict.class == Class::Ask;
-                let listed = if ask { self.approvals.and_then(|a| a.allowed(&spec.argv, &verdict)) } else { None };
+                let listed = if ask { self.approvals.and_then(|a| a.allowed(&spec.argv, &verdict, self.workspace.root())) } else { None };
                 let needs_approval = self.policy == ApprovalPolicy::Ask && ask && listed.is_none();
                 if needs_approval && self.approvals.is_some_and(|a| !a.interactive()) {
                     let _ = self.record_shell(id, &spec, &verdict, "denied_no_terminal", &[]);
@@ -1017,7 +1017,7 @@ where
                     Some(rule) => format!("Safety: {}; allowed by {}", verdict.class.label(), listed_rules(std::slice::from_ref(rule)).join(", ")),
                     None if needs_approval => format!(
                         "Safety: needs approval: {reasons}. Answer y (once){}, or n (deny).",
-                        if suggested.is_some() && self.approvals.is_some() { ", s (this session), p (this project)" } else { "" }
+                        if suggested.is_some() && self.approvals.is_some() { ", s (this exact argv, for this session), p (this exact argv, in .vade/permissions.json)" } else { "" }
                     ),
                     None if ask => format!("Safety: needs approval: {reasons}; prompts are off (--yes or --approval auto)"),
                     None => "Safety: safe (read-only, build or test command)".into(),
@@ -1025,14 +1025,19 @@ where
                 // No clear before the prompt: the terminal records the reach of
                 // every yes (once, session or project) just before it replies, so
                 // another agent cannot erase an answer meant for this one.
+                // The fixed system form that a read-only command runs as.
+                let executed = spec.executed_argv();
+                let runs = if executed == spec.argv { String::new() } else { format!("Runs as: {}\n", shell::visible_json(&executed)) };
                 let ephemeral_session = shell::BuildSession::default();
                 let build_session = self.build_session.unwrap_or(&ephemeral_session);
                 if !(self.preview)(
                     Preview {
                         title: "Command",
                         detail: &format!(
-                            "{}\nScan exclusions (no reads or writes, every depth): {}\nBuild environment: {}\n{safety}",
+                            "{}\n{runs}Folder: {}\nEnvironment (only these; <build> is the session build folder): {}\nScan exclusions (no reads or writes, every depth): {}\nBuild environment: {}\n{safety}",
                             spec.preview(),
+                            shell::visible_json(&[self.workspace.root().display().to_string()]),
+                            shell::visible_json(&build_session.environment_words()),
                             self.shell_exclusions.describe(),
                             build_session.description()
                         ),

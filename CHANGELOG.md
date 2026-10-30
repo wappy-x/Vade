@@ -32,6 +32,15 @@ Changes that are merged but not yet released are under Unreleased.
   class (read-only, build and test commands run at once) is experimental
   and off; `VADE_SHELL_CHECKER=1` turns it on. See
   [shell safety](docs/shell-safety.md).
+- An allow-list rule that you write can hold `<path>` slots, so one rule
+  such as `ls -la <path>` allows that command on any path inside the
+  workspace (no `..`, no leading `/`, no hidden, credential or linked
+  part). The command prompt shows the folder, every environment variable
+  that the command gets and, for a read-only command, the system form that
+  runs. A word that names a hidden, credential or `permissions.json` file
+  in any part, such as `tar -tfid_rsa` or `git show HEAD:.env`, never goes
+  on an allow list. Program paths such as `/bin//rm` and names such as `RM`
+  are read as macOS runs them, so `/bin//rm -rf /` is blocked.
 
 - Chat sessions can be listed, continued, exported and deleted. Each agent
   chat is a saved session (direct text chat saves none); `--name NAME` names
