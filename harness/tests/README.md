@@ -19,6 +19,7 @@ Run them all with `cargo test --offline`.
 | `route_a_check.rs` | `scripts/route-a-check.sh` against command mocks: the private home, endpoint and CLI each step uses, model-path checks, launch and stop failures, concurrent runs and interrupts. |
 | `sessions_cli.rs` | Saved sessions: a named chat, the session list, a resume by name, the Markdown export and delete. |
 | `setup_doctor.rs` | Client setup and the endpoint doctor. |
+| `tool_rerun.rs` | An external tool vendor (a fake MCP server in the same test program) counts every call it gets: after a tool error or a server that dies during the call, the original call reached the vendor once, and a resume makes no call. |
 | `ui_mock.rs` | The terminal interface's lifecycle, against scripted sockets. |
 | `workload_mock.rs` | The workload driver and its reports, against loopback fixtures. |
 | [`agent-suite/`](agent-suite/README.md) | Fixtures for the agent task suite: 12 mixed tasks with exact checks. A suite runner drives them against a live server; `cargo test` checks only that their files are complete. |

@@ -267,7 +267,8 @@ fn refusal(failure: Failure, request: &Request, what: &str, token: bool) -> Stri
     let access = if token { "The token was sent; check that it can read this model." }
         else { "For a gated or private model, accept its terms on the model page, then set HF_TOKEN or save the token in ~/.vade/hf-token." };
     match failure {
-        Failure::Http(401 | 403) => format!("The Hub refused access to {repo}. {access}"),
+        // The Hub answers 401, not 404, for a model ID that does not exist.
+        Failure::Http(401 | 403) => format!("The Hub refused access to {repo}. Check the model ID: the Hub also refuses an ID that does not exist. {access}"),
         Failure::Http(404) if what == "revision" => format!("The Hub has no model {repo} at revision {}. Check both names. {access}", request.revision),
         Failure::Http(404) => format!("The Hub has no {what} for {repo}. Check the name and revision."),
         Failure::Http(code) => format!("The Hub answered HTTP {code} for the {what} of {repo}. Run vade pull again later."),

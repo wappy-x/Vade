@@ -25,7 +25,7 @@ means.
 | [Shell safety](shell-safety.md) | Agent commands ask by default; what the prompt shows, exact and `<path>` allow-list rules, blocked commands, `--yes`, runs without a terminal and the experimental checker |
 | [CLI reference](../cli/README.md) | The `vade` commands: install, start, chat, check exactness, benchmark, diagnose, recover and stop |
 | [Saved chat sessions](sessions.md) | List, resume, export and delete your `vade chat` sessions |
-| [Reading files](reading-files.md) | How `vade read` and the agent turn documents (text, HTML, CSV, RTF, data, code) into Markdown with a header line |
+| [Reading files](reading-files.md) | How `vade read` and the agent turn documents (text, HTML, CSV, RTF, PDF, office, EPUB, data, code) into Markdown with a header line |
 | [MCP tools in chat](mcp.md) | Add the MCP servers you already use to `vade chat`: `vade mcp add`, `vade mcp test`, `vade tools`, the config files, approvals and limits |
 | [Examples](../examples/README.md) | Short examples you can run: curl against the OpenAI and Anthropic APIs, a Rust client, Claude Code, Codex, `vade bench` and a two-Spark launch |
 | [OpenAI-compatible API](openai-api.md) | Base URLs, a curl and a Python example, the chat fields Vade accepts, streaming, tool calls, errors, API keys and the known gaps. It also has notes for Continue and Open WebUI |

@@ -246,3 +246,30 @@ fn standalone_gateway_argument_errors_keep_option_context_and_hide_values() {
         assert!(!text.contains("PRIVATE") && !text.contains('\x1b') && !text.contains('\u{202e}'), "{text}");
     }
 }
+
+#[test]
+fn uncommon_startup_errors_name_the_cause_and_the_next_step() {
+    let failure = |program: &str, args: &[&str]| {
+        let mut command = home::command(program);
+        command.args(args).env_remove("VADE_API_KEY_FILE").env_remove("VADE_GATEWAY_TOKEN");
+        let output = cli::Cli::start(&mut command).finish();
+        assert!(!output.status.success(), "{args:?}");
+        String::from_utf8(output.stderr).unwrap()
+    };
+    let harness = env!("CARGO_BIN_EXE_vade-harness");
+    // A wildcard bind is refused for a stated reason, with a bind that works.
+    let text = failure(harness, &["gateway", "--upstream", "http://127.0.0.1:1/v1", "--bind", "0.0.0.0:0"]);
+    assert_eq!(text, "vade: gateway stopped (invalid configuration). The gateway listens only on loopback addresses. Use --bind 127.0.0.1:PORT; reach it from another computer through an SSH tunnel.\n");
+    // The OS text alone ("No such file or directory") named no file and blamed an executable.
+    let missing = std::env::temp_dir().join(format!("vade-no-folder-{}", std::process::id())).join("stats.jsonl");
+    let text = failure(env!("CARGO_BIN_EXE_vade-gateway"), &["--upstream", "http://127.0.0.1:1/v1", "--bind", "127.0.0.1:0", "--stats", missing.to_str().unwrap()]);
+    assert_eq!(text, "vade-gateway: cannot open the --stats file: its folder does not exist. Choose a --stats path in an existing folder.\n");
+    let folder = std::env::temp_dir();
+    let text = failure(env!("CARGO_BIN_EXE_vade-gateway"), &["--upstream", "http://127.0.0.1:1/v1", "--bind", "127.0.0.1:0", "--stats", folder.to_str().unwrap()]);
+    assert_eq!(text, "vade-gateway: cannot open the --stats file: the path is a folder. Give --stats a file path.\n");
+    // Doctor takes the URL as its first word; --endpoint used to read as "invalid HTTP endpoint".
+    let text = failure(harness, &["doctor", "--endpoint", "http://127.0.0.1:1/v1"]);
+    assert_eq!(text, "vade: doctor takes the API URL first, as in vade-harness doctor http://127.0.0.1:18080/v1 --model ID. See vade-harness doctor --help.\n");
+    let text = failure(harness, &["doctor", "127.0.0.1:18080"]);
+    assert_eq!(text, "vade: the doctor URL must begin with http://. See vade-harness doctor --help.\n");
+}

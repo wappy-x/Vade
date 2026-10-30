@@ -911,3 +911,29 @@ fn resume_requires_explicit_matching_child_scopes_and_uses_current_approval_poli
             )
     );
 }
+
+#[test]
+fn warm_turn_footer_reports_the_engine_cache_counts() {
+    // The engine-format warm turn: 960 of 1000 prompt tokens restored from the retained cache.
+    let fixture = vade_harness::json::parse(include_str!("fixtures/engine-warm-turn.json")).unwrap();
+    let body = fixture.get("cases").unwrap().as_array().unwrap().iter()
+        .find(|c| c.get("api").and_then(Value::as_str) == Some("chat") && c.get("stream") == Some(&Value::Bool(false)))
+        .unwrap().get("body").unwrap().as_str().unwrap().to_owned();
+    let f = Fixture::new();
+    let (url, server) = mock(vec![body]);
+    let output = run_bounded(f.command(&url).args(["--prompt", "warm"]), "");
+    server.join().unwrap();
+    let (stdout, stderr) = (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(stdout, "Yes.\n");
+    // Footer: restored / prompt tokens, and prefill speed over the 40 uncached
+    // tokens in the engine's 21.375 ms admitted prefill.
+    let footer = stderr.lines().find(|l| l.starts_with("vade: ╰ ")).unwrap();
+    assert!(footer.contains(" · 3 tokens out · ") && footer.contains(" · prefill 1.9k tok/s · ") && footer.contains(" · cached 960/1k"), "{footer}");
+    // The verbose status block repeats the engine's counts and its KV receipt.
+    for line in ["model response 1: prompt tokens 1000 · output tokens 3 · cached tokens 960",
+        "KV handle: hit · reused tokens 960 · checkpoint retained (input 1000 tokens, reusable 1000,",
+        "session reported cached tokens: 960 across 1/1 completed model responses with telemetry"] {
+        assert!(stderr.lines().any(|l| l.starts_with(line)), "{line}: {stderr}");
+    }
+}

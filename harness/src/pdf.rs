@@ -17,12 +17,12 @@
 //! Every read has one work budget (`budget::Budget`), and every parser and
 //! decoder charges it before each loop iteration and allocation. A crafted
 //! file stops at a limit, and the reply names the limit and the page.
-mod budget;
+pub(crate) mod budget;
 mod content;
 mod document;
 mod filters;
 mod font;
-mod inflate;
+pub(crate) mod inflate;
 mod syntax;
 #[cfg(test)]
 mod fuzz;
@@ -74,6 +74,8 @@ pub(crate) struct Limits {
     /// Form XObject calls in the whole read.
     pub(crate) document_form_calls: usize,
     pub(crate) text_bytes: usize,
+    /// Pages read, at most [`MAX_PAGES`].
+    pub(crate) pages: usize,
 }
 
 impl Limits {
@@ -92,6 +94,7 @@ impl Limits {
         form_bytes: 32 << 20,
         document_form_calls: 100_000,
         text_bytes: MAX_TEXT_BYTES,
+        pages: MAX_PAGES,
     };
 }
 
@@ -123,12 +126,44 @@ pub(crate) fn read(data: &[u8], limits: &Limits, cancel: &AtomicBool) -> Result<
 
 /// `read` with a budget the caller owns, so tests can inspect it after.
 pub(crate) fn read_with(data: &[u8], limits: &Limits, budget: &Budget) -> Result<String, String> {
+    let x = extract(data, limits, budget)?;
+    if let Some(line) = x.no_text {
+        return Ok(line);
+    }
+    let mut out = format!("PDF text layer extracted by Vade: {} pages. Layout is approximate; text follows content-stream order.\n", x.total);
+    out.push_str(&x.body);
+    out.push('\n');
+    out.push_str(&x.notes);
+    if x.unmapped > 0 {
+        out.push_str(&format!("\n[{} characters were left out: their fonts have no Unicode mapping]\n", x.unmapped));
+    }
+    Ok(out)
+}
+
+/// The text of one read, before [`read_with`] formats it.
+pub(crate) struct Extract {
+    /// Pages in the file.
+    pub(crate) total: usize,
+    /// Each page read: its number, and where its text starts and ends in `body`.
+    pub(crate) pages: Vec<(usize, usize, usize)>,
+    /// A `page N of M` line and the text of each page read.
+    pub(crate) body: String,
+    /// The notes on limits, each in brackets on its own line.
+    pub(crate) notes: String,
+    /// Characters left out because their fonts have no Unicode mapping.
+    pub(crate) unmapped: usize,
+    /// When the pages read have no text: the line that says why, notes included.
+    pub(crate) no_text: Option<String>,
+}
+
+/// Reads the pages of `data` within `limits` and `budget`.
+pub(crate) fn extract(data: &[u8], limits: &Limits, budget: &Budget) -> Result<Extract, String> {
     let structure = |e: Exhausted| if e == Exhausted::Cancelled { CANCELLED.to_string() } else { format!("PDF work limit reached while reading the file structure: {} limit", e.what()) };
     let doc = match Document::open(data, budget) {
         Ok(doc) => doc,
         Err(e) => return Err(budget.stopped().map_or(e, structure)),
     };
-    let tree = doc.pages(MAX_PAGES);
+    let tree = doc.pages(limits.pages.min(MAX_PAGES));
     let (pages, total) = (&tree.list, tree.total);
     // A budget that stopped in the walk leaves nothing to read the pages with.
     if let Some(e) = budget.stopped() {
@@ -139,6 +174,7 @@ pub(crate) fn read_with(data: &[u8], limits: &Limits, budget: &Budget) -> Result
     }
     let mut fonts = content::Fonts::default();
     let mut body = String::new();
+    let mut marks = Vec::new();
     let mut unmapped = 0;
     let mut chars = 0;
     // The last page read, and whether the text cap cut it.
@@ -212,7 +248,9 @@ pub(crate) fn read_with(data: &[u8], limits: &Limits, budget: &Budget) -> Result
             body.push_str("\n\n");
         }
         body.push_str(&format!("page {} of {total}\n", i + 1));
+        let start = body.len();
         body.push_str(if text.is_empty() { "(no text on this page)" } else { text });
+        marks.push((i + 1, start, body.len()));
         if cut || body.len() > limits.text_bytes || stop.is_some() {
             break;
         }
@@ -221,14 +259,19 @@ pub(crate) fn read_with(data: &[u8], limits: &Limits, budget: &Budget) -> Result
         let end = (0..=limits.text_bytes).rev().find(|&i| body.is_char_boundary(i)).unwrap_or(0);
         body.truncate(end);
         cut = true;
+        marks.retain(|m| m.1 <= end);
+        for m in &mut marks {
+            m.2 = m.2.min(end);
+        }
     }
     let mut notes = String::new();
     if cut {
-        notes.push_str(&format!("\n[text stopped inside page {last} of {total}: extracted text limit {} MiB]\n", limits.text_bytes >> 20));
+        let limit = if limits.text_bytes % (1 << 20) == 0 { format!("{} MiB", limits.text_bytes >> 20) } else { format!("{} bytes", limits.text_bytes) };
+        notes.push_str(&format!("\n[text stopped inside page {last} of {total}: extracted text limit {limit}]\n"));
     } else if let Some((page, e)) = stop {
         notes.push_str(&format!("\n[work limit reached on page {page} of {total} ({} limit): the read stopped there]\n", e.what()));
     } else if pages.len() < total {
-        notes.push_str(&format!("\n[stopped after page {} of {total}: page limit {MAX_PAGES}]\n", pages.len()));
+        notes.push_str(&format!("\n[stopped after page {} of {total}: page limit {}]\n", pages.len(), limits.pages.min(MAX_PAGES)));
     }
     if tree.incomplete {
         notes.push_str("\n[page tree: a limit skipped some branches, so some pages were not found]\n");
@@ -240,22 +283,15 @@ pub(crate) fn read_with(data: &[u8], limits: &Limits, budget: &Budget) -> Result
     }
     // A no-text verdict covers only the pages read.
     let (scope, what) = if last < total { (format!(" in the first {last} of {total} pages"), "these pages have") } else { (format!(", {total} pages"), "this PDF has") };
-    if chars == 0 && unmapped > 0 {
-        return Ok(format!("no readable text{scope}: the PDF shows {unmapped} characters, but its fonts have no Unicode mapping (no ToUnicode CMap; common for CJK CID fonts), so Vade cannot decode them.\n{notes}"));
-    }
-    if chars == 0 && (stop.is_some() || tree.incomplete || !short.is_empty()) {
+    let no_text = if chars == 0 && unmapped > 0 {
+        Some(format!("no readable text{scope}: the PDF shows {unmapped} characters, but its fonts have no Unicode mapping (no ToUnicode CMap; common for CJK CID fonts), so Vade cannot decode them.\n{notes}"))
+    } else if chars == 0 && (stop.is_some() || tree.incomplete || !short.is_empty()) {
         // Content was skipped: an unread text layer is not an absent one.
-        return Ok(format!("no text found in the content read{scope}: a work limit skipped some content (see the notes below), so the PDF may still have a text layer.\n{notes}"));
-    }
-    if chars == 0 {
-        return Ok(format!("no text layer{scope}: {what} no extractable text (scanned images or text drawn as shapes); Vade does not run OCR.\n{notes}"));
-    }
-    let mut out = format!("PDF text layer extracted by Vade: {total} pages. Layout is approximate; text follows content-stream order.\n");
-    out.push_str(&body);
-    out.push('\n');
-    out.push_str(&notes);
-    if unmapped > 0 {
-        out.push_str(&format!("\n[{unmapped} characters were left out: their fonts have no Unicode mapping]\n"));
-    }
-    Ok(out)
+        Some(format!("no text found in the content read{scope}: a work limit skipped some content (see the notes below), so the PDF may still have a text layer.\n{notes}"))
+    } else if chars == 0 {
+        Some(format!("no text layer{scope}: {what} no extractable text (scanned images or text drawn as shapes); Vade does not run OCR.\n{notes}"))
+    } else {
+        None
+    };
+    Ok(Extract { total, pages: marks, body, notes, unmapped, no_text })
 }

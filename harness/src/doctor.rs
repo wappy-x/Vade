@@ -60,11 +60,15 @@ impl Config {
     }
     fn parse_options(args: impl IntoIterator<Item = String>, option: &mut Option<String>) -> Result<Self, &'static str> {
         let mut args = args.into_iter();
-        let base = setup::api_base(
-            &args
-                .next()
-                .ok_or("doctor needs an HTTP URL; see doctor --help")?,
-        )?;
+        let url = args.next().ok_or("doctor needs an HTTP URL; see doctor --help")?;
+        // Other modes take --endpoint; doctor takes the URL as its first word.
+        if url.starts_with('-') {
+            return Err("doctor takes the API URL first, as in vade-harness doctor http://127.0.0.1:18080/v1 --model ID");
+        }
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Err("the doctor URL must begin with http://");
+        }
+        let base = setup::api_base(&url)?;
         let mut model = None;
         // Flash can need about 30 seconds for the cold 11k-token probe alone.
         // Leave time for metadata, exact admission, and the cached second turn.

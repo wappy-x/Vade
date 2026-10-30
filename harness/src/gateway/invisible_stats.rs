@@ -11,6 +11,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+pub(super) const OPEN_FAILED: &str = "cannot open the --stats file";
 pub(super) struct StatsLog(Mutex<File>);
 impl StatsLog {
     pub(super) fn open(path: &str) -> io::Result<Self> {
@@ -21,7 +22,8 @@ impl StatsLog {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        Ok(Self(Mutex::new(options.open(path)?)))
+        // Name the flag and keep the kind; the OS text alone names no file.
+        options.open(path).map(|file| Self(Mutex::new(file))).map_err(|error| io::Error::new(error.kind(), OPEN_FAILED))
     }
     pub(super) fn write(&self, line: &str) -> io::Result<()> {
         let mut file = self.0.lock().unwrap_or_else(|p| p.into_inner());
@@ -61,7 +63,7 @@ impl Observed {
         }
         if matches!(
             kind.as_deref(),
-            Some("response.completed" | "response.incomplete")
+            Some("response.completed" | "response.incomplete" | "message_stop")
         ) {
             self.terminal = true;
         }
@@ -87,6 +89,14 @@ impl Observed {
                 .get("vade")
                 .or_else(|| value.get("vade"))
                 .or_else(|| usage.get("vade"));
+            // Messages input_tokens leaves out cache reads and writes: add them
+            // back for the whole prompt, as the engine counts it.
+            let read = integer(usage.get("cache_read_input_tokens"));
+            let (prompt, cached) = match (prompt, read) {
+                (Some(input), Some(read)) => (input.checked_add(read)
+                    .and_then(|n| n.checked_add(integer(usage.get("cache_creation_input_tokens")).unwrap_or(0))), cached.or(Some(read))),
+                _ => (prompt, cached),
+            };
             let restored = integer(vade.and_then(|v| v.get("prefill_cache_restored_tokens")));
             if cached.zip(restored).is_some_and(|(a, b)| a != b) {
                 self.invalid = true;
@@ -141,7 +151,15 @@ impl Observed {
                     })
                 })
             });
-        if streaming && (response_delta || tool_start || completion_delta) {
+        // Messages: a text, thinking or tool-input delta, or a named tool_use start.
+        let message_delta = match kind.as_deref() {
+            Some("content_block_delta") => value.get("delta").is_some_and(|delta|
+                ["text", "thinking", "partial_json"].iter().any(|key| nonempty(delta.get(key)))),
+            Some("content_block_start") => value.get("content_block").is_some_and(|block|
+                block.get("type").and_then(View::as_str).as_deref() == Some("tool_use") && nonempty(block.get("name"))),
+            _ => false,
+        };
+        if streaming && (response_delta || tool_start || completion_delta || message_delta) {
             self.first.get_or_insert(at);
             self.last = Some(at);
             self.generated_events += 1;
@@ -393,6 +411,32 @@ impl Metrics {
 }
 
 #[cfg(test)] mod tests { use super::*;
+    /// A retained-prefix warm turn in each dialect, cut at several fragment
+    /// sizes: every row reports the engine's 960 of 1000 prompt tokens.
+    #[test]
+    fn warm_turn_rows_match_the_engine_cache_counts_in_every_dialect() {
+        let fixture = json::parse(include_str!("../../tests/fixtures/engine-warm-turn.json")).unwrap();
+        for case in fixture.get("cases").unwrap().as_array().unwrap() {
+            let (api, stream) = (case.get("api").unwrap().as_str().unwrap(), case.get("stream") == Some(&json::Value::Bool(true)));
+            let body = case.get("body").unwrap().as_str().unwrap().as_bytes();
+            for size in [1, 7, body.len()] {
+                let mut m = Metrics::new(true);
+                let media = if stream { "text/event-stream" } else { "application/json" };
+                m.response(&Head { first: "HTTP/1.1 200 OK".into(), fields: vec![("content-type".into(), media.into())] }, 200);
+                for fragment in body.chunks(size) { m.payload(fragment, Duration::ZERO); }
+                m.finish(true);
+                let row = json::parse(&m.json()).unwrap();
+                let number = |key: &str| row.get(key).cloned();
+                assert_eq!(number("telemetry_invalid"), Some(json::Value::Bool(false)), "{api} stream={stream} size={size}: {}", m.json());
+                assert_eq!(number("prompt_tokens"), Some(json::Value::Number("1000".into())), "{api} stream={stream}");
+                assert_eq!(number("cached_tokens"), Some(json::Value::Number("960".into())), "{api} stream={stream}");
+                assert_eq!(number("completion_tokens"), Some(json::Value::Number("3".into())), "{api} stream={stream}");
+                assert_eq!(number("cache_reuse_pct"), Some(json::Value::Number("96".into())), "{api} stream={stream}");
+                // A stream's first generated event times the warm turn; a JSON body cannot.
+                assert_eq!(m.observed.first.is_some(), stream, "{api} stream={stream} size={size}");
+            }
+        }
+    }
     #[test]
     fn recorded_engine_completions_have_generated_timing_at_every_fragment_size() {
         let recording = json::parse(include_str!("../../tests/fixtures/completions-engine-2026-10-23.json")).unwrap();

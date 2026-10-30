@@ -67,6 +67,20 @@ fn named_chat_is_listed_resumed_by_name_exported_and_deleted() {
     assert!(text(&sessions(&f, &[]).stdout).starts_with("No saved sessions."));
     let missing = sessions(&f, &["export", &id]);
     assert_eq!(missing.status.code(), Some(1));
-    assert!(text(&missing.stderr).contains("no saved session in this project has that ID or name"));
+    // Each lookup failure names the cause and the next step.
+    assert_eq!(text(&missing.stderr), "vade: no saved session in this project has that ID or name; run vade sessions to list the saved IDs and names\n");
+    let none = sessions(&f, &["export", "last"]);
+    assert_eq!(none.status.code(), Some(1));
+    assert_eq!(text(&none.stderr), "vade: this project has no saved sessions; check that you are in the project folder, or pass --workspace DIR\n");
     assert_eq!(sessions(&f, &["delete"]).status.code(), Some(2));
+}
+
+#[test]
+fn in_chat_resume_failure_names_the_cause_and_the_next_step() {
+    let f = Fixture::new();
+    let (url, server) = mock(vec![answer()]);
+    let output = run_bounded(f.command(&url).args(["--plain"]), "/resume nosuch\nhello\n");
+    server.join().unwrap();
+    // The notice used to list four possible causes and drop the real one.
+    assert_eq!(text(&output.stdout), "Cannot resume that session: no saved session in this project has that ID or name. The current session is kept. Type /sessions to list the saved sessions.\nmock complete\n");
 }

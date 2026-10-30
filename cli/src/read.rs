@@ -9,7 +9,7 @@ pub fn help() -> String {
         options: &[("--max-chars N", "Characters of Markdown to keep, 1..2000000 (default 2000000)")],
         examples: &["vade read notes.txt", "vade read report.html --max-chars 20000", "vade read table.csv"],
         notes: &[
-            "Reads text (UTF-8, UTF-16, Latin-1), Markdown, HTML, CSV, TSV, JSON, YAML, TOML, XML, RTF and source files. Other known formats print one line that names the format; other binary files print one line that says so.",
+            "Reads text (UTF-8, UTF-16, Latin-1), Markdown, HTML, CSV, TSV, JSON, YAML, TOML, XML, RTF, PDF, DOCX, XLSX, PPTX, EPUB, ODT, ODS, ODP and source files, and gives the size of PNG, JPEG, GIF and WebP images. PDF, office and EPUB output has a marker before each page, sheet, slide or chapter. Other known formats print one line that names the format; other binary files print one line that says so.",
             "The first line is <!-- vade read: NAME | FORMAT | pages N | chars C | skipped: ... -->. Files over 50 MiB are refused.",
             "Exit 0 when text was printed, 1 when the file cannot be read, 2 for a usage error. See docs/reading-files.md.",
         ],
@@ -147,7 +147,10 @@ mod tests {
         assert_eq!(text, "<!-- vade read: t.csv | CSV | pages 1 | chars 34 | skipped: none -->\n| a | b |\n| --- | --- |\n| 1 | 2 |\n");
         let png = dir.join("i.png");
         std::fs::write(&png, b"\x89PNG\r\n\x1a\n").unwrap();
-        assert_eq!(markdown(png.to_str().unwrap(), &Caps::default()).unwrap_err(), "Vade does not read PNG image files; no text was read");
+        assert_eq!(markdown(png.to_str().unwrap(), &Caps::default()).unwrap_err(), "damaged PNG image file: the PNG header is cut short; no text was read");
+        let tiff = dir.join("i.tif");
+        std::fs::write(&tiff, b"II*\0").unwrap();
+        assert_eq!(markdown(tiff.to_str().unwrap(), &Caps::default()).unwrap_err(), "Vade does not read TIFF image files; no text was read");
         assert!(markdown(dir.to_str().unwrap(), &Caps::default()).unwrap_err().contains("directory"));
         std::fs::remove_dir_all(&dir).unwrap();
     }

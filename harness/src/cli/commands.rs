@@ -279,7 +279,8 @@ impl App {
                             self.notice(if torn { "Session resumed from its last complete step; an unfinished step was dropped and is not rerun." } else { "Session resumed; nothing was rerun or restored. /branch shows file changes since." })?;
                             self.notice_cutoffs()?;
                         }
-                        Err(_) => self.notice("Cannot resume: missing, locked, incompatible, or invalid session. Current session retained.")?,
+                        Err(error) => self.notice(&format!("Cannot resume that session: {}. The current session is kept. Type /sessions to list the saved sessions.",
+                            vade_harness::terminal::sanitize(&error.to_string())))?,
                     }
                 }
                 "/fork" if self.config.mode == Mode::Agent => {

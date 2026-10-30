@@ -310,3 +310,36 @@ fn boundary_default_policy_adds_only_exact_defaults() {
         );
     }
 }
+
+#[test]
+fn stable_prefix_gives_messages_the_cache_fields_but_no_limit_changes() {
+    // The engine reuses a prefix only for a request with cache:true or a key;
+    // Claude Code sends neither, so without these every turn prefilled again.
+    let body = br#"{ "model":"mock", "max_tokens":500, "system":"sys\n", "messages":[{"role":"user","content":"first"}], "extension":1.20e0 }"#;
+    for clamp in [false, true] {
+        // Runtime::new would fetch capabilities for clamp; set the limits by hand.
+        let mut runtime = configured(Flags { stable: true, ..Flags::default() });
+        runtime.flags.clamp = clamp;
+        runtime.limits = vec![Some(Limits { context: 100, input: 99, output: 16, model: "mock".into() })];
+        let prepared = runtime.prepare("POST", "/v1/messages?beta=true", &head(), body);
+        let (original, patched) = (view(body).unwrap(), view(&prepared.body).unwrap());
+        assert_eq!(patched.get("cache").unwrap().raw(), "true");
+        assert!(text(patched, "prompt_cache_key").is_some_and(|k| k.starts_with("vade-")), "{}", prepared.report);
+        for field in ["max_tokens", "system", "messages", "extension"] {
+            assert_eq!(patched.get(field).unwrap().raw(), original.get(field).unwrap().raw(), "{field}");
+        }
+        assert!(prepared.report.contains(r#""cache_key_added":true,"cache_default_added":true"#) && prepared.report.contains(r#""clamps":[]"#), "{}", prepared.report);
+    }
+    // Explicit client choices survive, and without the flag Messages bytes are untouched.
+    let explicit = br#"{ "model":"mock", "max_tokens":8, "cache":false, "prompt_cache_key":"client", "messages":[] }"#;
+    let prepared = configured(Flags { stable: true, ..Flags::default() }).prepare("POST", "/v1/messages", &head(), explicit);
+    let patched = view(&prepared.body).unwrap();
+    assert_eq!((patched.get("cache").unwrap().raw(), text(patched, "prompt_cache_key").as_deref()), ("false", Some("client")));
+    let mut plain = configured(Flags { affinity: true, ..Flags::default() });
+    plain.flags.clamp = true;
+    plain.limits = vec![Some(Limits { context: 100, input: 99, output: 16, model: "mock".into() })];
+    let plain = plain.prepare("POST", "/v1/messages", &head(), body);
+    let plain = view(&plain.body).unwrap();
+    assert!(plain.get("cache").is_none() && plain.get("prompt_cache_key").is_none());
+    assert_eq!(plain.get("max_tokens").unwrap().raw(), "500");
+}

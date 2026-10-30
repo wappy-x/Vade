@@ -560,3 +560,99 @@ fn completions_stats_observe_streamed_text_without_changing_reply_bytes() {
     drop(gateway);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// End-to-end request headers that installed clients sent, captured on
+/// 2026-10-30 against a loopback capture server: Claude Code 2.1.314
+/// (Messages), Codex 0.165.0 (Responses) and openai-python 3.41.0 (Chat).
+/// IDs are replaced with fixed values of the same shape; names keep their case.
+fn vendor_headers(api: &str) -> Vec<&'static str> {
+    match api {
+        "messages" => vec!["Accept: application/json", "Authorization: Bearer no-key-required", "Content-Type: application/json",
+            "User-Agent: claude-cli/2.1.314 (external, sdk-cli)", "X-Claude-Code-Session-Id: 00000000-0000-4000-8000-000000000001",
+            "X-Stainless-Arch: arm64", "X-Stainless-Lang: js", "X-Stainless-OS: MacOS", "X-Stainless-Package-Version: 0.128.0",
+            "X-Stainless-Retry-Count: 0", "X-Stainless-Runtime: node", "X-Stainless-Runtime-Version: v26.12.1", "X-Stainless-Timeout: 600",
+            "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,effort-2025-11-24",
+            "anthropic-dangerous-direct-browser-access: true", "anthropic-version: 2023-06-01", "x-app: cli",
+            "Accept-Encoding: gzip, deflate, br, zstd"],
+        "responses" => vec!["x-codex-beta-features: remote_compaction_v2", "x-codex-window-id: 00000000-0000-7000-8000-000000000002:0",
+            r#"x-codex-turn-metadata: {"session_id":"00000000-0000-7000-8000-000000000002","turn_id":"00000000-0000-7000-8000-000000000003","window_number":0,"sandbox_mode":"read-only","analytics_enabled":false,"model":"fixture"}"#,
+            "x-client-request-id: 00000000-0000-7000-8000-000000000002", "session-id: 00000000-0000-7000-8000-000000000002",
+            "thread-id: 00000000-0000-7000-8000-000000000002", "accept: text/event-stream", "content-type: application/json",
+            "originator: codex_exec", "user-agent: codex_exec/0.165.0 (Mac OS 27.0.1; arm64) xterm-ghostty (codex_exec; 0.165.0)"],
+        _ => vec!["authorization: Bearer sk-local", "accept: application/json", "content-type: application/json",
+            "user-agent: OpenAI/Python 3.41.0", "x-stainless-lang: python", "x-stainless-package-version: 3.41.0",
+            "x-stainless-runtime: CPython", "x-stainless-async: false", "x-stainless-retry-count: 0", "x-stainless-read-timeout: 600"],
+    }
+}
+
+#[test]
+fn installed_vendor_headers_and_bodies_pass_both_gateways_exactly() {
+    // Response headers a vendor client may read: request IDs, rate limits, timing.
+    const REPLY_HEADERS: &str = "request-id: req_fixture_01\r\nanthropic-ratelimit-requests-remaining: 49\r\nopenai-processing-ms: 12\r\nx-request-id: 7f3a\r\nRetry-After: 2\r\n";
+    let cases = [("chat", "/v1/chat/completions"), ("responses", "/v1/responses"), ("messages", "/v1/messages?beta=true")];
+    let body = |api: &str| format!(r#"{{"model":"fixture","stream":false,"{}":[{{"role":"user","content":"Reply OK"}}],"max_tokens":8,"temperature":0}}"#, if api == "responses" { "input" } else { "messages" });
+    let reply = r#"{"id":"fixture","usage":{"input_tokens":3,"output_tokens":1},"content":[{"type":"text","text":"OK é"}]}"#.as_bytes();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let upstream = listener.local_addr().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = seen.clone();
+    let server = thread::spawn(move || {
+        for _ in 0..cases.len() * 3 {
+            let (socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut reader = BufReader::new(socket);
+            // Keep the header lines in order and case; a peer that closes early
+            // or sends more than 64 KiB of head fails the test.
+            let (mut lines, mut head) = (Vec::new(), 0);
+            loop {
+                let mut line = String::new();
+                let read = reader.read_line(&mut line).unwrap();
+                assert!(read > 0 && line.ends_with("\r\n"), "the peer closed inside the request head");
+                head += read;
+                assert!(head <= 64 * 1024, "request head over 64 KiB");
+                if line == "\r\n" { break; }
+                lines.push(line.trim_end_matches("\r\n").to_owned());
+            }
+            let size: usize = lines.iter().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|n| n.trim().parse().unwrap())).unwrap();
+            assert!(size <= 64 * 1024);
+            let mut body = vec![0; size];
+            reader.read_exact(&mut body).unwrap();
+            // Record before the reply: the client may read it and look at once.
+            record.lock().unwrap().push((lines, body));
+            let writer = reader.get_mut();
+            write!(writer, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{REPLY_HEADERS}Content-Length: {}\r\nConnection: close\r\n\r\n", reply.len()).unwrap();
+            writer.write_all(reply).unwrap();
+        }
+    });
+    let invisible = Gateway::start(upstream, true);
+    let core = Gateway::start(upstream, false);
+    for (api, path) in cases {
+        let body = body(api);
+        let sent = vendor_headers(api);
+        for address in [upstream, invisible.1, core.1] {
+            let mut socket = TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(4))).unwrap();
+            write!(socket, "POST {path} HTTP/1.1\r\nHost: localhost\r\n{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", sent.join("\r\n"), body.len()).unwrap();
+            let got = read_reply(&mut BufReader::new(socket), || {}).unwrap();
+            assert_eq!((got.status, got.body.as_slice()), (200, reply), "{api} via {address}");
+            for line in REPLY_HEADERS.trim_end().split("\r\n") {
+                let (name, value) = line.split_once(": ").unwrap();
+                assert_eq!(got.fields.get(&name.to_ascii_lowercase()).map(String::as_str), Some(value), "{api} via {address}: {name}");
+            }
+            let (lines, received) = seen.lock().unwrap().pop().unwrap();
+            assert_eq!(received, body.as_bytes(), "{api} via {address}: request body changed");
+            // Every end-to-end header arrives in order with its value byte for
+            // byte. Names are case-insensitive (RFC 9110 section 5.1): the core
+            // gateway sends them in lower case. The only others are the relay's
+            // own framing and Host.
+            let fold = |line: &str| { let (name, value) = line.split_once(':').unwrap(); (name.to_ascii_lowercase(), value.to_owned()) };
+            let sent: Vec<_> = sent.iter().map(|l| fold(l)).collect();
+            let framing = ["host", "content-length", "connection", "transfer-encoding"];
+            let got: Vec<_> = lines[1..].iter().map(|l| fold(l)).filter(|(name, _)| !framing.contains(&name.as_str())).collect();
+            assert_eq!(got, sent, "{api} via {address}: {lines:#?}");
+            assert_eq!(lines[0], format!("POST {path} HTTP/1.1"));
+        }
+    }
+    drop((invisible, core));
+    server.join().unwrap();
+}

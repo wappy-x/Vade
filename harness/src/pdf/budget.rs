@@ -150,7 +150,6 @@ impl<'c> Budget<'c> {
     }
 
     /// Units of `kind` charged so far.
-    #[cfg(test)]
     pub(crate) fn used(&self, kind: Kind) -> usize {
         self.used[kind as usize].get()
     }

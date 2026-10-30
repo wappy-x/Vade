@@ -105,7 +105,7 @@ fn r1_block2_repeated_stream_stops_at_the_decode_budget() {
 #[test]
 fn r1_block3_expanding_tj_stops_at_the_text_limit() {
     let out = read_with(&expanding_tj(20_000), Limits { text_bytes: 1000, ..Limits::DEFAULT });
-    assert!(out.len() < 1300 && out.ends_with("[text stopped inside page 1 of 1: extracted text limit 0 MiB]\n"), "{out}");
+    assert!(out.len() < 1300 && out.ends_with("[text stopped inside page 1 of 1: extracted text limit 1000 bytes]\n"), "{out}");
 }
 
 // ---- Review 858f7b4 (r2) ----

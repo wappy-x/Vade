@@ -107,6 +107,15 @@ impl Counts {
             if prompt.is_none() && usage.get(details).is_none() {
                 continue;
             }
+            // Engine Responses usage repeats its details as prompt_tokens_details.
+            // That alias is not a second snapshot; it must only agree.
+            if input == "prompt_tokens" && prompt.is_none() && usage.get("input_tokens").is_some() {
+                let cached = |key| usage.get(key).and_then(|v| v.get("cached_tokens")).map(|v| v.raw().to_owned());
+                if cached(details) != cached("input_tokens_details") {
+                    self.invalid = true;
+                }
+                continue;
+            }
             observed = true;
             let detail = usage.get(details).filter(|v| v.raw() != "null");
             if detail.is_some_and(|v| v.fields().is_none()) {
@@ -232,6 +241,25 @@ impl UsageTap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The engine-format warm turn in each dialect yields the engine's
+    /// prompt and cached counts at any fragment size.
+    #[test]
+    fn warm_turn_counts_match_the_engine_in_every_dialect() {
+        let fixture = json::parse(include_str!("../../tests/fixtures/engine-warm-turn.json")).unwrap();
+        for case in fixture.get("cases").unwrap().as_array().unwrap() {
+            let stream = case.get("stream") == Some(&json::Value::Bool(true));
+            let body = case.get("body").unwrap().as_str().unwrap().as_bytes();
+            for size in [1, 7, body.len()] {
+                let mut tap = UsageTap::new(Some(if stream { "text/event-stream" } else { "application/json" }), true);
+                for fragment in body.chunks(size) { tap.feed(fragment); }
+                assert_eq!(tap.finish(), Some((1000, 960)), "{:?} stream={stream} size={size}", case.get("api"));
+            }
+        }
+        // An alias that disagrees with input_tokens_details publishes no counts.
+        let mut tap = UsageTap::new(Some("application/json"), true);
+        tap.feed(br#"{"usage":{"input_tokens":1000,"input_tokens_details":{"cached_tokens":960},"prompt_tokens_details":{"cached_tokens":959}}}"#);
+        assert_eq!(tap.finish(), None);
+    }
     fn sse(parts: &[&str]) -> String {
         parts.iter().map(|p| format!("data: {p}\r\n\r\n")).collect()
     }

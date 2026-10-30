@@ -31,6 +31,17 @@ pub(crate) fn inflate(input: &[u8], cap: usize, out: &mut Vec<u8>, budget: &Budg
     if zlib && input[1] & 0x20 != 0 {
         return Err(Error::Data("zlib preset dictionary is not supported"));
     }
+    run(input, zlib, cap, out, budget)
+}
+
+/// [`inflate`] for raw deflate data with no zlib header, as in a ZIP entry.
+/// Raw data can start with bytes that look like a zlib header, so a caller
+/// that knows the data is raw must not guess.
+pub(crate) fn inflate_raw(input: &[u8], cap: usize, out: &mut Vec<u8>, budget: &Budget) -> Result<usize, Error> {
+    run(input, false, cap, out, budget)
+}
+
+fn run(input: &[u8], zlib: bool, cap: usize, out: &mut Vec<u8>, budget: &Budget) -> Result<usize, Error> {
     let mut bits = Bits { data: input, pos: if zlib { 2 } else { 0 }, buf: 0, count: 0, over: 0 };
     loop {
         // Each block is charged, so empty blocks cost work too.

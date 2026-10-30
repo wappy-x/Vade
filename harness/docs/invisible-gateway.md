@@ -162,12 +162,14 @@ rolled back.
 ## Optional optimizations
 
 The sampling-default rule above always applies. The optimizations below are off
-by default. Added fields and limit changes only touch Chat Completions and
-Responses requests. Affinity routing also applies to the metadata and admission
-routes.
+by default. Limit changes only touch Chat Completions and Responses requests.
+The cache fields of `--stable-prefix` also go on Messages requests. Affinity
+routing also applies to the metadata and admission routes.
 
 - `--stable-prefix` adds a missing `prompt_cache_key` and `cache: true`.
-  Explicit values, including `cache: false`, survive. Keys come from explicit
+  The engine reuses a prefix only for a request with one of them. Claude Code
+  and OpenCode send neither, so without the flag each of their turns prefills
+  the full prompt again. Explicit values, including `cache: false`, survive. Keys come from explicit
   session headers, or else from a deterministic hash of the model, instructions,
   tools, system/developer messages and the first user message. Turns that send
   the full history keep the same key; clients that send only new input must

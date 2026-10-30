@@ -174,14 +174,14 @@ impl Runtime {
         } else {
             String::new()
         };
-        let generation = method == "POST"
-            && matches!(
-                path.split('?').next().unwrap_or(path),
-                "/v1/chat/completions" | "/v1/responses"
-            );
+        let endpoint = path.split('?').next().unwrap_or(path);
+        let generation =
+            method == "POST" && matches!(endpoint, "/v1/chat/completions" | "/v1/responses");
+        // Messages gets only the cache fields; limit clamps stay Chat and Responses only.
+        let messages = method == "POST" && endpoint == "/v1/messages" && self.flags.stable;
         let mut report = Report::new(index);
         let Some(value) = parsed.filter(|v| {
-            generation
+            (generation || messages)
                 && v.fields().is_some()
                 && head
                     .get("content-encoding")
@@ -209,7 +209,7 @@ impl Runtime {
         }
         if let Some(limits) = self.limits[index]
             .as_ref()
-            .filter(|l| text(value, "model").as_deref() == Some(&l.model))
+            .filter(|l| generation && text(value, "model").as_deref() == Some(&l.model))
             && Self::clamp(index, path, &mut patched, limits, &mut report, admit).is_err()
         {
             report.error = Some("admission_unavailable");

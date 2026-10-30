@@ -69,6 +69,9 @@ pub fn error_hint(error: &io::Error) -> &'static str {
     if error.to_string() == "no output room in context" {
         return " The chat is too long for another reply; history is kept. Use /new.";
     }
+    if error.to_string() == crate::gateway::LOOPBACK_ONLY {
+        return " The gateway listens only on loopback addresses. Use --bind 127.0.0.1:PORT; reach it from another computer through an SSH tunnel.";
+    }
     if error.to_string() == "requested output exceeds context budget" {
         return " The reply length you asked for does not fit; lower --max-output-tokens or use /new.";
     }

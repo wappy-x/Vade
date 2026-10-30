@@ -8,6 +8,22 @@ Changes that are merged but not yet released are under Unreleased.
 - When an MCP call does not run, the model now learns why: you declined it, Vade could not show the question, no one could answer in a run without a terminal, or approvals are `never`. It no longer blames the tool server.
 - Chat with input from a pipe treats `/exit` before the provider starts your message like the end of input: the message still runs, and Vade says so on stderr. After the message starts, and during other work such as `/compact`, `/exit` cancels it, as before. Inside `/paste`, `/exit` is text. A sent line of only `y` or `n` answers a pending approval; in the full-screen editor, the key must be typed, not pasted or recalled. `vade mcp test` prints `none` for an empty resource or prompt list.
 - `docs/mcp.md` starts with an example MCP server that needs no token and no extra install ([`examples/mcp_word_count.rs`](examples/mcp_word_count.rs)). `scripts/install.sh` writes the GPU kernel compiler output to a log file and shows its end only when the build fails.
+- `vade-gateway --stats` rows count Messages cache reads, streams and first tokens the way the engine does, and the core gateway counts Responses replies. Before, a Messages warm turn and every Messages stream were marked invalid.
+- `vade-gateway --stable-prefix` now also adds `cache: true` and a cache key to Messages requests, so Claude Code reuses its prompt prefix. On a one-Spark engine its next tool turn read 16,000 cached tokens and gave a first token in 0.47 s instead of 8.0 s.
+- Uncommon startup errors name the cause and the next step: a wildcard gateway `--bind`, a `--stats` path in a missing folder, `vade-harness doctor --endpoint`, an unknown session in `vade sessions export`, and a model ID the Hub refuses in `vade pull`.
+- `vade read` reads PDF files as Markdown, with a page marker before each
+  page. The agent's `workspace_read` keeps its own PDF text path.
+- `vade read` and the agent's `workspace_read` read DOCX files as Markdown:
+  headings, lists, tables, links and line breaks, with a page marker before
+  each page. Images are listed by name. XLSX files read as one table for
+  each sheet, with dates as ISO dates, and PPTX files as one section for
+  each slide with its title, bullets, tables and speaker notes. EPUB books
+  read in spine order with a chapter marker for each chapter. OpenDocument
+  text, spreadsheets and presentations (ODT, ODS, ODP) read as pages,
+  sheets and slides too; their numbered lists show as bullets, and an ODT
+  file has page markers only where LibreOffice marked its pages. PNG, JPEG,
+  GIF and WebP images read as one line with their size in pixels. See
+  [reading files](docs/reading-files.md).
 - Native chat supports [host hooks](harness/docs/hooks.md), and chat supports [user slash commands](harness/docs/slash-commands.md) and `/clear`.
 - GitHub workflows now run only by hand; tests run locally before every merge, as [Local CI](docs/ci.md) describes.
 - Chat keeps private project notes across sessions; `VADE_MEMORY=0` turns memory off.

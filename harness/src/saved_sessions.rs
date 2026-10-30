@@ -319,6 +319,9 @@ pub fn list_home(home: &std::path::Path) -> io::Result<Listing> {
     newest_first(&mut listing.sessions);
     Ok(listing)
 }
+/// Lookup failures name only the cause; each caller adds its next step.
+const NOT_FOUND: &str = "no saved session in this project has that ID or name";
+const NONE_SAVED: &str = "this project has no saved sessions";
 
 /// Map `ID`, `last` or a display name to a session ID. An exact ID wins; a
 /// name shared by several sessions selects the newest one. `last` is the newest
@@ -338,9 +341,9 @@ pub fn resolve(workspace: &Workspace, query: &str, resume: bool) -> io::Result<S
     let found = if query == LAST { list.iter().filter(|s| s.turns > 0 && s.problem.is_none()).find(free) } else { list.iter().find(|s| s.name.as_deref() == Some(query)) };
     found.map(|s| s.id.clone()).ok_or_else(|| {
         error(match query {
-            LAST if list.is_empty() => "this project has no saved sessions",
+            LAST if list.is_empty() => NONE_SAVED,
             LAST => "no saved session in this project can be resumed with last: each one has no turns, is open in a chat, or cannot be resumed; run vade sessions",
-            _ => "no saved session in this project has that ID or name",
+            _ => NOT_FOUND,
         })
     })
 }
@@ -590,7 +593,14 @@ fn run(args: Vec<String>) -> Result<String, (u8, String)> {
     let workspace = Workspace::open(&root, state).map_err(failed)?;
     match action.as_str() {
         "list" => list(&workspace).map(|l| table(&l)),
-        "export" => resolve(&workspace, target.as_deref().unwrap(), false).and_then(|id| export_markdown(&workspace, &id)),
+        // resolve() states only the cause: each caller names its own next step.
+        "export" => resolve(&workspace, target.as_deref().unwrap(), false)
+            .map_err(|e| match e.to_string().as_str() {
+                NOT_FOUND => error(&format!("{NOT_FOUND}; run vade sessions to list the saved IDs and names")),
+                NONE_SAVED => error(&format!("{NONE_SAVED}; check that you are in the project folder, or pass --workspace DIR")),
+                _ => e,
+            })
+            .and_then(|id| export_markdown(&workspace, &id)),
         _ => {
             let id = target.unwrap();
             delete(&workspace, &id).map(|()| format!("Deleted session {id}.\n"))

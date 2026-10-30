@@ -618,7 +618,7 @@ fn text_operators_stop_at_the_text_limit() {
         assert!(reader.full && reader.out.len() <= 1000 && reader.out.len() > 500, "{}", reader.out.len());
     }
     let out = read_with(&file, Limits { text_bytes: 100, ..Limits::DEFAULT });
-    assert!(out.ends_with("\n[text stopped inside page 1 of 1: extracted text limit 0 MiB]\n"), "{out}");
+    assert!(out.ends_with("\n[text stopped inside page 1 of 1: extracted text limit 100 bytes]\n"), "{out}");
 }
 
 /// Revision 1 of `simple` plus a hybrid update: the classic table marks

@@ -8,7 +8,8 @@
 //!
 //! - First line: `<!-- vade read: <name> | <format> | pages N | chars C | skipped: ... -->`.
 //! - Pages: `<!-- page N of M -->` then `## Page N` ([`page_marker`]). Slides
-//!   use the same form with `slide` and `Slide`. Sheets use
+//!   use the same form with `slide` and `Slide`. EPUB chapters use `chapter` and
+//!   `Chapter` ([`chapter_marker`]). Sheets use
 //!   `<!-- sheet N of M -->` then `## Sheet <name>` ([`sheet_marker`]).
 //! - Tables are GitHub Markdown tables ([`table`]). Code and data are fenced
 //!   blocks with the language ([`fence`]).
@@ -24,9 +25,20 @@ use std::fmt;
 
 mod codepage;
 mod csv;
+mod docx;
+mod epub;
 mod html;
+mod image;
+mod odf;
+mod pdf;
+mod pptx;
 mod rtf;
 mod text;
+mod xlsx;
+mod xml;
+mod zip;
+#[cfg(test)]
+mod office_tests;
 #[cfg(test)]
 mod tests;
 
@@ -65,6 +77,8 @@ pub enum Format {
     Odt,
     Ods,
     Odp,
+    /// An image; the value is the format, for example `PNG`.
+    Image(&'static str),
     /// A recognized format that no reader converts, for example `PNG image`.
     Other(&'static str),
 }
@@ -92,6 +106,11 @@ impl Format {
             Format::Odt => "ODT",
             Format::Ods => "ODS",
             Format::Odp => "ODP",
+            Format::Image("PNG") => "PNG image",
+            Format::Image("JPEG") => "JPEG image",
+            Format::Image("GIF") => "GIF image",
+            Format::Image("WebP") => "WebP image",
+            Format::Image(_) => "image",
             Format::Other(name) => name,
         }
     }
@@ -184,6 +203,8 @@ pub struct Budget {
     /// False while text that was counted once moves into a parent block, and
     /// while the open blocks close after a stop.
     text_counts: bool,
+    /// A parser left out an attribute value longer than 4096 bytes.
+    long_attr: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,7 +216,7 @@ enum Stop {
 impl Budget {
     pub fn new(caps: &Caps) -> Self {
         let max_bytes = caps.max_chars.saturating_mul(WORK_BYTES_PER_CHAR).max(MIN_WORK_BYTES);
-        Self { chars: 0, bytes: 0, max_chars: caps.max_chars, max_bytes, hit: None, text_counts: true }
+        Self { chars: 0, bytes: 0, max_chars: caps.max_chars, max_bytes, hit: None, text_counts: true, long_attr: false }
     }
 
     /// True after a cap stopped a piece; the reader stops converting.
@@ -237,6 +258,22 @@ impl Budget {
         }
         self.bytes += bytes;
         true
+    }
+
+    /// True when `bytes` more of [`Budget::work`] fit whole, also after a
+    /// stop, so a reader can leave out a marker or link it cannot close.
+    fn fits(&self, bytes: usize) -> bool {
+        bytes <= self.max_bytes - self.bytes
+    }
+
+    /// Appends the note or marker `text` to `out` as [`Budget::work`], only
+    /// whole: when it does not fit, nothing, and a stop at the memory cap.
+    fn whole(&mut self, out: &mut String, text: &str) {
+        if self.fits(text.len()) {
+            out.push_str(self.work(text));
+        } else {
+            self.cut();
+        }
     }
 
     /// Stops the reader when it had to leave out source text to keep its
@@ -287,13 +324,16 @@ impl Budget {
         &text[..end]
     }
 
-    /// The warning for the cap that stopped the reader, if any. The char cap
-    /// warning is the same phrase [`read`] uses.
-    pub fn warning(&self) -> Option<String> {
-        match self.hit? {
-            Stop::Chars => Some(char_cap_warning(self.max_chars)),
-            Stop::Bytes => Some(format!("text after {} bytes of conversion work (memory cap)", self.max_bytes)),
-        }
+    /// The warnings for the cap that stopped the reader, if any, and for
+    /// attribute values left out. The char cap warning is the same phrase
+    /// [`read`] uses.
+    pub fn warning(&self) -> Vec<String> {
+        let stop = self.hit.map(|hit| match hit {
+            Stop::Chars => char_cap_warning(self.max_chars),
+            Stop::Bytes => format!("text after {} bytes of conversion work (memory cap)", self.max_bytes),
+        });
+        let attr = self.long_attr.then(|| format!("attribute values over {} bytes left out (attribute cap)", xml::MAX_ATTR));
+        stop.into_iter().chain(attr).collect()
     }
 }
 
@@ -367,7 +407,7 @@ pub trait Reader: Sync {
 
 /// The registry, in sniff order. The text reader is last. Bytes that no
 /// reader or known format claims are read as text when they decode as text.
-pub static READERS: &[&dyn Reader] = &[&rtf::RtfReader, &html::HtmlReader, &csv::CsvReader, &text::TextReader];
+pub static READERS: &[&dyn Reader] = &[&rtf::RtfReader, &pdf::PdfReader, &docx::DocxReader, &xlsx::XlsxReader, &pptx::PptxReader, &epub::EpubReader, &odf::OdfReader, &image::ImageReader, &html::HtmlReader, &csv::CsvReader, &text::TextReader];
 
 /// The lowercase extension of `name`, or `""`.
 pub fn extension(name: &str) -> String {
@@ -385,10 +425,6 @@ pub fn extension(name: &str) -> String {
 fn known(bytes: &[u8], ext: &str, by_name: bool) -> Option<Format> {
     const MAGIC: &[(&[u8], Format)] = &[
         (b"%PDF-", Format::Pdf),
-        (b"\x89PNG\r\n\x1a\n", Format::Other("PNG image")),
-        (b"\xff\xd8\xff", Format::Other("JPEG image")),
-        (b"GIF87a", Format::Other("GIF image")),
-        (b"GIF89a", Format::Other("GIF image")),
         (b"II*\0", Format::Other("TIFF image")),
         (b"MM\0*", Format::Other("TIFF image")),
         (b"\x1f\x8b", Format::Other("gzip archive")),
@@ -405,25 +441,38 @@ fn known(bytes: &[u8], ext: &str, by_name: bool) -> Option<Format> {
     if let Some((_, format)) = MAGIC.iter().find(|(magic, _)| bytes.starts_with(magic)) {
         return Some(*format);
     }
-    if bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        return Some(Format::Other("WebP image"));
-    }
     if !by_name {
         return None;
     }
     let by_ext = match ext {
-        "pdf" => Format::Pdf,
-        "docx" => Format::Docx,
-        "xlsx" => Format::Xlsx,
-        "pptx" => Format::Pptx,
-        "epub" => Format::Epub,
-        "odt" => Format::Odt,
-        "ods" => Format::Ods,
-        "odp" => Format::Odp,
         "doc" | "xls" | "ppt" => Format::Other("legacy Office (OLE)"),
         _ => return None,
     };
     Some(by_ext)
+}
+
+/// The magic bytes of an OLE compound file (legacy Office, or an encrypted
+/// Office Open XML package).
+const OLE: &[u8] = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1";
+
+fn is_ole(bytes: &[u8]) -> bool {
+    bytes.starts_with(OLE)
+}
+
+/// The ZIP container of an Office Open XML file. Office saves a file with a
+/// password as an OLE file with an `EncryptedPackage` stream; any other OLE
+/// file is a legacy Office file.
+fn office_zip<'a>(bytes: &'a [u8], format: Format) -> Result<zip::Zip<'a>, ReadError> {
+    if !is_ole(bytes) && !is_zip(bytes) {
+        return Err(ReadError::Malformed(format, "the file is not a ZIP archive".into()));
+    }
+    if is_ole(bytes) {
+        let name: Vec<u8> = "EncryptedPackage".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        scanned(bytes.len());
+        let encrypted = bytes.windows(name.len()).any(|w| w == name);
+        return Err(if encrypted { ReadError::Encrypted(format) } else { ReadError::Unsupported(Format::Other("legacy Office (OLE)")) });
+    }
+    zip::Zip::open(bytes, format)
 }
 
 /// True for the ZIP container magic (a local file header or an empty archive).
@@ -450,6 +499,14 @@ pub fn sniff(bytes: &[u8], name: &str) -> Option<(Format, Option<&'static dyn Re
     for r in READERS {
         if let Some(format) = r.sniff(bytes, "") {
             return Some((format, Some(*r)));
+        }
+    }
+    // An encrypted Office Open XML file is an OLE file with the Office extension.
+    if is_ole(bytes) {
+        for r in READERS {
+            if let Some(format) = r.sniff(bytes, name).filter(|f| zip_based(*f)) {
+                return Some((format, Some(*r)));
+            }
         }
     }
     if let Some(format) = known(bytes, "", false) {
@@ -491,6 +548,9 @@ pub fn read(bytes: &[u8], name: &str, caps: &Caps) -> Result<(Format, Doc), Read
     let (format, reader) = sniff(bytes, name).ok_or(ReadError::Binary)?;
     let reader = reader.ok_or(ReadError::Unsupported(format))?;
     let mut doc = reader.to_markdown(bytes, format, caps)?;
+    if let Format::Image(_) = format {
+        image::with_path(name, &mut doc);
+    }
     doc.pages = doc.pages.max(1);
     let mut chars = doc.markdown.chars().count();
     if chars > caps.max_chars {
@@ -556,6 +616,11 @@ pub fn slide_marker(n: usize, of: usize) -> String {
     format!("\n<!-- slide {n} of {of} -->\n## Slide {n}\n\n")
 }
 
+/// `<!-- chapter N of M -->` then `## Chapter N`, with blank lines like [`page_marker`].
+pub fn chapter_marker(n: usize, of: usize) -> String {
+    format!("\n<!-- chapter {n} of {of} -->\n## Chapter {n}\n\n")
+}
+
 /// `<!-- sheet N of M -->` then `## Sheet <name>`, with blank lines like [`page_marker`].
 pub fn sheet_marker(n: usize, of: usize, name: &str) -> String {
     format!("\n<!-- sheet {n} of {of} -->\n## Sheet {}\n\n", name.replace('\n', " "))
@@ -577,6 +642,12 @@ pub fn fence(lang: &str, body: &str) -> String {
     let ticks = "`".repeat(longest.max(2) + 1);
     let nl = if body.ends_with('\n') { "" } else { "\n" };
     format!("{ticks}{lang}\n{body}{nl}{ticks}\n")
+}
+
+/// The length of `](<target>)` for a link, with spaces and `)` escaped as
+/// the office readers write them.
+fn link_close_len(target: &str) -> usize {
+    3 + target.len() + 2 * target.bytes().filter(|&b| b == b' ' || b == b')').count()
 }
 
 /// One GitHub Markdown table cell: pipes escaped, line breaks as `<br>`.

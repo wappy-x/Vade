@@ -14,3 +14,7 @@ default-run = "vade-harness"
 [[test]]
 name = "mcp"
 harness = false
+
+[[test]]
+name = "tool_rerun"
+harness = false

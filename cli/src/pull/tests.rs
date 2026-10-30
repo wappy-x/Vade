@@ -360,7 +360,7 @@ fn gated_models_need_a_token_that_is_never_shown() {
     let token = "hf_testTOKEN123";
     let f = Fixture::new(Behavior { token: Some(token.into()), ..Behavior::default() });
     let error = f.pull(REPO, None, false).0.unwrap_err();
-    assert!(error.starts_with("The Hub refused access to org/model.") && error.contains("HF_TOKEN"), "{error}");
+    assert!(error.starts_with("The Hub refused access to org/model. Check the model ID: the Hub also refuses an ID that does not exist.") && error.contains("HF_TOKEN"), "{error}");
     let error = f.pull(REPO, Some("hf_wrong"), false).0.unwrap_err();
     assert!(error.contains("The token was sent") && !error.contains("hf_wrong"), "{error}");
     let (result, lines) = f.pull(REPO, Some(token), false);

@@ -88,6 +88,10 @@ pub fn exit(args: impl Iterator<Item = String>) -> std::process::ExitCode {
     match cli(args) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) if crate::auth::already_reported(&error) => std::process::ExitCode::FAILURE,
+        Err(error) if error.to_string() == stats::OPEN_FAILED => {
+            crate::diagnostics::stderr_line(format_args!("vade-gateway: {}{}", stats::OPEN_FAILED, stats_hint(&error)));
+            std::process::ExitCode::FAILURE
+        }
         Err(error) => {
             crate::diagnostics::stderr_line(format_args!("vade-gateway: {}.{}",
                 crate::terminal::sanitize(&error.to_string()),
@@ -98,6 +102,17 @@ pub fn exit(args: impl Iterator<Item = String>) -> std::process::ExitCode {
                 }));
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+/// The cause and next step for a `--stats` file the gateway cannot open.
+fn stats_hint(error: &io::Error) -> &'static str {
+    match error.kind() {
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => ": its folder does not exist. Choose a --stats path in an existing folder.",
+        io::ErrorKind::PermissionDenied => ": permission denied. Choose a --stats path you can write to.",
+        io::ErrorKind::IsADirectory => ": the path is a folder. Give --stats a file path.",
+        io::ErrorKind::ReadOnlyFilesystem => ": the filesystem is read-only. Choose a --stats path on a writable filesystem.",
+        _ => ". Check the --stats path, its permissions and free space, then retry.",
     }
 }
 

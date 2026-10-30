@@ -13,7 +13,7 @@ fn sniff_uses_magic_bytes_before_the_extension() {
     assert_eq!(format(b"%PDF-1.7\n", "notes.txt"), Some(Format::Pdf));
     assert_eq!(format(b"{\\rtf1 hi}", "notes.txt"), Some(Format::Rtf));
     assert_eq!(format(b"<!DOCTYPE html><p>x", "page.txt"), Some(Format::Html));
-    assert_eq!(format(b"\x89PNG\r\n\x1a\nrest", "a.md"), Some(Format::Other("PNG image")));
+    assert_eq!(format(b"\x89PNG\r\n\x1a\nrest", "a.md"), Some(Format::Image("PNG")));
     assert_eq!(format(b"PK\x03\x04rest", "report.docx"), Some(Format::Docx));
     assert_eq!(format(b"PK\x03\x04rest", "bundle.zip"), Some(Format::Other("ZIP archive")));
     assert_eq!(format(b"bplist00\xd1\x01\x02", "Info.plist"), Some(Format::Other("binary property list")));
@@ -32,8 +32,8 @@ fn sniff_uses_magic_bytes_before_the_extension() {
 fn unsupported_encrypted_and_binary_files_give_one_line() {
     let caps = Caps::default();
     for (bytes, name, line) in [
-        (&b"%PDF-1.4\n"[..], "a.pdf", "PDF files are not supported yet; no text was read"),
-        (b"\x89PNG\r\n\x1a\n", "a.png", "Vade does not read PNG image files; no text was read"),
+        (&b"7z\xbc\xaf\x27\x1c"[..], "a.7z", "Vade does not read 7z archive files; no text was read"),
+        (b"II*\0", "a.tif", "Vade does not read TIFF image files; no text was read"),
         (b"\0\x01\x02\x03\0\0\x10", "a.bin", "binary file with no known format; no text was read"),
     ] {
         let e = read(bytes, name, &caps).unwrap_err();
@@ -235,7 +235,7 @@ fn caps_bound_the_work_during_conversion() {
     // An XHTML part (EPUB) converts within its reader's budget.
     let mut budget = Budget::new(&Caps { max_chars: 3, ..Caps::default() });
     assert_eq!(html_to_markdown_in("<p>hello</p><p>more</p>", &mut budget), "hel\n");
-    assert_eq!(budget.warning().as_deref(), Some("text after 3 chars (char cap)"));
+    assert_eq!(budget.warning(), ["text after 3 chars (char cap)"]);
     // The registry does not repeat the reader's char cap warning.
     let (_, doc) = read(csv.as_bytes(), "w.csv", &tiny).unwrap();
     assert_eq!((doc.chars, doc.warnings), (1, vec!["text after 1 chars (char cap)".to_owned()]));
@@ -383,7 +383,7 @@ fn a_cap_inside_an_open_block_keeps_its_text() {
     assert_eq!(budget.text("abcdef"), "abc");
     assert_eq!((budget.text("x"), budget.work("x")), ("", "x"));
     assert!(budget.work(&"y".repeat(MIN_WORK_BYTES)).len() < MIN_WORK_BYTES);
-    assert_eq!(budget.warning().as_deref(), Some("text after 3 chars (char cap)"));
+    assert_eq!(budget.warning(), ["text after 3 chars (char cap)"]);
     // A shared budget (EPUB parts) counts the next part's text again.
     let mut budget = Budget::new(&Caps { max_chars: 8, ..Caps::default() });
     assert_eq!(html_to_markdown_in("<blockquote>abc", &mut budget), "> abc\n");

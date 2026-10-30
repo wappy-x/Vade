@@ -90,8 +90,10 @@ fn n_turn_prefix_is_byte_identical_through_invisible_gateway() {
                 let items: Vec<_> = forwarded.get(field).unwrap().array().unwrap().map(|v| v.raw().to_owned()).collect();
                 assert_eq!(items[..previous.len()], previous);
                 previous = items;
-                if !stable || path.starts_with("/v1/messages") { assert_eq!(received, body.as_bytes()); }
+                if !stable { assert_eq!(received, body.as_bytes()); }
                 else {
+                    // Every generation API, Messages too, gets the cache opt-in the engine needs to reuse a prefix.
+                    assert_eq!(forwarded.get("cache").unwrap().raw(), "true", "{path}");
                     let current = forwarded.get("prompt_cache_key").unwrap().raw().to_owned();
                     if let Some(previous) = &key { assert_eq!(&current, previous); }
                     key = Some(current);

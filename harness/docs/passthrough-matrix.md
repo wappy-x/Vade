@@ -180,6 +180,23 @@ default sampling, and token-ID payloads in JSON and SSE. The earlier
 27-of-27 live answer comparison still stands for what it covered; this test
 does not replace it.
 
+### Installed client headers (2026-10-30)
+
+On 2026-10-30, Claude Code 2.1.314 (Messages), Codex 0.165.0 (Responses) and
+the openai Python client 3.41.0 (Chat Completions) sent their requests to a
+loopback capture server. The test replays each client's request headers through
+the raw upstream and through both gateways. These headers include the
+`X-Stainless-*` set, `anthropic-beta`, a JSON-valued `x-codex-turn-metadata`
+and `Accept-Encoding`. The IDs in the test are fixed values with the same shape.
+The upstream gets every end-to-end header in the same order, and each value is
+unchanged byte for byte. The core gateway sends header names in lower case;
+HTTP header names are not case-sensitive. The only other headers are `Host` and
+the relay's own framing. The request body, the status, five response headers
+(request ID, rate limit, timing and `Retry-After`) and the response body are
+also unchanged. This test uses the clients' header sets, not the running
+clients. A live run of the clients through the gateway to the engine is a
+separate check.
+
 From `harness/`, run:
 
 ```sh

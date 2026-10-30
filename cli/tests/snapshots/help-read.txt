@@ -13,8 +13,11 @@ Options:
 
 Notes:
   - Reads text (UTF-8, UTF-16, Latin-1), Markdown, HTML, CSV, TSV, JSON, YAML,
-    TOML, XML, RTF and source files. Other known formats print one line that
-    names the format; other binary files print one line that says so.
+    TOML, XML, RTF, PDF, DOCX, XLSX, PPTX, EPUB, ODT, ODS, ODP and source files,
+    and gives the size of PNG, JPEG, GIF and WebP images. PDF, office and EPUB
+    output has a marker before each page, sheet, slide or chapter. Other known
+    formats print one line that names the format; other binary files print one
+    line that says so.
   - The first line is <!-- vade read: NAME | FORMAT | pages N | chars C |
     skipped: ... -->. Files over 50 MiB are refused.
   - Exit 0 when text was printed, 1 when the file cannot be read, 2 for a usage

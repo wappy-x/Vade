@@ -84,6 +84,8 @@ fn admission_refusal(body: &[u8]) -> bool {
             && error.get("message").and_then(json::Value::as_str) == Some("connection capacity reached")
     })).unwrap_or(false)
 }
+/// The bind refusal; the hint table matches this exact text.
+pub(crate) const LOOPBACK_ONLY: &str = "gateway bind must resolve only to loopback addresses";
 pub(crate) const MARKER_HEADER: &str = "x-vade-gateway";
 pub(crate) const MARKER_VALUE: &str = "v1";
 
@@ -277,10 +279,7 @@ fn bind_loopback(bind: &str) -> io::Result<TcpListener> {
         || addresses.len() > 16
         || addresses.iter().any(|address| !address.ip().is_loopback())
     {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "gateway bind must resolve only to loopback addresses",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, LOOPBACK_ONLY));
     }
     TcpListener::bind(addresses.as_slice())
 }
