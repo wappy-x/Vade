@@ -348,16 +348,20 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                         done("Config", configured_phase)?;
                         config
                     };
+                    // vade install from a new checkout must not keep an engine that another one built.
+                    let outdated = command == Command::Install && prior.is_none()
+                        && installed.as_ref().map_or(Ok(false), |files| install::outdated(files, &mut self.runner))?;
                     let start = phase(
                         "Install",
-                        if installed.is_some() {
+                        if installed.is_some() && !outdated {
                             "reuse installed files"
                         } else {
                             "prepare local engine and chat"
                         },
                     )?;
-                    let fresh = installed.is_none();
+                    let fresh = installed.is_none() || outdated;
                     let artifacts = match installed {
+                        Some(_) if outdated => install::rebuild(&self.root, &mut self.runner)?,
                         Some(files) => files,
                         None => install::ensure(&self.root, &mut self.runner)?,
                     };

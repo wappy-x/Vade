@@ -89,7 +89,9 @@ The installer runs only on Linux `aarch64`. It does these steps:
 3. It runs local `vade install`. This checks the Spark and the model once
    (preflight), then builds the GPU kernels, the engine and chat once,
    offline. It also compiles the GPU code into Vade's private startup cache,
-   so the first `up` does not have to.
+   so the first `up` does not have to. If `~/.vade` already holds files that
+   another checkout or revision built, it builds this checkout and prints the
+   generation that is now installed.
 4. With `--launch`, it starts the engine and opens chat in the folder where
    you started. Without that flag, it stops after the install.
 

@@ -322,3 +322,38 @@ fn a_dead_engine_record_is_reported_by_status_and_doctor_and_cleared_by_up() {
     launch.runner.listener_owned = true;
     captured(|| launch.execute(Command::Down, false)).0.unwrap();
 }
+
+#[test]
+fn install_from_another_checkout_rebuilds_and_names_the_new_generation() {
+    let f = Fixture::new();
+    f.installed();
+    f.configured();
+    let mut launch = f.launcher();
+    let path = f.root.join("stage/install.conf");
+    let built = |path: &Path| read_fields(path).unwrap().unwrap();
+    // The mock checkout is revision 40 'a'; the record says another revision, then none.
+    for (recorded, from) in [(Some("b".repeat(40)), "bbbbbbbbbbbb"), (None, "an earlier install with no recorded revision")] {
+        let mut record = built(&path);
+        match &recorded { Some(id) => { record.insert("source_revision".into(), id.clone()); } None => { record.remove("source_revision"); } }
+        text::atomic_write(&path, &text::encode(&record)).unwrap();
+        let old = record["generation"].clone();
+        launch.runner.calls.clear();
+        let (result, printed) = captured(|| launch.execute(Command::Install, false));
+        result.unwrap();
+        let now = built(&path);
+        assert_ne!(now["generation"], old, "the old generation must not stay installed");
+        assert_eq!(now["source_revision"], "a".repeat(40));
+        assert!(printed.contains(&format!(" Install this checkout is aaaaaaaaaaaa, but the installed engine was built from {from}; building this checkout\n")), "{printed}");
+        assert!(printed.contains(&format!(" Install generation {} is now installed, built from aaaaaaaaaaaa\n", &now["generation"][..12])), "{printed}");
+        assert!(!printed.contains("reuse installed files"), "{printed}");
+        assert!(launch.runner.calls.iter().any(|exec| exec.label == "Build GPU kernels"));
+    }
+    // The same revision reuses the files and builds nothing.
+    let record = fs::read(&path).unwrap();
+    launch.runner.calls.clear();
+    let (result, printed) = captured(|| launch.execute(Command::Install, false));
+    result.unwrap();
+    assert!(printed.contains("reuse installed files") && !printed.contains("building this checkout"), "{printed}");
+    assert!(!launch.runner.calls.iter().any(|exec| exec.label.starts_with("Build ")));
+    assert_eq!(fs::read(&path).unwrap(), record);
+}

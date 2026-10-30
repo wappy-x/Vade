@@ -67,6 +67,31 @@ pub(super) fn ensure<R: Runner>(root: &Path, runner: &mut R) -> Result<Fields, S
     refresh(root, runner)
 }
 
+/// Whether `installed` came from another source than this Git checkout
+/// builds: its recorded revision differs or is missing. It says so in one
+/// line. Bundles and trees without Git metadata keep the file checks alone.
+pub(super) fn outdated<R: Runner>(installed: &Fields, runner: &mut R) -> Result<bool, String> {
+    if bundle_path()?.is_some() { return Ok(false); }
+    let source = source_path()?;
+    if build_id::probe(&source) != build_id::Probe::Git { return Ok(false); }
+    let revision = git(runner, &source, &["rev-parse", "HEAD"])?.trim().to_owned();
+    if !text::is_lower_hex(&revision, 40) { return Err("Vade source has no complete Git revision.".into()); }
+    let built = installed.get("source_revision").filter(|id| text::is_lower_hex(id, 40));
+    if built == Some(&revision) { return Ok(false); }
+    let short = |id: &str| id[..12].to_owned();
+    super::progress("Install", crate::style::Token::Warn, format_args!("this checkout is {}, but the installed engine was built from {}; building this checkout",
+        short(&revision), built.map_or_else(|| "an earlier install with no recorded revision".to_owned(), |id| short(id))))?;
+    Ok(true)
+}
+
+/// Build this checkout over an outdated install, then name the new generation.
+pub(super) fn rebuild<R: Runner>(root: &Path, runner: &mut R) -> Result<Fields, String> {
+    let fields = refresh(root, runner)?;
+    let short = |key: &str| fields.get(key).map_or_else(String::new, |id| id.chars().take(12).collect());
+    super::progress("Install", crate::style::Token::Ok, format_args!("generation {} is now installed, built from {}", short("generation"), short("source_revision")))?;
+    Ok(fields)
+}
+
 /// Publish a fresh generation only after all replacement artifacts pass verification.
 pub(super) fn refresh<R: Runner>(root: &Path, runner: &mut R) -> Result<Fields, String> {
     let bundle = bundle_path()?;
@@ -74,7 +99,7 @@ pub(super) fn refresh<R: Runner>(root: &Path, runner: &mut R) -> Result<Fields, 
     text::private_dir(&stage)?;
     if let Some(bundle) = bundle {
         super::progress("Install", crate::style::Token::Dim, format_args!("checking the supplied local bundle"))?;
-        return publish(root, &bundle, Some(bundle_fields(&bundle)?));
+        return publish(root, &bundle, Some(bundle_fields(&bundle)?), None);
     }
     let source = source_path()?;
     super::progress("Install", crate::style::Token::Dim, format_args!("building the local engine and chat program"))?;
@@ -96,7 +121,8 @@ pub(super) fn refresh<R: Runner>(root: &Path, runner: &mut R) -> Result<Fields, 
     copy(&target.join("release/vade-harness"), &assembled.join("vade-harness"), true)?;
     copy(&snapshot.join("engine/target/nvptx64-nvidia-cuda/release/spark_layer_kernels.ptx"),
         &assembled.join("flash.ptx"), false)?;
-    let outcome = publish(root, &assembled, None);
+    let revision = snapshot.file_name().and_then(|name| name.to_str()).filter(|name| text::is_lower_hex(name, 40));
+    let outcome = publish(root, &assembled, None, revision);
     let _ = fs::remove_dir_all(&assembled);
     outcome
 }
@@ -266,7 +292,7 @@ fn build<R: Runner>(root: &Path, runner: &mut R, cwd: &Path, target: &Path, labe
     timing
 }
 
-fn publish(root: &Path, input: &Path, expected: Option<Fields>) -> Result<Fields, String> {
+fn publish(root: &Path, input: &Path, expected: Option<Fields>, revision: Option<&str>) -> Result<Fields, String> {
     let stage = root.join("stage/builds");
     text::private_dir(&stage)?;
     let id = text::random_hex(12)?;
@@ -278,6 +304,9 @@ fn publish(root: &Path, input: &Path, expected: Option<Fields>) -> Result<Fields
         ("generation".into(), id),
         ("kind".into(), "flash".into()),
     ]);
+    // A source build records its Git revision, so a later install from
+    // another checkout can see that these files are from a different source.
+    if let Some(revision) = revision { fields.insert("source_revision".into(), revision.into()); }
     let result = (|| {
         for (key, name) in FILES {
             let source = input.join(name);
@@ -309,7 +338,8 @@ fn publish(root: &Path, input: &Path, expected: Option<Fields>) -> Result<Fields
 
 #[cfg(test)]
 pub(super) fn publish_test_bundle(root: &Path, input: &Path) -> Result<Fields, String> {
-    publish(root, input, None)
+    // As if built from the checkout the mock Git reports (`rev-parse` = 40 'a').
+    publish(root, input, None, Some(&"a".repeat(40)))
 }
 
 fn read_manifest(path: &Path) -> Result<Option<Fields>, String> {
@@ -464,7 +494,7 @@ mod tests {
         let (root, bundle, expected) = fixture();
         let home = root.join("home");
         assert!(load(&home).unwrap().is_none());
-        let installed = publish(&home, &bundle, Some(expected)).unwrap();
+        let installed = publish(&home, &bundle, Some(expected), None).unwrap();
         assert_eq!(load(&home).unwrap(), Some(installed.clone()));
         fs::write(&installed["harness"], b"changed").unwrap();
         assert!(load(&home).unwrap().is_none());
@@ -479,9 +509,9 @@ mod tests {
     fn corrupt_bundle_never_replaces_an_activation() {
         let (root, bundle, expected) = fixture();
         let home = root.join("home");
-        let installed = publish(&home, &bundle, Some(expected.clone())).unwrap();
+        let installed = publish(&home, &bundle, Some(expected.clone()), None).unwrap();
         fs::write(bundle.join("flash.ptx"), b"changed").unwrap();
-        assert!(publish(&home, &bundle, Some(expected)).unwrap_err().contains("checksum"));
+        assert!(publish(&home, &bundle, Some(expected), None).unwrap_err().contains("checksum"));
         assert_eq!(load(&home).unwrap(), Some(installed));
         fs::remove_dir_all(root).unwrap();
     }
@@ -494,7 +524,7 @@ mod tests {
         assert!(bundle_fields(&bundle).unwrap_err().contains("ARM64"));
         let mut bytes = fs::read(bundle.join("flash-serve")).unwrap(); bytes[18] = 62;
         fs::write(bundle.join("flash-serve"), bytes).unwrap();
-        assert!(publish(&root.join("home"), &bundle, None).unwrap_err().contains("ARM64"));
+        assert!(publish(&root.join("home"), &bundle, None, None).unwrap_err().contains("ARM64"));
         fs::remove_dir_all(root).unwrap();
     }
 
