@@ -11,7 +11,7 @@ pub(crate) fn resolve(
     // Match lifecycle selection: saved owner defaults precede the older
     // qwen3-8b setup and an implicit controller config. Explicit selectors win.
     let owner_root = if explicit_url.is_none()
-        && std::env::var_os("VADE_CONFIG").is_none()
+        && !crate::config::controller_selected()
         && crate::launch::owner_configured()
     {
         Some(crate::launch::root()?)
@@ -20,7 +20,7 @@ pub(crate) fn resolve(
     };
     let local_root = if explicit_url.is_none()
         && owner_root.is_none()
-        && std::env::var_os("VADE_CONFIG").is_none()
+        && !crate::config::controller_selected()
     {
         let root = crate::run::home()?;
         crate::run::handles(&crate::cli::Command::Status, &root).then_some(root)
@@ -31,7 +31,7 @@ pub(crate) fn resolve(
         || (explicit_url.is_none()
             && owner_root.is_none()
             && local_root.is_none()
-            && (std::env::var_os("VADE_CONFIG").is_some()
+            && (crate::config::controller_selected()
                 || crate::config::config_path()?.exists()))
     {
         Some(crate::config::Config::load()?)

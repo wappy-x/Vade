@@ -13,6 +13,9 @@ impl<R: Runner> App<R> {
         let Some(session) = Session::load(&self.config.state_dir)? else {
             report.set("phase", "stopped");
             report.set("ready", false);
+            // Without VADE_GROUP, the groups that still own a server.
+            let groups = self.group_records()?;
+            if !groups.is_empty() { report.set("groups", Value::Array(groups.into_iter().map(Value::from).collect())); }
             return Ok(());
         };
         report.set("phase", session.phase.clone());

@@ -179,6 +179,17 @@ impl<R: Runner> App<R> {
         report.finish()
     }
 
+    /// `vade doctor --fabric`: the cabling shape, every group's ring, and each
+    /// Spark's ports, cables and clock, for every machine in the config.
+    pub(super) fn doctor_fabric(&mut self) -> Result<(), String> {
+        let mut report = Report::new("controller", self.dry);
+        match rdma_enabled() {
+            Ok(rdma) => crate::doctor::fabric::run(&mut report, &mut self.runner, &self.config, rdma, self.dry)?,
+            Err(error) => report.fail("SEQPAR_RDMA", &error, "Set SEQPAR_RDMA=0 for TCP or 1 for RDMA (or unset it), then run vade doctor --fabric.")?,
+        }
+        report.finish()
+    }
+
     /// The rows for one Spark's probe: SSH, nvidia-smi, disk, free memory and
     /// model files. An earlier failure skips the rows it hides.
     fn machine_rows(&self, report: &mut Report, machine: &Machine, probe: Result<Probe, String>, owned: bool) -> Result<(), String> {

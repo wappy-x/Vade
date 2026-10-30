@@ -34,6 +34,8 @@ pub enum Command {
     Sessions(Vec<String>),
     /// `vade doctor`.
     Doctor,
+    /// `vade doctor --fabric`: every configured cable, port and clock.
+    DoctorFabric,
     /// `vade install`.
     Install,
     /// `vade detect`.
@@ -249,6 +251,9 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
         Command::Chat(parse_chat(&args[1..])?)
     } else if command == "sessions" {
         Command::Sessions(parse_sessions(&args[1..])?)
+    } else if command == "doctor" && args.get(1) == Some(&"--fabric") {
+        if args.len() != 2 { return Err("Use vade doctor --fabric [--json] [--dry-run]. No other doctor options are supported.".into()); }
+        Command::DoctorFabric
     } else if matches!(command, "up" | "launch") {
         let options = parse_up(&args[1..]).map_err(|error| error.replace("vade up", &format!("vade {command}")))?;
         if command == "launch" { Command::Launch(options) } else { Command::Up(options) }
@@ -594,6 +599,9 @@ mod tests {
         });
         assert!(matches!(cli("chat -h").unwrap().command, Command::Help(Some(_))));
         assert!(cli("launch --context").unwrap_err().contains("vade launch --help"));
+        assert_eq!(cli("doctor --fabric --json --dry-run").unwrap(), Cli { command: Command::DoctorFabric, dry_run: true, json: true });
+        assert!(cli("doctor --fabric extra").unwrap_err().contains("vade doctor --fabric [--json] [--dry-run]"));
+        assert!(cli("doctor --sparks 2").unwrap_err().contains("Unexpected argument"));
     }
     #[test]
     fn fp8_default_depth_is_two_without_mtp() {

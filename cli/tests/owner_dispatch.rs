@@ -562,3 +562,39 @@ fn new_local_defaults_cannot_hide_a_default_controller_record() {
         assert!(text.contains(f.owner.join("config").to_str().unwrap()));
     }
 }
+
+#[test]
+fn group_records_guard_local_defaults_and_vade_group_selects_the_controller() {
+    let f = Fixture::new(true);
+    let config = f.base.join("xdg/vade/config");
+    let text = fs::read_to_string(&config).unwrap() + "[group pair]\nhosts = first,second\n";
+    fs::write(&config, text).unwrap();
+    // A running group leaves its record only under state_dir/groups/NAME.
+    let record = f.base.join("xdg/vade/controller-state/groups/pair/session.conf");
+    fs::create_dir_all(record.parent().unwrap()).unwrap();
+    fs::write(&record, "retain group ownership evidence\n").unwrap();
+    for args in [vec!["launch"], vec!["run", "qwen3-8b"]] {
+        let rejected = f.command(false).args(&args).bounded_output().unwrap();
+        assert_eq!(rejected.status.code(), Some(1), "{args:?}: {rejected:?}");
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("VADE_GROUP=pair vade down"), "{rejected:?}");
+        assert!(!f.owner.join("config").exists() && !f.owner.join("setup.conf").exists());
+        assert!(record.is_file());
+    }
+    // A record of a group no longer in the config guards too, and says how to stop it.
+    let gone = f.base.join("xdg/vade/controller-state/groups/gone/session.conf");
+    fs::create_dir_all(gone.parent().unwrap()).unwrap();
+    fs::write(&gone, "retain group ownership evidence\n").unwrap();
+    let rejected = f.command(false).arg("launch").bounded_output().unwrap();
+    assert_eq!(rejected.status.code(), Some(1), "{rejected:?}");
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("ownership record; restore [group gone] in its config, then run VADE_GROUP=gone vade down before creating local defaults"), "{rejected:?}");
+    assert!(!f.owner.join("config").exists() && gone.is_file());
+    fs::remove_dir_all(gone.parent().unwrap()).unwrap();
+    // With local defaults in place, VADE_GROUP alone still selects the controller.
+    f.configure_owner();
+    let shown = stdout(f.command(false).env("VADE_GROUP", "pair").arg("config").bounded_output().unwrap());
+    assert!(shown.contains("pair (VADE_GROUP): first, second"), "{shown}");
+    let refused = f.command(false).env("VADE_GROUP", "pair").arg("launch").bounded_output().unwrap();
+    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("VADE_GROUP selects the controller"), "{refused:?}");
+    assert!(record.is_file());
+}

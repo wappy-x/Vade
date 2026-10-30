@@ -61,6 +61,7 @@ impl<R: Runner> App<R> {
             Command::Chat(options) => self.chat(&options),
             Command::Sessions(action) => self.sessions(&action),
             Command::Doctor => self.doctor(),
+            Command::DoctorFabric => self.doctor_fabric(),
             Command::Install => self.install(),
             Command::Update => self.update(),
             _ => Err("Run vade --help to choose a command.".into()),
@@ -106,7 +107,8 @@ impl<R: Runner> App<R> {
         }
         let rdma = session.chained() && rdma;
         let transport = if session.replicas { "replicas (independent one-Spark servers behind a local gateway; no fabric)" } else { transport_name(session.ranks.len(), rdma) };
-        crate::output::text(format_args!("{} {}\n{}", style::paint(Token::Heading, "Launch plan:", Stream::Out), text::terminal_text(&session.model), style::table(&[
+        let group = self.config.group.as_ref().map(|group| ("Group", format!("{} (own ownership record; local port {})", group.name, group.local_port)));
+        crate::output::text(format_args!("{} {}\n{}", style::paint(Token::Heading, "Launch plan:", Stream::Out), text::terminal_text(&session.model), style::table(&group.into_iter().chain([
             ("Machines", session.ranks.iter().map(|rank| rank.machine.name.as_str()).collect::<Vec<_>>().join(", ")),
             ("Context", format!("{} tokens", session.context)),
             ("Output limit", format!("{} tokens", session.output)),
@@ -114,7 +116,7 @@ impl<R: Runner> App<R> {
             ("Concurrent chats", session.chats.map_or_else(|| "engine-admitted".into(), |count| count.to_string())),
             ("Transport", transport.into()),
             ("Endpoint", format!("{}/v1", session.endpoint())),
-        ], 2)))?;
+        ]).collect::<Vec<_>>(), 2)))?;
         self.resolve_fabric(&mut session)?;
         self.runner.port_free(session.local_port)?;
         if session.replicas {
@@ -377,7 +379,13 @@ impl<R: Runner> App<R> {
 
     fn down(&mut self) -> Result<(), String> {
         let Some(mut session) = Session::load(&self.config.state_dir)? else {
-            crate::output::line(format_args!("Vade is already stopped. Nothing to stop."))?;
+            let owned = self.group_records()?;
+            if owned.is_empty() {
+                crate::output::line(format_args!("Vade is already stopped. Nothing to stop."))?;
+            } else {
+                crate::output::line(format_args!("Vade has no server of its own to stop; groups still own servers."))?;
+                self.print_group_records(&owned)?;
+            }
             return Ok(());
         };
         self.cleanup(&mut session)?;
@@ -506,9 +514,35 @@ impl<R: Runner> App<R> {
         crate::output::line(format_args!("Vade is already running at {}/v1 (build {}). Chat: vade chat", session.endpoint(), session.build))
     }
 
+    /// Without `VADE_GROUP`, the groups whose ownership record exists, also a
+    /// group no longer in the config.
+    pub(crate) fn group_records(&self) -> Result<Vec<String>, String> {
+        if self.config.group.is_some() { return Ok(Vec::new()); }
+        Ok(self.config.group_record_names()?.into_iter().filter(|name| self.config.group_state_dir(name).join("session.conf").is_file()).collect())
+    }
+
+    /// Name the groups that still own a server, and any of them with no
+    /// `[group]` section.
+    fn print_group_records(&self, owned: &[String]) -> Result<(), String> {
+        crate::output::line(format_args!("Groups with an ownership record: {}. Run VADE_GROUP=NAME vade status to see one, VADE_GROUP=NAME vade down to stop one.", owned.join(", ")))?;
+        let missing: Vec<&str> = owned.iter().filter(|name| self.config.groups.iter().all(|group| &group.name != *name)).map(String::as_str).collect();
+        if !missing.is_empty() {
+            crate::output::line(format_args!("No [group] section for {}: restore it in the controller config, then use VADE_GROUP=NAME vade status or vade down.", missing.join(", ")))?;
+        }
+        Ok(())
+    }
+
     fn status(&mut self) -> Result<(), String> {
         let Some(session) = Session::load(&self.config.state_dir)? else {
-            return crate::output::text(format_args!("{}", crate::status::stopped(self.start_command())));
+            let owned = self.group_records()?;
+            if owned.is_empty() {
+                crate::output::text(format_args!("{}", crate::status::stopped(self.start_command())))?;
+            } else {
+                // Groups still run: never headline this as stopped.
+                crate::output::line(format_args!("{} Vade has no server of its own; {} group(s) still own one.", style::paint(Token::Dim, "○", Stream::Out), owned.len()))?;
+                self.print_group_records(&owned)?;
+            }
+            return Ok(());
         };
         // Rows print as each check finishes, in one label column.
         let row = |label: &str, value: &str| crate::output::text(format_args!("{}", style::table_at(&[(label, value.to_owned())], 2, 21)));

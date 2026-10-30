@@ -836,7 +836,7 @@ fn pair() -> (TcpStream, TcpStream) {
 fn front(stream: TcpStream, limit: Duration) -> Link {
     static DOWN: AtomicBool = AtomicBool::new(false);
     Link {
-        release_pool: false, released: 0,
+        release_pool: false, released: 0, window: Default::default(),
         cache: cache::Tickets::default(),
         stream,
         split: LAYERS / 2,
@@ -1380,7 +1380,7 @@ fn pp_wire_kept_invalid_length_and_accounting_fail_before_data_changes() {
         for word in [MAGIC_RESPONSE, 0, bytes + u32::from(!accounting), 1] { put(&mut message, word); }
         message.resize(REPLY_HEAD + bytes as usize, 0);
         let mut residual = vec![f32::from_bits(0x80000000); W];
-        let error = link.wire_reply(&message, &mut residual).unwrap_err();
+        let error = link.wire_reply(&message, link.sent, &mut residual).unwrap_err();
         assert!(error.contains(if accounting { "accounting" } else { "size mismatch" }), "{error}");
         assert_eq!(link.owed, 2);
         assert!(link.kept[0].data.is_none());
@@ -1429,7 +1429,7 @@ fn pp_wire_demux_consumes_dropped_chat_rows_before_live_rows() {
     for word in [MAGIC_RESPONSE, 0, (data.len() * 4) as u32, 1] { put(&mut message, word); }
     message.extend_from_slice(f32_bytes(&data));
     let mut current = vec![0.0; W];
-    link.wire_reply(&message, &mut current).unwrap();
+    link.wire_reply(&message, link.sent, &mut current).unwrap();
     assert_eq!(link.owed, 0);
     assert_eq!(link.kept.len(), 1);
     let live = link.take_kept(2);

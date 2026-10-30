@@ -37,6 +37,9 @@ use prefetch::{Incoming, Prefetch};
 mod acks;
 #[path = "next_pp_cache.rs"]
 pub(super) mod cache;
+#[path = "next_pp_overlap.rs"]
+mod overlap;
+#[cfg(target_os = "linux")] pub(super) use overlap::{GROUP_ROWS, IN_FLIGHT, split_groups};
 
 // Version 2: every request carries an exchange id that its reply echoes.
 const MAGIC_REQUEST: u32 = 0x3250_5056; // "VPP2"
@@ -397,6 +400,8 @@ pub(super) struct Link {
     cache: cache::Tickets,
     /// RELEASE_SLOTS bits of chats that ended since the last request.
     released: u32,
+    /// Verify exchanges posted without waiting (two groups in flight on a chain).
+    window: overlap::Window,
 }
 fn request_head(kind: u32, rows: usize, meta: &[[u32; 4]], id: u32) -> Vec<u8> {
     let mut head = Vec::with_capacity(REQUEST_HEAD + meta.len() * 16);
@@ -483,6 +488,7 @@ impl Link {
             release_pool: false,
             cache: cache::Tickets::default(),
             released: 0,
+            window: Default::default(),
         })
     }
     /// Any front-side pipeline error leaves the two ranks' session state unknown: the link is
@@ -522,7 +528,7 @@ impl Link {
         read_rest(&mut self.stream, &mut reply, None, left).map_err(|e| if e.contains("timed out") { silent() } else { e })?;
         if word(&reply, 0) == MAGIC_RESPONSE && word(&reply, 1) == STATUS_WORKING {
             let id = word(&reply, 3);
-            if word(&reply, 2) == 0 && id == expect && self.replied != self.sent {
+            if word(&reply, 2) == 0 && (id == expect || self.posted() && id.wrapping_sub(expect) <= self.sent.wrapping_sub(expect)) && self.replied != self.sent {
                 self.beats += 1;
                 (self.floor, *heard) = (id, Instant::now());
                 return Ok(None);
@@ -634,7 +640,7 @@ impl Link {
         let fits = wire_reply_size(self.owed, bytes).is_some_and(|n| self.fast.as_ref().is_some_and(|f| n <= f.capacity()));
         if fits {
             let mut fast = self.fast.take().ok_or("pipeline wire missing")?;
-            let result = self.wire_collect(&mut *fast, residual);
+            let result = self.wire_collect(&mut *fast, self.sent, residual);
             self.fast = Some(fast);
             result?;
             self.carried += 1;
@@ -801,15 +807,15 @@ impl Link {
     /// within `limit`, a closed link or a TCP reply ends the exchange in an error.
     fn wire_exchange(&mut self, fast: &mut dyn PpWire, head: &[u8], residual: &mut [f32]) -> Result<()> {
         fast.send(&[head, f32_bytes(residual)])?;
-        self.wire_collect(fast, residual)
+        self.wire_collect(fast, self.sent, residual)
     }
-    /// Wait for the wire reply of `self.sent`. Heartbeats of that request stay on TCP.
-    fn wire_collect(&mut self, fast: &mut dyn PpWire, residual: &mut [f32]) -> Result<()> {
+    /// Wait for the wire reply of `expect`. Heartbeats of that request stay on TCP.
+    fn wire_collect(&mut self, fast: &mut dyn PpWire, expect: u32, residual: &mut [f32]) -> Result<()> {
         let (sent, mut heard, mut look) = (Instant::now(), Instant::now(), Duration::from_millis(50));
         while !fast.try_recv(&mut self.message)? {
             if sent.elapsed() > look {
                 look = sent.elapsed() + Duration::from_millis(50);
-                self.wire_beats(&mut heard)?;
+                self.wire_beats(expect, &mut heard)?;
             }
             if heard.elapsed() > self.limit {
                 return Err(format!("pipeline back reply timed out after {} ms without a heartbeat", self.limit.as_millis()));
@@ -817,12 +823,12 @@ impl Link {
             std::hint::spin_loop();
         }
         let message = std::mem::take(&mut self.message);
-        let result = self.wire_reply(&message, residual);
+        let result = self.wire_reply(&message, expect, residual);
         self.message = message;
         result
     }
-    fn wire_reply(&mut self, message: &[u8], residual: &mut [f32]) -> Result<()> {
-        let (status, len) = self.reply_head(message, self.sent)?;
+    fn wire_reply(&mut self, message: &[u8], expect: u32, residual: &mut [f32]) -> Result<()> {
+        let (status, len) = self.reply_head(message, expect)?;
         if status != 0 {
             return Err(format!("pipeline back failed: {}", peer_text(&message[REPLY_HEAD..(REPLY_HEAD + len).min(message.len())])));
         }
@@ -859,7 +865,7 @@ impl Link {
     /// While a wire exchange waits: read the whole TCP headers already here (heartbeats of
     /// this exchange or late ones of earlier wire exchanges) without blocking. Only this
     /// thread reads the socket, and `drain` left no queued tile, so nothing else is owed.
-    fn wire_beats(&mut self, heard: &mut Instant) -> Result<()> {
+    fn wire_beats(&mut self, expect: u32, heard: &mut Instant) -> Result<()> {
         loop {
             let mut probe = [0u8; REPLY_HEAD];
             self.stream.set_nonblocking(true).map_err(err)?;
@@ -868,7 +874,7 @@ impl Link {
             match seen {
                 Ok(0) => return Err("pipeline back closed".into()),
                 Ok(n) if n >= REPLY_HEAD => {
-                    if self.frame(self.sent, heard)?.is_some() {
+                    if self.frame(expect, heard)?.is_some() {
                         return Err("pipeline reply on the TCP link for a wire exchange".into());
                     }
                 }
@@ -1077,6 +1083,8 @@ impl<'a> NextModel<'a> {
         if output && !verify && self.pp_async() {
             self.pp_post_final(b, meta, vector, count)?;
             self.pp_collect_final(b, vector, count)
+        } else if verify && self.pp_deferring() {
+            self.pp_post_verify(b, meta, vector, count)
         } else {
             let kind = if verify { KIND_VERIFY } else { KIND_ROWS };
             self.pp_exchange(b, kind, meta, vector, count)
@@ -1289,6 +1297,8 @@ fn serve_stage(
         socket: heartbeat_socket,
     };
     let reply_tx = reply_tx;
+    // Verify requests sent on down without their replies (overlap::relays), and a reply buffer.
+    let (mut relayed, mut back_rows) = (overlap::Relayed::new(), Vec::new());
     loop {
         // The reader alone owns TCP reads; changing nonblocking on any clone
         // would change its socket too. Poll the fast wire before completed TCP
@@ -1297,6 +1307,12 @@ fn serve_stage(
         let on_wire = loop {
             if stop.load(Ordering::Relaxed) {
                 return Err("pipeline back stopped by signal".into());
+            }
+            // A relayed reply that came back goes up first; the heartbeat then names the next one.
+            if let Some(link) = downstream.as_mut().filter(|_| !relayed.is_empty())
+                && overlap::relay(link, fast.as_mut(), &mut relayed, &mut back_rows, false, stop)? {
+                *working.lock().unwrap_or_else(|p| p.into_inner()) = relayed.front().map(|r| (r.0, Instant::now()));
+                continue;
             }
             if let Some(f) = fast.as_mut() {
                 if f.try_recv(&mut message)? { break true; }
@@ -1357,6 +1373,11 @@ fn serve_stage(
         {
             return Err("pipeline request kind or carrier outside the agreed recipe".into());
         }
+        // Replies go up in request order: a request that does not relay waits for the relayed ones.
+        let relay = overlap::relays(kind, u32::from(release) | slots | tp_bits, on_wire, downstream.as_ref(), meta.len(), count);
+        while let Some(link) = downstream.as_mut().filter(|_| !relay && !relayed.is_empty()) {
+            overlap::relay(link, fast.as_mut(), &mut relayed, &mut back_rows, true, stop)?;
+        }
         expect = expect.wrapping_add(1);
         // Rows a successful final reply will carry ahead of this tile. Captured before
         // `forward` / the kept-row move, so an error uses the same carrier as success.
@@ -1367,11 +1388,22 @@ fn serve_stage(
             .unwrap_or(kept.len() / W);
         let tile_bytes = count * W * 4;
         let started = Instant::now();
-        *working.lock().unwrap_or_else(|p| p.into_inner()) = Some((expect.wrapping_sub(1), started));
+        *working.lock().unwrap_or_else(|p| p.into_inner()) = Some((relayed.front().map_or(expect.wrapping_sub(1), |r| r.0), started));
         // Synchronize and drop pooled graphs/scratch before any session rollback,
         // verify allocation or execution. An error must prevent the step as well.
         let mut result = if release { release_pool() } else { Ok(()) }
             .and_then(|()| step(kind | tp_bits | slots, count, &meta, &mut residual));
+        if relay && result.is_ok() && let Some(link) = downstream.as_mut() {
+            // This request goes down now; its reply goes up from the poll above, in order.
+            link.post_wire(kind, &meta, &residual)?;
+            relayed.push_back((expect.wrapping_sub(1), count));
+            *working.lock().unwrap_or_else(|p| p.into_inner()) = relayed.front().map(|r| (r.0, Instant::now()));
+            (busy, served, last) = (busy + started.elapsed(), served + 1, Instant::now());
+            if served.is_power_of_two() || served % 4096 == 0 {
+                eprintln!("flashnext pp back served={served} busy_ms={:.1} last_kind={kind} last_rows={count} relayed=1", busy.as_secs_f64() * 1e3);
+            }
+            continue;
+        }
         if result.is_ok() && let Some(link) = downstream.as_mut() {
             link.release_pool |= release;
             link.released |= slots;

@@ -61,7 +61,7 @@ impl Selected {
 /// record, as [`crate::launch::handles`] decides), the legacy home, then the
 /// user config file.
 fn select() -> Selected {
-    if std::env::var_os("VADE_CONFIG").is_none() {
+    if !crate::config::controller_selected() {
         if crate::launch::owner_configured() {
             let path = crate::launch::root().ok().map(|root| root.join("config").display().to_string());
             return match crate::launch::saved_settings() {
@@ -90,7 +90,7 @@ fn select() -> Selected {
         Err(error) => return Selected::failed("controller", Some(path), error),
     };
     let names: Vec<&str> = config.machines.iter().map(|machine| machine.name.as_str()).collect();
-    let rows = vec![
+    let mut rows = vec![
         ("Model", format!("{} ({} at {})", config.model, config.model_repo, config.model_revision), "model", config.model.as_str().into()),
         ("Sparks", format!("{}: {}", names.len(), names.join(", ")), "machines", Value::Array(names.iter().map(|name| (*name).into()).collect())),
         ("Port", format!("{} on this computer", config.local_port), "local_port", Value::Int(config.local_port.into())),
@@ -98,5 +98,8 @@ fn select() -> Selected {
             config.prebuilt_dir.as_ref().map_or(Value::Null, |dir| dir.to_string_lossy().as_ref().into())),
         ("State", config.state_dir.display().to_string(), "state_dir", config.state_dir.to_string_lossy().as_ref().into()),
     ];
+    if let Some(group) = &config.group {
+        rows.push(("Group", format!("{} (VADE_GROUP): {}", group.name, group.hosts.join(", ")), "group", group.name.as_str().into()));
+    }
     Selected { setup: "controller", path: Some(path), rows: Some(rows), error: None }
 }

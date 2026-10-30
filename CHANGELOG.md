@@ -27,6 +27,18 @@ Changes that are merged but not yet released are under Unreleased.
 - Native chat supports [host hooks](harness/docs/hooks.md), and chat supports [user slash commands](harness/docs/slash-commands.md) and `/clear`.
 - GitHub workflows now run only by hand; tests run locally before every merge, as [Local CI](docs/ci.md) describes.
 - Chat keeps private project notes across sessions; `VADE_MEMORY=0` turns memory off.
+- Groups for many Sparks under one controller. A `[group NAME]` section in
+  the controller config names machines in rank order, a local port and a
+  layout tag; `VADE_GROUP=NAME vade up`, `status`, `down` and `update` work
+  on that group with its own ownership record. A group must close into a
+  ring of cables, and groups in one layout cannot share machines or ports.
+  Without `VADE_GROUP`, `vade status` and `vade down` name the groups that
+  still run. New `vade doctor --fabric` checks every configured cable over
+  SSH, read-only: the cabling shape, each group ring, each fabric port
+  (address, speed, MTU, RDMA device), both rails of each cable on their own
+  (two addresses, one subnet, 9000-byte pings both ways) and each clock. See
+  [Eight Sparks](docs/eight-sparks.md), with example configs for two rings
+  of four and one ring of eight.
 
 - New `vade pull <org>/<name>[@revision]` downloads a model from the Hugging
   Face Hub into `~/models/<org>/<name>`. It takes the weights, configs,

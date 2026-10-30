@@ -53,6 +53,7 @@ Options:
 Environment:
   VADE_HOME          Local install root and saved defaults (default ~/.vade)
   VADE_CONFIG        Controller config file; selects the controller (see Notes)
+  VADE_GROUP         A [group] in the controller config: machines, state, port
   VADE_API_KEY_FILE  Credential file when --api-key-file is not given
   NO_COLOR           Plain output without color
 

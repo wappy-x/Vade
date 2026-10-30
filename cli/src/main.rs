@@ -53,6 +53,7 @@ mod status;
 mod style;
 mod test_gate;
 mod text;
+mod topology;
 mod unix_file;
 mod unix_flags;
 mod worker;
@@ -201,7 +202,7 @@ fn run_main(mut args: Vec<String>) {
     // From here every error of a --json command still ends in its one object
     // (see fail).
     checks::set_json(parsed.json.then(|| checks::Answer { schema: match parsed.command {
-        cli::Command::Doctor => "vade.doctor.v1", cli::Command::Detect => "vade.detect.v1", cli::Command::Config => "vade.config.v1", _ => "vade.version.v1",
+        cli::Command::Doctor | cli::Command::DoctorFabric => "vade.doctor.v1", cli::Command::Detect => "vade.detect.v1", cli::Command::Config => "vade.config.v1", _ => "vade.version.v1",
     }, mode: owner(&parsed.command), dry: parsed.dry_run }));
     if parsed.command == cli::Command::Version {
         if parsed.json {
@@ -308,7 +309,7 @@ fn run_main(mut args: Vec<String>) {
         ) {
         None
     } else {
-        Some(state::Lock::acquire(&config.state_dir).unwrap_or_else(|error| fail(&error)))
+        Some(state::Lock::acquire(&config.lock_dir).unwrap_or_else(|error| fail(&error)))
     };
     let mut app = app::App {
         config,
@@ -327,7 +328,7 @@ fn run_main(mut args: Vec<String>) {
 fn owner(command: &cli::Command) -> &'static str {
     if launch::handles(command) { "local" }
     else if run::home().is_ok_and(|home| run::handles(command, &home)) { "legacy" }
-    else if std::env::var_os("VADE_CONFIG").is_some() || config::config_path().is_ok_and(|path| path.is_file()) { "controller" }
+    else if crate::config::controller_selected() || config::config_path().is_ok_and(|path| path.is_file()) { "controller" }
     else { "none" }
 }
 

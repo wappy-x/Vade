@@ -34,6 +34,13 @@ pub struct Config {
     pub health_timeout_secs: u64,
     pub build_manifest: PathBuf,
     pub machines: Vec<Machine>,
+    /// Every `[group NAME]` section, in config order.
+    pub groups: Vec<Group>,
+    /// The group `VADE_GROUP` selects. It sets `state_dir` and `local_port`.
+    pub group: Option<Group>,
+    /// The folder whose lock serializes `up`, `down`, `install` and `update`
+    /// for every group: the configured `state_dir`.
+    pub lock_dir: PathBuf,
 }
 
 /// One `[machine NAME]` section: how to reach the Spark and where its files are.
@@ -49,6 +56,36 @@ pub struct Machine {
     pub cli_source: String,
     pub stage_dir: String,
     pub state_dir: String,
+}
+
+/// One `[group NAME]` section: machines that run one server together. Each
+/// group has its own ownership record and local port, so two groups can run at
+/// the same time. Groups with the same `layout` must not share a machine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Group {
+    pub name: String,
+    /// Machine names in rank order. Rank 0, the first, answers HTTP.
+    pub hosts: Vec<String>,
+    pub local_port: u16,
+    /// The set of groups that runs at the same time; empty for the default set.
+    pub layout: String,
+}
+
+impl Group {
+    /// The local ports this group can hold: its gateway or tunnel port and,
+    /// for replicas, one tunnel port per machine after it.
+    fn ports(&self) -> std::ops::RangeInclusive<usize> {
+        usize::from(self.local_port)..=usize::from(self.local_port) + self.hosts.len()
+    }
+    fn port_label(&self) -> String {
+        format!("{}..{}", self.ports().start(), self.ports().end())
+    }
+}
+
+/// Whether the environment selects the controller: `VADE_CONFIG`, or
+/// `VADE_GROUP`, which names a group of the controller config.
+pub fn controller_selected() -> bool {
+    env::var_os("VADE_CONFIG").is_some() || env::var_os("VADE_GROUP").is_some()
 }
 
 /// `VADE_CONFIG`, or `config` in the user config directory (`$XDG_CONFIG_HOME/vade`,
@@ -112,7 +149,13 @@ impl Config {
                 format!("Cannot read config {}. Check its path and permissions.", crate::text::quoted(&path.to_string_lossy()))
             }
         })?;
-        let config = Self::parse(&text, &path)?;
+        let mut config = Self::parse(&text, &path)?;
+        match env::var("VADE_GROUP") {
+            Ok(name) if name.is_empty() => return Err("VADE_GROUP is empty. Set it to a [group name] from your config, or unset it.".into()),
+            Ok(name) => config.select_group(&name)?,
+            Err(env::VarError::NotPresent) => {}
+            Err(env::VarError::NotUnicode(_)) => return Err("Set VADE_GROUP to a plain [group name] from your config.".into()),
+        }
         if config.validate_model_revision().is_err() {
             crate::output::stderr_line(format_args!("Warning: model_revision is missing or mutable; inspection and shutdown remain available. Set a verified immutable revision before vade install or vade up; see INSTALL.md."));
         }
@@ -136,7 +179,7 @@ impl Config {
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
-        let (globals, rows) = parse_sections(text)?;
+        let (globals, rows, group_rows) = parse_sections(text)?;
         let mut globals = Values::new(globals);
         let state_dir = local_path(
             &globals.take("state_dir").unwrap_or_else(|| "state".into()),
@@ -187,8 +230,11 @@ impl Config {
             tp_port: integer(&mut globals, "tp_port", 29960, 1024, 65534)? as u16,
             health_timeout_secs: integer(&mut globals, "health_timeout_secs", 360, 1, 3600)?,
             build_manifest: activation,
+            lock_dir: state_dir.clone(),
             state_dir,
             machines: Vec::new(),
+            groups: Vec::new(),
+            group: None,
         };
         config.validate_control_socket()?;
         globals.finish("global")?;
@@ -298,7 +344,99 @@ impl Config {
                 }
             }
         }
+        for (name, values) in group_rows {
+            let mut values = Values::new(values);
+            let hosts: Vec<String> = values.take("hosts").ok_or_else(|| format!(
+                "Group {name} needs hosts = machine names in rank order, separated by commas."
+            ))?.split(',').map(|host| host.trim().to_owned()).collect();
+            let mut names = BTreeSet::new();
+            for host in &hosts {
+                if !names.insert(host.as_str()) || !config.machines.iter().any(|machine| machine.name == *host) {
+                    return Err(format!("Group {name}: list each configured machine once in hosts, in rank order. Add [machine {host}] or fix the name."));
+                }
+            }
+            let group = Group {
+                local_port: port(&mut values, "local_port", config.local_port.into())?,
+                layout: values.take("layout").unwrap_or_default(),
+                name,
+                hosts,
+            };
+            if !group.layout.is_empty() && !identifier(&group.layout) {
+                return Err(format!("Group {}: set layout to a plain name.", group.name));
+            }
+            if usize::from(u16::MAX - group.local_port) < group.hosts.len() {
+                return Err(format!("Group {}: replica tunnels need the local ports after local_port. Choose a lower local_port.", group.name));
+            }
+            values.finish(&format!("group {}", group.name))?;
+            // The groups of one layout run at the same time: no shared machine or local port.
+            for other in config.groups.iter().filter(|other| other.layout == group.layout) {
+                if let Some(host) = group.hosts.iter().find(|host| other.hosts.contains(host)) {
+                    return Err(format!(
+                        "Groups {} and {} share machine {host} in the same layout. Give one of them another layout = name, or remove the machine from one group.",
+                        other.name, group.name
+                    ));
+                }
+                if group.ports().start() <= other.ports().end() && other.ports().start() <= group.ports().end() {
+                    return Err(format!(
+                        "Groups {} and {} in the same layout need separate local ports. Set local_port so ports {} and {} do not overlap.",
+                        other.name, group.name, other.port_label(), group.port_label()
+                    ));
+                }
+            }
+            config.groups.push(group);
+        }
         Ok(config)
+    }
+
+    /// The ownership folder of group `name`: `state_dir/groups/NAME`.
+    pub fn group_state_dir(&self, name: &str) -> PathBuf {
+        self.lock_dir.join("groups").join(name)
+    }
+
+    /// Every group that may own a server: each `[group]` of this config and
+    /// each folder under `state_dir/groups`, so a group renamed or removed
+    /// while its server runs still counts.
+    pub fn group_record_names(&self) -> Result<Vec<String>, String> {
+        let unreadable = "Cannot list the group ownership folders under state_dir/groups; keep them for inspection.";
+        let mut names: Vec<String> = self.groups.iter().map(|group| group.name.clone()).collect();
+        match fs::read_dir(self.lock_dir.join("groups")) {
+            Ok(entries) => for entry in entries {
+                let entry = entry.map_err(|_| unreadable)?;
+                if let Some(name) = entry.file_name().to_str().filter(|name| identifier(name)) { names.push(name.into()); }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(unreadable.into()),
+        }
+        names.sort();
+        names.dedup();
+        Ok(names)
+    }
+
+    /// The step that stops the server of group `name` with this config, also
+    /// when the config has no `[group name]` section any more.
+    pub fn group_down_step(&self, name: &str) -> String {
+        if self.groups.iter().any(|group| group.name == name) {
+            format!("run VADE_GROUP={name} vade down with its config")
+        } else {
+            format!("restore [group {name}] in its config, then run VADE_GROUP={name} vade down")
+        }
+    }
+
+    /// Select the group `name`: its machines in rank order, its own ownership
+    /// folder under `state_dir` and its own local port.
+    pub fn select_group(&mut self, name: &str) -> Result<(), String> {
+        let group = self.groups.iter().find(|group| group.name == name).cloned().ok_or_else(|| {
+            let names: Vec<&str> = self.groups.iter().map(|group| group.name.as_str()).collect();
+            if names.is_empty() {
+                format!("VADE_GROUP selects group {}, but the config has no [group name] sections. Unset VADE_GROUP, or add the group. See docs/eight-sparks.md.", crate::text::argument(name))
+            } else {
+                format!("VADE_GROUP selects group {}, which is not in the config. Choose one of: {}.", crate::text::argument(name), names.join(", "))
+            }
+        })?;
+        self.state_dir = self.group_state_dir(&group.name);
+        self.local_port = group.local_port;
+        self.group = Some(group);
+        Ok(())
     }
 
     /// Resolve the activation record once per command. All reads use this generation.
@@ -332,10 +470,32 @@ impl Config {
     pub fn selected(&self, options: &UpOptions) -> Result<Vec<Machine>, String> {
         let selected = self.selected_machines(options)?;
         // Independent replicas never talk to each other, so they need no fabric links.
-        if !options.replicas { self.check_links(&selected)?; }
+        // A group must close into a ring; --hosts and --sparks need a path.
+        if !options.replicas {
+            match &self.group {
+                Some(group) => crate::topology::check_ring(&format!("Group {}", group.name), &selected)?,
+                None => self.check_links(&selected)?,
+            }
+        }
         Ok(selected)
     }
     fn selected_machines(&self, options: &UpOptions) -> Result<Vec<Machine>, String> {
+        let from_group;
+        let options = match &self.group {
+            None => options,
+            Some(group) => {
+                // `vade update` restarts a running group with its own hosts.
+                if (!options.hosts.is_empty() && options.hosts != group.hosts) || (options.sparks.is_some() && !options.replicas) {
+                    return Err(format!("VADE_GROUP={} names the machines and their rank order. Remove --sparks and --hosts, or unset VADE_GROUP.", group.name));
+                }
+                let count = if options.hosts.is_empty() { options.sparks } else { Some(options.hosts.len()) };
+                if options.replicas && count != Some(group.hosts.len()) {
+                    return Err(format!("Group {} has {} machines. Run vade up --replicas {} for one replica on each, or unset VADE_GROUP.", group.name, group.hosts.len(), group.hosts.len()));
+                }
+                from_group = UpOptions { hosts: group.hosts.clone(), sparks: None, ..options.clone() };
+                &from_group
+            }
+        };
         if options.fp4_local && self.model.ends_with("-fp8") {
             return Err("Your config selects FP8. Run vade up --fp8, or select the FP4-Local checkpoint in VADE_CONFIG and run vade up.".into());
         }
@@ -402,10 +562,12 @@ impl Config {
 type Section = BTreeMap<String, String>;
 type MachineRows = Vec<(String, Section)>;
 
-fn parse_sections(text: &str) -> Result<(Section, MachineRows), String> {
+fn parse_sections(text: &str) -> Result<(Section, MachineRows, MachineRows), String> {
     let mut global = Section::new();
     let mut machines: MachineRows = Vec::new();
-    let mut current: Option<usize> = None;
+    let mut groups: MachineRows = Vec::new();
+    // The open section: a machine (false) or a group (true), by index.
+    let mut current: Option<(bool, usize)> = None;
     let mut global_seen = false;
     for (index, raw) in text.lines().enumerate() {
         let line = raw.trim();
@@ -440,9 +602,15 @@ fn parse_sections(text: &str) -> Result<(Section, MachineRows), String> {
                     ));
                 }
                 machines.push((name.into(), Section::new()));
-                current = Some(machines.len() - 1);
+                current = Some((false, machines.len() - 1));
+            } else if let Some(name) = section.strip_prefix("group ").map(str::trim) {
+                if !identifier(name) || groups.iter().any(|(existing, _)| existing == name) {
+                    return Err(error("use a unique [group name] section with a plain name."));
+                }
+                groups.push((name.into(), Section::new()));
+                current = Some((true, groups.len() - 1));
             } else {
-                return Err(error("use [global] or [machine name]."));
+                return Err(error("use [global], [machine name] or [group name]."));
             }
             continue;
         }
@@ -471,14 +639,15 @@ fn parse_sections(text: &str) -> Result<(Section, MachineRows), String> {
             return Err(error("use a nonempty value without control characters."));
         }
         let target = match current {
-            Some(index) => &mut machines[index].1,
+            Some((false, index)) => &mut machines[index].1,
+            Some((true, index)) => &mut groups[index].1,
             None => &mut global,
         };
         if target.insert(key.into(), value.into()).is_some() {
             return Err(error("use each key only once in a section."));
         }
     }
-    Ok((global, machines))
+    Ok((global, machines, groups))
 }
 
 struct Values(Section);
@@ -695,6 +864,97 @@ mod tests {
     fn disconnected_selection_needs_both_link_addresses() {
         let config = parse(&PAIR.replace("fabric.machine-b = fabric-a\n", "")).unwrap();
         assert!(config.selected(&UpOptions { sparks: Some(2), ..UpOptions::default() }).unwrap_err().contains("Add fabric."));
+    }
+    /// Eight machines in two rings of four (s1..s4, s5..s8) plus `groups`.
+    fn eight(groups: &str) -> Result<Config, String> {
+        let mut text = PAIR.split("[machine").next().unwrap().to_string();
+        for index in 1..=8 {
+            let (ring, offset) = ((index - 1) / 4 * 4, (index - 1) % 4);
+            let (next, previous) = (ring + (offset + 1) % 4 + 1, ring + (offset + 3) % 4 + 1);
+            text += &format!("[machine s{index}]\nssh = s{index}-ssh\nfabric.s{next} = to-s{next}-from-s{index}\nfabric.s{previous} = to-s{previous}-from-s{index}\n");
+        }
+        parse(&(text + groups))
+    }
+    const LAYOUTS: &str = "[group quad-a]\nhosts = s1,s2,s3,s4\nlayout = quads\n[group quad-b]\nhosts = s5,s6,s7,s8\nlocal_port = 18090\nlayout = quads\n\
+        [group pair-1]\nhosts = s1,s2\nlayout = doubles\n[group pair-2]\nhosts = s3,s4\nlocal_port = 18083\nlayout = doubles\n\
+        [group pair-3]\nhosts = s5,s6\nlocal_port = 18086\nlayout = doubles\n[group pair-4]\nhosts = s7,s8\nlocal_port = 18089\nlayout = doubles\n\
+        [group one-1]\nhosts = s1\nlayout = singles\n[group one-8]\nhosts = s8\nlocal_port = 18082\nlayout = singles\n";
+    #[test]
+    fn groups_express_quads_doubles_and_singles_on_eight_machines() {
+        let mut config = eight(LAYOUTS).unwrap();
+        assert_eq!(config.groups.len(), 8);
+        assert_eq!(config.groups[1], Group { name: "quad-b".into(), hosts: vec!["s5".into(), "s6".into(), "s7".into(), "s8".into()], local_port: 18090, layout: "quads".into() });
+        // Without VADE_GROUP nothing changes.
+        assert_eq!(config.selected(&UpOptions::default()).unwrap().len(), 1);
+        let base = config.state_dir.clone();
+        config.select_group("quad-b").unwrap();
+        assert_eq!((config.state_dir.clone(), config.local_port, config.lock_dir.clone()), (base.join("groups/quad-b"), 18090, base.clone()));
+        let names = |machines: Vec<Machine>| machines.into_iter().map(|machine| machine.name).collect::<Vec<_>>();
+        assert_eq!(names(config.selected(&UpOptions::default()).unwrap()), ["s5", "s6", "s7", "s8"]);
+        assert_eq!(names(config.selected(&UpOptions { replicas: true, sparks: Some(4), ..UpOptions::default() }).unwrap()).len(), 4);
+        assert!(config.selected(&UpOptions { replicas: true, sparks: Some(2), ..UpOptions::default() }).unwrap_err().contains("--replicas 4"));
+        for options in [UpOptions { sparks: Some(2), ..UpOptions::default() }, UpOptions { hosts: vec!["s1".into()], ..UpOptions::default() }] {
+            assert!(config.selected(&options).unwrap_err().contains("Remove --sparks and --hosts"));
+        }
+        // vade update restarts a running group with its saved hosts.
+        let own: Vec<String> = ["s5", "s6", "s7", "s8"].map(String::from).to_vec();
+        assert!(config.selected(&UpOptions { hosts: own.clone(), ..UpOptions::default() }).is_ok());
+        assert!(config.selected(&UpOptions { hosts: own, replicas: true, ..UpOptions::default() }).is_ok());
+        // FP8 on a group of four keeps its own count rule.
+        config.model = "qwen3.8-flash-next-fp8".into();
+        assert_eq!(config.selected(&UpOptions { fp4_local: false, ..UpOptions::default() }).unwrap().len(), 4);
+        let mut config = eight(LAYOUTS).unwrap();
+        config.select_group("one-8").unwrap();
+        assert_eq!(names(config.selected(&UpOptions::default()).unwrap()), ["s8"]);
+        config.select_group("pair-3").unwrap();
+        assert_eq!(names(config.selected(&UpOptions::default()).unwrap()), ["s5", "s6"]);
+        assert!(config.select_group("nope").unwrap_err().contains("Choose one of: quad-a, quad-b, pair-1"));
+        assert!(eight("").unwrap().select_group("quad-a").unwrap_err().contains("no [group name] sections"));
+    }
+    #[test]
+    fn a_group_must_be_a_ring_in_cable_order() {
+        let mut config = eight("[group cross]\nhosts = s1,s2,s3,s4,s5,s6,s7,s8\n[group shuffled]\nhosts = s1,s3,s2,s4\nlocal_port = 18100\nlayout = other\n").unwrap();
+        config.select_group("cross").unwrap();
+        assert!(config.selected(&UpOptions::default()).unwrap_err().contains("Group cross is not a ring: s4 and s5 have no fabric link"));
+        config.select_group("shuffled").unwrap();
+        assert!(config.selected(&UpOptions::default()).unwrap_err().contains("hosts = s1,s2,s3,s4"));
+        // The same machines in --hosts cable order only need a path.
+        let config = eight("").unwrap();
+        assert!(config.selected(&UpOptions { hosts: ["s2", "s3", "s4", "s1"].map(String::from).to_vec(), ..UpOptions::default() }).is_ok());
+    }
+    #[test]
+    fn both_eight_spark_examples_start_every_group() {
+        let examples = [
+            (include_str!("../examples/eight-sparks.conf"), vec!["ring of 4: spark-1, spark-2, spark-3, spark-4", "ring of 4: spark-5, spark-6, spark-7, spark-8"], ["quads", "doubles", "singles"]),
+            (include_str!("../examples/eight-sparks-ring8.conf"), vec!["ring of 8: spark-1, spark-2, spark-3, spark-4, spark-5, spark-6, spark-7, spark-8"], ["eight", "doubles", "singles"]),
+        ];
+        for (text, cabling, layouts) in examples {
+            let config = parse(text).unwrap();
+            assert_eq!(crate::topology::cabling(&config.machines), cabling);
+            assert_eq!(config.groups.iter().map(|group| group.layout.as_str()).collect::<BTreeSet<_>>(), layouts.into());
+            assert_eq!(config.groups.iter().filter(|group| group.layout == "singles").count(), 8);
+            // Every group of the example passes the ring check vade up applies.
+            for group in &config.groups {
+                let mut config = config.clone();
+                config.select_group(&group.name).unwrap();
+                assert!(config.selected(&UpOptions::default()).is_ok(), "{}", group.name);
+            }
+        }
+    }
+    #[test]
+    fn groups_in_one_layout_cannot_share_machines_or_ports() {
+        for (groups, expected) in [
+            ("[group a]\nhosts = s1,s2\n[group b]\nhosts = s2,s3\nlocal_port = 18090\n", "share machine s2"),
+            ("[group a]\nhosts = s1,s2\n[group b]\nhosts = s3,s4\nlocal_port = 18082\n", "ports 18080..18082 and 18082..18084"),
+            ("[group a]\nhosts = s1,s1\n", "list each configured machine once"),
+            ("[group a]\nhosts = s1,s9\n", "Add [machine s9]"),
+            ("[group a]\nlocal_port = 18090\n", "needs hosts"),
+            ("[group a]\nhosts = s1\nlayout = two words\n", "plain name"),
+            ("[group a]\nhosts = s1\nwatts = 1\n", "Unknown config key watts in group a"),
+            ("[group a]\nhosts = s1\n[group a]\nhosts = s2\n", "unique [group name]"),
+            ("[group a]\nhosts = s1,s2\nlocal_port = 65535\n", "Choose a lower local_port"),
+        ] { assert!(eight(groups).unwrap_err().contains(expected), "{groups}: {:?}", eight(groups).err()); }
+        assert!(eight("[group a]\nhosts = s1,s2\nlayout = x\n[group b]\nhosts = s2,s3\nlayout = y\n").is_ok());
     }
     #[test]
     fn normalize_local_paths_and_validate_remote_endpoints() {

@@ -804,7 +804,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         model.return_work(work);
         result.map(|()| out)
     }
-    fn prepare_verify(&mut self, b: &Backend<'a>, tokens: &[u32]) -> Result<()> {
+    pub(super) fn prepare_verify(&mut self, b: &Backend<'a>, tokens: &[u32]) -> Result<()> {
         if self.mtp_depth() == 0
             || tokens.is_empty()
             || tokens.len() > self.verify_rows
@@ -975,26 +975,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             s.prepare_verify(b, t)?;
         }
         Self::run_rows_inner(b, sessions, tokens, true, true, greedy_head)?;
-        let model = sessions[0].model;
-        let held = model.work.borrow();
-        let work = held.as_ref().ok_or("missing verifier workspace")?;
-        let result = Self::split_results(b, sessions, &work.head_result, tokens.iter().map(|t| t.len()).sum());
-        drop(held);
-        if result.is_err() {
-            for s in sessions.iter_mut() {
-                s.valid = false;
-            }
-        }
-        let ids: Vec<_> = result?.into_iter().map(|v| v.0).collect();
-        let mut at = 0;
-        Ok(tokens
-            .iter()
-            .map(|t| {
-                let row = ids[at..at + t.len()].to_vec();
-                at += t.len();
-                row
-            })
-            .collect())
+        Self::verify_ids(b, sessions, tokens)
     }
     pub fn verify_mtp(&mut self, b: &Backend<'a>, tokens: &[u32]) -> Result<Vec<Vec<f32>>> {
         Self::verify_batch(b, &mut [self], &[tokens])?;

@@ -82,6 +82,7 @@ fn top(on: bool) -> String {
     out += &group("Environment:", &[
         ("VADE_HOME", "Local install root and saved defaults (default ~/.vade)"),
         ("VADE_CONFIG", "Controller config file; selects the controller (see Notes)"),
+        ("VADE_GROUP", "A [group] in the controller config: machines, state, port"),
         ("VADE_API_KEY_FILE", "Credential file when --api-key-file is not given"),
         ("NO_COLOR", "Plain output without color"),
     ], 0);
@@ -136,6 +137,7 @@ fn page(command: &str) -> Option<Page<'static>> {
                 "Two FP4-Local Sparks run the tensor split, the only two-Spark path for FP4-Local: both Sparks work on every token. It needs RDMA, so vade up refuses SEQPAR_RDMA=0 (TCP) for two FP4-Local Sparks. FP8 on two Sparks keeps its ring and may use TCP.",
                 "FP8 needs an FP8 config such as cli/examples/vade.conf. In our checks, FP8 gave the same token IDs on each Spark count, but 2 and 4 Sparks gave different IDs. See docs/benchmarks.md.",
                 "Spark counts above 2 require a current install and linked hosts in cable order.",
+                "VADE_GROUP=NAME selects a [group NAME] from the config: its hosts in rank order, its own ownership record and its own local_port. A group must close into a ring. Set the same VADE_GROUP for status, chat, logs and down. Groups in one layout can run at the same time. See docs/eight-sparks.md.",
                 "--replicas N starts one independent one-Spark server on each of the first N machines (or the N --hosts) and a local gateway on local_port; replica tunnels use the next N local ports. Each replica uses the FP4 defaults above. Use it when the model fits one Spark and many chats run at once; answers are the same on every replica.",
                 "One Spark needs no fabric. Linked Sparks use RDMA by default. SEQPAR_RDMA=0 selects TCP, except for two FP4-Local Sparks. Keep VADE_CONFIG and VADE_HOME consistent through chat, status and down.",
                 GPU_BUSY,
@@ -200,14 +202,15 @@ fn page(command: &str) -> Option<Page<'static>> {
         },
         "doctor" => Page {
             summary: "Check the setup: one line per check, then PASS or FAIL.",
-            usage: &["vade doctor [--json] [--api-key-file PATH] [--dry-run]"],
-            options: &[("--json", "Print one vade.doctor.v1 object with every check"), API_KEY, DRY_RUN],
-            examples: &["vade doctor", "vade doctor --json", "VADE_CONFIG=cluster.conf vade doctor --dry-run"],
+            usage: &["vade doctor [--json] [--api-key-file PATH] [--dry-run]", "vade doctor --fabric [--json] [--dry-run]"],
+            options: &[("--fabric", "Check every configured cable, port, group ring and clock (controller)"), ("--json", "Print one vade.doctor.v1 object with every check"), API_KEY, DRY_RUN],
+            examples: &["vade doctor", "vade doctor --json", "VADE_CONFIG=cluster.conf vade doctor --dry-run", "VADE_CONFIG=cluster.conf vade doctor --fabric"],
             notes: &[
                 "On this Spark: config, VADE_HOME writable, ownership, installed binaries, model files, nvidia-smi and driver, disk, free memory, port and engine health.",
                 "From a controller: local tools, then SSH, nvidia-smi, GPU use, disk, free memory, model files and the staged build on each selected Spark, then the fabric, the port, the harness and engine health.",
                 "Also shows the vade binary and version, context, output, drafting and prefix cache settings, model JSON files, safetensors count and bytes, and server ports on each Spark.",
                 "Doctor checks the active Sparks, or the default vade up selection, through the same SSH options. It does not start an engine or change the setup.",
+                "--fabric checks every machine in the controller config: the cabling shape, each [group] ring, each fabric port (address, 100000 Mb/s or more, MTU 9000, active RDMA device), each cable with both ends in the config and each of its two rails on its own (one subnet, speed, MTU, RDMA, 9000-byte pings both ways) and each clock (within 1000 ms, time sync on). See docs/eight-sparks.md.",
                 "Each FAIL row gives the next step. Exit 0 means PASS, 1 means FAIL.",
                 TRANSPORT, LIFECYCLE,
             ],

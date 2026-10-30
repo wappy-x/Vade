@@ -47,7 +47,7 @@ pub fn home() -> Result<PathBuf, String> {
 /// controller config exists).
 pub fn handles(command: &Command, root: &Path) -> bool {
     matches!(command, Command::Run(_))
-        || (std::env::var_os("VADE_CONFIG").is_none()
+        || (!crate::config::controller_selected()
             && matches!(
                 command,
                 Command::Menu
@@ -67,7 +67,7 @@ pub fn handles(command: &Command, root: &Path) -> bool {
 /// Reject an alternate local start before auth, locking or process work.
 pub(crate) fn validate_start(command: &Command) -> Result<(), String> {
     if matches!(command, Command::Run(_))
-        && (std::env::var_os("VADE_CONFIG").is_some() || crate::launch::owner_configured())
+        && (crate::config::controller_selected() || crate::launch::owner_configured())
     {
         return Err("vade run qwen3-8b needs its own local installation; unset VADE_CONFIG and choose a fresh VADE_HOME, then keep that selection for chat, status, logs and down.".into());
     }

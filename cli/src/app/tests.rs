@@ -7,6 +7,8 @@ mod owner_dispatch;
 mod chat_guards;
 #[path = "tests/two_spark.rs"]
 mod two_spark;
+#[path = "tests/groups.rs"]
+mod groups;
 use super::*;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -1435,3 +1437,4 @@ fn doctor_checks_each_spark_staged_build_against_the_manifest() {
     f.app.runner.probe = Some((false, ""));
     assert!(doctor(&mut f).1.contains("needs SSH"));
 }
+

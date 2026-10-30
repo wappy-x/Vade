@@ -3,6 +3,7 @@ use crate::{checks::Report, cli::{self, Command}, config::Machine, runner::{self
 use std::path::Path;
 
 mod model;
+pub(crate) mod fabric;
 
 /// Identify the command that is in use, without starting another copy.
 pub(crate) fn binary(report: &mut Report) -> Result<(), String> {

@@ -1011,18 +1011,12 @@ impl<'b, 'a, 'w> Engine for FlashNext<'b, 'a, 'w> {
             if batch_on {
                 // The row budget already holds a tick to tick_width (the verify rows, or 16 for
                 // four chats under VADE_MTP_COHORT=wide). Groups use that same width.
+                // On a layer chain the groups are in flight together (verify_groups_greedy).
                 let widths: Vec<_> = tokens.iter().map(|t| t.len()).collect();
-                let mut out = Vec::with_capacity(tokens.len());
-                for g in crate::mtp_batch::verify_groups(&widths, self.tick_width(chats)) {
-                    let ids = NextSession::verify_batch_greedy(
-                        self.backend,
-                        &mut sessions[g.clone()],
-                        &tokens[g],
-                    )
-                    .map_err(error)?;
-                    out.extend(ids.into_iter().map(Predictions::Greedy));
-                }
-                return Ok(out);
+                let groups = crate::mtp_batch::verify_groups(&widths, self.tick_width(chats));
+                return NextSession::verify_groups_greedy(self.backend, &mut sessions, &tokens, &groups)
+                    .map(|v| v.into_iter().map(Predictions::Greedy).collect())
+                    .map_err(error);
             }
             return NextSession::verify_batch_greedy(self.backend, &mut sessions, &tokens)
                 .map(|v| v.into_iter().map(Predictions::Greedy).collect())

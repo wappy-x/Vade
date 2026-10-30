@@ -57,6 +57,10 @@ Notes:
     different IDs. See docs/benchmarks.md.
   - Spark counts above 2 require a current install and linked hosts in cable
     order.
+  - VADE_GROUP=NAME selects a [group NAME] from the config: its hosts in rank
+    order, its own ownership record and its own local_port. A group must close
+    into a ring. Set the same VADE_GROUP for status, chat, logs and down. Groups
+    in one layout can run at the same time. See docs/eight-sparks.md.
   - --replicas N starts one independent one-Spark server on each of the first N
     machines (or the N --hosts) and a local gateway on local_port; replica
     tunnels use the next N local ports. Each replica uses the FP4 defaults

@@ -739,9 +739,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         let owner = crate::flash_next_rows::workspace_owner(sessions.iter().map(|s| s.capacity))?;
         let capacity = sessions[owner].capacity;
         let mut work = model.take_work(b, capacity, count)?;
-        work.bound_head = greedy_head && verify && sessions.len() == 1 && (head_split::eligible(model, sessions.len(), count, verify)
-            || (2..=crate::flash_head_options::RETAINED_ROWS).contains(&count) && model.head_bounds.is_some())
-            && sessions.iter().all(|s| s.dump.is_none() && s.layer_bytes.is_none());
+        work.bound_head = Self::bound_head(model, sessions, count, greedy_head, verify);
         // Rank 0 decides each pass whether its plain greedy head splits; tp_post sends it to rank 1.
         model.tp_set_head_pass(greedy_head && output && !verify && matches!(part, Part::Whole)
             && head_split::plain_eligible(model, sessions, count, &work));
@@ -774,6 +772,8 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 }
             });
         model.return_work(work);
+        // A posted verify group: its tail and positions follow in verify_finish (overlap).
+        if result.is_ok() && model.pp_posted(false) { return Ok(source); }
         if result.is_ok() {
             for (s, t) in sessions.iter_mut().zip(tokens) {
                 s.pos += t.len();
@@ -787,6 +787,12 @@ impl<'a, 'w> NextSession<'a, 'w> {
             }
         }
         result.map(|()| source)
+    }
+    /// The single-chat verify head projects only rows above the retained bound.
+    fn bound_head(model: &NextModel<'a>, sessions: &[&mut Self], count: usize, greedy_head: bool, verify: bool) -> bool {
+        greedy_head && verify && sessions.len() == 1 && (head_split::eligible(model, sessions.len(), count, verify)
+            || (2..=crate::flash_head_options::RETAINED_ROWS).contains(&count) && model.head_bounds.is_some())
+            && sessions.iter().all(|s| s.dump.is_none() && s.layer_bytes.is_none())
     }
     fn check_ops(
         b: &Backend<'_>,
@@ -1001,9 +1007,27 @@ impl<'a, 'w> NextSession<'a, 'w> {
                     }
                 }
                 Self::pp_return_and_observe(b, model, sessions, work, output, verify, &meta, count)?;
+                if model.pp_posted(false) { return Ok(()); }
             }
             Part::Whole => model.tp_seq_drain()?,
         }
+        Self::execute_tail(b, work, sessions, tokens, spans, output, verify, matches!(part, Part::Front(_)))
+    }
+    /// The rest of a pass once its rows are on this rank: draft history, then the head.
+    /// `front`: the pipeline front (its kept rows enter the draft history first).
+    #[allow(clippy::too_many_arguments)]
+    fn execute_tail(
+        b: &Backend<'a>,
+        work: &mut Workspace<'a>,
+        sessions: &mut [&mut Self],
+        tokens: &[&[u32]],
+        spans: &[std::ops::Range<usize>],
+        output: bool,
+        verify: bool,
+        front: bool,
+    ) -> Result<()> {
+        let model = sessions[0].model;
+        let count = spans.last().unwrap().end;
         for ((s, input), span) in sessions.iter_mut().zip(tokens).zip(spans) {
             if verify {
                 for i in 1..span.len() {
@@ -1023,7 +1047,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             let tiled = s.batch_drafts || (input.len() > 1 && super::mtp::tile_all());
             if let Some(d) = &mut s.draft {
                 Self::flush_into(b, model, d, work)?;
-                if (matches!(part, Part::Front(_)) || model.tp_on()) && model.pp_mtp() {
+                if (front || model.tp_on()) && model.pp_mtp() {
                     Self::observe_kept(b, model, d, work, s.slot, s.pos, s.batch_drafts, None)?;
                 }
                 if tiled {
@@ -1110,6 +1134,8 @@ pub(super) enum Part<'p> {
 mod pool;
 #[path = "next_execution_pp.rs"]
 mod pp_rows;
+#[path = "next_execution_overlap.rs"]
+mod overlap;
 #[path = "next_stage.rs"]
 mod stage;
 #[path = "next_split_bank.rs"]

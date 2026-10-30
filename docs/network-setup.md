@@ -69,7 +69,10 @@ This guide calls each half a **rail**.
 - One rail alone moved about **109 Gb/s** one way in our cable tests.
 - Both rails together moved **196.04 Gb/s** one way. That is the full cable.
   The [numbers we measured](#numbers-we-measured) name the record.
-- Vade splits each large transfer across both rails of a cable.
+- Vade's rank transport opens a cable's second rail only between two ranks, or
+  on each link of a path of three or more ranks, and only when both ends have a
+  second subnet. A closed ring of three or more ranks uses one rail per
+  neighbor. The FP4-Local layer chain sends on one rail.
 
 **Confirm the names on your machine.** Run `ibdev2netdev` (or `rdma link show`).
 Do not trust the labels printed on the case: on at least one Spark, the port
@@ -138,6 +141,9 @@ not need the cable that would close the ring.
 **Tip: cable a ring anyway.** In a ring, every pair of neighbors has its own
 direct cable. Six Sparks in a ring can serve as three separate pairs, or as
 one long chain, without recabling.
+
+**Eight Sparks?** See [Eight Sparks](eight-sparks.md): two rings of four or one
+ring of eight, a full address plan, and `vade doctor --fabric`.
 
 <br>
 
@@ -460,7 +466,7 @@ ICMP, SSH, **RoCE v2 (UDP 4791)** and **Vade's TCP ports 29960 and 29961**
 | Ping fails completely | Address on the wrong interface (case labels ≠ Linux names), or subnets differ at the two ends | Run `ibdev2netdev` and `ip -br address` on both ends. Move the address to the interface that is Up. |
 | Small ping works, `-s 8972 -M do` fails | MTU is not 9000 somewhere | Set MTU 9000 on both ends of that rail. |
 | `ib_write_bw` cannot open the device or register memory | Not in the RDMA group, or memlock limited | Run the `rdma` setup step, then **log out and back in**. Check `ulimit -l`. |
-| Bandwidth about half of 196 Gb/s per cable | Only one rail configured or used | Give rail 1 its own subnet at both ends. On FP8, check `vade logs` for `rails=2`. |
+| Bandwidth about half of 196 Gb/s per cable | Only one rail configured or used | Give rail 1 its own subnet at both ends. On FP8, check `vade logs`: two Sparks print `rails=2`; on 4 or 6 Sparks look for `rails_right=2` and `rails_left=2` (an end rank shows 1 on the side with no neighbor). |
 | Bandwidth about 185, not 196 Gb/s | MTU 1500 | Set MTU 9000. |
 | `vade up`: "RDMA launch needs unlimited soft and hard memlock in this SSH session" | The SSH alias Vade uses does not get unlimited locked memory (some routes, such as Tailscale SSH, skip login limits) | Point the config's `ssh =` at an OpenSSH alias over the LAN that prints `unlimited` for `ulimit -Sl` and `ulimit -Hl`. Or use TCP mode (`export SEQPAR_RDMA=0` on the controller). |
 | Engine log: "RDMA socket has no QSFP interface" or "no IPv4 RoCE-v2 GID on neighbour interface" | `fabric.<peer>` is not an address on a 100 Gb/s-or-faster ConnectX-7 interface, or that interface has no RoCE v2 GID yet (link down) | Use the Spark's own fabric address on that cable. Check carrier. |

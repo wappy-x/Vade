@@ -225,6 +225,14 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
         }
         let existing = Session::load(&self.config.state_dir)?;
         let has_running_record = existing.is_some();
+        // Every ownership record of this config, the selected one and each
+        // other group's, also a group no longer in the config: their ranks
+        // are owned engines, not outside jobs.
+        let mut owned: Vec<Session> = existing.iter().cloned().collect();
+        let groups = self.config.group_record_names()?;
+        for dir in std::iter::once(self.config.lock_dir.clone()).chain(groups.iter().map(|name| self.config.group_state_dir(name))) {
+            if dir != self.config.state_dir { owned.extend(Session::load(&dir)?); }
+        }
         let install_id = if self.dry {
             "preview".into()
         } else {
@@ -292,7 +300,7 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
         };
         let mut builds = Vec::new();
         for machine in &machines {
-            let borrowed = existing.as_ref().is_some_and(|session| {
+            let borrowed = owned.iter().any(|session| {
                 session.ranks.iter().any(|rank| {
                     rank.machine.name == machine.name && rank.machine.ssh == machine.ssh
                 })
@@ -598,8 +606,10 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
                 self.down()?;
                 return self.up(&options);
             }
+            // A group restarts under its own VADE_GROUP.
+            let group = self.config.group.as_ref().map(|group| format!("VADE_GROUP={} ", group.name)).unwrap_or_default();
             crate::output::line(format_args!(
-                "Running engine kept. Restart when ready:\n  vade down\n  vade up --hosts {}{}{} --context {} --output {}{}{}{}{}{}",
+                "Running engine kept. Restart when ready:\n  {group}vade down\n  {group}vade up --hosts {}{}{} --context {} --output {}{}{}{}{}{}",
                 options.hosts.join(","),
                 if options.replicas { format!(" --replicas {}", options.hosts.len()) } else { String::new() },
                 if options.mtp_explicit { format!(" --mtp {}", options.mtp) } else { String::new() },

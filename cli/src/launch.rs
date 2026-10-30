@@ -118,13 +118,21 @@ pub(crate) fn check_default_controller_record() -> Result<(), String> {
         return Err("The default controller config is too large; keep it for inspection before starting a new local installation.".into());
     }
     let config = crate::config::Config::parse(&source, &path)?;
-    let record = config.state_dir.join("session.conf");
-    match open_regular(&record) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound
-            && fs::symlink_metadata(&record).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) => Ok(()),
-        Ok(_) => Err("The default controller has an ownership record; run vade down with its config before creating local defaults, or set VADE_CONFIG to keep using that controller.".into()),
-        Err(_) => Err("Cannot inspect the default controller ownership record; keep it for inspection and use its VADE_CONFIG before starting a new local installation.".into()),
+    // The controller's own record and the record of every group guard alike,
+    // also a group no longer in the config.
+    let groups = config.group_record_names().map_err(|_| "Cannot inspect the default controller group ownership records; keep them for inspection before starting a new local installation.")?;
+    let records = std::iter::once((None, config.state_dir.join("session.conf")))
+        .chain(groups.iter().map(|name| (Some(name.as_str()), config.group_state_dir(name).join("session.conf"))));
+    for (group, record) in records {
+        let stop = group.map_or_else(|| "run vade down with its config".to_string(), |name| config.group_down_step(name));
+        match open_regular(&record) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                && fs::symlink_metadata(&record).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
+            Ok(_) => return Err(format!("The default controller has an ownership record; {stop} before creating local defaults, or set VADE_CONFIG to keep using that controller.")),
+            Err(_) => return Err(format!("Cannot inspect the default controller ownership record; keep it for inspection and {stop} before starting a new local installation.")),
+        }
     }
+    Ok(())
 }
 
 /// Whether the local owner flow runs `command`. An explicit `VADE_CONFIG` always
@@ -135,7 +143,7 @@ pub fn handles(command: &Command) -> bool {
     }
     // One explicit selector applies to the entire controller lifecycle, even
     // when either local installation already has generated configuration.
-    if std::env::var_os("VADE_CONFIG").is_some() {
+    if crate::config::controller_selected() {
         return false;
     }
     let configured = owner_configured();
@@ -161,8 +169,8 @@ pub fn handles(command: &Command) -> bool {
 /// Run a local lifecycle command after refusing conflicting selections. Without
 /// `--dry-run` it needs a Linux aarch64 Spark.
 pub fn run(command: Command, dry: bool) -> Result<(), String> {
-    if matches!(command, Command::Launch(_)) && std::env::var_os("VADE_CONFIG").is_some() {
-        return Err("VADE_CONFIG selects the controller installation; use vade up, or unset VADE_CONFIG before local vade launch and its lifecycle commands.".into());
+    if matches!(command, Command::Launch(_)) && crate::config::controller_selected() {
+        return Err("VADE_CONFIG or VADE_GROUP selects the controller installation; use vade up, or unset VADE_CONFIG and VADE_GROUP before local vade launch and its lifecycle commands.".into());
     }
     if matches!(command, Command::Install | Command::Update | Command::Launch(_) | Command::Up(_))
         && !owner_configured() && legacy_configured()
