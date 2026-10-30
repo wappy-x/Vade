@@ -8,7 +8,7 @@
 
 | File | Theme | Motion |
 | --- | --- | --- |
-| [vade-banner-dark.svg](vade-banner-dark.svg) | Dark | The letters decode in from noise. Then a light drifts over them and the cells under it scramble and settle. A faint current flows through the field. |
+| [vade-banner-dark.svg](vade-banner-dark.svg) | Dark | Soft light flows across the field, a shimmer travels through the letters and a highlight sweeps over them. All motion is continuous. |
 | [vade-banner-light.svg](vade-banner-light.svg) | Light | The same, on a pale field |
 | [vade-banner-dark-static.svg](vade-banner-dark-static.svg) | Dark | None |
 | [vade-banner-light-static.svg](vade-banner-light-static.svg) | Light | None |
@@ -18,7 +18,7 @@
 ## What it shows
 
 - **VADE**, drawn large in monospace characters, the same letter shapes as on [vade.lol](https://vade.lol).
-- **One line beneath it:** an LLM inference engine and agent harness, written in Rust, built for the DGX Spark. A cursor blinks after it.
+- **One line beneath it:** an LLM inference engine and agent harness, written in Rust, built for the DGX Spark. A still block cursor follows it.
 - **The project sites** in the corner: vade.lol and getvade.com.
 
 <br>
@@ -38,14 +38,13 @@
 - It copies the look of [vade.lol](https://vade.lol) as it renders: a deep indigo, nearly black field with tiny dots and dashes, violet letters lit from the upper left, a soft veil at the edges.
 - The colors are the site's "nebula" palette: indigo, violet and a pale blue for lit cells. The light version keeps the violet letters on a near-white lavender field.
 - The type follows the site: monospace for the letters and the corner, a plain sans-serif for the tagline. The files name system fonts only, so nothing is downloaded.
-- The motion follows the site too:
-  - **Intro.** The letters start as noise characters and decode from left to right in under three seconds. The first frame already shows VADE, so a still snapshot never shows an empty banner.
-  - **Light.** A soft light drifts over the letters on a slow path. It crosses the word in 28.6 s and moves up and down in 16.5 s, so the path does not repeat soon. Cells under it change to denser characters and a paler blue (a deeper blue in the light version).
-  - **Churn.** The cells at the center of the light scramble through noise characters, and they settle when the light moves on.
-  - **Depth.** The shadow side of the letters turns away from the light as it moves.
-  - **Field.** Faint stripes of dots and dashes flow through the background in two directions, at about 10 and 9 pixels a second.
-  - **Accents.** A few letter cells flick to noise for 0.7 s, a soft sheen crosses the word every 24 s, and the cursor blinks every 1.1 s.
-- No large area changes brightness quickly. The fast parts, the churn and the sparks, cover only a few cells at a time. The light version uses the same motion.
+- The motion is continuous, as on the site. Nothing jumps, blinks or swaps frames:
+  - **Current.** Two soft patches of light drift across the field, one to the right (30 s per loop) and one to the left at a slight angle (22 s per loop). Under them, the letters change to denser characters in a paler blue (a deeper blue in the light version), and the background dots get brighter.
+  - **Shimmer.** The letter cells sit in 32 narrow columns. The brightness of each column rises and falls over 10 s. Each column starts a little later than the one on its left, so a soft wave moves through the word from left to right.
+  - **Sweep.** A slanted highlight crosses the letters from left to right every 12 s.
+  - **Tagline.** It fades in once over 1.5 s and then stays.
+- Only position (`transform: translate`) and opacity move. Timing is linear or ease-in-out. Each loop ends where it starts: the moving light patches and the sweep are repeating tiles that move exactly one tile width per loop. No animation is shorter than 6 s, except the one-time fade. There are no filters, no `steps()` timing and no back-and-forth (`alternate`) loops.
+- All loops line up again after 660 s (10, 12, 22 and 30 s). The still files show the first frame of the moving files, with the tagline in place.
 
 <br>
 
@@ -65,6 +64,7 @@
 - Keep each file under 50 KB.
 - No `<script>`, no `<foreignObject>`, no links to other files or sites.
 - Keep a still version for every moving one.
+- Keep the motion continuous: animate only translate and opacity, with linear or ease-in-out timing, seamless loops and no `steps()`, blinking or frame swaps.
 
 The engine and harness banners still use the earlier, quieter version of this design: [`engine/docs/assets/`](../../engine/docs/assets/README.md) and [`harness/docs/assets/`](../../harness/docs/assets/README.md). The engine's older logo drawings live in the engine folder too.
 
