@@ -512,7 +512,7 @@ impl Config {
         let selected = if !options.hosts.is_empty() {
             options.hosts.iter().map(|name| {
                 self.machines.iter().find(|machine| machine.name == *name).cloned()
-                    .ok_or_else(|| format!("Machine {name} is not in your config. Check --hosts or add its machine section."))
+                    .ok_or_else(|| format!("Machine {name} is not in your config. Give --hosts the NAME of a [machine NAME] section; vade config lists them."))
             }).collect::<Result<Vec<_>, _>>()?
         } else {
             let count = options.sparks.unwrap_or(if options.fp4_local { 1 } else { 2 });

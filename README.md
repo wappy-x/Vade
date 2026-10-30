@@ -19,6 +19,16 @@ git clone --branch main https://github.com/wappy-x/vade.git "$HOME/vade" &&
   sh "$HOME/vade/scripts/install.sh" --launch
 ```
 
+- **The repository is private for now.** The clone above works only for an
+  account with access. Sign in with the [GitHub CLI](https://cli.github.com/)
+  (`gh auth login`), then use
+  `gh repo clone wappy-x/vade "$HOME/vade" -- --branch main` as the first
+  line. [INSTALL step 2](INSTALL.md#step-2-get-the-code) also shows a
+  read-only deploy key.
+- **No model yet?** The script builds `vade` first, then stops at the model
+  check. Download the 102.26 GB checkpoint with `vade pull`, then run the
+  script again. [No model yet](#no-model-yet) gives the two commands.
+
 [Why Vade](docs/why-vade.md) says why it exists and what "exact" means here.
 
 - **One model, two checkpoints:** Qwen3.8 Flash-Next, text only.
@@ -110,6 +120,7 @@ vade chat
 Each step stops at the first problem and prints what to do next. Run the
 same command again after the fix; work that is already done is reused.
 
+<a id="no-model-yet"></a>
 **No model yet?** The script builds `vade` first, then stops at the model
 check. Run the `export` line, download the model, then run the script again
 (not the clone line, because the folder exists now):
@@ -119,6 +130,13 @@ vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e6342
 sh "$HOME/vade/scripts/install.sh"
 ```
 
+`vade pull` shows its progress. If it stops, run it again; it continues from
+where it stopped. It puts the model in
+`~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local`, where the script looks. Over
+SSH, run it inside `tmux` or under `nohup`, because a dropped connection
+stops it. On 2026-10-24, rented GB10 VMs downloaded the checkpoint at 8 to
+22 MB/s: about 80 minutes at the top of that range and over three hours at
+the bottom ([benchmarks](docs/benchmarks.md#rented-cloud-gb10-vms)).
 [Download models](docs/pull-models.md) explains resume, the file checks,
 `vade models` and the commands for the FP8 and Qwen3-8B checkpoints.
 
@@ -153,17 +171,20 @@ The [INSTALL quick start](INSTALL.md#quick-start-with-an-existing-model)
 covers an existing checkout, a checkpoint outside `~/models` and what to do
 when a step fails.
 
-**Want chat right away?** `sh "$HOME/vade/scripts/install.sh" --launch`
-installs, starts the engine and opens chat in one step. Later,
-`vade launch` does the same.
+**Chat in one step.** `sh "$HOME/vade/scripts/install.sh" --launch`
+installs Vade, starts the engine and opens chat. Later, `vade launch` does
+the same.
 
 **Optional: the prebuilt bundle.** The
 [v0.1.0 release page](https://github.com/wappy-x/vade/releases/tag/v0.1.0)
 has a prebuilt launcher bundle and its `SHA256SUMS`. The bundle skips the
 Rust builds. It is an older build: v0.1.0, from 2026-10-24. It does not have
-the fixes merged since then, so it is slower than main and its prefix cache
-can miss where main's cache hits. In our replay of the bundle steps, with the
-model already on the Spark, the first command to `Launch ready` took
+the fixes merged since then. On one Spark with drafting ON, the v0.1.0 card
+of 2026-10-24 wrote code at 76.7 tok/s and C8 at 173.9 tok/s. Main `380d8e5`
+gave 81.4 and 179.5 on 2026-10-30 (mean of two or three starts; see the
+[v0.1.0 cards](docs/benchmarks.md#previous-2026-10-24-v010-release-5a22651)).
+In our replay of the bundle steps, with the model already on the Spark, the
+first command to `Launch ready` took
 101.262 s (record `2026-10-28_1305_bundle-install_5a22651`, not in the
 repository yet). To get the Unreleased changes, build from source.
 [INSTALL](INSTALL.md#optional-release-bundle) shows how to use the bundle.
@@ -392,8 +413,9 @@ explains the full rule and what each check proves.
   [the client gateway](INSTALL.md#client-gateway).
 - **Your own client.** Point any OpenAI-compatible client at
   `http://127.0.0.1:18080/v1`. The
-  [client setup guide](harness/docs/passthrough-matrix.md) covers Codex,
-  Hermes, OpenCode and Pi, directly or through the gateway.
+  [client setup guide](harness/docs/passthrough-matrix.md) covers Claude
+  Code, Codex, Hermes, OpenCode and Pi, directly or through the gateway.
+  Claude Code needs the gateway, or `claude --bare` direct to the engine.
 
 ## Measured results
 

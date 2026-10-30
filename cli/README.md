@@ -23,7 +23,7 @@ This page explains new terms where they first come up. The
 
 | Command | What it does |
 | --- | --- |
-| `vade` | Shows a short status and four choices: Start, Chat, Stop and Check (which runs `vade doctor`) |
+| `vade` | Shows a short status and the next command. On a Spark, that is the same output as `vade status`. From a controller, it lists four choices: Start, Chat, Stop and Check (which runs `vade doctor`) |
 | `vade launch` | Starts the engine on the Spark itself |
 | `vade up` | From a controller with a config file, runs the model on one or more Sparks. On the Spark itself, it also starts the local engine |
 | `vade chat` | Opens chat with the running engine. Add `--resume ID\|NAME\|last` to continue a saved session, or `--name NAME` to name this one |

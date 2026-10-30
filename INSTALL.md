@@ -131,6 +131,9 @@ engine keeps running.
   clone somewhere else.
 - **The clone fails:** check that this connection reaches GitHub and that you
   have access to the private repository (see [Step 2](#step-2-get-the-code)).
+- **The script stops at the model check:** `vade` is built at that point.
+  Run the `export` line, download the model with `vade pull` as in
+  [Step 3](#download), then run `sh "$HOME/vade/scripts/install.sh"` again.
 - **`VADE_CONFIG` or `VADE_BUNDLE` is set:** the script tells you which one to
   unset for this local source route.
 - **This Spark already has a controller config:** use the manual
@@ -477,14 +480,38 @@ still apply.
 
 ### Download
 
-The download prints nothing until it finishes, and that can take hours (see
-[download rates on rented VMs](docs/benchmarks.md#rented-cloud-gb10-vms)). Over
-SSH, a dropped connection stops it, so run it under `nohup` as below (or inside
-`tmux`, if you have it); its output goes to `~/vade-fetch.log`. If the
-complete checkpoint is already at that path, skip the fetch and go straight to
-the manifest check below.
+The checkpoint is 102.26 GB. On 2026-10-24, rented GB10 VMs downloaded it at
+8 to 22 MB/s: about 80 minutes at the top of that range and over three hours
+at the bottom
+([download rates on rented VMs](docs/benchmarks.md#rented-cloud-gb10-vms)).
+Over SSH, a dropped connection stops the download, so run it under `nohup` as
+below (or inside `tmux`, if you have it). If the complete checkpoint is
+already in `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local`, skip the download
+and go straight to the manifest check below.
 
-From the checkout root on the Spark, run this fetch exactly as written:
+Use `vade pull`. It shows its progress, continues after an interruption and
+checks every file. If `scripts/install.sh` stopped at the model check, `vade`
+is already built. If not, the second line below builds it with the host
+toolchain from step 1. From the checkout root on the Spark:
+
+```sh
+export PATH="$HOME/.cargo/bin:$PWD/cli/target/release:$PATH"
+command -v vade >/dev/null || cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml
+nohup vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300 > ~/vade-pull.log 2>&1 &
+```
+
+To follow it, run `tail -f ~/vade-pull.log` (`Ctrl-C` stops only `tail`). A
+good run prints `Verified 32 files, 102.26 GB in` and the model folder. If
+it stops, run the same `vade pull` line again; it continues from where it
+stopped. It writes the `.sha256` list beside the model folder, so the first
+`vade launch`, `vade up` or `vade install` checks the files.
+[Download models](docs/pull-models.md) has the details.
+
+#### Or use the fetch helper
+
+`ops/fetch-model.sh` is the older downloader. It prints nothing until it
+finishes, and its output goes to `~/vade-fetch.log`. From the checkout root on
+the Spark, run this fetch exactly as written:
 
 ```sh
 nohup sh ops/fetch-model.sh nvidia/Qwen3.8-Flash-Next-FP4-Local b9ce18a6887e18c089fdea8509a33e63429a3300 "$HOME/models/nvidia/Qwen3.8-Flash-Next-FP4-Local" > ~/vade-fetch.log 2>&1 &
@@ -515,14 +542,14 @@ enough. Vade's `install`, `up` and `launch` do not download these weights.
 
 On Route A, the first `vade launch`, `vade up` or `vade install` checks every
 file for you while it compiles the GPU code, if it finds a checksum list: the
-fetch helper's `Qwen3.8-Flash-Next-FP4-Local.sha256` beside the checkpoint
-folder, or a `manifest.sha256` inside it. A file that differs stops the launch
+`Qwen3.8-Flash-Next-FP4-Local.sha256` that `vade pull` or the fetch helper
+writes beside the checkpoint folder, or a `manifest.sha256` inside it. A file that differs stops the launch
 with its name. Nothing is written into the checkpoint; the result is kept in
 Vade's private state, so later starts skip the work.
 
 If you got the checkpoint another way, or you use Route B, check the files
-against the committed manifest once yourself. This reads the whole checkpoint
-and takes over a minute. From the checkout root:
+against the committed manifest once yourself. This reads all 102.26 GB of the
+checkpoint. From the checkout root:
 
 ```sh
 MODEL_SHA256_LIST="$PWD/cli/examples/qwen3.8-flash-next-fp4-local.sha256"
@@ -1389,7 +1416,7 @@ stop), and run `vade logs` and `vade doctor` before you retry.
 | `staged hashes differ from the manifest. Nothing started; run vade install.` | A controller's `vade up` prints this, with the machine name in front. Run `vade install` to restage the matching engine and PTX. A local `vade launch` or `vade up` rebuilds a changed staged build by itself. For stale PTX during a source build, run `cargo +1.99.0 kernels` again from `engine/` before you build again. |
 | HTTP 503 with `{"error":{"type":"overloaded","message":"connection capacity reached"}}` | The engine accepts 16 connections at once. A client that opens a 16th chat while an earlier one is still closing, or more than 16 at a time, gets this reply at the start; the server stays ready and nothing ran. Retry after a second: the engine sends no `Retry-After`, and the retry is accepted once a slot is free. `vade-harness gateway` ([client gateway](#client-gateway)) does this for you: with one upstream it waits up to 30 s for a slot, and it adds `Retry-After: 1` to any 429 or 503 it passes on without one. `vade-gateway` passes the refusal straight through. Otherwise lower the client's concurrency. |
 | `generation stopped before completion` | It can show up on the first 8- or 16-request `vade bench` after a controller start, when the engine log reports an allocation that did not fit. Run `vade logs`, then retry. |
-| `Transport: ... did not reply to the pre-start check; nothing was started or recorded.` | Vade gives each SSH connection a short time limit, so a brief network or SSH hiccup can cause this. Nothing started, so run `vade up` again. If it keeps happening, test the machine with `ssh -o BatchMode=yes` and read the SSH error in the retained logs. |
+| `Transport: ... did not reply to the pre-start check; nothing was started or recorded.` | Vade gives each SSH connection 10 seconds to connect and the check 90 seconds to finish, so a brief network or SSH hiccup can cause this. Nothing started, so run `vade up` again. If it keeps happening, test the machine with `ssh -o BatchMode=yes` and read the SSH error in the retained logs. |
 | `Directory ... is shared. Run chmod 700 ...` or `Directory ... on ... is open to other users.` | A `stage_dir` or `state_dir` is open to other users, on the controller or on a Spark. Run the `chmod 700` command the message prints, then run `vade install` again. Next time, create these folders with `mkdir -m 700` or let Vade create them. |
 | `Auto-compaction deferred: safe compaction cannot fit a useful reply reservation; history retained. Will retry on the next turn; /compact or /new may be needed.` | It can appear in a long chat when the context is 8192, because the output limit then equals the whole context and there is no room to shorten the history safely. Your history is kept and the reply still arrives. Type `/new` to start a fresh chat, which won't show this message. |
 | `Build GPU kernels failed; check the retained build log and the existing pinned Rust toolchains.` | Read the saved build log. Make sure you finished installing the pinned toolchains (step 1) and fetched the `build-std` files online (`sh scripts/install.sh` does this), which the offline kernel build needs, then retry. |

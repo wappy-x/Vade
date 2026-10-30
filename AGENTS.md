@@ -1,5 +1,10 @@
 # Working on Vade
 
+> [!NOTE]
+> This file is for agents that change Vade's code. To install, start or use
+> Vade for a person, or to connect Claude Code or Codex to it, read the
+> [agent quickstart](docs/agents/quickstart.md) instead.
+
 Vade is an inference engine for the NVIDIA DGX Spark / GB10, written in Rust
 using only the standard library. Version 0.1.0 targets
 `nvidia/Qwen3.8-Flash-Next-FP4-Local` and handles text only. It runs on one

@@ -46,7 +46,7 @@ Maintain:
   version   Print the CLI version
 
 Options:
-  --json               JSON output for status, doctor, config, detect, version
+  --json               JSON for status, doctor, config, detect, models, version
   --dry-run            Preview a lifecycle command; others run as usual
   --api-key-file PATH  Credential for chat, doctor, verify, bench and local run
   -h, --help           Show help

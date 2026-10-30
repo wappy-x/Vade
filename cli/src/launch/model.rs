@@ -13,7 +13,7 @@ use std::{
 use std::fs::File;
 
 const DEFAULT_CHECKPOINT: &str = "Qwen3.8-Flash-Next-FP4-Local";
-const MODEL_HELP: &str = "Use nvidia/Qwen3.8-Flash-Next-FP4-Local. From the checkout, download a checkpoint folder with: sh ops/fetch-model.sh nvidia/Qwen3.8-Flash-Next-FP4-Local b9ce18a6887e18c089fdea8509a33e63429a3300 ~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local";
+const MODEL_HELP: &str = "Use nvidia/Qwen3.8-Flash-Next-FP4-Local. Download it into ~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local with: vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300";
 
 #[derive(Clone, Debug)]
 pub(super) struct Model {

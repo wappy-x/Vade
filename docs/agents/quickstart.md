@@ -77,7 +77,23 @@ vade setup --yes
 The repository is private for now. Without access, the clone fails with
 `could not read Username` or `Repository not found`. Tell the person; do not
 try other URLs. [Install step 2](../../INSTALL.md#step-2-get-the-code) gives
-the two ways in.
+the two ways in. If `gh auth status` shows an account with access, clone with
+`gh repo clone wappy-x/vade "$HOME/vade" -- --branch main` instead.
+
+With no model on the Spark, the installer builds `vade`, then stops at the
+model check. The error says what is missing and gives the `vade pull`
+line. Ask the person before you download: the checkpoint is
+102.26 GB. Then run the download in the background and run the installer
+again when it is done:
+
+```sh
+export PATH="$HOME/.cargo/bin:$HOME/vade/cli/target/release:$PATH"
+nohup vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300 > ~/vade-pull.log 2>&1 &
+```
+
+The download is done when `~/vade-pull.log` has a `Verified 32 files` line.
+If the pull stops early, run the same line again; it continues from where it
+stopped. [Download models](../pull-models.md) has the details.
 
 After the installer, `vade setup --yes` reuses the model and settings the
 installer saved. It runs `vade install` (nothing is rebuilt), `vade up` and
@@ -145,7 +161,40 @@ An API chat request thinks first unless it sends `"enable_thinking": false`.
 The reasoning counts against `max_tokens`. See the
 [OpenAI API page](../openai-api.md).
 
-## 4. Stop and update
+## 4. Connect Claude Code or Codex
+
+`vade chat` is Vade's own agent. To use Claude Code or Codex with the
+running engine instead, run the example script for it from the checkout.
+Each script reads the model and its limits from `/v1/capabilities` first.
+Without `--interactive`, it asks one question and prints the answer, so you
+can check the connection first.
+
+| Client | Check | Open it | Needs |
+| --- | --- | --- | --- |
+| Claude Code | `sh examples/claude-code.sh` | `sh examples/claude-code.sh --interactive` | `claude` on `PATH` |
+| Codex | `sh examples/codex.sh` | `sh examples/codex.sh --interactive` | `codex` on `PATH` and `vade-harness`, built with the command below |
+
+```sh
+cd "$HOME/vade"
+cargo +1.99.0 build --release --offline --manifest-path harness/Cargo.toml --bins
+```
+
+The installer stages its own copy of `vade-harness` for `vade chat`. It does
+not build `harness/target/release`, which the Codex script uses. Both scripts
+use `http://127.0.0.1:18080`; set `VADE_API_URL` when `vade status --json`
+shows another `endpoint`.
+
+The Claude Code script runs `claude --bare`, without hooks, plugins, memory
+or `CLAUDE.md`. Without `--bare`, Claude Code sends a `system` role inside
+`messages`, and the engine answers HTTP 400. For full Claude Code, put the
+gateway in front of the engine. The
+[client setup guide](../../harness/docs/passthrough-matrix.md#claude-code)
+gives the commands, and it covers Hermes, OpenCode and Pi too. The Codex
+script writes a new Codex home with a read-only sandbox and never touches
+`~/.codex`. [Examples](../../examples/README.md#claude-code) shows the output
+of both scripts.
+
+## 5. Stop and update
 
 On a Spark:
 
@@ -208,6 +257,7 @@ both the same for every command in one setup.
 | `needs an NVIDIA GB10` or `CUDA 13.0 or newer` | Not a Spark, or the NVIDIA driver is too old | Tell the person; driver updates are an administrator job |
 | `no checksum list for this checkpoint` | No `.sha256` list beside the model folder, so Vade cannot check the files | Tell the person; [check the files](../../INSTALL.md#check-the-files) shows the check |
 | `Cannot reach ... over SSH` | A Spark is off, off the network or asks for a password | `ssh -o BatchMode=yes HOST true`, then run the command again |
+| `Model folder ... is unavailable` and a `vade pull` line | No checkpoint where Vade looks | Ask the person, then run the `vade pull` line (section 2) |
 | A doctor row `model files` fails | The checkpoint is missing or incomplete | Ask the person, then `vade pull` with the pinned command in [download models](../pull-models.md) |
 | `refused --context` or `Not enough memory` | The engine has too little memory | Run `vade up` with a smaller `--context` |
 | `Port ... is in use` | Another program has the port | Tell the person |

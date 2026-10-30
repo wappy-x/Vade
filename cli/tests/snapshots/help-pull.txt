@@ -12,7 +12,7 @@ Options:
   --include PATTERN  Download only matching paths; repeat for more (* matches
                      any text, / too)
   --to DIR           Model folder (default ~/models/<org>/<name>)
-  --dry-run          List the files and sizes; download nothing
+  --dry-run          Ask the Hub for the file list and sizes; download nothing
 
 Notes:
   - Without --include, pull takes the weights (*.safetensors and the index),

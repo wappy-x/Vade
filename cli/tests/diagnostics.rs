@@ -39,6 +39,7 @@ fn argument_errors_identify_the_problem_before_config_or_network_io() {
     let fixture = Fixture::new("options");
     for (args, expected) in [
         (vec!["statuz"], vec!["Unknown command", "statuz", "vade --help"]),
+        (vec!["serve"], vec!["Unknown command", "serve", "vade up", "vade launch"]),
         (vec!["up", "--spark"], vec!["Unknown option", "--spark", "vade up --help"]),
         (vec!["run", "qwen3-8b", "--porrt"], vec!["Unknown option", "--porrt", "vade run --help"]),
         (vec!["run", "qwen3-8b", "--port"], vec!["Give --port a value", "vade run --help"]),

@@ -214,6 +214,9 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
         if command.starts_with('-') {
             return Err(format!("Unknown option {}. Put options after the command name. Run vade --help.", crate::text::argument(command)));
         }
+        if command == "serve" {
+            return Err("Unknown command \"serve\". Run vade up to start the engine in the background, or vade launch to start it and open chat.".into());
+        }
         return Err(format!("Unknown command {}. Run vade --help to see the commands.", crate::text::argument(command)));
     }
     if args[1..].iter().any(|arg| matches!(*arg, "--help" | "-h")) {
@@ -434,7 +437,7 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
                     .any(|name| !identifier(name) || !names.insert(name))
                 {
                     return Err(
-                        "Give --hosts distinct machine names separated by commas, with no spaces."
+                        "Give --hosts distinct machine names separated by commas, with no spaces. Use the NAME of each [machine NAME] section in your config, not an SSH target; vade config lists them."
                             .into(),
                     );
                 }

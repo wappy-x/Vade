@@ -75,7 +75,7 @@ fn top(on: bool) -> String {
         ("version", "Print the CLI version"),
     ], 8);
     out += &group("Options:", &[
-        ("--json", "JSON output for status, doctor, config, detect, version"),
+        ("--json", "JSON for status, doctor, config, detect, models, version"),
         ("--dry-run", "Preview a lifecycle command; others run as usual"),
         ("--api-key-file PATH", "Credential for chat, doctor, verify, bench and local run"),
         ("-h, --help", "Show help"),
@@ -312,7 +312,7 @@ fn page(command: &str) -> Option<Page<'static>> {
             options: &[
                 ("--include PATTERN", "Download only matching paths; repeat for more (* matches any text, / too)"),
                 ("--to DIR", "Model folder (default ~/models/<org>/<name>)"),
-                ("--dry-run", "List the files and sizes; download nothing"),
+                ("--dry-run", "Ask the Hub for the file list and sizes; download nothing"),
             ],
             examples: &[
                 "vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local",
