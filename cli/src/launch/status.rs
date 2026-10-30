@@ -73,6 +73,12 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
 /// `vade status` when nothing is running.
 pub(super) fn stopped() -> String { crate::status::stopped(&text::command("launch")) }
 
+/// `vade status` when the recorded engine process is gone, as after a crash or a kill.
+pub(super) fn stale() -> String {
+    format!("{} Vade is stopped: the engine is not running (stale record found; the next start clears it).\n{}",
+        style::paint(Token::Dim, "○", Stream::Out), crate::status::next_steps(&[("Start", &text::command("launch"))]))
+}
+
 impl<R: Runner, D: Detector> Launcher<R, D> {
 
     /// Fill a status report; dry runs record every live check as unchecked.

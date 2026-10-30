@@ -21,6 +21,14 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             report.fail("saved config", "An owned engine has no valid saved config.",
                 "Preserve the state folder, then run vade down before repairing the saved config.")?;
         }
+        // A crash or a kill leaves the record of an engine that no longer runs: check it as stopped.
+        let record = match record {
+            Some(Some(owned)) if owned.get("phase").is_some_and(|phase| phase == "running") && self.engine_gone(&owned) => {
+                report.skip("engine process", &format!("not running; stale record found ({} clears it)", text::command("up")))?;
+                Some(None)
+            }
+            record => record,
+        };
         // Before the first launch, nothing installed is the expected state, not damage.
         let (missing, next) = if config.is_none() {
             ("Vade is not installed yet.", "Run vade launch to install and start Vade.")

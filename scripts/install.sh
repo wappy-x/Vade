@@ -81,17 +81,13 @@ printf '%s\n' 'Install: building the vade command.'
 CARGO_TARGET_DIR="$root/cli/target" cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml ||
     fail 'CLI build failed. Next: fix the compiler error above (including any missing linker), then rerun the Retry command below.'
 vade="$root/cli/target/release/vade"
-"$vade" detect </dev/null ||
-    fail 'preflight failed. Next: follow the diagnostic above, then rerun the Retry command below. For another model location, set VADE_MODELS to its checkpoint folder.'
-# The kernel build prints many compiler warnings; they go to a log file, and
-# the end of that log is shown only when the build fails.
-kernel_log="$root/engine/target/install-kernels.log"
-mkdir -p "$root/engine/target" || fail "cannot create $root/engine/target. Next: make the checkout writable, then rerun this script."
-printf 'Install: building the GPU kernels (the first build may download Rust build-std files). Log: %s\n' "$kernel_log"
-if ! (cd engine && cargo +1.99.0 kernels) >"$kernel_log" 2>&1; then
-    tail -n 40 "$kernel_log" >&2
-    fail "GPU kernel bootstrap failed. Next: fix the compiler/download error above (full log: $kernel_log); if build-std files are missing, rerun online with CARGO_NET_OFFLINE=false."
-fi
+# vade install checks this Spark and builds the GPU kernels once, offline.
+# That build needs the Rust build-std files; fetch only those here.
+sysroot=$(rustup run "$device" rustc --print sysroot) && [ -n "$sysroot" ] ||
+    fail "cannot find the $device sysroot. Next: rustup toolchain install $device --profile minimal --no-self-update --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda; then rerun this script."
+printf '%s\n' 'Install: fetching the Rust build-std files for the GPU kernels (none when cached).'
+cargo "+$device" fetch --locked --manifest-path "$sysroot/lib/rustlib/src/rust/library/Cargo.toml" ||
+    fail 'Rust build-std fetch failed. Next: check access to https://index.crates.io and rerun the Retry command below; with CARGO_NET_OFFLINE=true, run it once online first.'
 "$vade" install </dev/null ||
     fail "local install failed. Next: follow the diagnostic above, run \"$vade\" doctor, then retry."
 printf 'Install complete. Start and chat:\n  "%s" launch\nCheck and start:\n  "%s" setup\nTo type vade by name in a new shell, run this there first:\n  export PATH="$HOME/.cargo/bin:%s:$PATH"\n' "$vade" "$vade" "$root/cli/target/release"

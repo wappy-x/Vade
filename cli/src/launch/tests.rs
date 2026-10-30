@@ -619,8 +619,8 @@ fn source_install_fixture_child() {
         ),
         (1, 2, 1)
     );
-    assert_eq!(launch.runner.worker_ops(), ["listener"]);
-    assert_eq!(launch.runner.calls.len(), 3); // owned listener, loopback health, chat
+    assert_eq!(launch.runner.worker_ops(), ["inspect", "listener"]);
+    assert_eq!(launch.runner.calls.len(), 4); // live process, owned listener, loopback health, chat
     assert_eq!(fs::read(f.root.join("config")).unwrap(), config);
     assert_eq!(
         fs::read(f.root.join("stage/install.conf")).unwrap(),
@@ -801,7 +801,8 @@ fn unhealthy_or_unowned_resident_never_spawns_a_duplicate() {
         assert_eq!(launch.runner.starts, 1);
         assert_eq!(launch.runner.chats, 1);
         assert_eq!(launch.detector.calls, 1);
-        assert_eq!(launch.runner.worker_ops(), ["listener"]);
+        // A lost listener asks once more whether the process is gone.
+        assert_eq!(launch.runner.worker_ops(), if listener_owned { &["inspect", "listener"][..] } else { &["inspect", "listener", "inspect"] });
         assert!(launch.runner.cleanup_ops.is_empty());
         assert_eq!(fs::read(f.root.join("state/run.conf")).unwrap(), record);
     }

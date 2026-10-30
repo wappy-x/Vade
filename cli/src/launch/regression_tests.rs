@@ -177,7 +177,8 @@ fn changed_saved_launch_limits_refuse_resident_reuse_until_down() {
             assert!(error.contains("launch limits") && error.contains("vade down"), "{error}");
             assert_eq!(launch.runner.starts, 1);
             assert_eq!(launch.runner.chats, 1);
-            assert!(launch.runner.calls.is_empty());
+            assert_eq!(launch.runner.worker_ops(), ["inspect"]);
+            launch.runner.calls.clear();
             assert_eq!(fs::read(f.root.join("state/run.conf")).unwrap(), record);
         }
         let mut report = crate::status::Snapshot::new("local", false);

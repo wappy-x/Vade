@@ -845,6 +845,10 @@ add. Passing host checks doesn't prove the GPU path works.
 Try `vade status`, `vade logs`, then `vade down` first. If the controller
 crashed or the SSH master died, `vade down` is all you need: it reports
 `The controller tunnel was already closed.` and carries on stopping the ranks you own.
+If the local engine crashed or was killed, `vade status` says
+`the engine is not running (stale record found)`. The next `vade up` or
+`vade launch` clears that record in one line, then starts as usual. The crash
+log stays in `vade logs`.
 
 The launch helper saves the engine process's exact identity in a journal,
 `journal.conf` (see step 1 below), just before it starts that process (exec).

@@ -276,3 +276,49 @@ fn local_status_reads_and_prints_the_engine_events() {
     assert!(printed.contains("\n  Event counts: scheduler_pool 1 (from /health)\n  Last events: not read (the request failed; run vade status again)\n"), "{printed}");
     captured(|| launch.execute(Command::Down, false)).0.unwrap();
 }
+
+#[test]
+fn a_dead_engine_record_is_reported_by_status_and_doctor_and_cleared_by_up() {
+    let f = Fixture::new();
+    f.installed();
+    f.configured();
+    let mut launch = f.launcher();
+    captured(|| launch.execute(Command::Up(Default::default()), false)).0.unwrap();
+    // The engine crashed or was killed: its process is gone and nothing listens.
+    launch.runner.refused = true;
+    launch.runner.listener_owned = false;
+    let record = fs::read(f.root.join("state/run.conf")).unwrap();
+    assert_eq!(captured(|| launch.execute(Command::Status, false)), (Ok(()), format!(
+        "○ Vade is stopped: the engine is not running (stale record found; the next start clears it).\n  Start: {}\n", text::command("launch"))));
+    let (result, printed) = captured(|| launch.execute(Command::Doctor, false));
+    result.unwrap();
+    assert!(printed.contains(&format!("skip  engine process        not running; stale record found ({} clears it)\n", text::command("up"))), "{printed}");
+    assert!(printed.contains("ok    port ") && printed.contains("free on 127.0.0.1"), "doctor checks the listener: {printed}");
+    assert!(printed.contains(&format!("skip  engine health         stopped; start: {}\n", text::command("launch"))), "{printed}");
+    assert!(!printed.contains("in use by the running engine") && !printed.contains("holds its share"), "{printed}");
+    assert_eq!(captured(|| launch.execute(Command::Chat(Default::default()), false)).0.unwrap_err(), format!(
+        "The engine is not running; it stopped or was killed. Run {} to clear its record and start it again.", text::command("up")));
+    assert_eq!(fs::read(f.root.join("state/run.conf")).unwrap(), record, "status, doctor and chat keep the record");
+    assert_eq!(launch.runner.starts, 1);
+
+    // vade up clears the record in one line, then starts as usual.
+    launch.runner.listener_owned = true;
+    launch.runner.calls.clear();
+    let (result, printed) = captured(|| launch.execute(Command::Up(Default::default()), false));
+    result.unwrap();
+    assert!(printed.starts_with(&format!("Cleared the record of an engine that is no longer running (it stopped or was killed). Its log: {}\n", text::command("logs"))), "{printed}");
+    assert!(printed.contains("Up ready in "), "{printed}");
+    assert_eq!(launch.runner.worker_ops(), ["inspect", "stop", "clean", "probe", "start", "inspect", "listener"]);
+    assert_eq!(launch.runner.starts, 2);
+    assert_ne!(fs::read(f.root.join("state/run.conf")).unwrap(), record, "a new record replaces the stale one");
+
+    // A live engine whose listener is lost keeps the old error and record.
+    launch.runner.listener_owned = false;
+    let record = fs::read(f.root.join("state/run.conf")).unwrap();
+    assert_eq!(captured(|| launch.execute(Command::Status, false)).0.unwrap_err(), "The recorded server does not own the loopback listener.");
+    assert!(captured(|| launch.execute(Command::Up(Default::default()), false)).0.is_err());
+    assert_eq!(fs::read(f.root.join("state/run.conf")).unwrap(), record);
+    assert_eq!(launch.runner.starts, 2);
+    launch.runner.listener_owned = true;
+    captured(|| launch.execute(Command::Down, false)).0.unwrap();
+}

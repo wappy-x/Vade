@@ -29,13 +29,14 @@ if [ "$1" = component ]; then
     printf '%s\n' rust-src llvm-tools-aarch64-unknown-linux-gnu llvm-bitcode-linker-aarch64-unknown-linux-gnu rust-std-nvptx64-nvidia-cuda
 elif [ "$1" = run ]; then
     [ "${INSTALL_MISSING_HOST-false}" = false ] || [ "$2" != 1.99.0 ] || exit 1
+    [ "${4-}" != --print ] || [ "${INSTALL_NO_SYSROOT-false}" = true ] || printf '%s\n' "$INSTALL_ROOT/sysroot"
 fi
 "#);
         fixture.tool("cargo", r#"
 printf 'cargo %s\n' "$*" >> "$INSTALL_CALLS"
-if [ "$2" = kernels ]; then
-    printf 'warning: unused variable in a kernel\n' >&2
-    [ "${INSTALL_FAIL_KERNEL-false}" = false ] || { echo 'error: fixture kernel failure' >&2; exit 42; }
+if [ "$2" = fetch ]; then
+    [ "$5" = "$INSTALL_ROOT/sysroot/lib/rustlib/src/rust/library/Cargo.toml" ] || exit 89
+    [ "${INSTALL_FAIL_FETCH-false}" = false ] || { echo 'error: fixture fetch failure' >&2; exit 42; }
 else
     [ "$CARGO_TARGET_DIR" = "$INSTALL_ROOT/cli/target" ] || exit 90
 fi
@@ -68,7 +69,7 @@ printf 'vade %s\n' "$*" >> "$INSTALL_CALLS"
 impl Drop for Fixture { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.root); } }
 
 #[test]
-fn cached_source_install_uses_pins_and_preflights_before_kernel_build() {
+fn cached_source_install_fetches_build_std_and_leaves_detect_and_kernels_to_vade_install() {
     let f = Fixture::new();
     let output = f.run(&[("CARGO_TARGET_DIR", "/unrelated/target")]);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
@@ -76,24 +77,13 @@ fn cached_source_install_uses_pins_and_preflights_before_kernel_build() {
     assert!(!calls.contains("unexpected-download"), "{calls}");
     assert!(!calls.contains("toolchain install"), "{calls}");
     assert!(calls.contains("cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml"), "{calls}");
-    assert!(calls.find("vade detect").unwrap() < calls.find("cargo +1.99.0 kernels").unwrap());
-    assert!(calls.ends_with("vade install\n"), "{calls}");
+    // vade install detects this Spark and builds the kernels once (fresh install step 4).
+    let fetch = format!("cargo +nightly-2026-10-01 fetch --locked --manifest-path {}/sysroot/lib/rustlib/src/rust/library/Cargo.toml\n", f.root.display());
+    assert!(calls.ends_with(&format!("{fetch}vade install\n")), "{calls}");
+    assert!(!calls.contains("kernels") && !calls.contains("vade detect"), "{calls}");
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Install: fetching the Rust build-std files for the GPU kernels (none when cached).\n"), "{stdout}");
     assert!(stdout.contains(&format!("\"{}/cli/target/release/vade\" launch", f.root.display())), "{stdout}");
-    // Kernel compiler warnings go to the log, not to the screen (fresh install step 4).
-    let log = f.root.join("engine/target/install-kernels.log");
-    assert!(stdout.contains(&format!("Log: {}", log.display())), "{stdout}");
-    assert!(fs::read_to_string(&log).unwrap().contains("warning: unused variable"));
-    assert!(!stdout.contains("warning:") && !String::from_utf8_lossy(&output.stderr).contains("warning:"), "{stdout}");
-}
-
-#[test]
-fn a_failed_kernel_build_shows_the_end_of_its_log() {
-    let f = Fixture::new();
-    let output = f.run(&[("INSTALL_FAIL_KERNEL", "true")]);
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("error: fixture kernel failure") && stderr.contains("install-kernels.log"), "{stderr}");
 }
 
 #[test]
@@ -116,8 +106,8 @@ fn source_install_failures_stop_at_the_cause_and_print_a_next_step() {
         (("INSTALL_GPU_BUSY", "true"), "stop that workload through the launcher", "rustup "),
         (("INSTALL_MISSING_HOST", "true"), "rerun this script online", "cargo "),
         (("INSTALL_MISSING_DEVICE", "true"), "rerun this script online", "cargo "),
-        (("INSTALL_FAIL_KERNEL", "true"), "GPU kernel bootstrap failed", "vade install"),
-        (("INSTALL_FAIL_VADE", "detect"), "fixture diagnostic: fix this cause", "cargo +1.99.0 kernels"),
+        (("INSTALL_FAIL_FETCH", "true"), "Rust build-std fetch failed", "vade install"),
+        (("INSTALL_NO_SYSROOT", "true"), "cannot find the nightly-2026-10-01 sysroot", "fetch"),
         (("INSTALL_FAIL_VADE", "install"), "fixture diagnostic: fix this cause", "vade launch"),
     ] {
         let f = Fixture::new();

@@ -189,7 +189,6 @@ From a controller, `vade down` prints `Vade is stopped.`, or
 | `~/.vade/projects` | Saved chat sessions | Use `vade sessions` |
 | The path in `vade config` | The controller config | Ask the person |
 | `~/.vade/controller` | Stage and state of a controller that setup wrote | Never |
-| `engine/target/install-kernels.log` in the checkout | Output of the installer's kernel build | Read only |
 
 `VADE_HOME` moves `~/.vade`. `VADE_CONFIG` names a controller config. Keep
 both the same for every command in one setup.

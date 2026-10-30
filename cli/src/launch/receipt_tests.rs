@@ -140,8 +140,8 @@ fn cold_launch_stages_only_manifest_metadata_and_keeps_receipts_private() {
     launch.execute(Command::Launch(Default::default()), false).unwrap();
     assert_eq!(launch.detector.calls, 1);
     assert_eq!((launch.runner.starts, launch.runner.chats), (1, 2));
-    assert_eq!(launch.runner.worker_ops(), ["listener"]);
-    assert_eq!(launch.runner.calls.len(), 3);
+    assert_eq!(launch.runner.worker_ops(), ["inspect", "listener"]);
+    assert_eq!(launch.runner.calls.len(), 4);
     assert_eq!(fs::read(staged).unwrap(), manifest.as_bytes());
     assert_eq!(
         fs::read(f.model.join("manifest.sha256")).unwrap(),
@@ -194,8 +194,8 @@ fn generated_private_manifest_survives_restart_and_warm_attach() {
     fs::remove_file(f.model.join("config.json")).unwrap();
     launch.runner.calls.clear();
     launch.execute(Command::Launch(Default::default()), false).unwrap();
-    assert_eq!(launch.runner.worker_ops(), ["listener"]);
-    assert_eq!(launch.runner.calls.len(), 3);
+    assert_eq!(launch.runner.worker_ops(), ["inspect", "listener"]);
+    assert_eq!(launch.runner.calls.len(), 4);
     assert_eq!(
         (
             launch.detector.calls,

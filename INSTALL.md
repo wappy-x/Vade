@@ -84,12 +84,12 @@ The installer runs only on Linux `aarch64`. It does these steps:
 
 1. It finds Rust in `~/.cargo/bin`. It installs any missing pinned
    toolchains and GPU components.
-2. It builds the CLI and runs preflight checks.
-3. It fills the compiler cache and runs local `vade install`. This also
-   compiles the GPU code into Vade's private startup cache, so the first `up`
-   does not have to. The kernel build writes its many compiler warnings to
-   `engine/target/install-kernels.log`; the script shows the end of that log
-   only when the build fails.
+2. It builds the CLI and fetches the Rust `build-std` files that the GPU
+   kernel build needs. When they are cached, it downloads nothing.
+3. It runs local `vade install`. This checks the Spark and the model once
+   (preflight), then builds the GPU kernels, the engine and chat once,
+   offline. It also compiles the GPU code into Vade's private startup cache,
+   so the first `up` does not have to.
 4. With `--launch`, it starts the engine and opens chat in the folder where
    you started. Without that flag, it stops after the install.
 
@@ -1369,7 +1369,7 @@ stop), and run `vade logs` and `vade doctor` before you retry.
 | `Transport: ... did not reply to the pre-start check; nothing was started or recorded.` | Vade gives each SSH connection a short time limit, so a brief network or SSH hiccup can cause this. Nothing started, so run `vade up` again. If it keeps happening, test the machine with `ssh -o BatchMode=yes` and read the SSH error in the retained logs. |
 | `Directory ... is shared. Run chmod 700 ...` or `Directory ... on ... is open to other users.` | A `stage_dir` or `state_dir` is open to other users, on the controller or on a Spark. Run the `chmod 700` command the message prints, then run `vade install` again. Next time, create these folders with `mkdir -m 700` or let Vade create them. |
 | `Auto-compaction deferred: safe compaction cannot fit a useful reply reservation; history retained. Will retry on the next turn; /compact or /new may be needed.` | It can appear in a long chat when the context is 8192, because the output limit then equals the whole context and there is no room to shorten the history safely. Your history is kept and the reply still arrives. Type `/new` to start a fresh chat, which won't show this message. |
-| `Build GPU kernels failed; check the retained build log and the existing pinned Rust toolchains.` | Read the saved build log. Make sure you finished installing the pinned toolchains (step 1) and ran the online kernel build (step 2), which downloads what the offline launch build needs, then retry. |
+| `Build GPU kernels failed; check the retained build log and the existing pinned Rust toolchains.` | Read the saved build log. Make sure you finished installing the pinned toolchains (step 1) and fetched the `build-std` files online (`sh scripts/install.sh` does this), which the offline kernel build needs, then retry. |
 | `Vade hit an internal error at ...` | This is a bug in Vade, not in your setup. Run the same command again with `RUST_BACKTRACE=1` in front of it and report the output, with the command you ran, to the Vade maintainers. |
 
 If shutdown cannot confirm which process it started, follow

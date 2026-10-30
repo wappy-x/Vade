@@ -297,7 +297,15 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                     self.recover_builds()?;
                     let configured = Config::load(&self.root)?;
                     let installed = install::load(&self.root)?;
-                    let prior = self.record()?;
+                    let prior = match self.record()? {
+                        // A crash or a kill leaves the record of an engine that no longer runs.
+                        Some(record) if command != Command::Install && self.engine_gone(&record) => {
+                            self.stop(&record)?;
+                            output::line(format_args!("Cleared the record of an engine that is no longer running (it stopped or was killed). Its log: {}", text::command("logs")))?;
+                            None
+                        }
+                        prior => prior,
+                    };
                     if prior.is_some() && (configured.is_none() || installed.is_none()) {
                         return Err("An owned engine has incomplete install records; run vade down before reinstalling.".into());
                     }
@@ -457,6 +465,8 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             }
             Command::Status | Command::Menu => {
                 match (Config::load(&self.root)?, self.record()?) {
+                    (Some(_), Some(record)) if record["phase"] == "running" && self.engine_gone(&record) =>
+                        output::text(format_args!("{}", status::stale())),
                     (Some(config), Some(record)) => {
                         let health = self.ready(&config, &record)?;
                         let mut read = crate::app::events::read(config.endpoint(), "local events");
@@ -792,12 +802,14 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         if required(record, "phase")? != "running" {
             return Err("Startup is incomplete; run vade down, then vade launch.".into());
         }
-        self.worker(
+        if let Err(error) = self.worker(
             record,
             "listener",
             Fields::from([("port".into(), config.port.to_string())]),
             false,
-        )?;
+        ) {
+            return Err(if self.engine_gone(record) { format!("The engine is not running; it stopped or was killed. Run {} to clear its record and start it again.", text::command("up")) } else { error });
+        }
         match self.health_reply(config)? {
             Some((model, body)) if model == required(record, "endpoint_model")? => Ok(body),
             _ => Err(
@@ -805,6 +817,14 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                     .into(),
             ),
         }
+    }
+
+    /// Whether the worker confirms that the recorded engine process is gone,
+    /// as after a crash or a kill. A worker error answers false, so the
+    /// caller keeps its usual checks.
+    fn engine_gone(&mut self, record: &Fields) -> bool {
+        self.worker(record, "inspect", Fields::new(), false)
+            .is_ok_and(|reply| reply.get("alive").is_some_and(|alive| alive == "false"))
     }
 
     fn stage_manifest(&self, model: &Path) -> Result<Option<PathBuf>, String> {

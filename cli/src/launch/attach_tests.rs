@@ -145,11 +145,11 @@ impl Runner for ProcessRunner {
         self.calls.push(exec.label.clone());
         let script = if exec.args == ["__worker"] {
             let fields = text::parse(std::str::from_utf8(&exec.stdin).unwrap()).unwrap();
-            assert_eq!(
-                fields["op"], "listener",
-                "resident launch tried to start or reinstall"
-            );
-            "while IFS= read -r line; do :; done\nprintf 'listener=owned\\n'"
+            match fields["op"].as_str() {
+                "inspect" => "while IFS= read -r line; do :; done\nprintf 'alive=true\\nphase=running\\n'",
+                "listener" => "while IFS= read -r line; do :; done\nprintf 'listener=owned\\n'",
+                op => panic!("resident launch tried to start or reinstall ({op})"),
+            }
         } else {
             assert_eq!(exec.label, "local health");
             assert_eq!(exec.program, "curl");
@@ -223,7 +223,7 @@ fn attach_child() {
     let elapsed = started.elapsed();
     assert_eq!(
         launch.runner.calls,
-        ["local listener", "local health", "local chat"]
+        ["local inspect", "local listener", "local health", "local chat"]
     );
     assert_eq!(launch.detector.calls, 0);
     assert_eq!(fs::read(root.join("config")).unwrap(), config);
