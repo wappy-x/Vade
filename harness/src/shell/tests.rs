@@ -939,3 +939,17 @@ printf allowed > source.txt
         std::fs::remove_file(&f.0).unwrap();
         std::fs::rename(&moved, &f.0).unwrap();
     }
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn completed_command_keeps_receipt_when_post_run_scan_exceeds_limit() {
+        let f = Fixture::new();
+        std::fs::create_dir(f.0.join("many")).unwrap();
+        for i in 0..19_998 {
+            f.write(&format!("many/{i}"), "");
+        }
+        let session = BuildSession::new(None).unwrap();
+        let command = spec(&["/bin/sh", "-c", "echo done; : > many/a; : > many/b; : > many/c"], 5000);
+        let (out, changed) = run_in_session_observing(&f.workspace(), &command, 4096, &AtomicBool::new(false), &Exclusions::default(), &session, true).unwrap();
+        assert_eq!(out.outcome, Outcome::Exited(Some(0)), "{}", out.render());
+        assert!(changed && out.stdout.contains("done") && out.stderr.contains("20,000"), "{}", out.render());
+    }

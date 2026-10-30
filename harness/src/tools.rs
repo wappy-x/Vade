@@ -59,6 +59,9 @@ pub struct Workspace {
     /// The last PDF read as text, keyed by path and file stamp, so paging
     /// through one PDF parses it once.
     pdf: std::sync::Mutex<Option<(String, FileStamp, std::sync::Arc<str>)>>,
+    /// The last document converted to Markdown, with its format name, so
+    /// paging through one large document converts it once.
+    document: std::sync::Mutex<Option<(String, FileStamp, String, std::sync::Arc<str>)>>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     dir: anchored::Dir,
 }
@@ -89,6 +92,7 @@ impl Workspace {
             root,
             state,
             pdf: std::sync::Mutex::new(None),
+            document: std::sync::Mutex::new(None),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             dir,
         })
@@ -271,13 +275,22 @@ impl Workspace {
                 crate::readers::ReadError::TooLarge { bytes: stamp.bytes, cap: caps.max_bytes }
             )));
         }
-        let mut bytes = Vec::new();
-        (&file).take(stamp.bytes + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 != stamp.bytes || FileStamp::from_metadata(&file.metadata()?) != stamp {
-            return Err(error("source file changed during read"));
-        }
-        let (format, doc) = crate::readers::read(&bytes, path, &caps).map_err(|e| error(&format!("{path}: {e}")))?;
-        let markdown = crate::readers::render(path, format, &doc);
+        let cache = || self.document.lock().unwrap_or_else(|e| e.into_inner());
+        let hit = cache().as_ref().filter(|(p, s, _, _)| p == path && *s == stamp).map(|(_, _, f, m)| (f.clone(), m.clone()));
+        let (format, markdown) = match hit {
+            Some(hit) => hit,
+            None => {
+                let mut bytes = Vec::new();
+                (&file).take(stamp.bytes + 1).read_to_end(&mut bytes)?;
+                if bytes.len() as u64 != stamp.bytes || FileStamp::from_metadata(&file.metadata()?) != stamp {
+                    return Err(error("source file changed during read"));
+                }
+                let (format, doc) = crate::readers::read(&bytes, path, &caps).map_err(|e| error(&format!("{path}: {e}")))?;
+                let markdown: std::sync::Arc<str> = crate::readers::render(path, format, &doc).into();
+                *cache() = Some((path.to_owned(), stamp.clone(), format.to_string(), markdown.clone()));
+                (format.to_string(), markdown)
+            }
+        };
         if offset > markdown.len() {
             return Err(error(&format!(
                 "read offset is {offset} bytes; the Markdown from this {format} file is {} bytes",
@@ -295,7 +308,7 @@ impl Workspace {
             return Err(error("read limit must fit one character of the Markdown"));
         }
         if offset == 0 && end == markdown.len() {
-            return Ok(markdown);
+            return Ok(markdown.to_string());
         }
         Ok(format!(
             "Read Markdown bytes {offset}..{end} of {}, converted from {format} ({} bytes; range limit {limit}; next offset {end}).\n{}",
@@ -1233,6 +1246,21 @@ mod tests {
         assert!(w.read_range("big.pdf", 0, 16).unwrap_err().to_string().contains("PDF read limit is 52428800 bytes (50 MiB)"));
         fs::write(f.0.join("bad.pdf"), b"%PDF-1.7\nnothing else").unwrap();
         assert!(w.read_range("bad.pdf", 0, 16).unwrap_err().to_string().contains("no readable document catalog"));
+    }
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn ranged_document_reads_convert_once_per_file_version() {
+        let f = Fixture::new();
+        fs::write(f.0.join("latin.txt"), b"caf\xe9 one\ncaf\xe9 two\n").unwrap();
+        let w = f.workspace();
+        let whole = w.read_range("latin.txt", 0, MAX_READ_BYTES).unwrap();
+        let cached = || w.document.lock().unwrap().as_ref().map(|(p, _, _, m)| (p.clone(), m.to_string()));
+        assert_eq!(cached(), Some(("latin.txt".into(), whole.clone())));
+        let at = whole.find("two").unwrap();
+        assert!(w.read_range("latin.txt", at, 3).unwrap().ends_with(").\ntwo"));
+        fs::write(f.0.join("latin.txt"), b"caf\xe9 three\n").unwrap();
+        assert!(w.read_range("latin.txt", 0, MAX_READ_BYTES).unwrap().contains("café three"));
+        assert!(cached().unwrap().1.contains("three"));
     }
     #[test]
     #[cfg(any(target_os = "macos", target_os = "linux"))]

@@ -22,11 +22,12 @@ fn main() {
     if let Ok(mode) = std::env::var("FAKE_MCP") {
         return serve(&mode);
     }
-    let tests: [(&str, fn()); 13] = [
+    let tests: [(&str, fn()); 14] = [
         ("initialize_and_list", initialize_and_list),
         ("calls_progress_and_server_requests", calls_progress_and_server_requests),
         ("timeout_and_malformed_json", timeout_and_malformed_json),
         ("dead_server_restarts_once", dead_server_restarts_once),
+        ("mcp_server_cwd_and_environment_stay_inside", mcp_server_cwd_and_environment_stay_inside),
         ("stalled_server_and_canceled_start", stalled_server_and_canceled_start),
         ("cancel_after_send_keeps_unknown_outcome", cancel_after_send_keeps_unknown_outcome),
         ("secrets_never_leave_quoted_stderr", secrets_never_leave_quoted_stderr),
@@ -164,6 +165,10 @@ fn serve(mode: &str) {
                 let arguments = params.get("arguments").unwrap();
                 let token = params.get("_meta").and_then(|m| m.get("progressToken")).cloned();
                 match params.get("name").and_then(Value::as_str).unwrap() {
+                    // {"env":NAME} answers whether the server can see NAME.
+                    "echo" if let Some(name) = arguments.get("env").and_then(Value::as_str) => {
+                        text_result(&id, &format!("{name}={}", std::env::var_os(name).is_some()))
+                    }
                     "echo" => text_result(&id, &json::stringify(arguments).unwrap()),
                     "slow" => {
                         let ms = arguments.get("ms").and_then(|v| match v { Value::Number(n) => n.parse().ok(), _ => None }).unwrap_or(1000);
@@ -331,19 +336,49 @@ fn timeout_and_malformed_json() {
     let log = temp.0.join("log");
     let mut hub = Hub::start(vec![spec("normal", 300, Some(&log))], &temp.0);
     let started = Instant::now();
-    let (text, uncertain) = call(&mut hub, "fake__slow", r#"{"ms":2000}"#);
+    let (text, uncertain) = call(&mut hub, "fake__slow", r#"{"ms":1000}"#);
     let waited = started.elapsed();
     assert!(uncertain && text.contains("mcp_timeout") && text.contains("300 ms"), "{text}");
     // The call ends at its timeout, well before the tool does.
     assert!(waited >= Duration::from_millis(300) && waited < Duration::from_millis(1500), "{waited:?}");
-    wait_for_line(&log, "slow done", 1);
-    // The late answer to the abandoned call is skipped; the next call gets its own.
+    // Vade stops the server at the time limit, so the tool never finishes;
+    // each later call starts it again, and a stop at a time limit uses no
+    // restart of the one a crashed server gets.
+    std::thread::sleep(Duration::from_millis(1200));
+    assert!(!log_lines(&log).contains(&"slow done".to_owned()), "{:?}", log_lines(&log));
     assert_eq!(call(&mut hub, "fake__echo", r#"{"after":"slow"}"#).0, r#"{"after":"slow"}"#);
-    assert!(log_lines(&log).contains(&"notifications/cancelled".to_owned()));
+    assert!(call(&mut hub, "fake__slow", r#"{"ms":1000}"#).0.contains("mcp_timeout"));
+    assert_eq!(call(&mut hub, "fake__echo", r#"{"after":"second"}"#).0, r#"{"after":"second"}"#);
+    assert_eq!(log_lines(&log).iter().filter(|line| *line == "initialize").count(), 3);
     let (text, uncertain) = call(&mut hub, "fake__malformed", "{}");
     assert!(uncertain && text.contains("mcp_server_failed") && text.contains("malformed JSON-RPC"), "{text}");
     // The connection survives one bad line.
     assert_eq!(call(&mut hub, "fake__echo", r#"{"n":1}"#).0, r#"{"n":1}"#);
+}
+
+fn mcp_server_cwd_and_environment_stay_inside() {
+    let temp = Temp::new("inside");
+    std::fs::create_dir(temp.0.join("sub")).unwrap();
+    let parse = |cwd: &str| config::parse_entry("fake", &json::parse(&format!(r#"{{"command":"x","cwd":{}}}"#, json::quote(cwd))).unwrap(), config::Source::User);
+    for outside in ["../outside", "sub/../../outside", "/tmp"] {
+        assert!(parse(outside).unwrap_err().contains("inside the workspace"), "{outside}");
+    }
+    assert_eq!(parse("./sub").unwrap().cwd.as_deref(), Some("./sub"));
+    // A link inside the workspace that leads out is refused at start.
+    std::os::unix::fs::symlink(std::env::temp_dir(), temp.0.join("out")).unwrap();
+    let mut linked = spec("normal", 2000, None);
+    linked.cwd = Some("out".into());
+    let hub = Hub::start(vec![linked], &temp.0);
+    assert!(hub.notes.iter().any(|note| note.contains("cwd is not a folder inside the workspace")), "{:?}", hub.notes);
+    // The server sees ordinary names and its own env entries, not the rest.
+    let mut inside = spec("normal", 2000, None);
+    inside.cwd = Some("sub".into());
+    let mut hub = Hub::start(vec![inside], &temp.0);
+    assert!(hub.notes.is_empty(), "{:?}", hub.notes);
+    assert_eq!(call(&mut hub, "fake__echo", r#"{"env":"PATH"}"#).0, "PATH=true");
+    assert_eq!(call(&mut hub, "fake__echo", r#"{"env":"FAKE_MCP"}"#).0, "FAKE_MCP=true");
+    assert!(std::env::var_os("CARGO_PKG_NAME").is_some());
+    assert_eq!(call(&mut hub, "fake__echo", r#"{"env":"CARGO_PKG_NAME"}"#).0, "CARGO_PKG_NAME=false");
 }
 
 fn dead_server_restarts_once() {

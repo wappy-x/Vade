@@ -11,8 +11,9 @@ use std::process::{Command, Stdio};
 /// controller config.
 #[derive(Debug, PartialEq)]
 pub(super) enum Target {
-    /// This Spark; `model` becomes VADE_MODELS for the steps.
-    Local { model: Option<String> },
+    /// This Spark; `model` becomes VADE_MODELS for the steps. `installed`
+    /// skips `vade install` when the saved setup has current installed files.
+    Local { model: Option<String>, installed: bool },
     /// A controller config at `path`; `text` is the new file, or `None` to use
     /// the one that is there. `up` holds the `vade up` options. `installed`
     /// skips `vade install`: a second install makes a new generation, and a
@@ -44,7 +45,12 @@ pub fn run(options: &SetupOptions, dry: bool) -> Result<(), String> {
     let target = if !explicit && crate::launch::owner_configured() {
         refuse_answers(options, "This Spark already has local setup.")?;
         output::line(format_args!("Using the local setup in {}. Setup does not change it.", crate::launch::root()?.join("config").display()))?;
-        Target::Local { model: None }
+        // scripts/install.sh already ran vade install; a second one only repeats Prepare.
+        let installed = crate::launch::owner_install_current();
+        if installed {
+            output::line(format_args!("The installed files are current, so setup skips vade install."))?;
+        }
+        Target::Local { model: None, installed }
     } else if !explicit && crate::launch::legacy_configured() {
         return Err("This installation uses vade run qwen3-8b. Use that command, or choose a fresh VADE_HOME for vade setup.".into());
     } else if path.is_file() {
@@ -86,7 +92,7 @@ pub fn run(options: &SetupOptions, dry: bool) -> Result<(), String> {
     if dry {
         output::line(format_args!("Dry run: setup writes nothing and starts nothing."))?;
         match &target {
-            Target::Local { model } => output::line(format_args!("Where: this Spark\nModel: {}", local_model(model.as_deref(),
+            Target::Local { model, .. } => output::line(format_args!("Where: this Spark\nModel: {}", local_model(model.as_deref(),
                 crate::launch::owner_configured(), std::env::var("VADE_MODELS").ok().filter(|models| !models.is_empty()).as_deref())))?,
             Target::Controller { path, text: Some(config), .. } => output::text(format_args!("Config to write at {}:\n{config}", text::quoted(&path.to_string_lossy())))?,
             Target::Controller { .. } => (),
@@ -198,7 +204,7 @@ pub(super) fn answer(options: &SetupOptions, facts: &Facts, ask: &mut dyn FnMut(
         if model.as_deref().is_some_and(|model| !(model.starts_with('/') || model.starts_with("~/")) || model.chars().any(char::is_control)) {
             return Err("Give the model folder as an absolute path or a path under ~/, such as ~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local.".into());
         }
-        return Ok(Target::Local { model });
+        return Ok(Target::Local { model, installed: false });
     }
     let fp8 = match options.fp8 {
         Some(fp8) => fp8,
@@ -345,10 +351,10 @@ fn up_options(fp8: bool, names: &[String]) -> Vec<String> {
 /// checks every Spark (SSH, GPU, disk, model and network) before it builds.
 /// Doctor runs last, on the running engine, so it checks exactly the Sparks
 /// and links that up chose; before up it would check only its default
-/// selection. A controller config that already has an install starts at up.
+/// selection. A setup that already has a current install starts at up.
 fn steps(target: &Target) -> Vec<(Vec<String>, Vec<(String, String)>)> {
     let (up, env, installed) = match target {
-        Target::Local { model } => (Vec::new(), model.iter().map(|model| ("VADE_MODELS".to_owned(), model.clone())).collect(), false),
+        Target::Local { model, installed } => (Vec::new(), model.iter().map(|model| ("VADE_MODELS".to_owned(), model.clone())).collect(), *installed),
         Target::Controller { up, installed, .. } => (up.clone(), Vec::new(), *installed),
     };
     [vec!["install".to_owned()], std::iter::once("up".to_owned()).chain(up).collect(), vec!["doctor".to_owned()]]

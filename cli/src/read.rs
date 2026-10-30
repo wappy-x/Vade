@@ -9,7 +9,7 @@ pub fn help() -> String {
         options: &[("--max-chars N", "Characters of Markdown to keep, 1..2000000 (default 2000000)")],
         examples: &["vade read notes.txt", "vade read report.html --max-chars 20000", "vade read table.csv"],
         notes: &[
-            "Reads text (UTF-8, UTF-16, Latin-1), Markdown, HTML, CSV, TSV, JSON, YAML, TOML, XML, RTF, PDF, DOCX, XLSX, PPTX, EPUB, ODT, ODS, ODP and source files, and gives the size of PNG, JPEG, GIF and WebP images. PDF, office and EPUB output has a marker before each page, sheet, slide or chapter. Other known formats print one line that names the format; other binary files print one line that says so.",
+            "Reads text (UTF-8, UTF-16, Latin-1), Markdown, HTML, CSV, TSV, JSON, YAML, TOML, XML, RTF, PDF, DOCX, XLSX, PPTX, EPUB, ODT, ODS, ODP, ZIP, tar and gzip archives and source files, and gives the size of PNG, JPEG, GIF and WebP images. PDF, office, EPUB and archive output has a marker before each page, sheet, slide, chapter or file. Other known formats print one line that names the format; other binary files print one line that says so.",
             "The first line is <!-- vade read: NAME | FORMAT | pages N | chars C | skipped: ... -->. Files over 50 MiB are refused.",
             "Exit 0 when text was printed, 1 when the file cannot be read, 2 for a usage error. See docs/reading-files.md.",
         ],

@@ -54,7 +54,8 @@ enum Frame {
     Link(String),
     Quote,
     Pre(String),
-    Cell,
+    /// A table cell and the columns it spans.
+    Cell(usize),
     Table(Vec<Vec<String>>),
 }
 
@@ -69,11 +70,26 @@ struct Out<'b> {
     /// their close tags do not close an outer element. They are all inside the
     /// top frame, so a pop clears them.
     unpushed: [usize; 5],
-    lists: Vec<Option<u32>>,
+    lists: Vec<List>,
+    /// The number of open lists and of lists past the cap when each frame
+    /// above the root opened. A list left open in a frame ends with the frame.
+    list_marks: Vec<(usize, usize)>,
     /// List elements past [`MAX_NESTING`]; their close tags end no kept list.
     lists_past: usize,
+    /// The frame depth and text length just after a list item marker, so a
+    /// paragraph that starts the item stays on the marker line.
+    marker: Option<(usize, usize)>,
     dropped: usize,
     budget: &'b mut Budget,
+}
+
+/// One open list: the next number of an ordered list, the indent of its
+/// items, and the column where the text of its last item starts, so a
+/// nested list lines up under that text as CommonMark needs.
+struct List {
+    next: Option<u32>,
+    indent: usize,
+    content: usize,
 }
 
 /// Elements whose content is never text for a reader.
@@ -84,7 +100,16 @@ const BLOCKS: &[&str] = &[
 ];
 
 fn convert(html: &str, budget: &mut Budget) -> (String, usize) {
-    let mut out = Out { frames: vec![(Frame::Root, String::new())], unpushed: [0; 5], lists: Vec::new(), lists_past: 0, dropped: 0, budget };
+    let mut out = Out {
+        frames: vec![(Frame::Root, String::new())],
+        unpushed: [0; 5],
+        lists: Vec::new(),
+        list_marks: Vec::new(),
+        lists_past: 0,
+        marker: None,
+        dropped: 0,
+        budget,
+    };
     let b = html.as_bytes();
     let mut i = 0;
     // Set when no `</head` follows: later head tags then skip the search.
@@ -142,7 +167,8 @@ fn convert(html: &str, budget: &mut Budget) -> (String, usize) {
             let close = if tag.qname.is_empty() { &tag.name } else { &tag.qname };
             let found = if head && head_unclosed { None } else { find_end(&html[i..], &tag.name, close) };
             match found {
-                Some(n) => i += n + html[i + n..].find('>').map_or(html.len() - i - n, |m| m + 1),
+                // A quoted value in the close tag may hold `>`.
+                Some(n) => i = tag_end(b, i + n + 2).map_or(b.len(), |gt| gt + 1),
                 None if head => {
                     head_unclosed = true;
                     continue;
@@ -187,15 +213,30 @@ struct Tag {
     qname: String,
     close: bool,
     self_closing: bool,
-    /// The values of the attributes in [`ATTRS`], by position; the first one
-    /// of a name wins.
-    attrs: [Option<String>; 5],
+    /// The values of the attributes in [`ATTRS`] that the element uses, by
+    /// position; the first one of a name wins.
+    attrs: [Option<String>; 6],
     /// True when a value was cut to the limit and lost text.
     cut: bool,
 }
 
 /// The attributes a reader uses. A tag keeps no others.
-const ATTRS: [&str; 5] = ["start", "href", "alt", "src", "class"];
+const ATTRS: [&str; 6] = ["start", "href", "alt", "src", "class", "colspan"];
+
+/// True when the element `name` uses the attribute `ATTRS[n]`. Other values
+/// are not decoded, so they use no room.
+fn uses(name: &str, n: usize) -> bool {
+    match ATTRS[n] {
+        "start" => name == "ol",
+        "href" => name == "a",
+        "alt" | "src" => name == "img",
+        "class" => name == "pre",
+        _ => matches!(name, "td" | "th"),
+    }
+}
+
+/// The most columns one table cell spans, as in the DOCX reader.
+const MAX_SPAN: usize = 64;
 /// Longer element names are not names this reader knows.
 const MAX_NAME: usize = 32;
 
@@ -205,10 +246,11 @@ impl Tag {
     }
 }
 
-/// The tag at the start of `s` and its length. Attribute values are decoded
-/// up to `limit` bytes (a quarter of the room left), so a tag holds at most
-/// five values of that size and a link target leaves room for its text. A
-/// value that does not fit sets `cut`, and the reader stops there.
+/// The tag at the start of `s` and its length. The values of the attributes
+/// the element uses are decoded up to `limit` bytes (a quarter of the room
+/// left), so a tag holds at most two values of that size and a link target
+/// leaves room for its text. A value that does not fit sets `cut`, and the
+/// reader stops there.
 fn parse_tag(s: &str, limit: usize) -> Option<(Tag, usize)> {
     let b = s.as_bytes();
     let mut i = 1;
@@ -226,7 +268,7 @@ fn parse_tag(s: &str, limit: usize) -> Option<(Tag, usize)> {
     let name = if local.len() > MAX_NAME { String::new() } else { local.to_ascii_lowercase() };
     // The name with its prefix, for the close tag of a dropped element.
     let qname = if full.len() > 2 * MAX_NAME { String::new() } else { full.to_ascii_lowercase() };
-    let mut attrs: [Option<String>; 5] = Default::default();
+    let mut attrs: [Option<String>; 6] = Default::default();
     let mut cut = false;
     let mut self_closing = false;
     loop {
@@ -247,7 +289,7 @@ fn parse_tag(s: &str, limit: usize) -> Option<(Tag, usize)> {
         while i < b.len() && !b[i].is_ascii_whitespace() && !matches!(b[i], b'=' | b'>' | b'/') {
             i += 1;
         }
-        let key = ATTRS.iter().position(|n| n.eq_ignore_ascii_case(&s[k..i])).filter(|&n| attrs[n].is_none());
+        let key = ATTRS.iter().position(|n| n.eq_ignore_ascii_case(&s[k..i])).filter(|&n| attrs[n].is_none() && uses(&name, n));
         let mut raw = "";
         // Spaces may stand on both sides of `=`.
         let eq = i + b[i..].iter().take_while(|c| c.is_ascii_whitespace()).count();
@@ -305,7 +347,16 @@ impl Out<'_> {
     }
 
     fn in_cell(&self) -> bool {
-        matches!(self.frames.last(), Some((Frame::Cell, _)))
+        matches!(self.frames.last(), Some((Frame::Cell(_), _)))
+    }
+
+    /// [`Out::block`] for a paragraph or other block element, except right
+    /// after a list item marker: `<li><p>text` reads `- text`.
+    fn item_block(&mut self) {
+        let at = (self.frames.len(), self.buf().len());
+        if self.marker != Some(at) {
+            self.block();
+        }
     }
 
     fn text(&mut self, text: &str) {
@@ -342,6 +393,7 @@ impl Out<'_> {
     /// Ends the current line. Inside a list the break is single; elsewhere a
     /// blank line separates blocks. Inside a cell a block is a `<br>`.
     fn block(&mut self) {
+        self.marker = None;
         if self.in_cell() {
             let buf = self.buf();
             trim_end_spaces(buf);
@@ -371,6 +423,7 @@ impl Out<'_> {
         if self.frames.len() <= MAX_NESTING {
             if self.budget.reserve(payload(&frame)) {
                 self.frames.push((frame, String::new()));
+                self.list_marks.push((self.lists.len(), self.lists_past));
             }
             return;
         }
@@ -378,7 +431,7 @@ impl Out<'_> {
             Frame::Link(_) => "a",
             Frame::Quote => "blockquote",
             Frame::Pre(_) => "pre",
-            Frame::Cell => "td",
+            Frame::Cell(_) => "td",
             Frame::Table(_) => "table",
             Frame::Root => return,
         };
@@ -390,6 +443,12 @@ impl Out<'_> {
     fn pop(&mut self) {
         let Some((frame, text)) = self.frames.pop() else { return };
         self.unpushed = [0; 5];
+        // A list that the frame left open ends with it (`<td><ul><li>x</td>`).
+        if !matches!(frame, Frame::Root) {
+            let (open, past) = self.list_marks.pop().unwrap_or((0, 0));
+            self.lists.truncate(open);
+            self.lists_past = past;
+        }
         // The block's text moves into the parent; its bytes count there.
         let held = text.len() + payload(&frame);
         if !matches!(frame, Frame::Root) {
@@ -420,7 +479,7 @@ impl Out<'_> {
                     self.block();
                 }
             }
-            Frame::Cell => {
+            Frame::Cell(span) => {
                 let mut text = text.trim().to_owned();
                 while text.ends_with("<br>") {
                     text.truncate(text.len() - 4);
@@ -433,9 +492,18 @@ impl Out<'_> {
                     if !self.budget.reserve(slots) {
                         return;
                     }
-                    match rows.last_mut() {
-                        Some(row) => row.push(value),
-                        None => rows.push(vec![value]),
+                    if rows.is_empty() {
+                        rows.push(Vec::new());
+                    }
+                    let row = rows.last_mut().unwrap();
+                    row.push(value);
+                    // A cell that spans columns keeps the slots of the columns
+                    // it spans, as many as fit.
+                    for _ in 1..span {
+                        if !self.budget.reserve(CELL) {
+                            break;
+                        }
+                        row.push(String::new());
                     }
                 } else {
                     self.buf().push_str(&value);
@@ -520,15 +588,17 @@ impl Out<'_> {
                 self.close(|f| matches!(f, Frame::Pre(_)), |_| false);
             }
             "td" | "th" => {
-                self.close(|f| matches!(f, Frame::Cell), is_table);
+                self.close(|f| matches!(f, Frame::Cell(_)), is_table);
             }
             "table" => {
                 self.close(is_table, |_| false);
             }
             "ul" | "ol" => {
-                if self.lists_past > 0 {
+                // A close tag ends only a list that opened in this frame.
+                let (open, past) = self.list_marks.last().copied().unwrap_or((0, 0));
+                if self.lists_past > past {
                     self.lists_past -= 1;
-                } else {
+                } else if self.lists.len() > open {
                     self.lists.pop();
                 }
                 self.block();
@@ -575,28 +645,36 @@ impl Out<'_> {
                 if self.lists.len() > MAX_NESTING {
                     self.lists_past += 1;
                 } else {
-                    self.lists.push((name == "ol").then_some(start));
+                    let indent = self.lists.last().map_or(0, |l| l.content);
+                    self.lists.push(List { next: (name == "ol").then_some(start), indent, content: indent + 2 });
                 }
             }
             "li" => {
                 self.block();
-                let depth = (self.lists.len().max(1) - 1).min(MAX_NESTING);
-                let marker = match self.lists.last_mut() {
-                    Some(Some(n)) => {
-                        let shown = *n;
-                        *n = n.saturating_add(1).min(MAX_LIST_NUMBER);
-                        format!("{shown}. ")
+                let (indent, marker) = match self.lists.last_mut() {
+                    Some(list) => {
+                        let marker = match &mut list.next {
+                            Some(n) => {
+                                let shown = *n;
+                                *n = n.saturating_add(1).min(MAX_LIST_NUMBER);
+                                format!("{shown}. ")
+                            }
+                            None => "- ".to_owned(),
+                        };
+                        list.content = list.indent + marker.len();
+                        (list.indent, marker)
                     }
-                    _ => "- ".to_owned(),
+                    None => (0, "- ".to_owned()),
                 };
-                self.emit(&format!("{}{marker}", "  ".repeat(depth)));
+                self.emit(&format!("{}{marker}", " ".repeat(indent)));
+                self.marker = Some((self.frames.len(), self.buf().len()));
             }
             // A new link or cell ends an open one. When that one is past the cap,
             // the new one is too: the count stays.
             "a" if self.unpushed[0] > 0 => {}
             "td" | "th" if self.unpushed[3] > 0 => {}
             "a" => {
-                self.close(|f| matches!(f, Frame::Link(_)), |f| matches!(f, Frame::Table(_) | Frame::Cell));
+                self.close(|f| matches!(f, Frame::Link(_)), |f| matches!(f, Frame::Table(_) | Frame::Cell(_)));
                 let href = tag.attr("href").unwrap_or("").trim().to_owned();
                 self.push(Frame::Link(href));
             }
@@ -623,7 +701,7 @@ impl Out<'_> {
             }
             "tr" => {
                 self.unpushed[3] = 0;
-                self.close(|f| matches!(f, Frame::Cell), |f| matches!(f, Frame::Table(_)));
+                self.close(|f| matches!(f, Frame::Cell(_)), |f| matches!(f, Frame::Table(_)));
                 if let Some((Frame::Table(rows), _)) = self.frames.last_mut()
                     && self.budget.reserve(ROW)
                 {
@@ -631,16 +709,17 @@ impl Out<'_> {
                 }
             }
             "td" | "th" => {
-                self.close(|f| matches!(f, Frame::Cell), |f| matches!(f, Frame::Table(_)));
+                self.close(|f| matches!(f, Frame::Cell(_)), |f| matches!(f, Frame::Table(_)));
                 if matches!(self.frames.last(), Some((Frame::Table(_), _))) {
-                    self.push(Frame::Cell);
+                    let span = tag.attr("colspan").and_then(|v| v.trim().parse().ok()).unwrap_or(1).clamp(1, MAX_SPAN);
+                    self.push(Frame::Cell(span));
                 }
             }
             "strong" | "b" => self.emit("**"),
             "em" | "i" | "cite" | "dfn" => self.emit("*"),
             "del" | "s" | "strike" => self.emit("~~"),
             "code" | "kbd" | "samp" | "tt" => self.emit("`"),
-            n if BLOCKS.contains(&n) => self.block(),
+            n if BLOCKS.contains(&n) => self.item_block(),
             _ => {}
         }
     }
@@ -656,7 +735,7 @@ fn payload(frame: &Frame) -> usize {
     match frame {
         Frame::Link(s) | Frame::Pre(s) => s.len(),
         Frame::Table(rows) => rows.iter().map(|r| ROW + r.iter().map(|c| CELL + c.len()).sum::<usize>()).sum(),
-        Frame::Root | Frame::Quote | Frame::Cell => 0,
+        Frame::Root | Frame::Quote | Frame::Cell(_) => 0,
     }
 }
 
@@ -888,7 +967,8 @@ const NESTED: &[&str] = &["template", "svg", "math", "object", "canvas", "select
 /// whose content starts `hay`; `local` is its name without a prefix. In a
 /// [`NESTED`] element each inner `<qname>` needs its own close tag; an empty
 /// `<qname/>` needs none. Comments, CDATA sections, quoted attribute values
-/// (in open and close tags) and the text of [`RAW`] elements hold no tags.
+/// (in open and close tags) and the text of [`RAW`] elements hold no tags;
+/// an empty `<title/>` or `<script/>` has no text.
 /// One pass over `hay`.
 fn find_end(hay: &str, local: &str, qname: &str) -> Option<usize> {
     if !NESTED.contains(&local) {
@@ -935,9 +1015,14 @@ fn find_end(hay: &str, local: &str, qname: &str) -> Option<usize> {
         } else if same {
             // An inner open tag counts unless it is empty.
             depth += usize::from(h[gt - 1] != b'/');
-        } else if let Some(raw) = RAW.iter().find(|r| names_at(h, from, r.as_bytes())) {
+        } else if h[gt - 1] != b'/'
+            && let Some(raw) = RAW.iter().find(|r| names_at(h, from, r.as_bytes()))
+        {
+            // An empty `<title/>` has no text; a quoted value in the close tag
+            // may hold `>`.
             let Some(end) = close_at(&h[at..], raw.as_bytes()) else { break None };
-            at += end + 2;
+            let Some(gt) = tag_end(h, at + end + 2) else { break None };
+            at = gt + 1;
         }
     };
     super::scanned(found.unwrap_or(h.len()));

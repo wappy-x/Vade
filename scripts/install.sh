@@ -9,10 +9,10 @@ fail() {
 }
 if [ "${1-}" = --help ]; then
     printf '%s\n' 'Usage: sh scripts/install.sh [--launch]' \
-        'Install pinned Rust if missing, build Vade, and prepare one local Spark.' \
-        '--launch starts the engine and opens chat after installation.' \
+        'Install pinned Rust if missing, then build vade, the GPU kernels, the engine and chat.' \
+        'The model is not needed yet: the script prints the vade pull command for it.' \
+        '--launch starts the engine and opens chat after installation; it needs the model.' \
         'Needs an idle NVIDIA GB10 GPU with a driver that supports CUDA 13.0 or newer.' \
-        'Use an existing checkpoint under ~/models, or set VADE_MODELS.' \
         'CARGO_NET_OFFLINE=true requires already cached toolchains and build-std.'
     exit 0
 fi
@@ -90,6 +90,7 @@ CARGO_TARGET_DIR="$root/cli/target" cargo +1.99.0 build --release --offline --lo
     fail 'CLI build failed. Next: fix the compiler error above (including any missing linker), then rerun the Retry command below.'
 vade="$root/cli/target/release/vade"
 # vade install checks this Spark and builds the GPU kernels once, offline.
+# It needs no model on disk; vade launch saves defaults once the model is there.
 # That build needs the Rust build-std files; fetch only those here.
 sysroot=$(rustup run "$device" rustc --print sysroot) && [ -n "$sysroot" ] ||
     fail "cannot find the $device sysroot. Next: rustup toolchain install $device --profile minimal --no-self-update --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda; then rerun this script."
@@ -98,7 +99,13 @@ cargo "+$device" fetch --locked --manifest-path "$sysroot/lib/rustlib/src/rust/l
     fail 'Rust build-std fetch failed. Next: check access to https://index.crates.io and rerun the Retry command below; with CARGO_NET_OFFLINE=true, run it once online first.'
 "$vade" install </dev/null ||
     fail "local install failed. Next: follow the diagnostic above, run \"$vade\" doctor, then retry."
-printf 'Install complete. Start and chat:\n  "%s" launch\nCheck and start:\n  "%s" setup\nTo type vade by name in a new shell, run this there first:\n  export PATH="$HOME/.cargo/bin:%s:$PATH"\n' "$vade" "$vade" "$root/cli/target/release"
+printf '%s\n' 'Install complete. Next steps:' \
+    '1. Put vade on PATH in this shell (add this line to ~/.profile to keep it):' \
+    "   export PATH=\"\$HOME/.cargo/bin:$root/cli/target/release:\$PATH\"" \
+    '2. If the model is not on this Spark yet, download and check it (102.26 GB):' \
+    '   vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300' \
+    '3. Start the engine and open chat:' \
+    '   vade launch'
 if [ "$launch" = true ]; then
     cd "$workspace" || fail 'your starting folder is unavailable. Next: open an existing project folder, then use the launch command above.'
     exec "$vade" launch

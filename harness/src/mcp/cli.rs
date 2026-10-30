@@ -20,7 +20,7 @@ Commands:
                             Add a server to your user list.
       --project             Add it to .vade/mcp.json in this project instead.
       --env KEY=VALUE       Set an environment variable for the server (repeat).
-      --cwd DIR             Run the server in DIR (relative to the project).
+      --cwd DIR             Run the server in DIR (inside the project, no ..).
       --timeout-ms N        Time limit for one call, 1 to 600000 (default 60000).
       --disabled            Add the server but do not start it.
   remove NAME [--project]   Remove a server from your user list or the project list.

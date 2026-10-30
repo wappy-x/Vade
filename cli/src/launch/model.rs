@@ -13,7 +13,7 @@ use std::{
 use std::fs::File;
 
 const DEFAULT_CHECKPOINT: &str = "Qwen3.8-Flash-Next-FP4-Local";
-const MODEL_HELP: &str = "Use nvidia/Qwen3.8-Flash-Next-FP4-Local. Download it into ~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local with: vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300";
+pub(super) const MODEL_HELP: &str = "Use nvidia/Qwen3.8-Flash-Next-FP4-Local. Download it into ~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local with: vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300";
 
 #[derive(Clone, Debug)]
 pub(super) struct Model {
@@ -55,6 +55,12 @@ pub(super) fn discover_existing(home: &Path, saved: Option<&Path>) -> Result<Mod
     discover_with(home, saved, std::env::var_os("VADE_MODELS").as_deref(), |reason| {
         Err(format!("{reason}\n{MODEL_HELP}\nSet VADE_MODELS to the checkpoint folder, then run vade launch."))
     })
+}
+
+/// The checkpoint under ~/models, with no prompt and no VADE_MODELS, or why
+/// there is none.
+pub(super) fn find(home: &Path) -> Result<Model, String> {
+    discover_with(home, None, None, |reason| Err(reason.into()))
 }
 
 fn check_interrupted() -> Result<(), String> {

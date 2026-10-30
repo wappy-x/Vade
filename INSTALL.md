@@ -24,14 +24,15 @@ timing log of record `2026-10-28_1744_source-install_285fa8a` and its
 | First `vade launch`, to `Launch ready in 149.4 s.` | 149.4 |
 | Total | 228.2 |
 
-The total does not include the model download (102.26 GB). It also does not
-include a network fetch of the source: the clone came from a local copy of
-the repository. Download times depend on your network. We have not timed
-these steps on a later main.
+Each row is rounded to 0.1 s, so the rows add up to 228.3 s, not the
+228.2 s total. The total does not include the model download (102.26 GB). It
+also does not include a network fetch of the source: the clone came from a
+local copy of the repository. Download times depend on your network. We
+have not timed these steps on a later main.
 
-If your checkpoint is already under `~/models`, use the
-[quick start](#quick-start-with-an-existing-model). If not, do steps 1 to 3:
-prerequisites, the code and the model. Then pick a route:
+On one Spark, use the [quick start](#quick-start-on-one-spark). It also
+downloads the model when the Spark does not have it. For the long form, do
+steps 1 to 3: prerequisites, the code and the model. Then pick a route:
 
 - [Route A](#route-a-on-this-spark) runs everything on the Spark itself.
   Start here.
@@ -42,25 +43,22 @@ prerequisites, the code and the model. Then pick a route:
 This guide explains each new term where it first appears. The
 [glossary](docs/GLOSSARY.md) has the rest.
 
-Whatever the route, the steps are the same: get `vade`, then `vade setup`.
-Setup asks a few questions, writes what it needs, then runs `vade install`,
-`vade up` and `vade doctor`. Each step prints what to do when it fails, and
-a second run is safe. [Install and flows](docs/design/install-and-flows.md)
+On one Spark, the steps are: build Vade with `scripts/install.sh`, get the
+model with `vade pull`, then run `vade launch`. From a controller, the steps
+are: get `vade`, then run `vade setup`. Setup asks a few questions, writes
+what it needs, then runs `vade install`, `vade up` and `vade doctor`. Each
+step prints what to do when it fails, and a second run is safe. [Install and flows](docs/design/install-and-flows.md)
 shows the whole flow on one page. If you are an AI agent, read the
 [agent quickstart](docs/agents/quickstart.md).
 
-## Quick start with an existing model
+## Quick start on one Spark
 
+<a id="quick-start-with-an-existing-model"></a>
 You need a DGX Spark with Git, `cc` and curl. Its NVIDIA driver must support
 CUDA 13.0 or newer (the `CUDA Version` in the `nvidia-smi` header). The GPU
-must be idle: `nvidia-smi` must list no compute processes. You also need the
-complete checkpoint under `~/models`. Before the first
-launch, set `VADE_MODELS` to use a checkpoint outside `~/models`. A valid
-saved checkpoint takes precedence; see
-[use a different checkpoint folder](#use-a-different-checkpoint-folder).
-During the private preview, the clone also needs access to the repository.
-The private-preview note in [step 2](#step-2-get-the-code) gives the two
-ways in.
+must be idle: `nvidia-smi` must list no compute processes. During the private
+preview, the clone also needs access to the repository. The private-preview
+note in [step 2](#step-2-get-the-code) gives the two ways in.
 
 Run these five commands:
 
@@ -68,23 +66,56 @@ Run these five commands:
 git clone --branch main https://github.com/wappy-x/vade.git "$HOME/vade"
 sh "$HOME/vade/scripts/install.sh"
 export PATH="$HOME/.cargo/bin:$HOME/vade/cli/target/release:$PATH"
-vade setup
-vade chat
+vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300
+vade launch
 ```
 
-The `export` line puts `cargo` and `vade` on your `PATH` for this shell
-only, because the installer does not edit shell profiles. Run it again in each
-new shell, or add it to your shell profile yourself.
+- `scripts/install.sh` checks the Spark, installs the pinned Rust toolchains
+  if they are missing, and builds `vade`, the GPU kernels, the engine and the
+  chat program. It does not need the model.
+- The `export` line puts `cargo` and `vade` on your `PATH` for this shell
+  only, because the installer does not edit shell profiles. Run it again in
+  each new shell, or add it to `~/.profile` yourself.
+- `vade pull` downloads the 102.26 GB model into
+  `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local` and checks every file. Skip
+  it if the model is already in `~/models`. To use a checkpoint outside
+  `~/models`, set `VADE_MODELS` before the first launch; see
+  [use a different checkpoint folder](#use-a-different-checkpoint-folder).
+  [Step 3](#download) tells you how to keep a long download running over SSH.
+- `vade launch` finds the model, saves the settings in `~/.vade/config` and
+  checks the model files. Then it starts the engine on
+  `http://127.0.0.1:18080` and opens chat in the current folder. If another
+  program has port 18080, it names the port it uses instead. Type `/exit` to
+  leave chat; `vade down` stops the engine.
 
-`vade setup` uses the model and settings that the installer saved. It runs
-`vade install` again (nothing is rebuilt), then `vade up`, then
-`vade doctor`. It ends with `Setup done.` and the commands for chat, status and
-stop. `vade chat` then opens chat in the current folder.
+When the model is already in `~/models`, one command can do the last three
+steps: `sh "$HOME/vade/scripts/install.sh" --launch` installs, starts and
+opens chat. If you already cloned Vade, open its folder and run
+`sh scripts/install.sh`, then continue with the `export` line.
 
-To install, start and open chat in one step, use
-`sh "$HOME/vade/scripts/install.sh" --launch` instead. If you already cloned
-Vade, open its folder and run `sh scripts/install.sh`, then continue with the
-`export` line.
+**Older steps.** Earlier versions of this guide ran `vade setup` and
+`vade chat` after the installer. That still works. On one Spark with saved
+settings, `vade setup` skips `vade install` when the installed files are
+current, then runs `vade up` and `vade doctor`.
+
+### For a script or an agent
+
+The Vade steps ask no questions. Each command exits 0 on success and 1 on a
+failure. A failure prints its cause and a next step (with `--json`, inside
+the JSON object):
+
+```sh
+git clone --branch main https://github.com/wappy-x/vade.git "$HOME/vade"
+sh "$HOME/vade/scripts/install.sh"
+export PATH="$HOME/.cargo/bin:$HOME/vade/cli/target/release:$PATH"
+vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300
+vade up && vade doctor --json
+```
+
+`vade up` starts the engine without chat and prints one `Up ready in` line.
+`vade doctor --json` prints one `vade.doctor.v1` object. The
+[agent quickstart](docs/agents/quickstart.md) gives the rules, the JSON
+forms and the controller commands.
 
 The installer runs only on Linux `aarch64`. It does these steps:
 
@@ -95,12 +126,14 @@ The installer runs only on Linux `aarch64`. It does these steps:
    toolchains and GPU components.
 3. It builds the CLI and fetches the Rust `build-std` files that the GPU
    kernel build needs. When they are cached, it downloads nothing.
-4. It runs local `vade install`. This checks the Spark and the model once
-   (preflight), then builds the GPU kernels, the engine and chat once,
-   offline. It also compiles the GPU code into Vade's private startup cache,
-   so the first `up` does not have to. If `~/.vade` already holds files that
-   another checkout or revision built, it builds this checkout and prints the
-   generation that is now installed.
+4. It runs local `vade install`. This checks the Spark once (preflight),
+   then builds the GPU kernels, the engine and chat once, offline. It also
+   compiles the GPU code into Vade's private startup cache, so the first `up`
+   does not have to. When the model is already under `~/models`, it saves
+   the settings and checks the model files too. When it is not, it saves no
+   settings and prints the `vade pull` command. If `~/.vade` already holds
+   files that another checkout or revision built, it builds this checkout and
+   prints the generation that is now installed.
 5. With `--launch`, it starts the engine and opens chat in the folder where
    you started. Without that flag, it stops after the install.
 
@@ -131,9 +164,9 @@ engine keeps running.
   clone somewhere else.
 - **The clone fails:** check that this connection reaches GitHub and that you
   have access to the private repository (see [Step 2](#step-2-get-the-code)).
-- **The script stops at the model check:** `vade` is built at that point.
-  Run the `export` line, download the model with `vade pull` as in
-  [Step 3](#download), then run `sh "$HOME/vade/scripts/install.sh"` again.
+- **`vade launch` stops at the model check:** the model is not where Vade
+  looks. Run the `vade pull` line from the quick start, or set `VADE_MODELS`
+  to the checkpoint folder, then run `vade launch` again.
 - **`VADE_CONFIG` or `VADE_BUNDLE` is set:** the script tells you which one to
   unset for this local source route.
 - **This Spark already has a controller config:** use the manual
@@ -393,6 +426,8 @@ compiler downloads its `build-std` dependencies into Cargo's cache. Later,
 `vade launch` builds the kernels again, offline, in its own private copy of the
 source. It does not reuse this build's output, only those downloads. Without
 them, the first launch on a fresh machine fails at the kernel build.
+`scripts/install.sh` does not run this build: it fetches only the
+`build-std` files, with `cargo fetch`.
 
 ### Optional release bundle
 
@@ -490,9 +525,8 @@ already in `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local`, skip the download
 and go straight to the manifest check below.
 
 Use `vade pull`. It shows its progress, continues after an interruption and
-checks every file. If `scripts/install.sh` stopped at the model check, `vade`
-is already built. If not, the second line below builds it with the host
-toolchain from step 1. From the checkout root on the Spark:
+checks every file. If you ran `scripts/install.sh`, `vade` is already built.
+If not, the second line below builds it with the host toolchain from step 1. From the checkout root on the Spark:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PWD/cli/target/release:$PATH"

@@ -90,7 +90,10 @@ fn cached_source_install_fetches_build_std_and_leaves_detect_and_kernels_to_vade
     assert!(!calls.contains("kernels") && !calls.contains("vade detect"), "{calls}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Install: fetching the Rust build-std files for the GPU kernels (none when cached).\n"), "{stdout}");
-    assert!(stdout.contains(&format!("\"{}/cli/target/release/vade\" launch", f.root.display())), "{stdout}");
+    // One next path: PATH, the model when it is missing, then launch; no second install through vade setup.
+    assert!(stdout.contains(&format!("   export PATH=\"$HOME/.cargo/bin:{}/cli/target/release:$PATH\"\n", f.root.display())), "{stdout}");
+    assert!(stdout.contains("   vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300\n") && stdout.ends_with("   vade launch\n"), "{stdout}");
+    assert!(!stdout.contains("setup"), "{stdout}");
 }
 
 #[test]

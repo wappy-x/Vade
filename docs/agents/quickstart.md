@@ -65,13 +65,16 @@ engine. `endpoint` is the API address while the engine runs.
 
 Without a `vade` program yet, clone and run the installer. It installs the
 pinned Rust toolchains if they are missing, builds `vade`, checks the Spark
-and the model, and runs `vade install`. It needs no sudo.
+and runs `vade install`, which builds the GPU kernels, the engine and chat.
+It does not need the model, and it needs no sudo. Then get the model if the
+Spark does not have it, and start the engine:
 
 ```sh
 git clone --branch main https://github.com/wappy-x/vade.git "$HOME/vade"
 sh "$HOME/vade/scripts/install.sh"
 export PATH="$HOME/.cargo/bin:$HOME/vade/cli/target/release:$PATH"
-vade setup --yes
+vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300
+vade up && vade doctor --json
 ```
 
 The repository is private for now. Without access, the clone fails with
@@ -80,14 +83,13 @@ try other URLs. [Install step 2](../../INSTALL.md#step-2-get-the-code) gives
 the two ways in. If `gh auth status` shows an account with access, clone with
 `gh repo clone wappy-x/vade "$HOME/vade" -- --branch main` instead.
 
-With no model on the Spark, the installer builds `vade`, then stops at the
-model check. The error says what is missing and gives the `vade pull`
-line. Ask the person before you download: the checkpoint is
-102.26 GB. Then run the download in the background and run the installer
-again when it is done:
+With no model on the Spark, the installer still finishes with exit 0. Its
+`vade install` output says that the model is missing and gives the
+`vade pull` line. Skip `vade pull` when the model is already in `~/models`.
+Ask the person before you download: the checkpoint is 102.26 GB. Over SSH,
+run the download in the background, and run `vade up` when it is done:
 
 ```sh
-export PATH="$HOME/.cargo/bin:$HOME/vade/cli/target/release:$PATH"
 nohup vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300 > ~/vade-pull.log 2>&1 &
 ```
 
@@ -95,12 +97,17 @@ The download is done when `~/vade-pull.log` has a `Verified 32 files` line.
 If the pull stops early, run the same line again; it continues from where it
 stopped. [Download models](../pull-models.md) has the details.
 
-After the installer, `vade setup --yes` reuses the model and settings the
-installer saved. It runs `vade install` (nothing is rebuilt), `vade up` and
-`vade doctor`, and its last output line before the next steps is
-`Setup done.` On a Spark with no saved settings, it uses this Spark and the
-FP4-Local checkpoint under `~/models`; add `--model` with an absolute path
-or a path under `~/` for another folder.
+The first `vade up` finds the model under `~/models`, saves the settings in
+`~/.vade/config`, checks the model files, starts the engine and prints one
+`Up ready in` line. For a checkpoint in another folder, set `VADE_MODELS` to
+it before the first `vade up`. `vade doctor --json` then checks every part.
+
+`vade setup --yes` also works on one Spark. With saved settings and current
+installed files, it skips `vade install` and runs `vade up` and
+`vade doctor`; its last output line before the next steps is `Setup done.`
+On a Spark with no saved settings, it runs `vade install` first, with the
+FP4-Local checkpoint under `~/models`; add `--model` with an absolute path or
+a path under `~/` for another folder.
 
 The `export` line lasts for one shell. Repeat it in each new shell.
 

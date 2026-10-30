@@ -19,8 +19,8 @@ For one Ubuntu GB10 there are two model-specific guides: the
 [Qwen3.6-35B-A3B-FP8 guide](../docs/serve-35b-one-spark.md).
 
 To start the FP4-Local server by hand instead of through `vade`, see
-[next-http](docs/next-http.md). The [legacy FP8 profile](../docs/install-legacy-fp8.md)
-has its own checkpoint, topology and drafting settings.
+[next-http](docs/next-http.md). The [FP8 install](../docs/install-fp8.md)
+gives the FP8 checkpoint, topology and drafting settings.
 
 ## How it compares
 

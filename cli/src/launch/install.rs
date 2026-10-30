@@ -71,17 +71,23 @@ pub(super) fn ensure<R: Runner>(root: &Path, runner: &mut R) -> Result<Fields, S
 /// builds: its recorded revision differs or is missing. It says so in one
 /// line. Bundles and trees without Git metadata keep the file checks alone.
 pub(super) fn outdated<R: Runner>(installed: &Fields, runner: &mut R) -> Result<bool, String> {
-    if bundle_path()?.is_some() { return Ok(false); }
+    let Some((revision, built)) = changed_source(installed, runner)? else { return Ok(false) };
+    let short = |id: &str| id[..12].to_owned();
+    super::progress("Install", crate::style::Token::Warn, format_args!("this checkout is {}, but the installed engine was built from {}; building this checkout",
+        short(&revision), built.map_or_else(|| "an earlier install with no recorded revision".to_owned(), |id| short(&id))))?;
+    Ok(true)
+}
+
+/// The checkout revision and the installed one, when they differ, without
+/// any output. A bundle install or a checkout without Git never differs.
+pub(super) fn changed_source<R: Runner>(installed: &Fields, runner: &mut R) -> Result<Option<(String, Option<String>)>, String> {
+    if bundle_path()?.is_some() { return Ok(None); }
     let source = source_path()?;
-    if build_id::probe(&source) != build_id::Probe::Git { return Ok(false); }
+    if build_id::probe(&source) != build_id::Probe::Git { return Ok(None); }
     let revision = git(runner, &source, &["rev-parse", "HEAD"])?.trim().to_owned();
     if !text::is_lower_hex(&revision, 40) { return Err("Vade source has no complete Git revision.".into()); }
     let built = installed.get("source_revision").filter(|id| text::is_lower_hex(id, 40));
-    if built == Some(&revision) { return Ok(false); }
-    let short = |id: &str| id[..12].to_owned();
-    super::progress("Install", crate::style::Token::Warn, format_args!("this checkout is {}, but the installed engine was built from {}; building this checkout",
-        short(&revision), built.map_or_else(|| "an earlier install with no recorded revision".to_owned(), |id| short(id))))?;
-    Ok(true)
+    Ok((built != Some(&revision)).then(|| (revision, built.cloned())))
 }
 
 /// Build this checkout over an outdated install, then name the new generation.

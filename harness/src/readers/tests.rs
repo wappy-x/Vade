@@ -15,7 +15,7 @@ fn sniff_uses_magic_bytes_before_the_extension() {
     assert_eq!(format(b"<!DOCTYPE html><p>x", "page.txt"), Some(Format::Html));
     assert_eq!(format(b"\x89PNG\r\n\x1a\nrest", "a.md"), Some(Format::Image("PNG")));
     assert_eq!(format(b"PK\x03\x04rest", "report.docx"), Some(Format::Docx));
-    assert_eq!(format(b"PK\x03\x04rest", "bundle.zip"), Some(Format::Other("ZIP archive")));
+    assert_eq!(format(b"PK\x03\x04rest", "bundle.zip"), Some(Format::Archive("ZIP archive")));
     assert_eq!(format(b"bplist00\xd1\x01\x02", "Info.plist"), Some(Format::Other("binary property list")));
     assert_eq!(format(b"fn main() {}\n", "src/main.rs"), Some(Format::Source("rust")));
     assert_eq!(format(b"all:\n\ttrue\n", "Makefile"), Some(Format::Source("make")));
@@ -355,11 +355,11 @@ fn header_escapes_every_hyphen_run() {
 /// Astra SHOULD-FIX 12: ZIP magic wins over a text extension.
 #[test]
 fn zip_magic_wins_over_text_extensions() {
-    assert_eq!(format(b"PK\x03\x04rest", "notes.txt"), Some(Format::Other("ZIP archive")));
-    assert_eq!(format(b"PK\x05\x06rest", "data.csv"), Some(Format::Other("ZIP archive")));
+    assert_eq!(format(b"PK\x03\x04rest", "notes.txt"), Some(Format::Archive("ZIP archive")));
+    assert_eq!(format(b"PK\x05\x06rest", "data.csv"), Some(Format::Archive("ZIP archive")));
     assert_eq!(format(b"PK\x03\x04rest", "book.EPUB"), Some(Format::Epub));
     assert_eq!(format(b"PK\x03\x04rest", "sheet.xlsx"), Some(Format::Xlsx));
-    assert_eq!(read(b"PK\x03\x04rest", "notes.txt", &Caps::default()).unwrap_err().to_string(), "Vade does not read ZIP archive files; no text was read");
+    assert!(read(b"PK\x03\x04rest", "notes.txt", &Caps::default()).unwrap_err().to_string().starts_with("damaged ZIP archive file: "));
     assert_eq!(format(b"PK is a plain word\n", "notes.txt"), Some(Format::Text));
 }
 
@@ -594,4 +594,45 @@ fn drop_scanner_text_states_and_prefixed_names() {
         let (_, doc) = read(html.as_bytes(), "a.html", &Caps::default()).unwrap();
         assert_eq!((doc.markdown.as_str(), doc.warnings), ("visible\n", vec!["1 script, style or embedded blocks".to_owned()]), "{html}");
     }
+}
+
+/// Argon readers audit of 2026-10-30, HTML FIXES 1 to 4: an empty raw
+/// element in a dropped element and a quoted `>` in a close tag; a paragraph
+/// that starts a list item and a list nested under a numbered item; a list
+/// left open in a cell, and `colspan`; an attribute the element does not use
+/// takes no room.
+#[test]
+fn html_audit_items_and_close_tags() {
+    for (html, text) in [
+        ("<svg><title/></svg><p>Body</p>", "Body\n"),
+        ("<template><script src='a.js'/></template><p>Body</p>", "Body\n"),
+        ("<template>x</template data-x=\"a>b\"><p>v</p>", "v\n"),
+        ("<script>x</script data-x=\"a>b\"><p>v</p>", "v\n"),
+        ("<template><script>a</script x='>'>b</template><p>v</p>", "v\n"),
+        ("<ul><li><p>Item</p></li><li>\n  <p>Two</p></li></ul>", "- Item\n- Two\n"),
+        ("<ul><li></li></ul><p>Text</p>", "-\n\nText\n"),
+        ("<ol><li>One<ol><li>Sub</li></ol></li></ol>", "1. One\n   1. Sub\n"),
+        ("<ol start=9><li>Nine<ul><li>a<ul><li>b</li></ul></li></ul></li><li>Ten</li></ol>", "9. Nine\n   - a\n     - b\n10. Ten\n"),
+        ("<ul><li>One<ul><li>Sub</li></ul></li></ul>", "- One\n  - Sub\n"),
+        ("<table><tr><td><ul><li>cell</td></tr></table><p>Para 1</p><p>Para 2</p>", "- cell\n\nPara 1\n\nPara 2\n"),
+        ("<blockquote><ol><li>q</blockquote><ul><li>x</li></ul>", "> 1. q\n\n- x\n"),
+        (
+            "<table><tr><th colspan=2>H</th><th>C</th></tr><tr><td>a</td><td colspan='x'>b</td><td>c</td></tr></table>",
+            "| H |  | C |\n| --- | --- | --- |\n| a | b | c |\n",
+        ),
+    ] {
+        assert_eq!(md(html.as_bytes(), "a.html"), text, "{html}");
+    }
+    // Lists past the nesting cap in a cell end with the cell too (Astra
+    // review of 4a72078, finding 6).
+    let deep = format!("<table><tr><td>{}x</td></tr></table><ul><li>a</li></ul><p>P1</p><p>P2</p>", "<ul><li>".repeat(40));
+    assert!(md(deep.as_bytes(), "a.html").ends_with("\n- a\n\nP1\n\nP2\n"), "{}", md(deep.as_bytes(), "a.html"));
+    let wide = "<table><tr><td colspan=999999>a</td></tr><tr><td>b</td></tr></table>";
+    assert_eq!(md(wide.as_bytes(), "a.html").lines().next().unwrap().matches('|').count(), 64 + 1);
+    // A long class on a div is not decoded, so it uses none of the room.
+    let caps = Caps { max_chars: 4096, ..Caps::default() };
+    let html = format!("<p>{}</p><div class=\"{}\">after</div>", "w ".repeat(1500), "c".repeat(20_000));
+    let (_, doc) = read(html.as_bytes(), "a.html", &caps).unwrap();
+    assert!(doc.markdown.ends_with("w\n\nafter\n"), "{}", &doc.markdown[doc.markdown.len() - 20..]);
+    assert_eq!(doc.warnings, Vec::<String>::new());
 }

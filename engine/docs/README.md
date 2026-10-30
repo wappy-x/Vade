@@ -10,7 +10,7 @@ it covers and who it is for, and ends with where to go next.
 
 - [Installation](../../INSTALL.md) and [Flash server](next-http.md).
   Current FP4-Local launcher, Mac tunnel, harness build and client setup.
-  [Legacy FP8 installation](../../docs/install-legacy-fp8.md) remains separate.
+  [FP8 installation](../../docs/install-fp8.md) remains separate.
 - [One-Spark quickstart](../../docs/quickstart-one-spark.md). Current Ubuntu GB10
   route: prerequisites, engine workspace paths, complete official download and
   checksum commands, first chat and answer comparison. Use this
@@ -22,8 +22,9 @@ it covers and who it is for, and ends with where to go next.
   [quickstart step 3](../../docs/quickstart-one-spark.md#3-download-and-verify-the-official-small-model).
 - [Run, update, remove](upkeep.md). Keep Vade running as a service, update
   it, remove it.
-- [Multiple Sparks](multi-spark.md). Serve Qwen3-8B or Qwen3-32B across
-  cabled Sparks with tensor parallelism.
+- [Multiple Sparks](multi-spark.md). The older BF16 path: Qwen3-8B or
+  Qwen3-32B across cabled Sparks with tensor parallelism. FP4-Local uses the
+  tensor split on two Sparks and the layer chain on three or more.
 
 ## Performance
 

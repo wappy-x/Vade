@@ -107,7 +107,9 @@ The old text, not a line number, decides where a hunk goes:
 - The complete old hunk (the space and minus lines) must match exactly once, at
   line boundaries. When there is no exact match, a unique match that differs
   only in spaces or tabs is accepted, keeps the file's unchanged lines and is
-  reported in the result. Text that matches more than once is refused. There is
+  reported in the result. Each line must keep the same indent width (a tab
+  counts as 4 or 8 columns), so a block at another nesting depth never
+  matches. Text that matches more than once is refused. There is
   no other fuzzy matching, line-number search or implicit replace-all.
 - A bare empty line inside a hunk counts as an empty context line.
 - An empty existing file accepts a hunk that only inserts.
@@ -217,10 +219,12 @@ plus optional `max_bytes` and `timeout_s`. The limits in the tool schema are
 The result gives the final URL, content type and captured byte count before
 the body. HTML goes through the document reader to Markdown. Plain text,
 Markdown and JSON pass through. PDF and other formats with a registered reader
-use that reader. Other types give `binary <type>, <bytes> bytes`.
+use that reader. This includes office files, EPUB, and ZIP, tar and gzip
+archives. Other types give `binary <type>, <bytes> bytes`.
 The byte limit applies to both the downloaded body and the converted text.
 A cut result ends with `[truncated at N bytes]`. A reader can refuse an
-incomplete document. When a download cuts a UTF-8 character, HTML and table
+incomplete document. For example, a ZIP file that the byte limit cuts gives
+`document reader could not read the response`. When a download cuts a UTF-8 character, HTML and table
 readers get the valid prefix. Earlier characters keep their encoding. A
 complete response with a damaged UTF-8 byte order mark tail gives an error.
 The conversion character cap is set before the reader runs. It uses the

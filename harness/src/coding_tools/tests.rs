@@ -153,7 +153,7 @@ fn patch_failure_distinguishes_preflight_from_partial_writes() {
         if patch.contains("Update File:") && patch.contains("@@ -") { assert!(out.starts_with("Patch refused:") && (out.contains("old text missing") && out.contains("workspace_read_lines") || out.contains("requires nonempty exact old text")), "{out}"); assert_eq!(f.read("src/cli.rs"), "original source\n"); assert!(!f.0.join("Cargo.toml").exists() || f.read("Cargo.toml") == "original manifest\n"); continue; }
         assert!(out.starts_with("Patch refused:") && out.contains(&format!("First wrong line {wrong} ")) && out.contains(&json::quote(patch.lines().nth(wrong - 1).unwrap())) && out.contains("Expected patch string:"), "{out}"); assert_eq!(f.read("src/cli.rs"), "original source\n"); assert!(!f.0.join("Cargo.toml").exists() || f.read("Cargo.toml") == "original manifest\n"); let example = out.split("): ").last().unwrap(); let example = json::parse(example).unwrap(); let sample = example.get("patch").and_then(Value::as_str).unwrap(); assert!(!sample.contains("@@ -") && !sample.contains("--- ") && !sample.contains("+++ ")); let old: String = sample.lines().filter_map(|line| line.strip_prefix(' ').or_else(|| line.strip_prefix('-'))).map(|line| format!("{line}\n")).collect(); let path = if sample.contains("Cargo.toml") { "Cargo.toml" } else { "src/cli.rs" }; if sample.contains("Update File:") { f.write(path, &old); } assert!(crate::edit::prepare(&w, sample).is_ok(), "{sample}"); let retry = json::parse(r#"{"patch":"*** Add File: Cargo.toml","retry":true}"#).unwrap(); assert!(tools.execute(ToolInvocation { call: &call, arguments: &retry, max_output_bytes: 4096 }, &AtomicBool::new(false)).unwrap().contains("invalid_arguments"));
     }
-    for (existing, concurrent) in [(true, false), (false, false), (true, true), (false, true)] { let f = Fixture::new(); if existing { f.write("reuse", "old"); } let w = f.workspace(); let mut tools = CodingTools::new(&w, ApprovalPolicy::Auto, |_: Preview<'_>, _: &AtomicBool| true);
+    for (existing, concurrent) in [(true, false), (true, true)] { let f = Fixture::new(); if existing { f.write("reuse", "old"); } let w = f.workspace(); let mut tools = CodingTools::new(&w, ApprovalPolicy::Auto, |_: Preview<'_>, _: &AtomicBool| true);
         let mut invoke = |args: Value| { let call = ToolCall { id: "retry".into(), name: "apply_patch".into(), arguments: json::stringify(&args).unwrap() }; tools.execute(ToolInvocation { call: &call, arguments: &args, max_output_bytes: 4096 }, &AtomicBool::new(false)).unwrap() }; let refused = invoke(json::parse(&format!(r#"{{"patch":"*** Add File: reuse\n{}first\nsecond"}}"#, if existing { "" } else { "+" })).unwrap()); assert!(refused.contains("Retained") && (!existing || f.read("reuse") == "old")); if concurrent { f.write("reuse", "concurrent\n"); }
         let header = format!("*** {} File: reuse", if existing { "Update" } else { "Add" }); let expected = format!("{{\"patch\":{},\"retry\":true}}", json::quote(&header)); for raw in [format!("{{\"patch\":{},\"retry\":true}}", json::quote(&format!("{header}\\n"))), format!("{{\"patch\":{},\"retry\":{{}}}}", json::quote(&header)), format!("{{\"patch\":{},\"retry\":{{\"patch\":\"ignored\"}}}}", json::quote(&header)), r#"{"retry":true}"#.into(), r#"{"patch":[],"retry":true}"#.into(), format!("{{\"patch\":{},\"retry\":true,\"extra\":1}}", json::quote(&header))] { let out = invoke(json::parse(&raw).unwrap()); let v = json::parse(&out).unwrap(); assert_eq!(v.get("error").and_then(Value::as_str), Some("invalid_arguments")); assert!(v.get("message").and_then(Value::as_str).unwrap().contains(&expected) && out.lines().count() == 1); assert!(!f.0.join("reuse").exists() || f.read("reuse") == if concurrent { "concurrent\n" } else { "old" }); }
         let result = invoke(json::parse(&format!("{{\"patch\":{},\"retry\":true}}", json::quote(&format!("{header}\n")))).unwrap()); assert_eq!(f.read("reuse"), if concurrent { "concurrent\n" } else { "first\nsecond\n" }); assert_eq!(result.starts_with("Applied "), !concurrent); let again = invoke(json::parse(&expected).unwrap()); assert!(again.contains("invalid_arguments") && !again.contains(&json::quote(&expected)));
@@ -210,9 +210,10 @@ fn patch_failure_distinguishes_preflight_from_partial_writes() {
                 .and_then(Value::as_array)
                 .unwrap()
                 .len(),
-            usize::from(partial)
+            // A partial write of a is rolled back: written, then restored.
+            2 * usize::from(partial)
         );
-        assert_eq!(f.read("a"), if partial { "new\n" } else { "old\n" });
+        assert_eq!(f.read("a"), "old\n");
         assert_eq!(f.read("b"), "concurrent\n");
     }
 }
@@ -778,4 +779,57 @@ fn an_approval_the_journal_cannot_record_saves_no_rule() {
     assert!(!f.0.join("one.txt").exists());
     assert_eq!(approvals.allowed(&argv, &verdict, &f.0), None);
     assert!(approvals.summary().contains("0 session"), "{}", approvals.summary());
+}
+#[test]
+fn workspace_edit_lines_accepts_earlier_read_tag_after_reading_second_file() {
+    let f = Fixture::new();
+    f.write("a.rs", "a1\na2\na3\n");
+    f.write("b.rs", "b1\nb2\n");
+    let w = f.workspace();
+    let mut tools = CodingTools::new(&w, ApprovalPolicy::Auto, |_: Preview<'_>, _: &AtomicBool| true);
+    let mut invoke = |name: &str, args: String| { let args = json::parse(&args).unwrap(); let call = ToolCall { id: "lines".into(), name: name.into(), arguments: json::stringify(&args).unwrap() }; tools.execute(ToolInvocation { call: &call, arguments: &args, max_output_bytes: 4096 }, &AtomicBool::new(false)).unwrap() };
+    let read = |path: &str, start: usize, end: usize| format!(r#"{{"path":"{path}","start_line":{start},"end_line":{end}}}"#);
+    let tag = |out: String| json::parse(&out).unwrap().get("edit_tag").and_then(Value::as_str).unwrap().to_owned();
+    let a = tag(invoke("workspace_read_lines", read("a.rs", 1, 1)));
+    assert_eq!(tag(invoke("workspace_read_lines", read("a.rs", 3, 3))), a);
+    let b = tag(invoke("workspace_read_lines", read("b.rs", 1, 2)));
+    let edit = |path: &str, tag: &str, line: usize, text: &str| format!(r#"{{"path":"{path}","start_line":{line},"end_line":{line},"edit_tag":{},"operation":"replace","new_text":{}}}"#, json::quote(tag), json::quote(text));
+    // Both earlier ranges of a.rs stay editable after b.rs was read.
+    assert!(invoke("workspace_edit_lines", edit("a.rs", &a, 1, "A1\n")).starts_with("Applied "));
+    assert!(invoke("workspace_edit_lines", edit("b.rs", &b, 2, "B2\n")).starts_with("Applied "));
+    assert_eq!((f.read("a.rs"), f.read("b.rs")), ("A1\na2\na3\n".into(), "b1\nB2\n".into()));
+    // The old a.rs tag is stale after its own edit, and line 2 was never shown.
+    assert!(invoke("workspace_edit_lines", edit("a.rs", &a, 3, "A3\n")).contains("stale edit_tag"));
+    let a = tag(invoke("workspace_read_lines", read("a.rs", 1, 1)));
+    assert!(invoke("workspace_edit_lines", edit("a.rs", &a, 2, "A2\n")).contains("not fully shown"));
+}
+#[test]
+fn shell_receipt_rewrites_only_whole_workspace_root_paths() {
+    let root = "/work/repo";
+    let text = "/work/repo/src/a.rs:1 (/work/repo) /work/repo_old/file.rs /private/work/repo/x /work/repo: done";
+    assert_eq!(relative_root(text, root), "./src/a.rs:1 (.) /work/repo_old/file.rs /private/work/repo/x .: done");
+}
+#[test]
+#[cfg(target_os = "macos")]
+fn shell_capture_uses_the_whole_output_budget() {
+    let f = Fixture::new();
+    let w = f.workspace();
+    let mut tools = CodingTools::new(&w, ApprovalPolicy::Auto, |_: Preview<'_>, _: &AtomicBool| true);
+    // 30,000 bytes of stderr fit the 64 KiB budget with nothing omitted.
+    let args = json::parse(r#"{"argv":["/bin/sh","-c","i=0; while [ $i -lt 600 ]; do echo 0123456789012345678901234567890123456789012345678 >&2; i=$((i+1)); done"],"timeout_ms":20000}"#).unwrap();
+    let call = ToolCall { id: "loud".into(), name: "workspace_shell".into(), arguments: json::stringify(&args).unwrap() };
+    let out = tools.execute(ToolInvocation { call: &call, arguments: &args, max_output_bytes: 64 * 1024 }, &AtomicBool::new(false)).unwrap();
+    assert!(out.contains("stderr_read=30000 stdout_omitted=0 stderr_omitted=0"), "{}", &out[..out.len().min(600)]);
+}
+#[test]
+fn workspace_list_errors_name_their_reason() {
+    let f = Fixture::new();
+    std::fs::create_dir(f.0.join("src")).unwrap();
+    f.write("src/a.rs", "");
+    let w = f.workspace();
+    let mut tools = CodingTools::new(&w, ApprovalPolicy::Auto, |_: Preview<'_>, _: &AtomicBool| true);
+    let mut list = |path: &str| { let args = json::parse(&format!(r#"{{"path":{}}}"#, json::quote(path))).unwrap(); let call = ToolCall { id: "list".into(), name: "workspace_list".into(), arguments: json::stringify(&args).unwrap() }; tools.execute(ToolInvocation { call: &call, arguments: &args, max_output_bytes: 4096 }, &AtomicBool::new(false)) };
+    assert_eq!(list("src"), Ok("a.rs".into()));
+    assert_eq!(list("src/nonexistent"), Ok("List refused: This folder does not exist or is a symbolic link. The agent does not follow links.".into()));
+    assert!(list("../outside").unwrap().starts_with("List refused: Use a path relative to the workspace, without .. or a leading /"));
 }

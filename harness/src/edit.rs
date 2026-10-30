@@ -37,14 +37,10 @@ impl Snapshot {
                 m.len()
             )));
         }
-        let identity = (
-            m.dev(),
-            m.ino(),
-            m.len(),
-            m.mtime(),
-            m.mtime_nsec(),
-            m.mode(),
-        );
+        let stamp = |m: &std::fs::Metadata| {
+            ((m.dev(), m.ino(), m.len(), m.mtime(), m.mtime_nsec(), m.mode()), (m.ctime(), m.ctime_nsec()))
+        };
+        let (identity, changed) = stamp(&m);
         let mut bytes = Vec::new();
         (&file)
             .take((MAX_TEXT_BYTES + 1) as u64)
@@ -55,7 +51,8 @@ impl Snapshot {
                 bytes.len()
             )));
         }
-        if file.metadata()?.len() != m.len() || bytes.len() as u64 != m.len() {
+        // A same-length write during the read still moves mtime or ctime.
+        if stamp(&file.metadata()?) != (identity, changed) || bytes.len() as u64 != m.len() {
             return Err(err("target file changed during patch read"));
         }
         Ok(Some(Self {
@@ -200,15 +197,19 @@ impl PreparedPatch {
         }
         let mut applied = 0;
         for c in &self.changes {
-            if cancel.load(Ordering::Relaxed) {
-                return Err(ApplyError::new(
-                    err(&format!(
-                        "patch canceled; {applied} file operations committed"
-                    )),
-                    applied > 0,
-                ));
+            // Cancel stops only before the first write. A started batch runs to
+            // its end so a checked multi-file patch is not left half applied.
+            if applied == 0 && cancel.load(Ordering::Relaxed) {
+                return Err(ApplyError::new(err("patch canceled; 0 file operations committed"), false));
             }
-            c.check().map_err(|e| ApplyError::new(e, applied > 0))?;
+            if let Err(e) = c.check() {
+                if applied == 0 {
+                    return Err(ApplyError::new(e, false));
+                }
+                // Another writer changed a later file.
+                let undone = undo_committed(&self.changes[..applied], &mut receipt);
+                return Err(ApplyError::new(err(&format!("{e}; {undone}")), true));
+            }
             let result = (|| {
                 match (&c.after, &c.target) {
                     (Some(text), Some((dir, name, target))) => {
@@ -240,7 +241,7 @@ impl PreparedPatch {
                             c.mode(),
                             c.before.is_none(),
                             || {
-                                if cancel.load(Ordering::Relaxed) {
+                                if applied == 0 && cancel.load(Ordering::Relaxed) {
                                     return Err(err("patch canceled during staging"));
                                 }
                                 c.check()
@@ -256,9 +257,15 @@ impl PreparedPatch {
                 Ok(())
             })();
             if let Err(e) = result {
+                // The staging check or a write failed. The earlier files are
+                // undone the same way; this one may have partial changes.
+                let undone = match applied {
+                    0 => String::new(),
+                    _ => format!("; {}", undo_committed(&self.changes[..applied], &mut receipt)),
+                };
                 return Err(ApplyError::new(
                     err(&format!(
-                        "patch stopped after {applied} completed file operations; the failing operation may have partial changes: {e}"
+                        "patch stopped after {applied} completed file operations; the failing operation may have partial changes: {e}{undone}"
                     )),
                     true,
                 ));
@@ -275,6 +282,13 @@ impl PreparedPatch {
         }
         Ok(summary)
     }
+}
+/// Undo committed changes, last first, while each file still holds exactly
+/// the bytes this patch wrote. Every undo is tried, even after one fails.
+fn undo_committed(done: &[Change], receipt: &mut dyn FnMut(&'static str, &str)) -> String {
+    let undone = done.iter().rev().fold(true, |all, change| change.undo(receipt).is_ok() && all);
+    let how = if undone { "rolled back" } else { "could not roll back all of" };
+    format!("{how} the {} earlier file operations of this patch", done.len())
 }
 impl Change {
     fn mode(&self) -> u32 {
@@ -295,6 +309,34 @@ impl Change {
             };
         }
         Ok(Some(dir))
+    }
+    /// Undo a committed add, update or delete while the file still holds the
+    /// bytes this patch wrote. A move is not undone; created folders remain.
+    fn undo(&self, receipt: &mut dyn FnMut(&'static str, &str)) -> io::Result<()> {
+        if self.target.is_some() {
+            return Err(err("a move is not rolled back"));
+        }
+        let dir = self.parent(false)?.ok_or_else(|| err("patch parent is missing"))?;
+        let now = Snapshot::read(&dir, &self.name)?;
+        if now.as_ref().map(|s| &s.text) != self.after.as_ref() {
+            return Err(err("file changed after this patch wrote it"));
+        }
+        let unchanged = || match Snapshot::read(&dir, &self.name)? == now {
+            true => Ok(()),
+            false => Err(err("file changed after this patch wrote it")),
+        };
+        match &self.before {
+            Some(before) => {
+                dir.install(&self.name, before.text.as_bytes(), self.mode(), self.after.is_none(), unchanged)?;
+                receipt("File restored", &self.path);
+            }
+            None => {
+                unchanged()?;
+                dir.remove(&self.name)?;
+                receipt("File removed", &self.path);
+            }
+        }
+        Ok(())
     }
     fn check(&self) -> io::Result<()> {
         let current = match self.parent(false)? {
@@ -538,9 +580,12 @@ pub(crate) fn prepare_add_retry(workspace: &Workspace, patch: &str) -> io::Resul
             }
         }
     }
-    // An entirely bare Add keeps leading '+' content. A mixed Add is repaired
-    // only after the model explicitly accepts the normalization in the receipt.
+    // An entirely bare Add keeps leading '+' content. A mixed Add is refused:
+    // a bare line that starts with '+' cannot be told apart from a prefix.
     let prefixed = body.iter().any(|line| line.starts_with('+'));
+    if prefixed && body.iter().any(|line| !line.is_empty() && !line.starts_with('+') && *line != "\\ No newline at end of file") {
+        return Err(err("retry cannot tell a '+' prefix from '+' content in a mixed Add body"));
+    }
     for line in body {
         if *line == "\\ No newline at end of file" {
             corrected.push_str(line);
@@ -973,13 +1018,29 @@ pub fn prepare(workspace: &Workspace, patch: &str) -> io::Result<PreparedPatch> 
 }
 
 /// Line blocks equal to `old` when runs of spaces and tabs are ignored. Words
-/// and line endings (including a carriage return) must still agree. At most
-/// two starts and ends are returned.
+/// and line endings (including a carriage return) must still agree, and so
+/// must the indent width (a tab counts 4 or 8 columns), so a block at another
+/// nesting depth never matches. At most two starts and ends are returned.
 fn loose_matches(text: &str, old: &str) -> Vec<(usize, usize)> {
     fn words(line: &str) -> impl Iterator<Item = &str> {
         let line = line.strip_suffix('\n').unwrap_or(line);
         line.split([' ', '\t']).filter(|w| !w.is_empty())
     }
+    fn indent(line: &str, tab: usize) -> Option<usize> {
+        let mut width = 0;
+        for c in line.chars() {
+            match c {
+                ' ' => width += 1,
+                '\t' => width += tab,
+                '\n' | '\r' => return None,
+                _ => return Some(width),
+            }
+        }
+        None
+    }
+    let same_indent = |a: &str, b: &str| {
+        indent(a, 4).is_none() || indent(a, 4) == indent(b, 4) || indent(a, 8) == indent(b, 8)
+    };
     let old: Vec<&str> = old.split_inclusive('\n').collect();
     let mut at = 0;
     let lines: Vec<(usize, &str)> = text
@@ -995,7 +1056,9 @@ fn loose_matches(text: &str, old: &str) -> Vec<(usize, usize)> {
             block
                 .iter()
                 .zip(&old)
-                .all(|((_, a), b)| a.ends_with('\n') == b.ends_with('\n') && words(a).eq(words(b)))
+                .all(|((_, a), b)| {
+                    a.ends_with('\n') == b.ends_with('\n') && words(a).eq(words(b)) && same_indent(a, b)
+                })
         })
         .take(2)
         .map(|block| {

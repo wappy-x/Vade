@@ -78,6 +78,19 @@ pub(crate) fn owner_configured() -> bool {
     root().is_ok_and(|p| p.join("config").exists() || p.join("state/run.conf").exists())
 }
 
+/// Whether the local setup has saved defaults and an install built from this
+/// checkout, so vade install would only reuse it. Any doubt is `false`:
+/// vade install then runs and names the problem.
+pub(crate) fn owner_install_current() -> bool {
+    let current = || -> Result<bool, String> {
+        let root = root()?;
+        if Config::load(&root)?.is_none() { return Ok(false); }
+        let Some(files) = install::load(&root)? else { return Ok(false) };
+        Ok(install::changed_source(&files, &mut crate::runner::SystemRunner { dry: false })?.is_none())
+    };
+    current().unwrap_or(false)
+}
+
 /// The installed harness of the local owner flow, if the install is complete.
 pub(crate) fn installed_harness() -> Result<Option<PathBuf>, String> {
     Ok(install::load(&root()?)?.and_then(|artifacts| artifacts.get("harness").map(PathBuf::from)))
@@ -309,15 +322,26 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                     if prior.is_some() && (configured.is_none() || installed.is_none()) {
                         return Err("An owned engine has incomplete install records; run vade down before reinstalling.".into());
                     }
-                    let mut config = if let Some(record) = &prior {
+                    // vade install builds before the model is on disk, so
+                    // scripts/install.sh can run first and vade pull later.
+                    if command == Command::Install && prior.is_none() && configured.is_none()
+                        && std::env::var_os("VADE_MODELS").is_none_or(|path| path.is_empty())
+                        && let Err(reason) = model::find(&self.home)
+                    {
+                        return self.install_without_model(installed, &reason);
+                    }
+                    // A new or changed model choice gets its checkpoint check
+                    // in Prepare before the first start.
+                    let (mut config, chosen) = if let Some(record) = &prior {
                         let config = configured.ok_or("Run vade down before repairing the local config.")?;
-                        config.check_running_options(&options, record)?
+                        (config.check_running_options(&options, record)?, false)
                     } else {
                         let (model, identity) = self.detection(configured.as_ref(),
                             if installed.is_some() { 0 } else { INSTALL_SPACE })?;
                         let configured_phase = phase("Config", "choose and save local defaults")?;
                         let previous = configured.as_ref().map(Config::display);
                         let changed_model = configured.as_ref().is_some_and(|c| c.model != model.path);
+                        let chosen = configured.is_none() || changed_model;
                         let mut config = match configured {
                             Some(config) if !changed_model => config,
                             prior => {
@@ -352,34 +376,18 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                                 self.root.join("config").display(), config.display()))?;
                         }
                         done("Config", configured_phase)?;
-                        config
+                        (config, chosen)
                     };
-                    // vade install from a new checkout must not keep an engine that another one built.
-                    let outdated = command == Command::Install && prior.is_none()
-                        && installed.as_ref().map_or(Ok(false), |files| install::outdated(files, &mut self.runner))?;
-                    let start = phase(
-                        "Install",
-                        if installed.is_some() && !outdated {
-                            "reuse installed files"
-                        } else {
-                            "prepare local engine and chat"
-                        },
-                    )?;
-                    let fresh = installed.is_none() || outdated;
-                    let artifacts = match installed {
-                        Some(_) if outdated => install::rebuild(&self.root, &mut self.runner)?,
-                        Some(files) => files,
-                        None => install::ensure(&self.root, &mut self.runner)?,
-                    };
-                    done("Install", start)?;
+                    let (artifacts, fresh) = self.install_files(installed, command == Command::Install && prior.is_none())?;
                     let record = if command == Command::Install {
-                        if prior.is_none() { self.prepare(&config, &artifacts, "install")?; }
+                        if prior.is_none() { self.prepare(Some(&config.model), &artifacts, "install")?; }
                         None
                     } else {
-                        // A first launch fills the same caches as install, so
+                        // A first launch, or the first one after vade install
+                        // without a model, fills the same caches as install, so
                         // startup neither compiles nor hashes on the clock.
-                        if prior.is_none() && fresh {
-                            self.prepare(&config, &artifacts, if matches!(command, Command::Up(_)) { "up" } else { "launch" })?;
+                        if prior.is_none() && (fresh || chosen) {
+                            self.prepare(Some(&config.model), &artifacts, if matches!(command, Command::Up(_)) { "up" } else { "launch" })?;
                         }
                         let loading = format!("load {} on this Spark, context {} tokens",
                             text::terminal_text(&config.model.file_name().unwrap_or_default().to_string_lossy()), config.context);
@@ -494,6 +502,43 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         }
     }
 
+    /// The Install phase: reuse the installed files, or build and stage them.
+    /// With `check_source`, files built from another checkout are rebuilt.
+    /// Returns the files and whether they are new.
+    fn install_files(&mut self, installed: Option<Fields>, check_source: bool) -> Result<(Fields, bool), String> {
+        // vade install from a new checkout must not keep an engine that another one built.
+        let outdated = check_source
+            && installed.as_ref().map_or(Ok(false), |files| install::outdated(files, &mut self.runner))?;
+        let start = phase("Install", if installed.is_some() && !outdated { "reuse installed files" } else { "prepare local engine and chat" })?;
+        let fresh = installed.is_none() || outdated;
+        let artifacts = match installed {
+            Some(_) if outdated => install::rebuild(&self.root, &mut self.runner)?,
+            Some(files) => files,
+            None => install::ensure(&self.root, &mut self.runner)?,
+        };
+        done("Install", start)?;
+        Ok((artifacts, fresh))
+    }
+
+    /// `vade install` with no model on disk yet: check this Spark, build and
+    /// stage the engine, kernels and chat, and compile the GPU code. It saves
+    /// no defaults. The first vade launch or vade up finds the model, saves
+    /// them and checks the checkpoint files.
+    fn install_without_model(&mut self, installed: Option<Fields>, reason: &str) -> Result<(), String> {
+        let start = phase("Detect", "read this Spark; the model is not on disk yet")?;
+        let models = self.home.join("models");
+        let models = if models.is_dir() { models } else { self.home.clone() };
+        let identity = self.detector.detect(&self.root, &models)?;
+        identity.check_resources(0, if installed.is_some() { 0 } else { INSTALL_SPACE })?;
+        output::text(format_args!("{}", identity.display(&models)))?;
+        output::line(format_args!("Model: {reason} The install goes on without it; vade launch needs the model."))?;
+        done("Detect", start)?;
+        let (artifacts, _) = self.install_files(installed, true)?;
+        self.prepare(None, &artifacts, "install")?;
+        output::line(format_args!("Installed without a model, so no local defaults were saved yet.\n{}\nThen start the engine and open chat: {}",
+            model::MODEL_HELP, text::command("launch")))
+    }
+
     fn detection(
         &mut self,
         config: Option<&Config>,
@@ -524,14 +569,14 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         let model = match (saved_model(&self.root), std::env::var_os("VADE_MODELS").filter(|path| !path.is_empty())) {
             (Some(model), _) => format!("{} (saved)", shown(&model)),
             (None, Some(path)) => format!("{} (VADE_MODELS)", shown(Path::new(&path))),
-            (None, None) => format!("the FP4-Local checkpoint under {}, found at install", shown(&self.home.join("models"))),
+            (None, None) => format!("the FP4-Local checkpoint under {}, found at install (optional: without it, install saves no defaults)", shown(&self.home.join("models"))),
         };
         let mut rows = vec![("Where", "this Spark".to_owned())];
         rows.extend(install::plan(&self.root)?);
         rows.extend([
             ("Model", model),
             ("State", format!("{}: config, stage and state", shown(&self.root))),
-            ("Steps", "detect this Spark and model, save defaults, stage the engine, kernels and chat, warm the GPU startup cache".into()),
+            ("Steps", "detect this Spark and model, save defaults when the model is there, stage the engine, kernels and chat, warm the GPU startup cache".into()),
             ("Next", text::command("install")),
         ]);
         Ok(format!("Plan for vade install:\n{}", style::table(&rows, 2)))
@@ -946,8 +991,11 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         Ok(fields)
     }
 
-    fn prepare(&mut self, config: &Config, artifacts: &Fields, retry: &str) -> Result<(), String> {
-        let started = phase("Prepare", "compile GPU code and check every checkpoint file (private caches only)")?;
+    /// Fill the private startup caches: compile the GPU code and, with a
+    /// `model`, check every checkpoint file.
+    fn prepare(&mut self, model: Option<&Path>, artifacts: &Fields, retry: &str) -> Result<(), String> {
+        let started = phase("Prepare", if model.is_some() { "compile GPU code and check every checkpoint file (private caches only)" }
+            else { "compile GPU code (private cache only)" })?;
         let record = Fields::from([("token".into(), text::random_hex(32)?)]);
         let mut request = Fields::from([
             ("engine".into(), required(artifacts, "engine")?.into()),
@@ -960,16 +1008,19 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         // loading, so the helper does it now, during compilation, into the same
         // private receipt and stamp cache. Without one, startup serves at once
         // and the engine hashes in the background, so nothing is hashed here.
-        let result = self.stage_manifest(&config.model).and_then(|manifest| {
-            if supplied_manifest(&config.model)?.is_none() {
-                output::line(format_args!("Prepare: no checksum list for this checkpoint ({}.sha256 beside it, or manifest.sha256 inside it). Vade cannot check its files against the published hashes. To check them, see Check the files in INSTALL.md.",
-                    config.model.file_name().map_or_else(|| "<folder>".into(), |name| name.to_string_lossy())))?;
-            }
-            if manifest.is_some_and(|path| path.exists()) {
-                request.insert("verify_model".into(), config.model.to_string_lossy().into_owned());
-            }
-            self.worker(&record, "warm-ptx", request, false)
-        });
+        let result = match model {
+            None => self.worker(&record, "warm-ptx", request, false),
+            Some(model) => self.stage_manifest(model).and_then(|manifest| {
+                if supplied_manifest(model)?.is_none() {
+                    output::line(format_args!("Prepare: no checksum list for this checkpoint ({}.sha256 beside it, or manifest.sha256 inside it). Vade cannot check its files against the published hashes. To check them, see Check the files in INSTALL.md.",
+                        model.file_name().map_or_else(|| "<folder>".into(), |name| name.to_string_lossy())))?;
+                }
+                if manifest.is_some_and(|path| path.exists()) {
+                    request.insert("verify_model".into(), model.to_string_lossy().into_owned());
+                }
+                self.worker(&record, "warm-ptx", request, false)
+            }),
+        };
         let fields = result.map_err(|error| format!(
             "{error}\nLocal cache preparation failed; installed files were kept. Run {}, fix the reported cause, then retry {}.",
             text::command("doctor"), text::command(retry)))?;

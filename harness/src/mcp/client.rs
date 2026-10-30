@@ -102,17 +102,30 @@ pub struct Connection {
     stderr: Arc<Mutex<Redactor>>,
     next_id: u64,
     dead: bool,
+    /// Vade stopped the server at a call's time limit; that is not a crash.
+    pub timed_out: bool,
     pub info: ServerInfo,
 }
 
 impl Connection {
     /// Spawn the server and run `initialize` / `notifications/initialized`.
     pub fn start(spec: &ServerSpec, root: &Path, cancel: &AtomicBool) -> Result<Self, CallError> {
+        // Only ordinary runtime names pass from the chat; a server gets a
+        // token only through its own `env` entry.
+        const KEEP: &[&str] = &["HOME", "PATH", "TMPDIR", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM"];
+        // The folder must resolve inside the workspace, also through links.
+        let inside = |dir: &Path| Some(std::fs::canonicalize(dir).ok()?.starts_with(std::fs::canonicalize(root).ok()?));
+        let directory = spec.directory(root);
+        if inside(&directory) != Some(true) {
+            return Err(CallError::Spawn("cwd is not a folder inside the workspace".into()));
+        }
         let mut command = Command::new(&spec.command);
         command
             .args(&spec.args)
+            .env_clear()
+            .envs(std::env::vars_os().filter(|(name, _)| name.to_str().is_some_and(|name| KEEP.contains(&name))))
             .envs(spec.env.iter().map(|(k, v)| (k, v)))
-            .current_dir(spec.directory(root))
+            .current_dir(directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -140,7 +153,7 @@ impl Connection {
         let tail = Arc::clone(&stderr);
         std::thread::spawn(move || keep_tail(stderr_pipe, &tail));
         let queued = Arc::new(AtomicU64::new(0));
-        let mut connection = Self { writer: Some(writer), queued, written, child, incoming, closed, stderr, next_id: 1, dead: false, info: ServerInfo::default() };
+        let mut connection = Self { writer: Some(writer), queued, written, child, incoming, closed, stderr, next_id: 1, dead: false, timed_out: false, info: ServerInfo::default() };
         let params = json::parse(&format!(
             r#"{{"protocolVersion":"{PROTOCOL_VERSION}","capabilities":{{}},"clientInfo":{{"name":"vade","version":"{}"}}}}"#,
             env!("CARGO_PKG_VERSION")
@@ -246,7 +259,11 @@ impl Connection {
             }
             let now = Instant::now();
             if now >= deadline {
+                // Stop the server so the call does not run on past its time
+                // limit; the next call starts it again.
                 self.abandon(id, "timed out");
+                self.stop();
+                self.timed_out = true;
                 return Err(CallError::Timeout);
             }
             let line = match self.incoming.recv_timeout((deadline - now).min(POLL)) {

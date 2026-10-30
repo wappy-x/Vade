@@ -164,3 +164,21 @@ fn fresh_chat_at_whole_context_output_never_defers_compaction() {
     }
     std::fs::remove_dir_all(path).unwrap();
 }
+
+#[test]
+fn repeated_resume_without_a_turn_appends_one_resume_note() {
+    let path = std::env::temp_dir().join(format!("vade-resume-note-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir(&path).unwrap();
+    let workspace = Workspace::new(&path).unwrap();
+    let mut c = Conversation::from_request(json::parse(r#"{"model":"mock","messages":[{"role":"system","content":"rules"},{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}"#).unwrap(), Limits::default()).unwrap();
+    let mut store = Journal::create(&workspace, "notes", &c).unwrap();
+    for _ in 0..3 {
+        append_resume_note(&mut store, &mut c).unwrap();
+    }
+    drop(store);
+    let (_, resumed, _) = Journal::resume(&workspace, "notes", Limits::default()).unwrap();
+    let notes = resumed.messages().iter().filter(|m| m.value().get("content").and_then(Value::as_str) == Some(vade_harness::context::RESUME_NOTE)).count();
+    assert_eq!((notes, resumed.messages().len()), (1, 4));
+    let _ = std::fs::remove_dir_all(&path);
+}

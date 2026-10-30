@@ -966,6 +966,15 @@ pub(crate) fn invalid_integer(key: &str) -> ToolError {
 }
 
 /// Detailed validation errors use only the already reserved receipt capacity.
+/// History keeps "{}" for arguments that are not JSON, so the receipt quotes
+/// a bounded start of the model's own text, and repeats compare equal.
+fn malformed_arguments_content(raw: &str, cap: usize) -> String {
+    let start: String = raw.chars().take(160).collect();
+    let message = format!("arguments are not valid JSON; send one JSON object. They began: {start}");
+    let content = format!("{{\"ok\":false,\"error\":\"invalid_arguments\",\"message\":{}}}", json::quote(&message));
+    if content.len() <= cap { content } else { invalid_arguments_content("arguments must be a JSON object", cap) }
+}
+
 fn invalid_arguments_content(reason: &'static str, cap: usize) -> String {
     let fallback = error_content("invalid_arguments");
     if reason.len() > 160 { return fallback; }

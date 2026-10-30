@@ -214,6 +214,7 @@ fn generated_private_manifest_survives_restart_and_warm_attach() {
 fn oversized_manifest_refuses_before_engine_start_without_copying_it() {
     let f = Fixture::new();
     f.installed();
+    f.configured();
     let manifest = vec![b'x'; 1024 * 1024 + 1];
     fs::write(f.model.join("manifest.sha256"), &manifest).unwrap();
     let mut launch = f.launcher();

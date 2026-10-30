@@ -310,13 +310,23 @@ pub(crate) fn run_in_session_observing(
         if build.limits_exceeded()? {
             outcome = Outcome::BuildLimit;
         }
+        let mut scan_note = String::new();
         let changed = if detect_changes && matches!(outcome, Outcome::Exited(_)) {
             workspace.verify_root()?;
             let mut after = WorkspaceState::new();
-            verify_tree_with_git(
+            // The command already ran: keep its receipt, and count a failed
+            // scan as a change. The next command's scan still refuses first.
+            match verify_tree_with_git(
                 workspace.root(), cancel, exclusions, false, Some(&mut after),
-            )?;
-            before != after
+            ) {
+                Ok(()) => before != after,
+                Err(e) => {
+                    let e = e.to_string();
+                    let e = note_prefix(&e, 200);
+                    scan_note = format!("\n[vade: workspace scan after the command failed: {e}; treat every file as possibly changed]");
+                    true
+                }
+            }
         } else {
             false
         };
@@ -324,7 +334,7 @@ pub(crate) fn run_in_session_observing(
             CommandOutput {
                 outcome,
                 stdout: out.render(),
-                stderr: errors.render(),
+                stderr: errors.render() + &scan_note,
                 stdout_bytes: out.total,
                 stderr_bytes: errors.total,
                 stdout_omitted: out.omitted(),
@@ -374,13 +384,55 @@ impl Capture {
         self.total
             .saturating_sub((self.head.len() + self.tail.len()) as u64)
     }
+    /// At most one output byte per captured byte, so the cap holds: a cut
+    /// drops a split character, and other invalid UTF-8 shows as '?'.
     fn render(&self) -> String {
-        let mut bytes = self.head.clone();
+        let tail: Vec<u8> = self.tail.iter().copied().collect();
+        let (mut head, mut tail) = (&self.head[..], &tail[..]);
+        let mut text = String::with_capacity(head.len() + tail.len() + 48);
         if self.omitted() > 0 {
-            bytes.extend(format!("\n[... {} middle bytes omitted ...]\n", self.omitted()).bytes());
+            let start = head.len().saturating_sub(3);
+            let partial = (start..head.len()).rev().find(|&i| head[i] & 0xC0 != 0x80).filter(|&i| {
+                let need = match head[i] { 0xF0.. => 4, 0xE0.. => 3, 0xC0.. => 2, _ => 1 };
+                i + need > head.len()
+            });
+            let skip = tail.iter().take(3).take_while(|&&b| b & 0xC0 == 0x80).count();
+            let cut = partial.map_or(0, |i| head.len() - i) + skip;
+            head = &head[..head.len() - partial.map_or(0, |i| head.len() - i)];
+            tail = &tail[skip..];
+            push_text(&mut text, head);
+            text.push_str(&format!("\n[... {} middle bytes omitted ...]\n", self.omitted() + cut as u64));
+            push_text(&mut text, tail);
+        } else {
+            // Nothing was cut: head and tail are one run of bytes, and a
+            // character may cross from one to the other.
+            push_text(&mut text, &[head, tail].concat());
         }
-        bytes.extend(self.tail.iter());
-        String::from_utf8_lossy(&bytes).into_owned()
+        text
+    }
+}
+/// At most `bytes` bytes of `text`, cut on a character boundary, so a note
+/// fits the room the receipt keeps beside the capture.
+#[cfg(target_os = "macos")]
+fn note_prefix(text: &str, bytes: usize) -> &str {
+    let mut end = text.len().min(bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+#[cfg(target_os = "macos")]
+fn push_text(text: &mut String, mut bytes: &[u8]) {
+    loop {
+        match std::str::from_utf8(bytes) {
+            Ok(valid) => return text.push_str(valid),
+            Err(e) => {
+                let (valid, rest) = bytes.split_at(e.valid_up_to());
+                text.push_str(std::str::from_utf8(valid).unwrap_or_default());
+                text.push('?');
+                bytes = &rest[e.error_len().unwrap_or(rest.len())..];
+            }
+        }
     }
 }
 #[cfg(target_os = "macos")]
@@ -553,5 +605,45 @@ impl Drop for OwnedChild {
     fn drop(&mut self) {
         self.kill_group();
         let _ = self.0.wait();
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod capture_tests {
+    use super::{Capture, note_prefix};
+    #[test]
+    fn scan_note_is_cut_by_bytes_on_a_character_boundary() {
+        let long = "─".repeat(300);
+        assert_eq!(note_prefix(&long, 200).len(), 198);
+        assert_eq!(note_prefix("short", 200), "short");
+    }
+    #[test]
+    fn shell_capture_preserves_utf8_boundaries() {
+        // 3-byte characters with a 10-byte head (cap / 4) and a 30-byte tail.
+        let mut capture = Capture::new(40);
+        capture.append("─".repeat(100).as_bytes());
+        let text = capture.render();
+        assert!(!text.contains('\u{fffd}') && !text.contains('?'), "{text}");
+        let (head, tail) = text.split_once("\n[... ").unwrap();
+        let (marker, tail) = tail.split_once(" ...]\n").unwrap();
+        assert_eq!((head, tail), ("───", "──────────"));
+        assert_eq!(marker, "261 middle bytes omitted");
+        // Invalid bytes never grow the text past the capture.
+        let mut capture = Capture::new(40);
+        capture.append(&[0xff; 100]);
+        assert!(capture.render().len() <= 40 + 40);
+        let mut whole = Capture::new(40);
+        whole.append("a─b".as_bytes());
+        assert_eq!(whole.render(), "a─b");
+        // Nothing omitted, and a character crosses the 10-byte head.
+        let whole: &[&[u8]] = &["aaaaaaaaa─bbbbbbbb".as_bytes()];
+        let split: &[&[u8]] = &[b"aaaaaaaaa\xe2", b"\x94\x80bbbbbbbb"];
+        for chunks in [whole, split] {
+            let mut crossing = Capture::new(40);
+            for chunk in chunks {
+                crossing.append(chunk);
+            }
+            assert_eq!(crossing.render(), "aaaaaaaaa─bbbbbbbb");
+        }
     }
 }

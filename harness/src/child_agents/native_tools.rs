@@ -63,7 +63,7 @@ pub fn native_http_factory_with_generation(
             tools: Box::new(NativeTools {
                 id: context.id,
                 uncertain: false,
-                line_read: None,
+                line_read: Default::default(),
                 host: host.clone(),
                 journal: journal.clone(),
                 build: shell::BuildSession::new(host.shell_toolchain.as_deref())?,
@@ -77,7 +77,7 @@ pub fn native_http_factory_with_generation(
 struct NativeTools {
     id: TaskId,
     uncertain: bool,
-    line_read: Option<crate::line_edit::Read>,
+    line_read: crate::line_edit::Reads,
     host: NativeToolHost,
     journal: ChildJournal,
     build: shell::BuildSession,
@@ -108,9 +108,9 @@ impl agent::ToolExecutor for NativeTools {
         if let Some(approvals) = host.approvals.as_deref() {
             tools = tools.with_approvals(approvals);
         }
-        tools.line_read = self.line_read.take();
+        tools.line_read = std::mem::take(&mut self.line_read);
         let result = tools.execute(call, cancel);
-        self.line_read = tools.line_read.take();
+        self.line_read = std::mem::take(&mut tools.line_read);
         self.uncertain = tools.last_side_effect_uncertain();
         result
     }

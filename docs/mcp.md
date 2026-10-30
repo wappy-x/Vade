@@ -63,7 +63,7 @@ options are:
 | --- | --- |
 | `--project` | Write to `.vade/mcp.json` in the current project instead of your user list. |
 | `--env KEY=VALUE` | Set an environment variable for the server. Repeat it for more variables, each with a different name. |
-| `--cwd DIR` | Run the server in `DIR`. A relative `DIR` starts at the project folder. |
+| `--cwd DIR` | Run the server in `DIR`, a folder inside the project folder. `DIR` is relative, without `..`, and a link in it may not lead out of the project. |
 | `--timeout-ms N` | The time limit for one call, from 1 to 600000 ms. The default is 60000. |
 | `--disabled` | Add the server, but do not start it. |
 
@@ -202,8 +202,10 @@ a question, because the server supplies them.
 | Nesting of one tool definition | 32 levels; a deeper tool is left out with a note |
 | All MCP tool definitions together | 8192 JSON values and 512 KiB; later tools are left out with a note, so the chat history keeps its room |
 
-When a call passes its time limit, Vade sends `notifications/cancelled` and
-tells the model that the outcome is unknown. A late answer is ignored. When
+When a call passes its time limit, Vade sends `notifications/cancelled`,
+stops the server's process group and tells the model that the outcome is
+unknown. The next call starts the server again. A stop at a time limit does
+not use the one restart of a server that stopped by itself. When
 you cancel a run, Vade sends the same notification. This includes a cancel
 during a restart, the handshake or the lists. The notification does not prove
 that the server stopped its work. A call that you cancel after Vade sent it
@@ -213,9 +215,10 @@ state before you run that call again.
 Vade writes to each server from a separate thread. If a server stops reading
 its input, a call still ends at its time limit or when you cancel it. When a
 request is still unwritten at that time (the pipe to the server is full),
-Vade stops that server, and the next call starts it again once. A server that
+Vade stops that server. After a time limit, the next call starts it again;
+after a cancel, the next call starts it again once. A server that
 reads nothing but has room left in the pipe looks like a slow server: each
-call ends at its time limit, and the server keeps running.
+call ends at its time limit, and Vade stops the server.
 
 A result keeps its text parts. An image or audio part becomes one line that
 names its type and size. A binary resource becomes one line with its URI. A result with `isError` reaches the model
@@ -255,11 +258,10 @@ too large is cut, and the last line tells how many bytes were kept.
   when the wrapper exited first.
 
 Servers run in their own process group, so Ctrl-C in chat does not reach
-them. They get the environment of the chat plus their `env` entries.
-`vade launch`, and the local `vade chat` that attaches to its engine, start
-chat with a short environment (`HOME`, `PATH`, locale and terminal settings,
-and `VADE_MCP`), so give a server the variables it needs,
-such as a token, in its `env` entry. They run with your
+them. They get only `HOME`, `PATH`, `TMPDIR`, `USER`, `LOGNAME`, `SHELL`,
+`LANG`, `LC_ALL`, `LC_CTYPE` and `TERM` from the chat, plus their `env`
+entries. Give a server the other variables it needs, such as a token, in its
+`env` entry. They run with your
 permissions, outside the macOS sandbox that `workspace_shell` uses. Add only
 servers you trust.
 

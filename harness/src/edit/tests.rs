@@ -461,3 +461,110 @@ fn exact_line_boundaries_empty_files_and_crlf_are_preserved() {
     .unwrap();
     assert_eq!(f.read("crlf"), "new\r\n");
 }
+#[test]
+fn loose_match_never_moves_a_hunk_to_another_nesting_depth() {
+    let f = Fixture::new();
+    let w = f.workspace();
+    // The closure (8 spaces) was already edited, so its exact text is gone.
+    // The helper (4 spaces) differs only in indentation and must not match.
+    let file = "fn outer() {\n    let f = || {\n        let x = compute();\n        let y = x + 2;\n        y\n    };\n}\nfn helper() {\n    let x = compute();\n    let y = x + 1;\n    y\n}\n";
+    f.write("a.rs", file);
+    let error = prepare(&w, "*** Update File: a.rs\n@@\n         let x = compute();\n-        let y = x + 1;\n+        let y = x + 3;").err().unwrap().to_string();
+    assert!(error.contains("old text missing"), "{error}");
+    assert_eq!(f.read("a.rs"), file);
+    // Tabs against the same width in spaces still match, at 4 or 8 columns.
+    for (tab, spaces) in [("\t", "    "), ("\t", "        ")] {
+        f.write("t.go", &format!("func a() {{\n{tab}x  := 1\n}}\n"));
+        apply(&w, &format!("*** Update File: t.go\n@@\n func a() {{\n-{spaces}x := 1\n+{spaces}x := 2")).unwrap();
+        assert_eq!(f.read("t.go"), format!("func a() {{\n{spaces}x := 2\n}}\n"));
+    }
+}
+#[test]
+fn apply_patch_add_retry_refuses_to_strip_plus_from_mixed_bare_file() {
+    let f = Fixture::new();
+    let w = f.workspace();
+    let patch = "*** Begin Patch\n*** Add File: fixture.txt\nbare_line\n+literal_plus_line\n*** End Patch";
+    assert!(prepare(&w, patch).err().unwrap().to_string().contains("mixes '+'"));
+    assert!(prepare_add_retry(&w, patch).is_err());
+    f.write("fixture.txt", "old\n");
+    assert!(prepare_add_retry(&w, patch).is_err());
+    // A fully bare or fully prefixed body keeps its exact meaning.
+    for (body, text) in [("bare\nalso", "bare\nalso\n"), ("+a\n++b", "a\n+b\n")] {
+        f.write("fixture.txt", "old\n");
+        let (header, retry) = prepare_add_retry(&w, &format!("*** Add File: fixture.txt\n{body}")).unwrap();
+        assert_eq!(header, "*** Update File: fixture.txt");
+        retry.apply(&AtomicBool::new(false)).unwrap();
+        assert_eq!(f.read("fixture.txt"), text);
+    }
+}
+/// A guard for the stamp check after preview. The ctime check inside one
+/// `Snapshot::read` covers a race this test cannot time, so main passes too.
+#[test]
+fn same_length_change_after_preview_is_refused() {
+    let f = Fixture::new();
+    let w = f.workspace();
+    f.write("a", "one\n");
+    let p = prepare(&w, "*** Update File: a\n@@\n-one\n+uno").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    f.write("a", "two\n");
+    let error = p.apply(&AtomicBool::new(false)).unwrap_err().to_string();
+    assert!(error.contains("source changed since preview"), "{error}");
+    assert_eq!(f.read("a"), "two\n");
+}
+#[test]
+fn multi_file_patch_rolls_back_or_finishes_instead_of_half_applying() {
+    let patch = "*** Update File: a\n@@\n-a\n+A\n*** Add File: n\n+new\n*** Update File: b\n@@\n-b\n+B";
+    // Another writer changes b after a and n commit: both are undone.
+    let f = Fixture::new();
+    let w = f.workspace();
+    f.write("a", "a\n");
+    f.write("b", "b\n");
+    let p = prepare(&w, patch).unwrap();
+    let preview = p.preview();
+    let mut receipts = Vec::new();
+    let error = p.apply_with_receipts(&preview, &AtomicBool::new(false), |title, path| {
+        receipts.push(format!("{title} {path}"));
+        if path == "n" {
+            std::fs::write(f.0.join("b"), "external\n").unwrap();
+        }
+    }).unwrap_err();
+    assert!(error.uncertain_writes && error.to_string().contains("rolled back the 2 earlier"), "{error}");
+    assert_eq!((f.read("a"), f.read("b")), ("a\n".into(), "external\n".into()));
+    assert!(!f.0.join("n").exists());
+    assert_eq!(receipts, ["File written a", "File written n", "File removed n", "File restored a"]);
+    // Cancel after the first write lets the checked batch finish.
+    let f = Fixture::new();
+    let w = f.workspace();
+    f.write("a", "a\n");
+    f.write("b", "b\n");
+    let p = prepare(&w, patch).unwrap();
+    let preview = p.preview();
+    let cancel = AtomicBool::new(false);
+    p.apply_with_receipts(&preview, &cancel, |_, _| cancel.store(true, Ordering::Relaxed)).unwrap();
+    assert_eq!((f.read("a"), f.read("n"), f.read("b")), ("A\n".into(), "new\n".into(), "B\n".into()));
+}
+#[test]
+fn a_failed_write_after_the_first_file_rolls_back_every_undoable_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let w = f.workspace();
+    std::fs::create_dir(f.0.join("sub")).unwrap();
+    f.write("a", "a\n");
+    f.write("m", "m\n");
+    f.write("sub/b", "b\n");
+    // Updates a, moves m (never undone), then fails to write into sub.
+    let p = prepare(&w, "*** Update File: a\n@@\n-a\n+A\n*** Update File: m\n*** Move to: moved\n*** Update File: sub/b\n@@\n-b\n+B").unwrap();
+    let preview = p.preview();
+    let mut receipts = Vec::new();
+    let error = p.apply_with_receipts(&preview, &AtomicBool::new(false), |title, path| {
+        receipts.push(format!("{title} {path}"));
+        if path == "m" {
+            std::fs::set_permissions(f.0.join("sub"), std::fs::Permissions::from_mode(0o555)).unwrap();
+        }
+    }).unwrap_err();
+    std::fs::set_permissions(f.0.join("sub"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(error.uncertain_writes && error.to_string().contains("could not roll back all of the 2 earlier"), "{error}");
+    // The move stays; a is still restored after the move's undo failed.
+    assert_eq!((f.read("a"), f.read("moved"), f.read("sub/b")), ("a\n".into(), "m\n".into(), "b\n".into()));
+    assert_eq!(receipts, ["File written a", "File written moved", "File removed m", "File restored a"]);
+}

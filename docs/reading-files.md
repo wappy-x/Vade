@@ -18,7 +18,7 @@ The readers use only the Rust standard library.
 | --- | --- | --- | --- |
 | Plain text | `.txt`, `.log` and any file that decodes as text | Supported | The text. UTF-8, UTF-8 with a byte order mark, UTF-16 LE and BE (with or without a byte order mark) and Windows-1252 (a Latin-1 superset) are detected. A note names any encoding that is not UTF-8. A file with a UTF-8 byte order mark and bytes that are not UTF-8, a sequence cut at the end of the file included, shows those bytes as U+FFFD, with a note. An odd last byte of UTF-16 text shows as U+FFFD. A NUL byte anywhere makes the file binary |
 | Markdown | `.md`, `.markdown`, `.mdx` | Supported | The file as written |
-| HTML, XHTML | `.html`, `.htm`, `.xhtml` | Supported | Headings, paragraphs, lists, links, emphasis, inline code, code blocks, quotes, tables and image alt text. Scripts, styles, templates and the document head are dropped. A template, SVG or MathML element ends at its own close tag, also when an element of the same name is inside it, and a prefixed one such as `svg:svg` ends at its prefixed close tag. Tags in its comments, CDATA sections, quoted attribute values, scripts, styles, text areas and titles do not count. XHTML empty elements such as `<blockquote/>` read as empty. Quotes, tables and code blocks nest at most 32 levels deep; a deeper one reads as text in the block around it. A link inside a link ends the first link. Lists indent at most 32 levels; deeper items are list items at that indent. List numbers stop at 999,999,999, the Markdown limit |
+| HTML, XHTML | `.html`, `.htm`, `.xhtml` | Supported | Headings, paragraphs, lists, links, emphasis, inline code, code blocks, quotes, tables and image alt text. Scripts, styles, templates and the document head are dropped. A template, SVG or MathML element ends at its own close tag, also when an element of the same name is inside it, and a prefixed one such as `svg:svg` ends at its prefixed close tag. Tags in its comments, CDATA sections, quoted attribute values, scripts, styles, text areas and titles do not count. XHTML empty elements such as `<blockquote/>` read as empty. Quotes, tables and code blocks nest at most 32 levels deep; a deeper one reads as text in the block around it. A link inside a link ends the first link. A paragraph that starts a list item stays on the marker line (`- text`). A nested list lines up under the text of its item, so it is three spaces in under `1. `. A list that a table cell, table or quote leaves open ends with it. A cell with `colspan` keeps the columns it spans, at most 64. An empty `<title/>` or `<script/>` inside an SVG, MathML or template element holds no text, and a `>` in a quoted value of a close tag does not end the tag. Lists indent at most 32 levels; deeper items are list items at that indent. List numbers stop at 999,999,999, the Markdown limit |
 | CSV, TSV | `.csv`, `.tsv`, `.tab` | Supported | One GitHub Markdown table. The first row is the header. Quoted fields follow RFC 4180. The CSV delimiter (comma, semicolon, tab or pipe) is detected. A quoted field with no closing quote is an error |
 | JSON | `.json`, `.jsonl`, `.ipynb` and others | Supported | A `json` code block. Minified JSON up to 256 KiB is indented by two spaces; other JSON is kept as written |
 | YAML, TOML, XML | `.yaml`, `.yml`, `.toml`, `.xml`, `.svg`, `.plist` and others | Supported | A code block in the language |
@@ -26,15 +26,16 @@ The readers use only the Rust standard library.
 | RTF | `.rtf` | Supported | Plain text. `\par` and `\line` end a line. Formatting, fonts, pictures, field codes and `\binN` data are dropped; table cells are separated by ` \| `. `\'hh` bytes decode in the code page of the font charset (`\fcharsetN`), or else in the document code page (`\ansicpgN` or `\mac`): Windows-1252, Windows-1250, Windows-1251 or Mac Roman. `\plain` goes back to the default font (`\deffN`). In another code page, for example the double-byte Japanese, Chinese and Korean ones, they show as U+FFFD and `skipped:` names the code page |
 | PDF | `.pdf` | Supported | The text layer, page by page, with a page marker before each page. Text follows the order of the content streams, so the layout is approximate. A file with no text layer (scanned pages) gives one line; Vade runs no text recognition (OCR). The notes of the PDF reader on its limits go in `skipped:`. The agent tool `workspace_read` reads PDF files through its own path (see [The agent read tool](#the-agent-read-tool)) |
 | DOCX | `.docx`, `.docm`, `.dotx`, `.dotm` | Supported | A page marker before each page (see [Page markers](#output-conventions)). Headings come from the paragraph style (`Title` and `heading 1` to `heading 9`, also through `basedOn`) or the outline level; outline level 9 (body text) wins over a heading style. Bullet and numbered lists keep their level (four spaces for each level) and their numbers. Tables become Markdown tables; a merged cell keeps its columns and a table in a cell becomes text in that cell. Links keep their targets. Line breaks and tabs stay. Each image shows where it is in the text as `[image: <alt text> (<part name>)]`, or `[image: <part name>]` when it has no alt text, and `skipped:` counts the images. Tracked deletions, the properties before a tracked change, field codes, the fallback copy of alternate content, headers, footers, footnotes, comments and character formatting are dropped. A text box reads as text in its paragraph |
-| XLSX | `.xlsx`, `.xlsm`, `.xltx`, `.xltm` | Supported | A sheet marker and a Markdown table for each sheet, in workbook order. The name of a hidden sheet ends in `(hidden)`. Cells show their saved values: text, numbers in their shortest form, `TRUE` and `FALSE`, error codes and the last result of a formula. A number in a date or time format shows as `2023-01-31`, `13:45:00` or `2023-01-31 13:45:00`, in the 1900 or 1904 date system of the file. The table spans the used columns. Empty rows are left out, and the first row with values is the header. Formulas, charts, images, comments and formatting are dropped |
+| XLSX | `.xlsx`, `.xlsm`, `.xltx`, `.xltm` | Supported | A sheet marker and a Markdown table for each sheet, in workbook order. The name of a hidden sheet ends in `(hidden)`. Cells show their saved values: text, numbers in their shortest form, `TRUE` and `FALSE`, error codes and the last result of a formula. A number in a date or time format shows as `2023-01-31`, `13:45:00` or `2023-01-31 13:45:00`, in the 1900 or 1904 date system of the file. The table spans the used columns. Empty rows are left out, and the first row with values is the header. The shared string table may use at most half of the conversion work cap, so the sheets keep room for their rows: past that, a cell that uses a later string is empty, and `skipped:` says `shared strings after N (memory cap; later ones show as empty cells)`. Formulas, charts, images, comments and formatting are dropped |
 | PPTX | `.pptx`, `.pptm`, `.potx`, `.potm`, `.ppsx`, `.ppsm` | Supported | A slide marker for each slide, in show order. Then the slide title as a `###` heading, the text of each shape (body placeholders as bullet lists with their levels), tables, images as `[image: <alt text> (<part name>)]` and the speaker notes under `#### Notes`. A hidden slide says `(hidden slide)`. Slide numbers, dates, footers, charts, SmartArt, layouts and formatting are dropped |
 | EPUB | `.epub` (also found by its `mimetype` entry) | Supported | The title and authors (the first 20, then `and N more`), then a chapter marker for each item of the spine (the reading order), each read as HTML. An item with no text, such as a cover image, says `(no text in this chapter)`. A book with encrypted content (DRM) is refused; font obfuscation is not encryption of the text |
-| ODT | `.odt`, `.ott` (also found by its `mimetype` entry) | Supported | Headings by outline level, paragraphs, bullet lists with their levels (numbered lists show bullets too), tables, links, line breaks and images as `[image: <name> (<part name>)]` where they are in the text (also in a table cell). A page marker before each page: LibreOffice marks where each page started in its last layout (soft page breaks); a file with no marks is one page. Annotations, footnotes, tracked changes and formatting are dropped |
+| ODT | `.odt`, `.ott` (also found by its `mimetype` entry) | Supported | Headings by outline level, paragraphs, bullet and numbered lists with their levels (four spaces for each level), tables, links, line breaks and images as `[image: <name> (<part name>)]` where they are in the text (also in a table cell). A page marker before each page: LibreOffice marks where each page started in its last layout (soft page breaks); a file with no marks is one page. Annotations, footnotes, tracked changes and formatting are dropped |
 | ODS | `.ods`, `.ots` | Supported | A sheet marker and a Markdown table for each sheet, with the text each cell shows (as formatted in the file). Repeated rows and columns expand only between cells with values. The first row with values is the header |
 | ODP | `.odp`, `.otp` | Supported | A slide marker for each page, the title as a `###` heading, the text frames (lists as bullets), tables, images and the speaker notes under `#### Notes`. Page numbers, dates, headers and footers are dropped |
 | PNG, JPEG, GIF, WebP images | `.png`, `.jpg`, `.gif`, `.webp` (found by contents) | Supported | One line with the format, the size in pixels and details such as the bit depth or the frame count, then the path and a note that Vade runs no text recognition (OCR). `skipped:` says `image pixels (no text recognition)` |
+| ZIP, tar and gzip archives | `.zip`, `.tar`, `.tar.gz`, `.tgz`, `.gz` (found by contents; an old tar file with no `ustar` magic by its name) | Supported | A line with the entry count and the unpacked size, then a table of the entries: path, size in bytes and type. Then a file marker before each file, and the file read by the reader for its format (see [Archives](#archives)) |
 | TIFF images, scanned PDFs | `.tif`, `.tiff` | Not read | One line. Vade has no text recognition (OCR) |
-| Archives, executables, databases | ZIP, gzip, 7z, RAR, ELF, Mach-O, SQLite, WebAssembly, binary property lists, legacy Office | Not read | One line that names the format |
+| Other archives, executables, databases | 7z, RAR, xz, bzip2, zstd, ELF, Mach-O, SQLite, WebAssembly, binary property lists, legacy Office | Not read | One line that names the format |
 
 Vade finds the format from the file contents first. It uses the extension only
 when the contents do not decide. For example, a file named `notes.txt` that
@@ -71,7 +72,8 @@ shows the page count. Other readers print no markers, and the header shows
 
 Slides use the same form with `slide` and `Slide`. EPUB chapters use `chapter` and
 `Chapter`. Sheets use
-`<!-- sheet N of M -->` and then `## Sheet <name>`.
+`<!-- sheet N of M -->` and then `## Sheet <name>`. The files in an archive use
+`<!-- file N of M -->` and then `## File <path>`.
 
 A DOCX file has no fixed pages. When Word saves a file, it marks where each
 page started in its last layout, and the DOCX reader uses those marks. Only
@@ -99,8 +101,8 @@ convert, so a small file cannot build a large result before the cut:
 | Characters of Markdown | 2,000,000 | The text is cut and `text after N chars (char cap)` goes in `skipped:` |
 | Table rows (CSV, one sheet) | 10,000 data rows | The table stops and `rows after 10000 of N (row cap)` goes in `skipped:`. For a sheet, the phrase ends in `in sheet <name> (row cap)` |
 | Conversion work | 16 bytes for each character of the character cap, at least 64 KiB (32,000,000 bytes by default) | The reader stops and `text after N bytes of conversion work (memory cap)` goes in `skipped:`. Table padding, list indents, quote prefixes and text copied out of nested blocks count against it. Parser storage counts too: open RTF groups and fonts, HTML table rows and cells, link targets and the JSON indent. A CSV cell or an HTML attribute value that does not fit in the room left also stops the reader with this warning |
-| Unzipped data (ZIP-based files: DOCX, XLSX, PPTX, EPUB, ODT, ODS, ODP) | 64 MiB (67,108,864 bytes) for one part, 256 MiB (268,435,456 bytes) for one read | The part keeps its first bytes (stored and compressed parts alike), and `<part> after N bytes (unzip cap)` goes in `skipped:`. A character reference or a UTF-8 character that the cap cuts is left out. The paragraphs, cells, tables and CDATA sections that the cut leaves open keep their text. A spreadsheet number or shared string index that the cut ends inside is left out, because its value is not known. A ZIP file with more than 65,535 entries is refused |
-| XML attribute value (DOCX, XLSX, PPTX, EPUB, ODT, ODS, ODP) | 4,096 bytes | The value is not read: a style, list, link target or image reads as if it had none, and `attribute values over 4096 bytes left out (attribute cap)` goes in `skipped:`. The text stays. Image alt text keeps its first 200 characters and then ends in `...`. A part path (an internal link target, an EPUB package or chapter path) is read up to 65,535 bytes, the ZIP name limit |
+| Unzipped data (ZIP-based files: DOCX, XLSX, PPTX, EPUB, ODT, ODS, ODP) | 64 MiB (67,108,864 bytes) for one part, 256 MiB (268,435,456 bytes) for one read | The part keeps its first bytes (stored and compressed parts alike), and `<part> after N bytes (unzip cap)` goes in `skipped:`. A character reference or a UTF-8 character that the cap cuts is left out. The paragraphs, cells, tables and CDATA sections that the cut leaves open keep their text. A spreadsheet cell value in `<v>` (a number, a shared string index, a formula result or an error code) that the cut ends inside is left out, because its value is not known. A ZIP file with more than 65,535 entries is refused |
+| XML attribute value (DOCX, XLSX, PPTX, EPUB, ODT, ODS, ODP) | 4,096 bytes | The value is not read: a style, list, link target or image reads as if it had none, and `attribute values over 4096 bytes left out (attribute cap)` goes in `skipped:`. The text stays. Image alt text keeps its first 200 characters and then ends in `...`. A part path (an internal link target, an EPUB package or chapter path) is read up to 65,535 bytes, the ZIP name limit. A longer internal link target is left out with this warning. A longer path to the main document part, the EPUB package or a chapter refuses the file |
 
 After the character cap or the memory cap stops a reader, the pages, slides,
 sheets and chapters that start later get no marker; the page count in the
@@ -123,6 +125,36 @@ damaged DOCX file: the entry word/document.xml fails its CRC-32 check; no text w
 this DOCX file is encrypted; Vade cannot read encrypted files
 file is 60000000 bytes; the reader limit is 52428800 bytes
 ```
+
+## Archives
+
+The archive reader lists every entry of a ZIP, tar or gzip archive, then reads
+each file in it with the reader for that file's format. A `.tar.gz` or `.tgz`
+file is one tar archive. A gzip file that holds no tar archive has one entry:
+the file named in its header. ZIP entries with a name that is not UTF-8 are
+not listed.
+
+- Folders are listed. Symbolic links and hard links are listed and never
+  followed. Encrypted ZIP entries are listed and not read.
+- The files share the caps of the read: the character cap and the work cap,
+  and the pages cap for the files read from one archive (`files after 2000 of
+  N (files cap)`). The decoded bytes of all files together, at all levels,
+  are at most the file size cap (50 MiB). A file larger than the bytes left
+  is not decoded, and its section says so. A ZIP entry that decodes to more
+  than its declared size is damaged. Gzip data stops at the bytes left, with
+  `<name> after N bytes (archive bytes cap)` in `skipped:`. The parts that an
+  office or EPUB file in the archive unzips draw from the same bytes, with
+  `<file>: <part> after N bytes (unzip cap)` in `skipped:`. So a compression
+  bomb stops at the size of a file that Vade would read. A PDF file in the
+  archive decodes its streams within the limits of the PDF reader.
+- An archive in an archive is read, two levels deep in all. A deeper archive
+  is listed in its parent but not opened, with
+  `<path> (archive past 2 levels; depth cap)` in `skipped:`.
+- A file in a nested archive shows as `<archive path>/<file path>`. A
+  warning of a file reader starts with the file path.
+- A file that cannot be read gives one line in its section, for example
+  `(not read: this DOCX file is encrypted; Vade cannot read encrypted files)`.
+  The other files still read.
 
 ## `vade read`
 
@@ -279,7 +311,11 @@ large, and assert the output size with a small character cap.
 - XLSX merged cells show their value in the first cell only. A number shows
   its saved value, not its number format, except for dates and times; for
   example, a percentage shows as `0.25`.
-- ODT numbered lists show as bullet lists, and ODT pages come only from soft
-  page breaks.
+- ODT list numbers show as digits, also for letter and Roman number formats.
+  A list that continues its numbering continues only the last top-level list
+  of the same style. ODT pages come only from soft page breaks.
+- Archives: 7z, RAR, xz, bzip2 and zstd are not read (Vade has no decoders
+  for them). Only the first member of a gzip file is read. Tar entries other
+  than files, folders and links (devices, pipes) are listed and not read.
 - PPTX shapes come in the order of the slide file, which is often, but not
   always, the reading order.

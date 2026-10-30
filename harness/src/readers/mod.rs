@@ -11,6 +11,8 @@
 //!   use the same form with `slide` and `Slide`. EPUB chapters use `chapter` and
 //!   `Chapter` ([`chapter_marker`]). Sheets use
 //!   `<!-- sheet N of M -->` then `## Sheet <name>` ([`sheet_marker`]).
+//!   Archive members use `<!-- file N of M -->` then `## File <path>`
+//!   ([`file_marker`]).
 //! - Tables are GitHub Markdown tables ([`table`]). Code and data are fenced
 //!   blocks with the language ([`fence`]).
 //! - Caps ([`Caps`]): 50 MB file, 2,000 pages, 2,000,000 chars. Readers apply
@@ -23,6 +25,7 @@
 //! A new format adds one [`Reader`] and one line in [`READERS`].
 use std::fmt;
 
+mod archive;
 mod codepage;
 mod csv;
 mod docx;
@@ -37,6 +40,8 @@ mod text;
 mod xlsx;
 mod xml;
 mod zip;
+#[cfg(test)]
+mod audit_tests;
 #[cfg(test)]
 mod office_tests;
 #[cfg(test)]
@@ -79,6 +84,9 @@ pub enum Format {
     Odp,
     /// An image; the value is the format, for example `PNG`.
     Image(&'static str),
+    /// An archive that the archive reader lists and reads; the value is the
+    /// label, for example `ZIP archive`.
+    Archive(&'static str),
     /// A recognized format that no reader converts, for example `PNG image`.
     Other(&'static str),
 }
@@ -111,7 +119,7 @@ impl Format {
             Format::Image("GIF") => "GIF image",
             Format::Image("WebP") => "WebP image",
             Format::Image(_) => "image",
-            Format::Other(name) => name,
+            Format::Archive(name) | Format::Other(name) => name,
         }
     }
 
@@ -407,7 +415,10 @@ pub trait Reader: Sync {
 
 /// The registry, in sniff order. The text reader is last. Bytes that no
 /// reader or known format claims are read as text when they decode as text.
-pub static READERS: &[&dyn Reader] = &[&rtf::RtfReader, &pdf::PdfReader, &docx::DocxReader, &xlsx::XlsxReader, &pptx::PptxReader, &epub::EpubReader, &odf::OdfReader, &image::ImageReader, &html::HtmlReader, &csv::CsvReader, &text::TextReader];
+pub static READERS: &[&dyn Reader] = &[
+    &rtf::RtfReader, &pdf::PdfReader, &docx::DocxReader, &xlsx::XlsxReader, &pptx::PptxReader, &epub::EpubReader, &odf::OdfReader,
+    &archive::ArchiveReader, &image::ImageReader, &html::HtmlReader, &csv::CsvReader, &text::TextReader,
+];
 
 /// The lowercase extension of `name`, or `""`.
 pub fn extension(name: &str) -> String {
@@ -430,6 +441,8 @@ fn known(bytes: &[u8], ext: &str, by_name: bool) -> Option<Format> {
         (b"\x1f\x8b", Format::Other("gzip archive")),
         (b"7z\xbc\xaf\x27\x1c", Format::Other("7z archive")),
         (b"Rar!\x1a\x07", Format::Other("RAR archive")),
+        (b"\xfd7zXZ\0", Format::Other("xz archive")),
+        (b"\x28\xb5\x2f\xfd", Format::Other("zstd archive")),
         (b"\x7fELF", Format::Other("ELF executable")),
         (b"\xcf\xfa\xed\xfe", Format::Other("Mach-O executable")),
         (b"\xca\xfe\xba\xbe", Format::Other("Mach-O executable")),
@@ -440,6 +453,10 @@ fn known(bytes: &[u8], ext: &str, by_name: bool) -> Option<Format> {
     ];
     if let Some((_, format)) = MAGIC.iter().find(|(magic, _)| bytes.starts_with(magic)) {
         return Some(*format);
+    }
+    // bzip2: `BZh`, the block size digit, then the block magic (pi in BCD).
+    if bytes.len() >= 10 && bytes.starts_with(b"BZh") && (b'1'..=b'9').contains(&bytes[3]) && &bytes[4..10] == b"1AY&SY" {
+        return Some(Format::Other("bzip2 archive"));
     }
     if !by_name {
         return None;
@@ -485,7 +502,7 @@ fn zip_based(format: Format) -> bool {
     matches!(
         format,
         Format::Docx | Format::Xlsx | Format::Pptx | Format::Epub | Format::Odt | Format::Ods | Format::Odp
-            | Format::Other("ZIP archive")
+            | archive::ZIP
     )
 }
 
@@ -518,8 +535,8 @@ pub fn sniff(bytes: &[u8], name: &str) -> Option<(Format, Option<&'static dyn Re
                 return Some((format, Some(*r)));
             }
         }
-        let format = known(bytes, &ext, true).filter(|f| zip_based(*f)).unwrap_or(Format::Other("ZIP archive"));
-        return Some((format, None));
+        // Any other ZIP file is an archive.
+        return Some((archive::ZIP, Some(&archive::ArchiveReader)));
     }
     for r in READERS {
         if let Some(format) = r.sniff(bytes, name) {
@@ -624,6 +641,12 @@ pub fn chapter_marker(n: usize, of: usize) -> String {
 /// `<!-- sheet N of M -->` then `## Sheet <name>`, with blank lines like [`page_marker`].
 pub fn sheet_marker(n: usize, of: usize, name: &str) -> String {
     format!("\n<!-- sheet {n} of {of} -->\n## Sheet {}\n\n", name.replace('\n', " "))
+}
+
+/// `<!-- file N of M -->` then `## File <path>`, for a member of an archive,
+/// with blank lines like [`page_marker`].
+pub fn file_marker(n: usize, of: usize, path: &str) -> String {
+    format!("\n<!-- file {n} of {of} -->\n## File {}\n\n", path.replace(['\n', '\r'], " "))
 }
 
 /// The warning for a page cap: `pages after 2000 of 5000 (pages cap)`.

@@ -41,7 +41,8 @@ file or artifact without a specific need. Retained artifact bytes are useful
 for a particular omitted diagnostic; original captures remain in the journal.
 
 `workspace_edit_lines` edits a fully displayed range from the latest
-`workspace_read_lines` call. Copy its `edit_tag`, `path` and inclusive
+`workspace_read_lines` call for that path. Vade keeps the latest read of the
+eight most recently read paths, and two reads of unchanged bytes count as one. Copy its `edit_tag`, `path` and inclusive
 `start_line`/`end_line`; supply `operation` (`replace`, `delete`, `insert_after`)
 and exact `new_text`. Delete uses empty text; insert uses one anchor line.
 Empty files use 1..1. Include CRLF explicitly; text before later lines must end

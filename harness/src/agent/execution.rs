@@ -204,6 +204,8 @@ fn run_observed_inner(
     }
     let mut proposed_calls = 0usize;
     let mut consecutive_continues = 0usize;
+    // Cutoffs with no tool round between them, whatever path each one names.
+    let mut consecutive_truncations = 0usize;
     let mut empty_nudges = 0usize;
     let mut check_nudges = 0usize;
     let mut reminded_check = None;
@@ -428,7 +430,8 @@ fn run_observed_inner(
                 // Attempts are counted from journaled recovery prompts for
                 // this hint, so the per-task bound survives resume and a
                 // smaller patch to the same file still escalates.
-                let attempt = truncated_attempts(conversation, &truncated_step);
+                let attempt = truncated_attempts(conversation, &truncated_step).max(consecutive_truncations);
+                consecutive_truncations += 1;
                 if attempt >= MAX_TRUNCATED_RETRIES {
                     return report.stopped(StopReason::TruncatedToolCall);
                 }
@@ -561,6 +564,7 @@ fn run_observed_inner(
             return report.stopped(StopReason::Finished(finish));
         }
         consecutive_continues = 0;
+        consecutive_truncations = 0;
         empty_nudges = 0;
         let calls = message.tool_calls().to_vec();
         // Validate original argument text below, but persist only parseable
@@ -694,6 +698,9 @@ fn run_observed_inner(
                         }
                         Err(ToolError::UnknownTool) => error_content("unknown_tool"),
                         Err(ToolError::Denied) => error_content("denied"),
+                        Err(ToolError::InvalidArguments(_)) if dispatched.is_none() && json::view(&call.arguments).is_err() => {
+                            malformed_arguments_content(&call.arguments, output_limit)
+                        }
                         Err(ToolError::InvalidArguments(reason)) => invalid_arguments_content(reason, output_limit),
                     };
                     if let Some(arguments) = dispatched {
@@ -801,6 +808,10 @@ fn run_observed_inner(
             report.nudges += 1;
         }
         if let Some(arguments) = executor.take_pending_check() {
+            // The check is a tool call too; it never runs past the call cap.
+            if report.tool_calls >= limits.max_tool_calls {
+                return report.stopped(StopReason::Limit(LimitKind::ToolCalls));
+            }
             if let Some(reason) = auto_check(
                 conversation,
                 model,
@@ -953,11 +964,15 @@ fn auto_check(
         )
     };
     // A timeout is an ordinary partial-check receipt; only local I/O failure
-    // after spawning or cancellation stops the request.
+    // after spawning, a full output store or cancellation stops the request,
+    // the same as for a model tool call.
     let mut stop = None;
     let mut content = match result {
         Ok(output) if output.len() <= cap => output,
-        Ok(_) | Err(ToolError::OutputLimit) => error_content("output_limit"),
+        Ok(_) | Err(ToolError::OutputLimit) => {
+            stop = Some(StopReason::Limit(LimitKind::ToolOutput));
+            error_content("output_limit")
+        }
         Err(ToolError::Cancelled) => {
             stop = Some(StopReason::Cancelled);
             error_content("cancelled")

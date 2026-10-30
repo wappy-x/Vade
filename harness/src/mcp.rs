@@ -415,10 +415,12 @@ impl Hub {
         }
         // A server that stopped gets one more start per chat.
         if !server.connection.as_mut().is_some_and(Connection::alive) {
-            if server.restarted {
+            // A stop at a call's time limit was Vade's own; it uses no restart.
+            let counted = !server.connection.as_ref().is_some_and(|c| c.timed_out);
+            if counted && server.restarted {
                 return unavailable(format!("MCP server {server_name} stopped again after one restart; restart the chat to start it again"));
             }
-            server.restarted = true;
+            server.restarted |= counted;
             server.connection = None;
             let mut notes = Vec::new();
             match connect(&server.spec, &self.root, cancel, &mut notes) {
@@ -432,7 +434,7 @@ impl Hub {
                 }
                 Err(CallError::Cancelled) => {
                     // A canceled start does not use the one restart.
-                    server.restarted = false;
+                    server.restarted &= !counted;
                     return Err(NotSent(ToolError::Cancelled));
                 }
                 Err(error) => return unavailable(format!("MCP server {server_name} stopped and did not restart: {error}")),

@@ -21,6 +21,33 @@ pub(crate) struct Read {
     text: String,
     shown: Vec<usize>,
 }
+/// The latest read of each recently read path, so reading one file never
+/// drops the edit capability for another. Exact bytes still decide freshness.
+#[derive(Default)]
+pub(crate) struct Reads(Vec<Read>);
+impl Reads {
+    const MAX_PATHS: usize = 8;
+    pub(crate) fn record(&mut self, mut read: Read) {
+        if let Some(at) = self.0.iter().position(|old| old.path == read.path) {
+            let old = self.0.remove(at);
+            // Two ranges of unchanged bytes both stay editable.
+            if old.text == read.text {
+                for n in old.shown {
+                    if !read.shown.contains(&n) {
+                        read.shown.push(n);
+                    }
+                }
+            }
+        }
+        if self.0.len() == Self::MAX_PATHS {
+            self.0.remove(0);
+        }
+        self.0.push(read);
+    }
+    pub(crate) fn get(&self, path: &str) -> Option<&Read> {
+        self.0.iter().find(|read| read.path == path)
+    }
+}
 impl Read {
     pub(crate) fn capture(path: &str, text: String, output: &str) -> io::Result<Self> {
         let value = json::parse(output)?;

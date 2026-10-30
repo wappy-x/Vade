@@ -182,7 +182,13 @@ pub fn parse_entry(name: &str, entry: &Value, source: Source) -> Result<ServerSp
                     spec.env.push((key.clone(), value.into()));
                 }
             }
-            ("cwd", Value::String(cwd)) if !cwd.is_empty() => spec.cwd = Some(cwd.clone()),
+            ("cwd", Value::String(cwd)) if !cwd.is_empty() => {
+                use std::path::Component;
+                if !Path::new(cwd).components().all(|part| matches!(part, Component::Normal(_) | Component::CurDir)) {
+                    return Err(wrong("a relative folder inside the workspace, without .."));
+                }
+                spec.cwd = Some(cwd.clone())
+            }
             ("enabled", Value::Bool(enabled)) => spec.enabled = *enabled,
             ("timeout_ms", Value::Number(n)) => match n.parse::<u64>() {
                 Ok(ms @ 1..=MAX_TIMEOUT_MS) => spec.timeout = Duration::from_millis(ms),

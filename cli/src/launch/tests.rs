@@ -748,6 +748,36 @@ fn install_is_idempotent_and_does_not_start_or_chat() {
 }
 
 #[test]
+fn install_builds_before_the_model_and_launch_checks_it_after_pull() {
+    let f = Fixture::new();
+    f.installed();
+    let pulled = f.base.join("pulled");
+    fs::rename(&f.model, &pulled).unwrap();
+    let mut launch = f.launcher();
+    let capture = crate::output::testing::Capture::default();
+    crate::output::with_writer(capture.clone(), || launch.execute(Command::Install, false)).unwrap();
+    let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+    // No prompt, no saved defaults: only the GPU code is compiled.
+    assert!(printed.contains("The install goes on without it; vade launch needs the model."), "{printed}");
+    assert!(printed.contains("compile GPU code (private cache only)"), "{printed}");
+    assert!(printed.contains("vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300"), "{printed}");
+    assert!(!f.root.join("config").exists());
+    assert_eq!(launch.runner.worker_ops(), ["warm-ptx"]);
+    assert_eq!((launch.detector.calls, launch.runner.starts), (1, 0));
+    let artifacts = fs::read(f.root.join("stage/install.conf")).unwrap();
+    // vade pull puts the model in place; launch saves defaults and checks it before the start.
+    fs::rename(&pulled, &f.model).unwrap();
+    launch.runner.calls.clear();
+    launch.execute(Command::Launch(Default::default()), false).unwrap();
+    assert_eq!(Config::load(&f.root).unwrap().unwrap().model, fs::canonicalize(&f.model).unwrap());
+    assert_eq!(launch.runner.worker_ops(), ["warm-ptx", "probe", "start", "inspect", "listener"]);
+    assert!(!launch.runner.calls.iter().any(|exec| exec.label.starts_with("Build ")));
+    assert_eq!(fs::read(f.root.join("stage/install.conf")).unwrap(), artifacts);
+    assert_eq!((launch.runner.starts, launch.runner.chats), (1, 1));
+    launch.execute(Command::Down, false).unwrap();
+}
+
+#[test]
 fn install_says_when_no_checksum_list_can_check_the_checkpoint() {
     let f = Fixture::new();
     f.installed();
@@ -914,6 +944,8 @@ fn owner_json_status_does_not_call_an_incomplete_installation_stopped() {
 fn failed_start_cleans_only_its_ownership_and_keeps_install_for_retry() {
     let f = Fixture::new();
     f.installed();
+    // Saved defaults: a first launch over an install without them runs Prepare first.
+    f.configured();
     let mut launch = f.launcher();
     launch.runner.fail_start = true;
     let error = launch.execute(Command::Launch(Default::default()), false).unwrap_err();

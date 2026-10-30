@@ -1031,6 +1031,11 @@ impl RunObserver for SharedJournal {
     }
 }
 pub(crate) fn append_resume_note(store: &mut Journal, c: &mut Conversation) -> io::Result<()> {
+    // A resume that ends before the next user turn already left this note.
+    let last = c.messages().last().filter(|m| m.role() == "user").and_then(|m| m.value().get("content")).and_then(Value::as_str);
+    if last == Some(vade_harness::context::RESUME_NOTE) {
+        return Ok(());
+    }
     let note = native_message("user", vade_harness::context::RESUME_NOTE);
     c.push_user(note, Limits::default())?;
     store.save(c)

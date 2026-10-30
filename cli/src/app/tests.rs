@@ -1463,3 +1463,14 @@ fn doctor_checks_each_spark_staged_build_against_the_manifest() {
     f.app.runner.probe = Some((false, ""));
     assert!(doctor(&mut f).1.contains("needs SSH"));
 }
+
+#[test]
+fn saved_logs_show_every_rank_of_the_last_run() {
+    let (old, new) = ("0123456789abcdef", "fedcba9876543210");
+    let mut paths: Vec<std::path::PathBuf> = (1..=8).map(|i| format!("{old}-spark{i}.log").into()).collect();
+    paths.extend((1..=8).map(|i| format!("{new}-spark{i}.log").into()).chain([format!("{new}-gateway.log").into()]));
+    let shown = last_run_logs(paths.clone());
+    assert_eq!(shown, paths[8..]);
+    assert_eq!(last_run_logs(vec!["a.log".into(), "notes.log".into()]), [std::path::PathBuf::from("notes.log")]);
+    assert!(last_run_logs(Vec::new()).is_empty());
+}

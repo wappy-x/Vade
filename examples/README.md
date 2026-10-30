@@ -271,8 +271,8 @@ To run it for real:
    destinations, link addresses and model paths.
 2. Run `VADE_CONFIG=/your/copy sh examples/two-sparks.sh --live`.
 
-The live run installs on both Sparks and starts them as one engine (the layer
-pipeline: a range of the model's layers on each). It then checks the engine
+The live run installs on both Sparks and starts them as one engine (the tensor
+split: both Sparks work on every layer). It then checks the engine
 with `vade verify` and stops it with `vade down`. Along the way the script:
 
 - unsets `VADE_API_URL`, so `vade verify` checks the engine at your config's

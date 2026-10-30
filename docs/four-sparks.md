@@ -4,16 +4,30 @@ This page shows how to turn two existing pairs of Sparks into one group of
 four for the official Flash-Next FP8 checkpoint.
 
 **This build has not yet passed its qualification checks running natively on
-four Sparks.** We have measured FP8 on four of our Sparks: the 2026-10-25
-[benchmark cards](benchmarks.md#fp8) at `6cb46bf`, whose drafting ON and OFF
-cards returned identical token IDs in 62 of 62 responses, and the 2026-10-28
-cards at `76977df`, which matched in 66 of 66. Four Sparks give different token
-IDs than two
+four Sparks.** We have measured FP8 on four of our Sparks three times:
+
+- 2026-10-25 at `6cb46bf`
+  ([cards](benchmarks.md#previous-2026-10-25-main-80ac2d4-home-dgx-sparks)):
+  drafting ON and OFF gave identical token IDs in 62 of 62 responses.
+- 2026-10-28 at `76977df`
+  ([cards](benchmarks.md#current-2026-10-28-end-of-day-main-76977df-home-dgx-sparks)):
+  drafting ON and OFF matched in 66 of 66.
+- 2026-10-30 at `380d8e5`
+  ([cards](benchmarks.md#current-2026-10-30-morning-main-380d8e5-home-dgx-sparks)):
+  two server starts with drafting ON. Both matched the 2026-10-28 four-Spark
+  card in 66 of 66. One chat wrote prose at 47.321 tok/s and eight chats
+  wrote 129.360 tok/s in total (the mean of the two starts).
+
+Four Sparks give different token IDs than two: on 2026-10-28 and on
+2026-10-30, 7 of 66 responses were the same
 ([cause and fix](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)).
-Those cards measure speed; they are not the four-Spark qualification. Keep
-the official precision and the FP8 defaults: a 131,072-token context and an
-output limit of `min(65536, context)` (see
-[FP8 limits](../cli/README.md#fp8-limits-and-drafting)). If
+These cards ran through a lab launcher with context 32768, output 16384 and
+drafting depth 2. They measure speed; they are not the four-Spark
+qualification. For the qualification, keep the official precision and the
+FP8 defaults: a 131,072-token context and an output limit of
+`min(65536, context)` (see
+[FP8 limits](../cli/README.md#fp8-limits-and-drafting)). No card has measured
+that default context yet ([not tested yet](install-fp8.md#not-tested-yet)). If
 you choose a smaller context on purpose, that is a separate configuration; it
 is not a way to qualify the default.
 
@@ -67,10 +81,10 @@ a rank still uses it.
 2. Unplug both ends of **AB-move** and **CD-move**. A, B, C and D now each have
    exactly one free QSFP socket. The management LAN stays connected.
 3. Plug **AB-move** into B's freed socket and C's freed socket. Relabel both
-   ends **BC**. You now have a three-cable path: **A — B — C — D**.
+   ends **BC**. You now have a three-cable path: **A-B-C-D**.
 4. For a path, keep **CD-move** as a labeled spare and leave the freed sockets
    on A and D empty. For a ring, plug it into D's freed socket and A's freed
-   socket, and relabel both ends **DA**. You now have **A — B — C — D — A**.
+   socket, and relabel both ends **DA**. You now have **A-B-C-D-A**.
 5. Follow every cable from end to end and write down the socket it actually
    sits in at each end. Do not guess the Ethernet or RDMA device from a
    left/right sticker; use the
@@ -94,7 +108,7 @@ to each other.
 ## Update only the affected fabric configuration
 
 After the move, the old settings for the two cables you moved still describe
-A–B and C–D, not B–C or D–A. Write down this new rail plan privately:
+A-B and C-D, not B-C or D-A. Write down this new rail plan privately:
 
 | Cable | Subnets for its two rails | Addresses at each end, within each subnet |
 | --- | --- | --- |

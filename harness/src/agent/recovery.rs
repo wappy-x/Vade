@@ -135,14 +135,20 @@ pub(super) fn refusal_reason(receipt: &str) -> Option<String> {
 /// Consecutive closed refusals; exact tool/argument bytes, never IDs or hashes.
 /// Any successful or different call breaks this streak. Retained history permits resume.
 pub(super) fn identical_tool_refusals(conversation: &Conversation, staged: &[Message], target: &ToolCall) -> usize {
+    // History holds "{}" for arguments that are not JSON; their receipt quotes
+    // the original start, so equal receipts stand in for equal bytes.
+    let malformed = json::view(&target.arguments).is_err();
+    let arguments = if malformed { "{}" } else { target.arguments.as_str() };
+    let current = staged.last().and_then(|m| m.value().get("content")).and_then(Value::as_str);
     let mut calls: &[ToolCall] = &[];
     let mut count = 0;
     for message in conversation.messages.iter().chain(staged) {
         if message.role() == "assistant" { calls = message.tool_calls(); }
         if message.role() != "tool" { continue; }
-        let matching = calls.iter().any(|call| call.name == target.name
-            && call.arguments == target.arguments && Some(call.id.as_str()) == message.tool_call_id());
         let receipt = message.value().get("content").and_then(Value::as_str).unwrap_or("");
+        let matching = calls.iter().any(|call| call.name == target.name
+            && call.arguments == arguments && Some(call.id.as_str()) == message.tool_call_id())
+            && (!malformed || Some(receipt) == current);
         count = if matching && refusal_reason(receipt).is_some() { count + 1 } else { 0 };
     }
     count

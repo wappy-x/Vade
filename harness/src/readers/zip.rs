@@ -15,6 +15,7 @@ use super::xml::{self, Event};
 use super::{Budget, Format, ReadError, scanned};
 use crate::pdf::budget::{Budget as Work, Exhausted, Kind};
 use crate::pdf::inflate::{self, inflate_raw};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 
@@ -33,6 +34,40 @@ const ENTRY: usize = 96;
 /// The cancel flag of the inflate budget; a read is never cancelled.
 static NEVER: AtomicBool = AtomicBool::new(false);
 
+thread_local! {
+    /// The decoded bytes that ZIP parts on this thread may still use while
+    /// an archive is read ([`SharedCap`]); `None` outside an archive read.
+    static SHARED: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// The bytes cap of one archive read, shared by its members at all levels,
+/// the parts of office members included. Every ZIP part decoded on this
+/// thread while it lives draws from it, also a part of a member that then
+/// fails. The cap before it comes back when it drops.
+pub(super) struct SharedCap(Option<usize>);
+
+impl SharedCap {
+    pub(super) fn new(bytes: usize) -> Self {
+        SharedCap(SHARED.with(|s| s.replace(Some(s.get().map_or(bytes, |left| left.min(bytes))))))
+    }
+}
+
+impl Drop for SharedCap {
+    fn drop(&mut self) {
+        SHARED.with(|s| s.set(self.0));
+    }
+}
+
+/// The bytes left of the [`SharedCap`], or `usize::MAX` outside one.
+pub(super) fn shared_left() -> usize {
+    SHARED.with(|s| s.get().unwrap_or(usize::MAX))
+}
+
+/// Counts `n` bytes against the [`SharedCap`], if one is set.
+pub(super) fn take_shared(n: usize) {
+    SHARED.with(|s| s.set(s.get().map(|left| left.saturating_sub(n))));
+}
+
 struct Entry {
     name: String,
     flags: u16,
@@ -41,6 +76,18 @@ struct Entry {
     packed: usize,
     size: usize,
     offset: usize,
+    /// A Unix host wrote the entry as a symbolic link.
+    link: bool,
+}
+
+/// One entry of the directory, for an archive listing.
+pub(super) struct Listed<'z> {
+    pub(super) name: &'z str,
+    /// The size the directory declares for the decoded data.
+    pub(super) size: usize,
+    pub(super) link: bool,
+    /// Encrypted (PKWARE or WinZip AES, method 99).
+    pub(super) encrypted: bool,
 }
 
 /// One decoded part. `cut` is true when a cap kept only its first bytes.
@@ -114,11 +161,19 @@ impl<'a> Zip<'a> {
                 packed: fits(packed).ok_or_else(|| bad("an entry is larger than the file"))?,
                 size: usize::try_from(size).unwrap_or(usize::MAX),
                 offset: fits(offset).ok_or_else(|| bad("an entry starts past the end of the file"))?,
+                // A Unix host (3) keeps the file mode in the high half of the
+                // external attributes; 0o120000 is a symbolic link.
+                link: u16le(fixed, 4) >> 8 == 3 && (u32le(fixed, 38) >> 16) & 0o170000 == 0o120000,
             };
             zip.index.insert(key, zip.entries.len());
             zip.entries.push(entry);
         }
         Ok(zip)
+    }
+
+    /// The entries in directory order. Names that are not UTF-8 are left out.
+    pub(super) fn list(&self) -> impl Iterator<Item = Listed<'_>> {
+        self.entries.iter().map(|e| Listed { name: &e.name, size: e.size, link: e.link, encrypted: e.flags & 1 != 0 || e.method == 99 })
     }
 
     /// The index key of the part name `name`.
@@ -144,7 +199,7 @@ impl<'a> Zip<'a> {
         scanned(raw.len());
         // A part with more bytes than it declares is damaged; one with more
         // than the caps keeps the bytes up to the cap.
-        let room = self.part_cap.min(MAX_UNZIP_BYTES);
+        let room = self.part_cap.min(MAX_UNZIP_BYTES).min(shared_left());
         let cap = e.size.min(room);
         let mut data = Vec::new();
         let mut cut = false;
@@ -154,22 +209,28 @@ impl<'a> Zip<'a> {
                     return Err(bad(format!("the stored entry {} has the wrong size", e.name)));
                 }
                 // A stored part keeps the bytes that the read's total cap has left.
-                let left = self.total_cap.saturating_sub(self.work.used(Kind::Decoded));
+                let left = self.total_cap.saturating_sub(self.work.used(Kind::Decoded)).min(shared_left());
                 let n = cap.min(raw.len()).min(left);
                 // After an earlier stop the charge fails and the part keeps nothing.
                 if self.work.charge(Kind::Decoded, n).is_ok() {
                     data.extend_from_slice(&raw[..n]);
                 }
                 cut = data.len() < raw.len();
+                take_shared(data.len());
             }
-            8 => match inflate_raw(raw, cap, &mut data, &self.work) {
-                Ok(_) => {}
-                Err(inflate::Error::Cap) if e.size > cap => cut = true,
-                Err(inflate::Error::Cap) => return Err(bad(format!("the entry {} holds more data than its size", e.name))),
-                Err(inflate::Error::Budget(Exhausted::Limit(_))) => cut = true,
-                Err(inflate::Error::Budget(_)) => return Err(bad(format!("the entry {} could not be decoded", e.name))),
-                Err(inflate::Error::Data(why)) => return Err(bad(format!("the entry {}: {why}", e.name))),
-            },
+            8 => {
+                let result = inflate_raw(raw, cap, &mut data, &self.work);
+                // The bytes decoded count against a shared cap also when the part fails.
+                take_shared(data.len());
+                match result {
+                    Ok(_) => {}
+                    Err(inflate::Error::Cap) if e.size > cap => cut = true,
+                    Err(inflate::Error::Cap) => return Err(bad(format!("the entry {} holds more data than its size", e.name))),
+                    Err(inflate::Error::Budget(Exhausted::Limit(_))) => cut = true,
+                    Err(inflate::Error::Budget(_)) => return Err(bad(format!("the entry {} could not be decoded", e.name))),
+                    Err(inflate::Error::Data(why)) => return Err(bad(format!("the entry {}: {why}", e.name))),
+                }
+            }
             m => return Err(bad(format!("the entry {} uses compression method {m}, which Vade does not read", e.name))),
         }
         if cut {
@@ -243,11 +304,17 @@ fn rels(text: &str, cut: bool, dir: &str, budget: &mut Budget) -> Result<Rels, S
             continue;
         }
         // A part target may be as long as a ZIP entry name; a longer web
-        // address is left out at the attribute cap.
+        // address, or a longer target of a part other than the main document,
+        // is left out at the attribute cap.
         let external = tag.attr("TargetMode")?.is_some_and(|m| m == "External");
-        let target = if external { tag.attr("Target")? } else { tag.path("Target")? };
-        let (Some(id), Some(kind), Some(target)) = (tag.attr("Id")?, tag.attr("Type")?, target) else { continue };
+        let Some(kind) = tag.attr("Type")? else { continue };
         let kind = kind.rsplit('/').next().unwrap_or("");
+        let target = match (external, kind) {
+            (true, _) => tag.attr("Target")?,
+            (false, "officeDocument") => tag.path("Target")?,
+            (false, _) => tag.optional_path("Target")?,
+        };
+        let (Some(id), Some(target)) = (tag.attr("Id")?, target) else { continue };
         // A resolved target is never longer than the directory and the target.
         let size = 64 + id.len() + kind.len() + dir.len() + 1 + target.len();
         if !budget.reserve(size) {
@@ -360,8 +427,8 @@ fn directory(data: &[u8]) -> Result<(usize, usize, usize), &'static str> {
     let mut first = None;
     let mut best: Option<((bool, bool), (usize, usize, usize))> = None;
     // Directory records that the checks of all candidates may walk; each
-    // start is walked once, so false records that name the same directory
-    // cost nothing more.
+    // record position is walked once, so false records that name the same
+    // directory, or a start inside it, cost nothing more.
     let mut steps = 4 * MAX_ENTRIES;
     let mut walked = HashMap::new();
     for i in (0..tail.len().saturating_sub(21)).rev() {
@@ -389,8 +456,8 @@ fn directory(data: &[u8]) -> Result<(usize, usize, usize), &'static str> {
 
 /// The directory that the end record at `at` gives, when it checks out: its
 /// records fill the directory exactly. `steps` limits the records walked, and
-/// `walked` keeps the record ends found from each start.
-fn end_record(data: &[u8], at: usize, steps: &mut usize, walked: &mut HashMap<usize, Vec<usize>>) -> Result<(usize, usize, usize), &'static str> {
+/// `walked` keeps the run found from each record position (see [`record_run`]).
+fn end_record(data: &[u8], at: usize, steps: &mut usize, walked: &mut Walked) -> Result<(usize, usize, usize), &'static str> {
     let r = &data[at..at + 22];
     if u16le(r, 4) != 0 || u16le(r, 6) != 0 {
         return Err("split ZIP archives are not supported");
@@ -411,12 +478,14 @@ fn end_record(data: &[u8], at: usize, steps: &mut usize, walked: &mut HashMap<us
     let start = usize::try_from(start).ok().filter(|&s| s <= end).ok_or("the central directory starts past the end of the file")?;
     let size = usize::try_from(size).ok().filter(|&s| s <= end - start).ok_or("the central directory ends past the end of the file")?;
     // The directory ends where the (ZIP64) end record starts, and its records
-    // fill it. Past the entry limit it is not walked: the archive is refused.
+    // fill it: the run of records stops at that record, which is not a
+    // directory record. Past the entry limit it is not walked: the archive is
+    // refused.
     let found = start + size == end
         && match count {
             0 => true,
             n if n > MAX_ENTRIES => true,
-            n => walked.entry(start).or_insert_with(|| record_ends(data, start, steps)).get(n - 1) == Some(&(start + size)),
+            n => record_run(data, start, steps, walked) == Some((end, n)),
         };
     if !found {
         return Err("the central directory is not where the end record says");
@@ -424,23 +493,37 @@ fn end_record(data: &[u8], at: usize, steps: &mut usize, walked: &mut HashMap<us
     Ok((count, start, size))
 }
 
-/// The end of each central directory record in the run of records that
-/// starts at `start`, at most [`MAX_ENTRIES`]. Each record walked takes one
-/// of `steps`; the walk stops when none is left.
-fn record_ends(data: &[u8], start: usize, steps: &mut usize) -> Vec<usize> {
-    let mut ends = Vec::new();
+/// For each central directory record position walked, the run of records
+/// from it (see [`record_run`]).
+type Walked = HashMap<usize, Option<(usize, usize)>>;
+
+/// The run of central directory records that starts at `start`: where it
+/// stops (the first position that holds no record) and how many records it
+/// has. `None` for a run of more than [`MAX_ENTRIES`] records, a record that
+/// ends past the end of the file, or a walk that `steps` stopped. Each new
+/// record position takes one of `steps`; `walked` keeps the run of each, so
+/// runs from different starts in one directory join the walk already stored.
+fn record_run(data: &[u8], start: usize, steps: &mut usize, walked: &mut Walked) -> Option<(usize, usize)> {
+    let mut path = Vec::new();
     let mut at = start;
-    while ends.len() < MAX_ENTRIES {
-        let Some(left) = steps.checked_sub(1) else { break };
+    let mut run = loop {
+        if let Some(&known) = walked.get(&at) {
+            break known;
+        }
+        let Some(fixed) = data.get(at..at + 46).filter(|f| &f[..4] == b"PK\x01\x02") else { break Some((at, 0)) };
+        let Some(left) = steps.checked_sub(1) else { break None };
         *steps = left;
-        let Some(fixed) = data.get(at..at + 46).filter(|f| &f[..4] == b"PK\x01\x02") else { break };
+        path.push(at);
         at += 46 + u16le(fixed, 28) as usize + u16le(fixed, 30) as usize + u16le(fixed, 32) as usize;
         if at > data.len() {
-            break;
+            break None;
         }
-        ends.push(at);
+    };
+    for &p in path.iter().rev() {
+        run = run.map(|(stop, n)| (stop, n + 1)).filter(|&(_, n)| n <= MAX_ENTRIES);
+        walked.insert(p, run);
     }
-    ends
+    run
 }
 
 /// Sizes and offset from a ZIP64 extra field, for the fields set to all ones.

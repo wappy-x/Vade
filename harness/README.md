@@ -221,9 +221,13 @@ place atomically. Adds and moves never replace an existing destination. Delete
 sections must contain the entire exact old text. Existing permission bits are
 kept.
 
-Atomicity is **per file**, not a batch transaction. A combined move and edit can
-therefore leave both paths if it is interrupted between installing the new file
-and removing the source. Partial results and conflicts are reported explicitly.
+Atomicity is **per file**, not a batch transaction. Once the first file is
+written, a cancel lets the checked patch finish. If another writer changes a
+later file first, Vade undoes the earlier adds, updates and deletes of the
+patch that still hold its bytes; moves are not undone. A combined move and edit
+can therefore leave both paths if it is interrupted between installing the new
+file and removing the source. Partial results and conflicts are reported
+explicitly.
 See [tool grammar and limits](docs/agent-tools.md).
 
 ### Shell commands and the sandbox

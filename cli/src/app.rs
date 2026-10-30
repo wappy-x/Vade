@@ -664,7 +664,7 @@ impl<R: Runner> App<R> {
             if paths.is_empty() {
                 crate::output::line(format_args!("No saved logs yet. Start: {}", self.start_command()))?;
             }
-            for path in paths.into_iter().rev().take(6).rev() {
+            for path in last_run_logs(paths) {
                 text::reject_symlinks(&path)?;
                 if let Ok(log) = fs::read_to_string(&path) {
                     crate::output::line(format_args!(
@@ -864,6 +864,22 @@ pub(crate) fn rust_tool(name: &str) -> String {
         .filter(|p| p.is_file())
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| name.into())
+}
+
+/// The saved logs of the last stopped run, oldest first, from `paths` sorted oldest first.
+/// `vade down` saves `<token>-<machine>.log` per rank (and `<token>-gateway.log` for
+/// replicas), so the newest file's token names the run: all its files show, however many
+/// Sparks ran. A newest file without a token shows alone.
+fn last_run_logs(paths: Vec<std::path::PathBuf>) -> Vec<std::path::PathBuf> {
+    fn token(path: &Path) -> Option<String> {
+        let name = path.file_name()?.to_str()?;
+        name.split_once('-').filter(|(t, _)| t.len() == 16).map(|(t, _)| t.to_owned())
+    }
+    let Some(last) = paths.last().cloned() else { return paths };
+    match token(&last) {
+        Some(run) => paths.into_iter().filter(|p| token(p).as_deref() == Some(run.as_str())).collect(),
+        None => vec![last],
+    }
 }
 
 #[cfg(test)]

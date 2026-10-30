@@ -50,14 +50,14 @@ fn controller(target: Result<Target, String>) -> (String, Vec<String>) {
 #[test]
 fn yes_on_a_spark_installs_this_spark_with_the_found_model() {
     let (target, asked) = scripted(&flags(true, &[], &[]), &facts(true), &[]);
-    assert_eq!(target, Ok(Target::Local { model: None }));
+    assert_eq!(target, Ok(Target::Local { model: None, installed: false }));
     assert!(asked.is_empty());
     let mut options = flags(true, &[], &[]);
     options.model = Some("/data/models/fp4".into());
-    assert_eq!(scripted(&options, &facts(true), &[]).0, Ok(Target::Local { model: Some("/data/models/fp4".into()) }));
+    assert_eq!(scripted(&options, &facts(true), &[]).0, Ok(Target::Local { model: Some("/data/models/fp4".into()), installed: false }));
     // install expands ~/ in VADE_MODELS, as the default folder shows it.
     options.model = Some("~/models/fp4".into());
-    assert_eq!(scripted(&options, &facts(true), &[]).0, Ok(Target::Local { model: Some("~/models/fp4".into()) }));
+    assert_eq!(scripted(&options, &facts(true), &[]).0, Ok(Target::Local { model: Some("~/models/fp4".into()), installed: false }));
     for model in ["models/fp4", "~user/models", "/models/fp4\nx"] {
         options.model = Some(model.into());
         assert!(scripted(&options, &facts(true), &[]).0.unwrap_err().contains("absolute path or a path under ~/"), "{model}");
@@ -114,7 +114,7 @@ fn questions_show_defaults_and_build_an_fp8_pair() {
 #[test]
 fn on_a_spark_enter_takes_this_spark_and_the_found_model() {
     let (target, asked) = scripted(&SetupOptions::default(), &facts(true), &["", ""]);
-    assert_eq!(target, Ok(Target::Local { model: None }));
+    assert_eq!(target, Ok(Target::Local { model: None, installed: false }));
     assert_eq!(asked, [
         "Which Sparks? Type what you type after ssh, in cable order, separated by commas [this Spark]:",
         "Where is the FP4-Local model on this Spark? [found under ~/models]:",
@@ -203,7 +203,7 @@ fn a_running_engine_gets_a_bare_up_and_a_stopped_one_is_checked_first() {
 
 #[test]
 fn steps_run_install_then_up_then_doctor() {
-    let local = steps(&Target::Local { model: Some("/m".into()) });
+    let local = steps(&Target::Local { model: Some("/m".into()), installed: false });
     assert_eq!(local.iter().map(|(args, _)| args.join(" ")).collect::<Vec<_>>(), ["install", "up", "doctor"]);
     assert!(local.iter().all(|(_, env)| env == &[("VADE_MODELS".to_owned(), "/m".to_owned())]));
     let pair = steps(&Target::Controller { path: PathBuf::new(), text: None, up: vec!["--hosts".into(), "a,b".into()], installed: false });
@@ -212,6 +212,9 @@ fn steps_run_install_then_up_then_doctor() {
     // A second install would make a new generation, and a running engine would not attach.
     let installed = steps(&Target::Controller { path: PathBuf::new(), text: None, up: vec!["--fp8".into()], installed: true });
     assert_eq!(installed.iter().map(|(args, _)| args.join(" ")).collect::<Vec<_>>(), ["up --fp8", "doctor"]);
+    // After scripts/install.sh, a local setup with current files does not install again.
+    let local = steps(&Target::Local { model: None, installed: true });
+    assert_eq!(local.iter().map(|(args, _)| args.join(" ")).collect::<Vec<_>>(), ["up", "doctor"]);
 }
 
 fn shell(script: &str) -> Command {

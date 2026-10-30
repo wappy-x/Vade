@@ -177,10 +177,8 @@ fn invalid_tool_argument_json_is_recoverable_and_safe_to_replay() {
         content.get("error").and_then(Value::as_str),
         Some("invalid_arguments")
     );
-    assert_eq!(
-        content.get("message").and_then(Value::as_str),
-        Some("arguments must be a JSON object")
-    );
+    // The receipt quotes the start of the broken text; history keeps "{}".
+    assert!(content.get("message").and_then(Value::as_str).unwrap().starts_with("arguments are not valid JSON; send one JSON object. They began: {\"patch\""));
     let (url, server) = mock(vec![answer()]);
     let output = run_bounded(
         f.command(&url)

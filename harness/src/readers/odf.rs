@@ -1,8 +1,9 @@
 //! OpenDocument text, spreadsheets and presentations (ODT, ODS, ODP) to
 //! Markdown, from `content.xml`.
 //!
-//! - ODT: headings by outline level, paragraphs, bullet lists with their
-//!   levels, tables, links, line breaks and images by name. Pages come from
+//! - ODT: headings by outline level, paragraphs, bullet and numbered lists
+//!   with their levels (from the list styles in `styles.xml` and
+//!   `content.xml`), tables, links, line breaks and images by name. Pages come from
 //!   the soft page breaks that LibreOffice writes where its last layout
 //!   started a page; a file with none is one page.
 //! - ODS: one sheet marker and one table for each sheet, with the text each
@@ -59,7 +60,25 @@ impl Reader for OdfReader {
         let mut doc = if format == Format::Ods {
             sheets(&text, cut, caps, &mut budget).map_err(bad)?
         } else {
+            let mut styles = Vec::new();
+            // The list numbers are optional: a damaged styles.xml gives
+            // bullets, not a refusal.
+            let read = match zip.text("styles.xml") {
+                Ok(Some((named, cut))) => list_styles(&named, cut, &mut budget, &mut styles).is_ok(),
+                Ok(None) => true,
+                Err(_) => false,
+            };
+            if !read {
+                styles.clear();
+                zip.warnings.push("styles.xml (damaged; lists read as bullets)".into());
+            }
+            list_styles(&text, cut, &mut budget, &mut styles).map_err(bad)?;
+            // Sorted by name, the first of equal names kept, so that each
+            // list finds its style in a binary search.
+            styles.sort_by(|a, b| a.0.cmp(&b.0));
+            styles.dedup_by(|later, first| later.0 == first.0);
             let mut flow = Flow::new(&mut budget, caps, format == Format::Odp);
+            flow.styles = styles;
             flow.run(&text, cut).map_err(bad)?;
             flow.finish()
         };
@@ -92,6 +111,47 @@ fn encrypted(text: &str, cut: bool, budget: &mut Budget) -> Result<bool, String>
     }
     scan.finish(budget)?;
     Ok(false)
+}
+
+/// List styles by name: for each level, 1 to 10, the start number of a
+/// numbered level, or `None` for a bullet, image or unnumbered level.
+type ListStyles = Vec<(String, [Option<u32>; 10])>;
+
+/// The largest list number Markdown accepts (nine digits).
+const MAX_LIST_NUMBER: u32 = 999_999_999;
+
+/// Adds the list styles of `text` (`styles.xml`, or the automatic styles
+/// before the body of `content.xml`) to `styles`.
+fn list_styles(text: &str, cut: bool, budget: &mut Budget, styles: &mut ListStyles) -> Result<(), String> {
+    let mut scan = Scanner::new(text, cut);
+    let mut open: Option<(String, [Option<u32>; 10])> = None;
+    while let Some(event) = scan.next()? {
+        match event {
+            Event::Open(tag) => match tag.local() {
+                "body" => break,
+                "list-style" => open = Some((tag.attr("name")?.unwrap_or_default().into_owned(), [None; 10])),
+                "list-level-style-number" if open.is_some() => {
+                    let level = tag.attr("level")?.and_then(|l| l.parse::<usize>().ok()).unwrap_or(1).clamp(1, 10);
+                    // An empty number format shows no number.
+                    if !tag.attr("num-format")?.unwrap_or_default().is_empty() {
+                        let start = tag.attr("start-value")?.and_then(|v| v.parse().ok()).unwrap_or(1).min(MAX_LIST_NUMBER);
+                        open.as_mut().unwrap().1[level - 1] = Some(start);
+                    }
+                }
+                _ => {}
+            },
+            Event::Close(name) if xml::local(name) == "list-style" => {
+                let Some(style) = open.take() else { continue };
+                if !budget.reserve(SLOT + style.0.len()) {
+                    break;
+                }
+                styles.push(style);
+            }
+            _ => {}
+        }
+    }
+    scan.finish(budget)?;
+    Ok(())
 }
 
 /// The repeat count in `attr`, from 1 to `max`.
@@ -140,6 +200,14 @@ struct Flow<'a> {
     /// List depth, and whether the open list item has had its marker.
     lists: usize,
     item_marked: bool,
+    /// The list styles of the file, sorted by name.
+    styles: ListStyles,
+    /// For each open list, its style (an index in `styles`) and the next
+    /// number of a numbered list.
+    numbers: Vec<(Option<usize>, Option<u32>)>,
+    /// The style and next number of the last top-level numbered list, for a
+    /// list that continues its numbering.
+    last_list: Option<(Option<usize>, u32)>,
     /// The previous block in each sink was a list item.
     last_item: [bool; 3],
     link: Option<(usize, String)>,
@@ -175,6 +243,9 @@ impl<'a> Flow<'a> {
             heading: 0,
             lists: 0,
             item_marked: false,
+            styles: Vec::new(),
+            numbers: Vec::new(),
+            last_list: None,
             last_item: [false; 3],
             link: None,
             image: None,
@@ -279,8 +350,43 @@ impl<'a> Flow<'a> {
             }
             "tab" => self.push("\t"),
             "line-break" => self.push("\n"),
-            "list" => self.lists += 1,
-            "list-item" => self.item_marked = false,
+            "list" => {
+                // A nested list with no style takes the style of its parent.
+                let style = match tag.attr("style-name")? {
+                    Some(name) => self
+                        .styles
+                        .binary_search_by(|(s, _)| {
+                            super::scanned(1);
+                            s.as_str().cmp(&name)
+                        })
+                        .ok(),
+                    None => self.numbers.last().and_then(|l| l.0),
+                };
+                let mut next = style.and_then(|i| self.styles[i].1[self.lists.min(9)]);
+                if self.lists == 0
+                    && next.is_some()
+                    && tag.flag("continue-numbering")?.unwrap_or(false)
+                    && let Some((_, n)) = self.last_list.filter(|(last, _)| *last == style)
+                {
+                    next = Some(n);
+                }
+                // A new top-level list starts after a blank line, apart from
+                // the list before it.
+                if self.lists == 0 {
+                    self.last_item = [false; 3];
+                }
+                // The XML depth cap bounds this stack, so it holds no work bytes.
+                self.lists += 1;
+                self.numbers.push((style, next));
+            }
+            "list-item" => {
+                self.item_marked = false;
+                if let Some(start) = tag.attr("start-value")?.and_then(|v| v.parse::<u32>().ok())
+                    && let Some((_, Some(n))) = self.numbers.last_mut()
+                {
+                    *n = start.min(MAX_LIST_NUMBER);
+                }
+            }
             "list-header" => self.item_marked = true,
             "a" if self.p_depth > 0 && self.link.is_none() => {
                 // The target counts against the work cap while the link is open.
@@ -361,7 +467,14 @@ impl<'a> Flow<'a> {
                     self.end_para();
                 }
             }
-            "list" => self.lists = self.lists.saturating_sub(1),
+            "list" => {
+                self.lists = self.lists.saturating_sub(1);
+                if let Some((style, next)) = self.numbers.pop()
+                    && self.lists == 0
+                {
+                    self.last_list = next.map(|n| (style, n));
+                }
+            }
             "a" => {
                 let Some((start, href)) = self.link.take() else { return };
                 self.budget.release(href.len());
@@ -508,7 +621,15 @@ impl<'a> Flow<'a> {
         let body = text.trim();
         let item = self.lists > 0 && !self.item_marked;
         let prefix = if item {
-            format!("{}- ", "    ".repeat(self.lists - 1))
+            let marker = match self.numbers.last_mut() {
+                Some((_, Some(n))) => {
+                    let shown = *n;
+                    *n = n.saturating_add(1).min(MAX_LIST_NUMBER);
+                    format!("{shown}. ")
+                }
+                _ => "- ".to_owned(),
+            };
+            format!("{}{marker}", "    ".repeat(self.lists - 1))
         } else if self.lists > 0 {
             "    ".repeat(self.lists)
         } else if self.heading > 0 && self.table.is_none() {

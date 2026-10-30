@@ -25,9 +25,10 @@ git clone --branch main https://github.com/wappy-x/vade.git "$HOME/vade" &&
   `gh repo clone wappy-x/vade "$HOME/vade" -- --branch main` as the first
   line. [INSTALL step 2](INSTALL.md#step-2-get-the-code) also shows a
   read-only deploy key.
-- **No model yet?** The script builds `vade` first, then stops at the model
-  check. Download the 102.26 GB checkpoint with `vade pull`, then run the
-  script again. [No model yet](#no-model-yet) gives the two commands.
+- **No model yet?** Leave out `--launch`. The script installs Vade without
+  the model. Then download the 102.26 GB checkpoint with `vade pull` and run
+  `vade launch`. The [quick start](#quick-start-on-one-spark) gives the five
+  commands.
 
 [Why Vade](docs/why-vade.md) says why it exists and what "exact" means here.
 
@@ -85,9 +86,8 @@ up Vade for someone, read the [agent quickstart](docs/agents/quickstart.md).
 
 You need a DGX Spark with Git, a C linker (`cc`) and curl. Its NVIDIA driver
 must support CUDA 13.0 or newer (the `CUDA Version` in the `nvidia-smi`
-header), and no other program may use the GPU. You also need the complete
-102.26 GB checkpoint under `~/models`. INSTALL.md shows how to add missing
-tools and how to download the model.
+header), and no other program may use the GPU. INSTALL.md shows how to add
+missing tools.
 
 Open a terminal on the Spark and run these five commands:
 
@@ -95,45 +95,39 @@ Open a terminal on the Spark and run these five commands:
 git clone --branch main https://github.com/wappy-x/vade.git "$HOME/vade"
 sh "$HOME/vade/scripts/install.sh"
 export PATH="$HOME/.cargo/bin:$HOME/vade/cli/target/release:$PATH"
-vade setup
-vade chat
+vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300
+vade launch
 ```
 
 1. The clone gets the current main, with every change under Unreleased in
    the changelog.
 2. The script checks the GPU and driver first. Then it installs the pinned
-   Rust tools that are missing, builds `vade`, checks this Spark and the
-   model, and installs the engine, the GPU kernels and the chat program. It needs no sudo, and it does not change shell
-   profiles or model files.
-3. The `export` line puts `cargo` and `vade` on your `PATH`. The script
-   does not edit shell profiles, so the line lasts for this shell only. Run
-   it again in each new shell, or add it to your shell profile yourself.
-4. `vade setup` uses the model and settings the script saved. It runs
-   `vade install` again (nothing is rebuilt), starts the engine with
-   `vade up`, then checks everything with `vade doctor`. Without the script,
-   or from another computer, it first asks a few questions: which Sparks,
-   which checkpoint (for 2, 4 or 6 Sparks) and where the model is.
-5. `vade chat` opens the coding agent in the current folder. The agent can
-   edit files there, so ask it only to say hello. Type `/exit` to leave. The
-   engine keeps running until you run `vade down`.
+   Rust tools that are missing and builds `vade`, the GPU kernels, the engine
+   and the chat program. It does not need the model. It needs no sudo, and it
+   does not change shell profiles or model files.
+3. The `export` line puts `cargo` and `vade` on your `PATH` for this shell
+   only. Run it again in each new shell, or add it to `~/.profile` yourself.
+4. `vade pull` downloads the 102.26 GB model into
+   `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local` and checks every file. Skip
+   this command if the model is already in `~/models`.
+5. `vade launch` finds the model, saves the settings and checks the model
+   files. Then it starts the engine and opens the coding agent in the current
+   folder. The agent can edit files there, so ask it only to say hello. Type
+   `/exit` to leave chat. The engine keeps running until you run `vade down`.
+   The API is at `http://127.0.0.1:18080`. If another program has that port,
+   `vade launch` names the port it uses instead.
 
 Each step stops at the first problem and prints what to do next. Run the
-same command again after the fix; work that is already done is reused.
+same command again after the fix; work that is already done is reused. If
+you followed the older steps with `vade setup` and `vade chat`, they still
+work: on one Spark, `vade setup` skips `vade install` when the installed
+files are current.
 
 <a id="no-model-yet"></a>
-**No model yet?** The script builds `vade` first, then stops at the model
-check. Run the `export` line, download the model, then run the script again
-(not the clone line, because the folder exists now):
-
-```sh
-vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300
-sh "$HOME/vade/scripts/install.sh"
-```
-
-`vade pull` shows its progress. If it stops, run it again; it continues from
-where it stopped. It puts the model in
-`~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local`, where the script looks. Over
-SSH, run it inside `tmux` or under `nohup`, because a dropped connection
+**About the download.** `vade pull` shows its progress. If it stops, run it
+again; it continues from where it stopped. It puts the model in
+`~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local`, where `vade launch` looks.
+Over SSH, run it inside `tmux` or under `nohup`, because a dropped connection
 stops it. On 2026-10-24, rented GB10 VMs downloaded the checkpoint at 8 to
 22 MB/s: about 80 minutes at the top of that range and over three hours at
 the bottom ([benchmarks](docs/benchmarks.md#rented-cloud-gb10-vms)).
@@ -153,8 +147,9 @@ record is not in the repository yet.
 | First `vade launch`, to `Launch ready in 149.4 s.` | 149.4 |
 | Total | 228.2 |
 
-The model was already on the Spark, so the total does not include the
-102.26 GB model download. The clone came from a local copy of the repository,
+Each row is rounded to 0.1 s, so the rows add up to 228.3 s, not the
+228.2 s total. The model was already on the Spark, so the total does not
+include the 102.26 GB model download. The clone came from a local copy of the repository,
 so it does not include a network fetch of the source. Download times depend
 on your network. We have not timed these manual steps on a later main.
 
@@ -171,9 +166,9 @@ The [INSTALL quick start](INSTALL.md#quick-start-with-an-existing-model)
 covers an existing checkout, a checkpoint outside `~/models` and what to do
 when a step fails.
 
-**Chat in one step.** `sh "$HOME/vade/scripts/install.sh" --launch`
-installs Vade, starts the engine and opens chat. Later, `vade launch` does
-the same.
+**Chat in one step.** When the model is already in `~/models`,
+`sh "$HOME/vade/scripts/install.sh" --launch` installs Vade, starts the
+engine and opens chat. Later, `vade launch` does the same.
 
 **Optional: the prebuilt bundle.** The
 [v0.1.0 release page](https://github.com/wappy-x/vade/releases/tag/v0.1.0)
@@ -436,8 +431,10 @@ or three server starts.
 | fp8 | 4 | path | 47.321 | 66.450 | 69.085 | 59.242 | 86.447 | 129.360 | 6.854 |
 
 We did not measure drafting OFF on 2026-10-30. The latest drafting OFF
-cards are older: the 2026-10-29 runs at main `cbbb11b` and the 2026-10-28
-cards at main `76977df`, as the Main column shows.
+rows are older, as the Main column shows. The `76977df` rows are RigMark
+cards from 2026-10-28, one server start each. The `cbbb11b` rows are from
+2026-10-29: the mean of two server starts, with our own 64-request card
+client.
 
 | Model | Sparks | Path | Main | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) |
 | --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -445,7 +442,7 @@ cards at main `76977df`, as the Main column shows.
 | fp4-local | 2 | tensor split | `76977df` | 35.071 | 35.375 | 35.487 | 33.814 | 82.476 | 126.344 | 2.153 |
 | fp4-local | 4 | pipeline | `76977df` | 28.157 | 28.177 | 28.503 | 27.642 | 84.974 | 139.335 | 2.177 |
 | fp8 | 2 | ring | `cbbb11b` | 26.887 | 26.727 | 26.914 | 26.050 | 66.682 | 97.378 | 5.966 |
-| fp8 | 4 | path | `76977df` | 35.266 | 34.722 | 35.284 | 33.9 | 88.201 | 128.203 | 6.948 |
+| fp8 | 4 | path | `76977df` | 35.266 | 34.722 | 35.284 | 33.900 | 88.201 | 128.203 | 6.948 |
 
 Rates are in completion tokens per second. Prose, code and structured output
 each use one chat. C1, C4 and C8 give the total rates for one, four and eight
@@ -454,12 +451,15 @@ concurrent chats. Cold 8K is the time to the first token after an uncached
 15.66 s on one Spark, 10.13 s on two Sparks and 10.52 s on four Sparks, and
 in 24.11 s on two Sparks and 27.49 s on four Sparks with FP8.
 
-The [benchmark history](docs/benchmarks.md#current-2026-10-30-morning-main-380d8e5-home-dgx-sparks)
-gives the number of server starts per row, the 32K chat, the token ID checks
-and the limits. These tables are written by hand, because they average
-several server starts per row and the drafting OFF rows come from two older
-dates.
-`vade-tools bench-docs` can rewrite this block from RigMark cards.
+The [method](docs/benchmarks.md#how-the-current-numbers-were-measured)
+gives the checkpoints, builds, prompts, runs and statistics behind every
+row, and the commands you can run. The
+[benchmark history](docs/benchmarks.md#current-2026-10-30-morning-main-380d8e5-home-dgx-sparks)
+gives the 32K chat, the token ID checks and the limits. These tables are
+written by hand, because they average several server starts per row and the
+drafting OFF rows come from two older dates. `vade-tools bench-docs` writes a
+simpler table from RigMark card files: one card per setup, from the newest
+main only, with no averages.
 
 <!-- bench-docs:end -->
 

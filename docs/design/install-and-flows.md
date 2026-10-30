@@ -25,7 +25,11 @@ plan work as this page shows.
 ```
 
 On one Spark, `vade launch` stays the short way: install if needed, start,
-then open chat.
+then open chat. The one-Spark quick start is `scripts/install.sh`, then
+`vade pull` when the model is missing, then `vade launch`. The script needs
+no model on disk. Without one, its local `vade install` builds, compiles the
+GPU code, saves no settings and prints the `vade pull` line. The first
+`vade launch` or `vade up` then saves the settings and checks the model files.
 
 ## Each step
 
@@ -33,7 +37,7 @@ then open chat.
 | --- | --- | --- | --- | --- |
 | Get vade | Spark: `sh scripts/install.sh`. Bundle: unpack it. Mac: build the CLI | `Install complete.` and the path to `vade` | Rust tools, `cc` or curl are missing; the GPU is not a GB10, its driver is older than CUDA 13.0, or it is busy; no network on the first run | Do what the `Next:` line says, then run the same command again |
 | Set up | `vade setup` | One `Setup step` line per step below, then `Setup done.` and exit status 0 | `--yes` is missing a required answer, such as the Sparks on a controller | Add the flag it names, then run it again |
-| Install | `vade install` | Exit status 0. Local: `Install done in <time>`, then the GPU startup cache fills. Controller: `Installed build <revision>.` | A toolchain is missing, the checkout has changes, a GPU is busy, the disk is full, the model is missing | Do what the `hint:` line says, then `vade install`. A second run is always safe |
+| Install | `vade install` | Exit status 0. Local: `Install done in <time>`, then the GPU startup cache fills. Controller: `Installed build <revision>.` | A toolchain is missing, the checkout has changes, a GPU is busy, the disk is full; from a controller, the model is missing. On a Spark with no model yet, install still passes and prints the `vade pull` line | Do what the `hint:` line says, then `vade install`. A second run is always safe |
 | Start | `vade up` | On a Spark: `Up ready in <time>: <address>, context <n> tokens, ...`. From a controller: `<model> ready on <n> Sparks at <address>: context <n> tokens, ...` | The engine refuses the memory, the port is taken, the model load times out | `vade logs`, then `vade doctor`, then `vade up` |
 | Check | `vade doctor` | One row per check, then `PASS` | A row says `FAIL` | Run that row's `next:` step, then `vade doctor` |
 | Use | `vade chat`, `vade read FILE`, `vade tools`, or the API at `<address>/v1` | Chat opens; the API answers `/v1/models` | The engine is not running | `vade up` |
@@ -99,9 +103,9 @@ Plan for vade install:
   Files      a source build of /home/you/vade
   Toolchain  Rust 1.99.0 and nightly-2026-10-01
   Installed  not yet
-  Model      the FP4-Local checkpoint under /home/you/models, found at install
+  Model      the FP4-Local checkpoint under /home/you/models, found at install (optional: without it, install saves no defaults)
   State      /home/you/.vade: config, stage and state
-  Steps      detect this Spark and model, save defaults, stage the engine, kernels and chat, warm the GPU startup cache
+  Steps      detect this Spark and model, save defaults when the model is there, stage the engine, kernels and chat, warm the GPU startup cache
   Next       vade install
 Local config: /home/you/.vade/config
 ```
@@ -149,6 +153,10 @@ stops at the first step that fails, names the step and exits with status 1.
 If a controller config already has an install, setup skips `vade install`:
 a second install makes a new generation, and `vade up` could then not attach
 to an engine that runs from the first one. Run `vade update` after a pull.
+On a Spark with saved local settings, setup skips `vade install` when the
+installed files were built from the current checkout, for example right
+after `scripts/install.sh`. After a pull, they are not current, so setup runs
+`vade install`, which builds the new checkout.
 Install runs its own SSH, GPU, disk, toolchain, model and network checks on
 every Spark before it builds. Doctor runs last, on the running engine, so it
 checks the Sparks and cables that `vade up` chose. Before a start, doctor

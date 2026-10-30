@@ -366,7 +366,8 @@
             }
             assert_eq!(report.reason, StopReason::ToolFailed);
             assert_eq!(report.tool_calls, 1);
-            assert_eq!(w.read("a").unwrap(), "new\n");
+            // The conflict on b rolls back a; the receipt stays uncertain.
+            assert_eq!(w.read("a").unwrap(), "old\n");
             assert_eq!(w.read("b").unwrap(), "changed\n");
             let receipt = value(
                 c.messages()[2]
@@ -379,7 +380,7 @@
             assert_eq!(receipt.get("uncertain_writes"), Some(&Value::Bool(true)));
             assert_eq!(
                 receipt.get("committed").unwrap().as_array().unwrap().len(),
-                1
+                2
             );
             assert_eq!(
                 receipt
@@ -1289,3 +1290,5 @@
 
     #[path = "recovery_tests.rs"]
     mod recovery;
+    #[path = "loop_tests.rs"]
+    mod loop_guards;

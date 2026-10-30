@@ -35,9 +35,16 @@ impl Reader for XlsxReader {
         let (text, cut) = zip.text(&main)?.ok_or_else(|| ReadError::Malformed(format, format!("the archive has no {main}")))?;
         let (sheets, date1904) = workbook(&text, cut, &mut budget).map_err(|why| bad(&main, why))?;
         let part = |kind: &str| rels.first(kind).map(str::to_owned);
+        let mut strings_note = None;
         let (strings, strings_cut) = match part("sharedStrings") {
             Some(name) => match zip.text(&name)? {
-                Some((text, cut)) => (shared_strings(&text, cut, &mut budget).map_err(|why| bad(&name, why))?, cut || budget.full()),
+                Some((text, cut)) => {
+                    let (strings, stopped) = shared_strings(&text, cut, &mut budget).map_err(|why| bad(&name, why))?;
+                    if stopped {
+                        strings_note = Some(format!("shared strings after {} (memory cap; later ones show as empty cells)", strings.len()));
+                    }
+                    (strings, cut || stopped || budget.full())
+                }
                 None => (Vec::new(), false),
             },
             None => (Vec::new(), false),
@@ -106,6 +113,7 @@ impl Reader for XlsxReader {
             doc.markdown.push('\n');
         }
         doc.warnings.append(&mut zip.warnings);
+        doc.warnings.extend(strings_note);
         doc.warnings.extend(budget.warning());
         Ok(doc)
     }
@@ -140,10 +148,18 @@ fn workbook(text: &str, cut: bool, budget: &mut Budget) -> Result<(Vec<Sheet>, b
     Ok((sheets, date1904))
 }
 
+/// The part of the room left that the shared string table may hold, so a
+/// large table leaves the sheets room for their rows.
+const STRINGS_SHARE: usize = 2;
+
 /// The shared string table: each `si` item's text, phonetic runs left out.
-fn shared_strings(text: &str, cut: bool, budget: &mut Budget) -> Result<Vec<String>, String> {
+/// The table holds at most half of the room left; true when it stopped there
+/// (cells that use a later string then show as empty).
+fn shared_strings(text: &str, cut: bool, budget: &mut Budget) -> Result<(Vec<String>, bool), String> {
     let mut scan = Scanner::new(text, cut);
     let mut out = Vec::new();
+    let limit = budget.room() / STRINGS_SHARE;
+    let (mut held, mut stopped) = (0usize, false);
     let (mut item, mut in_text, mut phonetic) = (None::<String>, false, 0usize);
     while let Some(event) = scan.next()? {
         match event {
@@ -158,9 +174,14 @@ fn shared_strings(text: &str, cut: bool, budget: &mut Budget) -> Result<Vec<Stri
                 "rPh" => phonetic = phonetic.saturating_sub(1),
                 "si" => {
                     let text = item.take().unwrap_or_default();
-                    if !budget.reserve(SLOT + text.len()) {
+                    let size = SLOT + text.len();
+                    // A string that the room cut short is left out, so the
+                    // cells that use it are empty, not short.
+                    if stopped || held + size > limit || !budget.reserve(size) {
+                        stopped = true;
                         break;
                     }
+                    held += size;
                     out.push(text);
                 }
                 _ => {}
@@ -168,15 +189,13 @@ fn shared_strings(text: &str, cut: bool, budget: &mut Budget) -> Result<Vec<Stri
             Event::Text(raw) | Event::Cdata(raw) if in_text && phonetic == 0 => {
                 if let Some(item) = item.as_mut() {
                     // A string longer than the room left keeps what fits; only that is decoded.
-                    let text = if matches!(event, Event::Text(_)) { xml::unescape_prefix(raw, budget.room())? } else { raw.into() };
-                    let room = budget.room().saturating_sub(item.len() + SLOT);
+                    let room = limit.saturating_sub(held + item.len() + SLOT);
+                    let text = if matches!(event, Event::Text(_)) { xml::unescape_prefix(raw, room)? } else { raw.into() };
                     let mut end = text.len().min(room);
                     while !text.is_char_boundary(end) {
                         end -= 1;
                     }
-                    if end < text.len() {
-                        budget.cut();
-                    }
+                    stopped |= end < text.len();
                     item.push_str(&text[..end]);
                 }
             }
@@ -184,7 +203,7 @@ fn shared_strings(text: &str, cut: bool, budget: &mut Budget) -> Result<Vec<Stri
         }
     }
     scan.finish(budget)?;
-    Ok(out)
+    Ok((out, stopped))
 }
 
 /// Date kind of a number format: none, a date, a time, both, or elapsed

@@ -5,10 +5,14 @@
 ### Current main
 
 The drafting ON rows below measured main `380d8e5` on our DGX Sparks on the
-morning of 2026-10-30, with RigMark cards. Each row is the mean of two or
-three server starts. The drafting OFF rows were not measured again. They
-come from the 2026-10-29 runs at main `cbbb11b` and the 2026-10-28 cards at
-main `76977df`, as the Main column shows.
+morning of 2026-10-30, with RigMark cards. Each of these rows is the mean of
+two or three server starts. The drafting OFF rows were not measured again,
+and they come from two older dates, as the Main column shows. The `76977df`
+rows are RigMark cards from 2026-10-28, one server start each. The `cbbb11b`
+rows are from 2026-10-29: the mean of two server starts, measured with our
+own 64-request card client, not RigMark. The
+[method](#how-the-current-numbers-were-measured) gives the full recipe of
+each row.
 
 | Model | Sparks | Path | Drafting | Main | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) |
 | --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -20,7 +24,7 @@ main `76977df`, as the Main column shows.
 | fp4-local | 4 | pipeline | ON | `380d8e5` | 43.099 | 82.173 | 102.364 | 66.123 | 145.608 | 228.526 | 2.178 |
 | fp8 | 2 | ring | OFF | `cbbb11b` | 26.887 | 26.727 | 26.914 | 26.050 | 66.682 | 97.378 | 5.966 |
 | fp8 | 2 | ring | ON | `380d8e5` | 36.637 | 51.302 | 52.731 | 45.119 | 65.930 | 98.339 | 5.957 |
-| fp8 | 4 | path | OFF | `76977df` | 35.266 | 34.722 | 35.284 | 33.9 | 88.201 | 128.203 | 6.948 |
+| fp8 | 4 | path | OFF | `76977df` | 35.266 | 34.722 | 35.284 | 33.900 | 88.201 | 128.203 | 6.948 |
 | fp8 | 4 | path | ON | `380d8e5` | 47.321 | 66.450 | 69.085 | 59.242 | 86.447 | 129.360 | 6.854 |
 
 Rates are in completion tokens per second. Prose, code and structured output
@@ -35,20 +39,103 @@ of the `cbbb11b` rows, and the
 those of the `76977df` rows.
 
 This table is written by hand, because it mixes rows from three dates and
-averages several server starts per row. From the repository root, this
-command rewrites it and the README table from a folder of RigMark cards:
+averages several server starts per row. The `bench-docs` tool cannot make
+this table. It takes one card per setup, only from the newest main that has
+cards, and it does not average server starts
+([bench_docs.rs](../tools/src/bench_docs.rs)). From the repository root, this
+command replaces this block and the README block with such a table, from a
+folder of RigMark card files:
 
 ```sh
 cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- bench-docs '<cards-dir>' .
 ```
+
+The card files of the rows above are not in the repository yet.
 
 Each section below names its date and main. Its results apply only to that
 build.
 
 <!-- bench-docs:end -->
 
-This page has every speed we have published for Vade, newest first, and how
-to measure your own:
+## How the current numbers were measured
+
+This section gives the recipe behind the [current table](#current-main) and
+the [2026-10-30 section](#current-2026-10-30-morning-main-380d8e5-home-dgx-sparks).
+Every number comes from a card file or from a lab report line. Those records
+are not in the repository yet.
+
+### Models and builds
+
+| Model | Checkpoint | Checkpoint identity (SHA256 that the server reports) |
+| --- | --- | --- |
+| fp4-local | `nvidia/Qwen3.8-Flash-Next-FP4-Local`, revision `b9ce18a6887e18c089fdea8509a33e63429a3300` | `d99ccbed3a9db8a2f099eca98e17c0bc3a2ebe84df95852f3b07c87c20a32716` |
+| fp8 | `Qwen/Qwen3.8-Flash-Next-FP8`, revision `236dfdf285828023ca3bcd3f37366c58a3469b13` | `8f69659fb459c65ab2729022c87080c3eca51643db40288f9854632c4f0d0f03` |
+
+| Main | Date | Server build | Used for |
+| --- | --- | --- | --- |
+| `380d8e5` | 2026-10-30 | flash-serve `d56d255c`, PTX `84c09350` | Drafting ON rows, the 32K chat, the context run |
+| `51dce02` (engine `380d8e5`) | 2026-10-30 | flash-serve `44e95e44` | Two pairs at once |
+| `cbbb11b` | 2026-10-29 | flash-serve `cad21fbe`, PTX `4288b2a8` | Drafting OFF: fp4-local on one Spark, fp8 on two Sparks |
+| `76977df` | 2026-10-28 | flash-serve `4dedff9d`, PTX `4288b2a8` | Drafting OFF: fp4-local on two and four Sparks, fp8 on four Sparks |
+
+### Requests
+
+Every request used greedy decoding: temperature 0, top-p 1, top-k 0,
+repetition penalty 1 and presence and frequency penalties 0. Chat requests
+also set seed 20260905, thinking OFF and `cache` false. Drafting ON requests leave
+out the `draft` field, so the server uses its default: depth 3 on FP4-Local
+and depth 2 on FP8. Drafting OFF requests send `"draft":"plain"`.
+
+A RigMark card sends 66 requests. It uses the prompt set of RigMark commit
+`52c29c3fc1d741b9aef8895b23372aafa5dc6161` (prompts version 1.0.0). The
+prompt and reply lengths below are from the two-Spark FP4-Local card of
+2026-10-30.
+
+| Cell | Prompt | Reply | Runs | Value in the table |
+| --- | --- | --- | --- | --- |
+| Prose, code, structured | One chat. Prompts of 117 to 145 tokens | Up to 8192 tokens, to the natural stop (551 to 1,794 tokens) | 5 of each | Median of the 5 writing rates |
+| C1, C2, C4, C8 | 1, 2, 4 or 8 chats at once, code prompts of 140 to 147 tokens | Exactly 256 tokens per chat | 3 rounds of each | Median of the 3 round rates |
+| Cold 8K | 8,192 tokens, sent with drafting OFF and a new cache salt for each pair | 8 tokens | 3 cold and replay pairs | Median time to the first token of the 3 cold requests |
+
+When a setup has two or three server starts, each cell is the mean of the
+start medians. The `cbbb11b` rows used our own card client instead. It sends
+64 requests: no C2 round and five cold 8K prompts. In those rows, C4 and C8
+are the mean of the three round medians on FP4-Local and the median of the
+three rounds on FP8.
+
+### Each table
+
+| Table | Sparks and server start | Drafting | Starts | Record |
+| --- | --- | --- | ---: | --- |
+| Current main, drafting ON, and the 2026-10-30 speed table | 1 Spark: `vade up --sparks 1 --context 32768 --output 8192`. 2 Sparks: `vade up --sparks 2 --context 32768 --output 8192`. FP4-Local on 4 Sparks, FP8 on 2 and 4 Sparks: lab launcher, context 32768, output 8192 (FP4-Local) or 16384 (FP8) | ON | 3 on one and two Sparks, 2 on the others | Lab report `own-rigmark-eod-r2`, cards `2026-10-30_0702` to `0804` |
+| Current main, drafting OFF at `76977df` | 2 and 4 Sparks: lab launcher, the same limits | OFF | 1 | The 2026-10-28 cards with drafting OFF |
+| Current main, drafting OFF at `cbbb11b` | 1 Spark: `vade up --sparks 1`, context 32768, output 8192. FP8 on 2 Sparks: lab launcher, context 32768, output 16384 | OFF | 2 | Lab reports `own-card-1s-eod-2-r2` and `own-premerge-fp8b-r2` |
+| 32K chat | The card start. On one Spark, two other starts at context 65536 | ON | 2 or 3 | `own-rigmark-eod-r2` |
+| Context on one Spark | `vade up --sparks 1 --context 262144 --output 8192` | ON | 1 | `own-rigmark-eod-r2` |
+| Two pairs at once | `vade up --sparks 2` on each pair | ON | 2 | Lab report `own-two-pairs-r1` |
+
+The 32K chat sends a 32,099-token question. Then it sends a second question
+on the same chat: 32,305 tokens with a 54-token reply, or with FP8 on two
+Sparks 32,238 tokens with a 53-token reply. The first reply was 179 tokens
+long, and 112 with FP8 on two Sparks. The "Second question, cache" column is
+the first of two cached runs. The context run sent prompts of 64,217 and
+129,220 tokens with replies of 200 and 179 tokens, and a 64,444-token second
+question with a 56-token reply. Its writing speed is the same decode rate
+that the cards use.
+
+### What you can run today
+
+| Step | Command | State |
+| --- | --- | --- |
+| Start one or two Sparks as in the cards | `vade up --sparks 1 --context 32768 --output 8192 --mtp 3` or `vade up --sparks 2 --context 32768 --output 8192 --mtp 3` | Available |
+| Start four Sparks or FP8 | `vade up --sparks 4 --context 32768 --output 8192 --mtp 3` or `vade up --fp8 --sparks 2 --context 32768 --output 16384 --mtp 2` (or `--sparks 4`) | Available, but the cards used a lab launcher, not these commands |
+| Check token IDs, drafting ON against OFF | `vade verify -n 3 --prompt 8k --max-tokens 256` | Available. It checks one server, not one card against another |
+| Run the 66-request card | None | Not available from the `vade` CLI. The card client and its token ID compare are private. RigMark at `52c29c3` runs the same cells, but its cold 8K request is different ([details](#reproduce-this-table)) |
+| Time your own server | `vade bench --concurrency 1,2,4,8 --max-tokens 256 --repeats 3` | Available. It uses other prompts, so its numbers do not compare with the cards |
+| Run the 32K chat or the context run | None | Not available. No `vade` command times a second question with and without the cache, and the prompts are not in the repository |
+
+This page lists every speed we have published for Vade, newest first. It
+also shows how to measure your own:
 
 - [2026-10-30 morning cards](#current-2026-10-30-morning-main-380d8e5-home-dgx-sparks):
   one, two and four DGX Sparks at main `380d8e5`, FP4-Local and FP8,
@@ -121,8 +208,8 @@ On the morning of 2026-10-30 we measured main `380d8e5` (#201) on one, two
 and four Sparks, with FP4-Local and with FP8. Every server ran the prebuilt
 payload of `380d8e5` (flash-serve `d56d255c`, PTX `84c09350`), with greedy
 decoding and thinking OFF. FP4-Local used MTP 3 and output 8192. FP8 used
-MTP 2 and output 16384. No engine setting was set. Each card start had
-context 32768 and ran one RigMark card with drafting ON (66 responses). On
+MTP 2 and output 16384. No `VADE_` environment setting was set. Each card
+start had context 32768 and ran one RigMark card with drafting ON (66 responses). On
 two and four Sparks, the same start then ran a 32K-token chat. On one
 Spark, the chat ran on two more starts at context 65536, and one more start
 at context 262144 served long prompts. The Starts column counts the card
@@ -376,9 +463,9 @@ They do not measure `285fa8a`.
 A confirm run on 2026-10-28 compared `285fa8a` with the main before it,
 `54392da`. Its record is `2026-10-28_1713_confirm_285fa8a-vs-54392da`. The
 record is not in the repository yet. The run used one pair of home DGX
-Sparks, two Sparks on the tensor split, with drafting ON. It used the RigMark
-card recipe of the end-of-day cards, with five cold 8K prompt runs per server
-start. Each card had its own server start. The four card starts ran in this
+Sparks, two Sparks on the tensor split, with drafting ON. It used our own
+64-request card client, not the RigMark recipe of the end-of-day cards: it
+has no C2 round and five cold 8K prompts per server start. Each card had its own server start. The four card starts ran in this
 order: `a1` (old main), `x1` (new main), `x2` (new main), `a2` (old main).
 Then a 129,220-token prompt ran on its own server start for each main:
 `t128-x1` (new main), then `t128-a1` (old main).
@@ -694,8 +781,8 @@ the first start had C2 at 48.5 tok/s and C4 at 82.0. These are 1.2 % and
 
 ### The prefix cache on two Sparks
 
-These runs used the gate driver of #142 on home-3 + home-4 at main
-`9d2ec6c`, one fresh server per run, drafting ON. Each run asked a first
+These runs used the test client of #142 on home-3 + home-4 at main
+`9d2ec6c`. Each run started a fresh server with drafting ON. Each run asked a first
 question on a long chat. Then it asked a second question on the same chat
 with the cache allowed, and the same second question again with `cache` set
 to false. Three runs had the cache on (`VADE_FLASHNEXT_PREFIX_CACHE=1`), and
@@ -1306,7 +1393,7 @@ hard cutoff at 09:45.
 
 ### Reading these cards
 
-**Drafting ON is the lever for one chat.** On the `80ac2d4` pair it took code
+**Drafting ON makes one chat faster.** On the `80ac2d4` pair it took code
 from 27.9 to 79.3 tok/s, prose from 27.9 to 42.0 and structured from 28.2 to
 98.6. On four Sparks it took code from 28.4 to 80.3. On FP8 it took code from
 26.6 to 47.6 on two Sparks and from 34.4 to 62.5 on four.
@@ -1319,7 +1406,7 @@ moment one GPU is working on a given chat. With drafting ON, one chat wrote
 in the v0.1.0 card. With drafting OFF it sat at 27.9 on two Sparks and 28.4 on
 four, next to 27.8 on one.
 
-**What more Sparks buy is prompt reading and room.** The pipeline splits the
+**More Sparks read prompts faster and give more memory.** The pipeline splits the
 prompt work, so the first token after a cold 8K prompt came in 2.80 s on two
 Sparks and 2.19 s on four, against 3.86 s on one Spark in the v0.1.0 card.
 The batched rates held as Sparks were added (C4 with drafting ON: 142.9 on
@@ -1417,7 +1504,7 @@ the model's layers.
 
 ### What this means
 
-**Drafting is the big win.** On one Spark it takes code from 27.8 to 76.7
+**Drafting gives the largest gain for one chat.** On one Spark it takes code from 27.8 to 76.7
 tok/s and prose from 27.8 to 41.7, and it makes one chat faster on every
 setup we measured.
 
@@ -1441,7 +1528,7 @@ comparison on one machine.
 
 ### Known limits
 
-- **One chat barely moves from Spark to Spark.** On six of our Sparks measured
+- **One chat runs at almost the same speed on each Spark.** On six of our Sparks measured
   one at a time, drafting OFF gave 27.6 to 27.8 tok/s on prose and 27.7 to
   27.8 on code, and drafting ON gave 41.3 to 41.7 on prose and 76.1 to 76.7 on
   code.
@@ -1857,7 +1944,7 @@ How to read it:
 | Four cloud GB10 VMs | OFF | 21.9 | 20.7 | 104.2 | all (OFF) | 2.38 |
 | Four cloud GB10 VMs | ON | 51.6 | 29.0 | 104.2 | 24/24 | 2.42 |
 
-What stands out:
+The main results:
 
 - **One chat runs at the same speed on every Spark we tried.** On six of our
   Sparks, one at a time, drafting OFF gave 27.6 to 27.8 tok/s on prose and
@@ -2170,7 +2257,7 @@ parsing and receipt arithmetic, and supports no Spark speed claim.
 
 Leave time for the model download before you benchmark rented VMs. The
 verified FP4-Local snapshot is about **102 GB**. On 2026-10-24, rented GB10 VMs
-downloaded from Hugging Face at **8–22 MB/s each**: about 80 minutes for one VM
+downloaded from Hugging Face at **8 to 22 MB/s each**: about 80 minutes for one VM
 at the top of that range, and over three hours at the bottom. For the cloud
 cards we downloaded and verified the snapshot on one VM, copied it to the other
 over the 200G link between them, and checked its SHA-256 again there. Without
@@ -2424,7 +2511,7 @@ measurements and memory figures from `night-2026-10-11.json` and
 
 With the October 12 product defaults, Vade started answering an uncached 8k
 prompt in about **7.8 seconds** and wrote a single answer at about
-**23.2–23.4 tokens per second**. The final RigMark run on build `9bcb8170`
+**23.2 to 23.4 tokens per second**. The final RigMark run on build `9bcb8170`
 passed every line of its report with thinking off and with thinking on/low, on
 two DGX Sparks using the official Qwen3.8-Flash-Next FP8 checkpoint. Passing a
 report line means the requests finished and passed RigMark's checks; it does

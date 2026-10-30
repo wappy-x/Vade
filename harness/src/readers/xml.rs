@@ -78,6 +78,19 @@ impl<'a> Tag<'a> {
         }
     }
 
+    /// The attribute `name` as a part path, as [`Tag::path`], for a part the
+    /// reader can do without: a longer path reads as absent, and
+    /// [`Scanner::finish`] reports the attribute cap.
+    pub(super) fn optional_path(&self, name: &str) -> Result<Option<Cow<'a, str>>, String> {
+        match self.attr_prefix(name, MAX_PATH)? {
+            Some((_, false)) => {
+                self.long.set(true);
+                Ok(None)
+            }
+            value => Ok(value.map(|(v, _)| v)),
+        }
+    }
+
     /// The alt text of an image: the first of the attributes `names` that is
     /// not blank. Text after [`MAX_ALT_CHARS`] chars is left out and the
     /// alt text ends in `...`; only its start is decoded.

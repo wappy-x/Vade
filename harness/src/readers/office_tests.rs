@@ -131,6 +131,26 @@ pub(super) fn deflate_fixed(data: &[u8]) -> Vec<u8> {
     bits.out
 }
 
+/// Fixed-Huffman data for `prefix`, `b'a'`, `n` copies of 258 bytes at
+/// distance 1 (all `a`), then `suffix`: a large valid part from a few bytes.
+pub(super) fn deflate_run(prefix: &[u8], n: usize, suffix: &[u8]) -> Vec<u8> {
+    let mut bits = Bits { out: Vec::new(), bit: 0 };
+    bits.put(1, 1);
+    bits.put(1, 2);
+    for &b in prefix.iter().chain(b"a") {
+        bits.literal(u32::from(b));
+    }
+    for _ in 0..n {
+        bits.literal(285);
+        bits.code(0, 5);
+    }
+    for &b in suffix {
+        bits.literal(u32::from(b));
+    }
+    bits.literal(256);
+    bits.out
+}
+
 /// Fixed-Huffman data for `b'a'` then `n` copies of 258 bytes at distance 1:
 /// a few bytes per 258 bytes of output.
 pub(super) fn deflate_bomb(n: usize) -> Vec<u8> {
@@ -271,7 +291,7 @@ pub(super) fn docx(body: &str) -> Vec<u8> {
 }
 
 /// [`docx`] with some parts replaced: (part name, data).
-fn docx_with(body: &str, parts: &[(&str, &str)]) -> Vec<u8> {
+pub(super) fn docx_with(body: &str, parts: &[(&str, &str)]) -> Vec<u8> {
     let document = format!(r#"<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="w" xmlns:r="r"><w:body>{body}<w:sectPr/></w:body></w:document>"#);
     let defaults = [
         ("[Content_Types].xml", "<Types/>"),
@@ -554,8 +574,10 @@ fn docx_damaged_encrypted_and_legacy_files_give_one_line() {
     for n in (0..file.len()).step_by(7) {
         let _ = read(&file[..n], "a.docx", &Caps::default());
     }
-    // A name that is not .docx keeps the ZIP archive line.
-    assert_eq!(read(&file, "a.zip", &Caps::default()).unwrap_err().to_string(), "Vade does not read ZIP archive files; no text was read");
+    // A name that is not .docx reads the file as a ZIP archive.
+    let (format, doc) = read(&file, "a.zip", &Caps::default()).unwrap();
+    assert_eq!((format, doc.pages), (Format::Archive("ZIP archive"), 6));
+    assert!(doc.markdown.contains("| 3 | word/document.xml | 153 | file |\n"), "{}", doc.markdown);
 }
 
 const BOOK_RELS: &str = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#;
@@ -587,7 +609,7 @@ pub(super) fn xlsx(sheet1: &str, sheet2: &str) -> Vec<u8> {
     ])
 }
 
-const SALES: &str = r#"<row r="1"><c r="A1" t="s"><v>0</v></c><c r="C1" t="s"><v>1</v></c><c r="D1" t="s"><v>3</v></c></row>
+pub(super) const SALES: &str = r#"<row r="1"><c r="A1" t="s"><v>0</v></c><c r="C1" t="s"><v>1</v></c><c r="D1" t="s"><v>3</v></c></row>
 <row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2" t="b"><v>1</v></c><c r="C2"><v>1.1000000000000001</v></c><c r="D2" s="1"><v>44927</v></c></row>
 <row r="3"><c r="A3" s="1"/></row>
 <row r="5"><c r="A5" t="inlineStr"><is>
@@ -687,7 +709,7 @@ fn shape(placeholder: &str, paragraphs: &str) -> String {
     format!("<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"S\"/><p:cNvSpPr/><p:nvPr>{placeholder}</p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/>{paragraphs}</p:txBody></p:sp>")
 }
 
-fn ap(level: u32, text: &str) -> String {
+pub(super) fn ap(level: u32, text: &str) -> String {
     format!("<a:p><a:pPr lvl=\"{level}\"/><a:r><a:rPr lang=\"en-US\"/><a:t>{text}</a:t></a:r></a:p>")
 }
 
@@ -937,10 +959,11 @@ fn odf_encrypted_and_damaged_files_give_one_line() {
 
 #[test]
 fn parts_that_stop_at_the_work_cap_are_not_damaged() {
-    // A shared string table larger than the work cap stops with the warning.
+    // A shared string table larger than half the work cap stops there with
+    // a warning; the sheets keep their room, and a later string is empty.
     let strings: String = (0..5000).map(|i| format!("<si><t>string number {i}</t></si>")).collect();
     let shared = format!("<sst>{strings}</sst>");
-    let mut file = xlsx("<row><c r=\"A1\" t=\"s\"><v>4000</v></c></row>", "");
+    let mut file = xlsx("<row><c r=\"A1\" t=\"s\"><v>10</v></c><c r=\"B1\" t=\"s\"><v>4000</v></c><c r=\"C1\"><v>7</v></c></row>", "");
     file = {
         let mut entries = Vec::new();
         let mut zip = Zip::open(&file, Format::Xlsx).unwrap();
@@ -952,7 +975,8 @@ fn parts_that_stop_at_the_work_cap_are_not_damaged() {
     };
     let caps = Caps { max_chars: 1000, ..Caps::default() };
     let (_, doc) = read(&file, "a.xlsx", &caps).unwrap();
-    assert!(doc.warnings.contains(&format!("text after {MIN_WORK_BYTES} bytes of conversion work (memory cap)")), "{:?}", doc.warnings);
+    assert!(doc.markdown.starts_with("<!-- sheet 1 of 2 -->\n## Sheet Sales & costs\n\n| string number 10 |  | 7 |\n"), "{}", doc.markdown);
+    assert_eq!(doc.warnings, ["shared strings after 665 (memory cap; later ones show as empty cells)"]);
 }
 
 #[test]

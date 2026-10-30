@@ -33,7 +33,7 @@ pub struct CodingTools<'a, F> {
     failed_command: Option<(Vec<String>, String)>,
     /// One preflight-only correction, still requiring explicit retry and preview.
     rejected_add: Option<(String, crate::edit::PreparedPatch)>,
-    pub(crate) line_read: Option<crate::line_edit::Read>,
+    pub(crate) line_read: crate::line_edit::Reads,
 }
 /// The user's build/test command, run by the harness after rounds that
 /// changed files or before unverified completion (see `agent::ToolExecutor`).
@@ -188,7 +188,7 @@ where
             check: None,
             failed_command: None,
             rejected_add: None,
-            line_read: None,
+            line_read: Default::default(),
         }
     }
     /// Project notes are off for library, card and benchmark callers.
@@ -211,7 +211,6 @@ where
         self
     }
     fn mark_changed(&mut self) {
-        self.line_read = None;
         self.failed_command = None;
         if let Some(check) = self.check.as_mut() {
             check.pending = true;
@@ -688,7 +687,7 @@ where
                         _ => return Err(ToolError::InvalidArguments("use ranges array or start_line+end_line, never both")),
                     };
                     self.workspace.read_line_ranges_capture(path, &ranges, cap, cancel).and_then(|(output, text)| {
-                        self.line_read = Some(crate::line_edit::Read::capture(path, text, &output)?);
+                        self.line_read.record(crate::line_edit::Read::capture(path, text, &output)?);
                         Ok(output)
                     })
                 };
@@ -762,7 +761,9 @@ where
                             Err(error) => format!("Read refused: {error}"),
                         })
                     },
-                    |p: &str| self.workspace.list(p),
+                    // Like a refused read, a refused list names its reason;
+                    // these are fixed workspace messages without local paths.
+                    |p: &str| Ok(self.workspace.list(p).unwrap_or_else(|error| vec![format!("List refused: {error}")])),
                 )
                 .execute(
                     ToolInvocation {
@@ -800,7 +801,7 @@ where
                     _ => return self.patch_argument_correction(invocation.max_output_bytes),
                 };
                 let prepared = if anchored {
-                    let result = self.line_read.as_ref().ok_or_else(|| std::io::Error::other("re-read with workspace_read_lines in this activation"))
+                    let result = invocation.arguments.get("path").and_then(Value::as_str).and_then(|path| self.line_read.get(path)).ok_or_else(|| std::io::Error::other("re-read with workspace_read_lines in this activation"))
                         .and_then(|read| read.prepare(self.workspace, invocation.arguments));
                     match result { Ok(prepared) => prepared, Err(e) => {
                         let prefix = format!("Line edit refused: {e}\n");
@@ -821,10 +822,10 @@ where
                     match crate::edit::prepare(self.workspace, patch) {
                     Ok(p) => p,
                     Err(e) => {
-                        self.rejected_add = if e.to_string().contains("already exists") || e.to_string().contains("mixes '+'") {
+                        self.rejected_add = if e.to_string().contains("already exists") {
                             crate::edit::prepare_add_retry(self.workspace, patch).ok()
                         } else { None };
-                        let correction = self.rejected_add.as_ref().map_or(String::new(), |(header, _)| format!("\nRetained a single-file Add correction. To explicitly replace the entire existing file or normalize mixed prefixes (strip one '+' from prefixed lines, keep bare lines), call apply_patch with {{\"patch\":{},\"retry\":true}}. No content re-emit needed. Normal preview/approval and unchanged-file guards still apply; this retry is single-use in this activation.", json::quote(header)));
+                        let correction = self.rejected_add.as_ref().map_or(String::new(), |(header, _)| format!("\nRetained a single-file Add correction. To explicitly replace the entire existing file, call apply_patch with {{\"patch\":{},\"retry\":true}}. No content re-emit needed. Normal preview/approval and unchanged-file guards still apply; this retry is single-use in this activation.", json::quote(header)));
                         let guidance = format!("{}{}", crate::patch_feedback::refusal_guidance(patch, &e.to_string()), crate::line_edit::patch_hint(self.workspace, patch, &e.to_string()));
                         return bounded(format!("Patch refused: {e}{guidance}{correction}"), invocation.max_output_bytes);
                     }
@@ -1066,11 +1067,12 @@ where
                         self.remember_approval(scope, suggested, cancel);
                     }
                 }
+                // Rendering never grows the capture, so it gets the whole budget
+                // less room for the status lines and notes.
                 let cap = invocation
                     .max_output_bytes
-                    .saturating_sub(512)
-                    .min(64 * 1024)
-                    / 3;
+                    .saturating_sub(1024)
+                    .min(63 * 1024);
                 if cap == 0 {
                     return Err(ToolError::OutputLimit);
                 }
@@ -1136,7 +1138,7 @@ where
                     },
                     cancel,
                 );
-                let result = result.replace(&self.workspace.root().display().to_string(), ".");
+                let result = relative_root(&result, &self.workspace.root().display().to_string());
                 bounded(result, invocation.max_output_bytes)
             }
             _ => Err(ToolError::UnknownTool),
@@ -1202,6 +1204,23 @@ fn command_exit(raw: &str) -> Option<i32> {
         .strip_suffix("))")?
         .parse().ok()
 }
+/// Show the workspace root as "." only where it is a whole path, so a sibling
+/// such as `<root>_old/file` or `/private<root>` keeps its real name.
+fn relative_root(text: &str, root: &str) -> String {
+    let name = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '~' | '+' | '@' | '/');
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(root).filter(|_| !root.is_empty()) {
+        let (before, after) = (&rest[..at], &rest[at + root.len()..]);
+        let whole = !before.ends_with(name) && (after.is_empty() || after.starts_with('/') || !after.starts_with(name));
+        out.push_str(before);
+        out.push_str(if whole { "." } else { root });
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
 fn bounded(text: String, cap: usize) -> Result<String, ToolError> {
     if text.len() > cap {
         Err(ToolError::OutputLimit)
