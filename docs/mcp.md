@@ -21,11 +21,38 @@ workspace tools.
 
 ## Add a server
 
+A server is a program on the computer where chat runs. Vade starts it and
+talks to it over standard input and output.
+
+### A first server with no extra install
+
+The repository has a small example server,
+[`examples/mcp_word_count.rs`](../examples/mcp_word_count.rs). It has one tool,
+`word_count`, and needs no token, no network and no runtime besides the Rust
+that `scripts/install.sh` installs. From the checkout root:
+
+```sh
+cargo build --release --offline --manifest-path tools/Cargo.toml --example mcp-word-count
+vade mcp add words -- "$PWD/tools/target/release/examples/mcp-word-count"
+vade mcp test words
+```
+
+`vade mcp test words` shows `Tools (1):` and `words__word_count`. In chat, ask
+for example "Use the word_count tool on: one two three". Vade asks before the
+call; answer `y`.
+
+### A server you install
+
+Most servers need their own program, and often a token. For example, the
+GitHub server needs the `github-mcp-server` program and a GitHub token:
+
 ```sh
 vade mcp add github --env GITHUB_PERSONAL_ACCESS_TOKEN=YOUR_TOKEN -- github-mcp-server stdio
 vade mcp test github
 vade tools
 ```
+
+### Options
 
 `vade mcp add NAME [options] -- COMMAND [ARG...]` writes the server to your
 user list. Everything after `--` is the command and its arguments. Put
@@ -150,8 +177,10 @@ MCP calls follow `--approval`:
 | `auto` | Vade shows the call and runs it. |
 | `never` | Vade denies every MCP call. |
 
-When a call does not run, Vade tells the model why: you declined it, no one
-could answer the question, or the setting is `never`. The server is not asked.
+When a call does not run, Vade tells the model why: you declined it, Vade
+could not show the question (for example, the arguments hold characters that
+the terminal would hide), no one could answer the question, or the setting is
+`never`. The server is not asked.
 A run without a terminal (for example `--prompt`, or chat with input from a
 pipe) cannot answer a question. Under `ask`, such a run declines each MCP call
 and the model gets an `approval_required` result. Use `--yes` to let such a

@@ -5,7 +5,9 @@ Changes that are merged but not yet released are under Unreleased.
 
 ## Unreleased
 
-- When an MCP call does not run, the model now learns why: you declined it, no one could answer in a run without a terminal, or approvals are `never`. It no longer blames the tool server.
+- When an MCP call does not run, the model now learns why: you declined it, Vade could not show the question, no one could answer in a run without a terminal, or approvals are `never`. It no longer blames the tool server.
+- Chat with input from a pipe treats `/exit` before the provider starts your message like the end of input: the message still runs, and Vade says so on stderr. After the message starts, and during other work such as `/compact`, `/exit` cancels it, as before. Inside `/paste`, `/exit` is text. A sent line of only `y` or `n` answers a pending approval; in the full-screen editor, the key must be typed, not pasted or recalled. `vade mcp test` prints `none` for an empty resource or prompt list.
+- `docs/mcp.md` starts with an example MCP server that needs no token and no extra install ([`examples/mcp_word_count.rs`](examples/mcp_word_count.rs)). `scripts/install.sh` writes the GPU kernel compiler output to a log file and shows its end only when the build fails.
 - Native chat supports [host hooks](harness/docs/hooks.md), and chat supports [user slash commands](harness/docs/slash-commands.md) and `/clear`.
 - GitHub workflows now run only by hand; tests run locally before every merge, as [Local CI](docs/ci.md) describes.
 - Chat keeps private project notes across sessions; `VADE_MEMORY=0` turns memory off.

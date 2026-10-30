@@ -15,6 +15,8 @@ use crate::native_children;
 
 /// A y/n typed within this time of the approval appearing is draft text.
 pub(crate) const APPROVAL_SETTLE: Duration = Duration::from_millis(400);
+/// Shown when a piped /exit lets the current message finish first.
+pub(crate) const EXIT_AFTER_MESSAGE: &str = "/exit: the current message finishes first, then chat ends.";
 
 /// Separate a failed configured check from generic runtime/argument failures.
 pub(crate) const CHECK_FAILING_EXIT: u8 = 3;
@@ -203,7 +205,14 @@ impl App {
                                 self.menu_key(key, &mut menu)?;
                             }
                         }
-                        Ok(Input::Line(line)) => self.line_input(line)?,
+                        Ok(Input::Line(line)) if self.piped_exit_ends_input(&line) => {
+                            input_done = true;
+                            if self.pending.is_some() {
+                                self.run_notice(EXIT_AFTER_MESSAGE)?;
+                            }
+                            self.end_input()?;
+                        }
+                        Ok(Input::Line(line)) => self.sent_line(line)?,
                         Ok(Input::TooLong) => {
                             self.failed = true;
                             self.notice("Input is over 64 KiB, so it was discarded and not sent.")?;
@@ -214,18 +223,7 @@ impl App {
                         }
                         Ok(Input::Eof) | Err(mpsc::TryRecvError::Disconnected) => {
                             input_done = true;
-                            self.approval_input_closed = true;
-                            if let Some(approvals) = &self.approvals {
-                                approvals.set_interactive(false);
-                            }
-                            if self.approval_reply.is_some() {
-                                self.cancel()?;
-                            }
-                            if self.multiline.is_some() {
-                                self.notice("Unfinished multiline input discarded at EOF.")?;
-                                self.multiline = None;
-                                self.failed = true;
-                            }
+                            self.end_input()?;
                         }
                         Ok(Input::Error) => {
                             return Err(io::Error::other("cannot read terminal input"));
@@ -451,6 +449,38 @@ impl App {
         }
         Ok(!self.failed)
     }
+    /// Without a terminal, an /exit before the provider starts the user's
+    /// message ends the input as EOF does: the message still runs, and chat
+    /// exits when it is done. Once the provider starts the message, and
+    /// during other work such as /compact, /exit cancels, as before. Inside
+    /// /paste, /exit is text.
+    pub(crate) fn piped_exit_ends_input(&self, line: &str) -> bool {
+        self.quiet
+            && self.multiline.is_none()
+            && matches!(line.trim(), "/exit" | "/quit")
+            && self
+                .pending
+                .as_ref()
+                .is_none_or(|pending| !pending.user.is_empty() && !pending.rx.underway())
+    }
+    /// The input ended (EOF, or /exit without a terminal): no one can answer
+    /// an approval now, and unfinished multiline input is dropped.
+    fn end_input(&mut self) -> io::Result<()> {
+        self.approval_input_closed = true;
+        if let Some(approvals) = &self.approvals {
+            approvals.set_interactive(false);
+        }
+        if self.approval_reply.is_some() {
+            self.cancel()?;
+        }
+        if self.multiline.is_some() {
+            self.notice("Unfinished multiline input discarded at EOF.")?;
+            self.multiline = None;
+            self.failed = true;
+        }
+        Ok(())
+    }
+
     /// Footer facts at rest: model · folder · approval · ctx use · session.
     /// Only reported numbers appear; an unknown context use is omitted.
     pub(crate) fn idle_status(&self) -> String {

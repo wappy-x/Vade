@@ -241,6 +241,40 @@ fn line_controls_cancel_while_steering_ack_is_delayed() {
     );
 }
 
+/// A piped /exit after the delegated turn sent reply text cancels the turn
+/// (10-30 train review).
+#[test]
+fn piped_exit_cancels_a_started_delegated_turn() {
+    let mut command = base_command(true);
+    let args: Vec<_> = command.get_args().collect();
+    let position = args.iter().position(|arg| *arg == "--workspace").unwrap();
+    let marker = Path::new(args[position + 1]).join("exit-ready");
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"exit-wait\n").unwrap();
+    let started = std::time::Instant::now();
+    while !marker.exists() {
+        if started.elapsed() > std::time::Duration::from_secs(5) {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("fixture never sent its reply text");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    input.write_all(b"/exit\n").unwrap();
+    drop(input);
+    let output = finish(child);
+    let log = stderr(&output);
+    assert!(stdout(&output).is_empty(), "{}", stdout(&output));
+    assert!(log.contains("interruption requested"), "{log}");
+    assert!(log.contains("acknowledged interruption"), "{log}");
+}
+
 #[test]
 fn hermes_cli_exact_input_completed_projection_and_denial() {
     for (input, expected) in [

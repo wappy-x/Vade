@@ -13,6 +13,7 @@ package install: the scripts use `sh`, `curl` and the repository's Rust tools.
 | [`curl-openai.sh`](curl-openai.sh) | The OpenAI-compatible API with plain curl: models, one answer, one streamed answer | No |
 | [`curl-anthropic.sh`](curl-anthropic.sh) | The Anthropic Messages API with plain curl: token count, one answer, one streamed answer | No |
 | [`openai_client.sh`](openai_client.sh), [`openai_client.rs`](openai_client.rs) | Shell and std-only Rust clients: streaming, tool calling, and prompt caching across turns | No |
+| [`mcp_word_count.rs`](mcp_word_count.rs) | A small MCP tool server for a first `vade mcp add` test; see [MCP tools](../docs/mcp.md#a-first-server-with-no-extra-install) | Yes |
 | [`claude-code.sh`](claude-code.sh) | Claude Code pointed at Vade's Messages API | No |
 | [`codex.sh`](codex.sh) | The Codex CLI pointed at Vade's Responses API, in a private Codex home | No |
 | [`bench.sh`](bench.sh) | Reproduce the published one-Spark `vade bench` number | `--self-test` only |

@@ -365,6 +365,37 @@ fn cli_reuses_native_and_direct_clients_across_user_prompts() {
     }
 }
 
+/// Inside /paste, a piped /exit is message text, not an exit (10-30 train
+/// review).
+#[test]
+fn piped_exit_inside_paste_is_text() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut reader = BufReader::new(socket);
+        let body = vade_harness::json::parse_bytes(&request(&mut reader)).unwrap();
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(messages.last().unwrap().get("content").unwrap().as_str(), Some("keep\n/exit"));
+        let response = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}";
+        write!(reader.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{response}", response.len()).unwrap();
+    });
+    let mut child = home::harness()
+        .args(["direct", "--state-in-project", "--endpoint", &endpoint, "--model", "mock", "--plain"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"/paste\nkeep\n/exit\n/end\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    let (stdout, stderr) = (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(output.status.success(), "{stdout}{stderr}");
+    assert!(stdout.ends_with("\nanswer\n"), "{stdout}{stderr}");
+    server.join().unwrap();
+}
+
 #[test]
 fn direct_budget_requires_explicit_new_before_prefix_rewrite() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

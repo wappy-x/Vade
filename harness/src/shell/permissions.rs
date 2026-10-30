@@ -242,6 +242,8 @@ struct State {
     user: List,
     /// The reach of each pending yes, by the tool thread that asked.
     choices: Vec<(ThreadId, Scope)>,
+    /// Tool threads whose approval request the terminal could not show.
+    unshown: Vec<ThreadId>,
 }
 
 impl Approvals {
@@ -262,6 +264,7 @@ impl Approvals {
                 project: List { rules: read(&project)?, path: project },
                 user: List { rules: read(&user)?, path: user },
                 choices: Vec::new(),
+                unshown: Vec::new(),
             }),
         })
     }
@@ -310,6 +313,7 @@ impl Approvals {
         let mut state = self.state();
         state.session.clear();
         state.choices.clear();
+        state.unshown.clear();
         let State { project, user, .. } = &mut *state;
         let mut errors = Vec::new();
         for list in [project, user] {
@@ -336,6 +340,22 @@ impl Approvals {
     /// The terminal takes back a yes that did not reach its tool.
     pub fn withdraw_choice(&self, asker: ThreadId) {
         self.state().choices.retain(|(thread, _)| *thread != asker);
+    }
+    /// The terminal could not show this tool's approval request, so its no
+    /// is not the user's answer.
+    pub fn not_shown_for(&self, asker: ThreadId) {
+        let mut state = self.state();
+        if !state.unshown.contains(&asker) {
+            state.unshown.push(asker);
+        }
+    }
+    /// The executor reads, and clears, whether its request was not shown.
+    pub fn take_not_shown(&self) -> bool {
+        let me = std::thread::current().id();
+        let mut state = self.state();
+        let before = state.unshown.len();
+        state.unshown.retain(|thread| *thread != me);
+        state.unshown.len() != before
     }
     /// The executor reads, and clears, the reach of the answer it received.
     pub fn take_choice(&self) -> Scope {

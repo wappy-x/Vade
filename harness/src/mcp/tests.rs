@@ -173,6 +173,25 @@ fn router_sends_only_prefixed_names_to_mcp() {
         assert!(text.contains(&format!(r#""error":"{error}""#)) && text.contains(cause) && !text.contains("tool server"), "{text}");
         assert_eq!(denied.inner.0, 0);
     }
+    // A request the terminal could not show is not the user's no. A record
+    // left on this thread before the request does not change a real no.
+    let approvals = crate::shell::permissions::Approvals::new(None, None, true).unwrap();
+    for shown in [false, true] {
+        let me = std::thread::current().id();
+        approvals.not_shown_for(me);
+        let mut denied = McpTools::new(Native(0), Some(&hub), ApprovalPolicy::Ask, |_: Preview<'_>, _: &AtomicBool| {
+            if !shown {
+                approvals.not_shown_for(me);
+            }
+            false
+        })
+        .with_approvals(&approvals);
+        let text = denied.execute(ToolInvocation { call: &remote, arguments: &arguments, max_output_bytes: 4096 }, &cancel).unwrap();
+        let error = if shown { "declined_by_user" } else { "approval_not_shown" };
+        assert!(text.contains(&format!(r#""error":"{error}""#)), "{text}");
+        assert_eq!(denied.inner.0, 0);
+        assert!(!approvals.take_not_shown());
+    }
     // Without the session's approval state the decline still names the user.
     let mut denied = McpTools::new(Native(0), Some(&hub), ApprovalPolicy::Ask, |_: Preview<'_>, _: &AtomicBool| false);
     assert!(denied.execute(ToolInvocation { call: &remote, arguments: &arguments, max_output_bytes: 4096 }, &cancel).unwrap().contains("declined_by_user"));

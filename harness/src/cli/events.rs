@@ -264,6 +264,9 @@ impl App {
                                 }
                             }
                             Err(error) => {
+                                if let Some(approvals) = &self.approvals {
+                                    approvals.not_shown_for(reply.asker());
+                                }
                                 let _ = reply.send(false);
                                 self.run_notice(&error.to_string())?;
                             }
@@ -1086,6 +1089,9 @@ mod tests {
             assert_eq!(reply.try_recv(), Ok(true));
         }
         // Genuine preview errors send false and never install an answer lane.
+        // The asking tool learns that no one saw its request (10-30 review).
+        let approvals = Arc::new(vade_harness::shell::permissions::Approvals::new(None, None, true).unwrap());
+        app.approvals = Some(Arc::clone(&approvals));
         for detail in [
             "+hidden\u{202e}".into(),
             "+x\n".repeat(256 * 1024),
@@ -1096,6 +1102,8 @@ mod tests {
             assert_eq!(reply.try_recv(), Ok(false));
             assert!(app.approval_reply.is_none());
             assert!(app.terminal.approval_ready().is_err());
+            assert!(approvals.take_not_shown());
+            assert!(!approvals.take_not_shown());
         }
     }
 }

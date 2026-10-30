@@ -185,6 +185,100 @@ fn exit_during_generation_waits_for_server_cancel() {
     assert_eq!(first.read(&mut [0]).unwrap(), 0);
     assert!(mock.requests.try_recv().is_err());
 }
+fn piped_cli(mode: &str, endpoint: &str, root: &std::path::Path) -> cli::Cli {
+    cli::Cli::start(home::harness().args([mode, "--state-in-project", "--endpoint", endpoint,
+        "--model", "mock", "--plain", "--workspace", root.to_str().unwrap()]))
+}
+/// Step 8 of the 10-29 fresh install: piped `message` then `/exit` dropped
+/// the message. An /exit before the provider answers lets the message finish.
+/// The mock holds its answer until the CLI says it read /exit.
+#[test]
+fn piped_exit_before_the_answer_lets_the_message_finish() {
+    for mode in ["direct", "agent"] {
+        let mock = Mock::new();
+        let root = std::env::temp_dir().join(format!("vade-piped-early-exit-{}-{mode}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let mut cli = piped_cli(mode, &mock.endpoint, &root);
+        cli.send("hello there\n/exit\nnot read\n");
+        let (mut first, body) = mock.request();
+        assert_eq!(history(&body).last(), Some(&("user", "hello there")), "{mode}");
+        cli.until(true, "/exit: the current message finishes first");
+        finish(&mut first); drop(first);
+        let output = cli.finish();
+        let (stdout, stderr) = (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{mode}: {stdout}{stderr}");
+        assert_eq!(stdout, "FINAL\n", "{mode}: {stderr}");
+        assert!(!stderr.contains("not sent"), "{mode}: {stderr}");
+        assert!(mock.cancels.try_recv().is_err(), "{mode}");
+        assert!(mock.requests.try_recv().is_err(), "{mode}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+/// A piped /exit during a model summary from /compact cancels it, and the
+/// journal keeps the history it had (10-30 train review).
+#[test]
+fn piped_exit_cancels_a_model_compaction() {
+    let mock = Mock::new();
+    let root = std::env::temp_dir().join(format!("vade-piped-compact-exit-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let mut cli = piped_cli("agent", &mock.endpoint, &root);
+    // A long first turn gives the summary something to shrink.
+    let long = format!("first task: {}", "old detail ".repeat(1500));
+    for task in [long.as_str(), "second task", "third task"] {
+        cli.send(&format!("{task}\n"));
+        let (mut socket, _) = mock.request();
+        finish(&mut socket); drop(socket);
+        cli.until(false, "FINAL");
+    }
+    let journals = || {
+        let mut files: Vec<_> = std::fs::read_dir(root.join(".vade/sessions")).unwrap()
+            .map(|entry| entry.unwrap().path()).collect();
+        files.sort();
+        files.into_iter().map(|path| (path.clone(), std::fs::read(path).unwrap())).collect::<Vec<_>>()
+    };
+    let before = journals();
+    cli.send("/compact\n");
+    let Ok((mut summary, body)) = mock.requests.recv_timeout(Duration::from_secs(5)) else {
+        let output = cli.finish();
+        panic!("no summary request: {}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    };
+    stream(&mut summary, "SUMMARY_PART");
+    cli.send("/exit\n");
+    if body.get("cancel").is_some() { mock.cancelled(&body); }
+    let output = cli.finish();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("/exit: the current message finishes first"), "{stderr}");
+    let closed = summary.read(&mut [0]);
+    assert!(matches!(&closed, Ok(0)) || closed.as_ref().is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionReset), "{closed:?}");
+    assert!(mock.requests.try_recv().is_err());
+    assert_eq!(journals(), before);
+    std::fs::remove_dir_all(root).unwrap();
+}
+/// Without a terminal, a native run shows no reply text until it ends. An
+/// /exit after a tool step still cancels the run (10-30 train review).
+#[test]
+fn piped_exit_cancels_a_native_run_after_a_tool_step() {
+    let mock = Mock::new();
+    let root = std::env::temp_dir().join(format!("vade-piped-exit-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let mut cli = piped_cli("agent", &mock.endpoint, &root);
+    cli.send("original\n");
+    let (mut first, _) = mock.request();
+    reply(&mut first, r#"{"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"id":"read-1","type":"function","function":{"name":"workspace_read","arguments":"{\"path\":\"missing.txt\"}"}}]}}]}"#);
+    drop(first);
+    // The tool step runs before this request, so the run is underway here.
+    let (mut second, body) = mock.request();
+    stream(&mut second, "NATIVE_PART");
+    cli.send("/exit\n"); mock.cancelled(&body);
+    let output = cli.finish();
+    let (stdout, stderr) = (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(!stdout.contains("FINAL"), "{stdout}{stderr}");
+    // The client closed the stream; a close with unread bytes is a reset.
+    let closed = second.read(&mut [0]);
+    assert!(matches!(&closed, Ok(0)) || closed.as_ref().is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionReset), "{closed:?}");
+    assert!(mock.requests.try_recv().is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}
 #[test]
 fn queue_toggle_keeps_the_current_answer_running() {
     let mock = Mock::new(); let mut cli = mock.cli(); cli.send("/queue on\noriginal\n");

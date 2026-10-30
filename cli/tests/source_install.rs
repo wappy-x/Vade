@@ -13,7 +13,7 @@ impl Fixture {
         }
         fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/install.sh"), root.join("scripts/install.sh")).unwrap();
         let fixture = Self { root: fs::canonicalize(root).unwrap() };
-        for tool in ["sh", "dirname", "mktemp", "rm", "mkdir", "cp", "chmod"] {
+        for tool in ["sh", "dirname", "mktemp", "rm", "mkdir", "cp", "chmod", "tail"] {
             let path = ["/usr/bin", "/bin"].into_iter().map(|dir| Path::new(dir).join(tool))
                 .find(|path| path.is_file()).unwrap();
             std::os::unix::fs::symlink(path, fixture.root.join("bin").join(tool)).unwrap();
@@ -34,7 +34,8 @@ fi
         fixture.tool("cargo", r#"
 printf 'cargo %s\n' "$*" >> "$INSTALL_CALLS"
 if [ "$2" = kernels ]; then
-    [ "${INSTALL_FAIL_KERNEL-false}" = false ] || exit 42
+    printf 'warning: unused variable in a kernel\n' >&2
+    [ "${INSTALL_FAIL_KERNEL-false}" = false ] || { echo 'error: fixture kernel failure' >&2; exit 42; }
 else
     [ "$CARGO_TARGET_DIR" = "$INSTALL_ROOT/cli/target" ] || exit 90
 fi
@@ -79,6 +80,20 @@ fn cached_source_install_uses_pins_and_preflights_before_kernel_build() {
     assert!(calls.ends_with("vade install\n"), "{calls}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains(&format!("\"{}/cli/target/release/vade\" launch", f.root.display())), "{stdout}");
+    // Kernel compiler warnings go to the log, not to the screen (fresh install step 4).
+    let log = f.root.join("engine/target/install-kernels.log");
+    assert!(stdout.contains(&format!("Log: {}", log.display())), "{stdout}");
+    assert!(fs::read_to_string(&log).unwrap().contains("warning: unused variable"));
+    assert!(!stdout.contains("warning:") && !String::from_utf8_lossy(&output.stderr).contains("warning:"), "{stdout}");
+}
+
+#[test]
+fn a_failed_kernel_build_shows_the_end_of_its_log() {
+    let f = Fixture::new();
+    let output = f.run(&[("INSTALL_FAIL_KERNEL", "true")]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("error: fixture kernel failure") && stderr.contains("install-kernels.log"), "{stderr}");
 }
 
 #[test]

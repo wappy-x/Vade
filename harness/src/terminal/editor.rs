@@ -246,7 +246,21 @@ impl Editor {
     }
     /// The final-line approval shortcut requires freshly typed command bytes.
     /// Pasted/recalled multiline text cannot impersonate that shortcut.
+    /// A typed one-line draft that is only an answer key (y, n, s, p) answers
+    /// as its command; a pasted, recalled, or multiline key stays a draft.
     pub fn approval_command(&self) -> Option<(&str, usize)> {
+        if !self.text.contains('\n') && self.typed.iter().all(|typed| *typed) {
+            let command = match self.text.trim() {
+                "y" | "Y" | "yes" | "Yes" => Some("/approve"),
+                "n" | "N" | "no" | "No" => Some("/deny"),
+                "s" | "S" => Some("/approve session"),
+                "p" | "P" => Some("/approve project"),
+                _ => None,
+            };
+            if let Some(command) = command {
+                return Some((command, 0));
+            }
+        }
         let start = self.text.rfind('\n').map_or(0, |at| at + 1);
         let line = &self.text[start..];
         let command = line.trim();
@@ -542,6 +556,29 @@ mod approval_tests {
             let mut pasted = Editor::default();
             pasted.insert_paste(&format!("{command}\n"));
             assert_eq!(pasted.approval_command(), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn only_a_typed_one_line_key_answers_an_approval() {
+        for (key, command) in [("y", "/approve"), ("n", "/deny"), ("s", "/approve session"), ("p", "/approve project")] {
+            let mut typed = Editor::default();
+            typed.insert(key);
+            assert_eq!(typed.approval_command(), Some((command, 0)));
+            typed.remove_approval_command();
+            assert!(typed.is_empty());
+            let mut pasted = Editor::default();
+            pasted.insert_paste(key);
+            assert_eq!(pasted.approval_command(), None, "{key}");
+            let mut pasted_line = Editor::default();
+            pasted_line.insert_paste(&format!("{key}\n"));
+            assert_eq!(pasted_line.approval_command(), None, "{key}");
+            let mut recalled = Editor::default();
+            recalled.set(key.into());
+            assert_eq!(recalled.approval_command(), None, "{key}");
+            let mut second_line = Editor::default();
+            second_line.insert(&format!("note\n{key}"));
+            assert_eq!(second_line.approval_command(), None, "{key}");
         }
     }
 }

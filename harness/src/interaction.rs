@@ -136,6 +136,9 @@ struct Shared {
     render: Mutex<Render>,
     thinking: Mutex<ThinkingRender>,
     state: AtomicU8,
+    /// The provider reported a working phase or sent output for this run.
+    /// It stays set when the state moves on (for example, to a tool round).
+    underway: AtomicBool,
     notice: AtomicBool,
     closed: AtomicBool,
 }
@@ -156,6 +159,7 @@ pub fn lanes<F, R>() -> (Sender<F, R>, Inbox<F, R>) {
         render: Mutex::new(Render::default()),
         thinking: Mutex::new(ThinkingRender::default()),
         state: AtomicU8::new(State::Preparing as u8),
+        underway: AtomicBool::new(false),
         notice: AtomicBool::new(false),
         closed: AtomicBool::new(false),
     });
@@ -177,6 +181,9 @@ pub fn lanes<F, R>() -> (Sender<F, R>, Inbox<F, R>) {
 
 impl<F, R> Sender<F, R> {
     pub fn state(&self, state: State) {
+        if matches!(state, State::Thinking | State::Generating | State::ToolRunning | State::WaitingForApproval) {
+            self.shared.underway.store(true, Ordering::Release);
+        }
         if self.shared.state.swap(state as u8, Ordering::Relaxed) != state as u8 {
             self.shared.receiver.unpark();
         }
@@ -201,6 +208,7 @@ impl<F, R> Sender<F, R> {
             return false;
         };
         if !text.is_empty() {
+            self.shared.underway.store(true, Ordering::Release);
             render.first_text.get_or_insert_with(Instant::now);
             render.characters = render.characters.saturating_add(text.chars().count());
         }
@@ -222,6 +230,7 @@ impl<F, R> Sender<F, R> {
         if self.shared.closed.load(Ordering::Acquire) || text.is_empty() {
             return;
         }
+        self.shared.underway.store(true, Ordering::Release);
         let Ok(mut render) = self.shared.thinking.lock() else {
             return;
         };
@@ -282,6 +291,11 @@ impl<F, R> Sender<F, R> {
 impl<F, R> Inbox<F, R> {
     pub fn state(&self) -> State {
         State::decode(self.shared.state.load(Ordering::Relaxed))
+    }
+    /// The run has started at the provider: it reported a working phase or
+    /// sent output, even if the state has moved on since.
+    pub fn underway(&self) -> bool {
+        self.shared.underway.load(Ordering::Acquire)
     }
     /// Visible-text estimate only, never a claim about provider token counts.
     pub fn estimated_rate(&self) -> Option<f32> {
@@ -417,6 +431,22 @@ mod tests {
             worker.thread().unpark();
             worker.join().unwrap();
             assert_eq!(result, Ok(true), "lane {lane} failed to wake its receiver");
+        }
+    }
+    #[test]
+    fn underway_holds_after_the_run_moves_to_another_state() {
+        let (tx, rx) = lanes::<usize, usize>();
+        for state in [State::Counting, State::Connecting, State::Queued, State::Compacting] {
+            tx.state(state);
+            assert!(!rx.underway(), "{state:?}");
+        }
+        tx.state(State::ToolRunning);
+        tx.state(State::Connecting);
+        assert!(rx.underway());
+        for start in 0..2 {
+            let (tx, rx) = lanes::<usize, usize>();
+            if start == 0 { assert!(tx.render("text")); } else { tx.thinking_delta("thought"); }
+            assert!(rx.underway(), "start {start}");
         }
     }
     #[test]

@@ -658,8 +658,10 @@ fn interactive_tty_approval_previews_exact_diff_before_writing() {
         if cancel {
             terminal.write_all(b"/cancel\r").unwrap();
         } else {
+            // A sent line of only y answers like /approve (fresh install step 18).
+            let answer = if raw { "/approve" } else { "y" };
             terminal
-                .write_all(format!("/approve{eol}").as_bytes())
+                .write_all(format!("{answer}{eol}").as_bytes())
                 .unwrap();
         }
         let finished = until(&mut terminal, "Native run:");

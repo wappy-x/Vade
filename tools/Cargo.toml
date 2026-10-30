@@ -12,3 +12,8 @@ default-run = "vade-tools"
 [[example]]
 name = "openai-client"
 path = "../examples/openai_client.rs"
+
+[[example]]
+name = "mcp-word-count"
+path = "../examples/mcp_word_count.rs"
+test = true

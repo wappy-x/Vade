@@ -512,11 +512,17 @@ where
         let (server, tool) = name.split_once(SEPARATOR).unwrap_or((name, ""));
         // Bound the preview like the native tools do; the call itself gets every byte.
         let detail = format!("MCP server {server}, tool {tool}\nArguments: {}", truncate(arguments, 4096));
+        // Drop a record left by another tool's request on this thread.
+        if let Some(approvals) = self.approvals {
+            approvals.take_not_shown();
+        }
         if !(self.preview)(Preview { title: "MCP tool", detail: &detail, approval_required: self.policy == ApprovalPolicy::Ask }, cancel) {
             if cancel.load(Ordering::Relaxed) {
                 return Err(ToolError::Cancelled);
             }
-            return Ok(if self.approvals.is_some_and(|a| !a.interactive()) {
+            return Ok(if self.approvals.is_some_and(|a| a.take_not_shown()) {
+                failure("approval_not_shown", "MCP tool not run: Vade could not show its approval request, so no one approved it. The server was not asked. Do not retry it with the same arguments; tell the user that the request could not be shown.", invocation.max_output_bytes)
+            } else if self.approvals.is_some_and(|a| !a.interactive()) {
                 failure("approval_required", "MCP tool not run: it needs the user's approval, and no one can approve it in this non-interactive run. The server was not asked. Do not retry it; tell the user that this call needs approval. The person who runs Vade can allow MCP calls with --yes.", invocation.max_output_bytes)
             } else {
                 failure("declined_by_user", "MCP tool not run: the user declined this call. The server was not asked. Do not retry it unless the user asks.", invocation.max_output_bytes)

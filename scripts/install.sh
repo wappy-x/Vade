@@ -83,9 +83,15 @@ CARGO_TARGET_DIR="$root/cli/target" cargo +1.99.0 build --release --offline --lo
 vade="$root/cli/target/release/vade"
 "$vade" detect </dev/null ||
     fail 'preflight failed. Next: follow the diagnostic above, then rerun the Retry command below. For another model location, set VADE_MODELS to its checkpoint folder.'
-printf '%s\n' 'Install: preparing the GPU compiler cache (the first build may download Rust build-std files).'
-(cd engine && cargo +1.99.0 kernels) ||
-    fail 'GPU kernel bootstrap failed. Next: fix the compiler/download error above; if build-std files are missing, rerun online with CARGO_NET_OFFLINE=false.'
+# The kernel build prints many compiler warnings; they go to a log file, and
+# the end of that log is shown only when the build fails.
+kernel_log="$root/engine/target/install-kernels.log"
+mkdir -p "$root/engine/target" || fail "cannot create $root/engine/target. Next: make the checkout writable, then rerun this script."
+printf 'Install: building the GPU kernels (the first build may download Rust build-std files). Log: %s\n' "$kernel_log"
+if ! (cd engine && cargo +1.99.0 kernels) >"$kernel_log" 2>&1; then
+    tail -n 40 "$kernel_log" >&2
+    fail "GPU kernel bootstrap failed. Next: fix the compiler/download error above (full log: $kernel_log); if build-std files are missing, rerun online with CARGO_NET_OFFLINE=false."
+fi
 "$vade" install </dev/null ||
     fail "local install failed. Next: follow the diagnostic above, run \"$vade\" doctor, then retry."
 printf 'Install complete. Start and chat:\n  "%s" launch\nStart only:\n  "%s" up\nTo type vade by name in a new shell, run this there first:\n  export PATH="$HOME/.cargo/bin:%s:$PATH"\n' "$vade" "$vade" "$root/cli/target/release"

@@ -433,6 +433,21 @@ fn main() {
                     },
                 );
             }
+            "exit-wait" => {
+                delta(thread, &id, "provisional work");
+                // The client answers this request only after it read the delta.
+                send(obj(vec![
+                    ("method", s("unknown/futureCallback")),
+                    ("id", Value::Number("201".into())),
+                    ("params", obj(vec![("threadId", s(thread)), ("turnId", s(&id))])),
+                ]));
+                assert!(read(&mut reader).get("error").is_some());
+                std::fs::write("exit-ready", b"yes").unwrap();
+                let interrupt = read(&mut reader);
+                assert_eq!(get(&interrupt, "method"), "turn/interrupt");
+                reply(interrupt.get("id").unwrap(), obj(vec![]));
+                completed(thread, &id, "interrupted");
+            }
             "interrupt" | "interrupt-timeout" | "cancel-tool" | "cancel-race"
             | "interrupt-rejected" => {
                 if text == "cancel-tool" {

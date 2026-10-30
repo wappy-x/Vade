@@ -308,7 +308,11 @@ fn trust(root: &Path, name: &str) -> ExitCode {
     }
 }
 
+/// The names of listed resources or prompts, or `none`.
 fn names(items: &[Value]) -> String {
+    if items.is_empty() {
+        return "none".into();
+    }
     items
         .iter()
         .map(|item| sanitize(item.get("uri").or_else(|| item.get("name")).and_then(Value::as_str).unwrap_or("?")))
@@ -398,4 +402,15 @@ pub fn tools_cli(args: impl IntoIterator<Item = String>) -> ExitCode {
         out.push_str("  No MCP servers are configured. See vade mcp --help.\n");
     }
     print_stdout(&out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn an_empty_list_reads_none() {
+        assert_eq!(names(&[]), "none");
+        let listed = [crate::json::parse(r#"{"uri":"file:///a"}"#).unwrap(), crate::json::parse(r#"{"name":"b"}"#).unwrap()];
+        assert_eq!(names(&listed), "file:///a, b");
+    }
 }

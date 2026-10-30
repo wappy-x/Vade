@@ -43,7 +43,7 @@ pub(crate) const COMMANDS: &[Command] = &[
     Command::new("new", "", "Start a fresh conversation.", "Wait for cleanup. Native mode keeps the old journal; delegated mode starts a fresh external session.", "Sessions", "all", true),
     Command::new("clear", "", "Clear the conversation.", "Alias for /new. Keeps old native journals and waits for worker cleanup.", "Sessions", "all", false),
     Command::new("memory", "", "Show memory support.", "Saved memory is not available in this build. Use project instructions for saved rules.", "Context", "all", false),
-    Command::new("quit", "", "Leave chat; the engine keeps running.", "Active native or delegated work is canceled and cleaned up before exit. Alias: /exit.", "Sessions", "all", true),
+    Command::new("quit", "", "Leave chat; the engine keeps running.", "Active native or delegated work is canceled and cleaned up before exit. With piped input, a message the provider has not started yet finishes first. Alias: /exit.", "Sessions", "all", true),
     Command::new("exit", "", "Leave chat; the engine keeps running.", "Alias for /quit.", "Sessions", "all", false),
     Command::new("undo", "", "Remove the last chat exchange.", "Direct/demo only; tool and delegated histories cannot be spliced.", "Sessions", "chat", false),
     Command::new("paste", "", "Collect multiline input.", "Line mode: /end sends, /cancel discards. Raw mode: pasted text waits for Enter.", "Sessions", "all", false),
@@ -67,6 +67,25 @@ impl App {
             self.notice(&format!("Allow list not read, so its commands ask: {error}"))?;
         }
         Ok(())
+    }
+    /// A line from plain or piped input. While an approval waits, a line
+    /// that is only an answer key answers it, as the key alone does in the
+    /// full-screen editor (10-29 fresh install, step 18). The editor maps
+    /// only a typed key on Enter, so a pasted or recalled key stays a draft.
+    pub(crate) fn sent_line(&mut self, line: String) -> io::Result<()> {
+        if self.approval_reply.is_some() && self.multiline.is_none() {
+            let answer = match line.trim() {
+                "y" | "Y" | "yes" | "Yes" => Some("/approve"),
+                "n" | "N" | "no" | "No" => Some("/deny"),
+                "s" | "S" if self.approval_command => Some("/approve session"),
+                "p" | "P" if self.approval_command => Some("/approve project"),
+                _ => None,
+            };
+            if let Some(answer) = answer {
+                return self.line_input(answer.into());
+            }
+        }
+        self.line_input(line)
     }
     pub(crate) fn line_input(&mut self, line: String) -> io::Result<()> {
         if self.multiline.is_none() && self.terminal.raw() && !self.quiet && line.starts_with('/') && !line.starts_with("//") && help::lookup(line.split_whitespace().next().unwrap_or("").trim_start_matches('/')).is_some() { self.terminal.user_message(&line)?; }

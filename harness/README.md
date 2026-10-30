@@ -278,7 +278,13 @@ and `~/.vade/permissions.json`.
 removals in color.
 
 - A `y`/`n` typed while there is a draft in the editor, during `/paste`, or
-  within 400 ms of the prompt appearing is kept as text.
+  within 400 ms of the prompt appearing is kept as text. In the full-screen
+  editor, if the whole draft is one line that you typed and it is only `y`,
+  `yes`, `n` or `no` (or `s` or `p` for a command), pressing Enter sends it
+  as the answer. A pasted, recalled or multiline draft stays text.
+- In plain line mode (`--plain`, or input from a pipe), a sent line of only
+  `y`, `yes`, `n` or `no` (or `s` or `p` for a command) answers the prompt.
+  During line-mode `/paste`, such a line is part of the pasted text.
 - `/approve` and `/deny` answer the displayed operation once, exactly like y/n,
   and sending them never authorizes a later operation.
 - With a draft already in the input, type `/approve` or `/deny` on its own final
