@@ -178,9 +178,10 @@ pub fn run(command: Command, dry: bool) -> Result<(), String> {
         check_default_controller_record()?;
     }
     if !dry && !cfg!(all(target_os = "linux", target_arch = "aarch64")) {
-        return Err(
-            "Run the local launcher on a Linux aarch64 Spark; --dry-run previews it here.".into(),
-        );
+        return Err(format!(
+            "This command runs only on a DGX Spark (Linux aarch64), and this computer is {} {}. Run it on the Spark, or add --dry-run to preview it here. To drive Sparks from this computer, set VADE_CONFIG (see INSTALL.md).",
+            std::env::consts::OS, std::env::consts::ARCH,
+        ));
     }
     let mut launcher = Launcher {
         root: root()?,
@@ -224,14 +225,14 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                 "Dry run: no files, processes or connections changed."
             ))?;
             let action = match command {
-                Command::Down => "Stop the owned local engine",
-                Command::Chat(_) => "Attach chat to the owned local engine",
+                Command::Down => "Stop the local engine that vade started",
+                Command::Chat(_) => "Open chat on the running local engine",
                 Command::Sessions(_) => "List, export or delete saved chat sessions",
-                Command::Logs => "Read the owned local engine log",
+                Command::Logs => "Show the local engine log",
                 Command::Install => "Detect this Spark and model; save defaults; install locally; prepare the private GPU startup cache",
                 Command::Up(_) => "Start or attach to the local FP4-Local engine; use saved defaults or detect a first setup",
                 Command::Update => "Refresh local engine and chat from VADE_BUNDLE or the current source checkout; stop first with vade down",
-                Command::Doctor => "Check this Spark, driver, memory, disk, model, installed artifacts and owned endpoint",
+                Command::Doctor => "Check this Spark, driver, memory, disk, model, installed files and the running engine",
                 Command::Detect => "Detect this Spark and existing model",
                 _ => {
                     "Detect this Spark and model; save defaults; install locally; start on loopback; open chat"
@@ -340,14 +341,9 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                         if prior.is_none() && fresh {
                             self.prepare(&config, &artifacts, if matches!(command, Command::Up(_)) { "up" } else { "launch" })?;
                         }
-                        let start = phase(
-                            "Up",
-                            if prior.is_some() {
-                                "attach to owned engine"
-                            } else {
-                                "load model on this Spark"
-                            },
-                        )?;
+                        let loading = format!("load {} on this Spark, context {} tokens",
+                            text::terminal_text(&config.model.file_name().unwrap_or_default().to_string_lossy()), config.context);
+                        let start = phase("Up", if prior.is_some() { "attach to the running engine" } else { &loading })?;
                         let retry = if matches!(command, Command::Up(_)) { "vade up" } else { "vade launch" };
                         let record = self.up_admitted(&mut config, &options, &artifacts, prior, retry)?;
                         done("Up", start)?;
@@ -355,11 +351,15 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                     };
                     (config, artifacts, record)
                 };
+                if command != Command::Install {
+                    // One line with what a client needs: where, how much context, how many Sparks.
+                    output::line(format_args!("{} ready in {}: {}, context {} tokens, output {}, 1 Spark.",
+                        if matches!(command, Command::Launch(_)) { "Launch" } else { "Up" }, elapsed(began.elapsed()), config.endpoint(), config.context, config.output))?;
+                }
+                if matches!(command, Command::Up(_)) {
+                    output::text(format_args!("{}", crate::status::next_steps(&[("Chat", &text::command("chat")), ("Stop", &text::command("down"))])))?;
+                }
                 if matches!(command, Command::Launch(_)) {
-                    output::line(format_args!(
-                        "Launch ready in {}.",
-                        elapsed(began.elapsed())
-                    ))?;
                     let record = record.as_ref().ok_or("Launch did not produce an engine record.")?;
                     if self.runner.terminal() {
                         self.chat(&config, &artifacts, record, &crate::cli::ChatOptions::default())?;
@@ -372,14 +372,14 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             }
             Command::Chat(options) => {
                 let config = Config::load(&self.root)?
-                    .ok_or("Run vade launch to install and start Vade.")?;
-                let artifacts = install::load(&self.root)?.ok_or("Run vade install first.")?;
-                let record = self.record()?.ok_or("Vade is stopped; run vade launch.")?;
+                    .ok_or("Vade is not set up on this Spark yet. Run vade launch to install it, start it and open chat.")?;
+                let artifacts = install::load(&self.root)?.ok_or("The engine and chat are not installed yet. Run vade launch to install them and open chat.")?;
+                let record = self.record()?.ok_or("The engine is not running. Run vade launch to start it and open chat.")?;
                 self.ready(&config, &record)?;
                 self.chat(&config, &artifacts, &record, &options)
             }
             Command::Sessions(action) => {
-                let artifacts = install::load(&self.root)?.ok_or("Run vade install first.")?;
+                let artifacts = install::load(&self.root)?.ok_or("The engine and chat are not installed yet. Run vade launch to install them.")?;
                 let exec = chat::sessions(required(&artifacts, "harness")?, &action)?;
                 if self.runner.interactive(&exec)? { Ok(()) } else { Err(chat::SESSIONS_FAILED.into()) }
             }
@@ -387,7 +387,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                 let _lock = crate::state::Lock::acquire(&self.root)?;
                 self.recover_builds()?;
                 if let Some(record) = self.record()? {
-                    let start = phase("Down", "stop this launch's owned engine")?;
+                    let start = phase("Down", "stop the engine that vade started")?;
                     self.stop(&record)?;
                     done("Down", start)
                 } else {
@@ -457,7 +457,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         config: Option<&Config>,
         install_space: u64,
     ) -> Result<(model::Model, detect::Identity), String> {
-        let start = phase("Detect", "read this Spark and existing model")?;
+        let start = phase("Detect", "read this Spark and the model on disk")?;
         let model = model::discover(&self.home, config.map(|c| c.model.as_path()))?;
         let identity = self.identify(&model, install_space)?;
         output::text(format_args!("{}", identity.display(&model.path)))?;
@@ -694,11 +694,11 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             let mut next_progress = Instant::now() + Duration::from_secs(15);
             loop {
                 if self.runner.interrupted() {
-                    return Err("Launch interrupted; the owned engine was stopped.".into());
+                    return Err("Startup was interrupted, so Vade stopped the engine it was starting.".into());
                 }
                 let alive = self.worker(&record, "inspect", Fields::new(), false)?;
                 if alive.get("alive").map(String::as_str) != Some("true") {
-                    return Err("Engine stopped while loading. Run vade logs, then vade doctor before retrying vade up.".into());
+                    return Err(format!("The engine stopped while it loaded the model. Run vade logs to see why, then vade doctor, before you retry {retry}."));
                 }
                 if let Some(name) = self.health(config)? {
                     self.worker(
@@ -714,8 +714,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                 }
                 if Instant::now() >= deadline {
                     return Err(
-                        "Model loading timed out after 600 s. Run vade logs, then vade doctor before retrying vade up."
-                            .into(),
+                        format!("The model did not finish loading in 600 s. Run vade logs to see why, then vade doctor, before you retry {retry}."),
                     );
                 }
                 if Instant::now() >= next_progress {
@@ -761,7 +760,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         match self.health_reply(config)? {
             Some((model, body)) if model == required(record, "endpoint_model")? => Ok(body),
             _ => Err(
-                "The owned engine is not ready; run vade logs, then vade down and vade launch."
+                "The engine is not answering. Run vade logs to see why, then vade down and vade launch."
                     .into(),
             ),
         }
@@ -877,7 +876,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
     }
 
     fn prepare(&mut self, config: &Config, artifacts: &Fields, retry: &str) -> Result<(), String> {
-        let started = phase("Prepare", "compile GPU code while checking every checkpoint file; private caches only")?;
+        let started = phase("Prepare", "compile GPU code and check every checkpoint file (private caches only)")?;
         let record = Fields::from([("token".into(), text::random_hex(32)?)]);
         let mut request = Fields::from([
             ("engine".into(), required(artifacts, "engine")?.into()),
@@ -900,8 +899,8 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             "{error}\nLocal cache preparation failed; installed files were kept. Run {}, fix the reported cause, then retry {}.",
             text::command("doctor"), text::command(retry)))?;
         if let Some(bytes) = fields.get("model_hashed_bytes") {
-            output::line(format_args!("Prepare: checkpoint checked ({bytes} bytes hashed, {} files reused).",
-                fields.get("model_reused_files").map_or("0", String::as_str)))?;
+            let reused = fields.get("model_reused_files").map_or("0", String::as_str);
+            output::line(format_args!("Prepare: checkpoint checked ({bytes} bytes hashed, {reused} {} reused).", if reused == "1" { "file" } else { "files" }))?;
         }
         done("Prepare", started)
     }

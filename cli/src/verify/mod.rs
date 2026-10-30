@@ -62,6 +62,7 @@ pub fn help() -> String {
             ("--max-tokens N", "Tokens per run, 1..32768 (default 128)"),
             ("--timeout SECONDS", "Deadline for each request, 1..3600 (default 120)"),
             ("--receipt PATH", "Receipt file (default vade-verify.json in the current directory)"),
+            ("--api-key-file PATH", "Bearer credential file (or VADE_API_KEY_FILE)"),
         ],
         examples: &["vade verify", "vade verify -n 3 --prompt 2k", "vade verify --url http://127.0.0.1:18080/v1"],
         notes: &[

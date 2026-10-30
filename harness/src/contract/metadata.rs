@@ -15,7 +15,7 @@ impl Contract {
     ) -> io::Result<(transport::Response<'a>, Vec<u8>)> {
         for attempt in 0..2 {
             if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
-                return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "metadata cancelled"));
+                return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "metadata canceled"));
             }
             if method == "GET" { self.context.requests.capabilities += 1; }
             else { self.context.requests.admissions += 1; }

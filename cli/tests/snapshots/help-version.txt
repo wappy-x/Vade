@@ -7,7 +7,7 @@ Examples:
 
 Usage: vade --version [--json]
        vade version [--json]
-       vade -V
+       vade -V [--json]
 
 Options:
   --json  Print one vade.version.v1 object

@@ -900,7 +900,7 @@ fn check_cancel(cancel: &AtomicBool) -> io::Result<()> {
     if cancel.load(Ordering::Relaxed) {
         Err(io::Error::new(
             io::ErrorKind::ConnectionAborted,
-            "delegated operation cancelled; remote outcome unconfirmed",
+            "delegated operation canceled; remote outcome unconfirmed",
         ))
     } else {
         Ok(())

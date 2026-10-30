@@ -169,7 +169,7 @@ impl Report {
         match result {
             "fail" => {
                 output::line(format_args!("{}  {counts} in {time}", paint(Token::Error, "FAIL", Stream::Out)))?;
-                Err(format!("{failed} doctor check(s) failed. Run each next: command above, then vade doctor."))
+                Err(format!("{failed} doctor {} failed. Run the next: step under each FAIL row, then run vade doctor again.", if failed == 1 { "check" } else { "checks" }))
             }
             "plan" => output::line(format_args!("{}  {counts}; dry run, nothing checked", paint(Token::Dim, "PLAN", Stream::Out))),
             _ => output::line(format_args!("{}  {counts} in {time}", paint(Token::Ok, "PASS", Stream::Out))),
@@ -217,7 +217,7 @@ mod tests {
             report.fail("model files", "missing\nunder ~/models", "Run vade launch.")?;
             report.finish()
         });
-        assert_eq!(result.unwrap_err(), "1 doctor check(s) failed. Run each next: command above, then vade doctor.");
+        assert_eq!(result.unwrap_err(), "1 doctor check failed. Run the next: step under each FAIL row, then run vade doctor again.");
         assert!(printed.starts_with("FAIL  model files           missing under ~/models\n      next: Run vade launch.\nFAIL  0 ok, 1 failed, 0 skipped in "), "{printed}");
     }
     #[test]

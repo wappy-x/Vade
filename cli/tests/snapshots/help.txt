@@ -4,13 +4,13 @@ Vade runs Qwen3.8 Flash-Next FP4-Local on your DGX Spark.
 Examples:
   vade launch  Start on this Spark, then chat
   vade status  See what is running
-  vade doctor  Check the setup, one line per check
+  vade doctor  Check the setup, then PASS or FAIL
   vade down    Stop what vade started
 
 Usage: vade <COMMAND> [OPTIONS]
 
 Start and stop:
-  launch    Install if missing, start on this Spark, then chat
+  launch    Install if needed, start on this Spark, then open chat
   up        Start without chat (this Spark, or Sparks from a controller)
   down      Stop what vade started
 
@@ -28,7 +28,7 @@ Models:
 Look:
   status    Show what is running and whether it is healthy
   config    Show which setup is selected and what it holds
-  doctor    Check the setup: one line per check, then PASS or FAIL
+  doctor    Check the setup, one line per check, then PASS or FAIL
   detect    Show this Spark's machine, memory, disk, driver and model
   logs      Show recent engine logs
 
@@ -45,8 +45,8 @@ Maintain:
 
 Options:
   --json               JSON output for status, doctor, config, detect, version
-  --dry-run            Preview a lifecycle command; nothing changes
-  --api-key-file PATH  Credential for chat, doctor and local run
+  --dry-run            Preview a lifecycle command; others run as usual
+  --api-key-file PATH  Credential for chat, doctor, verify, bench and local run
   -h, --help           Show help
   -V, --version        Print the CLI version
 
@@ -61,7 +61,8 @@ Notes:
     logs, down and doctor, even after local setup; keep it set to the same file
     throughout that lifecycle. Without VADE_CONFIG, saved local setup wins over
     the user config directory.
-  - Global flags such as --dry-run before bench are unsupported.
+  - Put options after the command name. bench, verify and test do not take
+    --dry-run or --json.
 
 Learn more: vade <command> --help
 --- stderr

@@ -68,7 +68,7 @@ fn missing_config_and_setup_menu_escape_hostile_paths() {
         if args.is_empty() { assert!(output.status.success()); }
         else { assert_eq!(output.status.code(), Some(1)); }
         let text = format!("{}{}", safe(&output.stdout), safe(&output.stderr));
-        assert!(text.contains("Config is missing") && text.contains("INSTALL.md"));
+        assert!(text.contains("VADE_CONFIG names a missing file") && text.contains("INSTALL.md"));
         assert!(text.contains("\\u{1b}") && text.contains("\\r\\n") && text.contains("\\u{202e}"));
         assert!(text.contains(".conf"), "path must remain complete");
     }

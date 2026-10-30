@@ -119,7 +119,7 @@ fn json_commands_print_one_versioned_object_and_nothing_else() {
     let config = text(&vade(&["config", "--json"], &home).stdout);
     assert_eq!(config, "{\"schema\":\"vade.config.v1\",\"setup\":\"none\",\"path\":null,\"settings\":null,\"error\":null,\"next\":null}\n");
     let missing = text(&controller(&["config", "--json"], &home).stdout);
-    assert!(missing.starts_with("{\"schema\":\"vade.config.v1\",\"setup\":\"controller\",\"path\":") && missing.contains("\"error\":\"Config is missing: "), "{missing}");
+    assert!(missing.starts_with("{\"schema\":\"vade.config.v1\",\"setup\":\"controller\",\"path\":") && missing.contains("\"error\":\"VADE_CONFIG names a missing file: "), "{missing}");
     // A controller with no config still answers in its schema: one failed config row.
     let doctor = text(&controller(&["doctor", "--json", "--dry-run"], &home).stdout);
     for field in ["\"mode\":\"controller\"", "\"dry_run\":true", "\"result\":\"fail\"", "\"failed\":1", "\"checks\":[{\"name\":\"config\",\"state\":\"fail\""] {
@@ -255,10 +255,10 @@ fn doctor_rows_keep_their_columns_and_end_with_pass_or_fail() {
     let stdout = text(&output.stdout);
     let rows: Vec<&str> = stdout.lines().collect();
     assert!(rows[0].starts_with("FAIL  config                "), "{stdout}");
-    assert!(rows[1].starts_with("      next: On a Spark, run vade launch"), "{stdout}");
+    assert!(rows[1].starts_with("      next: Run vade launch on a Spark"), "{stdout}");
     assert!(rows.last().unwrap().starts_with("FAIL  0 ok, 1 failed, 0 skipped in "), "{stdout}");
     let stderr = text(&output.stderr);
-    assert_eq!(stderr, "error: 1 doctor check(s) failed.\n hint: Run each next: command above, then vade doctor.\n");
+    assert_eq!(stderr, "error: 1 doctor check failed.\n hint: Run the next: step under each FAIL row, then run vade doctor again.\n");
     let _ = std::fs::remove_dir_all(home);
 }
 

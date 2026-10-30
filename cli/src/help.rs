@@ -8,8 +8,8 @@ const GPU_BUSY: &str = "Only a running compute app or power draw of at least 30 
 const DRY_RUN: (&str, &str) = ("--dry-run", "Show what would happen; change nothing");
 const API_KEY: (&str, &str) = ("--api-key-file PATH", "Bearer credential file (or VADE_API_KEY_FILE)");
 const CONTEXT: (&str, &str) = ("--context N", "Context window in tokens, 4096..262144 (default 32768)");
-const OUTPUT: (&str, &str) = ("--output N", "Output limit in tokens, 1024..16384 (default min(8192, context))");
-const MTP: (&str, &str) = ("--mtp N", "Drafting depth 0..3; 0 disables server drafting (default: engine-selected)");
+const OUTPUT: (&str, &str) = ("--output N", "Output limit in tokens, 1024..16384 (default 8192, or the context if smaller)");
+const MTP: (&str, &str) = ("--mtp N", "Drafting depth 0..3; 0 turns drafting off (default: the engine chooses)");
 
 /// The help page for `command`, or the top-level page; headings are styled
 /// when standard output takes color.
@@ -34,12 +34,12 @@ fn top(on: bool) -> String {
     out += &style::table(&[
         ("vade launch", "Start on this Spark, then chat".into()),
         ("vade status", "See what is running".into()),
-        ("vade doctor", "Check the setup, one line per check".into()),
+        ("vade doctor", "Check the setup, then PASS or FAIL".into()),
         ("vade down", "Stop what vade started".into()),
     ], 2);
     out += &format!("\n{} vade <COMMAND> [OPTIONS]\n\n", heading("Usage:"));
     out += &group("Start and stop:", &[
-        ("launch", "Install if missing, start on this Spark, then chat"),
+        ("launch", "Install if needed, start on this Spark, then open chat"),
         ("up", "Start without chat (this Spark, or Sparks from a controller)"),
         ("down", "Stop what vade started"),
     ], 8);
@@ -57,7 +57,7 @@ fn top(on: bool) -> String {
     out += &group("Look:", &[
         ("status", "Show what is running and whether it is healthy"),
         ("config", "Show which setup is selected and what it holds"),
-        ("doctor", "Check the setup: one line per check, then PASS or FAIL"),
+        ("doctor", "Check the setup, one line per check, then PASS or FAIL"),
         ("detect", "Show this Spark's machine, memory, disk, driver and model"),
         ("logs", "Show recent engine logs"),
     ], 8);
@@ -74,8 +74,8 @@ fn top(on: bool) -> String {
     ], 8);
     out += &group("Options:", &[
         ("--json", "JSON output for status, doctor, config, detect, version"),
-        ("--dry-run", "Preview a lifecycle command; nothing changes"),
-        ("--api-key-file PATH", "Credential for chat, doctor and local run"),
+        ("--dry-run", "Preview a lifecycle command; others run as usual"),
+        ("--api-key-file PATH", "Credential for chat, doctor, verify, bench and local run"),
         ("-h, --help", "Show help"),
         ("-V, --version", "Print the CLI version"),
     ], 0);
@@ -88,7 +88,7 @@ fn top(on: bool) -> String {
     out += &format!("{}\n", heading("Notes:"));
     for note in [
         "Explicit VADE_CONFIG selects the controller for up, install, chat, status, logs, down and doctor, even after local setup; keep it set to the same file throughout that lifecycle. Without VADE_CONFIG, saved local setup wins over the user config directory.",
-        "Global flags such as --dry-run before bench are unsupported.",
+        "Put options after the command name. bench, verify and test do not take --dry-run or --json.",
     ] { out += &format!("  - {}\n", style::wrap(note, style::WIDTH, "    ")); }
     out += &format!("\nLearn more: {}\n", style::style(Token::Command, "vade <command> --help", on));
     out
@@ -97,16 +97,17 @@ fn top(on: bool) -> String {
 fn page(command: &str) -> Option<Page<'static>> {
     Some(match command {
         "launch" => Page {
-            summary: "Start Vade on this Spark and open chat.",
+            summary: "Install if needed, start Vade on this Spark, then open chat.",
             usage: &["vade launch [OPTIONS]"],
-            options: &[CONTEXT, OUTPUT, MTP, ("--memory-bytes N", "Memory budget for this Spark, in bytes"), ("--cache-bytes 0", "Disable retained prompt cache, even with an inherited opt-in"), DRY_RUN],
+            options: &[CONTEXT, OUTPUT, MTP, ("--memory-bytes N", "Memory budget for this Spark, in bytes"), ("--cache-bytes 0", "Turn the retained prompt cache off"), DRY_RUN],
             examples: &["vade launch", "vade launch --context 262144 --output 16384", "vade launch --dry-run"],
             notes: &[
                 "Finds the FP4-Local checkpoint, saves defaults, installs if missing and starts the engine. It opens chat when standard input is a terminal. Run it again to attach.",
-                "Local defaults match vade up from a controller: context 32768, output min(8192, context), engine-selected MTP.",
+                "Local defaults match vade up from a controller: context 32768, output 8192 (or the context if smaller), drafting depth chosen by the engine.",
                 "If the engine refuses the default or saved context for memory, launch tries smaller sizes from 32768, 16384, 8192 and 4096. It saves the first size that starts. A refused explicit --context is an error.",
                 "The checkpoint comes from the saved config, then explicit VADE_MODELS, then the FP4-Local checkpoint under ~/models; launch asks if it is missing. Files install under ~/.vade (or VADE_HOME).",
-                "Local --chats and positive --cache-bytes are unsupported. See vade up --help for memory options. Unset VADE_CONFIG for local lifecycle commands.",
+                "Local launch does not take --chats or a positive --cache-bytes. See vade up --help for memory options. Unset VADE_CONFIG to use the local setup.",
+                "Launch also takes --fp4-local, --sparks 1 and --fast-prompts from vade up; they change nothing here.",
             ],
         },
         "up" => Page {
@@ -114,7 +115,7 @@ fn page(command: &str) -> Option<Page<'static>> {
             usage: &["vade up [OPTIONS]"],
             options: &[
                 ("--fp4-local", "Qwen3.8 Flash-Next FP4-Local (the default; optional)"),
-                ("--fp8", "Qwen3.8 Flash-Next FP8 on 2, 4 or 6 Sparks (older spelling: --fp8-legacy): context 131072, output min(65536, context), MTP 2; output ceiling 262144"),
+                ("--fp8", "Qwen3.8 Flash-Next FP8 on 2, 4 or 6 Sparks (older spelling: --fp8-legacy): context 131072, output 65536 (or the context if smaller), drafting depth 2; output limit up to 262144"),
                 ("--sparks N", "Number of Sparks; FP4 supports 1..24"),
                 ("--hosts a,b", "Machine names in cable order, separated by commas"),
                 ("--replicas N", "2..16 independent one-Spark FP4-Local servers behind a local gateway"),
@@ -122,15 +123,16 @@ fn page(command: &str) -> Option<Page<'static>> {
                 ("--chats N", "Concurrent FP8 chats, 1..32 (controller)"),
                 ("--memory-bytes N", "Memory budget per rank, in bytes"),
                 ("--cache-bytes N", "FP8 retained prompt cache, in bytes; 0 disables it. Local FP4 accepts only 0"),
+                ("--fast-prompts", "Older option, kept for scripts; it has no effect"),
                 DRY_RUN,
             ],
             examples: &["vade up", "vade up --context 262144 --output 16384", "VADE_CONFIG=cluster.conf vade up --sparks 2"],
             notes: &[
                 "Default: Qwen3.8 Flash-Next FP4-Local on one Spark.",
-                "Local up and launch start with context 32768 and output min(8192, context). They reuse saved limits. A memory refusal lowers a default or saved context to a smaller size from 32768, 16384, 8192 and 4096. The first size that starts is saved. A refused explicit --context is an error. Local --chats and positive --cache-bytes are refused; --cache-bytes 0 disables retention.",
-                "Controller FP4 defaults match local ones on any Spark count: context 32768, output min(8192, context). --context 262144 requests a larger context. The engine still sets the chat count from context and memory.",
-                "Controller FP4 ignores --chats and --cache-bytes. Its engine admits chats from memory and uses its own prefix cache setting.",
-                "MTP is engine-selected. FP4-Local one-Spark concurrent chats can draft; the default request depth is 3 with strict verification. FP8 concurrent chats decode plainly. Per-request draft=plain disables drafting; draft=strict requests it when supported. --mtp overrides MTP, and 0 disables server drafting.",
+                "Local up and launch start with context 32768 and output 8192 (or the context if smaller). They reuse saved limits. A memory refusal lowers a default or saved context to a smaller size from 32768, 16384, 8192 and 4096. The first size that starts is saved. A refused explicit --context is an error. Local --chats and positive --cache-bytes are refused; --cache-bytes 0 disables retention.",
+                "Controller FP4 defaults match local ones on any Spark count: context 32768, output 8192 (or the context if smaller). --context 262144 requests a larger context. The engine still sets the chat count from context and memory.",
+                "Controller FP4 checks and passes on --chats and --cache-bytes, but its engine does not use them: it admits chats from memory and uses its own prefix cache setting.",
+                "The engine chooses the drafting depth (MTP). On one FP4-Local Spark, concurrent chats can draft; the default request depth is 3 with strict verification. FP8 concurrent chats do not draft. A request with draft=plain turns drafting off; draft=strict asks for it when supported. --mtp sets the depth, and 0 turns drafting off.",
                 "Two FP4-Local Sparks run the tensor split, the only two-Spark path for FP4-Local: both Sparks work on every token. It needs RDMA, so vade up refuses SEQPAR_RDMA=0 (TCP) for two FP4-Local Sparks. FP8 on two Sparks keeps its ring and may use TCP.",
                 "FP8 needs an FP8 config such as cli/examples/vade.conf. In our checks, FP8 gave the same token IDs on each Spark count, but 2 and 4 Sparks gave different IDs. See docs/benchmarks.md.",
                 "Spark counts above 2 require a current install and linked hosts in cable order.",
@@ -203,7 +205,7 @@ fn page(command: &str) -> Option<Page<'static>> {
             examples: &["vade doctor", "vade doctor --json", "VADE_CONFIG=cluster.conf vade doctor --dry-run"],
             notes: &[
                 "On this Spark: config, VADE_HOME writable, ownership, installed binaries, model files, nvidia-smi and driver, disk, free memory, port and engine health.",
-                "From a controller: local tools, then SSH, nvidia-smi, disk, free memory and model files on each selected Spark, then the fabric and the harness.",
+                "From a controller: local tools, then SSH, nvidia-smi, GPU use, disk, free memory, model files and the staged build on each selected Spark, then the fabric, the port, the harness and engine health.",
                 "Also shows the vade binary and version, context, output, drafting and prefix cache settings, model JSON files, safetensors count and bytes, and server ports on each Spark.",
                 "Doctor checks the active Sparks, or the default vade up selection, through the same SSH options. It does not start an engine or change the setup.",
                 "Each FAIL row gives the next step. Exit 0 means PASS, 1 means FAIL.",
@@ -236,14 +238,14 @@ fn page(command: &str) -> Option<Page<'static>> {
         },
         "detect" => Page {
             summary: "Show this Spark's machine, memory, disk, driver and model.",
-            usage: &["vade detect [--json]"],
-            options: &[("--json", "Print one vade.detect.v1 object")],
+            usage: &["vade detect [--json] [--dry-run]"],
+            options: &[("--json", "Print one vade.detect.v1 object"), ("--dry-run", "Print the plan; read nothing")],
             examples: &["vade detect", "vade detect --json"],
             notes: &["Reads only; no files are changed and nothing is started."],
         },
         "version" => Page {
             summary: "Print the CLI version.",
-            usage: &["vade --version [--json]", "vade version [--json]", "vade -V"],
+            usage: &["vade --version [--json]", "vade version [--json]", "vade -V [--json]"],
             options: &[("--json", "Print one vade.version.v1 object")],
             examples: &["vade --version", "vade version --json"],
             notes: &["Loads no configuration and opens no connections."],
@@ -261,9 +263,9 @@ fn page(command: &str) -> Option<Page<'static>> {
             ],
             examples: &["vade run qwen3-8b", "vade run qwen3-8b --dry-run"],
             notes: &[
-                "On one Linux/aarch64 NVIDIA GB10: detect prerequisites before downloading, resume and hash official pinned weights, start an owned server, answer, run doctor.",
+                "Runs on one Linux aarch64 NVIDIA GB10. It checks prerequisites before any download, downloads the official pinned weights (resumable, hash-checked), starts a server, answers one prompt and runs doctor.",
                 "Other --weights-source directory names are imported as Qwen3-8B inside VADE_HOME.",
-                "VADE_HOME selects a dedicated private data directory. Unset VADE_CONFIG; use a fresh VADE_HOME if local launch already has defaults. Keep the same selection for chat, status, logs and down. No system tool installation.",
+                "VADE_HOME selects a private data folder for this workflow. Unset VADE_CONFIG. Use a fresh VADE_HOME if vade launch already saved defaults. Keep the same VADE_HOME for chat, status, logs and down. No system tools are installed.",
             ],
         },
         "config" => Page {
@@ -315,7 +317,7 @@ fn page(command: &str) -> Option<Page<'static>> {
                 ("--max-tokens N", "Tokens each chat must generate (default 256)"),
                 ("--repeats N", "Repeats per cohort, none discarded (default 1)"),
                 ("--draft plain|strict", "Override drafting on every request (default: server)"),
-                ("--output FILE", "JSON receipt (default ./vade-bench.json) and a sibling .txt table"),
+                ("--output FILE", "JSON receipt (default ./vade-bench.json) and a sibling .txt table; --out is an alias"),
                 ("--api-key-file FILE", "Optional bearer credential; never stored in receipts"),
                 ("--self-test", "Run against a tiny local mock server; no GPU"),
                 ("--help-all", "List every option, including A/B runs and observation"),
@@ -324,6 +326,7 @@ fn page(command: &str) -> Option<Page<'static>> {
             notes: &[
                 "Wall time is measured on this client; token counts come from the server. Requests are greedy with cache and thinking off and a fixed length.",
                 "Prints one row per cohort: tokens per second, time to first token and the bytes the server reported.",
+                "vade bench --suite URL runs the development workloads instead; see engine/tools/bench/README.md.",
             ],
         },
         "test" => Page {

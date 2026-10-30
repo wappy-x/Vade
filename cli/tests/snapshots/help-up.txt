@@ -11,40 +11,43 @@ Usage: vade up [OPTIONS]
 Options:
   --fp4-local       Qwen3.8 Flash-Next FP4-Local (the default; optional)
   --fp8             Qwen3.8 Flash-Next FP8 on 2, 4 or 6 Sparks (older spelling:
-                    --fp8-legacy): context 131072, output min(65536, context),
-                    MTP 2; output ceiling 262144
+                    --fp8-legacy): context 131072, output 65536 (or the context
+                    if smaller), drafting depth 2; output limit up to 262144
   --sparks N        Number of Sparks; FP4 supports 1..24
   --hosts a,b       Machine names in cable order, separated by commas
   --replicas N      2..16 independent one-Spark FP4-Local servers behind a local
                     gateway
-  --mtp N           Drafting depth 0..3; 0 disables server drafting (default:
-                    engine-selected)
+  --mtp N           Drafting depth 0..3; 0 turns drafting off (default: the
+                    engine chooses)
   --context N       Context window in tokens, 4096..262144 (default 32768)
-  --output N        Output limit in tokens, 1024..16384 (default min(8192,
-                    context))
+  --output N        Output limit in tokens, 1024..16384 (default 8192, or the
+                    context if smaller)
   --chats N         Concurrent FP8 chats, 1..32 (controller)
   --memory-bytes N  Memory budget per rank, in bytes
   --cache-bytes N   FP8 retained prompt cache, in bytes; 0 disables it. Local
                     FP4 accepts only 0
+  --fast-prompts    Older option, kept for scripts; it has no effect
   --dry-run         Show what would happen; change nothing
 
 Notes:
   - Default: Qwen3.8 Flash-Next FP4-Local on one Spark.
-  - Local up and launch start with context 32768 and output min(8192, context).
-    They reuse saved limits. A memory refusal lowers a default or saved context
-    to a smaller size from 32768, 16384, 8192 and 4096. The first size that
-    starts is saved. A refused explicit --context is an error. Local --chats and
-    positive --cache-bytes are refused; --cache-bytes 0 disables retention.
+  - Local up and launch start with context 32768 and output 8192 (or the context
+    if smaller). They reuse saved limits. A memory refusal lowers a default or
+    saved context to a smaller size from 32768, 16384, 8192 and 4096. The first
+    size that starts is saved. A refused explicit --context is an error. Local
+    --chats and positive --cache-bytes are refused; --cache-bytes 0 disables
+    retention.
   - Controller FP4 defaults match local ones on any Spark count: context 32768,
-    output min(8192, context). --context 262144 requests a larger context. The
-    engine still sets the chat count from context and memory.
-  - Controller FP4 ignores --chats and --cache-bytes. Its engine admits chats
-    from memory and uses its own prefix cache setting.
-  - MTP is engine-selected. FP4-Local one-Spark concurrent chats can draft; the
-    default request depth is 3 with strict verification. FP8 concurrent chats
-    decode plainly. Per-request draft=plain disables drafting; draft=strict
-    requests it when supported. --mtp overrides MTP, and 0 disables server
-    drafting.
+    output 8192 (or the context if smaller). --context 262144 requests a larger
+    context. The engine still sets the chat count from context and memory.
+  - Controller FP4 checks and passes on --chats and --cache-bytes, but its
+    engine does not use them: it admits chats from memory and uses its own
+    prefix cache setting.
+  - The engine chooses the drafting depth (MTP). On one FP4-Local Spark,
+    concurrent chats can draft; the default request depth is 3 with strict
+    verification. FP8 concurrent chats do not draft. A request with draft=plain
+    turns drafting off; draft=strict asks for it when supported. --mtp sets the
+    depth, and 0 turns drafting off.
   - Two FP4-Local Sparks run the tensor split, the only two-Spark path for
     FP4-Local: both Sparks work on every token. It needs RDMA, so vade up
     refuses SEQPAR_RDMA=0 (TCP) for two FP4-Local Sparks. FP8 on two Sparks

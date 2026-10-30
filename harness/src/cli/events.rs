@@ -475,7 +475,7 @@ impl App {
                                     self.run_notice(&self.context.describe())?;
                                 }
                             } else {
-                                self.run_notice("Compaction retained; optional pre-warm failed or cancelled. Continuing normally; the next real request remains available.")?;
+                                self.run_notice("Compaction retained; optional pre-warm failed or was canceled. Continuing normally; the next real request remains available.")?;
                             }
                             self.dirty = true;
                             continue;

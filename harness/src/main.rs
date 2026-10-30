@@ -15,6 +15,7 @@ use cli::{
 };
 
 fn main() -> ExitCode {
+    vade_harness::diagnostics::install_panic_hook("vade");
     run_main(std::env::args().skip(1).collect())
 }
 

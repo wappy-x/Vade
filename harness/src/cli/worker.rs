@@ -155,7 +155,7 @@ impl App {
             || text.len() > MAX_PROMPT_BYTES
         {
             return self.run_notice(
-                "Steering not queued: cancelling, empty/oversized input, or 8 pending requests.",
+                "Steering not queued: a cancel is in progress, the input is empty or too large, or 8 requests are pending.",
             );
         }
         let Some(request_id) = self.steering_id.checked_add(1) else {
@@ -190,7 +190,7 @@ impl App {
         }
         if user.len() > MAX_PROMPT_BYTES {
             self.failed = true;
-            return self.notice("Prompt exceeds 64 KiB; not sent.");
+            return self.notice("The prompt is over 64 KiB, so it was not sent.");
         }
         if self.pending.is_some() {
             if !matches!(self.config.mode, Mode::Direct | Mode::Agent) || self.queue_input {
@@ -710,7 +710,7 @@ impl App {
         let received = pending.received;
         let counting = pending.rx.state() == RunState::Counting;
         if approval {
-            self.run_notice("Cancelling the run; the pending operation will be declined.")?;
+            self.run_notice("Canceling the run; the pending operation will be declined.")?;
         }
         if !received {
             self.terminal.clear_editor()?;

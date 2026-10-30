@@ -59,7 +59,21 @@ mod worker;
 mod verify;
 
 fn main() {
+    // A bug reaches the user as one plain error block, not a Rust panic
+    // message. RUST_BACKTRACE (other than 0) keeps the standard report for the bug report.
+    if std::env::var_os("RUST_BACKTRACE").is_none_or(|value| value.is_empty() || value == "0") {
+        std::panic::set_hook(Box::new(|info| output::stderr_line(format_args!("{}", internal_error(info.location())))));
+    }
     run_main(std::env::args().skip(1).collect());
+}
+
+/// The error block for a panic at `location`.
+fn internal_error(location: Option<&std::panic::Location<'_>>) -> String {
+    let place = location.map_or(String::new(), |at| format!(" at {}:{}", at.file(), at.line()));
+    style::error_block(&format!(
+        "Vade hit an internal error{place}. This is a bug in Vade, not in your setup. Run the same command again with RUST_BACKTRACE=1 and report the output at {}/issues.",
+        repository::VADE_REPO_URL,
+    ), style::color(style::Stream::Err))
 }
 
 fn run_main(mut args: Vec<String>) {
@@ -71,7 +85,10 @@ fn run_main(mut args: Vec<String>) {
     let topic = |name: &str| (args.len() == 2 && matches!(args[0].as_str(), "help" | "--help" | "-h") && args[1] == name)
         || (args.first().is_some_and(|arg| arg == name) && ((args.len() == 1 && name == "test")
             || (args.len() == 2 && matches!(args[1].as_str(), "--help" | "-h"))));
-    if topic("test") || topic("bench") {
+    // --help anywhere after bench shows its page; the development suite keeps its own.
+    let bench_help = args.first().is_some_and(|arg| arg == "bench") && !args.iter().any(|arg| arg == "--suite")
+        && args[1..].iter().any(|arg| matches!(arg.as_str(), "--help" | "-h"));
+    if topic("test") || topic("bench") || bench_help {
         public_output(&cli::help(Some(if topic("test") { "test" } else { "bench" })));
         return;
     }
@@ -98,6 +115,7 @@ fn run_main(mut args: Vec<String>) {
         } else {
             Some(runner::Interruptions::install())
         };
+        bench::refuse_lifecycle_flags(&args[1..]).unwrap_or_else(|error| fail(&error));
         let arguments = endpoint::bench_arguments(&args[1..]).unwrap_or_else(|error| fail(&error));
         match bench::run(&arguments, runner::interrupted) {
             Ok(code) => std::process::exit(if runner::interrupted() { 130 } else { code }),
@@ -256,7 +274,7 @@ fn run_main(mut args: Vec<String>) {
         // A fresh controller still gets one row per check and a FAIL line.
         Err(error) if parsed.command == cli::Command::Doctor => {
             let mut report = checks::Report::new(owner(&parsed.command), parsed.dry_run);
-            let next = "On a Spark, run vade launch; for a controller, copy cli/examples/fp4-local.conf, edit it and set VADE_CONFIG (INSTALL.md).";
+            let next = "Run vade launch on a Spark, or copy cli/examples/fp4-local.conf, edit it and set VADE_CONFIG to drive Sparks from this computer (INSTALL.md).";
             let result = report.fail("config", &style::split(&error).0, next).and_then(|()| {
                 if !parsed.dry_run {
                     doctor::binary(&mut report)?;
@@ -273,9 +291,12 @@ fn run_main(mut args: Vec<String>) {
             return;
         }
         Err(error) if matches!(parsed.command, cli::Command::Menu) => {
-            let error = text::terminal_text(&error);
-            public_output(&format!("{} Vade needs setup.\n  {error}\n\n{}", style::paint(style::Token::Warn, "▲", style::Stream::Out),
-                status::next_steps(&[("Start", "vade up"), ("Chat", "vade chat"), ("Stop", "vade down"), ("Check", "vade doctor")])));
+            // What is missing, the error's own next step, then where to start.
+            let (fact, next) = style::split(&text::terminal_text(&error));
+            let next = next.map_or(String::new(), |next| format!("  {next}\n"));
+            let start = if cfg!(all(target_os = "linux", target_arch = "aarch64")) { ("Start", "vade launch") } else { ("Preview", "vade launch --dry-run") };
+            public_output(&format!("{} {fact}\n{next}\n{}", style::paint(style::Token::Warn, "▲", style::Stream::Out),
+                status::next_steps(&[start, ("Check", "vade doctor"), ("Help", "vade --help")])));
             return;
         }
         Err(error) => fail(&error),
@@ -341,3 +362,14 @@ fn fail_private(message: &str) -> ! {
 #[cfg(test)]
 #[path = "../tests/host_edges/mod.rs"]
 mod host_edges;
+
+#[cfg(test)]
+mod internal_error_tests {
+    #[test]
+    fn a_panic_reads_as_an_error_with_a_next_step() {
+        let text = super::internal_error(Some(std::panic::Location::caller()));
+        assert!(text.starts_with("error: Vade hit an internal error at cli/src/main.rs:") || text.starts_with("error: Vade hit an internal error at src/main.rs:"), "{text}");
+        assert!(text.contains(". This is a bug in Vade, not in your setup.\n hint: Run the same command again with RUST_BACKTRACE=1"), "{text}");
+        assert!(super::internal_error(None).starts_with("error: Vade hit an internal error. "));
+    }
+}

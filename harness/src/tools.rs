@@ -111,7 +111,7 @@ impl Workspace {
 
     pub fn read(&self, path: &str) -> io::Result<String> {
         self.read_optional_bounded(path, MAX_READ_BYTES)?
-            .ok_or_else(|| error("file not found"))
+            .ok_or_else(|| error("No file exists at this path."))
     }
 
     /// Byte ranges use the same anchored path checks as whole-file reads.
@@ -130,9 +130,9 @@ impl Workspace {
         }
         let (mut file, stamp) = self
             .open_snapshot(path)?
-            .ok_or_else(|| error("file not found"))?;
+            .ok_or_else(|| error("No file exists at this path."))?;
         if stamp.directory {
-            return Err(error("read requires a regular file"));
+            return Err(error("This path is a folder, not a file."));
         }
         if let Some(text) = self.pdf_text(path, &mut file, &stamp, cancel)? {
             return text_range(&text, offset, limit, stamp.bytes);
@@ -146,7 +146,7 @@ impl Workspace {
         let scan = MAX_TEXT_BYTES.max(crate::readers::MAX_FILE_BYTES) as u64;
         if stamp.bytes > scan {
             return Err(error(&format!(
-                "source file is {} bytes; ranged-read source limit is {MAX_TEXT_BYTES} bytes (4 MiB) for UTF-8 text and {scan} bytes for other files",
+                "The file is {} bytes, more than the limit for byte-range reads: {MAX_TEXT_BYTES} bytes (4 MiB) for UTF-8 text and {scan} bytes for other files. Use workspace_search to find the part you need.",
                 stamp.bytes
             )));
         }
@@ -176,13 +176,13 @@ impl Workspace {
         }
         if stamp.bytes > MAX_TEXT_BYTES as u64 {
             return Err(error(&format!(
-                "source file is {} bytes; ranged-read source limit is {MAX_TEXT_BYTES} bytes (4 MiB)",
+                "The file is {} bytes, more than the {MAX_TEXT_BYTES}-byte (4 MiB) limit for byte-range reads. Use workspace_search to find the part you need.",
                 stamp.bytes
             )));
         }
         if offset as u64 > stamp.bytes {
             return Err(error(&format!(
-                "read offset is {offset} bytes; source file is {} bytes",
+                "The read offset is {offset} bytes, past the end of the {}-byte file. Use a smaller offset.",
                 stamp.bytes
             )));
         }
@@ -324,11 +324,11 @@ impl Workspace {
         };
         let cap = cap.min(MAX_READ_BYTES);
         if stamp.directory {
-            return Err(error("read requires a regular file"));
+            return Err(error("This path is a folder, not a file."));
         }
         if stamp.bytes > cap as u64 {
             return Err(error(&format!(
-                "source file is {} bytes; whole-file read limit is {cap} bytes; use workspace_read offset/limit byte ranges",
+                "The file is {} bytes, more than the {cap}-byte limit for a whole-file read. Use workspace_read with offset and limit to read it in parts.",
                 stamp.bytes
             )));
         }
@@ -347,7 +347,7 @@ impl Workspace {
         }
         String::from_utf8(bytes)
             .map(|text| Some((text, stamp)))
-            .map_err(|_| error("file is not UTF-8 text"))
+            .map_err(|_| error("This file is not UTF-8 text, so the agent cannot read it as text."))
     }
 
     pub(crate) fn stamp(&self, path: &str) -> io::Result<Option<FileStamp>> {
@@ -561,22 +561,22 @@ pub(crate) fn allowed_component(name: &str) -> bool {
 
 pub(crate) fn safe_parts(path: &str) -> io::Result<Vec<&str>> {
     if path.len() > 4096 || path.contains('\\') || path.chars().any(char::is_control) {
-        return Err(error("invalid workspace-relative path"));
+        return Err(error("This is not a valid path inside the workspace. Use a relative path with forward slashes."));
     }
     let mut parts = Vec::new();
     for component in Path::new(path).components() {
         match component {
             Component::CurDir => (),
             Component::Normal(value) => {
-                let value = value.to_str().ok_or_else(|| error("path must be UTF-8"))?;
+                let value = value.to_str().ok_or_else(|| error("This path is not valid UTF-8. Use a UTF-8 path."))?;
                 if !allowed_component(value) {
                     return Err(error(
-                        "non-ASCII, hidden or credential-related paths are blocked",
+                        "The agent does not open non-ASCII, hidden or credential-related paths.",
                     ));
                 }
                 parts.push(value);
             }
-            _ => return Err(error("use a relative path without parent traversal")),
+            _ => return Err(error("Use a path relative to the workspace, without .. or a leading /. The agent cannot reach files outside the workspace.")),
         }
     }
     Ok(parts)
@@ -711,7 +711,7 @@ pub(crate) mod anchored {
             let stream = unsafe { fdopendir(fd) };
             if stream.is_null() {
                 drop(unsafe { File::from_raw_fd(fd) });
-                return Err(error("cannot list directory"));
+                return Err(error("This folder cannot be listed. Check that it exists and that you can read it."));
             }
             Ok(Self(stream))
         }
@@ -855,7 +855,7 @@ pub(crate) mod anchored {
         pub fn child(&self, name: &str) -> io::Result<Self> {
             self.open(name, DIRECTORY)
                 .map(Self)
-                .map_err(|_| error("directory is unavailable or is a symlink"))
+                .map_err(|_| error("This folder does not exist or is a symbolic link. The agent does not follow links."))
         }
         fn verify_workspace_entry(&self, name: &str, file: &File) -> io::Result<()> {
             if !super::allowed_component(name) {
@@ -903,7 +903,7 @@ pub(crate) mod anchored {
                     Ok(Some(Self(file)))
                 }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-                Err(_) => Err(error("directory is unavailable or is a symlink")),
+                Err(_) => Err(error("This folder does not exist or is a symbolic link. The agent does not follow links.")),
             }
         }
         /// Creates a missing workspace directory, then opens it without
@@ -936,7 +936,7 @@ pub(crate) mod anchored {
                     Ok(Some(file))
                 }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-                Err(_) => Err(error("file unavailable or symlink")),
+                Err(_) => Err(error("This file does not exist or is a symbolic link. The agent does not follow links.")),
             }
         }
         pub(crate) fn journal_file(&self, name: &str) -> io::Result<File> {
@@ -1309,7 +1309,7 @@ mod tests {
         let mut utf8 = vec![b'a'; MAX_TEXT_BYTES];
         utf8.push(b'\n');
         fs::write(f.0.join("big.txt"), &utf8).unwrap();
-        assert!(w.read_range("big.txt", 0, 16).unwrap_err().to_string().contains("ranged-read source limit is 4194304 bytes"));
+        assert!(w.read_range("big.txt", 0, 16).unwrap_err().to_string().contains("more than the 4194304-byte (4 MiB) limit for byte-range reads"));
     }
     #[test]
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1326,7 +1326,7 @@ mod tests {
             w.read("large.txt")
                 .unwrap_err()
                 .to_string()
-                .contains("65537 bytes; whole-file read limit is 65536 bytes")
+                .contains("65537 bytes, more than the 65536-byte limit for a whole-file read")
         );
         assert!(
             w.read_range("large.txt", 65530, 32)

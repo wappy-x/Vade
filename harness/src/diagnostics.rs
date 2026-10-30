@@ -90,7 +90,7 @@ pub fn error_hint(error: &io::Error) -> &'static str {
     }
     match error.kind() {
         io::ErrorKind::ConnectionRefused => {
-            " Is the engine running? Check with vade status."
+            " Nothing answered at the endpoint. Check that the engine is running with vade status, or start it with vade launch."
         }
         io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => {
             " The engine did not answer in time. Check vade status, then retry."
@@ -184,6 +184,18 @@ pub fn stderr(args: std::fmt::Arguments<'_>) { let _ = io::stderr().lock().write
 /// [`stderr`] followed by a newline.
 pub fn stderr_line(args: std::fmt::Arguments<'_>) { let _ = writeln!(io::stderr().lock(), "{args}"); }
 
+/// Report a panic as one plain line for `program`, not a Rust panic message.
+/// RUST_BACKTRACE (other than 0) keeps the standard report for a bug report.
+pub fn install_panic_hook(program: &'static str) {
+    if std::env::var_os("RUST_BACKTRACE").is_some_and(|value| !value.is_empty() && value != "0") { return; }
+    std::panic::set_hook(Box::new(move |info| stderr_line(format_args!("{}", internal_error(program, info.location())))));
+}
+
+fn internal_error(program: &str, location: Option<&std::panic::Location<'_>>) -> String {
+    let place = location.map_or(String::new(), |at| format!(" at {}:{}", at.file(), at.line()));
+    format!("{program}: Vade hit an internal error{place}. This is a bug in Vade, not in your setup. Run the same command again with RUST_BACKTRACE=1 and report the output to the Vade maintainers.")
+}
+
 #[cfg(test)]
 mod file_error_tests {
     use super::*;
@@ -199,5 +211,15 @@ mod file_error_tests {
             assert!(hint.contains(action), "{kind:?}: {hint}");
             assert!(!hint.contains("PRIVATE") && !hint.contains('\x1b'));
         }
+    }
+}
+
+#[cfg(test)]
+mod panic_tests {
+    #[test]
+    fn a_panic_reads_as_one_line_with_a_next_step() {
+        let text = super::internal_error("vade", Some(std::panic::Location::caller()));
+        assert!(text.starts_with("vade: Vade hit an internal error at ") && text.contains("diagnostics.rs:"), "{text}");
+        assert!(text.ends_with("Run the same command again with RUST_BACKTRACE=1 and report the output to the Vade maintainers.") && !text.contains('\n'), "{text}");
     }
 }

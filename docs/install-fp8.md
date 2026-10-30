@@ -67,6 +67,7 @@ To download, run this from the repository root on a computer with Rust
 1.99.0, curl and network access:
 
 ```sh
+export PATH="$HOME/.cargo/bin:$PATH"
 sh ops/fetch-model.sh Qwen/Qwen3.8-Flash-Next-FP8 \
   236dfdf285828023ca3bcd3f37366c58a3469b13 \
   /absolute/path/to/Qwen3.8-Flash-Next-FP8
@@ -80,10 +81,13 @@ trust. `vade install` and `vade up` do not download weights.
 
 ## Write the config
 
-From the controller's checkout root, make a private config from the FP8
-template:
+From the controller's checkout root, build the CLI and make a private config
+from the FP8 template:
 
 ```sh
+export PATH="$HOME/.cargo/bin:$PATH"
+cargo +1.99.0 build --release --offline --manifest-path cli/Cargo.toml
+export PATH="$PWD/cli/target/release:$PATH"
 mkdir -m 700 -p .local
 [ -e .local/fp8.conf ] || cp cli/examples/vade.conf .local/fp8.conf
 export VADE_CONFIG="$PWD/.local/fp8.conf"

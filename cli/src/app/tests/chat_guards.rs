@@ -25,11 +25,11 @@ fn chat_refuses_each_unhealthy_state_before_opening_the_harness() {
     session.save(&f.app.config.state_dir).unwrap();
 
     f.app.runner.started.remove("b");
-    refused(&mut f, "An engine rank has stopped. Run vade status, then vade down.");
+    refused(&mut f, "The engine stopped on one of the Sparks. Run vade status, then vade down.");
     f.app.runner.started.insert("b".into());
 
     f.app.runner.tunnel_bad = true;
-    refused(&mut f, "The owned controller tunnel is down. Run vade status before chatting.");
+    refused(&mut f, "The SSH tunnel from this controller is down. Run vade status before you chat.");
     f.app.runner.tunnel_bad = false;
 
     f.app.runner.ready_model = Some("another-model".into());

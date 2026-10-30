@@ -613,7 +613,7 @@ mod mac_terminal {
         paste.extend(vec![b'x'; 65536]);
         paste.extend_from_slice(b"\x1b[201~\r");
         pty.send(&paste);
-        pty.wait_for("entire input discarded without sending");
+        pty.wait_for("so it was discarded and not sent");
         assert!(!pty.contains("Codex launch"));
         pty.send(b"/quit\r");
         pty.wait_exit_and_check_restore();

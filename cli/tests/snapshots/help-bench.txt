@@ -17,7 +17,7 @@ Options:
   --repeats N           Repeats per cohort, none discarded (default 1)
   --draft plain|strict  Override drafting on every request (default: server)
   --output FILE         JSON receipt (default ./vade-bench.json) and a sibling
-                        .txt table
+                        .txt table; --out is an alias
   --api-key-file FILE   Optional bearer credential; never stored in receipts
   --self-test           Run against a tiny local mock server; no GPU
   --help-all            List every option, including A/B runs and observation
@@ -27,5 +27,7 @@ Notes:
     Requests are greedy with cache and thinking off and a fixed length.
   - Prints one row per cohort: tokens per second, time to first token and the
     bytes the server reported.
+  - vade bench --suite URL runs the development workloads instead; see
+    engine/tools/bench/README.md.
 --- stderr
 --- exit 0

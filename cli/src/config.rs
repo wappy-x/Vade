@@ -102,8 +102,10 @@ impl Config {
     pub fn load() -> Result<Self, String> {
         let path = config_path()?;
         let text = fs::read_to_string(&path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                format!("Config is missing: {}. Copy cli/examples/fp4-local.conf for FP4-Local (or cli/examples/vade.conf for FP8), edit the placeholders, and set VADE_CONFIG. See INSTALL.md.", crate::text::quoted(&path.to_string_lossy()))
+            if error.kind() == std::io::ErrorKind::NotFound && env::var_os("VADE_CONFIG").is_none() {
+                format!("Vade is not set up yet: there is no local setup and no controller config at {}. Run vade launch on a Spark, or copy cli/examples/fp4-local.conf there (or set VADE_CONFIG to it) to drive Sparks from this computer. See INSTALL.md.", crate::text::quoted(&path.to_string_lossy()))
+            } else if error.kind() == std::io::ErrorKind::NotFound {
+                format!("VADE_CONFIG names a missing file: {}. Check the path, or copy cli/examples/fp4-local.conf there (cli/examples/vade.conf for FP8) and edit the placeholders. See INSTALL.md.", crate::text::quoted(&path.to_string_lossy()))
             } else if error.kind() == std::io::ErrorKind::InvalidData {
                 format!("Config {} is not UTF-8 text. Save it as plain UTF-8 text, then retry.", crate::text::quoted(&path.to_string_lossy()))
             } else {

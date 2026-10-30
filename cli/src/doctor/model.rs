@@ -224,7 +224,7 @@ pub(super) fn rows(report: &mut Report, prefix: &str, folder: &str, fields: &Fie
     let inventory = inventory(fields);
     report.check(&label("safetensors"), inventory.as_ref().map_err(Clone::clone), |shards| {
         let bytes: u64 = shards.values().copied().sum();
-        format!("{} files, {bytes} bytes", shards.len())
+        format!("{}, {bytes} bytes", crate::text::count(shards.len(), "file", "files"))
     }, "Copy all nonempty safetensors files from the checkpoint, then run vade doctor.")?;
     let result = json_field(fields, "index").and_then(|index| match &inventory {
         Ok(shards) => check_index(&index, shards),

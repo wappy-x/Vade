@@ -12,12 +12,12 @@ pub fn run(arguments: &[String], interrupted: fn() -> bool) -> Result<i32, Strin
     let mut arguments: Vec<String> = arguments.iter()
         .map(|arg| if arg == "--out" { "--output".into() } else { arg.clone() }).collect();
     if arguments.windows(2).any(|pair| pair[0] == "--output" && pair[1].is_empty()) {
-        return Err("missing value for --output".into());
+        return Err("Give --output a value. Run vade bench --help.".into());
     }
     if !arguments.iter().any(|arg| arg == "--output") {
         arguments.extend(["--output".into(), "./vade-bench.json".into()]);
     }
-    let status = vade_bench::run(&arguments, interrupted)?;
+    let status = vade_bench::run(&arguments, interrupted).map_err(|error| usage_error(&error))?;
     // With the server's own drafting policy, say where it chose plain decoding:
     // those rows measure plain speed, which is why a level can trail the one before.
     if !arguments.iter().any(|arg| arg == "--draft") {
@@ -27,6 +27,36 @@ pub fn run(arguments: &[String], interrupted: fn() -> bool) -> Result<i32, Strin
         }
     }
     Ok(status)
+}
+
+/// `vade bench` has no lifecycle flags. Say so before the endpoint lookup and
+/// before the benchmark reads `--dry-run` or `--json` as an option that needs a value.
+pub fn refuse_lifecycle_flags(arguments: &[String]) -> Result<(), String> {
+    if arguments.first().is_some_and(|arg| arg != "--suite")
+        && arguments.iter().any(|arg| matches!(arg.as_str(), "--dry-run" | "--json"))
+    {
+        return Err("vade bench takes no --dry-run or --json. Run vade bench --help to see its options.".into());
+    }
+    Ok(())
+}
+
+/// The benchmark's terse usage errors in the CLI's shape: a sentence, then
+/// the help page to read. Other errors pass through as they are.
+fn usage_error(error: &str) -> String {
+    if let Some(flag) = error.strip_prefix("missing value for ") {
+        // The benchmark reads a value before it checks the name, so this can be a typo.
+        return format!("Give {flag} a value, or check its spelling. Run vade bench --help.");
+    }
+    if let Some(flag) = error.strip_prefix("invalid --") {
+        return format!("Give --{flag} a valid value. Run vade bench --help.");
+    }
+    if let Some(flag) = error.strip_prefix("unknown benchmark option ").and_then(|rest| rest.strip_suffix("; use vade bench --help")) {
+        return format!("Unknown option {} for vade bench. Run vade bench --help.", crate::text::argument(flag));
+    }
+    if error.starts_with("--") && !error.contains(". ") {
+        return format!("{}. Run vade bench --help.", error.trim_end_matches('.'));
+    }
+    error.to_owned()
 }
 
 /// The receipt is saved and the status decided; a closed or failing stdout
@@ -71,6 +101,30 @@ mod tests {
         assert_eq!(super::plain_note(&receipt(&[cell(4, &["strict"; 4]), cell(8, &["plain", "plain", "strict", "plain"])])).unwrap(),
             "Drafting: the server answered without drafting (plain decoding) for 3 of 4 replies at 8 chats; those rows measure plain speed. Each reply's mode is under sampling_echo in the receipt.");
         assert_eq!(super::plain_note("not json"), None);
+    }
+
+    #[test]
+    fn usage_errors_name_the_help_page() {
+        // The benchmark's own parser makes each error; --self-test keeps it offline.
+        let parse = |arguments: &[&str]| {
+            let arguments: Vec<String> = ["--self-test"].iter().chain(arguments).map(|arg| (*arg).to_owned()).collect();
+            super::usage_error(&vade_bench::run(&arguments, || false).unwrap_err())
+        };
+        assert_eq!(parse(&["--repeats"]), "Give --repeats a value, or check its spelling. Run vade bench --help.");
+        assert_eq!(parse(&["--timeout", "soon"]), "Give --timeout a valid value. Run vade bench --help.");
+        assert_eq!(parse(&["--bogus", "1"]), "Unknown option \"--bogus\" for vade bench. Run vade bench --help.");
+        assert_eq!(parse(&["--draft", "fast"]), "--draft must be plain or strict. Run vade bench --help.");
+        assert_eq!(super::usage_error("Connection refused."), "Connection refused.");
+    }
+
+    #[test]
+    fn lifecycle_flags_are_refused_before_the_benchmark_reads_them() {
+        let refuse = |arguments: &[&str]| super::refuse_lifecycle_flags(&arguments.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>());
+        for flags in [&["--self-test", "--dry-run"][..], &["--json"], &["--repeats", "2", "--json"]] {
+            assert_eq!(refuse(flags).unwrap_err(), "vade bench takes no --dry-run or --json. Run vade bench --help to see its options.");
+        }
+        assert!(refuse(&["--self-test"]).is_ok());
+        assert!(refuse(&["--suite", "--json"]).is_ok(), "the development suite keeps its own options");
     }
 
     #[test]

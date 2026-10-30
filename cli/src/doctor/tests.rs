@@ -77,7 +77,7 @@ fn fake_ssh_checks_model_and_free_ports_on_the_configured_destination() {
     let (result, printed) = captured(|report| machine(report, &mut runner, &machine_config, &[Port::http(18080), Port::new("0.0.0.0", 29960), Port::new("0.0.0.0", 29961)], false, STATE));
     result.unwrap();
     assert_eq!(runner.calls, 1);
-    assert!(printed.contains("1 files, 32 bytes"), "{printed}");
+    assert!(printed.contains("1 file, 32 bytes"), "{printed}");
     for port in [18080, 29960, 29961] { assert!(printed.contains(&format!("spark-a port {port}")), "{printed}"); }
     assert!(printed.contains("34359738368 bytes free"), "{printed}");
     assert!(printed.contains("checkpoint 32 bytes fits with working room before context"), "{printed}");
@@ -168,7 +168,7 @@ fn fake_ssh_reports_unavailable_ss_and_preserves_other_checks() {
     let (result, printed) = captured(|report| machine(report, &mut runner, &machine_config, &[Port::http(18080)], false, STATE));
     assert!(result.is_err());
     assert!(printed.contains("Install the ss command on the Spark"), "{printed}");
-    assert!(printed.contains("1 files, 32 bytes"), "{printed}");
+    assert!(printed.contains("1 file, 32 bytes"), "{printed}");
 }
 
 struct Reply { result: Result<Output, String>, calls: usize }
@@ -211,8 +211,8 @@ fn fake_ssh_reports_zero_and_insufficient_free_memory() {
         let (result, printed) = captured(|report| machine(report, &mut runner, &machine_config, &[Port::http(18080)], false, state));
         assert!(result.is_err(), "{printed}");
         assert!(printed.contains("FAIL  spark-a model memory") && printed.contains("Not enough memory"), "{printed}");
-        assert!(printed.contains("stop other processes holding memory"), "{printed}");
-        assert!(printed.contains("1 files, 32 bytes"), "{printed}");
+        assert!(printed.contains("Dropping the page cache does not help"), "{printed}");
+        assert!(printed.contains("1 file, 32 bytes"), "{printed}");
     }
 }
 
@@ -243,7 +243,7 @@ fn fake_ssh_reports_split_memory_without_a_full_checkpoint_floor() {
     let state = RemoteState { split: true, ..state };
     let (result, printed) = captured(|report| machine(report, &mut runner, &machine_config, &[Port::http(18080)], false, state));
     result.unwrap();
-    assert!(printed.contains("MemAvailable 4.0 GiB") && printed.contains("startup checks the tensor share and context"), "{printed}");
+    assert!(printed.contains("4.0 GiB available") && printed.contains("startup checks the tensor share and context"), "{printed}");
     assert!(!printed.contains("fits with working room"), "{printed}");
     for memory in [None, Some((120 << 30, 0)), Some((0, 0)), Some((4 << 30, 8 << 30))] {
         let state = RemoteState { memory, ..state };

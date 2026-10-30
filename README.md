@@ -99,10 +99,11 @@ export PATH="$HOME/.cargo/bin:$HOME/vade/cli/target/release:$PATH"
 **No model yet?** The script builds the `vade` command first, then checks the
 model with `vade detect`. Without the model it stops at that check. Put `vade`
 on your `PATH` as above, download and check the model, then run the script
-again:
+again (not the clone line, because the folder exists now):
 
 ```sh
 vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300
+sh "$HOME/vade/scripts/install.sh" --launch
 ```
 
 [Download models](docs/pull-models.md) explains resume, the file checks,

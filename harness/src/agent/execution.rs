@@ -353,7 +353,7 @@ fn run_observed_inner(
                 callback_failed = true;
                 return Err(io::Error::new(
                     io::ErrorKind::Interrupted,
-                    "agent cancelled",
+                    "agent canceled",
                 ));
             }
             emitted_bytes = emitted_bytes.saturating_add(text.len());

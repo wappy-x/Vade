@@ -1,4 +1,4 @@
-pub(crate) const HELP: &str = "Vade Harness — first-party Rust coding harness
+pub(crate) const HELP: &str = "Vade Harness: the first-party Rust coding agent and gateway for Vade.
 
 Usage:
   vade-harness [demo] [OPTIONS]
@@ -52,7 +52,7 @@ Options:
                         stay blocked. Alias: --dangerously-skip-prompts
   --context-tokens N    Agent: override server context budget; default from capabilities
   --no-compact          Agent: no automatic compaction; /compact still works
-  --prewarm-compaction  Agent: opt-in one-token cache warm after compaction; reply discarded
+  --prewarm-compaction  Agent: opt in to a one-token cache warm after compaction; reply discarded
   --reply-tokens N      Agent: estimated prose budget; 0 disables local budgeting
                         Default: measured decode × min(120s, remaining task time / 8)
                         Unknown speed: 2048 tokens / 120s; default ceiling 4096
@@ -71,22 +71,25 @@ Options:
   --check COMMAND       Agent: run /bin/sh -c COMMAND in the sandbox after edits (or .vade/check)
                         Requires macOS; noninteractive runs require --approval auto
   --no-check            Agent: ignore the workspace .vade/check file
-  Environment          VADE_HARNESS_PREFIX_CACHE=0 disables negotiated shared-prefix caching
   --rules-scope PATH    Agent: freeze the AGENTS.md chain below the root to PATH (repeat ≤8)
   --shell-exclude NAME  Agent: extra inaccessible unscanned directory name (repeat ≤8)
   --shell-toolchain DIR Agent: owner-selected Rust distribution; bin/lib read-only
   --plain               Line input; no raw terminal/color
   --bind ADDRESS        Gateway bind, default 127.0.0.1:8787
   --children            Agent only: enable bounded children (read-only by default)
-  --child-edit NAME=PATH Host scope for exact file edits (repeat for each leased file)
-  --child-shell NAME     Host scope for shell; exclusive workspace writes, approvals apply
+  --child-edit NAME=PATH
+                        Host scope for exact file edits (repeat for each leased file)
+  --child-shell NAME    Host scope for shell; exclusive workspace writes, approvals apply
   --upstream URL        HTTP upstream; repeat for cache-aware routing
   --permission POLICY   Codex: read-only/workspace-write; Hermes: deny-callbacks; required
   --hermes-bin PATH     Hermes executable (default hermes on PATH); fixed acp argument
   --external-session ID Resume/load a Hermes-owned session if negotiated
   --codex-bin PATH      Codex executable (default codex on PATH)
   --thread ID           Resume a Codex-owned thread
-  -h, --help            Help; --version prints version
+  -h, --help            Show this help; --version prints the version
+
+Environment:
+  VADE_HARNESS_PREFIX_CACHE=0  Turn off negotiated shared-prefix caching
 
 Agent writes private journals under VADE_HOME/projects/NAME-HASH/sessions by default
 (~/.vade without VADE_HOME), never inside the workspace. --session names a
@@ -106,7 +109,8 @@ Conversation commands:
   Type /                Common commands; keep typing to search all. Arrows select,
                         Enter runs, Tab completes, Esc closes
 
-Agent tools: workspace_read/list, workspace_search, workspace_read_lines, workspace_edit_lines, apply_patch, workspace_shell (macOS only), tool_output_read,
+Agent tools: workspace_read/list, workspace_search, workspace_read_lines,
+workspace_edit_lines, apply_patch, workspace_shell (macOS only), tool_output_read,
 skill_read, workspace_manifest, workspace_symbols.
 Patch previews are shown before approval. ask requires y/n (or /approve, /deny) for
 edits and for every command; only a command whose exact argv is on an allow list
@@ -135,7 +139,7 @@ remain on disk.
 Direct/native chat: input during a reply interrupts it, keeps the partial answer marked
 [interrupted] in context, and sends the new message after cancellation. Vade Engine
 uses /v1/cancel; foreign servers receive a socket close (stop is not guaranteed).
-/queue on opts into queueing; /queue off restores steering; /queue TEXT queues once.
+/queue on queues new messages; /queue off restores steering; /queue TEXT queues once.
 Raw terminal: Enter sends; reported Shift+Enter,
 Option+Enter or Ctrl+J inserts a newline. Up/Down recall submitted messages;
 Left/Right move the cursor. Home/End, Delete, Ctrl+U (clear), Ctrl+K (to line end),
@@ -152,7 +156,6 @@ The terminal owns mouse selection and Cmd+C; mouse reporting stays off.
 Runs lasting at least 30 seconds ring the bell and send an OSC 9 desktop notice
 and OSC 2 title when they end or wait for approval (terminal support required).
 Line mode uses /paste for multiline entry; Ctrl+C exits the process.
-
 
 Direct/demo recall is in memory (32 turns/256 KiB); --session stores only a counter
 for those modes. Codex owns its delegated policy and persistence. Inference and KV
@@ -182,7 +185,8 @@ Usage: vade-harness agent --endpoint URL --model NAME --workspace PATH [OPTIONS]
   --yes                 No prompts (same as --approval auto); blocked commands stay
                         blocked. Alias: --dangerously-skip-prompts
   --context-tokens N    Override server context budget (fallback 131072)
-  --agent-time-limit-seconds N Active work per request (default 1200; 0 disables)
+  --agent-time-limit-seconds N
+                        Active work per request (default 1200; 0 disables)
   --config PATH         Native JSON config; time limit and auto_continue settings
   --max-output-tokens N Output reservation; positive, within upstream limit
   --no-auto-continue    Wait for /continue after an output cutoff
@@ -206,7 +210,8 @@ Usage: vade-harness agent --endpoint URL --model NAME --workspace PATH [OPTIONS]
   --shell-exclude NAME  Block another directory name (repeat up to 8)
   --shell-toolchain DIR Owner-selected Rust distribution; bin/lib read-only
   --children            Enable bounded children; default scopes are read-only
-  --child-edit NAME=PATH Grant an exact child file scope (repeatable)
+  --child-edit NAME=PATH
+                        Grant an exact child file scope (repeatable)
   --child-shell NAME    Grant an exclusive child shell scope (repeatable)
   --plain               Line input without raw terminal or color
   -h, --help            Show this help

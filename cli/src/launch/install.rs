@@ -214,7 +214,7 @@ fn clean_source<R: Runner>(runner: &mut R, source: &Path) -> Result<(), String> 
 
 fn build<R: Runner>(root: &Path, runner: &mut R, cwd: &Path, target: &Path, label: &str, args: &[&str]) -> Result<(), String> {
     let started = Instant::now();
-    crate::output::line(format_args!("{label}: starting."))?;
+    crate::output::line(format_args!("{label}: started; a first build can take several minutes."))?;
     let mut exec = Exec::new(label, &crate::app::rust_tool("cargo"), args.iter().map(|s| (*s).into()).collect());
     exec.cwd = Some(cwd.into());
     exec.timeout = Duration::from_secs(1800);
@@ -242,7 +242,7 @@ fn build<R: Runner>(root: &Path, runner: &mut R, cwd: &Path, target: &Path, labe
         }
     });
     if result.is_err() { crate::output::operation_failed(); }
-    let timing = crate::output::line(format_args!("{label}: {:.3} s.", started.elapsed().as_secs_f64()));
+    let timing = crate::output::line(format_args!("{label}: {} {}.", if result.is_ok() { "done in" } else { "stopped after" }, crate::launch::elapsed(started.elapsed())));
     result?;
     timing
 }
@@ -529,7 +529,7 @@ mod tests {
             }
             "output-failure" | "spawn-failure" => {
                 let writer = crate::output::testing::Capture {
-                    fail_on: Some((" s.", std::io::ErrorKind::BrokenPipe)),
+                    fail_on: Some(("stopped after ", std::io::ErrorKind::BrokenPipe)),
                     ..Default::default()
                 };
                 crate::output::with_writer(writer, || {

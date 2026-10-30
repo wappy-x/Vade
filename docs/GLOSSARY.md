@@ -17,11 +17,17 @@ with a box that explains its own engine terms.
 
 **aarch64 (Arm64).** The processor family of the Spark's CPU. On Linux, `uname -m` reports it.
 
+**Agent (coding agent).** The mode of chat that can use tools: it reads, searches and edits files in the [workspace](#sz), and on macOS it can run commands in a [sandbox](#sz). `vade chat` opens it when the context is at least 8192 tokens; see [chat and the coding agent on Linux](../INSTALL.md#chat-and-the-coding-agent-on-linux).
+
 **Allowlist.** A list of the only files that may be copied. Anything not on it stays behind.
 
 **API (application programming interface).** The agreed format two programs use to talk to each other. Vade's engine speaks the OpenAI-style chat API.
 
+**API key file.** A file that holds the secret a client sends to the engine as a bearer credential (an `Authorization: Bearer` header). Pass it with `--api-key-file PATH` or `VADE_API_KEY_FILE`, and keep the file private.
+
 **Apache License 2.0.** A permissive open-source license: use, change and share the code, keep the notices.
+
+**Approval.** The agent asks before it edits a file or runs a command outside its read-only list. `--approval ask` (the default) asks each time, `auto` allows checked patches and sandboxed commands, and `never` refuses them.
 
 **Bandwidth, Gb/s and GB/s.** How much data a link moves per second. A lowercase **b** means bits and an uppercase **B** means bytes, so 196 Gb/s ≈ 24.5 GB/s.
 
@@ -50,6 +56,8 @@ with a box that explains its own engine terms.
 **Cohort, C1..C16.** A group of request streams running at the same time in a benchmark. C1 means one stream, C8 means eight and C16 means sixteen. These are the concurrency levels requested. They do not promise that every stream holds a GPU slot at once; see [benchmark definitions](benchmarks.md).
 
 **Cohort drafting.** [Drafting](#dg) for several chats at once. The engine drafts for up to eight chats together and checks all their guesses in one shared pass, and each chat still gets the same bytes it would get running alone. It is on by default on one Spark and on the two-Spark tensor split; see the [cohort policy](../engine/crates/serve/src/mtp_batch.rs).
+
+**Compaction.** Making a long chat fit its context again: older answers are replaced by a short summary, and your instructions, tool results and recent turns stay. `/compact` does it by hand, and chat does it by itself when the context is nearly full. The full record stays on disk in the [journal](#ho).
 
 **ConnectX-7 (CX7).** NVIDIA's high-speed network chip inside each Spark. It provides the two QSFP ports and RDMA.
 
@@ -84,10 +92,12 @@ with a box that explains its own engine terms.
 
 **DGX Spark.** NVIDIA's desktop AI computer, built around the GB10 chip, with 128 GB of memory shared by CPU and GPU.
 
-**Drafting, speculative decoding.** Something cheap guesses a few tokens ahead, and the main model checks them all in one step. Vade keeps only the guesses the main model would have picked itself, so answers do not change.
+**Drafting, speculative decoding.** Something cheap guesses a few tokens ahead, and the main model checks them all in one step. Vade keeps only the guesses the main model would have picked itself, so answers do not change. The drafting depth is how many tokens it guesses ahead. `--mtp N` sets it from 0 to 3, and 0 turns drafting off.
 
 - **Flash-Next** has no separate draft model. Its guesses come from the checkpoint's own MTP heads (see [MTP](#ho)) and from prompt lookup.
 - **Gemma 4 31B** is the exception. It can use Google's separate assistant draft model; see [its engine code](../engine/crates/engine/src/gemma4/assistant.rs).
+
+**Direct text chat.** Plain chat with no tools. `vade chat` uses it when the local context is below 8192 tokens, too small for the agent.
 
 **Dry run.** A preview: the command prints what it would do and changes nothing. Every `vade` lifecycle command accepts `--dry-run`.
 
@@ -134,6 +144,8 @@ with a box that explains its own engine terms.
 **Inference.** Using a trained model to produce output. Training builds the model; inference runs it.
 
 **Inference engine.** The program that loads a model's weights and runs inference efficiently, often for many users at once.
+
+**Journal (session journal).** The private record of one agent chat: messages, tool calls and results. It is kept under the [Vade home](#sz) in `projects/`, never in your project folder, so `--resume` can continue the chat later.
 
 **Jumbo frames.** Network packets larger than the usual 1,500 bytes; here, MTU 9000. Fewer, bigger packets move data faster.
 
@@ -184,11 +196,17 @@ Under greedy decoding, ON and OFF must return the same token IDs; see [request c
 
 ## P–R
 
+**Page cache.** Copies of recently read files that Linux keeps in spare memory. Linux gives that memory back when a program needs it, so Vade counts it as available memory. Dropping the page cache does not make more room for the engine.
+
 **Path (topology).** Ranks connected in a line with two open ends, rather than a closed ring. An FP4-Local chain relays work through its stages in order; see [pipeline stage geometry](../engine/crates/engine/src/flash/next_pp.rs).
 
 **Poison.** Marking execution state as unusable after a step fails halfway, so later work cannot quietly carry on from half-updated state. On the older [tensor-map rank path](#sz), a poisoned [rank session](../engine/crates/tp/src/next.rs) stays failed until a reset across all ranks succeeds.
 
 **Prefill.** Reading the whole prompt once, before the first answer token. It sets the time to first token.
+
+**Prefix cache.** Another name for the [prompt cache](#ac): the engine keeps the work from the start of earlier prompts, so a new request that starts the same way reads only the new part. `--cache-bytes 0` turns the retained cache off.
+
+**Preflight.** The checks Vade runs before it installs or starts anything: the machine, driver, memory, disk and model files. A failed preflight changes nothing.
 
 **Prompt.** Everything sent to the model for one turn: instructions, the conversation so far, and the new question.
 
@@ -228,13 +246,19 @@ Under greedy decoding, ON and OFF must return the same token IDs; see [request c
 
 **Sampling.** Picking the next token with some randomness, controlled by settings like temperature. Turning it off gives greedy decoding.
 
+**Sandbox.** The macOS limits around the commands the agent runs: no network, a cleared environment and a 120-second time limit. Linux has no such sandbox yet, so there the agent does not run commands.
+
 **Scrub.** Removing private details from files before they are shared.
+
+**Skill.** A short instruction file that a project offers the agent. The agent sees each skill by name and loads its text only when it needs it. A skill never runs a script by itself.
 
 **Splitter.** The planner that decides which Spark owns which part of each layer, what the Sparks must add up or gather, and whether each one has the memory. See [Splitter](splitter.md).
 
 **SSH alias.** A short name in `~/.ssh/config` that stands for a machine's address, user and key. The Vade config's `ssh` entries may use these aliases or a plain `user@host`.
 
 **SSH tunnel.** A private pipe through SSH that makes a port on a remote machine appear on your own. On the configured controller, `vade up` opens one to rank 0.
+
+**Steering.** Typing while the agent answers. Chat stops the answer, keeps the part already written, and sends your new message. `/queue on` waits for the answer to finish instead, and `/queue off` turns steering back on.
 
 **Streaming.** Sending the answer as it is written, token by token, instead of all at the end.
 
@@ -252,6 +276,8 @@ Under greedy decoding, ON and OFF must return the same token IDs; see [request c
 
 It runs on four Sparks only; see [the rank backend](../engine/docs/next-http.md#native-rank-backend).
 
+**Thinking.** Reasoning text the model can write before its answer. It is off by default; `--thinking on` or `--effort LEVEL` turns it on, and Ctrl+T shows or hides it in chat.
+
 **Time to first token (TTFT).** Seconds from sending a request to receiving the first piece of the answer.
 
 **Token.** The small unit of text a model reads and writes, often a word or part of a word.
@@ -261,6 +287,8 @@ It runs on four Sparks only; see [the rank backend](../engine/docs/next-http.md#
 **Tokens per second (tok/s).** How fast answer text comes out.
 
 **Tool calls.** The model asks the harness to run a tool, such as reading a file, and gets the result back.
+
+**Vade home (`VADE_HOME`).** The private folder that holds Vade's install, saved defaults, engine state and chat history; `~/.vade` by default. Keep the same Vade home for every command of one installation.
 
 **Weights.** The learned numbers that make up a model. Loading a model means loading its weights into memory.
 

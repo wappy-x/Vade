@@ -237,7 +237,7 @@ pub(super) fn request_with_policy<'a>(
     if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
         return Err(io::Error::new(
             io::ErrorKind::ConnectionAborted,
-            "request cancelled",
+            "request canceled",
         ));
     }
     if deadline.is_some_and(|at| Instant::now() >= at) {

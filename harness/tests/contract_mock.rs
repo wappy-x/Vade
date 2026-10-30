@@ -577,7 +577,7 @@ fn manual_compaction_counts_before_save_and_warm_failure_allows_real_followup() 
                 "refused plan must not write a journal record"
             );
         } else {
-            child.until(true, "optional pre-warm failed or cancelled");
+            child.until(true, "optional pre-warm failed or was canceled");
             assert_ne!(std::fs::read(&path).unwrap(), before);
         }
         child.send("tiny follow-up\n");

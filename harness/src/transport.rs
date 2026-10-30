@@ -290,7 +290,7 @@ impl<'a> DeadlineStream<'a> {
         if self.cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
             return Err(io::Error::new(
                 io::ErrorKind::ConnectionAborted,
-                "request cancelled",
+                "request canceled",
             ));
         }
         if self.start.elapsed() >= LIFETIME

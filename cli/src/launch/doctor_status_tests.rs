@@ -24,13 +24,13 @@ fn doctor_reports_every_check_and_counts_the_failures() {
     // `state  name` at fixed columns, so each row can be found by its start.
     let row = |state: &str, name: &str| format!("{state:<4}  {name:<20}  ");
     let (result, printed) = captured(|| launch.execute(Command::Doctor, false));
-    assert_eq!(result.unwrap_err(), "1 doctor check(s) failed. Run each next: command above, then vade doctor.");
+    assert_eq!(result.unwrap_err(), "1 doctor check failed. Run the next: step under each FAIL row, then run vade doctor again.");
     for line in [
         format!("{}No saved config; first-run defaults apply.", row("ok", "config")),
         row("ok", "vade binary"),
         row("ok", "VADE_HOME writable"),
         format!("{}no engine recorded", row("ok", "ownership")),
-        format!("{}Local artifacts are missing or have changed.\n      next: Run vade down, then vade install", row("FAIL", "installed binaries")),
+        format!("{}Vade is not installed yet.\n      next: Run vade launch to install and start Vade.", row("FAIL", "installed binaries")),
         row("ok", "model files"),
         row("ok", "model folder"),
         row("ok", "config.json"),
@@ -54,7 +54,7 @@ fn doctor_reports_every_check_and_counts_the_failures() {
     // A fresh install needs install room as well as the model volume's.
     launch.detector.identity.install_free = GIB;
     let (result, printed) = captured(|| launch.execute(Command::Doctor, false));
-    assert!(result.unwrap_err().starts_with("2 doctor check(s) failed."));
+    assert!(result.unwrap_err().starts_with("2 doctor checks failed."));
     assert!(printed.contains(&format!("{}Insufficient disk working room: install needs 8.0 GiB and model volume needs 1 GiB.\n      next: Free space", row("FAIL", "disk"))), "{printed}");
 
     launch.detector.identity = identity();
@@ -87,7 +87,7 @@ fn doctor_keeps_file_checks_after_model_discovery_fails() {
     let (result, printed) = captured(|| launch.execute(Command::Doctor, false));
     assert!(result.is_err());
     assert!(printed.contains("FAIL  model files") && printed.contains("FAIL  tokenizer.json"), "{printed}");
-    assert!(printed.contains("1 files, 32 bytes") && printed.contains("Copy a complete tokenizer.json"), "{printed}");
+    assert!(printed.contains("1 file, 32 bytes") && printed.contains("Copy a complete tokenizer.json"), "{printed}");
     assert!(printed.contains("ok    default context") && printed.contains("8192 tokens"), "{printed}");
     assert_eq!(fs::read(f.root.join("config")).unwrap(), saved, "doctor must preserve saved defaults");
     assert_eq!(launch.runner.starts, 0);

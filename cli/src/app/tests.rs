@@ -495,7 +495,7 @@ fn staged_hashes_survive_changed_build_outputs_and_guard_every_harness_use() {
     for command in [Command::Chat(Default::default()), Command::Sessions(vec!["list".into()]), Command::Doctor] {
         // Chat and sessions stop at the hash; doctor reports it as its harness row's FAIL.
         f.app.runner.calls.clear(); let doctor = command == Command::Doctor; let error = f.app.execute(command).unwrap_err();
-        assert!(if doctor { error.starts_with("1 doctor check(s) failed.") } else { error.contains("differs from its saved hash") }, "{error}");
+        assert!(if doctor { error.starts_with("1 doctor check failed.") } else { error.contains("differs from its saved hash") }, "{error}");
         assert!(f.app.runner.calls.iter().any(|e| e.label == "harness hash")); assert!(!f.app.runner.calls.iter().any(|e| ["Vade chat", "saved sessions"].contains(&e.label.as_str()) || e.label.starts_with("harness doctor")));
     }
     f.app.execute(Command::Down).unwrap(); f.app.runner.calls.clear(); assert!(f.app.harness_doctor(true).unwrap_err().contains("differs from its saved hash"));
@@ -522,7 +522,7 @@ fn fake_full_lifecycle_and_recorded_targets() {
     assert_eq!(request["env_unset.FLASH_BF16_MMA"], "1"); assert_eq!(request["env.TP_WATCH_STDIN"], "0"); let secret = &request["env.SEQPAR_CONTROL_SECRET"]; assert!(!launch.args.iter().any(|a| a.contains(secret)) && !fs::read_to_string(f.app.config.state_dir.join("session.conf")).unwrap().contains(secret));
     assert!(!fs::read_dir(&f.app.config.state_dir).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().starts_with("env-")));
     f.app.execute(Command::Menu).unwrap(); f.app.execute(Command::Status).unwrap(); f.app.execute(Command::Chat(Default::default())).unwrap();
-    let mut starting = Session::load(&f.app.config.state_dir).unwrap().unwrap(); starting.phase = "starting".into(); starting.save(&f.app.config.state_dir).unwrap(); f.app.runner.started.remove("b"); assert!(f.app.execute(Command::Status).unwrap_err().contains("stopped or missing ranks"));
+    let mut starting = Session::load(&f.app.config.state_dir).unwrap().unwrap(); starting.phase = "starting".into(); starting.save(&f.app.config.state_dir).unwrap(); f.app.runner.started.remove("b"); assert!(f.app.execute(Command::Status).unwrap_err().contains("never started, on one or more Sparks"));
     f.app.runner.started.insert("b".into()); starting.phase = "running".into(); starting.save(&f.app.config.state_dir).unwrap();
     let chat = f.app.runner.calls.iter().find(|e| e.label == "Vade chat").unwrap();
     assert_eq!(chat.args[0], "agent"); assert!(!chat.args.contains(&"--plain".into()) && chat.unset.contains(&"OPENAI_API_KEY".into()));
@@ -1172,7 +1172,7 @@ fn doctor_skips_checks_an_earlier_failure_hid() {
     };
     let row = |printed: &str, name: &str| printed.lines().find(|line| line[6..].starts_with(name)).unwrap_or_else(|| panic!("{name}:\n{printed}")).to_owned();
     let (result, printed) = rows(Some((false, "gpu=NVIDIA GB10, 580.95\ndisk_kb=10\nmem_total_kb=127608480\nmem_available_kb=115343360\nmissing=disk\n")), 1, Ok(false));
-    assert!(result.unwrap_err().starts_with("1 doctor check(s) failed."), "{printed}");
+    assert!(result.unwrap_err().starts_with("1 doctor check failed."), "{printed}");
     assert!(row(&printed, "a disk").starts_with("FAIL"), "{printed}");
     assert_eq!(row(&printed, "a model files"), "skip  a model files         not checked; the script stopped at disk");
     let (_, printed) = rows(Some((false, "missing=cargo\n")), 1, Ok(false));

@@ -109,7 +109,7 @@ impl ChatClient {
             if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
                 Err(io::Error::new(
                     io::ErrorKind::ConnectionAborted,
-                    "request cancelled",
+                    "request canceled",
                 ))
             } else {
                 Ok(())

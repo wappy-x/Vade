@@ -43,8 +43,8 @@ pub(crate) const COMMANDS: &[Command] = &[
     Command::new("new", "", "Start a fresh conversation.", "Wait for cleanup. Native mode keeps the old journal; delegated mode starts a fresh external session.", "Sessions", "all", true),
     Command::new("clear", "", "Clear the conversation.", "Alias for /new. Keeps old native journals and waits for worker cleanup.", "Sessions", "all", false),
     Command::new("memory", "", "Show memory support.", "Saved memory is not available in this build. Use project instructions for saved rules.", "Context", "all", false),
-    Command::new("quit", "", "Exit the harness.", "Active native or delegated work is cancelled and cleaned up before exit. Alias: /exit.", "Sessions", "all", true),
-    Command::new("exit", "", "Exit the harness.", "Alias for /quit.", "Sessions", "all", false),
+    Command::new("quit", "", "Leave chat; the engine keeps running.", "Active native or delegated work is canceled and cleaned up before exit. Alias: /exit.", "Sessions", "all", true),
+    Command::new("exit", "", "Leave chat; the engine keeps running.", "Alias for /quit.", "Sessions", "all", false),
     Command::new("undo", "", "Remove the last chat exchange.", "Direct/demo only; tool and delegated histories cannot be spliced.", "Sessions", "chat", false),
     Command::new("paste", "", "Collect multiline input.", "Line mode: /end sends, /cancel discards. Raw mode: pasted text waits for Enter.", "Sessions", "all", false),
     Command::new("end", "", "Send collected multiline input.", "Available while /paste is collecting lines.", "Sessions", "all", false),
@@ -118,7 +118,7 @@ impl App {
                     return self.notice(if submitted {
                         "Approved this exact operation once."
                     } else {
-                        "Approval expired or cancelled; no operation authorized."
+                        "Approval expired or canceled; no operation authorized."
                     });
                 }
                 "/deny" => {

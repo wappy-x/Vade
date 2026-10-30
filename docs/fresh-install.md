@@ -123,7 +123,7 @@ Unset it to go back to the RDMA default.
 | `fabric.<peer>` in the config | Own address on the QSFP cable | Own ordinary address that the other Spark can reach |
 | Unlimited locked memory, RDMA setup | Required | Not needed |
 | Open between the Sparks | TCP 29960, 29961, RoCE UDP 4791, ping | TCP 29960, 29961 |
-| `vade up --fp8` says | `… on 2 machines using RDMA.` | `… on 2 machines using TCP.` |
+| `vade up --fp8` says | `… on 2 Sparks over RDMA.` | `… on 2 Sparks over TCP.` |
 | Rank logs show | `rdma=true` | `rdma=false` |
 | Speed | See [dated receipts](benchmarks.md) | No current measurement published here |
 
@@ -424,9 +424,9 @@ vade up --fp8
 ```
 
 ```text
-Starting qwen3.8-flash-next-fp8 on 2 machines using RDMA. Waiting for the model to be ready.
-qwen3.8-flash-next-fp8: ready on 2 machines. MTP 2, context 131072.
-Chat here: vade chat
+Starting qwen3.8-flash-next-fp8 on 2 Sparks over RDMA. Waiting for the model to load.
+qwen3.8-flash-next-fp8 ready on 2 Sparks at http://localhost:18080: context 131072 tokens, drafting depth 2.
+  Chat: vade chat   Stop: vade down
 ```
 
 Loading the weights takes minutes. `vade up --fp8` waits up to
@@ -513,7 +513,7 @@ vade down
 ```
 
 ```text
-Vade: stopped. Its owned ranks and tunnel are closed.
+Vade is stopped. The engines and the tunnel that vade started are closed.
 ```
 
 > **If it doesn't fit.** Does `vade up --fp8` stop with "Requested

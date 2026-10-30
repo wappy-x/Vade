@@ -579,7 +579,7 @@ impl Model for NativeModel {
         if cancel.load(Ordering::Relaxed) {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
-                "pre-warm cancelled",
+                "pre-warm canceled",
             ));
         }
         // Validate framing and finish without passing any provisional output to
@@ -694,7 +694,7 @@ impl NativeModel {
             if cancel.load(Ordering::Relaxed) {
                 Err(io::Error::new(
                     io::ErrorKind::ConnectionAborted,
-                    "request cancelled",
+                    "request canceled",
                 ))
             } else {
                 Ok(())

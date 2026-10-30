@@ -96,41 +96,49 @@ Vade runs Qwen3.8 Flash-Next FP4-Local on your DGX Spark.
 Examples:
   vade launch  Start on this Spark, then chat
   vade status  See what is running
-  vade doctor  Check the setup, one line per check
+  vade doctor  Check the setup, then PASS or FAIL
   vade down    Stop what vade started
 
 Usage: vade <COMMAND> [OPTIONS]
 
 Start and stop:
-  launch   Install if missing, start on this Spark, then chat
-  up       Start without chat (this Spark, or Sparks from a controller)
-  down     Stop what vade started
+  launch    Install if needed, start on this Spark, then open chat
+  up        Start without chat (this Spark, or Sparks from a controller)
+  down      Stop what vade started
 
 Use:
-  chat     Chat with the running engine
+  chat      Chat with the running engine
+  sessions  List, export or delete saved chat sessions
+  read      Print a file as Markdown (text, HTML, CSV, RTF, data, code)
+  tools     List the tools chat offers: native and MCP
+  mcp       Add, list, test, trust or remove MCP tool servers
+
+Models:
+  pull      Download a model from Hugging Face, with resume and checks
+  models    List the models on this machine and what can serve them
 
 Look:
-  status   Show what is running and whether it is healthy
-  config   Show which setup is selected and what it holds
-  doctor   Check the setup: one line per check, then PASS or FAIL
-  detect   Show this Spark's machine, memory, disk, driver and model
-  logs     Show recent engine logs
+  status    Show what is running and whether it is healthy
+  config    Show which setup is selected and what it holds
+  doctor    Check the setup, one line per check, then PASS or FAIL
+  detect    Show this Spark's machine, memory, disk, driver and model
+  logs      Show recent engine logs
 
 Prove:
-  verify   Check exact token IDs across runs, drafting ON and OFF
-  bench    Measure a running server from this client
-  test     Run the build, determinism and long-context gate checks
+  verify    Check exact token IDs across runs, drafting ON and OFF
+  bench     Measure a running server from this client
+  test      Run the build, determinism and long-context gate checks
 
 Maintain:
-  install  Save local defaults and install the engine and chat
-  update   Refresh the installed engine and chat
-  run      Run the separate legacy Qwen3-8B BF16 workflow
-  version  Print the CLI version
+  install   Save local defaults and install the engine and chat
+  update    Refresh the installed engine and chat
+  run       Run the separate legacy Qwen3-8B BF16 workflow
+  version   Print the CLI version
 
 Options:
   --json               JSON output for status, doctor, config, detect, version
-  --dry-run            Preview a lifecycle command; nothing changes
-  --api-key-file PATH  Credential for chat, doctor and local run
+  --dry-run            Preview a lifecycle command; others run as usual
+  --api-key-file PATH  Credential for chat, doctor, verify, bench and local run
   -h, --help           Show help
   -V, --version        Print the CLI version
 
@@ -145,7 +153,8 @@ Notes:
     logs, down and doctor, even after local setup; keep it set to the same file
     throughout that lifecycle. Without VADE_CONFIG, saved local setup wins over
     the user config directory.
-  - Global flags such as --dry-run before bench are unsupported.
+  - Put options after the command name. bench, verify and test do not take
+    --dry-run or --json.
 
 Learn more: vade <command> --help
 [exit 0]
@@ -181,14 +190,14 @@ next step for both routes; the local tools still get checked.
 
 ```text
 $ vade doctor
-FAIL  config                Config is missing: "/tmp/vade-example/Library/Application Support/vade/config".
-      next: On a Spark, run vade launch; for a controller, copy cli/examples/fp4-local.conf, edit it and set VADE_CONFIG (INSTALL.md).
+FAIL  config                Vade is not set up yet: there is no local setup and no controller config at "/tmp/vade-example/Library/Application Support/vade/config".
+      next: Run vade launch on a Spark, or copy cli/examples/fp4-local.conf, edit it and set VADE_CONFIG to drive Sparks from this computer (INSTALL.md).
 ok    ssh                   found on this computer
 ok    rsync                 found on this computer
 ok    curl                  found on this computer
 FAIL  3 ok, 1 failed, 0 skipped in 178 ms
-error: 1 doctor check(s) failed.
- hint: Run each next: command above, then vade doctor.
+error: 1 doctor check failed.
+ hint: Run the next: step under each FAIL row, then run vade doctor again.
 [exit 1]
 ```
 
@@ -196,7 +205,7 @@ The same as JSON, for scripts (nothing on stderr):
 
 ```text
 $ vade doctor --json
-{"schema":"vade.doctor.v1","mode":"none","dry_run":false,"result":"fail","ok":3,"failed":1,"skipped":0,"planned":0,"checks":[{"name":"config","state":"fail","detail":"Config is missing: \"/tmp/vade-example/Library/Application Support/vade/config\".","next":"On a Spark, run vade launch; for a controller, copy cli/examples/fp4-local.conf, edit it and set VADE_CONFIG (INSTALL.md)."},{"name":"ssh","state":"ok","detail":"found on this computer","next":null},{"name":"rsync","state":"ok","detail":"found on this computer","next":null},{"name":"curl","state":"ok","detail":"found on this computer","next":null}],"elapsed_ms":172.420292}
+{"schema":"vade.doctor.v1","mode":"none","dry_run":false,"result":"fail","ok":3,"failed":1,"skipped":0,"planned":0,"checks":[{"name":"config","state":"fail","detail":"Vade is not set up yet: there is no local setup and no controller config at \"/tmp/vade-example/Library/Application Support/vade/config\".","next":"Run vade launch on a Spark, or copy cli/examples/fp4-local.conf, edit it and set VADE_CONFIG to drive Sparks from this computer (INSTALL.md)."},{"name":"ssh","state":"ok","detail":"found on this computer","next":null},{"name":"rsync","state":"ok","detail":"found on this computer","next":null},{"name":"curl","state":"ok","detail":"found on this computer","next":null}],"elapsed_ms":172.420292}
 [exit 1]
 ```
 

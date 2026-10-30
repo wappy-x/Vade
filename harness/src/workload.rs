@@ -738,7 +738,7 @@ pub fn run(config: Config) -> io::Result<Report> {
                         .filter(|waiting| waiting.load(Ordering::Relaxed))
                         .count(),
                     if cancel.load(Ordering::Relaxed) {
-                        "; cancelling"
+                        "; canceling"
                     } else {
                         ""
                     }

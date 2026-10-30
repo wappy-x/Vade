@@ -64,6 +64,20 @@ Changes that are merged but not yet released are under Unreleased.
 
 - The native agent has `web_fetch` and `web_search`; harness `--no-web` or `VADE_WEB=0` turns both off.
 
+- Help, errors and startup lines read in plain words. Each error says what
+  failed and what to run next; with nothing set up, `vade status`, `vade chat`
+  and `vade doctor` name `vade launch`. On a Spark, `vade up` now prints a
+  ready line like `vade launch`: the address, context, output and Spark count.
+  From a controller, the ready line gives the address, context, drafting depth
+  and Spark count. A bug in `vade`, `vade-harness` or `vade-gateway` prints one
+  plain error that asks for a report in place of the Rust panic message
+  (`RUST_BACKTRACE=1` shows the full report). The agent's file tool errors are
+  full sentences, and the glossary covers the new terms.
+
+- On macOS, the agent and the gateway now read a reply that a server sends
+  just before it closes the connection, such as a 401 for a wrong key. Before,
+  they could report "Invalid argument" in place of the reply.
+
 ## v0.2.0 - not released yet
 
 v0.2.0 makes two Sparks much faster than v0.1.0. Two Sparks also admit more

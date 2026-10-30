@@ -201,7 +201,7 @@ fn workspace_build(directory: &Path, args: &[String]) -> Command {
 fn step(label: &str, commands: &mut [Command], log: &Path) -> i32 {
     if File::create(log).is_err() {
         crate::output::report(format_args!("FAIL {label} (exit 1)"), true);
-        crate::output::stderr_line(format_args!("unable to create temporary build log"));
+        crate::output::stderr_line(format_args!("FAIL temporary: cannot create the temporary build log"));
         return 1;
     }
     for command in commands {

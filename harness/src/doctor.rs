@@ -267,7 +267,7 @@ fn error_category(error: &io::Error) -> &'static str {
             }
         }
         io::ErrorKind::TimedOut => "timeout",
-        io::ErrorKind::ConnectionAborted => "cancelled/deadline",
+        io::ErrorKind::ConnectionAborted => "canceled or past deadline",
         io::ErrorKind::UnexpectedEof => "incomplete HTTP response",
         io::ErrorKind::InvalidData => "invalid metadata/protocol",
         io::ErrorKind::ConnectionRefused => "connection refused",
@@ -525,7 +525,7 @@ fn outcome(reason: &StopReason) -> (&'static str, bool) {
     match reason {
         StopReason::Finished(FinishReason::Stop) => ("complete (stop)", true),
         StopReason::Finished(FinishReason::Length) => ("complete (output token limit)", true),
-        StopReason::Cancelled => ("cancelled/deadline", false),
+        StopReason::Cancelled => ("canceled or past deadline", false),
         StopReason::ModelError(io::ErrorKind::PermissionDenied) => {
             ("HTTP 401 Unauthorized: authentication failed", false)
         }

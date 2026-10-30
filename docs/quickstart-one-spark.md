@@ -181,7 +181,7 @@ Shut down in this order:
 vade down
 ```
 
-You should see `Vade: stopped. Its owned ranks and tunnel are closed.` Then,
+You should see `Vade is stopped. The engines and the tunnel that vade started are closed.` Then,
 on the Spark, `nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader`
 must show no row for that server.
 

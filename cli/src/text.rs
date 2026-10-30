@@ -35,6 +35,9 @@ pub fn argument(value: &str) -> String {
     format!("{}{}", quoted(&short), if short.len() < value.len() { "…" } else { "" })
 }
 
+/// `n` and the noun for it, such as "1 Spark" or "2 Sparks".
+pub fn count(n: usize, one: &str, many: &str) -> String { format!("{n} {}", if n == 1 { one } else { many }) }
+
 /// `value` as a Rust-style quoted string, safe to print on a terminal.
 pub fn quoted(value: &str) -> String {
     terminal_text(&format!("{value:?}")).into_owned()

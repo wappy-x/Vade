@@ -836,7 +836,7 @@ add. Passing host checks doesn't prove the GPU path works.
 
 Try `vade status`, `vade logs`, then `vade down` first. If the controller
 crashed or the SSH master died, `vade down` is all you need: it reports
-`controller tunnel already closed.` and carries on stopping the ranks you own.
+`The controller tunnel was already closed.` and carries on stopping the ranks you own.
 
 The launch helper saves the engine process's exact identity in a journal,
 `journal.conf` (see step 1 below), just before it starts that process (exec).

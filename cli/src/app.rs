@@ -133,9 +133,9 @@ impl<R: Runner> App<R> {
         }
         if !self.dry {
             crate::output::line(format_args!(
-                "Starting {} on {} machines using {}. Waiting for the model to be ready.",
+                "Starting {} on {} over {}. Waiting for the model to load.",
                 session.model,
-                session.ranks.len(),
+                crate::text::count(session.ranks.len(), "Spark", "Sparks"),
                 transport
             ))?;
         }
@@ -147,7 +147,7 @@ impl<R: Runner> App<R> {
             for index in 0..session.ranks.len() {
                 if self.runner.interrupted() {
                     return Err(
-                        "Startup interrupted. Stopping this launch's recorded ranks.".into(),
+                        "Startup was interrupted. Stopping the engines this launch started.".into(),
                     );
                 }
                 // Intent goes to disk before SSH: a lost reply is recovered from the remote journal.
@@ -203,18 +203,20 @@ impl<R: Runner> App<R> {
             }
             if self.dry {
                 crate::output::line(format_args!(
-                    "Start planned for {} on {} machines. Run the same command without --dry-run to start it.",
+                    "Start planned for {} on {}. Run the same command without --dry-run to start it.",
                     session.model,
-                    session.ranks.len()
+                    crate::text::count(session.ranks.len(), "Spark", "Sparks")
                 ))?;
             } else {
                 crate::output::line(format_args!(
-                    "{}: ready on {} machines{}. MTP {}, context {}.\nChat here: vade chat",
+                    "{} ready on {}{} at {}: context {} tokens, drafting depth {}.\n{}",
                     session.model,
-                    session.ranks.len(),
-                    if session.replicas { " as independent replicas behind the gateway" } else { "" },
+                    crate::text::count(session.ranks.len(), "Spark", "Sparks"),
+                    if session.replicas { " (independent replicas behind the gateway)" } else { "" },
+                    session.endpoint(),
+                    session.context,
                     session.mtp_label(),
-                    session.context
+                    crate::status::next_steps(&[("Chat", "vade chat"), ("Stop", "vade down")]).trim_end(),
                 ))?;
             }
             Ok(())
@@ -226,7 +228,7 @@ impl<R: Runner> App<R> {
                     crate::output::cleanup_failed();
                     return Err(format!("{error} Cleanup could not finish: {cleanup} Leave saved ownership files in place; retry vade down or see Recovery in cli/README.md."));
                 }
-                crate::output::stderr_line(format_args!("Owned cleanup finished. This launch's ranks and tunnel are closed."));
+                crate::output::stderr_line(format_args!("Cleanup finished. The engines and the tunnel this launch started are closed."));
             }
             return Err(error);
         }
@@ -375,11 +377,11 @@ impl<R: Runner> App<R> {
 
     fn down(&mut self) -> Result<(), String> {
         let Some(mut session) = Session::load(&self.config.state_dir)? else {
-            crate::output::line(format_args!("Vade: stopped. No owned engine or tunnel to stop."))?;
+            crate::output::line(format_args!("Vade is already stopped. Nothing to stop."))?;
             return Ok(());
         };
         self.cleanup(&mut session)?;
-        crate::output::line(format_args!("Vade: stopped. Its owned ranks and tunnel are closed."))?;
+        crate::output::line(format_args!("Vade is stopped. The engines and the tunnel that vade started are closed."))?;
         Ok(())
     }
 
@@ -422,7 +424,7 @@ impl<R: Runner> App<R> {
                     .cleanup(&self.tunnel_at(session, index, Some("check")))?;
                 if !self.dry && !checked.success {
                     remove_dead_socket(&socket)?;
-                    crate::output::stderr_line(format_args!("controller tunnel already closed."));
+                    crate::output::stderr_line(format_args!("The controller tunnel was already closed."));
                 }
             }
             if self.dry || socket.exists() {
@@ -501,7 +503,7 @@ impl<R: Runner> App<R> {
         if !self.dry && (!tunnel || !self.local_health(session)?) {
             return Err("The recorded engine or tunnel is unhealthy. Run vade status, then vade down; nothing restarted.".into());
         }
-        crate::output::line(format_args!("Vade: already ready at {}/v1 (running build {}). Chat here: vade chat", session.endpoint(), session.build))
+        crate::output::line(format_args!("Vade is already running at {}/v1 (build {}). Chat: vade chat", session.endpoint(), session.build))
     }
 
     fn status(&mut self) -> Result<(), String> {
@@ -544,7 +546,7 @@ impl<R: Runner> App<R> {
             }
         }
         if !self.dry && session.phase == "starting" && !all {
-            return Err("Vade startup has stopped or missing ranks. Run vade logs, then vade down before another start.".into());
+            return Err("The engine stopped, or never started, on one or more Sparks. Run vade logs, then vade down before another start.".into());
         }
         let tunnel = self.connection_ok(&session)?;
         if session.replicas {
@@ -642,11 +644,11 @@ impl<R: Runner> App<R> {
         for rank in &session.ranks {
             let fields = self.worker(&session, rank, "inspect", Fields::new())?;
             if !self.dry && fields.get("alive").map(String::as_str) != Some("true") {
-                return Err("An engine rank has stopped. Run vade status, then vade down.".into());
+                return Err("The engine stopped on one of the Sparks. Run vade status, then vade down.".into());
             }
         }
         if !self.connection_ok(&session)? {
-            return Err("The owned controller tunnel is down. Run vade status before chatting.".into());
+            return Err("The SSH tunnel from this controller is down. Run vade status before you chat.".into());
         }
         if !self.local_health(&session)? && !self.dry {
             return Err("The engine is not ready. Run vade status or vade doctor.".into());

@@ -146,6 +146,8 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
         .filter(|arg| arg.as_str() != "--dry-run")
         .map(String::as_str)
         .collect();
+    // A leading --json reads as if it followed the command: vade --json doctor.
+    if args.len() > 1 && args[0] == "--json" { args.rotate_left(1); }
     // --json belongs to the read-only commands; `status --json` keeps its own form.
     let json = args.first().is_some_and(|command| matches!(*command, "doctor" | "detect" | "config" | "version" | "--version" | "-V"))
         && args[1..].contains(&"--json");
@@ -165,8 +167,14 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
         return Ok(Cli { command: Command::Version, dry_run, json });
     }
     if matches!(command, "--help" | "-h" | "help") {
-        if args.len() > 2 || (args.len() == 2 && !known_command(args[1])) {
-            return Err("Use vade help, or vade help <command>.".into());
+        // Help is text only, so --json changes nothing.
+        args.retain(|arg| *arg != "--json");
+        let topic = |name: &str| known_command(name) || matches!(name, "bench" | "verify" | "test");
+        if args.len() > 2 || (args.len() == 2 && !topic(args[1])) {
+            return Err(match args.get(1) {
+                Some(topic) if args.len() == 2 => format!("No help topic is named {}. Run vade --help to see the commands.", crate::text::argument(topic)),
+                _ => "Use vade help, or vade help <command>.".into(),
+            });
         }
         return Ok(Cli {
             command: Command::Help(args.get(1).map(|s| (*s).into())),
@@ -175,6 +183,18 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
         });
     }
     if !known_command(command) {
+        // bench, verify and test parse their own options before this parser runs,
+        // so they reach it only with an option before their name.
+        if matches!(command, "bench" | "verify" | "test") {
+            return Err(if dry_run || args.contains(&"--json") {
+                format!("vade {command} takes no --dry-run or --json. Run vade {command} --help to see its options.")
+            } else {
+                format!("vade {command} reads only the options after its name. Run vade {command} --help to see them.")
+            });
+        }
+        if command.starts_with('-') {
+            return Err(format!("Unknown option {}. Put options after the command name. Run vade --help.", crate::text::argument(command)));
+        }
         return Err(format!("Unknown command {}. Run vade --help to see the commands.", crate::text::argument(command)));
     }
     if args[1..].iter().any(|arg| matches!(*arg, "--help" | "-h")) {
@@ -609,7 +629,12 @@ mod tests {
     fn argument_errors_name_the_command_to_run_instead() {
         for (args, expected) in [
             ("help up down", "Use vade help, or vade help <command>."),
-            ("help nonsense", "Use vade help, or vade help <command>."),
+            ("help nonsense", "No help topic is named \"nonsense\". Run vade --help to see the commands."),
+            ("--json verify", "vade verify takes no --dry-run or --json. Run vade verify --help to see its options."),
+            ("--dry-run bench", "vade bench takes no --dry-run or --json. Run vade bench --help to see its options."),
+            // What is left of `vade --api-key-file KEY bench` once the key file is taken out.
+            ("bench", "vade bench reads only the options after its name. Run vade bench --help to see them."),
+            ("--bogus up", "Unknown option \"--bogus\". Put options after the command name. Run vade --help."),
             ("version --json now", "Use vade --version without additional arguments."),
             ("run", "Use vade launch for Flash-Next FP4-Local, or vade run qwen3-8b for the separate official Qwen3-8B BF16 catalog."),
             ("run qwen3-8b --release r --engine-source e", "Choose --release or source checkouts."),
@@ -621,6 +646,13 @@ mod tests {
             assert_eq!(cli(args).unwrap_err(), expected, "{args}");
         }
         assert_eq!(cli("help up").unwrap().command, Command::Help(Some("up".into())));
+        for args in ["--json --help", "help --json", "--help --json"] {
+            assert_eq!(cli(args).unwrap().command, Command::Help(None), "{args}: help ignores --json");
+        }
+        for topic in ["bench", "verify", "test"] {
+            assert_eq!(cli(&format!("--dry-run help {topic}")).unwrap().command, Command::Help(Some(topic.into())));
+        }
+        assert!(cli("--json doctor").unwrap().json, "a leading --json reads as a trailing one");
         assert_eq!(cli("-V").unwrap().command, Command::Version);
         let Command::Run(options) = cli("run qwen3-8b --release r --port 9000").unwrap().command else { panic!() };
         assert_eq!((options.release.as_deref(), options.port), (Some(std::path::Path::new("r")), 9000));

@@ -712,7 +712,7 @@ impl CompactingJournal {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
-                "compaction cancelled",
+                "compaction canceled",
             ));
         }
         Ok(())

@@ -74,7 +74,7 @@ pub fn paint(token: Token, text: &str, stream: Stream) -> String { style(token, 
 /// Imperative openings that make a sentence a next step rather than a fact.
 const STEPS: &[&str] = &[
     "Add", "Check", "Choose", "Close", "Copy", "Create", "Delete", "Disable", "Edit", "Enable", "Export", "Fix",
-    "Free", "Give", "Inspect", "Install", "Keep", "Move", "Omit", "Open", "Pass", "Preserve", "Rebuild", "Reinstall",
+    "Free", "Give", "Inspect", "Install", "Keep", "Move", "Omit", "Open", "Pass", "Preserve", "Put", "Rebuild", "Reinstall",
     "Remove", "Rerun", "Restart", "Retry", "Run", "See", "Select", "Set", "Start", "Stop", "Supply", "Try", "Unset",
     "Update", "Use", "Wait",
 ];

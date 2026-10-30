@@ -4,7 +4,7 @@ set -eu
 
 fail() {
     printf '%s\n' "install: $*" >&2
-    [ -z "${root-}" ] || printf 'Retry: sh "%s/scripts/install.sh"\n' "$root" >&2
+    [ -z "${root-}" ] || printf 'Retry: sh "%s/scripts/install.sh"%s\n' "$root" "$([ "${launch-false}" = true ] && printf ' --launch')" >&2
     exit 1
 }
 if [ "${1-}" = --help ]; then
@@ -53,9 +53,9 @@ if ! command -v rustup >/dev/null 2>&1; then
     printf '%s\n' 'Install: downloading the official Rust installer (no shell profile changes).'
     curl -q --proto '=https' --tlsv1.2 --fail --location --show-error --silent \
         --output "$installer" https://sh.rustup.rs ||
-        fail 'Rust installer download failed. Next: check access to https://sh.rustup.rs and rerun sh scripts/install.sh.'
+        fail 'Rust installer download failed. Next: check access to https://sh.rustup.rs and rerun the Retry command below.'
     sh "$installer" -y --default-toolchain none --no-modify-path ||
-        fail 'Rust installation failed. Next: read the Rust error above, fix it, then rerun sh scripts/install.sh.'
+        fail 'Rust installation failed. Next: read the Rust error above, fix it, then rerun the Retry command below.'
     rm -f "$installer"
     trap - EXIT INT TERM
 fi
@@ -79,16 +79,16 @@ if ! rustup run "$device" rustc --version >/dev/null 2>&1 || [ "$complete" = fal
 fi
 printf '%s\n' 'Install: building the vade command.'
 CARGO_TARGET_DIR="$root/cli/target" cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml ||
-    fail 'CLI build failed. Next: fix the compiler error above (including any missing linker), then rerun sh scripts/install.sh.'
+    fail 'CLI build failed. Next: fix the compiler error above (including any missing linker), then rerun the Retry command below.'
 vade="$root/cli/target/release/vade"
 "$vade" detect </dev/null ||
-    fail 'preflight failed. Next: follow the diagnostic above, then rerun sh scripts/install.sh. For another model location, set VADE_MODELS to its checkpoint folder.'
+    fail 'preflight failed. Next: follow the diagnostic above, then rerun the Retry command below. For another model location, set VADE_MODELS to its checkpoint folder.'
 printf '%s\n' 'Install: preparing the GPU compiler cache (the first build may download Rust build-std files).'
 (cd engine && cargo +1.99.0 kernels) ||
     fail 'GPU kernel bootstrap failed. Next: fix the compiler/download error above; if build-std files are missing, rerun online with CARGO_NET_OFFLINE=false.'
 "$vade" install </dev/null ||
-    fail "local install failed. Next: follow the diagnostic above; inspect \"$vade\" doctor, then retry."
-printf 'Install complete. Start and chat:\n  "%s" launch\nStart only:\n  "%s" up\n' "$vade" "$vade"
+    fail "local install failed. Next: follow the diagnostic above, run \"$vade\" doctor, then retry."
+printf 'Install complete. Start and chat:\n  "%s" launch\nStart only:\n  "%s" up\nTo type vade by name in a new shell, run this there first:\n  export PATH="$HOME/.cargo/bin:%s:$PATH"\n' "$vade" "$vade" "$root/cli/target/release"
 if [ "$launch" = true ]; then
     cd "$workspace" || fail 'your starting folder is unavailable. Next: open an existing project folder, then use the launch command above.'
     exec "$vade" launch

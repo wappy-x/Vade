@@ -97,7 +97,7 @@ fn invalid_receipt_settings_fail_without_falling_back_to_the_build_tree() {
         for values in [vec![flag], vec![flag, ""]] {
             let result = fixture.command().args(values).output().unwrap();
             assert_eq!(result.status.code(), Some(1));
-            assert!(String::from_utf8(result.stderr).unwrap().contains("missing value for --output"));
+            assert!(String::from_utf8(result.stderr).unwrap().contains("Give --output a value"));
         }
     }
     assert!(!fixture.0.join("working/vade-bench.json").exists());

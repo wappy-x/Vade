@@ -203,7 +203,7 @@ impl PreparedPatch {
             if cancel.load(Ordering::Relaxed) {
                 return Err(ApplyError::new(
                     err(&format!(
-                        "patch cancelled; {applied} file operations committed"
+                        "patch canceled; {applied} file operations committed"
                     )),
                     applied > 0,
                 ));
@@ -241,7 +241,7 @@ impl PreparedPatch {
                             c.before.is_none(),
                             || {
                                 if cancel.load(Ordering::Relaxed) {
-                                    return Err(err("patch cancelled during staging"));
+                                    return Err(err("patch canceled during staging"));
                                 }
                                 c.check()
                             },

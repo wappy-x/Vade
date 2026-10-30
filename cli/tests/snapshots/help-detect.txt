@@ -5,10 +5,11 @@ Examples:
   vade detect
   vade detect --json
 
-Usage: vade detect [--json]
+Usage: vade detect [--json] [--dry-run]
 
 Options:
-  --json  Print one vade.detect.v1 object
+  --json     Print one vade.detect.v1 object
+  --dry-run  Print the plan; read nothing
 
 Notes:
   - Reads only; no files are changed and nothing is started.

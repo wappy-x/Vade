@@ -21,10 +21,15 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             report.fail("saved config", "An owned engine has no valid saved config.",
                 "Preserve the state folder, then run vade down before repairing the saved config.")?;
         }
+        // Before the first launch, nothing installed is the expected state, not damage.
+        let (missing, next) = if config.is_none() {
+            ("Vade is not installed yet.", "Run vade launch to install and start Vade.")
+        } else {
+            ("Local artifacts are missing or have changed.", "Run vade down, then vade install from your Vade checkout or with VADE_BUNDLE set.")
+        };
         let installed = report.check("installed binaries", install::load(&self.root)
-            .and_then(|value| value.ok_or_else(|| "Local artifacts are missing or have changed.".into())),
-            |_| "engine, kernels and chat match their saved file metadata".into(),
-            "Run vade down, then vade install from your Vade checkout or with VADE_BUNDLE set.")?;
+            .and_then(|value| value.ok_or_else(|| missing.into())),
+            |_| "engine, kernels and chat match their saved file metadata".into(), next)?;
         let model = report.check("model files", model::discover_existing(&self.home,
             config.as_ref().map(|config| config.model.as_path())).and_then(|model| {
                 if !model.fp4_local {
@@ -94,7 +99,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         }
         match (config.as_ref(), record.as_ref()) {
             (Some(config), Some(Some(record))) => {
-                report.skip(&format!("port {}", config.port), "in use by the owned engine")?;
+                report.skip(&format!("port {}", config.port), "in use by the running engine")?;
                 report.check("engine health", self.ready(config, record), |_| config.endpoint(),
                     "Run vade logs, then vade down and vade launch.")?;
             }

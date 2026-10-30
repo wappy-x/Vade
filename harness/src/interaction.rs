@@ -72,7 +72,7 @@ impl State {
             Self::ToolRunning => "running tool",
             Self::WaitingForApproval => "waiting for approval",
             Self::Compacting => "compacting",
-            Self::Cancelling => "cancelling · awaiting acknowledgment",
+            Self::Cancelling => "canceling · awaiting acknowledgment",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::OutcomeUnknown => "outcome unknown",

@@ -17,8 +17,9 @@ Notes:
   - On this Spark: config, VADE_HOME writable, ownership, installed binaries,
     model files, nvidia-smi and driver, disk, free memory, port and engine
     health.
-  - From a controller: local tools, then SSH, nvidia-smi, disk, free memory and
-    model files on each selected Spark, then the fabric and the harness.
+  - From a controller: local tools, then SSH, nvidia-smi, GPU use, disk, free
+    memory, model files and the staged build on each selected Spark, then the
+    fabric, the port, the harness and engine health.
   - Also shows the vade binary and version, context, output, drafting and prefix
     cache settings, model JSON files, safetensors count and bytes, and server
     ports on each Spark.

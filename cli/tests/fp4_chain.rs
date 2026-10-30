@@ -36,7 +36,7 @@ fn fp4_chain_preview_covers_size_order_transport_and_local_refusals() {
                 .env("VADE_CONFIG", &config).env("SEQPAR_RDMA", rdma).env_remove("MTP").output().unwrap();
             assert!(output.status.success(), "{}", safe(&output.stderr));
             let stdout = safe(&output.stdout);
-            assert!(stdout.contains(&format!("on {count} machines")));
+            assert!(stdout.contains(&format!("on {count} Sparks")));
             assert_eq!(stdout.matches(&format!("# arg.1={count}\n")).count(), count);
             assert!(!stdout.contains("env.VADE_W2_PP="), "preview must keep private environment values hidden");
             assert!(stdout.contains("Run the same command without --dry-run"));

@@ -20,7 +20,7 @@ pub struct Completion {
 /// never its untrusted message (which may contain request or provider data).
 pub(crate) fn interruption_error(code: &str) -> Option<io::Error> {
     let (kind, message) = match code {
-        "client_cancelled" => (io::ErrorKind::Interrupted, "upstream request cancelled"),
+        "client_cancelled" => (io::ErrorKind::Interrupted, "upstream request canceled"),
         "generation_deadline" => (io::ErrorKind::TimedOut, "upstream generation deadline exceeded"),
         _ => return None,
     };

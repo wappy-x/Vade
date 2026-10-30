@@ -482,14 +482,14 @@ fn workspace_read_returns_pdf_text_through_the_tool() {
     assert!(whole.starts_with("Path: manual.pdf\nPDF text layer extracted by Vade: 2 pages.") && whole.ends_with("page 1 of 2\nInstall the tool\n\npage 2 of 2\nRun the tool\n"), "{whole}");
     let part = invoke("workspace_read", r#"{"path":"manual.pdf","offset":0,"limit":20}"#);
     assert!(part.contains("Read bytes 0..20 of ") && part.contains(" of extracted PDF text (source PDF ") && part.ends_with("next offset 20).\nPDF text layer extra"), "{part}");
-    assert_eq!(invoke("workspace_read_lines", r#"{"path":"manual.pdf","start_line":1,"end_line":3}"#), "Discovery refused: source is a PDF; read its extracted text with workspace_read");
+    assert_eq!(invoke("workspace_read_lines", r#"{"path":"manual.pdf","start_line":1,"end_line":3}"#), "Discovery refused: This file is a PDF. Use workspace_read to read its text.");
 }
 #[test]
 fn workspace_read_lines_names_workspace_read_for_an_ascii_pdf() {
     let f = Fixture::new(); let pdf = crate::pdf::tests::sample_ascii(&["Plain"]); assert!(pdf.is_ascii()); std::fs::write(f.0.join("plain.pdf"), pdf).unwrap(); let w = f.workspace();
     let mut tools = CodingTools::new(&w, ApprovalPolicy::Auto, |_: Preview<'_>, _: &AtomicBool| true);
     let raw = r#"{"path":"plain.pdf","start_line":1,"end_line":3}"#; let args = json::parse(raw).unwrap(); let call = ToolCall { id: "pdf".into(), name: "workspace_read_lines".into(), arguments: raw.into() };
-    assert_eq!(tools.execute(ToolInvocation { call: &call, arguments: &args, max_output_bytes: 4096 }, &AtomicBool::new(false)).unwrap(), "Discovery refused: source is a PDF; read its extracted text with workspace_read");
+    assert_eq!(tools.execute(ToolInvocation { call: &call, arguments: &args, max_output_bytes: 4096 }, &AtomicBool::new(false)).unwrap(), "Discovery refused: This file is a PDF. Use workspace_read to read its text.");
 }
 /// Keeps every shell approval decision, like a session journal.
 #[derive(Default)]

@@ -24,7 +24,7 @@ pub(crate) fn engine_ceiling(available: u64) -> u64 {
 /// The memory quantities every preflight prints, from /proc/meminfo.
 pub(crate) fn memory_summary(total: u64, available: u64) -> String {
     format!(
-        "MemAvailable {:.1} GiB of MemTotal {:.1} GiB (page cache counts as free); engine ceiling {:.1} GiB (MemAvailable less 10%, at least 2 GiB; chats get it less weights, shared buffers and a 512 MiB transient reserve)",
+        "{:.1} GiB available of {:.1} GiB (page cache counts as available); the engine may use up to {:.1} GiB",
         gib(available),
         gib(total),
         gib(engine_ceiling(available)),
@@ -36,7 +36,7 @@ pub(crate) fn check_memory(total: u64, available: u64, model_bytes: u64) -> Resu
     let required_memory = model_bytes.saturating_add(MEMORY_RESERVE);
     if total < required_memory || available < required_memory {
         return Err(format!(
-            "Not enough memory: {}; required {:.1} GiB for the checkpoint and working room before any context. Fix: stop other processes holding memory (free -g, nvidia-smi); dropping caches does not help, then run vade doctor before retrying vade up.",
+            "Not enough memory: {}. The checkpoint and working room need {:.1} GiB before any context. Dropping the page cache does not help. Stop other programs that hold memory (see free -g and nvidia-smi), then run vade doctor and retry vade up.",
             memory_summary(total, available),
             gib(required_memory),
         ));
@@ -561,10 +561,10 @@ mod tests {
         let mut identity = fixture.identity();
         identity.memory_available = 20 * GIB;
         let error = identity.check_resources(96 * GIB, 0).unwrap_err();
-        for text in ["MemAvailable 20.0 GiB of MemTotal 122.0 GiB", "required 104.0 GiB", "engine ceiling 18.0 GiB", "Fix: "] {
+        for text in ["20.0 GiB available of 122.0 GiB", "need 104.0 GiB", "may use up to 18.0 GiB", ". Stop other programs"] {
             assert!(error.contains(text), "{error}");
         }
-        assert!(identity.display(Path::new("/m")).contains("Memory: MemAvailable 20.0 GiB of MemTotal 122.0 GiB (page cache counts as free); engine ceiling 18.0 GiB"));
+        assert!(identity.display(Path::new("/m")).contains("Memory: 20.0 GiB available of 122.0 GiB (page cache counts as available); the engine may use up to 18.0 GiB"));
         assert_eq!(engine_ceiling(110 * GIB), 99 * GIB);
         assert_eq!(engine_ceiling(GIB), 0);
     }

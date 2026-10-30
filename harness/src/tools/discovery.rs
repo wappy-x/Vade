@@ -38,13 +38,13 @@ impl Workspace {
     ) -> io::Result<String> {
         let (mut file, stamp) = self
             .open_snapshot(path)?
-            .ok_or_else(|| error("file not found"))?;
+            .ok_or_else(|| error("No file exists at this path."))?;
         if expected.is_some_and(|expected| *expected != stamp) {
             return Err(error("source changed before discovery"));
         }
         if stamp.directory || stamp.bytes > cap as u64 {
             return Err(error(
-                "discovery requires a regular file within the source byte limit",
+                "Search and line reads need a regular file within the source size limit. Use workspace_read with offset and limit for a large file.",
             ));
         }
         let mut bytes = Vec::new();
@@ -55,9 +55,9 @@ impl Workspace {
         }
         // Check the header first: an ASCII-only PDF is valid UTF-8 too.
         if crate::pdf::is_pdf(&bytes[..bytes.len().min(1024)]) {
-            return Err(error("source is a PDF; read its extracted text with workspace_read"));
+            return Err(error("This file is a PDF. Use workspace_read to read its text."));
         }
-        String::from_utf8(bytes).map_err(|_| error("source is not UTF-8 text"))
+        String::from_utf8(bytes).map_err(|_| error("This file is not UTF-8 text, so the agent cannot search it."))
     }
 
     /// One-based inclusive lines, bounded in source bytes, lines and wire bytes.

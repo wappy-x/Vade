@@ -114,8 +114,11 @@ later command.
 
 ## Before you start
 
-Run `vade doctor` before `vade up` to check the binary, model files, memory, driver, links, ports, disk, and four defaults.
-Each failed check gives a fix; a controller checks the active Sparks, or the default `vade up` selection, through the same SSH path.
+Once the CLI is built, run `vade doctor` before `vade up`. It checks the
+binary, model files, memory, driver, links, ports and disk, and it shows the
+four default settings. Each failed check names its fix. A controller checks
+the active Sparks, or the Sparks that `vade up` would select, over the same
+SSH path.
 
 You need a DGX Spark (NVIDIA GB10) running Linux `aarch64`. `nvidia-smi` must
 work, and the GPU must be idle.
@@ -545,8 +548,11 @@ The build creates the CLI. `launch` does the rest:
 When a checksum list is present, `launch` also performs the file check
 described in [Check the files](#check-the-files). Later launches reuse the
 installed files and the saved check. Loading the model still takes time.
-When the engine is ready, it prints `Launch ready in ...` with how long the
-launch took.
+When the engine is ready, it prints one line with how long the launch took,
+the address, the context and output limits and the Spark count, for example
+`Launch ready in 149.4 s: http://127.0.0.1:18080, context 32768 tokens, output 8192, 1 Spark.`
+`vade up` prints the same line, starting with `Up ready in`, then the chat
+and stop commands. The v0.1.0 bundle prints only `Launch ready in ...`.
 
 Run from a script, where standard input is not a terminal, `launch` skips
 chat: after the ready line it prints
@@ -644,15 +650,16 @@ block:
 
 ```sh
 cd ~/vade-launch && unset VADE_CONFIG
+export PATH="$HOME/vade-launch:$PATH"
 ./vade launch
 ```
 
-Use `./vade` for the lifecycle commands that follow, or add that folder to your
-`PATH`. On main, status hints repeat the command the way you typed it, such
-as `Chat: ./vade chat`. The v0.1.0 bundle is older and prints the bare
-`vade`, such as `Chat: vade chat` and `Start: vade launch`. A few messages
-on main still name the bare `vade`, such as the port error's
-`retry vade launch`. From the bundle folder, type `./vade` for those too.
+Then follow Route A from "Next, run these in order". With the bundle folder on
+your `PATH`, `vade status`, `vade verify` and `vade down` work by name, also
+after `cd ~`. In a new shell, run the `export` line first. Status hints repeat
+the command the way you typed it, such as `Chat: ./vade chat`. The v0.1.0
+bundle is older and prints the bare `vade`, such as `Chat: vade chat`. With the
+bundle folder on your `PATH`, those commands work as printed.
 
 ### What `vade verify` checks
 
@@ -1285,6 +1292,8 @@ stop), and run `vade logs` and `vade doctor` before you retry.
 
 | Message | What to do |
 | --- | --- |
+| `Vade is not set up yet` | Nothing is set up for this user: no local setup in `~/.vade` and no controller config. On a Spark, run `vade launch` (or the installer above). To drive Sparks from another computer, follow [Route B](#route-b-from-a-controller). |
+| `This command runs only on a DGX Spark (Linux aarch64)` | You ran a local command such as `vade launch` on another computer. Run it on the Spark, add `--dry-run` to preview it, or use [Route B](#route-b-from-a-controller) to drive the Spark from this computer. |
 | `engine source has local changes. Commit or preserve them before install/update` | A controller's `vade install` stages only committed source, and an untracked file counts as a local change. The same check covers `harness` and `CLI` source. Nothing was overwritten. Use a clean clone for the controller; `git status` shows what is untracked. |
 | `The engine refused --context N for memory` | `vade launch` or `vade up` on the Spark prints this when the engine refuses a `--context` you set yourself; the engine's own memory message follows. Choose a smaller `--context`, or leave it out next time: Vade then tries the standard sizes (32768, 16384, 8192, 4096) in turn until the engine accepts one. Run `vade doctor` to inspect memory. A context you set yourself is never lowered silently. |
 | `Requested size does not fit.` / `Not enough memory` | Read the quantities in the message. A token-limit error asks for a shorter prompt or reply. A memory error gives the required and available memory. The engine's memory ceiling is MemAvailable minus a reserve of 10 % or 2 GiB, whichever is larger. Page cache already counts as free, so dropping caches won't help. Stop other programs that hold memory, or lower the context. FP4-Local chooses its chat count from memory; `--chats` does not lower it. A local launch or install also refuses to start when another engine holds the GPU memory. Stop that engine with its own `vade down` or the launcher that started it, then retry. |
@@ -1299,6 +1308,7 @@ stop), and run `vade logs` and `vade doctor` before you retry.
 | `Directory ... is shared. Run chmod 700 ...` or `Directory ... on ... is open to other users.` | A `stage_dir` or `state_dir` is open to other users, on the controller or on a Spark. Run the `chmod 700` command the message prints, then run `vade install` again. Next time, create these folders with `mkdir -m 700` or let Vade create them. |
 | `Auto-compaction deferred: safe compaction cannot fit a useful reply reservation; history retained. Will retry on the next turn; /compact or /new may be needed.` | It can appear in a long chat when the context is 8192, because the output limit then equals the whole context and there is no room to shorten the history safely. Your history is kept and the reply still arrives. Type `/new` to start a fresh chat, which won't show this message. |
 | `Build GPU kernels failed; check the retained build log and the existing pinned Rust toolchains.` | Read the saved build log. Make sure you finished installing the pinned toolchains (step 1) and ran the online kernel build (step 2), which downloads what the offline launch build needs, then retry. |
+| `Vade hit an internal error at ...` | This is a bug in Vade, not in your setup. Run the same command again with `RUST_BACKTRACE=1` in front of it and report the output, with the command you ran, to the Vade maintainers. |
 
 If shutdown cannot confirm which process it started, follow
 [CLI recovery](cli/README.md#recovery). Keep the state rather than deleting it.

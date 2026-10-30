@@ -206,7 +206,7 @@ impl App {
                         Ok(Input::Line(line)) => self.line_input(line)?,
                         Ok(Input::TooLong) => {
                             self.failed = true;
-                            self.notice("Input exceeds 64 KiB; discarded.")?;
+                            self.notice("Input is over 64 KiB, so it was discarded and not sent.")?;
                         }
                         Ok(Input::InvalidUtf8) => {
                             self.failed = true;
@@ -341,7 +341,7 @@ impl App {
                             RunState::Thinking => "reasoning",
                             RunState::Generating => "writing",
                             RunState::ToolRunning => "running tool",
-                            RunState::Cancelling => "cancelling",
+                            RunState::Cancelling => "canceling",
                             _ => state.label(),
                         };
                         let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"]
@@ -668,7 +668,7 @@ impl App {
                     self.input_overflow = false;
                     self.failed = true;
                     return self
-                        .notice("Input exceeded 64 KiB; entire input discarded without sending.");
+                        .notice("Input is over 64 KiB, so it was discarded and not sent.");
                 }
                 // An empty-editor Ctrl+D is an exit even while an approval
                 // waits, exactly like /exit there: quit and cancel, which
