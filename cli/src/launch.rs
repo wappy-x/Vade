@@ -322,7 +322,13 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                             Some(config) if !changed_model => config,
                             prior => {
                                 let mut config = Config::new(&self.root, &model)?;
-                                if let Some(prior) = prior { config.port = prior.port; }
+                                match prior {
+                                    Some(prior) => config.port = prior.port,
+                                    None if config.port != config::DEFAULT_PORT => output::line(format_args!(
+                                        "Port {} on 127.0.0.1 is in use, so the API uses port {} instead. Clients and vade status use the saved port.",
+                                        config::DEFAULT_PORT, config.port))?,
+                                    None => (),
+                                }
                                 config
                             }
                         };
@@ -955,6 +961,10 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         // private receipt and stamp cache. Without one, startup serves at once
         // and the engine hashes in the background, so nothing is hashed here.
         let result = self.stage_manifest(&config.model).and_then(|manifest| {
+            if supplied_manifest(&config.model)?.is_none() {
+                output::line(format_args!("Prepare: no checksum list for this checkpoint ({}.sha256 beside it, or manifest.sha256 inside it). Vade cannot check its files against the published hashes. To check them, see Check the files in INSTALL.md.",
+                    config.model.file_name().map_or_else(|| "<folder>".into(), |name| name.to_string_lossy())))?;
+            }
             if manifest.is_some_and(|path| path.exists()) {
                 request.insert("verify_model".into(), config.model.to_string_lossy().into_owned());
             }

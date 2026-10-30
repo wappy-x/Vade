@@ -586,6 +586,10 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
                 "need the verified-copy and SHA256 checks above"
             }
         ))?;
+        // The build stays staged for the next run; the exit status still says the model is not ready.
+        if !self.dry && !weights_present {
+            return Err("The model is missing or incomplete on at least one Spark, so vade up cannot start yet. Copy it as shown above, then run vade install again.".into());
+        }
         match self.harness_doctor(true) {
             Err(error) if has_running_record => {
                 crate::output::line(format_args!("Build staged. Current engine doctor: {error}"))?;

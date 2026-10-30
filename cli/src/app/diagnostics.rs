@@ -232,7 +232,8 @@ impl<R: Runner> App<R> {
                     else { report.ok(&name("nvidia-smi"), "present")?; }
                     report.fail(&name("tools"), &error, &format!("Install {tool} on {}, {rerun}", machine.name))?;
                 }
-                for check in ["GPU use", "disk", "free memory", "model files"] { report.skip(&name(check), "needs the tool checks")?; }
+                let reason = if tool == "driver" { "needs a supported GPU and driver" } else { "needs the tool checks" };
+                for check in ["GPU use", "disk", "free memory", "model files"] { report.skip(&name(check), reason)?; }
                 return Ok(());
             }
             _ => report.ok(&name("nvidia-smi"), probe.gpu.as_deref().unwrap_or("driver answered"))?,
@@ -332,6 +333,7 @@ gpu=$(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader) || {{ pr
 printf 'gpu=%s\n' "$(printf '%s\n' "$gpu" | head -n 1)"
 apps=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null) && printf 'gpu_apps=%s\n' "$(printf '%s\n' "$apps" | awk 'NF {{n++}} END {{print n + 0}}')"
 power=$(nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits 2>/dev/null) && printf 'gpu_watts=%s\n' "$(printf '%s\n' "$power" | awk '$1 ~ /^[0-9]+([.][0-9]+)?$/ {{n++; if ($1 + 0 > max) max = $1 + 0}} END {{if (n) print max}}')"
+printf 'cuda=%s\n' "$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: *\([0-9][0-9.]*\).*/\1/p' | head -n 1)"
 available=$(df -Pk "$HOME" | awk 'NR == 2 {{print $4}}')
 printf 'disk_kb=%s\n' "$available"
 awk '/^MemTotal:/ {{print "mem_total_kb=" $2}} /^MemAvailable:/ {{print "mem_available_kb=" $2}}' /proc/meminfo 2>/dev/null || true
@@ -399,6 +401,22 @@ fi"#, host = HOST_TOOLCHAIN.replace('.', "[.]")) } else { String::new() },
             toolchains: (fields.get("toolchains").map(String::as_str) == Some("ok")).then_some(true)
                 .or_else(|| fields.get("failed").filter(|failed| TOOLCHAIN_FAILURES.contains(&failed.as_str())).map(|_| false)),
         };
+        // The same GPU and driver rules as local detection, on what the script read.
+        let gpu_name = fields.get("gpu").map(|gpu| gpu.rsplit_once(',').map_or(gpu.as_str(), |(name, _)| name).trim().to_owned());
+        let driver = match (gpu_name, fields.get("cuda")) {
+            _ if !output.success => None,
+            (Some(name), _) if !crate::detect::is_gb10(&name) => Some(format!(
+                "{} reports the GPU {}; Vade needs an NVIDIA GB10 (DGX Spark). Check that the config names a Spark, then run vade doctor.",
+                machine.name, text::terminal_text(&name))),
+            (_, Some(cuda)) if !crate::detect::cuda_supported(cuda) => Some(format!(
+                "{} has an NVIDIA driver with CUDA {}; this Vade build needs CUDA 13.0 or newer. Have the administrator update the driver, then run vade doctor.",
+                machine.name, if cuda.is_empty() { "support unknown".into() } else { text::terminal_text(cuda) })),
+            _ => None,
+        };
+        if let Some(error) = driver {
+            probe.missing = Some("driver".into());
+            probe.error = Some(error);
+        }
         if !output.success {
             let failed = fields.get("failed").map(String::as_str);
             let missing = match (fields.get("missing"), failed) {
@@ -435,8 +453,8 @@ fi"#, host = HOST_TOOLCHAIN.replace('.', "[.]")) } else { String::new() },
                     "driver" => format!("{} has nvidia-smi, but its GPU query failed. Run ssh {} nvidia-smi to see the driver error, then run vade doctor.", machine.name, machine.ssh),
                     tool @ ("cargo" | "rustc") => format!("{} has {tool}, but {tool} --version failed there. Repair that Rust toolchain, then run vade doctor.", machine.name),
                     "rustup" => format!("{} has no rustup. A source build needs rustup with Rust {HOST_TOOLCHAIN} and {KERNEL_TOOLCHAIN} for the GPU kernels. Install them there (INSTALL.md), or set prebuilt_dir to a matching bundle, then run vade doctor.", machine.name),
-                    "toolchain" => format!("{} has no Rust {HOST_TOOLCHAIN} toolchain. Run rustup toolchain install {HOST_TOOLCHAIN} --profile minimal there, or set prebuilt_dir to a matching bundle, then run vade doctor.", machine.name),
-                    "kernel-toolchain" => format!("{} lacks the {KERNEL_TOOLCHAIN} toolchain for the GPU kernels. Run rustup toolchain install {KERNEL_TOOLCHAIN} --profile minimal --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda there, or set prebuilt_dir to a matching bundle, then run vade doctor.", machine.name),
+                    "toolchain" => format!("{} has no Rust {HOST_TOOLCHAIN} toolchain. Run rustup toolchain install {HOST_TOOLCHAIN} --profile minimal --no-self-update there, or set prebuilt_dir to a matching bundle, then run vade doctor.", machine.name),
+                    "kernel-toolchain" => format!("{} lacks the {KERNEL_TOOLCHAIN} toolchain for the GPU kernels. Run rustup toolchain install {KERNEL_TOOLCHAIN} --profile minimal --no-self-update --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda there, or set prebuilt_dir to a matching bundle, then run vade doctor.", machine.name),
                     "ssh" => format!("ssh {} did not run the check script. Run ssh {} true to see the SSH error, then run vade doctor.", machine.ssh, machine.ssh),
                     _ => format!("{}'s check script stopped before naming a failed check. Rerun vade doctor; if this repeats, check the login shell with ssh {} true.", machine.name, machine.ssh),
                 },

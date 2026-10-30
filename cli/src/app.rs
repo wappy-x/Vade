@@ -326,20 +326,25 @@ impl<R: Runner> App<R> {
 
     /// Hash the staged engine, PTX and helper on `machine` against `a`.
     pub(super) fn verify_staged(&mut self, machine: &Machine, a: &Artifact) -> Result<(), String> {
+        // The marker tells a failed hash from SSH that never ran the command.
         let command = format!(
-            "sha256sum {} {} {}",
+            "sha256sum {} {} {} || {{ printf 'hash_failed=1\\n'; exit 1; }}",
             remote_path(&a.binary),
             remote_path(&a.ptx),
             remote_path(&a.worker)
         );
-        let output = self.checked(
-            runner::ssh(
-                &machine.ssh,
-                command,
-                &format!("{} artifact hashes", machine.name),
-            ),
-            "Cannot verify staged artifacts. Run vade install, then try vade up.",
-        )?;
+        let output = self.runner.run(&runner::ssh(
+            &machine.ssh,
+            command,
+            &format!("{} artifact hashes", machine.name),
+        ))?;
+        if !output.success {
+            return Err(if output.stdout.contains("hash_failed=1") {
+                "Cannot verify staged artifacts. Run vade install, then try vade up.".into()
+            } else {
+                format!("Cannot reach {} over SSH, or its login shell failed. Run ssh {} true to see the error, then run vade doctor.", machine.name, machine.ssh)
+            });
+        }
         if !self.dry {
             let hashes = output
                 .stdout

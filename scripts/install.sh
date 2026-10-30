@@ -11,6 +11,7 @@ if [ "${1-}" = --help ]; then
     printf '%s\n' 'Usage: sh scripts/install.sh [--launch]' \
         'Install pinned Rust if missing, build Vade, and prepare one local Spark.' \
         '--launch starts the engine and opens chat after installation.' \
+        'Needs an idle NVIDIA GB10 GPU with a driver that supports CUDA 13.0 or newer.' \
         'Use an existing checkpoint under ~/models, or set VADE_MODELS.' \
         'CARGO_NET_OFFLINE=true requires already cached toolchains and build-std.'
     exit 0
@@ -32,8 +33,15 @@ workspace=$(pwd -P) || fail 'current folder is unavailable. Next: open an existi
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P) ||
     fail 'cannot find the checkout. Next: run sh scripts/install.sh from the Vade checkout.'
 cd "$root"
+# Check the GPU and driver before any download; vade install checks them again.
+gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader) ||
+    fail 'NVIDIA driver check failed (nvidia-smi error above). Next: ask your administrator to restore nvidia-smi, then retry.'
+case " $gpu " in *[!A-Za-z0-9]GB10[!A-Za-z0-9]*) ;; *) fail "this needs an NVIDIA GB10 GPU (a DGX Spark); nvidia-smi reports: $gpu. Next: run this script on a Spark." ;; esac
+cuda=$(nvidia-smi | sed -n 's/.*CUDA Version: *\([0-9][0-9]*\)\.[0-9].*/\1/p' | head -n 1)
+[ -n "$cuda" ] && [ "$cuda" -ge 13 ] ||
+    fail 'the NVIDIA driver must support CUDA 13.0 or newer (the "CUDA Version" that nvidia-smi prints). Next: ask your administrator to update the driver, then retry.'
 gpu_processes=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader) ||
-    fail 'NVIDIA driver check failed. Next: ask your administrator to restore nvidia-smi, then retry.'
+    fail 'NVIDIA driver check failed (nvidia-smi error above). Next: ask your administrator to restore nvidia-smi, then retry.'
 [ -z "$gpu_processes" ] ||
     fail 'the GPU is in use. Next: stop that workload through the launcher that started it, then retry.'
 export PATH="$HOME/.cargo/bin:$PATH"

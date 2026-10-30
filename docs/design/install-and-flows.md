@@ -31,7 +31,7 @@ then open chat.
 
 | Step | Command | It worked when you see | It fails when | Next safe action |
 | --- | --- | --- | --- | --- |
-| Get vade | Spark: `sh scripts/install.sh`. Bundle: unpack it. Mac: build the CLI | `Install complete.` and the path to `vade` | Rust tools, `cc` or curl are missing; the GPU is busy; no network on the first run | Do what the `Next:` line says, then run the same command again |
+| Get vade | Spark: `sh scripts/install.sh`. Bundle: unpack it. Mac: build the CLI | `Install complete.` and the path to `vade` | Rust tools, `cc` or curl are missing; the GPU is not a GB10, its driver is older than CUDA 13.0, or it is busy; no network on the first run | Do what the `Next:` line says, then run the same command again |
 | Set up | `vade setup` | One `Setup step` line per step below, then `Setup done.` and exit status 0 | `--yes` is missing a required answer, such as the Sparks on a controller | Add the flag it names, then run it again |
 | Install | `vade install` | Exit status 0. Local: `Install done in <time>`, then the GPU startup cache fills. Controller: `Installed build <revision>.` | A toolchain is missing, the checkout has changes, a GPU is busy, the disk is full, the model is missing | Do what the `hint:` line says, then `vade install`. A second run is always safe |
 | Start | `vade up` | On a Spark: `Up ready in <time>: <address>, context <n> tokens, ...`. From a controller: `<model> ready on <n> Sparks at <address>: context <n> tokens, ...` | The engine refuses the memory, the port is taken, the model load times out | `vade logs`, then `vade doctor`, then `vade up` |

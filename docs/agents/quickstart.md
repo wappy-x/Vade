@@ -205,6 +205,9 @@ both the same for every command in one setup.
 | A `toolchain` or `rustup` hint | A pinned Rust toolchain is missing | Run the `rustup` command in the hint |
 | `source has local changes` | The checkout has uncommitted or untracked files | Show `git status` to the person |
 | `GPU is in use` | Another program uses the GPU | Tell the person; do not stop it |
+| `needs an NVIDIA GB10` or `CUDA 13.0 or newer` | Not a Spark, or the NVIDIA driver is too old | Tell the person; driver updates are an administrator job |
+| `no checksum list for this checkpoint` | No `.sha256` list beside the model folder, so Vade cannot check the files | Tell the person; [check the files](../../INSTALL.md#check-the-files) shows the check |
+| `Cannot reach ... over SSH` | A Spark is off, off the network or asks for a password | `ssh -o BatchMode=yes HOST true`, then run the command again |
 | A doctor row `model files` fails | The checkpoint is missing or incomplete | Ask the person, then `vade pull` with the pinned command in [download models](../pull-models.md) |
 | `refused --context` or `Not enough memory` | The engine has too little memory | Run `vade up` with a smaller `--context` |
 | `Port ... is in use` | Another program has the port | Tell the person |

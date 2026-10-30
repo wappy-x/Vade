@@ -13,14 +13,21 @@ impl Fixture {
         }
         fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/install.sh"), root.join("scripts/install.sh")).unwrap();
         let fixture = Self { root: fs::canonicalize(root).unwrap() };
-        for tool in ["sh", "dirname", "mktemp", "rm", "mkdir", "cp", "chmod", "tail"] {
+        for tool in ["sh", "dirname", "mktemp", "rm", "mkdir", "cp", "chmod", "tail", "sed", "head"] {
             let path = ["/usr/bin", "/bin"].into_iter().map(|dir| Path::new(dir).join(tool))
                 .find(|path| path.is_file()).unwrap();
             std::os::unix::fs::symlink(path, fixture.root.join("bin").join(tool)).unwrap();
         }
         fixture.tool("uname", "case $1 in -s) echo Linux ;; -m) echo aarch64 ;; esac");
         fixture.tool("cc", "exit 0");
-        fixture.tool("nvidia-smi", "[ \"${INSTALL_GPU_BUSY-false}\" = false ] || echo 1234");
+        fixture.tool("nvidia-smi", r#"
+[ "${INSTALL_DRIVER_FAIL-false}" = false ] || { echo 'NVIDIA-SMI has failed because it could not reach the driver.' >&2; exit 9; }
+case "${1-}" in
+    --query-gpu=name) printf '%s\n' "${INSTALL_GPU_NAME-NVIDIA GB10}" ;;
+    --query-compute-apps=pid) [ "${INSTALL_GPU_BUSY-false}" = false ] || echo 1234 ;;
+    '') printf '| NVIDIA-SMI 580.95.05  Driver Version: 580.95.05  CUDA Version: %s |\n' "${INSTALL_CUDA-13.0}" ;;
+esac
+"#);
         fixture.tool("curl", "echo unexpected-download >> \"$INSTALL_CALLS\"; exit 91");
         fixture.tool("rustup", r#"
 printf 'rustup %s\n' "$*" >> "$INSTALL_CALLS"
@@ -104,6 +111,11 @@ fn source_install_failures_stop_at_the_cause_and_print_a_next_step() {
         (("VADE_CONFIG", "/controller.conf"), "unset VADE_CONFIG", "cargo "),
         (("VADE_BUNDLE", "/bundle"), "unset VADE_BUNDLE", "cargo "),
         (("INSTALL_GPU_BUSY", "true"), "stop that workload through the launcher", "rustup "),
+        (("INSTALL_DRIVER_FAIL", "true"), "NVIDIA driver check failed (nvidia-smi error above)", "rustup "),
+        (("INSTALL_GPU_NAME", "NVIDIA B200"), "needs an NVIDIA GB10 GPU (a DGX Spark); nvidia-smi reports: NVIDIA B200.", "rustup "),
+        (("INSTALL_GPU_NAME", "NVIDIA GB100"), "needs an NVIDIA GB10 GPU", "rustup "),
+        (("INSTALL_CUDA", "12.8"), "must support CUDA 13.0 or newer", "rustup "),
+        (("INSTALL_CUDA", "N/A"), "must support CUDA 13.0 or newer", "rustup "),
         (("INSTALL_MISSING_HOST", "true"), "rerun this script online", "cargo "),
         (("INSTALL_MISSING_DEVICE", "true"), "rerun this script online", "cargo "),
         (("INSTALL_FAIL_FETCH", "true"), "Rust build-std fetch failed", "vade install"),

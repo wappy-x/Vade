@@ -748,6 +748,38 @@ fn install_is_idempotent_and_does_not_start_or_chat() {
 }
 
 #[test]
+fn install_says_when_no_checksum_list_can_check_the_checkpoint() {
+    let f = Fixture::new();
+    f.installed();
+    let install = |launch: &mut Launcher<MockRunner, MockDetector>| {
+        let capture = crate::output::testing::Capture::default();
+        crate::output::with_writer(capture.clone(), || launch.execute(Command::Install, false)).unwrap();
+        String::from_utf8(capture.bytes.borrow().clone()).unwrap()
+    };
+    let printed = install(&mut f.launcher());
+    assert!(printed.contains("Prepare: no checksum list for this checkpoint (checkpoint.sha256 beside it, or manifest.sha256 inside it)."), "{printed}");
+    assert!(printed.contains("see Check the files in INSTALL.md"), "{printed}");
+    fs::write(f.home.join("models/checkpoint.sha256"), format!("{}  ./model.safetensors\n", "0".repeat(64))).unwrap();
+    fs::remove_file(f.root.join("config")).unwrap();
+    let printed = install(&mut f.launcher());
+    assert!(!printed.contains("no checksum list"), "{printed}");
+}
+
+#[test]
+fn first_install_says_when_the_default_port_is_taken() {
+    let f = Fixture::new();
+    f.installed();
+    // Another program may hold the port already; either way it is taken.
+    let _held = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, config::DEFAULT_PORT));
+    let capture = crate::output::testing::Capture::default();
+    crate::output::with_writer(capture.clone(), || f.launcher().execute(Command::Install, false)).unwrap();
+    let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+    let port = Config::load(&f.root).unwrap().unwrap().port;
+    assert_ne!(port, config::DEFAULT_PORT);
+    assert!(printed.contains(&format!("Port 18080 on 127.0.0.1 is in use, so the API uses port {port} instead.")), "{printed}");
+}
+
+#[test]
 fn install_preparation_failure_keeps_artifacts_and_names_the_next_step() {
     let f = Fixture::new();
     f.installed();

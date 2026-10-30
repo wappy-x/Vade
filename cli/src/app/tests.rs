@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Default)]
-struct FakeRunner { calls: Vec<Exec>, started: BTreeSet<String>, fail: Option<String>, foreign: Option<String>, bad_hash: bool, ports: Vec<u16>, dry: bool, doctor_bad: bool, tunnel_bad: bool, refused_start: Option<String>, inspect_error: Option<String>, mac_secret_seen: bool, alter_build_outputs: bool, local_state: PathBuf, exit_on_health: Option<String>, ready_model: Option<String>, health_extra: String, silent_probe: bool, gateway: Option<String>, gateway_start: Option<String>, gateway_exits: bool, gateway_stubborn: bool, signals: Vec<String>, probe: Option<(bool, &'static str)> }
+struct FakeRunner { calls: Vec<Exec>, started: BTreeSet<String>, fail: Option<String>, foreign: Option<String>, bad_hash: bool, ports: Vec<u16>, dry: bool, doctor_bad: bool, tunnel_bad: bool, refused_start: Option<String>, inspect_error: Option<String>, mac_secret_seen: bool, alter_build_outputs: bool, local_state: PathBuf, exit_on_health: Option<String>, ready_model: Option<String>, health_extra: String, silent_probe: bool, gateway: Option<String>, gateway_start: Option<String>, gateway_exits: bool, gateway_stubborn: bool, signals: Vec<String>, probe: Option<(bool, &'static str)>, hashes: Option<(bool, &'static str)> }
 impl Runner for FakeRunner {
     fn run(&mut self, exec: &Exec) -> Result<Output, String> {
         self.calls.push(exec.clone());
@@ -60,6 +60,7 @@ impl Runner for FakeRunner {
             }).collect::<String>()
         } else if exec.label.ends_with("tracked files") { "Cargo.toml\0src/main.rs\0src/flash-serve.rs\0".into()
         } else if exec.label.ends_with("remotes") { "origin\n".into()
+        } else if let Some((success, stdout)) = self.hashes.filter(|_| exec.label.ends_with("artifact hashes")) { return Ok(Output { success, stdout: stdout.into() });
         } else if exec.label.ends_with("artifact hashes") || exec.label.ends_with("build and stage") {
             format!("{}  binary\n{}  ptx\n{}  worker\n", if self.bad_hash { "9" } else { "1" }.repeat(64), "2".repeat(64), "3".repeat(64))
         } else if exec.label == "controller capabilities" { r#"{"object":"engine.capabilities","prefix_cache":false}"#.into()
@@ -1203,11 +1204,25 @@ fn doctor_skips_checks_an_earlier_failure_hid() {
     let (result, printed) = rows(Some((false, Box::leak(format!("{found}failed=kernel-toolchain\n").into_boxed_str()))), 1, Ok(false));
     assert!(result.is_err() && row(&printed, "a nvidia-smi").contains("GB10") && row(&printed, "a disk").starts_with("ok"), "{printed}");
     assert!(row(&printed, "a model files").starts_with("ok") && row(&printed, "a toolchains").starts_with("FAIL"), "{printed}");
-    assert!(printed.contains("rustup toolchain install nightly-2026-10-01 --profile minimal --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda"), "{printed}");
+    assert!(printed.contains("rustup toolchain install nightly-2026-10-01 --profile minimal --no-self-update --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda"), "{printed}");
     let (_, printed) = rows(Some((false, Box::leak(format!("{found}failed=toolchain\n").into_boxed_str()))), 1, Ok(false));
     assert!(row(&printed, "a toolchains").contains("no Rust 1.99.0 toolchain"), "{printed}");
     let (_, printed) = rows(Some((true, Box::leak(format!("{found}toolchains=ok\nrust=ok\ndriver=ok\n").into_boxed_str()))), 1, Ok(false));
     assert!(row(&printed, "a toolchains").starts_with("ok"), "{printed}");
+    // A finished script still fails on a GPU other than GB10 or a driver below CUDA 13.0, as local detection does.
+    let driver = |gpu: &str, cuda: &str| {
+        let (result, printed) = rows(Some((true, Box::leak(format!("{}cuda={cuda}\nrust=ok\ndriver=ok\n", found.replace("gpu=GB10", &format!("gpu={gpu}, 580.95"))).into_boxed_str()))), 1, Ok(false));
+        (result.is_ok(), row(&printed, "a nvidia-smi"), printed)
+    };
+    let (_, line, printed) = driver("NVIDIA GB10", "13.0");
+    assert!(line.starts_with("ok") && line.contains("NVIDIA GB10, 580.95"), "{printed}");
+    let (passed, line, printed) = driver("NVIDIA GB10", "12.8");
+    assert!(!passed && line.starts_with("FAIL") && line.contains("CUDA 12.8; this Vade build needs CUDA 13.0 or newer"), "{printed}");
+    assert!(row(&printed, "a GPU use").ends_with("needs a supported GPU and driver"), "{printed}");
+    let (passed, line, printed) = driver("NVIDIA GB10", "");
+    assert!(!passed && line.contains("CUDA support unknown"), "{printed}");
+    let (passed, line, printed) = driver("NVIDIA B200", "13.0");
+    assert!(!passed && line.contains("reports the GPU NVIDIA B200; Vade needs an NVIDIA GB10"), "{printed}");
     // GPU use follows the rule vade up applies, so doctor names what up would refuse.
     let gpu = |sample: &str, machines: usize| {
         let (result, printed) = rows(Some((true, Box::leak(format!("{found}{sample}rust=ok\ndriver=ok\n").into_boxed_str()))), machines, Ok(true));
@@ -1392,9 +1407,9 @@ fn prerequisite_script_marks_failed_driver_queries_and_tool_versions() {
     let (ok, out) = toolchains(None, "/opt/kernel/bin");
     assert!(ok && !out.contains("toolchains="), "{out}");
     // The GPU use row reads the compute process count and the highest power draw.
-    fs::write(bin.join("nvidia-smi"), "#!/bin/sh\ncase \"$1\" in\n--query-gpu=name,driver_version) echo 'NVIDIA GB10, 580.95';;\n--query-compute-apps=pid) printf '12\\n34\\n';;\n--query-gpu=power.draw) printf '19.5\\n41.25\\n';;\nesac\n").unwrap();
+    fs::write(bin.join("nvidia-smi"), "#!/bin/sh\ncase \"$1\" in\n--query-gpu=name,driver_version) echo 'NVIDIA GB10, 580.95';;\n--query-compute-apps=pid) printf '12\\n34\\n';;\n--query-gpu=power.draw) printf '19.5\\n41.25\\n';;\n'') echo '| NVIDIA-SMI 580.95  Driver Version: 580.95  CUDA Version: 13.0 |';;\nesac\n").unwrap();
     let (ok, out) = toolchains(None, "/opt/kernel/bin");
-    assert!(ok && out.contains("gpu=NVIDIA GB10, 580.95\ngpu_apps=2\ngpu_watts=41.25\n"), "{out}");
+    assert!(ok && out.contains("gpu=NVIDIA GB10, 580.95\ngpu_apps=2\ngpu_watts=41.25\ncuda=13.0\n"), "{out}");
 }
 
 /// The toolchain pins doctor checks are the ones the build uses.
@@ -1423,7 +1438,18 @@ fn doctor_checks_each_spark_staged_build_against_the_manifest() {
     let (passed, row) = doctor(&mut f);
     assert!(passed && row.ends_with("engine, PTX and helper match the build manifest"), "{row}");
     let hashed = f.app.runner.calls.iter().find(|e| e.label == "a artifact hashes").unwrap();
-    assert_eq!(hashed.args.last().unwrap(), "sha256sum \"$HOME\"/stage/a/flash-serve \"$HOME\"/stage/flash.ptx \"$HOME\"/stage/a/vade");
+    assert_eq!(hashed.args.last().unwrap(), "sha256sum \"$HOME\"/stage/a/flash-serve \"$HOME\"/stage/flash.ptx \"$HOME\"/stage/a/vade || { printf 'hash_failed=1\\n'; exit 1; }");
+    // A file that cannot be hashed and a Spark that SSH cannot reach name different fixes.
+    for (stdout, expected) in [("hash_failed=1\n", "Cannot verify staged artifacts. Run vade install"),
+        ("", "Cannot reach a over SSH, or its login shell failed. Run ssh a-ssh true to see the error")] {
+        let mut f = Fixture::fp4(1, false);
+        f.app.runner.hashes = Some((false, stdout));
+        let (passed, row) = doctor(&mut f);
+        assert!(!passed && row[28..].len() > 20 && expected.starts_with(row[28..].trim_end()), "{row}");
+        f.app.runner.hashes = Some((false, stdout));
+        let error = f.app.up(&fp4_options(&[])).unwrap_err();
+        assert!(error.contains(expected) && f.app.runner.started.is_empty(), "{error}");
+    }
     f.app.runner.bad_hash = true;
     let (passed, row) = doctor(&mut f);
     assert!(!passed && row.starts_with("FAIL") && row.contains("staged hashes differ from the manifest"), "{row}");

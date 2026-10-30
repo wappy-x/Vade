@@ -371,7 +371,12 @@ fn preparation_uses_verified_artifacts_and_only_supported_model_options() {
         fs::write(f.app.config.engine_source.join("src/flash-serve.rs"), marker).unwrap();
         let mut app = App { config: f.app.config.clone(), dry: false,
             runner: PrepareRunner { inner: std::mem::take(&mut f.app.runner), fail: false, missing_model, helper_preparation: "warm-ptx-v1", cause: "" } };
-        app.execute(Command::Install).unwrap();
+        let result = app.execute(Command::Install);
+        // A missing model still stages the build, then fails so scripts and setup stop there.
+        if missing_model {
+            assert!(result.unwrap_err().starts_with("The model is missing or incomplete on at least one Spark"));
+            assert!(app.config.activation.is_file());
+        } else { result.unwrap(); }
         let calls = &app.runner.inner.calls;
         let preparation = calls.iter().position(|e| e.label == "a install preparation");
         if source == "old" { assert!(preparation.is_none()); continue; }

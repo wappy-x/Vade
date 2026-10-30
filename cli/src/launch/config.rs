@@ -35,6 +35,9 @@ pub(super) struct Config {
     state: PathBuf,
 }
 
+/// The API port a first launch tries before it takes any free loopback port.
+pub const DEFAULT_PORT: u16 = 18080;
+
 impl Config {
     /// First-run defaults for `model`: the standard FP4-Local context (capped by the
     /// checkpoint) and its default output.
@@ -47,7 +50,7 @@ impl Config {
         if context < 4096 {
             return Err("The model has less than 4096 tokens of context; this launcher needs a larger supported context.".into());
         }
-        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 18080))
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, DEFAULT_PORT))
             .or_else(|_| std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)))
             .map_err(|_| "Cannot reserve a local chat port.")?;
         Ok(Self {

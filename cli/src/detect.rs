@@ -162,25 +162,20 @@ fn detect_at(
             "--format=csv,noheader,nounits".into(),
         ],
     )
-    .map_err(
-        |_| "Cannot read the NVIDIA GPU and driver; nvidia-smi must work before Vade can launch.",
-    )?;
+    .map_err(|said| format!(
+        "Cannot read the NVIDIA GPU and driver; nvidia-smi must work before Vade can launch.{said}"
+    ))?;
     let (gpu, driver) = gpu_driver(&query)?;
-    if !gpu.split(',').all(|name| {
-        name.split(|c: char| !c.is_ascii_alphanumeric())
-            .any(|word| word.eq_ignore_ascii_case("GB10"))
-    }) {
-        return Err(
-            "The Spark launcher needs an NVIDIA GB10 GPU; nvidia-smi reported another GPU.".into(),
-        );
+    if !is_gb10(&gpu) {
+        return Err(format!(
+            "The Spark launcher needs an NVIDIA GB10 GPU; nvidia-smi reported {gpu}."
+        ));
     }
-    let header = run("nvidia-smi", &[]).map_err(
-        |_| "Cannot read CUDA support from nvidia-smi; check the installed NVIDIA driver.",
-    )?;
+    let header = run("nvidia-smi", &[]).map_err(|said| format!(
+        "Cannot read CUDA support from nvidia-smi; check the installed NVIDIA driver.{said}"
+    ))?;
     let cuda = cuda_version(&header)?;
-    // The shipped GPU build uses CUDA Driver API 13000 (dependency-manifest.txt).
-    // Require that supported build baseline before attempting to load its PTX.
-    if cuda.split('.').next().and_then(|n| n.parse::<u32>().ok()).is_none_or(|major| major < 13) {
+    if !cuda_supported(&cuda) {
         return Err(format!("NVIDIA driver {driver} supports CUDA {cuda}; this Vade build requires driver CUDA support 13.0 or newer. Run nvidia-smi to check the driver, then vade doctor before vade launch."));
     }
     Ok(Identity {
@@ -308,6 +303,20 @@ fn cuda_version(text: &str) -> Result<String, String> {
     })
 }
 
+/// Whether every GPU that nvidia-smi names is a GB10.
+pub(crate) fn is_gb10(names: &str) -> bool {
+    names.split(',').all(|name| {
+        name.split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| word.eq_ignore_ascii_case("GB10"))
+    })
+}
+
+/// The shipped GPU build uses CUDA Driver API 13000 (dependency-manifest.txt).
+/// Require that supported build baseline before attempting to load its PTX.
+pub(crate) fn cuda_supported(cuda: &str) -> bool {
+    version(cuda) && cuda.split('.').next().and_then(|n| n.parse::<u32>().ok()).is_some_and(|major| major >= 13)
+}
+
 fn version(value: &str) -> bool {
     let parts: Vec<_> = value.split('.').collect();
     parts.len() >= 2
@@ -336,18 +345,35 @@ fn gib(value: u64) -> f64 {
     value as f64 / GIB as f64
 }
 
+/// The first line a failed probe wrote to stderr, as `" <program> said: <line>."`,
+/// or empty. Local tools only: nvidia-smi names the driver fault there.
+fn said(program: &str, stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let line = text.lines().map(plain).find(|line| !line.is_empty());
+    line.map_or_else(String::new, |line| format!(" {program} said: {}.", line.trim_end_matches('.')))
+}
+
 fn command(program: &str, args: &[String]) -> Result<String, String> {
-    let error = || format!("Cannot complete {program} detection.");
+    let error = String::new;
     let mut child = Command::new(program)
         .args(args)
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .process_group(0)
         .spawn()
         .map_err(|_| error())?;
     let mut stdout = child.stdout.take().ok_or_else(error)?;
+    let mut stderr = child.stderr.take().ok_or_else(error)?;
+    // Keep the first 4 KiB and drain the rest, so a chatty tool never blocks.
+    let (send_errors, errors) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stderr.by_ref().take(4096).read_to_end(&mut bytes);
+        let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+        let _ = send_errors.send(bytes);
+    });
     let (send, receive) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
         let mut bytes = Vec::new();
@@ -384,7 +410,11 @@ fn command(program: &str, args: &[String]) -> Result<String, String> {
         .recv_timeout(Duration::from_secs(5).saturating_sub(start.elapsed()))
         .map_err(|_| error())?
         .map_err(|_| error())?;
-    if !status?.success() || bytes.len() > 64 * 1024 {
+    if !status?.success() {
+        return Err(errors.recv_timeout(Duration::from_secs(5).saturating_sub(start.elapsed()))
+            .map_or_else(|_| String::new(), |stderr| said(program, &stderr)));
+    }
+    if bytes.len() > 64 * 1024 {
         return Err(error());
     }
     String::from_utf8(bytes).map_err(|_| error())
@@ -618,9 +648,9 @@ mod tests {
                 .detect(|program, args| match (failure, program, args.is_empty()) {
                     ("architecture", "uname", _) => Ok("x86_64\n".into()),
                     ("gpu", "nvidia-smi", false) => Ok("NVIDIA B200, 580.178.04\n".into()),
-                    ("driver", "nvidia-smi", _) | ("df", "df", _) => {
-                        Err("private child details\nnot for display".into())
-                    }
+                    ("driver", "nvidia-smi", _) => Err(said("nvidia-smi",
+                        b"NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver.\nprivate child details")),
+                    ("df", "df", _) => Err("private child details\nnot for display".into()),
                     ("cuda", "nvidia-smi", true) => Ok("CUDA Version: N/A\n".into()),
                     _ => fake_command(program, args),
                 })
@@ -628,7 +658,33 @@ mod tests {
             assert!(!error.contains('\n'), "{failure}: {error}");
             assert!(!error.contains("private child details"));
             assert!(!fixture.0.join("home/.vade").exists());
+            match failure {
+                "gpu" => assert!(error.ends_with("nvidia-smi reported NVIDIA B200."), "{error}"),
+                "driver" => assert!(error.ends_with("before Vade can launch. nvidia-smi said: NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver."), "{error}"),
+                _ => (),
+            }
         }
+    }
+
+    #[test]
+    fn a_failed_probe_names_its_first_stderr_line_and_nothing_else() {
+        assert_eq!(said("nvidia-smi", b""), "");
+        assert_eq!(said("nvidia-smi", b"\n  \n"), "");
+        assert_eq!(said("nvidia-smi", b"\nNo devices were found\nsecond"), " nvidia-smi said: No devices were found.");
+        assert!(!said("nvidia-smi", b"bad \x1b[31mcolor\x1b[0m\r").contains('\x1b'));
+        assert!(said("nvidia-smi", &[b'x'; 5000]).len() < 300, "one bounded line");
+        // A real child: its stderr reaches the message; a success keeps stdout.
+        let error = command("ls", &["/vade-detect-missing-path".into()]).unwrap_err();
+        assert!(error.starts_with(" ls said: ") && error.contains("vade-detect-missing-path"), "{error}");
+        assert!(command("ls", &["/".into()]).is_ok());
+    }
+
+    #[test]
+    fn gpu_and_cuda_rules_match_the_build_baseline() {
+        assert!(is_gb10("NVIDIA GB10") && is_gb10("NVIDIA GB10, NVIDIA GB10"));
+        assert!(!is_gb10("NVIDIA B200") && !is_gb10("NVIDIA GB10, NVIDIA B200") && !is_gb10("GB100"));
+        assert!(cuda_supported("13.0") && cuda_supported("13.1") && cuda_supported("14.0"));
+        assert!(!cuda_supported("12.9") && !cuda_supported("13") && !cuda_supported("N/A") && !cuda_supported(""));
     }
 
     #[test]

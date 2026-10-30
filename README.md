@@ -76,10 +76,11 @@ up Vade for someone, read the [agent quickstart](docs/agents/quickstart.md).
 
 ### Quick start on one Spark
 
-You need an idle DGX Spark with Git, a C linker (`cc`), curl and a working
-NVIDIA driver. You also need the complete 102.26 GB checkpoint under
-`~/models`. INSTALL.md shows how to add missing tools and how to download the
-model.
+You need a DGX Spark with Git, a C linker (`cc`) and curl. Its NVIDIA driver
+must support CUDA 13.0 or newer (the `CUDA Version` in the `nvidia-smi`
+header), and no other program may use the GPU. You also need the complete
+102.26 GB checkpoint under `~/models`. INSTALL.md shows how to add missing
+tools and how to download the model.
 
 Open a terminal on the Spark and run these five commands:
 
@@ -93,14 +94,16 @@ vade chat
 
 1. The clone gets the current main, with every change under Unreleased in
    the changelog.
-2. The script installs the pinned Rust tools that are missing, builds `vade`,
-   checks this Spark and the model, and installs the engine, the GPU kernels
-   and the chat program. It needs no sudo, and it does not change shell
+2. The script checks the GPU and driver first. Then it installs the pinned
+   Rust tools that are missing, builds `vade`, checks this Spark and the
+   model, and installs the engine, the GPU kernels and the chat program. It needs no sudo, and it does not change shell
    profiles or model files.
-3. The `export` line puts `cargo` and `vade` on your `PATH`. It lasts for this
-   shell only, so run it again in each new shell.
-4. `vade setup` uses the model and settings the script saved. It starts the
-   engine, then checks everything with `vade doctor`. Without the script,
+3. The `export` line puts `cargo` and `vade` on your `PATH`. The script
+   does not edit shell profiles, so the line lasts for this shell only. Run
+   it again in each new shell, or add it to your shell profile yourself.
+4. `vade setup` uses the model and settings the script saved. It runs
+   `vade install` again (nothing is rebuilt), starts the engine with
+   `vade up`, then checks everything with `vade doctor`. Without the script,
    or from another computer, it first asks a few questions: which Sparks,
    which checkpoint (for 2, 4 or 6 Sparks) and where the model is.
 5. `vade chat` opens the coding agent in the current folder. The agent can

@@ -51,8 +51,10 @@ shows the whole flow on one page. If you are an AI agent, read the
 
 ## Quick start with an existing model
 
-You need an idle DGX Spark with Git, `cc`, curl and a working NVIDIA driver.
-You also need the complete checkpoint under `~/models`. Before the first
+You need a DGX Spark with Git, `cc` and curl. Its NVIDIA driver must support
+CUDA 13.0 or newer (the `CUDA Version` in the `nvidia-smi` header). The GPU
+must be idle: `nvidia-smi` must list no compute processes. You also need the
+complete checkpoint under `~/models`. Before the first
 launch, set `VADE_MODELS` to use a checkpoint outside `~/models`. A valid
 saved checkpoint takes precedence; see
 [use a different checkpoint folder](#use-a-different-checkpoint-folder).
@@ -70,6 +72,10 @@ vade setup
 vade chat
 ```
 
+The `export` line puts `cargo` and `vade` on your `PATH` for this shell
+only, because the installer does not edit shell profiles. Run it again in each
+new shell, or add it to your shell profile yourself.
+
 `vade setup` uses the model and settings that the installer saved. It runs
 `vade install` again (nothing is rebuilt), then `vade up`, then
 `vade doctor`. It ends with `Setup done.` and the commands for chat, status and
@@ -82,17 +88,20 @@ Vade, open its folder and run `sh scripts/install.sh`, then continue with the
 
 The installer runs only on Linux `aarch64`. It does these steps:
 
-1. It finds Rust in `~/.cargo/bin`. It installs any missing pinned
+1. It checks that the GPU is a GB10, that the driver supports CUDA 13.0 or
+   newer and that no compute process uses the GPU. It stops before any
+   download if one of these fails.
+2. It finds Rust in `~/.cargo/bin`. It installs any missing pinned
    toolchains and GPU components.
-2. It builds the CLI and fetches the Rust `build-std` files that the GPU
+3. It builds the CLI and fetches the Rust `build-std` files that the GPU
    kernel build needs. When they are cached, it downloads nothing.
-3. It runs local `vade install`. This checks the Spark and the model once
+4. It runs local `vade install`. This checks the Spark and the model once
    (preflight), then builds the GPU kernels, the engine and chat once,
    offline. It also compiles the GPU code into Vade's private startup cache,
    so the first `up` does not have to. If `~/.vade` already holds files that
    another checkout or revision built, it builds this checkout and prints the
    generation that is now installed.
-4. With `--launch`, it starts the engine and opens chat in the folder where
+5. With `--launch`, it starts the engine and opens chat in the folder where
    you started. Without that flag, it stops after the install.
 
 The installer does not download or edit models. It does not change shell
@@ -257,7 +266,8 @@ nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader
 command -v cc git ssh rsync curl sha256sum find sort nvidia-smi
 ```
 
-You should see `aarch64`, GB10 and no running compute application. Each of
+You should see `aarch64`, GB10 and no running compute application. Run
+`nvidia-smi` alone too: its header must show `CUDA Version: 13.0` or newer. Each of
 the 9 names in the `command -v` line must print a path; nothing printed means
 that tool is missing. Install any missing one with `apt-get` (`ssh` is in
 `openssh-client`). If
@@ -292,14 +302,17 @@ runs the model download helper:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
-rustup toolchain install 1.99.0 --profile minimal
+rustup toolchain install 1.99.0 --profile minimal --no-self-update
 ```
 
 Source builds also need the pinned GPU toolchain:
 
 ```sh
-rustup toolchain install nightly-2026-10-01 --profile minimal --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda
+rustup toolchain install nightly-2026-10-01 --profile minimal --no-self-update --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda
 ```
+
+`--no-self-update` keeps rustup itself as it is, as `scripts/install.sh`
+does. These are the same commands that the installer runs and prints.
 
 ### Extra tools for a controller or linked Sparks
 
@@ -1363,6 +1376,11 @@ stop), and run `vade logs` and `vade doctor` before you retry.
 | `engine source has local changes. Commit or preserve them before install/update` | A controller's `vade install` stages only committed source, and an untracked file counts as a local change. The same check covers `harness` and `CLI` source. Nothing was overwritten. Use a clean clone for the controller; `git status` shows what is untracked. |
 | `The engine refused --context N for memory` | `vade launch` or `vade up` on the Spark prints this when the engine refuses a `--context` you set yourself; the engine's own memory message follows. Choose a smaller `--context`, or leave it out next time: Vade then tries the standard sizes (32768, 16384, 8192, 4096) in turn until the engine accepts one. Run `vade doctor` to inspect memory. A context you set yourself is never lowered silently. |
 | `Requested size does not fit.` / `Not enough memory` | Read the quantities in the message. A token-limit error asks for a shorter prompt or reply. A memory error gives the required and available memory. The engine's memory ceiling is MemAvailable minus a reserve of 10 % or 2 GiB, whichever is larger. Page cache already counts as free, so dropping caches won't help. Stop other programs that hold memory, or lower the context. FP4-Local chooses its chat count from memory; `--chats` does not lower it. A local launch or install also refuses to start when another engine holds the GPU memory. Stop that engine with its own `vade down` or the launcher that started it, then retry. |
+| `needs an NVIDIA GB10 GPU` or `must support CUDA 13.0 or newer` (from `vade install` or a controller's `vade doctor`, `has an NVIDIA driver with CUDA ...`) | Vade runs only on a DGX Spark's GB10, with an NVIDIA driver that supports CUDA 13.0 or newer. `nvidia-smi` prints the supported version as `CUDA Version` in its header. Driver updates are a job for the Spark's administrator; Vade does not change the driver. |
+| `Cannot read the NVIDIA GPU and driver; ... nvidia-smi said: ...` | The text after `nvidia-smi said:` is the driver's own error. Run `nvidia-smi` to see it in full, and ask the administrator to fix the driver. |
+| `Prepare: no checksum list for this checkpoint` | Vade found no checksum list beside the model folder, so it cannot check the files against the published hashes. The install goes on. To check the files, follow [check the files](#check-the-files), or download the model with `vade pull`, which writes the list. |
+| `The model is missing or incomplete on at least one Spark` | A controller's `vade install` staged the build, but a Spark has no complete checkpoint. Copy the checkpoint to the path the message above it names, check it, then run `vade install` again. |
+| `Cannot reach ... over SSH, or its login shell failed.` | A controller's `vade up` or `vade doctor` could not run a command on that Spark. Run the `ssh ... true` command it prints to see the SSH error. Check that the Spark is on and that SSH logs in with no password prompt. |
 | `This machine's GPU is in use.` | On a controller, `vade up` puts the machine name in front of it. Stop the workload with the launcher that started it, run `vade doctor`, then retry. Never kill processes by name. |
 | `Install cache preparation failed; the previous activation was kept.` | A controller's `vade install` prints this when a Spark's GPU is busy or its files fail a check. The build you had before is still the active one. The message starts with the machine name and the reason (for example `This machine's GPU is in use.`), and the line above it gives the path of a saved log. Fix the reason, or read the log, then run `vade install` again. |
 | `Port ... is in use; close the application using it and retry vade launch.` (from `vade up`, it ends `retry vade up.`) | Find the program using the port and stop it through its own controls. A first local setup can pick another port, but later launches reuse the saved one. On a controller, choose free `local_port` and `serve_port` values in the private config. |
