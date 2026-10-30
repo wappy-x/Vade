@@ -202,7 +202,7 @@ fn run_main(mut args: Vec<String>) {
     // From here every error of a --json command still ends in its one object
     // (see fail).
     checks::set_json(parsed.json.then(|| checks::Answer { schema: match parsed.command {
-        cli::Command::Doctor | cli::Command::DoctorFabric => "vade.doctor.v1", cli::Command::Detect => "vade.detect.v1", cli::Command::Config => "vade.config.v1", _ => "vade.version.v1",
+        cli::Command::Doctor | cli::Command::DoctorFabric { .. } => "vade.doctor.v1", cli::Command::Detect => "vade.detect.v1", cli::Command::Config => "vade.config.v1", _ => "vade.version.v1",
     }, mode: owner(&parsed.command), dry: parsed.dry_run }));
     if parsed.command == cli::Command::Version {
         if parsed.json {

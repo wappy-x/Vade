@@ -30,15 +30,18 @@ Changes that are merged but not yet released are under Unreleased.
 - Groups for many Sparks under one controller. A `[group NAME]` section in
   the controller config names machines in rank order, a local port and a
   layout tag; `VADE_GROUP=NAME vade up`, `status`, `down` and `update` work
-  on that group with its own ownership record. A group must close into a
-  ring of cables, and groups in one layout cannot share machines or ports.
+  on that group with its own ownership record. A group must be an arc of the
+  cabling (each host cabled to the next, in rank order), and groups in one
+  layout cannot share machines or ports.
   Without `VADE_GROUP`, `vade status` and `vade down` name the groups that
   still run. New `vade doctor --fabric` checks every configured cable over
   SSH, read-only: the cabling shape, each group ring, each fabric port
   (address, speed, MTU, RDMA device), both rails of each cable on their own
-  (two addresses, one subnet, 9000-byte pings both ways) and each clock. See
-  [Eight Sparks](docs/eight-sparks.md), with example configs for two rings
-  of four and one ring of eight.
+  (two addresses, one subnet, 9000-byte pings both ways) and each clock.
+  `vade doctor --fabric --ring` also expects one closed ring: every Spark has
+  exactly two neighbors, and both rails of every cable link at one speed. See
+  [Eight Sparks](docs/eight-sparks.md), with an example config for one ring
+  of eight.
 
 - New `vade pull <org>/<name>[@revision]` downloads a model from the Hugging
   Face Hub into `~/models/<org>/<name>`. It takes the weights, configs,

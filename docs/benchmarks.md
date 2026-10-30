@@ -2155,6 +2155,47 @@ its full timing matrix is incomplete. Its clean-install comparison measured
 against historical results from another pair, with a stated historical noise
 rule, and its raw cold-prompt ranges did not overlap.
 
+## Columns for eight Sparks
+
+Eight Sparks form one ring ([Eight Sparks](eight-sparks.md)). A run uses an
+arc of that ring: neighbors in cable order, rank 0 first. Our version 2 cards
+(the card format we call RigMark v2; it is not a release of the public
+RigMark project) add the columns below. **No value is measured yet.** Every
+cell in these columns is to be measured.
+
+| Column | Sparks with a server | Arc in rank order | Path in this build | The other Sparks |
+| --- | ---: | --- | --- | --- |
+| **8 of 8** | 8 | `eight`: spark-1 to spark-8, rank 0 spark-1 | FP4-Local layer chain of eight | none |
+| **4 of 8** | 4 | `quad-a`: spark-1 to spark-4, rank 0 spark-1; then `quad-b`: spark-5 to spark-8, rank 0 spark-5 | FP4-Local layer chain of four; FP8 four-way TP on a path | no server |
+| **2 × 4 of 8** | 8 | `quad-a` and `quad-b` at the same time | two FP4-Local layer chains of four | none |
+| **FP8, 8 of 8** | none | none | refused: `FP8 needs 2, 4, or 6 machines` ([cli/src/config.rs](../cli/src/config.rs)) | not measured |
+
+**What each column measures.** The same cells as the other columns, on the
+same build, checkpoint and request bodies: prose, code and structured output
+with one chat, C1, C4, C8 and C16 total rates, cold 8K and 32K first-token
+times, and the largest context that the server reports. Each cell gives
+drafting ON and OFF, each from two or more fresh server starts, with the
+spread between the starts.
+
+**Rules for these columns.**
+
+- **4 of 8** gives one value per arc, `quad-a` and `quad-b`, not a mean. The
+  difference between them is the arc-to-arc spread.
+- **2 × 4 of 8** runs the same cell on both servers at the same time. A
+  multi-chat cell gives the sum of the two servers' total rates and each
+  server's value beside it. A one-chat cell gives each server's value.
+- **Token IDs.** For the same request and settings, each column must give the
+  same token IDs as the one-, two- and four-Spark columns. The card states
+  this from the saved token ID hashes, as `vade verify` records them
+  (`reference_ids_sha256`).
+- **Shape.** A 4 of 8 arc and four neighbors of a six-Spark ring are both a
+  path of four over three cables. A difference between those two columns is a
+  machine or cable difference, not a shape difference. That difference is to
+  be measured.
+- Each card records the arc as the labels in rank order, with the revision,
+  hardware, checkpoint identity, settings and raw results. It names no
+  machine and no address.
+
 ## Build, hardware and memory identity
 
 A useful receipt records:

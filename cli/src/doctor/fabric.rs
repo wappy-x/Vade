@@ -2,7 +2,8 @@
 //! SSH calls per Spark: one reads its IPv4 interfaces (speed, MTU, RDMA
 //! device), one pings the far end of each rail of each cable twice (once with
 //! a full 9000-byte frame), and one reads its clock. The checks below only read
-//! that output; they change no setting.
+//! that output; they change no setting. With `--ring`, two more rows expect
+//! one closed ring of every machine at one line rate.
 use crate::{checks::Report, config::Config, runner::{self, Runner, quote}, topology};
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
@@ -234,15 +235,36 @@ pub(crate) fn clock(text: &str, before: u128, after: u128) -> Result<String, Str
 
 fn now() -> u128 { SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |time| time.as_nanos()) }
 
+/// The `ring line rate` row: rail `r` of every cable links at the fastest
+/// speed that any cable's rail `r` reports. `rates` holds (cable row, rail,
+/// Spark, interface) for both ends of both rails of every cable it checked.
+fn line_rate(rates: &[(String, usize, String, Interface)], cables: usize) -> Result<String, String> {
+    let fastest = |rail: usize| rates.iter().filter(|rate| rate.1 == rail).map(|rate| rate.3.speed).max().unwrap_or(0);
+    let slow: Vec<String> = rates.iter().filter(|(_, rail, _, end)| end.speed < fastest(*rail))
+        .map(|(row, rail, name, end)| format!("{row} rail {rail}: {name} {} at {} Mb/s", end.name, end.speed)).collect();
+    if !slow.is_empty() {
+        return Err(format!("Rail 0 of the other cables links at {} Mb/s and rail 1 at {} Mb/s, but {}. Check that cable: use a 200 Gb/s cable and seat both ends.", fastest(0), fastest(1), slow.join("; ")));
+    }
+    let checked = rates.len() / 4;
+    if checked < cables {
+        return Err(format!("Only {checked} of {cables} cables have both rails to compare. Fix the failed or skipped cable rows first."));
+    }
+    Ok(format!("rail 0 at {} Mb/s and rail 1 at {} Mb/s on all {cables} cables", fastest(0), fastest(1)))
+}
+
 /// Run every fabric check for every machine and group in `config`. A failed
-/// check never stops the rest.
-pub(crate) fn run<R: Runner>(report: &mut Report, runner: &mut R, config: &Config, rdma: bool, dry: bool) -> Result<(), String> {
+/// check never stops the rest. `ring` adds the rows for one closed ring.
+pub(crate) fn run<R: Runner>(report: &mut Report, runner: &mut R, config: &Config, rdma: bool, ring: bool, dry: bool) -> Result<(), String> {
     report.ok("cabling", &topology::cabling(&config.machines).join("; "))?;
+    if ring {
+        report.check("ring", topology::check_whole_ring(&config.machines), String::clone,
+            "Cable every Spark to its two ring neighbors, give both ends of each cable a fabric entry, then run vade doctor --fabric --ring. See docs/eight-sparks.md.")?;
+    }
     for group in &config.groups {
         let machines: Vec<_> = group.hosts.iter().filter_map(|host| config.machines.iter().find(|machine| machine.name == *host).cloned()).collect();
         let label = format!("group {}", group.name);
-        let result = topology::check_ring(&format!("Group {}", group.name), &machines);
-        report.check(&label, result, |()| format!("ring of {} in rank order: {}", machines.len(), group.hosts.join(", ")),
+        let result = topology::check_arc(&format!("Group {}", group.name), &machines);
+        report.check(&label, result, |()| topology::arc_text(&machines),
             "Fix the group's hosts order or its fabric entries, then run vade doctor --fabric.")?;
     }
     // A link with only one end in the config is a defect, never a skipped cable.
@@ -270,27 +292,34 @@ pub(crate) fn run<R: Runner>(report: &mut Report, runner: &mut R, config: &Confi
             report.plan(&format!("{} - {} cable", config.machines[a].name, config.machines[b].name),
                 "both rails: one subnet each, speed, MTU and RDMA at both ends, small and 9000-byte pings both ways, no shared subnet")?;
         }
+        if ring {
+            report.plan("ring line rate", "rail 0 and rail 1 of every cable link at one speed each")?;
+        }
         return Ok(());
     }
     // 1. Interfaces, and one row per configured port.
     let mut probes: Vec<Probe> = Vec::new();
+    // A Spark whose probe did not run has no port facts: skip its port and cable rows.
+    let mut probed: Vec<bool> = Vec::new();
     for machine in &config.machines {
         let name = |check: &str| format!("{} {check}", machine.name);
         let probe = match runner.run(&runner::ssh(&machine.ssh, PROBE_SCRIPT.into(), &name("fabric probe"))) {
-            Ok(output) if output.success => parse_probe(&output.stdout),
+            Ok(output) if output.success => Some(parse_probe(&output.stdout)),
             _ => {
                 report.fail(&name("fabric ports"), "The fabric probe did not run over SSH.", "Check the ssh entry and that ip exists on the Spark, then run vade doctor --fabric.")?;
-                Probe::default()
+                None
             }
         };
         for (peer, value) in &machine.fabric {
             let row = name(&format!("port to {peer}"));
-            match numeric(value) {
-                None => report.skip(&row, "fabric address is a host name; this check reads numeric IPv4 addresses")?,
-                Some(own) => { report.check(&row, port(&probe, own, peer, rdma), String::clone, "Fix this port, then run vade doctor --fabric. See docs/network-setup.md.")?; }
+            match (numeric(value), &probe) {
+                (None, _) => report.skip(&row, "fabric address is a host name; this check reads numeric IPv4 addresses")?,
+                (Some(_), None) => report.skip(&row, &format!("the fabric probe of {} did not run; fix its fabric ports row first", machine.name))?,
+                (Some(own), Some(probe)) => { report.check(&row, port(probe, own, peer, rdma), String::clone, "Fix this port, then run vade doctor --fabric. See docs/network-setup.md.")?; }
             }
         }
-        probes.push(probe);
+        probed.push(probe.is_some());
+        probes.push(probe.unwrap_or_default());
     }
     // 2. Find both rails of each cable; ping the far end of each rail from both ends.
     let mut found = Vec::new();
@@ -302,6 +331,10 @@ pub(crate) fn run<R: Runner>(report: &mut Report, runner: &mut R, config: &Confi
             report.skip(&row, "fabric address is a host name; this check reads numeric IPv4 addresses")?;
             continue;
         };
+        if let Some(index) = [a, b].into_iter().find(|&index| !probed[index]) {
+            report.skip(&row, &format!("the fabric probe of {} did not run; fix its fabric ports row first", config.machines[index].name))?;
+            continue;
+        }
         match rails((&ma.name, a_address, &probes[a]), (&mb.name, b_address, &probes[b])) {
             Err(error) => report.fail(&row, &error, "Fix this cable or its addresses, then run vade doctor --fabric. See docs/eight-sparks.md.")?,
             Ok(pair) => {
@@ -329,7 +362,12 @@ pub(crate) fn run<R: Runner>(report: &mut Report, runner: &mut R, config: &Confi
     }
     // 3. Check each cable, rail by rail, and that no two cables share a subnet.
     let mut subnets: BTreeMap<(Ipv4Addr, u8), String> = BTreeMap::new();
+    let mut rates = Vec::new();
     for (a, b, row, pair) in found {
+        for (index, (a_end, b_end)) in pair.iter().enumerate() {
+            rates.push((row.clone(), index, config.machines[a].name.clone(), a_end.clone()));
+            rates.push((row.clone(), index, config.machines[b].name.clone(), b_end.clone()));
+        }
         let mut result = link((&config.machines[a].name, &probes[a]), (&config.machines[b].name, &probes[b]), &pair, rdma);
         for (index, (end, _)) in pair.iter().enumerate() {
             if let Some(other) = subnets.insert(end.subnet(), row.clone()).filter(|_| result.is_ok()) {
@@ -337,6 +375,10 @@ pub(crate) fn run<R: Runner>(report: &mut Report, runner: &mut R, config: &Confi
             }
         }
         report.check(&row, result, String::clone, "Fix this cable or its addresses, then run vade doctor --fabric. See docs/eight-sparks.md.")?;
+    }
+    if ring {
+        report.check("ring line rate", line_rate(&rates, cables.len()), String::clone,
+            "Fix the named rail, then run vade doctor --fabric --ring. See docs/network-setup.md, step 7.")?;
     }
     Ok(())
 }

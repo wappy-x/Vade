@@ -6,13 +6,16 @@ Examples:
   vade doctor --json
   VADE_CONFIG=cluster.conf vade doctor --dry-run
   VADE_CONFIG=cluster.conf vade doctor --fabric
+  VADE_CONFIG=ring8.conf vade doctor --fabric --ring
 
 Usage: vade doctor [--json] [--api-key-file PATH] [--dry-run]
-       vade doctor --fabric [--json] [--dry-run]
+       vade doctor --fabric [--ring] [--json] [--dry-run]
 
 Options:
-  --fabric             Check every configured cable, port, group ring and clock
+  --fabric             Check every configured cable, port, group arc and clock
                        (controller)
+  --ring               With --fabric: expect one closed ring of every machine at
+                       one line rate
   --json               Print one vade.doctor.v1 object with every check
   --api-key-file PATH  Bearer credential file (or VADE_API_KEY_FILE)
   --dry-run            Show what would happen; change nothing
@@ -30,11 +33,14 @@ Notes:
   - Doctor checks the active Sparks, or the default vade up selection, through
     the same SSH options. It does not start an engine or change the setup.
   - --fabric checks every machine in the controller config: the cabling shape,
-    each [group] ring, each fabric port (address, 100000 Mb/s or more, MTU 9000,
+    each [group] arc, each fabric port (address, 100000 Mb/s or more, MTU 9000,
     active RDMA device), each cable with both ends in the config and each of its
     two rails on its own (one subnet, speed, MTU, RDMA, 9000-byte pings both
     ways) and each clock (within 1000 ms, time sync on). See
     docs/eight-sparks.md.
+  - --ring also expects one closed ring of every machine: each Spark has exactly
+    two neighbors in the config and the links close into one ring, and rail 0
+    and rail 1 of every cable link at one speed each.
   - Each FAIL row gives the next step. Exit 0 means PASS, 1 means FAIL.
   - One Spark needs no fabric or RDMA; linked Sparks use RDMA by default. Set
     SEQPAR_RDMA=0 for TCP using the configured fabric addresses on any reachable

@@ -8,8 +8,12 @@ use std::time::Duration;
 /// host 1 and the port 1 end is host 2 (docs/eight-sparks.md).
 fn rail(cable: u8, rail: u8, host: u8) -> Ipv4Addr { Ipv4Addr::new(192, 0, 2, 16 * (cable - 1) + 8 * rail + host) }
 
-/// The two rings of four from docs/eight-sparks.md: (cable, port 0 end, port 1 end).
+/// Two rings of four, which the ring check must refuse as one ring: (cable,
+/// port 0 end, port 1 end).
 const TWO_RINGS: [(u8, &str, &str); 8] = [(1, "s1", "s2"), (2, "s2", "s3"), (3, "s3", "s4"), (4, "s4", "s1"), (5, "s5", "s6"), (6, "s6", "s7"), (7, "s7", "s8"), (8, "s8", "s5")];
+/// The ring of eight from docs/eight-sparks.md: cable c joins s<c> port 0 to
+/// the next Spark's port 1.
+const ONE_RING: [(u8, &str, &str); 8] = [(1, "s1", "s2"), (2, "s2", "s3"), (3, "s3", "s4"), (4, "s4", "s5"), (5, "s5", "s6"), (6, "s6", "s7"), (7, "s7", "s8"), (8, "s8", "s1")];
 
 fn line(name: &str, address: Ipv4Addr, speed: i64, mtu: u32, device: &str, state: &str) -> String {
     format!("iface {name} {address}/29 {speed} {mtu} {device} {state}\n")
@@ -148,7 +152,8 @@ impl Runner for Scripted {
         self.labels.push(exec.label.clone());
         let (machine, check) = exec.label.split_once(' ').unwrap();
         let stdout = match check {
-            "fabric probe" => self.probes[machine].clone(),
+            // A Spark with no probe text fails its probe, as an SSH failure does.
+            "fabric probe" => match self.probes.get(machine) { Some(text) => text.clone(), None => return Ok(Output { success: false, stdout: String::new() }) },
             "fabric ping" => {
                 let script = exec.args.last().unwrap();
                 let targets = script.lines().find_map(|line| line.strip_prefix("for address in ")?.strip_suffix("; do")).unwrap();
@@ -167,12 +172,14 @@ impl Runner for Scripted {
     fn pause(&mut self, _: Duration) { panic!("The fabric check never waits.") }
 }
 
-fn eight_spark_text(groups: &str) -> String {
+fn eight_spark_text(groups: &str) -> String { cabled_text(&TWO_RINGS, groups) }
+
+fn cabled_text(cables: &[(u8, &str, &str)], groups: &str) -> String {
     let mut text = "[global]\nstate_dir = /state\n".to_string();
     for index in 1..=8 {
         let name = format!("s{index}");
         text += &format!("[machine {name}]\nssh = {name}-ssh\n");
-        for &(cable, from, to) in &TWO_RINGS {
+        for &(cable, from, to) in cables {
             if from == name { text += &format!("fabric.{to} = {}\n", rail(cable, 0, 1)); }
             if to == name { text += &format!("fabric.{from} = {}\n", rail(cable, 0, 2)); }
         }
@@ -183,11 +190,16 @@ fn eight_spark_text(groups: &str) -> String {
 const GROUPS: &str = "[group left]\nhosts = s1,s2,s3,s4\nlayout = quads\n[group right]\nhosts = s5,s6,s7,s8\nlocal_port = 18090\nlayout = quads\n[group bad]\nhosts = s1,s3,s2,s4\nlocal_port = 18100\nlayout = test\n";
 
 fn fabric_rows(text: &str, probes: BTreeMap<String, String>, silent: BTreeSet<(String, Ipv4Addr)>, dry: bool) -> (Result<(), String>, String, Vec<String>) {
+    ring_rows(text, probes, silent, false, dry)
+}
+
+/// [`fabric_rows`] with `--ring` set by `ring`.
+fn ring_rows(text: &str, probes: BTreeMap<String, String>, silent: BTreeSet<(String, Ipv4Addr)>, ring: bool, dry: bool) -> (Result<(), String>, String, Vec<String>) {
     let config = Config::parse(text, Path::new("test-config/config")).unwrap();
     let mut runner = Scripted { probes, silent, labels: Vec::new() };
     let mut report = Report::new("controller", dry);
     let capture = crate::output::testing::Capture::default();
-    let result = crate::output::with_writer(capture.clone(), || run(&mut report, &mut runner, &config, true, dry).and_then(|()| report.finish()));
+    let result = crate::output::with_writer(capture.clone(), || run(&mut report, &mut runner, &config, true, ring, dry).and_then(|()| report.finish()));
     (result, String::from_utf8(capture.bytes.borrow().clone()).unwrap(), runner.labels)
 }
 
@@ -195,8 +207,71 @@ fn row<'a>(printed: &'a str, name: &str) -> &'a str {
     printed.lines().find(|line| line.get(6..).is_some_and(|rest| rest.starts_with(name))).unwrap_or_else(|| panic!("{name}:\n{printed}"))
 }
 
-fn healthy_probes() -> BTreeMap<String, String> {
-    (1..=8).map(|index| { let name = format!("s{index}"); let text = healthy(&name, &TWO_RINGS); (name, text) }).collect()
+fn healthy_probes() -> BTreeMap<String, String> { probes_for(&TWO_RINGS) }
+
+fn probes_for(cables: &[(u8, &str, &str)]) -> BTreeMap<String, String> {
+    (1..=8).map(|index| { let name = format!("s{index}"); let text = healthy(&name, cables); (name, text) }).collect()
+}
+
+/// Arcs of the ring of eight: the whole ring, two quads, a quad across
+/// cable 8, a pair on cable 8, and four Sparks with a gap.
+const ARCS: &str = "[group eight]\nhosts = s1,s2,s3,s4,s5,s6,s7,s8\nlayout = eight\n[group quad-a]\nhosts = s1,s2,s3,s4\nlayout = quads\n\
+    [group quad-b]\nhosts = s5,s6,s7,s8\nlocal_port = 18090\nlayout = quads\n[group cross]\nhosts = s7,s8,s1,s2\nlayout = cross\n\
+    [group pair-81]\nhosts = s8,s1\nlayout = pairs\n[group gap]\nhosts = s1,s2,s4,s5\nlayout = gap\n";
+
+#[test]
+fn a_ring_of_eight_passes_the_ring_rows_and_every_arc() {
+    let (result, printed, labels) = ring_rows(&cabled_text(&ONE_RING, ARCS), probes_for(&ONE_RING), BTreeSet::new(), true, false);
+    assert!(result.unwrap_err().starts_with("1 doctor check failed."), "only the gap group fails:\n{printed}");
+    assert!(row(&printed, "cabling").contains("ring of 8: s1, s2, s3, s4, s5, s6, s7, s8"), "{printed}");
+    assert!(row(&printed, "ring ").starts_with("ok") && row(&printed, "ring ").contains("ring of 8: s1, s2, s3, s4, s5, s6, s7, s8; every Spark has two neighbors"), "{printed}");
+    assert!(row(&printed, "group eight").contains("arc of 8 in rank order: s1, s2, s3, s4, s5, s6, s7, s8; the ring closes"), "{printed}");
+    assert!(row(&printed, "group quad-b").contains("arc of 4 in rank order: s5, s6, s7, s8"), "{printed}");
+    assert!(row(&printed, "group cross").starts_with("ok") && row(&printed, "group pair-81").starts_with("ok"), "{printed}");
+    assert!(row(&printed, "group gap").starts_with("FAIL") && printed.contains("Group gap is not an arc of the cabling: s2 and s4"), "{printed}");
+    for cable in ["s1 - s2 cable", "s4 - s5 cable", "s1 - s8 cable", "s5 port to s4", "s1 port to s8"] {
+        assert!(row(&printed, cable).starts_with("ok"), "{cable}:\n{printed}");
+    }
+    assert!(row(&printed, "ring line rate").starts_with("ok") && printed.contains("rail 0 at 200000 Mb/s and rail 1 at 200000 Mb/s on all 8 cables"), "{printed}");
+    assert_eq!(labels.len(), 24, "one probe, one ping and one clock call per Spark: {labels:?}");
+    // Without --ring there are no ring rows.
+    let (_, printed, _) = fabric_rows(&cabled_text(&ONE_RING, ""), probes_for(&ONE_RING), BTreeSet::new(), false);
+    assert!(!printed.contains("ring line rate") && !printed.lines().any(|line| line.get(6..).is_some_and(|rest| rest.starts_with("ring "))), "{printed}");
+}
+
+#[test]
+fn one_slow_rail_fails_the_ring_line_rate_only() {
+    // Rail 1 of cable 5 links at 100000 Mb/s at the s6 end: still a fabric port, but not the ring's rate.
+    let mut probes = probes_for(&ONE_RING);
+    let slow = probes["s6"].replace("p1r1 192.0.2.74/29 200000", "p1r1 192.0.2.74/29 100000");
+    probes.insert("s6".into(), slow);
+    let (result, printed, _) = ring_rows(&cabled_text(&ONE_RING, ""), probes, BTreeSet::new(), true, false);
+    assert!(result.unwrap_err().starts_with("1 doctor check failed."), "{printed}");
+    assert!(row(&printed, "s5 - s6 cable").starts_with("ok"), "{printed}");
+    assert!(row(&printed, "ring line rate").starts_with("FAIL") && printed.contains("but s5 - s6 cable rail 1: s6 p1r1 at 100000 Mb/s"), "{printed}");
+    // A cable without two rails leaves the rate unproven.
+    let mut probes = probes_for(&ONE_RING);
+    for machine in ["s2", "s3"] {
+        let text = probes[machine].lines().filter(|line| !line.contains("192.0.2.25/") && !line.contains("192.0.2.26/")).map(|line| format!("{line}\n")).collect::<String>();
+        probes.insert(machine.into(), text);
+    }
+    let (_, printed, _) = ring_rows(&cabled_text(&ONE_RING, ""), probes, BTreeSet::new(), true, false);
+    assert!(row(&printed, "s2 - s3 cable").starts_with("FAIL") && printed.contains("Only 7 of 8 cables have both rails to compare"), "{printed}");
+}
+
+#[test]
+fn the_ring_row_names_a_missing_closing_cable_and_two_rings() {
+    // Cable 8 (s8 - s1) is not in the config: a path of eight.
+    let (result, printed, _) = ring_rows(&cabled_text(&ONE_RING[..7], ""), BTreeMap::new(), BTreeSet::new(), true, true);
+    assert!(result.is_err() && row(&printed, "ring ").starts_with("FAIL") && printed.contains("The ring does not close: path of 8: s1, s2, s3, s4, s5, s6, s7, s8.")
+        && printed.contains("next: Add the cable between s1 and s8, then add fabric.s8 under [machine s1]"), "{printed}");
+    assert!(row(&printed, "ring line rate").starts_with("plan"), "{printed}");
+    // Two rings of four are not one ring.
+    let (_, printed, _) = ring_rows(&eight_spark_text(""), BTreeMap::new(), BTreeSet::new(), true, true);
+    assert!(printed.contains("The cabling is 2 rings, not one"), "{printed}");
+    // The ring of eight dry run passes with no SSH.
+    let (result, printed, labels) = ring_rows(&cabled_text(&ONE_RING, ""), BTreeMap::new(), BTreeSet::new(), true, true);
+    assert!(result.is_ok() && labels.is_empty(), "{printed}");
 }
 
 #[test]
@@ -204,7 +279,7 @@ fn eight_sparks_in_two_rings_pass_every_fabric_check() {
     let (result, printed, labels) = fabric_rows(&eight_spark_text(GROUPS), healthy_probes(), BTreeSet::new(), false);
     assert!(result.unwrap_err().starts_with("1 doctor check failed."), "only the bad group fails:\n{printed}");
     assert!(row(&printed, "cabling").contains("ring of 4: s1, s2, s3, s4; ring of 4: s5, s6, s7, s8"), "{printed}");
-    assert!(row(&printed, "group left").contains("ring of 4 in rank order: s1, s2, s3, s4"), "{printed}");
+    assert!(row(&printed, "group left").contains("arc of 4 in rank order: s1, s2, s3, s4; the ring closes"), "{printed}");
     assert!(row(&printed, "group bad").starts_with("FAIL") && printed.contains("hosts = s1,s2,s3,s4"), "{printed}");
     for cable in ["s1 - s2 cable", "s1 - s4 cable", "s5 - s8 cable", "s6 - s7 cable", "s4 port to s1", "s8 clock"] {
         assert!(row(&printed, cable).starts_with("ok"), "{cable}:\n{printed}");
@@ -224,6 +299,21 @@ fn eight_sparks_in_two_rings_pass_every_fabric_check() {
     probes.insert("s2".into(), copied);
     let (result, printed, _) = fabric_rows(&eight_spark_text(""), probes, BTreeSet::new(), false);
     assert!(result.is_err() && row(&printed, "s1 - s2 cable").starts_with("FAIL") && printed.contains("Rail 1: s1 and s2 both hold 192.0.2.9"), "{printed}");
+}
+
+#[test]
+fn a_spark_whose_probe_fails_skips_its_port_and_cable_rows() {
+    let mut probes = probes_for(&ONE_RING);
+    probes.remove("s3");
+    let (result, printed, labels) = ring_rows(&cabled_text(&ONE_RING, ""), probes, BTreeSet::new(), true, false);
+    assert!(result.is_err() && row(&printed, "s3 fabric ports").starts_with("FAIL"), "{printed}");
+    for skipped in ["s3 port to s2", "s3 port to s4", "s2 - s3 cable", "s3 - s4 cable"] {
+        assert!(row(&printed, skipped).starts_with("skip") && row(&printed, skipped).contains("the fabric probe of s3 did not run"), "{skipped}:\n{printed}");
+    }
+    assert!(row(&printed, "s2 port to s3").starts_with("ok") && row(&printed, "s4 - s5 cable").starts_with("ok"), "{printed}");
+    assert!(!printed.contains("No interface on this Spark"), "{printed}");
+    assert!(printed.contains("Only 6 of 8 cables have both rails to compare"), "{printed}");
+    assert!(!labels.contains(&"s3 fabric ping".to_string()), "{labels:?}");
 }
 
 #[test]
@@ -272,9 +362,9 @@ fn clocks_must_be_close_and_synchronized() {
 }
 
 #[test]
-fn both_example_configs_pass_their_dry_run_fabric_check() {
-    for text in [include_str!("../../examples/eight-sparks.conf"), include_str!("../../examples/eight-sparks-ring8.conf")] {
-        let (result, printed, labels) = fabric_rows(text, BTreeMap::new(), BTreeSet::new(), true);
+fn the_example_config_passes_its_dry_run_ring_check() {
+    for ring in [false, true] {
+        let (result, printed, labels) = ring_rows(include_str!("../../examples/eight-sparks.conf"), BTreeMap::new(), BTreeSet::new(), ring, true);
         assert!(result.is_ok() && labels.is_empty(), "{printed}");
         assert!(!printed.contains("FAIL"), "{printed}");
     }

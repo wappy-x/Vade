@@ -470,10 +470,11 @@ impl Config {
     pub fn selected(&self, options: &UpOptions) -> Result<Vec<Machine>, String> {
         let selected = self.selected_machines(options)?;
         // Independent replicas never talk to each other, so they need no fabric links.
-        // A group must close into a ring; --hosts and --sparks need a path.
+        // A group must be an arc of the cabling in rank order, each host linked
+        // to the next; --hosts and --sparks need the same path.
         if !options.replicas {
             match &self.group {
-                Some(group) => crate::topology::check_ring(&format!("Group {}", group.name), &selected)?,
+                Some(group) => crate::topology::check_arc(&format!("Group {}", group.name), &selected)?,
                 None => self.check_links(&selected)?,
             }
         }
@@ -912,10 +913,10 @@ mod tests {
         assert!(eight("").unwrap().select_group("quad-a").unwrap_err().contains("no [group name] sections"));
     }
     #[test]
-    fn a_group_must_be_a_ring_in_cable_order() {
+    fn a_group_must_be_an_arc_in_cable_order() {
         let mut config = eight("[group cross]\nhosts = s1,s2,s3,s4,s5,s6,s7,s8\n[group shuffled]\nhosts = s1,s3,s2,s4\nlocal_port = 18100\nlayout = other\n").unwrap();
         config.select_group("cross").unwrap();
-        assert!(config.selected(&UpOptions::default()).unwrap_err().contains("Group cross is not a ring: s4 and s5 have no fabric link"));
+        assert!(config.selected(&UpOptions::default()).unwrap_err().contains("Group cross is not an arc of the cabling: s4 and s5 have no fabric link"));
         config.select_group("shuffled").unwrap();
         assert!(config.selected(&UpOptions::default()).unwrap_err().contains("hosts = s1,s2,s3,s4"));
         // The same machines in --hosts cable order only need a path.
@@ -923,17 +924,17 @@ mod tests {
         assert!(config.selected(&UpOptions { hosts: ["s2", "s3", "s4", "s1"].map(String::from).to_vec(), ..UpOptions::default() }).is_ok());
     }
     #[test]
-    fn both_eight_spark_examples_start_every_group() {
+    fn the_eight_spark_example_starts_every_group() {
         let examples = [
-            (include_str!("../examples/eight-sparks.conf"), vec!["ring of 4: spark-1, spark-2, spark-3, spark-4", "ring of 4: spark-5, spark-6, spark-7, spark-8"], ["quads", "doubles", "singles"]),
-            (include_str!("../examples/eight-sparks-ring8.conf"), vec!["ring of 8: spark-1, spark-2, spark-3, spark-4, spark-5, spark-6, spark-7, spark-8"], ["eight", "doubles", "singles"]),
+            (include_str!("../examples/eight-sparks.conf"), vec!["ring of 8: spark-1, spark-2, spark-3, spark-4, spark-5, spark-6, spark-7, spark-8"], ["eight", "quads", "doubles", "doubles-b", "singles"]),
         ];
         for (text, cabling, layouts) in examples {
             let config = parse(text).unwrap();
             assert_eq!(crate::topology::cabling(&config.machines), cabling);
             assert_eq!(config.groups.iter().map(|group| group.layout.as_str()).collect::<BTreeSet<_>>(), layouts.into());
             assert_eq!(config.groups.iter().filter(|group| group.layout == "singles").count(), 8);
-            // Every group of the example passes the ring check vade up applies.
+            assert!(crate::topology::check_whole_ring(&config.machines).is_ok());
+            // Every group of the example passes the arc check vade up applies.
             for group in &config.groups {
                 let mut config = config.clone();
                 config.select_group(&group.name).unwrap();

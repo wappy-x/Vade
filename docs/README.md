@@ -44,7 +44,7 @@ the other terms.
 | [One-Spark quickstart](quickstart-one-spark.md) | From a controller: start FP4-Local on one Spark, put the gateway (`vade-gateway`, a relay between your client and the engine) in front of it, and send a first chat. An older second part builds Qwen3-8B directly on the Spark |
 | [Network setup](network-setup.md) | Linking Sparks: what to buy, cabling, addresses and link checks |
 | [Spark setup](spark-setup.md) | The OS and network preparation for each linked Spark, and what its checks can and cannot confirm |
-| [Eight Sparks](eight-sparks.md) | Cabling eight Sparks as two rings of four or one ring of eight, the address plan, groups and layouts, `vade doctor --fabric` and a day-one checklist |
+| [Eight Sparks](eight-sparks.md) | Cabling eight Sparks as one ring of eight, the arcs for 2, 4 and 8 Sparks, the address plan, groups and layouts, `vade doctor --fabric --ring` and a step-by-step checklist |
 | [FP4-Local on Vade's own server](../engine/docs/next-http.md) | For advanced use: starting the Flash-Next server by hand, without `vade up`, and the ways to arrange your Sparks. It is an engine reference, not a first guide |
 
 ### FP8 on 2, 4 or 6 Sparks

@@ -371,8 +371,10 @@ the local lifecycle.
 A controller config can also name several servers as `[group NAME]` sections.
 Set `VADE_GROUP=NAME` to select one: its machines in rank order, its own
 ownership record and its own local port. Keep the same `VADE_GROUP` for every
-command of that server. `vade doctor --fabric` checks every cable, port and
-clock in the config. See [Eight Sparks](../docs/eight-sparks.md).
+command of that server. A group must be an arc of the cabling: each host is
+cabled to the next, in rank order. `vade doctor --fabric` checks every cable,
+port and clock in the config, and `--ring` also expects one closed ring. See
+[Eight Sparks](../docs/eight-sparks.md).
 
 One `VADE_HOME` holds one local installation: either the default one (started
 with plain `up` or `launch`) or the Qwen3-8B one (started with `run qwen3-8b`).

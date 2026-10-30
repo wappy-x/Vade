@@ -142,8 +142,9 @@ not need the cable that would close the ring.
 direct cable. Six Sparks in a ring can serve as three separate pairs, or as
 one long chain, without recabling.
 
-**Eight Sparks?** See [Eight Sparks](eight-sparks.md): two rings of four or one
-ring of eight, a full address plan, and `vade doctor --fabric`.
+**Eight Sparks?** See [Eight Sparks](eight-sparks.md): one ring of eight, its
+arcs for 2, 4 and 8 Sparks, a full address plan, and
+`vade doctor --fabric --ring`.
 
 <br>
 
@@ -187,7 +188,8 @@ spark-1 + spark-2 and spark-3 + spark-4 can also run as two separate pairs.
 ### Six Sparks (ring)
 
 Same rule, six cables: spark-N port 0 → spark-(N+1) port 1, and spark-6 port 0
-→ spark-1 port 1. Our six-Spark ring measured the same speed on all six cables.
+→ spark-1 port 1. We have no saved per-cable measurement of the six-Spark ring
+(see [numbers we measured](#numbers-we-measured)).
 
 ### With a switch
 

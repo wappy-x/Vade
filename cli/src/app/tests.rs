@@ -1437,4 +1437,3 @@ fn doctor_checks_each_spark_staged_build_against_the_manifest() {
     f.app.runner.probe = Some((false, ""));
     assert!(doctor(&mut f).1.contains("needs SSH"));
 }
-

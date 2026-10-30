@@ -61,7 +61,7 @@ impl<R: Runner> App<R> {
             Command::Chat(options) => self.chat(&options),
             Command::Sessions(action) => self.sessions(&action),
             Command::Doctor => self.doctor(),
-            Command::DoctorFabric => self.doctor_fabric(),
+            Command::DoctorFabric { ring } => self.doctor_fabric(ring),
             Command::Install => self.install(),
             Command::Update => self.update(),
             _ => Err("Run vade --help to choose a command.".into()),
@@ -85,7 +85,16 @@ impl<R: Runner> App<R> {
                 let machines: Vec<_> = session.ranks.iter().map(|rank| rank.machine.name.as_str()).collect();
                 crate::output::line(format_args!("{mark} Vade is {state} on {}.", machines.join(", ")))?;
             }
-            None => crate::output::line(format_args!("{} Vade is stopped.", style::paint(Token::Dim, "○", Stream::Out)))?,
+            None => {
+                let owned = self.group_records()?;
+                if owned.is_empty() {
+                    crate::output::line(format_args!("{} Vade is stopped.", style::paint(Token::Dim, "○", Stream::Out)))?;
+                } else {
+                    // Groups still run: never headline this as stopped.
+                    crate::output::line(format_args!("{} Vade has no server of its own; {} group(s) still own one.", style::paint(Token::Dim, "○", Stream::Out), owned.len()))?;
+                    self.print_group_records(&owned)?;
+                }
+            }
         }
         crate::output::text(format_args!("{}", crate::status::next_steps(&[
             ("Start", self.start_command()), ("Chat", "vade chat"), ("Stop", "vade down"), ("Check", "vade doctor")])))
@@ -663,8 +672,13 @@ impl<R: Runner> App<R> {
     }
 
     fn chat(&mut self, options: &crate::cli::ChatOptions) -> Result<(), String> {
-        let session = Session::load(&self.config.state_dir)?
-            .ok_or_else(|| format!("Vade is stopped. Run {}, then vade chat.", self.start_command()))?;
+        let Some(session) = Session::load(&self.config.state_dir)? else {
+            let owned = self.group_records()?;
+            if owned.is_empty() {
+                return Err(format!("Vade is stopped. Run {}, then vade chat.", self.start_command()));
+            }
+            return Err(format!("Vade has no server of its own; groups own servers: {}. Run VADE_GROUP=NAME vade chat for one of them.", owned.join(", ")));
+        };
         if session.phase != "running" || session.ranks.iter().any(|r| !r.attempted) {
             return Err(
                 "Engine startup or cleanup is unfinished. Run vade status before chat.".into(),

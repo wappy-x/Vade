@@ -29,6 +29,13 @@ fn status_without_a_group_names_the_groups_that_own_a_server() {
     let printed = status(&mut f);
     assert!(printed.starts_with("○ Vade has no server of its own; 1 group(s) still own one.\n") && !printed.contains("Vade is stopped"), "{printed}");
     assert!(printed.contains("Groups with an ownership record: right. Run VADE_GROUP=NAME vade status to see one, VADE_GROUP=NAME vade down to stop one."), "{printed}");
+    // Plain vade and vade chat name the groups too, and never say stopped.
+    let capture = crate::output::testing::Capture::default();
+    crate::output::with_writer(capture.clone(), || f.app.menu()).unwrap();
+    let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+    assert!(printed.starts_with("○ Vade has no server of its own; 1 group(s) still own one.\nGroups with an ownership record: right.") && !printed.contains("stopped"), "{printed}");
+    let error = f.app.chat(&crate::cli::ChatOptions::default()).unwrap_err();
+    assert_eq!(error, "Vade has no server of its own; groups own servers: right. Run VADE_GROUP=NAME vade chat for one of them.");
     // Plain vade down names them too, and vade status --json lists them.
     let capture = crate::output::testing::Capture::default();
     crate::output::with_writer(capture.clone(), || f.app.down()).unwrap();
@@ -49,6 +56,7 @@ fn status_without_a_group_names_the_groups_that_own_a_server() {
     let mut f = Fixture::fp4(4, false);
     f.app.config.lock_dir = f.app.config.state_dir.clone();
     assert!(status(&mut f).starts_with("○ Vade is stopped."));
+    assert!(f.app.chat(&crate::cli::ChatOptions::default()).unwrap_err().starts_with("Vade is stopped. Run "));
 }
 
 #[test]
