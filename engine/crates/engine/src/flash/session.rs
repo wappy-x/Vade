@@ -374,9 +374,9 @@ fn reduce_device_inner<E: Exchange>(b: &Backend<'_>, ranks: &mut [E], scratch: &
 pub struct Model<'a> {
     root: PathBuf,
     checkpoint: Checkpoint,
-    persistent: Vec<Weights<'a>>,
-    resident: bool,
-    activation_quantization: bool,
+    /// LBF12 twins (HC up, attention): declared before the weights they mirror, so they drop first.
+    _lbf12: super::blocks::Lbf12Twins<'a>, persistent: Vec<Weights<'a>>,
+    resident: bool, activation_quantization: bool,
     mtp_depth: usize,
     profile_layers: bool,
     prompt: RefCell<Option<PromptScratch<'a>>>,
@@ -517,7 +517,7 @@ impl<'a> Model<'a> {
                 persistent.last().unwrap().resident_bytes(), start.elapsed().as_secs_f64()*1000.0);
         }
         Ok(Self { root: root.to_owned(), checkpoint, persistent, resident: false, activation_quantization,
-            mtp_depth: 0, profile_layers: crate::collective::layers_enabled(), prompt: RefCell::new(None), draft_mx8: None })
+            mtp_depth: 0, profile_layers: crate::collective::layers_enabled(), prompt: RefCell::new(None), draft_mx8: None, _lbf12: Default::default() })
     }
     /// Load a single rank for a distributed session. The budget covers weights
     /// and execution memory; a low budget retains the existing streamed path.
@@ -555,7 +555,7 @@ impl<'a> Model<'a> {
             weights.payload_bytes as f64 / (io_ms * 1e6), stats.weight_file_bytes,
             stats.weight_file_bytes as f64 / (io_ms * 1e6), stats.weight_buffered_bytes,
             b.peak_pinned_staging_bytes(), b.pinned_staging_bytes());
-        Ok(Self { draft_mx8: if mtp_depth != 0 && resident { Head::fp8_draft_twin(b, &weights)? } else { None }, root: root.to_owned(),
+        Ok(Self { draft_mx8: if mtp_depth != 0 && resident { Head::fp8_draft_twin(b, &weights)? } else { None }, root: root.to_owned(), _lbf12: if resident { super::blocks::Lbf12Twins::fp8(b, &weights, reserve)? } else { Default::default() },
             checkpoint, persistent: vec![weights], resident, activation_quantization, mtp_depth, profile_layers: crate::collective::layers_enabled(), prompt: RefCell::new(None) })
     }
     /// Serving ranks agree on this decision before any potentially slow load.

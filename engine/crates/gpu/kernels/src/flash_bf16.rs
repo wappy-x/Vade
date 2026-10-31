@@ -166,11 +166,11 @@ unsafe fn dot_range<const DEEP: bool, const INPUT_BF16: bool>(p: Bf16Rows, row: 
         return dot_hc::<INPUT_BF16>(p, row, lane, part);
     }
     if p.rows % 64 == 0 && p.cols % 16 == 0 {
-        return dot_inner::<true, true, DEEP, INPUT_BF16, false>(p, row, lane, part);
+        return dot_inner::<true, true, DEEP, INPUT_BF16, false, false>(p, row, lane, part);
     }
     if flash_bf16_packed(p.rows as usize, p.cols as usize) {
-        dot_inner::<true, false, DEEP, INPUT_BF16, false>(p, row, lane, part)
-    } else { dot_inner::<false, false, DEEP, INPUT_BF16, false>(p, row, lane, part) }
+        dot_inner::<true, false, DEEP, INPUT_BF16, false, false>(p, row, lane, part)
+    } else { dot_inner::<false, false, DEEP, INPUT_BF16, false, false>(p, row, lane, part) }
 }
 
 /// Solo HC: forty native eight-row tiles plus one compact four-row matrix.
@@ -227,7 +227,7 @@ unsafe fn dot_hc<const INPUT_BF16: bool>(p: Bf16Rows, row: usize, lane: usize, p
 }
 
 #[inline(always)]
-unsafe fn dot_inner<const PACKED: bool, const NATIVE: bool, const DEEP: bool, const INPUT_BF16: bool, const SINGLE: bool>(p: Bf16Rows, row: usize, lane: usize, part: usize) -> Acc {
+unsafe fn dot_inner<const PACKED: bool, const NATIVE: bool, const DEEP: bool, const INPUT_BF16: bool, const SINGLE: bool, const LBF: bool>(p: Bf16Rows, row: usize, lane: usize, part: usize) -> Acc {
     let k = p.cols as usize;
     let wr = row + if SINGLE { 0 } else { lane / 4 };
     let (start, end) = canonical::range(k.div_ceil(16), part);
@@ -248,6 +248,16 @@ unsafe fn dot_inner<const PACKED: bool, const NATIVE: bool, const DEEP: bool, co
     let live = token < p.tokens as usize;
     let x_row = if live { token * k } else { 0 };
     let mut acc = ZERO;
+    // LBF12 twin in weight2 (flash_bf16_lbf12_twin of this native matrix, K <= 4096): one
+    // 8-row x K32 slot per tile pair, 12 bytes per lane, row bases after the slots, then
+    // ceil(K / 1024) flag words per 8-row group. A flagged slot decodes to the identical B
+    // fragments.
+    let (pairs, slots) = (k / 32, p.rows as usize / 8 * (k / 32));
+    let twin = p.weight2 as *const u8;
+    let words = pairs.div_ceil(32);
+    let fl = twin.add(slots * 392 + row / 8 * words * 4).cast::<u32>();
+    let flags = if LBF { [*fl, if words > 1 { *fl.add(1) } else { 0 }, if words > 2 { *fl.add(2) } else { 0 },
+        if words > 3 { *fl.add(3) } else { 0 }] } else { [0; 4] };
     let load = |tile: usize| {
         let c = tile * 16 + lane % 4 * 2;
         // Packed layouts have K % 16 == 0, so only row-major shards end inside
@@ -256,7 +266,12 @@ unsafe fn dot_inner<const PACKED: bool, const NATIVE: bool, const DEEP: bool, co
         let at = if !in_k { p.weight as *const u16 }
             else if NATIVE { w.add((canonical::weight_tile(row / 8, tile, k / 16) * 32 + lane) * 4) }
             else { w.add(base + tile * stride) };
-        let b = if PACKED {
+        let (slot, q) = (row / 8 * pairs + tile / 2, tile / 2);
+        let word = if q < 32 { flags[0] } else if q < 64 { flags[1] } else if q < 96 { flags[2] } else { flags[3] };
+        let b = if LBF && word >> (q % 32) & 1 != 0 {
+            let v = dense_latency::lbf12_decode(twin.add(slot * 384), twin.add(slots * 384 + slot * 8), lane);
+            if tile % 2 == 0 { [v[0], v[1]] } else { [v[2], v[3]] }
+        } else if PACKED {
             let value: u64;
             core::arch::asm!("ld.global.nc.u64 {v}, [{p}];", v = out(reg64) value, p = in(reg64) at);
             [value as u32, (value >> 32) as u32]
@@ -421,19 +436,31 @@ pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_rows(mut p: Bf16Rows) {
 // input conversion out of the BF16-input kernel's register allocation.
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_320(mut p: Bf16Rows) {
-    p.cols = 320; decode_input::<false, false, true>(p);
+    // hc_silu bit 1: weight2 holds the matrix's LBF12 twin (one matrix, rows2 == 0).
+    p.cols = 320;
+    if p.hc_silu & 2 != 0 && p.rows2 == 0 { decode_input::<false, false, true, true>(p); }
+    else { decode_input::<false, false, true, false>(p); }
 }
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_320_bf16(mut p: Bf16Rows) {
-    p.cols = 320; decode_input::<false, true, true>(p);
+    // hc_silu bit 1: weight2 holds the matrix's LBF12 twin (one matrix, rows2 == 0).
+    p.cols = 320;
+    if p.hc_silu & 2 != 0 && p.rows2 == 0 { decode_input::<false, true, true, true>(p); }
+    else { decode_input::<false, true, true, false>(p); }
 }
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_3072_native(mut p: Bf16Rows) {
-    p.cols = 3072; decode_input::<false, false, true>(p);
+    // hc_silu bit 1: weight2 holds the matrix's LBF12 twin (one matrix, rows2 == 0).
+    p.cols = 3072;
+    if p.hc_silu & 2 != 0 && p.rows2 == 0 { decode_input::<false, false, true, true>(p); }
+    else { decode_input::<false, false, true, false>(p); }
 }
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_2560_native(mut p: Bf16Rows) {
-    p.cols = 2560; decode_input::<false, false, true>(p);
+    // hc_silu bit 1: weight2 holds the matrix's LBF12 twin (one matrix, rows2 == 0).
+    p.cols = 2560;
+    if p.hc_silu & 2 != 0 && p.rows2 == 0 { decode_input::<false, false, true, true>(p); }
+    else { decode_input::<false, false, true, false>(p); }
 }
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_2560(mut p: Bf16Rows) { p.cols = 2560; decode::<false>(p); }
@@ -447,8 +474,8 @@ pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_2560_narrow(mut p: Bf16Rows) {
 pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_2560_pairs(p: crate::kernel_params::Bf16Pairs) {
     let mut pair = if core::arch::nvptx::_block_idx_y() == 0 { p.pairs[0] } else { p.pairs[1] };
     pair.cols = 2560;
-    if pair.tokens == 1 { decode_rows::<true, false, false, false>(pair, true); }
-    else { decode_rows::<true, false, false, true>(pair, true); }
+    if pair.tokens == 1 { decode_rows::<true, false, false, false, false>(pair, true); }
+    else { decode_rows::<true, false, false, true, false>(pair, true); }
 }
 
 /// Tiny gate matrices use one CTA per output instead of leaving most SMs
@@ -465,8 +492,8 @@ pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_2560_small(mut p: Bf16Rows) {
         p.weight = p.weight2; p.output = p.output2; p.rows = p.rows2; p.stride = p.stride2;
     }
     p.rows2 = 0; p.cols = 2560; p.tokens = 1;
-    let sum = if flash_bf16_packed(p.rows as usize, 2560) { dot_inner::<true, false, true, false, true>(p, row, lane, part) }
-        else { dot_inner::<false, false, true, false, true>(p, row, lane, part) };
+    let sum = if flash_bf16_packed(p.rows as usize, 2560) { dot_inner::<true, false, true, false, true, false>(p, row, lane, part) }
+        else { dot_inner::<false, false, true, false, true, false>(p, row, lane, part) };
     let sh = ptx::shared::<16>();
     if lane == 0 { ptx::store(sh + (part * 4) as u32, sum.a); }
     ptx::sync();
@@ -477,20 +504,20 @@ pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_2560_small(mut p: Bf16Rows) {
 
 #[inline(always)]
 unsafe fn decode<const DEEP: bool>(p: Bf16Rows) {
-    if p.input_bf16 != 0 { decode_input::<DEEP, true, false>(p); }
-    else { decode_input::<DEEP, false, false>(p); }
+    if p.input_bf16 != 0 { decode_input::<DEEP, true, false, false>(p); }
+    else { decode_input::<DEEP, false, false, false>(p); }
 }
 
 #[inline(always)]
-unsafe fn decode_input<const DEEP: bool, const INPUT_BF16: bool, const NATIVE: bool>(p: Bf16Rows) {
-    let split = if NATIVE { p.cols == 320 }
+unsafe fn decode_input<const DEEP: bool, const INPUT_BF16: bool, const NATIVE: bool, const LBF: bool>(p: Bf16Rows) {
+    let split = if NATIVE { p.cols == 320 || LBF }
         else { flash_bf16_decode_split((p.rows + p.rows2) as usize, p.cols as usize) };
-    if p.tokens == 1 { decode_rows::<DEEP, INPUT_BF16, NATIVE, false>(p, split); }
-    else { decode_rows::<DEEP, INPUT_BF16, NATIVE, true>(p, split); }
+    if p.tokens == 1 { decode_rows::<DEEP, INPUT_BF16, NATIVE, false, LBF>(p, split); }
+    else { decode_rows::<DEEP, INPUT_BF16, NATIVE, true, LBF>(p, split); }
 }
 
 #[inline(always)]
-unsafe fn decode_rows<const DEEP: bool, const INPUT_BF16: bool, const NATIVE: bool, const BATCH: bool>(p: Bf16Rows, split: bool) {
+unsafe fn decode_rows<const DEEP: bool, const INPUT_BF16: bool, const NATIVE: bool, const BATCH: bool, const LBF: bool>(p: Bf16Rows, split: bool) {
     let tid = _thread_idx_x() as usize;
     let lane = tid % 32;
     let tile = if split { _block_idx_x() as usize }
@@ -506,7 +533,7 @@ unsafe fn decode_rows<const DEEP: bool, const INPUT_BF16: bool, const NATIVE: bo
         (tile - first) * 8
     };
     p.rows2 = 0;
-    let dot = |part| if NATIVE { dot_inner::<true, true, DEEP, INPUT_BF16, false>(p, row, lane, part) }
+    let dot = |part| if NATIVE { dot_inner::<true, true, DEEP, INPUT_BF16, false, LBF>(p, row, lane, part) }
         else { dot_range::<DEEP, INPUT_BF16>(p, row, lane, part) };
     if split {
         let part = tid / 32 & 3;
@@ -1000,10 +1027,10 @@ pub unsafe extern "ptx-kernel" fn flash_next_hc_up_latency4_lbf12(p: Bf16Rows, n
 #[inline(always)]
 unsafe fn twin_shuffle(v: u32, d: u32) -> u32 { crate::shuffle_xor(u32::MAX, v, d, 31) }
 /// LBF12 twin of a packed BF16 matrix [N][K] (flash_bf16_element order; N % 64 == 0,
-/// K % 32 == 0, K <= 1024): one warp per 8-row x K32 slot reads the lanes' two K16 fragments
+/// K % 32 == 0, K <= 4096): one warp per 8-row x K32 slot reads the lanes' two K16 fragments
 /// (as the latency kernels load them); if every row's nonzero exponents span <= 14 and none
 /// is subnormal (a warp vote), it writes twin[slot * 384 + lane * 12], the row bases at
-/// twin + slots * 384 and the slot's bit in one u32 flag word per 8-row group at
+/// twin + slots * 384 and the slot's bit in ceil(K / 1024) u32 flag words per 8-row group at
 /// twin + slots * 392 (zeroed by the host); other slots are read from the BF16 matrix.
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_bf16_lbf12_twin(p: crate::kernel_params::FlashBf16Pack) {
@@ -1037,7 +1064,7 @@ pub unsafe extern "ptx-kernel" fn flash_bf16_lbf12_twin(p: crate::kernel_params:
     *w = lo64 as u32; *w.add(1) = (lo64 >> 32) as u32; *w.add(2) = hi64 as u32;
     if lane % 4 == 0 { *twin.add(slots * 384 + slot * 8 + lane / 4) = base as u8; }
     if lane == 0 {
-        core::arch::asm!("red.global.or.b32 [{a}], {v};", a = in(reg64) twin.add(slots * 392 + slot / pairs * 4) as u64, v = in(reg32) 1u32 << (slot % pairs));
+        core::arch::asm!("red.global.or.b32 [{a}], {v};", a = in(reg64) twin.add(slots * 392 + (slot / pairs * pairs.div_ceil(32) + slot % pairs / 32) * 4) as u64, v = in(reg32) 1u32 << (slot % pairs % 32));
     }
 }
 

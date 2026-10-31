@@ -63,17 +63,14 @@ fn verify_mx_solo97(tokens: usize, rows: usize, cols: usize) -> bool {
 /// expansion, so the output bytes are the BF16 matrix's. Prompt launches keep the BF16 copy.
 /// Each entry is owned by the Mx8Twin that holds the twin's memory.
 use crate::flash_mx8_registry as mx8_registry;
-/// LBF12 twins: packed BF16 matrix address -> its flash_bf16_lbf12_twin image.
-static LBF12: std::sync::RwLock<std::collections::BTreeMap<u64, u64>> = std::sync::RwLock::new(std::collections::BTreeMap::new());
+/// LBF12 twins: packed BF16 matrix address -> (its flash_bf16_lbf12_twin image, rows, cols).
+static LBF12: std::sync::RwLock<std::collections::BTreeMap<u64, (u64, usize, usize)>> = std::sync::RwLock::new(std::collections::BTreeMap::new());
 /// Build and register the LBF12 twin of a packed BF16 [rows][cols] matrix (rows % 64 == 0,
-/// cols % 32 == 0, cols <= 1024): 12-bit slots where a slot's rows fit, flags + row bases;
+/// cols % 32 == 0, cols <= 4096): 12-bit slots where a slot's rows fit, flags + row bases;
 /// decode kernels read it in place of the BF16 bytes and get the identical fragments.
 pub(super) fn lbf12_twin<'a>(b: &Backend<'a>, weight: u64, rows: usize, cols: usize) -> Result<Option<DeviceVector<'a>>> {
-    if rows % 64 != 0 || cols % 32 != 0 || cols > 1024 || !b.has_flash("flash_bf16_lbf12_twin") {
-        return Ok(None);
-    }
-    let slots = rows / 8 * (cols / 32);
-    let bytes = slots * 392 + rows / 8 * 4;
+    if rows % 64 != 0 || cols % 32 != 0 || cols > 4096 || !b.has_flash("flash_bf16_lbf12_twin") { return Ok(None); }
+    let (slots, bytes) = (rows / 8 * (cols / 32), lbf12_bytes(rows, cols));
     let mut v = b.vector(bytes.div_ceil(4))?;
     b.write_vector_bytes(&mut v, &vec![0u8; bytes.div_ceil(4) * 4])?;
     let mut pack = spark_gpu_probe::kernel_params::FlashBf16Pack { source: weight, weight: v.device_address(), rows: rows as u32, cols: cols as u32 };
@@ -81,12 +78,36 @@ pub(super) fn lbf12_twin<'a>(b: &Backend<'a>, weight: u64, rows: usize, cols: us
         b.launch_flash("flash_bf16_lbf12_twin", (slots * 32).div_ceil(128) as u32, 128,
             &mut [(&mut pack as *mut spark_gpu_probe::kernel_params::FlashBf16Pack).cast()])?;
     }
-    LBF12.write().map_err(|_| "LBF12 registry poisoned")?.insert(weight, v.device_address());
+    LBF12.write().map_err(|_| "LBF12 registry poisoned")?.insert(weight, (v.device_address(), rows, cols));
     Ok(Some(v))
 }
-fn lbf12_of(weight: u64) -> Option<u64> {
-    LBF12.read().ok().and_then(|m| m.get(&weight).copied())
+fn lbf12_bytes(rows: usize, cols: usize) -> usize { rows / 8 * (cols / 32) * 392 + rows / 8 * (cols / 32).div_ceil(32) * 4 }
+fn lbf12_of(weight: u64, size: Option<(usize, usize)>) -> Option<u64> { LBF12.read().ok().and_then(|m| m.get(&weight).filter(|t| size.is_none_or(|s| s == (t.1, t.2))).map(|t| t.0)) }
+/// The FP8 rank path's LBF12 twins of its packed HC up weights ([W][LOW], replicated; built on every resident rank,
+/// with no room check): K320 decode rows read them in place of the BF16 bytes (same B fragments). Dropping the set removes its entries.
+#[derive(Default)] pub(super) struct Lbf12Twins<'a>(Vec<(u64, DeviceVector<'a>)>);
+impl<'a> Lbf12Twins<'a> {
+    pub(super) fn hc_up(b: &Backend<'a>, w: &Weights<'_>) -> Result<Self> {
+        let mut twins = Self(Vec::new());
+        for name in w.tensors.keys().filter(|name| name.ends_with(".input_mix_weight_up.weight")) {
+            let Ok(address) = weight(w, name, &[W as u64, LOW as u64]) else { continue };
+            if let Some(twin) = lbf12_twin(b, address, W, LOW)? { twins.0.push((address, twin)); }
+        }
+        b.synchronize()?; println!("flash_session hc_up_lbf12 matrices={} bytes={}", twins.0.len(), twins.0.iter().map(|t| t.1.len() * 4).sum::<usize>());
+        Ok(twins)
+    }
+    /// hc_up's twins (no room check; the load plan does not count them), then the rank's attention projections' (native
+    /// K2560/K3072 decode rows). Only the attention twins are checked: each only while it fits above the funded `reserve`.
+    pub(super) fn fp8(b: &Backend<'a>, w: &Weights<'_>, reserve: usize) -> Result<Self> {
+        let mut twins = Self::hc_up(b, w)?; let hc = twins.0.len();
+        let mut room = b.allocation_budget().saturating_sub(b.allocated_bytes()).saturating_sub(reserve);
+        for (address, rows, cols) in w.attention_matrices() { if lbf12_bytes(rows, cols) > room { continue }
+            if let Some(twin) = lbf12_twin(b, address, rows, cols)? { room = room.saturating_sub(twin.len() * 4); twins.0.push((address, twin)); } }
+        b.synchronize()?; println!("flash_session attention_lbf12 matrices={} bytes={}", twins.0.len() - hc, twins.0[hc..].iter().map(|t| t.1.len() * 4).sum::<usize>());
+        Ok(twins)
+    }
 }
+impl Drop for Lbf12Twins<'_> { fn drop(&mut self) { if let Ok(mut map) = LBF12.write() { for (address, _) in &self.0 { map.remove(address); } } } }
 /// An MXFP8 twin's memory and its registry entry. Fields drop in order: the entry is
 /// removed first, then the memory is freed (teardown and partial-load unwinding alike).
 pub(super) struct Mx8Twin<'a> {
@@ -670,25 +691,9 @@ fn next_prefill_packed(
 }
 
 /// Two weight matrices over the same tile in one launch: (weight, output, rows, stride).
-pub(crate) fn bf16_row_pair(
-    b: &Backend<'_>,
-    x: u64,
-    cols: usize,
-    tokens: usize,
-    first: (u64, u64, usize, usize),
-    second: (u64, u64, usize, usize),
-) -> Result<()> {
-    project_rows(
-        b,
-        x,
-        cols,
-        tokens,
-        first,
-        second,
-        false,
-        false,
-        BF16_ROWS_TOKENS,
-    )
+pub(crate) fn bf16_row_pair(b: &Backend<'_>, x: u64, cols: usize, tokens: usize,
+    first: (u64, u64, usize, usize), second: (u64, u64, usize, usize)) -> Result<()> {
+    project_rows(b, x, cols, tokens, first, second, false, false, BF16_ROWS_TOKENS)
 }
 /// QSA alone reuses the same packed prompt input across both projection pairs.
 pub(super) fn qsa_pair(b: &Backend<'_>, x: u64, tokens: usize,
@@ -829,23 +834,33 @@ fn project_rows(b: &Backend<'_>, x: u64, cols: usize, tokens: usize, first: (u64
             3072 if !input_bf16 && rows >= 1024 && rows < 16384
                 && first.2 % 64 == 0 && second.2 % 64 == 0 => "flash_bf16_mma1_3072_native",
             _ => "flash_bf16_mma1" };
-        if !spark_gpu_probe::kernel_params::flash_bf16_decode_split(rows, cols) {
-            threads = 64; (decode, (first.2.div_ceil(8) + second.2.div_ceil(8)).div_ceil(2))
-        }
-        else {
-            (decode, first.2.div_ceil(8) + second.2.div_ceil(8))
-        }
+        let groups = first.2.div_ceil(8) + second.2.div_ceil(8);
+        if !spark_gpu_probe::kernel_params::flash_bf16_decode_split(rows, cols) { threads = 64; (decode, groups.div_ceil(2)) }
+        else { (decode, groups) }
     }
     else if tokens >= 32 {
         threads = 256;
         ("flash_bf16_mma64", rows.div_ceil(BF16_MMA_ROWS) * tokens.div_ceil(BF16_MMA_TOKENS))
     }
     else { ("flash_bf16_mma", rows.div_ceil(BF16_TILE_ROWS) * tokens.div_ceil(BF16_TILE_TOKENS)) };
-    profile_projection(b, rows, cols, || unsafe {
-        b.launch_flash_rows(name, blocks as u32, 1, threads,
-            if name == "flash_bf16_mma64" { FLASH_BF16_MMA_SHARED as u32 } else { 0 },
-            &mut [(&mut params as *mut Bf16Rows).cast()])
-    })
+    // K320 decode rows of one matrix read its registered LBF12 twin (hc_silu bit 1).
+    if let Some(twin) = lbf12_of(first.0, None).filter(|_| name.starts_with("flash_bf16_mma1_320") && second.2 == 0) { params.weight2 = twin; params.hc_silu |= 2; }
+    // Native K2560/K3072 decode rows of a matrix with a registered LBF12 twin read the twin (hc_silu
+    // bit 1) through the split, four warps per 8-row group; a pair with a twin runs as two launches.
+    let twin = |m: (u64, u64, usize, usize)| lbf12_of(m.0, Some((m.2, cols))).filter(|_| name.ends_with("_native") && m.2 != 0);
+    let mut launches = [(params, rows, blocks, threads), (params, 0, 0, 0)];
+    if twin(first).is_some() || twin(second).is_some() { for (at, m) in launches.iter_mut().zip([first, second]) {
+        let mut p = row_params(x, cols, tokens, m, (0, 0, 0, 0), input_bf16, hc_silu);
+        *at = match twin(m) { Some(t) => { (p.weight2, p.hc_silu) = (t, p.hc_silu | 2); (p, m.2, m.2 / 8, 128) } None => (p, m.2, (m.2 / 8).div_ceil(2), 64) };
+    } }
+    for (mut params, rows, blocks, threads) in launches.into_iter().filter(|l| l.1 != 0) {
+        profile_projection(b, rows, cols, || unsafe {
+            b.launch_flash_rows(name, blocks as u32, 1, threads,
+                if name == "flash_bf16_mma64" { FLASH_BF16_MMA_SHARED as u32 } else { 0 },
+                &mut [(&mut params as *mut Bf16Rows).cast()])
+        })?;
+    }
+    Ok(())
 }
 fn profile_projection(b: &Backend<'_>, rows: usize, cols: usize, run: impl FnOnce() -> Result<()>) -> Result<()> {
     if b.is_profiling() && rows < 16384 {
@@ -1189,7 +1204,7 @@ impl<'w> Hc<'w> {
                 // One warp per stream (gates mixed in stream order by warp 0); at M1-16 the LBF12
                 // twin of the up weight, when built, replaces its BF16 bytes (same bits; M2-16:
                 // hc_up_gate's chains on the twin's fragments).
-                match lbf12_of(self.up).filter(|_| tokens <= 16) {
+                match lbf12_of(self.up, None).filter(|_| tokens <= 16) {
                     Some(mut twin) => b.launch_flash_rows(if tokens == 1 { "flash_next_hc_up_latency4_lbf12" } else { "flash_next_hc_up_latency16_lbf12" }, H.div_ceil(8) as u32, 1, 128, 0,
                         &mut [(&mut p as *mut Bf16Rows).cast(), (&mut normalized as *mut u64).cast(), (&mut twin as *mut u64).cast()]),
                     None => b.launch_flash_rows("flash_next_hc_up_latency4", H.div_ceil(8) as u32, tokens.div_ceil(16) as u32, 128, 0,

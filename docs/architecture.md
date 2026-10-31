@@ -323,8 +323,30 @@ Three details matter for exactness and speed:
 The arithmetic behind every returned token, the target model and its
 verification of drafts, never re-quantizes the checkpoint: it reads the tensors
 in the formats above. The BF16 output head may be re-encoded in place as
-LBF12, a lossless packing that decodes to the identical BF16 bits
-(`VADE_HEAD_LBF12=0` keeps plain BF16).
+LBF12, a lossless packing that decodes to the identical BF16 bits.
+`VADE_HEAD_LBF12=0` keeps plain BF16 for the head and, on FP4-Local, builds no
+LBF12 copies of the HC up weights.
+
+On FP8, decode rows also read LBF12 copies, but only on a rank whose weights
+are resident. A rank that streams its weights (drafting off and a budget below
+weights plus reserve) gets no copies. A resident FP8 rank gets these copies:
+
+- All of its HC up weights. These copies have no room check, and the load plan
+  does not count them.
+- Its packed BF16 attention projections with K 2560 or 3072, the MTP layer's
+  included: GDN `in_proj_qkv`, `in_proj_z` and `out_proj`, and QSA `q_proj`
+  (query and gate) and `o_proj`
+  ([`attention_matrices`](../engine/crates/engine/src/flash/weights.rs)). Each
+  of these copies is made only when it fits above the execution reserve. QSA
+  `k_proj` and `v_proj`, the indexer's `index_qk_proj`, and GDN `in_proj_a`
+  and `in_proj_b` get no copy.
+
+An LBF12 copy takes 392 bytes for each block of 8 rows by 32 columns (512 bytes
+in BF16), plus flag words (`lbf12_bytes` in
+[`blocks.rs`](../engine/crates/engine/src/flash/blocks.rs)). Each rank prints
+the sizes at startup. On two Sparks with MTP depth 2 and context 32768, both
+ranks printed `flash_session attention_lbf12 matrices=134 bytes=2059973376`
+and `flash_session hc_up_lbf12 matrices=100 bytes=502272000`.
 
 The drafter is the exception, and it is on by default whenever drafting is.
 At load Vade builds lower-precision copies that only propose tokens: an MXFP8

@@ -4,6 +4,10 @@
 #[path = "kernel_cuda.rs"]
 mod cuda;
 #[cfg(target_os = "linux")] use cuda::fp8group;
+#[cfg(target_os = "linux")] use cuda::rows;
+#[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
+#[path = "kernel_rows.rs"] mod rows;
 #[cfg(not(target_os = "linux"))]
 #[allow(dead_code)]
 #[path = "kernel_fp8.rs"] mod fp8group;
@@ -22,7 +26,7 @@ type Result<T> = std::result::Result<T, String>;
 /// fp4_bw gate/down, fp4_prefill_tc gate/down); 8-10 flash_bf16_mma_latency grouped/fused;
 /// 20-21 fp4_bw routed C1/C8; 30-33 QSA attention scores/values/index scores, L2 gather;
 /// 40-45 GDN seq/chunk/slot/fla0/split/cslot (kernel_gdn.rs and kernel_qsa.rs still see their
-/// own 7.. numbering: the dispatch subtracts the family base).
+/// own 7.. numbering: the dispatch subtracts the family base); 75 FP8 ring BF16 decode rows.
 #[derive(Clone, Debug, Default)]
 struct Case {
     name: String,
@@ -104,6 +108,7 @@ struct Options {
 }
 fn cases() -> Vec<Case> {
     let mut out = fp8group::cases();
+    out.extend(rows::cases());
     if std::env::var("KBENCH_FRONTEND").is_ok_and(|v|v=="1") {
         for m in [1,65,2048,8191,8192] {out.push(Case {name:format!("prompt-frontend-m{m}"),kernel:"flash_next_prompt_frontend",m,n:2560,k:0,kind:70,..Default::default()});}
     }

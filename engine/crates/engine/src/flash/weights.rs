@@ -450,6 +450,17 @@ impl<'a> Weights<'a> {
             .map(|(_, t)| t.bytes)
             .sum()
     }
+    /// The rank's packed attention projections (GDN qkv, z, out; QSA q/gate, o; the MTP layer's
+    /// too) with K 2560 or 3072 (the native decode entries) as (address, rows, cols) of the stored
+    /// packed matrix, for blocks::Lbf12Twins.
+    pub(super) fn attention_matrices(&self) -> Vec<(u64, usize, usize)> {
+        const PARTS: [&str; 5] = [".linear_attn.in_proj_qkv.weight", ".linear_attn.in_proj_z.weight",
+            ".linear_attn.out_proj.weight", ".self_attn.q_proj.weight", ".self_attn.o_proj.weight"];
+        self.tensors.iter()
+            .filter(|(name, t)| matches!(t.packed_cols, 2560 | 3072) && t.tensor.dtype == Dtype::Bf16 && PARTS.iter().any(|p| name.ends_with(p)))
+            .map(|(_, t)| (self.arena.device_address() + t.offset as u64, t.bytes / 2 / t.packed_cols, t.packed_cols))
+            .collect()
+    }
     pub fn tensor(&self, name: &str) -> Result<&TensorSlice> {
         self.tensors
             .get(name)

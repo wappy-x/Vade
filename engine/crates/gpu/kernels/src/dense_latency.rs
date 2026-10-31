@@ -1161,7 +1161,7 @@ unsafe fn lbf_shuffle(v: u32, d: u32) -> u32 { crate::shuffle_xor(u32::MAX,v,d,3
 /// 32-byte sector. The decode gives back the identical BF16 bits.
 #[cfg(target_arch = "nvptx64")]
 #[inline(always)]
-unsafe fn lbf12_decode(slot: *const u8, bases: *const u8, lane: usize) -> [u32; 4] {
+pub(super) unsafe fn lbf12_decode(slot: *const u8, bases: *const u8, lane: usize) -> [u32; 4] {
     let w = slot.add(lane*12) as *const u32;
     let lo = *w as u64 | (*w.add(1) as u64) << 32;
     let hi = *w.add(2) as u64;

@@ -30,6 +30,7 @@ mod frontend;
 #[path = "kernel_fp4_prompt.rs"]
 mod fp4_prompt;
 #[path = "kernel_fp8.rs"] pub(super) mod fp8group;
+#[path = "kernel_rows.rs"] pub(super) mod rows;
 #[path = "kernel_mxgroup.rs"]
 mod mxgroup;
 #[path = "kernel_fp8moe.rs"] mod fp8moe;
@@ -449,6 +450,7 @@ fn fixture(g: &mut Gpu, c: &Case, order: bool) -> Result<Fixture> {
         return routed_fixture(g, c);
     }
     if matches!(c.kind,71..=73) { return fp8group::fixture(g,c); }
+    if matches!(c.kind, 75 | 76) { return rows::fixture(g, c); }
     let (m, n, k) = (c.m, c.n, c.k);
     if c.kind == 8 {
         return group_fixture(g, c);
@@ -998,6 +1000,7 @@ fn launch_group(g: &Gpu, f: H, merge: H, c: &Case, v: &mut Fixture, i: usize, ar
 type Pre = (Option<H>, Option<u32>, Option<u32>);
 fn launch(g: &Gpu, f: H, merge: H, c: &Case, v: &mut Fixture, i: usize, arm: usize, (pre, shared, threads): Pre) -> Result<()> {
     if c.kind == 1 { return head::launch(g, f, c, v, i, arm); }
+    if matches!(c.kind, 75 | 76) { return rows::launch(g, f, c, v, i, arm); }
     if let Some(q) = v.qsa.as_mut() {
         return qsa::launch(g, f, q, arm);
     }
@@ -1229,6 +1232,7 @@ pub(super) fn run(o: &Options, cases: &[Case]) -> Result<()> {
         }
         let mut v = fixture(&mut g, c, o.order)?;
         head::prepare(&mut g, modules[0], c, &mut v)?;
+        if c.kind == 75 && c.mats[3] & 2 != 0 { rows::twins(&mut g, modules[1], c, &mut v)?; }
         if c.kind == 9 || c.kind == 10 || c.kind == 12 {
             v.pack = g.function(modules[0], "flash_bf16_input")?;
         }
@@ -1243,7 +1247,7 @@ pub(super) fn run(o: &Options, cases: &[Case]) -> Result<()> {
         // overrides X's down entry in the down and layer cases (fp4_bw_down_pdl / _x2 / _x4).
         let xover = if prompt::hcup_a16(c) {Some("flash_next_hc_up_tiled_a16".into())} else if c.name.starts_with("proute-") {std::env::var("KBENCH_ROUTE_PREFILL_X").ok()} else if c.name.starts_with("hc_up_prod-") && std::env::var("KBENCH_HCUP_M32").is_ok_and(|v|v=="1") {Some("flash_next_hc_up_m32".to_string())} else if c.name.starts_with("pgprod-") { std::env::var("KBENCH_PGPROD_X").ok().filter(|x|matches!(x.as_str(),"w16"|"u32"|"plan")).map(|x|format!("flash_bf16_mma_prefill_tiled_{x}")) } else if super::fold_x(c) { Some("flash_bf16_mma_latency_fold".to_string()) } else if (c.kind == 31 || c.kind == 32) && o.order && c.m < 64 && qsa::small_x().is_some() { qsa::small_x() }
             else if c.kind == 21 || c.kind == 22 { std::env::var("KBENCH_XDOWN").ok() } else if c.kind == 27 { Some("flash_next_compact_route_ids".into()) } else if c.kind == 29 || c.kind == 28 { Some(format!("{}{}", if c.kind == 29 { "flash_next_compact_route" } else { "flash_next_route_compact1" }, if c.name.contains("pack") && c.name.contains("mask") { "_pack_mask" } else if c.name.contains("pack") { "_pack" } else if c.name.contains("mask") { "_silu_mask" } else { "_silu" })) } else if c.kind == 24 && c.name.contains("fast") { Some(if c.name.contains("silu") { "flash_moe_silu_fast" } else { "flash_moe_route_fast" }.into()) }
-            else { std::env::var("KBENCH_XKERNEL").ok().filter(|_| c.kind == 1 || (30..=32).contains(&c.kind) || c.kind == 20 || matches!(c.kind,71..=73) || c.kind == 34 || c.kind >= 37 && c.kind <= 38) };
+            else { std::env::var("KBENCH_XKERNEL").ok().filter(|_| c.kind == 1 || (30..=32).contains(&c.kind) || c.kind == 20 || matches!(c.kind,71..=73) || matches!(c.kind, 75 | 76) || c.kind == 34 || c.kind >= 37 && c.kind <= 38) };
         let xname: &str = match &xover { Some(n) => n.as_str(), None if o.order && !c.xkernel.is_empty() => c.xkernel, None => c.kernel };
         let mut rows_entries = [String::new(), String::new()]; // KBENCH_MXROWS_X: printed as "entry"
         let functions = if let Some(f) = prompt_functions {
