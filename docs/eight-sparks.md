@@ -797,7 +797,12 @@ Spark finished loading the model much later than the Spark before it. Each
 rank waits 10 seconds for the next rank
 (`LINK_TIMEOUT` in
 [engine/crates/engine/src/flash/next_pp.rs](../engine/crates/engine/src/flash/next_pp.rs)).
-Look in `VADE_GROUP=eight vade logs` for the rank that finished loading last.
+Look in `VADE_GROUP=eight vade logs` for the rank that had not finished
+loading. Every rank after rank 0 prints `flashnext pp back loaded` once its
+model is loaded. A rank without that line was still loading when the start
+stopped. `flashnext pp back ready`, and the `flashnext startup_phases` line of
+rank 0, come only after the links are up, so they do not show loading.
+
 Every start reads the model from disk again: the engine drops the checkpoint
 from the file cache before it loads. So a second start is not faster on its
 own. Find out why that Spark loads more slowly, for example its disk, before
