@@ -66,9 +66,34 @@ pub fn cached() -> Options {
         frontend_gpu: false, frontend_dedup: false, gemm_u32: false, cold8k_r2: false,
     })
 }
+/// The longest prompt (rows) whose chain tiles over more than two ranks are half a PIPELINE_TILE.
+/// On S stages a prompt of n tiles gives its first token after about n + S - 1 stage times, so a
+/// half tile shortens the fill and the drain, while each half-tile row costs more (routed experts
+/// see half the rows). Four Sparks, FP4-Local, one fresh start per arm (own-4s-prefill r1 b1):
+/// cold 8K 2.178 -> 1.921 s with 1024-row tiles, 32K turn 1 9.130 -> 9.653 s; the two lengths
+/// cross near 16,000 rows. An operator figure with a margin below that crossing, not a checkpoint one.
+pub const CHAIN_HALF_MAX: usize = 6 * crate::flash_tp_switch::PIPELINE_TILE;
+/// Rows of each chain tile of a prompt that ends at `end` over more than two ranks
+/// (next_tp_seq.rs prompt_slice): PIPELINE_TILE / 2 up to CHAIN_HALF_MAX rows, else PIPELINE_TILE.
+/// Every kernel is row-exact per tile and tile edges stay on 64-row multiples, so the tile
+/// does not change token ids. One Spark and the pair never call it.
+pub fn chain_tile(end: usize) -> usize {
+    let tile = crate::flash_tp_switch::PIPELINE_TILE;
+    if end <= CHAIN_HALF_MAX { tile / 2 } else { tile }
+}
 #[cfg(test)]
 mod tests {
     use super::Options;
+    #[test]
+    fn chain_tile_is_half_a_pipeline_tile_up_to_the_bound() {
+        let tile = crate::flash_tp_switch::PIPELINE_TILE;
+        assert_eq!(super::CHAIN_HALF_MAX, 12_288);
+        for (end, rows) in [(1, tile / 2), (1024, tile / 2), (8192, tile / 2), (12_288, tile / 2), (12_289, tile), (32_099, tile), (262_144, tile)] {
+            assert_eq!(super::chain_tile(end), rows, "{end}");
+        }
+        // A half tile is still a pipeline tile (next_tp.rs tile_pass: 2 * rows >= PIPELINE_TILE) on 64-row edges.
+        assert!(2 * (tile / 2) >= tile && (tile / 2).is_multiple_of(64));
+    }
     #[test]
     fn strict_prompt_switches_and_dependency() {
         assert_eq!(Options::parse(|_| Ok(None)).unwrap(), Options::default());

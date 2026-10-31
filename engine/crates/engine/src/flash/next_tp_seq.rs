@@ -255,11 +255,11 @@ impl<'a> NextModel<'a> {
 impl<'a> NextModel<'a> {
     /// Rows of a chat's next prompt slice on a two-rank split front (tp_switch::seq_slice), for a
     /// live chat or a cached one (None: pipeline tiles); None off the split front. Over more ranks
-    /// (no token split) every slice is a pipeline tile.
+    /// (no token split) every slice is a chain tile of prompt_options::chain_tile rows.
     pub fn prompt_slice(&self, chat: Option<&NextSession<'a, '_>>, end: usize, chunk: usize) -> Option<usize> {
         self.tp.borrow().as_ref().filter(|s| s.rank == 0)?;
+        if !self.tp_pair() { return Some(crate::flash_prompt_options::chain_tile(end).min(chunk)); }
         let tile = crate::flash_tp_switch::PIPELINE_TILE.min(chunk);
-        if !self.tp_pair() { return Some(tile); }
         Some(chat.map_or(tile, |c| crate::flash_tp_switch::seq_slice(c.pos, end, chunk)))
     }
     /// Rank 0, a prompt call's next rows: the first part when the call holds a whole cold prompt
