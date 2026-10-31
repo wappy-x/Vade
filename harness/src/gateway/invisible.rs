@@ -1,7 +1,7 @@
 //! Standalone opaque HTTP relay. Observers and optional policies never own replies.
 use crate::transport::{self, BodyReader, DeadlineStream, Endpoint, Head};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::TcpStream;
 #[cfg(test)]
 use std::net::TcpListener;
 use std::sync::{
@@ -63,12 +63,12 @@ impl Origin {
         format!("{}{suffix}", self.prefix)
     }
     fn connect(&self) -> io::Result<DeadlineStream<'static>> {
-        let started = Instant::now();
-        for address in (self.endpoint.host.as_str(), self.endpoint.port)
-            .to_socket_addrs()?
-            .take(16)
-        {
-            let left = Duration::from_secs(5).saturating_sub(started.elapsed());
+        self.connect_until(Instant::now() + Duration::from_secs(5))
+    }
+    fn connect_until(&self, deadline: Instant) -> io::Result<DeadlineStream<'static>> {
+        // The deadline also bounds the name lookup, as in the core gateway.
+        for address in transport::resolve::addresses(&self.endpoint, Some(deadline))? {
+            let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 break;
             }
@@ -252,7 +252,8 @@ fn busy(socket: TcpStream, log: Option<&StatsLog>) -> io::Result<()> {
         503,
     );
     let result = local_error(reader.get_mut(), messages, 503, "gateway busy");
-    metrics.finish(result.is_ok());
+    // A local refusal is not an upstream completion.
+    metrics.finish(false);
     if let Some(log) = log {
         log.write(&metrics.json())?;
     }
@@ -265,10 +266,17 @@ struct WireHead {
 }
 impl WireHead {
     fn read(reader: &mut impl BufRead) -> io::Result<Self> {
+        Self::read_noting(reader, |_| {})
+    }
+    /// `first` sees the request line before the rest is read, so an error can name its route.
+    fn read_noting(reader: &mut impl BufRead, mut first: impl FnMut(&[u8])) -> io::Result<Self> {
         let mut wire = Vec::new();
         let mut lines = Vec::new();
         loop {
             let line = transport::line(reader, transport::MAX_HEADERS.saturating_sub(wire.len()))?;
+            if lines.is_empty() {
+                first(&line);
+            }
             wire.extend_from_slice(&line);
             wire.extend_from_slice(b"\r\n");
             if wire.len() > transport::MAX_HEADERS {
@@ -371,11 +379,12 @@ fn forward(
 ) -> io::Result<()> {
     let local = socket.local_addr()?;
     let mut client = BufReader::new(DeadlineStream::new(socket, None)?);
-    let mut request = match WireHead::read(&mut client) {
+    let mut messages = false;
+    let mut request = match WireHead::read_noting(&mut client, |first| messages = super::messages_route(&String::from_utf8_lossy(first))) {
         Ok(request) => request,
         // A client that sent nothing gets nothing; any other bad head gets a 400.
         Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Err(error),
-        Err(_) => return local_error(client.get_mut(), false, 400, "invalid or oversized HTTP headers"),
+        Err(_) => return refused(local_error(client.get_mut(), messages, 400, "invalid or oversized HTTP headers")),
     };
     let messages = super::messages_route(&request.parsed.first);
     let parts: Vec<_> = request.parsed.first.split(' ').collect();
@@ -384,12 +393,12 @@ fn forward(
         || !parts[1].starts_with('/')
         || parts[1].contains(['#', '\\'])
     {
-        return local_error(client.get_mut(), messages, 400, "invalid HTTP request target");
+        return refused(local_error(client.get_mut(), messages, 400, "invalid HTTP request target"));
     }
     let cors = match access.check(&request.parsed, local) {
         Ok(origin) => access::cors(origin.as_deref()),
-        Err(Refusal::Status(code, message)) => return local_error(client.get_mut(), messages, code, message),
-        Err(Refusal::Preflight(headers)) => return access::write_preflight(client.get_mut(), "", &headers),
+        Err(Refusal::Status(code, message)) => return refused(local_error(client.get_mut(), messages, code, message)),
+        Err(Refusal::Preflight(headers)) => return refused(access::write_preflight(client.get_mut(), "", &headers)),
     };
     if access.consumes_authorization() {
         // The gateway token stays here; --api-key-file supplies upstream credentials.
@@ -401,12 +410,12 @@ fn forward(
         });
     }
     if request.parsed.get("upgrade").is_some() {
-        return local_error(client.get_mut(), messages, 400, "protocol upgrades unsupported");
+        return refused(local_error(client.get_mut(), messages, 400, "protocol upgrades unsupported"));
     }
     let body_head = request.body_head();
     if let Err(error) = BodyReader::new(io::Cursor::new(&[]), &body_head, true, crate::json::MAX_INPUT_BYTES) {
         let (status, message) = super::request_body_error(&error);
-        return super::write_error(client.get_mut(), messages, status, &message);
+        return refused(super::write_error(client.get_mut(), messages, status, &message));
     }
     if request
         .parsed
@@ -428,7 +437,7 @@ fn forward(
     let mut body = Vec::new();
     if let Err(error) = input.read_to_end(&mut body) {
         let (status, message) = super::request_body_error(&error);
-        return super::write_error(input.reader.get_mut(), messages, status, &message);
+        return refused(super::write_error(input.reader.get_mut(), messages, status, &message));
     }
     metrics.request(&body);
     if method == "GET" && path.split('?').next() == Some("/health") && runtime.origins().len() > 1 {
@@ -437,15 +446,27 @@ fn forward(
         let writer = input.reader.get_mut();
         write!(writer, "HTTP/1.1 {code} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{cors}\r\n{document}",
             if code == 200 { "OK" } else { "Gateway Error" }, document.len())?;
-        return writer.flush();
+        return refused(writer.flush());
+    }
+    // The gateway adds Host, length and key lines. A head that would then pass the
+    // limit gets the 400 of an oversized client head, before any folder or forwarding.
+    // The first check, at the client's body length, also runs before the --clamp-limits
+    // admission request; the second covers a body that the policy made longer.
+    let unforwardable = |length| runtime.origins().iter().any(|origin| upstream_head(&request, origin, length).is_ok_and(|head| head.len() > transport::MAX_HEADERS));
+    if unforwardable(body.len()) {
+        return refused(local_error(input.reader.get_mut(), messages, 400, "invalid or oversized HTTP headers"));
+    }
+    let prepared = runtime.prepare(method, path, &request.parsed, &body);
+    // A refusal after the policy keeps its report in the stats row.
+    metrics.policy = prepared.report;
+    if unforwardable(prepared.body.len()) {
+        return refused(local_error(input.reader.get_mut(), messages, 400, "invalid or oversized HTTP headers"));
     }
     // Only a complete request that passed the access checks gets a folder on disk.
     *recording = recorder.and_then(Recorder::begin);
     record::observe(recording, |r| {
         r.request(method, path, &request.parsed, &body)
     });
-    let prepared = runtime.prepare(method, path, &request.parsed, &body);
-    metrics.policy = prepared.report;
     if prepared.body.as_ref() != body {
         record::observe(recording, |r| r.effective(&prepared.body));
     }
@@ -471,12 +492,12 @@ fn forward(
                     (index, lease) = (next.index, Some(next));
                     continue;
                 }
-                return local_error(
+                return refused(local_error(
                     client.get_mut(),
                     messages,
                     502,
                     "upstream connection failed; request not replayed",
-                );
+                ));
             }
         };
         upstream.watch_peer(client.get_ref());
@@ -504,7 +525,7 @@ fn forward(
         drop(lease.take());
         match alternate() {
             Some(next) => (index, lease) = (next.index, Some(next)),
-            None => return local_error(client.get_mut(), messages, 502, "upstream failed before replying"),
+            None => return refused(local_error(client.get_mut(), messages, 502, "upstream failed before replying")),
         }
     }
 }
@@ -541,7 +562,7 @@ fn fan_out(
         let calls: Vec<_> = runtime.origins().iter().map(|origin| {
             let mut attempt = metrics.attempt();
             scope.spawn(move || {
-                let mut upstream = origin.connect().ok()?;
+                let mut upstream = origin.connect_until(deadline).ok()?;
                 upstream.bound_deadline(deadline);
                 // A full fixed buffer fails the write, so a large reply is skipped.
                 let mut reply = io::Cursor::new(vec![0; CONTROL_REPLY_BYTES].into_boxed_slice());
@@ -567,7 +588,7 @@ fn fan_out(
         }
     }
     let Some((reply, attempt, _)) = chosen else {
-        return local_error(client.get_mut(), false, 502, "no upstream answered; request not replayed");
+        return refused(local_error(client.get_mut(), false, 502, "no upstream answered; request not replayed"));
     };
     *metrics = attempt;
     if let Some((_, body)) = buffered(&reply) {
@@ -633,23 +654,8 @@ fn exchange(
     } = dispatch;
     let parts: Vec<_> = request.parsed.first.split(' ').collect();
     let (method, path) = (parts[0], parts[1]);
-    let first = format!("{method} {} HTTP/1.1", origin.target(path));
-    let mut head = Vec::new();
-    request.forward_upstream(
-        &mut head,
-        &first,
-        &format!(
-            "Host: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
-            origin.endpoint.authority,
-            body.len()
-        ),
-    )?;
-    // The added Host, length and key lines can push a near-limit head past what
-    // the upstream reads; the client gets the 400 it would get for its own head.
-    if head.len() > transport::MAX_HEADERS {
-        return local_error(writer, super::messages_route(&request.parsed.first), 400, "invalid or oversized HTTP headers").map(|_| true);
-    }
-    upstream.write_all(&head)?;
+    // forward refuses a head that grows past the limit; a replayed one fails here.
+    upstream.write_all(&fitting_head(request, origin, body.len())?)?;
     upstream.write_all(body)?;
     upstream.flush()?;
     upstream.gateway_response(method, path);
@@ -673,7 +679,7 @@ fn exchange(
     }
     metrics.response(&response.parsed, code);
     if code == 101 {
-        return local_error(writer, super::messages_route(&request.parsed.first), 502, "upstream upgrade unsupported").map(|_| true);
+        return refused(local_error(writer, super::messages_route(&request.parsed.first), 502, "upstream upgrade unsupported")).map(|_| true);
     }
     let no_body = method == "HEAD" || matches!(code, 204 | 304);
     let chunked = response.parsed.first.starts_with("HTTP/1.1 ");
@@ -703,6 +709,26 @@ fn exchange(
         relay(&mut body, writer, metrics, recording, chunked)?;
     }
     Ok(true)
+}
+
+/// The head `exchange` sends: the client's lines with this origin's target,
+/// Host, length and close lines, and the configured key.
+fn upstream_head(request: &WireHead, origin: &Origin, body_len: usize) -> io::Result<Vec<u8>> {
+    let parts: Vec<_> = request.parsed.first.split(' ').collect();
+    let first = format!("{} {} HTTP/1.1", parts[0], origin.target(parts[1]));
+    let mut head = Vec::new();
+    request.forward_upstream(&mut head, &first,
+        &format!("Host: {}\r\nContent-Length: {body_len}\r\nConnection: close\r\n", origin.endpoint.authority))?;
+    Ok(head)
+}
+
+/// `upstream_head`, or an error when it passes the header limit.
+fn fitting_head(request: &WireHead, origin: &Origin, body_len: usize) -> io::Result<Vec<u8>> {
+    let head = upstream_head(request, origin, body_len)?;
+    if head.len() > transport::MAX_HEADERS {
+        return Err(transport::invalid("forwarded HTTP headers exceed limit"));
+    }
+    Ok(head)
 }
 
 fn relay(
@@ -762,6 +788,13 @@ fn local_error(writer: &mut impl Write, messages: bool, code: u16, message: &str
         body.len()
     )?;
     writer.flush()
+}
+
+/// A local answer (a refusal, a 502, a CORS preflight or the replica /health) is not an
+/// upstream completion: once written, it is an error, so its statistics line and
+/// recording say `"complete":false`.
+fn refused(written: io::Result<()>) -> io::Result<()> {
+    written.and(Err(io::Error::other("answered locally")))
 }
 
 #[cfg(test)]

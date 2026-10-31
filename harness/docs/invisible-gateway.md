@@ -44,14 +44,20 @@ to the upstream, then closes that connection. HTTP servers ignore a blank line
 between requests (RFC 9112, section 2.2), but the Vade engine drops a request
 that bytes follow, so a stream still in the engine queue stops at once. With
 several upstreams, `POST /v1/cancel` and `/v1/kv/release` go to every upstream
-at the same time. The gateway waits at most 1.5 seconds and reads at most 64 KiB
-from each one.
+at the same time. Name lookup, connection, request and reply for all of them
+share one 1.5-second limit. A reply over 64 KiB is skipped, as is a late one.
 
 Request bodies are capped at 8 MiB on every route. A body over the cap, whether
 by its declared length or by its chunked total, gets HTTP 413 with the byte
 limit, and Messages routes use `request_too_large`. The whole request is checked
 before an upstream connection is opened, so an oversized request is never partly
-forwarded. The exact public
+forwarded. A head that would pass the 32 KiB header limit once the gateway adds
+its Host, length and key lines gets HTTP 400 before it is recorded or forwarded,
+and its stats row has `complete` false. This check runs before the `--clamp-limits`
+admission request too. Only a head that fits with the client's body but not with
+the longer body that the policy makes is sent in an admission request first. The
+first check uses the client's body length. So when the policy makes the body
+shorter, a head within 1 byte of the limit can get the 400 too. The exact public
 `/completions` alias picks `/v1/completions` upstream, including query strings
 and a configured API prefix. Other custom paths stay opaque, and this alias does
 not translate request or response schemas.
@@ -128,7 +134,9 @@ reply is forwarded. Without a log, observation is off.
 Some clients stop reading right after the final model event. After that event,
 the gateway allows one second to validate the rest of the upstream HTTP framing.
 `complete` records a validated upstream completion, and `downstream_complete`
-also reports whether the downstream framing finished. A fully validated upstream
+also reports whether the downstream framing finished. A local refusal, a
+gateway 502 (also for an upstream `101`), a CORS preflight and the replica
+`/health` answer have `complete` false, and a recording is left out of replay. A fully validated upstream
 reply keeps its usage and recording even when the client has already closed.
 Truncated upstream framing still suppresses usage and keeps the recording out of
 replay. Local busy refusals also produce a stats row, with unavailable request
@@ -144,13 +152,15 @@ recorder never holds a whole reply in memory. New directories get owner-only
 permissions, and files get owner read/write permissions. An existing DIR that
 other users can open gets owner-only permissions at startup, with a note on
 stderr. Only a
-complete request that passed the Host, Origin and `--token` checks gets a
-directory, so a refused request leaves nothing on disk. DIR holds at most
-100,000 request directories, the replay limit. When it is full, the gateway
-says so once on stderr and forwards later requests without recording them.
-Recording failures are reported on stderr and forwarding carries on. Incomplete
-recordings are left out of replay and do not count against its limit. Bodies
-can contain session content, so keep recordings outside the tracked tree.
+complete request that passed the Host, Origin and `--token` checks, and whose
+forwarded head fits the 32 KiB header limit, gets a directory, so a refused
+request leaves nothing on disk. The gateway makes at most 100,000 request
+directories in DIR, complete or not, counting those already there; that is also
+the most replay reads. When it is full, the gateway says so once on stderr and
+forwards later requests without recording them. Recording failures are reported
+on stderr and forwarding carries on. Incomplete recordings are left out of
+replay. Bodies can contain session content, so keep recordings outside the
+tracked tree.
 
 `vade-gateway replay DIR --upstream HTTP_BASE_URL --concurrency N --stats FILE`
 replays complete recordings, prints a stats row per request, and can also append
@@ -261,7 +271,9 @@ check this with `vade verify` against each replica.
 
 With several upstreams, `POST /v1/cancel` and `POST /v1/kv/release` are not
 routed by load. The gateway does not record which replica holds a key, so it
-sends each call to every upstream in order. The client gets the first 2xx reply
-that reports `"cancelled":true` or `"released":true`, otherwise the first reply,
-or HTTP 502 when no upstream answers. Keys are random capability tokens, so an
+sends each call to every upstream at the same time, within 1.5 seconds, name
+lookup included. A reply over 64 KiB is skipped. The client gets the first 2xx
+reply, in upstream order, that reports `"cancelled":true` or `"released":true`,
+otherwise the first reply, or HTTP 502 when no upstream gives a usable reply in
+time. Keys are random capability tokens, so an
 unknown key changes nothing on the other replicas.

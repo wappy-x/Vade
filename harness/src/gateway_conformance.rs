@@ -169,12 +169,13 @@ fn oversized_bodies_return_413_on_every_route_without_upstream_dispatch() {
                 let address = gateway.local_addr().unwrap();
                 let relay = thread::spawn(move || {
                     let socket = gateway.accept().unwrap().0;
-                    if lane == 0 { handle(socket, &endpoint) } else if lane == 3 {
+                    if lane == 0 { handle(socket, &endpoint).unwrap() } else if lane == 3 {
                         let cluster = Cluster::new(&[url], RoutingConfig::default()).unwrap();
-                        handle_target(socket, &Upstream::Cluster(cluster), None, &ConnectionPool::default(), &Access::default())
+                        handle_target(socket, &Upstream::Cluster(cluster), None, &ConnectionPool::default(), &Access::default()).unwrap()
                     } else {
-                        invisible::handle_conformance(socket, &url, lane == 2, None)
-                    }.unwrap();
+                        // vade-gateway reports its own 413 as an error, so the stats row is not a completion.
+                        assert_eq!(invisible::handle_conformance(socket, &url, lane == 2, None).unwrap_err().to_string(), "answered locally");
+                    }
                 });
                 let mut socket = DeadlineStream::new(TcpStream::connect(address).unwrap(), None).unwrap();
                 write!(socket, "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n{framing}").unwrap();
@@ -978,8 +979,8 @@ fn optional_bearer_token_gates_client_requests_and_stays_local() {
 
 #[test]
 fn client_hang_up_before_the_reply_stops_the_queued_engine_request() {
-    // A queued engine stream survives a closed socket (engine dispatch.rs:317)
-    // but is dropped when bytes follow the request (engine scheduler.rs:507).
+    // A queued engine stream survives a closed socket but is dropped when bytes
+    // follow the request (engine serve crate, scheduler.rs, Wire::connected).
     for lane in 0..3 {
         let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = Endpoint::parse(&format!("http://{}", upstream.local_addr().unwrap())).unwrap();

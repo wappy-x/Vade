@@ -26,7 +26,7 @@ pub use native::{NativeModel, NativePhase, ThinkingUpdate};
 mod estimate;
 pub use estimate::PrefillEstimate;
 mod cancel;
-mod resolve;
+pub(crate) mod resolve;
 mod request;
 pub(crate) use request::{
     ControlFanout, request_gateway_pooled, request_method_pooled, request_method_pooled_deadline,

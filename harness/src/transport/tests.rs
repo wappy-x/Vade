@@ -825,12 +825,16 @@
             let mut server = DeadlineStream::new(listener.accept().unwrap().0, None).unwrap();
             server.watch_downstream().unwrap();
             client.write_all(&vec![b'x'; extra]).unwrap();
-            let until = Instant::now() + Duration::from_secs(5);
+            let held = || server.buffered_input.as_ref().unwrap().lock().unwrap().buffered.len();
+            // Poll until every byte is held or the check fails; no fixed sleep decides it.
+            let until = Instant::now() + Duration::from_secs(10);
             let mut result = server.check();
-            while result.is_ok() && Instant::now() < until {
-                thread::sleep(Duration::from_millis(10));
+            while result.is_ok() && held() < extra && Instant::now() < until {
+                thread::sleep(Duration::from_millis(5));
                 result = server.check();
-                if !refused && Instant::now() + Duration::from_secs(4) > until { break; }
+            }
+            if !refused {
+                assert_eq!(held(), extra, "all {extra} bytes are held");
             }
             assert_eq!(result.as_ref().err().map(|e| e.to_string()), refused.then(|| "pipelined HTTP input exceeds limit".to_owned()), "{extra}");
         }

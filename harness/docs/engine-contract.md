@@ -326,10 +326,10 @@ endpoint, and a request with an uncertain outcome is never replayed.
 Both modes relay `POST /v1/cancel` and `POST /v1/kv/release`. With one
 upstream they are plain relays. With several, the gateway does not record which
 endpoint holds a key, so it sends each call to every upstream (the core
-gateway at once, within 1.5 seconds; `vade-gateway` one after another) and
+gateway and `vade-gateway` both at once, within 1.5 seconds) and
 answers with the first 2xx reply, in configuration order, that reports
 `"cancelled":true` or `"released":true`, otherwise the first reply, or HTTP 502
-when no upstream answers. Keys are random capabilities, so an unknown key changes nothing on the
+when no upstream gives a usable reply in time. Keys are random capabilities, so an unknown key changes nothing on the
 other endpoints. Cluster mode still has no handle-based affinity: a request
 that names a checkpoint handle is routed like any other and can reach an
 endpoint that does not hold it, so use one upstream or a direct engine endpoint
@@ -345,8 +345,9 @@ for checkpoint work.
 - The 64 MiB response bound, the idle and absolute deadlines and cancellation
   polling still apply. Socket I/O polls every 50 ms. Callers that close their
   write half are not supported.
-- Pipelined bytes are buffered on demand, up to 8,421,376 bytes, next to the
-  8,192-byte downstream read buffer, so they cannot hide a client disconnect.
+- Pipelined bytes are buffered on demand, up to 32,768 bytes (one header
+  block), next to the 8,192-byte downstream read buffer, so they cannot hide a
+  client disconnect.
 - Complete framed responses may reuse sockets, with at most 16 idle sockets
   that expire after 15 seconds. A stale pooled connection never causes an
   accepted request to be resent.

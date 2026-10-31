@@ -19,7 +19,7 @@ fn nonstream_error_status_headers_and_binary_body_are_identical() { relay(false)
 #[test]
 fn busy_refusal_has_one_stats_row_without_upstream_dispatch() {
     let path=std::env::temp_dir().join(format!("vade-gateway-busy-{}",std::process::id()));let log=StatsLog::open(path.to_str().unwrap()).unwrap();let listener=TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();let worker=thread::spawn(move || busy(listener.accept().unwrap().0,Some(&log)).unwrap());
-    let mut client=TcpStream::connect(address).unwrap();client.write_all(b"GET /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();let mut bytes=Vec::new();client.read_to_end(&mut bytes).unwrap();worker.join().unwrap();assert!(bytes.starts_with(b"HTTP/1.1 503"));let lines=std::fs::read_to_string(&path).unwrap();assert_eq!(lines.lines().count(),1);let row=crate::json::parse(lines.trim()).unwrap();assert_eq!(row.get("path").unwrap().as_str(),Some("/v1/models"));assert_eq!(row.get("status"),Some(&crate::json::Value::Number("503".into())));std::fs::remove_file(path).unwrap();
+    let mut client=TcpStream::connect(address).unwrap();client.write_all(b"GET /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();let mut bytes=Vec::new();client.read_to_end(&mut bytes).unwrap();worker.join().unwrap();assert!(bytes.starts_with(b"HTTP/1.1 503"));let lines=std::fs::read_to_string(&path).unwrap();assert_eq!(lines.lines().count(),1);let row=crate::json::parse(lines.trim()).unwrap();assert_eq!(row.get("path").unwrap().as_str(),Some("/v1/models"));assert_eq!(row.get("status"),Some(&crate::json::Value::Number("503".into())));assert_eq!(row.get("complete"),Some(&crate::json::Value::Bool(false)));std::fs::remove_file(path).unwrap();
 }
 fn final_event_close(truncated: bool) {
     let path=std::env::temp_dir().join(format!("vade-gateway-final-{}-{truncated}",std::process::id()));let log=StatsLog::open(path.to_str().unwrap()).unwrap();let upstream=TcpListener::bind("127.0.0.1:0").unwrap();let origin=Origin::parse(&format!("http://{}",upstream.local_addr().unwrap())).unwrap();let listener=TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();let (release,wait)=mpsc::channel();
@@ -160,10 +160,14 @@ fn guarded(runtime: &Runtime, access: &Access, request: &str) -> String {
 }
 
 fn guarded_recorded(runtime: &Runtime, access: &Access, recorder: Option<&Recorder>, request: &str) -> String {
+    guarded_logged(runtime, access, None, recorder, request)
+}
+
+fn guarded_logged(runtime: &Runtime, access: &Access, log: Option<&StatsLog>, recorder: Option<&Recorder>, request: &str) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     thread::scope(|scope| {
-        let gateway = scope.spawn(|| handle_guarded(listener.accept().unwrap().0, runtime, None, recorder, access));
+        let gateway = scope.spawn(|| handle_guarded(listener.accept().unwrap().0, runtime, log, recorder, access));
         let mut client = TcpStream::connect(address).unwrap();
         client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         client.write_all(request.replace("PORT", &address.port().to_string()).as_bytes()).unwrap();
@@ -504,6 +508,9 @@ fn a_head_the_gateway_cannot_forward_gets_a_400_not_a_close_or_a_502() {
     let many: String = (0..101).map(|i| format!("X-{i}: 1\r\n")).collect();
     let reply = guarded(&runtime, &Access::default(), &format!("GET /v1/models HTTP/1.1\r\nHost: localhost:PORT\r\n{many}\r\n"));
     assert!(reply.starts_with("HTTP/1.1 400 "), "{reply}");
+    // Claude Code reads the Anthropic error shape on Messages, even for a bad head.
+    let reply = guarded(&runtime, &Access::default(), &format!("POST /v1/messages HTTP/1.1\r\nHost: localhost:PORT\r\n{many}\r\n"));
+    assert!(reply.starts_with("HTTP/1.1 400 ") && reply.contains(r#"{"type":"error","error":{"type":"invalid_request_error""#), "{reply}");
     // A head just under the limit grows past it with the gateway's own lines:
     // before, the upstream refused it and the client saw a 502.
     let mut request = "GET /v1/models HTTP/1.1\r\nHost: localhost:PORT\r\n".to_owned();
@@ -511,8 +518,158 @@ fn a_head_the_gateway_cannot_forward_gets_a_400_not_a_close_or_a_502() {
         request.push_str(&format!("X-Pad-{}: {}\r\n", request.len(), "y".repeat(7000)));
     }
     request.push_str(&format!("X-Last: {}\r\n\r\n", "z".repeat(transport::MAX_HEADERS - 20 - request.len())));
-    let server = thread::spawn(move || { let mut sent = Vec::new(); upstream.accept().unwrap().0.read_to_end(&mut sent).unwrap(); sent });
+    let dir = std::env::temp_dir().join(format!("vade-record-head-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let recorder = Recorder::open(dir.to_str().unwrap()).unwrap();
+    let stats = dir.with_extension("jsonl");
+    let log = StatsLog::open(stats.to_str().unwrap()).unwrap();
+    let reply = guarded_logged(&runtime, &Access::default(), Some(&log), Some(&recorder), &request);
+    assert!(reply.starts_with("HTTP/1.1 400 ") && reply.contains("oversized HTTP headers"), "{}", &reply[..reply.len().min(200)]);
+    // Refused before any recording folder or upstream connection.
+    assert_eq!(fs_entries(&dir), 0);
+    upstream.set_nonblocking(true).unwrap();
+    assert_eq!(upstream.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock, "no upstream connection");
+    // Nothing reached an upstream, so the stats row is not a completion.
+    let row = crate::json::parse(std::fs::read_to_string(&stats).unwrap().trim()).unwrap();
+    assert_eq!(row.get("complete"), Some(&crate::json::Value::Bool(false)));
+    assert_eq!(row.get("downstream_complete"), Some(&crate::json::Value::Bool(false)));
+    upstream.set_nonblocking(false).unwrap();
+    // A forwarded head of exactly the limit, with its real length line, still goes upstream.
+    let pad = |n: usize| format!("GET /v1/models HTTP/1.1\r\nHost: localhost:PORT\r\nX-A: {}\r\nX-B: {}\r\nX-C: {}\r\nX-D: {}\r\nX-E: {}\r\n\r\n",
+        "a".repeat(7000), "b".repeat(7000), "c".repeat(7000), "d".repeat(7000), "e".repeat(n));
+    let forwarded = |n: usize| upstream_head(&WireHead::read(&mut io::Cursor::new(pad(n).into_bytes())).unwrap(), runtime.origin(0), 0).unwrap().len();
+    let fits = 4000 + transport::MAX_HEADERS - forwarded(4000);
+    assert_eq!(forwarded(fits), transport::MAX_HEADERS);
+    let server = thread::spawn(move || {
+        let mut socket = BufReader::new(upstream.accept().unwrap().0);
+        let head = WireHead::read(&mut socket).unwrap();
+        socket.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}").unwrap();
+        head.lines.iter().map(|line| line.len() + 2).sum::<usize>() + 2
+    });
+    let reply = guarded_recorded(&runtime, &Access::default(), Some(&recorder), &pad(fits));
+    assert!(reply.starts_with("HTTP/1.1 200 "), "{}", &reply[..reply.len().min(200)]);
+    assert_eq!(server.join().unwrap(), transport::MAX_HEADERS);
+    assert_eq!(fs_entries(&dir), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+    std::fs::remove_file(stats).unwrap();
+}
+
+#[test]
+fn a_head_that_fits_only_before_the_policy_lengthens_the_body_gets_a_400_with_its_policy() {
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let runtime = Runtime::new(&[format!("http://{}", upstream.local_addr().unwrap())], Flags { greedy: true, ..Flags::default() }).unwrap();
+    let body = r#"{"model":"m","messages":[]}"#;
+    let pad = |n: usize| format!("POST /v1/chat/completions HTTP/1.1\r\nHost: localhost:PORT\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-A: {}\r\nX-B: {}\r\nX-C: {}\r\nX-D: {}\r\nX-E: {}\r\n\r\n{body}",
+        body.len(), "a".repeat(7000), "b".repeat(7000), "c".repeat(7000), "d".repeat(7000), "e".repeat(n));
+    let head = |n: usize| WireHead::read(&mut io::Cursor::new(pad(n).into_bytes())).unwrap();
+    let forwarded = |n: usize, length: usize| upstream_head(&head(n), runtime.origin(0), length).unwrap().len();
+    // --greedy-when-unset adds sampling fields, so the length line gets more digits.
+    let longer = runtime.prepare("POST", "/v1/chat/completions", &head(0).parsed, body.as_bytes()).body.len();
+    assert!(longer.to_string().len() > body.len().to_string().len(), "{longer}");
+    let fits = 4000 + transport::MAX_HEADERS - forwarded(4000, body.len());
+    assert_eq!(forwarded(fits, body.len()), transport::MAX_HEADERS);
+    assert!(forwarded(fits, longer) > transport::MAX_HEADERS);
+    let dir = std::env::temp_dir().join(format!("vade-record-policy-head-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let recorder = Recorder::open(dir.to_str().unwrap()).unwrap();
+    let stats = dir.with_extension("jsonl");
+    let log = StatsLog::open(stats.to_str().unwrap()).unwrap();
+    let reply = guarded_logged(&runtime, &Access::default(), Some(&log), Some(&recorder), &pad(fits));
+    assert!(reply.starts_with("HTTP/1.1 400 ") && reply.contains("oversized HTTP headers"), "{}", &reply[..reply.len().min(200)]);
+    assert_eq!(fs_entries(&dir), 0);
+    upstream.set_nonblocking(true).unwrap();
+    assert_eq!(upstream.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock, "no upstream connection");
+    // The row keeps what the policy did, and it is not a completion.
+    let row = crate::json::parse(std::fs::read_to_string(&stats).unwrap().trim()).unwrap();
+    assert_eq!(row.get("complete"), Some(&crate::json::Value::Bool(false)));
+    assert_eq!(row.get("policy").and_then(|policy| policy.get("greedy_added")), Some(&crate::json::Value::Bool(true)), "{row:?}");
+    std::fs::remove_dir_all(dir).unwrap();
+    std::fs::remove_file(stats).unwrap();
+}
+
+#[test]
+fn with_clamp_limits_an_unforwardable_head_gets_its_400_before_the_admission_call() {
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = upstream.local_addr().unwrap();
+    let url = format!("http://{address}");
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let server = thread::spawn({
+        let stop = stop.clone();
+        move || {
+            let mut reader = BufReader::new(upstream.accept().unwrap().0);
+            transport::read_head(&mut reader).unwrap();
+            let caps = r#"{"object":"engine.capabilities","contract_version":"vade.engine.v1","model":"mock","context_limit":100,"input_limit":99,"output_limit":16,"admission":"/v1/admission","admission_kind":"context_fit"}"#;
+            write!(reader.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{caps}", caps.len()).unwrap();
+            // Count every later connection; the gateway must open none.
+            let mut later = 0;
+            for socket in upstream.incoming() {
+                if stop.load(std::sync::atomic::Ordering::SeqCst) { break; }
+                drop(socket);
+                later += 1;
+            }
+            later
+        }
+    });
+    let runtime = Runtime::new(&[url], Flags { clamp: true, ..Flags::default() }).unwrap();
+    let body = r#"{"model":"mock","messages":[]}"#;
+    let mut request = format!("POST /v1/chat/completions HTTP/1.1\r\nHost: localhost:PORT\r\nContent-Length: {}\r\n", body.len());
+    while request.len() < transport::MAX_HEADERS - 8000 {
+        request.push_str(&format!("X-Pad-{}: {}\r\n", request.len(), "y".repeat(7000)));
+    }
+    request.push_str(&format!("X-Last: {}\r\n\r\n{body}", "z".repeat(transport::MAX_HEADERS - 20 - request.len())));
     let reply = guarded(&runtime, &Access::default(), &request);
     assert!(reply.starts_with("HTTP/1.1 400 ") && reply.contains("oversized HTTP headers"), "{}", &reply[..reply.len().min(200)]);
-    assert!(server.join().unwrap().is_empty(), "no request bytes reached the upstream");
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    TcpStream::connect(address).unwrap();
+    assert_eq!(server.join().unwrap(), 0, "the client's header lines reached the upstream in an admission request");
+}
+
+#[test]
+fn a_local_refusal_or_502_is_not_a_completion_in_stats_or_recordings() {
+    let dir = std::env::temp_dir().join(format!("vade-record-local-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let recorder = Recorder::open(dir.to_str().unwrap()).unwrap();
+    let stats = dir.with_extension("jsonl");
+    let log = StatsLog::open(stats.to_str().unwrap()).unwrap();
+    // Ports that were just released are closed, so a request that passes every check gets a 502.
+    let closed: Vec<String> = [TcpListener::bind("127.0.0.1:0").unwrap(), TcpListener::bind("127.0.0.1:0").unwrap()].iter().map(|l| format!("http://{}", l.local_addr().unwrap())).collect();
+    let one = Runtime::single(Origin::parse(&closed[0]).unwrap());
+    let two = Runtime::new(&closed, Flags::default()).unwrap();
+    // An upstream that answers 101 gets the gateway's own 502.
+    let upgrade = upstream(vec!["HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: x\r\n\r\n"]);
+    let switching = Runtime::single(Origin::parse(&upgrade.0).unwrap());
+    // Replicas answer /health as one engine, and the gateway writes that answer itself.
+    let (a, b) = (upstream(vec![health("m")]), upstream(vec![health("m")]));
+    let replicas = Runtime::new(&[a.0.clone(), b.0.clone()], Flags::default()).unwrap();
+    let (open, mut browser) = (Access::default(), Access::default());
+    browser.allow_origin("https://app.example").unwrap();
+    let many: String = (0..101).map(|i| format!("X-{i}: 1\r\n")).collect();
+    let cases: [(&Runtime, &Access, String, &str); 11] = [
+        (&one, &open, format!("GET /v1/models HTTP/1.1\r\nHost: localhost:PORT\r\n{many}\r\n"), "400"),
+        (&one, &open, "GET v1/models HTTP/1.1\r\nHost: localhost:PORT\r\n\r\n".into(), "400"),
+        (&one, &open, "GET /v1/models HTTP/1.1\r\nHost: evil.example\r\n\r\n".into(), "421"),
+        (&one, &open, "GET /v1/models HTTP/1.1\r\nHost: localhost:PORT\r\nUpgrade: websocket\r\n\r\n".into(), "400"),
+        (&one, &open, "POST /v1/responses HTTP/1.1\r\nHost: localhost:PORT\r\nContent-Length: 999999999\r\n\r\n".into(), "413"),
+        (&one, &open, "POST /v1/responses HTTP/1.1\r\nHost: localhost:PORT\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n".into(), "400"),
+        (&one, &open, "GET /v1/models HTTP/1.1\r\nHost: localhost:PORT\r\n\r\n".into(), "502"),
+        (&two, &open, "POST /v1/cancel HTTP/1.1\r\nHost: localhost:PORT\r\nContent-Length: 2\r\n\r\n{}".into(), "502"),
+        (&switching, &open, "GET /v1/models HTTP/1.1\r\nHost: localhost:PORT\r\n\r\n".into(), "502"),
+        (&one, &browser, "OPTIONS /v1/chat/completions HTTP/1.1\r\nHost: localhost:PORT\r\nOrigin: https://app.example\r\nAccess-Control-Request-Method: POST\r\n\r\n".into(), "204"),
+        (&replicas, &open, "GET /health HTTP/1.1\r\nHost: localhost:PORT\r\n\r\n".into(), "200"),
+    ];
+    for (runtime, access, request, status) in &cases {
+        let reply = guarded_logged(runtime, access, Some(&log), Some(&recorder), request);
+        assert!(reply.starts_with(&format!("HTTP/1.1 {status} ")), "{request:?} -> {reply}");
+    }
+    assert_eq!((upgrade.1.join().unwrap(), a.1.join().unwrap(), b.1.join().unwrap()), (1, 1, 1));
+    let rows = std::fs::read_to_string(&stats).unwrap();
+    assert_eq!(rows.lines().count(), cases.len());
+    for (row, (_, _, request, _)) in rows.lines().zip(&cases) {
+        assert_eq!(crate::json::parse(row).unwrap().get("complete"), Some(&crate::json::Value::Bool(false)), "{request:?} -> {row}");
+    }
+    // The three 502s passed every check, so they have folders, but replay must skip them.
+    assert_eq!(fs_entries(&dir), 3);
+    for folder in std::fs::read_dir(&dir).unwrap() {
+        let meta = std::fs::read_to_string(folder.unwrap().path().join("meta.json")).unwrap();
+        assert!(meta.ends_with(",\"complete\":false}"), "{meta}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+    std::fs::remove_file(stats).unwrap();
 }

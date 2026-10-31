@@ -5,7 +5,7 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::mpsc;
 use std::time::Instant;
 
-pub(super) fn addresses(
+pub(crate) fn addresses(
     endpoint: &Endpoint,
     deadline: Option<Instant>,
 ) -> io::Result<Vec<SocketAddr>> {

@@ -11,6 +11,11 @@ use std::{
 
 /// The most `request-*` folders one recording folder holds; replay refuses more.
 const MAX_RECORDINGS: usize = 100_000;
+const RECORDING_LIMIT: &str = "recording limit reached";
+/// True for the folder limit that `start` reported once; a full disk is not silent.
+fn limit_reached(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|inner| inner.to_string() == RECORDING_LIMIT)
+}
 pub(super) struct Recorder {
     root: PathBuf,
     sequence: AtomicUsize,
@@ -37,7 +42,7 @@ impl Recorder {
             use std::os::unix::fs::PermissionsExt;
             let mode = fs::metadata(&root)?.permissions().mode();
             if mode & 0o077 != 0 {
-                fs::set_permissions(&root, fs::Permissions::from_mode(mode & 0o7700))?;
+                fs::set_permissions(&root, fs::Permissions::from_mode(mode & 0o7700)).map_err(|error| io::Error::new(error.kind(), format!("cannot make the --record folder owner-only: {error}")))?;
                 crate::diagnostics::stderr_line(format_args!("vade-gateway: the --record folder was open to other users; it now has owner-only permissions."));
             }
         }
@@ -55,7 +60,7 @@ impl Recorder {
     pub(super) fn begin(&self) -> Option<Recording> {
         match self.start() {
             Ok(recording) => Some(recording),
-            Err(error) if error.kind() == io::ErrorKind::StorageFull => None,
+            Err(error) if limit_reached(&error) => None,
             Err(_) => {
                 crate::diagnostics::stderr_line(format_args!("vade-gateway: recorder start failed; this request is forwarded but not recorded. Check the --record folder's permissions and free space."));
                 None
@@ -72,7 +77,7 @@ impl Recorder {
             if sequence == self.room {
                 crate::diagnostics::stderr_line(format_args!("vade-gateway: the --record folder holds {MAX_RECORDINGS} recordings, the replay limit; later requests are forwarded but not recorded. Move old recordings out, then restart the gateway."));
             }
-            return Err(io::Error::new(io::ErrorKind::StorageFull, "recording limit reached"));
+            return Err(io::Error::new(io::ErrorKind::StorageFull, RECORDING_LIMIT));
         }
         let dir = self.root.join(format!("request-{stamp:020}-{sequence:08}"));
         let mut builder = fs::DirBuilder::new();
@@ -213,7 +218,8 @@ fn inventory(root: &Path) -> io::Result<Vec<Vec<Saved>>> {
     let mut dirs = Vec::new();
     for entry in fs::read_dir(root)? {
         let entry = entry?;
-        // Incomplete folders have no meta.json; they never count against the limit.
+        // A folder without meta.json was never finished and is not listed;
+        // replay also skips "complete":false below.
         if entry.file_type()?.is_dir()
             && entry.file_name().to_string_lossy().starts_with("request-")
             && entry.path().join("meta.json").exists()
@@ -323,7 +329,8 @@ fn replay_one(origin: &Origin, saved: &Saved, log: Option<&StatsLog>) -> io::Res
     let mut metrics = Metrics::new(true);
     metrics.path = saved.path.clone();
     metrics.request(&body);
-    let result = origin.connect().and_then(|upstream| {
+    // A head that cannot be forwarded fails before any connection.
+    let result = fitting_head(&request, origin, body.len()).and_then(|_| origin.connect()).and_then(|upstream| {
         exchange(
             upstream,
             Dispatch {
@@ -477,6 +484,9 @@ mod limit_tests {
         complete.finish("{\"complete\":true}").unwrap();
         assert_eq!(recorder.start().err().map(|e| e.kind()), Some(io::ErrorKind::StorageFull));
         assert!(recorder.begin().is_none());
+        // Only the folder limit, which start reported once, is silent; a full disk is not.
+        assert!(recorder.start().err().is_some_and(|error| limit_reached(&error)));
+        assert!(!limit_reached(&io::Error::from(io::ErrorKind::StorageFull)));
         let sessions = inventory(&dir).unwrap();
         assert_eq!(sessions.iter().map(Vec::len).sum::<usize>(), 1);
         fs::remove_dir_all(dir).unwrap();
