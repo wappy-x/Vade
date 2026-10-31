@@ -45,9 +45,9 @@ A task passes the dry-run gate when all of these are true:
   fail.
 
 The exit status is 0 when every task passes the gate, 1 when one does not,
-and 2 on a usage or setup error. On a failure, the runner keeps its folder
-and prints its path. `--out DIR` keeps the folder in every case; `--only
-ID,ID` runs only some tasks. On the lab Mac on 2026-10-30, the full dry run
+and 2 on a usage or setup error. Without `--out`, the runner uses a new
+temporary folder and removes it at the end, also after a failure. `--out DIR`
+keeps the folder and prints its path; `--only ID,ID` runs only some tasks. On the lab Mac on 2026-10-30, the full dry run
 of 22 tasks took 35.58 s of wall time (`/usr/bin/time -p`, `real 35.58`).
 
 `cargo test` runs the same dry run in

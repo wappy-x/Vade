@@ -30,8 +30,17 @@ fn the_agent_suite_passes_its_dry_run_gate() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     // A source export without .git cannot prove which files a fresh checkout has.
     if !Command::new("git").current_dir(root).args(["rev-parse", "--git-dir"]).output().is_ok_and(|o| o.status.success()) { eprintln!("skipped: the suite runner needs a Git checkout"); return; }
-    let out = suite(&["--dry-run"], root);
+    // A private TMPDIR: the run's own folder must be gone after it, and a folder that another run left stays.
+    let tmp = std::env::temp_dir().join(format!("vade-suite-dry-tmp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let stale = tmp.join(format!("vade-suite-dry-run-{}", std::process::id()));
+    std::fs::create_dir_all(&stale).unwrap();
+    let out = suite_in(&["--dry-run"], root, Some(&tmp));
     let all = text(&out);
+    let left: Vec<_> = std::fs::read_dir(&tmp).unwrap().flatten().map(|e| e.path()).filter(|p| *p != stale).collect();
+    assert!(stale.is_dir(), "the run removed a folder it did not make");
+    let _ = std::fs::remove_dir_all(&tmp);
+    assert!(left.is_empty(), "left in TMPDIR: {left:?}\n{all}");
     assert!(out.status.success(), "{all}");
     let tasks = std::fs::read_dir(root.join("tests/agent-suite/tasks")).unwrap().count();
     let last = all.lines().rfind(|l| l.starts_with("DRY RUN ")).unwrap_or_default();
@@ -47,6 +56,7 @@ impl Scratch {
     fn new(name: &str, files: &[(&str, &str)]) -> Self {
         let dir = std::env::temp_dir().join(format!("vade-suite-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(dir.with_extension("tmp"));
         for (path, body) in files {
             let p = dir.join("suite/tasks/t").join(path);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -58,14 +68,21 @@ impl Scratch {
         git(&["add", "-A"]);
         Scratch(dir)
     }
+    /// The child's TMPDIR, next to the checkout and outside it.
+    fn tmp(&self) -> PathBuf { self.0.with_extension("tmp") }
+    /// A dry run without --out: its temporary folder must be gone after a pass or a fail.
     fn run(&self) -> (bool, String) {
-        let out = suite(&["--dry-run", "--suite", "suite"], &self.0);
+        let tmp = self.tmp();
+        std::fs::create_dir_all(&tmp).unwrap();
+        let out = suite_in(&["--dry-run", "--suite", "suite"], &self.0, Some(&tmp));
         assert!(matches!(out.status.code(), Some(0 | 1)), "{}", text(&out));
+        let left: Vec<_> = std::fs::read_dir(&tmp).unwrap().flatten().map(|e| e.path()).collect();
+        assert!(left.is_empty(), "left in TMPDIR: {left:?}\n{}", text(&out));
         (out.status.success(), text(&out))
     }
 }
 
-impl Drop for Scratch { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+impl Drop for Scratch { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); let _ = std::fs::remove_dir_all(self.tmp()); } }
 
 const TASK: &str = "id: t\ntitle: Write one file\ncategory: test\ninputs: in.txt\nbudget_seconds: 60\n\nstep: new\nprompt:\n  Copy in.txt to out.txt.\n\ncheck: last-exit-zero\ncheck: file-equals out.txt in.txt.want\ncheck: unchanged in.txt\n";
 const RUBRIC: &str = "may_change: out.txt\nmax_changed_lines: 2\nanswer_mentions: Done\nanswer_max_chars: 100\n";

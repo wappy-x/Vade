@@ -21,6 +21,7 @@ use serve::{Server, Source};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -44,7 +45,7 @@ rubric.txt). See docs/harness-suite.md.
   --suite DIR        The suite folder (default harness/tests/agent-suite or
                      tests/agent-suite under the current folder).
   --out DIR          A new folder for the results. A dry run without --out
-                     uses a temporary folder and keeps it only on failure.
+                     uses a new temporary folder and removes it at the end.
   --only ID,ID       Run only these tasks.
   --toolchain DIR    The Rust distribution for checks and the command sandbox
                      (default: the one that runs cargo or rustc).
@@ -189,6 +190,29 @@ fn new_dir(p: &Path) -> Result<PathBuf, String> {
     std::fs::canonicalize(p).map_err(|e| e.to_string())
 }
 
+/// A dry run's own folder in `tmp`: always a new one, removed when the run
+/// ends, on a pass, a fail or an error. A folder that is already there, such
+/// as one left by a stopped run with the same process ID, is not used and not
+/// touched: the next name is tried.
+struct TempOut(PathBuf);
+
+impl TempOut {
+    fn new(tmp: &Path) -> Result<Self, String> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        for _ in 0..1000 {
+            let p = tmp.join(format!("vade-suite-dry-run-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            match std::fs::create_dir(&p) {
+                Ok(()) => return std::fs::canonicalize(&p).map(TempOut).map_err(|e| { let _ = std::fs::remove_dir(&p); format!("{}: {e}", p.display()) }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("{}: {e}", p.display())),
+            }
+        }
+        Err(format!("{}: 1000 vade-suite-dry-run folders of this process ID exist; use --out DIR", tmp.display()))
+    }
+}
+
+impl Drop for TempOut { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for e in std::fs::read_dir(from)? {
@@ -261,9 +285,10 @@ fn suite_version(o: &Opts) -> String { std::fs::read_to_string(o.suite.join("VER
 /// its wrong.script, and the solve replay uses every scripted reply.
 fn dry_run(o: &Opts) -> Result<u8, String> {
     let tasks = load_tasks(o)?;
-    let (out, temporary) = match &o.out {
-        Some(p) => (new_dir(p)?, false),
-        None => (new_dir(&std::env::temp_dir().join(format!("vade-suite-dry-run-{}", std::process::id())))?, true),
+    // `_temp` lives to the end of this function, so its folder goes on every return.
+    let (out, _temp) = match &o.out {
+        Some(p) => (new_dir(p)?, None),
+        None => { let t = TempOut::new(&std::env::temp_dir())?; (t.0.clone(), Some(t)) }
     };
     let version = suite_version(o);
     let (mut ok, mut skipped) = (0, 0);
@@ -306,7 +331,7 @@ fn dry_run(o: &Opts) -> Result<u8, String> {
     }
     let pass = ok > 0 && ok + skipped == tasks.len();
     println!("DRY RUN {}: {ok} of {} tasks pass with solve.script and fail with wrong.script, {skipped} skipped ({version})", if pass { "PASS" } else { "FAIL" }, tasks.len());
-    if pass && temporary { let _ = std::fs::remove_dir_all(&out); } else { println!("Results: {}", out.display()); }
+    if o.out.is_some() { println!("Results: {}", out.display()); } else if !pass { println!("The temporary results folder is removed; use --out DIR to keep the results."); }
     Ok(if pass { 0 } else { 1 })
 }
 
@@ -621,6 +646,26 @@ mod tests {
         assert_eq!(std::fs::read_link(b.join("broken")).unwrap(), Path::new("gone.txt"));
         assert_eq!(std::fs::read_to_string(b.join("f.txt")).unwrap(), "x");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn a_dry_run_folder_is_new_and_goes_at_the_end() {
+        let tmp = std::env::temp_dir().join(format!("vade-suite-tempout-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // Folders with the first names, as a stopped run with the same process ID leaves them.
+        let next = |k: u64| tmp.join(format!("vade-suite-dry-run-{}-{k}", std::process::id()));
+        let mut stale = Vec::new();
+        for k in 0..3 { std::fs::create_dir(next(k)).unwrap(); std::fs::write(next(k).join("keep.txt"), "x").unwrap(); stale.push(next(k)); }
+        let (a, b) = (TempOut::new(&tmp).unwrap(), TempOut::new(&tmp).unwrap());
+        assert_ne!(a.0, b.0);
+        for t in [&a, &b] { assert!(t.0.is_dir() && std::fs::read_dir(&t.0).unwrap().next().is_none(), "{}", t.0.display()); }
+        std::fs::write(a.0.join("x.txt"), "x").unwrap();
+        let (pa, pb) = (a.0.clone(), b.0.clone());
+        drop((a, b));
+        assert!(!pa.exists() && !pb.exists());
+        for s in &stale { assert_eq!(std::fs::read_to_string(s.join("keep.txt")).unwrap(), "x", "a stale folder was touched"); }
+        assert!(TempOut::new(&tmp.join("missing")).is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
     #[test]
     fn chunks_join_as_bytes() {
