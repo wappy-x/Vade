@@ -631,6 +631,15 @@ fabric port.
 - [ ] On spark-6, the cable 6 addresses stay. Only its peer on that cable
       changes, from spark-1 to spark-7
       ([spark-setup.md, name each peer rail](spark-setup.md#name-each-peer-rail)).
+- [ ] On spark-1 and spark-6, do not run the network step of `apply.sh`
+      again. It refuses a fabric that is already configured, and it never
+      replaces a working configuration. On spark-1, change only the file or
+      profile that owns the moved port, then read its GID again
+      ([spark-setup.md, record each rail's real GID](spark-setup.md#record-each-rails-real-gid)).
+      On both, change only the hosts entry of the new peer. Keep a private
+      copy of the old files for rollback, as
+      [four-sparks.md, update only the affected fabric configuration](four-sparks.md#update-only-the-affected-fabric-configuration)
+      describes.
 - [ ] Give spark-6 and spark-1 SSH to their new peers. spark-setup step 6 on
       spark-7 and spark-8 copies only their own keys, so it does not cover
       this direction.
@@ -710,12 +719,21 @@ It passes when every row passes:
 
 ### Step 7. Build and model files
 
+- [ ] On spark-7 and spark-8, install the prerequisites of
+      [INSTALL.md, step 1](../INSTALL.md#step-1-prerequisites), as on the other
+      six: the Ubuntu packages and both pinned Rust toolchains. `vade install`
+      builds from source on each Spark, unless `prebuilt_dir` in the
+      controller config points at a bundle from the controller checkout's own
+      commit.
 - [ ] Copy the checkpoint to spark-7 and spark-8 at the same absolute path
       as on the other Sparks
       ([INSTALL.md, step 3](../INSTALL.md#step-3-get-the-model)). It is
       102.26 GB. Copy it from a neighbor over a measured fabric cable, not over
-      a slow LAN. Then check that it has the same files and sizes as on the
-      neighbor.
+      a slow LAN. Copy the checksum list beside the folder too
+      (`Qwen3.8-Flash-Next-FP4-Local.sha256`), if the neighbor has one. With
+      it, the first start on the new Spark checks every file, as on the
+      other six. Without it, check the files once yourself
+      ([INSTALL.md, check the files](../INSTALL.md#check-the-files)).
 - [ ] `vade install`, so that every Spark has the same staged build. It
       reports an error when a Spark does not have the model yet, so copy the
       model first.
@@ -725,10 +743,15 @@ It passes when every row passes:
 
 ### Step 8. The new pair gives the same token IDs
 
+Run `vade verify` from the checkout root. Its receipts on this page go into
+`.local/`, which Git ignores and which already holds your private config.
+A receipt file elsewhere in the checkout makes the next `vade install` refuse
+to build, because it builds only from a checkout with no local changes.
+
 - [ ] `VADE_GROUP=pair-4 vade up` (spark-7 and spark-8 on cable 7).
-- [ ] `VADE_GROUP=pair-4 vade verify --prompt 8k --receipt verify-pair-4.json`
+- [ ] `VADE_GROUP=pair-4 vade verify --prompt 8k --receipt .local/verify-pair-4.json`
       prints `IDENTICAL`. Then `VADE_GROUP=pair-4 vade down`.
-- [ ] Do the same `up`, `verify` (with `--receipt verify-pair-1.json`) and
+- [ ] Do the same `up`, `verify` (with `--receipt .local/verify-pair-1.json`) and
       `down` on one existing pair, for example `VADE_GROUP=pair-1`. The two
       receipts must have the same `reference_ids_sha256` value: the same
       request gives the same token IDs on the new pair.
@@ -740,17 +763,17 @@ Start one at a time ([section 6](#several-servers-behind-one-address)).
 
 ```sh
 vade up --replicas 8
-vade verify --prompt 8k --receipt verify-singles.json
+vade verify --prompt 8k --receipt .local/verify-singles.json
 vade down
 
 vade up --replicas 4 --pairs
-vade verify --prompt 8k --receipt verify-pairs.json
+vade verify --prompt 8k --receipt .local/verify-pairs.json
 vade down
 ```
 
 `vade verify` with no `--url` goes through the gateway on `local_port`. To
 check one server alone, give its tunnel:
-`vade verify --prompt 8k --url http://127.0.0.1:18081 --receipt verify-server-1.json`.
+`vade verify --prompt 8k --url http://127.0.0.1:18081 --receipt .local/verify-server-1.json`.
 Every receipt must have the same `reference_ids_sha256` value as the pair
 receipts of step 8.
 
@@ -764,7 +787,7 @@ eight Sparks is not measured yet ([section 8](#8-what-to-measure-first)).
       machines. After the start, `VADE_GROUP=eight vade logs` shows one
       `flashnext pp stage rank=<r> world=8 layers=<first>..<end>` line per
       Spark, 6 layers each.
-- [ ] `VADE_GROUP=eight vade verify --prompt 8k --receipt verify-eight.json`
+- [ ] `VADE_GROUP=eight vade verify --prompt 8k --receipt .local/verify-eight.json`
       prints `IDENTICAL`, with the same `reference_ids_sha256` value as the
       pair receipts.
 - [ ] `VADE_GROUP=eight vade down`.
@@ -774,8 +797,11 @@ Spark finished loading the model much later than the Spark before it. Each
 rank waits 10 seconds for the next rank
 (`LINK_TIMEOUT` in
 [engine/crates/engine/src/flash/next_pp.rs](../engine/crates/engine/src/flash/next_pp.rs)).
-Look in `VADE_GROUP=eight vade logs` for the rank that finished loading last,
-then start again.
+Look in `VADE_GROUP=eight vade logs` for the rank that finished loading last.
+Every start reads the model from disk again: the engine drops the checkpoint
+from the file cache before it loads. So a second start is not faster on its
+own. Find out why that Spark loads more slowly, for example its disk, before
+you start again.
 
 FP8 on eight Sparks is refused by this build.
 
