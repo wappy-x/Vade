@@ -646,7 +646,7 @@ unsafe fn narrow_total(w: *const u32, x: *const u32, mt: usize, nt: usize,
 mod attention;
 mod attention_fast {
 //! Independent grouped-query prefill: register scores, absolute 64-key tiles.
-//! TensorFold's grouped-head staging idea; implementation is original Rust.
+//! Grouped-head staging idea studied in TensorFold; this Rust implementation is our own.
 use super::*;
 use crate::ptx;
 

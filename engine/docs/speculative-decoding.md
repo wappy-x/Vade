@@ -743,5 +743,6 @@ speedup. Qualify the actual native build and request set, including long-context
 requests, before making a performance claim. Report copy acceptance as accepted proposals divided by all
 proposed tokens, including the unused tail after the first mismatch.
 
-Idea credit: TensorFold's copy-first suffix index and confidence-squared depth
-cost rule, independently implemented in Rust from verified study findings.
+Idea credit: the copy-first suffix index and the confidence-squared depth cost
+rule were studied in TensorFold. The implementation in
+`engine/crates/engine/src/hybrid/draft_control.rs` is Vade's own Rust.

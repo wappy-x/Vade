@@ -1,8 +1,21 @@
 # Credits
 
-**Vade's code is its own, written from scratch in Rust, and many of its ideas came from other people's work.** This page introduces the engine and harness credit lists, and summarizes the harness notes.
+**Vade's code is written from scratch in Rust, and much of its design is our own work. Other parts use ideas from published papers and from other projects, and this page names them.** It lists the original work first, then introduces the engine and harness credit lists and summarizes the harness notes.
 
-No source code was copied, translated or adapted from any project credited here. A credit means Vade learned from that work, not that their code runs in Vade.
+No source code was copied, translated or adapted from any project credited here. A credit names an idea or a reference behavior and the part of Vade that uses it. It does not mean their code runs in Vade.
+
+<br>
+
+## Original work
+
+**These parts were designed and built in this project.** Each item names where to check it in the tree. Where an item uses a published idea, the credit lists name that idea and its source.
+
+- **The exactness law and its gates.** The same setup and request must give identical token IDs on every run: alone or batched, cached or fresh, and with drafting on or off. The same request must also give the same IDs across supported Spark counts. The rule and the merge gate are in [AGENTS.md](AGENTS.md#exactness-law-and-merge-gate) and [architecture](docs/architecture.md#exactness-and-model-quality). Batch-invariant arithmetic is a published idea, credited under [Attention and determinism](engine/docs/CREDITS.md#attention-and-determinism). The rule does not hold everywhere yet: on FP8, 2 and 4 Sparks give different IDs today ([Exactness](README.md#exactness)).
+- **Standard-library Rust, GPU kernels included.** The engine, the CLI, the harness and the repository tools use no third-party crates. The GPU kernels are Rust compiled for NVPTX, in [engine/crates/gpu/kernels](engine/crates/gpu/kernels) ([What it is](README.md#what-it-is)).
+- **The tensor split and the RDMA fabric.** The split runs one model across two or four Sparks, with transport over RDMA ([engine/crates/tp](engine/crates/tp/README.md), [verbs.rs](engine/crates/fabric/src/verbs.rs)). Tensor parallelism follows the Megatron-LM paper, and the transport ideas we studied are credited under [DGX Spark community](engine/docs/CREDITS.md#dgx-spark-community) and [NVIDIA and transport](engine/docs/CREDITS.md#nvidia-and-transport). The rank code and the transport are our own Rust.
+- **The Flash-Next MTP drafting path.** The checkpoint's own multi-token prediction (MTP) head proposes tokens, and a batched check keeps only the tokens the model would have chosen ([next_mtp.rs](engine/crates/engine/src/flash/next_mtp.rs)). Under greedy decoding, drafting on and off give identical token IDs ([Drafting](docs/architecture.md#drafting)). Draft-and-verify and MTP are published ideas, credited under [Speculative decoding](engine/docs/CREDITS.md#speculative-decoding).
+- **The agent harness and the operator CLI.** `vade chat` opens a native coding agent ([harness](harness/README.md)). The `vade` CLI installs, starts, checks and stops the engine ([cli](cli/README.md), [What you get](README.md#what-you-get)). On Linux, the Spark included, the agent runs no shell commands; its shell tool needs the macOS sandbox ([What works today](README.md#what-works-today-and-what-doesnt-yet)).
+- **Cards, gates and receipts.** `vade verify` sends the same requests with drafting on and off and checks that the token IDs match ([Verify exactness](cli/README.md#verify-exactness)). `vade bench` measures the running engine and writes a receipt. A change to engine behavior must pass a device gate on real Sparks before it merges, and its card joins the exactness and measurement results ([Exactness and evidence](CONTRIBUTING.md#exactness-and-evidence), [The measurement card](CONTRIBUTING.md#the-measurement-card)). A gated change that was rebased onto a moved main passes a screen on the Sparks first.
 
 <br>
 
@@ -20,7 +33,7 @@ No source code was copied, translated or adapted from any project credited here.
 
 ## Engine
 
-**The full list lives in [engine/docs/CREDITS.md](engine/docs/CREDITS.md).** Each entry says what Vade took and links the people, papers and projects.
+**The full list lives in [engine/docs/CREDITS.md](engine/docs/CREDITS.md).** Each entry names the idea or behavior Vade uses and links the people, papers and projects.
 
 - [Model makers](engine/docs/CREDITS.md#model-makers): the teams whose official models define what the engine must compute
 - [Reference code](engine/docs/CREDITS.md#reference-code): the makers' official code that its answers are checked against
@@ -34,7 +47,7 @@ No source code was copied, translated or adapted from any project credited here.
 
 ## Harness
 
-**What the harness learned from, and from whom.** The harness's own notes are in [harness/CREDITS-NOTES.md](harness/CREDITS-NOTES.md).
+**The ideas the harness studied, and their sources.** The harness's own notes are in [harness/CREDITS-NOTES.md](harness/CREDITS-NOTES.md).
 
 **Client setup.** For Codex, Hermes, OpenCode and Pi, client setup follows each client's own pinned command-line help and configuration docs. Hermes's context exception and file-write limits come from its pinned initialization and file-safety modules. The templates, the model catalog prompt and the instruction to call a tool right away instead of promising to are Vade's own Rust output; no client code or prompt was copied. Source links and pins are listed in [the passthrough matrix](harness/docs/passthrough-matrix.md#sources-and-credit).
 

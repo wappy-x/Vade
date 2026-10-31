@@ -480,8 +480,10 @@ test at main `250fb49`, are in the [benchmark history](docs/benchmarks.md).
 Vade's code is licensed under [Apache-2.0](LICENSE). The bundled tokenizer and
 template fixtures keep their upstream licenses, the
 [Code of Conduct](CODE_OF_CONDUCT.md) uses CC BY 4.0, and models keep their own
-licenses. [NOTICE](NOTICE) lists the shipped files and their license texts,
-and [Credits](CREDITS.md) keeps the source attribution.
+licenses. [NOTICE](NOTICE) lists the shipped files and their license texts.
+[Credits](CREDITS.md) names the papers and projects whose ideas Vade uses.
+Its [Original work](CREDITS.md#original-work) section lists what was designed
+and built here, with the files to check.
 
 ## Documentation map
 

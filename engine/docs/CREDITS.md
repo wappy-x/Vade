@@ -1,6 +1,6 @@
 # Credits
 
-**Vade's code is its own, but many of its ideas came from the people, papers and projects below.** No source code was copied, translated or adapted from any of them.
+**This page names the people, papers and projects whose ideas or reference behavior Vade uses, and the part of Vade that uses each one.** No source code was copied, translated or adapted from any of them. Vade's code is written here, in Rust; the parts designed and built in this project are listed under [Original work](../../CREDITS.md#original-work).
 
 A credit does not mean their code runs in Vade, or that their speed or correctness claims apply to it. Every profile link was checked against the person's own GitHub or Hugging Face profile, as [Link checks](link-checks.md) records.
 
@@ -21,7 +21,7 @@ A credit does not mean their code runs in Vade, or that their speed or correctne
 </dl>
 
 - Vade's own code covers the engine, the GPU kernels, the tokenizer, the Spark-to-Spark transport, the server and the tools.
-- Each entry says what Vade took. Where a second line follows, it names the people or gives the links.
+- Each entry says which idea or behavior Vade uses. Where a second line follows, it names the people or gives the links.
 - Papers list every author when there are nine or fewer. Longer lists show the first three names and the total; the paper link has them all.
 - Paper authors' profile links sit in a fold at the end of their section. An X account or website appears only when the person's own profile lists it; an author missing from the section's profile fold is credited by name and paper only.
 
@@ -197,7 +197,7 @@ Draft and verify:
 
 Guessing without a draft model:
 
-- **[Prompt Lookup Decoding](https://github.com/apoorvumang/prompt-lookup-decoding).** Guessing continuations from text already in the prompt. Vade learned it through TensorFold; this is the original published source.\
+- **[Prompt Lookup Decoding](https://github.com/apoorvumang/prompt-lookup-decoding).** Guessing continuations from text already in the prompt. This is the original published source; we first saw the idea in TensorFold.\
   Apoorv Saxena
 - **[Token Recycling](https://arxiv.org/abs/2408.08696).** Keeping the model's predictions, even from rejected rows, as future guesses. Vade keeps the best follower of each token.\
   Xianzhen Luo, Yixuan Wang, Qingfu Zhu, Zhiming Zhang, Xuanyu Zhang, Qing Yang and Dongliang Xu
@@ -311,9 +311,9 @@ Tokens, number formats and sampling:
 
 ## DGX Spark community
 
-**These people and projects shared what they learned on the same hardware. Vade took ideas, never code.**
+**These people and projects published their work on the same hardware. Vade uses some of their ideas, never their code.**
 
-**[TensorFold](https://github.com/ashhart/TensorFold), by Ash Hart and the TensorFold contributors, is the project Vade learned the most from.** Vade's kernel comments and build notes name it directly; the fold at the end of this section lists the eleven ideas.\
+**[TensorFold](https://github.com/ashhart/TensorFold), by Ash Hart and the TensorFold contributors.** We studied eleven of its ideas; the fold at the end of this section lists them. Vade's kernel comments and build notes name TensorFold where one of these ideas is used, and each implementation is Vade's own Rust.\
 Ash Hart: [GitHub](https://github.com/ashhart) · [X](https://x.com/ashxhart)
 
 Engines and recipes:
@@ -354,19 +354,19 @@ From the NVIDIA developer forum. Its profile pages refuse automated requests, so
 Christopher Owen and FujitsuPolycom are credited under [Studied, not used](#studied-not-used).
 
 <details>
-<summary><b>What Vade took from TensorFold</b>: eleven ideas, in three groups</summary>
+<summary><b>Ideas studied in TensorFold</b>: eleven ideas, in three groups</summary>
 
 On the GPU:
 
 - The whole decode step stays on the GPU: KV cache, activations and buffers stay resident.
 - Kernels are looked up once, and launches are queued until a result is needed.
-- Prefill attention where one GPU block serves every query head that shares a KV head, with staged, swizzled tiles.
+- Prefill attention where one GPU block serves every query head that shares a KV head, with staged, swizzled tiles. Swizzled shared-memory tiles themselves are older practice from CUTLASS and GPU textbooks ([NVIDIA and transport](#nvidia-and-transport)).
 - Wide, neighbouring memory reads for matrix-vector kernels.
 - Computing output scores only for the final prompt position ([source](https://github.com/ashhart/TensorFold/blob/17c73e189f5e6a5304cda7ea37f086f9c49b4788/src/tensorfold/families/qwen4_exp/cuda/decode.py)).
 
 Drafting, sampling and conversations:
 
-- Exact draft verification: keep only guesses the model itself would choose.
+- Exact draft verification: keep only guesses the model itself would choose (original source: the papers under [Speculative decoding](#speculative-decoding)).
 - Guessing from text already in the prompt (original source: Apoorv Saxena, under [Speculative decoding](#speculative-decoding)).
 - Sampling keyed by seed and token position.
 - Conversation snapshots at message boundaries that can branch.
@@ -485,7 +485,7 @@ Vade also declares the CUDA driver and RDMA functions it calls, written against 
 
 **To report a missing or wrong credit, open an issue in the repository's issue tracker.** Name the idea, its original source and the part of Vade that uses it.
 
-The project credits both the original work and the source through which it learned an idea, and an earlier original source is always welcome.
+A credit names the original source of an idea and, if different, the project where we first saw it. An earlier original source is always welcome.
 
 **Where next:** [Link checks](link-checks.md) · [Provenance](provenance.md) · [Documentation index](README.md)
 

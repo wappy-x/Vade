@@ -8,7 +8,9 @@ informed the work without supplying code. For maintainers and license
 reviewers.
 
 [Credits](CREDITS.md) is the full list of people, papers and projects whose
-ideas shaped Vade, with main and development scope marked.
+ideas Vade uses, with main and development scope marked. The parts designed
+and built in this project are listed under
+[Original work](../../CREDITS.md#original-work).
 
 <details>
 <summary><b>Terms on this page</b>: provenance, revision, SHA-256 hash, checkpoint, chat template, fixture, Unicode Character Database</summary>
@@ -173,8 +175,8 @@ Unicode library.
 - the paths and changes made;
 - the license and any retained notices.
 
-Private development does not waive upstream license obligations. Writing
-original code for an idea learned elsewhere is credited as an idea, not
+Private development does not waive upstream license obligations. Original
+code written for an idea first seen elsewhere is credited as an idea, not
 labelled as copied code.
 
 ## Ideas and references consulted

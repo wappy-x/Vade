@@ -1,12 +1,12 @@
 # Ideas and reference behavior
 
 This page lists the papers, official model sources, other projects and earlier
-Vade work whose ideas or documented behavior shaped Vade's engine. Each entry
+Vade work whose ideas or documented behavior Vade's engine uses. Each entry
 says what was used and which part is Vade's own.
 
 **No external implementation code was copied into the engine.** The engine is
 Vade's own Rust, and its GPU code is Rust, with inline PTX assembly where
-needed, compiled to PTX. When an entry names another project, Vade took an
+needed, compiled to PTX. When an entry names another project, Vade uses an
 idea, a published equation or a documented behavior from it, or ran it
 separately as a reference to compare against. The third-party files the repository does keep, such as official model
 configurations, chat templates and Unicode data, are listed with their
@@ -94,8 +94,11 @@ rounded remainder.</dd>
   chat template, used only to generate comparison fixtures, and the sign
   convention for the repetition penalty.
 
-- SplitMix64 (Sebastiano Vigna): integer finalizer constants for stateless
-  seeded sampling. This is not a cryptographic RNG.
+- SplitMix64 (Guy L. Steele, Doug Lea and Christine H. Flood, "Fast splittable
+  pseudorandom number generators", https://doi.org/10.1145/2660193.2660195;
+  reference code on Sebastiano Vigna's page,
+  https://prng.di.unimi.it/splitmix64.c): integer finalizer constants for
+  stateless seeded sampling. This is not a cryptographic RNG.
 
 - TensorFold: conversation state snapshots and independent branches at message
   boundaries. Vade builds them on the engine's public fork/truncate API.
@@ -137,9 +140,11 @@ rounded remainder.</dd>
   predictions as guesses in a later verification cycle. Vade shifts
   already-computed rejected rows without extra target passes.
 
-- TensorFold's prefill attention, as recorded in Vade's internal notes: one
-  block shares K/V across a group of query heads, asynchronously stages
-  swizzled tiles, and keeps probabilities in registers at absolute key tiles.
+- Grouped-head prefill attention, studied in TensorFold and recorded in Vade's
+  internal notes: one block shares K/V across a group of query heads,
+  asynchronously stages swizzled tiles, and keeps probabilities in registers at
+  absolute key tiles. Swizzled shared-memory tiles themselves are older
+  practice from CUTLASS and GPU textbooks.
   Vade's own Rust attention kernels now use single BF16 operands and share
   each K/V tile across its query heads.
 
@@ -192,16 +197,18 @@ rounded remainder.</dd>
   warp32 matvec while moving surrounding operations onto the device.
 
 - The kernel implementation starts from Vade's original Rust matvec/GEMM
-  code. Its recorded ideas come from TensorFold and jayleaton ROOFLINE (wide
-  coalesced loads and warp-cooperative rows), the LLVM NVPTX intrinsic
-  definitions and NVIDIA's PTX MMA fragment-layout specifications. Following a
-  precision analysis, the integration adds three-product, two-component
-  attention and removes unused variants. Batched scheduling, causal attention
-  and storage integration are Vade's own Rust.
+  code. The recorded ideas it uses were studied in TensorFold and jayleaton
+  ROOFLINE (wide coalesced loads and warp-cooperative rows), the LLVM NVPTX
+  intrinsic definitions and NVIDIA's PTX MMA fragment-layout specifications.
+  Following a precision analysis, the integration adds three-product,
+  two-component attention and removes unused variants. Batched scheduling,
+  causal attention and storage integration are Vade's own Rust.
 
 - The draft implementation integrates Vade's original Rust draft2 suffix lookup
-  and guarded verification. The prompt lookup and position-keyed sampling ideas
-  are credited to TensorFold/vcruz305; no external model is used.
+  and guarded verification. Prompt lookup is Apoorv Saxena's Prompt Lookup
+  Decoding (https://github.com/apoorvumang/prompt-lookup-decoding). We first
+  saw it, and position-keyed sampling, in TensorFold and vcruz305's work. No
+  external model is used.
 
 - Draft-model decoding uses the standard speculative-decoding idea: a smaller
   official Qwen3 model proposes a chain, the target verifies consecutive rows,
