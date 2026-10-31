@@ -21,6 +21,30 @@ fn clipped(text: &str, limit: usize) -> &str {
     }
     &text[..end]
 }
+/// Rows shown from the start of each range. The smallest range takes first:
+/// each range gets an equal part of the bytes left, and a range that needs
+/// less leaves the rest to the larger ranges. One range, or ranges that fit
+/// together, show the same rows as one shared budget filled in order.
+fn share_budget(rows: &[Vec<(usize, Value, usize)>], budget: usize) -> Vec<usize> {
+    let need = |rows: &[(usize, Value, usize)]| rows.iter().fold(0usize, |sum, row| sum.saturating_add(row.2));
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by_key(|&range| (need(&rows[range]), range));
+    let mut shown = vec![0; rows.len()];
+    let mut left = budget;
+    for (done, &range) in order.iter().enumerate() {
+        let share = left / (rows.len() - done);
+        let mut used = 0usize;
+        for row in &rows[range] {
+            if row.2 > share - used {
+                break;
+            }
+            used += row.2;
+            shown[range] += 1;
+        }
+        left -= used;
+    }
+    shown
+}
 fn cancelled(cancel: &AtomicBool) -> io::Result<()> {
     if cancel.load(Ordering::Relaxed) {
         Err(io::ErrorKind::Interrupted.into())
@@ -141,9 +165,10 @@ impl Workspace {
                 "path/range provenance exceeds output budget; narrow path or ranges",
             ));
         }
-        let mut bytes = overhead;
+        // Each row costs its bytes plus one comma; the first row has none.
+        let budget = cap - overhead + 1;
+        let mut rows: Vec<Vec<(usize, Value, usize)>> = vec![Vec::new(); ranges.len()];
         let mut range_index = 0;
-        let mut next = None;
         for (index, line) in text.split_inclusive('\n').enumerate() {
             cancelled(cancel)?;
             let line_number = index + 1;
@@ -156,21 +181,25 @@ impl Workspace {
             if line_number < ranges[range_index].0 {
                 continue;
             }
-            if line.len() > cap.saturating_sub(bytes) {
-                next = Some((range_index, line_number));
-                break;
+            // A line over the whole budget can never be shown; stop its range.
+            if line.len() >= budget {
+                rows[range_index].push((line_number, Value::Null, usize::MAX));
+                continue;
             }
             let row = Value::Object(vec![
                 ("line".into(), number(line_number)),
                 ("text".into(), Value::String(line.into())),
             ]);
-            let size = json::stringify(&row)?.len() + usize::from(!lines.is_empty());
-            if bytes + size > cap {
-                next = Some((range_index, line_number));
-                break;
+            let size = json::stringify(&row)?.len() + 1;
+            rows[range_index].push((line_number, row, size));
+        }
+        let shown = share_budget(&rows, budget);
+        let mut next = None;
+        for (range, (rows, &count)) in rows.into_iter().zip(&shown).enumerate() {
+            if next.is_none() && let Some(&(line, _, _)) = rows.get(count) {
+                next = Some((range, line));
             }
-            bytes += size;
-            lines.push(row);
+            lines.extend(rows.into_iter().take(count).map(|(_, row, _)| row));
         }
         Ok((render(&lines, next)?, text))
     }
@@ -355,5 +384,50 @@ impl Workspace {
             ("skipped".into(), number(skipped)),
             ("hint".into(), Value::String("Copy next_offset for more matches; narrow path when scan_truncated or skipped is nonzero. Live files can change between pages.".into())),
         ]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_workspace::Fixture;
+    fn sizes(rows: &[&[usize]]) -> Vec<Vec<(usize, Value, usize)>> {
+        rows.iter().map(|range| range.iter().enumerate().map(|(i, &size)| (i + 1, Value::Null, size)).collect()).collect()
+    }
+    #[test]
+    fn ranges_share_the_byte_budget_smallest_first() {
+        // Filled in order, the first range took all 1000 bytes: [10, 0, 0].
+        // C (50) takes 50 of 333, B (300) takes 300 of 950/2 = 475, A gets 650.
+        assert_eq!(share_budget(&sizes(&[&[100; 10], &[100; 3], &[50]]), 1000), [6, 3, 1]);
+        // One range: the same rows as one budget filled in order.
+        assert_eq!(share_budget(&sizes(&[&[100; 10]]), 999), [9]);
+        // Ranges that fit together are all shown.
+        assert_eq!(share_budget(&sizes(&[&[100; 4], &[100; 3], &[50]]), 750), [4, 3, 1]);
+        // Equal needs split evenly; integer shares round down, slack moves on.
+        assert_eq!(share_budget(&sizes(&[&[100; 5], &[100; 5]]), 701), [3, 4]);
+        // A line over the budget stops its range only.
+        assert_eq!(share_budget(&sizes(&[&[10, usize::MAX, 10], &[10, 10]]), 100), [1, 2]);
+    }
+    #[test]
+    fn a_long_first_range_cannot_starve_a_later_range() {
+        let f = Fixture::new();
+        let text: String = (1..=100).map(|n| format!("{n:03} {}\n", "x".repeat(35))).collect();
+        f.write("long.rs", &text);
+        let w = f.workspace();
+        let cancel = AtomicBool::new(false);
+        let output = w.read_line_ranges("long.rs", &[(1, 80), (90, 95)], 4096, &cancel).unwrap();
+        assert!(output.len() <= 4096, "{}", output.len());
+        let value = json::parse(&output).unwrap();
+        let shown: Vec<usize> = value.get("lines").and_then(Value::as_array).unwrap().iter()
+            .map(|row| match row.get("line") { Some(Value::Number(n)) => n.parse().unwrap(), _ => panic!() }).collect();
+        assert_eq!(shown[shown.len() - 6..], [90, 91, 92, 93, 94, 95]);
+        let first = shown.len() - 6;
+        assert_eq!(shown[..first], (1..=first).collect::<Vec<_>>());
+        assert_eq!(value.get("next_range"), Some(&number(0)));
+        assert_eq!(value.get("next_line"), Some(&number(first + 1)));
+        assert_eq!(value.get("truncated"), Some(&Value::Bool(true)));
+        // One range keeps the fill-in-order result: the same first rows.
+        let alone = json::parse(&w.read_line_ranges("long.rs", &[(1, 80)], 4096, &cancel).unwrap()).unwrap();
+        assert!(alone.get("lines").and_then(Value::as_array).unwrap().len() > first);
     }
 }

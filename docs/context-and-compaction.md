@@ -1,10 +1,15 @@
 # Context and compaction
 
 A chat in the native agent (`vade chat`, or `vade-harness agent`) does not
-stop at the end of the model's context window. When the next turn would not
-fit, the model writes a short summary of the older turns, the most recent
-turns stay word for word, and the chat continues. You see one status line,
-where N is the number of kept turns and M is the size of the summary:
+stop at the end of the model's context window. When the context fills up, the
+harness compacts it on the CPU, with no model request: every user message and
+the newest tool rounds stay word for word, and a ledger and excerpts replace
+the older tool calls and results. On one Spark a model-written summary costs a
+long prefill and decode, so automatic compaction never asks the model.
+
+`/compact` asks the model to write a short summary of the older turns (a
+rollover). You then see one status line, where N is the number of kept turns
+and M is the size of the summary:
 
 ```text
 [context compacted: kept N turns, summary M tokens]
@@ -53,15 +58,43 @@ each request inside a long task:
 `--no-compact` turns off both automatic triggers. (`--no-auto-compact` is an
 older name for the same flag.) `/compact` still works.
 
+## What automatic compaction keeps
+
+Automatic compaction scales from the context window (see the
+[budget table](#budget-table)):
+
+- **The frozen prefix.** Every byte stays.
+- **Every user message** stays word for word, the first task included.
+- **The newest closed tool rounds**: 4 at a 32,768-token window, 8 at 65,536
+  tokens and above, never fewer than 3. The latest edit, check and command
+  receipts, uncertain outcomes and the pinned messages also stay.
+- **One in-task summary** for the older rounds, directly after the first
+  user messages (the anchor), at most 6 KiB at 32,768
+  tokens and 12 KiB at 65,536 and above. It starts with a ledger that the
+  harness writes: each file with the line ranges read and the edit calls
+  applied, each command with its status line and up to 3 error lines, and
+  each other tool (web, memory, MCP `server__tool`) with its arguments and the
+  first line of its result. Excerpts of the older calls and results fill the
+  rest, newest first.
+
+If the frozen prefix is over its share of the window, the compaction notice
+says so. Compaction never changes the prefix, so only shorter project
+instructions, memory or rules make it smaller.
+
 ## What a rollover keeps
 
-A rollover replaces the older turns with one state block. A turn starts at a
+A `/compact` rollover replaces the older turns with one state block. A turn starts at a
 user message.
 
 - **The frozen prefix.** The options, the tool definitions and the leading
   system and developer messages keep every byte.
 - **The state block.** One user message, named `vade_context_summary`, that
   comes directly after the frozen prefix.
+- **The pinned messages.** The harness developer prompts in the older turns
+  (recovery, review and submission prompts) and the latest automatic check
+  call with its result, word for word, directly after the state block. The
+  agent counts these prompts to limit retries, and reads the check status.
+  The local excerpt planner keeps them too.
 - **The recent turns.** The newest 2 user turns, with every assistant reply,
   tool call and tool result in them, word for word. If 2 turns do not fit,
   the harness keeps 1 turn.
@@ -129,14 +162,13 @@ when the engine counts tokens, and an estimate otherwise.
 
 The harness never deletes history that it cannot replace safely.
 
-1. **Model rollover.** This is the first choice.
-2. **Local excerpts.** If the model reply fails, if it calls a tool, if a
-   tool outcome in an older turn is unknown, or if one kept turn and a full
-   state block do not fit, the harness uses its older planner. That planner
-   keeps the user messages and the latest edit and check receipts word for
-   word and excerpts older results. In an automatic compaction, the notice
-   names the reason that the model summary was not used.
-3. **The hard stop.** If neither one fits, see the next section.
+1. **Automatic compaction** uses the local planner only. If its plan does not
+   fit, it excerpts the largest old replies, and then keeps only the newest 3
+   rounds and the pinned messages.
+2. **`/compact`** asks the model first. If the model reply fails, if it calls
+   a tool, if a tool outcome in an older turn is unknown, or if one kept turn
+   and a full state block do not fit, it uses the local planner.
+3. **The hard stop.** If nothing fits, see the next section.
 
 A rollover does not summarize a turn that holds a tool call with an unknown
 outcome. If such a call is in an older turn, the local excerpt planner keeps
@@ -164,7 +196,7 @@ history stays as it was.
 | Command or flag | What it does |
 | --- | --- |
 | `/context` | The budget after each turn, the per-message estimates and the last request's admission |
-| `/compact` | A model rollover now, with local excerpts as the fallback |
+| `/compact` | A model rollover now, with local excerpts as the fallback (automatic compaction never asks the model) |
 | `/compact KEEP SUMMARY` | Your own summary; keeps the newest KEEP user turns |
 | `/compact-preview [KEEP SUMMARY]` | Preview the local excerpt plan, or your own summary, and change nothing |
 | `/compaction` | The latest compaction: who wrote the summary, the kept turns, the summary and the source records |
@@ -197,8 +229,30 @@ different, so the next reply can differ from the reply to the full history.
 This is expected.
 
 A compaction makes the engine read the new suffix again, so the next turn has
-fewer cached tokens. The frozen prefix keeps its bytes, so its cached tokens
-can still be used. The next response's reported usage gives the real number.
+fewer cached tokens. An automatic compaction keeps the frozen prefix and the
+first user messages (the anchor) at the same indices with the same bytes, and
+puts its summary after them. The harness keeps each KV checkpoint hint whose
+messages the new request sends with the same bytes, so the next request can
+restore the engine state up to the anchor; later hints are dropped. A
+tool-recovery boundary changes no message and keeps all hints. The engine
+checks every hint against the prompt it renders, so a hint that does not
+match is a miss, not a wrong reuse. The next response's reported usage gives
+the real number.
+
+## Budget table
+
+These values are in the code. Each row names its constant.
+
+| Item | Value | Code |
+| --- | --- | --- |
+| Read receipts kept | 8 paths, the oldest read out first | `line_edit.rs` `Reads::MAX_PATHS` |
+| `workspace_read_lines` output | 4,096 bytes, shared by its ranges, smallest range first | `artifacts.rs` `INLINE_BYTES`, `discovery.rs` `share_budget` |
+| Kept closed tool rounds | window / 8,192, from 3 to 8: 4 at 32,768 tokens, 8 at 65,536 | `context.rs` `Retention::for_window` |
+| In-task summary with its ledger | 3/16 byte per window token, 2 KiB to 12 KiB: 6,144 B at 32,768, 12,288 B at 65,536; the ledger takes at most half | `Retention::for_window`, `rollover.rs` `ledger` |
+| Frozen prefix share (reported, not cut) | 3/8 byte per window token: 12,288 B at 32,768, 24,576 B at 65,536 | `Retention::for_window`, `context.rs` `prefix_note` |
+| Summary request on an automatic watermark | none; only `/compact` asks the model | `cli/native_setup.rs` `before_hosted_request` |
+| Anchor (unchanged after an automatic compaction) | the frozen prefix and the user messages right after it | `context.rs` `anchor` |
+| KV hints after a compaction | those at or below the leading messages with unchanged bytes; after a tool-recovery boundary, all | `transport/native.rs` `keep_shared_hints`, `prompt.rs` `shared_messages` |
 
 ## Limits
 

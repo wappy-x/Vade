@@ -60,6 +60,10 @@ struct State {
     mismatch: bool,
     truncated: bool,
     retention_failure: bool,
+    /// Like the Engine (serve cache.rs `restorable_prefix`): a checkpoint is
+    /// reused up to the prompt it shares, without its generation suffix.
+    partial: bool,
+    answer: String,
 }
 impl Default for State {
     fn default() -> Self {
@@ -80,6 +84,8 @@ impl Default for State {
             mismatch: false,
             truncated: false,
             retention_failure: false,
+            partial: false,
+            answer: "answer".into(),
         }
     }
 }
@@ -166,8 +172,9 @@ impl State {
                 .position(|e| e.handle == handle && !e.foreign)
             {
                 let saved = self.entries.remove(index).unwrap();
-                reuse = if prompt.starts_with(&saved.prompt) && !self.mismatch {
-                    reused = saved.prompt.len();
+                let shared = saved.prompt.strip_suffix("<assistant>").filter(|_| self.partial).unwrap_or(&saved.prompt);
+                reuse = if prompt.starts_with(shared) && !self.mismatch {
+                    reused = shared.len();
                     "hit"
                 } else {
                     "prompt_mismatch"
@@ -230,7 +237,8 @@ impl State {
                 200,
                 "text/event-stream",
                 format!(
-                    "data: {{\"choices\":[{{\"delta\":{{\"content\":\"answer\"}},\"finish_reason\":\"stop\"}}]}}\n\ndata: {{\"choices\":[],\"usage\":{usage}}}\n\ndata: [DONE]\n\n"
+                    "data: {{\"choices\":[{{\"delta\":{{\"content\":{}}},\"finish_reason\":\"stop\"}}]}}\n\ndata: {{\"choices\":[],\"usage\":{usage}}}\n\ndata: [DONE]\n\n",
+                    json::quote(&self.answer)
                 ),
                 self.truncated,
             )
@@ -239,7 +247,8 @@ impl State {
                 200,
                 "application/json",
                 format!(
-                    r#"{{"choices":[{{"message":{{"role":"assistant","content":"answer"}},"finish_reason":"stop"}}],"usage":{usage}}}"#
+                    r#"{{"choices":[{{"message":{{"role":"assistant","content":{}}},"finish_reason":"stop"}}],"usage":{usage}}}"#,
+                    json::quote(&self.answer)
                 ),
                 self.truncated,
             )
@@ -770,4 +779,49 @@ fn simultaneous_child_clients_share_one_parent_reference_and_keep_independent_ta
         "shared handle released once after all children join"
     );
     assert!(mock.state.lock().unwrap().entries.is_empty());
+}
+
+#[test]
+fn compaction_and_tool_recovery_keep_the_anchor_checkpoint() {
+    let mock = Mock::new();
+    mock.state.lock().unwrap().partial = true;
+    mock.state.lock().unwrap().answer = "a long resolved answer ".repeat(100);
+    let temp = Temp::new();
+    let w = temp.workspace();
+    let mut c = conversation(false);
+    let mut journal = Journal::create(&w, "anchor", &c).unwrap();
+    let mut model = NativeModel::new(&mock.endpoint).unwrap();
+    for ask in ["first task", "second ask", "third ask", "fourth ask"] {
+        run(&mut c, &mut model, &mut journal, ask);
+    }
+    let handle = |n: u64| format!("{n:064x}");
+    let sent = |state: &State| state.requests.last().unwrap().get("kv_handle").and_then(Value::as_str).map(str::to_owned);
+    // The earliest checkpoint (system + first task, 2 messages) and the latest stay.
+    assert_eq!(sent(&mock.state.lock().unwrap()), Some(handle(3)));
+    // A tool-recovery boundary changes no message: the latest checkpoint stays.
+    model.reestablish_prompt(PromptBoundary::ToolRecovery);
+    run(&mut c, &mut model, &mut journal, "fifth ask");
+    assert_eq!(sent(&mock.state.lock().unwrap()), Some(handle(4)));
+    assert_eq!(reuse(&model), Reuse::Hit);
+    // An automatic compaction keeps the task at its index and puts the summary
+    // after it, so the anchor checkpoint still covers unchanged bytes.
+    let before: Vec<String> = c.messages()[..2].iter().map(|m| m.serialized_json().to_owned()).collect();
+    let plan = vade_harness::context::auto_plan(&c, 1, Limits { max_context_tokens: 16_384, ..Limits::default() }).unwrap();
+    journal.compact(&plan).unwrap();
+    c = plan.into_conversation();
+    let after: Vec<String> = c.messages()[..2].iter().map(|m| m.serialized_json().to_owned()).collect();
+    assert_eq!(after, before);
+    assert_eq!(after, [r#"{"role":"system","content":"exact rules and project prefix"}"#, r#"{"role":"user","content":"first task"}"#]);
+    assert_eq!(c.messages()[2].value().get("name").and_then(Value::as_str), Some("vade_context_summary"));
+    model.reset_prompt();
+    run(&mut c, &mut model, &mut journal, "after compaction");
+    let state = mock.state.lock().unwrap();
+    assert_eq!(sent(&state), Some(handle(1)), "the anchor checkpoint, never a later one");
+    let requests = state.requests.len();
+    drop(state);
+    assert_eq!(reuse(&model), Reuse::Hit);
+    let prefix = r#"[]<system>exact rules and project prefix</system><user>first task</user>"#;
+    assert_eq!(model.context().turns.back().unwrap().kv.as_ref().unwrap().reused_tokens, prefix.len() as u64);
+    // Five turns and one after the compaction: no summary request was sent.
+    assert_eq!(requests, 6);
 }

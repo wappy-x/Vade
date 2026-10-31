@@ -12,6 +12,40 @@ pub const DEFAULT_CONTEXT_TOKENS: usize = 131_072;
 pub const DEFAULT_RESERVE: usize = 4096;
 pub const COMPACTION_OUTPUT_TOKENS: usize = 8192;
 
+/// What automatic compaction keeps, scaled from the context window in tokens.
+/// `rounds`: newest closed tool rounds kept word for word (4 at 32,768, 8 at
+/// 65,536 and above, never below 3). `summary_bytes`: the in-task summary with
+/// its ledger (6 KiB at 32,768, 12 KiB at 65,536 and above). `prefix_bytes`:
+/// the share of the window the frozen prefix should stay under, 3/8 of a byte
+/// per token (12 KiB at 32,768); compaction never changes the prefix and only
+/// reports a larger one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Retention {
+    pub rounds: usize,
+    pub summary_bytes: usize,
+    pub prefix_bytes: usize,
+}
+impl Retention {
+    pub fn for_window(window: usize) -> Self {
+        Self {
+            rounds: (window / 8192).clamp(3, 8),
+            summary_bytes: (window / 16).saturating_mul(3).clamp(2048, 12 * 1024),
+            prefix_bytes: (window / 8).saturating_mul(3),
+        }
+    }
+}
+
+/// A note when the frozen prefix (options, tool definitions and the leading
+/// system and developer messages) is over its [`Retention`] share of the
+/// window. Compaction keeps every prefix byte, so only shorter project
+/// instructions, memory or rules can make it smaller.
+pub fn prefix_note(c: &Conversation, window: usize) -> Option<String> {
+    let after: usize = c.messages()[c.prefix_len()..].iter().map(|m| m.serialized_bytes()).sum();
+    let bytes = c.serialized_bytes().saturating_sub(after);
+    let share = Retention::for_window(window).prefix_bytes;
+    (bytes > share).then(|| format!("The frozen prefix (tools, system and developer messages) is {bytes} bytes, over its {share}-byte share of a {window}-token window; compaction keeps it whole, so shorter project instructions, memory or rules leave more room."))
+}
+
 /// The reply room compaction protects: the requested output, at most
 /// `COMPACTION_OUTPUT_TOKENS` and a quarter of the context. A whole-context
 /// output (8192 of 8192) would otherwise leave no history room on a fresh
@@ -293,7 +327,7 @@ impl Usage {
     }
 }
 
-pub const KV_COMPACTION_NOTICE: &str = "System/tools wire bytes stay exact; the summary starts immediately after that prefix. Changing history invalidates all later causal KV, including retained tail text. Engine-reported cached tokens determine actual reuse; byte equality alone does not prove a hit.";
+pub const KV_COMPACTION_NOTICE: &str = "System/tools wire bytes stay exact; an automatic summary starts after that prefix and the first user messages, which also stay exact. Changing history invalidates all later causal KV, including retained tail text. Engine-reported cached tokens determine actual reuse; byte equality alone does not prove a hit.";
 
 /// A reviewable derived view, never a replacement for raw journal records.
 /// Preserve all user text rather than guessing which sentences are constraints.
@@ -573,16 +607,26 @@ pub fn auto_plan(
     keep_turns: usize,
     limits: Limits,
 ) -> io::Result<CompactionPlan> {
+    auto_plan_for(c, keep_turns, limits, Retention::for_window(limits.max_context_tokens))
+}
+/// [`auto_plan`] with the retention of the real window, when `limits` is a
+/// planning limit.
+fn auto_plan_for(
+    c: &Conversation,
+    keep_turns: usize,
+    limits: Limits,
+    retention: Retention,
+) -> io::Result<CompactionPlan> {
     if keep_turns == 0 {
         return Err(io::Error::other(
             "auto-compaction requires retained rounds/turns",
         ));
     }
-    let keep_rounds = keep_turns.max(3);
+    let keep_rounds = keep_turns.max(retention.rounds);
     let (rounds, protected) = protected_groups(c, keep_rounds)?;
     // Closed tool rounds, unlike user turns, exist inside one long coding task.
     // Both candidates use the same invariants and must shrink and fit.
-    if let Ok(plan) = task_plan(c, &rounds, &protected, keep_rounds, limits) {
+    if let Ok(plan) = task_plan(c, &rounds, &protected, keep_rounds, retention.summary_bytes, limits) {
         return Ok(plan);
     }
     let starts: Vec<_> = c
@@ -682,7 +726,8 @@ pub fn auto_plan_fitting(
         max_context_tokens: usize::MAX,
         ..limits
     };
-    let mut candidate = auto_plan(c, keep, planning).ok().or_else(||
+    let retention = Retention::for_window(before.context_limit(limits.max_context_tokens));
+    let mut candidate = auto_plan_for(c, keep, planning, retention).ok().or_else(||
         finish_plan(c, "Tool-call reasoning excerpts (lossy historical data); calls and receipts stay exact. Full reasoning remains in the raw journal.", c.messages().len(), c.prefix_len(), Vec::new(), planning, true).ok());
     let mut removed = candidate.as_ref()
         .map_or_else(Vec::new, |p| p.removed_indices.clone());
@@ -710,7 +755,7 @@ pub fn auto_plan_fitting(
             }
         }
         let Some((_, index)) = prose.pop() else {
-            if let Ok(mut plan) = pressure_plan(c, keep.max(3), planning) {
+            if let Ok(mut plan) = pressure_plan(c, keep.max(3), retention.summary_bytes, planning) {
                 let after = count(plan.conversation())?;
                 if after.fits(limits.max_context_tokens, limits.output_reserve_tokens)
                     && !before.exact.zip(after.exact).is_some_and(|(a, b)| b.0 >= a.0)
@@ -748,6 +793,20 @@ pub fn auto_plan_fitting(
     }
 }
 
+/// Where an automatic summary goes: after the frozen prefix and the user
+/// messages that directly follow it (the task), which all stay. Their bytes do
+/// not change, so a KV checkpoint up to there stays valid after the rewrite. A
+/// user-supplied summary goes directly after the frozen prefix.
+fn anchor(c: &Conversation, removed: &std::collections::HashSet<usize>, automatic: bool) -> usize {
+    let prefix = c.prefix_len();
+    if !automatic {
+        return prefix;
+    }
+    prefix + c.messages()[prefix..].iter().enumerate()
+        .take_while(|&(at, m)| m.role() == "user" && !is_summary(m) && !removed.contains(&(prefix + at)))
+        .count()
+}
+
 fn finish_plan(
     c: &Conversation,
     summary: &str,
@@ -758,29 +817,30 @@ fn finish_plan(
     automatic: bool,
 ) -> io::Result<CompactionPlan> {
     let removed_set: std::collections::HashSet<_> = removed.iter().copied().collect();
+    let summary_message = crate::agent_wire::Message::from_value(
+        Value::Object(vec![
+            ("role".into(), Value::String("user".into())),
+            (
+                "content".into(),
+                Value::String(if automatic {
+                    summary.into()
+                } else {
+                    format!(
+                        "User-supplied compaction summary (lossy data; original records remain in the journal):\n{summary}"
+                    )
+                }),
+            ),
+            ("name".into(), Value::String("vade_context_summary".into())),
+        ]),
+        limits.wire,
+    )?;
+    let anchor = anchor(c, &removed_set, automatic);
     let mut messages = Vec::new();
     let mut retained = Vec::new();
     let mut excerpted = Vec::new();
     for (i, message) in c.messages().iter().enumerate() {
-        if i == c.prefix_len() {
-            let mut fields = vec![
-                ("role".into(), Value::String("user".into())),
-                (
-                    "content".into(),
-                    Value::String(if automatic {
-                        summary.into()
-                    } else {
-                        format!(
-                            "User-supplied compaction summary (lossy data; original records remain in the journal):\n{summary}"
-                        )
-                    }),
-                ),
-            ];
-            fields.push(("name".into(), Value::String("vade_context_summary".into())));
-            messages.push(crate::agent_wire::Message::from_value(
-                Value::Object(fields),
-                limits.wire,
-            )?);
+        if i == anchor {
+            messages.push(summary_message.clone());
         }
         if !removed_set.contains(&i) {
             let mut value = message.value().clone();
@@ -799,6 +859,9 @@ fn finish_plan(
             if kept == *message { retained.push(i); } else { excerpted.push(i); }
             messages.push(kept);
         }
+    }
+    if anchor == c.messages().len() {
+        messages.push(summary_message);
     }
     let compacted = c.with_messages(messages, limits)?;
     let before = Usage::for_conversation(c);
@@ -822,7 +885,7 @@ fn finish_plan(
         source_request: c.request(limits.wire).to_json()?,
         limits,
         recent_start: cut,
-        unchanged_prefix_messages: c.prefix_len(),
+        unchanged_prefix_messages: anchor,
         retained_indices: retained,
         excerpted_indices: excerpted,
         removed_indices: removed,

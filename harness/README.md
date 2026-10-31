@@ -701,8 +701,8 @@ Longer guides sit in `harness/docs/`:
   branches](docs/context-and-projects.md) and [engine
   checkpoints](docs/engine-checkpoints.md)
 - [Context and compaction](../docs/context-and-compaction.md): the token
-  budget after each turn, the model-written rollover at the window edge and
-  the hard stop
+  budget after each turn, the local compaction at the window edge, the
+  `/compact` rollover and the hard stop
 - [Workload guide](docs/workload.md) and the [bridge
   contract](docs/bridge-contract.md)
 
@@ -1338,12 +1338,13 @@ it: older turns are replaced with a shorter version so the next request fits.
 - `/compact-preview` shows the plan first.
 - `/compact KEEP SUMMARY` uses your own summary.
 
-First the model summarizes the older turns into one state block, and the
-newest 2 turns stay word for word (see [context and
-compaction](../docs/context-and-compaction.md)). If that is not possible, the
-older local planner runs: your messages, instructions, recent tool rounds, the
-latest edit for each file, the latest run of each check, and the last answer
-stay word for word, and no model writes that summary.
+Automatic compaction is local, with no model request: your messages,
+instructions, recent tool rounds (4 at a 32,768-token window, 8 at 65,536),
+the latest edit for each file, the latest run of each check, and the last
+answer stay word for word, and a harness-written ledger and excerpts replace
+the older rounds. `/compact` first asks the model to summarize the older turns
+into one state block, and the newest 2 turns stay word for word (see [context
+and compaction](../docs/context-and-compaction.md)).
 
 Compaction has a cost. The engine's cache holds the conversation as one
 unbroken sequence, so changing anything in the middle means everything after it

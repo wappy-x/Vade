@@ -168,19 +168,22 @@ pub fn turn_starts(c: &Conversation) -> Vec<usize> {
 }
 
 /// A rollover keeps `kept` turns from `cut`. The result has the frozen
-/// prefix, one state block and the kept turns, all other bytes unchanged.
+/// prefix, one state block, the pinned messages (see retention.rs `pinned`)
+/// and the kept turns, all other bytes unchanged.
 pub(crate) fn rollover_plan(c: &Conversation, cut: usize, kept: usize, model_text: &str, limits: Limits) -> io::Result<CompactionPlan> {
     let prefix = c.prefix_len();
     if cut <= prefix || cut >= c.messages().len() {
         return Err(io::Error::other("no older turns to summarize"));
     }
     let summary = state_block(c, cut, model_text);
+    let pinned = pinned(c, prefix, cut);
     let mut messages = c.messages()[..prefix].to_vec();
     messages.push(Message::from_value(Value::Object(vec![
         ("role".into(), Value::String("user".into())),
         ("content".into(), Value::String(summary.clone())),
         ("name".into(), Value::String(SUMMARY_NAME.into())),
     ]), limits.wire)?);
+    messages.extend(pinned.iter().map(|&i| c.messages()[i].clone()));
     messages.extend_from_slice(&c.messages()[cut..]);
     let conversation = c.with_messages(messages, limits)?;
     Ok(CompactionPlan {
@@ -193,9 +196,9 @@ pub(crate) fn rollover_plan(c: &Conversation, cut: usize, kept: usize, model_tex
         limits,
         recent_start: cut,
         unchanged_prefix_messages: prefix,
-        retained_indices: (0..prefix).chain(cut..c.messages().len()).collect(),
+        retained_indices: (0..prefix).chain(pinned.iter().copied()).chain(cut..c.messages().len()).collect(),
         excerpted_indices: Vec::new(),
-        removed_indices: (prefix..cut).collect(),
+        removed_indices: (prefix..cut).filter(|i| !pinned.contains(i)).collect(),
         automatic: true,
         in_task: false,
         exact_counts: None,
@@ -203,10 +206,11 @@ pub(crate) fn rollover_plan(c: &Conversation, cut: usize, kept: usize, model_tex
     })
 }
 
-/// The frozen prefix and the kept turns, without a state block: the floor a
-/// rollover cannot go below.
+/// The frozen prefix, the pinned messages and the kept turns, without a state
+/// block: the floor a rollover cannot go below.
 fn bare(c: &Conversation, cut: usize, limits: Limits) -> io::Result<Conversation> {
     let mut messages = c.messages()[..c.prefix_len()].to_vec();
+    messages.extend(pinned(c, c.prefix_len(), cut).into_iter().map(|i| c.messages()[i].clone()));
     messages.extend_from_slice(&c.messages()[cut..]);
     c.with_messages(messages, limits)
 }
@@ -555,6 +559,96 @@ fn state_block(c: &Conversation, cut: usize, model_text: &str) -> String {
     )
 }
 
+/// The harness-written ledger of the `removed` messages, at most `cap` bytes
+/// (a cut keeps its head and tail and names the bytes left out):
+/// each file with its read ranges and edit counts, each command with its
+/// status line and up to 3 diagnostic lines (errors first), and each other
+/// tool (web, memory, MCP `server__tool`) with its arguments and first result
+/// line. No tool output text is copied beyond those lines. Empty when the
+/// removed messages call no tool.
+pub(super) fn ledger(c: &Conversation, removed: &[usize], cap: usize) -> String {
+    let removed: Vec<&Message> = removed.iter().map(|&i| &c.messages()[i]).collect();
+    let results: BTreeMap<&str, String> = removed.iter()
+        .filter(|m| m.role() == "tool")
+        .filter_map(|m| Some((m.tool_call_id()?, m.value().get("content").map_or_else(String::new, text_of))))
+        .collect();
+    let mut files: BTreeMap<String, (Vec<String>, usize, usize)> = BTreeMap::new();
+    let (mut commands, mut others) = (String::new(), String::new());
+    // One line each: the start of the text, cut on a character boundary.
+    let head = |text: &str, limit: usize| {
+        let line = text.lines().next().unwrap_or("");
+        if line.is_empty() { "no result".to_owned() } else if line.len() <= limit { line.to_owned() } else { format!("{}...", &line[..line.floor_char_boundary(limit)]) }
+    };
+    for call in removed.iter().flat_map(|m| m.tool_calls()) {
+        let result = results.get(call.id.as_str()).map_or("", String::as_str);
+        let status = first_line(result);
+        let edit = matches!(call.name.as_str(), "apply_patch" | "workspace_edit_lines");
+        let paths = call_paths(&call.name, &call.arguments);
+        for (path, lines) in &paths {
+            let entry = files.entry(path.clone()).or_default();
+            if edit {
+                entry.1 += 1;
+                entry.2 += usize::from(status.starts_with("Applied "));
+            } else if let Some(lines) = lines {
+                if !entry.0.contains(lines) {
+                    entry.0.push(lines.clone());
+                }
+            } else if !entry.0.iter().any(|l| l == "listed or searched") {
+                entry.0.push("listed or searched".into());
+            }
+        }
+        if matches!(call.name.as_str(), "workspace_shell" | "workspace_check") {
+            commands.push_str(&format!("- {} -> {}\n", head(&call_reference(&call.name, &call.arguments), 200), head(&status, 120)));
+            let body = result_body(result);
+            let mut ranked: Vec<(u8, usize, &str)> = body.lines().enumerate().skip(1)
+                .filter_map(|(at, line)| Some((crate::coding_tools::diagnostic_rank(line)?, at, line.trim())))
+                .filter(|(rank, _, _)| *rank < 3)
+                .collect();
+            ranked.sort_unstable();
+            for (_, _, line) in ranked.into_iter().take(3) {
+                commands.push_str(&format!("  {}\n", head(line, 160)));
+            }
+        } else if paths.is_empty() {
+            others.push_str(&format!("- {} {} -> {}\n", call.name, head(&call.arguments, 120), head(&status, 120)));
+        }
+    }
+    let mut out = String::new();
+    for (path, (reads, edits, applied)) in &files {
+        let mut parts = Vec::new();
+        if !reads.is_empty() {
+            parts.push(format!("read {}", reads.join(", ")));
+        }
+        if *edits > 0 {
+            parts.push(format!("edit calls {edits}, applied {applied}"));
+        }
+        out.push_str(&format!("- {path}: {}\n", parts.join("; ")));
+    }
+    out.push_str(&commands);
+    out.push_str(&others);
+    if out.is_empty() {
+        return out;
+    }
+    let text = format!("Ledger of the excerpted tool calls (harness-written; files with ranges read and edits applied, commands with status and diagnostics, other tools):\n{out}");
+    // A cut adds "\n[N bytes omitted]\n": 18 bytes and the digits of N.
+    let marker = 18 + text.len().to_string().len();
+    if text.len() <= cap {
+        text
+    } else if cap > marker {
+        excerpt(&text, cap - marker)
+    } else {
+        String::new()
+    }
+}
+
+/// The text of a tool result, from the envelope of a captured result.
+fn result_body(content: &str) -> String {
+    let Some(rest) = content.strip_prefix("Captured tool result excerpt") else {
+        return content.to_owned();
+    };
+    rest.split_once('\n').and_then(|(_, envelope)| crate::json::parse(envelope).ok())
+        .and_then(|v| v.get("text").and_then(Value::as_str).map(str::to_owned))
+        .unwrap_or_default()
+}
 
 /// The harness note a resumed or forked chat gets as a user message. It is
 /// not an ask, so a state block leaves it out.

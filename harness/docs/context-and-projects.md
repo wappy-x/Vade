@@ -234,10 +234,13 @@ terminal transcript is not redrawn as the compacted view.
 
 ### What compaction does to the cache
 
-The summary becomes the first user message after the frozen system and developer
-messages. After it, three things stay exact: summaries you supplied, summaries
-of older turns, and the original user instructions. Generated in-task summaries
-fold forward into a single summary instead of piling up.
+An automatic summary comes after the frozen system and developer messages and
+the user messages that directly follow them (the task); those keep their bytes
+and indices, so a KV checkpoint up to there stays valid. A summary you supply
+comes directly after the frozen messages. After the summary, three things stay
+exact: summaries you supplied, summaries of older turns, and the original user
+instructions. Generated in-task summaries fold forward into a single summary
+instead of piling up.
 
 Compaction never touches the start of the request. The options, tool definitions
 and system text stay byte for byte the same, and only what comes after them is
@@ -277,10 +280,10 @@ window. After that, optional rewrites wait for the 60% low watermark. A next
 request that really does not fit tries another safe plan, even above that
 watermark.
 
-First the model writes a state block for the older turns and the newest turns
-stay exact; [context and compaction](../../docs/context-and-compaction.md)
-describes it. The planner on this page is the fallback when that rollover
-cannot run.
+Automatic compaction uses only the local planner on this page; it never asks
+the model for a summary. `/compact` asks the model first;
+[context and compaction](../../docs/context-and-compaction.md) describes that
+rollover and the budget table.
 
 Each attempt is checked before anything is saved or sent:
 
@@ -302,7 +305,8 @@ of those calls. The automatic planner first tries to condense older complete
 tool rounds, including rounds inside a single user request. That planner and the
 older-user-turn fallback keep exactly the same things:
 
-- at least the latest three tool rounds
+- the latest tool rounds: 4 at a 32,768-token window, 8 at 65,536 tokens and
+  above, never fewer than 3
 - every original user, system and developer message
 - the latest prose answer
 - the latest patch attempt and successful applied edit per path
@@ -332,8 +336,12 @@ The automatic planner writes a local extractive summary, built from facts it
 copies out. It records call IDs, relative paths, requested line or byte ranges,
 search terms, result metadata, and bounded facts from the head and tail.
 
-Its 12 KiB budget favors recent excerpts, and it explicitly counts the old
-excerpts it left out. Generated task summaries fold forward instead of piling up
+It starts with a ledger of the excerpted calls: files with the ranges read and
+edits applied, commands with their status line and up to 3 error lines, and
+other tools (web, memory, MCP) with their arguments and first result line. Its
+budget is 6 KiB at a 32,768-token window and 12 KiB at 65,536 and above; the
+ledger takes at most half. The budget favors recent excerpts, and it
+explicitly counts the old excerpts it left out. Generated task summaries fold forward instead of piling up
 another full summary on each rewrite. Original user instructions and earlier
 summaries you supplied stay exact.
 

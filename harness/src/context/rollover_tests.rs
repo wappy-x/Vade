@@ -516,3 +516,45 @@ fn the_resume_note_is_not_an_ask() {
     assert!(block.contains("ask number 0") && block.contains("ask number 1"));
     assert!(!block.contains("Transcript resumed"), "{block}");
 }
+
+/// `chat(turns)` with a harness recovery prompt and the automatic check
+/// (call and result) inside the first turn.
+fn chat_with_pins(turns: usize) -> Conversation {
+    let c = chat(turns);
+    let parse = |text: &str| Message::from_value(json::parse(text).unwrap(), Limits::default().wire).unwrap();
+    let mut messages = c.messages().to_vec();
+    let at = turn_starts(&c)[1];
+    messages.splice(at..at, [
+        parse(r#"{"role":"developer","content":"The tool call apply_patch src/lib.rs (untrusted tool/path text) was discarded because it exceeded the 4096-token reply limit."}"#),
+        parse(r#"{"role":"assistant","content":"","tool_calls":[{"id":"vade-check-9","type":"function","function":{"name":"workspace_shell","arguments":"{\"argv\":[\"make\",\"check\"],\"timeout_ms\":1000}"}}]}"#),
+        parse(r#"{"role":"tool","tool_call_id":"vade-check-9","content":"status: Exited(Some(1))\nerror: check failed"}"#),
+    ]);
+    c.with_messages(messages, Limits::default()).unwrap()
+}
+
+#[test]
+fn harness_prompts_and_the_latest_check_survive_rollover_and_pressure_plans() {
+    let c = chat_with_pins(4);
+    let pinned: Vec<String> = c.messages().iter()
+        .filter(|m| m.role() == "developer" || m.tool_call_id() == Some("vade-check-9") || m.tool_calls().iter().any(|call| call.id == "vade-check-9"))
+        .map(|m| m.serialized_json().to_owned()).collect();
+    assert_eq!(pinned.len(), 3);
+    let starts = turn_starts(&c);
+    let cut = starts[starts.len() - 1];
+    let plan = rollover_plan(&c, cut, 1, SUMMARY, limits(1 << 20)).unwrap();
+    let after = plan.conversation().messages();
+    // Prefix, state block, the pinned messages in order, then the kept turn.
+    assert_eq!(after[0].serialized_json(), c.messages()[0].serialized_json());
+    assert_eq!(after[1].value().get("name").and_then(Value::as_str), Some(SUMMARY_NAME));
+    assert_eq!(after[2..5].iter().map(|m| m.serialized_json()).collect::<Vec<_>>(), pinned);
+    assert_eq!(after[5..].iter().map(|m| m.serialized_json()).collect::<Vec<_>>(),
+        c.messages()[cut..].iter().map(|m| m.serialized_json()).collect::<Vec<_>>());
+    assert!(!plan.removed_indices.iter().any(|&i| c.messages()[i].role() == "developer"));
+    // The floor that the kept-turns rule counts holds the pinned bytes too.
+    let floor = bare(&c, cut, limits(1 << 20)).unwrap();
+    assert_eq!(floor.messages()[1..4].iter().map(|m| m.serialized_json()).collect::<Vec<_>>(), pinned);
+    // Pressure keeps only the newest rounds, but still the check and the prompt.
+    let plan = pressure_plan(&c, 1, 12 * 1024, limits(1 << 20)).unwrap();
+    let kept: Vec<_> = plan.conversation().messages().iter().map(|m| m.serialized_json()).collect();
+    assert!(pinned.iter().all(|p| kept.contains(&p.as_str())));
+}

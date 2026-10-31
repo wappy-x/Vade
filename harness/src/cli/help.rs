@@ -129,10 +129,11 @@ No TLS or permission escalation.
 
 /context shows the token budget after each turn, per-message estimates, and the
 last request's contract admission and reported usage. At 80% of the window, or
-when the next turn would not fit, the model summarizes older turns into one state
-block and the last 2 turns stay verbatim; local excerpts are the fallback.
-/compact runs the same rollover on request; /compact KEEP_TURNS SUMMARY uses your
-own summary. /compact-preview previews the local excerpt plan; /compaction
+when the next turn would not fit, the harness compacts locally with no model
+request: user messages and the newest tool rounds stay verbatim, and a ledger and
+excerpts replace older rounds. /compact asks the model to summarize older turns
+into one state block, the last 2 turns verbatim; /compact KEEP_TURNS SUMMARY uses
+your own summary. /compact-preview previews the local excerpt plan; /compaction
 inspects the latest compaction. All later KV is invalidated. Journal records
 remain on disk.
 

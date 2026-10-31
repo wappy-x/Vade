@@ -79,6 +79,26 @@ pub struct AppendOnlyRequest {
     ends: Vec<usize>,
 }
 impl AppendOnlyRequest {
+    /// Leading messages of `messages` whose bytes, with the same options, match
+    /// the last request. A KV checkpoint taken at that many messages or fewer
+    /// covers bytes that the new request still sends unchanged.
+    pub fn shared_messages<'a>(&self, options: &str, messages: impl IntoIterator<Item = &'a str>) -> usize {
+        let Some(stem) = options.strip_suffix('}') else { return 0 };
+        let start = stem.len() + usize::from(stem.len() > 1) + "\"messages\":[".len();
+        if self.bytes.is_empty() || start != self.records_start || !self.bytes.starts_with(stem) {
+            return 0;
+        }
+        let mut offset = start;
+        let mut shared = 0;
+        for (record, &end) in messages.into_iter().zip(&self.ends) {
+            if self.bytes.get(offset..end) != Some(record) {
+                break;
+            }
+            shared += 1;
+            offset = end + 1;
+        }
+        shared
+    }
     /// Replace history only after a verified immutable prefix. Validation happens
     /// before truncation, so a changed schema/system prompt cannot erase it.
     pub fn replace_suffix<'a>(

@@ -190,16 +190,14 @@ impl App {
                                 model.count_input(candidate.request(limits.wire), &worker_cancel)
                                     .and_then(|input| Usage::for_conversation(candidate).with_count(&input))
                             };
-                            // The run's observer performs the rewrite; here only
-                            // check that a rollover or local excerpts can fit.
-                            let room = (!fits && can_compact).then(|| {
+                            // The run's observer performs the local rewrite; here only
+                            // check that it can fit. The kept-turns floor, counted
+                            // only, gives the hard stop its number.
+                            let recoverable = !fits && can_compact
+                                && context::auto_plan_fitting(conversation, 2, limits, &usage, &mut count).is_ok_and(|plan| plan.is_some());
+                            let room = (!fits && can_compact && !recoverable).then(|| {
                                 context::rollover_room(conversation, context::KEEP_TURNS, limits, &usage, &mut context::CountOnly(&mut count, automatic))
                             });
-                            let recoverable = match room {
-                                Some(Ok(_)) => true,
-                                Some(Err(_)) => context::auto_plan_fitting(conversation, 2, limits, &usage, &mut count).is_ok_and(|plan| plan.is_some()),
-                                None => false,
-                            };
                             // Even a compacted prompt does not fit: say so plainly. An
                             // admission issue or an unknown outcome gets the general text.
                             let window = usage.context_limit(limits.max_context_tokens);

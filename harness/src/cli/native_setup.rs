@@ -841,57 +841,36 @@ impl RunObserver for CompactingJournal {
         }
         // A fresh chat has nothing compaction may remove; retry quietly next turn.
         if context::nothing_to_compact(c) { self.trigger.lock().map_err(|_| io::Error::other("compaction lock failed"))?.plan_failed(); return Ok(false); }
-        // First the model-written rollover; local excerpts are the fallback.
-        let mut no_room = None;
-        let mut model_failure = None;
-        let rolled = match context::rollover(c, context::KEEP_TURNS, limits, usage, host) {
-            Ok(result) => Some(result),
-            Err(context::RolloverError::Failed(error))
-                if cancel.load(std::sync::atomic::Ordering::Relaxed)
-                    || error.kind() == io::ErrorKind::Interrupted =>
-            {
-                self.trigger.lock().map_err(|_| io::Error::other("compaction lock failed"))?.plan_failed();
-                return Err(error);
-            }
-            Err(context::RolloverError::Failed(error)) if error.kind() == io::ErrorKind::Unsupported => None,
-            // The hard stop applies only when the request really does not fit.
-            Err(error @ context::RolloverError::NoRoom { needed, window }) => {
-                model_failure = Some(error.to_string());
-                no_room = (!usage.fits(limits.max_context_tokens, limits.output_reserve_tokens)).then_some((needed, window));
-                None
-            }
-            Err(error) => {
-                model_failure = Some(error.to_string());
-                None
-            }
-        };
-        if let Err(error) = Self::check_cancel(cancel) {
-            self.trigger.lock().map_err(|_| io::Error::other("compaction lock failed"))?.plan_failed();
-            return Err(error);
-        }
-        // Byte/structure limits still apply; real admission replaces only the
-        // heuristic fit check. Count the candidate before journal persistence.
-        let (plan, after) = match rolled {
-            Some(result) => result,
-            None => match context::auto_plan_fitting(c, 2, limits, usage, &mut |candidate| {
-                Self::check_cancel(cancel)?;
-                let after = host.count(candidate)?;
-                Self::check_cancel(cancel)?;
-                Ok(after)
-            }) {
-                Ok(Some(result)) => result,
-                Ok(None) => return self.failed_plan(
+        // Automatic compaction is local: the harness writes the summary and
+        // its ledger, with no model request. /compact asks the model.
+        let (plan, after) = match context::auto_plan_fitting(c, 2, limits, usage, &mut |candidate| {
+            Self::check_cancel(cancel)?;
+            let after = host.count(candidate)?;
+            Self::check_cancel(cancel)?;
+            Ok(after)
+        }) {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                // The hard stop applies only when the request really does not
+                // fit; the kept-turns floor gives its number, with counts only.
+                let no_room = match (!usage.fits(limits.max_context_tokens, limits.output_reserve_tokens))
+                    .then(|| context::rollover_room(c, context::KEEP_TURNS, limits, usage, host))
+                {
+                    Some(Err(context::RolloverError::NoRoom { needed, window })) => Some((needed, window)),
+                    _ => None,
+                };
+                return self.failed_plan(
                     &no_room.map_or_else(
                         || "safe compaction cannot fit a useful reply reservation; history retained".into(),
                         |(needed, window)| context::hard_stop(needed, window),
                     ),
                     cancel,
-                ),
-                Err(error) => {
-                    self.failed_plan("candidate admission failed", cancel)?;
-                    return Err(error);
-                }
-            },
+                );
+            }
+            Err(error) => {
+                self.failed_plan("candidate admission failed", cancel)?;
+                return Err(error);
+            }
         };
         let notice = if let Some(line) = plan.status_line() {
             line
@@ -904,9 +883,9 @@ impl RunObserver for CompactingJournal {
         } else {
             compaction_notice(&plan, &after, limits)
         };
-        let notice = match model_failure {
-            Some(reason) if plan.status_line().is_none() => format!("Model summary not used ({reason}); local excerpts instead. {notice}"),
-            _ => notice,
+        let notice = match context::prefix_note(c, usage.context_limit(limits.max_context_tokens)) {
+            Some(note) => format!("{notice} {note}"),
+            None => notice,
         };
         let mut journal = self
             .inner

@@ -173,7 +173,8 @@ fn single_task_compaction_keeps_goal_edits_checks_and_uncertain_groups() {
         ));
     }
     let c = Conversation::from_request(json::parse(&format!(r#"{{"messages":[{{"role":"system","content":"stable"}},{{"role":"user","content":"fix src/task.rs; keep public API"}},{}]}}"#, rounds.join(","))).unwrap(), Limits::default()).unwrap();
-    let plan = auto_plan(&c, 2, Limits::default()).unwrap();
+    // A 24,576-token window keeps 3 closed rounds (Retention::for_window).
+    let plan = auto_plan(&c, 2, Limits { max_context_tokens: 24_576, ..Limits::default() }).unwrap();
     assert!(plan.in_task && plan.summary.contains("src/task.rs"));
     assert!(plan.summary.contains("start_line=13"));
     for i in (0..8).chain(14..20) {
@@ -183,8 +184,10 @@ fn single_task_compaction_keeps_goal_edits_checks_and_uncertain_groups() {
         assert!(plan.removed_indices.contains(&i));
     }
     assert_eq!(plan.conversation.messages()[0], c.messages()[0]);
-    assert!(plan.conversation.messages().contains(&c.messages()[1]));
-    assert!(is_summary(&plan.conversation.messages()[1]));
+    // The task stays at its index; the summary follows it (the anchor).
+    assert_eq!(plan.conversation.messages()[1], c.messages()[1]);
+    assert!(is_summary(&plan.conversation.messages()[2]));
+    assert_eq!(plan.unchanged_prefix_messages, 2);
 }
 #[test]
 fn auto_compaction_preserves_prior_summaries_and_stable_wire_prefix() {
@@ -426,4 +429,102 @@ fn runtime_stops_before_a_model_call_over_budget() {
 #[test]
 fn pressure_compacts_old_successful_edits_but_keeps_goal_recent_and_uncertain() {
     let mut messages = vec![json::parse(r#"{"role":"system","content":"stable rules"}"#).unwrap(), json::parse(r#"{"role":"user","content":"implement all outputs"}"#).unwrap()]; for i in 0..10 { let args = json::stringify(&json::parse(&format!(r#"{{"patch":{}}}"#, json::quote(&format!("*** Begin Patch\n*** Add File: f{i}.rs\n+{}\n*** End Patch", "x".repeat(8000))))).unwrap()).unwrap(); messages.push(json::parse(&format!(r#"{{"role":"assistant","tool_calls":[{{"id":"r{i}","type":"function","function":{{"name":"apply_patch","arguments":{}}}}}]}}"#, json::quote(&args))).unwrap()); messages.push(json::parse(&format!(r#"{{"role":"tool","tool_call_id":"r{i}","content":{}}}"#, json::quote(if i == 6 { r#"{"error":"unknown_outcome"}"# } else { "Applied 1 file operations." }))).unwrap()); } let c = Conversation::from_request(Value::Object(vec![("messages".into(), Value::Array(messages))]), Limits::default()).unwrap(); let limits = Limits { max_context_tokens: 16000, output_reserve_tokens: 128, ..Limits::default() }; let plan = auto_plan_fitting(&c, 2, limits, &Usage::for_conversation(&c), &mut |c| Ok(Usage::for_conversation(c))).unwrap().unwrap().0; assert!(plan.conversation.serialized_bytes() < c.serialized_bytes()); for i in (0..2).chain(14..22) { assert!(plan.retained_indices.contains(&i)); } assert!(plan.removed_indices.contains(&2)); assert!(plan.summary.contains("f0.rs")); assert_eq!(plan.conversation.messages()[0], c.messages()[0]);
+}
+#[test]
+fn retention_scales_from_the_window() {
+    let r = |window| { let r = Retention::for_window(window); (r.rounds, r.summary_bytes, r.prefix_bytes) };
+    // rounds = window / 8192 in 3..=8; summary = 3/16 byte per token in 2..=12 KiB;
+    // prefix share = 3/8 byte per token.
+    assert_eq!(r(16_384), (3, 3072, 6144));
+    assert_eq!(r(32_768), (4, 6144, 12_288));
+    assert_eq!(r(65_536), (8, 12_288, 24_576));
+    assert_eq!(r(131_072), (8, 12_288, 49_152));
+    assert_eq!(r(4096), (3, 2048, 1536));
+    // The prefix note names its bytes: here the system message alone is over 1536.
+    let c = Conversation::from_request(json::parse(&format!(r#"{{"messages":[{{"role":"system","content":"{}"}},{{"role":"user","content":"task"}}]}}"#, "r".repeat(1600))).unwrap(), Limits::default()).unwrap();
+    let bytes = c.serialized_bytes() - c.messages()[1].serialized_bytes();
+    assert_eq!(prefix_note(&c, 4096).unwrap(), format!("The frozen prefix (tools, system and developer messages) is {bytes} bytes, over its 1536-byte share of a 4096-token window; compaction keeps it whole, so shorter project instructions, memory or rules leave more room."));
+    assert_eq!(prefix_note(&c, 32_768), None);
+}
+/// One user task with `n` closed rounds: a read, an edit, a failing check and
+/// an MCP call, in turn. Each result is about 2 KiB.
+fn coding_task(n: usize) -> Conversation {
+    let mut messages = vec![r#"{"role":"system","content":"stable"}"#.to_owned(), r#"{"role":"user","content":"fix src/lib.rs"}"#.to_owned()];
+    for i in 0..n {
+        let (name, args, result) = match i % 4 {
+            0 => ("workspace_read_lines", format!(r#"{{"path":"src/lib.rs","start_line":{},"end_line":{}}}"#, 10 + i, 40 + i), format!("lines {i} {}", "fn body() {} ".repeat(150))),
+            1 => ("workspace_edit_lines", r#"{"path":"src/lib.rs","start_line":12,"end_line":12,"edit_tag":"t","operation":"replace","new_text":"x\n"}"#.to_owned(), format!("Applied 1 line edit {i}. {}", "ok ".repeat(600))),
+            2 => ("workspace_shell", r#"{"argv":["cargo","test"],"timeout_ms":1000}"#.to_owned(), format!("status: Exited(Some(101))\nstdout:\n{}warning: unused\nerror[E0425]: cannot find value `x{i}`\ntest result: FAILED. 1 passed; 1 failed\n", "compiling crate\n".repeat(120))),
+            _ => ("docs__lookup", format!(r#"{{"query":"api {i}"}}"#), format!("result {i} {}", "doc text ".repeat(220))),
+        };
+        messages.push(format!(r#"{{"role":"assistant","tool_calls":[{{"id":"c{i}","type":"function","function":{{"name":"{name}","arguments":{}}}}}]}}"#, json::quote(&args)));
+        messages.push(format!(r#"{{"role":"tool","tool_call_id":"c{i}","content":{}}}"#, json::quote(&result)));
+    }
+    Conversation::from_request(json::parse(&format!(r#"{{"messages":[{}]}}"#, messages.join(","))).unwrap(), Limits::default()).unwrap()
+}
+#[test]
+fn automatic_compaction_keeps_window_rounds_and_writes_a_bounded_ledger() {
+    let c = coding_task(16);
+    let limits = Limits { max_context_tokens: 32_768, output_reserve_tokens: 4096, ..Limits::default() };
+    let plan = auto_plan(&c, 2, limits).unwrap();
+    assert!(plan.in_task);
+    // 32,768 tokens keep the newest 4 rounds word for word: messages 26..34.
+    for i in 26..34 {
+        assert!(plan.retained_indices.contains(&i), "{i}");
+    }
+    assert!(plan.summary.len() <= 6144, "{}", plan.summary.len());
+    // A ledger over its cap keeps its head and tail, and the cut marker fits in the cap.
+    let long = coding_task(160);
+    let all: Vec<usize> = (0..long.messages().len()).collect();
+    for cap in [1024, 3072, 6144] {
+        let ledger = super::rollover::ledger(&long, &all, cap);
+        assert!(ledger.len() <= cap && ledger.contains(" bytes omitted]\n"), "{cap}: {}", ledger.len());
+    }
+    assert_eq!(super::rollover::ledger(&long, &all, 20), "");
+    let ledger = plan.summary.split_once("Ledger of the excerpted tool calls").unwrap().1.split_once("\nSource message").unwrap().0;
+    assert!(ledger.contains("\n- src/lib.rs: read 10-40, 14-44"), "{ledger}");
+    assert!(ledger.contains("- argv: cargo test -> status: Exited(Some(101))\n  error[E0425]: cannot find value `x2`\n  test result: FAILED. 1 passed; 1 failed\n- argv"), "{ledger}");
+    assert!(!ledger.contains("warning: unused"), "warnings rank below the 3 lines");
+    assert!(ledger.contains(&format!("- docs__lookup {{\"query\":\"api 3\"}} -> result 3 {}...\n", &"doc text ".repeat(14)[..111])), "{ledger}");
+    // The frozen prefix and the task keep their exact bytes and indices.
+    for i in 0..2 {
+        assert_eq!(plan.conversation().messages()[i].serialized_json(), c.messages()[i].serialized_json());
+    }
+    // 65,536 tokens keep 8 rounds.
+    let plan = auto_plan(&c, 2, Limits { max_context_tokens: 65_536, ..limits }).unwrap();
+    for i in 18..34 {
+        assert!(plan.retained_indices.contains(&i), "{i}");
+    }
+}
+#[test]
+fn compaction_keeps_the_anchor_bytes_and_the_builder_counts_them() {
+    let limits = Limits { max_context_tokens: 32_768, output_reserve_tokens: 4096, ..Limits::default() };
+    let c = coding_task(16);
+    let mut builder = crate::prompt::AppendOnlyRequest::default();
+    let options = c.request(limits.wire).serialized_options().to_owned();
+    builder.prepare(&options, c.messages().iter().map(|m| m.serialized_json())).unwrap();
+    let anchor = br#"{"messages":[{"role":"system","content":"stable"},{"role":"user","content":"fix src/lib.rs"}"#;
+    assert_eq!(builder.stable_prefix_bytes(2).unwrap(), anchor);
+    let mut compacted = c.clone();
+    for round in 0..2 {
+        let plan = auto_plan(&compacted, 2, limits).unwrap();
+        assert_eq!(plan.unchanged_prefix_messages, 2, "round {round}");
+        compacted = plan.into_conversation();
+        let records: Vec<&str> = compacted.messages().iter().map(|m| m.serialized_json()).collect();
+        // The first two messages, and no more, keep their bytes.
+        assert_eq!(builder.shared_messages(&options, records.iter().copied()), 2);
+        builder.replace_suffix(&options, records.iter().copied(), 1).unwrap();
+        assert_eq!(builder.stable_prefix_bytes(2).unwrap(), anchor);
+        assert_eq!(builder.shared_messages(&options, records.iter().copied()), records.len());
+        // Grow the task again so the next round has old rounds to fold.
+        let mut messages = compacted.messages().to_vec();
+        messages.extend(c.messages()[2..18].iter().map(|m| {
+            let text = m.serialized_json().replace(r#""id":"c"#, &format!(r#""id":"g{round}c"#)).replace(r#""tool_call_id":"c"#, &format!(r#""tool_call_id":"g{round}c"#));
+            crate::agent_wire::Message::from_value(json::parse(&text).unwrap(), Limits::default().wire).unwrap()
+        }));
+        compacted = compacted.with_messages(messages, Limits::default()).unwrap();
+        builder.prepare(&options, compacted.messages().iter().map(|m| m.serialized_json())).unwrap();
+    }
+    // Other options share nothing.
+    assert_eq!(builder.shared_messages("{\"model\":\"other\"}", c.messages().iter().map(|m| m.serialized_json())), 0);
 }

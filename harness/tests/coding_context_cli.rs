@@ -564,12 +564,6 @@ fn compaction_request_options(request: &Value) -> String {
     ))
     .unwrap()
 }
-/// A summary reply with a tool call: the harness refuses it and falls back to
-/// local excerpts.
-fn refused_summary() -> String {
-    tools(vec![call("summary-tool", "workspace_read", json::parse(r#"{"path":"x"}"#).unwrap())])
-}
-
 /// Drop the rollover summary requests, after checking that there are `expected`
 /// of them and that each keeps the chat's options and first message bytes.
 fn without_summary_requests(requests: Vec<Value>, initial: &Value, expected: usize) -> Vec<Value> {
@@ -632,14 +626,8 @@ fn automatic_cli_compaction_observes_incoming_user_and_preserves_prior_summaries
         let incoming =
             compaction_text_to_threshold(&initial, "user", "incoming-long-user-marker", 81, budget);
         let raw_before = std::fs::read(f.0.join(".vade/sessions/automatic.journal")).unwrap();
-        // The model is asked for a rollover summary first. This mock answers
-        // with a tool call, which the harness refuses, so this test covers the
-        // local excerpt fallback; the rollover has its own test below.
-        let mut replies = vec![answer(), answer()];
-        if !disabled {
-            replies.insert(0, refused_summary());
-        }
-        let (url, server) = mock(replies);
+        // Automatic compaction is local: no summary request reaches the model.
+        let (url, server) = mock(vec![answer(), answer()]);
         let mut command = compaction_cli_command(&f, &url);
         command.args([
             "--resume",
@@ -659,7 +647,7 @@ fn automatic_cli_compaction_observes_incoming_user_and_preserves_prior_summaries
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let requests = without_summary_requests(server.join().unwrap(), &initial_requests[0], usize::from(!disabled));
+        let requests = without_summary_requests(server.join().unwrap(), &initial_requests[0], 0);
         let notice = String::from_utf8_lossy(&output.stderr);
         assert_eq!(notice.contains("Auto-compacted older results:"), !disabled);
         assert_eq!(
@@ -777,7 +765,6 @@ fn automatic_cli_compaction_observes_incoming_user_and_preserves_prior_summaries
         let (url, server) = mock(vec![
             answer().replace("mock complete", &first_growth),
             answer().replace("mock complete", &second_growth),
-            refused_summary(),
             answer(),
             answer(),
         ]);
@@ -798,7 +785,7 @@ fn automatic_cli_compaction_observes_incoming_user_and_preserves_prior_summaries
         let notice = String::from_utf8_lossy(&output.stderr);
         assert_eq!(notice.matches("Auto-compacted older results:").count(), 1);
         assert!(notice.contains("later admission overflow attempts another safe rewrite"));
-        let requests = without_summary_requests(server.join().unwrap(), &initial_requests[0], 1);
+        let requests = without_summary_requests(server.join().unwrap(), &initial_requests[0], 0);
         for request in &requests {
             assert_eq!(compaction_request_options(request), initial_options);
             let messages = request.get("messages").unwrap().as_array().unwrap();
@@ -941,7 +928,7 @@ fn every_test_launcher_isolates_home() {
 }
 
 #[test]
-fn automatic_cli_rollover_writes_a_model_summary_and_keeps_two_turns() {
+fn automatic_cli_compaction_writes_a_local_summary_without_a_model_request() {
     use vade_harness::{agent::Limits, context::Usage};
     let f = Fixture::new();
     let old_answer = format!("old-result-marker {} old-result-tail", "resolved ".repeat(1000));
@@ -961,32 +948,31 @@ fn automatic_cli_rollover_writes_a_model_summary_and_keeps_two_turns() {
     drop(journal);
     let budget = Usage::for_conversation(&initial).required(128).saturating_mul(10).div_ceil(7).max(8192);
     let incoming = compaction_text_to_threshold(&initial, "user", "incoming-long-user-marker", 81, budget);
-    let summary = answer().replace("mock complete", "Plan: keep going.\\nOpen tasks: none.");
-    let (url, server) = mock(vec![summary, answer(), answer()]);
+    // Two replies only: an automatic watermark sends no summary request.
+    let (url, server) = mock(vec![answer(), answer()]);
     let output = run_bounded(
         compaction_cli_command(&f, &url).args(["--resume", "rollover", "--context-tokens", &budget.to_string()]),
         &format!("{incoming}\nsmall followup\n/quit\n"),
     );
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let notice = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(notice.matches("[context compacted: kept 2 turns, summary ").count(), 1, "{notice}");
-    assert!(!notice.contains("Auto-compacted older results:"));
-    let requests = without_summary_requests(server.join().unwrap(), &initial_requests[0], 1);
+    assert_eq!(notice.matches("Auto-compacted older results:").count(), 1, "{notice}");
+    assert!(!notice.contains("[context compacted: kept "));
+    let requests = without_summary_requests(server.join().unwrap(), &initial_requests[0], 0);
     assert_eq!(requests.len(), 2);
     let messages = requests[0].get("messages").unwrap().as_array().unwrap();
     let prefix: Vec<_> = initial.messages()[..initial.prefix_len()].iter().map(|m| m.value().clone()).collect();
     assert_eq!(messages[..initial.prefix_len()], prefix[..], "frozen prefix bytes unchanged");
-    let block = messages[initial.prefix_len()].clone();
-    assert_eq!(block.get("name").and_then(Value::as_str), Some("vade_context_summary"));
-    let text = block.get("content").and_then(Value::as_str).unwrap();
-    assert!(text.contains("Plan: keep going.") && text.ends_with("--- ask, 15 bytes ---\nold constraints\n--- ask, 18 bytes ---\nsecond constraints\n"), "{text}");
+    let block = messages.iter().find(|m| m.get("name").and_then(Value::as_str) == Some("vade_context_summary")).unwrap().clone();
     let contents: Vec<_> = messages.iter().filter_map(|m| m.get("content").and_then(Value::as_str)).collect();
-    assert!(contents.contains(&"latest constraints") && contents.contains(&incoming.as_str()));
-    assert!(!contents.iter().any(|c| c.contains("old-result-marker")), "summarized answers left the prompt");
-    assert!(requests[1].get("messages").unwrap().as_array().unwrap().contains(&block), "the block stays for the next turn");
+    for ask in ["old constraints", "second constraints", "latest constraints", incoming.as_str()] {
+        assert!(contents.contains(&ask), "every user message stays word for word");
+    }
+    assert!(!contents.contains(&old_answer.as_str()), "the old answers are excerpts now");
+    assert!(requests[1].get("messages").unwrap().as_array().unwrap().contains(&block), "the summary stays for the next turn");
     let raw = std::fs::read(f.0.join(".vade/sessions/rollover.journal")).unwrap();
     assert!(raw.windows(old_answer.len()).any(|bytes| bytes == old_answer.as_bytes()), "the journal keeps the originals");
-    let origin = br#""summary_origin":"model""#;
+    let origin = br#""summary_origin":"local excerpts""#;
     assert!(raw.windows(origin.len()).any(|bytes| bytes == origin));
     let (journal, _, _) = vade_harness::journal::Journal::resume(&workspace, "rollover", Limits::default()).unwrap();
     assert_eq!(journal.generation(), 1);

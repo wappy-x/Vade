@@ -183,7 +183,22 @@ impl NativeModel {
         }
         self.counted = None;
         self.contract.reset_prefix(boundary);
-        self.kv_hints.clear();
+        // A compaction keeps the hints of its unchanged leading messages (see
+        // `keep_shared_hints`). A tool-recovery policy changes no message; the
+        // engine checks each hint against the rendered prompt in any case.
+        if !matches!(boundary, crate::contract::PromptBoundary::Compaction | crate::contract::PromptBoundary::ToolRecovery) {
+            self.kv_hints.clear();
+        }
+    }
+    /// Before the first request after a compaction: keep only the KV hints whose
+    /// messages the new request sends with the same bytes. The anchor (frozen
+    /// prefix and the first task) keeps its checkpoint, so the warm turn stays
+    /// warm up to there.
+    fn keep_shared_hints(&mut self, options: &str, request: ModelRequest<'_>) {
+        if self.suffix_replaced {
+            let shared = self.prompt.shared_messages(options, request.messages.iter().map(|m| m.serialized_json()));
+            self.kv_hints.retain(|h| h.messages <= shared);
+        }
     }
 
     pub fn context(&self) -> &crate::contract::Context {
@@ -493,6 +508,9 @@ impl Model for NativeModel {
         }
         let options = self.contract.decorate(request.serialized_options())?;
         if self.suffix_replaced {
+            // As `keep_shared_hints`, field by field while `caps` is borrowed.
+            let shared = self.prompt.shared_messages(&options, request.messages.iter().map(|m| m.serialized_json()));
+            self.kv_hints.retain(|h| h.messages <= shared);
             let prefix = request
                 .messages
                 .iter()
@@ -714,6 +732,8 @@ impl NativeModel {
                 self.reestablish_prompt(crate::contract::PromptBoundary::EngineBuild);
             }
         }
+        let options = self.contract.decorate(model_request.serialized_options())?;
+        self.keep_shared_hints(&options, model_request);
         let caps = self
             .contract
             .context
@@ -743,7 +763,6 @@ impl NativeModel {
         if let Some(caps) = &caps {
             self.kv_session.remember(branch, &hints, caps);
         }
-        let options = self.contract.decorate(model_request.serialized_options())?;
         let prefix_messages = model_request
             .messages
             .iter()

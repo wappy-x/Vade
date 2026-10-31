@@ -633,7 +633,7 @@ fn sessions_saved_with_the_shell_still_resume_where_it_is_unavailable() {
 }
 
 #[test]
-fn model_rollover_shows_one_status_line_and_journals_the_summary() {
+fn automatic_compaction_is_local_and_never_asks_the_model() {
     struct Host(usize, usize);
     impl context::ContextHost for Host {
         fn count(&mut self, c: &Conversation) -> io::Result<context::Usage> {
@@ -676,15 +676,15 @@ fn model_rollover_shows_one_status_line_and_journals_the_summary() {
         assert_eq!(result, rolled);
         let event = rx.fact().unwrap();
         let super::super::events::WorkerEvent::ToolPreview { detail, .. } = event else { panic!("expected one context line") };
+        // An automatic watermark never sends a summary request to the model.
+        assert_eq!(host.1, 0);
         if rolled {
-            assert_eq!(host.1, 1);
-            assert!(detail.starts_with("[context compacted: kept 2 turns, summary ") && detail.ends_with(" tokens]"), "{detail}");
+            assert!(detail.starts_with("Auto-compacted older results: "), "{detail}");
             assert_eq!(journal.lock().unwrap().generation(), 1);
-            assert!(journal.lock().unwrap().compaction_status().contains("Model-written (kept 2 turns"));
-            assert_eq!(c.messages().len(), 5, "prefix, state block, two kept turns of three messages");
+            assert!(journal.lock().unwrap().compaction_status().contains("Local excerpt"));
+            assert_eq!(c.messages().len(), 6, "prefix, summary, the user messages and the latest answer");
         } else {
-            // Neither a rollover nor local excerpts fit: the hard stop, no model request.
-            assert_eq!(host.1, 0);
+            // No local plan fits: the hard stop, with the counted kept-turns floor.
             assert!(detail.contains("This chat cannot continue: even after compaction"), "{detail}");
             assert_eq!(journal.lock().unwrap().generation(), 0);
         }
