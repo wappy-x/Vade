@@ -5,6 +5,24 @@ use engine_fabric::layout::PeerLayout;
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Fewest ranks whose commands may ride the RDMA command relay (Ring::open_command_relay).
+/// Smaller worlds, the pair included, keep main's command path.
+pub const COMMAND_RELAY_RANKS: usize = 4;
+/// The relay opens only on a path of COMMAND_RELAY_RANKS or more ranks (the configured world).
+pub fn command_relay_world(world: usize, path: bool) -> bool { world >= COMMAND_RELAY_RANKS && path }
+
+/// Route of one command part. The pair test runs first and alone, as on main: a pair asks
+/// only has_mailbox, never the relay; any other layout asks only the relay.
+#[cfg(any(target_os="linux", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandRoute { PairMailbox, Relay, Tcp }
+#[cfg(any(target_os="linux", test))]
+#[inline]
+fn command_route(pair: bool, mailbox: impl FnOnce() -> bool, relay: impl FnOnce() -> bool) -> CommandRoute {
+    if pair { if mailbox() { CommandRoute::PairMailbox } else { CommandRoute::Tcp } }
+    else if relay() { CommandRoute::Relay } else { CommandRoute::Tcp }
+}
+
 fn command_read(mut stream: &TcpStream, mut bytes: &mut [u8], mut deadline: Option<Instant>, timeout: Duration) -> Result<()> {
     while !bytes.is_empty() {
         let remaining = deadline.map(|d| d.checked_duration_since(Instant::now()).filter(|d| !d.is_zero())
@@ -130,6 +148,10 @@ pub struct Ring {
     rdma:[Option<crate::rdma::Endpoint>;2],
     #[cfg(target_os="linux")]
     mailbox:[Option<crate::rdma::Mailbox>;2],
+    // Command relay on a path of four or more ranks: [to rank + 1, from rank - 1]. Only
+    // command_phase reads it; no collective uses these mailboxes.
+    #[cfg(target_os="linux")]
+    relay:[Option<crate::rdma::Mailbox>;2],
     #[cfg(target_os="linux")]
     peer_receive:Option<(usize,usize,usize,usize)>,
     aux:Option<Box<Ring>>,
@@ -178,10 +200,25 @@ impl Ring {
             }
         Ok(())
     }
+    /// RDMA mailboxes that carry small commands rank to rank on a path of
+    /// COMMAND_RELAY_RANKS or more ranks (smaller worlds and the pair keep main's
+    /// command path). Every rank calls this at the same point, after connect_options;
+    /// the bytes of every command stay the same, and no collective reads these mailboxes.
+    #[cfg(target_os="linux")]
+    pub fn open_command_relay(&mut self)->Result<()> {
+        if !command_relay_world(self.world,self.link.is_path()) { return Err("the command relay needs a path of four or more ranks".into()); }
+        let mut right=self.tx.as_ref().map(crate::rdma::Mailbox::prepare).transpose()?;
+        let mut left=self.rx.as_ref().map(crate::rdma::Mailbox::prepare).transpose()?;
+        let sr=right.as_ref().map(|m|m.hello());let sl=left.as_ref().map(|m|m.hello());let mut rr=[0;24];let mut rl=[0;24];
+        exchange_duplex(self.tx.as_ref(),self.rx.as_ref(),sr.as_ref().map_or(&[],|v|v.as_slice()),sl.as_ref().map_or(&[],|v|v.as_slice()),if left.is_some(){&mut rl}else{&mut []},if right.is_some(){&mut rr}else{&mut []})?;
+        if let Some(m)=&mut right{m.ready(&rr)?;}if let Some(m)=&mut left{m.ready(&rl)?;}
+        self.relay=[right,left];
+        Ok(())
+    }
     pub fn connect_options(rank: usize, world: usize, listen: SocketAddr, next: SocketAddr, path: bool) -> Result<Self> {
         crate::runtime::pin()?;
         if world == 0 || world > 64 || rank >= world { return Err("rank must be less than world in 1..=64".into()); }
-        let mut ring = Self { rank, world, tx: None, rx: None, link: PeerLayout::new(world, path), packed: Vec::new(), unpacked: Vec::new(), exchanges: 0, elapsed: Duration::ZERO, reduction_bytes:0,reduction_elapsed:Duration::ZERO, #[cfg(target_os="linux")]rdma:[None,None],#[cfg(target_os="linux")]mailbox:[None,None],#[cfg(target_os="linux")]peer_receive:None,aux:None };
+        let mut ring = Self { rank, world, tx: None, rx: None, link: PeerLayout::new(world, path), packed: Vec::new(), unpacked: Vec::new(), exchanges: 0, elapsed: Duration::ZERO, reduction_bytes:0,reduction_elapsed:Duration::ZERO, #[cfg(target_os="linux")]rdma:[None,None],#[cfg(target_os="linux")]mailbox:[None,None],#[cfg(target_os="linux")]relay:[None,None],#[cfg(target_os="linux")]peer_receive:None,aux:None };
         if world == 1 { return Ok(ring); }
         let deadline = Instant::now() + TIMEOUT;
         let run_hash = crate::runtime::run_hash();
@@ -237,7 +274,7 @@ impl Ring {
         for stream in self.tx.iter().chain(self.rx.iter()) { let _=stream.shutdown(std::net::Shutdown::Both); }
         if let Some(aux)=&mut self.aux { aux.abort(); }
         #[cfg(target_os="linux")]
-        { self.mailbox=[None,None];self.rdma=[None,None];self.peer_receive=None; }
+        { self.mailbox=[None,None];self.relay=[None,None];self.rdma=[None,None];self.peer_receive=None; }
     }
     pub fn world(&self) -> usize { self.world }
     pub fn topology(&self) -> &'static str { if self.link.is_path() { "path" } else { "ring" } }
@@ -245,7 +282,7 @@ impl Ring {
     pub fn uses_rdma(&self)->bool {#[cfg(target_os="linux")]{self.rdma.iter().any(Option::is_some)}#[cfg(not(target_os="linux"))]{false}}
     pub fn clear_registered(&mut self){#[cfg(target_os="linux")]{
         if self.peer_receive.is_some(){self.abort();}
-        for e in self.rdma.iter_mut().flatten(){e.clear_regions();}for m in self.mailbox.iter_mut().flatten(){m.clear_registered();}
+        for e in self.rdma.iter_mut().flatten(){e.clear_regions();}for m in self.mailbox.iter_mut().chain(self.relay.iter_mut()).flatten(){m.clear_registered();}
     }if let Some(aux)=&mut self.aux{aux.clear_registered();}}
 
     fn profile(&self, kind: &str, sent: usize, received: usize, elapsed: Duration) {
@@ -585,6 +622,8 @@ impl Ring {
     #[cfg(target_os="linux")]
     fn has_mailbox(&self,bytes:usize)->bool{self.mailbox.iter().flatten().next().is_some_and(|m|m.supports(bytes.div_ceil(4)))}
     #[cfg(target_os="linux")]
+    fn has_relay(&self,bytes:usize)->bool{self.relay.iter().flatten().next().is_some_and(|m|m.supports(bytes.div_ceil(4)))}
+    #[cfg(target_os="linux")]
     fn gather_mailbox(&mut self,buffer:&mut [u8],range:&impl Fn(usize)->std::ops::Range<usize>)->Result<()> {
         let start=Instant::now();let(rank,world,path)=(self.rank,self.world,self.link.is_path());
         let rounds=if self.link.is_pair(){1}else if path{world-1}else{world/2};
@@ -717,20 +756,29 @@ impl Ring {
     /// Path selected for this command part, captured before a failure drops it.
     pub fn command_path(&self, bytes: usize) -> spark_engine::collective::Path {
         #[cfg(target_os="linux")]
-        if self.link.is_pair() && self.has_mailbox(bytes) { return spark_engine::collective::Path::Mailbox; }
+        if command_route(self.link.is_pair(), || self.has_mailbox(bytes), || self.has_relay(bytes)) != CommandRoute::Tcp { return spark_engine::collective::Path::Mailbox; }
         #[cfg(not(target_os="linux"))]
         let _ = bytes;
         spark_engine::collective::Path::Tcp
     }
     fn command_phase(&mut self, bytes: &mut [u8], idle: bool) -> Result<()> {
         #[cfg(target_os="linux")]
-        if self.link.is_pair()&&self.has_mailbox(bytes.len()) {
-            let mailbox=self.mailbox[0].as_mut().unwrap();
-            let result=if self.rank==0 {
-                unsafe{mailbox.post(bytes)}.and_then(|()|mailbox.finish(&mut []))
-            }else if idle {mailbox.finish_command(bytes)}else{mailbox.finish(bytes)};
-            if result.is_err(){self.mailbox=[None,None];}
-            return result.map_err(|e| format!("TP peer {} command mailbox phase: {e}", 1 - self.rank));
+        {
+            let n=bytes.len();let route=command_route(self.link.is_pair(),||self.has_mailbox(n),||self.has_relay(n));
+            let relay=route==CommandRoute::Relay;
+            if route!=CommandRoute::Tcp {
+                // The pair: rank 0 sends to rank 1. The relay: each rank takes the part from
+                // rank - 1, then forwards the same bytes to rank + 1 and waits for that send.
+                let (receive,send)=if relay {let [right,left]=&mut self.relay;(left.as_mut(),right.as_mut())}
+                    else if self.rank==0 {(None,self.mailbox[0].as_mut())} else {(self.mailbox[0].as_mut(),None)};
+                let mut result=match receive {Some(m) if idle=>m.finish_command(bytes),Some(m)=>m.finish(bytes),None=>Ok(())};
+                if let (Ok(()),Some(mailbox))=(&result,send) {
+                    result=unsafe{mailbox.post(bytes)}.and_then(|()|mailbox.finish(&mut []));
+                }
+                if result.is_err(){self.mailbox=[None,None];self.relay=[None,None];}
+                if relay { return result.map_err(|e| format!("TP rank {} command relay phase: {e}", self.rank)); }
+                return result.map_err(|e| format!("TP peer {} command mailbox phase: {e}", 1 - self.rank));
+            }
         }
         // Sockets stay nonblocking between phases; only a parked fallback
         // switches one to blocking, and every socket is restored below.
@@ -817,6 +865,21 @@ fn exchange_duplex(right: Option<&TcpStream>, left: Option<&TcpStream>, sr: &[u8
 mod tests {
     use super::*;
     use std::net::TcpListener;
+    #[test]
+    fn command_relay_only_from_four_ranks_and_the_pair_asks_main_only() {
+        // The gate reads the configured world: never one, two or three ranks, never a ring.
+        for world in 1..COMMAND_RELAY_RANKS { for path in [false, true] { assert!(!command_relay_world(world, path)); } }
+        for world in COMMAND_RELAY_RANKS..=64 { assert!(command_relay_world(world, true) && !command_relay_world(world, false)); }
+        // Call identity: main asks a pair `is_pair() && has_mailbox()` and nothing else. The
+        // pair here asks has_mailbox once and the relay never, with main's result; every other
+        // layout asks the relay once and has_mailbox never.
+        for world in 2..=8 { for path in [false, true] { for up in [false, true] {
+            let (mailbox, relay) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
+            let pair = PeerLayout::new(world, path).is_pair();
+            let route = command_route(pair, || { mailbox.set(mailbox.get() + 1); up }, || { relay.set(relay.get() + 1); up });
+            let expected = match (pair, up) { (true, true) => CommandRoute::PairMailbox, (false, true) => CommandRoute::Relay, _ => CommandRoute::Tcp };
+            assert_eq!((route, mailbox.get(), relay.get()), (expected, pair as usize, !pair as usize), "world {world} path {path} up {up}");        } } }
+    }
     #[test]
     fn command_idle_and_payload_deadlines() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap(); let mut sender = TcpStream::connect(listener.local_addr().unwrap()).unwrap(); let (receiver, _) = listener.accept().unwrap();

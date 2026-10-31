@@ -37,6 +37,10 @@ depth 7, from its measured verify times and draft acceptance. `VADE_FLASH_MTP_DE
 serving depth. Verification is strict, so the depth changes only speed, never tokens.
 Its drafts score an MXFP8 copy of the rank's head rows (`VADE_FP8_DRAFT_MX8`, unset or
 `1` = on, `0` = the BF16 head); verification always uses the BF16 head.
+On a path of four or more FP8 ranks whose data ring runs RDMA, small rank
+commands go through RDMA mailboxes, rank to rank, instead of the TCP chain. The
+command bytes do not change, so tokens do not change. Two or three ranks and
+TCP transport keep their usual command path.
 
 `WORLD=3..24` without `--tensor-map` runs the layer pipeline as a chain, with
 equal contiguous layer ranges by default. It needs a cable chain, not a closing

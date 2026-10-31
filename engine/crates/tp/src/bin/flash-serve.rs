@@ -345,6 +345,13 @@ fn run() -> Result<(), String> {
     let mut data = if path {
         spark_seqpar::Ring::connect_path(rank, world, data_address(listen)?, data_address(next)?, &run_id)?
     } else { spark_seqpar::Ring::connect(rank, world, data_address(listen)?, data_address(next)?, &run_id)? };
+    // A path of four or more FP8 ranks whose data ring runs RDMA sends its commands over
+    // RDMA mailboxes. All ranks reach the same data transport, so all open the relay or none
+    // does. A smaller world, the pair included, asks nothing here and keeps main's commands.
+    if spark_tp::transport::command_relay_world(world, path) && data.uses_rdma() {
+        commands.open_command_relay()?;
+        eprintln!("flash_serve command_relay rank={rank} world={world} transport=rdma_mailbox");
+    }
     let activation = spark_engine::flash::moe::Moe::activation_quantization()?;
     let sampled = match std::env::var("FLASH_MTP_SAMPLED").as_deref() {
         Ok("1") => true, Ok("0") | Err(std::env::VarError::NotPresent) => false,
