@@ -97,6 +97,7 @@ pub(super) fn recorded_options(session: &Session) -> UpOptions {
             .map(|rank| rank.machine.name.clone())
             .collect(),
         replicas: session.replicas,
+        replica_sparks: session.replica_sparks,
         mtp: session.mtp,
         mtp_explicit: session.mtp_explicit,
         fp4_local: session.fp4_local,

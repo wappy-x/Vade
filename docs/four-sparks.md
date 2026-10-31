@@ -1,7 +1,9 @@
 # Prepare four Sparks from two pairs
 
 This page shows how to turn two existing pairs of Sparks into one group of
-four for the official Flash-Next FP8 checkpoint.
+four for the official Flash-Next FP8 checkpoint. To serve FP4-Local on two
+pairs with no new cables, see
+[two pairs behind one address](#two-pairs-behind-one-address).
 
 **This build has not yet passed its qualification checks running natively on
 four Sparks.** We have measured FP8 on four of our Sparks three times:
@@ -272,3 +274,59 @@ configuration and check that all four GPUs are empty. Then restore the pairs:
 
 Once the operator has accepted either the verified four-Spark setup or the
 restored pairs, the machines are free for other work.
+
+## Two pairs behind one address
+
+This mode is an option. It does not change the default four-Spark mode:
+`vade up --sparks 4` still starts the FP4-Local layer chain. The project owner
+decides whether this mode becomes the default.
+
+`vade up --replicas 2 --pairs` starts two FP4-Local servers. Each server is a
+two-Spark tensor split, the same path as `vade up --sparks 2`. The pairs keep
+their own cables. No cable between the pairs is necessary. Give the four
+machines as two pairs in order: the first and second machine form pair 1, and
+the third and fourth form pair 2. Each pair needs its `fabric.<peer>` entries
+at both ends, as for one pair:
+
+```sh
+vade up --replicas 2 --pairs --hosts a,b,c,d --dry-run
+vade up --replicas 2 --pairs --hosts a,b,c,d
+```
+
+`vade up` opens one tunnel to the first machine of each pair, on
+`local_port + 1` and `local_port + 2`. It starts `vade-gateway` on
+`local_port`, so clients use one address. The gateway runs with
+`--stable-prefix`, which adds `prompt_cache_key` and `cache: true` to a
+request that does not set them. Then each pair's prefix cache can serve the
+later turns of a chat. The engine treats a `prompt_cache_key` as a request for
+the cache, so `"cache": false` alone does not turn the cache off through this
+gateway. Token IDs stay the same; memory use and first-turn time can change.
+
+The gateway routes each request to one pair:
+
+- A first turn (nothing after its first user message) goes to the pair with
+  fewer requests in flight through the gateway. On a tie, it goes to the pair
+  that served the same key before, if there is one; otherwise ties take turns.
+  Identical prompts sent at the same time divide evenly between the pairs.
+- A later turn of the same chat (anything after the first user message:
+  another user turn, a reply or a tool result) goes to the pair that served the
+  previous turn while that pair has fewer than 8 requests in flight or is
+  among the least busy. The gateway identifies
+  a chat by its `prompt_cache_key`, else by a session header, else by the
+  model, instructions, system prompt, tools and messages through the first
+  user message.
+- One chat runs on one pair (two Sparks), never on all four.
+
+If a pair stops before it sends a reply byte, the gateway sends the request to
+the other pair. If a pair stops during a reply, the client gets a cut reply.
+The gateway does not resend it, and it does not join output from the two
+pairs. The next turn goes to the live pair, which reads the full chat again
+with no cache. `GET /health` returns HTTP 503 with `"status":"degraded"` while
+one pair is down.
+
+Both pairs run the same engine build and checkpoint. The gateway health check
+returns an error if they differ. Token IDs must be identical on each pair, as
+for any two-Spark tensor split. No measurement card exists yet for this mode
+through one address, so this page makes no speed claim. The
+[benchmarks](benchmarks.md) give the cards for one pair and for the four-Spark
+layer chain.

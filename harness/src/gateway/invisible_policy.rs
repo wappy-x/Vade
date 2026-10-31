@@ -104,7 +104,7 @@ impl Runtime {
             let request = if path.split('?').next() == Some("/v1/admission") { parsed.and_then(|v| v.get("request")) } else { parsed };
             affinity(&key(request, head), &self.origins)
         });
-        let conversation = if self.origins.len() > 1 { super::route::conversation_key(body) } else { None };
+        let conversation = if self.origins.len() > 1 { super::route::conversation_key(body, head) } else { None };
         self.router.acquire(pinned, conversation, excluded)
     }
     pub(super) fn prepare<'a>(
@@ -443,7 +443,7 @@ pub(super) fn hash(bytes: &[u8]) -> u64 {
         (h ^ *b as u64).wrapping_mul(0x100000001b3)
     })
 }
-fn key(v: Option<View<'_>>, head: &Head) -> String {
+pub(super) fn key(v: Option<View<'_>>, head: &Head) -> String {
     if let Some(key) = v.and_then(|v| text(v, "prompt_cache_key")) {
         return key;
     }

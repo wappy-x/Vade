@@ -588,6 +588,7 @@ With `VADE_CONFIG` set, the lifecycle commands work like this:
 | `vade` | Short status and four choices: start, chat, stop, doctor. |
 | `vade up` (also `--fp4-local`) | Starts FP4-Local on one configured Spark. Add `--sparks N` for 2–24 or ordered `--hosts` for a chain. Larger chains need a current staged build, and each must still pass its own live checks on real Sparks. |
 | `vade up --replicas N` | FP4-Local only, N = 2–16: one independent one-Spark server on each of the first N configured machines (or the N `--hosts`), behind a local gateway. Details below the table. |
+| `vade up --replicas N --pairs` | FP4-Local only, N = 2–12: N two-Spark tensor-split servers on 2N machines, in pairs in list order, behind a local gateway. An option, not the four-Spark default ([two pairs behind one address](../docs/four-sparks.md#two-pairs-behind-one-address)). |
 | `vade up --fp8` | FP8: starts on the first two configured machines, tensor parallel on a ring. |
 | `vade up --fp8 --sparks 4` | FP8: four machines in config order, tensor parallel on a path. Its token IDs differ from two Sparks ([benchmarks](../docs/benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)). |
 | `vade up --hosts machine-a,machine-b` | Selects connected machines in the given order. |
@@ -603,7 +604,9 @@ With `--replicas N`, each replica sits behind its own tunnel on the N local
 ports after `local_port`, and the local gateway listens on `local_port`. It needs
 no `fabric.*` entries and can't be combined with `--sparks` or `--fp8`.
 `vade down` stops the gateway, the tunnels and every replica. See
-[Replicas](../INSTALL.md#serve-many-chats-with-replicas).
+[Replicas](../INSTALL.md#serve-many-chats-with-replicas). With `--pairs`, each
+pair needs the `fabric.*` entries of its own link, only each pair's first
+machine gets a tunnel, and the gateway runs with `--stable-prefix`.
 
 Every lifecycle command accepts `--dry-run`, in any position. A dry run prints
 every remote command it would run, including worker operations and the stdin

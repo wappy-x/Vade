@@ -113,7 +113,8 @@ This build has no four-Spark or eight-Spark tensor split for FP4-Local.
 **One server per group.** Each group is its own server on its own
 `local_port`. No gateway joins two groups, so a client must send its chats to
 each group's port itself. Only `vade up --replicas N` puts one local gateway
-in front of several engines, and each of those engines runs on one Spark.
+in front of several engines. Each of those engines runs on one Spark, or on a
+tensor-split pair with `--pairs`.
 
 A run of three or more Sparks uses a path (`TP_TOPOLOGY=path`, see
 `topology()` in [cli/src/state.rs](../cli/src/state.rs)). So a run on all
@@ -317,9 +318,10 @@ from the default controller config.
 
 With `VADE_GROUP` set, `--sparks` is refused, and `--hosts` must repeat the
 group's own list: the group names the machines. `--replicas N` starts one
-replica on each machine of the group, so N must equal the group size. `up`,
-`down`, `install` and `update` share one lock, so start the groups one after
-the other.
+replica on each machine of the group, so N must equal the group size. With
+`--pairs`, `--replicas N` starts one pair on each two machines of the group,
+so 2N must equal the group size. `up`, `down`, `install` and `update` share
+one lock, so start the groups one after the other.
 
 **Install and update with running groups.** `vade install` and `vade update`
 stage the new build on every machine in the config. They treat the engines

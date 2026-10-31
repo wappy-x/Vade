@@ -9,6 +9,8 @@ mod chat_guards;
 mod two_spark;
 #[path = "tests/groups.rs"]
 mod groups;
+#[path = "tests/pairs.rs"]
+mod pairs;
 use super::*;
 use std::collections::BTreeSet;
 use std::path::PathBuf;

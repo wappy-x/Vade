@@ -830,7 +830,7 @@ sent upstream. Full rules: [engine contract](docs/engine-contract.md#opaque-gate
 
 Both gateways accept several `--upstream` options, but they route differently.
 `vade-gateway` balances identical replicas by load and keeps a conversation on
-its last replica while that replica is among the least busy (this section),
+its last replica while that replica has room (this section),
 while `vade-harness gateway` routes by cache affinity across compatible
 endpoints ([next section](#several-servers-behind-vade-harness-gateway)).
 
@@ -840,11 +840,13 @@ servers running the same one-Spark model (for example from
 
 - Each request goes to the upstream with the fewest requests in flight, and
   ties take turns.
-- Requests whose `messages` (or Responses `input` array) share their first 2048
-  bytes up to the last user message prefer the upstream that served the
-  previous one, as long as it is among the least busy. `--no-sticky` turns that
-  off. FP4-Local prefix retention is ON by default, but cache hits from this
-  routing are unverified.
+- Turns of one chat share a key: `prompt_cache_key`, else a session header,
+  else the prompt through the first user message. A later turn (anything after
+  the first user message) goes to the upstream that served the previous turn
+  while that upstream has fewer than 8 requests in flight or is among the
+  least busy; a first turn uses it only while it is among the least busy.
+  `--no-sticky` turns that off. FP4-Local prefix retention is ON by default,
+  but cache hits from this routing are unverified.
 - `GET /health` then reports every upstream, and fails when their model IDs
   differ.
 - A failed upstream is retried on another one only while nothing has been

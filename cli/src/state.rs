@@ -181,8 +181,10 @@ pub struct Session {
     pub local_port: u16,
     pub serve_port: u16,
     pub ranks: Vec<Rank>,
-    /// Each rank is an independent one-Spark server; a local gateway owns local_port.
+    /// Independent servers behind a local gateway that owns local_port.
     pub replicas: bool,
+    /// Sparks in each replica: 1, or 2 for `--pairs` (each replica is a tensor-split pair).
+    pub replica_sparks: usize,
     /// The local gateway's PID and `ps` start time, recorded before it can serve.
     pub gateway: Option<(u32, String)>,
 }
@@ -221,6 +223,11 @@ impl Session {
             return Err("Memory must be positive and cache must be smaller than memory.".into());
         }
         let machines = config.selected(options)?;
+        // Each group of Sparks serves one model: every machine, or one replica.
+        let group = if options.replicas { options.replica_sparks.max(1) } else { machines.len() };
+        if machines.len() % group != 0 {
+            return Err("Each pair needs two machines. Give --replicas N --pairs 2N machines.".into());
+        }
         if options.replicas && usize::from(u16::MAX - config.local_port) < machines.len() {
             return Err("Replica tunnels need the local ports after local_port. Choose a lower local_port.".into());
         }
@@ -229,15 +236,17 @@ impl Session {
         }
         let mut ranks = Vec::new();
         for (index, machine) in machines.iter().enumerate() {
-            let (listen, next) = if machines.len() == 1 || options.replicas {
+            let (first, at) = (index - index % group, index % group);
+            let members = &machines[first..first + group];
+            let (listen, next) = if members.len() == 1 {
                 ("127.0.0.1:0".into(), "127.0.0.1:0".into())
             } else {
-                let prev = if index == 0 {
-                    &machines[1]
+                let prev = if at == 0 {
+                    &members[1]
                 } else {
-                    &machines[index - 1]
+                    &members[at - 1]
                 };
-                let listen = if options.fp4_local && machines.len() > 2 && index == 0 {
+                let listen = if options.fp4_local && members.len() > 2 && at == 0 {
                     "127.0.0.1:0".into()
                 } else { address(
                     machine.fabric.get(&prev.name).ok_or(
@@ -245,12 +254,12 @@ impl Session {
                     )?,
                     config.tp_port,
                 ) };
-                let next_machine = &machines[(index + 1) % machines.len()];
-                let next = if options.fp4_local && machines.len() > 2 && index + 1 == machines.len() {
+                let next_machine = &members[(at + 1) % members.len()];
+                let next = if options.fp4_local && members.len() > 2 && at + 1 == members.len() {
                     "127.0.0.1:0".into()
-                } else if index + 1 == machines.len() && machines.len() > 2 {
+                } else if at + 1 == members.len() && members.len() > 2 {
                     ranks
-                        .first()
+                        .get(first)
                         .map(|r: &Rank| r.listen.clone())
                         .unwrap_or_default()
                 } else {
@@ -308,16 +317,21 @@ impl Session {
             serve_port: config.serve_port,
             ranks,
             replicas: options.replicas,
+            replica_sparks: if options.replicas { group } else { 1 },
             gateway: None,
         })
     }
-    /// Ranks that cooperate on one model over the fabric (not independent replicas).
+    /// Sparks that serve one model together: every rank, or one replica.
+    pub fn group_len(&self) -> usize {
+        if self.replicas { self.replica_sparks } else { self.ranks.len() }
+    }
+    /// Ranks that cooperate on one model over the fabric: a chain, or `--pairs` replicas.
     pub fn chained(&self) -> bool {
-        self.ranks.len() > 1 && !self.replicas
+        self.group_len() > 1
     }
     /// Two FP4-Local Sparks on one model: the tensor split, the only two-Spark path.
     pub fn two_sparks(&self) -> bool {
-        self.fp4_local && self.chained() && self.ranks.len() == 2
+        self.fp4_local && self.group_len() == 2
     }
     /// Whether the engine has a prefix restore here (one Spark, replicas, the tensor split),
     /// so an unset VADE_FLASHNEXT_PREFIX_CACHE means on. The layer chain has none: off.
@@ -326,15 +340,15 @@ impl Session {
     }
     /// The engine's own rank and world size for this machine.
     pub fn engine_slot(&self, index: usize) -> (usize, usize) {
-        if self.replicas { (0, 1) } else { (index, self.ranks.len()) }
+        (index % self.group_len(), self.group_len())
     }
-    /// Ranks serving HTTP: rank zero, or every replica.
-    pub fn servers(&self) -> std::ops::Range<usize> {
-        0..if self.replicas { self.ranks.len() } else { 1 }
+    /// Ranks serving HTTP: rank zero, or the first rank of every replica.
+    pub fn servers(&self) -> std::iter::StepBy<std::ops::Range<usize>> {
+        (0..self.ranks.len()).step_by(self.group_len().max(1))
     }
     /// Local tunnel port for a serving rank; replicas use the ports after the gateway's.
     pub fn tunnel_port(&self, index: usize) -> u16 {
-        if self.replicas { self.local_port + 1 + index as u16 } else { self.local_port }
+        if self.replicas { self.local_port + 1 + (index / self.replica_sparks) as u16 } else { self.local_port }
     }
     /// The SSH control socket for a serving rank's tunnel; replicas get one each.
     pub fn tunnel_socket(&self, dir: &Path, index: usize) -> PathBuf {
@@ -358,7 +372,7 @@ impl Session {
     }
     /// `TP_TOPOLOGY` for this session: "ring" for a two-Spark chain, else "path".
     pub fn topology(&self) -> &'static str {
-        if self.ranks.len() == 2 && !self.replicas {
+        if self.group_len() == 2 {
             "ring"
         } else {
             "path"
@@ -431,6 +445,9 @@ impl Session {
         // Chain records keep their original fields and launch fingerprints.
         if self.replicas {
             fields.insert("replicas".into(), "true".into());
+        }
+        if self.replica_sparks > 1 {
+            fields.insert("replica_sparks".into(), self.replica_sparks.to_string());
         }
         if let Some((pid, started)) = &self.gateway {
             fields.insert("gateway_pid".into(), pid.to_string());
@@ -538,6 +555,7 @@ impl Session {
             serve_port: number(&f, "serve_port")?,
             ranks,
             replicas: f.get("replicas").map(|value| boolean(value)).transpose()?.unwrap_or(false),
+            replica_sparks: f.get("replica_sparks").map(|_| number(&f, "replica_sparks")).transpose()?.unwrap_or(1),
             gateway: match (f.get("gateway_pid"), f.get("gateway_started")) {
                 (Some(_), Some(started)) => Some((number(&f, "gateway_pid")?, started.clone())),
                 _ => None,
@@ -549,6 +567,8 @@ impl Session {
             || session.local_port == 0
             || session.serve_port == 0
             || (session.replicas && (!session.fp4_local || usize::from(u16::MAX - session.local_port) < session.ranks.len()))
+            || session.replica_sparks == 0
+            || (session.replica_sparks > 1 && (!session.replicas || session.ranks.len() % session.replica_sparks != 0))
             || session.mtp > 3
             || !(4096..=262144).contains(&session.context)
             || !(1024..=session.context).contains(&session.output)

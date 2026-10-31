@@ -1,6 +1,7 @@
-//! `vade up --replicas N`: independent one-Spark servers, one tunnel each, and a
-//! local vade-gateway on local_port. The gateway is an owned process: it is
-//! signaled only while its PID still has the recorded start time and command.
+//! `vade up --replicas N`: independent servers (one Spark each, or a tensor-split
+//! pair each with `--pairs`), one tunnel to each server's first rank, and a local
+//! vade-gateway on local_port. The gateway is an owned process: it is signaled
+//! only while its PID still has the recorded start time and command.
 use super::*;
 
 impl<R: Runner> App<R> {
@@ -37,6 +38,11 @@ impl<R: Runner> App<R> {
         let mut args = vec!["vade-gateway".into(), "--bind".into(), format!("127.0.0.1:{}", session.local_port)];
         for index in session.servers() {
             args.extend(["--upstream".into(), format!("http://127.0.0.1:{}", session.tunnel_port(index))]);
+        }
+        // Pairs keep a chat's prefix cache: the gateway gives each chat a stable
+        // prompt_cache_key and cache:true, so a later turn on its pair restores it.
+        if session.chained() {
+            args.push("--stable-prefix".into());
         }
         let mut exec = Exec::new("replica gateway", &self.config.stage_dir.join("vade-harness").to_string_lossy(), args);
         clear_cloud_auth(&mut exec);

@@ -17,6 +17,8 @@ Options:
   --hosts a,b       Machine names in cable order, separated by commas
   --replicas N      2..16 independent one-Spark FP4-Local servers behind a local
                     gateway
+  --pairs           With --replicas 2..12: N two-Spark tensor-split servers on
+                    2N Sparks instead
   --mtp N           Drafting depth 0..3; 0 turns drafting off (default: the
                     engine chooses)
   --context N       Context window in tokens, 4096..262144 (default 32768)
@@ -68,6 +70,13 @@ Notes:
     tunnels use the next N local ports. Each replica uses the FP4 defaults
     above. Use it when the model fits one Spark and many chats run at once;
     answers are the same on every replica.
+  - --replicas N --pairs makes each replica a two-Spark tensor split: machines 1
+    and 2 form the first pair, 3 and 4 the next, and each pair must share a
+    fabric link. Only each pair's first machine gets a tunnel. The gateway keeps
+    a chat's later turns on its pair while that pair has fewer than 8 requests
+    in flight or is among the least busy, and gives each chat a stable prompt
+    cache key. This is an option; the default four-Spark mode is unchanged. See
+    docs/four-sparks.md.
   - One Spark needs no fabric. Linked Sparks use RDMA by default. SEQPAR_RDMA=0
     selects TCP, except for two FP4-Local Sparks. Keep VADE_CONFIG and VADE_HOME
     consistent through chat, status and down.

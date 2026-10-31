@@ -117,7 +117,9 @@ impl<R: Runner> App<R> {
             return self.already_ready(&existing);
         }
         let rdma = session.chained() && rdma;
-        let transport = if session.replicas { "replicas (independent one-Spark servers behind a local gateway; no fabric)" } else { transport_name(session.ranks.len(), rdma) };
+        let transport = if session.chained() && session.replicas {
+            format!("replicas (tensor-split pairs over {} behind a local gateway)", transport_name(session.group_len(), rdma))
+        } else if session.replicas { "replicas (independent one-Spark servers behind a local gateway; no fabric)".into() } else { transport_name(session.ranks.len(), rdma).into() };
         let group = self.config.group.as_ref().map(|group| ("Group", format!("{} (own ownership record; local port {})", group.name, group.local_port)));
         crate::output::text(format_args!("{} {}\n{}", style::paint(Token::Heading, "Launch plan:", Stream::Out), text::terminal_text(&session.model), style::table(&group.into_iter().chain([
             ("Machines", session.ranks.iter().map(|rank| rank.machine.name.as_str()).collect::<Vec<_>>().join(", ")),
@@ -125,7 +127,7 @@ impl<R: Runner> App<R> {
             ("Output limit", format!("{} tokens", session.output)),
             ("Drafting request", if session.mtp_explicit { format!("MTP {}", session.mtp) } else { "engine default".into() }),
             ("Concurrent chats", session.chats.map_or_else(|| "engine-admitted".into(), |count| count.to_string())),
-            ("Transport", transport.into()),
+            ("Transport", transport.clone()),
             ("Endpoint", format!("{}/v1", session.endpoint())),
         ]).collect::<Vec<_>>(), 2)))?;
         self.resolve_fabric(&mut session)?;
@@ -225,7 +227,7 @@ impl<R: Runner> App<R> {
                     "{} ready on {}{} at {}: context {} tokens, drafting depth {}.\n{}",
                     session.model,
                     crate::text::count(session.ranks.len(), "Spark", "Sparks"),
-                    if session.replicas { " (independent replicas behind the gateway)" } else { "" },
+                    if session.chained() && session.replicas { " (tensor-split pairs behind the gateway)" } else if session.replicas { " (independent replicas behind the gateway)" } else { "" },
                     session.endpoint(),
                     session.context,
                     session.mtp_label(),
@@ -564,7 +566,7 @@ impl<R: Runner> App<R> {
         let row = |label: &str, value: &str| crate::output::text(format_args!("{}", style::table_at(&[(label, value.to_owned())], 2, 21)));
         crate::output::line(format_args!("{} is {}.", style::paint(Token::Title, "Vade", Stream::Out), session.phase))?;
         row("Machines", &session.ranks.iter().map(|r| r.machine.name.as_str()).collect::<Vec<_>>().join(", "))?;
-        if session.replicas { row("Mode", "independent one-Spark replicas behind the local gateway")?; }
+        if session.replicas { row("Mode", if session.chained() { "tensor-split pairs behind the local gateway" } else { "independent one-Spark replicas behind the local gateway" })?; }
         row("Model", &session.model)?;
         row("Build", &session.build)?;
         row("MTP", &session.mtp_label())?;

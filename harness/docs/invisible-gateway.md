@@ -228,12 +228,21 @@ Repeating `--upstream` without `--affinity` treats the upstreams as identical
 replicas (full, separate copies of the same model), such as the one-Spark
 servers that `vade up --replicas N` starts. Each request goes to the upstream
 with the fewest requests in flight through this gateway, and ties rotate in
-configuration order. Work sent straight to an engine is not counted. Requests
-whose `messages` (or Responses `input` array) share their first 2048 bytes up to
-the last user message form one conversation: a later turn prefers the upstream
-that served the previous one while that upstream is among the least busy, and
-otherwise load wins. The bounded table keeps hashes and positions only.
-`--no-sticky` routes every request by load.
+configuration order. Work sent straight to an engine is not counted. A request
+with a user message in `messages` (or the Responses `input` array) belongs to a
+conversation. Its key is the `--stable-prefix` cache key: `prompt_cache_key`,
+else a session header, else the model, instructions, system prompt, tools and
+messages through the first user message. Every turn of a chat has the same key.
+A later turn (anything after the first user message: another user turn, a
+reply or a tool result) goes to the upstream that served the previous turn
+while that upstream has fewer than 8 requests in flight through this gateway
+or is among the least busy. A first turn uses that upstream only while it is
+among the least busy, so identical prompts sent at the same time divide
+evenly. A first request that ends with an assistant message after its user
+message (a prefill) counts as a later turn, so identical prefill requests stay
+on one upstream until it has 8 in flight; then the next one moves the chat to
+the least busy upstream. Otherwise load wins. The bounded table keeps hashes
+and positions only. `--no-sticky` routes every request by load.
 
 With several upstreams, the gateway answers `GET /health` itself. It returns the
 first ready replica's engine fields (`model`, `vade`, `caps`) with `active` and

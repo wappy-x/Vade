@@ -120,7 +120,7 @@ impl<R: Runner> App<R> {
                 }
             }
             let mut ports = Vec::new();
-            if session.as_ref().map_or(index == 0, |session| session.servers().contains(&index)) {
+            if session.as_ref().map_or(index == 0, |session| session.servers().any(|server| server == index)) {
                 ports.push(crate::doctor::Port::http(session.as_ref().map_or(self.config.serve_port, |session| session.serve_port)));
             }
             let starts_path = fp4_local || session.as_ref().is_some_and(|session| session.topology() == "path");
@@ -540,7 +540,9 @@ fi"#, host = HOST_TOOLCHAIN.replace('.', "[.]")) } else { String::new() },
     fn session_network_checks(&mut self, session: &Session, rdma: bool) -> Result<(), String> {
         for (index, rank) in session.ranks.iter().enumerate() {
             let closes_ring = !session.fp4_local && session.topology() == "ring";
-            let peer = session.ranks.get(index + 1).or_else(|| closes_ring.then(|| session.ranks.first()).flatten());
+            // Peers stay inside a --pairs replica; the next pair is not a peer.
+            let peer = session.ranks.get(index + 1).filter(|_| (index + 1) % session.group_len() != 0)
+                .or_else(|| closes_ring.then(|| session.ranks.first()).flatten());
             let Some(peer) = peer else { continue; };
             let (host, port) = rank.next.rsplit_once(':').ok_or("The saved fabric endpoint is invalid. Preserve the state folder, then run vade status.")?;
             if port.parse::<u16>().ok().is_none_or(|port| port == 0) || host.is_empty() {

@@ -112,8 +112,10 @@ pub struct UpOptions {
     pub supplied_options: std::collections::BTreeSet<String>,
     pub sparks: Option<usize>,
     pub hosts: Vec<String>,
-    /// One independent one-Spark server per selected machine, behind a local gateway.
+    /// Independent servers behind a local gateway: one per machine, or one per pair.
     pub replicas: bool,
+    /// Sparks in each replica: 1, or 2 with `--pairs` (a tensor-split pair each).
+    pub replica_sparks: usize,
     pub mtp: u32,
     pub mtp_explicit: bool,
     pub fp4_local: bool,
@@ -135,6 +137,7 @@ impl Default for UpOptions {
             sparks: None,
             hosts: Vec::new(),
             replicas: false,
+            replica_sparks: 1,
             mtp: 2,
             mtp_explicit: false,
             fp4_local: true,
@@ -417,6 +420,11 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
             index += 1;
             continue;
         }
+        if flag == "--pairs" {
+            options.replica_sparks = 2;
+            index += 1;
+            continue;
+        }
         if !UP_VALUE_OPTIONS.contains(&flag) {
             return Err(unknown_option(flag, "up", &UP_VALUE_OPTIONS));
         }
@@ -470,11 +478,19 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
             }
         }
     }
+    if options.replica_sparks > 1 && !options.replicas {
+        return Err("Use --pairs with --replicas N: N tensor-split pairs on 2N Sparks. Run vade up --help.".into());
+    }
     if options.replicas {
-        if !options.fp4_local || options.sparks.is_some() || !(options.hosts.is_empty() || options.hosts.len() == replicas) {
-            return Err("Use --replicas N with FP4-Local alone, or with N machine names in --hosts. Run vade up --help.".into());
+        let machines = replicas * options.replica_sparks;
+        if machines > crate::config::MAX_FP4_SPARKS {
+            return Err(format!("Use --replicas 2..{} with --pairs: each pair takes two of the {} Sparks FP4-Local supports. Run vade up --help.",
+                crate::config::MAX_FP4_SPARKS / options.replica_sparks, crate::config::MAX_FP4_SPARKS));
         }
-        if options.hosts.is_empty() { options.sparks = Some(replicas); }
+        if !options.fp4_local || options.sparks.is_some() || !(options.hosts.is_empty() || options.hosts.len() == machines) {
+            return Err("Use --replicas N with FP4-Local alone, or with N machine names in --hosts (2N with --pairs). Run vade up --help.".into());
+        }
+        if options.hosts.is_empty() { options.sparks = Some(machines); }
     }
     if options.fp4_local {
         if !seen.contains("--context") { options.context = FP4_CONTEXT; }
@@ -614,7 +630,7 @@ mod tests {
             "up --fp4-local", "up --fp4-local --chats 1", "up --fp4-local --chats 4", "up --fp4-local --chats 8",
             "up --fp4-local --chats 32", "up --fp4-local --sparks 1", "up --fp4-local --sparks 2",
             "up --fp4-local --sparks 2 --chats 1", "up --fp4-local --hosts a,b", "up --fp4-local --hosts a --chats 1",
-            "up --replicas 2", "up --replicas 2 --chats 1", "up --replicas 2 --hosts a,b --chats 8",
+            "up --replicas 2", "up --replicas 2 --chats 1", "up --replicas 2 --hosts a,b --chats 8", "up --replicas 2 --pairs", "up --pairs --replicas 2 --hosts a,b,c,d",
         ] {
             let Command::Up(options) = cli(args).unwrap().command else { panic!("{args}") };
             assert_eq!((options.context, options.output), (FP4_CONTEXT, fp4_output(FP4_CONTEXT)), "{args}");
@@ -700,7 +716,7 @@ mod tests {
             "up --hosts a,a", "up --hosts a,", "up --sparks 2 --hosts a,b", "up --mtp 4",
             "up --context 4095", "up --output 262145", "up --mtp", "up --mtp 1 --mtp 2", "down --force", "unknown",
             "up --output 1023", "up --context 4096 --output 8192", "up --fp4-local --fp8", "up --fp4-local --fp8-legacy", "up --fp8 --fp8-legacy",
-            "up --replicas 1", "up --replicas 17", "up --replicas 2 --sparks 2", "up --replicas 3 --hosts a,b", "up --fp8 --replicas 2",
+            "up --replicas 1", "up --replicas 17", "up --replicas 2 --sparks 2", "up --replicas 3 --hosts a,b", "up --fp8 --replicas 2", "up --pairs", "up --replicas 2 --pairs --pairs", "up --replicas 2 --pairs --hosts a,b", "up --replicas 13 --pairs",
         ] { assert!(cli(args).is_err(), "{args}"); }
         assert_eq!(cli("up --hosts a,b --chats 3 --fast-prompts").unwrap().command, Command::Up(UpOptions {
             supplied_options: ["--hosts".into(), "--chats".into(), "--fast-prompts".into()].into(),

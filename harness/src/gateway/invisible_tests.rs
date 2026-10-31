@@ -255,15 +255,107 @@ fn replicas_route_to_fewest_in_flight_rotate_ties_and_keep_conversations_sticky(
     let r = Router::new(3, false); let mut held: Vec<_> = (0..3).map(|_| r.acquire(None, None, &[]).unwrap()).collect(); assert_eq!(held.iter().map(|l| l.index).collect::<Vec<_>>(), [0, 1, 2]);
     held.remove(1); assert_eq!(r.acquire(None, None, &[]).unwrap().index, 1); assert_eq!(r.acquire(None, None, &[1]).unwrap().index, 2); assert!(r.acquire(None, None, &[0, 1, 2]).is_none());
     let chat = |turns: &str| format!(r#"{{"model":"m","messages":[{{"role":"system","content":"{}"}},{{"role":"user","content":"q"}}{turns}]}}"#, "s".repeat(2100));
-    let (one, two) = (route::conversation_key(chat("").as_bytes()), route::conversation_key(chat(r#",{"role":"assistant","content":"a"},{"role":"user","content":"q2"}"#).as_bytes()));
-    assert!(one.is_some() && one == two && one != route::conversation_key(br#"{"messages":[{"role":"user","content":"other"}]}"#) && route::conversation_key(br#"{"messages":[]}"#).is_none());
+    let (one, two) = (conversation(&chat(""), None), conversation(&chat(r#",{"role":"assistant","content":"a"},{"role":"user","content":"q2"}"#), None));
+    assert!(one.is_some_and(|c| !c.continues) && two.is_some_and(|c| c.continues) && one.map(|c| c.key) == two.map(|c| c.key));
+    assert!(one != conversation(r#"{"messages":[{"role":"user","content":"other"}]}"#, None) && conversation(r#"{"messages":[]}"#, None).is_none());
     for sticky in [true, false] { let r = Router::new(2, sticky); let first = r.acquire(None, one, &[]).unwrap().index; assert_eq!(r.acquire(None, one, &[]).unwrap().index == first, sticky);
-        let busy = r.acquire(None, None, &[1 - first]).unwrap(); assert_eq!(r.acquire(None, one, &[]).unwrap().index, 1 - first, "a busier remembered upstream yields"); drop(busy); }
+        let busy = r.acquire(None, None, &[1 - first]).unwrap(); assert_eq!(r.acquire(None, one, &[]).unwrap().index, 1 - first, "a busier remembered upstream yields a first turn"); drop(busy); }
+}
+
+fn conversation(body: &str, session: Option<&str>) -> Option<route::Conversation> {
+    let fields = session.map(|id| vec![("X-Claude-Code-Session-Id".to_string(), id.to_string())]).unwrap_or_default();
+    route::conversation_key(body.as_bytes(), &Head { first: "POST /v1/chat/completions HTTP/1.1".into(), fields })
+}
+const SHORT_CHAT: [&str; 3] = [r#"{"model":"m","messages":[{"role":"system","content":"s"},{"role":"user","content":"hi"}]}"#,
+    r#"{"model":"m","messages":[{"role":"system","content":"s"},{"role":"user","content":"hi"},{"role":"assistant","content":"hello"},{"role":"user","content":"more"}]}"#,
+    r#"{"model":"m","messages":[{"role":"system","content":"s"},{"role":"user","content":"hi"},{"role":"assistant","content":"hello"},{"role":"user","content":"more"},{"role":"assistant","content":"ok"},{"role":"user","content":"end"}]}"#];
+
+#[test]
+fn conversation_key_is_the_same_on_every_turn_of_a_short_chat() {
+    // Before, the key hashed through the last user message: a chat under 2048 bytes got a new key each turn.
+    let turns: Vec<_> = SHORT_CHAT.iter().map(|body| conversation(body, None).unwrap()).collect();
+    assert!(turns.iter().all(|c| c.key == turns[0].key), "{turns:?}");
+    assert_eq!(turns.iter().map(|c| c.continues).collect::<Vec<_>>(), [false, true, true]);
+    // A different system prompt, tools or first user message is another chat.
+    for other in [SHORT_CHAT[0].replace(r#""content":"s""#, r#""content":"t""#), SHORT_CHAT[0].replace(r#""content":"hi""#, r#""content":"ho""#),
+        SHORT_CHAT[0].replace(r#"{"model":"m","#, r#"{"model":"m","tools":[{"type":"function"}],"#)] {
+        assert_ne!(conversation(&other, None).unwrap().key, turns[0].key, "{other}");
+    }
+    // An explicit cache key or a session header names the chat, whatever the messages say.
+    let keyed = |body: &str| body.replacen('{', r#"{"prompt_cache_key":"chat-7","#, 1);
+    assert_eq!(conversation(&keyed(SHORT_CHAT[0]), None).unwrap().key, conversation(&keyed(&SHORT_CHAT[1].replace("hi", "x")), None).unwrap().key);
+    assert_eq!(conversation(SHORT_CHAT[0], Some("s1")).unwrap().key, conversation(&SHORT_CHAT[2].replace("hi", "x"), Some("s1")).unwrap().key);
+    assert_ne!(conversation(SHORT_CHAT[0], Some("s1")).unwrap().key, conversation(SHORT_CHAT[0], Some("s2")).unwrap().key);
+    // Responses input arrays and Messages tool results count user turns the same way.
+    let input = conversation(r#"{"model":"m","input":[{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"user","content":"c"}]}"#, None).unwrap();
+    assert!(input.continues && input.key == conversation(r#"{"model":"m","input":[{"role":"user","content":"a"}]}"#, None).unwrap().key);
+    let tool = conversation(r#"{"model":"m","system":"s","messages":[{"role":"user","content":"a"},{"role":"assistant","content":[{"type":"tool_use"}]},{"role":"user","content":[{"type":"tool_result"}]}]}"#, None).unwrap();
+    assert!(tool.continues);
+    // Tool loops add no user message: a Chat tool reply or a Responses function output still continues the chat.
+    let chat_tool = conversation(r#"{"model":"m","messages":[{"role":"user","content":"a"},{"role":"assistant","tool_calls":[{"id":"c1"}]},{"role":"tool","tool_call_id":"c1","content":"r"}]}"#, None).unwrap();
+    let responses_tool = conversation(r#"{"model":"m","input":[{"role":"user","content":"a"},{"type":"function_call","call_id":"c1"},{"type":"function_call_output","call_id":"c1","output":"r"}]}"#, None).unwrap();
+    let first = conversation(r#"{"model":"m","messages":[{"role":"user","content":"a"}]}"#, None).unwrap();
+    assert!(chat_tool.continues && responses_tool.continues && chat_tool.key == first.key, "{chat_tool:?} {responses_tool:?}");
+    assert!(conversation(r#"{"model":"m","input":"text"}"#, None).is_none() && conversation(r#"{"model":"m","prompt":"p"}"#, None).is_none());
+}
+
+#[test]
+fn a_continuation_stays_on_its_upstream_until_the_turn_limit() {
+    let (first, next) = (conversation(SHORT_CHAT[0], None), conversation(SHORT_CHAT[1], None));
+    let r = Router::new(2, true); let home = r.acquire(None, first, &[]).unwrap().index; let other = 1 - home;
+    // The home replica is busier than the idle one, yet the next turn stays: its cache is there.
+    let mut held: Vec<_> = (1..route::STICKY_TURN_LIMIT).map(|_| r.acquire(Some(home), None, &[]).unwrap()).collect();
+    let stay = r.acquire(None, next, &[]).unwrap(); assert_eq!(stay.index, home, "{} in flight on the home replica", held.len());
+    // A first turn with the same key is new work: it goes to the least busy replica.
+    assert_eq!(r.acquire(None, first, &[]).unwrap().index, other);
+    // At the limit the engine would queue the turn, so load wins.
+    held.push(stay); assert_eq!(r.acquire(None, next, &[]).unwrap().index, other);
+    held.pop(); assert_eq!(r.acquire(None, next, &[]).unwrap().index, other, "the last turn moved the chat");
+    let r = Router::new(2, false); let _busy = r.acquire(Some(0), None, &[]).unwrap(); assert_eq!(r.acquire(None, next, &[]).unwrap().index, 1, "--no-sticky routes by load");
+    // Past the limit on every replica (C16 over two pairs), a home that is among the least busy keeps the turn.
+    let r = Router::new(2, true); assert_eq!(r.acquire(None, first, &[]).unwrap().index, 0);
+    let _full: Vec<_> = (0..2 * route::STICKY_TURN_LIMIT).map(|i| r.acquire(Some(i % 2), None, &[]).unwrap()).collect();
+    assert_eq!(r.acquire(None, next, &[]).unwrap().index, 0, "a tie at the limit keeps the cache");
+}
+
+#[test]
+fn identical_first_turns_spread_evenly_over_the_replicas() {
+    // C4 and C8 cards send the same prompt at once: equal halves, never a pile on one pair.
+    let first = conversation(SHORT_CHAT[0], None);
+    for chats in [4, 8] {
+        let r = Router::new(2, true); let held: Vec<_> = (0..chats).map(|_| r.acquire(None, first, &[]).unwrap()).collect();
+        assert_eq!(held.iter().filter(|l| l.index == 0).count(), chats / 2, "{chats} chats");
+    }
+    // Different chats rotate on ties too.
+    let r = Router::new(2, true); let a = r.acquire(None, conversation(SHORT_CHAT[0], None), &[]).unwrap();
+    let b = r.acquire(None, conversation(&SHORT_CHAT[0].replace("hi", "yo"), None), &[]).unwrap(); assert_ne!(a.index, b.index);
+}
+
+#[test]
+fn a_dropped_replica_cuts_its_stream_and_the_next_turn_lands_on_a_live_one() {
+    let post = |body: &str| format!("POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+    let ok = |text: &'static str| -> &'static str { Box::leak(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{text}", text.len()).into_boxed_str()) };
+    // Replica 0 answers turn 1, then dies in the middle of turn 2 and stops listening.
+    let (dying, live) = (upstream(vec![ok("a1"), "HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\npart"]), upstream(vec![ok("b3"), ok("b4")]));
+    let runtime = Runtime::new(&[dying.0, live.0], Flags::default()).unwrap();
+    let send = |body: &str| thread::scope(|scope| {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap(); let mut c = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let runtime = &runtime; let gateway = scope.spawn(move || { let _ = handle(listener.accept().unwrap().0, runtime, None, None); });
+        c.write_all(post(body).as_bytes()).unwrap(); let mut reply = String::new(); let _ = c.read_to_string(&mut reply); gateway.join().unwrap(); reply
+    });
+    let one = send(SHORT_CHAT[0]); assert!(one.starts_with("HTTP/1.1 200") && one.ends_with("\r\n2\r\na1\r\n0\r\n\r\n"), "{one}");
+    // Bytes already reached the client: the gateway ends the reply there and never replays it.
+    let two = send(SHORT_CHAT[1]); assert!(two.starts_with("HTTP/1.1 200") && two.ends_with("\r\n4\r\npart\r\n"), "the client sees a cut stream: {two}");
+    assert_eq!(dying.1.join().unwrap(), 2);
+    // The chat's replica is gone: the next turn fails over before any byte, and later turns follow it.
+    let three = send(SHORT_CHAT[2]); assert!(three.starts_with("HTTP/1.1 200") && three.contains("\r\nb3\r\n"), "{three}");
+    let four = send(&SHORT_CHAT[2].replace("end", "again")); assert!(four.contains("\r\nb4\r\n"), "{four}");
+    assert_eq!(live.1.join().unwrap(), 2);
 }
 
 fn upstream(replies: Vec<&'static str>) -> (String, thread::JoinHandle<usize>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap(); let url = format!("http://{}", listener.local_addr().unwrap());
-    (url, thread::spawn(move || { listener.set_nonblocking(true).unwrap(); let (mut served, idle) = (0, Instant::now() + Duration::from_millis(1500)); for reply in replies { let socket = loop { match listener.accept() { Ok((s, _)) => break s, Err(_) if Instant::now() < idle => thread::sleep(Duration::from_millis(5)), Err(_) => return served } };
+    (url, thread::spawn(move || { listener.set_nonblocking(true).unwrap(); let mut served = 0; for reply in replies { let idle = Instant::now() + Duration::from_millis(1500); let socket = loop { match listener.accept() { Ok((s, _)) => break s, Err(_) if Instant::now() < idle => thread::sleep(Duration::from_millis(5)), Err(_) => return served } };
         socket.set_nonblocking(false).unwrap(); let mut r = BufReader::new(socket); let h = transport::read_head(&mut r).unwrap(); let mut b = BodyReader::new(r, &h, true, 1 << 20).unwrap(); b.read_to_end(&mut Vec::new()).unwrap(); b.reader.get_mut().write_all(reply.as_bytes()).unwrap(); served += 1; } served }))
 }
 fn ask(urls: &[String], request: &str) -> String {

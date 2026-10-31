@@ -466,7 +466,7 @@ impl Config {
     }
 
     /// The machines `vade up` uses for these options, with their fabric links
-    /// checked unless they are independent replicas.
+    /// checked unless they are independent one-Spark replicas.
     pub fn selected(&self, options: &UpOptions) -> Result<Vec<Machine>, String> {
         let selected = self.selected_machines(options)?;
         // Independent replicas never talk to each other, so they need no fabric links.
@@ -476,6 +476,11 @@ impl Config {
             match &self.group {
                 Some(group) => crate::topology::check_arc(&format!("Group {}", group.name), &selected)?,
                 None => self.check_links(&selected)?,
+            }
+        } else if options.replica_sparks > 1 {
+            // A --pairs replica is a tensor split: its two machines share a fabric link.
+            for (index, pair) in selected.chunks(options.replica_sparks).enumerate() {
+                crate::topology::check_arc(&format!("Pair {}", index + 1), pair)?;
             }
         }
         Ok(selected)
@@ -491,7 +496,19 @@ impl Config {
                 }
                 let count = if options.hosts.is_empty() { options.sparks } else { Some(options.hosts.len()) };
                 if options.replicas && count != Some(group.hosts.len()) {
-                    return Err(format!("Group {} has {} machines. Run vade up --replicas {} for one replica on each, or unset VADE_GROUP.", group.name, group.hosts.len(), group.hosts.len()));
+                    // Name only commands the parser accepts for this group size.
+                    // FP4-Local runs on 1..24 Sparks, so a larger group has no command.
+                    let size = group.hosts.len();
+                    let machines = crate::text::count(size, "machine", "machines");
+                    if size > MAX_FP4_SPARKS {
+                        return Err(format!("Group {} has {machines}. FP4-Local supports 1..{MAX_FP4_SPARKS} Sparks. Shorten the group, or unset VADE_GROUP.", group.name));
+                    }
+                    let mut runs = Vec::new();
+                    if (2..=MAX_REPLICAS).contains(&size) { runs.push(format!("vade up --replicas {size} for one replica on each")); }
+                    if size % 2 == 0 && (2..=MAX_REPLICAS).contains(&(size / 2)) { runs.push(format!("vade up --replicas {} --pairs for a pair each", size / 2)); }
+                    if size % 2 == 0 && size / 2 == 1 { runs.push("vade up without --replicas for one tensor-split pair".into()); }
+                    if runs.is_empty() { runs.push("vade up without --replicas".into()); }
+                    return Err(format!("Group {} has {machines}. Run {}, or unset VADE_GROUP.", group.name, runs.join(", or ")));
                 }
                 from_group = UpOptions { hosts: group.hosts.clone(), sparks: None, ..options.clone() };
                 &from_group
@@ -893,7 +910,33 @@ mod tests {
         let names = |machines: Vec<Machine>| machines.into_iter().map(|machine| machine.name).collect::<Vec<_>>();
         assert_eq!(names(config.selected(&UpOptions::default()).unwrap()), ["s5", "s6", "s7", "s8"]);
         assert_eq!(names(config.selected(&UpOptions { replicas: true, sparks: Some(4), ..UpOptions::default() }).unwrap()).len(), 4);
-        assert!(config.selected(&UpOptions { replicas: true, sparks: Some(2), ..UpOptions::default() }).unwrap_err().contains("--replicas 4"));
+        assert!(config.selected(&UpOptions { replicas: true, sparks: Some(2), ..UpOptions::default() }).unwrap_err().contains("Group quad-b has 4 machines. Run vade up --replicas 4 for one replica on each, or vade up --replicas 2 --pairs for a pair each, or unset VADE_GROUP."));
+        // Every hint is a command the parser accepts: no --replicas 1 for a pair or a single machine.
+        for (name, hint) in [("pair-1", "Group pair-1 has 2 machines. Run vade up --replicas 2 for one replica on each, or vade up without --replicas for one tensor-split pair, or unset VADE_GROUP."),
+            ("one-1", "Group one-1 has 1 machine. Run vade up without --replicas, or unset VADE_GROUP.")] {
+            let mut small = eight(LAYOUTS).unwrap();
+            small.select_group(name).unwrap();
+            let error = small.selected(&UpOptions { replicas: true, replica_sparks: 2, sparks: Some(4), ..UpOptions::default() }).unwrap_err();
+            assert_eq!(error, hint);
+            assert!(!error.contains("--replicas 1") && crate::cli::parse(&["up".into(), "--replicas".into(), "1".into()]).is_err());
+        }
+        // For every group size, each hinted command parses; a group over 24 machines gets no command.
+        for size in 1..=32 {
+            let mut sized = eight(LAYOUTS).unwrap();
+            sized.groups.push(Group { name: "sized".into(), hosts: (1..=size).map(|index| format!("m{index}")).collect(), local_port: 18100, layout: "sized".into() });
+            sized.select_group("sized").unwrap();
+            let error = sized.selected(&UpOptions { replicas: true, replica_sparks: 2, sparks: Some(size + 2), ..UpOptions::default() }).unwrap_err();
+            if size > MAX_FP4_SPARKS {
+                assert_eq!(error, format!("Group sized has {size} machines. FP4-Local supports 1..24 Sparks. Shorten the group, or unset VADE_GROUP."));
+                continue;
+            }
+            let runs = error.split_once(". Run ").and_then(|(_, runs)| runs.strip_suffix(", or unset VADE_GROUP.")).unwrap_or_else(|| panic!("{error}"));
+            for run in runs.split(", or ") {
+                let words: Vec<String> = run.split(' ').skip(1).take_while(|word| !["for", "without"].contains(word)).map(String::from).collect();
+                assert!(words[0] == "up" && crate::cli::parse(&words).is_ok(), "size {size}: {run}");
+            }
+        }
+        assert!(crate::cli::parse(&["up", "--replicas", "13", "--pairs"].map(String::from)).is_err());
         for options in [UpOptions { sparks: Some(2), ..UpOptions::default() }, UpOptions { hosts: vec!["s1".into()], ..UpOptions::default() }] {
             assert!(config.selected(&options).unwrap_err().contains("Remove --sparks and --hosts"));
         }

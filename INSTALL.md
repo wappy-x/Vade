@@ -1164,12 +1164,16 @@ one-Spark server on each of the first two machines (or the machines named in
 `--hosts`). It also starts a local gateway on `local_port` that sends each
 request to the replica with the fewest requests in flight.
 
-The gateway also tries to keep each conversation on one replica. Suppose a
-request's messages, up to and including the last user message, start with the
-same 2048 bytes as an earlier request. Then the gateway sends it to the replica
-that handled the latest such request, as long as that replica is one of the
-least busy. Otherwise the least busy replica wins. The prefix cache is on by
-default, but we haven't confirmed that this routing gives cache hits.
+The gateway also tries to keep each conversation on one replica. Every turn of
+a chat has the same key: its `prompt_cache_key`, else a session header, else
+the model, instructions, system prompt, tools and messages through the first
+user message. A later turn (anything after the first user message: another
+user turn, a reply or a tool result) goes to the replica that served the
+previous turn while that replica has fewer than 8 requests in flight or is
+among the least busy. A first turn uses that replica only while it is among
+the least busy, so identical prompts sent at the same time divide evenly.
+Otherwise the least busy replica wins. The prefix cache is on by default, but
+we haven't confirmed that this routing gives cache hits.
 
 A single chat runs at one-Spark speed; total throughput grows with the number
 of replicas. Every replica is the same one-Spark engine, so a request gets the

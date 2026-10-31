@@ -644,7 +644,7 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
             crate::output::line(format_args!(
                 "Running engine kept. Restart when ready:\n  {group}vade down\n  {group}vade up --hosts {}{}{} --context {} --output {}{}{}{}{}{}",
                 options.hosts.join(","),
-                if options.replicas { format!(" --replicas {}", options.hosts.len()) } else { String::new() },
+                if options.replicas { format!(" --replicas {}{}", options.hosts.len() / options.replica_sparks.max(1), if options.replica_sparks > 1 { " --pairs" } else { "" }) } else { String::new() },
                 if options.mtp_explicit { format!(" --mtp {}", options.mtp) } else { String::new() },
                 options.context,
                 options.output,
