@@ -1,12 +1,12 @@
 # Models
 
-**Six official models have a single-Spark serving path. Flash-Next FP8 has a
-separate two-Spark serving path.**
+**Six official models have a single-Spark serving path. Flash-Next FP8 runs
+on 2, 4 or 6 linked Sparks through `flash-serve`.**
 
 The single-Spark catalog below covers text models from Qwen3, Qwen3.8 and Gemma 4.
 Four more are in development and 29 are planned. Vade retains the official
-checkpoint weights at their published precision. For the current two-Spark
-Flash-Next route, use [INSTALL.md](../../INSTALL.md), the
+checkpoint weights at their published precision. For the current
+Flash-Next routes, use [INSTALL.md](../../INSTALL.md), the
 [Flash server guide](flash-server.md) and its
 [dated benchmark evidence](../../docs/benchmarks.md).
 
@@ -553,15 +553,15 @@ Do not delete or re-download anything without asking.
 
 ## Qwen3.8-Flash-Next-FP8
 
-**Flash-Next FP8 serves HTTP requests across two Sparks through `flash-serve`.**
+**Flash-Next FP8 serves HTTP requests across 2, 4 or 6 Sparks through `flash-serve`.**
 
 The FP8 deployment splits the checkpoint across Sparks. Each rank retains
 its share of the weights; `spark-serve` and the dense-model `tp-serve` are
 different serving paths and cannot load this checkpoint.
 
-Follow [INSTALL.md](../../INSTALL.md) for the two-Spark procedure and the
+Follow the [FP8 install](../../docs/install-fp8.md) for the procedure and the
 [Flash server guide](flash-server.md) for clients. Defaults are 131,072 context
-tokens, a 65,536-token output cap and MTP off. Explicit output limits may equal
+tokens, a 65,536-token output cap and drafting depth 2. Explicit output limits may equal
 context; each reply is capped at the room left after the tokenized prompt. The
 [benchmark record](../../docs/benchmarks.md) separates native engine results
 from the still-unqualified Rust install/start/stop lifecycle. Other rank counts

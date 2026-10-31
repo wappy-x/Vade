@@ -17,7 +17,7 @@ A credit does not mean their code runs in Vade, or that their speed or correctne
 <dt>Main</dt>
 <dd>The merged code on the main branch. Work outside main is labelled <b>development only</b>.</dd>
 <dt>Research engine</dt>
-<dd>The separate two-Spark engine for Qwen3.8-Flash-Next-FP8. The chat server cannot load it.</dd>
+<dd>The Flash-Next engine path for Qwen3.8-Flash-Next-FP8. It began as a separate two-Spark engine; today <code>flash-serve</code> serves FP8 on 2, 4 or 6 Sparks.</dd>
 </dl>
 
 - Vade's own code covers the engine, the GPU kernels, the tokenizer, the Spark-to-Spark transport, the server and the tools.

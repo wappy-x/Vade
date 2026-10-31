@@ -876,10 +876,12 @@ only the processes the CLI recorded, after checking each one's identity.
 This page describes main after v0.1.0, the latest release. Its default is
 FP4-Local on one Spark. The benchmark page also has results from cabled pairs
 and a group of four Sparks, and from rented cloud VMs. On four Sparks,
-FP4-Local on the layer chain gave the same token IDs as on one and two Sparks
-in 66 of 66 responses (the 2026-10-28 cards at `76977df` and the 2026-10-30 morning cards
-at `380d8e5`). FP8 on two and on four Sparks gave the same token IDs in only
-7 of 66 responses in those same cards, so compare FP8 results only at one
+FP4-Local gave the same token IDs as on one and two Sparks in 66 of 66
+responses: on the layer chain in the 2026-10-28 cards at `76977df` and the
+2026-10-30 morning cards at `380d8e5`, and on the split in parts over RDMA in
+the 2026-10-31 morning cards at `dc32b7c` ([results](results.md#token-ids)).
+FP8 on two and on four Sparks gave the same token IDs in only 7 of 66
+responses in those same cards, so compare FP8 results only at one
 Spark count
 ([benchmarks](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)).
 Chains longer than four Sparks
@@ -891,10 +893,10 @@ level.
 - The prefix cache is on by default. It works locally, on the two-Spark
   tensor split and on FP8. FP4-Local on three or more Sparks (the layer chain,
   or the split in parts on four Sparks over RDMA) runs without it.
-- Greedy decoding needs `"temperature": 0` and neutral penalties. On
-  FP4-Local, `"temperature": 0` alone is enough, because the checkpoint's own
-  penalties are neutral. On FP8, send the three neutral penalties too
-  ([OpenAI API](openai-api.md)).
+- On FP4-Local, a request with no sampling field is greedy, and
+  `"temperature": 0` alone is greedy too, because the checkpoint's own
+  penalties are neutral. On FP8, a greedy request needs `"temperature": 0`
+  and the three neutral penalties ([OpenAI API](openai-api.md)).
 - A cancel is handled by the scheduler between model steps, so it waits for
   the GPU work already running
   ([`dispatch.rs`](../engine/crates/serve/src/scheduler/dispatch.rs)).

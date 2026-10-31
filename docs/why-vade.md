@@ -123,10 +123,12 @@ Spark and 0.76 s on two. Four FP4-Local Sparks keep no prefix cache.
 - **Not for images.** Vade reads and writes text only.
 - **Not every checkpoint.** Two checkpoints are supported: FP4-Local and FP8
   of Qwen3.8 Flash-Next.
-- **Not faster on four Sparks for one chat.** With FP4-Local, four Sparks
-  wrote prose at 43.1 tok/s in the 2026-10-30 morning cards at `380d8e5`,
-  against 42.6 on one Spark and 54.9 on two. Four Sparks read a cold 8K
-  prompt sooner than one.
+- **Not fast on every Spark count.** Four Sparks linked by RDMA write one
+  chat faster than two (63.0 against 54.9 tok/s prose in the table above).
+  Three Sparks, five or more, and four over TCP run the layer chain, and one
+  chat there writes at about the speed of one Spark
+  ([what works today](../README.md#what-works-today-and-what-doesnt-yet)).
+  Four FP4-Local Sparks keep no prefix cache.
 
 ## Where to go next
 

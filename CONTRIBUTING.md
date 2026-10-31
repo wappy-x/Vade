@@ -152,8 +152,9 @@ Exactness means **identical token IDs every run on every Spark with the same
 setup**. A request must give the same result whether it runs alone, batched,
 cached or chunked, and drafting ON must match drafting OFF. Check the same
 request across the supported Spark counts too. Similar answer text is not
-enough. When a request doesn't specify sampling, decoding is greedy (always
-the most likely next token).
+enough. With FP4-Local, a request that doesn't specify sampling is decoded
+greedily (always the most likely next token). With FP8, a request is greedy
+only when it sets `temperature` 0 and leaves the penalties neutral.
 
 To keep that true, don't use floating-point atomics, reductions that depend
 on arrival order, or reductions whose split order changes with batching,

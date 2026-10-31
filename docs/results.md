@@ -121,6 +121,7 @@ this repository.
 | --- | --- | --- |
 | One Spark at `--context 262144`: a 64K prompt gave its first token in 32.97 s and a 128K prompt in 71.53 s (means of two runs) | 2026-10-30, main `380d8e5` | Private report `own-rigmark-eod-r2`, context run |
 | Two Sparks at `--context 262144`: a 201,654-token prompt gave its first token in 68.02 and 68.10 s | 2026-10-28, main `285fa8a` | Private report `own-ctx-r1` |
+| Two FP4-Local pairs at once, eight chats on each pair: 465.2 tok/s in total (means of two starts) | 2026-10-30, main `51dce02` (engine `380d8e5`) | Private report `own-two-pairs-r1` ([two pairs at once](benchmarks.md#two-pairs-at-once)) |
 | Bundle steps to `Launch ready`: 101.262 s | 2026-10-28, v0.1.0 bundle (`5a22651`) | Record `2026-10-28_1305_bundle-install_5a22651` |
 | v0.1.0 on one Spark, drafting ON: code 76.7 tok/s, C8 173.9 tok/s | 2026-10-24, `5a22651` | In this repository: [bench/receipts/2026-10-24](../bench/receipts/2026-10-24/README.md) |
 | Rented cloud GB10 VMs downloaded the checkpoint at 8 to 22 MB/s | 2026-10-24 | [Rented cloud GB10 VMs](benchmarks.md#rented-cloud-gb10-vms) |

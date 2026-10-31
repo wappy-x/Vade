@@ -262,7 +262,7 @@ Launch plan: qwen3.8-flash-next-fp4-local
   Concurrent chats  engine-admitted
   Transport         RDMA
   Endpoint          http://localhost:18080/v1
-Start planned for qwen3.8-flash-next-fp4-local on 2 machines. Run the same command without --dry-run to start it.
+Start planned for qwen3.8-flash-next-fp4-local on 2 Sparks. Run the same command without --dry-run to start it.
 ```
 
 To run it for real:

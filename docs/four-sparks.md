@@ -261,8 +261,10 @@ Follow the [world-four golden procedure](../cli/docs/test.md#world-four-goldens)
 means four ranks; goldens are saved reference answers). First, on the same pair,
 confirm that the world-two (two-rank) bytes still match the base. Then capture
 world-four goldens twice, and compare only runs with matching world, topology
-and rank-order settings. Different Spark counts may produce different bytes,
-but each setup must repeat exactly and pass the quality checks. Neither a check
+and rank-order settings. The exactness rule asks for the same token IDs on
+every supported Spark count. FP8 on four Sparks does not meet it yet: it
+matches two Sparks in only 7 of 66 card responses (see the top of this page).
+Each setup must still repeat exactly and pass the quality checks. Neither a check
 on the Mac nor a successful startup shows this.
 
 When the four-rank work is done, run `vade down` with the four-rank

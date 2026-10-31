@@ -256,9 +256,12 @@ and how to change it. These are the defaults you meet first:
   no sampling options is sampled. Send `temperature: 0` with the three
   neutral penalties, or the full set above. The gateways add the full set,
   plus `seed` 20260905, when a request sends no sampling option.
-- **Context 32768 tokens, output up to 8192.** On the Spark, Vade lowers the
-  context (to 16384, then 8192, then 4096) only if the engine refuses it for
-  lack of memory. Vade tells you when it does this. `--context 262144` asks
+- **Context 32768 tokens, output up to 8192** on FP4-Local. FP8 starts with
+  context 131072 and output 65536
+  ([FP8 install](docs/install-fp8.md#defaults-and-drafting)). On the Spark,
+  Vade lowers the context (to 16384, then 8192, then 4096) only if the
+  engine refuses it for lack of memory. Vade tells you when it does this.
+  `--context 262144` asks
   for a larger context. On 2026-10-30 at main `380d8e5`, one Spark served
   `--context 262144`: a 64K-token prompt gave its first token in 32.97 s and
   a 128K-token prompt in 71.53 s (means of two runs), with the same token IDs

@@ -161,13 +161,13 @@ harness development or explicit client configuration.
 ### Build the Mac harness
 
 Use a Mac checkout of the same Vade revision as the installed Sparks. If you
-need a checkout, prepare [repository access](../../INSTALL.md#3-clone-and-build)
-and run the following on the Mac, from a parent directory of your choice.
+need a checkout ([clone and build](../../INSTALL.md#3-clone-and-build)), run
+the following on the Mac, from a parent directory of your choice.
 Enter the commit printed by `git rev-parse HEAD` in the rank-zero checkout:
 
 ```sh
 bash
-git clone --branch main git@github.com:wappy-x/vade.git vade
+git clone --branch main https://github.com/wappy-x/vade.git vade
 cd vade
 read -r -p 'Vade commit running on the Sparks: ' VADE_SPARK_COMMIT
 git checkout --detach "$VADE_SPARK_COMMIT"
