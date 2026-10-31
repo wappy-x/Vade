@@ -31,12 +31,13 @@ Current defaults are defined by the
   one Spark and on the pipeline. The adaptive chooser is enabled by default;
   request depth and resident ceiling are distinct. `--mtp 0` selects plain decoding.
 - The launcher selects `Auto8` for one Spark, the two-Spark tensor split and
-  the four-Spark layer chain. This mode allows greedy drafting with one through
+  four Sparks (the split in parts or the layer chain). This mode allows greedy drafting with one through
   eight active chats. Larger cohorts use pooled plain steps. The cost controller
   can also choose plain steps. With `VADE_MTP_C8=0`, the automatic table allows
   drafting through five chats. The three-Spark chain uses that table by default.
   `VADE_MTP_BATCH` can override the automatic table.
-- The two-Spark tensor split and four-Spark layer chain use a larger shared
+- The two-Spark tensor split and four Sparks (the split in parts or the layer
+  chain) use a larger shared
   token-checking pass by default. Five through eight chats can share a pass of
   up to 32 rows.
   `VADE_MTP_COHORT=off` restores the 16-row controller unless
@@ -317,11 +318,16 @@ layer 2:
 - Plain (drafting-off) steps use the session path instead of pooled decode.
 - The serving metadata (`vade.numerics`) of two or more ranks names the path the
   engine chose in `"path"` and why in `"path_reason"`: `"tensor_split"` (FP4-Local
-  on two Sparks), `"layer_pipeline"` (FP4-Local on three or more), `"rank_path"`
-  (FP4-Local with `--tensor-map`) or `"ring"` (FP8: the tensor split does not serve
-  FP8). The split adds `"tensor_split"` with its recipe: `"experts"`
-  (`"output_columns"`), `"long_prompts"`, `"projection_level"` (`3`), `"wire"`
-  (`"write"`) and `"head"` (`"vocabulary_halves"`).
+  on two Sparks, or on more Sparks over RDMA whose widths cut into whole parts and
+  whose mailbox has room: four for the shipped checkpoint),
+  `"layer_pipeline"` (FP4-Local on three or more without the split),
+  `"rank_path"` (FP4-Local with `--tensor-map`) or `"ring"` (FP8: the tensor split
+  does not serve FP8). The split adds `"tensor_split"` with its recipe:
+  `"experts"` (`"output_columns"`), `"long_prompts"`, `"projection_level"`,
+  `"wire"` and `"head"`. On two Sparks these are
+  `"pipeline_tiles_then_state_handoff"`, `3`, `"write"` and `"vocabulary_halves"`;
+  on more Sparks `"chain_tiles_then_state_gather"`, `2` (the linear-attention
+  heads stay whole), `"relay"` and `"vocabulary_parts"`.
 
 ## Native rank backend
 
@@ -367,8 +373,8 @@ it has no request parser or serve loop. Its original positional form and
 greedy defaults even when checkpoint metadata requests sampling. World one and
 FP8 retain their checkpoint generation defaults. Qualification requests send
 all greedy fields explicitly. This greedy-only rule binds this native rank
-backend only. One Spark, the two-Spark tensor split and the chain sample on
-rank 0 ([Sampling](../../docs/sampling.md)).
+backend only. One Spark, the two-Spark tensor split, the split in parts and the chain
+sample on rank 0 ([Sampling](../../docs/sampling.md)).
 
 Worlds 2/4 refuse `--verify-full` and `FLASH_VERIFY_FULL=1` before rank startup:
 the native shard loader does not implement full payload verification. Use world

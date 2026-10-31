@@ -15,8 +15,8 @@ pub const TILE: u32 = 1 << 29;
 /// Request kind bit: rank 0 runs this one-chat pass's GDN layers by heads, so rank 1 does too;
 /// without it rank 1 keeps the chat's GDN states whole.
 pub const HEADS: u32 = 1 << 28;
-/// Request kind bit: rank 0 splits this plain pass's greedy head by vocabulary halves, so rank 1
-/// projects its half of each chat's last row and sends the argmax rows (execution::head_split).
+/// Request kind bit: rank 0 splits this plain pass's greedy head by vocabulary parts, so ranks 1..
+/// project their part of each chat's last row and send the argmax rows (execution::head_split).
 pub const HEAD: u32 = 1 << 27;
 /// The first layer rank 1 runs: rank 0 keeps the frontend and layer 1's PLE (pp::Stage).
 pub const SPLIT: usize = 2;
@@ -227,15 +227,47 @@ pub struct Path {
 }
 impl Path {
     pub const TENSOR_SPLIT: Self = Self { name: "tensor_split", reason: "FP4-Local on two Sparks" };
-    pub const LAYER_PIPELINE: Self = Self { name: "layer_pipeline", reason: "FP4-Local on three or more Sparks" };
+    /// The split over more than two ranks (TpLayout::for_config cuts every width, RDMA links).
+    pub const TENSOR_PARTS: Self = Self { name: "tensor_split", reason: "FP4-Local on more than two Sparks whose widths cut into whole parts" };
+    pub const LAYER_PIPELINE: Self = Self { name: "layer_pipeline", reason: "FP4-Local on three or more Sparks without the tensor split (TCP, or a world the split does not take)" };
     pub const RANK_PATH: Self = Self { name: "rank_path", reason: "FP4-Local with --tensor-map" };
     pub const RING: Self = Self { name: "ring", reason: "FP8: the tensor split does not serve FP8" };
 }
 static PATH: std::sync::OnceLock<Option<Path>> = std::sync::OnceLock::new();
 /// flash-serve selects the path once at startup, before anything reads it (None on one Spark).
-/// The tensor split is on for the FP4-Local service at world 2 only. A second selection is refused.
+/// The tensor split is on for the FP4-Local service on the pair, and over more ranks over RDMA
+/// when TpLayout::for_config cuts every width. A second selection is refused.
 pub fn select(path: Option<Path>) -> Result<(), String> {
     PATH.set(path).map_err(|_| "the multi-Spark path is already selected".to_string())
+}
+/// The ranks of the pair: every split level runs there (routed experts, projections, GDN heads,
+/// the head and token splits, prompt tiles and their handoffs, the prefix cache). On more ranks
+/// the split cuts the routed and shared experts, the projections and the greedy head into parts;
+/// long cold prompts run as chain tiles and a state gather (next_tp_gather), and every rank runs
+/// the GDN heads whole, with no token split and no prefix cache.
+pub const PAIR: usize = 2;
+static WORLD: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+/// flash-serve sets the split's ranks once at startup, with the path (unset: the pair).
+pub fn select_world(ranks: usize) -> Result<(), String> {
+    WORLD.set(ranks).map_err(|_| "the tensor split's ranks are already selected".to_string())
+}
+/// The split's ranks.
+pub fn world() -> usize {
+    WORLD.get().copied().unwrap_or(PAIR)
+}
+static RANK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+/// flash-serve sets this process's rank of the split once at startup, with the ranks (the head
+/// split's vocabulary part, flash_head_options::bounds_rows).
+pub fn select_rank(rank: usize) -> Result<(), String> {
+    RANK.set(rank).map_err(|_| "the tensor split's rank is already selected".to_string())
+}
+/// This process's rank of the split (None: not selected).
+pub fn rank() -> Option<usize> {
+    RANK.get().copied()
+}
+/// This process serves the tensor split on the pair (every level), not on more ranks.
+pub fn pair() -> bool {
+    on() && world() == PAIR
 }
 /// The selected path (None until flash-serve selects one, and on one Spark).
 pub fn path() -> Option<Path> {
@@ -243,7 +275,7 @@ pub fn path() -> Option<Path> {
 }
 /// Whether this process serves the tensor split.
 pub fn on() -> bool {
-    path() == Some(Path::TENSOR_SPLIT)
+    matches!(path(), Some(p) if p == Path::TENSOR_SPLIT || p == Path::TENSOR_PARTS)
 }
 /// A plain pass of the split whose chats each decode one token runs as captured segments, as a
 /// verify pass does (flash::next_execution): the same arithmetic and mailbox order as the eager
@@ -258,7 +290,8 @@ pub fn plain_segments(split: bool, verify: bool, readback: bool, lens: impl Into
 
 /// The split's geometry, derived from the checkpoint: residual width (HC branches x hidden),
 /// hidden width, routed-expert width (gate/up rows, down K), routed experts per token and the
-/// expert count. Rank r owns half of the expert width and half of the hidden width.
+/// expert count, over `world` ranks. Rank r owns part r of `world` equal parts of the expert
+/// width and of the hidden width (`part`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TpLayout {
     pub hidden: usize,
@@ -266,6 +299,7 @@ pub struct TpLayout {
     pub expert_width: usize,
     pub top_k: usize,
     pub experts: usize,
+    pub world: usize,
 }
 impl TpLayout {
     /// Rows a verify pass may have for its experts to split: the served cohort tick's widest pass
@@ -274,23 +308,62 @@ impl TpLayout {
     /// Rows any other pass (decode, short prompt tiles) may have to split: above 16 rows a prompt
     /// pass runs the prompt expert kernels, which compute whole columns (Workspace::moe_at).
     pub const PROMPT_ROWS: usize = 16;
+    /// The packed BF16 weights' row tile: a rank's output rows start and end on it.
+    pub const ROW_TILE: usize = 64;
     /// The split bound of a pass of this kind.
     pub fn split_rows(verify: bool) -> usize { if verify { Self::ROWS } else { Self::PROMPT_ROWS } }
-    pub fn new(hidden: u64, branches: u64, expert_width: u64, top_k: u64, experts: u64) -> Result<Self, String> {
+    /// The expert and hidden geometry over `world` ranks, refused unless the hidden and expert
+    /// widths cut into whole 16-column K16 tiles and BF16 pairs and each hidden part is whole
+    /// ROW_TILE rows. The other matrices the split cuts are checked by for_config.
+    pub fn new(hidden: u64, branches: u64, expert_width: u64, top_k: u64, experts: u64, world: usize) -> Result<Self, String> {
         let n = |v: u64| usize::try_from(v).map_err(|_| "tensor split geometry overflow".to_string());
         let layout = Self { hidden: n(hidden)?, residual: n(hidden.checked_mul(branches).ok_or("tensor split geometry overflow")?)?,
-            expert_width: n(expert_width)?, top_k: n(top_k)?, experts: n(experts)? };
-        // Halves of whole K16 tiles and BF16 pairs; the finish covers 256 columns per CTA.
-        if layout.hidden == 0 || !layout.hidden.is_multiple_of(32) || layout.expert_width == 0 || !layout.expert_width.is_multiple_of(32)
+            expert_width: n(expert_width)?, top_k: n(top_k)?, experts: n(experts)?, world };
+        // Parts of whole K16 tiles and BF16 pairs; each rank's output rows are whole 64-row tiles
+        // of the packed BF16 shared weights (shared_rows) and whole finish CTAs.
+        let edge = 16usize.checked_mul(world).filter(|&e| e > 0).ok_or("tensor split needs at least one rank")?;
+        if layout.hidden == 0 || !layout.hidden.is_multiple_of(edge) || layout.expert_width == 0 || !layout.expert_width.is_multiple_of(edge)
             || layout.top_k == 0 || layout.experts == 0 || branches == 0 {
-            return Err(format!("tensor split needs even 16-column halves: hidden {hidden}, expert width {expert_width}, top-k {top_k}"));
+            return Err(format!("tensor split needs {world} whole 16-column parts: hidden {hidden}, expert width {expert_width}, top-k {top_k}"));
+        }
+        if !layout.out_cols().is_multiple_of(Self::ROW_TILE) {
+            return Err(format!("tensor split needs {world} whole {}-row parts of hidden {hidden}", Self::ROW_TILE));
         }
         Ok(layout)
     }
+    /// The layout of this checkpoint over `world` ranks: TpLayout::new, and every other matrix the
+    /// split cuts by rows has whole ROW_TILE-row parts: the GDN qkv and z in-projections and the
+    /// QSA q/gate rows, which also hold whole query heads per part (next_tp::tp_half_twins,
+    /// Qsa::project_batch_part). A world that does not cut every one of them has no layout.
+    /// Startup (settings::split_accepts) and NextModel::set_tp both use it.
+    pub fn for_config(c: &engine_model::flash::Config, world: usize) -> Result<Self, String> {
+        let layout = Self::new(c.hidden, c.branches, c.expert_width, c.top_k, c.experts, world)?;
+        let mul = |a: u64, b: u64| a.checked_mul(b).ok_or_else(|| "tensor split geometry overflow".to_string());
+        let value = mul(c.linear_value_heads, c.linear_value_dim)?;
+        let qkv = mul(2, mul(c.linear_key_heads, c.linear_key_dim)?)?.checked_add(value).ok_or("tensor split geometry overflow")?;
+        Self::row_parts(world, [("GDN qkv", qkv), ("GDN z", value), ("QSA q/gate", mul(2, mul(c.query_heads, c.head_dim)?)?)], c.query_heads)?;
+        Ok(layout)
+    }
+    /// Each named row count cuts into `world` whole ROW_TILE-row parts, and the query heads into
+    /// `world` whole parts.
+    fn row_parts<const N: usize>(world: usize, rows: [(&str, u64); N], query_heads: u64) -> Result<(), String> {
+        let tile = u64::try_from(Self::ROW_TILE * world).map_err(|_| "tensor split geometry overflow".to_string())?;
+        for (name, n) in rows {
+            if n == 0 || !n.is_multiple_of(tile) {
+                return Err(format!("tensor split needs {world} whole {}-row parts of the {name} rows ({n})", Self::ROW_TILE));
+            }
+        }
+        if query_heads == 0 || !query_heads.is_multiple_of(world as u64) {
+            return Err(format!("tensor split needs {world} whole parts of {query_heads} query heads"));
+        }
+        Ok(())
+    }
+    /// Rank r's part of `n` columns (or rows): [n r / world, n (r + 1) / world).
+    pub fn part(&self, n: usize, rank: usize) -> std::ops::Range<usize> { n * rank / self.world..n * (rank + 1) / self.world }
     /// Gate/up output columns and down output columns per rank.
-    pub fn mid_cols(&self) -> usize { self.expert_width / 2 }
-    pub fn out_cols(&self) -> usize { self.hidden / 2 }
-    /// One BF16 middle row in 32-bit words (BF16 pairs).
+    pub fn mid_cols(&self) -> usize { self.expert_width / self.world }
+    pub fn out_cols(&self) -> usize { self.hidden / self.world }
+    /// One whole BF16 middle row in 32-bit words (BF16 pairs).
     pub fn mid_words(&self) -> usize { self.expert_width / 2 }
     /// Gate output (BF16 pairs): rank r writes middle columns from mid_cols * r.
     pub fn mid(&self, rank: usize) -> u64 { (rank * self.mid_cols() * 2) as u64 }
@@ -304,12 +377,15 @@ impl TpLayout {
     pub fn out(&self, rank: usize) -> u64 { (rank * self.out_cols() * 4) as u64 }
     /// A world-one launch of `whole` CTAs over `full` output columns, scaled to `own` columns.
     pub fn share(&self, whole: u32, own: usize, full: usize) -> u32 { (whole as usize * own).div_ceil(full).max(1) as u32 }
-    /// Finish CTAs (256 columns each) over one rank's columns.
-    pub fn finish_ctas(&self) -> u32 { self.out_cols().div_ceil(256) as u32 }
-    /// Rank 1's descriptor shift: gate/up start at row mid_cols (K = hidden), down at row
-    /// out_cols (K = expert_width); FP4 nibbles take k / 2 bytes per row, E4M3 scales k / 16.
-    pub fn gate_shift(&self) -> (usize, usize) { (self.mid_cols() * self.hidden / 2, self.mid_cols() * (self.hidden / 16)) }
-    pub fn down_shift(&self) -> (usize, usize) { (self.out_cols() * self.expert_width / 2, self.out_cols() * (self.expert_width / 16)) }
+    /// Finish threads per CTA: the widest of 256, 128 and 64 that divides the rank's columns, so
+    /// the CTAs cover them exactly (the finish kernel bounds only the whole row).
+    pub fn finish_threads(&self) -> u32 { [256, 128, Self::ROW_TILE].into_iter().find(|&t| self.out_cols().is_multiple_of(t)).unwrap_or(Self::ROW_TILE) as u32 }
+    /// Finish CTAs over one rank's columns.
+    pub fn finish_ctas(&self) -> u32 { (self.out_cols() / self.finish_threads() as usize) as u32 }
+    /// Rank r's descriptor shift: gate/up start at row r mid_cols (K = hidden), down at row
+    /// r out_cols (K = expert_width); FP4 nibbles take k / 2 bytes per row, E4M3 scales k / 16.
+    pub fn gate_shift(&self, rank: usize) -> (usize, usize) { (rank * self.mid_cols() * self.hidden / 2, rank * self.mid_cols() * (self.hidden / 16)) }
+    pub fn down_shift(&self, rank: usize) -> (usize, usize) { (rank * self.out_cols() * self.expert_width / 2, rank * self.out_cols() * (self.expert_width / 16)) }
     /// The largest mailbox message: ROWS rows of the residual (the layer-2 post).
     pub fn slot_bytes(&self) -> usize { Self::ROWS * self.residual * 4 }
 }
@@ -317,6 +393,14 @@ impl TpLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One Spark selects no path, world or rank (flash-serve selects them only under the split), so
+    /// world() stays the pair's: the head's result arena keeps main's three floats per pair rank
+    /// (flash::head::Head::arena_lengths), and no part, rank or layout is read.
+    #[test]
+    fn one_spark_selects_no_split_world_or_rank() {
+        assert_eq!((on(), pair(), world(), rank()), (false, false, PAIR, None));
+    }
 
     #[test]
     fn long_split_cuts_cold_long_prompts_before_a_short_tail() {
@@ -367,14 +451,16 @@ mod tests {
     /// at u16 index row*2*(top_k+1)*hidden + rank*2*hidden + col, shared FP32 at word
     /// (row*(top_k+1)+top_k)*hidden + col, output at row*hidden + col) and fp4_bw_down's
     /// (u32 word slot*hidden + col/2) with rank r's offsets: the finish reads exactly the
-    /// columns rank r wrote, and rank 1's shifted shared row stays clear of routed columns.
-    /// Run for the shipped checkpoint geometry and a different one, so nothing is fixed.
+    /// columns rank r wrote, and every later rank's shifted shared row stays clear of routed
+    /// columns. Run for the shipped checkpoint geometry and a different one, on two and four
+    /// ranks, so nothing is fixed.
     #[test]
     fn rank_offsets_address_each_ranks_columns_for_any_geometry() {
-        for layout in [TpLayout::new(2560, 4, 640, 10, 512).unwrap(), TpLayout::new(4096, 2, 1536, 8, 128).unwrap()] {
-            let (h, k) = (layout.hidden, layout.top_k);
+        let layouts = [2, 4].map(|world| [TpLayout::new(2560, 4, 640, 10, 512, world).unwrap(), TpLayout::new(4096, 2, 1536, 8, 128, world).unwrap()]);
+        for layout in layouts.into_iter().flatten() {
+            let (h, k, world) = (layout.hidden, layout.top_k, layout.world);
             let slots = k + 1;
-            for rank in 0..2 {
+            for rank in 0..world {
                 let (routed_u16, routed_words, out_words) = (layout.routed(rank) as usize / 2, layout.routed(rank) as usize / 4, layout.out(rank) as usize / 4);
                 assert_eq!(layout.routed(rank) % 4, 0);
                 for row in [0usize, 3, TpLayout::ROWS - 1] {
@@ -395,21 +481,37 @@ mod tests {
                     assert!(rank == 0 || first >= (row * slots + k - 1) * h + h / 2);
                 }
                 assert_eq!(layout.mid(rank) as usize / 4, rank * layout.mid_cols() / 2);
+                assert_eq!((layout.part(h, rank), layout.part(layout.expert_width, rank).len()), (rank * layout.out_cols()..(rank + 1) * layout.out_cols(), layout.mid_cols()));
+                assert_eq!(layout.gate_shift(rank), (rank * layout.mid_cols() * h / 2, rank * layout.mid_cols() * h / 16));
+                assert_eq!(layout.down_shift(rank).1, rank * layout.out_cols() * layout.expert_width / 16);
             }
-            assert!(layout.finish_ctas() as usize * 256 >= layout.out_cols());
-            assert_eq!(layout.share(40, layout.mid_cols(), layout.expert_width), 20);
-            assert_eq!(layout.share(160, layout.out_cols(), layout.hidden), 80);
+            // Parts of whole K16 tiles that tile each width exactly.
+            assert!(layout.mid_cols().is_multiple_of(16) && layout.out_cols().is_multiple_of(16));
+            assert_eq!((layout.part(h, world - 1).end, layout.mid_cols() * world), (h, layout.expert_width));
+            assert_eq!(layout.finish_ctas() as usize * layout.finish_threads() as usize, layout.out_cols());
+            assert_eq!(layout.share(40, layout.mid_cols(), layout.expert_width) as usize, 40 / world);
+            assert_eq!(layout.share(160, layout.out_cols(), layout.hidden) as usize, 160 / world);
             assert_eq!(layout.share(5, 1, 3), 2);
-            assert_eq!(layout.gate_shift().0, layout.mid_cols() * h / 2);
-            assert_eq!(layout.down_shift().1, layout.out_cols() * layout.expert_width / 16);
             assert_eq!(layout.slot_bytes(), TpLayout::ROWS * layout.residual * 4);
         }
-        assert!(TpLayout::new(2560, 4, 650, 10, 512).is_err());
+        // The two-rank layout is the halves it always was.
+        let pair = TpLayout::new(2560, 4, 640, 10, 512, 2).unwrap();
+        assert_eq!((pair.mid_cols(), pair.out_cols(), pair.mid_words(), pair.gate_shift(1), pair.down_shift(1)),
+            (320, 1280, 320, (320 * 2560 / 2, 320 * 2560 / 16), (1280 * 640 / 2, 1280 * 640 / 16)));
+        // A world that does not cut every width into whole 16-column parts has no layout.
+        for world in [0, 3, 6, 7] { assert!(TpLayout::new(2560, 4, 640, 10, 512, world).is_err(), "{world}"); }
+        assert!(TpLayout::new(2560, 4, 640, 10, 512, 8).is_ok());
+        // Whole 16-column parts that cut a 64-row tile of the shared weights have no layout.
+        assert!(TpLayout::new(2624, 4, 640, 10, 512, 4).is_err() && TpLayout::new(2624, 4, 640, 10, 512, 2).is_err());
+        // The finish CTAs cover each rank's columns exactly: 5 x 256 on the pair, 5 x 128 on quarters.
+        let quarters = TpLayout::new(2560, 4, 640, 10, 512, 4).unwrap();
+        assert_eq!([(pair.finish_ctas(), pair.finish_threads()), (quarters.finish_ctas(), quarters.finish_threads())], [(5, 256), (5, 128)]);
+        assert!(TpLayout::new(2560, 4, 650, 10, 512, 2).is_err());
         // Prompt passes split only below the prompt expert kernels' threshold; verify passes up to the mailbox.
         assert_eq!((TpLayout::split_rows(true), TpLayout::split_rows(false)), (TpLayout::ROWS, TpLayout::PROMPT_ROWS));
         assert!(TpLayout::PROMPT_ROWS <= 16 && TpLayout::PROMPT_ROWS <= TpLayout::ROWS);
-        assert!(TpLayout::new(2570, 4, 640, 10, 512).is_err());
-        assert!(TpLayout::new(2560, 0, 640, 10, 512).is_err());
+        assert!(TpLayout::new(2570, 4, 640, 10, 512, 2).is_err());
+        assert!(TpLayout::new(2560, 0, 640, 10, 512, 2).is_err());
     }
     /// Each request kind bit is its own bit, above the kind numbers and below the pipeline's
     /// release bit (1 << 31).

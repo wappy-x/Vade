@@ -59,11 +59,11 @@ weights: [Check the files](../INSTALL.md#check-the-files) gives the command.
 The engine has two ways to split a model across Sparks:
 
 - the [layer pipeline](../docs/GLOSSARY.md#ho), which FP4-Local runs as a
-  chain on three or more Sparks: each Spark runs its own block of layers and
-  passes the result on;
+  chain on three or more Sparks when the tensor split does not apply: each
+  Spark runs its own block of layers and passes the result on;
 - [tensor parallelism](../docs/GLOSSARY.md#sz), which splits each layer's
-  tensors so several GPUs work on a token together. FP4-Local on two Sparks
-  runs the tensor split, and FP8 runs tensor parallel on two and four
+  tensors so several GPUs work on a token together. FP4-Local on two Sparks,
+  and on four over RDMA, runs the tensor split, and FP8 runs tensor parallel on two and four
   Sparks.
 
 Which models, Spark counts and network transports each path supports differs.

@@ -53,6 +53,26 @@ impl Link {
         })
     }
 }
+impl Link {
+    /// The tensor split's middle over more than two ranks: send pass `raw` (its whole kind word;
+    /// `kind` without flags) down before this rank runs it, as the front posted it. Its ack comes
+    /// back empty (read_ready). A pass whose reply carries rows is refused.
+    pub(super) fn mirror(&mut self, kind: u32, raw: u32, meta: &[[u32; 4]], residual: &[f32]) -> Result<()> {
+        if !matches!(kind, KIND_ROWS_ASYNC | crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF) {
+            return Err("the tensor split over more than two ranks carries only asynchronous passes".into());
+        }
+        let mut rows = self.spare(residual.len());
+        rows.copy_from_slice(residual);
+        // `raw` carries every bit; a chain tile's TILE flag stays off this pass (enqueue adds it).
+        (self.tp_tile, self.tp_seq) = (false, false);
+        self.enqueue(raw, meta, rows)?;
+        self.acks.push_back(None);
+        Ok(())
+    }
+}
+#[cfg(test)]
+#[path = "next_pp_mirror_tests.rs"]
+mod mirror_tests;
 #[cfg(target_os = "linux")]
 impl NextModel<'_> {
     /// Front: read the queued-tile acks already on the socket, so the rows they carry are back

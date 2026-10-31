@@ -13,9 +13,18 @@
 //! is in flight (between passes, between requests, while rank 1 idles). After
 //! any error it fails its mailbox and writes 1 into the peer's ERROR word, which the peer's takes
 //! poll; their timeout stays the backstop, so no rank ever computes on missing rows.
+//!
+//! On more than two ranks (a path) the thread is a relay (spark_gpu_probe::tp_route::Relay): one
+//! queue pair per neighbor, each rank's own messages to both sides and the other ranks' messages
+//! on from its receive slots, with no host copy. It polls with the same backoff and does not park.
 use spark_gpu_probe::driver::TpMailboxHost;
+use spark_gpu_probe::tp_route::Channels;
 #[cfg(target_os = "linux")]
-use spark_gpu_probe::tp_mailbox_host::Ring;
+use spark_gpu_probe::tp_route::Links;
+#[cfg(target_os = "linux")]
+use spark_gpu_probe::tp_mailbox_host::{Ring, TpDoorbell};
+#[cfg(target_os = "linux")]
+use spark_gpu_probe::tp_route::Side;
 #[cfg(target_os = "linux")]
 use std::time::Instant;
 use std::{
@@ -36,6 +45,10 @@ const IDLE_MAX: Duration = Duration::from_micros(100);
 pub enum Wire {
     #[cfg(target_os = "linux")]
     Write(WriteLink),
+    /// More than two ranks: the links to the left and right neighbors (None at an end of the
+    /// path), the path and this rank.
+    #[cfg(target_os = "linux")]
+    Relay([Option<WriteLink>; 2], Links, usize),
 }
 /// The write wire before the mailbox exists: the split's TCP link (for the one key swap)
 /// and the RDMA device, RoCE v2 GID and path MTU code behind its local address.
@@ -121,6 +134,8 @@ pub enum Worker<'m> {
     Unsupported(std::convert::Infallible, std::marker::PhantomData<TpMailboxHost<'m>>),
     #[cfg(target_os = "linux")]
     Write(TpMailboxHost<'m>, WriteLink, bool),
+    #[cfg(target_os = "linux")]
+    Relay(TpMailboxHost<'m>, [Option<WriteLink>; 2], Links, Channels, usize),
 }
 /// The longest a rank waits for its peer to attach its mailbox (both ranks load their models first).
 #[cfg(target_os = "linux")]
@@ -129,19 +144,20 @@ const ATTACH_WAIT: Duration = Duration::from_secs(600);
 #[cfg(target_os = "linux")]
 const ATTACH_POLL: Duration = Duration::from_millis(100);
 impl Wire {
-    /// Both ranks, after set_tp and before any take is queued (no peer traffic here); `lead` is
-    /// rank 0, which serves only once its thread attached.
-    pub fn bind(self, host: TpMailboxHost<'_>, lead: bool) -> Result<Worker<'_>, String> {
+    /// Every rank, after set_tp and before any take is queued (no peer traffic here); `lead` is
+    /// rank 0, which serves only once its thread attached; `layout` is the mailbox's.
+    pub fn bind(self, host: TpMailboxHost<'_>, lead: bool, layout: Channels) -> Result<Worker<'_>, String> {
         #[cfg(not(target_os = "linux"))]
-        { let _ = (host, lead); match self {} }
+        { let _ = (host, lead, layout); match self {} }
         #[cfg(target_os = "linux")]
-        match self {
-            Wire::Write(link) => {
-                let mut host = host;
-                host.set_take_pause(TAKE_PAUSE_NS);
-                host.set_wide(true);
-                host.set_take_ctas(TAKE_CTAS);
-                Ok(Worker::Write(host, link, lead))
+        {
+            let mut host = host;
+            host.set_take_pause(TAKE_PAUSE_NS);
+            host.set_wide(true);
+            host.set_take_ctas(TAKE_CTAS);
+            match self {
+                Wire::Write(link) => Ok(Worker::Write(host, link, lead)),
+                Wire::Relay(links, route, rank) => Ok(Worker::Relay(host, links, route, layout, rank)),
             }
         }
     }
@@ -177,8 +193,56 @@ impl Worker<'_> {
                 attached.store(true, Ordering::Release);
                 run_write(host, rdma, stop)
             }
+            #[cfg(target_os = "linux")]
+            Worker::Relay(mut host, mut links, route, layout, rank) => {
+                let words = host.words();
+                let cancel = || stop.load(Ordering::Relaxed) || failed.load(Ordering::Relaxed);
+                // The lower rank of each link leads its swap. Links attach in their peers' rank
+                // order from the highest down, so a rank attaches its lower neighbor only after its
+                // higher one: rank 0's last attach ends after every link of the path is up, and
+                // rank 0 serves only then (wait_attached).
+                let mut wires: [Option<spark_gpu_probe::tp_rdma::TpRdma<'_>>; 2] = [None, None];
+                let order = attach_order(&route, rank, [links[0].is_some(), links[1].is_some()]);
+                let relay = (|| {
+                    for &i in &order {
+                        let peer = route.neighbor(rank, [Side::Left, Side::Right][i]).ok_or("tensor split relay: link without a neighbor")?;
+                        let link = links[i].as_mut().ok_or("tensor split relay: link missing")?;
+                        wires[i] = Some(link.attach(words, rank < peer, &cancel)?);
+                    }
+                    spark_gpu_probe::tp_route::Relay::new(words, route, layout, rank)
+                })();
+                // A failure fails this mailbox, writes 1 into the ERROR word of each neighbor already
+                // attached (its takes stop at once) and shuts every link down.
+                let mut relay = match relay {
+                    Ok(relay) => relay,
+                    Err(error) => {
+                        host.fail();
+                        for wire in wires.iter_mut().flatten() { host.fail_peer(wire); }
+                        links.iter_mut().flatten().for_each(|l| { let _ = l.link.shutdown(std::net::Shutdown::Both); });
+                        failed.store(true, Ordering::Release);
+                        eprintln!("flashnext tp relay: {error}");
+                        return Err(error);
+                    }
+                };
+                attached.store(true, Ordering::Release);
+                let timing = Ring { active: ACTIVE, spin: DOORBELL_SPIN, idle_max: IDLE_MAX, ..Ring::default() };
+                let [left, right] = &mut wires;
+                let result = relay.run([left.as_mut().map(|w| w as &mut dyn TpDoorbell), right.as_mut().map(|w| w as &mut dyn TpDoorbell)], stop, timing);
+                if let Err(error) = &result { eprintln!("flashnext tp relay: {error}"); }
+                result
+            }
         }
     }
+}
+/// The relay's links (0 left, 1 right; `present` marks those it has) in attach order: the higher
+/// neighbor first. A rank's swap with its lower neighbor then waits until every link above it is
+/// up, so rank 0's swaps end last, on a path and on a ring.
+#[cfg(any(target_os = "linux", test))]
+fn attach_order(route: &spark_gpu_probe::tp_route::Links, rank: usize, present: [bool; 2]) -> Vec<usize> {
+    use spark_gpu_probe::tp_route::Side;
+    let mut order: Vec<usize> = (0..2).filter(|&i| present[i]).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(route.neighbor(rank, [Side::Left, Side::Right][i])));
+    order
 }
 /// Start the wire thread (named vade-tp-wire, so its core time can be read per thread).
 pub fn spawn<'scope, 'env, 'm: 'scope>(scope: &'scope std::thread::Scope<'scope, 'env>, worker: Worker<'m>, stop: &'scope AtomicBool, attached: &'scope AtomicBool,
@@ -252,6 +316,36 @@ mod tests {
             assert_eq!(wait_attached(&attached, &up), Ok(()));
             stop.store(true, Ordering::Relaxed);
         });
+    }
+    /// Every rank swaps its links in attach_order, one swap at a time, and a swap runs once both of
+    /// its ranks reach it. On paths and rings of 2 to 8 ranks every link comes up (no rank waits
+    /// in a cycle), and rank 0's last swap is the last of all: rank 0 serves only when the whole
+    /// path is attached.
+    #[test]
+    fn rank_zero_attaches_last_on_every_path_and_ring() {
+        use spark_gpu_probe::tp_route::{Links, Side};
+        for (count, ring) in (2..=8).flat_map(|n| [(n, false), (n, true)]) {
+            let route = Links::new(count, ring).unwrap();
+            // Each rank's peers in its attach order (a two-rank ring links its pair once).
+            let peers: Vec<Vec<usize>> = (0..count).map(|r| {
+                let sides = [Side::Left, Side::Right].map(|side| route.neighbor(r, side));
+                let present = [sides[0].is_some(), sides[1].is_some() && sides[1] != sides[0]];
+                attach_order(&route, r, present).into_iter().filter_map(|i| sides[i]).collect()
+            }).collect();
+            let (mut next, mut done) = (vec![0usize; count], Vec::new());
+            while let Some((a, b)) = (0..count).find_map(|a| {
+                let b = *peers[a].get(next[a])?;
+                (peers[b].get(next[b]) == Some(&a)).then_some((a, b))
+            }) {
+                next[a] += 1;
+                next[b] += 1;
+                done.push((a.min(b), a.max(b)));
+            }
+            let links = peers.iter().map(Vec::len).sum::<usize>() / 2;
+            assert_eq!(done.len(), links, "{count} ranks, ring {ring}: a swap never ran");
+            let last_zero = done.iter().rposition(|&(a, _)| a == 0).unwrap();
+            assert_eq!(last_zero, links - 1, "{count} ranks, ring {ring}: rank 0 attached before {:?}", &done[last_zero + 1..]);
+        }
     }
     /// The key swap over a socket pair: both ranks up -> both Ok and rank 0 read the
     /// acknowledgement; rank 1's queue pair fails to come up -> rank 1 returns the error without

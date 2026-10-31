@@ -96,7 +96,7 @@ impl<'a> NextModel<'a> {
         let n = gdn.out_cols();
         let mut gated = self.tp.borrow_mut().as_mut().and_then(|s| s.heads.as_mut()).and_then(|h| h.gated.take()).ok_or("GDN gathered rows missing")?;
         let swapped = b.copy_strided(&s.gated, &mut gated, 0, moe.rank * n, n, 2 * n, n, count)
-            .and_then(|()| moe.halves(b, &mut gated, count, 2 * n));
+            .and_then(|()| moe.parts(b, &mut gated, count, 2 * n));
         let x = gated.device_address();
         if let Some(h) = self.tp.borrow_mut().as_mut().and_then(|s| s.heads.as_mut()) { h.gated = Some(gated); }
         swapped?;
@@ -117,7 +117,8 @@ impl<'a> NextModel<'a> {
     pub(in crate::flash) fn tp_gdn_frame<'w>(&self, b: &Backend<'a>, sessions: &mut [&mut NextSession<'a, 'w>], count: usize) -> Result<()> {
         let (rank, mut temp, heads, keys, mut policy, bit) = {
             let mut guard = self.tp.borrow_mut();
-            let Some(s) = guard.as_mut() else { return Ok(()) };
+            // GDN by heads runs on the pair only.
+            let Some(s) = guard.as_mut().filter(|s| s.layout.world == crate::flash_tp_switch::PAIR) else { return Ok(()) };
             let h = s.heads.as_mut().ok_or("GDN head operands missing")?;
             (s.rank, h.temp.take().ok_or("GDN conversion staging missing")?, h.heads, h.keys, std::mem::take(&mut h.policy), s.heads_pass)
         };

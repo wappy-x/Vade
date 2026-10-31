@@ -341,8 +341,9 @@ the agent edits files but does not run commands. The list gives the details.
   and four cloud GB10 VMs at v0.1.0 on 2026-10-24.
 - **The prefix cache is on by default.** With the cache, a request that
   starts like an earlier one does not read that start again. The cache works
-  on one Spark, on two FP4-Local Sparks (the tensor split) and on FP8. The
-  FP4-Local layer chain (three or more Sparks) runs without it. It keeps
+  on one Spark, on two FP4-Local Sparks (the tensor split) and on FP8.
+  FP4-Local on three or more Sparks (the layer chain, or the split in parts on
+  four Sparks over RDMA) runs without it. It keeps
   prompts only for requests that send `cache:true` or a
   `prompt_cache_key`. At startup it takes a memory room of its own; on one
   Spark the room never lowers the number of full-context chats, and on two

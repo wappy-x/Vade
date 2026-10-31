@@ -1002,21 +1002,21 @@ impl<'a, 'w> Qsa<'a, 'w> {
     pub fn weight_bytes(&self) -> usize { self.weight_bytes }
     pub fn kv_bytes(&self) -> usize { 2 * (self.capacity * (self.plan.kv_heads.end - self.plan.kv_heads.start) as usize * DIM * 4).max(4).div_ceil(64) * 64 }
     pub fn index_bytes(&self) -> usize { self.capacity * self.index_width * 4 }
-    /// The tensor split: project_batch with this rank's row half of the q/gate projection (query
-    /// heads [rank * h / 2, (rank + 1) * h / 2), a head's q and gate rows adjacent) into its columns
-    /// of the pass's q/gate rows, index, k and v whole, in the Next group's order with its per-row
-    /// chains. Some(q/gate width) when run, None off the Next group path.
-    pub(super) fn project_batch_half(&self, b: &Backend<'_>, batch: &mut QsaBatch<'_>, input: &DeviceVector<'_>, count: usize,
-        rank: usize) -> Result<Option<usize>> {
+    /// The tensor split: project_batch with this rank's row part of the q/gate projection (query
+    /// heads [rank * h / world, (rank + 1) * h / world), a head's q and gate rows adjacent) into its
+    /// columns of the pass's q/gate rows, index, k and v whole, in the Next group's order with its
+    /// per-row chains. Some(q/gate width) when run, None off the Next group path.
+    pub(super) fn project_batch_part(&self, b: &Backend<'_>, batch: &mut QsaBatch<'_>, input: &DeviceVector<'_>, count: usize,
+        rank: usize, world: usize) -> Result<Option<usize>> {
         if !self.next || self.native.is_some() { return Ok(None); }
         let heads = (self.plan.query_heads.end - self.plan.query_heads.start) as usize;
         let keys = (self.plan.kv_heads.end - self.plan.kv_heads.start) as usize;
         let n = heads * 2 * DIM;
-        if heads % 2 != 0 || (n / 2) % 64 != 0 { return Ok(None); }
+        if !heads.is_multiple_of(world) || !(n / world).is_multiple_of(64) { return Ok(None); }
         batch.index.resize_within_capacity(count * INDEX)?;
         let whole = |w: u64, y: u64, rows: usize| (w, y, rows, rows);
         super::blocks::next_rows_group_at(b, input.device_address(), HIDDEN, count, [
-            (self.qg + (rank * n / 2 * HIDDEN * 2) as u64, batch.qg.device_address() + (rank * n / 2 * 4) as u64, n / 2, n),
+            (self.qg + (rank * n / world * HIDDEN * 2) as u64, batch.qg.device_address() + (rank * n / world * 4) as u64, n / world, n),
             whole(self.index, batch.index.device_address(), INDEX),
             whole(self.k, batch.k.device_address(), keys * DIM),
             whole(self.v, batch.v.device_address(), keys * DIM)])?;

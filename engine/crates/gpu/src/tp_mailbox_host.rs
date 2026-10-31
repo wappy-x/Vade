@@ -160,7 +160,7 @@ impl Default for Ring {
     }
 }
 /// Spin until `spin` has passed since `since`, then yield the core once and restart the count.
-fn pace(since: &mut Instant, spin: Duration) {
+pub(crate) fn pace(since: &mut Instant, spin: Duration) {
     if since.elapsed() < spin { std::hint::spin_loop(); } else { std::thread::yield_now(); *since = Instant::now(); }
 }
 impl TpMailboxHost<'_> {

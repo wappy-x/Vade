@@ -12,6 +12,14 @@
 //! layer-SPLIT residual and both halves) rides the in-graph mailbox (spark-gpu-probe
 //! TpMailbox), so split passes keep their captured verify segments. All widths come from
 //! the checkpoint (flash_tp_switch::TpLayout).
+//!
+//! On more ranks (flash_tp_switch::world, a path of four) ranks 1.. mirror every pass as rank 1
+//! does, each rank computes its column part of every routed expert and, on one-chat passes, its
+//! row part of the projections (GDN qkv and z, both out projections, QSA q/gate), as `parts`: one
+//! put and a take from each other rank, relayed along the path by the wire threads. Long prompts
+//! run as chain tiles and a state gather (next_tp_gather.rs). The head split takes vocabulary
+//! parts (head_split.rs). Everything else runs whole on every rank: the GDN heads, the token
+//! split and the prefix cache stay on the pair (flash_tp_switch::pair).
 use super::*;
 use crate::flash_tp_switch::{SeqMode, TpLayout};
 use std::time::Instant;
@@ -19,16 +27,22 @@ use std::time::Instant;
 mod heads;
 #[path = "next_tp_seq.rs"]
 mod seq;
+#[path = "next_tp_gather.rs"]
+mod gather;
 
 pub(super) use crate::flash_tp_switch::SPLIT;
 
-/// The checkpoint's split geometry.
+/// The pair's ranks (the tests' geometry).
+#[cfg(test)]
+const WORLD: usize = crate::flash_tp_switch::PAIR;
+
+/// The checkpoint's split geometry over the selected ranks.
 pub(super) fn layout(config: &engine_model::flash::Config) -> Result<TpLayout> {
-    TpLayout::new(config.hidden, config.branches, config.expert_width, config.top_k, config.experts)
+    TpLayout::for_config(config, crate::flash_tp_switch::world())
 }
 
-/// Rank 1's expert descriptors: the same matrices from row mid_cols (gate, up) and row
-/// out_cols (down), appended after the world-one descriptors of each layer.
+/// Ranks 1.. expert descriptors: the same matrices from row r mid_cols (gate, up) and row
+/// r out_cols (down), one table per rank appended after the world-one descriptors of each layer.
 pub(super) fn shifted(descriptors: &mut Vec<spark_gpu_probe::driver::fp4_abi::Expert>, layout: &TpLayout) {
     use spark_gpu_probe::driver::fp4_abi::Matrix;
     let shift = |m: Matrix, (weights, scales): (usize, usize)| Matrix {
@@ -37,24 +51,29 @@ pub(super) fn shifted(descriptors: &mut Vec<spark_gpu_probe::driver::fp4_abi::Ex
         global_scale: m.global_scale,
     };
     let base = descriptors.len();
-    for i in 0..base {
-        let d = descriptors[i];
-        descriptors.push(spark_gpu_probe::driver::fp4_abi::Expert {
-            gate: shift(d.gate, layout.gate_shift()),
-            up: shift(d.up, layout.gate_shift()),
-            down: shift(d.down, layout.down_shift()),
-            ..d
-        });
+    for rank in 1..layout.world {
+        for i in 0..base {
+            let d = descriptors[i];
+            descriptors.push(spark_gpu_probe::driver::fp4_abi::Expert {
+                gate: shift(d.gate, layout.gate_shift(rank)),
+                up: shift(d.up, layout.gate_shift(rank)),
+                down: shift(d.down, layout.down_shift(rank)),
+                ..d
+            });
+        }
     }
 }
 
-/// This rank's half and its mailbox counters (NextModel::tp_box holds the mailbox; the proxy
-/// thread owns the RDMA wire). Messages count from 1 per direction in u64.
+/// This rank's part and its mailbox counters (NextModel::tp_box holds the mailbox; the proxy
+/// thread owns the RDMA wire). Messages count from 1 per origin rank in u64.
 pub(super) struct Swap<'a> {
     rank: usize,
     layout: TpLayout,
     sent: u64,
-    taken: u64,
+    /// Messages taken from each origin rank (this rank's entry stays 0).
+    got: Vec<u64>,
+    /// The pair's other rank: the levels that run on the pair only exchange with it.
+    peer: usize,
     /// A take waits at most this long (pp::LINK_TIMEOUT), then fails the pass.
     limit_ns: u64,
     /// Rank 1: this pass's residual arrives in the mailbox (the request's MAIL bit).
@@ -67,10 +86,11 @@ pub(super) struct Swap<'a> {
     handoff: Vec<u32>,
     /// Rank 0: the current pass runs as a pipeline tile (tp_part).
     front_tile: bool,
-    /// This rank's row halves of the projections' MXFP8 twins (copied from the loaded twins, so
+    /// This rank's row parts of the projections' MXFP8 twins (copied from the loaded twins, so
     /// the same bytes): the GDN in-projections (tp_gdn_project), the mixers' out projections
-    /// (tp_out_project) and the shared expert's down projection (TpMoe::shared_rows). The GDN
-    /// mixers of one-chat split passes run by heads (next_tp_heads.rs).
+    /// (tp_out_project), the QSA q/gate projection (tp_qsa_project) and the shared expert's down
+    /// projection (TpMoe::shared_rows). On the pair the GDN mixers of one-chat split passes run
+    /// by heads (next_tp_heads.rs).
     _twins: Vec<blocks::Mx8Twin<'a>>,
     /// This rank's GDN head operands and buffers.
     heads: Option<heads::GdnHeads<'a>>,
@@ -85,6 +105,20 @@ pub(super) struct Swap<'a> {
     verify_pass: bool,
     /// Token-split prompt passes (next_tp_seq.rs).
     seq: seq::Seq<'a>,
+}
+
+impl Swap<'_> {
+    /// The other ranks, nearest first on the path (each part arrives after its hops).
+    fn origins(&self) -> Vec<usize> {
+        let mut origins: Vec<usize> = (0..self.layout.world).filter(|&o| o != self.rank).collect();
+        origins.sort_by_key(|&o| o.abs_diff(self.rank));
+        origins
+    }
+    /// The sequence of the next message to take from `origin`.
+    fn take(&mut self, origin: usize) -> u64 {
+        self.got[origin] += 1;
+        self.got[origin]
+    }
 }
 
 /// One routed MoE layer's split on this rank (Workspace::moe_at offsets and swaps).
@@ -104,14 +138,15 @@ impl<'a> TpMoe<'_, 'a> {
     pub(super) fn routed(self) -> u64 { self.layout.routed(self.rank) }
     pub(super) fn out(self) -> u64 { self.layout.out(self.rank) }
     pub(super) fn finish_ctas(self) -> u32 { self.layout.finish_ctas() }
+    pub(super) fn finish_threads(self) -> u32 { self.layout.finish_threads() }
     /// World-one gate / down CTAs scaled to this rank's share of the output columns.
     pub(super) fn gate_ctas(self, whole: u32) -> u32 { self.layout.share(whole, self.layout.mid_cols(), self.layout.expert_width) }
     pub(super) fn down_ctas(self, whole: u32) -> u32 { self.layout.share(whole, self.layout.out_cols(), self.layout.hidden) }
     pub(super) fn swap_mid(self, b: &Backend<'a>, mid: &mut DeviceVector<'a>, count: usize) -> Result<()> {
-        self.halves(b, mid, count * self.layout.top_k, self.layout.mid_words())
+        self.parts(b, mid, count * self.layout.top_k, self.layout.mid_words())
     }
     pub(super) fn swap_out(self, b: &Backend<'a>, block: &mut DeviceVector<'a>, count: usize) -> Result<()> {
-        self.halves(b, block, count, self.layout.hidden)
+        self.parts(b, block, count, self.layout.hidden)
     }
     /// The shared expert's down projection ([hidden][k] BF16 at `weight`, output `y` as moe_at
     /// lays it out): this rank's output rows [out_cols r, out_cols (r + 1)) as (weight, y, rows),
@@ -120,83 +155,98 @@ impl<'a> TpMoe<'_, 'a> {
         let start = self.rank * self.layout.out_cols();
         (weight + (start * k * 2) as u64, y + (start * 4) as u64, self.layout.out_cols())
     }
-    /// Publish this rank's half of each of `rows` rows of `width` words and take the peer's,
-    /// both queued in the stream.
-    fn halves(self, b: &Backend<'a>, vector: &mut DeviceVector<'a>, rows: usize, width: usize) -> Result<()> {
+    /// Publish this rank's part of each of `rows` rows of `width` words and take every other
+    /// rank's, all queued in the stream (on the pair: its half, then the peer's).
+    fn parts(self, b: &Backend<'a>, vector: &mut DeviceVector<'a>, rows: usize, width: usize) -> Result<()> {
         let mut guard = self.swap.borrow_mut();
         let s = guard.as_mut().ok_or("tensor split missing")?;
-        let half = width / 2;
+        let part = width / s.layout.world;
         s.sent += 1;
-        s.taken += 1;
-        b.tp_mailbox_put(self.mailbox, vector, rows, width, half, s.rank * half, s.sent)?;
-        b.tp_mailbox_take(self.mailbox, vector, rows, width, half, (1 - s.rank) * half, s.taken, s.limit_ns)
+        b.tp_mailbox_put(self.mailbox, vector, rows, width, part, s.rank * part, s.sent)?;
+        self.take_parts(b, s, vector, rows, width)
     }
-    /// `halves` for two vectors of one launch: both puts, then both takes, so the second
+    /// Take every other rank's next message into its part of `vector` (as `parts` lays it out).
+    fn take_parts(self, b: &Backend<'a>, s: &mut Swap<'a>, vector: &mut DeviceVector<'a>, rows: usize, width: usize) -> Result<()> {
+        let part = width / s.layout.world;
+        for origin in s.origins() {
+            let seq = s.take(origin);
+            let channel = self.mailbox.layout().channel(origin, s.rank);
+            b.tp_mailbox_take_from(self.mailbox, vector, rows, width, part, origin * part, channel, seq, s.limit_ns)?;
+        }
+        Ok(())
+    }
+    /// `parts` for two vectors of one launch: both puts, then both takes, so the second
     /// message travels while the first is awaited. With the pass's residual message still
     /// unread by the peer, three are in flight, below the mailbox's four slots.
-    fn halves_pair(self, b: &Backend<'a>, [(x, xw), (y, yw)]: [(&mut DeviceVector<'a>, usize); 2], rows: usize) -> Result<()> {
+    fn parts_pair(self, b: &Backend<'a>, [(x, xw), (y, yw)]: [(&mut DeviceVector<'a>, usize); 2], rows: usize) -> Result<()> {
         let mut guard = self.swap.borrow_mut();
         let s = guard.as_mut().ok_or("tensor split missing")?;
-        let (sent, taken, rank) = (s.sent, s.taken, s.rank);
+        let (sent, rank, world) = (s.sent, s.rank, s.layout.world);
         s.sent += 2;
-        s.taken += 2;
-        b.tp_mailbox_put(self.mailbox, x, rows, xw, xw / 2, rank * xw / 2, sent + 1)?;
-        b.tp_mailbox_put(self.mailbox, y, rows, yw, yw / 2, rank * yw / 2, sent + 2)?;
-        b.tp_mailbox_take(self.mailbox, x, rows, xw, xw / 2, (1 - rank) * xw / 2, taken + 1, s.limit_ns)?;
-        b.tp_mailbox_take(self.mailbox, y, rows, yw, yw / 2, (1 - rank) * yw / 2, taken + 2, s.limit_ns)
+        b.tp_mailbox_put(self.mailbox, x, rows, xw, xw / world, rank * xw / world, sent + 1)?;
+        b.tp_mailbox_put(self.mailbox, y, rows, yw, yw / world, rank * yw / world, sent + 2)?;
+        self.take_parts(b, s, x, rows, xw)?;
+        self.take_parts(b, s, y, rows, yw)
     }
 }
 
 impl<'a> NextModel<'a> {
-    /// Both ranks, before serving: this rank's half and the mailbox. The proxy thread then takes
-    /// the mailbox's one host endpoint (tp_mailbox_host).
+    /// Every rank, before serving: this rank's part and the mailbox. The proxy thread then takes
+    /// the mailbox's one host endpoint (tp_mailbox_host). `link`: the split's TCP link to rank 0
+    /// (rank 0: to rank 1), which carries the pair's state handoffs.
     pub fn set_tp(&self, b: &Backend<'a>, rank: usize, link: std::net::TcpStream) -> Result<()> {
-        if rank > 1 || !crate::flash_tp_switch::on() {
-            return Err("the tensor split needs world 2 and rank 0 or 1".into());
-        }
         let layout = layout(&self.checkpoint.config)?;
+        if rank >= layout.world || !crate::flash_tp_switch::on() {
+            return Err(format!("the tensor split has no rank {rank} of {}", layout.world));
+        }
         // The world-one MoE path this split reuses sizes its buffers from the same geometry.
         if layout.hidden != H || layout.residual != W || layout.experts != EXPERTS {
             return Err(format!("tensor split geometry {layout:?} differs from the loaded world-one layout"));
         }
-        if self.tp_box.set(b.tp_mailbox(seq::slot_bytes(layout.slot_bytes()))?).is_err() {
+        // The pair's token split moves state in large slots; more ranks move only expert parts and
+        // the residual, through relays (spark_gpu_probe::tp_route).
+        let pair = crate::flash_tp_switch::pair();
+        let words = if pair { seq::slot_bytes(layout.slot_bytes()) } else { layout.slot_bytes() } / 4;
+        let channels = spark_gpu_probe::tp_route::Channels::new(&spark_gpu_probe::tp_route::Links::new(layout.world, false)?, words)?;
+        if self.tp_box.set(b.tp_mailbox_routed(channels)?).is_err() {
             return Err("the tensor split mailbox is already set".into());
         }
-        let twins = self.tp_half_twins(b, rank)?;
-        let heads = Some(heads::GdnHeads::new(self, b, rank)?);
-        *self.tp.borrow_mut() = Some(Swap { rank, layout, sent: 0, taken: 0, limit_ns: pp::LINK_TIMEOUT.as_nanos() as u64,
+        let twins = self.tp_half_twins(b, rank, layout.world)?;
+        let heads = if pair { Some(heads::GdnHeads::new(self, b, rank)?) } else { None };
+        *self.tp.borrow_mut() = Some(Swap { rank, layout, sent: 0, got: vec![0; layout.world], peer: usize::from(rank == 0),
+            limit_ns: pp::LINK_TIMEOUT.as_nanos() as u64,
             mail_pass: false, tile_pass: false, link, handoff: Vec::new(), front_tile: false, _twins: twins, heads, heads_pass: false,
             head_pass: false, verify_pass: false, seq: Default::default() });
-        eprintln!("flashnext tp rank={rank} split={SPLIT} rows<={} (verify) <={} (other) layout={layout:?}", TpLayout::ROWS,
+        eprintln!("flashnext tp rank={rank} split={SPLIT} rows<={} (verify) <={} (other) layout={layout:?} mailbox={channels:?}", TpLayout::ROWS,
             TpLayout::PROMPT_ROWS);
         Ok(())
     }
-    /// This rank's row half [rank * n / 2, (rank + 1) * n / 2) of every split layer's GDN z
-    /// in-projection, GDN and QSA out projection, QSA q/gate projection and shared expert down
-    /// projection twin, the qkv twin's rows of this rank's q, k and v heads, and the qkv twin's
-    /// row half. Rows are 64-row blocks first in both the packed BF16 order
+    /// This rank's row part [rank * n / world, (rank + 1) * n / world) of every split layer's GDN
+    /// z and qkv in-projection, GDN and QSA out projection, QSA q/gate projection and shared
+    /// expert down projection twin; on the pair also the qkv twin's rows of this rank's q, k and
+    /// v heads (the GDN head split). Rows are 64-row blocks first in both the packed BF16 order
     /// and the twin's bytes, and the twin's scales are [row / 8][K / 32][8], so a row range is two
     /// contiguous ranges of the loaded twin, registered under its BF16 rows' address.
-    fn tp_half_twins(&self, b: &Backend<'a>, rank: usize) -> Result<Vec<blocks::Mx8Twin<'a>>> {
+    fn tp_half_twins(&self, b: &Backend<'a>, rank: usize, world: usize) -> Result<Vec<blocks::Mx8Twin<'a>>> {
         let c = &self.checkpoint.config;
         let hidden = c.hidden as usize;
         let value = (c.linear_value_heads * c.linear_value_dim) as usize;
         let keys = (c.linear_key_heads * c.linear_key_dim) as usize;
         let rows = [2 * keys + value, value];
-        // The split also cuts BF16 matrices of `hidden` rows at their row half without a twin.
-        if !(hidden / 2).is_multiple_of(64) { return Err(format!("tensor split: hidden {hidden} has no 64-row halves")); }
+        // The split also cuts BF16 matrices of `hidden` rows at their row part without a twin.
+        if !(hidden / world).is_multiple_of(64) { return Err(format!("tensor split: hidden {hidden} has no 64-row parts")); }
         let mut twins = Vec::new();
         for li in SPLIT..self.gdn_proj.len() {
             // (BF16 matrix, rows, K, first row, rows of this rank); absent matrices are 0.
-            let half = |w: u64, n: usize, k: usize| (w, n, k, rank * n / 2, n / 2);
+            let part = |w: u64, n: usize, k: usize| (w, n, k, rank * n / world, n / world);
             let (qkv, n) = (self.gdn_proj[li][0], rows[0]);
-            let split = [(qkv, n, hidden, rank * keys / 2, keys / 2), (qkv, n, hidden, keys + rank * keys / 2, keys / 2),
-                (qkv, n, hidden, 2 * keys + rank * value / 2, value / 2), half(self.gdn_proj[li][1], value, hidden),
-                // Passes before a chat's states become halves run the qkv row half.
-                half(qkv, n, hidden),
-                half(self.gdn_proj[li][4], hidden, value), half(self.qsa_proj[li][4], hidden, (c.query_heads * c.head_dim) as usize),
-                half(self.qsa_proj[li][0], (c.query_heads * 2 * c.head_dim) as usize, hidden),
-                half(self.moe[li].shared[2], hidden, c.shared_width as usize)];
+            let mut split = if world == crate::flash_tp_switch::PAIR { vec![(qkv, n, hidden, rank * keys / 2, keys / 2),
+                (qkv, n, hidden, keys + rank * keys / 2, keys / 2), (qkv, n, hidden, 2 * keys + rank * value / 2, value / 2)] } else { Vec::new() };
+            // On the pair, passes before a chat's states become halves run the qkv row half.
+            split.extend([part(self.gdn_proj[li][1], value, hidden), part(qkv, n, hidden),
+                part(self.gdn_proj[li][4], hidden, value), part(self.qsa_proj[li][4], hidden, (c.query_heads * c.head_dim) as usize),
+                part(self.qsa_proj[li][0], (c.query_heads * 2 * c.head_dim) as usize, hidden),
+                part(self.moe[li].shared[2], hidden, c.shared_width as usize)]);
             for (w, n, k, start, part) in split {
                 if w == 0 { continue; }
                 let Some((full, r, cols)) = crate::flash_mx8_registry::get(w, n).filter(|&(_, r, cols)| (r, cols) == (n, k)) else { continue };
@@ -215,9 +265,9 @@ impl<'a> NextModel<'a> {
         b.synchronize()?;
         Ok(twins)
     }
-    /// A split layer at <= ROWS rows of one chat: each rank runs its row half of the GDN
+    /// A split layer at <= ROWS rows of one chat: each rank runs its row part of the GDN
     /// qkv and z in-projections (same per-row chains and merge as the whole launch) into its
-    /// columns of the full outputs, a and b whole, then the ranks swap the halves as raw bits.
+    /// columns of the full outputs, a and b whole, then the ranks gather the parts as raw bits.
     /// False: not split here (the caller runs the whole projection).
     pub(super) fn tp_gdn_project(&self, b: &Backend<'a>, li: usize, gdn: &gdn::Gdn<'a, '_>, s: &mut gdn::GdnScratch<'a>,
         input: &DeviceVector<'a>, count: usize, chats: usize) -> Result<bool> {
@@ -227,41 +277,46 @@ impl<'a> NextModel<'a> {
         let Some(moe) = self.tp_moe(li, count) else { return Ok(false) };
         if gdn.is_half() { return self.tp_heads_project(b, li, moe.rank, s, input, count).map(|()| true); }
         let ([qkv, z, a, bb], k) = gdn.projection();
-        let half = |(w, n): (u64, usize), y: u64| (w + (moe.rank * n / 2 * k * 2) as u64, y + (moe.rank * n / 2 * 4) as u64, n / 2, n);
-        blocks::next_rows_group_at(b, input.device_address(), k, count, [half(qkv, s.qkv.device_address()), half(z, s.z.device_address()),
+        let world = moe.layout.world;
+        let part = |(w, n): (u64, usize), y: u64| (w + (moe.rank * n / world * k * 2) as u64, y + (moe.rank * n / world * 4) as u64, n / world, n);
+        blocks::next_rows_group_at(b, input.device_address(), k, count, [part(qkv, s.qkv.device_address()), part(z, s.z.device_address()),
             (a.0, s.a.device_address(), a.1, a.1), (bb.0, s.b.device_address(), bb.1, bb.1)])?;
-        moe.halves_pair(b, [(&mut s.qkv, qkv.1), (&mut s.z, z.1)], count)?;
+        moe.parts_pair(b, [(&mut s.qkv, qkv.1), (&mut s.z, z.1)], count)?;
         Ok(true)
     }
-    /// A split layer at <= ROWS rows of one chat: each rank runs its row half
-    /// [rank * n / 2, (rank + 1) * n / 2) of the mixer's out projection ([n][k] BF16 at `weight`
-    /// over the `x` rows, n = hidden; same per-row chains and merge as the whole launch) into its
-    /// columns of `output`, then the ranks swap the halves as raw bits (one message per layer).
+    /// A split layer at <= ROWS rows of one chat: each rank runs its row part
+    /// [rank * n / world, (rank + 1) * n / world) of the mixer's out projection ([n][k] BF16 at
+    /// `weight` over the `x` rows, n = hidden; same per-row chains and merge as the whole launch)
+    /// into its columns of `output`, then the ranks gather the parts as raw bits (one message per layer).
     /// False: not split here (the caller projects whole).
     pub(super) fn tp_out_project(&self, b: &Backend<'a>, li: usize, (weight, x, k): (u64, u64, usize), output: &mut DeviceVector<'a>,
         count: usize, chats: usize) -> Result<bool> {
-        // One chat only, as tp_gdn_project: wider passes exchange larger halves.
+        // One chat only, as tp_gdn_project: wider passes exchange larger parts.
         if chats != 1 { return Ok(false); }
         let Some(moe) = self.tp_moe(li, count) else { return Ok(false) };
         let (n, half) = (moe.layout.hidden, moe.layout.out_cols());
         blocks::next_rows_strided(b, weight + (moe.rank * half * k * 2) as u64, x, output.device_address() + (moe.rank * half * 4) as u64,
             half, k, count, n)?;
-        moe.halves(b, output, count, n)?;
+        moe.parts(b, output, count, n)?;
         Ok(true)
     }
-    /// A split layer at <= ROWS rows of one chat: each rank runs its row half of
-    /// the served QSA q/gate projection (Qsa::project_batch_half), then the ranks swap the halves
+    /// A split layer at <= ROWS rows of one chat: each rank runs its row part of
+    /// the served QSA q/gate projection (Qsa::project_batch_part), then the ranks gather the parts
     /// as raw bits. False: the caller projects whole.
     pub(super) fn tp_qsa_project(&self, b: &Backend<'a>, li: usize, q: &Qsa<'a, '_>, batch: &mut crate::flash::qsa::QsaBatch<'a>,
         input: &DeviceVector<'a>, count: usize, chats: usize) -> Result<bool> {
         if chats != 1 { return Ok(false); }
         let Some(moe) = self.tp_moe(li, count) else { return Ok(false) };
-        let Some(n) = q.project_batch_half(b, batch, input, count, moe.rank)? else { return Ok(false) };
-        moe.halves(b, Qsa::batch_qg(batch), count, n)?;
+        let Some(n) = q.project_batch_part(b, batch, input, count, moe.rank, moe.layout.world)? else { return Ok(false) };
+        moe.parts(b, Qsa::batch_qg(batch), count, n)?;
         Ok(true)
     }
     pub(super) fn tp_on(&self) -> bool {
         self.tp.borrow().is_some()
+    }
+    /// The split runs on the pair, with every level (flash_tp_switch::pair).
+    pub(super) fn tp_pair(&self) -> bool {
+        self.tp.borrow().as_ref().is_some_and(|s| s.layout.world == crate::flash_tp_switch::PAIR)
     }
     /// A restored prefix is whole on both ranks. Its slot has no earlier transfer debt.
     pub(super) fn tp_prefix_restored(&self, slot: u32) {
@@ -269,6 +324,10 @@ impl<'a> NextModel<'a> {
             s.handoff.retain(|&held| held != slot);
             s.seq.chats.settled(&[slot]);
         }
+    }
+    /// This rank's mailbox layout (the relay's channels and slots).
+    pub fn tp_mailbox_layout(&self) -> Option<spark_gpu_probe::tp_route::Channels> {
+        self.tp_box.get().map(|m| m.layout())
     }
     /// The proxy thread's endpoint of this rank's mailbox (handed out once).
     pub fn tp_mailbox_host(&self) -> Option<spark_gpu_probe::driver::TpMailboxHost<'_>> {
@@ -312,9 +371,15 @@ impl<'a> NextModel<'a> {
     pub(super) fn tp_set_head_pass(&self, on: bool) {
         if let Some(s) = self.tp.borrow_mut().as_mut().filter(|s| s.rank == 0) { s.head_pass = on; }
     }
-    /// Rank 1: the first layer of the current request (24 for a pipeline tile, else SPLIT).
+    /// Ranks 1..: the first layer of the current request (its chain tile layers' start for a
+    /// pipeline tile, 24 on the pair; else SPLIT).
     pub(super) fn tp_back_split(&self) -> Option<usize> {
-        self.tp.borrow().as_ref().filter(|s| s.tile_pass).map(|s| if s.seq.chats.mode == SeqMode::Export { SPLIT } else { LAYERS / 2 })
+        self.tp.borrow().as_ref().filter(|s| s.tile_pass)
+            .map(|s| if s.seq.chats.mode == SeqMode::Export { SPLIT } else { gather::tile_layers(s.rank, s.layout.world).start })
+    }
+    /// Ranks 1.., a chain tile: the end of this rank's tile layers (None: every layer to the end).
+    pub(super) fn tp_back_end(&self) -> Option<usize> {
+        self.tp.borrow().as_ref().filter(|s| s.tile_pass && s.seq.chats.mode != SeqMode::Export).map(|s| gather::tile_layers(s.rank, s.layout.world).end)
     }
     /// Rank 0, before a pass. Mailbox mode: a prompt tile of more than ROWS rows runs as a
     /// pipeline tile (Part::Front at layer 24; returns Some(24)) and its chats owe a state
@@ -347,7 +412,7 @@ impl<'a> NextModel<'a> {
         s.verify_pass = verify;
         if tile {
             for chat in sessions.iter() { if !s.handoff.contains(&chat.slot) { s.handoff.push(chat.slot); } }
-            return Ok(Some(LAYERS / 2));
+            return Ok(Some(gather::tile_layers(0, s.layout.world).end));
         }
         let owed: Vec<usize> = (0..sessions.len()).filter(|&i| sessions[i].pos > 0 && s.handoff.contains(&sessions[i].slot)).collect();
         if owed.is_empty() {
@@ -366,7 +431,8 @@ impl<'a> NextModel<'a> {
         for (i, chat) in sessions.iter_mut().enumerate() { if owed.contains(&i) { chats.push(chat); } }
         // The debt is settled only by a whole exchange: a failure leaves the chats' state partly
         // installed, so they stop being reusable and the link stops (the back sees it too).
-        if let Err(error) = self.tp_swap_state(b, &mut chats, SPLIT..LAYERS / 2, LAYERS / 2..LAYERS, link) {
+        let settle = if self.tp_pair() { self.tp_swap_state(b, &mut chats, SPLIT..LAYERS / 2, LAYERS / 2..LAYERS, link) } else { self.tp_gather_state(b, &mut chats) };
+        if let Err(error) = settle {
             chats.iter_mut().for_each(|chat| chat.valid = false);
             return Err(self.pp.borrow_mut().as_mut().map_or(error.clone(), |pp| pp.fail(error)));
         }
@@ -379,6 +445,12 @@ impl<'a> NextModel<'a> {
         // Rank 0 asks for these chats' GDN whole rebuild (next_tp_heads.rs).
         if !lens.is_empty() && lens.iter().all(|&n| n == heads::GDN_WHOLE as usize) { return self.tp_gdn_frame(b, sessions, usize::MAX); }
         if !lens.is_empty() && lens.iter().all(|&n| n == heads::GDN_PROBE as usize) { return self.tp_gdn_probe(); }
+        // Over more ranks: the chain tiles' state gather (next_tp_gather.rs).
+        if !self.tp_pair() {
+            let gathered = self.tp_gather_state(b, sessions);
+            if gathered.is_err() { sessions.iter_mut().for_each(|chat| chat.valid = false); }
+            return gathered;
+        }
         if self.tp_seq_handoff_back(b, sessions, lens)? { return Ok(()); }
         let link = self.tp.borrow().as_ref().map(|s| s.link.try_clone()).ok_or("tensor split missing")?.map_err(err)?;
         let swapped = self.tp_swap_state(b, sessions, LAYERS / 2..LAYERS, SPLIT..LAYERS / 2, link);
@@ -428,7 +500,7 @@ impl<'a> NextModel<'a> {
             }
         }
         let (pad, mut pad_in) = (b.vector(1)?, b.vector(1)?);
-        let (mut sent, mut taken, limit) = self.tp.borrow().as_ref().map(|s| (s.sent, s.taken, s.limit_ns)).ok_or("tensor split missing")?;
+        let (mut sent, mut taken, limit) = self.tp.borrow().as_ref().map(|s| (s.sent, s.got[s.peer], s.limit_ns)).ok_or("tensor split missing")?;
         let messages = sends.len().max(recvs.len());
         let put = |sessions: &mut [&mut NextSession<'a, 'w>], i: usize, sent: &mut u64| -> Result<()> {
             *sent += 1;
@@ -454,7 +526,7 @@ impl<'a> NextModel<'a> {
                 None => b.tp_mailbox_take(mailbox, &mut pad_in, 1, 1, 1, 0, taken, limit),
             });
         }
-        if let Some(s) = self.tp.borrow_mut().as_mut() { (s.sent, s.taken) = (sent, taken); }
+        if let Some(s) = self.tp.borrow_mut().as_mut() { (s.sent, s.got[s.peer]) = (sent, taken); }
         swapped?;
         b.synchronize()?;
         if self.tp_failed() {
@@ -466,7 +538,7 @@ impl<'a> NextModel<'a> {
         Ok(())
     }
 
-    /// Rank 1, before layer SPLIT: the pass's residual rows from the request, or (MAIL) a take
+    /// Ranks 1.., before layer SPLIT: the pass's residual rows from the request, or (MAIL) a take
     /// of rank 0's in-stream post.
     pub(super) fn tp_residual_in(&self, b: &Backend<'a>, residual: &mut DeviceVector<'a>, input: &[f32], count: usize) -> Result<()> {
         let mut guard = self.tp.borrow_mut();
@@ -474,27 +546,42 @@ impl<'a> NextModel<'a> {
             return b.write_vector_range(residual, 0, &input[..count * W]);
         };
         s.mail_pass = false;
-        s.taken += 1;
-        let width = s.layout.residual;
-        b.tp_mailbox_take(self.tp_box.get().ok_or("tensor split mailbox missing")?, residual, count, width, width, 0, s.taken, s.limit_ns)
+        let (width, seq) = (s.layout.residual, s.take(0));
+        let mailbox = self.tp_box.get().ok_or("tensor split mailbox missing")?;
+        b.tp_mailbox_take_from(mailbox, residual, count, width, width, 0, mailbox.layout().channel(0, s.rank), seq, s.limit_ns)
     }
-    fn tp_rank(&self) -> Option<usize> {
+    pub(super) fn tp_rank(&self) -> Option<usize> {
         self.tp.borrow().as_ref().map(|s| s.rank)
     }
-    /// The split head: `rows` rows of `width` words from rank 1 to rank 0, queued in the
-    /// stream (rank 1 puts `vector`'s rows, rank 0 takes them into `vector`); both ranks call it
-    /// for the same passes (execution::head_split).
+    /// The split head: `rows` rows of `width` words from each rank 1.. to rank 0, queued in the
+    /// stream (ranks 1.. put `vector`'s first rows, rank 0 takes origin o's into block o - 1 of
+    /// `vector`, on the pair rank 1's into `vector`); every rank calls it for the same passes
+    /// (execution::head_split). Over more ranks `vector` holds world - 1 blocks on every rank.
     pub(super) fn tp_rows_to_front(&self, b: &Backend<'a>, vector: &mut DeviceVector<'a>, rows: usize, width: usize) -> Result<()> {
         let mut guard = self.tp.borrow_mut();
         let s = guard.as_mut().ok_or("tensor split missing")?;
         let mailbox = self.tp_box.get().ok_or("tensor split mailbox missing")?;
-        if s.rank == 1 {
-            s.sent += 1;
-            b.tp_mailbox_put(mailbox, vector, rows, width, width, 0, s.sent)
-        } else {
-            s.taken += 1;
-            b.tp_mailbox_take(mailbox, vector, rows, width, width, 0, s.taken, s.limit_ns)
+        if s.layout.world == crate::flash_tp_switch::PAIR {
+            if s.rank == 1 {
+                s.sent += 1;
+                return b.tp_mailbox_put(mailbox, vector, rows, width, width, 0, s.sent);
+            }
+            s.got[s.peer] += 1;
+            return b.tp_mailbox_take(mailbox, vector, rows, width, width, 0, s.got[s.peer], s.limit_ns);
         }
+        // Over more ranks every message reaches every rank, and every rank takes it: ranks 1.. put
+        // their rows (block 0 of `vector`) and every rank takes origin o's into block o - 1.
+        if s.rank != 0 {
+            s.sent += 1;
+            b.tp_mailbox_put(mailbox, vector, rows, width, width, 0, s.sent)?;
+        }
+        let block = rows * width;
+        for origin in s.origins().into_iter().filter(|&o| o != 0) {
+            let seq = s.take(origin);
+            let channel = mailbox.layout().channel(origin, s.rank);
+            b.tp_mailbox_take_from(mailbox, &mut vector.slice((origin - 1) * block..origin * block)?, rows, width, width, 0, channel, seq, s.limit_ns)?;
+        }
+        Ok(())
     }
     /// Layers whose MoE output is formed without the deferred finish: the front's last layer
     /// before the post (its residual crosses) and every split layer (its halves cross).
@@ -621,11 +708,12 @@ fn handoff_words(rows: usize, width: usize, len: usize) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// Rank 1's descriptors start at its half's rows, for the shipped geometry and another.
+    /// Rank 1's descriptors start at its half's rows, for the shipped geometry and another; on
+    /// four ranks each rank's table starts at its quarter's rows.
     #[test]
     fn shifted_descriptors_start_at_the_rank_one_rows() {
         use spark_gpu_probe::driver::fp4_abi::{Expert, Matrix};
-        for layout in [TpLayout::new(2560, 4, 640, 10, 512).unwrap(), TpLayout::new(4096, 2, 1536, 8, 128).unwrap()] {
+        for layout in [TpLayout::new(2560, 4, 640, 10, 512, WORLD).unwrap(), TpLayout::new(4096, 2, 1536, 8, 128, WORLD).unwrap()] {
             let m = |w: u64| Matrix { weights: w, scales: w + 1, global_scale: w + 2 };
             let mut d = vec![Expert { gate: m(1000), up: m(2000), down: m(3000), width: layout.expert_width as u32, reserved: 0 }; 2];
             shifted(&mut d, &layout);
@@ -636,6 +724,17 @@ mod tests {
             assert_eq!(d[3].down.scales, 3001 + (layout.out_cols() * layout.expert_width / 16) as u64);
             assert_eq!(d[3].down.global_scale, 3002);
             assert_eq!(d[2].width, layout.expert_width as u32);
+        }
+        let quarters = TpLayout::new(2560, 4, 640, 10, 512, 4).unwrap();
+        let m = |w: u64| Matrix { weights: w, scales: w + 1, global_scale: w + 2 };
+        let mut d = vec![Expert { gate: m(1000), up: m(2000), down: m(3000), width: 640, reserved: 0 }; 3];
+        shifted(&mut d, &quarters);
+        assert_eq!(d.len(), 12);
+        for rank in 0..4 {
+            for e in &d[rank * 3..rank * 3 + 3] {
+                assert_eq!((e.gate.weights, e.up.scales), (1000 + (rank * 160 * 2560 / 2) as u64, 2001 + (rank * 160 * 2560 / 16) as u64));
+                assert_eq!((e.down.weights, e.down.scales, e.down.global_scale), (3000 + (rank * 640 * 640 / 2) as u64, 3001 + (rank * 640 * 640 / 16) as u64, 3002));
+            }
         }
     }
     /// A peer's handoff length beyond the receiving state, or one that does not fit usize, and QSA

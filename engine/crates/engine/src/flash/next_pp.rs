@@ -3,7 +3,7 @@
 //! contiguous layer interval and relays final residuals back over the same cables.
 //! Prompt tiles and decode steps preserve world-one kernels, FP32 bits and layer order.
 //! Each boundary materializes the same per-element combine (see blocks.rs).
-//! World two serves the tensor split (next_tp.rs) on this protocol; three or more ranks run it as a layer chain.
+//! The tensor split (next_tp.rs) runs on this protocol: world two, and more ranks that split_accepts takes; other worlds run a layer chain.
 #[cfg(target_os = "linux")]
 use super::*;
 // Host-only protocol tests use the same fixed Flash-Next wire geometry, without CUDA.
@@ -235,12 +235,10 @@ impl Stage {
             return Err(format!("pipeline needs rank < WORLD in 2..={}", LAYERS / 2));
         }
         let (first, end) = if let Some(split) = split {
-            // One explicit cut describes the intervals between these boundaries.
-            let boundaries = [0, split, LAYERS];
-            if ranks + 1 != boundaries.len() || !(2..LAYERS).contains(&split) {
-                return Err("a two-rank cut needs two ranks and a cut in 2..48".into());
-            }
-            (boundaries[rank], boundaries[rank + 1])
+            // The tensor split: rank 0 runs layers [0, split), and every other rank mirrors
+            // [split, LAYERS) (over more ranks without the pair-only levels: flash_tp_switch::PAIR).
+            if !(2..LAYERS).contains(&split) { return Err("a tensor split cut needs a cut in 2..48".into()); }
+            if rank == 0 { (0, split) } else { (split, LAYERS) }
         } else {
             (LAYERS * rank / ranks, LAYERS * (rank + 1) / ranks)
         };
@@ -256,8 +254,8 @@ impl Stage {
         (cuts[self.rank], cuts[self.rank + 1]) = (self.first, self.end);
         cuts.windows(2).map(|w| w[0]..w[1]).collect()
     }
-    /// This rank's stage: the tensor split cuts after its first SPLIT layers (rank 1 runs every
-    /// split pass from there); a longer chain cuts the layers evenly.
+    /// This rank's stage: the tensor split cuts after its first SPLIT layers (ranks 1.. run every
+    /// split pass from there); a chain cuts the layers evenly.
     pub fn for_rank(rank: usize, ranks: usize) -> Result<Self> {
         Self::new(rank, ranks, crate::flash_tp_switch::on().then_some(crate::flash_tp_switch::SPLIT))
     }
@@ -425,7 +423,10 @@ impl Link {
         stream.set_read_timeout(Some(Duration::from_millis(100))).map_err(err)?;
         stream.set_write_timeout(Some(limit)).map_err(err)?;
         let mut hello = Vec::new();
-        for v in [MAGIC_HELLO, stage.end as u32, context as u32, active as u32, tile as u32, u32::from(fast.is_some()), limit.as_millis() as u32, stage.ranks as u32, stage.rank as u32, u32::from(recipe.mtp) | u32::from(recipe.tp) << 1] {
+        // The next rank starts where this one ends; under the tensor split ranks 1.. all start at
+        // the cut, so a middle names its own first layer.
+        let split = if recipe.tp && stage.rank > 0 { stage.first } else { stage.end };
+        for v in [MAGIC_HELLO, split as u32, context as u32, active as u32, tile as u32, u32::from(fast.is_some()), limit.as_millis() as u32, stage.ranks as u32, stage.rank as u32, u32::from(recipe.mtp) | u32::from(recipe.tp) << 1] {
             put(&mut hello, v);
         }
         stream.write_all(&hello).map_err(err)?;
@@ -1299,6 +1300,8 @@ fn serve_stage(
     let reply_tx = reply_tx;
     // Verify requests sent on down without their replies (overlap::relays), and a reply buffer.
     let (mut relayed, mut back_rows) = (overlap::Relayed::new(), Vec::new());
+    // The tensor split's middle: when the rank after it last showed life (Link::frame).
+    let mut heard_down = Instant::now();
     loop {
         // The reader alone owns TCP reads; changing nonblocking on any clone
         // would change its socket too. Poll the fast wire before completed TCP
@@ -1314,6 +1317,7 @@ fn serve_stage(
                 *working.lock().unwrap_or_else(|p| p.into_inner()) = relayed.front().map(|r| (r.0, Instant::now()));
                 continue;
             }
+            match downstream.as_mut().filter(|l| recipe.tp && l.pending > 0) { Some(link) => link.read_ready(&mut heard_down)?, None => heard_down = Instant::now() }
             if let Some(f) = fast.as_mut() {
                 if f.try_recv(&mut message)? { break true; }
             }
@@ -1364,6 +1368,7 @@ fn serve_stage(
             prefetch.recycle(request.rows)?;
             (request.kind, request.count, request.meta)
         };
+        let raw = kind;
         let release = kind & RELEASE_POOLED != 0; let tp_bits = kind & (crate::flash_tp_switch::MAIL | crate::flash_tp_switch::TILE | crate::flash_tp_switch::HEADS | crate::flash_tp_switch::HEAD | crate::flash_tp_switch::SEQ);
         let slots = kind & RELEASE_SLOTS;
         let kind = kind & !RELEASE_POOLED & !RELEASE_SLOTS & !tp_bits;
@@ -1373,6 +1378,12 @@ fn serve_stage(
         {
             return Err("pipeline request kind or carrier outside the agreed recipe".into());
         }
+        // The tensor split over more than two ranks: ranks 1.. all run each pass, and a rank's
+        // takes wait for the ranks after it, so a middle sends the request down before it runs it.
+        // The downstream acks come back empty and are read as they arrive (read_ready below).
+        // A chain tile (TILE) runs this rank's tile layers and goes down after them, as on a chain.
+        let mirror = recipe.tp && downstream.is_some() && tp_bits & crate::flash_tp_switch::TILE == 0;
+        if let Some(link) = downstream.as_mut().filter(|_| mirror) { link.mirror(kind, raw, &meta, &residual)?; }
         // Replies go up in request order: a request that does not relay waits for the relayed ones.
         let relay = overlap::relays(kind, u32::from(release) | slots | tp_bits, on_wire, downstream.as_ref(), meta.len(), count);
         while let Some(link) = downstream.as_mut().filter(|_| !relay && !relayed.is_empty()) {
@@ -1393,6 +1404,8 @@ fn serve_stage(
         // verify allocation or execution. An error must prevent the step as well.
         let mut result = if release { release_pool() } else { Ok(()) }
             .and_then(|()| step(kind | tp_bits | slots, count, &meta, &mut residual));
+        // The split's pass (mirrored or a chain tile) left the next rank unread: its limit counts from now.
+        if recipe.tp { heard_down = Instant::now(); }
         if relay && result.is_ok() && let Some(link) = downstream.as_mut() {
             // This request goes down now; its reply goes up from the poll above, in order.
             link.post_wire(kind, &meta, &residual)?;
@@ -1404,7 +1417,8 @@ fn serve_stage(
             }
             continue;
         }
-        if result.is_ok() && let Some(link) = downstream.as_mut() {
+        if result.is_ok() && !mirror && let Some(link) = downstream.as_mut() {
+            link.tp_tile = tp_bits & crate::flash_tp_switch::TILE != 0;
             link.release_pool |= release;
             link.released |= slots;
             result = link.forward(kind, &meta, &mut residual, &mut out);

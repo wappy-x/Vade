@@ -103,7 +103,7 @@ fn run() -> Result<(), String> {
     let context_explicit = raw_args.get(6).is_some_and(|arg| arg.parse::<SocketAddr>().is_err());
     let args = settings::startup_args(raw_args);
     if args.len() < 9 {
-        return Err("usage: flash-serve RANK WORLD LISTEN NEXT PTX MODEL [CONTEXT] BIND REQUESTS (0=continuous) [--allow-remote] [--api-key-file PATH] [--mtp 0..3] [--nvfp4] [--verify-full] [--fp4-local] [--indexer sparse|dense] [--tensor-map PATH]; FP4-Local defaults to context 32768, output cap 16384, up to sixteen memory-admitted chats with automatic local prompt tiles (pipeline default 2048 rows) and sparse indexing; mixed directories auto-select NextModel; world 1 strict MTP 3 plus lookup, world 2 the FP4-Local tensor split over the layer pipeline's links with the world-1 engine's MTP, the only 2-Spark path (both ranks split the routed experts, the projections and the linear-attention heads, one-sided RDMA writes carry the exchanges, and one greedy chat's verify head is split by vocabulary halves; it needs RDMA, so SEQPAR_RDMA=0 and --tensor-map are refused there; three or more ranks run the layer chain; FP8 keeps its ring), world 4 rank path plain only with --tensor-map PATH; FP8 defaults to context 131072, output cap min(65536, context), strict MTP 2 (the FP8 rank path: one chat chooses its depth each cycle up to 7; VADE_FLASH_MTP_DEPTH=1..7 sets that ceiling, VADE_MTP_ADAPT=0 or --mtp keeps the fixed depth; its drafts read an MXFP8 head copy, VADE_FP8_DRAFT_MX8=0 keeps the BF16 head); data transport uses LISTEN/NEXT ports + 1; world-1 Flash-Next defaults to C8 cohort control and healthy capture fallback (VADE_MTP_COHORT=wide, the guarded two-/four-stage pipelines' default and opt-in on world 1: 5-8 chats draft depth 3 in one 32-row verify tick, cohort control opt-in; VADE_MTP_COHORT=off restores the 16-row controller tick); all three VADE_MTP_C8/VADE_MTP_COHORT_ADAPT/VADE_POOL_GRAPH_FALLBACK=0 restore the prior automatic policy; explicit VADE_MTP_BATCH retains its table; the two- and four-stage pipelines always use guarded Auto8 and cohort control; explicit cohort=1 requires Auto8 and a supported route; other pipeline sizes and native ranks retain their prior defaults; invalid switch values fail at startup; VADE_C8_GUARD_ROBUST unset/1 stays on draft unless plain is 8% cheaper per token, 0 keeps the live 2% latch".into());
+        return Err("usage: flash-serve RANK WORLD LISTEN NEXT PTX MODEL [CONTEXT] BIND REQUESTS (0=continuous) [--allow-remote] [--api-key-file PATH] [--mtp 0..3] [--nvfp4] [--verify-full] [--fp4-local] [--indexer sparse|dense] [--tensor-map PATH]; FP4-Local defaults to context 32768, output cap 16384, up to sixteen memory-admitted chats with automatic local prompt tiles (pipeline default 2048 rows) and sparse indexing; mixed directories auto-select NextModel; world 1 strict MTP 3 plus lookup, world 2 the FP4-Local tensor split over the layer pipeline's links with the world-1 engine's MTP, the only 2-Spark path (both ranks split the routed experts, the projections and the linear-attention heads, one-sided RDMA writes carry the exchanges, and one greedy chat's verify head is split by vocabulary halves; it needs RDMA, so SEQPAR_RDMA=0 and --tensor-map are refused there; more ranks over RDMA run the split in parts when every width cuts into whole parts and the mailbox has room (world 4 for the shipped checkpoint), other worlds run the layer chain; FP8 keeps its ring), world 4 rank path plain only with --tensor-map PATH; FP8 defaults to context 131072, output cap min(65536, context), strict MTP 2 (the FP8 rank path: one chat chooses its depth each cycle up to 7; VADE_FLASH_MTP_DEPTH=1..7 sets that ceiling, VADE_MTP_ADAPT=0 or --mtp keeps the fixed depth; its drafts read an MXFP8 head copy, VADE_FP8_DRAFT_MX8=0 keeps the BF16 head); data transport uses LISTEN/NEXT ports + 1; world-1 Flash-Next defaults to C8 cohort control and healthy capture fallback (VADE_MTP_COHORT=wide, the guarded two-/four-stage pipelines' default and opt-in on world 1: 5-8 chats draft depth 3 in one 32-row verify tick, cohort control opt-in; VADE_MTP_COHORT=off restores the 16-row controller tick); all three VADE_MTP_C8/VADE_MTP_COHORT_ADAPT/VADE_POOL_GRAPH_FALLBACK=0 restore the prior automatic policy; explicit VADE_MTP_BATCH retains its table; the two- and four-stage pipelines always use guarded Auto8 and cohort control; explicit cohort=1 requires Auto8 and a supported route; other pipeline sizes and native ranks retain their prior defaults; invalid switch values fail at startup; VADE_C8_GUARD_ROBUST unset/1 stays on draft unless plain is 8% cheaper per token, 0 keeps the live 2% latch".into());
     }
     spark_engine::flash_prompt_options::load()?;
     spark_serve::intake_grace::load()?;
@@ -175,12 +175,14 @@ fn run() -> Result<(), String> {
         return Err("--nvfp4 requires an NVFP4 checkpoint declared by hf_quant_config.json".into());
     }
     // The engine chooses the path; no switch selects it. FP4-Local with peers serves on the
-    // pipeline service: the tensor split at world 2 (it needs RDMA), the layer chain at three or
-    // more ranks. --tensor-map selects the older rank path (world 4). FP8 keeps its ring. Pipeline
+    // pipeline service: the tensor split at world 2 (it needs RDMA) and over more RDMA ranks whose
+    // widths cut into whole parts (settings::split_accepts), else the layer chain at three or more
+    // ranks. --tensor-map selects the older rank path (world 4). FP8 keeps its ring. Pipeline
     // stages run world-one arithmetic; startup validates their geometry before opening any link.
     let mixed = checkpoint.config.mixed.is_some();
     let rank_path = tensor_map.is_some();
-    let tp = settings::tensor_split(mixed, world, rank_path, settings::rdma(std::env::var("SEQPAR_RDMA"))?)?;
+    let tp = settings::tensor_split(mixed, world, rank_path, settings::rdma(std::env::var("SEQPAR_RDMA"))?,
+        || settings::split_accepts(&checkpoint.config, world))?;
     let (pipeline, distributed) = settings::pipeline_recipe(mixed, rank, world, rank_path);
     let next_model = settings::next_model(mixed, fp4_local, if pipeline { 0 } else { rank }, if pipeline { 1 } else { world },
         settings::startup_mtp(pipeline, mtp_explicit.then_some(mtp)))?;
@@ -190,7 +192,8 @@ fn run() -> Result<(), String> {
     if tp && !pp { return Err("the tensor split needs the FP4-Local service on two connected ranks".into()); }
     // Startup is still single-threaded: every reader (the layer cut, the model load, the head,
     // the receipt) sees this one selection.
-    spark_engine::flash_tp_switch::select(settings::chosen_path(distributed, next_model, tp, pp))?;
+    spark_engine::flash_tp_switch::select(settings::chosen_path(distributed, next_model, tp, pp, world))?;
+    if tp { spark_engine::flash_tp_switch::select_world(world)?; spark_engine::flash_tp_switch::select_rank(rank)?; }
     if pp { spark_engine::flash::next_batched::PpStage::for_rank(rank, world)?; }
     // Parse once after route resolution, before any GPU load or peer connection.
     let experiments = spark_serve::mtp_batch::Experiments::startup_pipeline(world, pp)?;

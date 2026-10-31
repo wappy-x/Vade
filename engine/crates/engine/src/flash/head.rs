@@ -42,13 +42,14 @@ pub struct Head<'a, 'w> {
     /// VADE_FLASHNEXT_DRAFT_FP4=2 (the default): rescore the FP4 screen's top four 1024-row chunks from
     /// the MXFP8 twin's values (needs that twin).
     fp4_rescore: bool,
-    /// The split head: the last verify pass projected rows [0, n) here and rank 1 rows [n, ..);
-    /// its argmax rows are merged on readback (take_split) and its logits are sparse.
-    split: Option<u32>,
-    /// The plain split head (head_split): this rank projected rows [0, n); `result` holds this
-    /// half's argmax row, then rank 1's. The logits are sparse: full-logit readers project the
-    /// whole head again from `input` (NextSession::canonical_split_logits).
-    halves: Option<u32>,
+    /// The split head over this many ranks: the last verify pass projected this rank's part (rows
+    /// [0, part_start(1))) here and every other rank its part; its argmax rows are merged on
+    /// readback (take_split) and its logits are sparse.
+    split: Option<usize>,
+    /// The plain split head (head_split) over this many ranks: this rank projected its part; `result`
+    /// holds each rank's argmax row in rank order. The logits are sparse: full-logit readers project
+    /// the whole head again from `input` (NextSession::canonical_split_logits).
+    halves: Option<usize>,
     /// The plain split head's retained input row (H floats; under the tensor split only).
     input: Option<DeviceVector<'a>>,
     ready: bool,
@@ -127,9 +128,10 @@ impl<'a, 'w> Head<'a, 'w> {
         }
         Ok(())
     }
-    /// Logits, argmax partials, and two argmax rows (the plain split head keeps both halves' rows).
+    /// Logits, argmax partials, and an argmax row per rank of the split (two without it; the
+    /// plain split head keeps every part's row).
     fn arena_lengths(rows: usize) -> [usize; 3] {
-        [rows.max(1), (rows.div_ceil(1024) * 3).max(1), 6]
+        [rows.max(1), (rows.div_ceil(1024) * 3).max(1), 3 * crate::flash_tp_switch::world()]
     }
     pub(super) fn reservation_bytes(rows: usize) -> usize {
         Self::arena_lengths(rows).into_iter()
@@ -553,28 +555,30 @@ impl<'a, 'w> Head<'a, 'w> {
         }
         Ok(())
     }
-    /// The split head: this session's last verify pass projected rows [0, rows) here. Its logits
-    /// are sparse: `ready` stays false until a canonical reader re-projects the retained inputs.
-    pub(super) fn mark_split(&mut self, rows: u32) {
-        self.ready = false; self.max_ready = false; self.split = Some(rows); self.halves = None;
+    /// The split head over `parts` ranks: this session's last verify pass projected this rank's
+    /// part here. Its logits are sparse: `ready` stays false until a canonical reader re-projects
+    /// the retained inputs.
+    pub(super) fn mark_split(&mut self, parts: usize) {
+        self.ready = false; self.max_ready = false; self.split = Some(parts); self.halves = None;
     }
     /// A new pass starts: the verify split's mark is taken and the plain split's rows are dropped.
-    pub(super) fn take_split(&mut self) -> Option<u32> { self.halves = None; self.split.take() }
-    /// The plain split head: chat `row`'s argmax rows of both halves (`result` holds `chats` rows of
-    /// this rank's rows [0, start), then rank 1's), merged by local_max, and its head input row
-    /// (`hidden` row `row`), kept for full-logit readers. The logits stay sparse.
+    pub(super) fn take_split(&mut self) -> Option<usize> { self.halves = None; self.split.take() }
+    /// The plain split head over `parts` ranks: chat `row`'s argmax rows of every part (`result`
+    /// holds `chats` rows of each rank's part in rank order, this rank's first), merged by
+    /// local_max, and its head input row (`hidden` row `row`), kept for full-logit readers. The
+    /// logits stay sparse.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn publish_halves(&mut self, b: &Backend<'_>, result: &DeviceVector<'_>, hidden: &DeviceVector<'_>,
-        row: usize, chats: usize, start: u32) -> Result<()> {
+    pub(super) fn publish_parts(&mut self, b: &Backend<'_>, result: &DeviceVector<'_>, hidden: &DeviceVector<'_>,
+        row: usize, chats: usize, parts: usize) -> Result<()> {
         self.ready = false; self.max_ready = false; self.split = None; self.halves = None;
-        if self.range.start != 0 || !(1..self.range.end).contains(&start) || row >= chats {
+        let start = crate::flash_head_options::part_start(self.range.len(), parts, 1);
+        if self.range.start != 0 || !(1..self.range.len()).contains(&start) || row >= chats || self.result.len() < 3 * parts {
             return Err("plain split head rows".into());
         }
         let input = self.input.as_mut().ok_or("plain split head has no retained input")?;
         b.copy_range(hidden, input, row * H, 0, H)?;
-        b.copy_range(result, &mut self.result, row * 3, 0, 3)?;
-        b.copy_range(result, &mut self.result, (chats + row) * 3, 3, 3)?;
-        self.halves = Some(start);
+        for part in 0..parts { b.copy_range(result, &mut self.result, (part * chats + row) * 3, part * 3, 3)?; }
+        self.halves = Some(parts);
         Ok(())
     }
     /// The head keeps an input row for the plain split head (Head::load under the tensor split).
@@ -616,9 +620,9 @@ impl<'a, 'w> Head<'a, 'w> {
     }
     /// Transfer only the GPU winner; full rows are downloaded only on request.
     pub fn local_max(&mut self, b: &Backend<'_>) -> Result<Option<Candidate>> {
-        if let Some(start) = self.halves {
-            let both = b.read_argmax_results(&self.result, 2)?;
-            let (token, logit) = merge_split(&both[..1], &both[1..], start)?[0];
+        if let Some(parts) = self.halves {
+            let rows = b.read_argmax_results(&self.result, parts)?;
+            let (token, logit) = crate::flash_head_options::merge_parts(&rows, self.range.len(), parts)?[0];
             return Ok(Some(Candidate { token: self.range.start + token, logit }));
         }
         if !self.ready { return Err("Flash head has no projected logits".into()); }
@@ -682,7 +686,7 @@ impl<'a, 'w> Head<'a, 'w> {
         }).collect()
     }
 }
-pub(super) use crate::flash_head_options::merge_split;
+pub(super) use crate::flash_head_options::merge_parts;
 fn first_mx8(heads: &[&mut Head<'_, '_>]) -> Option<u64> {
     let twin = heads.first()?.mx8.as_ref()?.device_address();
     heads.iter().all(|h| h.mx8.as_ref().map(|v| v.device_address()) == Some(twin)).then_some(twin)

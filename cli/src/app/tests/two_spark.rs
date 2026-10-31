@@ -37,7 +37,8 @@ fn up_with_two_sparks_runs_the_split_over_rdma_only() {
             assert!(request.keys().all(|key| !key.contains("VADE_W2")), "{request:?}");
             assert_eq!(request["env.SEQPAR_RDMA"], "1");
         }
-        // A chain of four carries no path switch either: the engine chooses the chain.
+        // Four Sparks carry no path switch either: the engine chooses the split in parts over RDMA
+        // or the chain.
         let mut chain = Fixture::fp4(4, false);
         chain.app.up(&fp4_options(&["--sparks", "4", "--mtp", "0"])).unwrap();
         assert!(starts(&chain).iter().all(|request| request.keys().all(|key| !key.contains("VADE_W2"))));
@@ -54,7 +55,7 @@ fn up_with_two_sparks_runs_the_split_over_rdma_only() {
 }
 
 const SPLIT: &str = r#","vade":{"numerics":{"world_size":2,"topology":"pipeline","path":"tensor_split","path_reason":"FP4-Local on two Sparks","tensor_split":{"experts":"output_columns","projection_level":3,"wire":"write","head":"vocabulary_halves"}}}"#;
-const CHAIN: &str = r#","vade":{"numerics":{"world_size":4,"topology":"pipeline","path":"layer_pipeline","path_reason":"FP4-Local on three or more Sparks"}}"#;
+const CHAIN: &str = r#","vade":{"numerics":{"world_size":4,"topology":"pipeline","path":"layer_pipeline","path_reason":"FP4-Local on three or more Sparks without the tensor split (TCP, or a world the split does not take)"}}"#;
 const RING: &str = r#","vade":{"numerics":{"world_size":2,"topology":"ring","path":"ring","path_reason":"FP8: the tensor split does not serve FP8"}}"#;
 
 /// `vade status` text and `vade status --json` of a running launch.
@@ -77,8 +78,8 @@ fn status_names_every_multi_spark_path_and_its_reason() {
             format!("tensor split (FP4-Local on two Sparks; {split_levels})"),
             r#"{"path":"tensor_split","path_reason":"FP4-Local on two Sparks","projection_level":3.0,"wire":"write","head":"vocabulary_halves"}"#),
         ("chain", || Fixture::fp4(4, false), fp4_options(&["--sparks", "4"]), CHAIN,
-            "layer chain (FP4-Local on three or more Sparks)".into(),
-            r#"{"path":"layer_pipeline","path_reason":"FP4-Local on three or more Sparks","projection_level":null,"wire":null,"head":null}"#),
+            "layer chain (FP4-Local on three or more Sparks without the tensor split (TCP, or a world the split does not take))".into(),
+            r#"{"path":"layer_pipeline","path_reason":"FP4-Local on three or more Sparks without the tensor split (TCP, or a world the split does not take)","projection_level":null,"wire":null,"head":null}"#),
         ("FP8 ring", || Fixture::new(2, false), fp8_options(), RING,
             "ring (FP8: the tensor split does not serve FP8)".into(),
             r#"{"path":"ring","path_reason":"FP8: the tensor split does not serve FP8","projection_level":null,"wire":null,"head":null}"#),
@@ -96,6 +97,9 @@ fn status_names_every_multi_spark_path_and_its_reason() {
     // The split without a reason (an older receipt), and the rank path, which only --tensor-map selects.
     let split = health::MultiSparkPath::from_health(&format!("{{\"status\":\"ready\"{}}}", SPLIT.replace(r#""path_reason":"FP4-Local on two Sparks","#, ""))).unwrap();
     assert_eq!(split.label(), format!("tensor split ({split_levels})"));
+    // The split over more ranks: its own reason, projection level 2 over the relay, the head in parts.
+    let parts = health::MultiSparkPath::from_health(r#"{"vade":{"numerics":{"path":"tensor_split","path_reason":"FP4-Local on more than two Sparks whose widths cut into whole parts","tensor_split":{"experts":"output_columns","long_prompts":"chain_tiles_then_state_gather","projection_level":2,"wire":"relay","head":"vocabulary_parts"}}}}"#).unwrap();
+    assert_eq!(parts.label(), "tensor split (FP4-Local on more than two Sparks whose widths cut into whole parts; projection level 2, relay wire, head split by vocabulary parts)");
     let rank = health::MultiSparkPath::from_health(r#"{"vade":{"numerics":{"path":"rank_path","path_reason":"FP4-Local with --tensor-map"}}}"#).unwrap();
     assert_eq!(rank.label(), "rank path (FP4-Local with --tensor-map)");
     assert_eq!(health::MultiSparkPath::from_health(r#"{"status":"ready","vade":{"numerics":{"topology":"local"}}}"#), None);

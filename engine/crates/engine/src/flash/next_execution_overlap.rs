@@ -83,7 +83,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 &sessions.iter().map(|s| s.capacity).collect::<Vec<_>>(), model.checkpoint.config.vocab)?;
             let owner = crate::flash_next_rows::workspace_owner(sessions.iter().map(|s| s.capacity))?;
             let mut work = model.take_work(b, sessions[owner].capacity, count)?;
-            work.bound_head = Self::bound_head(model, sessions, count, true, true);
+            work.bound_head = Self::bound_head(model, sessions, count, true, true, work.head_result.len());
             let result = (|| -> Result<()> {
                 work.status.clear(b, count, 0)?;
                 work.residual.resize_within_capacity(count * W)?;

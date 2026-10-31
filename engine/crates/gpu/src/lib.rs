@@ -6,6 +6,7 @@ pub mod kernel_params;
 #[cfg(target_os = "linux")]
 pub mod driver;
 pub mod tp_mailbox_host;
+pub mod tp_route;
 #[cfg(target_os = "linux")]
 pub mod tp_rdma;
 #[cfg(all(test, not(target_os = "linux")))]

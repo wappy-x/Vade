@@ -75,8 +75,9 @@ pub fn run_pp(
     if !sparse {
         return Err("rows require --indexer sparse".into());
     }
-    // The split has paired prefix snapshots. The layer chain refuses an explicit 1 (unset: off).
-    spark_serve::prefix_switch::prefix_cache(spark_engine::flash_tp_switch::on())?;
+    // The pair has paired prefix snapshots. The layer chain and the split over more ranks refuse
+    // an explicit 1 (unset: off).
+    spark_serve::prefix_switch::prefix_cache(spark_engine::flash_tp_switch::pair())?;
     let stage = spark_engine::flash::next_batched::PpStage::for_rank(rank, world)?;
     let limit = spark_engine::flash::next_batched::PP_LINK_TIMEOUT;
     // Over RDMA (SEQPAR_RDMA unset, auto or 1; the tensor split needs it): decode steps and short
@@ -113,18 +114,25 @@ pub fn run_pp(
     }).transpose()?;
     eprintln!("flashnext pp stage rank={rank} world={world} layers={}..{} upstream={} downstream={}",
         stage.first, stage.end, incoming.is_some(), outgoing.is_some());
-    // The tensor split: a second cable link (opened after the pipeline's, same order on both
-    // ranks) carries the per-layer column swaps as one-sided writes between the mapped
-    // mailboxes (tp_proxy).
+    // The tensor split: a second cable link to each neighbor (opened after the pipeline's, in
+    // the same order) carries the per-layer column swaps as one-sided writes between the mapped
+    // mailboxes (tp_proxy); on more than two ranks each rank's wire thread relays along the path.
     let tp = if tensor {
-        let (out, inc) = spark_seqpar::control::connect_peers((rank > 0).then_some(listen), (rank == 0).then_some(next), deadline)?;
-        let link = out.or(inc).ok_or("tensor split has no peer link")?;
+        let (out, inc) = spark_seqpar::control::connect_peers((rank > 0).then_some(listen), stage.successor().map(|_| next), deadline)?;
+        // The split's TCP link for the pair's state handoffs: the one toward rank 0 (rank 0: rank 1).
+        let link = inc.as_ref().or(out.as_ref()).ok_or("tensor split has no peer link")?.try_clone().map_err(|e| e.to_string())?;
         #[cfg(target_os = "linux")]
-        let swap = tp_proxy::Wire::Write(tp_proxy::WriteLink::new(&link)?);
+        let swap = if world == spark_engine::flash_tp_switch::PAIR {
+            tp_proxy::Wire::Write(tp_proxy::WriteLink::new(&link)?)
+        } else {
+            let route = spark_gpu_probe::tp_route::Links::new(world, false)?;
+            let wire = |l: Option<std::net::TcpStream>| l.map(|l| tp_proxy::WriteLink::new(&l)).transpose();
+            tp_proxy::Wire::Relay([wire(inc)?, wire(out)?], route, rank)
+        };
         #[cfg(not(target_os = "linux"))]
-        let swap: tp_proxy::Wire = return Err("the tensor split needs Linux".into());
+        let swap: tp_proxy::Wire = { let _ = (out, inc); return Err("the tensor split needs Linux".into()) };
         eprintln!("flashnext tp link rank={rank} world={world}");
-        eprintln!("flashnext tp wire=write");
+        eprintln!("flashnext tp wire={}", if world == spark_engine::flash_tp_switch::PAIR { "write" } else { "relay" });
         Some((link, swap))
     } else {
         None

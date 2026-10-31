@@ -59,6 +59,8 @@ impl<'a> NextModel<'a> {
     /// export this pass does not import and sent owed chats' state to rank 1.
     pub(super) fn tp_seq_plan<'w>(&self, b: &Backend<'a>, sessions: &mut [&mut NextSession<'a, 'w>], spans: &[std::ops::Range<usize>],
         verify: bool, output: bool) -> Result<Option<bool>> {
+        // The token split runs on the pair only.
+        if !self.tp_pair() { return Ok(None); }
         let chats: Vec<_> = sessions.iter().zip(spans).map(|(c, span)| (c.slot, c.pos, span.len(), !c.logits_ready)).collect();
         let plan = {
             let mut guard = self.tp.borrow_mut();
@@ -108,7 +110,7 @@ impl<'a> NextModel<'a> {
             let mut guard = self.tp.borrow_mut();
             let s = guard.as_mut().ok_or("tensor split missing")?;
             if s.seq.pads.is_none() { s.seq.pads = Some([b.vector(1)?, b.vector(1)?]); }
-            let (mut sent, mut taken, limit) = (s.sent, s.taken, s.limit_ns);
+            let (mut sent, mut taken, limit) = (s.sent, s.got[s.peer], s.limit_ns);
             let [pad, scratch] = s.seq.pads.as_mut().ok_or("token split pads missing")?;
             for _ in 0..s.seq.owed {
                 taken += 1;
@@ -116,7 +118,7 @@ impl<'a> NextModel<'a> {
                 sent += 1;
                 b.tp_mailbox_put(mailbox, pad, 1, 1, 1, 0, sent)?;
             }
-            (s.sent, s.taken, s.seq.owed) = (sent, taken, 0);
+            (s.sent, s.got[s.peer], s.seq.owed) = (sent, taken, 0);
         }
         {
             let mut guard = self.pp.borrow_mut();
@@ -153,8 +155,8 @@ impl<'a> NextModel<'a> {
         let s = guard.as_mut().ok_or("tensor split missing")?;
         let [_, pad_in] = s.seq.pads.as_mut().ok_or("token split pads missing")?;
         for _ in 0..s.seq.msgs.min(TP_MAILBOX_SLOTS) {
-            s.taken += 1;
-            b.tp_mailbox_take(mailbox, pad_in, 1, 1, 1, 0, s.taken, s.limit_ns)?;
+            s.got[s.peer] += 1;
+            b.tp_mailbox_take(mailbox, pad_in, 1, 1, 1, 0, s.got[s.peer], s.limit_ns)?;
         }
         s.seq.msgs = 0;
         Ok(())
@@ -175,7 +177,7 @@ impl<'a> NextModel<'a> {
         let mut guard = self.tp.borrow_mut();
         let s = guard.as_mut().ok_or("tensor split missing")?;
         if s.seq.pads.is_none() { s.seq.pads = Some([b.vector(1)?, b.vector(1)?]); }
-        let (mut sent, mut taken, mut msgs, limit) = (s.sent, s.taken, s.seq.msgs, s.limit_ns);
+        let (mut sent, mut taken, mut msgs, limit) = (s.sent, s.got[s.peer], s.seq.msgs, s.limit_ns);
         let [pad, pad_in] = s.seq.pads.as_mut().ok_or("token split pads missing")?;
         for &Piece { at: (_, li, k), from, words } in &parts {
             let v = state_vector(chat, li, k)?;
@@ -196,7 +198,7 @@ impl<'a> NextModel<'a> {
             msgs += 1;
         }
         if !put { s.seq.owed = s.seq.owed.saturating_sub(parts.len()); }
-        (s.sent, s.taken, s.seq.msgs) = (sent, taken, msgs);
+        (s.sent, s.got[s.peer], s.seq.msgs) = (sent, taken, msgs);
         Ok(())
     }
     /// Rank 0, pass B, before the drafter observes: read pass A's ack, which carries its rows.
@@ -252,10 +254,13 @@ impl<'a> NextModel<'a> {
 
 impl<'a> NextModel<'a> {
     /// Rows of a chat's next prompt slice on a two-rank split front (tp_switch::seq_slice), for a
-    /// live chat or a cached one (None: pipeline tiles); None off the split front.
+    /// live chat or a cached one (None: pipeline tiles); None off the split front. Over more ranks
+    /// (no token split) every slice is a pipeline tile.
     pub fn prompt_slice(&self, chat: Option<&NextSession<'a, '_>>, end: usize, chunk: usize) -> Option<usize> {
         self.tp.borrow().as_ref().filter(|s| s.rank == 0)?;
-        Some(chat.map_or(crate::flash_tp_switch::PIPELINE_TILE.min(chunk), |c| crate::flash_tp_switch::seq_slice(c.pos, end, chunk)))
+        let tile = crate::flash_tp_switch::PIPELINE_TILE.min(chunk);
+        if !self.tp_pair() { return Some(tile); }
+        Some(chat.map_or(tile, |c| crate::flash_tp_switch::seq_slice(c.pos, end, chunk)))
     }
     /// Rank 0, a prompt call's next rows: the first part when the call holds a whole cold prompt
     /// the token split takes (its final call from position 0); None: the usual rows. Only a first
@@ -263,7 +268,8 @@ impl<'a> NextModel<'a> {
     pub(in crate::flash) fn tp_seq_cut(&self, chat: &NextSession<'a, '_>, output: bool, rows: usize, chunk: usize) -> Option<usize> {
         if !output || chat.pos != 0 { return None; }
         let mut guard = self.tp.borrow_mut();
-        let s = guard.as_mut().filter(|s| s.rank == 0)?;
+        // The token split runs on the pair only (one Spark has no split and stops here).
+        let s = guard.as_mut().filter(|s| s.rank == 0 && s.layout.world == crate::flash_tp_switch::PAIR)?;
         let p = crate::flash_tp_switch::seq_first(0, rows, chunk)?;
         s.seq.chats.expect(chat.slot, p);
         Some(p)

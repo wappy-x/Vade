@@ -109,8 +109,8 @@ pub fn run(
             // smallest chat funds a slot. Live sessions stop TRANSIENT_RESERVE short of the ceiling.
             let smallest = slot_bytes(&model, context, needed as usize, pp.is_some() && tp.is_none())?;
             // The prefix cache: on unless set to 0, where a prefix restore exists (one Spark,
-            // the tensor split); the layer chain runs without it.
-            let prefix_cache = spark_serve::prefix_switch::prefix_cache(pp.is_none() || tp.is_some())?;
+            // the tensor split on the pair); the layer chain and the split over more ranks run without it.
+            let prefix_cache = spark_serve::prefix_switch::prefix_cache(pp.is_none() || tp.is_some() && spark_engine::flash_tp_switch::pair())?;
             // Live sessions stop TRANSIENT_RESERVE short of the allocator ceiling. With the cache
             // on, the full chat the pool must hold carries the room floor (prefix_switch::plan_room).
             let full = (needed as usize).saturating_add(spark_serve::prefix_switch::plan_room(prefix_cache, spark_serve::prefix_switch::cache_room_setting()?));
@@ -132,7 +132,8 @@ pub fn run(
                 ));
             }
             // TP ranks can see different free memory. Agree before the existing serving hello.
-            // The pages rank 0 admits must fit on rank 1 too: both take the smaller pool.
+            // The pages rank 0 admits must fit on every rank: rank 1 brings the smallest values of
+            // the ranks after rank 0 (run_back), and both take the smaller pool.
             let (active, pool) = if tp.is_some() {
                 let (stream, _) = pp.as_mut().ok_or("tensor split has no control link")?;
                 let (peer, chosen) = spark_tp::startup_pool::agree(stream, active, load_deadline, shutdown)?;
@@ -220,7 +221,8 @@ pub fn run(
                 "flashnext ready world={world} model={name} context={context} concurrency=rows active={active} connections={POOL_SIZE} mtp_depth={mtp} resident_bytes={resident} session_pool_bytes={pool} prefix_cache_room_bytes={room} session_reservation_bytes={needed} shared_pool_reservation_bytes={shared} transient_reserve_bytes={} prefix_cache={prefix_cache}",
                 spark_serve::budget::TRANSIENT_RESERVE
             );
-            let worker = tp_wire.zip(model.tp_mailbox_host()).map(|(wire, host)| wire.bind(host, true)).transpose()?;
+            let layout = model.tp_mailbox_layout();
+            let worker = tp_wire.zip(model.tp_mailbox_host()).zip(layout).map(|((wire, host), layout)| wire.bind(host, true, layout)).transpose()?;
             let (proxy_stop, attached) = (AtomicBool::new(false), AtomicBool::new(false));
             let served = std::thread::scope(|scope| {
                 let proxy = worker.map(|worker| super::tp_proxy::spawn(scope, worker, &proxy_stop, &attached, shutdown)).transpose()?;
@@ -310,8 +312,10 @@ pub fn run_back(
         let depth = spark_engine::flash_draft_stack::resident_mtp_depth(true)?;
         let mut model = NextModel::load_with_checkpoint_role(backend, root, Some(checkpoint), options, depth, true)?;
         model.disable_prompt_frontend()?;
-        // Each back rank funds session state for its own layers only.
-        model.own_stage_state(stage.first, stage.end, &stage.intervals())?;
+        // Each back rank funds session state for its own layers only; every rank of the split
+        // after rank 0 owns the same layers, so its list is the pair's.
+        let stages = if tp.is_some() { vec![0..stage.first, stage.first..stage.end] } else { stage.intervals() };
+        model.own_stage_state(stage.first, stage.end, &stages)?;
         let kv_reserve = match std::env::var("VADE_FLASHNEXT_KV_RESERVE").as_deref() {
             Ok("0") => false,
             Err(std::env::VarError::NotPresent) | Ok("1") => true,
@@ -326,7 +330,7 @@ pub fn run_back(
         let resident_tiles = backend.flash_dense_bytes() + backend.flash_mixed_bytes();
         let smallest = slot_bytes(&model, context, needed as usize, tp.is_none())?;
         // The same plan as the front: with the cache on, one full chat plus the room floor.
-        let prefix_cache = spark_serve::prefix_switch::prefix_cache(tp.is_some())?;
+        let prefix_cache = spark_serve::prefix_switch::prefix_cache(tp.is_some() && spark_engine::flash_tp_switch::pair())?;
         let full = (needed as usize).saturating_add(spark_serve::prefix_switch::plan_room(prefix_cache, spark_serve::prefix_switch::cache_room_setting()?));
         let (active, pool, _shared) = model.session_pool_plan(context, 1, spark_serve::budget::after_transient_reserve(budget.saturating_sub(resident)), resident_tiles, [smallest, full])?;
         model.prepare_prompt_workspace(backend, context)?;
@@ -336,8 +340,15 @@ pub fn run_back(
         if needed > pool as u128 {
             return Err(format!("pipeline back cannot fund one session: needed {needed} bytes, pool {pool} bytes"));
         }
-        // The same order as the front: the slot count, then the smaller pool.
+        // The same order as the front: the slot count, then the smaller pool. Over more ranks each
+        // rank first takes the smaller values of the ranks after it (its next link), then agrees
+        // with the rank before it, so rank 0 admits only the pages every rank can hold.
         let (active, pool) = if tp.is_some() {
+            let (active, pool) = match next.as_mut() {
+                Some((down, _)) => (spark_tp::startup_pool::agree(down, active, load_deadline, shutdown)?.1,
+                    spark_tp::startup_pool::agree(down, pool, load_deadline, shutdown)?.1),
+                None => (active, pool),
+            };
             let (_, chosen) = spark_tp::startup_pool::agree(&mut stream, active, load_deadline, shutdown)?;
             (chosen, spark_tp::startup_pool::agree(&mut stream, pool, load_deadline, shutdown)?.1)
         } else { (active, pool) };
@@ -356,10 +367,11 @@ pub fn run_back(
         backend.synchronize()?;
         eprintln!("flashnext pp back loaded context={context} active={active} resident_bytes={resident} session_pool_bytes={pool} prefix_cache_room_bytes={room}");
         let (_link, tp_wire) = match tp {
-            Some((link, swap)) => { model.set_tp(backend, 1, link)?; (None::<std::net::TcpStream>, Some(swap)) }
+            Some((link, swap)) => { model.set_tp(backend, stage.rank, link)?; (None::<std::net::TcpStream>, Some(swap)) }
             None => (None, None),
         };
-        let worker = tp_wire.zip(model.tp_mailbox_host()).map(|(wire, host)| wire.bind(host, false)).transpose()?;
+        let layout = model.tp_mailbox_layout();
+        let worker = tp_wire.zip(model.tp_mailbox_host()).zip(layout).map(|((wire, host), layout)| wire.bind(host, false, layout)).transpose()?;
         let (proxy_stop, attached) = (AtomicBool::new(false), AtomicBool::new(false));
         let served = std::thread::scope(|scope| {
             let proxy = worker.map(|worker| super::tp_proxy::spawn(scope, worker, &proxy_stop, &attached, shutdown)).transpose()?;

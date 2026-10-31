@@ -111,11 +111,16 @@ impl Metadata {
 
 /// The receipt's path line: `"path"` names the multi-Spark path the engine chose and
 /// `"path_reason"` says why (spark_engine::flash_tp_switch::Path); the tensor split adds its
-/// recipe. One Spark adds nothing.
+/// recipe: on the pair every level, over more ranks the expert, projection-row and head parts
+/// over the relay (GDN heads whole, long prompts as chain tiles and a state gather). One Spark
+/// adds nothing.
 fn path_field(path: Option<spark_engine::flash_tp_switch::Path>) -> String {
+    use spark_engine::flash_tp_switch::Path;
     let Some(path) = path else { return String::new() };
-    let split = if path == spark_engine::flash_tp_switch::Path::TENSOR_SPLIT {
+    let split = if path == Path::TENSOR_SPLIT {
         ",\"tensor_split\":{\"experts\":\"output_columns\",\"long_prompts\":\"pipeline_tiles_then_state_handoff\",\"projection_level\":3,\"wire\":\"write\",\"head\":\"vocabulary_halves\"}"
+    } else if path == Path::TENSOR_PARTS {
+        ",\"tensor_split\":{\"experts\":\"output_columns\",\"long_prompts\":\"chain_tiles_then_state_gather\",\"projection_level\":2,\"wire\":\"relay\",\"head\":\"vocabulary_parts\"}"
     } else { "" };
     format!(",\"path\":{},\"path_reason\":{}{split}", quote(path.name), quote(path.reason))
 }
@@ -135,7 +140,8 @@ mod tests {
     fn receipt_names_the_path_and_the_split_recipe() {
         use spark_engine::flash_tp_switch::Path;
         assert_eq!(path_field(Some(Path::TENSOR_SPLIT)), ",\"path\":\"tensor_split\",\"path_reason\":\"FP4-Local on two Sparks\",\"tensor_split\":{\"experts\":\"output_columns\",\"long_prompts\":\"pipeline_tiles_then_state_handoff\",\"projection_level\":3,\"wire\":\"write\",\"head\":\"vocabulary_halves\"}");
-        assert_eq!(path_field(Some(Path::LAYER_PIPELINE)), ",\"path\":\"layer_pipeline\",\"path_reason\":\"FP4-Local on three or more Sparks\"");
+        assert_eq!(path_field(Some(Path::TENSOR_PARTS)), ",\"path\":\"tensor_split\",\"path_reason\":\"FP4-Local on more than two Sparks whose widths cut into whole parts\",\"tensor_split\":{\"experts\":\"output_columns\",\"long_prompts\":\"chain_tiles_then_state_gather\",\"projection_level\":2,\"wire\":\"relay\",\"head\":\"vocabulary_parts\"}");
+        assert_eq!(path_field(Some(Path::LAYER_PIPELINE)), ",\"path\":\"layer_pipeline\",\"path_reason\":\"FP4-Local on three or more Sparks without the tensor split (TCP, or a world the split does not take)\"");
         assert_eq!(path_field(Some(Path::RING)), ",\"path\":\"ring\",\"path_reason\":\"FP8: the tensor split does not serve FP8\"");
         assert_eq!(path_field(None), "");
     }

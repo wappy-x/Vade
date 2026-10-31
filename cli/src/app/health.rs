@@ -208,7 +208,8 @@ impl MultiSparkPath {
                 let levels = format!("projection level {}, {} wire, {}",
                     self.projection_level.map_or("unknown".into(), |level| format!("{level}")),
                     text::terminal_text(self.wire.as_deref().unwrap_or("unknown")),
-                    match self.head.as_deref() { Some("vocabulary_halves") => "head split by vocabulary halves".into(), Some("whole") => "whole head".into(),
+                    match self.head.as_deref() { Some("vocabulary_halves") => "head split by vocabulary halves".into(),
+                        Some("vocabulary_parts") => "head split by vocabulary parts".into(), Some("whole") => "whole head".into(),
                         other => format!("head {}", text::terminal_text(other.unwrap_or("unknown"))) });
                 match self.reason.as_deref() {
                     Some(reason) => format!("tensor split ({}; {levels})", text::terminal_text(reason)),

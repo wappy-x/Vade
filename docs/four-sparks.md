@@ -278,8 +278,9 @@ restored pairs, the machines are free for other work.
 ## Two pairs behind one address
 
 This mode is an option. It does not change the default four-Spark mode:
-`vade up --sparks 4` still starts the FP4-Local layer chain. The project owner
-decides whether this mode becomes the default.
+`vade up --sparks 4` starts the FP4-Local four-way tensor split over RDMA (the
+layer chain over TCP). The project owner decides whether this mode becomes the
+default.
 
 `vade up --replicas 2 --pairs` starts two FP4-Local servers. Each server is a
 two-Spark tensor split, the same path as `vade up --sparks 2`. The pairs keep

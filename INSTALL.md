@@ -1124,8 +1124,12 @@ There are two ways to choose the Sparks. Use one or the other, not both:
 
 With FP4-Local, two Sparks run the tensor split, the only two-Spark path: both
 Sparks work on every token, each on half of the experts and of most
-projections. With three or more Sparks, Vade uses the layer chain, which
-spreads the layers across all the Sparks you chose. FP8 runs tensor parallel on
+projections. With more Sparks over RDMA, Vade runs the tensor split in parts
+when every split width of the model cuts into whole parts for that many Sparks
+and the mailbox has room for that many ranks: for this checkpoint, four Sparks
+(with no prefix cache). Three, five or more Sparks, and any three or
+more over TCP, use the layer chain, which spreads the layers across all the
+Sparks you chose. FP8 runs tensor parallel on
 two and on four Sparks instead; see
 [FP8 on 2, 4 or 6 Sparks](#fp8-on-2-4-or-6-sparks).
 
@@ -1209,7 +1213,7 @@ to a request.
 | How you start | Context (tokens) | Output (tokens) | Drafting (multi-token prediction, MTP) | Prefix cache |
 | --- | --- | --- | --- | --- |
 | On this Spark: `vade launch` / `vade up` | 32768; lowered through 16384, 8192, 4096 only if the engine refuses it for memory | `min(context, 8192)` | ON, engine-selected | ON |
-| From a controller: `vade up` on any number of Sparks, with or without `--chats` | 32768 | `min(context, 8192)` | ON, engine-selected | ON on one or two FP4-Local Sparks and on FP8; OFF on the FP4-Local layer chain (three or more Sparks) |
+| From a controller: `vade up` on any number of Sparks, with or without `--chats` | 32768 | `min(context, 8192)` | ON, engine-selected | ON on one or two FP4-Local Sparks and on FP8; OFF on three or more FP4-Local Sparks (the layer chain, or the split in parts on four Sparks over RDMA) |
 | From a controller: `vade up --replicas N`, each replica | 32768 | `min(context, 8192)` | ON, engine-selected | ON |
 
 `--context 262144` requests a larger context on either route
@@ -1230,7 +1234,8 @@ a refusal is reported and the context is not lowered.
 
 The prefix cache (reusing a cached prompt prefix across requests) is ON by
 default on one Spark, on two FP4-Local Sparks (the tensor split) and on FP8.
-The FP4-Local layer chain (three or more Sparks) runs without it. The cache
+FP4-Local on three or more Sparks (the layer chain, or the split in parts on
+four Sparks over RDMA) runs without it. The cache
 keeps prompts only for requests that send
 `cache:true` or a `prompt_cache_key`. Other requests run as before. A cached
 answer has the same token IDs as an uncached one: the cache changes which
@@ -1259,7 +1264,7 @@ The engine log line `flashnext ready` shows `prefix_cache_room_bytes`.
 
 | Setting | What it does |
 | --- | --- |
-| `VADE_FLASHNEXT_PREFIX_CACHE=0` | Turns the cache off. `1` turns it on; the FP4-Local layer chain (three or more Sparks) refuses `1`. |
+| `VADE_FLASHNEXT_PREFIX_CACHE=0` | Turns the cache off. `1` turns it on; FP4-Local on three or more Sparks (the layer chain, or the split in parts on four Sparks over RDMA) refuses `1`. |
 | `VADE_FLASHNEXT_CACHE_ROOM=<bytes>` | Sets the room. The slot plan keeps it beside one full-context chat, which can give fewer chat slots. `0` gives no room and the slot plan of a server without the cache. A room too large to keep beside one full-context chat at two or more slots gives one chat slot. A room that leaves less than one full-context chat is lowered to leave one. |
 | `VADE_FLASHNEXT_ADOPT=0` | Keeps every prompt as a copy on one Spark. `1` keeps long prompts in place on two Sparks too; that mode is not measured on two Sparks. |
 | `--cache-bytes 0` | Turns the cache off for a local install. |

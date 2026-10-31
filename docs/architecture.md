@@ -517,7 +517,8 @@ top of that, the engine has three behaviors of its own
   measured cost per token with and without drafting, and serves chats without
   drafting when that is at least 8 % cheaper per token
   ([`flash-serve.rs`](../engine/crates/tp/src/bin/flash-serve.rs)). On the
-  two-Spark tensor split and the four-Spark layer chain by default, and with
+  two-Spark tensor split and on four Sparks (the split in parts or the layer
+  chain) by default, and with
   `VADE_MTP_COHORT=wide` on one Spark, five to eight chats instead draft three
   tokens each in one 32-row verify step, and this guard is opt-in;
   `VADE_MTP_COHORT=off` on every pipeline Spark brings the guard back
@@ -571,8 +572,9 @@ now hold one chat fewer at a 32,768-token context (8 instead of 9). In
 exchange, both Sparks work together on a cold prompt of 2,048 to 8,192
 tokens.
 
-A Spark has one GPU and one pool of memory. To use three or more, Vade splits
-the model by layers, not by matrices. Each Spark runs one
+A Spark has one GPU and one pool of memory. To use three or more, Vade usually
+splits the model by layers, not by matrices (four Sparks over RDMA run the
+tensor split in parts; see **Choosing the layout** below). Each Spark runs one
 engine process, called a *[rank](GLOSSARY.md#pr)*, and the ranks form a chain
 over direct cables:
 
@@ -610,8 +612,13 @@ available because verification rows cross the pipeline like any other rows.
 
 **Choosing the layout.** The engine chooses the path itself; no switch selects
 it ([`settings.rs`](../engine/crates/tp/src/flash/settings.rs)). FP4-Local on
-two Sparks runs the tensor split; on three or more it runs the N-stage chain;
-with `--tensor-map` on four Sparks it runs the older rank path. FP8 runs
+two Sparks runs the tensor split. On more Sparks over RDMA it runs the split in
+parts when every split width cuts into whole parts (`TpLayout::for_config` in
+[`tp_switch.rs`](../engine/crates/engine/src/flash/tp_switch.rs)) and the
+mailbox has room for that many ranks (`split_accepts` in `settings.rs`): four
+Sparks for this checkpoint. Eight Sparks pass the width check but not the
+mailbox check. All other counts run the N-stage chain. With `--tensor-map` on
+four Sparks it runs the older rank path. FP8 runs
 tensor parallel: on a ring on two Sparks and on a path on four. The serving
 receipt names the path and why (`vade.numerics.path` and
 `path_reason`).
@@ -643,14 +650,14 @@ machine
 ## The prefix cache
 The prefix cache lets a new request skip reading the start of its prompt when
 an earlier request began the same way. It is **on by default** on one Spark,
-on the tensor split and on FP8; the layer chain runs without it. Requests
+on the two-Spark tensor split and on FP8; FP4-Local on three or more Sparks (the layer chain, or the split in parts on four Sparks over RDMA) runs without it. Requests
 that send
 `cache:true` or a `prompt_cache_key` keep their prompt for reuse;
 `VADE_FLASHNEXT_PREFIX_CACHE=0` turns the cache off
 ([`prefix_switch.rs`](../engine/crates/serve/src/prefix_switch.rs)). At
 startup the cache takes a room of its own from the session pool: half of the
 bytes no full-context chat can use, 512 MiB to 4 GiB, never more than those
-bytes. On the tensor split, where each rank keeps a copy, the room is at least
+bytes. On the two-Spark tensor split, where each rank keeps a copy, the room is at least
 one full-context chat (up to 4 GiB). Admission never uses the room and host memory pressure does not
 reclaim it, so a snapshot fits even after a burst of chats fills the spare
 buffers. Beyond the room the cache uses pool bytes live chats leave free and
@@ -678,7 +685,7 @@ Retention is elastic: by default cached prefixes may use up to half the
 session pool, and admission reclaims them before it refuses a live
 request
 ([`next_batched_service.rs`](../engine/crates/tp/src/flash/next_batched_service.rs)).
-The cache works locally and on the tensor split. Each split rank saves its
+The cache works locally and on the two-Spark tensor split. Each split rank saves its
 own state. A shared prefix ID ties the saved states together. The existing
 ordered control link completes the worker restore before the next prompt
 rows run. The cache uses the larger rank charge and the smaller available
@@ -686,7 +693,8 @@ memory bound. A snapshot that does not fit that bound is not kept, and the
 next turn reads its prompt again. For example, on two Sparks at
 `--context 131072` a 100K-token prompt needs a 6.2 GB front snapshot, but the
 live request leaves 5.3 to 6.0 GB, so its second turn reads the whole prompt
-again. At `--context 110592` the same snapshot fits. The layer chain still refuses the cache at startup
+again. At `--context 110592` the same snapshot fits. The layer chain and the
+split in parts on four Sparks still refuse the cache at startup
 ([`prefix_switch.rs`](../engine/crates/serve/src/prefix_switch.rs)).
 
 ## Ranks, memory and ownership
@@ -846,8 +854,8 @@ only the processes the CLI recorded, after checking each one's identity.
 This page describes main after v0.1.0, the latest release. Its default is
 FP4-Local on one Spark. The benchmark page also has results from cabled pairs
 and a group of four Sparks, and from rented cloud VMs. On four Sparks,
-FP4-Local gave the same token IDs as on one and two Sparks in 66 of 66
-responses (the 2026-10-28 cards at `76977df` and the 2026-10-30 morning cards
+FP4-Local on the layer chain gave the same token IDs as on one and two Sparks
+in 66 of 66 responses (the 2026-10-28 cards at `76977df` and the 2026-10-30 morning cards
 at `380d8e5`). FP8 on two and on four Sparks gave the same token IDs in only
 7 of 66 responses in those same cards, so compare FP8 results only at one
 Spark count
@@ -858,8 +866,9 @@ have no live exactness check yet
 servers and protocol routes in the source are not qualified to the same
 level.
 
-- The prefix cache is on by default. It works locally, on the tensor split
-  and on FP8. The FP4-Local layer chain runs without it.
+- The prefix cache is on by default. It works locally, on the two-Spark
+  tensor split and on FP8. FP4-Local on three or more Sparks (the layer chain,
+  or the split in parts on four Sparks over RDMA) runs without it.
 - Greedy decoding needs `"temperature": 0` and neutral penalties. On
   FP4-Local, `"temperature": 0` alone is enough, because the checkpoint's own
   penalties are neutral. On FP8, send the three neutral penalties too

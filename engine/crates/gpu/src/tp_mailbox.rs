@@ -8,32 +8,34 @@
 //! Message s (1, 2, ... per direction, counted in u64) uses slot s % SLOTS and publishes the
 //! low 32 bits of s; a slot is reused only four messages later, and the split's lockstep keeps
 //! at most three messages in flight per direction, so a slot is
-//! never rewritten while in use.
+//! never rewritten while in use. Over more than two ranks the layout is crate::tp_route::Channels
+//! (one receive channel per origin rank, and relayed slots start with a frame): `tp_mailbox_routed`.
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use crate::tp_mailbox_host::{Bell, TpMailboxHost, TP_MAILBOX_SLOTS, HEADER, SEND_SEQ, SEND_LEN, RECV_SEQ, ERROR, TAKE_PAUSE, WIDE, TAKE_CTAS};
+use crate::tp_mailbox_host::{Bell, TpMailboxHost, SEND_SEQ, SEND_LEN, ERROR, TAKE_PAUSE, WIDE, TAKE_CTAS};
+use crate::tp_route::{Channels, Links};
 
 /// The mapped mailbox of one rank (device-visible host memory), `slot_bytes` per slot.
 /// `bell`: every queued put rings it, so a waiting write doorbell can park.
-pub struct TpMailbox<'a> { vector: DeviceVector<'a>, host: *mut f32, slot_words: usize, host_taken: AtomicBool, bell: Bell }
+pub struct TpMailbox<'a> { vector: DeviceVector<'a>, host: *mut f32, layout: Channels, host_taken: AtomicBool, bell: Bell }
 impl<'a> TpMailbox<'a> {
     fn words(&self) -> &[AtomicU32] {
-        // SAFETY: the mapping is HEADER + 2 * SLOTS * slot_words aligned u32 words, zeroed by the
+        // SAFETY: the mapping is the layout's aligned u32 words (Channels::words), zeroed by the
         // driver before this view first exists (Backend::tp_mailbox), that live as long as
         // `self`; host code reads and writes them only as atomics, and kernels access them only
         // through the protocol in the module comment.
         unsafe { std::slice::from_raw_parts(self.host.cast::<AtomicU32>(), self.vector.len) }
     }
-    fn send_slot(&self, slot: usize) -> usize { HEADER + slot * self.slot_words }
-    fn recv_slot(&self, slot: usize) -> usize { HEADER + (TP_MAILBOX_SLOTS + slot) * self.slot_words }
     fn device(&self, word: usize) -> u64 { self.vector.device_address() + (word * 4) as u64 }
     /// The proxy thread's endpoint: handed out once, so one thread owns the host side.
     pub fn take_host(&self) -> Option<TpMailboxHost<'_>> {
-        (!self.host_taken.swap(true, Ordering::AcqRel)).then(|| TpMailboxHost::with_bell(self.words(), self.slot_words, &self.bell))
+        (!self.host_taken.swap(true, Ordering::AcqRel)).then(|| TpMailboxHost::with_bell(self.words(), self.layout.slot_words, &self.bell))
     }
     /// A take timed out or the proxy failed (sticky).
     pub fn failed(&self) -> bool { self.words()[ERROR].load(Ordering::Acquire) != 0 }
-    pub fn slot_bytes(&self) -> usize { self.slot_words * 4 }
+    /// The rows one message holds, in bytes (a relayed slot's frame not counted).
+    pub fn slot_bytes(&self) -> usize { (self.layout.slot_words - self.layout.frame) * 4 }
+    pub fn layout(&self) -> Channels { self.layout }
     /// 1 when the host asked for four-word copies (tp_mailbox_host::WIDE).
     fn wide(&self) -> u64 { u64::from(self.words()[WIDE].load(Ordering::Relaxed) == 1) }
 }
@@ -42,14 +44,22 @@ impl<'a> Backend<'a> {
     /// A zeroed mailbox with slots of `slot_bytes` (a multiple of 4).
     pub fn tp_mailbox(&self, slot_bytes: usize) -> Result<TpMailbox<'a>, String> {
         if slot_bytes == 0 || !slot_bytes.is_multiple_of(4) { return Err("tensor split mailbox slot size".into()); }
-        let words = (2 * TP_MAILBOX_SLOTS).checked_mul(slot_bytes / 4).and_then(|n| n.checked_add(HEADER)).ok_or("mailbox size overflow")?;
+        self.tp_mailbox_routed(Channels::new(&Links::new(2, false)?, slot_bytes / 4)?)
+    }
+    /// A zeroed mailbox of this layout. A frame keeps the rows on 16-byte lines (four-word copies).
+    pub fn tp_mailbox_routed(&self, layout: Channels) -> Result<TpMailbox<'a>, String> {
+        if layout.slot_words == 0 || !layout.frame.is_multiple_of(4) || layout.frame > 0 && !layout.slot_words.is_multiple_of(4) {
+            return Err("tensor split mailbox slot size".into());
+        }
+        let words = layout.slots.checked_mul(layout.world).and_then(|n| n.checked_mul(layout.slot_words))
+            .and_then(|n| n.checked_add(crate::tp_mailbox_host::HEADER)).ok_or("mailbox size overflow")?;
         // Every word (header and payload) is zeroed by the driver, and the stream drained, before
         // the host view exists or any mailbox kernel runs.
         let mut vector = self.mapped_vector(words)?;
         self.zero_vector(&mut vector)?;
         self.synchronize()?;
         let host = self.mapped_exchange_host(&vector)?;
-        Ok(TpMailbox { vector, host, slot_words: slot_bytes / 4, host_taken: AtomicBool::new(false), bell: Bell::default() })
+        Ok(TpMailbox { vector, host, layout, host_taken: AtomicBool::new(false), bell: Bell::default() })
     }
     /// Queue tp_mailbox_put: words [own, own + half) of each of `rows` rows of `width` words of
     /// `source` go to the send slot of message `seq`, then its sequence word is published.
@@ -57,8 +67,8 @@ impl<'a> Backend<'a> {
         own: usize, seq: u64) -> Result<(), String> {
         self.check_mailbox_owner(m, source)?;
         check_mailbox_shape(m, source.len, rows, width, half, own)?;
-        let slot = seq as usize % TP_MAILBOX_SLOTS;
-        let mut args = [source.buffer.address, rows as u64, width as u64, half as u64, own as u64, m.device(m.send_slot(slot)),
+        let slot = seq as usize % m.layout.slots;
+        let mut args = [source.buffer.address, rows as u64, width as u64, half as u64, own as u64, m.device(m.layout.send_slot(slot) + m.layout.frame),
             m.device(SEND_LEN + slot), m.device(SEND_SEQ + slot), (seq as u32) as u64 | m.wide() << 32];
         self.tp_mailbox_launch("tp_mailbox_put", 1, 1024, &mut args)?;
         m.bell.queued(seq);
@@ -68,14 +78,22 @@ impl<'a> Backend<'a> {
     /// then its rows go to words [peer, peer + half) of each `width`-word row of `target`.
     pub fn tp_mailbox_take(&self, m: &TpMailbox<'_>, target: &mut DeviceVector<'_>, rows: usize, width: usize, half: usize,
         peer: usize, seq: u64, limit_ns: u64) -> Result<(), String> {
+        self.tp_mailbox_take_from(m, target, rows, width, half, peer, 0, seq, limit_ns)
+    }
+    /// tp_mailbox_take from receive channel `channel` (Channels::channel of the origin rank;
+    /// the pair has only channel 0).
+    #[allow(clippy::too_many_arguments)]
+    pub fn tp_mailbox_take_from(&self, m: &TpMailbox<'_>, target: &mut DeviceVector<'_>, rows: usize, width: usize, half: usize,
+        peer: usize, channel: usize, seq: u64, limit_ns: u64) -> Result<(), String> {
         self.check_mailbox_owner(m, target)?;
         check_mailbox_shape(m, target.len, rows, width, half, peer)?;
-        let slot = seq as usize % TP_MAILBOX_SLOTS;
+        if channel + 1 >= m.layout.world { return Err("tensor split mailbox channel outside the layout".into()); }
+        let slot = seq as usize % m.layout.slots;
         // The limit keeps 47 bits; bit 47 asks for four-word copies and the top 16 carry the host's
         // poll pause (0 = the kernel's 2048 ns).
         let limit = limit_ns.min((1 << 47) - 1) | m.wide() << 47 | u64::from(m.words()[TAKE_PAUSE].load(Ordering::Relaxed) & 0xffff) << 48;
-        let mut args = [target.buffer.address, rows as u64, width as u64, half as u64, peer as u64, m.device(m.recv_slot(slot)),
-            m.device(RECV_SEQ + slot), (seq as u32) as u64, m.device(ERROR), limit];
+        let mut args = [target.buffer.address, rows as u64, width as u64, half as u64, peer as u64, m.device(m.layout.recv_slot(channel, slot) + m.layout.frame),
+            m.device(m.layout.recv_seq(channel, slot)), (seq as u32) as u64, m.device(ERROR), limit];
         let most = match m.words()[TAKE_CTAS].load(Ordering::Relaxed) { 0 => 96, n => n.min(96) as usize };
         self.tp_mailbox_launch("tp_mailbox_take", (rows * half).div_ceil(256).clamp(1, most) as u32, 256, &mut args)
     }
@@ -99,7 +117,7 @@ impl<'a> Backend<'a> {
 fn check_mailbox_shape(m: &TpMailbox<'_>, len: usize, rows: usize, width: usize, half: usize, offset: usize) -> Result<(), String> {
     let words = rows.checked_mul(width).ok_or("mailbox shape overflow")?;
     if rows == 0 || half == 0 || offset.checked_add(half).is_none_or(|end| end > width) || words > len
-        || rows.checked_mul(half).is_none_or(|n| n > m.slot_words) {
+        || rows.checked_mul(half).is_none_or(|n| n > m.layout.slot_words - m.layout.frame) {
         return Err("tensor split mailbox shape outside the slot or the vector".into());
     }
     Ok(())

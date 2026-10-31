@@ -21,7 +21,7 @@ impl<'a> NextModel<'a> {
         let slot = mailbox.slot_bytes() / 4;
         let mut guard = self.tp.borrow_mut();
         let s = guard.as_mut().ok_or("tensor split missing")?;
-        let (mut sent, mut taken, mut msgs, limit) = (s.sent, s.taken, s.seq.msgs, s.limit_ns);
+        let (mut sent, mut taken, mut msgs, limit) = (s.sent, s.got[s.peer], s.seq.msgs, s.limit_ns);
         let [_, pad_in] = s.seq.pads.as_mut().ok_or("token split pads missing")?;
         for from in (0..v.len()).step_by(slot) {
             if msgs >= TP_MAILBOX_SLOTS {
@@ -32,7 +32,7 @@ impl<'a> NextModel<'a> {
             b.tp_mailbox_put(mailbox, v, 1, v.len(), slot.min(v.len() - from), from, sent)?;
             msgs += 1;
         }
-        (s.sent, s.taken, s.seq.msgs) = (sent, taken, msgs);
+        (s.sent, s.got[s.peer], s.seq.msgs) = (sent, taken, msgs);
         Ok(())
     }
     /// Take every word of `v` as slot-sized data messages, each followed by its credit pad.
@@ -41,7 +41,7 @@ impl<'a> NextModel<'a> {
         let slot = mailbox.slot_bytes() / 4;
         let mut guard = self.tp.borrow_mut();
         let s = guard.as_mut().ok_or("tensor split missing")?;
-        let (mut sent, mut taken, limit) = (s.sent, s.taken, s.limit_ns);
+        let (mut sent, mut taken, limit) = (s.sent, s.got[s.peer], s.limit_ns);
         let [pad, _] = s.seq.pads.as_mut().ok_or("token split pads missing")?;
         let len = v.len();
         for from in (0..len).step_by(slot) {
@@ -50,7 +50,7 @@ impl<'a> NextModel<'a> {
             sent += 1;
             b.tp_mailbox_put(mailbox, pad, 1, 1, 1, 0, sent)?;
         }
-        (s.sent, s.taken) = (sent, taken);
+        (s.sent, s.got[s.peer]) = (sent, taken);
         Ok(())
     }
     /// The front's notice pad outside the credit count (`put`), or the worker's take of it; the
@@ -64,8 +64,8 @@ impl<'a> NextModel<'a> {
             s.sent += 1;
             b.tp_mailbox_put(mailbox, pad, 1, 1, 1, 0, s.sent)
         } else {
-            s.taken += 1;
-            b.tp_mailbox_take(mailbox, pad_in, 1, 1, 1, 0, s.taken, s.limit_ns)
+            s.got[s.peer] += 1;
+            b.tp_mailbox_take(mailbox, pad_in, 1, 1, 1, 0, s.got[s.peer], s.limit_ns)
         }
     }
     /// The worker's funding answer, one word outside the credit count (`put`), or the front's
@@ -78,8 +78,8 @@ impl<'a> NextModel<'a> {
             s.sent += 1;
             b.tp_mailbox_put(mailbox, word, 1, 1, 1, 0, s.sent)?;
         } else {
-            s.taken += 1;
-            b.tp_mailbox_take(mailbox, word, 1, 1, 1, 0, s.taken, s.limit_ns)?;
+            s.got[s.peer] += 1;
+            b.tp_mailbox_take(mailbox, word, 1, 1, 1, 0, s.got[s.peer], s.limit_ns)?;
         }
         Ok(())
     }
@@ -92,8 +92,9 @@ impl<'a> NextModel<'a> {
     /// one attention selection for every row (prefill_inner's one-row rule never cuts its tiles).
     pub(in crate::flash) fn tp_split_cut(&self, chat: &NextSession<'a, '_>, output: bool, rows: usize, chunk: usize) -> Option<usize> {
         let owns = crate::flash_next_rows::check_owners(&chat.gdn_state, &chat.qsa_state, self.state_range()).is_ok();
+        // The transaction runs on the pair only; one Spark (no pipeline queue) stops at pp_async first.
         if !crate::flash_tp_switch::split_session(output, chat.valid, chat.pos, chat.dump.is_some() || chat.layer_bytes.is_some(), owns)
-            || !self.pp_async() || crate::flash_next_rows::prompt_tile() < crate::flash_tp_switch::PIPELINE_TILE { return None; }
+            || !self.pp_async() || crate::flash_next_rows::prompt_tile() < crate::flash_tp_switch::PIPELINE_TILE || !self.tp_pair() { return None; }
         let n = crate::flash_tp_switch::split_rows(0, rows, chunk)?;
         self.tp.borrow().as_ref().filter(|s| s.rank == 0 && s.seq.chats.pending().is_none())?;
         (3..LAYERS).step_by(4).all(|li| (1..n).all(|i| chat.indexer.select(li, i, i + 1) == chat.indexer.select(li, 0, 1))).then_some(n)

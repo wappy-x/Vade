@@ -333,8 +333,9 @@ impl Session {
     pub fn two_sparks(&self) -> bool {
         self.fp4_local && self.group_len() == 2
     }
-    /// Whether the engine has a prefix restore here (one Spark, replicas, the tensor split),
-    /// so an unset VADE_FLASHNEXT_PREFIX_CACHE means on. The layer chain has none: off.
+    /// Whether the engine has a prefix restore here (one Spark, replicas, the two-Spark split),
+    /// so an unset VADE_FLASHNEXT_PREFIX_CACHE means on. Three or more Sparks have none (the
+    /// layer chain, or the split in parts on four Sparks over RDMA): off.
     pub fn prefix_restore(&self) -> bool {
         !self.chained() || self.two_sparks()
     }

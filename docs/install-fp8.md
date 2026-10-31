@@ -8,7 +8,7 @@ Vade serves two checkpoints of the same model. Both are supported:
 | Sparks | 1 to 24 | 2, 4 or 6 |
 | Measured in our cards | 1, 2 and 4 Sparks | 2 and 4 Sparks |
 | Two Sparks | The tensor split | Tensor parallel on a ring |
-| Four Sparks | The layer chain | Tensor parallel on a path |
+| Four Sparks | The tensor split in quarters (RDMA) | Tensor parallel on a path |
 | Start command | `vade up` | `vade up --fp8` |
 | Guide | [INSTALL.md](../INSTALL.md) | This page |
 

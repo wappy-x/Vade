@@ -27,7 +27,8 @@ it covers and who it is for, and ends with where to go next.
   it, remove it.
 - [Multiple Sparks](multi-spark.md). The older BF16 path: Qwen3-8B or
   Qwen3-32B across cabled Sparks with tensor parallelism. FP4-Local uses the
-  tensor split on two Sparks and the layer chain on three or more.
+  tensor split on two Sparks and on four over RDMA, and the layer chain on
+  other counts of three or more.
 
 ## Performance
 

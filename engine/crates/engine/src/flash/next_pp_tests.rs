@@ -752,7 +752,7 @@ fn pp_stage_geometry_covers_each_layer_once_and_keeps_ple_on_front() {
     }
     assert_eq!(Stage::new(1, 4, None).unwrap(), Stage { rank: 1, ranks: 4, first: 12, end: 24 });
     assert_eq!(Stage::new(1, 2, Some(17)).unwrap().first, 17);
-    assert!(Stage::new(1, 4, Some(24)).is_err());
+    assert!(Stage::new(1, 4, Some(48)).is_err());
     for ranks in [0, 1, 25, usize::MAX] { assert!(Stage::new(0, ranks, None).is_err()); }
     assert!(Stage::new(4, 4, None).is_err());
     assert!(!pool_advances_position(1, true)); // frontend's layer-zero graph

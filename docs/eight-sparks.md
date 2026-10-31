@@ -109,17 +109,18 @@ with `--hosts` ([section 6](#6-start-a-run-on-an-arc)).
 | --- | --- | --- |
 | 1 | One Spark, no fabric. `--replicas 8` runs eight independent servers behind one local gateway. | Refused. |
 | 2 | The tensor split, the only two-Spark path. It needs RDMA. `--replicas 4 --pairs` runs four pairs behind one local gateway. | Two-way TP. |
-| 4 | The layer chain of four. | Four-way TP on a path. Today it gives other token IDs than two Sparks ([benchmarks.md](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)). |
+| 4 | Over RDMA, the tensor split in parts (each Spark works on every token). Over TCP, the layer chain of four. | Four-way TP on a path. Today it gives other token IDs than two Sparks ([benchmarks.md](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)). |
 | 8 | The layer chain of eight. | Refused: `FP8 needs 2, 4, or 6 machines` ([cli/src/config.rs](../cli/src/config.rs)). |
 
-FP4-Local runs tensor parallel only on two Sparks (the tensor split). On four
-or eight Sparks it runs the layer chain: each Spark holds a block of layers.
-The model has 48 layers, so on eight Sparks each Spark runs 6 of them, and
-each token passes through all eight Sparks in turn
+FP4-Local runs the tensor split on two Sparks, and the tensor split in parts on
+four Sparks over RDMA. On four Sparks over TCP and on eight Sparks it runs the
+layer chain: each Spark holds a block of layers. Eight Sparks do not run the
+split: the mailbox has no room for eight ranks. The split in parts and the
+chain have no prefix cache. The model has 48 layers, so on eight Sparks each
+Spark runs 6 of them, and each token passes through all eight Sparks in turn
 (`Stage::new` in
 [engine/crates/engine/src/flash/next_pp.rs](../engine/crates/engine/src/flash/next_pp.rs)).
-This build has no four-Spark or eight-Spark tensor split for FP4-Local. No
-card has measured the layer chain of eight yet, so this page gives no speed
+No card has measured the layer chain of eight yet, so this page gives no speed
 for it.
 
 **One address for several servers.** Only `vade up --replicas N` puts one
@@ -433,8 +434,10 @@ vade up --hosts spark-7,spark-8            # the same arc, without a group
 vade up --hosts spark-8,spark-1            # the pair on cable 8
 ```
 
-**Four Sparks (world 4).** FP4-Local runs the layer chain of four. FP8 runs
-four-way TP with `--fp8` and a config that selects the FP8 checkpoint
+**Four Sparks (world 4).** FP4-Local runs the four-way tensor split over RDMA
+(each Spark works on every token, on a quarter of the experts; one-chat passes
+also split most projections, and greedy steps split the output head) and the
+layer chain of four over TCP. FP8 runs four-way TP with `--fp8` and a config that selects the FP8 checkpoint
 (`vade up --fp8` refuses an FP4-Local config). Each group below is its own
 server on its own local port.
 

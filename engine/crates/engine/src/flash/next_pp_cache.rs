@@ -98,7 +98,7 @@ impl Saved<'_> {
 }
 #[cfg(target_os = "linux")]
 impl<'a> NextModel<'a> {
-    pub fn tp_prefix_supported(&self) -> bool { self.pp.borrow().as_ref().is_some_and(|l| l.tp) && self.tp_on() }
+    pub fn tp_prefix_supported(&self) -> bool { self.pp.borrow().as_ref().is_some_and(|l| l.tp) && self.tp_pair() }
     pub fn pp_cache_releases(&self) -> Result<()> {
         if let Some(link) = self.pp.borrow_mut().as_mut() { link.cache_releases()?; }
         Ok(())

@@ -2,7 +2,9 @@
 
 This page covers the older BF16 `tp-serve` path. FP4-Local uses `flash-serve`
 instead. The [launcher](../crates/tp/src/bin/flash-serve.rs) selects the tensor
-split on two Sparks and the layer chain on three or more. The
+split on two Sparks, the split in parts on more Sparks over RDMA when every
+split width cuts into whole parts and the mailbox has room for that many ranks
+(four for the shipped checkpoint), and the layer chain otherwise. The
 [`vade up` configuration limit](../../cli/src/config.rs) allows up to 24 Sparks.
 These are code paths and launch limits, not device test results. See
 [FP4-Local serving](next-http.md) for that path's settings.

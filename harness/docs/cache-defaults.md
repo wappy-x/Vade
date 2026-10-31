@@ -10,7 +10,7 @@ sending `cache:true` cannot enable a server feature that was disabled at startup
 | Direct and native agent harness | Request `cache:true` when supported; keep a stable session key when advertised | Permission for the engine to reuse a prefix, with exact admission seeing the same decorated request |
 | `VADE_HARNESS_PREFIX_CACHE=0` | Unset | Request `cache:false`; keep the transcript and advertised affinity key unchanged |
 | Gateway | Preserve caller cache fields | `--stable-prefix` explicitly enables supported request decoration; routing affinity alone is not a cache hit |
-| FP4-Local engine `VADE_FLASHNEXT_PREFIX_CACHE` | Unset: retention on, on one Spark and on the two-Spark tensor split; off on the layer chain (three or more Sparks) | `0` turns retention off; `1` on the layer chain is refused |
+| FP4-Local engine `VADE_FLASHNEXT_PREFIX_CACHE` | Unset: retention on, on one Spark and on the two-Spark tensor split; off on three or more Sparks (the layer chain, and the split in parts on four Sparks over RDMA) | `0` turns retention off; `1` on three or more Sparks is refused |
 
 The request rules are in [contract.rs](../src/contract.rs); the server defaults
 and pipeline refusal are in [prefix_switch.rs](../../engine/crates/serve/src/prefix_switch.rs).
@@ -19,9 +19,10 @@ contract does not enable custom cache decoration.
 
 ## Engine retention default
 
-The engine keeps prefixes by default on one Spark and on the tensor split. Each
+The engine keeps prefixes by default on one Spark and on the two-Spark tensor
+split; three or more Sparks (the layer chain and the split in parts) do not. Each
 engine start takes a memory room for the cache. On one Spark the room never
-lowers the number of full-context chats; on the tensor split it holds one
+lowers the number of full-context chats; on the two-Spark tensor split it holds one
 full-context copy up to 4 GiB (all of a 32,768 context) and can lower that number by one (see [the prefix cache](../../INSTALL.md#the-prefix-cache)).
 Requests without `cache:true` or a `prompt_cache_key` do not keep prefixes, so
 their work does not change. The default-on gate measures repeated-prefix
@@ -93,8 +94,8 @@ cargo test --offline --test contract_cli both_cli_modes_negotiate_cache_permissi
 ## Recommended defaults
 
 Keep negotiated harness requests on and keep gateway cache decoration opt-in.
-Keep the engine retention default: on for one Spark and the tensor split, off
-on the layer chain. A request keeps a prefix only with `cache:true` or a
+Keep the engine retention default: on for one Spark and the two-Spark tensor
+split, off on three or more Sparks (the layer chain and the split in parts). A request keeps a prefix only with `cache:true` or a
 `prompt_cache_key`. This preserves the available repeated-prefix optimization
 without claiming that a request flag changes server capacity or enables an
 unqualified pipeline path.

@@ -2398,8 +2398,8 @@ cell in these columns is to be measured.
 | Column | Sparks with a server | Arc in rank order | Path in this build | The other Sparks |
 | --- | ---: | --- | --- | --- |
 | **8 of 8** | 8 | `eight`: spark-1 to spark-8, rank 0 spark-1 | FP4-Local layer chain of eight | none |
-| **4 of 8** | 4 | `quad-a`: spark-1 to spark-4, rank 0 spark-1; then `quad-b`: spark-5 to spark-8, rank 0 spark-5 | FP4-Local layer chain of four; FP8 four-way TP on a path | no server |
-| **2 × 4 of 8** | 8 | `quad-a` and `quad-b` at the same time | two FP4-Local layer chains of four | none |
+| **4 of 8** | 4 | `quad-a`: spark-1 to spark-4, rank 0 spark-1; then `quad-b`: spark-5 to spark-8, rank 0 spark-5 | FP4-Local tensor split in parts over RDMA (layer chain of four over TCP); FP8 four-way TP on a path | no server |
+| **2 × 4 of 8** | 8 | `quad-a` and `quad-b` at the same time | two FP4-Local four-Spark servers (the split in parts over RDMA, chains over TCP) | none |
 | **FP8, 8 of 8** | none | none | refused: `FP8 needs 2, 4, or 6 machines` ([cli/src/config.rs](../cli/src/config.rs)) | not measured |
 
 **What each column measures.** The same cells as the other columns, on the

@@ -18,10 +18,23 @@ pub fn load() -> Result<bool, String> {
 pub fn validate() -> Result<(), String> {
     parse(std::env::var("VADE_HEAD_BOUNDS")).map(|_| ())
 }
-/// Rows of rank 0's vocabulary half under the tensor split's head split: the lower half in
-/// whole 64-row tiles (the bounded screen's unit); rank 1 takes the rest. The split head
+/// Rows of rank 0's vocabulary half under the tensor split's head split on the pair: the lower
+/// half in whole 64-row tiles (the bounded screen's unit); rank 1 takes the rest. The split head
 /// covers the greedy verify head of one-chat passes of 2..=RETAINED_ROWS rows.
-pub fn split_rows(vocabulary: usize) -> usize { vocabulary / 128 * 64 }
+pub fn split_rows(vocabulary: usize) -> usize { part_start(vocabulary, crate::flash_tp_switch::PAIR, 1) }
+/// The first row of rank `rank`'s vocabulary part under the head split over `world` ranks: equal
+/// parts of whole 64-row tiles, the last rank also takes the rest (`rank` = `world`: the end).
+pub fn part_start(vocabulary: usize, world: usize, rank: usize) -> usize {
+    if rank >= world { vocabulary } else { vocabulary / (64 * world) * 64 * rank }
+}
+/// The split head over `parts` ranks: each row's argmax from the parts' argmax rows (`rows` holds
+/// `parts` blocks of the same rows, part p's ids from 0 at part_start), merge_split folded in rank
+/// order. The rule is a total order, so the result is the whole head's argmax.
+pub fn merge_parts(rows: &[(u32, f32)], vocabulary: usize, parts: usize) -> Result<Vec<(u32, f32)>, String> {
+    if parts == 0 || !rows.len().is_multiple_of(parts) { return Err("split head rows differ".into()); }
+    let n = rows.len() / parts;
+    (1..parts).try_fold(rows[..n].to_vec(), |merged, p| merge_split(&merged, &rows[p * n..(p + 1) * n], part_start(vocabulary, parts, p) as u32))
+}
 /// The split head: each row's argmax over the whole vocabulary from the two halves' argmax rows
 /// (`own` over rows [0, start), `peer` over rows [start, ..) with ids from 0): the larger logit,
 /// ties to the lower id (always `own`'s), the order logits_argmax_finish uses within one head.
@@ -34,18 +47,20 @@ pub fn merge_split(own: &[(u32, f32)], peer: &[(u32, f32)], start: u32) -> Resul
     }).collect()
 }
 /// The head rows whose bounds this rank loads, as (start, rows): the whole head on a rank with the
-/// head; under the tensor split the front its lower half and the headless rank 1 its upper half.
-/// None: no bounds (a headless pipeline rank).
+/// head; under the tensor split each rank its part (on the pair the front its lower half and the
+/// headless rank 1 its upper half). None: no bounds (a headless pipeline rank).
 pub fn bounds_rows(vocabulary: usize, headless: bool) -> Option<(usize, usize)> {
-    split_bounds_rows(vocabulary, headless, crate::flash_tp_switch::on())
+    use crate::flash_tp_switch as tp;
+    split_bounds_rows(vocabulary, headless, tp::on().then(|| (tp::rank().unwrap_or(usize::from(headless)), tp::world())))
 }
-fn split_bounds_rows(vocabulary: usize, headless: bool, split: bool) -> Option<(usize, usize)> {
-    let half = split_rows(vocabulary);
-    match (split, headless) {
-        (false, true) => None,
-        (false, false) => Some((0, vocabulary)),
-        (true, false) => Some((0, half)),
-        (true, true) => Some((half, vocabulary - half)),
+/// `split`: (this rank, the split's ranks) under the tensor split.
+fn split_bounds_rows(vocabulary: usize, headless: bool, split: Option<(usize, usize)>) -> Option<(usize, usize)> {
+    match split {
+        Some((rank, world)) => {
+            let start = part_start(vocabulary, world, rank);
+            Some((start, part_start(vocabulary, world, rank + 1) - start))
+        }
+        None => (!headless).then_some((0, vocabulary)),
     }
 }
 fn configured() -> Result<Option<bool>, String> {
@@ -82,7 +97,7 @@ pub const RETAINED_INPUT_BYTES: usize = RETAINED_ROWS * 2560 * 4;
 pub fn retained_input_bytes(enabled: bool) -> usize { if enabled { RETAINED_INPUT_BYTES } else { 0 } }
 #[cfg(test)]
 mod tests {
-    use super::{parse, load_local, retained_input_bytes, funded, split_bounds_rows, split_rows, merge_split};
+    use super::{parse, load_local, retained_input_bytes, funded, split_bounds_rows, split_rows, merge_split, merge_parts, part_start};
     /// One argmax over a row: the larger logit, ties to the lower id (logits_argmax_finish).
     fn whole(row: &[f32]) -> (u32, f32) {
         row.iter().enumerate().fold((u32::MAX, f32::NEG_INFINITY), |best, (i, &v)| {
@@ -182,12 +197,58 @@ mod tests {
             let half = split_rows(vocabulary);
             assert_eq!(half % 64, 0);
             assert!(half <= vocabulary - half && vocabulary - 2 * half < 128);
-            assert_eq!(split_bounds_rows(vocabulary, false, true), Some((0, half)));
-            assert_eq!(split_bounds_rows(vocabulary, true, true), Some((half, vocabulary - half)));
-            assert_eq!(split_bounds_rows(vocabulary, false, false), Some((0, vocabulary)));
-            assert_eq!(split_bounds_rows(vocabulary, true, false), None);
+            assert_eq!(split_bounds_rows(vocabulary, false, Some((0, 2))), Some((0, half)));
+            assert_eq!(split_bounds_rows(vocabulary, true, Some((1, 2))), Some((half, vocabulary - half)));
+            assert_eq!(split_bounds_rows(vocabulary, false, None), Some((0, vocabulary)));
+            assert_eq!(split_bounds_rows(vocabulary, true, None), None);
+            // Four ranks: equal parts of whole 64-row tiles that tile the head; the last takes the rest.
+            let parts: Vec<_> = (0..4).map(|r| split_bounds_rows(vocabulary, r != 0, Some((r, 4))).unwrap()).collect();
+            assert!(parts.windows(2).all(|w| w[0].0 + w[0].1 == w[1].0 && w[0].0 % 64 == 0 && w[0].1 == parts[0].1));
+            assert_eq!((parts[0].0, parts[3].0 + parts[3].1), (0, vocabulary));
+            assert!(parts[3].1 >= parts[0].1 && parts[3].1 - parts[0].1 < 256);
         }
         assert_eq!(split_rows(248_320), 124_160);
+        assert_eq!((1..=4).map(|r| part_start(248_320, 4, r)).collect::<Vec<_>>(), [62_080, 124_160, 186_240, 248_320]);
+    }
+    /// The parts' merge equals one argmax over the whole row at 2, 3 and 4 parts, with ties
+    /// inside and across the parts, and on the pair equals merge_split.
+    #[test]
+    fn parts_merge_equals_the_whole_argmax() {
+        let vocabulary = 64 * 13 + 40;
+        for seed in 0..200usize {
+            let row: Vec<f32> = (0..vocabulary).map(|i| ((i * 7919 + seed * 104_729) % 11) as f32 - 5.0).collect();
+            for parts in 2..=4usize {
+                let rows: Vec<_> = (0..parts).map(|p| whole(&row[part_start(vocabulary, parts, p)..part_start(vocabulary, parts, p + 1)])).collect();
+                let merged = merge_parts(&rows, vocabulary, parts).unwrap()[0];
+                let w = whole(&row);
+                assert_eq!((merged.0, merged.1.to_bits()), (w.0, w.1.to_bits()), "seed {seed} parts {parts}");
+                if parts == 2 { assert_eq!(merge_split(&rows[..1], &rows[1..], split_rows(vocabulary) as u32).unwrap()[0], merged); }
+            }
+        }
+        assert!(merge_parts(&[(0, 1.0); 3], vocabulary, 2).is_err());
+    }
+    /// Ties across the four parts of the real head (248320 rows, 62080 per part): equal top logits
+    /// in every part, a tie of parts 1 and 3 above parts 0 and 2, and a signed-zero tie (-0.0 in
+    /// part 0, +0.0 in part 1) each give the whole head's argmax: the lowest global id, its logit
+    /// bits kept (-0.0 stays -0.0).
+    #[test]
+    fn four_part_ties_give_the_whole_argmax() {
+        let vocabulary = 248_320;
+        let start = |p| part_start(vocabulary, 4, p);
+        assert_eq!((start(1), start(4) - start(3)), (62_080, 62_080));
+        let mut equal = vec![-1.0f32; vocabulary];
+        (0..4).for_each(|p| equal[start(p) + 10] = 1.5);
+        let mut upper = vec![-1.0f32; vocabulary];
+        (upper[start(1) + 5], upper[start(3)], upper[start(0) + 7], upper[start(2) + 1]) = (2.0, 2.0, 1.0, 1.0);
+        let mut zeros = vec![-1.0f32; vocabulary];
+        (zeros[start(0) + 7], zeros[start(1)]) = (-0.0, 0.0);
+        for (row, want) in [(&equal, (10, 1.5f32)), (&upper, (62_085, 2.0)), (&zeros, (7, -0.0))] {
+            let parts: Vec<_> = (0..4).map(|p| whole(&row[start(p)..start(p + 1)])).collect();
+            let merged = merge_parts(&parts, vocabulary, 4).unwrap()[0];
+            assert_eq!((merged.0, merged.1.to_bits()), (want.0, want.1.to_bits()));
+            let w = whole(row);
+            assert_eq!((merged.0, merged.1.to_bits()), (w.0, w.1.to_bits()));
+        }
     }
     #[test]
     fn disabled_and_headless_models_never_allocate_optional_head_state() {

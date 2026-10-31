@@ -264,8 +264,8 @@ fn fake_ssh_reads_the_cache_setting_from_the_spark_session() {
     }
     // Unset follows the topology when the session names it.
     runner.cache = "unset".into();
-    for (default, expected) in [(None, "unset in the Spark SSH session: on for one Spark and the tensor split, off on the layer chain"),
-        (Some(true), "unset in the Spark SSH session: on for this topology"), (Some(false), "unset in the Spark SSH session: off on the layer chain")] {
+    for (default, expected) in [(None, "unset in the Spark SSH session: on for one Spark and the two-Spark split, off on three or more Sparks"),
+        (Some(true), "unset in the Spark SSH session: on for this topology"), (Some(false), "unset in the Spark SSH session: off on three or more Sparks")] {
         let state = RemoteState { cache_default: default, ..STATE };
         let (result, printed) = captured(|report| machine(report, &mut runner, &machine_config, &[Port::http(18080)], false, state));
         assert!(result.is_ok() && printed.contains(expected), "{printed}");

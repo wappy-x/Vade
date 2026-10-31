@@ -601,7 +601,7 @@ impl<'a> Workspace<'a> {
                 "flash_next_k16_finish",
                 tp.map_or(H.div_ceil(256) as u32, |t| t.finish_ctas()),
                 count as u32,
-                256,
+                tp.map_or(256, |t| t.finish_threads()),
                 0,
                 &mut [(&mut finish as *mut MoeFinishParams).cast()],
             )?;
@@ -739,7 +739,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         let owner = crate::flash_next_rows::workspace_owner(sessions.iter().map(|s| s.capacity))?;
         let capacity = sessions[owner].capacity;
         let mut work = model.take_work(b, capacity, count)?;
-        work.bound_head = Self::bound_head(model, sessions, count, greedy_head, verify);
+        work.bound_head = Self::bound_head(model, sessions, count, greedy_head, verify, work.head_result.len());
         // Rank 0 decides each pass whether its plain greedy head splits; tp_post sends it to rank 1.
         model.tp_set_head_pass(greedy_head && output && !verify && matches!(part, Part::Whole)
             && head_split::plain_eligible(model, sessions, count, &work));
@@ -789,8 +789,8 @@ impl<'a, 'w> NextSession<'a, 'w> {
         result.map(|()| source)
     }
     /// The single-chat verify head projects only rows above the retained bound.
-    fn bound_head(model: &NextModel<'a>, sessions: &[&mut Self], count: usize, greedy_head: bool, verify: bool) -> bool {
-        greedy_head && verify && sessions.len() == 1 && (head_split::eligible(model, sessions.len(), count, verify)
+    fn bound_head(model: &NextModel<'a>, sessions: &[&mut Self], count: usize, greedy_head: bool, verify: bool, result: usize) -> bool {
+        greedy_head && verify && sessions.len() == 1 && (head_split::eligible(model, sessions.len(), count, verify, result)
             || (2..=crate::flash_head_options::RETAINED_ROWS).contains(&count) && model.head_bounds.is_some())
             && sessions.iter().all(|s| s.dump.is_none() && s.layer_bytes.is_none())
     }
@@ -903,7 +903,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         let (first, end) = match part {
             Part::Whole => (0, LAYERS),
             Part::Front(split) => (0, split),
-            Part::Back(split, _) => (split, model.pp_end.get()),
+            Part::Back(split, _) => (split, model.tp_back_end().unwrap_or(model.pp_end.get())),
         };
         work.residual.resize_within_capacity(count * W)?;
         work.mixed.resize_within_capacity(count * H)?;

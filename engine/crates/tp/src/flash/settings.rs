@@ -72,18 +72,19 @@ pub fn rank_mtp(serving: usize, explicit: bool, adapt: bool, ceiling: Option<&st
     Ok(if explicit || !adapt || serving == 0 { (serving, false) } else { (depth, true) })
 }
 
-/// The pipeline service serves with the world-1 engine's MTP (the tensor split at world 2, the
-/// layer chain at three or more ranks), so an explicit depth there is checked as world 1 checks
+/// The pipeline service serves with the world-1 engine's MTP (the tensor split, the layer chain),
+/// so an explicit depth there is checked as world 1 checks
 /// it (0..=3, already enforced by mtp_depth) instead of refused as rank Next.
 pub fn startup_mtp(pipeline: bool, explicit: Option<usize>) -> Option<usize> {
     explicit.filter(|_| !pipeline)
 }
 
-/// World size of the tensor split, which serves on the pipeline service.
+/// World size of the pair, where the tensor split runs every level (it serves on the pipeline service).
 pub const PIPELINE_RANKS: usize = 2;
 
 /// The engine chooses the path; no switch selects it. FP4-Local with peers serves on the
-/// pipeline service: the tensor split at world 2 and the layer chain at three or more ranks.
+/// pipeline service: the tensor split at world 2 and over more ranks that tensor_split accepts,
+/// else the layer chain at three or more ranks.
 /// `--tensor-map` (`rank_path`) selects the older rank path instead, which serves world 4 only
 /// (tensor_split refuses it at world 2). World 1 never builds a pipeline because its peer set
 /// is empty. Return pipeline enabled and whether this rank has peers.
@@ -132,24 +133,47 @@ pub fn rdma(value: Result<String, std::env::VarError>) -> Result<bool, String> {
 /// linear-attention heads, one-sided RDMA writes for the exchanges and the verify head split by
 /// vocabulary halves. Its exchanges ride RDMA, so TCP (`rdma` false) and `--tensor-map`
 /// (`rank_path`) are refused at world 2 before any rank loads. FP8 keeps its ring path.
-pub fn tensor_split(mixed: bool, world: usize, rank_path: bool, rdma: bool) -> Result<bool, String> {
-    if !mixed || world != PIPELINE_RANKS {
+/// A larger world serves the split when `splits` (the checkpoint's widths cut into whole parts
+/// for it and its mailbox has room: split_accepts) and its links are RDMA; there it splits the
+/// experts, the projections and the greedy head into parts (flash_tp_switch::PAIR has the levels
+/// that stay on the pair). Otherwise, over TCP and with `--tensor-map`, it keeps its other path.
+/// `splits` runs only for FP4-Local on two or more ranks: one Spark and FP8 ask nothing new. At
+/// world 2 a checkpoint whose widths have no halves stops startup too, so the split stays the
+/// only two-Spark path.
+pub fn tensor_split(mixed: bool, world: usize, rank_path: bool, rdma: bool, splits: impl FnOnce() -> bool) -> Result<bool, String> {
+    if !mixed || world < PIPELINE_RANKS {
         return Ok(false);
     }
+    let pair = world == PIPELINE_RANKS;
     if rank_path {
+        if !pair { return Ok(false); }
         return Err("two Sparks run the tensor split; --tensor-map selects the rank path, which serves four Sparks".into());
     }
     if !rdma {
+        if !pair { return Ok(false); }
         return Err("two Sparks run the tensor split, which needs RDMA: unset SEQPAR_RDMA or set it to 1".into());
+    }
+    if !splits() {
+        if !pair { return Ok(false); }
+        return Err("two Sparks run the tensor split, and this checkpoint's widths have no whole halves".into());
     }
     Ok(true)
 }
-/// The path the engine chose and why, for the receipt (None on one Spark): the tensor split, the
-/// FP4-Local layer chain, the FP4-Local rank path (`--tensor-map`) or FP8's ring.
-pub fn chosen_path(distributed: bool, next_model: bool, tp: bool, pp: bool) -> Option<spark_engine::flash_tp_switch::Path> {
+/// The split's layout accepts `world` for this checkpoint (TpLayout::for_config: every matrix the
+/// split cuts has whole parts) and its relayed mailbox has room for a path of `world` ranks.
+pub fn split_accepts(config: &engine_model::flash::Config, world: usize) -> bool {
+    let links = spark_gpu_probe::tp_route::Links::new(world, false);
+    spark_engine::flash_tp_switch::TpLayout::for_config(config, world).is_ok()
+        && links.is_ok_and(|links| spark_gpu_probe::tp_route::Channels::new(&links, 1).is_ok())
+}
+/// The path the engine chose and why, for the receipt (None on one Spark): the tensor split (on
+/// the pair or over `world` ranks), the FP4-Local layer chain, the FP4-Local rank path
+/// (`--tensor-map`) or FP8's ring.
+pub fn chosen_path(distributed: bool, next_model: bool, tp: bool, pp: bool, world: usize) -> Option<spark_engine::flash_tp_switch::Path> {
     use spark_engine::flash_tp_switch::Path;
     distributed.then_some(match (tp, pp, next_model) {
-        (true, _, _) => Path::TENSOR_SPLIT,
+        (true, _, _) if world == PIPELINE_RANKS => Path::TENSOR_SPLIT,
+        (true, _, _) => Path::TENSOR_PARTS,
         (false, true, _) => Path::LAYER_PIPELINE,
         (false, false, true) => Path::RANK_PATH,
         (false, false, false) => Path::RING,
@@ -351,15 +375,28 @@ impl CommandState {
 #[cfg(test)]
 #[test]
 fn tensor_split_is_the_only_world_two_path() {
-    // World 2 FP4-Local always runs the split; every other world and FP8 never do.
-    assert_eq!(tensor_split(true, 2, false, true), Ok(true));
-    for (mixed, world) in [(true, 1), (true, 3), (true, 4), (false, 2), (false, 4)] {
-        assert_eq!(tensor_split(mixed, world, false, true), Ok(false), "{mixed} {world}");
-        assert_eq!(tensor_split(mixed, world, true, false), Ok(false), "{mixed} {world}");
+    // World 2 FP4-Local runs the split (or stops startup); world 1, FP8 and larger worlds the layout
+    // refuses never do.
+    assert_eq!(tensor_split(true, 2, false, true, || true), Ok(true));
+    for (mixed, world, splits) in [(true, 1, true), (true, 3, false), (true, 4, false), (false, 2, true), (false, 4, true)] {
+        assert_eq!(tensor_split(mixed, world, false, true, || splits), Ok(false), "{mixed} {world}");
+        assert_eq!(tensor_split(mixed, world, true, false, || splits), Ok(false), "{mixed} {world}");
     }
+    // One Spark and FP8 never ask the layout: world 1 starts as it did before the split took a world.
+    let asked = std::cell::Cell::new(0);
+    for (mixed, world) in [(true, 1), (false, 1), (false, 2), (false, 4)] {
+        assert_eq!(tensor_split(mixed, world, false, true, || { asked.set(asked.get() + 1); true }), Ok(false), "{mixed} {world}");
+    }
+    assert_eq!(asked.get(), 0);
+    // At world 2 a refused layout stops startup (the split is the only two-Spark path).
+    assert!(tensor_split(true, 2, false, true, || false).unwrap_err().contains("no whole halves"));
+    // A world the layout accepts runs the split over RDMA; over TCP or with --tensor-map it keeps its path.
+    assert_eq!(tensor_split(true, 4, false, true, || true), Ok(true));
+    assert_eq!(tensor_split(true, 4, false, false, || true), Ok(false));
+    assert_eq!(tensor_split(true, 4, true, true, || true), Ok(false));
     // TCP and --tensor-map are refused at world 2.
-    assert!(tensor_split(true, 2, false, false).unwrap_err().contains("needs RDMA"));
-    assert!(tensor_split(true, 2, true, true).unwrap_err().contains("--tensor-map"));
+    assert!(tensor_split(true, 2, false, false, || true).unwrap_err().contains("needs RDMA"));
+    assert!(tensor_split(true, 2, true, true, || true).unwrap_err().contains("--tensor-map"));
     // SEQPAR_RDMA: unset, 1 or auto is RDMA; 0 is TCP; anything else stops startup.
     use std::env::VarError::{NotPresent, NotUnicode};
     assert_eq!(rdma(Err(NotPresent)), Ok(true));
@@ -368,12 +405,13 @@ fn tensor_split_is_the_only_world_two_path() {
     assert!(rdma(Err(NotUnicode("x".into()))).is_err());
     // The receipt names each path and why; one Spark names none.
     use spark_engine::flash_tp_switch::Path;
-    assert_eq!(chosen_path(true, true, true, true), Some(Path::TENSOR_SPLIT));
-    assert_eq!(chosen_path(true, true, false, true), Some(Path::LAYER_PIPELINE));
-    assert_eq!(chosen_path(true, true, false, false), Some(Path::RANK_PATH));
-    assert_eq!(chosen_path(true, false, false, false), Some(Path::RING));
+    assert_eq!(chosen_path(true, true, true, true, 2), Some(Path::TENSOR_SPLIT));
+    assert_eq!(chosen_path(true, true, true, true, 4), Some(Path::TENSOR_PARTS));
+    assert_eq!(chosen_path(true, true, false, true, 4), Some(Path::LAYER_PIPELINE));
+    assert_eq!(chosen_path(true, true, false, false, 4), Some(Path::RANK_PATH));
+    assert_eq!(chosen_path(true, false, false, false, 2), Some(Path::RING));
     assert_eq!(Path::RING.reason, "FP8: the tensor split does not serve FP8");
-    assert_eq!(chosen_path(false, true, false, false), None);
+    assert_eq!(chosen_path(false, true, false, false, 1), None);
 }
 
 #[cfg(test)]
@@ -631,4 +669,49 @@ fn rank_mtp_adapts_only_the_default_depth() {
         assert!(rank_mtp(2, false, true, Some(bad)).is_err());
         assert!(rank_mtp(2, true, false, Some(bad)).is_err());
     }
+}
+/// The shipped FP4-Local geometry (the config.json text fields the flash loader reads).
+#[cfg(test)]
+fn shipped_config() -> engine_model::flash::Config {
+    let layers = (0..48).map(|i| if i % 4 == 3 { "\"full_attention\"" } else { "\"linear_attention\"" }).collect::<Vec<_>>().join(",");
+    let text = format!(r#"{{"model_type":"qwen4_exp","text_config":{{
+        "model_type":"qwen4_exp_text","hidden_act":"silu","output_gate_type":"sigmoid",
+        "mamba_ssm_dtype":"float32","attention_bias":false,"tie_word_embeddings":false,
+        "mtp_use_dedicated_embeddings":false,"hidden_size":2560,"num_hidden_layers":48,
+        "num_attention_heads":24,"num_key_value_heads":2,"head_dim":256,
+        "linear_num_key_heads":16,"linear_num_value_heads":48,"linear_key_head_dim":128,
+        "linear_value_head_dim":128,"linear_conv_kernel_dim":4,"num_experts":512,
+        "num_experts_per_tok":10,"moe_intermediate_size":640,"shared_expert_intermediate_size":640,
+        "hc_count":4,"hc_lowrank":320,"vocab_size":248320,"max_position_embeddings":262144,
+        "eos_token_id":248044,"rms_norm_eps":0.000001,"partial_rotary_factor":0.25,
+        "indexer_n_heads":4,"indexer_kv_heads":1,"indexer_head_dim":128,"indexer_budget":2048,
+        "indexer_compress_ratio":4,"ple_layer_ids":[2],"ngram_size":3,"heads_per_ngram":8,
+        "ple_embed_dim":2560,"ple_conv_kernel_size":4,"split_ngram_parts":128,
+        "mtp_num_hidden_layers":1,"layer_types":[{layers}],
+        "rope_parameters":{{"rope_type":"default","mrope_interleaved":true,"rope_theta":10000000,
+            "partial_rotary_factor":0.25,"mrope_section":[11,11,10]}},
+        "mtp":{{"num_hidden_layers":1,"layer_types":["full_attention"],"hybrid":true,
+            "mtp_use_hidden_state_from_layer":null,"rope_theta":10000000}}
+        }},"quantization_config":{{"quant_method":"fp8","activation_scheme":"dynamic",
+            "weight_per_tensor":false,"act_per_tensor":false,"weight_block_size":[128,128]}}}}"#);
+    engine_model::flash::Config::parse(text.as_bytes()).unwrap()
+}
+#[cfg(test)]
+#[test]
+fn the_split_accepts_only_worlds_that_cut_every_matrix() {
+    // The shipped geometry over 1..=8 ranks: two and four ranks cut every split matrix into
+    // whole 64-row parts with room in the relayed mailbox. Five ranks cut hidden (512 rows) and
+    // the expert width, but not the GDN z rows (6144 / 5) or the QSA q/gate rows (12288 / 5), so
+    // five Sparks keep the layer chain. Three, six and seven do not cut hidden; eight has no
+    // mailbox room for its receive sequence words.
+    let config = shipped_config();
+    let accepted: Vec<usize> = (1..=8).filter(|&world| split_accepts(&config, world)).collect();
+    assert_eq!(accepted, [1, 2, 4]);
+    let five = spark_engine::flash_tp_switch::TpLayout::for_config(&config, 5).unwrap_err();
+    assert!(five.contains("GDN z rows (6144)"), "{five}");
+    assert!(spark_engine::flash_tp_switch::TpLayout::new(config.hidden, config.branches, config.expert_width, config.top_k, config.experts, 5).is_ok());
+    // World 1 accepts the layout but never runs the split (tensor_split stops below two ranks).
+    assert_eq!(tensor_split(true, 1, false, true, || split_accepts(&config, 1)), Ok(false));
+    assert_eq!(tensor_split(true, 5, false, true, || split_accepts(&config, 5)), Ok(false));
+    assert_eq!(tensor_split(true, 4, false, true, || split_accepts(&config, 4)), Ok(true));
 }

@@ -94,8 +94,13 @@ scores of the output head.
   ([`head_split.rs`](../engine/crates/engine/src/flash/head_split.rs)). Rank 1
   never samples. It gets the chosen token as the input of the next step, so
   the two ranks always agree on the token.
-- **Three or more Sparks (the chain).** The front rank keeps the output head
-  and samples.
+- **Four Sparks (the tensor split in parts).** As on two Sparks: a greedy step
+  splits the output head into four vocabulary parts, and a step that samples
+  runs the whole head on rank 0, which samples. The other ranks never sample.
+  On two and on four Sparks, a greedy prompt pass and a greedy verify pass of
+  more than one chat or more than 8 rows also run the whole head on rank 0.
+- **The chain (three or more Sparks without the split).** The front rank keeps
+  the output head and samples.
 - **Four Sparks with `--tensor-map`.** This older rank path accepts greedy
   requests only. It refuses a sampled request before admission
   ([next-http](../engine/docs/next-http.md)).

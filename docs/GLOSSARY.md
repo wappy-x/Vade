@@ -43,7 +43,7 @@ with a box that explains its own engine terms.
 
 **Cargo.** Rust's build tool and package manager. `cargo build` compiles; `cargo run` compiles and runs.
 
-**Chain.** A [layer pipeline](#ho) stretched across more than two Sparks. Each Spark owns a block of consecutive layers and passes the intermediate state on to the next. The engine runs a chain on its own when FP4-Local runs on three or more Sparks without a tensor map. See [architecture](architecture.md#several-sparks-the-layer-pipeline-and-the-chain) and [controller selection](../cli/src/app/plan.rs).
+**Chain.** A [layer pipeline](#ho) stretched across more than two Sparks. Each Spark owns a block of consecutive layers and passes the intermediate state on to the next. The engine runs a chain on its own when FP4-Local runs on three or more Sparks without a tensor map and without the tensor split (over TCP, or when the split does not take that many Sparks: its widths must cut into whole parts and its mailbox must have room; for this checkpoint the split takes two and four). See [architecture](architecture.md#several-sparks-the-tensor-split-layer-pipeline-and-chain) and [controller selection](../cli/src/app/plan.rs).
 
 **Checkpoint.** One published set of a model's files (weights, configuration and tokenizer) at one exact revision.
 
@@ -153,7 +153,7 @@ with a box that explains its own engine terms.
 
 **Launcher.** The `vade launch` workflow you run on the Spark. It finds an existing checkpoint, prepares local artifacts, starts or attaches to the engine it owns, and opens chat. See [first run](../harness/docs/first-run.md) and the [launcher implementation](../cli/src/launch.rs).
 
-**Layer pipeline.** A way to run FP4-Local on several Sparks: the model's layers are split into blocks, and each Spark runs its own block with the same arithmetic as the one-Spark engine, passing its result on to the next. Drafted tokens are checked across every stage. It runs as a [chain](#ac) of three or more Sparks. Two Sparks no longer run it: they run the [tensor split](#sz), which keeps the pipeline's links and protocol. On two Sparks, a cold prompt of 2,048 to 8,192 tokens takes the token split, and one of up to 20,480 tokens runs layer by layer. A longer prompt runs as pipeline tiles of 2,048 rows; from 28,672 tokens, the middle tiles take 4,096 rows. See [several Sparks](architecture.md#several-sparks-the-tensor-split-layer-pipeline-and-chain).
+**Layer pipeline.** A way to run FP4-Local on several Sparks: the model's layers are split into blocks, and each Spark runs its own block with the same arithmetic as the one-Spark engine, passing its result on to the next. Drafted tokens are checked across every stage. It runs as a [chain](#ac) of three or more Sparks when the tensor split does not take that count. Two Sparks no longer run it: they run the [tensor split](#sz), which keeps the pipeline's links and protocol. Four Sparks over RDMA run the split in parts on the same links. On two Sparks, a cold prompt of 2,048 to 8,192 tokens takes the token split, and one of up to 20,480 tokens runs layer by layer. A longer prompt runs as pipeline tiles of 2,048 rows; from 28,672 tokens, the middle tiles take 4,096 rows. See [several Sparks](architecture.md#several-sparks-the-tensor-split-layer-pipeline-and-chain).
 
 **LLM (large language model).** A model trained on large amounts of text to predict the next token. Chat assistants are built on them.
 
