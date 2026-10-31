@@ -103,6 +103,7 @@ returns and trailing empty lines.
 | `exists PATH` | The path exists |
 | `missing PATH` | The path does not exist |
 | `file-equals PATH FIXTURE` | The file text equals the fixture |
+| `lines-equal PATH FIXTURE` | The file has the same non-blank lines as the fixture, in the same order; blank lines are not compared |
 | `json-equals PATH FIXTURE` | Both parse as JSON and are equal; member order is free |
 | `contains PATH TEXT` | The file holds the text |
 | `starts-with PATH TEXT` | The file starts with the text |

@@ -16,7 +16,7 @@ check: last-exit-zero
 check: contains src/order.rs // Part of the tally crate. License: Apache-2.0.
 check: starts-with src/order.rs // Part of the tally crate. License: Apache-2.0.
 check: contains src/order.rs ///
-check: file-equals CHANGELOG.md expected/CHANGELOG.md
+check: lines-equal CHANGELOG.md expected/CHANGELOG.md
 check: unchanged vendor
 check: unchanged Cargo.toml
 check: run-with hidden/median_tests.rs tests/hidden_median_tests.rs -- cargo test --offline --quiet --test hidden_median_tests

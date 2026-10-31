@@ -61,7 +61,7 @@ fn every_named_task_input_exists_and_is_tracked() {
                 ["inputs:", paths @ ..] => { inputs += paths.len(); named.extend(paths.iter().map(|p| format!("workspace/{p}"))); }
                 ["remove_before:", paths @ ..] => named.extend(paths.iter().map(|p| format!("workspace/{p}"))),
                 ["request:", file] => named.push(file.to_string()),
-                ["check:", "file-equals" | "json-equals", _, fixture] => named.push(fixture.to_string()),
+                ["check:", "file-equals" | "lines-equal" | "json-equals", _, fixture] => named.push(fixture.to_string()),
                 ["check:" | "step_check:", "run-with" | "fails-with", fixture, ..] => named.push(fixture.to_string()),
                 _ => {}
             }

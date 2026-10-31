@@ -155,6 +155,55 @@ fn the_runner_refuses_unknown_checks_and_untracked_files() {
     assert!(!s.0.join("results").exists(), "a refusal made the results folder");
 }
 
+/// Every file of a real suite task, as (path in the task folder, text).
+fn task_files(dir: &Path, rel: &Path, out: &mut Vec<(String, String)>) {
+    let mut entries: Vec<_> = std::fs::read_dir(dir.join(rel)).unwrap().flatten().map(|e| e.path()).collect();
+    entries.sort();
+    for p in entries {
+        let r = rel.join(p.file_name().unwrap());
+        if p.is_dir() { task_files(dir, &r, out) } else { out.push((r.to_string_lossy().into(), std::fs::read_to_string(&p).unwrap())) }
+    }
+}
+
+/// The CHANGELOG hunk that the live model sent in all three runs of the
+/// 2026-10-31 one-Spark suite card: it adds a blank line, then the entry, so
+/// the list gets a blank line between its two items. AGENTS.md rule 4 sets the
+/// line, its heading and its order, not the blank lines.
+const LIVE_HUNK: &str = "*** Update File: CHANGELOG.md\n@@\n ## Unreleased\n+\n+- added: order::median\n \n - added: stats::mean\n";
+const SOLVE_HUNK: &str = "*** Update File: CHANGELOG.md\n@@\n ## Unreleased\n \n+- added: order::median\n - added: stats::mean\n";
+
+#[test]
+fn follow_agents_md_grades_the_changelog_rule_not_its_blank_lines() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/agent-suite/tasks/follow-agents-md");
+    let mut real = Vec::new();
+    task_files(&dir, Path::new(""), &mut real);
+    let with = |solve: &str| -> Vec<(String, String)> {
+        real.iter().map(|(p, t)| match p.as_str() {
+            "task.txt" => (p.clone(), t.replace("id: follow-agents-md", "id: t")),
+            "solve.script" => (p.clone(), solve.to_string()),
+            _ => (p.clone(), t.clone()),
+        }).collect()
+    };
+    let solve = real.iter().find(|(p, _)| p == "solve.script").unwrap().1.clone();
+    assert!(solve.contains(SOLVE_HUNK), "{solve}");
+    let run = |name: &str, solve: &str| {
+        let files = with(solve);
+        let refs: Vec<(&str, &str)> = files.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
+        Scratch::new(name, &refs).run()
+    };
+    // The live model's edit keeps every line, the heading and the order: it passes, and the real wrong.script still fails.
+    let (ok, all) = run("agents-live", &solve.replace(SOLVE_HUNK, LIVE_HUNK));
+    if all.contains("| SKIP: ") { eprintln!("skipped: this host has no command sandbox\n{all}"); return; }
+    assert!(ok, "{all}");
+    assert!(all.contains("| t | edit-in-place | solve PASS 8/8 quality 3/3 (16 changed lines) | wrong FAIL "), "{all}");
+    assert!(all.contains("| OK"), "{all}");
+    // The same loose list with the new line below the older one breaks rule 4 and fails.
+    let swapped = "*** Update File: CHANGELOG.md\n@@\n - added: stats::mean\n+\n+- added: order::median\n";
+    let (ok, all) = run("agents-swapped", &solve.replace(SOLVE_HUNK, swapped));
+    assert!(!ok, "{all}");
+    assert!(all.contains("first failure: lines-equal CHANGELOG.md expected/CHANGELOG.md -> line 5: got \"- added: stats::mean\", want \"- added: order::median\" (blank lines are not compared)"), "{all}");
+}
+
 /// A loopback model that streams fixed replies as SSE with a `token_id` on
 /// every chunk, in a cycle. `change` gives a token ID offset per answered call
 /// number (1-based, over all runs), to make one call of one run differ.

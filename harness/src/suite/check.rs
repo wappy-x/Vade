@@ -6,6 +6,7 @@
 //!   exists PATH                          the workspace path exists
 //!   missing PATH                         the workspace path does not exist
 //!   file-equals PATH FIXTURE             same text after line-end normalization (see `normal`)
+//!   lines-equal PATH FIXTURE             same non-blank lines in the same order, after the same normalization
 //!   json-equals PATH FIXTURE             both parse as JSON and are equal (member order free)
 //!   contains PATH TEXT...                the file holds TEXT
 //!   starts-with PATH TEXT...             the file starts with TEXT
@@ -46,6 +47,7 @@ pub fn run(line: &str, c: &Ctx) -> Outcome {
         ["exists", p] => if std::fs::symlink_metadata(c.work.join(p)).is_ok() { Ok("present".into()) } else { Err("missing".into()) },
         ["missing", p] => if std::fs::symlink_metadata(c.work.join(p)).is_ok() { Err("present".into()) } else { Ok("missing as required".into()) },
         ["file-equals", p, f] => file_equals(&c.work.join(p), &c.task_dir.join(f)),
+        ["lines-equal", p, f] => lines_equal(&c.work.join(p), &c.task_dir.join(f)),
         ["json-equals", p, f] => json_equals(&c.work.join(p), &c.task_dir.join(f)),
         ["contains", p, _, ..] => read(&c.work.join(p)).and_then(|t| if t.contains(&rest(2)) { Ok("found".into()) } else { Err("not found".into()) }),
         ["absent", p, _, ..] => occurrences(&c.work.join(p), &rest(2)).and_then(|(n, at)| if n == 0 { Ok("0 occurrences".into()) } else { Err(format!("{n} occurrences, first in {at}")) }),
@@ -83,7 +85,7 @@ pub fn run(line: &str, c: &Ctx) -> Outcome {
 pub fn known(line: &str) -> bool {
     let words: Vec<&str> = line.split_whitespace().collect();
     matches!(words.as_slice(),
-        ["last-exit-zero"] | ["held-closed"] | ["exists", _] | ["missing", _] | ["file-equals", _, _] | ["json-equals", _, _]
+        ["last-exit-zero"] | ["held-closed"] | ["exists", _] | ["missing", _] | ["file-equals", _, _] | ["lines-equal", _, _] | ["json-equals", _, _]
         | ["contains", _, _, ..] | ["absent", _, _, ..] | ["count", _, _, _, ..] | ["count-min", _, _, _, ..] | ["starts-with", _, _, ..]
         | ["unchanged", _] | ["reply-contains", _, ..] | ["run", _, ..] | ["run-with" | "fails-with", _, _, "--", _, ..])
 }
@@ -104,6 +106,21 @@ fn file_equals(got: &Path, want: &Path) -> Result<String, String> {
     let (gl, wl): (Vec<_>, Vec<_>) = (g.lines().collect(), w.lines().collect());
     let i = gl.iter().zip(&wl).position(|(a, b)| a != b).unwrap_or(gl.len().min(wl.len()));
     Err(format!("line {}: got {:?}, want {:?}", i + 1, gl.get(i).unwrap_or(&"<end>"), wl.get(i).unwrap_or(&"<end>")))
+}
+
+/// The non-blank lines of a normalized text, each with its 1-based line number.
+fn solid(text: &str) -> Vec<(usize, &str)> { text.lines().enumerate().filter(|(_, l)| !l.is_empty()).map(|(i, l)| (i + 1, l)).collect() }
+
+/// Blank lines do not count; every other line must be the same, in the same
+/// order, with the same indent. For a rule that fixes lines and their order
+/// but not the blank lines between them, such as a Markdown list.
+fn lines_equal(got: &Path, want: &Path) -> Result<String, String> {
+    let (g, w) = (normal(&read(got)?), normal(&read(want)?));
+    let (gl, wl) = (solid(&g), solid(&w));
+    if gl.len() == wl.len() && gl.iter().zip(&wl).all(|(a, b)| a.1 == b.1) { return Ok(format!("{} non-blank lines equal", wl.len())); }
+    let i = gl.iter().zip(&wl).position(|(a, b)| a.1 != b.1).unwrap_or(gl.len().min(wl.len()));
+    let at = gl.get(i).map_or(g.lines().count() + 1, |l| l.0);
+    Err(format!("line {at}: got {:?}, want {:?} (blank lines are not compared)", gl.get(i).map_or("<end>", |l| l.1), wl.get(i).map_or("<end>", |l| l.1)))
 }
 
 fn json_equals(got: &Path, want: &Path) -> Result<String, String> {
@@ -211,12 +228,32 @@ mod tests {
         assert_ne!(normal("a\n\nb"), normal("a\nb"));
     }
     #[test]
+    fn lines_equal_skips_only_blank_lines() {
+        let dir = std::env::temp_dir().join(format!("vade-check-lines-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let want = dir.join("want");
+        std::fs::write(&want, "# Log\n\n## New\n\n- added: b\n- added: a\n\n## 1.0\n\n- First.\n").unwrap();
+        let check = |text: &str| { std::fs::write(dir.join("got"), text).unwrap(); lines_equal(&dir.join("got"), &want) };
+        // A loose list, CRLF and trailing blank lines are the same lines.
+        assert_eq!(check("# Log\n\n## New\n\n- added: b\n\n- added: a\n\n## 1.0\n\n- First.\n"), Ok("6 non-blank lines equal".into()));
+        assert!(check("# Log\r\n## New\r\n- added: b\r\n- added: a\r\n## 1.0\r\n- First.\r\n\n\n").is_ok());
+        // Order, text, indent, an extra line and a missing line still count.
+        assert_eq!(check("# Log\n\n## New\n\n- added: a\n\n- added: b\n\n## 1.0\n\n- First.\n"), Err("line 5: got \"- added: a\", want \"- added: b\" (blank lines are not compared)".into()));
+        assert!(check("# Log\n## New\n- added: B\n- added: a\n## 1.0\n- First.\n").is_err());
+        assert!(check("# Log\n## New\n  - added: b\n- added: a\n## 1.0\n- First.\n").is_err());
+        assert_eq!(check("# Log\n## New\n- added: b\n- added: a\n## 1.0\n- First.\n- x\n"), Err("line 7: got \"- x\", want \"<end>\" (blank lines are not compared)".into()));
+        assert_eq!(check("# Log\n## New\n- added: b\n- added: a\n## 1.0\n"), Err("line 6: got \"<end>\", want \"- First.\" (blank lines are not compared)".into()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
     fn known_checks() {
         assert!(known("run cargo test --offline"));
         assert!(known("fails-with mutants/a.rs src/lib.rs -- cargo test"));
         assert!(known("missing src/v1"));
         assert!(!known("fails-with mutants/a.rs src/lib.rs cargo test"));
         assert!(!known("file-equals a"));
+        assert!(known("lines-equal a b"));
+        assert!(!known("lines-equal a"));
         assert!(!known("max-turns 6"));
     }
 }

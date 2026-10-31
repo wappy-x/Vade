@@ -8,6 +8,7 @@ them ([glossary](docs/GLOSSARY.md#ho), "Main `abc1234`").
 
 ## Unreleased
 
+- `vade-harness suite`: the task follow-agents-md now checks the CHANGELOG lines and their order with the new check `lines-equal`, which does not compare blank lines. Before, its `file-equals` check also compared blank lines, so a correct entry failed when the list had a blank line between its items. AGENTS.md in the task states the line, its heading and its order, but no blank-line layout.
 - docs: eight-Spark runbook and changelog statements corrected to match the code
 - docs: credits and provenance reworded; original-work section added; facts unchanged
 - harness: suite_dry_run uses a unique temp folder and cleans up (CI flake fix)
