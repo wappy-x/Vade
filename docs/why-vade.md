@@ -58,15 +58,10 @@ requests.
 
 What our checks show today:
 
-- On main `cbbb11b` (2026-10-29), the FP4-Local cards on one Spark with
-  drafting ON and OFF, and on two Sparks with drafting ON, gave the same token
-  IDs in 64 of 64 responses
-  ([benchmarks](benchmarks.md#current-2026-10-29-main-cbbb11b-home-dgx-sparks)).
-- On main `380d8e5` (2026-10-30 morning), four Sparks gave the same
-  FP4-Local token IDs as one and two Sparks, in 66 of 66 responses in every
-  server start
-  ([benchmarks](benchmarks.md#token-ids)).
-- In the same cards, the second question on a 32K-token chat gave the same
+- On main `dc32b7c` (2026-10-31 morning), the FP4-Local cards on one, two
+  and four Sparks, each with drafting ON and OFF, gave the same token IDs in
+  66 of 66 responses ([results](results.md#token-ids)).
+- In the same runs, the second question on a 32K-token chat gave the same
   token IDs with the prefix cache and without it.
 - Before a change to the engine's arithmetic, scheduling, caching or
   transport merges, it runs at least three times on real Sparks and is
@@ -80,11 +75,10 @@ Two exceptions apply to FP8 today:
   greedy set when a request sends none
   ([FP8 install](install-fp8.md#defaults-and-drafting)).
 - FP8 on two Sparks and on four Sparks gives different token IDs. Their
-  cards matched in 7 of 66 responses on 2026-10-28, and again on 2026-10-30
-  at main `380d8e5`. Each Spark count is
-  stable on its own: on two Sparks at `cbbb11b`, drafting ON and OFF matched
-  in 64 of 64 responses. A fix is in screening
-  ([benchmarks](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)).
+  cards matched in 7 of 66 responses on 2026-10-28, on 2026-10-30 and again
+  on 2026-10-31 at main `dc32b7c`. Each Spark count is stable on its own: at
+  `dc32b7c`, drafting ON and OFF matched in 66 of 66 responses on two Sparks
+  and on four ([benchmarks](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)).
 
 `vade verify` checks the drafting part of the rule on your own engine. It
 sends the same requests several times with drafting ON and OFF and compares
@@ -93,30 +87,36 @@ batching and caching.
 
 ## How fast it is
 
-These are the 2026-10-30 morning cards at main `380d8e5`, the mean of two or
-three server starts per row. Prose, code and C8 ran with drafting ON. The
-cards send the cold 8K prompt with drafting OFF. Rates are completion tokens
-per second. C8 is the total rate of eight chats at once.
+These are the 2026-10-31 morning cards at main `dc32b7c`. The one-Spark row
+is the mean of two server starts; the other rows are one start each. Prose,
+code and C8 ran with drafting ON. The cards send the cold 8K prompt with
+drafting OFF. Rates are completion tokens per second. C8 is the total rate
+of eight chats at once.
 
 | Setup | Prose | Code | C8 | Cold 8K prompt, first token | 32K prompt, first token |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| FP4-Local, one Spark | 42.6 | 81.4 | 179.5 | 3.76 s | 15.66 s |
-| FP4-Local, two Sparks | 54.9 | 102.2 | 231.9 | 2.15 s | 10.13 s |
-| FP4-Local, four Sparks | 43.1 | 82.2 | 228.5 | 2.18 s | 10.52 s |
-| FP8, two Sparks | 36.6 | 51.3 | 98.3 | 5.96 s | 24.11 s |
-| FP8, four Sparks | 47.3 | 66.5 | 129.4 | 6.85 s | 27.49 s |
+| FP4-Local, one Spark | 42.5 | 81.1 | 179.0 | 3.77 s | 15.63 s |
+| FP4-Local, two Sparks | 54.9 | 102.3 | 232.2 | 2.15 s | 10.09 s |
+| FP4-Local, four Sparks | 63.0 | 113.0 | 245.1 | 1.92 s | 8.98 s |
+| FP8, two Sparks | 36.6 | 51.3 | 98.7 | 5.97 s | 24.12 s |
+| FP8, four Sparks | 49.5 | 69.3 | 131.0 | 6.92 s | 27.81 s |
 
-The [benchmarks page](benchmarks.md#current-2026-10-30-morning-main-380d8e5-home-dgx-sparks)
-gives the method, the number of server starts and the limits. With the
-prefix cache, the second question on a 32K-token chat gave its first token in
-0.36 s on one Spark and 0.75 s on two.
+[Results and receipts](results.md) gives the receipt of each row, the
+machines, the commands and what you can re-run. With the prefix cache, the
+second question on a 32K-token chat gave its first token in 0.36 s on one
+Spark and 0.76 s on two. Four FP4-Local Sparks keep no prefix cache.
 
 ## What it is not
 
-- **Not tuned for one model.** The engine takes its plan from the
-  checkpoint's configuration, tensor shapes and data types. The house rules
-  do not allow a check of the model's name for speed, constants for one
-  checkpoint or shortcuts for one prompt ([adding a model](adding-a-model.md)).
+- **Not generic yet.** The house rules ask the engine to take its plan from
+  the checkpoint's configuration, tensor shapes and data types, with no check
+  of the model's name, no constants for one checkpoint and no shortcuts for
+  one prompt ([adding a model](adding-a-model.md)). The code does not meet
+  that rule everywhere yet: for example, the hidden width 2560 of the
+  shipped checkpoints is a constant in
+  `engine/crates/engine/src/flash/blocks.rs` and
+  `engine/crates/engine/src/flash/next_prefill.rs`. A checkpoint with other
+  shapes needs engine work first.
 - **Not a general GPU server.** The engine runs only on DGX Spark (NVIDIA
   GB10) with Linux `aarch64`. It does not run on other GPUs.
 - **Not a trainer.** Vade serves models. It does not train or fine-tune them.

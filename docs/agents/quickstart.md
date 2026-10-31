@@ -77,12 +77,6 @@ vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e6342
 vade up && vade doctor --json
 ```
 
-The repository is private for now. Without access, the clone fails with
-`could not read Username` or `Repository not found`. Tell the person; do not
-try other URLs. [Install step 2](../../INSTALL.md#step-2-get-the-code) gives
-the two ways in. If `gh auth status` shows an account with access, clone with
-`gh repo clone wappy-x/vade "$HOME/vade" -- --branch main` instead.
-
 With no model on the Spark, the installer still finishes with exit 0. Its
 `vade install` output says that the model is missing and gives the
 `vade pull` line. Skip `vade pull` when the model is already in `~/models`.

@@ -6,7 +6,7 @@ pairs with no new cables, see
 [two pairs behind one address](#two-pairs-behind-one-address).
 
 **This build has not yet passed its qualification checks running natively on
-four Sparks.** We have measured FP8 on four of our Sparks three times:
+four Sparks.** We have measured FP8 on four of our Sparks four times in published cards:
 
 - 2026-10-25 at `6cb46bf`
   ([cards](benchmarks.md#previous-2026-10-25-main-80ac2d4-home-dgx-sparks)):
@@ -15,13 +15,18 @@ four Sparks.** We have measured FP8 on four of our Sparks three times:
   ([cards](benchmarks.md#current-2026-10-28-end-of-day-main-76977df-home-dgx-sparks)):
   drafting ON and OFF matched in 66 of 66.
 - 2026-10-30 at `380d8e5`
-  ([cards](benchmarks.md#current-2026-10-30-morning-main-380d8e5-home-dgx-sparks)):
+  ([cards](benchmarks.md#previous-2026-10-30-morning-main-380d8e5-home-dgx-sparks)):
   two server starts with drafting ON. Both matched the 2026-10-28 four-Spark
   card in 66 of 66. One chat wrote prose at 47.321 tok/s and eight chats
   wrote 129.360 tok/s in total (the mean of the two starts).
+- 2026-10-31 at `dc32b7c`
+  ([results](results.md)): one server start, drafting ON and OFF. ON and OFF
+  matched in 66 of 66, and both matched the four-Spark cards of the
+  evening before (main `7943f57`) in 66 of 66. One chat wrote prose at 49.508 tok/s and eight chats wrote 130.999
+  tok/s in total.
 
-Four Sparks give different token IDs than two: on 2026-10-28 and on
-2026-10-30, 7 of 66 responses were the same
+Four Sparks give different token IDs than two: on 2026-10-28, 2026-10-30 and
+2026-10-31, 7 of 66 responses were the same
 ([cause and fix](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)).
 These cards ran through a lab launcher with context 32768, output 16384 and
 drafting depth 2. They measure speed; they are not the four-Spark

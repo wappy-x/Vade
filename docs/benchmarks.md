@@ -4,53 +4,46 @@
 
 ### Current main
 
-The drafting ON rows below measured main `380d8e5` on our DGX Sparks on the
-morning of 2026-10-30, with RigMark cards. Each of these rows is the mean of
-two or three server starts. The drafting OFF rows were not measured again,
-and they come from two older dates, as the Main column shows. The `76977df`
-rows are RigMark cards from 2026-10-28, one server start each. The `cbbb11b`
-rows are from 2026-10-29: the mean of two server starts, measured with our
-own 64-request card client, not RigMark. The
-[method](#how-the-current-numbers-were-measured) gives the full recipe of
-each row.
+These rows measured main `dc32b7c` on our DGX Sparks on the morning of
+2026-10-31. Each server start ran one card with drafting ON and one with
+drafting OFF. The one-Spark rows are the mean of two server starts; the
+other rows are one start each.
+[Results and receipts](results.md) links the receipt of every row and gives
+the machines, the server commands and the request settings.
 
-| Model | Sparks | Path | Drafting | Main | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) |
-| --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| fp4-local | 1 | local | OFF | `cbbb11b` | 27.891 | 27.707 | 27.915 | 27.079 | 85.042 | 138.608 | 3.764 |
-| fp4-local | 1 | local | ON | `380d8e5` | 42.597 | 81.372 | 100.747 | 65.924 | 144.829 | 179.467 | 3.761 |
-| fp4-local | 2 | tensor split | OFF | `76977df` | 35.071 | 35.375 | 35.487 | 33.814 | 82.476 | 126.344 | 2.153 |
-| fp4-local | 2 | tensor split | ON | `380d8e5` | 54.879 | 102.190 | 129.957 | 79.572 | 166.133 | 231.882 | 2.153 |
-| fp4-local | 4 | pipeline | OFF | `76977df` | 28.157 | 28.177 | 28.503 | 27.642 | 84.974 | 139.335 | 2.177 |
-| fp4-local | 4 | pipeline | ON | `380d8e5` | 43.099 | 82.173 | 102.364 | 66.123 | 145.608 | 228.526 | 2.178 |
-| fp8 | 2 | ring | OFF | `cbbb11b` | 26.887 | 26.727 | 26.914 | 26.050 | 66.682 | 97.378 | 5.966 |
-| fp8 | 2 | ring | ON | `380d8e5` | 36.637 | 51.302 | 52.731 | 45.119 | 65.930 | 98.339 | 5.957 |
-| fp8 | 4 | path | OFF | `76977df` | 35.266 | 34.722 | 35.284 | 33.900 | 88.201 | 128.203 | 6.948 |
-| fp8 | 4 | path | ON | `380d8e5` | 47.321 | 66.450 | 69.085 | 59.242 | 86.447 | 129.360 | 6.854 |
+| Model | Sparks | Path | Drafting | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) |
+| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| fp4-local | 1 | local | ON | 42.530 | 81.138 | 100.808 | 65.688 | 144.681 | 178.981 | 3.769 |
+| fp4-local | 1 | local | OFF | 27.911 | 27.761 | 28.012 | 27.115 | 85.004 | 138.609 | 3.778 |
+| fp4-local | 2 | tensor split | ON | 54.878 | 102.314 | 130.800 | 79.632 | 166.796 | 232.198 | 2.153 |
+| fp4-local | 2 | tensor split | OFF | 36.047 | 35.840 | 36.142 | 34.375 | 88.178 | 134.414 | 2.131 |
+| fp4-local | 4 | tensor split in parts | ON | 63.036 | 113.025 | 145.238 | 86.962 | 177.581 | 245.145 | 1.924 |
+| fp4-local | 4 | tensor split in parts | OFF | 42.084 | 41.486 | 42.072 | 38.080 | 95.113 | 143.015 | 1.916 |
+| fp8 | 2 | tensor parallel | ON | 36.624 | 51.293 | 52.763 | 45.436 | 66.578 | 98.670 | 5.971 |
+| fp8 | 2 | tensor parallel | OFF | 27.072 | 26.913 | 27.114 | 26.089 | 66.273 | 98.059 | 5.952 |
+| fp8 | 4 | tensor parallel | ON | 49.508 | 69.340 | 72.248 | 61.435 | 88.017 | 130.999 | 6.923 |
+| fp8 | 4 | tensor parallel | OFF | 35.902 | 35.641 | 35.955 | 34.592 | 87.157 | 131.147 | 6.873 |
 
 Rates are in completion tokens per second. Prose, code and structured output
 each use one chat. C1, C4 and C8 give the total rates for one, four and eight
 concurrent chats. Cold 8K is the time to the first token after an uncached
-8192-token prompt, sent with drafting OFF. The
-[2026-10-30 section](#current-2026-10-30-morning-main-380d8e5-home-dgx-sparks)
-gives the method and limits of the `380d8e5` rows, the
-[2026-10-29 section](#current-2026-10-29-main-cbbb11b-home-dgx-sparks) those
-of the `cbbb11b` rows, and the
-[2026-10-28 section](#current-2026-10-28-end-of-day-main-76977df-home-dgx-sparks)
-those of the `76977df` rows.
+8192-token prompt, sent with drafting OFF in both cards. The
+[2026-10-31 section](#current-2026-10-31-morning-main-dc32b7c-home-dgx-sparks)
+gives the 32K chat and the token ID checks.
 
-This table is written by hand, because it mixes rows from three dates and
-averages several server starts per row. The `bench-docs` tool cannot make
-this table. It takes one card per setup, only from the newest main that has
-cards, and it does not average server starts
-([bench_docs.rs](../tools/src/bench_docs.rs)). From the repository root, this
-command replaces this block and the README block with such a table, from a
-folder of RigMark card files:
+This table is written by hand, because the one-Spark rows average two server
+starts. The `bench-docs` tool cannot make this table. It takes one card per
+setup, only from the newest main that has cards, and it does not average
+server starts ([bench_docs.rs](../tools/src/bench_docs.rs)). From the
+repository root, this command replaces this block and the README block with
+such a table, from a folder of RigMark card files:
 
 ```sh
 cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- bench-docs '<cards-dir>' .
 ```
 
-The card files of the rows above are not in the repository yet.
+The full card files are private. Their sanitized extracts are in
+[bench/receipts/2026-10-31](../bench/receipts/2026-10-31/README.md).
 
 Each section below names its date and main. Its results apply only to that
 build.
@@ -59,11 +52,13 @@ build.
 
 ## How the current numbers were measured
 
-This section gives the recipe behind the [current table](#current-main) and
-the [2026-10-30 section](#current-2026-10-30-morning-main-380d8e5-home-dgx-sparks).
-Every number comes from a card file or from a lab report line. Those records
-are not in the repository yet. A revision such as main `380d8e5` and a pull
-request such as #142 belong to the private development history, so they are
+The recipe of the [current table](#current-main) (main `dc32b7c`) is on
+[results and receipts](results.md), with a sanitized receipt for each card.
+This section gives the recipe behind the
+[2026-10-30 section](#previous-2026-10-30-morning-main-380d8e5-home-dgx-sparks)
+and the 2026-10-28 and 2026-10-29 rows. Every number there comes from a card
+file or from a lab report line. Those records are not in the repository.
+A revision such as main `380d8e5` and a pull request such as #142 belong to the private development history, so they are
 not in this repository. The v0.1.0 commits `5a22651` and `99e8f62` are the
 exception ([glossary](GLOSSARY.md#ho), "Main `abc1234`").
 
@@ -76,6 +71,7 @@ exception ([glossary](GLOSSARY.md#ho), "Main `abc1234`").
 
 | Main | Date | Server build | Used for |
 | --- | --- | --- | --- |
+| `dc32b7c` | 2026-10-31 | flash-serve `55bdc7a8`, PTX `84c09350` | The current table ([receipts](../bench/receipts/2026-10-31/README.md)) |
 | `380d8e5` | 2026-10-30 | flash-serve `d56d255c`, PTX `84c09350` | Drafting ON rows, the 32K chat, the context run |
 | `51dce02` (engine `380d8e5`) | 2026-10-30 | flash-serve `44e95e44` | Two pairs at once |
 | `cbbb11b` | 2026-10-29 | flash-serve `cad21fbe`, PTX `4288b2a8` | Drafting OFF: fp4-local on one Spark, fp8 on two Sparks |
@@ -110,9 +106,9 @@ three rounds on FP8.
 
 | Table | Sparks and server start | Drafting | Starts | Record |
 | --- | --- | --- | ---: | --- |
-| Current main, drafting ON, and the 2026-10-30 speed table | 1 Spark: `vade up --sparks 1 --context 32768 --output 8192`. 2 Sparks: `vade up --sparks 2 --context 32768 --output 8192`. FP4-Local on 4 Sparks, FP8 on 2 and 4 Sparks: lab launcher, context 32768, output 8192 (FP4-Local) or 16384 (FP8) | ON | 3 on one and two Sparks, 2 on the others | Lab report `own-rigmark-eod-r2`, cards `2026-10-30_0702` to `0804` |
-| Current main, drafting OFF at `76977df` | 2 and 4 Sparks: lab launcher, the same limits | OFF | 1 | The 2026-10-28 cards with drafting OFF |
-| Current main, drafting OFF at `cbbb11b` | 1 Spark: `vade up --sparks 1`, context 32768, output 8192. FP8 on 2 Sparks: lab launcher, context 32768, output 16384 | OFF | 2 | Lab reports `own-card-1s-eod-2-r2` and `own-premerge-fp8b-r2` |
+| The 2026-10-30 speed table, drafting ON | 1 Spark: `vade up --sparks 1 --context 32768 --output 8192`. 2 Sparks: `vade up --sparks 2 --context 32768 --output 8192`. FP4-Local on 4 Sparks, FP8 on 2 and 4 Sparks: lab launcher, context 32768, output 8192 (FP4-Local) or 16384 (FP8) | ON | 3 on one and two Sparks, 2 on the others | Lab report `own-rigmark-eod-r2`, cards `2026-10-30_0702` to `0804` |
+| Drafting OFF at `76977df` (2026-10-28) | 2 and 4 Sparks: lab launcher, the same limits | OFF | 1 | The 2026-10-28 cards with drafting OFF |
+| Drafting OFF at `cbbb11b` (2026-10-29) | 1 Spark: `vade up --sparks 1`, context 32768, output 8192. FP8 on 2 Sparks: lab launcher, context 32768, output 16384 | OFF | 2 | Lab reports `own-card-1s-eod-2-r2` and `own-premerge-fp8b-r2` |
 | 32K chat | The card start. On one Spark, two other starts at context 65536 | ON | 2 or 3 | `own-rigmark-eod-r2` |
 | Context on one Spark | `vade up --sparks 1 --context 262144 --output 8192` | ON | 1 | `own-rigmark-eod-r2` |
 | Two pairs at once | `vade up --sparks 2` on each pair | ON | 2 | Lab report `own-two-pairs-r1` |
@@ -140,7 +136,11 @@ that the cards use.
 This page lists every speed we have published for Vade, newest first. It
 also shows how to measure your own:
 
-- [2026-10-30 morning cards](#current-2026-10-30-morning-main-380d8e5-home-dgx-sparks):
+- [2026-10-31 morning cards](#current-2026-10-31-morning-main-dc32b7c-home-dgx-sparks):
+  one, two and four DGX Sparks at main `dc32b7c`, FP4-Local and FP8,
+  drafting ON and OFF from the same start, a 32K chat with the prefix cache,
+  and sanitized receipts in the repository.
+- [2026-10-30 morning cards](#previous-2026-10-30-morning-main-380d8e5-home-dgx-sparks):
   one, two and four DGX Sparks at main `380d8e5`, FP4-Local and FP8,
   drafting ON, with second starts, and a 32K chat with the prefix cache.
 - [2026-10-29 cards](#current-2026-10-29-main-cbbb11b-home-dgx-sparks): one
@@ -205,7 +205,53 @@ or sentences names its run folder, such as `c139-l32`, `r142-wtT-x1` or
 `eod-wtT-x1`.
 These folders are not in the repository yet either.
 
-## Current (2026-10-30 morning, main 380d8e5, home DGX Sparks)
+## Current (2026-10-31 morning, main dc32b7c, home DGX Sparks)
+
+On the morning of 2026-10-31 we measured main `dc32b7c` on one, two and
+four Sparks, with FP4-Local and with FP8. Every server ran the same
+`flash-serve` binary (SHA256 `55bdc7a8...`, PTX `84c09350`), with greedy
+decoding, thinking OFF and no `VADE_` setting. Each server start ran one
+card with drafting ON and one with drafting OFF, and the 32K chat ran on the
+two-Spark and four-Spark starts. On one Spark, the card ran on two starts,
+and the 32K chat on two more starts at context 65536.
+[Results and receipts](results.md) gives the table, the receipt of each
+card, the server commands and what you can re-run; the speeds are in the
+[current table](#current-main).
+
+What changed since the 2026-10-30 cards: FP4-Local on four Sparks linked by
+RDMA now runs the tensor split in parts, not the layer chain. Its prose
+went from 43.397 tok/s on the evening of 2026-10-30 (main `7943f57`, layer
+chain) to 63.036 tok/s. FP8 on four Sparks went from 46.759 to 49.508 tok/s
+after a change that sends the FP8 commands between ranks over RDMA. These two
+before values are private cards of 2026-10-30 that this page does not list
+elsewhere. The one-Spark and two-Spark rows changed by at most 2.2 % in any
+cell.
+
+**The 32K chat.** Times to the first token, in seconds. The one-Spark row
+is the mean of two starts.
+
+| Setup | First question | Second question, cache | Tokens reused | Second question, no cache |
+| --- | ---: | ---: | ---: | ---: |
+| FP4-Local, one Spark | 15.63 | 0.36 | 32,064 | 15.79 |
+| FP4-Local, two Sparks | 10.09 | 0.76 | 32,064 | 9.95 |
+| FP4-Local, four Sparks | 8.98 | 8.72 | 0 | 8.74 |
+| FP8, two Sparks | 24.12 | 0.94 | 32,064 | 23.91 |
+| FP8, four Sparks | 27.81 | 1.06 | 32,064 | 28.47 |
+
+Four FP4-Local Sparks keep no prefix cache, so the second question reads the
+whole prompt again.
+
+**Token IDs.** All eight FP4-Local cards (one, two and four Sparks, drafting
+ON and OFF) gave the same token IDs in 66 of 66 responses. FP8 drafting ON
+and OFF gave the same token IDs in 66 of 66 on two Sparks, and on four. FP8
+two against four Sparks matched in 7 of 66
+([FP8 on two and four Sparks](#fp8-on-two-and-four-sparks-different-token-ids)).
+
+**Limits.** One server start per setup, except one Spark. The four-Spark and
+FP8 starts used a private lab launcher. The card client and the 32K chat
+client are private.
+
+## Previous (2026-10-30 morning, main 380d8e5, home DGX Sparks)
 
 On the morning of 2026-10-30 we measured main `380d8e5` (#201) on one, two
 and four Sparks, with FP4-Local and with FP8. Every server ran the prebuilt
@@ -424,9 +470,11 @@ without it.
 On 2026-10-29 (record `own-ctx-1spark-2-r1`), one Spark served
 `vade up --sparks 1 --context 262144
 --output 8192` at main `cbbb11b`, with FP4-Local, drafting ON (depth 3),
-greedy decoding and thinking OFF, on one server start. Each cold prompt ran
-twice with `cache` false, and both runs gave the same token IDs. Then a
-64K-token chat sent a second question with the cache on.
+greedy decoding and thinking OFF, on one server start. The runs went in this
+order: the 64K prompt, the 128K prompt, the 64K prompt again, a 64K-token
+chat that sent a second question with the cache on, then the 128K prompt
+again. The cold prompts used `cache` false, and both runs of each gave the
+same token IDs.
 
 | Prompt | Prompt tokens | First token (s) | Writing speed (tok/s) |
 | --- | ---: | ---: | ---: |
@@ -656,8 +704,9 @@ or `-eod-fp8-4s`; the table gives the names without the suffix.
 
 **FP4-Local gave the same answers on one, two and four Sparks.** The token
 IDs matched in 66 of 66 responses in every compare: drafting ON against OFF,
-one Spark against two and four, and each card against the cards of the same
-Spark count earlier on 2026-10-28.
+one Spark against two and four, and the one-Spark and two-Spark cards
+against the cards of the same Spark count earlier on 2026-10-28. No earlier
+four-Spark FP4-Local card ran on 2026-10-28.
 
 **FP8 gives different answers on two and on four Sparks.** On each Spark
 count, the drafting-ON card matched the drafting-OFF card in 66 of 66
@@ -684,7 +733,9 @@ against 177.5 on one Spark and 229.5 on the two-Spark tensor split. On
 on two and four Sparks (2.18 to 2.19 s, against 3.76 s on one Spark).
 
 **FP8 drafts at one chat only.** With drafting ON, FP8 drafted at depth 2 on
-the one-chat cells and on C1, and served C2 to C8 at depth 0. So its C4 and
+the one-chat cells and on C1. It served C2 to C8 at depth 0, except one C4
+stream on two Sparks that drafted (the `draft_used` field of round 1,
+stream index 3). So its C4 and
 C8 rates with drafting ON (66.5 and 98.3 tok/s) are close to the rates with
 drafting OFF (66.6 and 99.3).
 
@@ -701,6 +752,8 @@ different token IDs for the same request and settings:
 
 | Cards | Main | Two-Spark against four-Spark responses with identical token IDs |
 | --- | --- | ---: |
+| 2026-10-31 morning | `dc32b7c` | 7 of 66 |
+| 2026-10-30 morning | `380d8e5` | 7 of 66 |
 | 2026-10-28 end of day | `76977df` | 7 of 66 |
 | 2026-10-25 | `6cb46bf` | 5 of 62 |
 
@@ -719,7 +772,7 @@ linear-attention layers, and the shared expert's down projection, split their
 inner sum across the ranks. The ranks then add their parts in a different order
 than on two Sparks, and the routed experts group their blocks differently. The
 results differ in the last bits, and greedy decoding can then pick a different
-token. A fix is in screening on Sparks. It is not on main.
+token. Work on a fix is under way. It is not on main.
 
 Until the fix is on main, compare FP8 results only at the same Spark count.
 `vade verify` checks one running engine, so it does not show this difference.

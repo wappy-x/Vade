@@ -1,6 +1,12 @@
 name: CI
 
+# Runs on GitHub-hosted standard runners only: no self-hosted runner, no
+# larger runner and no secret. Every job is skipped while the repository is
+# private, so a private copy of this workflow uses no paid minutes.
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -8,7 +14,7 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  # Keep main's receipts; superseded manual runs need not finish.
+  # Keep main's receipts; superseded branch and pull request runs need not finish.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
@@ -26,8 +32,9 @@ env:
 jobs:
   repository:
     name: Documentation links and release bundle regression
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -45,13 +52,15 @@ jobs:
 
   engine:
     name: Engine and GPU kernel build (${{ matrix.runner }}, no GPU)
+    # The engine workspace needs the NVPTX kernel build first. It runs only when
+    # a maintainer starts the workflow by hand.
+    if: ${{ !github.event.repository.private && github.event_name == 'workflow_dispatch' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        # Manual runs exercise Linux and macOS.
-        runner: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["macos-15","ubuntu-24.04-arm"]' || '["ubuntu-24.04-arm"]') }}
+        runner: ["ubuntu-24.04-arm", "macos-15"]
     defaults:
       run:
         shell: bash
@@ -107,12 +116,15 @@ jobs:
 
   host:
     name: ${{ matrix.component.name }} (${{ matrix.runner }})
+    if: ${{ !github.event.repository.private }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        runner: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["macos-15","ubuntu-24.04-arm"]' || '["ubuntu-24.04-arm"]') }}
+        # The CPU crates on Linux aarch64 (the Spark's platform) and x86_64.
+        # Manual runs add macOS.
+        runner: ${{ fromJSON(github.event_name == 'workflow_dispatch' && '["ubuntu-24.04-arm","ubuntu-latest","macos-15"]' || '["ubuntu-24.04-arm","ubuntu-latest"]') }}
         component:
           - name: CLI tests and repository ratchet
             directory: cli
@@ -164,5 +176,5 @@ jobs:
         if: matrix.component.rustdoc
         run: cargo +1.99.0 doc --offline --locked --no-deps
       - name: aarch64 Linux cross-check
-        if: runner.os == 'macOS' && matrix.component.linux-check
+        if: matrix.component.linux-check && matrix.runner != 'ubuntu-24.04-arm'
         run: cargo +1.99.0 check --offline --locked --all-targets --target aarch64-unknown-linux-gnu

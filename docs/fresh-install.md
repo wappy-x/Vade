@@ -49,7 +49,7 @@ guide, with the measured speeds, is
 - [ ] **Plenty of free disk on each Spark** for the checkpoint (see its size on the model page) plus room for the build
 - [ ] **The basic programs and download tools**: `cc`, `curl`, `git`, `rsync`, `ping`, `sha256sum`, Rust 1.99.0. Have them ready before step 5.
 - [ ] **A Mac** with Git and network access to both Sparks
-- [ ] **Network access to GitHub**. The repository is private during the preview, so you also need access to it; [INSTALL step 2](../INSTALL.md#step-2-get-the-code) shows the two ways in
+- [ ] **Network access to GitHub**
 
 **No Mac?** A Linux computer works as the controller for install, start, stop
 and chat. The coding assistant's shell tool and automatic checks need the
@@ -317,10 +317,8 @@ sha256sum -c ../Qwen3.8-Flash-Next-FP8.sha256   # every file must report OK
 Sparks and builds there. (The Spark clones from step 2 are only for the
 OS-setup scripts.)
 
-The repository is <https://github.com/wappy-x/vade>. It is private during the
-preview, so the HTTPS `git clone` below fails for anyone without access; see
-[INSTALL step 2](../INSTALL.md#step-2-get-the-code) for the two ways in. Clone
-it and build the CLI:
+The repository is <https://github.com/wappy-x/vade>. Clone it and build the
+CLI:
 
 ```sh
 git clone https://github.com/wappy-x/vade ~/vade

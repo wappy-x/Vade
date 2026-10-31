@@ -2,7 +2,7 @@
 
 **Vade's code is written from scratch in Rust, and much of its design is our own work. Other parts use ideas from published papers and from other projects, and this page names them.** It lists the original work first, then introduces the engine and harness credit lists and summarizes the harness notes.
 
-No source code was copied, translated or adapted from any project credited here. A credit names an idea or a reference behavior and the part of Vade that uses it. It does not mean their code runs in Vade.
+No source code was copied from any project credited here. One file follows a credited reference closely: the FP32 CPU reference [refcpu.rs](engine/crates/model/src/flash/refcpu.rs) computes the formulas of the Transformers file `modeling_qwen4_exp.py` (revision `b0cdc61`) in the same order, and its comments cite that file's lines. A credit names an idea or a reference behavior and the part of Vade that uses it. It does not mean their code runs in Vade.
 
 <br>
 

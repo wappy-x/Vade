@@ -2,10 +2,11 @@
 
 Vade is an inference engine for the NVIDIA DGX Spark / GB10, written in Rust
 using only the standard library. Version 0.1.0 runs one model,
-`nvidia/Qwen3.8-Flash-Next-FP4-Local`, as text only. It runs on a single Spark
-out of the box and can spread across more Sparks when you link them. Drafting
-is on by default: an extra model head guesses the next few tokens, and the
-model checks them in one pass.
+`nvidia/Qwen3.8-Flash-Next-FP4-Local`, as text only. Main also serves
+`Qwen/Qwen3.8-Flash-Next-FP8` on 2, 4 or 6 Sparks. Vade runs on a single
+Spark out of the box and can spread across more Sparks when you link them.
+Drafting is on by default: an extra model head guesses the next few tokens,
+and the model checks them in one pass.
 
 This page covers four things: how to check a change on your own computer, the
 house rules, what exactness asks of engine changes, and how to send a pull
@@ -281,9 +282,10 @@ Unreleased section of [CHANGELOG.md](CHANGELOG.md).
 ### How a pull request lands
 
 1. **Host checks pass.** Run the checks in [Local CI](docs/ci.md) before
-   every merge. Save the logs for the committed revision. The
-   [GitHub workflow](.github/workflows/ci.yml) runs only by hand and can give
-   optional evidence. A failed build or test blocks the change.
+   every merge. Save the logs for the committed revision. On the public
+   repository, the [GitHub workflow](.github/workflows/ci.yml) also runs the
+   host checks of the CPU crates on each pull request. A failed build or
+   test blocks the change.
 2. **A maintainer reviews it.** [CODEOWNERS](.github/CODEOWNERS) requests
    the review automatically. Expect questions about exactness, the house
    rules and anything the PR says it didn't check.

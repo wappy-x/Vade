@@ -1,17 +1,34 @@
 # Local CI
 
 Tests run locally before every merge. Use the public commands below.
-Vade does not pay for GitHub Actions minutes. GitHub Actions can refuse to
-start jobs because of account billing or spending limits. A refused run has
-no build or test result.
+Vade does not pay for GitHub Actions minutes.
 
-The [CI workflow](../.github/workflows/ci.yml) runs only when a maintainer
-starts it by hand with `workflow_dispatch`. It defines the GitHub host checks
-and builds GPU kernels without a GPU. The
-[release workflow](../.github/workflows/release.yml) also runs only by hand.
+The [CI workflow](../.github/workflows/ci.yml) runs on GitHub-hosted
+standard runners, with no secret. It starts on a push to `main`, on a pull
+request and by hand (`workflow_dispatch`). Every job is skipped while the
+repository is private, so it uses no paid minutes.
+
+- **On a push or a pull request** it runs the documentation links, the
+  release workflow checks and the repository tools tests on Linux `aarch64`
+  (`ubuntu-24.04-arm`, the Spark's platform). It runs the CPU crates on both
+  Linux `aarch64` and Linux `x86_64` (`ubuntu-latest`). Each crate runs the
+  steps that its row in the workflow matrix sets:
+  - `cli/`: check, tests (with the repository ratchet) and Rustdoc;
+  - `harness/`: check, tests, doctests and Rustdoc;
+  - `engine/tools/bench/`: check, tests and doctests.
+
+  On `x86_64` and on macOS, `cli/` and `harness/` also get a `cargo check`
+  for Linux `aarch64`.
+- **By hand** it also runs the CPU crates on macOS, and the engine job:
+  it builds the GPU kernels without a GPU, then checks and tests the engine
+  host crates on Linux `aarch64` and macOS.
+
+CI does not run `cargo fmt` or clippy. The Rust is formatted densely on
+purpose ([AGENTS.md](../AGENTS.md)), and both fail on the CPU crates today.
+
+The [release workflow](../.github/workflows/release.yml) runs only by hand.
 Select an existing tag with the `v` prefix when you start a release run.
 The release job rejects other refs before checkout or toolchain setup.
-Pushes, pull requests, merge queues and schedules do not start these workflows.
 
 This page explains the local checks and the commands a contributor can run
 without the private CI script. There is no `scripts/ci-local.sh` in this

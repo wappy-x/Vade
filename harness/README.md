@@ -22,9 +22,12 @@ It gives you:
 - a hand-off of each turn to **Codex** (through its app-server) or to a
   **Hermes** agent (over ACP v1), if you have one installed.
 
-We keep the native harness small on purpose. Changes to it add automatic
-limits, make its requests [greedy](../docs/GLOSSARY.md#dg) and cache-friendly,
-or fix bugs.
+The native harness is not small. At main `ee5dafb` it had 101,731 lines of
+Rust in 217 files under `src/` (`wc -l`, tests inside `src/` included). The
+largest folders are `cli/` (10,748 lines), `readers/` (10,278), `shell/`
+(8,719) and `gateway/` (6,847). These counts leave out files beside the
+folders, such as `gateway.rs`, and the PDF reader in `pdf/`. It keeps its
+requests [greedy](../docs/GLOSSARY.md#dg) and cache-friendly.
 
 Already have a coding client you like? You can keep it and put Vade's gateway in
 front of the engine instead; way 2 below shows how.

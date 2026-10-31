@@ -99,9 +99,7 @@ tools listed in INSTALL.
 
 The v0.1.0 bundle and its `SHA256SUMS` are on the GitHub release page. Follow
 [INSTALL's download and checksum steps](../../INSTALL.md#optional-release-bundle)
-before you run it. While the repository is private, the plain download links
-fail; INSTALL's private-preview note shows the `gh release download` command
-that works. The launcher uses the bundle that holds the `vade` you ran.
+before you run it. The launcher uses the bundle that holds the `vade` you ran.
 `VADE_BUNDLE` can instead point to an existing bundle folder by absolute path.
 
 ### Source build

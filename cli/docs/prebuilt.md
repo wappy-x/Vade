@@ -214,8 +214,9 @@ binary, PTX or manifest that still contains one.
 
 ### How releases are built and tested
 
-The [release workflow](../../.github/workflows/release.yml) runs on tag pushes
-matching `v*`, on `ubuntu-24.04-arm`. It installs the same pinned toolchains,
+The [release workflow](../../.github/workflows/release.yml) runs only when a
+maintainer starts it by hand on a tag with the `v` prefix, on
+`ubuntu-24.04-arm`. It installs the same pinned toolchains,
 runs the same script unchanged, and checks `SHA256SUMS`. It then attaches the
 bundle and checksum to the tag's GitHub release. The tag workflow does the
 full native build, and it checks both the archive checksum and the extracted

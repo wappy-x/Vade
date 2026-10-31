@@ -8,6 +8,7 @@ them ([glossary](docs/GLOSSARY.md#ho), "Main `abc1234`").
 
 ## Unreleased
 
+- docs: the public pages use the 2026-10-31 cards at main `dc32b7c`, with drafting ON and OFF from the same server start. A new page, [Results and receipts](docs/results.md), gives each number the README quotes with its record, and [bench/receipts/2026-10-31](bench/receipts/2026-10-31/README.md) holds a sanitized extract of every card. The README no longer says that four FP4-Local Sparks write at the speed of one: over RDMA they run the tensor split in parts. The credits now name the one file that follows a reference closely, the CPU reference `refcpu.rs`.
 - `vade-harness suite`: the task follow-agents-md now checks the CHANGELOG lines and their order with the new check `lines-equal`, which does not compare blank lines. Before, its `file-equals` check also compared blank lines, so a correct entry failed when the list had a blank line between its items. AGENTS.md in the task states the line, its heading and its order, but no blank-line layout.
 - docs: eight-Spark runbook and changelog statements corrected to match the code
 - docs: credits and provenance reworded; original-work section added; facts unchanged
@@ -61,7 +62,7 @@ them ([glossary](docs/GLOSSARY.md#ho), "Main `abc1234`").
   [agent quickstart](docs/agents/quickstart.md) and
   [install and flows](docs/design/install-and-flows.md).
 - Native chat supports [host hooks](harness/docs/hooks.md), and chat supports [user slash commands](harness/docs/slash-commands.md) and `/clear`.
-- GitHub workflows now run only by hand; tests run locally before every merge, as [Local CI](docs/ci.md) describes.
+- The CI workflow runs on a push to `main`, on a pull request and by hand, on GitHub-hosted standard runners with no secret; every job is skipped while the repository is private. Pushes and pull requests check and test the CPU crates (`cli`, `harness`, `engine/tools/bench`) on Linux `aarch64` and `x86_64`, and the repository tools on Linux `aarch64`; the engine and GPU kernel job runs only by hand. Tests still run locally before every merge, as [Local CI](docs/ci.md) describes.
 - Chat keeps private project notes across sessions; `VADE_MEMORY=0` turns memory off.
 - Groups for many Sparks under one controller. A `[group NAME]` section in
   the controller config names machines in rank order, a local port and a

@@ -56,9 +56,7 @@ shows the whole flow on one page. If you are an AI agent, read the
 <a id="quick-start-with-an-existing-model"></a>
 You need a DGX Spark with Git, `cc` and curl. Its NVIDIA driver must support
 CUDA 13.0 or newer (the `CUDA Version` in the `nvidia-smi` header). The GPU
-must be idle: `nvidia-smi` must list no compute processes. During the private
-preview, the clone also needs access to the repository. The private-preview
-note in [step 2](#step-2-get-the-code) gives the two ways in.
+must be idle: `nvidia-smi` must list no compute processes.
 
 Run these five commands:
 
@@ -162,8 +160,7 @@ engine keeps running.
 
 - **`~/vade` already exists:** use the existing-checkout commands above, or
   clone somewhere else.
-- **The clone fails:** check that this connection reaches GitHub and that you
-  have access to the private repository (see [Step 2](#step-2-get-the-code)).
+- **The clone fails:** check that this connection reaches GitHub.
 - **`vade launch` stops at the model check:** the model is not where Vade
   looks. Run the `vade pull` line from the quick start, or set `VADE_MODELS`
   to the checkpoint folder, then run `vade launch` again.
@@ -363,33 +360,6 @@ administrator; see [network setup](docs/network-setup.md).
 
 <a id="3-clone-and-build"></a>
 
-> [!IMPORTANT]
-> **Private preview.** The repository is private for now. Until it is public,
-> the HTTPS clone below fails for anyone without access (Git asks for a
-> password or reports `Repository not found`), and so do the release downloads
-> on this page. Ask the repository owner for access, then clone one of these
-> two ways instead:
->
-> - **With a GitHub account that has access.** Install the
->   [GitHub CLI](https://cli.github.com/), sign in with `gh auth login`, then
->   run `cd ~ && gh repo clone wappy-x/vade -- --branch main && cd ~/vade`.
-> - **With a read-only deploy key.** On the Spark, make a key with
->   `ssh-keygen -t ed25519 -f ~/.ssh/vade-deploy -N ''` and send the owner
->   `~/.ssh/vade-deploy.pub`. Once they have added it to the repository, clone
->   over SSH:
->
->   ```sh
->   cd ~ && GIT_SSH_COMMAND='ssh -i ~/.ssh/vade-deploy -o IdentitiesOnly=yes' git clone --branch main git@github.com:wappy-x/vade.git && cd ~/vade
->   ```
->
->   The first connection asks you to confirm GitHub's host key. Compare it
->   with [GitHub's published fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints).
->   A later `git pull` needs the same `GIT_SSH_COMMAND`.
->
-> The rest of the page is the same. The [release bundle](#optional-release-bundle)
-> and the [Route B manifest](#check-the-files) have their own private-preview
-> notes.
-
 On the Spark, clone the repository into your home folder and stay at its root
 in this shell. Later steps assume the checkout is `~/vade`:
 
@@ -456,25 +426,6 @@ mkdir "$HOME/vade-launch" &&
   curl --fail --location --output "$BUNDLE" "https://github.com/wappy-x/vade/releases/download/v0.1.0/$BUNDLE" && \
   sha256sum -c SHA256SUMS && tar --zstd -xf "$BUNDLE")
 ```
-
-> [!IMPORTANT]
-> **Private preview.** While the repository is private, the two `curl`
-> downloads above answer 404. Download with the GitHub CLI instead, signed in
-> with an account that has access. It fetches both release files into the new
-> folder:
->
-> ```sh
-> mkdir "$HOME/vade-launch" &&
-> (cd "$HOME/vade-launch" && \
->   gh release download v0.1.0 -R wappy-x/vade && \
->   read -r BUNDLE_SHA256 BUNDLE < SHA256SUMS && \
->   sha256sum -c SHA256SUMS && tar --zstd -xf "$BUNDLE")
-> ```
->
-> If the Spark has no `gh`, run `gh release download v0.1.0 -R wappy-x/vade`
-> on a computer that has it, copy both files into `~/vade-launch` on the Spark
-> (with `scp`, for example), and finish there with the `read`, `sha256sum` and
-> `tar` lines.
 
 Keeping the bundle outside the checkout leaves the clone clean, so you can
 later use the same clone as a controller. Take both files from that release
@@ -603,17 +554,6 @@ MODEL_SHA256_LIST="$HOME/qwen3.8-flash-next-fp4-local.sha256"
 curl -fsSL https://raw.githubusercontent.com/wappy-x/vade/v0.1.0/cli/examples/qwen3.8-flash-next-fp4-local.sha256 -o "$MODEL_SHA256_LIST"
 (cd "$HOME/models/nvidia/Qwen3.8-Flash-Next-FP4-Local" && sha256sum -c "$MODEL_SHA256_LIST")
 ```
-
-> [!IMPORTANT]
-> **Private preview.** While the repository is private, that `curl` answers
-> 404. Copy the manifest from the controller's checkout instead. From its root:
->
-> ```sh
-> scp cli/examples/qwen3.8-flash-next-fp4-local.sha256 you@spark-a-address:
-> ```
->
-> That puts it in the Spark's home folder, where the check above expects it.
-> Then run the `sha256sum -c` line on the Spark.
 
 ## Route A: on this Spark
 
