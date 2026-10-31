@@ -2,7 +2,8 @@
 
 **How to cable eight Sparks (GB10 machines) into one ring without a switch,
 give every link an address, check the ring and start the first two-Spark and
-eight-Spark runs.**
+eight-Spark runs. [Section 7](#7-day-one-at-the-rack) is the check list for
+the day the new Sparks arrive.**
 
 Read [Hardware and network setup](network-setup.md) first. This page uses its
 words (port, rail, ring, path) and its rules (MTU 9000, one subnet per
@@ -20,6 +21,10 @@ rail, no gateway). The OS steps are in [Spark system setup](spark-setup.md).
 > - `vade doctor --fabric --ring` checks that every Spark has exactly two
 >   neighbors, that every cable passes on both rails, and that the ring closes.
 >   It does not measure bandwidth. The bandwidth test does that.
+> - On eight Sparks, FP4-Local runs as one server (the layer chain of eight),
+>   as eight one-Spark servers behind one address (`vade up --replicas 8`),
+>   or as four pairs behind one address (`vade up --replicas 4 --pairs`).
+>   FP8 does not run on eight Sparks.
 
 <br>
 
@@ -31,8 +36,9 @@ rail, no gateway). The OS steps are in [Spark system setup](spark-setup.md).
 4. [Controller config: machines and groups](#4-controller-config-machines-and-groups)
 5. [Check the ring](#5-check-the-ring)
 6. [Start a run on an arc](#6-start-a-run-on-an-arc)
-7. [Saturday, step by step](#7-saturday-step-by-step)
-8. [What vade prints for eight Sparks](#8-what-vade-prints-for-eight-sparks)
+7. [Day one at the rack](#7-day-one-at-the-rack)
+8. [What to measure first](#8-what-to-measure-first)
+9. [What vade prints for eight Sparks](#9-what-vade-prints-for-eight-sparks)
 
 This page calls the Sparks **spark-1** to **spark-8**. These are labels for
 this page, not host names. Put a label with the same name on each Spark and on
@@ -102,19 +108,27 @@ with `--hosts` ([section 6](#6-start-a-run-on-an-arc)).
 | Sparks | FP4-Local | FP8 |
 | --- | --- | --- |
 | 1 | One Spark, no fabric. `--replicas 8` runs eight independent servers behind one local gateway. | Refused. |
-| 2 | The tensor split, the only two-Spark path. It needs RDMA. | Two-way TP. |
+| 2 | The tensor split, the only two-Spark path. It needs RDMA. `--replicas 4 --pairs` runs four pairs behind one local gateway. | Two-way TP. |
 | 4 | The layer chain of four. | Four-way TP on a path. Today it gives other token IDs than two Sparks ([benchmarks.md](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)). |
 | 8 | The layer chain of eight. | Refused: `FP8 needs 2, 4, or 6 machines` ([cli/src/config.rs](../cli/src/config.rs)). |
 
 FP4-Local runs tensor parallel only on two Sparks (the tensor split). On four
 or eight Sparks it runs the layer chain: each Spark holds a block of layers.
-This build has no four-Spark or eight-Spark tensor split for FP4-Local.
+The model has 48 layers, so on eight Sparks each Spark runs 6 of them, and
+each token passes through all eight Sparks in turn
+(`Stage::new` in
+[engine/crates/engine/src/flash/next_pp.rs](../engine/crates/engine/src/flash/next_pp.rs)).
+This build has no four-Spark or eight-Spark tensor split for FP4-Local. No
+card has measured the layer chain of eight yet, so this page gives no speed
+for it.
 
-**One server per group.** Each group is its own server on its own
-`local_port`. No gateway joins two groups, so a client must send its chats to
-each group's port itself. Only `vade up --replicas N` puts one local gateway
-in front of several engines. Each of those engines runs on one Spark, or on a
-tensor-split pair with `--pairs`.
+**One address for several servers.** Only `vade up --replicas N` puts one
+local gateway in front of several engines. Each engine runs on one Spark, or,
+with `--pairs`, on a tensor-split pair. Without `--replicas`, a group is one
+server on its own `local_port`. No `--replicas` mode puts four Sparks or more
+in one server. So two quads are two servers on two ports, and a client must
+send its chats to each port itself. See
+[section 6](#several-servers-behind-one-address) for the commands.
 
 A run of three or more Sparks uses a path (`TP_TOPOLOGY=path`, see
 `topology()` in [cli/src/state.rs](../cli/src/state.rs)). So a run on all
@@ -372,7 +386,7 @@ one row per check:
 **No bandwidth number.** `vade doctor --fabric` checks link state, speed,
 MTU, the RDMA device and pings. It does not move data at full rate, so a
 cable can pass every row and still be slow. Run the bandwidth test on every
-new or moved cable ([step 3 of section 7](#7-saturday-step-by-step)).
+new or moved cable ([step 5 of section 7](#step-5-measure-each-moved-and-new-cable)).
 
 Our links report `200000Mb/s` in `ethtool`
 ([network-setup.md](network-setup.md#1-what-to-buy)). The rate row compares
@@ -451,11 +465,66 @@ vade up --sparks 8          # the first eight machines in config order
 Stop a run with the same selection: `VADE_GROUP=NAME vade down`, or plain
 `vade down` for a `--hosts` or `--sparks` run.
 
+### Several servers behind one address
+
+`vade up --replicas N` starts N FP4-Local servers and one local gateway. It
+does not take `--fp8`. The gateway listens on `local_port`, so clients use one
+address. Each server gets its own tunnel on `local_port + 1` to
+`local_port + N`. Each reply comes from one server. The gateway never joins
+output from two servers. The rule that picks the server is in
+[four-sparks.md](four-sparks.md#two-pairs-behind-one-address).
+
+**Eight singles.** Eight one-Spark servers. They do not use the fabric, so a
+cable fault does not stop them.
+
+```sh
+vade up --replicas 8 --dry-run
+vade up --replicas 8                  # the first eight machines in config order
+VADE_GROUP=eight vade up --replicas 8 # the same eight, as the group eight
+```
+
+**Four pairs.** Four tensor-split servers, two Sparks each. The first and
+second machine form pair 1, the third and fourth pair 2, and so on. Each pair
+must have its own cable: `vade up` checks that each pair is an arc and stops
+before it starts anything when one is not. With the machines in cable order,
+the pairs are spark-1 and spark-2 (cable 1), spark-3 and spark-4 (cable 3),
+spark-5 and spark-6 (cable 5), and spark-7 and spark-8 (cable 7), the same
+pairs as the `doubles` layout.
+
+```sh
+vade up --replicas 4 --pairs --dry-run
+vade up --replicas 4 --pairs
+VADE_GROUP=eight vade up --replicas 4 --pairs
+vade up --replicas 4 --pairs --hosts spark-2,spark-3,spark-4,spark-5,spark-6,spark-7,spark-8,spark-1
+```
+
+The last line uses the other four cables (2, 4, 6 and 8), the same pairs as
+the `doubles-b` layout.
+
+With `VADE_GROUP`, N must equal the group size, or with `--pairs`, half of
+it. `VADE_GROUP=quad-a vade up --replicas 2 --pairs` puts two pairs of
+`quad-a` behind one address. `--replicas` takes 2 to 16 servers, and with
+`--pairs` 2 to 12 pairs.
+
+**Not in this build:** a server of four or eight Sparks behind a shared
+address with other servers. `--pairs` is the only size above one Spark. Two
+quads run as two servers, each on its own port:
+`VADE_GROUP=quad-a vade up`, then `VADE_GROUP=quad-b vade up`.
+
+Stop a replica run as you started it: `vade down`, or `VADE_GROUP=NAME vade
+down`.
+
 <br>
 
 ---
 
-## 7. Saturday, step by step
+## 7. Day one at the rack
+
+This is the check list for the day the new Sparks arrive. It assumes that six
+Sparks already run as one ring (spark-1 to spark-6, cabled as in
+[section 2](#2-cable-plan)) and that spark-7 and spark-8 are new. With eight
+new Sparks, do step 1 on all of them, then cable all eight as in
+[section 2](#2-cable-plan).
 
 Do the steps in order. Do not start a step until the one before it passes.
 Write down the time and the result of each step.
@@ -474,124 +543,301 @@ Write down the time and the result of each step.
       [cli/examples/eight-sparks.conf](../cli/examples/eight-sparks.conf).
       Run `vade doctor --fabric --ring --dry-run` with it: no row fails.
 
-**1. Unbox and check, before any QSFP cable**
+### Step 1. Check each new Spark, before any QSFP cable
 
 - [ ] Place spark-7 and spark-8 as in [section 1](#1-the-ring-and-its-arcs).
       Connect power and the management LAN only. Keep a local console ready.
 - [ ] Finish the OS first boot. Do not update the firmware yet: first write
-      down the versions below, then decide.
-- [ ] On spark-7, spark-8 and one of the other six, read these values. None
-      of the commands needs `sudo` or changes a setting. Each value on a new
-      Spark must be the same as on the other Spark. When one is different,
-      decide before you cable: match it, or write down why you accept it.
+      down the values below, then decide.
+- [ ] Choose one of the six Sparks as the reference. On spark-7, spark-8 and
+      the reference, read these values. None of the commands needs `sudo` or
+      changes a setting, and the reference can stay busy.
 
-      | What | Command |
-      | --- | --- |
-      | Memory | `grep MemTotal /proc/meminfo` |
-      | Board, BIOS, embedded controller | `cat /sys/class/dmi/id/{product_name,bios_version,bios_date,ec_firmware_release}` (some boards have no `ec_firmware_release`) |
-      | Kernel and boot options | `uname -r`; `cat /proc/cmdline` |
-      | GPU driver and CUDA | `nvidia-smi` (first lines) |
-      | GPU clock, power limit, PCIe link | `nvidia-smi --query-gpu=clocks.max.graphics,power.limit,pcie.link.gen.current,pcie.link.width.current --format=csv` |
-      | ConnectX-7 firmware | `cat /sys/class/infiniband/*/fw_ver` (four devices, one version) |
-      | ConnectX-7 PCIe links | `cat /sys/class/infiniband/*/device/current_link_speed /sys/class/infiniband/*/device/current_link_width` (the same as `max_link_speed` and `max_link_width`) |
-      | Wi-Fi off | `nmcli radio wifi` shows `disabled` |
+      | What | Command | On a new Spark |
+      | --- | --- | --- |
+      | Memory | `grep MemTotal /proc/meminfo` | The same as the reference |
+      | GPU name and driver | `nvidia-smi --query-gpu=name,driver_version --format=csv` | The same |
+      | CUDA | `nvidia-smi` (the `CUDA Version` in the first lines); `nvcc --version` (often `/usr/local/cuda/bin/nvcc`) | The same |
+      | OS release | `cat /etc/os-release` | The same |
+      | Kernel and boot options | `uname -r`; `cat /proc/cmdline` | The same |
+      | Board, BIOS, embedded controller | `cat /sys/class/dmi/id/{product_name,bios_version,bios_date,ec_firmware_release}` (some boards have no `ec_firmware_release`) | The same, or a difference that you accept in writing |
+      | GPU clock, power limit, PCIe link | `nvidia-smi --query-gpu=clocks.max.graphics,power.limit,pcie.link.gen.current,pcie.link.width.current --format=csv` | The same |
+      | GPU temperature at idle | `nvidia-smi --query-gpu=temperature.gpu --format=csv` | Write it down. Row 10 of [section 8](#8-what-to-measure-first) compares with it |
+      | RDMA devices | `ls /sys/class/infiniband` | Four devices |
+      | ConnectX-7 firmware | `cat /sys/class/infiniband/*/fw_ver` | One version on all four devices, the same as the reference |
+      | ConnectX-7 PCIe links | `cat /sys/class/infiniband/*/device/current_link_speed /sys/class/infiniband/*/device/current_link_width` | The same as `max_link_speed` and `max_link_width`, on all four devices |
+      | NCCL, only if you use `nccl-tests` | `ls /usr/lib/aarch64-linux-gnu/libnccl.so.*` | The same. Vade does not use NCCL |
+      | Wi-Fi | `nmcli radio wifi` | `disabled` |
 
+- [ ] **Stop rule.** A new Spark with less memory, a lower GPU clock or
+      power limit, or a PCIe link below its maximum does not join the ring.
+      Solve that first. For any other difference, decide before you cable:
+      match the six, or write down why you accept it. Do not update firmware
+      to clear a difference before you have written down both values.
 - [ ] Match the kernel and the driver of the other six. On kernel
       `7.0.0-1019-nvidia`, apply the `kho=off` step
       ([spark-setup.md, step 5](spark-setup.md#5-check-the-kernel-before-registering-memory)).
 
-**2. Cable**
+### Step 2. Find the cable 6 end, before any cable moves
+
+Only one cable end moves: the cable 6 end on spark-1. Find it by its
+address, not by the label on the case.
 
 - [ ] Stop every server on the six Sparks. Plain `vade status` shows
       `Vade is stopped.` and names no group. Never move a cable that a running
       rank uses.
-- [ ] Find and tag the cable 6 end on spark-1
-      ([from a ring of six](#2-cable-plan)).
-- [ ] Move and add cables as in [from a ring of six](#2-cable-plan): move the
-      cable 6 end to spark-7 port 1, add cables 7 and 8.
-- [ ] On each Spark, `ibdev2netdev` shows both ports `(Up)`, and `ethtool`
-      shows the same speed on every fabric interface as on the other six.
+- [ ] On spark-1, from its local console, run `ibdev2netdev` and
+      `ip -4 -br addr`. Write down the interface that holds the cable 6 rail 0
+      address and the interface that holds the cable 1 rail 0 address.
+- [ ] `sudo ethtool -p <cable 6 interface> 10`. The port light that blinks is
+      the cable 6 end. Put a tag on that cable end.
+- [ ] `sudo ethtool -p <cable 1 interface> 10`. The other port must blink. If
+      the same port blinks, stop: the private mapping is wrong.
 
-**3. Address**
+Some ports do not blink. Then use step 3 to check the end you unplug.
+
+### Step 3. Cable, in this order
+
+After each cable, check both of its ends with `ibdev2netdev` (the port shows
+`(Up)`) and `ethtool <interface>` (the same `Speed` as the fabric interfaces
+of the other six).
+
+| Order | Cable | What to do | Check |
+| --- | --- | --- | --- |
+| 1 | 6 | Unplug the tagged end from spark-1. Plug it into spark-7 port 1. | When you unplug: on spark-1, `ibdev2netdev` shows the cable 6 port `(Down)` and the cable 1 port still `(Up)`. If cable 1 went down, put that end back in the same port and go back to step 2. When you plug in: spark-6 and spark-7 |
+| 2 | 7 | New cable: spark-7 port 0 to spark-8 port 1. | spark-7 and spark-8 |
+| 3 | 8 | New cable: spark-8 port 0 to the spark-1 port that cable 6 left. | spark-8 and spark-1 |
+
+Cables 1 to 5 do not move. If the port that cable 6 left on spark-1 is not
+port 1, write down the real port. Its interfaces get the cable 8 addresses.
+A port that links at `100000Mb/s` most likely has a 100 Gb/s cable
+([network-setup.md, troubleshooting](network-setup.md#9-troubleshooting)).
+
+### Step 4. Give the new cable ends their addresses
 
 Make network changes from the local console of the Spark, not over SSH on a
 fabric port.
 
-- [ ] On spark-7 and spark-8, run the OS setup steps 1 to 4 of
+- [ ] On spark-7 and spark-8, run the OS setup steps 1 to 7 of
       [spark-setup.md](spark-setup.md) with the `ring` template and their
-      addresses from [section 3](#3-address-plan).
-- [ ] On spark-1, change the port 1 addresses only (cable 8).
-- [ ] Run the bandwidth test on the moved and new cables (6, 7, 8), on each
-      rail ([network-setup.md, step 7](network-setup.md#7-check-every-link)).
-      The test passes on any positive value, so read the number. The
+      addresses from [section 3](#3-address-plan). Steps 4 to 7 (memlock,
+      kernel, SSH between the Sparks, paused updates) are needed for the rail
+      check below.
+- [ ] On spark-1, change only the port that cable 6 left: it gets the cable 8
+      addresses, and its peer is now spark-8.
+- [ ] On spark-6, the cable 6 addresses stay. Only its peer on that cable
+      changes, from spark-1 to spark-7
+      ([spark-setup.md, name each peer rail](spark-setup.md#name-each-peer-rail)).
+- [ ] Give spark-6 and spark-1 SSH to their new peers. spark-setup step 6 on
+      spark-7 and spark-8 copies only their own keys, so it does not cover
+      this direction.
+  - On spark-6: the addresses `192.0.2.82` and `192.0.2.90` now belong to
+    spark-7, but spark-6 still holds spark-1's host key for them. The rail
+    check connects with strict host-key checking, so its SSH row fails, and
+    the `FAIL` text does not say that the key changed. On spark-7's local
+    console, read its host key fingerprint
+    (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`). Then, on spark-6,
+    remove the old entries for these two addresses only
+    (`ssh-keygen -R 192.0.2.82` and `ssh-keygen -R 192.0.2.90`, as the
+    service account), and run
+    [spark-setup.md, step 6](spark-setup.md#6-establish-ssh-between-the-sparks).
+    Accept the new key only if it matches what spark-7's console showed.
+  - On spark-1: the cable 8 addresses are new, so there is no old entry to
+    remove. Compare spark-8's fingerprint on spark-8's console, then run
+    spark-setup step 6 on spark-1.
+  - Step 6 loops over every peer in the Spark's config. For the peer that did
+    not change, `ssh-copy-id` finds the key already there.
+- [ ] On spark-1 and spark-6, if updates were restored after the last
+      benchmark window, pause them again
+      ([spark-setup.md, step 7](spark-setup.md#7-pause-updates-only-for-the-benchmark-window)).
+      If you skip this, the rail check fails its five update rows.
+- [ ] On spark-1, spark-6, spark-7 and spark-8, run the rail check of
+      [spark-setup.md, step 8](spark-setup.md#8-verify-every-rail-and-the-actual-launch-session)
+      with `--apply`. It passes when its last line shows `INFO failures=0`.
+      The rail rows then print `PASS`: address, MTU 9000, carrier, speed,
+      RDMA `ACTIVE`, the RoCE v2 GID that matches the IPv4 address, the
+      9000-byte ping and SSH to the peer. Each rail also prints one
+      `UNVERIFIED` row, because this check does not run `ib_write_bw`. Step 5
+      does. A `FAIL` row names the setting to fix: on a kernel other than
+      `7.0.0-1019-nvidia`, for example, set `KERNEL_FIXED` as
+      [spark-setup.md, step 5](spark-setup.md#5-check-the-kernel-before-registering-memory)
+      says.
+- [ ] On every Spark, `ip -4 -br addr` shows four fabric addresses, each
+      with `/24`. Across the eight Sparks, each of the 16 subnets is on
+      exactly two Sparks.
+
+### Step 5. Measure each moved and new cable
+
+`vade doctor` and the rail check do not move data at full rate. A cable can
+pass both and still be slow, so measure it.
+
+- [ ] Run the bandwidth test
+      ([network-setup.md, step 7](network-setup.md#7-check-every-link)) on
+      each rail of cables 6, 7 and 8, in both directions: swap the server and
+      the client ends.
+- [ ] In the same sitting, run the same test on one rail of a cable that did
+      not move, for example cable 1. That value is your reference for the day.
+- [ ] Read the numbers. The test passes on any positive value. The
       [numbers we measured](network-setup.md#numbers-we-measured) on earlier
-      cables: about 109 Gb/s one way on one rail, and 196.04 Gb/s one way
-      with both rails at MTU 9000. A rail far below that has a fault: reseat
-      the cable at both ends, then test again.
+      cables are about 109 Gb/s one way on one rail and 196.04 Gb/s one way
+      on both rails at MTU 9000. For a both-rails value, start the rail 0 and
+      rail 1 tests at the same time and add the two results.
+- [ ] A rail clearly below the reference cable has a fault. Reseat the cable
+      at both ends and test again. If it stays low, try another cable.
+
+### Step 6. Check the ring
+
+```sh
+vade doctor --fabric --ring
+```
+
+It passes when every row passes:
+
+- `cabling` and `ring` show `ring of 8: spark-1, spark-2, spark-3, spark-4,
+  spark-5, spark-6, spark-7, spark-8`, and `ring` adds `every Spark has two
+  neighbors`.
+- Each `<a> - <b> cable` row passes on both rails. Each port links at
+  100,000 Mb/s or more, has MTU 9000 and an `ACTIVE` RDMA device, and
+  answers a small and a 9000-byte ping from the other end.
+- Each `<spark> clock` row is within 1,000 ms of the controller.
+- `ring line rate` shows `rail 0 at … Mb/s and rail 1 at … Mb/s on all 8
+  cables`.
+
+[Section 5](#5-check-the-ring) explains every row and each failure.
+
+### Step 7. Build and model files
+
 - [ ] Copy the checkpoint to spark-7 and spark-8 at the same absolute path
       as on the other Sparks
       ([INSTALL.md, step 3](../INSTALL.md#step-3-get-the-model)). It is
-      102.26 GB. Copy it from a neighbor over a tested fabric cable, not over
+      102.26 GB. Copy it from a neighbor over a measured fabric cable, not over
       a slow LAN. Then check that it has the same files and sizes as on the
       neighbor.
-
-**4. Ring check**
-
-- [ ] `vade doctor --fabric --ring`: every row passes, `cabling` and `ring`
-      show `ring of 8: spark-1, …, spark-8`, and `ring line rate` passes.
-- [ ] `vade install`, so that every Spark has the same staged build.
+- [ ] `vade install`, so that every Spark has the same staged build. It
+      reports an error when a Spark does not have the model yet, so copy the
+      model first.
 - [ ] `VADE_GROUP=pair-4 vade doctor` and `VADE_GROUP=eight vade doctor`.
+      They run the normal checks (SSH, GPU, disk, memory, model files, ports)
+      on the group's Sparks.
 
-**5. First two-Spark run: the new pair**
+### Step 8. The new pair gives the same token IDs
 
 - [ ] `VADE_GROUP=pair-4 vade up` (spark-7 and spark-8 on cable 7).
 - [ ] `VADE_GROUP=pair-4 vade verify --prompt 8k --receipt verify-pair-4.json`
-      prints `IDENTICAL`.
-- [ ] Run the FP4-Local two-Spark card on the new pair, then
-      `VADE_GROUP=pair-4 vade down`.
+      prints `IDENTICAL`. Then `VADE_GROUP=pair-4 vade down`.
 - [ ] Do the same `up`, `verify` (with `--receipt verify-pair-1.json`) and
       `down` on one existing pair, for example `VADE_GROUP=pair-1`. The two
       receipts must have the same `reference_ids_sha256` value: the same
       request gives the same token IDs on the new pair.
 
-**6. First eight-Spark run**
+### Step 9. Serve on all eight
+
+Two layouts put several servers on the eight Sparks behind one address.
+Start one at a time ([section 6](#several-servers-behind-one-address)).
+
+```sh
+vade up --replicas 8
+vade verify --prompt 8k --receipt verify-singles.json
+vade down
+
+vade up --replicas 4 --pairs
+vade verify --prompt 8k --receipt verify-pairs.json
+vade down
+```
+
+`vade verify` with no `--url` goes through the gateway on `local_port`. To
+check one server alone, give its tunnel:
+`vade verify --prompt 8k --url http://127.0.0.1:18081 --receipt verify-server-1.json`.
+Every receipt must have the same `reference_ids_sha256` value as the pair
+receipts of step 8.
+
+Eight singles do not use the fabric, so a cable fault does not stop them.
+Four pairs each use one cable. Which layout gives more tokens per second on
+eight Sparks is not measured yet ([section 8](#8-what-to-measure-first)).
+
+### Step 10. Eight Sparks as one server
 
 - [ ] `VADE_GROUP=eight vade up`. The launch plan shows group `eight` and eight
-      machines.
+      machines. After the start, `VADE_GROUP=eight vade logs` shows one
+      `flashnext pp stage rank=<r> world=8 layers=<first>..<end>` line per
+      Spark, 6 layers each.
 - [ ] `VADE_GROUP=eight vade verify --prompt 8k --receipt verify-eight.json`
       prints `IDENTICAL`, with the same `reference_ids_sha256` value as the
       pair receipts.
-- [ ] Run the FP4-Local eight-Spark card (layer chain). FP8 on eight Sparks
-      is refused by this build.
 - [ ] `VADE_GROUP=eight vade down`.
 
-**7. Arcs of four and layouts**
+If the start fails with `pipeline peer read timed out after 10000 ms`, one
+Spark finished loading the model much later than the Spark before it. Each
+rank waits 10 seconds for the next rank
+(`LINK_TIMEOUT` in
+[engine/crates/engine/src/flash/next_pp.rs](../engine/crates/engine/src/flash/next_pp.rs)).
+Look in `VADE_GROUP=eight vade logs` for the rank that finished loading last,
+then start again.
 
-- [ ] `quad-a`, then `quad-b`: the FP4-Local four-Spark card on each, and the
-      FP8 four-Spark card with an FP8 config. Compare the FP8 token IDs with
-      other four-Spark FP8 runs only.
-- [ ] The FP4-Local layouts at equal total load: 8 singles
-      (`vade up --replicas 8`, one local port), 4 doubles (`doubles`, then
-      `doubles-b`: four servers on four local ports), 2 quads (`quads`: two
-      servers on two ports). With groups, the load client sends its chats to
-      every group's port itself. Record the same cells for each layout, and
-      check that the token IDs are the same across layouts for the same
-      request.
+FP8 on eight Sparks is refused by this build.
 
-**Where the numbers land.** Each card records the revision, the hardware, the
-checkpoint, the settings, the arc (the hosts in rank order) and the raw
-results. The eight-Spark and four-of-eight columns are defined in
-[benchmarks.md](benchmarks.md#columns-for-eight-sparks). Published numbers go
-there, with a small sanitized receipt in [bench/receipts](../bench/receipts/README.md),
-after review. Until then, every value for eight Sparks is to be measured. An
-arc or layout that we have not tested still needs its own exactness check on
-real Sparks before you rely on it.
+### Step 11. Arcs of four
+
+- [ ] `VADE_GROUP=quad-a vade up`, then `VADE_GROUP=quad-b vade up`: two
+      servers on two local ports. Check each with `vade verify` and the same
+      `VADE_GROUP`.
+- [ ] FP8 on four Sparks needs an FP8 config. Compare its token IDs only
+      with other four-Spark FP8 runs.
+
+### When you are done
+
+- [ ] Stop every server: `vade down` with the same `VADE_GROUP` as each
+      `vade up`. Plain `vade status` then shows `Vade is stopped.` and names no
+      group. Then restore updates on every Spark where you paused them,
+      spark-7 and spark-8 included
+      ([spark-setup.md, step 9](spark-setup.md#9-finish-benchmarking-and-restore-updates)).
 
 <br>
 
 ---
 
-## 8. What vade prints for eight Sparks
+## 8. What to measure first
+
+Measure in this order. Each row names the record that the value goes into.
+Each card records the revision, the hardware, the checkpoint, the settings,
+the arc or layout (the labels in rank order) and the raw results. **No value
+for eight Sparks is measured yet**, so this page gives no expected number.
+An arc or layout that has not been tested still needs its own exactness check
+on real Sparks before you rely on it.
+
+| Order | What | How | Record |
+| --- | --- | --- | --- |
+| 1 | The values of each new Spark and the reference | [Step 1](#step-1-check-each-new-spark-before-any-qsfp-cable) | Your private notes, with the date |
+| 2 | Bandwidth of each rail of cables 6, 7 and 8, both directions, and of one cable that did not move | [Step 5](#step-5-measure-each-moved-and-new-cable) | Your private notes: the raw `ib_write_bw` output |
+| 3 | The same token IDs on the new pair and an old pair | [Step 8](#step-8-the-new-pair-gives-the-same-token-ids) | The two `vade verify` receipts |
+| 4 | Speed of the new pair and an old pair, in the same sitting | The FP4-Local two-Spark card on `pair-4` and `pair-1` | One two-Spark card for each pair ([benchmarks.md](benchmarks.md)) |
+| 5 | Eight singles behind one address: the card cells | `vade up --replicas 8`. The load client on `local_port` gives the total; the same client on each tunnel at the same time gives each server's value | A card for this layout: the total, and each server's value beside it |
+| 6 | Four pairs behind one address: the same cells | `vade up --replicas 4 --pairs` | A card for this layout, as in row 5 |
+| 7 | Eight Sparks as one server: `vade verify`, then the card | `VADE_GROUP=eight` | The **8 of 8** column ([benchmarks.md](benchmarks.md#columns-for-eight-sparks)) |
+| 8 | Two quads: each alone, then both at the same time | `VADE_GROUP=quad-a`, `VADE_GROUP=quad-b` | The **4 of 8** and **2 × 4 of 8** columns |
+| 9 | How long `vade status --json` takes during rows 5 and 7 | `time vade status --json`, with the same `VADE_GROUP` as the run | Your private notes. Its checks share a 15-second deadline |
+| 10 | Heat while row 5 runs | `nvidia-smi --query-gpu=temperature.gpu,clocks.sm,power.draw --format=csv -l 1` on each Spark | Your private notes, beside the idle values of step 1 |
+
+Rows 5 and 6 have no column in [benchmarks.md](benchmarks.md) yet. Through the
+gateway, the client sees only the total. For each server's value, send the
+same cells to each server's tunnel (`local_port + 1` to `local_port + N`) at
+the same time, and record that run on its own. These are two different loads:
+at 16 chats, the gateway run puts 16 chats on all servers together, and the
+tunnel run puts 16 chats on each server. So the sum of the tunnel run is not
+the gateway total. Label each run on the card, and do not put a gateway total
+beside per-server values from the tunnel run. Within each run, follow the
+rules of the **2 × 4 of 8** column: a multi-chat cell gives the sum of the
+servers and each server's value beside it, and a one-chat cell gives each
+server's value. Token IDs must be the same as in the one-, two-
+and four-Spark columns for the same request. Published numbers go to
+[benchmarks.md](benchmarks.md), with a small sanitized receipt in
+[bench/receipts](../bench/receipts/README.md), after review.
+
+<br>
+
+---
+
+## 9. What vade prints for eight Sparks
 
 These are the output lines that the ring of eight adds or changes. Nothing
 changes for a config without groups or without `--ring`.
