@@ -1,5 +1,6 @@
 id: markdown-spec-qa
 title: Read a Markdown spec and answer questions
+category: document-reading
 inputs: SPEC.md QUESTIONS.md
 budget_seconds: 600
 

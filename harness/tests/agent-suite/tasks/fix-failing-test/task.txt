@@ -1,5 +1,6 @@
 id: fix-failing-test
 title: Fix a failing test in a small Rust crate
+category: bug-fix
 inputs: Cargo.toml src/lib.rs tests/balance.rs
 budget_seconds: 600
 

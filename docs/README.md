@@ -89,6 +89,8 @@ What we measured, what backs it up, and who we credit.
 
 - [What is new in v0.2.0, in plain words](release-notes/0.2.0.md)
 - [How we benchmark, the current results and older results](benchmarks.md)
+- [Agent task suite](harness-suite.md): 22 mixed tasks for the coding agent,
+  the dry-run gate, the live card and what grade A means
 - [Which run records (receipts) are public](../bench/receipts/README.md)
 - [Engine validation](../engine/docs/validation.md)
 - [Older evidence we kept](history/README.md)

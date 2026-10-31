@@ -1,0 +1,19 @@
+id: docx-policy-qa
+title: Read a Word document and answer five questions
+category: document-reading
+inputs: retention_policy.docx QUESTIONS.md
+budget_seconds: 300
+needs: Word (.docx) text in workspace_read
+
+# The facts are only in the .docx file. workspace_read gives its text; the
+# raw file is a ZIP archive that is hard to read without that.
+step: new
+prompt:
+  Read retention_policy.docx and QUESTIONS.md. Write the answers to
+  ANSWERS.txt in the exact form that QUESTIONS.md gives, one line for each of
+  Q1 to Q5. Do not change the input files.
+
+check: last-exit-zero
+check: file-equals ANSWERS.txt expected/ANSWERS.txt
+check: unchanged retention_policy.docx
+check: unchanged QUESTIONS.md

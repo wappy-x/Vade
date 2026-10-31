@@ -1,5 +1,6 @@
 id: multi-file-rename
 title: Rename a type across every file of a crate
+category: multi-file-refactor
 inputs: Cargo.toml README.md src/lib.rs src/catalog.rs src/price.rs tests/catalog.rs
 budget_seconds: 900
 

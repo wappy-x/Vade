@@ -1,5 +1,6 @@
 id: pdf-table
 title: Read a PDF and extract its table as CSV
+category: document-reading
 inputs: invoice.pdf
 budget_seconds: 600
 needs: PDF text in workspace_read (own-pdf); the raw PDF source also works

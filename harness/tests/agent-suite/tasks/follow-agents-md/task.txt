@@ -1,5 +1,6 @@
 id: follow-agents-md
 title: Follow the rules in AGENTS.md
+category: edit-in-place
 inputs: AGENTS.md CHANGELOG.md Cargo.toml src/lib.rs src/stats.rs vendor/fastmath/README.md vendor/fastmath/lib.rs
 budget_seconds: 900
 

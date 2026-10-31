@@ -30,6 +30,7 @@ fn run_main(mut arguments: Vec<String>) -> ExitCode {
     match args.next().as_deref() {
         Some("workload") => return vade_harness::workload::cli(args),
         Some("quality-card") => return vade_harness::quality::cli(args),
+        Some("suite") => return vade_harness::suite::cli(args),
         Some("setup") => return vade_harness::setup::cli(args),
         Some("doctor") => return vade_harness::doctor::cli(args),
         Some("sessions") => return vade_harness::saved_sessions::cli(args),

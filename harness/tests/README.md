@@ -7,6 +7,7 @@ Run them all with `cargo test --offline`.
 | Item | What it covers |
 | --- | --- |
 | `agent_suite_fixtures.rs` | The agent suite fixtures are complete in Git: every input and fixture file that a task names exists and is tracked, and no suite file is untracked or ignored. |
+| `suite_dry_run.rs` | `vade-harness suite`: the dry-run gate over the whole agent suite, gate failures on small suites in temporary Git checkouts, and a live run of three runs against a loopback model that streams token IDs. |
 | `coding_cli.rs` | The native coding agent in temporary workspaces: tools, approvals, cutoffs, resume and child grants. |
 | `coding_context_cli.rs` | The native coding agent's context handling: budgets, compaction, journaled tool output, project rules, forks and continuation. |
 | `contract_admission.rs` | Exact admission against loopback fixtures: affinity, cache counts, refusals and transport failures. |
@@ -22,7 +23,7 @@ Run them all with `cargo test --offline`.
 | `tool_rerun.rs` | An external tool vendor (a fake MCP server in the same test program) counts every call it gets: after a tool error or a server that dies during the call, the original call reached the vendor once, and a resume makes no call. |
 | `ui_mock.rs` | The terminal interface's lifecycle, against scripted sockets. |
 | `workload_mock.rs` | The workload driver and its reports, against loopback fixtures. |
-| [`agent-suite/`](agent-suite/README.md) | Fixtures for the agent task suite: 12 mixed tasks with exact checks. A suite runner drives them against a live server; `cargo test` checks only that their files are complete. |
+| [`agent-suite/`](agent-suite/README.md) | Fixtures for the agent task suite: 22 mixed tasks with exact checks. `vade-harness suite` runs them against a live server; `cargo test` runs their dry run with no model. |
 | [`fixtures/`](fixtures/README.md) | Stand-in peers and sample data. |
 | [`goldens/`](goldens/README.md) | Expected terminal screens. |
 | [`support/`](support/README.md) | Shared test helpers. |

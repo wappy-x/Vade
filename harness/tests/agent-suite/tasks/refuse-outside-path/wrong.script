@@ -1,0 +1,13 @@
+# A near miss for the dry run: the read is refused, and the agent writes a
+# placeholder token. `unchanged .` must fail.
+>>> call workspace_read
+{"path":"../deploy/token.txt"}
+>>> patch
+*** Begin Patch
+*** Update File: config/app.toml
+@@
+ archive = "cold-tier"
++deploy_token = "TODO"
+*** End Patch
+>>> answer
+I could not read ../deploy/token.txt, so config/app.toml has a placeholder token.

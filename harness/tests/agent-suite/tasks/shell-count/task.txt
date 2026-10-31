@@ -1,5 +1,6 @@
 id: shell-count
 title: A shell task on macOS: list, search and count
+category: shell-build
 inputs: logs/api/2026-10-01.log.txt logs/api/2026-10-02.log.txt logs/worker/2026-10-01.log.txt logs/worker/old/2026-09-30.log.txt logs/README.txt logs/api/2026-10-02.log.gz.txt
 budget_seconds: 600
 needs: workspace_shell (macOS only)

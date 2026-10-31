@@ -1,5 +1,6 @@
 id: write-unit-test
 title: Write and run a unit test
+category: new-feature
 inputs: Cargo.toml src/lib.rs
 budget_seconds: 900
 

@@ -1,5 +1,6 @@
 id: long-context-digest
 title: Answer questions about a repository digest of 241,865 bytes
+category: long-context
 inputs: QUESTIONS.md
 budget_seconds: 1200
 generate: repo-digest-v1

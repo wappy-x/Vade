@@ -40,6 +40,7 @@ pub mod shell;
 #[cfg(test)]
 mod test_workspace;
 pub mod quality;
+pub mod suite;
 mod process_group;
 pub mod readers;
 pub mod wake;

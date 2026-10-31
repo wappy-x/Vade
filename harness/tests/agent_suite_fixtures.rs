@@ -48,11 +48,12 @@ fn every_named_task_input_exists_and_is_tracked() {
     let mut ids: Vec<_> = std::fs::read_dir(&suite).unwrap().map(|e| e.unwrap().path()).filter(|p| p.is_dir())
         .map(|p| p.file_name().unwrap().to_str().unwrap().to_string()).collect();
     ids.sort();
-    assert_eq!(ids.len(), 12, "the suite README lists 12 tasks: {ids:?}");
+    assert_eq!(ids.len(), 22, "the suite README lists 22 tasks: {ids:?}");
     for id in &ids {
         let text = std::fs::read_to_string(suite.join(id).join("task.txt")).unwrap_or_else(|e| panic!("{id}/task.txt: {e}"));
         assert!(text.lines().any(|l| l == format!("id: {id}")), "{id}/task.txt must say id: {id}");
-        let mut named = vec!["task.txt".to_string(), "solve.script".to_string()];
+        // The dry-run gate replays both scripts of every task.
+        let mut named = vec!["task.txt".to_string(), "solve.script".to_string(), "wrong.script".to_string(), "rubric.txt".to_string()];
         let mut inputs = 0;
         for line in text.lines() {
             let words: Vec<&str> = line.split_whitespace().collect();

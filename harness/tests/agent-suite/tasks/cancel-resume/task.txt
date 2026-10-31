@@ -1,5 +1,6 @@
 id: cancel-resume
 title: Cancel in the middle of a task, then continue
+category: session-resume
 inputs: notes/a.txt notes/b.txt notes/c.txt
 budget_seconds: 900
 

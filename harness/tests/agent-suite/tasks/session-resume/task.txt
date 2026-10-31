@@ -1,5 +1,6 @@
 id: session-resume
 title: Continue a resumed session with a fact that only the first run read
+category: session-resume
 inputs: README.md notes/release.txt
 budget_seconds: 600
 

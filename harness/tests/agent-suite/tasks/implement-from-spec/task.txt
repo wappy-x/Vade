@@ -1,5 +1,6 @@
 id: implement-from-spec
 title: Implement a function from a Markdown spec
+category: new-feature
 inputs: Cargo.toml src/lib.rs SPEC.md
 budget_seconds: 900
 
