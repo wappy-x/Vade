@@ -109,7 +109,7 @@ with `--hosts` ([section 6](#6-start-a-run-on-an-arc)).
 | --- | --- | --- |
 | 1 | One Spark, no fabric. `--replicas 8` runs eight independent servers behind one local gateway. | Refused. |
 | 2 | The tensor split, the only two-Spark path. It needs RDMA. `--replicas 4 --pairs` runs four pairs behind one local gateway. | Two-way TP. |
-| 4 | Over RDMA, the tensor split in parts (each Spark works on every token). Over TCP, the layer chain of four. | Four-way TP on a path. Today it gives other token IDs than two Sparks ([benchmarks.md](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)). |
+| 4 | Over RDMA, the tensor split in parts ([section 6](#6-start-a-run-on-an-arc) says which work it splits). Over TCP, the layer chain of four. | Four-way TP on a path. Today it gives other token IDs than two Sparks ([benchmarks.md](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)). |
 | 8 | The layer chain of eight. | Refused: `FP8 needs 2, 4, or 6 machines` ([cli/src/config.rs](../cli/src/config.rs)). |
 
 FP4-Local runs the tensor split on two Sparks, and the tensor split in parts on
@@ -435,9 +435,13 @@ vade up --hosts spark-8,spark-1            # the pair on cable 8
 ```
 
 **Four Sparks (world 4).** FP4-Local runs the four-way tensor split over RDMA
-(each Spark works on every token, on a quarter of the experts; one-chat passes
-also split most projections, and greedy steps split the output head) and the
-layer chain of four over TCP. FP8 runs four-way TP with `--fp8` and a config that selects the FP8 checkpoint
+and the layer chain of four over TCP. In the split, rank 0 runs layers 0 and 1
+alone. On a pass of at most 16 rows (32 for a drafting verify pass), each Spark
+computes a quarter of every routed expert, and a one-chat pass also splits most
+projections. A plain greedy step of that size splits the output head; a verify
+step splits it only for one chat and 1 to 8 rows. A long prompt runs as chain
+tiles, in which each Spark runs 12 whole layers
+([architecture.md](architecture.md#several-sparks-the-layer-pipeline-and-the-chain)). FP8 runs four-way TP with `--fp8` and a config that selects the FP8 checkpoint
 (`vade up --fp8` refuses an FP4-Local config). Each group below is its own
 server on its own local port.
 
@@ -731,9 +735,16 @@ It passes when every row passes:
       102.26 GB. Copy it from a neighbor over a measured fabric cable, not over
       a slow LAN. Copy the checksum list beside the folder too
       (`Qwen3.8-Flash-Next-FP4-Local.sha256`), if the neighbor has one. With
-      it, the first start on the new Spark checks every file, as on the
-      other six. Without it, check the files once yourself
-      ([INSTALL.md, check the files](../INSTALL.md#check-the-files)).
+      it, a `vade up` start on the new Spark checks
+      `model.safetensors.index.json` and every weight shard against the list
+      before it loads. It does not check `config.json`, the tokenizer or the
+      template files. With the list beside the folder, `vade install` from
+      the controller hashes nothing: it checks that each shard is there and
+      that its size and header match the index. (A `manifest.sha256` inside
+      the folder makes it hash every listed file.) So check all the files
+      once yourself
+      ([INSTALL.md, check the files](../INSTALL.md#check-the-files)), with or
+      without the list.
 - [ ] `vade install`, so that every Spark has the same staged build. It
       reports an error when a Spark does not have the model yet, so copy the
       model first.
@@ -745,8 +756,11 @@ It passes when every row passes:
 
 Run `vade verify` from the checkout root. Its receipts on this page go into
 `.local/`, which Git ignores and which already holds your private config.
-A receipt file elsewhere in the checkout makes the next `vade install` refuse
-to build, because it builds only from a checkout with no local changes.
+A receipt file elsewhere in the checkout makes the next `vade install` stop
+with `source has local changes`. Before it builds, and before it looks for a
+`prebuilt_dir` bundle, `vade install` runs
+`git status --porcelain --untracked-files=normal` on the checkout and stops
+when that prints anything.
 
 - [ ] `VADE_GROUP=pair-4 vade up` (spark-7 and spark-8 on cable 7).
 - [ ] `VADE_GROUP=pair-4 vade verify --prompt 8k --receipt .local/verify-pair-4.json`
@@ -791,6 +805,19 @@ eight Sparks is not measured yet ([section 8](#8-what-to-measure-first)).
       prints `IDENTICAL`, with the same `reference_ids_sha256` value as the
       pair receipts.
 - [ ] `VADE_GROUP=eight vade down`.
+
+**Why eight Sparks run the layer chain.** The engine chooses the path at
+startup. On eight Sparks, over RDMA or TCP, it runs the layer chain of eight.
+The tensor split in parts needs room in its mailbox for the sequence words of
+every other Spark. The mailbox has room for 32 words, and a path of eight
+needs 56: 7 other Sparks with 8 message slots each. So the engine does not
+take the split there
+([settings.rs](../engine/crates/tp/src/flash/settings.rs),
+[tp_route.rs](../engine/crates/gpu/src/tp_route.rs)). No startup line names
+this reason. Plain `vade status` shows the path as `layer chain (FP4-Local
+on three or more Sparks without the tensor split (TCP, or a world the split
+does not take))`. The chain runs from spark-1 to spark-8 over cables 1 to 7,
+so cable 8 carries no traffic in this run.
 
 If the start fails with `pipeline peer read timed out after 10000 ms`, one
 Spark finished loading the model much later than the Spark before it. Each
