@@ -7,11 +7,11 @@ The implementation is in [cli/src/evals](../../../cli/src/evals/mod.rs).
 
 ## Prepare inputs
 
-Build the tokenizer from `engine/`, and build the CLI from the repository root:
+Build the engine tokenizer and the CLI from the repository root:
 
 ```sh
-cargo build --release --offline --manifest-path engine/Cargo.toml -p engine-tokenizer --example tokenize
-cargo build --release --offline --manifest-path cli/Cargo.toml
+cargo +1.99.0 build --release --offline --locked --manifest-path engine/Cargo.toml -p engine-tokenizer --example tokenize
+cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml
 ```
 
 Set `TOKENIZER_DIR` to the pinned checkpoint's tokenizer directory,

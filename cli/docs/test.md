@@ -34,7 +34,7 @@ new command.
 Build `vade` from the root of the monorepo with the pinned host compiler:
 
 ```sh
-cargo build --release --offline --manifest-path cli/Cargo.toml
+cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml
 cli/target/release/vade test build --help
 cli/target/release/vade test determinism --help
 ```

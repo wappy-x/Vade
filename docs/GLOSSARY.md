@@ -137,7 +137,7 @@ with a box that explains its own engine terms.
 
 **HTTP.** The ordinary protocol of the web. The engine listens for HTTP requests on a port.
 
-**Hugging Face.** The website where model makers publish their weights. Its `hf` command-line tool downloads them.
+**Hugging Face.** The website where model makers publish their weights. `vade pull` downloads a checkpoint from it and checks the files; see [download models](pull-models.md).
 
 **ib_write_bw, perftest.** `perftest` is the standard RDMA test kit. `ib_write_bw` is the tool in it that measures RDMA write bandwidth between two machines.
 
@@ -160,6 +160,8 @@ with a box that explains its own engine terms.
 **Locked memory (memlock).** Memory the OS promises never to move or swap out. RDMA needs it. Vade requires the limit to be `unlimited` in the session that starts it.
 
 **Loopback, localhost.** The address a machine uses to talk to itself (`127.0.0.1`). The launcher binds HTTP there. The configured controller route uses an [SSH tunnel](#sz) to reach the engine from another computer.
+
+**Main `abc1234`, #123.** A revision and a pull request of Vade's private development repository. Results, receipts and the changelog name them so a number can be traced to the code that made it. Each public commit holds the files of one private main revision, but the public history does not contain most of those revisions. So `git checkout abc1234` usually does not find the revision here, and pull request `#123` here is a different one or none. The exceptions are the two v0.1.0 release commits, `5a22651` and `99e8f62`: they are public commits.
 
 **Mixture of experts (MoE).** A model made of many small expert networks, where each token visits only a few of them.
 
@@ -204,7 +206,7 @@ Under greedy decoding, ON and OFF must return the same token IDs; see [request c
 
 **Prefill.** Reading the whole prompt once, before the first answer token. It sets the time to first token.
 
-**Prefix cache.** Another name for the [prompt cache](#ac): the engine keeps the work from the start of earlier prompts, so a new request that starts the same way reads only the new part. `--cache-bytes 0` turns the retained cache off.
+**Prefix cache.** Another name for the [prompt cache](#ac): the engine keeps the work from the start of earlier prompts, so a new request that starts the same way reads only the new part. `--cache-bytes 0` turns the retained cache off for a local install, and `vade up --fp8 --cache-bytes 0` turns it off for FP8. From an FP4-Local controller, set `VADE_FLASHNEXT_PREFIX_CACHE=0` on every Spark instead; see [the prefix cache](../INSTALL.md#the-prefix-cache).
 
 **Preflight.** The checks Vade runs before it installs or starts anything: the machine, driver, memory, disk and model files. A failed preflight changes nothing.
 

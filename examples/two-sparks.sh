@@ -2,7 +2,7 @@
 # Purpose: start one engine across two DGX Sparks from a controller, check it, and stop it.
 # Run:     sh examples/two-sparks.sh          (dry run: prints every command; no SSH, no files, any Mac or Linux)
 #          VADE_CONFIG=/your/two-sparks.conf sh examples/two-sparks.sh --live
-# Needs:   vade on PATH (cargo +1.99.0 build --release --offline --manifest-path cli/Cargo.toml).
+# Needs:   vade on PATH (cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml).
 #          --live also needs the INSTALL.md controller setup: passwordless SSH to both Sparks,
 #          the verified checkpoint on each, and a cable between them (RDMA, or SEQPAR_RDMA=0 for TCP).
 # Expected output: see "Two Sparks" in examples/README.md.

@@ -11,10 +11,13 @@ it covers and who it is for, and ends with where to go next.
 - [Installation](../../INSTALL.md) and [Flash server](next-http.md).
   Current FP4-Local launcher, Mac tunnel, harness build and client setup.
   [FP8 installation](../../docs/install-fp8.md) remains separate.
-- [One-Spark quickstart](../../docs/quickstart-one-spark.md). Current Ubuntu GB10
-  route: prerequisites, engine workspace paths, complete official download and
-  checksum commands, first chat and answer comparison. Use this
-  route in place of the older [install page](install.md).
+- [One-Spark quickstart](../../docs/quickstart-one-spark.md). Part 1 drives
+  FP4-Local from a controller. Part 2 is the older Qwen3-8B route on the Spark:
+  prerequisites, engine workspace paths, download and checksum commands, first
+  chat and answer comparison. For the current install on the Spark itself, use
+  [INSTALL.md](../../INSTALL.md).
+- [Older install page](install.md). Now points to INSTALL.md and keeps the
+  anchors that older links use.
 - [One-Spark server and API](server.md). Run `spark-serve`, connect apps through the
   OpenAI-compatible API, every flag, every limit.
 - [Models](models.md). Which models run, context limits, precision and the
@@ -67,6 +70,29 @@ For maintainers and writers:
 
 - [Export](export.md). How the allowlisted shareable copy is made, and what
   it checks.
+
+## Engine notes
+
+**Short contracts for one kernel, path or setting each.** They are written for
+people who change the engine, and some describe older models.
+
+- Servers: [two-Spark Flash server](flash-server.md) (connect a Mac, the
+  harness or an app to the FP8 server), [execution options](next-fast.md)
+  (the `0`/`1` switches and when they are read) and
+  [one-start kernel A/B](ab-serve-switch.md) (compare two PTX builds in one
+  start, test only).
+- Flash-Next arithmetic: [arithmetic](flash-fp8-math.md),
+  [rows](flash-next-rows.md) (one path for a prompt tile or up to sixteen
+  chats), [dense projection schedule](flashnext-dense-latency.md),
+  [HC up register lookahead](flashnext-hc-up.md),
+  [native MXFP8 decode](flashnext-native.md),
+  [NVFP4 on GB10](fp4-kernels.md) and
+  [C8 cohort draft selection](c8-cohort-experiment.md).
+- Typed hybrid serving: [memory admission](hybrid-memory.md),
+  [exact prompt recurrence](gdn-scan.md),
+  [routed FP8 prompt tiles](routed-prefill.md),
+  [decode graphs](typed-decode-graphs.md) and the
+  [FP32 QSA indexer](qsa-indexer.md).
 
 ## Changing the code
 

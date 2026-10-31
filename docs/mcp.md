@@ -32,7 +32,7 @@ The repository has a small example server,
 that `scripts/install.sh` installs. From the checkout root:
 
 ```sh
-cargo build --release --offline --manifest-path tools/Cargo.toml --example mcp-word-count
+cargo build --release --offline --locked --manifest-path tools/Cargo.toml --example mcp-word-count
 vade mcp add words -- "$PWD/tools/target/release/examples/mcp-word-count"
 vade mcp test words
 ```

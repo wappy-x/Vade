@@ -16,14 +16,22 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
+# curl reads the key header from a file in the private temporary folder, so
+# the key never appears in curl's arguments, which other users can see.
+AUTH=
+if [ -n "${VADE_API_KEY_FILE:-}" ]; then
+  KEY=$(cat "$VADE_API_KEY_FILE")
+  case $KEY in *"$(printf '\r')"*|*'
+'*) echo 'The bearer key holds a line break.' >&2; exit 1 ;; esac
+  AUTH=$DIR/authorization
+  printf 'Authorization: Bearer %s\n' "$KEY" > "$AUTH"; KEY=
+fi
 get() { "$VADE_TOOLS" json-get "$@"; }
 value() { "$VADE_TOOLS" json-value "$@"; }
 quote() { "$VADE_TOOLS" json-quote; }
 request() {
   path=$1; shift
-  if [ -n "${VADE_API_KEY_FILE:-}" ]; then
-    set -- --header "Authorization: Bearer $(cat "$VADE_API_KEY_FILE")" "$@"
-  fi
+  if [ -n "$AUTH" ]; then set -- --header "@$AUTH" "$@"; fi
   curl --fail-with-body -sS --max-time 600 --header 'Content-Type: application/json' "$BASE$path" "$@"
 }
 chat() { request /v1/chat/completions --data-binary "$1"; }

@@ -14,9 +14,10 @@ compilers, the model download and its checks, and the launcher for the default
 model, `nvidia/Qwen3.8-Flash-Next-FP4-Local` (the
 [FP4-Local](../docs/GLOSSARY.md#dg) profile).
 
-For one Ubuntu GB10 there are two model-specific guides: the
-[Qwen3-8B quickstart](../docs/quickstart-one-spark.md) and the
-[Qwen3.6-35B-A3B-FP8 guide](../docs/serve-35b-one-spark.md).
+Two older one-Spark guides serve other models: the
+[Qwen3-8B route](../docs/quickstart-one-spark.md#qwen3-8b-bf16-ubuntu-to-a-first-answer)
+and, as history, the
+[Qwen3.6-35B-A3B-FP8 guide](../docs/history/serve-35b-one-spark.md).
 
 To start the FP4-Local server by hand instead of through `vade`, see
 [next-http](docs/next-http.md). The [FP8 install](../docs/install-fp8.md)

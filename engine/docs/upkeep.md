@@ -2,10 +2,10 @@
 
 **Keep Vade running in the background, update it to a new revision, or remove it, all as an ordinary user.**
 
-For anyone who has finished [the canonical one-Spark guide](../../docs/quickstart-one-spark.md) and operates a Spark.
+For anyone who has finished [part 2 of the one-Spark quickstart](../../docs/quickstart-one-spark.md#qwen3-8b-bf16-ubuntu-to-a-first-answer), the older Qwen3-8B route, and operates a Spark.
 
 These service recipes use one-Spark `spark-serve`. For the current two-Spark
-Flash server, use [INSTALL's shutdown](../../INSTALL.md#6-run-the-timing-benchmark)
+Flash server, use [INSTALL's shutdown](../../INSTALL.md#stop-the-engine)
 and the [Flash connection guide](flash-server.md).
 
 - Nothing here uses `sudo` or changes the OS, driver or network.

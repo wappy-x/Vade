@@ -7,8 +7,9 @@ model's replies into a coding conversation, and a CLI that builds, starts and
 stops them. All three are first-party Rust built on the standard library
 alone, and the engine talks straight to NVIDIA's driver.
 
-The release serves one model, `nvidia/Qwen3.8-Flash-Next-FP4-Local`, on one
-Spark by default, and can spread it across a chain of Sparks. Two ideas shape
+Vade serves `nvidia/Qwen3.8-Flash-Next-FP4-Local` on one Spark by default. On
+main, two Sparks run it as a tensor split and three or more as a chain. Main
+also serves `Qwen/Qwen3.8-Flash-Next-FP8` on 2, 4 or 6 Sparks. Two ideas shape
 almost every design choice on this page:
 
 - **Exactness.** The same request on the same setup returns the same token IDs
@@ -629,13 +630,14 @@ they run the same PTX and checkpoint artifacts, and every worker reserves
 memory for the number of chats the front will admit
 ([`next_batched_service.rs`](../engine/crates/tp/src/flash/next_batched_service.rs)).
 
-**What the measured layer pipeline provides.** In the
-2026-10-25 cards the first token after a cold 8K prompt came in 2.80 s on two
-Sparks and 2.19 s on four, against 3.86 s on one Spark in the v0.1.0 card.
-Only one pipeline GPU works on a given chat at a time. With drafting ON,
-code ran at 79.3 tok/s on two Sparks and
-80.3 on four, next to 76.7 on one. A chain is mainly for models too large for
-a single machine
+**What the measured layer pipeline provided.** These numbers are from the
+2026-10-25 cards, when two Sparks still ran the layer pipeline. Today two
+Sparks run the tensor split. In those cards the first token after a cold 8K
+prompt came in 2.80 s on two Sparks and 2.19 s on four, against 3.86 s on
+one Spark in the v0.1.0 card. Only one pipeline GPU works on a given chat at a
+time. With drafting ON, code ran at 79.3 tok/s on two Sparks and 80.3 on four,
+next to 76.7 on one. A chain is mainly for models too large for a single
+machine
 ([reading these cards](benchmarks.md#reading-these-cards)).
 
 ## The prefix cache

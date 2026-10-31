@@ -179,7 +179,7 @@ impl<R: Runner> Local<R> {
                 "# Fetch engine and harness source (or verify --release); pin source revisions before building."
             ))?;
             crate::output::line(format_args!(
-                "# cargo kernels; cargo build --release --offline -p spark-serve; build vade-harness."
+                "# cargo kernels; cargo build --release --offline --locked -p spark-serve; build vade-harness."
             ))?;
             if options.weights_source.is_some() || stored_weights {
                 crate::output::line(format_args!(

@@ -9,7 +9,7 @@ recipes below cover the separate one-Spark `spark-serve` workflow.
 
 - **Start:** `./target/release/spark-serve models/Qwen/Qwen3-8B`, then wait for `ready`.
 - **Connect:** base URL `http://localhost:8080/v1`, model `qwen3-8b`.
-- **First:** [The canonical one-Spark guide](../../docs/quickstart-one-spark.md) builds it. Several Sparks: [Multiple Sparks](multi-spark.md).
+- **First:** [Part 2 of the one-Spark quickstart](../../docs/quickstart-one-spark.md#qwen3-8b-bf16-ubuntu-to-a-first-answer), the older Qwen3-8B route, builds it. Several Sparks: [Multiple Sparks](multi-spark.md).
 
 **Do:** [Start](#start-it) · [Connect an app](#use-it-from-an-app) · [Remote access](#reach-it-from-another-machine) ·
 [Stop](#stopping) · [Swap model](#swap-the-model). **Look up:** [Sizing](#how-it-sizes-itself) ·

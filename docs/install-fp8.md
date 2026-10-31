@@ -87,7 +87,7 @@ from the FP8 template:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo +1.99.0 build --release --offline --manifest-path cli/Cargo.toml
+cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml
 export PATH="$PWD/cli/target/release:$PATH"
 mkdir -m 700 -p .local
 [ -e .local/fp8.conf ] || cp cli/examples/vade.conf .local/fp8.conf

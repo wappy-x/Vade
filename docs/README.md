@@ -64,8 +64,9 @@ supported route on 2, 4 or 6 linked Sparks.
 How Vade works, and how to change it. These pages are for contributors.
 
 - **Before you change code:** the [agent rules](../AGENTS.md), the
-  [contribution process](../CONTRIBUTING.md) and the
-  [design decisions](decisions/README.md)
+  [contribution process](../CONTRIBUTING.md), the
+  [design decisions](decisions/README.md) and [local CI](ci.md) (the CI
+  commands to run on your own computer)
 - **How the parts fit together:** [architecture](architecture.md),
   [glossary](GLOSSARY.md), [engine documentation](../engine/docs/README.md)
   and [harness documentation](../harness/README.md)

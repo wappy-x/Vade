@@ -41,7 +41,7 @@ that many distinct --hosts."
 ## Steps
 
 1. Build the CLI on the controller:
-   `cargo build --release --offline --manifest-path cli/Cargo.toml`.
+   `cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml`.
 2. Copy [fp4-local.conf](../examples/fp4-local.conf) to a new file, replace
    its placeholders, and set `VADE_CONFIG` to that file's absolute path. Every
    Spark you use needs the same verified checkpoint, at the same absolute

@@ -137,7 +137,7 @@ arguments and the repeat and noise rules.
 
    ```sh
    # Run from the checkout root.
-   cargo +1.99.0 build --release --offline --manifest-path cli/Cargo.toml
+   cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml
    ```
 
 2. Start the server you want to measure in another terminal, for example
@@ -157,7 +157,7 @@ arguments and the repeat and noise rules.
 
 ```text
 In the Vade checkout on this DGX Spark, build the client with
-cargo +1.99.0 build --release --offline --manifest-path cli/Cargo.toml.
+cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml.
 spark-serve is already running with Qwen3-8B on loopback port 8080. Run
 cli/target/release/vade bench --suite http://localhost:8080 --tokenizer
 models/Qwen/Qwen3-8B --only concurrency --concurrency 16 --repeats 1

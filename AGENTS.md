@@ -7,10 +7,13 @@
 
 Vade is an inference engine for the NVIDIA DGX Spark / GB10, written in Rust
 using only the standard library. Version 0.1.0 targets
-`nvidia/Qwen3.8-Flash-Next-FP4-Local` and handles text only. It runs on one
-Spark by default, and the topology supports 1..N Sparks. Drafting is on by
-default: an extra model head proposes tokens and the model verifies them. When
-a request doesn't say how to sample, Vade decodes greedily. The source
+`nvidia/Qwen3.8-Flash-Next-FP4-Local` and handles text only. Main also serves
+`Qwen/Qwen3.8-Flash-Next-FP8` on 2, 4 or 6 Sparks. Vade runs on one Spark by
+default, and the topology supports 1..N Sparks. Drafting is on by default: an
+extra model head proposes tokens and the model verifies them. With FP4-Local,
+a request that doesn't say how to sample is decoded greedily. With FP8, such a
+request is sampled with the checkpoint's values
+([FP8 defaults](docs/install-fp8.md#defaults-and-drafting)). The source
 repository URL is defined by [`VADE_REPO_URL`](cli/src/repository.rs).
 
 ## House rules
@@ -57,16 +60,17 @@ repository URL is defined by [`VADE_REPO_URL`](cli/src/repository.rs).
 
 Exactness means **identical token IDs every run on every Spark with the same
 setup**. The same request and settings must also give the same IDs across
-supported Spark counts. Similar text is not proof. Greedy decoding is the
-default when a request leaves sampling unspecified. Before you merge a change
-to engine arithmetic, scheduling, caching or transport, run it at least three
-times and compare the results across at least two Sparks. One exception: a
-gated change rebased onto a moved main can merge on its gate with an
-identical patch, disjoint files and a passing pre-merge screen on the Sparks
-(see `CONTRIBUTING.md`, Exactness and evidence). For the same request and
-settings, the answer must not depend on how it ran. Alone, batched, cached
-and chunked runs must all match. Drafting (multi-token prediction, MTP) ON
-and OFF must match too.
+supported Spark counts. Similar text is not proof. With FP4-Local, greedy
+decoding is the default when a request leaves sampling unspecified. With FP8,
+a request is greedy only when it sets `temperature` 0 and leaves the
+penalties neutral. Before you merge a change to engine arithmetic, scheduling,
+caching or transport, run it at least three times and compare the results
+across at least two Sparks. One exception: a gated change rebased onto a
+moved main can merge on its gate with an identical patch, disjoint files and
+a passing pre-merge screen on the Sparks (see `CONTRIBUTING.md`, Exactness
+and evidence). For the same request and settings, the answer must not depend
+on how it ran. Alone, batched, cached and chunked runs must all match.
+Drafting (multi-token prediction, MTP) ON and OFF must match too.
 
 Don't introduce floating-point atomics, reductions that depend on arrival
 order, or reduction splits that change with batch size, prompt length or
@@ -138,10 +142,10 @@ separately while you're online. Then run this block from **`engine/`**:
 
 ```sh
 cargo +1.99.0 kernels
-cargo +1.99.0 check --offline --all-targets --manifest-path ../cli/Cargo.toml
-cargo +1.99.0 check --offline --all-targets --manifest-path ../harness/Cargo.toml
-cargo +1.99.0 check --offline --all-targets --manifest-path tools/bench/Cargo.toml
-cargo +1.99.0 test --offline --manifest-path ../cli/Cargo.toml --test ratchet -- --nocapture
+cargo +1.99.0 check --offline --locked --all-targets --manifest-path ../cli/Cargo.toml
+cargo +1.99.0 check --offline --locked --all-targets --manifest-path ../harness/Cargo.toml
+cargo +1.99.0 check --offline --locked --all-targets --manifest-path tools/bench/Cargo.toml
+cargo +1.99.0 test --offline --locked --manifest-path ../cli/Cargo.toml --test ratchet -- --nocapture
 cargo +1.99.0 run --offline --locked --manifest-path ../tools/Cargo.toml -p vade-tools -- check-doc-links
 ```
 
@@ -167,8 +171,8 @@ export LD_LIBRARY_PATH="$PWD/target/ci-no-gpu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PAT
 On macOS, or on a Linux host prepared that way, from `engine/`:
 
 ```sh
-cargo +1.99.0 check --offline --all-targets --workspace --exclude spark-rust-kernels
-cargo +1.99.0 test --offline --all-targets --workspace --exclude spark-rust-kernels -- --nocapture
+cargo +1.99.0 check --offline --locked --all-targets --workspace --exclude spark-rust-kernels
+cargo +1.99.0 test --offline --locked --all-targets --workspace --exclude spark-rust-kernels -- --nocapture
 ```
 
 Always pass `--workspace --exclude spark-rust-kernels` for engine host checks
@@ -178,21 +182,21 @@ doesn't count as a device pass. For Linux-only engine code on a Mac with the
 aarch64-unknown-linux-gnu target installed, also run this from `engine/`:
 
 ```sh
-cargo +1.99.0 check --offline --all-targets --workspace --exclude spark-rust-kernels --target aarch64-unknown-linux-gnu
+cargo +1.99.0 check --offline --locked --all-targets --workspace --exclude spark-rust-kernels --target aarch64-unknown-linux-gnu
 ```
 
 For the rest of the CI tests, run the first command below from `cli/`. Run the
 second from `harness/`, then again from `engine/tools/bench/`:
 
 ```sh
-cargo +1.99.0 test --offline --all-targets -- --nocapture
-cargo +1.99.0 test --offline --all-targets
+cargo +1.99.0 test --offline --locked --all-targets -- --nocapture
+cargo +1.99.0 test --offline --locked --all-targets
 ```
 
 CI also checks the Linux target from both `cli/` and `harness/`:
 
 ```sh
-cargo +1.99.0 check --offline --all-targets --target aarch64-unknown-linux-gnu
+cargo +1.99.0 check --offline --locked --all-targets --target aarch64-unknown-linux-gnu
 ```
 
 The workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) is the full

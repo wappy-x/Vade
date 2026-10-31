@@ -2,7 +2,7 @@
 # Purpose: reproduce a published vade bench number (one Spark, drafting ON: C1 45.466 and C8 185.144 tok/s).
 # Run:     sh examples/bench.sh              (measures the running engine; about 2 minutes)
 #          sh examples/bench.sh --self-test  (no engine or GPU: checks the client against a built-in mock)
-# Needs:   vade on PATH (cargo +1.99.0 build --release --offline --manifest-path cli/Cargo.toml),
+# Needs:   vade on PATH (cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml),
 #          and for a real run an engine started with vade launch or vade up at the default settings.
 # Expected output: see "Reproduce a benchmark number" in examples/README.md.
 # The reference is the zero-flag run in the receipt of the one-Spark v0.1.0 drafting-ON card:

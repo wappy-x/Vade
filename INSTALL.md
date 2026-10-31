@@ -1327,7 +1327,7 @@ To put Vade's gateway between your own client and the engine, build the
 harness binaries from the checkout and run:
 
 ```sh
-cargo +1.99.0 build --release --offline --manifest-path harness/Cargo.toml --bins
+cargo +1.99.0 build --release --offline --locked --manifest-path harness/Cargo.toml --bins
 harness/target/release/vade-gateway --upstream http://127.0.0.1:18080/v1 --bind 127.0.0.1:8787
 ```
 

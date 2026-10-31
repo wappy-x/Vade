@@ -32,8 +32,8 @@ cargo +1.99.0 kernels
 Host validation, from `engine/`:
 
 ```sh
-cargo +1.99.0 check --offline --all-targets --workspace --exclude spark-rust-kernels
-cargo +1.99.0 test --offline --all-targets --workspace --exclude spark-rust-kernels -- --nocapture
+cargo +1.99.0 check --offline --locked --all-targets --workspace --exclude spark-rust-kernels
+cargo +1.99.0 test --offline --locked --all-targets --workspace --exclude spark-rust-kernels -- --nocapture
 ```
 
 The workspace has only eight default members; a plain Cargo test omits five
@@ -44,8 +44,8 @@ members. Always use the workspace selection above. CI sets `RUSTFLAGS` to
 Benchmark validation, from `engine/tools/bench/`:
 
 ```sh
-cargo +1.99.0 check --offline --all-targets
-cargo +1.99.0 test --offline --all-targets
+cargo +1.99.0 check --offline --locked --all-targets
+cargo +1.99.0 test --offline --locked --all-targets
 ```
 
 TP kernels, from `engine/` (compilation needs no GPU):

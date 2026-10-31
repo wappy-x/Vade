@@ -4,7 +4,7 @@
 model's scores for each next token while it is fed the known tokens) and
 retrieval answers, or compares saved captures. `vade test gdn-state` compares
 complete recurrent-state dumps. Neither command needs lifecycle configuration.
-Build the CLI with `cargo build --offline --manifest-path cli/Cargo.toml`, and
+Build the CLI with `cargo build --offline --locked --manifest-path cli/Cargo.toml`, and
 keep generated prompts, dumps and reports in private runtime storage.
 
 These Rust commands are ports of older Python tools, called the reference

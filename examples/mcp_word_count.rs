@@ -1,7 +1,7 @@
 //! A small MCP tool server for a first test of `vade mcp`: one tool,
 //! `word_count`, over stdio. It needs no token, no network and no runtime
 //! besides the Rust that `scripts/install.sh` installs. Build and add it:
-//!   cargo build --release --offline --manifest-path tools/Cargo.toml --example mcp-word-count
+//!   cargo build --release --offline --locked --manifest-path tools/Cargo.toml --example mcp-word-count
 //!   vade mcp add words -- "$PWD/tools/target/release/examples/mcp-word-count"
 //! See docs/mcp.md.
 #![forbid(unsafe_code)]

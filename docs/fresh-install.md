@@ -24,7 +24,7 @@ guide, with the measured speeds, is
 
 | # | Step | Where |
 | --- | --- | --- |
-| 0 | [Check what you have](#0-check-what-you-have) | — |
+| 0 | [Check what you have](#0-check-what-you-have) | anywhere |
 | 1 | [Renting? Ask for these](#1-renting-ask-for-these) | provider |
 | 2 | [Network and OS](#2-network-and-os) | each Spark |
 | 3 | [SSH from your Mac](#3-ssh-from-your-mac) | Mac |
@@ -254,9 +254,15 @@ supporting files. Make sure your free disk space covers that snapshot plus the
 build output. How long the download takes depends on your connection and on
 Hugging Face.
 
-> `vade` does **not** download Flash-Next. You fetch it once with the
-> repository's helper, `ops/fetch-model.sh`. It uses curl for the download.
-> Rust checks every file against the pinned publisher metadata.
+> This page fetches the checkpoint with the repository's helper,
+> `ops/fetch-model.sh`. It uses curl for the download. Rust checks every file
+> against the pinned publisher metadata. `vade pull
+> Qwen/Qwen3.8-Flash-Next-FP8@236dfdf285828023ca3bcd3f37366c58a3469b13` fetches
+> the files Vade serves from into the same folder. It writes a
+> `<folder>.sha256` list in the same form, which the `sha256sum -c` step on
+> spark-2 below reads; no FP8 start checks that list. `vade pull` skips files
+> such as `.gitattributes`, so the two folders are not identical; see
+> [the differences](pull-models.md#difference-from-the-fetch-helper).
 
 **Download and verify on spark-1**, from the repository root you cloned in step 2.
 Keep the folder name exactly `Qwen3.8-Flash-Next-FP8`: its lowercase name becomes
@@ -319,7 +325,7 @@ it and build the CLI:
 ```sh
 git clone https://github.com/wappy-x/vade ~/vade
 cd ~/vade
-cargo build --release --offline --manifest-path cli/Cargo.toml
+cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml
 export PATH="$PWD/cli/target/release:$PATH"
 mkdir -m 700 -p .local
 [ -e .local/vade.conf ] || cp cli/examples/vade.conf .local/vade.conf

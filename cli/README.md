@@ -438,7 +438,7 @@ Testing so far covers this much:
 Build the command on the controller (Linux or macOS), from the checkout root:
 
 ```sh
-cargo +1.99.0 build --release --offline --manifest-path cli/Cargo.toml
+cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml
 ./cli/target/release/vade --help
 ```
 
@@ -1112,14 +1112,14 @@ records, command arguments and network requests keep their original bytes.
 
 To build and check a change, see [CONTRIBUTING.md](../CONTRIBUTING.md) and the
 house rules in [AGENTS.md](../AGENTS.md). From `engine/`, this block is
-identical to AGENTS.md:
+identical to the host block in AGENTS.md:
 
 ```sh
 cargo +1.99.0 kernels
-cargo +1.99.0 check --offline --all-targets --manifest-path ../cli/Cargo.toml
-cargo +1.99.0 check --offline --all-targets --manifest-path ../harness/Cargo.toml
-cargo +1.99.0 check --offline --all-targets --manifest-path tools/bench/Cargo.toml
-cargo +1.99.0 test --offline --manifest-path ../cli/Cargo.toml --test ratchet -- --nocapture
+cargo +1.99.0 check --offline --locked --all-targets --manifest-path ../cli/Cargo.toml
+cargo +1.99.0 check --offline --locked --all-targets --manifest-path ../harness/Cargo.toml
+cargo +1.99.0 check --offline --locked --all-targets --manifest-path tools/bench/Cargo.toml
+cargo +1.99.0 test --offline --locked --manifest-path ../cli/Cargo.toml --test ratchet -- --nocapture
 cargo +1.99.0 run --offline --locked --manifest-path ../tools/Cargo.toml -p vade-tools -- check-doc-links
 ```
 

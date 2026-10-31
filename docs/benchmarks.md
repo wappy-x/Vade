@@ -62,7 +62,10 @@ build.
 This section gives the recipe behind the [current table](#current-main) and
 the [2026-10-30 section](#current-2026-10-30-morning-main-380d8e5-home-dgx-sparks).
 Every number comes from a card file or from a lab report line. Those records
-are not in the repository yet.
+are not in the repository yet. A revision such as main `380d8e5` and a pull
+request such as #142 belong to the private development history, so they are
+not in this repository. The v0.1.0 commits `5a22651` and `99e8f62` are the
+exception ([glossary](GLOSSARY.md#ho), "Main `abc1234`").
 
 ### Models and builds
 
@@ -2131,7 +2134,7 @@ model that `/health` reports and a bundled prompt. The explicit recipe below
 picks retained prompts and plain drafting instead:
 
 ```sh
-cargo build --release --offline --manifest-path cli/Cargo.toml
+cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml
 cli/target/release/vade bench --url "$VADE_API_URL" \
   --model qwen3.8-flash-next-fp4-local --draft plain --prompts /path/to/retained-prompts.txt --concurrency 1,8,16 \
   --max-tokens 256 --repeats 3 --output /path/to/private-receipt.json

@@ -402,7 +402,7 @@ unset RUSTUP_TOOLCHAIN CARGO_TARGET_DIR RUSTFLAGS CARGO_ENCODED_RUSTFLAGS \
   CARGO_BUILD_TARGET RUSTC RUSTDOC RUSTC_WRAPPER
 cargo +1.99.0 --version
 cargo kernels
-cargo +1.99.0 build --release --offline -p spark-serve
+cargo +1.99.0 build --release --offline --locked -p spark-serve
 ```
 
 Expected: a full source SHA, Cargo 1.99.0, and Cargo builds that exit
@@ -638,7 +638,7 @@ Spark with `vade launch`, it refuses to start and tells you to unset
 
 ```sh
 cd "$VADE_ROOT"
-cargo +1.99.0 build --release --offline --manifest-path cli/Cargo.toml
+cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml
 unset VADE_CONFIG
 ./cli/target/release/vade run qwen3-8b --engine-source "$VADE_ROOT/engine" \
   --harness-source "$VADE_ROOT/harness" --weights-source "$VADE_ENGINE/models/Qwen/Qwen3-8B"

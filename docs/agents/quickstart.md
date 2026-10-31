@@ -183,7 +183,7 @@ can check the connection first.
 
 ```sh
 cd "$HOME/vade"
-cargo +1.99.0 build --release --offline --manifest-path harness/Cargo.toml --bins
+cargo +1.99.0 build --release --offline --locked --manifest-path harness/Cargo.toml --bins
 ```
 
 The installer stages its own copy of `vade-harness` for `vade chat`. It does
