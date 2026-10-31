@@ -19,6 +19,8 @@ pub(crate) struct Prefill {
     pub first_logits: Option<Duration>,
     /// Wall time from cache lookup to the restored session (set only on a cache hit).
     pub cache_restore: Option<Duration>,
+    /// The warm-cache estimate made at admission; none on a queued cancellation.
+    pub estimate: Option<crate::warm_estimate::Estimate>,
     chunks: usize,
     admitted: Instant,
     started: Option<Instant>,
@@ -26,7 +28,17 @@ pub(crate) struct Prefill {
 impl Prefill {
     pub fn new(prompt_tokens: usize, cache_restored_tokens: usize, admitted: Instant) -> Self {
         Self { prompt_tokens, cache_restored_tokens, elapsed: Duration::ZERO,
-            rows_per_chunk: Vec::new(), first_logits: None, cache_restore: None, chunks: 0, admitted, started: None }
+            rows_per_chunk: Vec::new(), first_logits: None, cache_restore: None, estimate: None, chunks: 0, admitted, started: None }
+    }
+    /// An admitted request: the estimate uses the time spent since `admitted`.
+    pub fn estimated(prompt_tokens: usize, cache_restored_tokens: usize, admitted: Instant) -> Self {
+        let estimate = crate::warm_estimate::current(prompt_tokens, cache_restored_tokens, admitted.elapsed());
+        Self { estimate: Some(estimate), ..Self::new(prompt_tokens, cache_restored_tokens, admitted) }
+    }
+    /// Stream headers: the opt-in reuse count, then the estimate.
+    pub fn headers(&self, report_reuse: bool) -> String {
+        let reuse = if report_reuse { format!("X-Prefix-Reused-Tokens: {}\r\n", self.cache_restored_tokens) } else { String::new() };
+        reuse + &self.estimate.map(|e| e.headers()).unwrap_or_default()
     }
     pub fn begin(&mut self, started: Instant) { self.started.get_or_insert(started); }
     pub fn abandon(&mut self) { self.started = None; }
@@ -36,7 +48,11 @@ impl Prefill {
             self.chunks += 1;
             if self.rows_per_chunk.len() < 64 { self.rows_per_chunk.push(rows); }
         }
-        if last { self.first_logits.get_or_insert(finished.duration_since(self.admitted)); }
+        if last && self.first_logits.is_none() {
+            let first = finished.duration_since(self.admitted);
+            self.first_logits = Some(first);
+            if let Some(estimate) = &self.estimate { crate::warm_estimate::learn(estimate, first); }
+        }
     }
     /// Request cohort width is log-only: keep every response field unchanged.
     pub fn commit_cohort(&mut self, id: u64, rows: usize, width: usize, finished: Instant, last: bool) {
@@ -49,7 +65,8 @@ impl Prefill {
         let first = ms(self.first_logits);
         // The one reuse field for clients: restored prompt tokens / prompt tokens, in percent.
         let reuse = self.cache_restored_tokens as f64 * 100.0 / self.prompt_tokens.max(1) as f64;
-        format!("\"prefill_ms\":{:.3},\"prefill_prompt_tokens\":{},\"prefill_chunks\":{},\"prefill_rows_per_chunk\":{:?},\"prefill_rows_per_chunk_omitted\":{},\"prefill_cache_restored_tokens\":{},\"prefill_cache_reuse_pct\":{reuse:.1},\"prefill_cache_restore_ms\":{},\"admission_to_first_logits_ms\":{first}",
+        let estimate = self.estimate.map(|e| format!(",{}", e.json())).unwrap_or_default();
+        format!("\"prefill_ms\":{:.3},\"prefill_prompt_tokens\":{},\"prefill_chunks\":{},\"prefill_rows_per_chunk\":{:?},\"prefill_rows_per_chunk_omitted\":{},\"prefill_cache_restored_tokens\":{},\"prefill_cache_reuse_pct\":{reuse:.1},\"prefill_cache_restore_ms\":{},\"admission_to_first_logits_ms\":{first}{estimate}",
             self.elapsed.as_secs_f64() * 1000.0, self.prompt_tokens, self.chunks,
             self.rows_per_chunk, self.chunks - self.rows_per_chunk.len(), self.cache_restored_tokens,
             ms(self.cache_restore))

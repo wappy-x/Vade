@@ -805,7 +805,7 @@ fn sampling_echo_on_scheduler_responses() {
         assert!(number("prefill_ms") > 0.0 && number("admission_to_first_logits_ms") >= number("prefill_ms"), "{reply}");
         let count = if chat { 1 } else { 3 };
         let effort = if chat { "\"reasoning_effort\":\"none\"," } else { "" };
-        let mut expected = engine_model::json::parse(format!(r#"{{{effort}"sampling":{{{sampling}}},"draft":"plain","mtp_depth":0,"thinking":false,"draft_used":false,"model_draft_used":false,"prefill_ms":{:.3},"prefill_prompt_tokens":{count},"prefill_chunks":{count},"prefill_rows_per_chunk":{rows},"prefill_rows_per_chunk_omitted":0,"prefill_cache_restored_tokens":0,"prefill_cache_reuse_pct":0.0,"prefill_cache_restore_ms":null,"admission_to_first_logits_ms":{:.3},{metadata_fields}}}"#, number("prefill_ms"), number("admission_to_first_logits_ms")).as_bytes(), Default::default()).unwrap();
+        let mut expected = engine_model::json::parse(format!(r#"{{{effort}"sampling":{{{sampling}}},"draft":"plain","mtp_depth":0,"thinking":false,"draft_used":false,"model_draft_used":false,"prefill_ms":{:.3},"prefill_prompt_tokens":{count},"prefill_chunks":{count},"prefill_rows_per_chunk":{rows},"prefill_rows_per_chunk_omitted":0,"prefill_cache_restored_tokens":0,"prefill_cache_reuse_pct":0.0,"prefill_cache_restore_ms":null,"admission_to_first_logits_ms":{:.3},"prefill_estimated_ms":{:.1},"prefill_cold_estimated_ms":{:.1},{metadata_fields}}}"#, number("prefill_ms"), number("admission_to_first_logits_ms"), number("prefill_estimated_ms"), number("prefill_cold_estimated_ms")).as_bytes(), Default::default()).unwrap();
         let engine_model::json::Value::Object(fields) = &mut expected else { unreachable!() };
         let engine_model::json::Value::Object(numerics) = fields.get_mut("numerics").unwrap() else { unreachable!() };
         numerics.insert("draft".into(), engine_model::json::Value::String("plain".into()));
@@ -899,6 +899,22 @@ fn automatic_prefix_cache_is_isolated_per_api_key() {
         let pct = if reused == "0" { "0.0" } else { "100.0" };
         assert!(reply.contains(&format!("\"prefill_cache_reuse_pct\":{pct},\"prefill_cache_restore_ms\":")), "{reply}");
         assert_eq!(reply.contains("\"prefill_cache_restore_ms\":null"), reused == "0", "{reply}");
+    }
+}
+
+#[test]
+fn stream_head_carries_the_warm_cache_estimate() {
+    let server = Server::with_prefix_cache(1, true);
+    let body = r#"{"stream":true,"temperature":0,"prompt_token_ids":[1,2,3],"max_tokens":1,"prompt_cache_key":"estimate"}"#;
+    for cached in ["0", "3"] {
+        let mut reply = String::new();
+        server.send_body(body).read_to_string(&mut reply).unwrap();
+        let (head, events) = reply.split_once("\r\n\r\n").unwrap();
+        assert_eq!((header(head, "X-Vade-Prompt-Tokens:"), header(head, "X-Vade-Cached-Tokens:")), ("3", cached), "{head}");
+        let warm: f64 = header(head, "X-Vade-Estimated-First-Token-Ms:").parse().unwrap();
+        let cold: f64 = header(head, "X-Vade-Estimated-Cold-Ms:").parse().unwrap();
+        assert!(warm >= 0.0 && cold > 0.0 && (cached == "3" || warm >= cold - 1.0), "{head}");
+        assert!(!head.contains("data:") && events.contains(",\"prefill_estimated_ms\":") && events.contains(",\"prefill_cold_estimated_ms\":"), "{reply}");
     }
 }
 

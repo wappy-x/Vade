@@ -608,7 +608,7 @@ pub(crate) fn parse_head(head: &[u8], access: &AccessPolicy, admin: bool)
     }
     let mut cors = String::new();
     if let Some(origin) = headers.get("origin") {
-        cors = format!("Access-Control-Allow-Origin: {origin}\r\nVary: Origin\r\nAccess-Control-Allow-Credentials: true\r\nAccess-Control-Expose-Headers: X-Session-Capability, X-Cancel-Capability, X-Prefix-Reused-Tokens, X-Sampling-Seed\r\n");
+        cors = format!("Access-Control-Allow-Origin: {origin}\r\nVary: Origin\r\nAccess-Control-Allow-Credentials: true\r\nAccess-Control-Expose-Headers: X-Session-Capability, X-Cancel-Capability, X-Prefix-Reused-Tokens, X-Sampling-Seed, X-Vade-Prompt-Tokens, X-Vade-Cached-Tokens, X-Vade-Estimated-First-Token-Ms, X-Vade-Estimated-Cold-Ms\r\n");
     }
     let preflight = parts[0] == "OPTIONS";
     if preflight {

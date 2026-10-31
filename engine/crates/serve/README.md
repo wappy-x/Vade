@@ -584,6 +584,30 @@ backend replays to stay exact.
 The older opt-in `X-Prefix-Reused-Tokens` header describes the matched snapshot
 at admission and can be larger than final usage when a backend replays a tail.
 
+Every admitted streamed reply also sends a warm-cache estimate in its
+response head, before prefill starts. A streamed request that is cancelled
+or passes its deadline while it waits in the queue gets no estimate.
+
+- `X-Vade-Prompt-Tokens` and `X-Vade-Cached-Tokens`: the prompt length and
+  the cached prefix matched at admission. The cached count is the same
+  number as `X-Prefix-Reused-Tokens`, so it can also be larger than final
+  usage when a backend replays a tail.
+- `X-Vade-Estimated-First-Token-Ms`: about how many ms the first token takes
+  from admission, with that prefix.
+- `X-Vade-Estimated-Cold-Ms`: the same for the prompt with nothing cached.
+
+The estimate is a hint. It is
+`setup + fixed + max(0, U - 256) * row * (1 + (P + C) / 600000)`, with P
+prompt tokens, C cached tokens, U = P - C, and the measured setup time since
+admission. When U is 0 the prefill part is 0. The `fixed` and `row` rates
+start from the one-Spark card in [docs/benchmarks.md](../../../docs/benchmarks.md)
+(cold 8K in 3.761 s; a short prefill in about 350 ms). Each finished prompt
+updates them: short tails (256 rows or fewer) teach `fixed` and prompts of
+2,048 rows or more teach `row`. The rates are a mean of the start value and
+the first three prompts, then a moving average with weight 0.25. One server
+process serves one model, so it keeps one pair of rates. The estimate makes no
+scheduling, cache or sampling decision, so it cannot change token IDs.
+
 Every admitted request also echoes always-on engine prefill timing and counters
 in the top-level `vade` sampling object.
 
@@ -597,6 +621,9 @@ in the top-level `vade` sampling object.
 - `prefill_cache_restore_ms`: wall ms from cache lookup to the restored
   session; null without a hit.
 - `admission_to_first_logits_ms`.
+- `prefill_estimated_ms` and `prefill_cold_estimated_ms`: the warm-cache
+  estimate from the response head, so a client can compare it with
+  `admission_to_first_logits_ms`. Admitted requests only.
 
 Terminal server logs carry the same object. Chunk timing spans successful
 commit, including layer yields; admission timing also includes

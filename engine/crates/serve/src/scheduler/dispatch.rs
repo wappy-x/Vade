@@ -714,9 +714,8 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 .unwrap_or_default();
             let seed = ready.request.sampling.seed;
             let cancel = ready.cancel.expose();
-            let reuse_header = if config.sharing.report_prefix_reuse {
-                format!("X-Prefix-Reused-Tokens: {reused}\r\n")
-            } else { String::new() };
+            let mut prefill = crate::usage::Prefill::estimated(ready.prompt.len(), reused, cache_started);
+            let reuse_header = prefill.headers(config.sharing.report_prefix_reuse);
             if ready.request.stream && ready.wire.push(&format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\nX-Accel-Buffering: no\r\nX-Sampling-Seed: {seed}\r\nX-Cancel-Capability: {cancel}\r\n{reuse_header}{capability}{}\r\n", ready.wire.cors), limits, false).is_err() {
                 continue;
             }
@@ -768,7 +767,6 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
             generation.seed_draft(draft_bank.propose(ready.handle_scope.as_deref(), ready.request.session, config.draft_global_bank, &ready.prompt));
             let decoder = tokenizer.map(|t| if ready.parser.is_some() { t.chat_decoder() } else { t.decoder() });
             let mut echo = protocol::SamplingEcho::new(&ready.request, mode, if mode == protocol::DraftMode::Plain && engine.greedy_draft_only() {0} else {generation.mtp_depth.unwrap_or(config.mtp_depth)}).with_metadata(limits);
-            let mut prefill = crate::usage::Prefill::new(ready.prompt.len(), reused, cache_started);
             if reused > 0 { prefill.cache_restore = Some(cache_started.elapsed()); }
             if reused == ready.prompt.len() {
                 prefill.commit(0, Instant::now(), true);

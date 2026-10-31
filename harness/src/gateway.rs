@@ -905,6 +905,16 @@ mod tests {
     use std::sync::mpsc;
 
     #[test]
+    fn stream_head_forwards_the_warm_cache_estimate() {
+        let fields = ["x-vade-prompt-tokens: 8000", "x-vade-cached-tokens: 7812",
+            "x-vade-estimated-first-token-ms: 812", "x-vade-estimated-cold-ms: 3770"];
+        let head = transport::Head { first: "HTTP/1.1 200 OK".into(), fields: fields.iter()
+            .map(|f| { let (k, v) = f.split_once(": ").unwrap(); (k.into(), v.into()) }).collect() };
+        let headers = response_head(200, &head, "POST", "/v1/chat/completions", None, "");
+        assert!(fields.iter().all(|f| headers.contains(&format!("{f}\r\n"))), "{headers}");
+    }
+
+    #[test]
     fn refuses_public_bind_and_https_upstream() {
         assert!(bind_loopback("0.0.0.0:0").is_err());
         assert!(bind_loopback("[::]:0").is_err());

@@ -34,6 +34,8 @@ pub(crate) enum WorkerEvent {
     AutoContinued(usize),
     Notice,
     HookNotice(String),
+    /// The engine's warm-cache estimate line, before the first token.
+    Estimate(String),
     ThreadReady(String),
     ToolApprovalClosed,
     ToolPreview {
@@ -391,6 +393,14 @@ impl App {
                     }
                 }
                 WorkerEvent::HookNotice(text) => { self.run_notice(&text)?; }
+                WorkerEvent::Estimate(text) => {
+                    // Only before the answer; redirected output keeps the answer alone.
+                    if !self.quiet && matches!(self.config.mode, Mode::Agent | Mode::Direct)
+                        && self.pending.as_ref().is_some_and(|p| !p.received && !p.canceled)
+                    {
+                        self.notice(&text)?;
+                    }
+                }
                 WorkerEvent::Notice => {
                     if self.quiet {
                         vade_harness::diagnostics::stderr_line(format_args!(

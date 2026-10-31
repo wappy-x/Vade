@@ -7,6 +7,7 @@ pub mod contract;
 pub mod metadata;
 #[cfg(test)] #[path = "../build.rs"] #[allow(dead_code)] mod build_metadata;
 pub mod usage;
+pub mod warm_estimate;
 pub mod cache;
 pub mod chat_output;
 pub mod generation;

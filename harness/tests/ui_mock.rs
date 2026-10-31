@@ -238,6 +238,25 @@ fn plain_tty_streamed_reply_is_uninterrupted_and_state_resets_for_the_next_run()
 }
 
 #[test]
+fn chat_prints_the_warm_cache_estimate_before_the_answer() {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let mut reader = BufReader::new(socket);
+        request(&mut reader);
+        reader.get_mut().write_all("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nX-Vade-Prompt-Tokens: 8000\r\nX-Vade-Cached-Tokens: 7812\r\nX-Vade-Estimated-First-Token-Ms: 812\r\nX-Vade-Estimated-Cold-Ms: 3770\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Warm reply\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".as_bytes()).unwrap();
+    });
+    let mut ui = Ui::start_with_args("agent", &endpoint, ".", &["--plain"]);
+    ui.send(b"hello\r");
+    let transcript = ui.until("Warm reply", Duration::from_secs(3));
+    let line = "cached 7,812 of 8,000 tokens; about 0.8 s to first token (3.8 s without the cache)";
+    assert!(transcript.find(line).is_some_and(|at| at < transcript.find("Warm reply").unwrap()), "{transcript:?}");
+    server.join().unwrap();
+}
+
+#[test]
 fn raw_ui_cancels_while_mock_has_sent_no_response_bytes() {
     for mode in ["direct", "agent"] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

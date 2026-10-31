@@ -486,6 +486,14 @@ impl App {
                     transport::NativePhase::Thinking => progress_tx.state(RunState::Thinking),
                     transport::NativePhase::Idle => (), // terminal/tool state owns the next update
                 })));
+                // One estimate line per turn: each tool round sends its own request.
+                let estimate_tx = Arc::clone(&tx);
+                let estimated = AtomicBool::new(false);
+                model.set_estimate_observer(Some(Arc::new(move |estimate: transport::PrefillEstimate| {
+                    if !estimated.swap(true, Ordering::Relaxed) {
+                        let _ = estimate_tx.fact(super::events::WorkerEvent::Estimate(estimate.line()));
+                    }
+                })));
                 model.begin_run();
                 let mut conversation = native.expect("native worker owns prepared conversation");
                 let project = project::Snapshot::from_conversation(&conversation)
@@ -600,6 +608,7 @@ impl App {
                 hooks.stop(&mut |text| super::hooks::notice(&tx, text));
                 model.set_progress_observer(None);
                 model.set_thinking_observer(None);
+                model.set_estimate_observer(None);
                 tx.finish(WorkerResult {
                     http: None,
                     result: Ok(TurnResult::Native(NativeResult {

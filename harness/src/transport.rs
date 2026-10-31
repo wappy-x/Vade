@@ -23,6 +23,8 @@ mod native;
 mod chat;
 mod sse;
 pub use native::{NativeModel, NativePhase, ThinkingUpdate};
+mod estimate;
+pub use estimate::PrefillEstimate;
 mod cancel;
 mod resolve;
 mod request;

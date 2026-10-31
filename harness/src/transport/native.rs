@@ -114,6 +114,7 @@ pub struct NativeModel {
     kv_branch: String,
     progress: Option<ProgressObserver>,
     thinking: Option<ThinkingObserver>,
+    estimate: Option<super::estimate::EstimateObserver>,
     suffix_replaced: bool,
     prewarm_compaction: bool,
     warm_pending: bool,
@@ -150,6 +151,11 @@ impl NativeModel {
     }
     pub fn set_thinking_observer(&mut self, observer: Option<ThinkingObserver>) {
         self.thinking = observer;
+    }
+    /// The engine's warm-cache estimate, once per streamed reply, before its
+    /// first token. Same rules as the progress observer.
+    pub fn set_estimate_observer(&mut self, observer: Option<super::estimate::EstimateObserver>) {
+        self.estimate = observer;
     }
 
     /// Doctor has already recognized this contract while discovering the model.
@@ -299,6 +305,7 @@ impl NativeModel {
             kv_branch: crate::journal::fresh_name(),
             progress: None,
             thinking: None,
+            estimate: None,
             suffix_replaced: false,
             prewarm_compaction: self.prewarm_compaction,
             warm_pending: false,
@@ -357,6 +364,7 @@ impl NativeModel {
             ),
             progress: None,
             thinking: None,
+            estimate: None,
             suffix_replaced: false,
             prewarm_compaction: false,
             warm_pending: false,
@@ -696,6 +704,7 @@ impl NativeModel {
         }
         let progress = self.progress.clone();
         let thinking_observer = self.thinking.clone();
+        let estimate_observer = self.estimate.clone();
         let mut thinking = ThinkingProjection::default();
         let mut phase = NativePhase::Queued;
         let mut prefix = crate::terminal::AnswerPrefix::default();
@@ -826,6 +835,9 @@ impl NativeModel {
         self.contract.context.requests.status(response.status);
         if !(200..300).contains(&response.status) {
             return Err(response.failure());
+        }
+        if let (Some(observer), Some(estimate)) = (&estimate_observer, super::estimate::PrefillEstimate::from_head(&response.head)) {
+            observer(estimate);
         }
         let content_type = response
             .head
