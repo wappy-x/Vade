@@ -388,7 +388,10 @@ fn small_context_launch_and_saved_chat_use_direct_mode() {
         } else { vec!["launch".into()] };
         launcher.execute(crate::cli::parse(&args).unwrap().command, false).unwrap();
         assert_eq!(Config::load(&fixture.root).unwrap().unwrap().context, 4096);
-        launcher.execute(Command::Chat(Default::default()), false).unwrap();
+        let capture = crate::output::testing::Capture::default();
+        output::with_writer(capture.clone(), || launcher.execute(Command::Chat(Default::default()), false)).unwrap();
+        let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+        assert!(printed.starts_with("Context 4096 is below the agent minimum of 8192, so chat opens without workspace tools and saves no session. For the agent, run vade down, then vade launch --context 8192 or larger.\n"), "{printed}");
         launcher.execute(Command::Launch(Default::default()), false).unwrap();
         assert_eq!(launcher.runner.starts, 1);
         assert_eq!(launcher.runner.chats, 3);

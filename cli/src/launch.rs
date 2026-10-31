@@ -37,6 +37,10 @@ pub(crate) use chat::setup as chat_setup;
 pub(crate) use chat::{session_arguments as chat_session_arguments, sessions as sessions_exec, SESSIONS_FAILED};
 
 const INSTALL_SPACE: u64 = 8 * 1024 * 1024 * 1024;
+/// vade chat while another terminal's vade launch or vade up still loads the model.
+const STILL_LOADING: &str = "The engine is still loading the model, so chat cannot open yet. Wait for vade launch to say it is ready, then run vade chat again. Run vade logs to follow the load.";
+/// A start whose command ended early (it is gone) and left its record behind.
+const UNFINISHED: &str = "The last engine start did not finish, and the engine is not ready. Run vade down to clear it, then vade launch.";
 
 /// The local Vade home: `VADE_HOME`, else `~/.vade`. It must be absolute and
 /// private.
@@ -423,6 +427,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                     .ok_or("Vade is not set up on this Spark yet. Run vade launch to install it, start it and open chat.")?;
                 let artifacts = install::load(&self.root)?.ok_or("The engine and chat are not installed yet. Run vade launch to install them and open chat.")?;
                 let record = self.record()?.ok_or("The engine is not running. Run vade launch to start it and open chat.")?;
+                if self.loading(&record) { return Err(STILL_LOADING.into()); }
                 self.ready(&config, &record)?;
                 self.chat(&config, &artifacts, &record, &options)
             }
@@ -485,6 +490,8 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                 match (Config::load(&self.root)?, self.record()?) {
                     (Some(_), Some(record)) if record["phase"] == "running" && self.engine_gone(&record) =>
                         output::text(format_args!("{}", status::stale())),
+                    (Some(_), Some(record)) if self.loading(&record) =>
+                        output::text(format_args!("{}", status::starting())),
                     (Some(config), Some(record)) => {
                         let health = self.ready(&config, &record)?;
                         let mut read = crate::app::events::read(config.endpoint(), "local events");
@@ -852,10 +859,12 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         }
     }
 
-    /// The ready engine's `/health` body.
+    /// The ready engine's `/health` body. A record that is not running is a
+    /// start that did not finish (a stop never writes a phase); callers
+    /// without the lock ask [`Self::loading`] first.
     fn ready(&mut self, config: &Config, record: &Fields) -> Result<String, String> {
         if required(record, "phase")? != "running" {
-            return Err("Startup is incomplete; run vade down, then vade launch.".into());
+            return Err(UNFINISHED.into());
         }
         if let Err(error) = self.worker(
             record,
@@ -872,6 +881,16 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                     .into(),
             ),
         }
+    }
+
+    /// Whether a vade launch or vade up still loads this engine: the record
+    /// is `starting` and a command holds the lock. Only callers that do not
+    /// hold the lock may ask. Two short windows: a vade down or vade install
+    /// working on a `starting` record also holds the lock, and the probe takes
+    /// a free lock for an instant, so a lifecycle command started at that
+    /// same instant is refused as busy.
+    fn loading(&self, record: &Fields) -> bool {
+        record.get("phase").is_some_and(|phase| phase == "starting") && crate::state::Lock::held(&self.root)
     }
 
     /// Whether the worker confirms that the recorded engine process is gone,
@@ -1056,9 +1075,9 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             return Err(format!("Context {context} is below the agent minimum of {}, so vade chat opens direct text chat, which saves no transcript. --resume and --name need the agent.", chat::AGENT_MIN_CONTEXT));
         }
         if context < chat::AGENT_MIN_CONTEXT {
-            output::line(format_args!("Context {context} is below the agent minimum of {}; opening direct text chat.", chat::AGENT_MIN_CONTEXT))?;
+            output::line(format_args!("{}", chat::low_context_notice(context)))?;
         } else if cfg!(target_os = "linux") {
-            output::line(format_args!("Automatic workspace checks are disabled on Linux; checks require the macOS sandbox."))?;
+            output::line(format_args!("{}", chat::LINUX_NOTICE))?;
         }
         let start = phase("Chat", "open local chat; /exit leaves the engine running")?;
         let workspace = std::env::current_dir().map_err(|_| "Open an existing workspace and run vade chat.")?;

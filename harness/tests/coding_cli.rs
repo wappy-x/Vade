@@ -640,7 +640,7 @@ fn interactive_tty_approval_previews_exact_diff_before_writing() {
             for key in [b"\x1b".as_slice(), b"\x03".as_slice()] {
                 terminal.write_all(key).unwrap();
                 let waiting = until(&mut terminal, "Approval still pending;");
-                assert!(!waiting.contains("Native cancellation requested"));
+                assert!(!waiting.contains("Stopping the reply"));
                 assert!(!f.0.join(filename).exists());
                 assert!(child.0.try_wait().unwrap().is_none());
             }

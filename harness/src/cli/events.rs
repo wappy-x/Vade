@@ -473,7 +473,7 @@ impl App {
                             self.queue_paused = false;
                             self.last_state = Some(if pending.canceled { RunState::LocalCancelled } else { RunState::Completed });
                             if success {
-                                self.run_notice("Compacted context pre-warmed; discarded reply, no tools or user turn recorded. Cache retention remains Engine-owned.")?;
+                                self.run_notice("Compacted context pre-warmed: the engine has read the shorter chat, so the next reply can start sooner. Nothing was added to the chat.")?;
                                 if self.config.verbose {
                                     self.run_notice(&self.context.describe())?;
                                 }

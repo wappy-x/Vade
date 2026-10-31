@@ -7,6 +7,14 @@ use std::{ffi::OsString, path::{Path, PathBuf}};
 /// negotiates its budget from the server and supports smaller launches.
 pub(super) const AGENT_MIN_CONTEXT: u32 = 8192;
 
+/// The line before chat opens on Linux: what the agent can and cannot do.
+pub(super) const LINUX_NOTICE: &str = "On Linux, the agent reads, searches and edits files in this folder. It cannot run shell commands or checks; run builds and tests in your own terminal.";
+
+/// The line before direct text chat opens, with the way back to the agent.
+pub(super) fn low_context_notice(context: u32) -> String {
+    format!("Context {context} is below the agent minimum of {AGENT_MIN_CONTEXT}, so chat opens without workspace tools and saves no session. For the agent, run vade down, then vade launch --context {AGENT_MIN_CONTEXT} or larger.")
+}
+
 pub(super) fn arguments(endpoint: &str, model: &str, workspace: &Path, context: u32, state: Vec<String>) -> Vec<String> {
     let agent = context >= AGENT_MIN_CONTEXT;
     let mut args = vec![

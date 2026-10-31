@@ -374,6 +374,15 @@ impl App {
             if !finished && !pending.canceled && !time_limited {
                 if let Some(failure) = self.context.failure {
                     self.run_notice(failure)?;
+                } else if let StopReason::ModelError(kind) = native.report.reason {
+                    // The engine may be down, busy or at the wrong address: name
+                    // the check, as plain chat does. A refused request keeps its
+                    // HTTP status; a 2xx reply that broke off keeps the I/O kind.
+                    let error = match self.context.last_http_status {
+                        Some(status) if !(200..300).contains(&status) => vade_harness::transport::status_error(status),
+                        _ => io::Error::from(kind),
+                    };
+                    self.run_notice(vade_harness::diagnostics::error_hint(&error).trim_start())?;
                 }
             }
         }
@@ -382,7 +391,7 @@ impl App {
     }
     /// One plain line for a run that did not finish normally, e.g.
     /// `Canceled · 19m44s · 4 edits · check passing · say continue`.
-    fn run_end_line(
+    pub(super) fn run_end_line(
         &self,
         report: &agent::RunReport,
         display_limited: bool,
@@ -395,6 +404,8 @@ impl App {
             "Finished before the cancel took effect".to_owned()
         } else if display_limited {
             "Stopped: the reply is too large to show".to_owned()
+        } else if pending.canceled && self.steering.is_some() && !self.quit {
+            "Stopped for your new message".to_owned()
         } else if pending.canceled || report.reason == StopReason::Cancelled {
             "Canceled".to_owned()
         } else if time_limited {
@@ -453,6 +464,8 @@ impl App {
         parts.push(
             if finished {
                 "answer kept"
+            } else if pending.canceled && self.steering.is_some() && !self.quit {
+                "sending it now"
             } else if matches!(report.reason, StopReason::ModelError(_) | StopReason::InvalidConfiguration) {
                 "/retry or send a new message"
             } else {

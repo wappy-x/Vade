@@ -57,6 +57,40 @@ shows the whole screen.)
 through `VADE_CHAT_SETUP` (for example `2 Sparks, drafting on`); the chat
 program cannot ask the server for them.
 
+### What you see when
+
+Each row is one situation on a local Spark launch, the text Vade prints, and
+the exit code. Every message says what happened and what to do next. Tests
+pin each message text (the `/exit` row prints none): `cli/src/cli.rs`,
+`cli/src/launch/doctor_status_tests.rs`,
+`cli/src/launch/tests.rs`, `cli/tests/first_run.rs`, `cli/tests/snapshots/`,
+`harness/tests/errors_cli.rs`, `harness/tests/ui_mock.rs`,
+`harness/tests/coding_cli.rs`, `harness/src/cli/steering.rs`,
+`harness/src/cli/admission.rs` and `harness/src/context/rollover_tests.rs`.
+
+| When | What you see | Exit |
+| --- | --- | --- |
+| `vade chat` before any setup | `Vade is not set up on this Spark yet.` Hint: run `vade launch` to install it, start it and open chat. | 1 |
+| `vade chat` with the engine stopped | `The engine is not running.` Hint: run `vade launch` to start it and open chat. | 1 |
+| `vade chat` after the engine crashed or was killed | `The engine is not running; it stopped or was killed.` Hint: run `vade up` to clear its record and start it again. | 1 |
+| `vade chat` while `vade launch` (or `vade up`) still loads the model in another terminal | `The engine is still loading the model, so chat cannot open yet.` Hint: wait for `vade launch` to say it is ready, then run `vade chat` again; `vade logs` follows the load. | 1 |
+| `vade status` while the model loads | `◐ Vade is starting: the engine is still loading the model.` and the `vade logs` command. `vade doctor` skips its engine health check. | 0 |
+| A start whose command ended early, for example a `vade launch` that an SSH hang-up stopped while the engine went on loading | `The last engine start did not finish, and the engine is not ready.` Hint: run `vade down`, then `vade launch`. Vade knows the load is still in progress only while its `vade launch` or `vade up` holds the state lock. | 1 |
+| The engine runs but does not answer | `The engine is not answering.` Hint: run `vade logs`, then `vade down` and `vade launch`. | 1 |
+| `vade chat "a prompt"` | `vade chat takes no prompt on the command line ("a prompt").` Hint: run `vade chat`, then type the message. | 1 |
+| `vade chat --name login bug` (a value with spaces, not quoted) | `Unexpected word "bug" after the --name value.` Hint: put a value with spaces in quotes. | 1 |
+| `vade chat --json` | `vade chat has no --json output; it is an interactive chat.` Hint: run `vade status --json`. | 1 |
+| Chat opens below 8192 context tokens | One line: chat opens without workspace tools and saves no session; for the agent, run `vade down`, then `vade launch --context 8192` or larger. | (chat opens) |
+| Chat opens on Linux | One line: the agent reads, searches and edits files but cannot run shell commands or checks; run builds and tests in your own terminal. | (chat opens) |
+| You press Enter during a reply (steering, the default) | Agent: `Stopping the reply to send your new message. ...`, then `Stopped for your new message · <time> · <edits> · sending it now`. Direct text chat (below 8192): `Stopping the reply to send your new message; the partial answer is kept.` The partial answer stays in the chat, marked `[interrupted]`. `/queue on` queues messages instead. | (chat stays open) |
+| You press Esc during a reply | Agent: `Stopping the reply. Finished tool steps and the partial answer are kept.`, then `Canceled · <time> · <edits> · say continue`. Direct text chat: `Stopping the reply; the partial answer is kept.` | (chat stays open) |
+| You send a message while the engine is stopped | Agent: `Stopped: the model request failed (connection refused) · ... · /retry or send a new message`, then `Nothing answered at the endpoint. Check that the engine is running with vade status, or start it with vade launch.` | (chat stays open) |
+| The engine closes the connection before the reply is complete (in the middle of a reply, or before its first word) | Agent: `Stopped: the model request failed (incomplete upstream response) · ...`, then `The reply ended early; review any partial output and check vade status before retrying.` | (chat stays open) |
+| The engine refuses the request with an HTTP error | Agent: the stop line, then the next step for that status, for example `The engine is busy or unavailable. Check vade status, wait for capacity, then retry.` for 503, or `Check --endpoint ...` for 404. | (chat stays open) |
+| The chat fills the context | Vade compacts older turns and prints `[context compacted: kept N turns, summary M tokens]`. If that is not enough: `This chat cannot continue: ...` with `/new` or a shorter message as the next step. | (chat stays open) |
+| An approval is open and you press Esc or Ctrl+C | `Approval still pending; draft retained.` with `y`, `n`, `/approve`, `/deny` and `/cancel`. | (chat stays open) |
+| You type `/exit` | Chat closes; the engine keeps running for the next `vade chat`. | 0 |
+
 ## Commands
 
 | Group | Command | What it does |

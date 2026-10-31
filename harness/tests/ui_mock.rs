@@ -273,8 +273,12 @@ fn raw_ui_cancels_while_mock_has_sent_no_response_bytes() {
         ui.until("the current one reports when it finishes.", Duration::from_secs(1));
         let start = Instant::now();
         ui.send(&[27]);
-        let text = ui.until("cancellation requested.", Duration::from_secs(1));
-        assert!(text.contains("cancellation requested."));
+        let text = ui.until("Stopping the reply", Duration::from_secs(1));
+        assert!(ui.until("kept.", Duration::from_secs(1)).contains(if mode == "agent" {
+            ". Finished tool steps and the partial answer are kept."
+        } else {
+            "; the partial answer is kept."
+        }), "{text}");
         assert!(start.elapsed() < Duration::from_secs(1));
         // Native/direct worker cleanup polls the socket independently; the UI
         // cancellation notice arrives without any upstream response/EOF.

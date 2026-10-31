@@ -151,6 +151,41 @@ mod tests {
         assert!(app.input.text() == second, "rejected steering must be recoverable from the draft");
     }
 
+    #[test]
+    fn steer_end_line_says_the_new_message_follows() {
+        use vade_harness::agent::{RunReport, StopReason};
+        let root = std::env::temp_dir().join(format!("vade-steer-end-line-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir(&root).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+        let _cleanup = Cleanup(root.clone());
+        let args::Parsed::Run(config) = args::Config::parse(
+            ["agent", "--endpoint", "http://127.0.0.1:1", "--model", "mock", "--workspace", root.to_str().unwrap(), "--plain"]
+                .into_iter().map(str::to_owned),
+        ).unwrap() else { panic!("expected native configuration") };
+        let mut app = super::App::new(config).unwrap();
+        let report = RunReport {
+            reason: StopReason::Cancelled, answer_cut_off: false, model_turns: 1, auto_continues: 0, nudges: 0,
+            auto_checks: 0, tool_turns: 0, tool_calls: 0, output_bytes: 0,
+        };
+        let (_producer, mut pending) = held_pending();
+        pending.canceled = true;
+        let line = |app: &super::App, pending: &super::Pending| {
+            let line = app.run_end_line(&report, false, pending, false, false);
+            let parts: Vec<String> = line.split(" · ").map(str::to_owned).collect();
+            (parts[0].clone(), parts[2..].join(" · "))
+        };
+        // Esc: the reply was canceled, and continue resumes it.
+        assert_eq!(line(&app, &pending), ("Canceled".into(), "no edits · say continue".into()));
+        // A steer: the reply stopped for the new message, which goes next.
+        app.steering = Some("correction".into());
+        assert_eq!(line(&app, &pending), ("Stopped for your new message".into(), "no edits · sending it now".into()));
+        // A quit after the steer (Ctrl+C on an empty editor, SIGINT) sends nothing.
+        app.quit = true;
+        assert_eq!(line(&app, &pending), ("Canceled".into(), "no edits · say continue".into()));
+    }
+
     fn native_capacity_case(room: usize) {
         use super::super::{events::{TurnResult, WorkerResult}, native_setup::native_message};
         use vade_harness::agent::{Limits, RunReport, StopReason};

@@ -319,15 +319,25 @@ fn known_command(command: &str) -> bool {
 
 fn parse_chat(args: &[&str]) -> Result<ChatOptions, String> {
     let mut options = ChatOptions::default();
-    let mut rest = args.iter();
-    while let Some(&flag) = rest.next() {
+    let mut rest = args.iter().enumerate();
+    // The option whose value came last: a bare word after it is most likely
+    // the rest of an unquoted value, such as --name login bug.
+    let mut after: Option<&str> = None;
+    while let Some((index, &flag)) = rest.next() {
         let slot = match flag {
             "--resume" => &mut options.resume,
             "--name" => &mut options.name,
+            "--json" => return Err("vade chat has no --json output; it is an interactive chat. Run vade status --json for the engine state as JSON.".into()),
+            _ if !flag.starts_with('-') => return Err(match after {
+                Some(option) => format!("Unexpected word {} after the {option} value. Put a value with spaces in quotes, for example vade chat {option} \"login bug\".", crate::text::argument(flag)),
+                None => format!("vade chat takes no prompt on the command line ({}). Run vade chat, then type the message and press Enter.",
+                    crate::text::argument(&args[index..].join(" "))),
+            }),
             _ => return Err(format!("Unknown option {} for vade chat. Run vade chat --help.", crate::text::argument(flag))),
         };
-        let value = rest.next().filter(|v| !v.is_empty() && !v.starts_with("--"))
+        let value = rest.next().map(|(_, v)| v).filter(|v| !v.is_empty() && !v.starts_with("--"))
             .ok_or_else(|| format!("Give {flag} a value. Run vade chat --help."))?;
+        after = Some(flag);
         if slot.replace((*value).into()).is_some() {
             return Err(format!("Use {flag} only once. Run vade chat --help."));
         }
@@ -602,9 +612,13 @@ mod tests {
         assert_eq!(chat(&["chat"]).unwrap(), Command::Chat(ChatOptions::default()));
         assert_eq!(chat(&["chat", "--resume", "last", "--name", "bug fix", "--dry-run"]).unwrap(),
             Command::Chat(ChatOptions { resume: Some("last".into()), name: Some("bug fix".into()) }));
-        for bad in [&["chat", "--resume"][..], &["chat", "--resume", "a", "--resume", "b"], &["chat", "--name", "--resume"], &["chat", "extra"]] {
+        for bad in [&["chat", "--resume"][..], &["chat", "--resume", "a", "--resume", "b"], &["chat", "--name", "--resume"], &["chat", "-x"]] {
             assert!(chat(bad).unwrap_err().contains("vade chat --help"), "{bad:?}");
         }
+        // A prompt or --json says what vade chat does instead (snapshots pin the exit code).
+        assert_eq!(chat(&["chat", "fix", "tests"]).unwrap_err(), "vade chat takes no prompt on the command line (\"fix tests\"). Run vade chat, then type the message and press Enter.");
+        assert_eq!(chat(&["chat", "--name", "login", "bug"]).unwrap_err(), "Unexpected word \"bug\" after the --name value. Put a value with spaces in quotes, for example vade chat --name \"login bug\".");
+        assert_eq!(chat(&["chat", "--json"]).unwrap_err(), "vade chat has no --json output; it is an interactive chat. Run vade status --json for the engine state as JSON.");
         let sessions = |args: &str| match cli(args).map(|c| c.command) { Ok(Command::Sessions(a)) => Ok(a.join(" ")), Ok(other) => panic!("{other:?}"), Err(e) => Err(e) };
         assert_eq!(sessions("sessions").unwrap(), "list");
         assert_eq!(sessions("sessions list --all").unwrap(), "list --all");

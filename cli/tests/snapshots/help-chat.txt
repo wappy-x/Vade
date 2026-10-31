@@ -20,8 +20,9 @@ Options:
 Notes:
   - Opens the Vade agent on the resident engine. Start the engine once with vade
     launch or vade up.
-  - Local contexts below 8192 tokens use direct text chat. Local Linux agent
-    mode disables automatic workspace checks with a notice.
+  - Local contexts below 8192 tokens use direct text chat. On Linux the agent
+    reads, searches and edits files but runs no shell commands or checks; a
+    local launch prints a notice that says so.
   - Typing during a reply interrupts it and keeps its partial answer in context.
     /queue on queues follow-ups; /queue off restores steering. /exit leaves the
     engine running.

@@ -40,6 +40,8 @@ const CASES: &[(&str, &[&str])] = &[
     ("error-help-topic", &["help", "nonsense"]),
     ("error-missing-config", &["status"]),
     ("error-verify-option", &["verify", "--bogus"]),
+    ("error-chat-prompt", &["chat", "explain main.rs"]),
+    ("error-chat-json", &["chat", "--json"]),
 ];
 
 fn command(args: &[&str]) -> Command {

@@ -721,7 +721,7 @@ impl App {
         } else {
             self.terminal.line("")?;
         }
-        match cancel_notice(self.config.mode, counting) {
+        match cancel_notice(self.config.mode, counting, self.steering.is_some()) {
             Some(text) => self.run_notice(text),
             None => Ok(()),
         }
@@ -729,15 +729,18 @@ impl App {
 }
 /// What a cancellation reports while it waits. A prompt still being counted
 /// has reached no generation, tool or server cleanup; admission reports its
-/// one outcome line instead.
-pub(crate) fn cancel_notice(mode: Mode, counting: bool) -> Option<&'static str> {
+/// one outcome line instead. A steer (a message sent during a reply) says
+/// that the new message follows, so it does not read as an error.
+pub(crate) fn cancel_notice(mode: Mode, counting: bool, steering: bool) -> Option<&'static str> {
     if counting { return None; }
     Some(match mode {
         Mode::Demo => "Demo cancellation requested; waiting for local cleanup.",
         Mode::Hermes => "Hermes interruption requested. Local response discarded; waiting for ACP prompt acknowledgment.",
         Mode::Codex => "Codex interruption requested. Local response discarded; waiting for provider cleanup.",
-        Mode::Agent => "Native cancellation requested. Completed tool results are kept; waiting for cleanup.",
-        _ => "Interrupting reply; keeping the partial answer. Server cancellation requested.",
+        Mode::Agent if steering => "Stopping the reply to send your new message. Finished tool steps and the partial answer are kept.",
+        Mode::Agent => "Stopping the reply. Finished tool steps and the partial answer are kept.",
+        _ if steering => "Stopping the reply to send your new message; the partial answer is kept.",
+        _ => "Stopping the reply; the partial answer is kept.",
     })
 }
 pub(crate) fn emit_delta(tx: &WorkSender, cancel: &AtomicBool, emitted: &mut usize, text: &str) {

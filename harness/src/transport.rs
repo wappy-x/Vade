@@ -58,6 +58,12 @@ impl std::fmt::Display for HttpStatus {
 }
 impl std::error::Error for HttpStatus {}
 
+/// An error that carries a trusted HTTP status, as from a parsed response;
+/// for a caller that kept only the status.
+pub fn status_error(status: u16) -> io::Error {
+    io::Error::other(HttpStatus(status))
+}
+
 /// Only errors created from a parsed HTTP response expose a status here.
 /// An upstream body that happens to contain status-like text cannot spoof it.
 pub fn http_status(error: &io::Error) -> Option<u16> {

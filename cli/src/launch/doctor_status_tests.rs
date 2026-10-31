@@ -278,6 +278,62 @@ fn local_status_reads_and_prints_the_engine_events() {
 }
 
 #[test]
+fn a_load_in_progress_is_reported_without_asking_to_stop_it() {
+    let f = Fixture::new();
+    f.installed();
+    f.configured();
+    let mut launch = f.launcher();
+    captured(|| launch.execute(Command::Up(Default::default()), false)).0.unwrap();
+    // A ready engine opens the agent; on Linux one line first says what it can do.
+    let (result, printed) = captured(|| launch.execute(Command::Chat(Default::default()), false));
+    result.unwrap();
+    let linux = "On Linux, the agent reads, searches and edits files in this folder. It cannot run shell commands or checks; run builds and tests in your own terminal.\n";
+    assert_eq!(printed.starts_with(linux), cfg!(target_os = "linux"), "{printed}");
+    // Another terminal's vade launch has written its record and still loads
+    // the model: it holds the lock for the whole load.
+    let path = f.root.join("state/run.conf");
+    let mut record = read_fields(&path).unwrap().unwrap();
+    record.insert("phase".into(), "starting".into());
+    fs::write(&path, text::encode(&record)).unwrap();
+    let launcher_lock = crate::state::Lock::acquire(&f.root).unwrap();
+    // Status answers (exit 0) and names the log; chat refuses (exit 1) and says to wait.
+    assert_eq!(captured(|| launch.execute(Command::Status, false)), (Ok(()), format!(
+        "◐ Vade is starting: the engine is still loading the model. The vade launch or vade up that started it says when it is ready.\n  Load progress: {}\n", text::command("logs"))));
+    let loading = "The engine is still loading the model, so chat cannot open yet. Wait for vade launch to say it is ready, then run vade chat again. Run vade logs to follow the load.";
+    assert_eq!(captured(|| launch.execute(Command::Chat(Default::default()), false)), (Err(loading.into()), String::new()));
+    assert_eq!(launch.runner.chats, 1);
+    // Doctor skips the health check while the load runs, with no stop advice.
+    let (result, printed) = captured(|| launch.execute(Command::Doctor, false));
+    result.unwrap();
+    assert!(printed.contains("skip  engine health         still loading the model; vade launch says when it is ready\n"), "{printed}");
+    assert!(!printed.contains("vade down"), "{printed}");
+    // The launch died (an SSH hang-up kills it; the detached engine keeps
+    // loading): the kernel drops its lock, and nothing will mark the record
+    // running. Status, chat and a new launch say to clear it, not to wait.
+    drop(launcher_lock);
+    let unfinished = "The last engine start did not finish, and the engine is not ready. Run vade down to clear it, then vade launch.";
+    for engine_gone in [false, true] {
+        launch.runner.refused = engine_gone;
+        assert_eq!(captured(|| launch.execute(Command::Chat(Default::default()), false)).0.unwrap_err(), unfinished);
+        assert_eq!(captured(|| launch.execute(Command::Status, false)).0.unwrap_err(), unfinished);
+    }
+    launch.runner.refused = false;
+    assert!(captured(|| launch.execute(Command::Up(Default::default()), false)).0.unwrap_err().contains(unfinished));
+    assert_eq!(read_fields(&path).unwrap().unwrap(), record, "status, chat and launch keep the record");
+    assert_eq!(launch.runner.chats, 1);
+    captured(|| launch.execute(Command::Down, false)).0.unwrap();
+    // The other chat refusals of the "what you see when" table in cli/docs/ux.md.
+    assert_eq!(captured(|| launch.execute(Command::Chat(Default::default()), false)).0.unwrap_err(),
+        "The engine is not running. Run vade launch to start it and open chat.");
+    captured(|| launch.execute(Command::Up(Default::default()), false)).0.unwrap();
+    launch.runner.health_ready = false;
+    assert_eq!(captured(|| launch.execute(Command::Chat(Default::default()), false)).0.unwrap_err(),
+        "The engine is not answering. Run vade logs to see why, then vade down and vade launch.");
+    launch.runner.health_ready = true;
+    captured(|| launch.execute(Command::Down, false)).0.unwrap();
+}
+
+#[test]
 fn a_dead_engine_record_is_reported_by_status_and_doctor_and_cleared_by_up() {
     let f = Fixture::new();
     f.installed();

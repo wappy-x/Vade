@@ -79,6 +79,12 @@ pub(super) fn stale() -> String {
         style::paint(Token::Dim, "○", Stream::Out), crate::status::next_steps(&[("Start", &text::command("launch"))]))
 }
 
+/// `vade status` while vade launch still loads the model in another terminal.
+pub(super) fn starting() -> String {
+    format!("{} Vade is starting: the engine is still loading the model. The vade launch or vade up that started it says when it is ready.\n{}",
+        style::paint(Token::Dim, "◐", Stream::Out), crate::status::next_steps(&[("Load progress", &text::command("logs"))]))
+}
+
 impl<R: Runner, D: Detector> Launcher<R, D> {
 
     /// Fill a status report; dry runs record every live check as unchecked.

@@ -106,6 +106,10 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             report.skip("free memory", "needs nvidia-smi and the machine checks")?;
         }
         match (config.as_ref(), record.as_ref()) {
+            (Some(config), Some(Some(record))) if self.loading(record) => {
+                report.skip(&format!("port {}", config.port), "held by the engine that is loading")?;
+                report.skip("engine health", "still loading the model; vade launch says when it is ready")?;
+            }
             (Some(config), Some(Some(record))) => {
                 report.skip(&format!("port {}", config.port), "in use by the running engine")?;
                 report.check("engine health", self.ready(config, record), |_| config.endpoint(),

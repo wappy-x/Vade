@@ -469,9 +469,16 @@ mod tests {
     fn cancel_while_counting_prints_one_presend_line() {
         use super::super::{args::Mode, worker::cancel_notice};
         for mode in [Mode::Agent, Mode::Direct, Mode::Demo, Mode::Codex, Mode::Hermes] {
-            assert_eq!(cancel_notice(mode, true), None);
-            assert!(cancel_notice(mode, false).is_some());
+            for steering in [false, true] {
+                assert_eq!(cancel_notice(mode, true, steering), None);
+                assert!(cancel_notice(mode, false, steering).is_some());
+            }
         }
+        // A steer says the new message follows; Esc says only that the reply stops.
+        assert_eq!(cancel_notice(Mode::Agent, false, true), Some("Stopping the reply to send your new message. Finished tool steps and the partial answer are kept."));
+        assert_eq!(cancel_notice(Mode::Agent, false, false), Some("Stopping the reply. Finished tool steps and the partial answer are kept."));
+        assert_eq!(cancel_notice(Mode::Direct, false, true), Some("Stopping the reply to send your new message; the partial answer is kept."));
+        assert_eq!(cancel_notice(Mode::Direct, false, false), Some("Stopping the reply; the partial answer is kept."));
         assert_eq!(presend_cancel_notice(true, true), "Exited before the message was sent; it was not sent.");
         assert_eq!(presend_cancel_notice(false, true), "Canceled before sending; nothing changed.");
         assert_eq!(presend_cancel_notice(true, false), "Canceled before sending; nothing changed.");

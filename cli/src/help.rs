@@ -182,7 +182,7 @@ fn page(command: &str) -> Option<Page<'static>> {
             examples: &["vade chat", "vade chat --name \"login bug\"", "vade chat --resume last", "VADE_CONFIG=cluster.conf vade chat"],
             notes: &[
                 "Opens the Vade agent on the resident engine. Start the engine once with vade launch or vade up.",
-                "Local contexts below 8192 tokens use direct text chat. Local Linux agent mode disables automatic workspace checks with a notice.",
+                "Local contexts below 8192 tokens use direct text chat. On Linux the agent reads, searches and edits files but runs no shell commands or checks; a local launch prints a notice that says so.",
                 "Typing during a reply interrupts it and keeps its partial answer in context. /queue on queues follow-ups; /queue off restores steering. /exit leaves the engine running.",
                 "Chat history is kept in ~/.vade/projects (VADE_HOME changes the root), never in this folder; VADE_CHAT_IN_PROJECT=1 keeps it in a git-ignored ./.vade.",
                 "Each agent chat is a saved session; direct text chat saves none. vade sessions lists them. A resume replays the saved history into the context; it reruns no tools and restores no files.",

@@ -64,6 +64,13 @@ impl Mock {
                     count.fetch_add(1, Ordering::Relaxed);
                     status
                 };
+                // Status 1: the engine closes the connection before any reply byte.
+                if reply_status == 1 { continue; }
+                if reply_status == 0 {
+                    // Status 0: the engine dies in the middle of a streamed reply.
+                    reader.get_mut().write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"PARTIAL\"}}]}\n\n").unwrap();
+                    continue;
+                }
                 let body = "{\"error\":\"PRIVATE_TOKEN_123 https://private.invalid/?key=secret \\u001b[2J\"}";
                 let reply = format!("HTTP/1.1 {reply_status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 let _ = reader.get_mut().write_all(reply.as_bytes());
@@ -113,6 +120,61 @@ fn direct_http_failures_offer_specific_recovery_without_body_disclosure_or_retry
         assert_eq!(mock.posts.load(Ordering::Relaxed), 1, "failed generation replayed");
     }
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// One agent prompt against `endpoint` in a fresh folder: the exit code, the
+/// stop line with the line after it, and the whole output.
+fn agent_stop(endpoint: &str, name: &str) -> (Option<i32>, String, String, String) {
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+    let root = std::env::temp_dir().join(format!("vade-error-agent-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let _cleanup = Cleanup(root.clone());
+    let mut command = home::harness();
+    command.args(["agent", "--state-in-project", "--endpoint", endpoint, "--model", "mock", "--plain", "--workspace"])
+        .arg(&root).env_remove("VADE_API_KEY_FILE").env("NO_COLOR", "1");
+    let mut process = cli::Cli::start(&mut command);
+    process.send("hello\n");
+    let output = process.finish();
+    let text = String::from_utf8_lossy(&output.stderr).into_owned();
+    let lines: Vec<&str> = text.lines().collect();
+    let stop = lines.iter().position(|line| line.starts_with("vade: Stopped: ")).expect(&text);
+    let all = format!("{}{text}", String::from_utf8_lossy(&output.stdout));
+    (output.status.code(), lines[stop].to_owned(), lines.get(stop + 1).copied().unwrap_or_default().to_owned(), all)
+}
+
+#[test]
+fn agent_stop_on_a_stopped_engine_names_the_engine_check() {
+    // A port that was just free: nothing answers, as when the engine is down.
+    let endpoint = format!("http://{}/v1", TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap());
+    let (code, stop, next, _) = agent_stop(&endpoint, "down");
+    assert_eq!(code, Some(1));
+    assert!(stop.starts_with("vade: Stopped: the model request failed (connection refused) · ")
+        && stop.ends_with(" · no edits · /retry or send a new message"), "{stop}");
+    assert_eq!(next, "vade: Nothing answered at the endpoint. Check that the engine is running with vade status, or start it with vade launch.");
+    // The engine closes the connection after part of a streamed reply (the
+    // mock's write of the headers and one delta succeeded), or before any
+    // byte. Plain agent output shows only the final answer, so both read the
+    // same: the reply ended early, and nothing was sent again.
+    for (status, name) in [(0, "midway"), (1, "closed")] {
+        let mock = Mock::status(status);
+        let (code, stop, next, all) = agent_stop(&mock.endpoint, name);
+        assert_eq!(code, Some(1));
+        assert!(stop.starts_with("vade: Stopped: the model request failed (incomplete upstream response) · "), "{stop}");
+        assert_eq!(next, "vade: The reply ended early; review any partial output and check vade status before retrying.", "{stop}");
+        assert!(!all.contains("PARTIAL"), "plain agent output shows no unfinished answer: {all}");
+        assert_eq!(mock.posts.load(Ordering::Relaxed), 1, "failed generation replayed");
+    }
+    // An HTTP refusal keeps its status: a wrong address names --endpoint.
+    for (status, hint) in [
+        (404, "vade: Check --endpoint and the engine's supported API routes; the usual base is http://127.0.0.1:18080/v1."),
+        (503, "vade: The engine is busy or unavailable. Check vade status, wait for capacity, then retry."),
+    ] {
+        let mock = Mock::status(status);
+        let (code, _, next, _) = agent_stop(&mock.endpoint, &format!("http{status}"));
+        assert_eq!((code, next.as_str()), (Some(1), hint), "status {status}");
+    }
 }
 
 #[test]

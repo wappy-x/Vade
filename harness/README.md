@@ -472,7 +472,10 @@ Use /compact to shrink older turns, or /new to start over.
   and what you can do.
 
 A run that does not finish normally ends with one plain line such as
-`Canceled · <elapsed> · <edits> · check passing · say continue`. The labels
+`Canceled · <elapsed> · <edits> · check passing · say continue`. A message sent
+during a reply ends it with `Stopped for your new message · ... · sending it
+now`. When the model request fails, the next line names the check, such as
+`vade status` when nothing answers at the endpoint. The labels
 carry the meaning with `NO_COLOR` and in plain or redirected output. The UI uses
 the terminal's own foreground and background, so it works in light and dark
 themes. `/status` shows the full counters; `--verbose` also prints the contract

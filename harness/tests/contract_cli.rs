@@ -243,7 +243,7 @@ fn cli_compaction_fork_switch_and_resume_reestablish_admitted_prefixes_and_repor
             if !line.starts_with('/') {
                 child.until(true, "Native run:");
             } else if line.starts_with("/compact ") {
-                child.until(true, "Compacted context pre-warmed;");
+                child.until(true, "Compacted context pre-warmed:");
             }
         }
         let output = child.finish();

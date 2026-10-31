@@ -639,6 +639,9 @@ fn address(host: &str, port: u16) -> String {
     }
 }
 
+/// The error when another lifecycle command holds the lock.
+const LOCK_BUSY: &str = "Vade is already changing this engine. Wait, then run vade status.";
+
 /// The exclusive operation lock on a state directory, held until dropped.
 pub struct Lock {
     _file: File,
@@ -666,11 +669,15 @@ impl Lock {
             }
             // The descriptor stays open for this value's lifetime; the inode is never removed.
             if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } != 0 {
-                return Err(
-                    "Vade is already changing this engine. Wait, then run vade status.".into(),
-                );
+                return Err(LOCK_BUSY.into());
             }
         }
         Ok(Self { _file: file })
+    }
+    /// Whether another lifecycle command (such as a vade launch that still
+    /// loads the model) holds the lock now. The kernel drops the lock when
+    /// its process ends, so a launch that died does not count.
+    pub fn held(dir: &Path) -> bool {
+        matches!(Self::acquire(dir), Err(error) if error == LOCK_BUSY)
     }
 }

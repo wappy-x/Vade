@@ -136,8 +136,9 @@ engine on the saved launcher port, normally 18080.
 
 Chat opens the coding agent in the current folder. When the context is below
 8192 (say, after startup fell back to 4096), `vade chat` opens plain text chat
-instead. On Linux the agent tells you its automatic workspace checks are off,
-because those checks need the macOS sandbox.
+instead. On Linux the agent reads, searches and edits files but cannot run
+shell commands or checks, and a local launch says so before chat opens. Run
+builds and tests in your own terminal.
 
 To pick up a new bundle or source build, run `vade update`. It restages the
 current bundle or rebuilds the current source, then tells you the restart
