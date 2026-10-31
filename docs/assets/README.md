@@ -8,7 +8,7 @@
 
 | File | What it is |
 | --- | --- |
-| [vade-banner.webp](vade-banner.webp) | The moving banner: 12 seconds, 30 frames per second, a loop, 1280 x 400 pixels, lossless, about 3.3 MB. |
+| [vade-banner.webp](vade-banner.webp) | The moving banner: 12 seconds, 30 frames per second, a loop, 1280 x 400 pixels, lossless, about 3.8 MB. |
 | [vade-banner-static.png](vade-banner-static.png) | Its first frame, for readers who ask for reduced motion. |
 
 The README uses a `<picture>` element: the browser shows the still frame when your system asks for reduced motion, and the moving banner otherwise. The same dark banner shows in light and dark mode.
@@ -19,9 +19,9 @@ The README uses a `<picture>` element: the browser shows the still frame when yo
 
 **The banner is a recording of [vade.lol](https://vade.lol), the project site, rendered by the site's own code.** Nothing is redrawn by hand, so the two match.
 
-- The site draws VADE on a canvas as a grid of monospace characters over a slow current of dots and dashes. A soft light drifts across the letters, which are lit and beveled; cells under the light change quickly through random characters and settle; small dots far back blink softly. The copy and the footer are the site's own text, so the footer's copyright line is the site's, not this repository's NOTICE.
-- To make the banner, the page is opened in headless Chrome at 1280 x 400 pixels, with the site's nebula palette fixed (the site picks one of its five at random; the choice here is the owner's), the letters sized for a wide banner and the intro skipped. The animation clock is stepped by hand, one thirtieth of a second per frame, and every frame is captured.
-- The loop is made by the renderer, not by cross-fading pictures. Over the last four seconds every continuous quantity (the current, the light's path, the highlight sweep, the blinking dots) is blended toward its value twelve seconds earlier, and the cells that were changing at the start are brought back, so the last frame runs into the first. Measured on this file, decoded frame by frame (mean squared difference between frames): the loop step is 25.7, the median ordinary step is 5.7, the largest ordinary step is 65.2, and 85 of the 420 ordinary steps are larger than the loop step.
+- The site draws VADE on a canvas as a grid of monospace characters over a slow current of dots and dashes. A soft light drifts across the letters, which are lit and beveled; cells under the light change quickly through random characters and settle; small dots far back blink softly. Under the letters is one line of the site's own text, "Pure-Rust engine and harness for the DGX Spark", in the site's monospace style. The banner leaves out the site's GitHub link and footer.
+- To make the banner, the page is opened in headless Chrome at 1280 x 400 pixels, with the site's nebula palette, the letters sized and placed for a wide banner and the intro skipped. The animation clock is stepped by hand, one thirtieth of a second per frame, and every frame is captured.
+- The loop is made by the renderer, not by cross-fading pictures. Over the last four seconds every continuous quantity (the current, the light's path, the highlight sweep, the blinking dots) is blended toward its value twelve seconds earlier, and the cells that were changing at the start are brought back, so the last frame runs into the first. Measured on this file: decode it to raw frames, then compare each frame with the next (mean squared difference over the RGBA values, 0 to 255). The loop step is 22.6, the median ordinary step is 16.8, the largest ordinary step is 64.9, and 140 of the 359 ordinary steps are larger than the loop step.
 - The frames are encoded as a lossless animated WebP, so every frame is exact and the loop point gets no codec seam (a lossy file softens ordinary frames and restarts sharp at the first frame, which reads as a jump), and the first frame as a PNG.
 
 To make it again: take the page as the site serves it, fix the palette and the letter size, step the clock, blend the last four seconds as above, capture the frames and encode them. The small Chrome DevTools Protocol script that does this is kept with the lab scripts, outside this repository, so the repository stays Rust and docs. The site's renderer is the only source of the look; when the site changes, record the banner again.

@@ -8,7 +8,7 @@ and edits files (on the Spark, it does not run commands).
 
 <picture>
   <source media="(prefers-reduced-motion: reduce)" srcset="docs/assets/vade-banner-static.png">
-  <img src="docs/assets/vade-banner.webp" width="100%" alt="VADE drawn in lit monospace characters over a slow field of dots and dashes, as on vade.lol. An LLM inference engine, written in Rust, built for the DGX Spark.">
+  <img src="docs/assets/vade-banner.webp" width="100%" alt="VADE drawn in lit monospace characters over a slow field of dots and dashes, as on vade.lol, above one line of text: Pure-Rust engine and harness for the DGX Spark.">
 </picture>
 
 On one Spark with the model already in `~/models`, this installs Vade and
