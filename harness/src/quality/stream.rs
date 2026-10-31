@@ -24,6 +24,8 @@ pub struct Reply {
     pub model_draft_used: Option<bool>,
     /// The model name the stream itself reports, when it reports one.
     pub served_model: Option<String>,
+    /// Streamed tool calls, joined from their `delta.tool_calls` parts.
+    pub tool_calls: Vec<ToolCall>,
     /// The last `vade` receipt object as streamed, kept for the receipt.
     pub vade_receipt: Option<String>,
     pub prefill_ms: Option<f64>,
@@ -31,6 +33,15 @@ pub struct Reply {
     pub ttft_s: Option<f64>,
     pub total_s: f64,
 }
+/// One streamed tool call: the name and argument text joined in index order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ToolCall {
+    pub index: u64,
+    pub id: Option<String>,
+    pub name: String,
+    pub arguments: String,
+}
+
 impl Reply {
     /// Output tokens per second over the whole request, when counted.
     pub fn end_to_end_tok_s(&self) -> Option<f64> {
@@ -77,6 +88,33 @@ fn bool_of(value: Option<&Value>) -> Option<bool> {
     }
 }
 
+/// Join one streamed `delta.tool_calls` part into the call with its index.
+/// The first part names the call; later parts add argument text. A part
+/// without an index belongs to call 0, as in a one-call reply.
+fn apply_tool_call_part(reply: &mut Reply, part: &Value, elapsed_s: f64) {
+    let index = count(part.get("index")).unwrap_or(0);
+    let at = match reply.tool_calls.iter().position(|call| call.index == index) {
+        Some(at) => at,
+        None => {
+            reply.tool_calls.push(ToolCall { index, ..ToolCall::default() });
+            reply.tool_calls.len() - 1
+        }
+    };
+    reply.ttft_s.get_or_insert(elapsed_s);
+    let call = &mut reply.tool_calls[at];
+    if let Some(id) = text_of(part.get("id")) {
+        call.id = Some(id);
+    }
+    if let Some(function) = part.get("function") {
+        if let Some(name) = function.get("name").and_then(Value::as_str) {
+            call.name.push_str(name);
+        }
+        if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
+            call.arguments.push_str(arguments);
+        }
+    }
+}
+
 /// Apply one SSE `data:` payload to a reply. Returns true on `[DONE]`.
 pub fn apply_sse_data(reply: &mut Reply, data: &str, elapsed_s: f64) -> io::Result<bool> {
     let data = data.trim();
@@ -117,6 +155,9 @@ pub fn apply_sse_data(reply: &mut Reply, data: &str, elapsed_s: f64) -> io::Resu
                     reply.ttft_s.get_or_insert(elapsed_s);
                 }
                 reply.reasoning.push_str(reasoning);
+            }
+            for part in delta.get("tool_calls").and_then(Value::as_array).unwrap_or(&[]) {
+                apply_tool_call_part(reply, part, elapsed_s);
             }
         }
         if let Some(content) = choice.get("text").and_then(Value::as_str) {

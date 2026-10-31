@@ -33,11 +33,17 @@ mod cases;
 pub use cases::{CASES, Case, Rule, SET_VERSION, Scoring};
 
 mod stream;
-pub use stream::{Reply, apply_sse_data, send};
+pub use stream::{Reply, ToolCall, apply_sse_data, send};
+
+pub mod engine;
+pub mod engine_cases;
+mod engine_report;
+pub use engine::{EngineReport, Grade, run_engine};
 
 pub const HELP: &str = "Vade answer quality and exactness cost cards (HTTP chat API)
 
 Usage: vade-harness quality-card --endpoint URL --model NAME --json FILE [OPTIONS]
+       vade-harness quality-card --set engine-1 --endpoint URL --model NAME --json FILE
        vade-harness quality-card --print-prompts
 
   --endpoint URL        Required http:// chat endpoint (base, /v1 or full path)
@@ -46,6 +52,9 @@ Usage: vade-harness quality-card --endpoint URL --model NAME --json FILE [OPTION
   --card FILE           Optional new text file for the two printed cards
   --server-log FILE     Optional server log with draft receipt lines
   --api-key-file FILE   Global credential file (or VADE_API_KEY_FILE), sent as a Bearer key
+  --set NAME            quality-set-1 (default: the quality and exactness cards)
+                        or engine-1 (the engine card: needle recall, JSON mode,
+                        tool calls, cache and concurrency invariance)
   --only WHICH          quality, exactness or both (default both)
   --seed N              Request seed (default 20261027)
   --request-seconds N   Per-request deadline, 10..3600 (default 300)
@@ -64,6 +73,9 @@ token evidence on both arms (valid integer ids, the terminal event, counts
 that match the streamed ids, the same finish and count on both arms, and
 the returned draft modes strict then plain) with identical id lists.
 A low quality score is a measurement, not a failure.
+The engine card sends tools, response_format and 8 requests at once; it exits
+0 only at grade A+. --only, --server-log, --rustc, --no-code-run and
+--print-prompts apply to quality-set-1 only.
 Code answers run under rustc --test on this machine unless --no-code-run is
 given. No endpoint credentials are written to the receipt.
 ";
@@ -101,6 +113,15 @@ pub enum Only {
     Both,
 }
 
+/// Which fixed set one run sends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardSet {
+    /// quality-set-1: the quality and exactness cards.
+    Quality,
+    /// engine-1: the engine card (see `engine`).
+    Engine,
+}
+
 /// One quality-card run: where to send the fixed set and where to write.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -117,6 +138,7 @@ pub struct Config {
     pub hardware: Option<String>,
     pub recipe: Option<String>,
     pub print_prompts: bool,
+    pub set: CardSet,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -134,6 +156,7 @@ impl Default for Config {
             hardware: None,
             recipe: None,
             print_prompts: false,
+            set: CardSet::Quality,
         }
     }
 }
@@ -190,8 +213,20 @@ impl Config {
                 "--rustc" => config.rustc = value,
                 "--hardware" => config.hardware = Some(value),
                 "--recipe" => config.recipe = Some(value),
+                "--set" => {
+                    config.set = match value.as_str() {
+                        "quality-set-1" => CardSet::Quality,
+                        "engine-1" => CardSet::Engine,
+                        _ => return Err("--set must be quality-set-1 or engine-1"),
+                    }
+                }
                 _ => return Err("unknown quality-card option; see quality-card --help"),
             }
+        }
+        let quality_only = ["--only", "--server-log", "--rustc", "--no-code-run", "--print-prompts"];
+        if config.set == CardSet::Engine && seen.iter().any(|key| quality_only.contains(&key.as_str())) {
+            *option = None;
+            return Err("--only, --server-log, --rustc, --no-code-run and --print-prompts apply to quality-set-1 only");
         }
         *option = None;
         config.validate()?;
@@ -943,9 +978,10 @@ pub struct ExactCase {
 /// adds the pair conditions. A complete reply streams only exact integer
 /// ids, ends with the terminal event, and reports a completion count and a
 /// finish reason. The streamed ids must match the count. The engine counts
-/// its end-of-sequence token without streaming its id on a stop finish
-/// only, so one fewer id is complete for `stop` and for no other finish; a
-/// length finish streams every counted token.
+/// its end-of-sequence token without streaming its id. That finish is
+/// `stop`, or `tool_calls` when the reply holds tool calls, so one fewer id
+/// is complete for those two finishes only; a length finish streams every
+/// counted token.
 fn reply_evidence_failure(reply: &Reply) -> Option<String> {
     if reply.invalid_token_id {
         return Some("invalid token id".into());
@@ -963,7 +999,8 @@ fn reply_evidence_failure(reply: &Reply) -> Option<String> {
         return Some("missing finish reason".into());
     };
     let streamed = reply.token_ids.len() as u64;
-    let matches = streamed == counted || (finish == "stop" && streamed + 1 == counted);
+    let eos_finish = finish == "stop" || finish == "tool_calls";
+    let matches = streamed == counted || (eos_finish && streamed + 1 == counted);
     if !matches {
         return Some(format!(
             "token id count mismatch: streamed {streamed} ids, completion_tokens {counted}, finish {finish}"
@@ -1370,6 +1407,9 @@ pub fn cli(args: impl IntoIterator<Item = String>) -> ExitCode {
         },
         None => None,
     };
+    if config.set == CardSet::Engine {
+        return engine_report::cli(config, json_file, card_file);
+    }
     crate::diagnostics::stderr_line(format_args!(
         "quality-card: {} fixed prompts, one request at a time",
         CASES.len()
@@ -1412,3 +1452,5 @@ pub fn cli(args: impl IntoIterator<Item = String>) -> ExitCode {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod engine_tests;

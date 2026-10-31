@@ -2,7 +2,7 @@
 use super::*;
 use std::fmt::Write as _;
 
-fn reply_json(reply: &Reply) -> Value {
+pub(super) fn reply_json(reply: &Reply) -> Value {
     obj([
         ("text", s(&reply.text)),
         ("reasoning", s(&reply.reasoning)),
@@ -11,6 +11,23 @@ fn reply_json(reply: &Reply) -> Value {
             Value::Array(reply.token_ids.iter().map(n).collect()),
         ),
         ("finish_reason", opt_s(&reply.finish_reason)),
+        (
+            "tool_calls",
+            Value::Array(
+                reply
+                    .tool_calls
+                    .iter()
+                    .map(|call| {
+                        obj([
+                            ("index", n(call.index)),
+                            ("id", opt_s(&call.id)),
+                            ("name", s(&call.name)),
+                            ("arguments", s(&call.arguments)),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
         ("saw_terminal_event", Value::Bool(reply.saw_done)),
         ("token_ids_valid", Value::Bool(!reply.invalid_token_id)),
         (
@@ -239,22 +256,22 @@ impl Report {
     }
 }
 
-const WIDTH: usize = 72;
+pub(super) const WIDTH: usize = 72;
 
-fn rule(left: char, fill: char, right: char) -> String {
+pub(super) fn rule(left: char, fill: char, right: char) -> String {
     format!("{left}{}{right}\n", fill.to_string().repeat(WIDTH))
 }
-fn blank(out: &mut String) {
+pub(super) fn blank(out: &mut String) {
     let _ = writeln!(out, "│{}│", " ".repeat(WIDTH));
 }
-fn section(out: &mut String, title: &str) {
+pub(super) fn section(out: &mut String, title: &str) {
     let head = format!("├─ {title} ");
     let fill = WIDTH + 1 - head.chars().count();
     let _ = writeln!(out, "{head}{}┤", "─".repeat(fill));
     blank(out);
 }
 /// Word-wrap one logical line into the card body (two-space indent).
-fn body(out: &mut String, text: &str) {
+pub(super) fn body(out: &mut String, text: &str) {
     let room = WIDTH - 4;
     let mut line = String::new();
     for word in text.split_whitespace() {
@@ -269,13 +286,13 @@ fn body(out: &mut String, text: &str) {
     }
     emit(out, &line);
 }
-fn emit(out: &mut String, line: &str) {
+pub(super) fn emit(out: &mut String, line: &str) {
     let shown: String = line.chars().take(WIDTH - 4).collect();
     let pad = WIDTH - 2 - shown.chars().count();
     let _ = writeln!(out, "│  {shown}{}│", " ".repeat(pad));
 }
 /// One pre-formatted row; callers keep it inside the card width.
-fn row(out: &mut String, text: String) {
+pub(super) fn row(out: &mut String, text: String) {
     emit(out, &text);
 }
 /// The complete-evidence facts for one passed exactness case.
@@ -296,7 +313,7 @@ fn evidence_text(item: &ExactCase) -> String {
     )
 }
 
-fn fmt(value: Option<f64>, digits: usize) -> String {
+pub(super) fn fmt(value: Option<f64>, digits: usize) -> String {
     value
         .filter(|v| v.is_finite())
         .map(|v| format!("{v:.digits$}"))
