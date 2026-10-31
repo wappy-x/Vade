@@ -138,15 +138,17 @@ impl State {
                 Ok((out, pages))
             }
             GZIP => {
-                // The decoded data is at most the bytes left; its members count
-                // against them as they are read.
+                // The decoded data is at most the bytes left and counts
+                // against them, also when its check fails.
                 let (name, data, cut) = gunzip(bytes, shared_left()).map_err(|why| ReadError::Malformed(GZIP, why))?;
                 if cut {
                     let named = path_of(outer, name.as_deref().unwrap_or("the gzip data"));
                     self.warnings.push(format!("{named} after {} bytes (archive bytes cap)", data.len()));
                 }
-                // A tar file inside is the archive; any other file is its one member.
-                if is_tar(&data) || name.as_deref().is_some_and(|n| extension(n) == "tar") {
+                // A tar file inside (a good first header checksum, as an old
+                // tar file has no magic) is the archive; any other file is
+                // its one member.
+                if checksum_ok(&data) || name.as_deref().is_some_and(|n| extension(n) == "tar") {
                     let entries = tar(&data, cut).map_err(|why| ReadError::Malformed(GZIP, why))?;
                     let mut out = self.listing(&entries, outer);
                     let pages = self.members(&entries, depth, outer, &mut out, in_memory);
@@ -172,13 +174,21 @@ impl State {
             return out;
         }
         let mut rows = vec![vec!["#".to_owned(), "Path".to_owned(), "Size (bytes)".to_owned(), "Type".to_owned()]];
+        // Rows past the chars left never show, so they are not built. The
+        // storage of the rows is given back after the table.
+        let (left, mut shown, mut held) = (self.budget.max_chars - self.budget.chars, 0usize, 0);
         for (n, e) in entries.iter().enumerate() {
-            if !self.budget.reserve(4 * size_of::<String>() + e.path.len() + outer.len()) {
+            let size = 4 * size_of::<String>() + e.path.len() + outer.len();
+            if shown > left || !self.budget.reserve(size) {
                 break;
             }
-            rows.push(vec![(n + 1).to_string(), cell(&path_of(outer, &e.path)), e.size.to_string(), e.kind.label().to_owned()]);
+            held += size;
+            let row = vec![(n + 1).to_string(), cell(&path_of(outer, &e.path)), e.size.to_string(), e.kind.label().to_owned()];
+            shown += row.iter().map(|c| c.chars().count()).sum::<usize>();
+            rows.push(row);
         }
         let table = table_in(&rows, &mut self.budget);
+        self.budget.release(held);
         out.push_str(&table);
         out
     }
@@ -186,7 +196,8 @@ impl State {
     /// Reads the file entries after the listing, each after a file marker,
     /// and gives the number of files read. `open` decodes a ZIP member (its
     /// part draws from the shared cap): its bytes, or `None` for the bytes
-    /// cap, or the reason it failed. Bytes in memory (tar) count here.
+    /// cap, or the reason it failed. Tar members are slices of bytes in
+    /// memory, which the file size cap or the decoder that made them counted.
     fn members(&mut self, entries: &[Entry], depth: usize, outer: &str, out: &mut String, mut open: impl FnMut(&str) -> Result<Vec<u8>, Option<String>>) -> usize {
         let files: Vec<&Entry> = entries.iter().filter(|e| e.kind == Kind::File).collect();
         let total = files.len();
@@ -195,6 +206,10 @@ impl State {
             if n == self.caps.max_pages {
                 self.warnings.push(page_cap_warning(self.caps.max_pages, total, "files"));
                 break;
+            }
+            // A file that filled the char cap exactly stops the read too.
+            if self.budget.text_counts && self.budget.chars == self.budget.max_chars {
+                self.budget.hit.get_or_insert(super::Stop::Chars);
             }
             if self.budget.full() {
                 break;
@@ -209,15 +224,12 @@ impl State {
             out.push_str(self.budget.work(marker));
             read += 1;
             let left = shared_left();
-            let (body, counted) = if e.size > left {
+            let (body, counted) = if e.data.is_none() && e.size > left {
                 self.warnings.push(format!("{path} ({} bytes; archive bytes cap)", e.size));
                 (format!("(not read: the member has {} bytes, more than the {left} bytes left of the archive bytes cap)", e.size), false)
             } else {
                 let bytes = match e.data {
-                    Some(data) => {
-                        take_shared(data.len());
-                        Ok(Cow::Borrowed(data))
-                    }
+                    Some(data) => Ok(Cow::Borrowed(data)),
                     None => open(&e.path).map(Cow::Owned),
                 };
                 match bytes {
@@ -290,8 +302,14 @@ fn path_of(outer: &str, path: &str) -> String {
 fn tar(data: &[u8], cut: bool) -> Result<Vec<Entry<'_>>, String> {
     let mut entries = Vec::new();
     let (mut at, mut long_name) = (0usize, None::<String>);
-    while at + 512 <= data.len() {
-        let h = &data[at..at + 512];
+    // The file may end after an entry, also inside its padding.
+    while at < data.len() {
+        let Some(h) = data.get(at..at + 512) else {
+            if cut {
+                break;
+            }
+            return Err(format!("the file ends inside the header at byte {at}"));
+        };
         scanned(512);
         if h.iter().all(|&b| b == 0) {
             break;
@@ -334,6 +352,9 @@ fn tar(data: &[u8], cut: bool) -> Result<Vec<Entry<'_>>, String> {
         }
         let data = (kind == Kind::File).then_some(body);
         entries.push(Entry { path, size, kind, data });
+    }
+    if long_name.is_some() && !cut {
+        return Err("the file ends after a long name with no entry".into());
     }
     Ok(entries)
 }
@@ -390,7 +411,8 @@ fn pax_path(body: &[u8]) -> Option<String> {
 }
 
 /// The file name in the header, the data and whether `cap` cut it, from the
-/// first member of gzip data (RFC 1952). Later members are not read.
+/// first member of gzip data (RFC 1952). Later members are not read. The
+/// decoded bytes count against the shared cap ([`take_shared`]).
 fn gunzip(data: &[u8], cap: usize) -> Result<(Option<String>, Vec<u8>, bool), String> {
     if data.len() < 18 || !data.starts_with(b"\x1f\x8b\x08") {
         return Err("the file is not gzip data".into());
@@ -425,7 +447,9 @@ fn gunzip(data: &[u8], cap: usize) -> Result<(Option<String>, Vec<u8>, bool), St
     let limits = crate::pdf::Limits { stream_bytes: cap, ..crate::pdf::Limits::DEFAULT };
     let work = Work::new(&limits, &NEVER);
     let mut out = Vec::new();
-    match inflate_raw(raw, cap, &mut out, &work) {
+    let result = inflate_raw(raw, cap, &mut out, &work);
+    take_shared(out.len());
+    match result {
         Ok(used) => {
             let tail = raw.get(used..used + 8).ok_or("the data ends before the gzip trailer")?;
             let (crc, size) = (u32::from_le_bytes(tail[..4].try_into().unwrap()), u32::from_le_bytes(tail[4..].try_into().unwrap()));

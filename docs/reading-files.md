@@ -130,8 +130,10 @@ file is 60000000 bytes; the reader limit is 52428800 bytes
 
 The archive reader lists every entry of a ZIP, tar or gzip archive, then reads
 each file in it with the reader for that file's format. A `.tar.gz` or `.tgz`
-file is one tar archive. A gzip file that holds no tar archive has one entry:
-the file named in its header. ZIP entries with a name that is not UTF-8 are
+file is one tar archive: the gzip data starts with a tar header, or the name
+in the gzip header ends in `.tar`. A gzip file that holds no tar archive has
+one entry: the file named in its header. A tar file that ends inside a
+header, or after a long name with no entry, is damaged. ZIP entries with a name that is not UTF-8 are
 not listed.
 
 - Folders are listed. Symbolic links and hard links are listed and never
@@ -139,8 +141,9 @@ not listed.
 - The files share the caps of the read: the character cap and the work cap,
   and the pages cap for the files read from one archive (`files after 2000 of
   N (files cap)`). The decoded bytes of all files together, at all levels,
-  are at most the file size cap (50 MiB). A file larger than the bytes left
-  is not decoded, and its section says so. A ZIP entry that decodes to more
+  are at most the file size cap (50 MiB), also the bytes of gzip data that
+  fails its check. A file in a tar archive is part of bytes already counted. A ZIP entry larger than the bytes
+  left is not decoded, and its section says so. A ZIP entry that decodes to more
   than its declared size is damaged. Gzip data stops at the bytes left, with
   `<name> after N bytes (archive bytes cap)` in `skipped:`. The parts that an
   office or EPUB file in the archive unzips draw from the same bytes, with

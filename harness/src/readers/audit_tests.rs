@@ -464,3 +464,107 @@ fn long_relationship_target_is_left_out() {
     assert_eq!(doc.markdown, "<!-- page 1 of 1 -->\n## Page 1\n\nkept\n");
     assert_eq!(doc.warnings, ["attribute values over 4096 bytes left out (attribute cap)"]);
 }
+
+/// Argon review of e83b94c, finding 1: what gzip decodes counts against the
+/// archive bytes cap, also when its check then fails, so ten members of
+/// 39,991 bytes each with a bad CRC-32 stop at a 100,000-byte cap: two fail
+/// the check, the third stops at the bytes left.
+#[test]
+fn gzip_members_charge_what_they_decode() {
+    let n = 155;
+    let mut member = b"\x1f\x8b\x08\x08\0\0\0\0\0\x03a.txt\0".to_vec();
+    member.extend(deflate_run(b"", n, b""));
+    member.extend_from_slice(&[0, 0, 0, 0]);
+    member.extend_from_slice(&((1 + 258 * n) as u32).to_le_bytes());
+    let names: Vec<String> = (0..10).map(|i| format!("m{i}.gz")).collect();
+    let file = zip_file(&names.iter().map(|name| Entry { name, data: member.clone(), deflate: false, raw: None }).collect::<Vec<_>>());
+    let (_, doc) = read(&file, "bombs.zip", &Caps { max_bytes: 100_000, ..Caps::default() }).unwrap();
+    assert_eq!(doc.markdown.matches("fails its CRC-32").count(), 2, "{}", doc.markdown);
+    assert!(doc.warnings.iter().any(|w| w.starts_with("m2.gz/a.txt after ") && w.ends_with(" bytes (archive bytes cap)")), "{:?}", doc.warnings);
+}
+
+/// Argon review of e83b94c, finding 1: a tar file in a ZIP counts its bytes
+/// once, when the ZIP decodes it; its members are slices of those bytes.
+#[test]
+fn tar_in_zip_counts_its_bytes_once() {
+    let mut inner = tar_entry("a.txt", b'0', "word ".repeat(10_000).as_bytes());
+    inner.extend(vec![0; 1024]);
+    let file = zip_file(&[Entry { name: "inner.tar", data: inner, deflate: false, raw: None }]);
+    let (_, doc) = read(&file, "outer.zip", &Caps { max_bytes: 100_000, ..Caps::default() }).unwrap();
+    assert!(doc.markdown.contains("## File inner.tar/a.txt\n\nword word"), "{}", &doc.markdown[..doc.markdown.len().min(600)]);
+    assert_eq!(doc.warnings, Vec::<String>::new());
+}
+
+/// Argon review of e83b94c, finding 2: a tar file that ends inside a header,
+/// or after a long name with no entry, is damaged. One that ends inside the
+/// padding after a whole entry body keeps its entries.
+#[test]
+fn cut_tar_files_are_damaged() {
+    let tar = tarball();
+    let err = |bytes: &[u8]| read(bytes, "a.tar", &Caps::default()).map(|(_, doc)| doc.markdown).unwrap_err().to_string();
+    assert_eq!(err(b"corrupt"), "damaged tar archive file: the file ends inside the header at byte 0; no text was read");
+    assert_eq!(err(&tar[..1536 + 70]), "damaged tar archive file: the file ends inside the header at byte 1536; no text was read");
+    let lone = tar_entry("././@LongLink", b'L', b"name.txt\0");
+    assert_eq!(err(&lone), "damaged tar archive file: the file ends after a long name with no entry; no text was read");
+    let (_, doc) = read(&tar[..1024 + 9], "a.tar", &Caps::default()).unwrap();
+    assert!(doc.markdown.starts_with("2 entries, 9 bytes when unpacked.\n"), "{}", doc.markdown);
+}
+
+/// Argon review of e83b94c, finding 3: a member whose text fills the char
+/// cap exactly stops the read; the next file gets no marker.
+#[test]
+fn a_member_that_fills_the_char_cap_stops_the_read() {
+    let file = zip_file(&[stored("a.txt", &"x\n".repeat(250)), stored("b.txt", "hello")]);
+    for max_chars in 150..400 {
+        let doc = super::archive::ArchiveReader.to_markdown(&file, super::archive::ZIP, &Caps { max_chars, ..Caps::default() }).unwrap();
+        if let Some(at) = doc.markdown.find("## File b.txt\n\n") {
+            assert!(!doc.markdown[at + 15..].trim().is_empty(), "{max_chars}: {}", doc.markdown);
+        }
+        assert!(!doc.warnings.iter().any(|w| w.starts_with("b.txt")), "{max_chars}: {:?}", doc.warnings);
+    }
+}
+
+/// Argon review of e83b94c, finding 3: the listing holds rows only for the
+/// entries that the char cap can show, and gives their storage back after
+/// the table, so 1,000 entries at a 300-char cap stop at the char cap.
+#[test]
+fn a_long_listing_stops_at_the_char_cap() {
+    let names: Vec<String> = (0..1000).map(|i| format!("f{i:04}")).collect();
+    let file = zip_file(&names.iter().map(|name| stored(name, "")).collect::<Vec<_>>());
+    let doc = super::archive::ArchiveReader.to_markdown(&file, super::archive::ZIP, &Caps { max_chars: 300, ..Caps::default() }).unwrap();
+    assert_eq!(doc.warnings, ["text after 300 chars (char cap)"]);
+}
+
+/// Argon review of e83b94c, finding 4: the list styles of a damaged
+/// styles.xml give their room back, so the body keeps it.
+#[test]
+fn damaged_odt_styles_give_their_room_back() {
+    let styles: String = (0..1700).map(|i| format!("<text:list-style style:name=\"S{i:04}\"/>")).collect();
+    let styles = format!("<office:document-styles xmlns:office=\"o\" xmlns:style=\"s\" xmlns:text=\"t\"><office:styles>{styles}<a></office:styles></office:document-styles>");
+    let body = "word ".repeat(600);
+    let content = format!("<office:document-content xmlns:office=\"o\" xmlns:text=\"t\"><office:body><office:text><text:p>{body}</text:p></office:text></office:body></office:document-content>");
+    let file = zip_file(&[stored("mimetype", "application/vnd.oasis.opendocument.text"), deflated("styles.xml", &styles), deflated("content.xml", &content)]);
+    let doc = super::odf::OdfReader.to_markdown(&file, Format::Odt, &Caps { max_chars: 4096, ..Caps::default() }).unwrap();
+    assert_eq!(doc.warnings, ["styles.xml (damaged; lists read as bullets)"]);
+    assert!(doc.markdown.ends_with("word\n"), "{}", &doc.markdown[doc.markdown.len().saturating_sub(80)..]);
+}
+
+/// Argon review of e83b94c, finding 6: a `.tgz` file with no name in its
+/// gzip header and an old tar archive (no `ustar` magic) inside is a tar
+/// archive: its first header checksum says so.
+#[test]
+fn old_tar_in_nameless_gzip_is_an_archive() {
+    let mut tar = tar_entry("a.txt", b'0', b"old tar\n");
+    tar[257..265].fill(0);
+    tar[148..156].copy_from_slice(b"        ");
+    let sum: u32 = tar[..512].iter().map(|&b| u32::from(b)).sum();
+    tar[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    tar.extend(vec![0; 1024]);
+    let mut gz = b"\x1f\x8b\x08\0\0\0\0\0\0\x03".to_vec();
+    gz.extend(deflate_fixed(&tar));
+    gz.extend_from_slice(&crc32(&tar).to_le_bytes());
+    gz.extend_from_slice(&(tar.len() as u32).to_le_bytes());
+    let (_, doc) = read(&gz, "a.tgz", &Caps::default()).unwrap();
+    assert!(doc.markdown.starts_with("1 entry, 8 bytes when unpacked.\n"), "{}", doc.markdown);
+    assert!(doc.markdown.contains("## File a.txt\n\nold tar\n"), "{}", doc.markdown);
+}

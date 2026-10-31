@@ -69,6 +69,7 @@ impl Reader for OdfReader {
                 Err(_) => false,
             };
             if !read {
+                budget.release(styles.iter().map(|s| SLOT + s.0.len()).sum());
                 styles.clear();
                 zip.warnings.push("styles.xml (damaged; lists read as bullets)".into());
             }
