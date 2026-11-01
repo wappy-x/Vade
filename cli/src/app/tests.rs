@@ -862,13 +862,20 @@ fn prerequisite_model_probe_accepts_indexed_nested_shards_without_claiming_verif
     fs::write(model.join("tensors/a.safetensors"), "placeholder").unwrap();
     let mut machine = f.app.config.machines[0].clone();
     machine.model_path = model.to_string_lossy().into_owned();
+    // A source-build probe also reads this host's rustup toolchains, and a CI
+    // host has no nightly. The prebuilt probe has the same model line.
+    f.app.config.prebuilt_dir = Some(f.dir.join("bundle"));
     f.app.machine_checks(&machine).unwrap();
     let command = f.app.runner.calls.last().unwrap().args.last().unwrap();
     let probe = &command[command.find("if test -d ").unwrap()..];
+    assert!(!probe.contains("rustup"), "{probe}");
+    // Linux hosts run sh as dash. A Mac has dash too, so it checks the same shell.
+    let shell = if Path::new("/bin/dash").exists() { "/bin/dash" } else { "sh" };
     let run = || {
-        let output = std::process::Command::new("sh").args(["-c", probe]).output().unwrap();
-        assert!(output.status.success());
-        String::from_utf8(output.stdout).unwrap()
+        let output = std::process::Command::new(shell).args(["-c", probe]).output().unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(output.status.success(), "{shell}: {stdout}{}", String::from_utf8_lossy(&output.stderr));
+        stdout
     };
     assert!(run().contains("weights=present"), "indexed nested checkpoint was called missing");
     fs::remove_file(model.join("tokenizer.json")).unwrap();
