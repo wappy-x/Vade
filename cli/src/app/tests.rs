@@ -11,6 +11,8 @@ mod two_spark;
 mod groups;
 #[path = "tests/pairs.rs"]
 mod pairs;
+#[path = "tests/local_rank.rs"]
+mod local_rank;
 use super::*;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -21,7 +23,7 @@ struct FakeRunner { calls: Vec<Exec>, started: BTreeSet<String>, fail: Option<St
 impl Runner for FakeRunner {
     fn run(&mut self, exec: &Exec) -> Result<Output, String> {
         self.calls.push(exec.clone());
-        let request = if exec.program == "ssh" && exec.args.last().is_some_and(|a| a.contains("__worker")) { text::parse(&String::from_utf8_lossy(&exec.stdin)).unwrap() } else { Fields::new() };
+        let request = if matches!(exec.program.as_str(), "ssh" | "sh") && exec.args.last().is_some_and(|a| a.contains("__worker")) { text::parse(&String::from_utf8_lossy(&exec.stdin)).unwrap() } else { Fields::new() };
         let name = exec.label.split_whitespace().next().unwrap_or("").to_string();
         let op = request.get("op").map(String::as_str).unwrap_or("");
         if op == "start" {

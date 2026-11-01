@@ -57,11 +57,6 @@ impl<R: Runner> App<R> {
             "Cannot create a fresh private machine source directory. Check its ownership, permissions, and symlink-free ancestors.",
         )?;
         // No deletion: source checkouts and immutable staged builds are never removed.
-        let ssh = std::iter::once("ssh".into())
-            .chain(runner::ssh_options())
-            .map(|s| quote(&s))
-            .collect::<Vec<_>>()
-            .join(" ");
         let tracked = self.checked(
             Exec::new(
                 &format!("{label} tracked files"),
@@ -76,27 +71,16 @@ impl<R: Runner> App<R> {
             ),
             "Cannot list tracked source files. Check the configured Git checkout.",
         )?;
-        let mut exec = Exec::new(
+        // Enter exactly the directory prepared above. Neither old rsync nor
+        // protected-argument rsync has to expand a tilde. Implied parent
+        // directories use the receiver's umask. Archive mode otherwise
+        // reapplies shared source permissions.
+        let mut exec = runner::copy_to(
             &format!("{} {label} source copy", machine.name),
-            "rsync",
-            vec![
-                "-a".into(),
-                // Archive mode otherwise reapplies shared source permissions.
-                "--chmod=go-rwx".into(),
-                "--from0".into(),
-                "--files-from=-".into(),
-                "--exclude=target".into(),
-                "--exclude=.git".into(),
-                "--exclude=*.local".into(),
-                // Enter exactly the directory prepared above. Neither old
-                // rsync nor protected-argument rsync has to expand a tilde.
-                // Implied parent directories use the receiver's umask.
-                format!("--rsync-path=umask 077 && cd {} && exec rsync", remote_path(destination)),
-                "-e".into(),
-                ssh,
-                format!("{}/", source.display()),
-                format!("{}:./", machine.ssh),
-            ],
+            &machine.ssh,
+            destination,
+            ["--from0", "--files-from=-", "--exclude=target", "--exclude=.git", "--exclude=*.local"].map(String::from).to_vec(),
+            vec![format!("{}/", source.display())],
         );
         exec.stdin = tracked.stdout.into_bytes();
         exec.timeout = Duration::from_secs(600);

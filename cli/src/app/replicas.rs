@@ -8,7 +8,7 @@ impl<R: Runner> App<R> {
     /// Every owned tunnel answers and a replica gateway is still the recorded process.
     pub(super) fn connection_ok(&mut self, session: &Session) -> Result<bool, String> {
         let mut ok = true;
-        for index in session.servers() {
+        for index in session.servers().filter(|&index| tunneled(session, index)) {
             ok &= self.runner.run(&self.tunnel_at(session, index, Some("check")))?.success;
         }
         if session.replicas && ok && !self.dry {
@@ -18,7 +18,7 @@ impl<R: Runner> App<R> {
     }
 
     pub(super) fn start_tunnels(&mut self, session: &Session) -> Result<(), String> {
-        for index in session.servers() {
+        for index in session.servers().filter(|&index| tunneled(session, index)) {
             self.checked(self.tunnel_at(session, index, None), &format!("The controller tunnel could not start. Check rank {index}'s ssh entry and local_port; run vade status."))?;
             self.checked(
                 self.tunnel_at(session, index, Some("check")),

@@ -54,6 +54,9 @@ impl<R: Runner> App<R> {
         if !matches!(command, Command::Install | Command::Update) {
             self.config.resolve_generation()?;
         }
+        if matches!(command, Command::Up(_) | Command::Install | Command::Update) {
+            one_local_machine(&self.config)?;
+        }
         match command {
             Command::Menu => self.menu(),
             Command::Up(options) => self.up(&options),
@@ -115,6 +118,10 @@ impl<R: Runner> App<R> {
                 return Err("Vade already has an ownership record with different launch settings or build. Run vade down before changing it.".into());
             }
             return self.already_ready(&existing);
+        }
+        // A serving rank on this computer has no tunnel; its engine port is the endpoint.
+        if let Some(index) = session.servers().find(|&index| !tunneled(&session, index) && session.tunnel_port(index) != session.serve_port) {
+            return Err(format!("{} is this computer, so its engine is the endpoint and this launch needs local_port equal to serve_port, without --replicas; nothing was started.", session.ranks[index].machine.name));
         }
         let rdma = session.chained() && rdma;
         let transport = if session.chained() && session.replicas {
@@ -441,7 +448,7 @@ impl<R: Runner> App<R> {
             }
         }
         self.stop_gateway(session)?;
-        for index in session.servers() {
+        for index in session.servers().filter(|&index| tunneled(session, index)) {
             let socket = session.tunnel_socket(&self.config.state_dir, index);
             text::reject_symlinks(&socket)?;
             if self.dry || socket.exists() {
@@ -757,7 +764,7 @@ impl<R: Runner> App<R> {
             if exec.args.iter().any(|arg| arg.contains(REMOTE_STORAGE_GUARD)) {
                 if let Some(detail) = output.stdout.lines().find_map(|line| line.strip_prefix("VADE_STORAGE_ERROR ")) {
                     if let Some((kind, path)) = detail.split_once(' ') {
-                        let host = exec.args.iter().rev().nth(1).map(String::as_str).unwrap_or("the remote machine");
+                        let host = if exec.program == "ssh" { exec.args.iter().rev().nth(1).map(String::as_str).unwrap_or("the remote machine") } else { "this computer" };
                         return Err(if kind == "private" {
                             format!("Directory {path} on {host} is open to other users. Run chmod 700 {} there, then run vade install again.", quote(path))
                         } else {
@@ -847,6 +854,22 @@ pub(crate) fn retention_label(session: &Session, reported: Option<bool>) -> Stri
 /// One wording for the selected transport in launch plans, install and doctor.
 pub(crate) fn transport_name(machines: usize, rdma: bool) -> &'static str {
     if machines == 1 { "local (one Spark; no fabric)" } else if rdma { "RDMA" } else { "TCP" }
+}
+
+/// Whether the serving rank at `index` needs the controller tunnel. A rank on
+/// this computer serves the endpoint itself on 127.0.0.1:serve_port.
+fn tunneled(session: &Session, index: usize) -> bool {
+    !runner::this_computer(&session.ranks[index].machine.ssh)
+}
+
+/// Refuse a config where two or more machines name this computer: one
+/// computer cannot hold two ranks of one launch.
+fn one_local_machine(config: &Config) -> Result<(), String> {
+    let local = config.machines.iter().filter(|machine| runner::this_computer(&machine.ssh)).map(|machine| machine.name.as_str()).collect::<Vec<_>>();
+    if local.len() > 1 {
+        return Err(format!("Machines {} all name this computer, so nothing was started; give each machine the SSH destination of its own Spark.", local.join(", ")));
+    }
+    Ok(())
 }
 
 fn rdma_enabled() -> Result<bool, String> {

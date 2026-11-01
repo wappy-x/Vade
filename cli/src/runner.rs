@@ -552,12 +552,60 @@ pub fn remote_path(value: &str) -> String {
     }
 }
 
-/// Run `command` on the SSH host `alias` with [`ssh_options`].
+/// Run `command` on the SSH host `alias` with [`ssh_options`]. When `alias`
+/// names this computer ([`this_computer`]), run the same command string as a
+/// local child process instead ([`local`]): a fresh Spark has no SSH key for
+/// itself.
 pub fn ssh(alias: &str, command: String, label: &str) -> Exec {
+    if this_computer(alias) {
+        return local(command, label);
+    }
     let mut args = ssh_options();
     args.extend([alias.into(), command]);
     Exec::new(label, "ssh", args)
 }
+
+/// Run `command` through `sh -c` on this computer, as SSH would run it on a
+/// remote one. The child gets only the names an SSH session gives a command
+/// (home, path, user, shell and locale), so no controller shell setting
+/// reaches a rank on this computer that would not reach a remote rank.
+pub fn local(command: String, label: &str) -> Exec {
+    let mut exec = Exec::new(label, "sh", vec!["-c".into(), command]);
+    exec.unset = std::env::vars_os()
+        .map(|(name, _)| name.to_string_lossy().into_owned())
+        .filter(|name| !(matches!(name.as_str(), "HOME" | "PATH" | "USER" | "LOGNAME" | "SHELL" | "LANG") || name.starts_with("LC_")))
+        .collect();
+    exec
+}
+
+/// Copy `sources` into the existing folder `folder` on the SSH host `alias`
+/// with rsync. `options` follow `-a --chmod=go-rwx`. The receiver runs with
+/// umask 077 inside `folder`. When `alias` names this computer, the same
+/// rsync runs as a local copy inside `folder`, with the same umask.
+pub fn copy_to(label: &str, alias: &str, folder: &str, options: Vec<String>, sources: Vec<String>) -> Exec {
+    let receiver = format!("umask 077 && cd {} && exec rsync", remote_path(folder));
+    let mut args: Vec<String> = vec!["-a".into(), "--chmod=go-rwx".into()];
+    args.extend(options);
+    if this_computer(alias) {
+        let here = std::env::current_dir().map(|dir| dir.to_string_lossy().into_owned()).unwrap_or_default();
+        args.extend(sources.into_iter().map(|source| if source.starts_with('/') { source } else { format!("{here}/{source}") }));
+        args.push("./".into());
+        let mut exec = local(format!("{receiver} \"$@\""), label);
+        exec.args.push("sh".into());
+        exec.args.extend(args);
+        return exec;
+    }
+    let ssh = std::iter::once("ssh".into()).chain(ssh_options()).map(|s| quote(&s)).collect::<Vec<_>>().join(" ");
+    args.extend([format!("--rsync-path={receiver}"), "-e".into(), ssh]);
+    args.extend(sources);
+    args.push(format!("{alias}:./"));
+    Exec::new(label, "rsync", args)
+}
+
+mod host;
+#[cfg(test)]
+pub(crate) use host::{fake as fake_host, names as host_names, Host};
+pub(crate) use host::this_computer;
 
 /// Non-interactive SSH options: batch mode, a 10 s connect timeout, a
 /// keepalive that drops a dead peer after about 20 s, and no local commands

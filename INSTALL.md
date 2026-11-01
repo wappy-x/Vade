@@ -1083,13 +1083,18 @@ The same `~/` text is not enough when home folders differ between accounts.
 
 ### Check SSH from the controller
 
-The controller reaches **every** rank over SSH. That includes its own machine
-when the controller is one of the Sparks: Vade has no separate path for a
-local rank. Plain `ssh = you@spark-a-address` and `ssh = you@spark-b-address`
-work for every rank with no `~/.ssh/config` alias.
+The controller reaches every other rank over SSH. When the controller is one
+of the Sparks, Vade runs that Spark's commands on it as local processes, with
+no SSH to itself, so that Spark needs no key for itself. Vade finds that
+Spark by its `ssh =` entry: `localhost`, a loopback address, one of its own
+addresses, its host name, or an alias that `ssh -G` resolves to one of these.
+Only one machine in the config can name the controller. When that machine is
+rank 0, keep `local_port` equal to `serve_port` (the default), because its
+engine then serves the endpoint itself. Plain `ssh = you@spark-a-address` and
+`ssh = you@spark-b-address` work for every rank with no `~/.ssh/config` alias.
 
-Before `vade install`, check each rank from the controller exactly the way Vade
-connects, with no prompt:
+Before `vade install`, check each other rank from the controller exactly the way
+Vade connects, with no prompt:
 
 ```sh
 ssh -o BatchMode=yes you@spark-a-address true
@@ -1098,24 +1103,8 @@ ssh -o BatchMode=yes you@spark-b-address true
 
 `Host key verification failed` or `Permission denied` means one of two things.
 Either that machine does not trust the controller's key yet, or the controller
-does not know that host key yet. Fix it with your usual SSH key setup. On a
-Spark that is also the controller, that includes its own address. To record a
-Spark's own host key on that Spark, run this once there:
-
-```sh
-ssh -o StrictHostKeyChecking=accept-new you@spark-a-address true
-```
-
-If that Spark then answers `Permission denied (publickey)`, it does not trust
-its own key yet. Add the key there. If `~/.ssh/id_ed25519.pub` does not exist,
-run `ssh-keygen -t ed25519` first:
-
-```sh
-cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
-```
-
-Running the controller on a separate computer avoids SSH to itself. Vade never
-edits SSH settings.
+does not know that host key yet. Fix it with your usual SSH key setup. Vade
+never edits SSH settings.
 
 You need an alias only for settings that a plain destination cannot carry,
 such as a jump host, a non-default port or a specific key. For that case,

@@ -48,13 +48,8 @@ impl<R: Runner> App<R> {
         crate::output::line(format_args!("{}: install caches prepared{}.", machine.name, timings))
     }
     fn bundle_copy(&self, bundle: &crate::prebuilt::Bundle, machine: &Machine, destination: &str, files: &[&str]) -> Exec {
-        let ssh = std::iter::once("ssh".into()).chain(runner::ssh_options()).map(|s| quote(&s)).collect::<Vec<_>>().join(" ");
-        let mut exec = Exec::new(&format!("{} prebuilt copy", machine.name), "rsync", vec![
-            "-a".into(), "--chmod=go-rwx".into(),
-            format!("--rsync-path=umask 077 && cd {} && exec rsync", remote_path(destination)), "-e".into(), ssh,
-        ]);
-        exec.args.extend(files.iter().map(|name| bundle.dir.join(name).to_string_lossy().into_owned()));
-        exec.args.push(format!("{}:./", machine.ssh));
+        let mut exec = runner::copy_to(&format!("{} prebuilt copy", machine.name), &machine.ssh, destination, Vec::new(),
+            files.iter().map(|name| bundle.dir.join(name).to_string_lossy().into_owned()).collect());
         exec.timeout = Duration::from_secs(600);
         exec
     }
