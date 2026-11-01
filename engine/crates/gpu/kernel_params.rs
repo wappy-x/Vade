@@ -855,33 +855,35 @@ pub const fn canonical_span(tiles: usize, part: usize, ranges: u32) -> Option<(u
     if part % 2 != 0 { return None; }
     Some((tiles * (part / 2) / 2, tiles * (part / 2 + 1) / 2))
 }
-/// Rank counts fold_ranks holds: rank 65535 would need a 17th carry entry.
+/// Rank counts fold_ranks holds: rank 65535 would need a 17th level.
 pub const FOLD_RANKS_LIMIT: usize = 1 << 16;
 /// FP32 partials of `count` ranks folded as a pair tree: ranks 2i and 2i+1
 /// first, then pairs of pairs. Two and three ranks keep the sequential order.
-/// A carry stack gives the same additions as the in-place pairwise passes. Its
-/// 16 entries hold any count below FOLD_RANKS_LIMIT; callers pass a rank count.
+/// Level j holds the latest complete block of 2^j ranks while bit j of the
+/// ranks taken is set. A rank adds the levels of its trailing one bits, older
+/// block first, and the result adds the set levels of `count` from low to high:
+/// the additions of the in-place pairwise passes. The level steps are written
+/// out, so every index is a constant and a kernel keeps the levels in registers.
 #[inline]
 pub fn fold_ranks(count: usize, value: impl Fn(usize) -> f32) -> f32 {
     debug_assert!(count < FOLD_RANKS_LIMIT, "fold_ranks holds at most 65535 ranks");
-    let (mut sums, mut sizes, mut depth) = ([0.0f32; 16], [0usize; 16], 0);
+    let mut levels = [0.0f32; 16];
     for rank in 0..count {
-        sums[depth] = value(rank);
-        sizes[depth] = 1;
-        depth += 1;
-        while depth > 1 && sizes[depth - 2] == sizes[depth - 1] {
-            sums[depth - 2] += sums[depth - 1];
-            sizes[depth - 2] *= 2;
-            depth -= 1;
-        }
+        let (next, mut carry) = (rank + 1, value(rank));
+        // Bits 0..=bit of rank + 1 are zero while bit is a trailing one of rank.
+        macro_rules! steps { ($($bit:literal)*) => { $(
+            let low = next & ((2 << $bit) - 1);
+            if low == 0 { carry = levels[$bit] + carry; } else if low == 1 << $bit { levels[$bit] = carry; }
+        )* } }
+        steps!(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14);
+        // Level 15 only takes a block: a 16th trailing one needs rank 65535.
+        if next & 0xffff == 1 << 15 { levels[15] = carry; }
     }
-    if depth == 0 { return 0.0; }
-    let mut sum = sums[depth - 1];
-    while depth > 1 {
-        depth -= 1;
-        sum = sums[depth - 1] + sum;
+    let mut sum = None;
+    for (bit, level) in levels.iter().enumerate() {
+        if count >> bit & 1 != 0 { sum = Some(sum.map_or(*level, |sum| *level + sum)); }
     }
-    sum
+    sum.unwrap_or(0.0)
 }
 
 /// Raw BF16 KV words retained at a canonical hybrid prefill boundary.

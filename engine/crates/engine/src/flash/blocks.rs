@@ -797,7 +797,7 @@ fn project_rows(b: &Backend<'_>, x: u64, cols: usize, tokens: usize, first: (u64
         return Err("Flash BF16 MMA needs K >= 64, a multiple of 8, and aligned operands".into());
     }
     if tokens > decode_width && !input_bf16 { params.input = b.pack_flash_dense_input(x, cols, tokens)?; }
-    if tokens >= 128 && cols % 64 == 0 && first.2 % 64 == 0 && second.2 % 64 == 0 && ranges == 0 { // no ranges copy: shards take mma64
+    if tokens >= 128 && cols % 64 == 0 && first.2 % 64 == 0 && second.2 % 64 == 0 {
         return profile_projection(b, rows, cols, || {
             let full = tokens / 128 * 128;
             params.tokens = full as u32;
@@ -838,7 +838,7 @@ fn project_rows(b: &Backend<'_>, x: u64, cols: usize, tokens: usize, first: (u64
             _ => "flash_bf16_mma1" } };
         let groups = first.2.div_ceil(8) + second.2.div_ceil(8);
         if !spark_gpu_probe::kernel_params::flash_bf16_decode_split(rows, cols) { threads = 64; (decode, groups.div_ceil(2)) }
-        else { (decode, groups) }
+        else { (decode, if ranges != 0 { groups.div_ceil(2) } else { groups }) } // two-range shards: two tiles a block
     }
     else if tokens >= 32 {
         threads = 256;

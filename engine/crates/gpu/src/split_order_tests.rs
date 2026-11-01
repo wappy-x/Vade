@@ -118,7 +118,7 @@ fn routed_down_block_fold_follows_the_pair_split() {
     assert_eq!(fixed_four, 0);
 }
 
-/// Bit-exact order checks: the pair tree, the carry stack and the shard spans.
+/// Bit-exact order checks: the pair tree, the fold levels and the shard spans.
 #[test]
 fn fold_and_span_orders_are_exact() {
     let mut g = Lcg(11);
@@ -141,7 +141,7 @@ fn fold_and_span_orders_are_exact() {
     assert_eq!(fold_ranks(3, |r| v[r]).to_bits(), ((v[0] + v[1]) + v[2]).to_bits());
     assert_eq!(fold_ranks(4, |r| v[r]).to_bits(), ((v[0] + v[1]) + (v[2] + v[3])).to_bits());
     assert_eq!(fold_ranks(6, |r| v[r]).to_bits(), (((v[0] + v[1]) + (v[2] + v[3])) + (v[4] + v[5])).to_bits());
-    // The largest count the 16-entry carry stack holds: 15 pending subtrees at most.
+    // The largest count the 16 levels hold: rank 65534 has 15 trailing ones at most.
     let count = FOLD_RANKS_LIMIT - 1;
     let mut p = (0..count).map(|r| (r % 7) as f32 - 2.5).collect::<Vec<_>>();
     let expected = { let mut step = 1; while step < count { let mut i = 0; while i + step < count { p[i] += p[i + step]; i += 2 * step; } step *= 2; } p[0] };
@@ -168,6 +168,88 @@ fn fold_and_span_orders_are_exact() {
         assert_eq!([1, 2, 4, 8].map(|w| shard_ranges(whole / w, whole)), [0, 0, 2, 0]);
         assert_eq!(shard_ranges(whole / 6, whole), 0);
     }
+}
+
+/// flash_prefill.rs flash_bf16_mma128 walks K in K32 stages (two K16 tiles) and
+/// closes a range when tile + 1 == canonical::end, then moves to canonical::next;
+/// its merge is left = p0 (+ p1), right = p2 (+ p3), left + right. decode_rows'
+/// paired split block adds l0 + l2. Both must give shard()'s bits, which the
+/// two-rank shard gives, for four ranges and for two.
+fn wide_walk(x: &[f32], w: &[f32], ranges: u32) -> f32 {
+    let kt = x.len() / 16;
+    let end = |part| if ranges == 0 { kt * (part + 1) / 4 } else { canonical_span(kt, part, ranges).map_or(usize::MAX, |s| s.1) };
+    let next = |part| part + if ranges == 2 { 2 } else { 1 };
+    let (hi, lo): (Vec<f32>, Vec<f32>) = x.iter().map(|&v| (bf16(v), bf16(v - bf16(v)))).unzip();
+    let (mut h, mut l, mut range, mut left, mut right) = (0.0f32, 0.0f32, 0, 0.0f32, 0.0f32);
+    let mut k = 0;
+    while k < kt {
+        for z in 0..2 {
+            let t = k + z;
+            h = tile(h, &hi[t * 16..t * 16 + 16], &w[t * 16..t * 16 + 16]);
+            l = tile(l, &lo[t * 16..t * 16 + 16], &w[t * 16..t * 16 + 16]);
+            if t + 1 == end(range) {
+                let value = h + l;
+                match range { 0 => left = value, 1 => left += value, 2 => right = value, _ => right += value }
+                (h, l, range) = (0.0, 0.0, next(range));
+            }
+        }
+        k += 2;
+    }
+    left + right
+}
+#[test]
+fn two_range_prompt_tile_and_paired_decode_keep_the_shard_bits() {
+    // Shard K of the FP8 geometry on four ranks (1536 and 160) and on two (3072 and 320).
+    for (k, seed) in [(1536, 21), (160, 22), (3072, 23), (320, 24), (64, 25)] {
+        let (x, w) = problem(k, 64, seed);
+        for row in &w {
+            for ranges in [0, 2] {
+                if ranges == 2 && (k / 16) % 2 != 0 { continue; }
+                assert_eq!(wide_walk(&x, row, ranges).to_bits(), shard(&x, row, ranges).to_bits(), "K {k} ranges {ranges}");
+            }
+            // Paired decode: (l0 + -0.0) + (l2 + -0.0) is l0 + l2 for the two-range parts.
+            let parts = [0, 2].map(|p| canonical_span(k / 16, p, 2).map_or(-0.0, |(s, e)| {
+                let (hi, lo): (Vec<f32>, Vec<f32>) = x.iter().map(|&v| (bf16(v), bf16(v - bf16(v)))).unzip();
+                let (mut h, mut l) = (0.0f32, 0.0f32);
+                for t in s..e { h = tile(h, &hi[t * 16..t * 16 + 16], &row[t * 16..t * 16 + 16]); l = tile(l, &lo[t * 16..t * 16 + 16], &row[t * 16..t * 16 + 16]); }
+                h + l
+            }));
+            assert_eq!((parts[0] + parts[1]).to_bits(), shard(&x, row, 2).to_bits(), "K {k} paired decode");
+        }
+    }
+}
+
+/// The carry stack fold_ranks used before its levels moved to registers.
+fn carry_stack(count: usize, value: impl Fn(usize) -> f32) -> f32 {
+    let (mut sums, mut sizes, mut depth) = ([0.0f32; 16], [0usize; 16], 0);
+    for rank in 0..count {
+        sums[depth] = value(rank);
+        sizes[depth] = 1;
+        depth += 1;
+        while depth > 1 && sizes[depth - 2] == sizes[depth - 1] { sums[depth - 2] += sums[depth - 1]; sizes[depth - 2] *= 2; depth -= 1; }
+    }
+    if depth == 0 { return 0.0; }
+    let mut sum = sums[depth - 1];
+    while depth > 1 { depth -= 1; sum = sums[depth - 1] + sum; }
+    sum
+}
+
+/// The register levels make the carry stack's additions for every rank count:
+/// signed zeros, subnormals, infinities, NaN payloads and cancelling values.
+#[test]
+fn register_levels_give_the_carry_stack_bits() {
+    let special = [0.0f32, -0.0, f32::MIN_POSITIVE / 8.0, -f32::MIN_POSITIVE / 3.0, f32::INFINITY, f32::NEG_INFINITY,
+        f32::from_bits(0x7fc0_1234), f32::from_bits(0xffa0_0001), 1.0e8, -1.0e8, 1.0, f32::MAX, -f32::MAX, 3.0e-3];
+    let mut g = Lcg(29);
+    for count in (0..=257).chain([1023, 1024, 1025, 32767, 32768, FOLD_RANKS_LIMIT - 1]) {
+        for round in 0..8 {
+            let v = (0..count).map(|r| if round % 2 == 0 { special[(r * 7 + round) % special.len()] }
+                else if round == 3 { -0.0 } else { g.next() * 1.0e3 }).collect::<Vec<_>>();
+            assert_eq!(fold_ranks(count, |r| v[r]).to_bits(), carry_stack(count, |r| v[r]).to_bits(), "count {count} round {round}");
+        }
+    }
+    // All -0.0 stays -0.0: no level adds a +0.0.
+    for count in 1..=64 { assert_eq!(fold_ranks(count, |_| -0.0).to_bits(), (-0.0f32).to_bits(), "count {count}"); }
 }
 
 /// Two ranks launch main's bytes: the descriptor keeps its size, and a shard

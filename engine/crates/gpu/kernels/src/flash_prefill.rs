@@ -16,24 +16,33 @@ macro_rules! unroll {
 
 // One K32 stage: 8192 B per A plane, 4096 B of weights. Every
 // 16-byte copy preserves the original lane-major fragment words.
-#[inline(always)]
-unsafe fn stage(p: Bf16Rows, sh: u32, mt: usize, nt: usize, k: usize, tid: usize) {
-    let kt = p.cols as usize / 16;
-    let x = (p.input as *const u32).add((mt + tid / 64) * kt * 128 + k * 128 + tid % 64 * 4);
-    let w = (p.weight as *const u32).add(canonical::weight_tile(nt + tid / 32, k, kt) * 64 + tid % 32 * 4);
-    let dst = sh + (tid * 16) as u32;
-    for plane in 0..TERMS {
-        ptx::copy16(dst + (plane * 8192) as u32, x.add(plane * p.input_plane_words as usize));
-        ptx::copy16(dst + (plane * 8192 + 4096) as u32,
-            x.add(plane * p.input_plane_words as usize + kt * 512));
-    }
-    ptx::copy16(dst + (TERMS * 8192) as u32, w);
-    ptx::commit();
+macro_rules! stage {
+    ($p:expr, $sh:expr, $mt:expr, $nt:expr, $k:expr, $tid:expr) => {{
+        let (p, sh, mt, nt, k, tid): (Bf16Rows, u32, usize, usize, usize, usize) = ($p, $sh, $mt, $nt, $k, $tid);
+        let kt = p.cols as usize / 16;
+        let x = (p.input as *const u32).add((mt + tid / 64) * kt * 128 + k * 128 + tid % 64 * 4);
+        let w = (p.weight as *const u32).add(canonical::weight_tile(nt + tid / 32, k, kt) * 64 + tid % 32 * 4);
+        let dst = sh + (tid * 16) as u32;
+        for plane in 0..TERMS {
+            ptx::copy16(dst + (plane * 8192) as u32, x.add(plane * p.input_plane_words as usize));
+            ptx::copy16(dst + (plane * 8192 + 4096) as u32,
+                x.add(plane * p.input_plane_words as usize + kt * 512));
+        }
+        ptx::copy16(dst + (TERMS * 8192) as u32, w);
+        ptx::commit();
+    }};
 }
 
-/// Block256, grid(T/128,(N0+N1)/64), shared61440 at two planes.
+/// Block256, grid(T/128,(N0+N1)/64), shared61440 at two planes. A four-rank K-split
+/// shard runs its own two-range copy; four ranges run the code without ranges.
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn flash_bf16_mma128(mut p: Bf16Rows) {
+pub unsafe extern "ptx-kernel" fn flash_bf16_mma128(p: Bf16Rows) {
+    let (cols, ranges) = crate::kernel_params::bf16_cols_ranges(p.cols);
+    if ranges == 2 { wide::<2>(Bf16Rows { cols, ..p }); } else { wide::<0>(p); }
+}
+
+#[inline(always)]
+unsafe fn wide<const RANGES: u32>(mut p: Bf16Rows) {
     let tid = _thread_idx_x() as usize;
     let (lane, warp) = (tid % 32, tid / 32);
     let (wm, wn) = (warp / 2 * 2, warp % 2 * 4);
@@ -58,13 +67,13 @@ pub unsafe extern "ptx-kernel" fn flash_bf16_mma128(mut p: Bf16Rows) {
     let (mut left, mut right) = ([[ZERO; 4]; 2], [[ZERO; 4]; 2]);
     let mut sums = [[[ZERO; 4]; 2]; TERMS];
     let mut range = 0;
-    stage(p, 0, mt, nt, 0, tid);
-    stage(p, FLASH_BF16_WIDE_STAGE as u32, mt, nt, 2, tid);
+    stage!(p, 0, mt, nt, 0, tid);
+    stage!(p, FLASH_BF16_WIDE_STAGE as u32, mt, nt, 2, tid);
     ptx::wait_one(); ptx::sync();
     let (mut k, mut current, mut next) = (0, 0, 2 * FLASH_BF16_WIDE_STAGE);
     while k < kt {
         let ahead = k + 4;
-        if ahead < kt { stage(p, next as u32, mt, nt, ahead, tid); }
+        if ahead < kt { stage!(p, next as u32, mt, nt, ahead, tid); }
         unroll!(2, z, {
             let base_a = (current + wm * 1024 + z * 512 + lane * 16) as u32;
             let base_b = (current + TERMS * 8192 + wn * 512 + z * 256 + lane * 8) as u32;
@@ -79,7 +88,7 @@ pub unsafe extern "ptx-kernel" fn flash_bf16_mma128(mut p: Bf16Rows) {
                 });
             });
             // Five K16 instructions per K=320 range may cross a K32 stage.
-            if k + z + 1 == canonical::range(kt, range).1 {
+            if k + z + 1 == canonical::end(kt, range, RANGES) {
                 unroll!(2, i, { unroll!(4, j, {
                     let mut value = sums[0][i][j];
                     for plane in 1..TERMS { value = add(value, sums[plane][i][j]); }
@@ -89,7 +98,8 @@ pub unsafe extern "ptx-kernel" fn flash_bf16_mma128(mut p: Bf16Rows) {
                     }
                     for plane in 0..TERMS { sums[plane][i][j] = ZERO; }
                 }); });
-                range += 1;
+                // Parts outside the shard add -0.0, so skipping them is exact.
+                range = canonical::next(range, RANGES);
             }
         });
         k += 2;

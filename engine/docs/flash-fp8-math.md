@@ -115,8 +115,9 @@ on each Spark count must confirm that the token IDs are identical.
 The loader registers a four-rank shard by weight address
 ([`split_ranges.rs`](../crates/engine/src/flash/split_ranges.rs)), and
 `project_rows` puts its ranges in the high bits of the launch's `cols` word
-(`bf16_cols_word`). Such a shard takes the generic entries and the 64-row
-prompt tiles, which keep the same canonical chains. Two ranks register nothing: each launch has the same
+(`bf16_cols_word`). Such a shard takes the generic entries, the 64-row
+prompt tiles and the two-range copy of the 128-token prompt tile
+`flash_bf16_mma128`, which keep the same canonical chains. Two ranks register nothing: each launch has the same
 descriptor bytes and kernel as before, and the fixed-shape decode entries keep
 their code. One Spark cannot hold the FP8 checkpoint. Six and eight ranks keep
 four ranges per shard and give their own IDs. `FLASH_BF16_EXPERTS=1` keeps
@@ -134,7 +135,8 @@ For an FP32 activation `x`, the BF16 projection operands are
 `hi = BF16_RNE(x)` and `lo = BF16_RNE(x - FP32(hi))`. Each is multiplied by
 the unchanged checkpoint BF16 weights, accumulated in FP32 and combined in the
 fixed projection order. This changes output bits from older scalar builds.
-Decode and prompt tiles use the same four fixed K ranges on every rank. In
+Decode and prompt tiles use the same four fixed K ranges on every rank (a
+four-rank shard holds two of them; see [Rank counts](#rank-counts)). In
 each range the high and residual chains accumulate separately in FP32, then
 form `P_i = H_i + L_i`. The final merge is `(P_0 + P_1) + (P_2 + P_3)`,
 independent of batch width or tile size. Eligible dense matrices are permuted

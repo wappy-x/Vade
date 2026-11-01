@@ -527,14 +527,20 @@ unsafe fn decode_input<const DEEP: bool, const INPUT_BF16: bool, const NATIVE: b
 unsafe fn decode_rows<const DEEP: bool, const INPUT_BF16: bool, const NATIVE: bool, const BATCH: bool, const LBF: bool, const RANGES: u32>(p: Bf16Rows, split: bool) {
     let tid = _thread_idx_x() as usize;
     let lane = tid % 32;
-    let tile = if split { _block_idx_x() as usize }
-        else { _block_idx_x() as usize * 2 + tid / 32 };
+    // A two-range shard has no parts 1 and 3: a split block runs two row tiles,
+    // warps 0-1 parts 0 and 2 of the first, warps 2-3 of the second.
+    let pair = split && RANGES == 2;
     let first = (p.rows as usize).div_ceil(8);
-    if tile >= first + (p.rows2 as usize).div_ceil(8) { return; }
+    let tiles = first + (p.rows2 as usize).div_ceil(8);
+    let tile = if pair { (_block_idx_x() as usize * 2 + tid / 64).min(tiles - 1) }
+        else if split { _block_idx_x() as usize }
+        else { _block_idx_x() as usize * 2 + tid / 32 };
+    if tile >= tiles { return; }
     // Keep every warp aligned to its original matrix, including a four-row
     // matrix fused ahead of a large projection.
     let mut p = p;
     if !BATCH { p.tokens = 1; }
+    let whole = p;
     let row = if tile < first { tile * 8 } else {
         p.weight = p.weight2; p.output = p.output2; p.rows = p.rows2; p.stride = p.stride2;
         (tile - first) * 8
@@ -542,6 +548,39 @@ unsafe fn decode_rows<const DEEP: bool, const INPUT_BF16: bool, const NATIVE: bo
     p.rows2 = 0;
     let dot = |part| if NATIVE { dot_inner::<true, true, DEEP, INPUT_BF16, false, LBF, RANGES>(p, row, lane, part) }
         else { dot_range::<DEEP, INPUT_BF16, RANGES>(p, row, lane, part) };
+    if pair {
+        let sum = dot((tid / 32 & 1) * 2);
+        let sh = if BATCH { ptx::shared::<1024>() } else { ptx::shared::<128>() };
+        let part_rows = if BATCH { 64 } else { 8 };
+        let token = if p.tokens == 1 { 0 } else { lane / 4 };
+        if (p.tokens != 1 || lane < 4) && token < p.tokens as usize {
+            let at = tid / 32 * part_rows + token * 8 + lane % 4 * 2;
+            ptx::store(sh + (at * 4) as u32, sum.a);
+            ptx::store(sh + ((at + 1) * 4) as u32, sum.b);
+        }
+        ptx::sync();
+        let n = p.tokens as usize * 8;
+        let (sub, i) = (tid / n, tid % n);
+        let tile = _block_idx_x() as usize * 2 + sub;
+        if sub < 2 && tile < tiles {
+            let at = sh + ((sub * 2 * part_rows + i) * 4) as u32;
+            // The four-part merge with -0.0 parts 1 and 3: (l0 + -0.0) + (l2 + -0.0).
+            let value = ptx::load(at) + ptx::load(at + (part_rows * 4) as u32);
+            let mut q = whole;
+            let row = if tile < first { tile * 8 } else {
+                q.weight = q.weight2; q.output = q.output2; q.rows = q.rows2; q.stride = q.stride2;
+                (tile - first) * 8
+            };
+            q.rows2 = 0;
+            if q.cols == 10240 && q.hc_silu != 0 && q.rows == 320 {
+                let value = crate::flash_ops::silu(value, 1.0, 4.0, 0);
+                let (hi, lo) = crate::gemm::split2(value);
+                *(q.output as *mut u16).add(row + i) = hi;
+                *(q.output as *mut u16).add(320 + row + i) = lo;
+            } else { put(q, value, i / 8, row + i % 8); }
+        }
+        return;
+    }
     if split {
         let part = tid / 32 & 3;
         let sum = dot(part);
