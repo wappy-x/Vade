@@ -8,9 +8,10 @@ impl Fixture {
         let root = std::env::temp_dir().join(format!("vade source install {}-{}-{}", std::process::id(),
             SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos(),
             SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
-        for dir in ["bin", "scripts", "engine", "cli/target/release", "home", "tmp"] {
+        for dir in ["bin", "scripts", "engine", "harness", "cli/target/release", "home", "tmp"] {
             fs::create_dir_all(root.join(dir)).unwrap();
         }
+        for file in ["cli/Cargo.toml", "engine/Cargo.toml", "harness/Cargo.toml"] { fs::write(root.join(file), "").unwrap(); }
         fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/install.sh"), root.join("scripts/install.sh")).unwrap();
         let fixture = Self { root: fs::canonicalize(root).unwrap() };
         for tool in ["sh", "dirname", "mktemp", "rm", "mkdir", "cp", "chmod", "tail", "sed", "head", "ls"] {
@@ -444,4 +445,222 @@ fn check_writes_nothing_and_source_skips_the_bundle() {
     assert!(!f.bundles().exists());
     assert!(f.calls().contains("cargo +1.99.0 build") && !f.calls().contains("bundle-vade"), "{}", f.calls());
     assert_eq!(fs::read_to_string(keep.join("file")).unwrap(), "kept");
+}
+
+// A piped install: `curl ... | sh`. $0 is "sh", the script is standard input,
+// and the current folder says nothing about a checkout.
+const CLONE_URL: &str = "https://github.com/wappy-x/vade.git";
+const CURL_LINE: &str = "curl -fsSL https://vade.lol/install.sh | sh";
+fn script() -> Vec<u8> { fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/install.sh")).unwrap() }
+fn shells() -> Vec<&'static str> { ["/bin/sh", "/bin/dash"].into_iter().filter(|shell| Path::new(shell).is_file()).collect() }
+impl Fixture {
+    fn piped_with(&self, shell: &str, script: &[u8], cwd: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
+        let mut child = Command::new(shell).args(["-c", "umask 002 && exec \"$0\" -s -- \"$@\""])
+            .arg(if shell == "/bin/sh" { "sh" } else { shell }).args(args).current_dir(cwd).env_clear()
+            .env("PATH", self.root.join("bin")).env("TMPDIR", self.root.join("tmp"))
+            .env("HOME", self.root.join("home")).env("CARGO_NET_OFFLINE", "true")
+            .env("INSTALL_ROOT", &self.root).env("INSTALL_CALLS", self.root.join("calls"))
+            .envs(env.iter().copied()).stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        // A shell that stops early closes the pipe; that is not a test failure.
+        let _ = std::io::Write::write_all(&mut child.stdin.take().unwrap(), script);
+        child.wait_with_output().unwrap()
+    }
+    /// The current folder is scripts/ of a checkout: the old script took its parent as the source.
+    fn piped(&self, env: &[(&str, &str)], args: &[&str]) -> Output {
+        self.piped_with("/bin/sh", &script(), &self.root.join("scripts"), env, args)
+    }
+    fn piped_prebuilt(&self, env: &[(&'static str, String)], args: &[&str]) -> Output {
+        let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        self.piped(&env, args)
+    }
+    /// A fake `git clone` of public main: the checkout in public/, with its own
+    /// vade program. Cargo says where it runs, so a test sees the build folder.
+    fn public_main(&self) {
+        for dir in ["scripts", "cli/target/release", "engine", "harness"] { fs::create_dir_all(self.root.join("public").join(dir)).unwrap(); }
+        for file in ["cli/Cargo.toml", "engine/Cargo.toml", "harness/Cargo.toml"] { fs::write(self.root.join("public").join(file), "").unwrap(); }
+        fs::write(self.root.join("public/scripts/install.sh"), script()).unwrap();
+        self.write("public/cli/target/release/vade", "printf 'clone-vade %s source %s\\n' \"$*\" \"$VADE_SOURCE\" >> \"$INSTALL_CALLS\"");
+        self.tool("git", r#"
+printf 'git %s\n' "$*" >> "$INSTALL_CALLS"
+[ "${INSTALL_FAIL_CLONE-false}" = false ] || { echo 'fatal: fixture clone failure' >&2; exit 128; }
+[ "$GIT_TERMINAL_PROMPT" = 0 ] || exit 88
+for target; do :; done
+cp -R "$INSTALL_ROOT/public/." "$target/"
+"#);
+        self.tool("cargo", r#"
+printf 'cargo %s in %s\n' "$2" "$PWD" >> "$INSTALL_CALLS"
+[ "${INSTALL_FAIL_CARGO-false}" = false ] || { echo 'error: fixture build failure' >&2; exit 42; }
+"#);
+    }
+    /// The folders a clone made in the Vade home.
+    fn clones(&self) -> Vec<PathBuf> {
+        let mut clones: Vec<PathBuf> = fs::read_dir(self.root.join("home/.vade")).map(|dir| dir.map(|e| e.unwrap().path())
+            .filter(|path| path.file_name().unwrap().to_string_lossy().starts_with("source.")).collect()).unwrap_or_default();
+        clones.sort();
+        clones
+    }
+    fn tmp_is_empty(&self) -> bool { fs::read_dir(self.root.join("tmp")).unwrap().next().is_none() }
+    fn run_file(&self, file: &Path, cwd: &Path, args: &[&str]) -> Output {
+        Command::new("/bin/sh").arg(file).args(args).current_dir(cwd).env_clear()
+            .env("PATH", self.root.join("bin")).env("TMPDIR", self.root.join("tmp"))
+            .env("HOME", self.root.join("home")).env("CARGO_NET_OFFLINE", "true")
+            .env("INSTALL_ROOT", &self.root).env("INSTALL_CALLS", self.root.join("calls")).output().unwrap()
+    }
+}
+
+#[test]
+fn the_installer_is_plain_sh_and_ends_in_main() {
+    for shell in shells() {
+        let check = Command::new(shell).arg("-n").arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/install.sh")).output().unwrap();
+        assert!(check.status.success(), "{shell}: {}", String::from_utf8_lossy(&check.stderr));
+    }
+    let text = String::from_utf8(script()).unwrap();
+    assert!(text.starts_with("#!/bin/sh\n"));
+    assert_eq!(text.lines().last(), Some("main \"$@\""));
+    assert!(text.ends_with("\n}\nmain \"$@\"\n"), "the last line needs a final newline");
+    // Nothing runs before main: only comments are outside it.
+    let (head, _) = text.split_once("\nmain() {\n").unwrap();
+    assert!(head.lines().all(|line| line.starts_with('#')), "{head}");
+    let repository = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/repository.rs")).unwrap();
+    assert!(text.contains(&format!("clone_url={CLONE_URL}\n")) && repository.contains(&format!("\"{}\"", CLONE_URL.trim_end_matches(".git"))));
+}
+
+#[test]
+fn a_cut_off_download_runs_nothing() {
+    let whole = script();
+    let text = String::from_utf8(whole.clone()).unwrap();
+    let first = text.find("main() {\n").unwrap() + "main() {\n".len();
+    let last = text.rfind("}\nmain \"$@\"\n").unwrap();
+    let mut cuts: Vec<usize> = (first..last).step_by(211).collect();
+    cuts.extend([first, last - 1, last]);
+    assert!(cuts.len() > 50, "{}", cuts.len());
+    let f = Fixture::new();
+    f.public_main();
+    let env = f.prebuilt(&bundle(Bad::None), Bad::None);
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let clean = |context: String| {
+        assert_eq!(f.calls(), "", "{context}");
+        assert!(f.tree().is_empty() && f.tmp_is_empty(), "{context}: {:?}", f.tree());
+    };
+    for cut in cuts {
+        for shell in shells() {
+            let output = f.piped_with(shell, &whole[..cut], &f.root.join("scripts"), &env, &[]);
+            assert!(!output.status.success(), "{shell} cut at {cut}");
+            assert!(output.stdout.is_empty(), "{shell} cut at {cut}: {}", String::from_utf8_lossy(&output.stdout));
+            clean(format!("{shell} cut at {cut}"));
+        }
+        // The same cut saved to a file in a checkout.
+        fs::write(f.root.join("scripts/install.sh"), &whole[..cut]).unwrap();
+        assert!(!f.run_args(&env, &[]).status.success(), "file cut at {cut}");
+        clean(format!("file cut at {cut}"));
+    }
+    // A cut after the closing brace defines main and never calls it.
+    let output = f.piped_with("/bin/sh", &whole[..last + 2], &f.root.join("scripts"), &env, &[]);
+    assert!(output.status.success() && output.stdout.is_empty());
+    clean("cut after main".into());
+}
+
+#[test]
+fn piped_bundle_install_needs_no_checkout() {
+    let f = Fixture::new();
+    f.public_main();
+    let env = f.prebuilt(&bundle(Bad::None), Bad::None);
+    let output = f.piped_prebuilt(&env, &[]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(f.calls(), "bundle-vade install\n");
+    let folder = f.bundles().join(stem());
+    assert!(stdout.contains(&format!("   export PATH=\"{}:$PATH\"\n", folder.display())) && !stdout.contains("Prebuilt:"), "{stdout}");
+    assert!(f.clones().is_empty() && f.tmp_is_empty());
+    // --launch opens chat on the terminal, never on the script; with no terminal it stops at the next steps.
+    let output = f.piped_prebuilt(&env, &["--launch"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}");
+    assert!(stdout.ends_with("Run the commands above in a terminal.\n") != f.calls().ends_with("bundle-vade launch\n"), "{stdout}{}", f.calls());
+}
+
+#[test]
+fn piped_source_build_clones_public_main_into_a_new_folder() {
+    let f = Fixture::new();
+    f.public_main();
+    let env = f.prebuilt(&bundle(Bad::None), Bad::None);
+    let mut unfit = env.clone();
+    unfit.push(("INSTALL_DRIVER", "575.51.03".into()));
+    let output = f.piped_prebuilt(&unfit, &[]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("Prebuilt: the bundle needs NVIDIA driver 580 or newer and this Spark has 575.51.03; building from source.\n"), "{stdout}");
+    let clones = f.clones();
+    assert_eq!(clones.len(), 1, "{stdout}");
+    let clone = clones[0].display();
+    let calls = f.calls();
+    assert!(calls.starts_with(&format!("git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 clone --quiet --depth 1 {CLONE_URL} {clone}\n")), "{calls}");
+    // The build runs in the clone, never in the folder above the current one.
+    assert!(calls.contains(&format!("cargo build in {clone}\n")) && !calls.contains(&format!("in {}\n", f.root.display())), "{calls}");
+    assert!(calls.ends_with(&format!("clone-vade install source {clone}\n")), "{calls}");
+    assert!(stdout.contains(&format!("   export PATH=\"$HOME/.cargo/bin:{clone}/cli/target/release:$PATH\"\n")), "{stdout}");
+    f.assert_private("clone");
+    assert_eq!(fs::metadata(&clones[0]).unwrap().permissions().mode() & 0o077, 0);
+    assert!(f.tmp_is_empty() && !f.root.join("target").exists());
+    // --source skips latest.json; a second run takes a new folder and leaves the first.
+    fs::remove_file(f.root.join("dl/main/latest.json")).unwrap();
+    let output = f.piped_prebuilt(&env, &["--source"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("Prebuilt: --source was given; building from source.\n"), "{stdout}");
+    assert_eq!(f.clones().len(), 2);
+    assert!(clones[0].join("scripts/install.sh").is_file() && !f.bundles().exists());
+}
+
+#[test]
+fn piped_failures_leave_no_folder_and_name_the_one_line_retry() {
+    for (env, args, message, retry, clones) in [
+        (("INSTALL_FAIL_CLONE", "true"), &[][..], format!("cannot clone {CLONE_URL} (git error above)"), format!("Retry: {CURL_LINE}\n"), 0),
+        (("INSTALL_FAIL_CLONE", "true"), &["--source"], format!("cannot clone {CLONE_URL} (git error above)"), format!("Retry: {CURL_LINE} -s -- --source\n"), 0),
+        (("INSTALL_BAD_CLONE", "true"), &[], "is not a Vade checkout".into(), format!("Retry: {CURL_LINE}\n"), 0),
+        // The clone is whole, so a build failure keeps it and retries in it.
+        (("INSTALL_FAIL_CARGO", "true"), &[], "CLI build failed".into(), "/scripts/install.sh\" --source\n".into(), 1),
+    ] {
+        let f = Fixture::new();
+        f.public_main();
+        if env.0 == "INSTALL_BAD_CLONE" { fs::remove_file(f.root.join("public/harness/Cargo.toml")).unwrap(); }
+        let output = f.piped(&[env], args);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains(&*message) && stderr.contains("Next:") && stderr.ends_with(&*retry), "{stderr}");
+        assert_eq!(f.clones().len(), clones, "{env:?}");
+        assert!(f.tmp_is_empty());
+        f.assert_private(env.0);
+    }
+    // No git: the script stops before it writes anything.
+    let f = Fixture::new();
+    let output = f.piped(&[], &[]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success() && stderr.contains("missing git") && stderr.ends_with(&format!("Retry: {CURL_LINE}\n")), "{stderr}");
+    assert!(f.tree().is_empty() && f.calls().is_empty(), "{:?}", f.tree());
+}
+
+#[test]
+fn only_a_file_in_a_checkout_counts_as_a_checkout() {
+    let f = Fixture::new();
+    f.public_main();
+    let plan = format!("Check: would clone {CLONE_URL} into a new folder in {}/.vade, then build from source there.\n", f.root.join("home").display());
+    // Piped --check, and a saved copy outside a checkout: the clone plan, and nothing written.
+    let output = f.piped(&[], &["--check"]);
+    assert!(String::from_utf8_lossy(&output.stdout).ends_with(&plan), "{}", String::from_utf8_lossy(&output.stdout));
+    fs::create_dir(f.root.join("tmp/away")).unwrap();
+    fs::copy(f.root.join("scripts/install.sh"), f.root.join("tmp/away/install.sh")).unwrap();
+    let output = f.run_file(&f.root.join("tmp/away/install.sh"), &f.root, &["--check"]);
+    assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).ends_with(&plan), "{}", String::from_utf8_lossy(&output.stdout));
+    assert!(f.tree().is_empty() && f.calls().is_empty());
+    // In a checkout, every way to name the file builds that checkout.
+    let build = format!("build vade in {}/cli/target,", f.root.display());
+    for (file, cwd) in [("scripts/install.sh", f.root.clone()), ("install.sh", f.root.join("scripts")), ("./install.sh", f.root.join("scripts"))] {
+        let output = f.run_file(Path::new(file), &cwd, &["--source", "--check"]);
+        assert!(String::from_utf8_lossy(&output.stdout).contains(&build), "{file}: {}", String::from_utf8_lossy(&output.stdout));
+    }
+    // A checkout without one of its parts is not one.
+    fs::remove_file(f.root.join("harness/Cargo.toml")).unwrap();
+    let output = f.run_file(&f.root.join("scripts/install.sh"), &f.root, &["--source", "--check"]);
+    assert!(String::from_utf8_lossy(&output.stdout).ends_with(&plan), "{}", String::from_utf8_lossy(&output.stdout));
 }

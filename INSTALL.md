@@ -92,9 +92,10 @@ The installer downloads the build of main from dl.vade.lol. GitHub Releases
 holds only the older v0.1.0 bundle.
 
 When the bundle does not fit your Spark, the installer prints one
-`Prebuilt:` line with the reason. The one-line install has no copy of the
-code to build, so it then stops with an error. In that case, use
-[the source build](#build-from-source-on-one-spark) below.
+`Prebuilt:` line with the reason. Then it clones public main into a new
+folder in `~/.vade` and builds from source there. This needs `git` and
+`cc`. If the clone or the build fails, the installer prints a `Retry:`
+line.
 
 ### Build from source on one Spark
 

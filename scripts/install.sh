@@ -1,6 +1,12 @@
 #!/bin/sh
 # Setup on one Spark: the prebuilt bundle when it fits, else a source build.
+# From a checkout:  sh scripts/install.sh
+# With no checkout: curl -fsSL https://vade.lol/install.sh | sh
 # No sudo, shell profile edits, or model downloads.
+# Every statement is inside main, and main runs on the last line, so a cut-off
+# download is a syntax error and runs nothing. Keep main "$@" as the last line:
+# the release upload checks it.
+main() {
 set -eu
 
 fail() {
@@ -9,14 +15,20 @@ fail() {
         exit 0
     fi
     printf '%s\n' "install: $*" >&2
-    [ -z "${root-}" ] || printf 'Retry: sh "%s/scripts/install.sh"%s\n' "$root" "${retry-}" >&2
+    if [ -n "${root-}" ]; then
+        printf 'Retry: sh "%s/scripts/install.sh"%s\n' "$root" "${retry-}" >&2
+    elif [ "${piped-false}" = true ]; then
+        printf 'Retry: curl -fsSL https://vade.lol/install.sh | sh%s\n' "${retry:+ -s --$retry}" >&2
+    fi
     exit 1
 }
 if [ "${1-}" = --help ]; then
     printf '%s\n' 'Usage: sh scripts/install.sh [--launch] [--source] [--check]' \
+        '   or: curl -fsSL https://vade.lol/install.sh | sh -s -- [--launch] [--source] [--check]' \
         'Install the prebuilt bundle for this Spark, then run vade install. When the bundle does not fit' \
         'or cannot be downloaded, say why, install pinned Rust if missing, and build vade, the GPU' \
-        'kernels, the engine and chat from this checkout instead.' \
+        'kernels, the engine and chat from this checkout instead. With no checkout, the source build' \
+        'clones public main into a new folder in ~/.vade and runs the installer of that clone.' \
         'The model is not needed yet: the script prints the vade pull command for it.' \
         '--launch starts the engine and opens chat after installation; it needs the model.' \
         '--source always builds from source.' \
@@ -27,20 +39,21 @@ if [ "${1-}" = --help ]; then
         'CARGO_NET_OFFLINE=true requires already cached toolchains and build-std.'
     exit 0
 fi
-launch=false source=false check=false retry=
+clone_url=https://github.com/wappy-x/vade.git
+launch=false source=false check=false retry= root= piped=false
 for argument in "$@"; do
     case $argument in
         --launch) launch=true retry="$retry --launch" ;;
         --source) source=true retry="$retry --source" ;;
         --check) check=true ;;
-        *) check=false; fail 'unknown arguments. Next: sh scripts/install.sh --help' ;;
+        *) check=false; fail 'unknown arguments. Next: run the installer with --help.' ;;
     esac
 done
 [ -n "${HOME-}" ] || fail 'HOME is missing. Next: run the installer from your normal login shell on the Spark.'
 [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = aarch64 ] ||
     fail 'run this on a Linux aarch64 DGX Spark. Next: open a terminal on your Spark and retry.'
 [ -z "${VADE_CONFIG+x}" ] ||
-    fail 'VADE_CONFIG selects a controller. Next: unset VADE_CONFIG, then rerun sh scripts/install.sh for this Spark.'
+    fail 'VADE_CONFIG selects a controller. Next: unset VADE_CONFIG, then rerun the installer for this Spark.'
 [ -z "${VADE_BUNDLE+x}" ] ||
     fail 'VADE_BUNDLE selects a bundle. Next: unset VADE_BUNDLE and rerun this script, or run vade launch from that bundle.'
 for tool in cc curl nvidia-smi; do
@@ -48,9 +61,19 @@ for tool in cc curl nvidia-smi; do
         fail "missing $tool. Next: ask your administrator to provide the prerequisites in INSTALL.md#step-1-prerequisites, then retry."
 done
 workspace=$(pwd -P) || fail 'current folder is unavailable. Next: open an existing project folder and retry.'
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P) ||
-    fail 'cannot find the checkout. Next: run sh scripts/install.sh from the Vade checkout.'
-cd "$root"
+# A Vade checkout holds this file, the CLI, the engine and the harness.
+checkout() {
+    [ -f "$1/scripts/install.sh" ] && [ -f "$1/cli/Cargo.toml" ] && [ -f "$1/engine/Cargo.toml" ] &&
+        [ -f "$1/harness/Cargo.toml" ]
+}
+# Piped, $0 names the shell, not this file: then no folder here is the source.
+case $0 in */install.sh|install.sh)
+    if [ -f "$0" ]; then
+        root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P) || root=
+        [ -z "$root" ] || checkout "$root" || root=
+    fi ;;
+esac
+if [ -n "$root" ]; then cd "$root"; else piped=true; fi
 # Check the GPU and driver before any download; vade install checks them again.
 gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader) ||
     fail 'NVIDIA driver check failed (nvidia-smi error above). Next: ask your administrator to restore nvidia-smi, then retry.'
@@ -185,9 +208,46 @@ else
     [ -z "${download-}" ] || rm -rf "$download"
     trap - EXIT INT TERM
 fi
+# With no checkout: clone public main into a new folder, then run the installer
+# of the clone, which holds the pinned tools of that source. The folder is in
+# the Vade home, not in /tmp: the vade program stays in the clone, and vade
+# install and vade setup read the clone, so it must outlive a reboot.
+clone_source() {
+    vade_home=${VADE_HOME:-$HOME/.vade}
+    case $vade_home in /*) ;; *) fail 'VADE_HOME is not an absolute path. Next: unset VADE_HOME or set it to a full path, then retry.' ;; esac
+    if [ "$check" = true ]; then
+        printf 'Check: would clone %s into a new folder in %s, then build from source there.\n' "$clone_url" "$vade_home"
+        exit 0
+    fi
+    command -v git >/dev/null 2>&1 ||
+        fail 'missing git, which the source build needs to get the Vade source. Next: ask your administrator to install git, then retry.'
+    # Private like the folders vade makes: vade refuses a ~/.vade that others can read.
+    (umask 077 && mkdir -p "$vade_home") ||
+        fail "cannot create $vade_home. Next: check that you own its parent folder, then retry."
+    clone=$(mktemp -d "$vade_home/source.XXXXXXXX") ||
+        fail "cannot create a folder in $vade_home. Next: check its permissions and disk space, then retry."
+    trap 'rm -rf "$clone"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    printf 'Install: cloning %s into %s.\n' "$clone_url" "$clone"
+    # A transfer under 1 KB/s for 60 s stops; git never asks for a password.
+    GIT_TERMINAL_PROMPT=0 git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 \
+        clone --quiet --depth 1 "$clone_url" "$clone" </dev/null ||
+        fail "cannot clone $clone_url (git error above). Next: check that this Spark reaches github.com, then retry."
+    checkout "$clone" ||
+        fail "the clone of $clone_url is not a Vade checkout. Next: retry; if it fails again, report it with the Vade version."
+    trap - EXIT INT TERM
+    # Standard input is this script, so the clone's installer reads the terminal
+    # or nothing. A build failure there keeps the clone and prints its own Retry line.
+    if [ "$launch" = true ] && (: </dev/tty) 2>/dev/null; then
+        exec sh "$clone/scripts/install.sh" --source --launch </dev/tty
+    fi
+    exec sh "$clone/scripts/install.sh" --source </dev/null
+}
 # The source build below is the same as before the prebuilt bundle existed.
 if [ -z "$vade" ]; then
 printf 'Prebuilt: %s; building from source.\n' "$why"
+[ "$piped" = false ] || clone_source
 if [ "$check" = true ]; then
     printf '%s\n' "Check: would install the pinned Rust toolchains if missing, build vade in $root/cli/target," \
         'fetch the Rust build-std files, then run vade install to build the GPU kernels, the engine and chat.'
@@ -259,5 +319,13 @@ printf '%s\n' 'Install complete. Next steps:' \
     '   vade launch'
 if [ "$launch" = true ]; then
     cd "$workspace" || fail 'your starting folder is unavailable. Next: open an existing project folder, then use the launch command above.'
+    [ "$piped" = false ] || (: </dev/tty) 2>/dev/null || {
+        printf '%s\n' 'No terminal to open chat in, so the installer stops here. Run the commands above in a terminal.'
+        exit 0
+    }
+    # Piped, standard input is this script, so chat reads the terminal.
+    [ "$piped" = false ] || exec "$vade" launch </dev/tty
     exec "$vade" launch
 fi
+}
+main "$@"
