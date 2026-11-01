@@ -325,6 +325,13 @@ ignored and the Sparks build from source. The launcher bundle has no host pair,
 so the controller builds its own CLI and chat program. Otherwise, assemble a
 `vade-prebuilt-v1` bundle as described below.
 
+A controller that is a Spark needs no checkout. After the one-line install,
+`vade setup --hosts` writes `source = installed-bundle` in place of the three
+source folders. `vade install` then reads the engine, harness and CLI revisions
+from the `launcher-bundle.conf` next to the `vade` that runs, checks the bundle's
+hashes, and stages its `vade` and `vade-harness` for this Spark. A fault in that
+bundle stops the install, because there is no source to build from.
+
 ### What a controller bundle contains
 
 With a controller bundle, `vade install` can copy its binaries instead of

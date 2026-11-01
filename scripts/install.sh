@@ -318,17 +318,43 @@ quoted=$(printf '%s\n' "$vade" | sed "s/'/'\\\\''/g")
     printf '#!/bin/sh\nexec '\''%s'\'' "$@"\n' "$quoted" > "$vade_home/bin/vade.new" &&
     chmod 700 "$vade_home/bin/vade.new" && mv -f "$vade_home/bin/vade.new" "$vade_home/bin/vade") ||
     fail "cannot write $vade_home/bin/vade. Next: check that path and its permissions, then retry."
+# A second script for new shells: the stock Ubuntu ~/.profile puts ~/.local/bin on
+# PATH at login when the folder exists. No shell profile changes, no link, and
+# never over a file that is not ours. It names ~/.vade, so a named VADE_HOME skips it.
+shim="$HOME/.local/bin/vade"
+shim_marker='# Written by the Vade installer. vade-path-shim-v1'
+shim_written=false
+if [ -z "${VADE_HOME-}" ] || [ "$VADE_HOME" = "$HOME/.vade" ]; then
+    if { [ ! -e "$shim" ] && [ ! -L "$shim" ]; } ||
+        { [ -f "$shim" ] && [ ! -L "$shim" ] && [ "$(sed -n 2p "$shim" 2>/dev/null)" = "$shim_marker" ]; }; then
+        if (mkdir -p "$HOME/.local/bin" &&
+            printf '#!/bin/sh\n%s\nexec "$HOME/.vade/bin/vade" "$@"\n' "$shim_marker" > "$shim.new" &&
+            chmod 700 "$shim.new" && mv -f "$shim.new" "$shim") 2>/dev/null; then
+            shim_written=true
+        else
+            rm -f "$shim.new" 2>/dev/null || true
+            printf 'Skipped %s: this account cannot write it.\n' "$shim"
+        fi
+    else
+        printf 'Skipped %s: that file is not from Vade, so the installer left it alone.\n' "$shim"
+    fi
+fi
 printf '%s\n' 'Install complete. Next steps:' \
-    '1. Put vade on PATH: run the last line below.' \
-    '2. If the model is not on this Spark yet, download and check it (102.26 GB):' \
+    '1. If the model is not on this Spark yet, download and check it (102.26 GB):' \
     '   vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300' \
-    '3. Start the engine:' \
+    '2. Start the engine:' \
     '   vade up' \
-    'To start the engine and open the coding agent in the current folder, run vade launch.' \
-    'To keep vade on PATH in new shells, add the last line to ~/.profile.' \
-    '' \
-    'Your shell cannot find vade until you run this line:' \
-    "   export PATH=\"${bin_path:-\$HOME/.vade/bin}:\$PATH\""
+    'vade launch starts the engine and opens chat.' \
+    ''
+found=$(command -v vade 2>/dev/null || true)
+path_line="export PATH=\"${bin_path:-\$HOME/.vade/bin}:\$PATH\""
+if [ "$found" = "$vade_home/bin/vade" ] || { [ "$shim_written" = true ] && [ "$found" = "$shim" ]; }; then
+    printf '%s\n' 'vade is on your PATH.'
+elif [ "$shim_written" = true ]; then
+    printf 'Open a new terminal, or run: %s\n' "$path_line"
+else
+    printf 'Run: %s\n' "$path_line"
+fi
 if [ "$launch" = true ]; then
     cd "$workspace" || fail 'your starting folder is unavailable. Next: open an existing project folder, then use the launch command above.'
     [ "$piped" = false ] || (: </dev/tty) 2>/dev/null || {

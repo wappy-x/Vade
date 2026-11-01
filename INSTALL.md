@@ -80,8 +80,12 @@ vade up
    holds ready-made programs for the GB10, so the Spark needs no Rust and no
    build. The installer checks the bundle's hashes and installs it into
    `~/.vade`. It does not need sudo or the model, and it does not change your
-   shell profile. At the end, it prints an `export` line that puts `vade` on
-   your `PATH`. Run that line if your shell cannot find `vade`.
+   shell profile. It writes a small script at `~/.local/bin/vade`. The stock
+   Ubuntu `~/.profile` puts that folder on your `PATH` when you log in, so a
+   new SSH login finds `vade`. The last line of the installer output tells you
+   what to do. On the Spark's own desktop, a new terminal finds `vade` only
+   after you log out and log in once. If your shell cannot find `vade`, run
+   the `export` line from that last line.
 2. **Pull** downloads the model (102.26 GB) and checks every file. The long
    hash after `@` pins the exact revision we tested. If the download stops,
    run the same command again. It continues where it stopped.
@@ -103,7 +107,7 @@ Use this route when the prebuilt bundle does not fit your Spark, or when you
 want to build main yourself. You also need Git. Run these five commands:
 
 ```sh
-git clone --branch main https://github.com/wappy-x/vade.git "$HOME/vade"
+git clone --depth 1 --branch main https://github.com/wappy-x/Vade.git "$HOME/vade"
 sh "$HOME/vade/scripts/install.sh"
 export PATH="$HOME/.cargo/bin:$HOME/vade/cli/target/release:$PATH"
 vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300
@@ -121,10 +125,9 @@ vade launch
   The script does not need the model. `--source` always builds from source.
   `--check` prints what the script would do, writes nothing and exits 0.
 - The `export` line puts `cargo` and `vade` on your `PATH` for this shell
-  only, because the installer does not edit shell profiles. Run it again in
-  each new shell, or add it to `~/.profile` yourself. This line is for the
-  source build. When the script installs the prebuilt bundle, it prints an
-  `export` line for the bundle folder instead. Use the line that it prints.
+  only, because the installer does not edit shell profiles. A new login finds
+  `vade` through `~/.local/bin/vade`, which the script writes. It finds `cargo`
+  only if you put `~/.cargo/bin` on your `PATH` yourself.
 - `vade pull` downloads the 102.26 GB model into
   `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local` and checks every file. Skip
   it if the model is already in `~/models`. To use a checkpoint outside
@@ -154,7 +157,7 @@ failure. A failure prints its cause and a next step. With `--json`, the cause
 and the next step are inside the JSON object:
 
 ```sh
-git clone --branch main https://github.com/wappy-x/vade.git "$HOME/vade"
+git clone --depth 1 --branch main https://github.com/wappy-x/Vade.git "$HOME/vade"
 sh "$HOME/vade/scripts/install.sh"
 export PATH="$HOME/.cargo/bin:$HOME/vade/cli/target/release:$PATH"
 vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300
@@ -189,7 +192,12 @@ The installer runs only on Linux `aarch64`. It does these steps:
    settings and prints the `vade pull` command. If `~/.vade` already holds
    files that another checkout or revision built, it builds this checkout and
    prints the generation that is now installed.
-6. With `--launch`, it starts the engine and opens chat in the folder where
+6. It writes `~/.vade/bin/vade`, a small script that runs the build it just
+   installed. It rewrites that script on each install. For a newer Vade, run
+   the install command again.
+7. It writes `~/.local/bin/vade`, a small script that runs the first one. It
+   never replaces a file there that is not from Vade. It says so and goes on.
+8. With `--launch`, it starts the engine and opens chat in the folder where
    you started. Without that flag, it stops after the install.
 
 The installer does not download or edit models. It does not change shell
@@ -427,7 +435,7 @@ On the Spark, clone the repository into your home folder and stay at its root
 in this shell. Later steps assume the checkout is `~/vade`:
 
 ```sh
-cd ~ && git clone --branch main https://github.com/wappy-x/vade.git && cd ~/vade
+cd ~ && git clone --depth 1 --branch main https://github.com/wappy-x/Vade.git vade && cd ~/vade
 ```
 
 This gives you the latest `main`: v0.1.0 plus the changes listed under
@@ -496,6 +504,9 @@ The installer does these checks in order. When one fails, it prints one
    in `launcher-bundle.conf` again and copies the engine, the kernels and
    chat into `~/.vade`. When an earlier install has other files, from a
    source build or another bundle, it replaces them.
+8. It writes `~/.vade/bin/vade`, a small script that runs the build it
+   installed, and it rewrites that script on each install. For a newer Vade,
+   run the install command again.
 
 Two settings choose the download. `VADE_DL_BASE` is the download location,
 and `VADE_CHANNEL` is the channel (default `main`). The installer reads
@@ -570,9 +581,9 @@ and go straight to the manifest check below.
 Use `vade pull`. It shows its progress, continues after an interruption and
 checks every file.
 
-If you ran `scripts/install.sh`, first run the `export PATH=...` line that it
-printed. That line puts `vade` on `PATH`, from the bundle folder in
-`~/.vade/bundles` or from `cli/target/release`. After a bundle install there
+If you ran `scripts/install.sh`, your shell finds `vade` after a new login. In
+the same shell, first run the `export PATH=...` line that it printed. That
+line puts `vade` on `PATH` through `~/.vade/bin`. After a bundle install there
 is no `cargo`, so the second line below works only for a source build. If you
 did not run the script, the second line builds `vade` with the host toolchain
 from step 1. Run these lines from the checkout root on the Spark:
@@ -653,7 +664,7 @@ release tag instead, then run the same check:
 
 ```sh
 MODEL_SHA256_LIST="$HOME/qwen3.8-flash-next-fp4-local.sha256"
-curl -fsSL https://raw.githubusercontent.com/wappy-x/vade/v0.1.0/cli/examples/qwen3.8-flash-next-fp4-local.sha256 -o "$MODEL_SHA256_LIST"
+curl -fsSL https://raw.githubusercontent.com/wappy-x/Vade/v0.1.0/cli/examples/qwen3.8-flash-next-fp4-local.sha256 -o "$MODEL_SHA256_LIST"
 (cd "$HOME/models/nvidia/Qwen3.8-Flash-Next-FP4-Local" && sha256sum -c "$MODEL_SHA256_LIST")
 ```
 
@@ -708,8 +719,8 @@ the `PATH` line below.
 ssh -t you@spark-address 'cd "$HOME/vade" && ./cli/target/release/vade chat'
 ```
 
-For the prebuilt bundle, use `'"$HOME/.vade/bundles/<name>/vade" chat'`
-instead, with the folder name that the installer printed.
+For the prebuilt bundle, use `'"$HOME/.vade/bin/vade" chat'` instead. That
+path stays the same for every version.
 Without `-t` there is no terminal, so chat shows plain lines instead of its
 window.
 
@@ -783,8 +794,8 @@ commands without running anything, on any computer.
 ### Launch from the bundle
 
 After the model check in step 3, run this instead of Route A's source-build
-block. First run the `export` line that `scripts/install.sh` printed. It puts
-the bundle folder, `~/.vade/bundles/<name>`, on your `PATH`. Then run these
+block. In the shell where you ran `scripts/install.sh`, first run the `export`
+line that it printed. It puts `~/.vade/bin` on your `PATH`. Then run these
 commands:
 
 ```sh
@@ -792,9 +803,9 @@ unset VADE_CONFIG
 vade launch
 ```
 
-Then follow Route A from "Next, run these in order". With the bundle folder on
-your `PATH`, `vade status`, `vade verify` and `vade down` work by name, in any
-folder. In a new shell, run the `export` line first.
+Then follow Route A from "Next, run these in order". With `vade` on your
+`PATH`, `vade status`, `vade verify` and `vade down` work by name, in any
+folder.
 
 ### What `vade verify` checks
 
@@ -836,6 +847,8 @@ A local install keeps its files here:
 | `~/.vade/stage` | The source copy Vade builds from, the built engine, GPU kernels and chat program |
 | `~/.vade/state` | Records of the engine Vade started (so `vade down` stops the right process), and logs |
 | `~/.vade/projects` | Chat history, never in the folder you chat from (`VADE_CHAT_IN_PROJECT=1` keeps it in a git-ignored `./.vade`) |
+| `~/.vade/bin/vade` | A small script that runs the installed build |
+| `~/.local/bin/vade` | A small script outside `~/.vade`, so a new login finds `vade` |
 
 Use `vade logs` to read engine diagnostics. `VADE_HOME` picks a different
 private root. Keep it the same through launch, chat, verify and shutdown.
@@ -978,8 +991,9 @@ that `vade setup` wrote is ready to use. Edit it only to change the setup.
 
 **Ports.** Keep the default `local_port` and `serve_port` of **18080** unless
 something already uses them. The first is on this computer. The second is on
-the Spark that serves. If the controller is one of the Sparks, both would land
-on the same machine, so set `local_port` to another free port, such as 18181.
+the Spark that serves. If the controller is the Spark that serves (rank 0),
+keep `local_port` equal to `serve_port`. Its engine then serves the endpoint
+itself, with no tunnel. `vade setup` keeps both defaults, so it needs no change.
 
 ### Install and start
 
@@ -1067,16 +1081,181 @@ Several Sparks can work together in two ways:
 | A chain: one engine spread across the Sparks | You want long prompts read faster, or the model is too big for one Spark | `vade up --sparks N` or `--hosts` |
 | [Replicas](#replicas): a separate copy on each Spark | The model fits on one Spark and you want many chats | `vade up --replicas N` |
 
-Both use Route B. The setup below is for the chain. Replicas need less of it.
+Both use Route B. Follow the steps below for a chain. Replicas need less of
+them.
 
-### Describe each Spark in the config
+Run every step on one Spark. That Spark is the controller. The one-line
+install is enough, so you do not need a clone. `vade install` copies Vade to
+the other Sparks for you. These examples use `spark-a` for this Spark and
+`spark-b` for the other Spark.
 
-Add a `[machine name]` section for each Spark. The
+Before step 1, check these three things:
+
+- **The model.** Each Spark needs the same model in the same folder.
+  `vade install` does not copy it. The simple way is to run the one-line
+  install and `vade pull` on each Spark.
+  [Step 3](#step-3-get-the-model) has the other ways.
+- **The cables.** Each cable needs an address at both ends, and each address
+  must already work. [Network setup](docs/network-setup.md) shows how to set
+  them up.
+- **The ports.** Keep HTTP port **18080** and transport ports **29960**
+  (`tp_port`) and **29961** (`tp_port + 1`) free on each Spark.
+
+### Step 1 of 6: check SSH
+
+Check SSH from this Spark to the other Spark. Repeat this for each other
+Spark:
+
+```sh
+ssh spark-b true
+```
+
+It worked if it prints nothing and your prompt comes back.
+
+If it asks for a password, Vade cannot use that connection, because Vade
+cannot type a password. Run `ssh-copy-id spark-b`, then run the check again.
+If `ssh-copy-id` says that it found no identities, run `ssh-keygen -t ed25519`
+first.
+
+If it prints `Host key verification failed` or `Permission denied`, read
+[Check SSH from the controller](#check-ssh-from-the-controller).
+
+### Step 2 of 6: write the setup and start the engine
+
+Give the Sparks in cable order. Give each Spark's own address on each cable
+with `--link FROM:TO=ADDRESS`:
+
+```sh
+vade setup --hosts spark-a,spark-b \
+  --link spark-a:spark-b=192.0.2.1 --link spark-b:spark-a=192.0.2.2
+```
+
+`spark-a` must name this Spark. Use its host name. Without the `--link` flags,
+setup asks for each address. At a terminal, setup also asks which checkpoint to
+use and where the model is. Press Enter to take the default of each question.
+
+If the one-line install saved a local setup, setup asks this question first:
+
+```text
+This Spark has local setup in "/home/you/.vade/config". Move it to "/home/you/.vade/config.local" and write a controller config? [y/N]:
+```
+
+Type `y`. Setup deletes nothing, and it prints how to move the file back. To
+skip the question, add `--replace-local`. You need that flag with `--yes` or
+in a script. If the local engine runs, setup stops. Run `vade down`, then run
+setup again.
+
+Setup writes the controller config. Then it runs `vade install`, `vade up` and
+`vade doctor`, and it prints each step. It worked if the last step ends and
+this line prints:
+
+```text
+Setup done.
+```
+
+If it fails, setup stops at the failed step and prints the cause. Fix that
+cause. Then run `vade setup` again, without `--hosts` or `--link`. Setup uses
+the config that it wrote and repeats only the steps that need it.
+
+### Step 3 of 6: check the answers
+
+```sh
+vade verify
+```
+
+It worked if it prints a line like this one, where N is the token count:
+
+```text
+IDENTICAL: 20/20 runs, 1 machine, N tokens
+```
+
+It says `1 machine` because the two Sparks form one engine.
+[What `vade verify` checks](#what-vade-verify-checks) has the details. The
+command writes `vade-verify.json` in the current folder.
+
+If it fails, run `vade doctor`, then follow the `next:` step of the row that
+says `FAIL`.
+
+### Step 4 of 6: start the engine
+
+Setup already started the engine, so this command only finds it. You need the
+same command to start the engine after step 6.
+
+```sh
+vade up --hosts spark-a,spark-b
+```
+
+It worked if it prints a line that starts like this:
+
+```text
+Vade is already running at http://127.0.0.1:18080/v1
+```
+
+After a stop, it prints a line with `ready on 2 Sparks` instead.
+
+Always name the Sparks here. A plain `vade up` starts only the first Spark in
+the config.
+
+If it fails, run `vade logs`, fix the cause that it shows, then run the command
+again.
+
+### Step 5 of 6: send one chat request
+
+```sh
+curl -sS http://127.0.0.1:18080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "qwen3.8-flash-next-fp4-local",
+  "messages": [{"role": "user", "content": "Name the capital of France in one word."}],
+  "enable_thinking": false
+}'
+```
+
+It worked if it prints one JSON object with the answer in
+`choices[0].message.content`.
+
+If it fails with `Connection refused`, go back to step 4.
+
+### Step 6 of 6: stop the engine
+
+```sh
+vade down
+```
+
+It worked if it prints this line:
+
+```text
+Vade is stopped. The engines and the tunnel that vade started are closed.
+```
+
+If it fails, run `vade status`. Keep the state folder, and read
+[stop the engine](#stop-the-engine).
+
+<a id="describe-each-spark-in-the-config"></a>
+### What setup writes in the config
+
+`vade setup` adds a `[machine name]` section for each Spark. To write the
+config by hand, the
 [example configuration](cli/examples/fp4-local.conf) has a commented-out pair.
 
 For each link between two adjacent Sparks, put a `fabric.<peer>` line in both
 machine sections. Its value is that machine's **own address** on the link
 toward the peer. Those addresses must already be set up and reachable.
+
+After a one-line install, the config has the line
+`source = installed-bundle` in place of `engine_source`, `harness_source` and
+`cli_source`. `vade install` then takes every program and its revision from
+the bundle next to the `vade` that runs, on this Spark and on each other Spark.
+It needs no clone and no Rust. It writes the programs to `~/vade-stage` and the
+engine state to `~/.local/state/vade` on each Spark, and it makes no source
+folders there. After you run the one-line install again, the same config uses
+the new bundle. `vade update` has no checkout to update, so it
+tells you to run the install command.
+
+From a clone, setup writes those three source folders instead. `vade install`
+then builds from source on each Spark, unless `prebuilt_dir` points at a bundle
+from the controller checkout's own commit (see
+[bundle details](cli/docs/prebuilt.md)). A bundle from another commit does not
+qualify. A source build also writes `~/vade-source` and `~/vade-cli-source` on
+each Spark.
 
 Every rank (each Spark that runs part of the engine) needs the same expanded
 absolute paths for the checkpoint and for the staged GPU kernel files (PTX).
@@ -1094,11 +1273,10 @@ rank 0, keep `local_port` equal to `serve_port` (the default), because its
 engine then serves the endpoint itself. Plain `ssh = you@spark-a-address` and
 `ssh = you@spark-b-address` work for every rank with no `~/.ssh/config` alias.
 
-Before `vade install`, check each other rank from the controller exactly the way
-Vade connects, with no prompt:
+To check each other rank exactly the way Vade connects, with no prompt, run
+this:
 
 ```sh
-ssh -o BatchMode=yes you@spark-a-address true
 ssh -o BatchMode=yes you@spark-b-address true
 ```
 
@@ -1120,38 +1298,18 @@ Host spark-b
     IdentityFile ~/.ssh/your-key
 ```
 
-### Install and start the chain
+<a id="install-and-start-the-chain"></a>
+### Choose the Sparks by hand
 
-`vade setup` can write the config for a chain. Give the Sparks in cable order
-and, with `--link`, each Spark's own address on each cable:
-
-```sh
-vade setup --hosts spark-a,spark-b \
-  --link spark-a:spark-b=192.0.2.1 --link spark-b:spark-a=192.0.2.2
-```
-
-Without the `--link` flags, setup asks for each address. It then installs and
-starts the chain with `vade up --hosts` in that order. The steps below do the
-same by hand.
-
-Reserve these ports on the chosen Sparks:
-
-- HTTP port **18080**
-- transport ports **29960** (`tp_port`) and **29961** (`tp_port + 1`)
-
-Keep `serve_port` different from both transport ports. Then, from the
-controller, after stopping any earlier run:
+Setup runs these steps for you. To run them by hand, stop any earlier run
+first:
 
 ```sh
 vade install
 vade up --sparks 2
 ```
 
-`vade install` builds from source on each Spark, unless `prebuilt_dir` points
-at a bundle from the controller checkout's own commit (see
-[bundle details](cli/docs/prebuilt.md)). A bundle from another commit does
-not qualify. After `vade up --sparks 2`, `vade verify` reports `1 machine`,
-because the two ranks form one engine, not two separate engines.
+Keep `serve_port` different from both transport ports.
 
 There are two ways to choose the Sparks. Use one or the other, not both:
 

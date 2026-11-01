@@ -114,7 +114,8 @@ fn setup_writes_a_private_config_then_stops_at_the_first_failed_step() {
     let (stdout, stderr) = (text(&output.stdout), text(&output.stderr));
     assert_eq!(output.status.code(), Some(1), "{stdout}{stderr}");
     let config = home.join("config/vade/config");
-    assert!(stdout.contains("Wrote the controller config at") && stdout.contains("Setup step 1 of 3: vade install\n"), "{stdout}");
+    assert!(stdout.contains(&format!("Writing the controller config to {:?}.\n", config.display().to_string())), "{stdout}");
+    assert!(stdout.contains("Setup step 1 of 3: vade install\nThis step checks SSH, the GPU, the disk and the model on each Spark, then installs Vade there.\n"), "{stdout}");
     assert!(!stdout.contains("Setup step 2 of 3"), "{stdout}");
     assert!(stderr.contains("error: vade install failed, so setup stopped.") && stderr.contains("hint: Fix the cause it printed above, then run vade setup again."), "{stderr}");
     use std::os::unix::fs::PermissionsExt;
@@ -148,7 +149,7 @@ fn a_hand_written_fp8_config_starts_its_sparks_and_an_install_is_not_repeated() 
     let output = vade(&["setup", "--yes", "--dry-run"], &home, &[]);
     assert!(output.status.success(), "{output:?}");
     // Doctor runs last, on the engine that up started, so it checks both Sparks.
-    assert_eq!(steps(&text(&output.stdout)), "  vade install\n  vade up --fp8 --hosts spark-a,spark-b\n  vade doctor\n", "{output:?}");
+    assert_eq!(steps(&text(&output.stdout)), "  vade install\n    This step checks SSH, the GPU, the disk and the model on each Spark, then installs Vade there.\n  vade up --fp8 --hosts spark-a,spark-b\n    This step starts the engine.\n  vade doctor\n    This step checks the running engine.\n", "{output:?}");
     // With an install in place (its activation record), setup goes straight to up and doctor.
     std::fs::create_dir_all(home.join("state")).unwrap();
     std::fs::write(home.join("state/build.conf"), "").unwrap();
@@ -156,7 +157,7 @@ fn a_hand_written_fp8_config_starts_its_sparks_and_an_install_is_not_repeated() 
     let stdout = text(&output.stdout);
     assert!(output.status.success(), "{output:?}");
     assert!(stdout.contains("This config already has an install, so setup skips vade install."), "{stdout}");
-    assert_eq!(steps(&stdout), "  vade up --fp8 --hosts spark-a,spark-b\n  vade doctor\n", "{stdout}");
+    assert_eq!(steps(&stdout), "  vade up --fp8 --hosts spark-a,spark-b\n    This step starts the engine.\n  vade doctor\n    This step checks the running engine.\n", "{stdout}");
 }
 
 /// Run vade `args` with a controller config while `tool` waits as a long
@@ -312,4 +313,34 @@ fn hosts_over_a_local_setup_move_it_aside_only_when_told_to() {
     assert!(text(&moved.stdout).contains(&format!("Moved the local setup to {:?}. To use it again, move that file back to {:?}.", aside.display().to_string(), file.display().to_string())), "{moved:?}");
     assert_eq!(std::fs::read_to_string(&aside).unwrap(), "format=vade-owner-v1\n");
     assert!(!file.exists() && home.join("config/vade/config").is_file(), "{moved:?}");
+}
+
+/// A one-line install: a copy of vade outside any checkout, with a launcher
+/// bundle named by VADE_BUNDLE, as the installed program has one next to it.
+#[test]
+fn hosts_with_no_checkout_write_a_config_that_needs_no_clone() {
+    let home = home("no-clone");
+    let bundle = home.join("bundle");
+    std::fs::create_dir(&bundle).unwrap();
+    let program = home.join("vade");
+    std::fs::copy(env!("CARGO_BIN_EXE_vade"), &program).unwrap();
+    let run = |bundle: Option<&Path>| {
+        let mut command = Command::new(&program);
+        command.args(["setup", "--dry-run", "--yes", "--hosts", "spark-a,spark-b", "--link", "spark-a:spark-b=192.0.2.1", "--link", "spark-b:spark-a=192.0.2.2"])
+            .current_dir(&home).env_clear().env("HOME", &home).env("XDG_CONFIG_HOME", home.join("xdg")).env("PATH", "/usr/bin:/bin");
+        if let Some(bundle) = bundle { command.env("VADE_BUNDLE", bundle); }
+        command.output().unwrap()
+    };
+    let output = run(Some(&bundle));
+    let stdout = text(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    assert!(stdout.lines().any(|line| line == "source = installed-bundle") && !stdout.contains("engine_source"), "{stdout}");
+    // The pin comes from the copy built into the program.
+    let example = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/fp4-local.conf")).unwrap();
+    assert!(stdout.lines().any(|line| Some(line) == example.lines().find(|line| line.starts_with("model_revision = "))), "{stdout}");
+    assert!(!home.join("xdg").exists(), "dry run wrote files");
+    // No bundle and no checkout: the error from before stays.
+    let output = run(None);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(text(&output.stderr).contains("More Sparks need a Vade checkout on this computer"), "{output:?}");
 }

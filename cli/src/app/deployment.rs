@@ -11,6 +11,8 @@ test -z "$applications"
 printf '%s\n' "$power" | awk 'NF {n++; if ($1 !~ /^[0-9]+([.][0-9]+)?$/) bad=1; else if ($1 + 0 >= 30) busy=1} END {exit (n == 0 || bad || busy)}'
 printf '%s\n' "$utilization" | awk 'NF && $1 ~ /^[0-9]+$/ && $1 + 0 > max {max = $1 + 0} END {if (max > 0) printf "stale_utilization=%d\n", max}'
 "#;
+/// A `source = installed-bundle` config run by a vade with no bundle beside it.
+pub(super) const NO_INSTALLED_BUNDLE: &str = "This config uses the installed Vade bundle, and this vade program is not in a bundle. Run the vade from the install command, or set engine_source, harness_source and cli_source in the config.";
 impl<R: Runner> App<R> {
     fn source_revision(&mut self, path: &Path, label: &str) -> Result<String, String> {
         let folder = path.to_string_lossy().into_owned();
@@ -202,6 +204,8 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
         let names: Vec<&str> = config.machines.iter().map(|machine| machine.name.as_str()).collect();
         let sparks = if names.len() == 1 { "Spark" } else { "Sparks" };
         let files = match &config.prebuilt_dir {
+            Some(dir) if config.installed_bundle => format!("the installed Vade bundle in {}", shown(dir)),
+            None if config.installed_bundle => NO_INSTALLED_BUNDLE.into(),
             Some(dir) => format!("a bundle in {} if one matches the engine and CLI revisions, else a source build on each Spark", shown(dir)),
             None => "a source build on each Spark (the config sets no prebuilt_dir)".into(),
         };
@@ -209,8 +213,8 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
         let rows = [
             ("Where", format!("{} {sparks} over SSH: {}", names.len(), names.join(", "))),
             ("Files", files),
-            ("Source", format!("{} (committed files only)", shown(&config.engine_source))),
-            ("Toolchain", format!("Rust {} and {} on each Spark, for a source build", diagnostics::HOST_TOOLCHAIN, diagnostics::KERNEL_TOOLCHAIN)),
+            ("Source", if config.installed_bundle { "none; the bundle holds every program".into() } else { format!("{} (committed files only)", shown(&config.engine_source)) }),
+            ("Toolchain", if config.installed_bundle { "none; the bundle is prebuilt".into() } else { format!("Rust {} and {} on each Spark, for a source build", diagnostics::HOST_TOOLCHAIN, diagnostics::KERNEL_TOOLCHAIN) }),
             ("Model", models),
             ("State", format!("{} and {} here; stage_dir and state_dir on each Spark", shown(&config.state_dir), shown(&config.stage_root))),
             ("Steps", "check tools, SSH, GPUs, disks and models; copy or build; build chat here; warm the GPU startup cache; switch to the new build".into()),
@@ -253,15 +257,21 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
         let engine_source = self.config.engine_source.clone();
         let harness_source = self.config.harness_source.clone();
         let cli_source = self.config.cli_source.clone();
-        let engine_sha = self.source_revision(&engine_source, "engine")?;
-        let harness_sha = self.source_revision(&harness_source, "harness")?;
-        let cli_sha = self.source_revision(&cli_source, "CLI")?;
+        // With no checkout, the bundle names its own revisions and is the only source.
+        let bundled = self.config.installed_bundle;
+        let [engine_sha, harness_sha, cli_sha] = if bundled {
+            crate::prebuilt::revisions(self.config.prebuilt_dir.as_deref().ok_or(NO_INSTALLED_BUNDLE)?)?
+        } else {
+            [self.source_revision(&engine_source, "engine")?, self.source_revision(&harness_source, "harness")?, self.source_revision(&cli_source, "CLI")?]
+        };
         let selected = crate::prebuilt::Bundle::find(self.config.prebuilt_dir.as_deref(), &engine_sha, &cli_sha)
             .and_then(|bundle| {
-                let host = bundle.as_ref().map(|bundle| bundle.host(&harness_sha)).transpose()?.flatten();
+                let host = bundle.as_ref().map(|bundle| if bundled { bundle.launcher_host().map(Some) } else { bundle.host(&harness_sha) }).transpose()?.flatten();
                 Ok((bundle, host))
             });
         let (bundle, host_bundle) = match selected {
+            // No source to fall back on, so a bundle fault stops the install.
+            Err(error) if bundled => return Err(format!("Cannot use the installed Vade bundle: {} Run the install command again.", text::terminal_text(&error))),
             Ok((None, _)) if self.config.prebuilt_dir.is_some() => {
                 // A set prebuilt_dir that serves nothing is named, so a source build is never a surprise.
                 let dir = self.config.prebuilt_dir.clone().unwrap_or_default();
@@ -291,17 +301,22 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
         let machines = self.config.machines.clone();
         let mut weights_present = true;
         for machine in &machines {
+            if !self.dry {
+                if runner::this_computer(&machine.ssh) { crate::output::line(format_args!("Checking {} on this computer.", machine.name))?; }
+                else { crate::output::line(format_args!("Checking SSH to {}.", machine.name))?; }
+            }
             weights_present &= self.machine_checks_for_build(machine, bundle.is_none())?;
         }
         self.network_checks(&machines)?;
+        // An installed bundle is one build of this CLI's engine, so it has all four.
         let supports_output =
-            self.dry || source_contains(&engine_source, "FLASH_SERVE_OUTPUT_TOKENS")?;
+            self.dry || bundled || source_contains(&engine_source, "FLASH_SERVE_OUTPUT_TOKENS")?;
         // Record the startup contract from the same checked source revision
         // used for every staged engine. Older manifests conservatively omit it.
-        let supports_fp4_chain = self.dry
+        let supports_fp4_chain = self.dry || bundled
             || source_contains(&engine_source, "next_service::run_pp(rank, world,")?;
-        let supports_warm_ptx = self.dry || source_contains(&engine_source, "warm_ptx_arg")?;
-        let supports_prepare_model = self.dry || source_contains(&engine_source, "prepare_model_for_install")?;
+        let supports_warm_ptx = self.dry || bundled || source_contains(&engine_source, "warm_ptx_arg")?;
+        let supports_prepare_model = self.dry || bundled || source_contains(&engine_source, "prepare_model_for_install")?;
         let mut manifest = Manifest {
             engine_sha: engine_sha.clone(),
             cli_sha: cli_sha.clone(),
@@ -348,7 +363,7 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
                         manifest.artifacts.insert(machine.name.clone(), artifact);
                         continue;
                     }
-                    Err(error) if error.starts_with("Prebuilt artifact rejected:") => {
+                    Err(error) if !bundled && error.starts_with("Prebuilt artifact rejected:") => {
                         crate::output::line(format_args!("{}: {}; building from source.", machine.name, text::terminal_text(&error)))?;
                         weights_present &= self.machine_checks_for_build(machine, true)?;
                     }
@@ -372,6 +387,7 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
                 ),
                 "Cannot prepare build folders on this machine. Use folders owned by your account, with no symlinks or access for other users, then run vade install again.",
             )?;
+            if !self.dry { crate::output::line(format_args!("Copying the source to {}.", machine.name))?; }
             self.sync_source(&engine_source, machine, &remote_engine, "engine")?;
             self.sync_source(&cli_source, machine, &remote_cli, "CLI")?;
             // The remote CLI build resolves its `../harness` path dependency here.
@@ -586,6 +602,9 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
     }
 
     pub(super) fn update(&mut self) -> Result<(), String> {
+        if self.config.installed_bundle {
+            return Err("This setup uses the installed Vade bundle, so it has no checkout to update. For a newer Vade, run the install command again: curl -fsSL https://vade.lol/install.sh | sh".into());
+        }
         let sources = [
             ("engine", self.config.engine_source.clone()),
             ("harness", self.config.harness_source.clone()),

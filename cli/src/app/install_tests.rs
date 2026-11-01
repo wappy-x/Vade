@@ -259,6 +259,80 @@ fn verified_host_payload_avoids_compilers_and_rejects_changed_staged_bytes() {
     }
 }
 
+/// A config with `source = installed-bundle`: a launcher bundle, and no checkout at all.
+fn with_installed_bundle() -> Fixture {
+    let mut f = Fixture::fp4(1, false);
+    let root = f.dir.join("bundles/vade-0.1.0-aaaaaaa");
+    fs::create_dir_all(&root).unwrap();
+    let mut conf = format!("format=vade-launch-bundle-v1\ntarget=aarch64-unknown-linux-gnu\nengine_sha={0}\ncli_sha={1}\nharness_sha={1}\n", "d".repeat(40), "e".repeat(40));
+    for (name, key) in [("flash-serve", "engine_sha256"), ("flash.ptx", "ptx_sha256"), ("vade", "vade_sha256"), ("vade-harness", "harness_sha256")] {
+        let mut bytes = vec![0; 32]; bytes[..6].copy_from_slice(b"\x7fELF\x02\x01"); bytes[18] = 183; bytes[31] = name.len() as u8;
+        fs::write(root.join(name), &bytes).unwrap();
+        conf.push_str(&format!("{key}={}\n", crate::sha256::sha(&bytes)));
+    }
+    fs::write(root.join("launcher-bundle.conf"), conf).unwrap();
+    for source in [&f.app.config.engine_source, &f.app.config.harness_source, &f.app.config.cli_source] { fs::remove_dir_all(source).unwrap(); }
+    f.app.config.prebuilt_dir = Some(root);
+    f.app.config.installed_bundle = true;
+    f
+}
+
+fn installed_bundle_app(f: &mut Fixture) -> App<HostHashRunner> {
+    crate::prebuilt::LINUX_HOST.set(true);
+    App { config: f.app.config.clone(), dry: false, runner: HostHashRunner { inner: std::mem::take(&mut f.app.runner), corrupt_staged: false } }
+}
+
+#[test]
+fn an_installed_bundle_gives_the_revisions_and_every_program_with_no_checkout() {
+    let mut f = with_installed_bundle();
+    let mut app = installed_bundle_app(&mut f);
+    app.execute(Command::Install).unwrap();
+    crate::prebuilt::LINUX_HOST.set(false);
+    let calls = &app.runner.inner.calls;
+    assert!(!calls.iter().any(|e| e.program == "git"), "a checkout was read");
+    assert!(!calls.iter().any(|e| e.program.ends_with("cargo") || e.program.ends_with("rustc")));
+    assert!(!calls.iter().any(|e| e.label.ends_with("source copy") || e.label.ends_with("helper build") || e.label.ends_with("build and stage")));
+    assert!(calls.iter().any(|e| e.label == "a prebuilt helper hash"));
+    assert!(app.config.stage_dir.join("vade-harness").is_file() && app.config.stage_dir.join("vade").is_file());
+    let manifest = text::parse(&fs::read_to_string(&app.config.build_manifest).unwrap()).unwrap();
+    assert_eq!((manifest["engine_sha"].as_str(), manifest["cli_sha"].as_str(), manifest["harness_source_sha"].as_str()), (&*"d".repeat(40), &*"e".repeat(40), &*"e".repeat(40)));
+}
+
+#[test]
+fn an_installed_bundle_fault_stops_the_install_and_never_builds_from_source() {
+    // A changed local program: the bundle is refused here, before any Spark work.
+    let mut f = with_installed_bundle();
+    fs::write(f.app.config.prebuilt_dir.as_ref().unwrap().join("flash-serve"), b"changed").unwrap();
+    let error = installed_bundle_app(&mut f).execute(Command::Install).unwrap_err();
+    crate::prebuilt::LINUX_HOST.set(false);
+    assert!(error.starts_with("Cannot use the installed Vade bundle:") && error.ends_with("Run the install command again."), "{error}");
+    // A helper that does not arrive whole on a Spark: no source copy follows.
+    let mut f = with_installed_bundle();
+    crate::prebuilt::LINUX_HOST.set(true);
+    let mut app = App { config: f.app.config.clone(), dry: false, runner: HashFailureRunner { inner: std::mem::take(&mut f.app.runner),
+        reject: "a prebuilt helper hash", rejected: false, source_hashes: None } };
+    let error = app.execute(Command::Install).unwrap_err();
+    crate::prebuilt::LINUX_HOST.set(false);
+    assert!(app.runner.rejected && error.starts_with("Prebuilt artifact rejected:"), "{error}");
+    assert!(!app.runner.inner.calls.iter().any(|e| e.label.ends_with("source copy") || e.label.ends_with("build directories")));
+    // This vade has no bundle beside it.
+    let mut f = with_installed_bundle();
+    f.app.config.prebuilt_dir = None;
+    assert_eq!(f.app.execute(Command::Install).unwrap_err(), crate::app::deployment::NO_INSTALLED_BUNDLE);
+}
+
+#[test]
+fn an_installed_bundle_has_no_checkout_to_update_and_the_plan_says_so() {
+    let mut f = with_installed_bundle();
+    let error = f.app.execute(Command::Update).unwrap_err();
+    assert!(error.contains("no checkout to update") && error.contains("curl -fsSL https://vade.lol/install.sh | sh"), "{error}");
+    assert!(!f.app.runner.calls.iter().any(|e| e.program == "git"));
+    let plan = f.app.install_plan();
+    assert!(plan.contains("the installed Vade bundle in") && plan.contains("none; the bundle holds every program") && plan.contains("none; the bundle is prebuilt"), "{plan}");
+    f.app.config.prebuilt_dir = None;
+    assert!(f.app.install_plan().contains("is not in a bundle"));
+}
+
 #[test]
 fn host_payload_checks_target_revision_digest_and_executable_before_copying() {
     for changed in ["target", "revision", "digest", "executable"] {

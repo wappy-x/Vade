@@ -44,6 +44,7 @@ impl Bundle {
                     "engine_sha256" => "flash-serve.sha256".into(),
                     "ptx_sha256" => "flash.ptx.sha256".into(),
                     "vade_sha256" => "vade.sha256".into(),
+                    "harness_sha256" => "vade-harness.sha256".into(),
                     "target" | "engine_sha" | "cli_sha" => key,
                     _ => continue,
                 };
@@ -88,8 +89,15 @@ impl Bundle {
             || self.fields.get("harness_sha").map(String::as_str) != Some(harness) {
             return Err("Prebuilt host target or harness revision does not match.".into());
         }
+        self.host_pair("host-vade-harness", "host-vade").map(Some)
+    }
+    /// The launcher bundle's own vade and vade-harness, for a controller that is
+    /// a Spark and has no checkout to build them from.
+    pub fn launcher_host(&self) -> Result<HostBundle, String> { self.host_pair("vade-harness", "vade") }
+    /// The two files after checking their hashes and their platform.
+    fn host_pair(&self, harness: &str, cli: &str) -> Result<HostBundle, String> {
         let mut hashes = Vec::new();
-        for name in ["host-vade-harness", "host-vade"] {
+        for name in [harness, cli] {
             let expected = self.fields.get(&format!("{name}.sha256")).filter(|s| text::is_lower_hex(s, 64))
                 .ok_or("Prebuilt host artifact SHA256 is missing.")?;
             let path = self.dir.join(name);
@@ -104,9 +112,19 @@ impl Bundle {
             if !host_executable(&header) { return Err("Prebuilt host executable has the wrong platform.".into()); }
             hashes.push(actual);
         }
-        Ok(Some(HostBundle { cli: self.dir.join("host-vade"), harness: self.dir.join("host-vade-harness"),
-            hashes: hashes.try_into().unwrap() }))
+        Ok(HostBundle { cli: self.dir.join(cli), harness: self.dir.join(harness), hashes: hashes.try_into().unwrap() })
     }
+}
+/// The engine, harness and CLI revisions in the launcher bundle in `dir`.
+pub fn revisions(dir: &Path) -> Result<[String; 3], String> {
+    let mut manifest = String::new();
+    File::open(dir.join(LAUNCHER)).and_then(|f| f.take(4097).read_to_string(&mut manifest))
+        .map_err(|_| format!("Cannot read {LAUNCHER} in the installed Vade bundle. Run the install command again."))?;
+    if manifest.len() > 4096 { return Err(format!("{LAUNCHER} exceeds 4 KiB. Run the install command again.")); }
+    let fields = text::parse(&manifest)?;
+    let revision = |key: &str| fields.get(key).filter(|sha| text::is_lower_hex(sha, 40)).cloned()
+        .ok_or_else(|| format!("{LAUNCHER} has no full {key}. Run the install command again."));
+    Ok([revision("engine_sha")?, revision("harness_sha")?, revision("cli_sha")?])
 }
 /// This computer's Rust target triple, or "unsupported".
 pub(crate) fn host_target() -> &'static str {
@@ -118,7 +136,14 @@ pub(crate) fn host_target() -> &'static str {
         _ => "unsupported",
     }
 }
+#[cfg(test)]
+thread_local! {
+    /// Lets a test on a Mac stage a launcher bundle, which holds Linux programs only.
+    pub(crate) static LINUX_HOST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 fn host_executable(header: &[u8; 20]) -> bool {
+    #[cfg(test)]
+    if LINUX_HOST.get() { return &header[..6] == b"\x7fELF\x02\x01" && header[18..20] == [183, 0]; }
     let arm = cfg!(target_arch = "aarch64");
     if cfg!(target_os = "macos") {
         header[..4] == [0xcf, 0xfa, 0xed, 0xfe]
@@ -170,6 +195,19 @@ mod tests {
         assert_eq!(bundle.dir, root);
         assert_eq!(bundle.hashes[0], sha256::sha(&fs::read(root.join("flash-serve")).unwrap()));
         assert!(bundle.host(&cli).unwrap().is_none(), "no host pair: the controller builds its own CLI and harness");
+        // With no checkout, the same file names the revisions and the two local programs.
+        assert_eq!(revisions(&root).unwrap(), [engine.clone(), cli.clone(), cli.clone()]);
+        LINUX_HOST.set(true);
+        let host = bundle.launcher_host().unwrap();
+        assert_eq!((host.cli, host.harness), (root.join("vade"), root.join("vade-harness")));
+        assert_eq!(host.hashes, [sha256::sha(&fs::read(root.join("vade-harness")).unwrap()), bundle.hashes[2].clone()]);
+        fs::write(root.join("vade-harness"), b"changed").unwrap();
+        assert!(bundle.launcher_host().err().unwrap().contains("host artifact SHA256 mismatch"));
+        LINUX_HOST.set(false);
+        fs::write(root.join(LAUNCHER), conf.replace(&format!("harness_sha={cli}"), "harness_sha=short")).unwrap();
+        assert!(revisions(&root).unwrap_err().contains("has no full harness_sha"));
+        fs::write(root.join(LAUNCHER), &conf).unwrap();
+        assert!(revisions(Path::new("/no/such/bundle")).unwrap_err().contains("Run the install command again"));
         // Another revision's bundle there means: build from source.
         assert!(Bundle::find(Some(&root), &"c".repeat(40), &cli).unwrap().is_none());
         fs::write(root.join("vade"), b"changed").unwrap();

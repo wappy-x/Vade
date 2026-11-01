@@ -124,7 +124,16 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 
 ### Install
 
-- The installer writes one fixed folder, `~/.vade/bin`, with a small script that runs the build it just installed. It prints the same `export` line for every version and for a source build, and step 3 is now `vade up`. `vade update` keeps that script on the bundle it staged. For a newer Vade, run the install command again.
+- `vade setup --hosts` now works after the one-line install, with no clone. Setup writes `source = installed-bundle`, and `vade install` takes every program and its revision from the bundle next to `vade`. A clone works as before.
+- The installer also writes `~/.local/bin/vade`, which the stock Ubuntu `~/.profile` puts on `PATH` at login, so a new SSH login finds `vade` with no `export` line.
+  - It edits no shell profile, and it leaves a file there that is not from Vade.
+  - The steps are now `vade pull`, then `vade up`, and the output ends with one line about `PATH`.
+- Two or more FP4-Local Sparks now start when one Spark has the full checksum list from `vade pull` and another has the engine's shorter list, such as after a copy of the model.
+  - Each rank now writes the same short list for the same weights.
+  - Different weights still stop the start, and the engine does not change.
+- `vade setup` shows `vade up --hosts` with the Sparks as you typed them, so you can paste the command, and it stops for a missing checkout before it asks any question.
+- `vade setup` says what each step does, also in `--dry-run`, and `vade install` prints `Checking SSH to <name>.` and `Copying Vade to <name>.` for each Spark.
+- The installer writes one fixed folder, `~/.vade/bin`, with a small script that runs the build it just installed. It prints the same `export` line for every version and for a source build. `vade update` keeps that script on the bundle it staged. For a newer Vade, run the install command again.
 - `curl -fsSL https://vade.lol/install.sh | sh` is now safe when the download stops early, and its source build no longer runs in the wrong folder.
   - Every statement of `scripts/install.sh` is now inside `main`, and the last line calls it, so a cut-off script is a syntax error and runs nothing.
   - With no checkout, the source build clones public main into a new folder in `~/.vade` and runs the installer of that clone.

@@ -7,12 +7,13 @@ fn facts(spark: bool) -> Facts {
         explicit: false,
         path: PathBuf::from("/home/you/.config/vade/config"),
         checkout: Some(PathBuf::from("/home/you/vade")),
+        bundle: false,
         home: PathBuf::from("/home/you/.vade"),
         models: None,
     }
 }
 
-fn pinned(_: &Path, fp8: bool) -> Result<Profile, String> {
+fn pinned(_: Option<&Path>, fp8: bool) -> Result<Profile, String> {
     Ok(if fp8 {
         Profile { fp8, model: "qwen3.8-flash-next-fp8".into(), repo: "Qwen/Qwen3.8-Flash-Next-FP8".into(), revision: "b".repeat(40) }
     } else {
@@ -309,8 +310,56 @@ fn moving_a_local_setup_keeps_every_file_and_can_go_back() {
 }
 
 #[test]
+fn more_sparks_with_no_checkout_use_the_installed_bundle() {
+    let facts = Facts { checkout: None, bundle: true, ..facts(true) };
+    let options = flags(true, &["spark-a", "spark-b"], &[("spark-a", "spark-b", "192.0.2.1"), ("spark-b", "spark-a", "192.0.2.2")]);
+    let (text, up) = controller(scripted(&options, &facts, &[]).0);
+    assert_eq!(up, ["--hosts", "spark-a,spark-b"]);
+    assert!(text.contains("[global]\nsource = installed-bundle\nstage_dir = /home/you/.vade/controller/stage\n"), "{text}");
+    assert!(!text.contains("_source"), "{text}");
+    let config = crate::config::Config::parse(&text, &facts.path).unwrap();
+    assert!(config.installed_bundle);
+    // A checkout still wins, with the same three lines as before.
+    let (text, _) = controller(scripted(&options, &Facts { bundle: true, ..self::facts(true) }, &[]).0);
+    assert!(text.contains("engine_source = /home/you/vade/engine\nharness_source = /home/you/vade/harness\ncli_source = /home/you/vade/cli\n") && !text.contains("source = installed-bundle"), "{text}");
+}
+
+#[test]
+fn the_start_command_shows_the_sparks_as_they_were_typed() {
+    let options = flags(true, &["192.0.2.10", "192.0.2.11"], &[("192.0.2.10", "192.0.2.11", "198.51.100.1"), ("192.0.2.11", "192.0.2.10", "198.51.100.2")]);
+    let (text, up) = controller(scripted(&options, &facts(true), &[]).0);
+    assert_eq!(up, ["--hosts", "192.0.2.10,192.0.2.11"]);
+    assert!(text.starts_with("# Written by vade setup. Start: vade up --hosts 192.0.2.10,192.0.2.11\n") && text.contains("[machine 192-0-2-10]\nssh = 192.0.2.10\n"), "{text}");
+    // A second setup finds the same Sparks from that line, and the start passes the same checks.
+    let config = crate::config::Config::parse(&text, &facts(true).path).unwrap();
+    assert_eq!(start_options(&text, &config), up);
+    assert_eq!(check_start(&config, &up), Ok(()));
+}
+
+#[test]
+fn the_built_in_examples_give_the_same_pin_as_the_checkout() {
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    for fp8 in [false, true] {
+        assert_eq!(profile(None, fp8).unwrap(), profile(Some(&checkout), fp8).unwrap());
+    }
+}
+
+#[test]
+fn each_step_says_what_it_does_on_a_spark_and_from_a_controller() {
+    let local = Target::Local { model: None, installed: false };
+    let pair = Target::Controller { path: PathBuf::new(), text: None, up: Vec::new(), installed: false };
+    assert_eq!(step_note("install", &local), "This step checks this Spark and installs Vade here.");
+    assert!(step_note("install", &pair).contains("SSH"));
+    assert_eq!(step_note("up", &pair), "This step starts the engine.");
+    assert_eq!(step_note("doctor", &local), "This step checks the running engine.");
+}
+
+#[test]
 fn more_sparks_with_no_checkout_name_the_clone_and_write_nothing() {
     let facts = Facts { checkout: None, ..facts(true) };
     let error = scripted(&flags(true, &["a"], &[]), &facts, &[]).0.unwrap_err();
     assert!(error.starts_with("More Sparks need a Vade checkout on this computer") && error.contains("Run git clone "), "{error}");
+    // The stop comes before any question, because no answer can change it.
+    let (_, asked) = scripted(&flags(false, &["spark-a", "spark-b"], &[]), &Facts { checkout: None, ..self::facts(true) }, &[]);
+    assert!(asked.is_empty(), "{asked:?}");
 }

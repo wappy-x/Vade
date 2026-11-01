@@ -62,7 +62,7 @@ source that applies:
 | Where | 1st choice | 2nd choice | Last choice |
 | --- | --- | --- | --- |
 | This Spark | The bundle that `VADE_BUNDLE` names | A launcher bundle next to the `vade` program | A source build of the checkout that holds `vade` |
-| Controller | A bundle in `prebuilt_dir` whose engine and CLI revisions match the checkout | | A source build on each Spark |
+| Controller | With `source = installed-bundle`, the bundle next to `vade`, and nothing else. Otherwise, a bundle in `prebuilt_dir` whose engine and CLI revisions match the checkout | | A source build on each Spark |
 
 A source build uses the pinned Rust 1.99.0 and nightly-2026-10-01. Install
 checks every bundle file against its SHA-256 before use. A controller bundle

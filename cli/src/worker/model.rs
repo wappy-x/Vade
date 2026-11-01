@@ -197,7 +197,8 @@ pub(super) fn indexed_shards(index: &str) -> Result<BTreeSet<String>, String> {
 /// Without one, `private` keeps one receipt per checkpoint path in this
 /// helper's state folder across starts, so a different checkpoint never
 /// inherits another's hashes; `pipeline` starts every rank of a chain from no
-/// receipt. Older controllers send no field and keep the engine's default.
+/// receipt, and a supplied list goes in as [`chain_manifest`] gives it. Older
+/// controllers send no field and keep the engine's default.
 pub(crate) fn receipt(root: &Path, model: &Path, request: &Fields, environment: &mut Fields) -> Result<(), String> {
     let pipeline = match request.get("model_receipt").map(String::as_str) {
         None => return Ok(()),
@@ -226,6 +227,7 @@ pub(crate) fn receipt(root: &Path, model: &Path, request: &Fields, environment: 
         }
     }
     if let Some(manifest) = supplied {
+        let manifest = if pipeline { chain_manifest(&manifest).unwrap_or(manifest) } else { manifest };
         crate::text::atomic_write(&path, &manifest)?;
     }
     environment.remove("env_unset.FLASH_NVFP4_MANIFEST");
@@ -233,9 +235,73 @@ pub(crate) fn receipt(root: &Path, model: &Path, request: &Fields, environment: 
     Ok(())
 }
 
+/// A chain compares the bytes of this file between ranks, so two correct lists
+/// of a different shape refuse to start: `vade pull` lists every file, and a
+/// rank with no list gets the engine's own. This gives the engine's shape: the
+/// index row, then the weight files by name. Equal weights give equal bytes on
+/// every rank, and a different hash still stops the chain. A row that is not
+/// valid gives `None`, so the engine sees the list as it is and refuses it.
+fn chain_manifest(supplied: &str) -> Option<String> {
+    const INDEX: &str = "model.safetensors.index.json";
+    let mut rows = std::collections::BTreeMap::new();
+    for row in supplied.lines().filter(|row| !row.is_empty()) {
+        let (hash, mark, name) = (row.get(..64)?, row.get(64..66)?, row.get(66..)?);
+        if !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) || !matches!(mark, "  " | " *") { return None; }
+        if (name == INDEX || name.ends_with(".safetensors")) && rows.insert(name, hash.to_ascii_lowercase()).is_some() { return None; }
+    }
+    let index = rows.remove(INDEX)?;
+    Some(std::iter::once(format!("{index}  {INDEX}\n")).chain(rows.iter().map(|(name, hash)| format!("{hash}  {name}\n"))).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn chain_ranks_with_a_full_list_and_a_short_list_write_the_same_bytes() {
+        let list = include_str!("../../examples/qwen3.8-flash-next-fp4-local.sha256");
+        let full = list.replace("  ./", "  ");
+        let chain = chain_manifest(&full).unwrap();
+        assert_eq!(chain.lines().count(), 22);
+        assert!(chain.starts_with(&full.lines().find(|row| row.ends_with("  model.safetensors.index.json")).map(|row| format!("{row}\n")).unwrap()));
+        // The digest that the engine's own list had on a real pair: the same bytes.
+        assert_eq!(crate::sha256::sha(chain.as_bytes()), "d99ccbed3a9db8a2f099eca98e17c0bc3a2ebe84df95852f3b07c87c20a32716");
+        // The list from one rank, as the other rank sees it, gives the same file again.
+        assert_eq!(chain_manifest(&chain).as_deref(), Some(chain.as_str()));
+        assert_eq!(chain_manifest(&full.replace("  ", " *")).as_deref(), Some(chain.as_str()));
+        assert_eq!(chain_manifest(&full.to_ascii_uppercase().replace(".SAFETENSORS", ".safetensors").replace("MODEL.safetensors.INDEX.JSON", "model.safetensors.index.json").replace("TENSORS/MODEL", "tensors/model").replace("-OF-", "-of-")).as_deref(), Some(chain.as_str()));
+        // Another weight file is still another list, so the chain stops.
+        let first = full.lines().find(|row| row.ends_with(".safetensors")).unwrap();
+        let changed = full.replacen(&first[..64], &"0".repeat(64), 1);
+        assert_ne!(chain_manifest(&changed).unwrap(), chain);
+        // A list the engine would refuse reaches the engine as it is.
+        for bad in ["not a row", &format!("{}", "z".repeat(70)), &format!("{full}{first}\n")] { assert_eq!(chain_manifest(bad), None, "{bad}"); }
+        assert_eq!(chain_manifest(&full.replace("model.safetensors.index.json", "other.json")), None);
+    }
+
+    #[test]
+    fn a_chain_start_writes_the_short_list_and_a_private_start_keeps_the_full_one() {
+        let root = fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("vade-receipt-{}", crate::text::random_hex(8).unwrap()));
+        let state = root.join("state");
+        crate::text::private_dir(&state).unwrap();
+        let [leftover, pulled] = ["leftover/model", "pulled/model"].map(|name| {
+            let model = root.join(name); fs::create_dir_all(&model).unwrap();
+            fs::write(model.join("config.json"), crate::launch::test_mixed_config(32768)).unwrap();
+            model
+        });
+        let list = include_str!("../../examples/qwen3.8-flash-next-fp4-local.sha256");
+        let short = chain_manifest(&list.replace("  ./", "  ")).unwrap();
+        fs::write(leftover.join("manifest.sha256"), &short).unwrap();
+        fs::write(root.join("pulled/model.sha256"), list).unwrap();
+        let start = |model: &Path, mode: &str| {
+            let mut environment = Fields::new();
+            receipt(&state, model, &fields(&[("model_receipt", mode)]), &mut environment).unwrap();
+            fs::read_to_string(&environment["env.FLASH_NVFP4_MANIFEST"]).unwrap()
+        };
+        assert_eq!(start(&leftover, "pipeline"), start(&pulled, "pipeline"));
+        assert_eq!(start(&pulled, "private"), list.replace("  ./", "  "));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn fp4_local_receipts_stay_private_and_chain_ranks_start_without_one() {
         let root = fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("vade-receipt-{}", crate::text::random_hex(8).unwrap()));

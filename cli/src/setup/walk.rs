@@ -29,6 +29,8 @@ pub(super) struct Facts {
     pub explicit: bool,
     pub path: PathBuf,
     pub checkout: Option<PathBuf>,
+    /// Whether this vade runs from a launcher bundle, which can stand in for a checkout.
+    pub bundle: bool,
     pub home: PathBuf,
     /// VADE_MODELS, which the steps inherit and vade install reads first.
     pub models: Option<String>,
@@ -82,6 +84,7 @@ pub fn run(options: &SetupOptions, dry: bool) -> Result<(), String> {
             explicit,
             path,
             checkout: crate::launch::checkout().ok(),
+            bundle: crate::launch::bundle_folder().is_ok_and(|bundle| bundle.is_some()),
             home: crate::launch::root()?,
             models: std::env::var("VADE_MODELS").ok().filter(|models| !models.is_empty()),
         };
@@ -103,7 +106,7 @@ pub fn run(options: &SetupOptions, dry: bool) -> Result<(), String> {
             Target::Controller { .. } => (),
         }
         output::line(format_args!("Steps:"))?;
-        for (args, _) in &steps { output::line(format_args!("  vade {}", args.join(" ")))?; }
+        for (args, _) in &steps { output::line(format_args!("  vade {}\n    {}", args.join(" "), step_note(&args[0], &target)))?; }
         return Ok(());
     }
     if let Some(setup) = &replace {
@@ -111,6 +114,7 @@ pub fn run(options: &SetupOptions, dry: bool) -> Result<(), String> {
         output::line(format_args!("Moved the local setup to {}. To use it again, move that file back to {}.", text::quoted(&setup.aside.to_string_lossy()), text::quoted(&setup.file.to_string_lossy())))?;
     }
     if let Target::Controller { path, text: Some(config), .. } = &target {
+        output::line(format_args!("Writing the controller config to {}.", text::quoted(&path.to_string_lossy())))?;
         // Create only: another setup may have written this file while this one asked.
         let created = text::create_private(path, config);
         // No controller config, so the local setup goes back to its place.
@@ -118,7 +122,6 @@ pub fn run(options: &SetupOptions, dry: bool) -> Result<(), String> {
         if !created? {
             return Err(format!("{} appeared while setup asked its questions. Setup did not change it. Run vade setup again to use it.", text::quoted(&path.to_string_lossy())));
         }
-        output::line(format_args!("Wrote the controller config at {}.", text::quoted(&path.to_string_lossy())))?;
     }
     let program = std::env::current_exe().map_err(|_| "Cannot find the vade program that runs setup.")?;
     let _interruptions = crate::runner::Interruptions::install();
@@ -129,7 +132,7 @@ pub fn run(options: &SetupOptions, dry: bool) -> Result<(), String> {
         if crate::runner::interrupted() {
             return Err(format!("Setup was interrupted before {shown}. Run vade setup again to continue."));
         }
-        output::line(format_args!("Setup step {} of {total}: {shown}", number + 1))?;
+        output::line(format_args!("Setup step {} of {total}: {shown}\n{}", number + 1, step_note(&args[0], &target)))?;
         let (passed, stopped) = run_step(step_command(&program, args, env, options.yes), &crate::runner::interrupted)
             .map_err(|_| format!("Cannot run {shown}. Check that the vade program still exists, then run vade setup again."))?;
         if stopped || crate::runner::interrupted() {
@@ -225,10 +228,18 @@ fn read_answer(input: &mut impl BufRead) -> Result<String, String> {
 }
 
 /// The pinned model of the FP4-Local or FP8 profile, from the example config
-/// in `checkout`, so setup and the docs name the same revision.
-fn profile(checkout: &Path, fp8: bool) -> Result<Profile, String> {
-    let path = checkout.join("cli/examples").join(if fp8 { "vade.conf" } else { "fp4-local.conf" });
-    let source = std::fs::read_to_string(&path).map_err(|_| format!("Cannot read {}. Run vade setup from a complete Vade checkout.", path.display()))?;
+/// in `checkout`, so setup and the docs name the same revision. With no
+/// checkout, the copy built into this program gives the same pin.
+fn profile(checkout: Option<&Path>, fp8: bool) -> Result<Profile, String> {
+    let name = if fp8 { "vade.conf" } else { "fp4-local.conf" };
+    let (path, source) = match checkout {
+        Some(checkout) => {
+            let path = checkout.join("cli/examples").join(name);
+            let source = std::fs::read_to_string(&path).map_err(|_| format!("Cannot read {}. Run vade setup from a complete Vade checkout.", path.display()))?;
+            (path, source)
+        }
+        None => (PathBuf::from(name), if fp8 { include_str!("../../examples/vade.conf") } else { include_str!("../../examples/fp4-local.conf") }.to_owned()),
+    };
     let config = crate::config::Config::parse(&source, &path)?;
     config.validate_model_revision()?;
     Ok(Profile { fp8, model: config.model, repo: config.model_repo, revision: config.model_revision })
@@ -237,7 +248,7 @@ fn profile(checkout: &Path, fp8: bool) -> Result<Profile, String> {
 /// Ask the questions that flags did not answer, and choose the target.
 /// `--yes` takes each default and fails on a question without one.
 pub(super) fn answer(options: &SetupOptions, facts: &Facts, ask: &mut dyn FnMut(&str) -> Result<String, String>,
-    profile: fn(&Path, bool) -> Result<Profile, String>) -> Result<Target, String> {
+    profile: fn(Option<&Path>, bool) -> Result<Profile, String>) -> Result<Target, String> {
     let local_default = facts.spark && !facts.explicit;
     let hosts: Vec<String> = if !options.hosts.is_empty() { options.hosts.clone() } else if local_default && options.yes { Vec::new() } else if options.yes {
         return Err("Setup needs the Sparks to drive from this computer. Add --hosts with what you type after ssh, such as --hosts spark-a, in cable order.".into());
@@ -268,6 +279,9 @@ pub(super) fn answer(options: &SetupOptions, facts: &Facts, ask: &mut dyn FnMut(
         }
         return Ok(Target::Local { model, installed: false });
     }
+    // Before any question: no answer below can change this.
+    let checkout = facts.checkout.as_deref();
+    if checkout.is_none() && !facts.bundle { return Err(format!("More Sparks need a Vade checkout on this computer, and this vade program has none. Run git clone {}, then run vade setup again from that folder, or set VADE_SOURCE to a checkout.", crate::repository::VADE_REPO_URL)); }
     let fp8 = match options.fp8 {
         Some(fp8) => fp8,
         None if options.yes || !matches!(hosts.len(), 2 | 4 | 6) => false,
@@ -280,7 +294,6 @@ pub(super) fn answer(options: &SetupOptions, facts: &Facts, ask: &mut dyn FnMut(
     if fp8 && !matches!(hosts.len(), 2 | 4 | 6) {
         return Err(format!("{} This setup has {}. Use 2 or 4 Sparks in --hosts, or omit --fp8.", crate::config::FP8_SPARKS, hosts.len()));
     }
-    let checkout = facts.checkout.as_deref().ok_or_else(|| format!("More Sparks need a Vade checkout on this computer, and this vade program has none. Run git clone {}, then run vade setup again from that folder, or set VADE_SOURCE to a checkout.", crate::repository::VADE_REPO_URL))?;
     let profile = profile(checkout, fp8)?;
     let default_model = format!("~/models/{}", profile.repo);
     let model = match (&options.model, options.yes) {
@@ -314,7 +327,7 @@ pub(super) fn answer(options: &SetupOptions, facts: &Facts, ask: &mut dyn FnMut(
     let text = render(checkout, &facts.home, &profile, &hosts, &names, &links, &model);
     // The steps read this file, so it must pass the same parser and the
     // same Spark and cable checks as vade up before setup writes it.
-    let up = up_options(fp8, &names);
+    let up = up_options(fp8, &hosts);
     check_start(&crate::config::Config::parse(&text, &facts.path)?, &up)
         .map_err(|error| format!("Nothing was written: vade up would refuse this setup. {error}"))?;
     Ok(Target::Controller { path: facts.path.clone(), text: Some(text), up, installed: false })
@@ -336,15 +349,19 @@ pub(super) fn machine_names(hosts: &[String]) -> Vec<String> {
     names
 }
 
-/// The controller config: this checkout as the source, Vade's private folders
-/// under the Vade home, and one section per Spark with its cable addresses.
-/// Every other key keeps the parser's default.
-pub(super) fn render(checkout: &Path, home: &Path, profile: &Profile, hosts: &[String], names: &[String],
+/// The controller config: this checkout as the source, or the installed bundle
+/// when there is no checkout, Vade's private folders under the Vade home, and
+/// one section per Spark with its cable addresses. Every other key keeps the
+/// parser's default.
+pub(super) fn render(checkout: Option<&Path>, home: &Path, profile: &Profile, hosts: &[String], names: &[String],
     links: &[(String, String, String)], model: &str) -> String {
-    let start = format!("vade {}", std::iter::once("up".to_owned()).chain(up_options(profile.fp8, names)).collect::<Vec<_>>().join(" "));
+    let start = format!("vade {}", std::iter::once("up".to_owned()).chain(up_options(profile.fp8, hosts)).collect::<Vec<_>>().join(" "));
     let mut out = format!("# Written by vade setup. Start: {start}\n# Edit this file to change the setup; vade setup never replaces it.\n[global]\n");
-    for (key, folder) in [("engine_source", "engine"), ("harness_source", "harness"), ("cli_source", "cli")] {
-        out += &format!("{key} = {}\n", checkout.join(folder).display());
+    match checkout {
+        Some(checkout) => for (key, folder) in [("engine_source", "engine"), ("harness_source", "harness"), ("cli_source", "cli")] {
+            out += &format!("{key} = {}\n", checkout.join(folder).display());
+        },
+        None => out += "source = installed-bundle\n",
     }
     out += &format!("stage_dir = {}\nstate_dir = {}\n", home.join("controller/stage").display(), home.join("controller/state").display());
     out += &format!("model = {}\nmodel_repo = {}\nmodel_revision = {}\n", profile.model, profile.repo, profile.revision);
@@ -374,7 +391,7 @@ pub(super) fn start_options(file: &str, config: &crate::config::Config) -> Vec<S
     let mut options = Vec::new();
     if config.model.ends_with("-fp8") { options.push("--fp8".to_owned()); }
     // Even one name: a plain vade up takes the first machine, which may be a verify engine.
-    if !names.is_empty() && names.iter().all(|name| config.machines.iter().any(|machine| &machine.name == name)) {
+    if !names.is_empty() && names.iter().all(|name| config.machines.iter().any(|machine| &machine.name == name || &machine.ssh == name)) {
         options.extend(["--hosts".to_owned(), names.join(",")]);
     }
     options
@@ -401,11 +418,12 @@ pub(super) fn check_start(config: &crate::config::Config, up: &[String]) -> Resu
     }
 }
 
-/// The `vade up` options for a profile on these machines, in cable order.
-fn up_options(fp8: bool, names: &[String]) -> Vec<String> {
+/// The `vade up` options for a profile on these Sparks, in cable order, as the
+/// user typed them, so the printed command can be pasted.
+fn up_options(fp8: bool, hosts: &[String]) -> Vec<String> {
     let mut options = Vec::new();
     if fp8 { options.push("--fp8".to_owned()); }
-    if names.len() > 1 { options.extend(["--hosts".to_owned(), names.join(",")]); }
+    if hosts.len() > 1 { options.extend(["--hosts".to_owned(), hosts.join(",")]); }
     options
 }
 
@@ -421,6 +439,16 @@ fn steps(target: &Target) -> Vec<(Vec<String>, Vec<(String, String)>)> {
     };
     [vec!["install".to_owned()], std::iter::once("up".to_owned()).chain(up).collect(), vec!["doctor".to_owned()]]
         .into_iter().skip(usize::from(installed)).map(|args| (args, env.clone())).collect()
+}
+
+/// What one step does, the same sentence in a run and in a dry run.
+fn step_note(step: &str, target: &Target) -> &'static str {
+    match (step, target) {
+        ("install", Target::Local { .. }) => "This step checks this Spark and installs Vade here.",
+        ("install", Target::Controller { .. }) => "This step checks SSH, the GPU, the disk and the model on each Spark, then installs Vade there.",
+        ("up", _) => "This step starts the engine.",
+        _ => "This step checks the running engine.",
+    }
 }
 
 /// The command for one step. With `yes` nobody answers, so a step that would

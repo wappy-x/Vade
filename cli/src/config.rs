@@ -24,6 +24,9 @@ pub const FP8_SPARKS: &str = "FP8 runs on 2 or 4 Sparks, and the same request wi
 pub struct Config {
     pub engine_source: PathBuf,
     pub prebuilt_dir: Option<PathBuf>,
+    /// `source = installed-bundle`: the launcher bundle next to this vade is the
+    /// source, in `prebuilt_dir`, and the config names no checkout.
+    pub installed_bundle: bool,
     pub harness_source: PathBuf,
     pub cli_source: PathBuf,
     pub stage_dir: PathBuf,
@@ -202,8 +205,18 @@ impl Config {
         let model_repo = globals.take("model_repo").unwrap_or_else(|| if model == "qwen3.8-flash-next-fp8" {
             "Qwen/Qwen3.8-Flash-Next-FP8".into()
         } else { "nvidia/Qwen3.8-Flash-Next-FP4-Local".into() });
+        let installed_bundle = match globals.take("source").as_deref() {
+            None => false,
+            Some("installed-bundle") => true,
+            Some(_) => return Err("Set source to installed-bundle, or remove that line and set engine_source, harness_source and cli_source.".into()),
+        };
+        if installed_bundle && ["prebuilt_dir", "engine_source", "harness_source", "cli_source"].iter().any(|key| globals.0.contains_key(*key)) {
+            return Err("source = installed-bundle replaces prebuilt_dir, engine_source, harness_source and cli_source. Remove those lines, or remove the source line.".into());
+        }
         let config = Self {
-            prebuilt_dir: globals.take("prebuilt_dir").map(|p| local_path(&p, base)).transpose()?,
+            // Found on each run, so a new install moves this config to the new bundle.
+            prebuilt_dir: if installed_bundle { crate::launch::bundle_folder()? } else { globals.take("prebuilt_dir").map(|p| local_path(&p, base)).transpose()? },
+            installed_bundle,
             engine_source: local_path(
                 &globals
                     .take("engine_source")
@@ -854,6 +867,19 @@ mod tests {
         assert_eq!(config.selected(&reversed).unwrap()[0].name, "machine-b");
         assert!(config.selected(&UpOptions { sparks: Some(4), ..UpOptions::default() }).is_err());
     }
+    #[test]
+    fn installed_bundle_replaces_the_source_folders() {
+        let bundled = PAIR.replace("engine_source = engine\nharness_source = harness\ncli_source = cli\n", "source = installed-bundle\n");
+        let config = parse(&bundled).unwrap();
+        assert!(config.installed_bundle);
+        // This test program is in no bundle, so an install stops and names that.
+        assert_eq!(config.prebuilt_dir, None);
+        assert!(!parse(PAIR).unwrap().installed_bundle);
+        assert!(parse(&PAIR.replace("engine_source = engine", "source = installed-bundle\nengine_source = engine")).unwrap_err().contains("replaces prebuilt_dir"));
+        assert!(parse(&bundled.replace("source = installed-bundle", "source = installed-bundle\nprebuilt_dir = /bundle")).unwrap_err().contains("replaces prebuilt_dir"));
+        assert!(parse(&bundled.replace("installed-bundle", "other")).unwrap_err().contains("Set source to installed-bundle"));
+    }
+
     #[test]
     fn hosts_take_what_you_type_after_ssh_or_a_section_name() {
         let config = parse(PAIR).unwrap();

@@ -179,7 +179,7 @@ pub(super) fn plan(root: &Path) -> Result<Vec<(&'static str, String)>, String> {
     Ok(vec![("Files", files), ("Toolchain", toolchain), ("Installed", installed)])
 }
 
-fn bundle_path() -> Result<Option<PathBuf>, String> {
+pub(super) fn bundle_path() -> Result<Option<PathBuf>, String> {
     if let Some(path) = std::env::var_os("VADE_BUNDLE") {
         let path = PathBuf::from(path);
         if !path.is_absolute() || !path.is_dir() {

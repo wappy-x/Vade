@@ -77,6 +77,9 @@ pub(crate) fn saved_model(root: &Path) -> Option<PathBuf> {
 /// checkout that holds this vade program or the current folder.
 pub(crate) fn checkout() -> Result<PathBuf, String> { install::source_path() }
 
+/// The launcher bundle that holds this vade program, or the one in VADE_BUNDLE.
+pub(crate) fn bundle_folder() -> Result<Option<PathBuf>, String> { install::bundle_path() }
+
 /// Whether the local home has saved defaults or an owned engine.
 pub(crate) fn owner_configured() -> bool {
     root().is_ok_and(|p| p.join("config").exists() || p.join("state/run.conf").exists())

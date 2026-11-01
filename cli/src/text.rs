@@ -50,12 +50,24 @@ pub fn command(subcommand: &str) -> String {
     format!("{} {subcommand}", invocation(program.as_deref(), std::env::var_os("PATH").as_deref()))
 }
 
+/// The second line of the script that scripts/install.sh keeps in ~/.local/bin.
+const PATH_SCRIPT_MARKER: &str = "# Written by the Vade installer. vade-path-shim-v1";
+
+/// The text of `found` when it is a small shell script.
+fn small_script(found: &Path) -> Option<String> {
+    let text = fs::metadata(found).ok().filter(|meta| meta.len() <= 4096).and_then(|_| fs::read_to_string(found).ok())?;
+    text.starts_with("#!/bin/sh\n").then_some(text)
+}
+
 /// Whether `found` is a small script that names `program`, as the one that
 /// scripts/install.sh keeps in the Vade home's `bin` folder. It starts `program`
-/// by its full path, so that path is the name this program sees.
-fn script_runs(found: &Path, program: &Path) -> bool {
-    fs::metadata(found).is_ok_and(|meta| meta.len() <= 4096) && fs::read_to_string(found)
-        .is_ok_and(|text| text.starts_with("#!/bin/sh\n") && text.contains(program.to_string_lossy().as_ref()))
+/// by its full path, so that path is the name this program sees. The script in
+/// ~/.local/bin starts that first script, so it counts when the first one does.
+fn script_runs(found: &Path, program: &Path, home: Option<&Path>) -> bool {
+    let names = |script: &str| script.contains(program.to_string_lossy().as_ref());
+    let Some(script) = small_script(found) else { return false };
+    names(&script) || (script.lines().nth(1) == Some(PATH_SCRIPT_MARKER)
+        && home.and_then(|home| small_script(&home.join(".vade/bin/vade"))).is_some_and(|first| names(&first)))
 }
 
 /// The bare name when it was typed bare, or PATH finds this same program first
@@ -70,7 +82,8 @@ pub fn invocation(program: Option<&std::ffi::OsStr>, path: Option<&std::ffi::OsS
     }
     let executable = |candidate: &Path| fs::metadata(candidate).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
     let found = path.into_iter().flat_map(std::env::split_paths).map(|dir| dir.join(name)).find(|candidate| executable(candidate));
-    if found.as_deref().is_some_and(|found| script_runs(found, typed)) { return bare(); }
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if found.as_deref().is_some_and(|found| script_runs(found, typed, home.as_deref())) { return bare(); }
     match (found.and_then(|found| fs::canonicalize(found).ok()), fs::canonicalize(typed).ok()) {
         (Some(found), Some(this)) if found == this => bare(),
         _ => terminal_text(&crate::runner::quote(&typed.to_string_lossy())).into_owned(),
@@ -385,6 +398,15 @@ mod invocation_tests {
         fs::set_permissions(root.join("fixed/vade"), fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(invocation(Some(bundle.as_os_str()), Some(&path(&["fixed"]))), "vade");
         assert_eq!(invocation(Some(root.join("other/vade").as_os_str()), Some(&path(&["fixed"]))), root.join("other/vade").to_str().unwrap());
+        // The script in ~/.local/bin starts that one, so the hint stays short through both.
+        fs::create_dir_all(root.join("home/.vade/bin")).unwrap();
+        fs::create_dir_all(root.join("local")).unwrap();
+        fs::copy(root.join("fixed/vade"), root.join("home/.vade/bin/vade")).unwrap();
+        let second = root.join("local/vade");
+        fs::write(&second, format!("#!/bin/sh\n{PATH_SCRIPT_MARKER}\nexec \"$HOME/.vade/bin/vade\" \"$@\"\n")).unwrap();
+        assert!(script_runs(&second, &bundle, Some(&root.join("home"))));
+        assert!(!script_runs(&second, &root.join("other/vade"), Some(&root.join("home"))));
+        assert!(!script_runs(&second, &bundle, None));
         let spaced = root.join("my folder/vade");
         assert_eq!(invocation(Some(spaced.as_os_str()), None), format!("'{}'", spaced.display()));
         assert_eq!(invocation(Some(OsStr::new("./vade\x1b[2J")), None), "'./vade\\u{1b}[2J'");

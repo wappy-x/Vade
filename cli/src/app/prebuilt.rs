@@ -80,7 +80,7 @@ impl<R: Runner> App<R> {
         self.model_result(machine, checked)
     }
     pub(super) fn install_prebuilt(&mut self, machine: &Machine, bundle: &crate::prebuilt::Bundle, build: &str) -> Result<(Artifact, bool), String> {
-        crate::output::line(format_args!("{}: copying verified prebuilt engine and helper.", machine.name))?;
+        crate::output::line(format_args!("Copying Vade to {}.", machine.name))?;
         let storage = format!("{REMOTE_STORAGE_GUARD}\nvade_private_dir {} create\nvade_private_dir {} create\nvade_private_dir {} new\n",
             remote_path(&machine.stage_dir), remote_path(&format!("{}/builds", machine.stage_dir)), remote_path(build));
         self.checked(runner::ssh(&machine.ssh, storage, &format!("{} prebuilt directory", machine.name)), "Cannot prepare prebuilt stage; check its ownership and permissions.")?;
