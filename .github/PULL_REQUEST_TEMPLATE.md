@@ -21,10 +21,13 @@ cargo +1.99.0 run --offline --locked --manifest-path ../tools/Cargo.toml -p vade
 - [ ] **Docs:** pages, help text and the Unreleased section of CHANGELOG.md
   are updated for anything a user would notice, or nothing user-visible
   changed.
-- [ ] **Standard library only:** no new third-party dependencies of any kind
-  (registry, Git, path or vendored).
-- [ ] **No new unsafe:** no new `unsafe` blocks, functions, impls or `extern`
-  declarations, and existing SAFETY comments still hold.
+- [ ] **Zero third-party dependencies:** no new dependency of any kind
+  (registry, git, off-tree path, build or dev). The code uses the Rust standard
+  library only.
+- [ ] **No new unsafe:** no new `unsafe` blocks, functions, implementations or
+  `extern` declarations, and existing SAFETY comments still hold. The one
+  exception is in CONTRIBUTING.md: a kernel may add one `unsafe` block in the
+  GPU crate, with a written safety contract above it.
 - [ ] **Exactness kept:** the same request on the same setup still returns the
   same token IDs, alone, batched, cached, chunked, and with drafting on or off.
   For engine changes I attached the receipts that show it. For host-only or

@@ -99,7 +99,8 @@ tools listed in INSTALL.
 
 `scripts/install.sh` downloads, checks and unpacks a bundle of main when
 one is published ([INSTALL: Prebuilt bundle](../../INSTALL.md#prebuilt-bundle)).
-For the older v0.1.0 bundle on the GitHub release page, follow the
+Builds of main come from dl.vade.lol, and GitHub Releases holds only the old
+v0.1.0 bundle. For that bundle, follow the
 [download and checksum steps](../../cli/docs/prebuilt.md#download-check-and-unpack)
 before you run it. The launcher uses the bundle that holds the `vade` you ran.
 `VADE_BUNDLE` can instead point to an existing bundle folder by absolute path.
@@ -188,13 +189,17 @@ Context is the prompt plus the generated reply, counted in tokens, so a reply
 must fit in the context the prompt leaves. The engine's `/health` endpoint
 reports the request limits that are in effect.
 
+<div align="center">
+
 | Setting | Local default |
-| --- | --- |
+| :---: | :---: |
 | Context | 32768, or the checkpoint's own limit if that is lower; stepped down only as described above |
 | Output | The smaller of the context and 8192 tokens |
 | [Drafting](../../docs/GLOSSARY.md#dg) | On (the engine's default), unless `--mtp` or an `MTP` variable in your shell says otherwise |
 | Prefix retention (reusing the start of an earlier prompt) | On, on one Spark and on two Sparks (the tensor split), unless `VADE_FLASHNEXT_PREFIX_CACHE=0` is set when the engine starts; three or more Sparks run without it |
 | Port | 18080 on loopback at first setup, or another free loopback port if that one is taken; then saved |
+
+</div>
 
 ### Change a setting
 
@@ -223,20 +228,26 @@ Other flags, such as `--cache-bytes 0` and `--chats`, are covered in
 
 ## Where Vade keeps its files
 
+<div align="center">
+
 | Path | What it holds |
-| --- | --- |
+| :---: | :---: |
 | `~/.vade/config` | Saved checkpoint, limits, port and private paths |
 | `~/.vade/stage/` | Installed engine, kernels, harness and source-build files |
 | `~/.vade/state/` | Engine ownership record, runtime manifests and retained log |
 | `~/.vade/build-jobs/` | Source-build supervision records and logs |
 | `~/.vade/projects/` | Chat journals and input recall, one folder per project path (`VADE_CHAT_IN_PROJECT=1` keeps them in `./.vade`, git-ignored) |
 
+</div>
+
 An explicit absolute `VADE_HOME` replaces `~/.vade` for all of these paths.
 
 ## Commands
 
+<div align="center">
+
 | Command | What it does |
-| --- | --- |
+| :---: | :---: |
 | `vade launch` | Install if needed, start or reuse this installation's engine, open chat |
 | `vade install` | Prepare local defaults and artifacts without starting the engine |
 | `vade up` | Start or reuse the engine without opening chat |
@@ -247,6 +258,8 @@ An explicit absolute `VADE_HOME` replaces `~/.vade` for all of these paths.
 | `vade verify` | Check that the engine gives the same answer every time, with drafting on and off |
 | `vade down` | Stop this installation's recorded engine |
 | `vade update` | After shutdown, rebuild or restage engine and harness artifacts |
+
+</div>
 
 ## If you also use a controller
 

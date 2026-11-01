@@ -167,7 +167,7 @@ Enter the commit printed by `git rev-parse HEAD` in the rank-zero checkout:
 
 ```sh
 bash
-git clone --branch main https://github.com/wappy-x/vade.git vade
+git clone --branch main https://github.com/wappy-x/Vade.git vade
 cd vade
 read -r -p 'Vade commit running on the Sparks: ' VADE_SPARK_COMMIT
 git checkout --detach "$VADE_SPARK_COMMIT"

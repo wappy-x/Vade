@@ -4,10 +4,10 @@ Vade is an inference engine for the NVIDIA DGX Spark / GB10. It is written in
 Rust and uses only the standard library.
 
 Version 0.1.0 runs one model, `nvidia/Qwen3.8-Flash-Next-FP4-Local`, as text
-only. Main also serves `Qwen/Qwen3.8-Flash-Next-FP8` on 2, 4 or 6 Sparks. Vade
-runs on a single Spark out of the box. It can spread across more Sparks when
-you link them. Drafting is on by default: an extra model head guesses the next
-few tokens, and the model checks them in one pass.
+only. Main also serves `Qwen/Qwen3.8-Flash-Next-FP8`. Vade runs on one Spark by
+default, and it can spread across more Sparks when you link them. Drafting is
+on by default: an extra model head proposes the next few tokens, and the model
+verifies them in one pass.
 
 This page covers four things:
 
@@ -16,11 +16,22 @@ This page covers four things:
 - **Exactness.** It says what exactness asks of engine changes.
 - **Pull requests.** It shows how to send a pull request.
 
-Read [AGENTS.md](AGENTS.md) for the project rules. Everyone who takes part follows the [code of conduct](CODE_OF_CONDUCT.md). [Local CI](docs/ci.md)
-gives the current CI status and the public host commands. Run the affected
-host checks in [Local CI](docs/ci.md) and the
-[workflow](.github/workflows/ci.yml), doctests and Rustdoc included. The
-[glossary](docs/GLOSSARY.md) explains the terms used here.
+These pages go with this one:
+
+- **Project rules.** [AGENTS.md](AGENTS.md) gives the rules for a change to
+  Vade's code. This page says the same rules for people.
+- **Code of conduct.** Everyone who takes part follows the
+  [code of conduct](CODE_OF_CONDUCT.md).
+- **Security problems.** Do not open a public issue. Use
+  [GitHub private reporting](https://github.com/wappy-x/Vade/security/advisories/new),
+  as the [security policy](SECURITY.md) says.
+- **Bugs and ideas.** Use the
+  [issue forms](https://github.com/wappy-x/Vade/issues/new/choose).
+- **CI.** [Local CI](docs/ci.md) gives the current CI status and the public
+  host commands. Run the host checks that your change affects, with doctests
+  and Rustdoc. The [workflow](.github/workflows/ci.yml) is the full list.
+- **Terms.** The [glossary](docs/GLOSSARY.md) explains the terms that this page
+  uses.
 
 ## Build and validate
 
@@ -40,7 +51,7 @@ rustup target add --toolchain 1.99.0 aarch64-unknown-linux-gnu
 rustup toolchain install nightly-2026-10-01 --profile minimal --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda
 ```
 
-CI denies warnings. To match CI, run `export RUSTFLAGS="-D warnings"` in your
+CI denies warnings. To match CI, run `export RUSTFLAGS='-D warnings'` in your
 shell. You do not need GPU flags, because the kernel builder adds its own
 device flags.
 
@@ -118,21 +129,24 @@ install or start an engine. To install from source on a Spark, follow
 
 ## Rules and formatting
 
-- **Rust and the standard library.** Use shell only where Rust cannot do the
-  job. Do not use or require Python.
-- **Plain writing.** Use ASD-STE100 Simplified Technical English and American
-  spelling in docs, help, errors and reports. Use short sentences and active
-  voice. Give each sentence one main idea. Use plain words and no em dashes.
-  Give each numerical claim a source card, log or command output.
-- **No third-party dependencies.** Use only the Rust standard library and the
-  first-party path crates already here. Registry, git, external path, dev and
-  build dependencies all count.
-- **No new `unsafe`, with one exception.** The unsafe code that already
-  exists at the CUDA, kernel and transport boundaries doesn't make room for
-  more. The exception: a kernel may add one new `unsafe` block in the GPU
-  crate (`engine/crates/gpu`) only. Put its safety contract in a comment
-  directly above the block, and a reviewer checks it. The ratchet test
-  (below) doesn't count unsafe code, so check your diff for it yourself.
+- **Language.** Write code in Rust with the standard library only. Use shell
+  only where Rust cannot do the job. Do not use or require Python.
+- **Writing.** Use ASD-STE100 Simplified Technical English and American
+  spelling. Use short sentences, active voice and plain words. Give each
+  sentence one main idea. Do not use em dashes or lab slang. Apply this rule
+  to docs, help, errors, reports and messages. Every numerical claim must name
+  its card, log or command output. Give raw values with any percentage.
+- **Zero third-party dependencies.** Use the Rust standard library and the
+  first-party crates already in the tree. Registry, git, off-tree path, build
+  and dev dependencies all count, and so do lockfile sources.
+- **No new `unsafe`, with one exception.** Don't add unsafe blocks, functions,
+  implementations or extern declarations. The existing CUDA, FFI, kernel and
+  transport boundaries are not permission to grow them. Keep their safety
+  contracts and SAFETY comments intact. The exception: a kernel may add one
+  new `unsafe` block, in the GPU crate (`engine/crates/gpu`) only. Write its
+  safety contract in a comment directly above the block, and a reviewer checks
+  it before the merge. The ratchet test (below) doesn't count unsafe code, so
+  check your diff for it yourself.
 - **Model-generic behavior.** Derive it from the checkpoint configuration and
   tensor metadata, with no dispatch on the model name and no model-specific
   tuning. See [adding a model](docs/adding-a-model.md).
@@ -150,9 +164,9 @@ install or start an engine. To install from source on a Spark, follow
   It fails when a count rises above its ceiling. Don't raise the
   [ratchet ceilings](cli/ratchet-baseline.txt). When a count drops, lower its
   ceiling in the same commit.
-- **Nothing private.** Never commit secrets, credentials, model weights,
-  generated PTX or private machine data. Keep local results outside the
-  tracked tree. Keep license notices intact. If you add non-code third-party
+- **Nothing private.** Never commit secrets, credentials, machine addresses,
+  local config, model weights, generated PTX or build output. Keep local
+  results outside the tracked tree. Keep license notices intact. If you add non-code third-party
   material (allowed only when its license permits), list it in
   [NOTICE](NOTICE), or in [engine/NOTICE](engine/NOTICE) for files under
   `engine/`.
@@ -168,8 +182,8 @@ greedily (always the most likely next token). With FP8, a request is greedy
 only when it sets `temperature` 0 and leaves the penalties neutral.
 
 To keep that true, don't use floating-point atomics, reductions that depend
-on arrival order, or reductions whose split order changes with batching,
-sequence length or occupancy.
+on arrival order, or reduction splits that change with batch size, prompt
+length or occupancy.
 
 ### Which changes need a Spark
 
@@ -181,7 +195,7 @@ Spark, run the repeats on it and say so in the PR. The change can't merge
 until the comparison on a second Spark is done. There is one exception. A
 gated change rebased onto a moved main can merge on its gate with an identical
 patch, disjoint files and a passing pre-merge screen on the Sparks (see
-[Which proof a change needs](#exactness-and-evidence)).
+[Which proof a change needs](#which-proof-a-change-needs)).
 
 - If your change leaves the arithmetic order alone, it must keep main's
   results: the same token IDs.
@@ -192,21 +206,22 @@ patch, disjoint files and a passing pre-merge screen on the Sparks (see
   against main and reviewed updates to any goldens (saved reference answers)
   that change. An ID change needs the project owner's approval before merge.
 
-Run the Spark proof on the exact commit that will merge, except in cases 1
-and 2 below. Keep the token ID arrays, the requests and the effective settings
+Run the Spark proof on the exact commit that will merge, except in cases 1, 2
+and 3 below. Keep the token ID arrays, the requests and the effective settings
 in its receipts. Show the result of each comparison, including failed or
 missing checks. The card must cover the change's affected cases as well as the
 required exactness cases.
 
-Which proof a change needs:
+### Which proof a change needs
 
 1. **A docs-only change needs no device proof.** A change is docs-only when
    every file it changes is a Markdown or plain-text page that no build, test,
    CI job or script reads. Files such as `rust-toolchain.toml`, CI files,
    build scripts and shell scripts are executable changes, also when they are
    text.
-2. **An engine change that was gated and then rebased onto a moved main can
-   merge on that gate only when all three of these conditions are true:**
+2. **A rebased engine change can keep the gate that it already passed.** This
+   applies when main moved after the gate. All three of these conditions must
+   be true:
    - The patch is identical. `git range-diff <gate base>..<proved commit>
      <new main>..<rebased commit>` shows each commit as `=`.
    - The files are disjoint. No file that the change touches is in
@@ -219,8 +234,8 @@ Which proof a change needs:
    If the screen fails, run the full gate on the rebased commit. After the
    merge, a full confirm card runs on the merged main within one hour. If the
    confirm card fails, or does not run within the hour, the merge is reverted.
-3. **A screened change that was rebased keeps the Spark proof of the screened
-   commit when its engine patch did not change.** Both of these conditions
+3. **A rebased change can keep the proof of the commit that passed the screen.**
+   This applies when its engine patch did not change. Both of these conditions
    must be true:
    - The engine patch is the same. `git diff <base> <commit> -- engine |
      git patch-id --stable` gives the same ID for the screened commit on its
@@ -290,7 +305,8 @@ card and its exactness receipts. Include the output of `vade verify` and any
 `vade test determinism` checks, with their coverage limits.
 
 If users would notice the change, add one plain line about it to the
-Unreleased section of [CHANGELOG.md](CHANGELOG.md).
+Unreleased section of [CHANGELOG.md](CHANGELOG.md), under the heading for its
+area. Put the newest line first.
 
 ### How a pull request lands
 
@@ -309,7 +325,7 @@ Unreleased section of [CHANGELOG.md](CHANGELOG.md).
    exception. A gated change rebased onto a moved main can merge on its gate
    with an identical patch, disjoint files and a passing pre-merge screen on the
    Sparks. Its cards name the revisions that they tested (see
-   [exactness](#exactness-and-evidence)).
+   [Which proof a change needs](#which-proof-a-change-needs)).
 4. **The maintainer applies it.** The maintainers publish `main` here from
    their development tree, one commit per update. For this reason, nobody
    uses the merge button. The maintainer applies the accepted change in the

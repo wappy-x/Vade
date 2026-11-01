@@ -4,7 +4,20 @@
 
 A credit does not mean their code runs in Vade, or that their speed or correctness claims apply to it. Every profile link was checked against the person's own GitHub or Hugging Face profile, as [Link checks](link-checks.md) records.
 
-**On this page:** [Model makers](#model-makers) · [Reference code](#reference-code) · [Attention](#attention-and-determinism) · [Serving](#serving-many-requests) · [Speculative decoding](#speculative-decoding) · [Building blocks](#model-building-blocks) · [Spark community](#dgx-spark-community) · [NVIDIA and transport](#nvidia-and-transport) · [Compiler and standards](#compiler-and-standards) · [Studied, not used](#studied-not-used) · [Reused data](#reused-data) · [Corrections](#corrections)
+**On this page:**
+
+- [Model makers](#model-makers)
+- [Reference code](#reference-code)
+- [Attention](#attention-and-determinism)
+- [Serving](#serving-many-requests)
+- [Speculative decoding](#speculative-decoding)
+- [Building blocks](#model-building-blocks)
+- [Spark community](#dgx-spark-community)
+- [NVIDIA and transport](#nvidia-and-transport)
+- [Compiler and standards](#compiler-and-standards)
+- [Studied, not used](#studied-not-used)
+- [Reused data](#reused-data)
+- [Corrections](#corrections)
 
 <details>
 <summary><b>Terms on this page</b>: KV cache, tile, main, research engine; how entries are written</summary>
@@ -31,16 +44,32 @@ A credit does not mean their code runs in Vade, or that their speed or correctne
 
 **Vade runs official releases only, so these teams define what it must compute.**
 
-- **Qwen team, Alibaba Cloud.** Model definitions, official BF16 and FP8 weights and scales, tokenizers and chat templates.\
-  [GitHub](https://github.com/QwenLM) · [Hugging Face](https://huggingface.co/Qwen) · [X](https://x.com/Alibaba_Qwen) · [Qwen3 Technical Report](https://arxiv.org/abs/2505.09388)
-- **Google DeepMind, Gemma team.** Main's Gemma text model: local and global attention, proportional rotary positions, normalization, tokenizer and the canonical chat template.\
-  [GitHub](https://github.com/google-deepmind) · [Hugging Face](https://huggingface.co/google) · [Site](https://deepmind.google) · [Gemma 4 31B](https://huggingface.co/google/gemma-4-31B-it)
-- **OpenAI, gpt-oss team.** Development only: the official MXFP4 checkpoint, model equations and the Harmony conversation format.\
-  [GitHub](https://github.com/openai) · [Hugging Face](https://huggingface.co/openai) · [Site](https://openai.com/) · [gpt-oss](https://github.com/openai/gpt-oss) · [Harmony](https://github.com/openai/harmony)
-- **Mistral AI.** Development only: Mistral Small 3.2's model contract, Tekken tokenizer and instruction format.\
-  [GitHub](https://github.com/mistralai) · [Hugging Face](https://huggingface.co/mistralai) · [Site](https://mistral.ai) · [mistral-common](https://github.com/mistralai/mistral-common)
-- **Microsoft, Phi team.** Development only: the official BF16 checkpoint, architecture, tokenizer and chat format.\
-  [GitHub](https://github.com/microsoft) · [Hugging Face](https://huggingface.co/microsoft) · [X](https://x.com/OpenAtMicrosoft) · [Phi-4](https://huggingface.co/microsoft/phi-4)
+- **Qwen team, Alibaba Cloud.** Model definitions, official BF16 and FP8 weights and scales, tokenizers and chat templates.
+  - [GitHub](https://github.com/QwenLM)
+  - [Hugging Face](https://huggingface.co/Qwen)
+  - [X](https://x.com/Alibaba_Qwen)
+  - [Qwen3 Technical Report](https://arxiv.org/abs/2505.09388)
+- **Google DeepMind, Gemma team.** Main's Gemma text model: local and global attention, proportional rotary positions, normalization, tokenizer and the canonical chat template.
+  - [GitHub](https://github.com/google-deepmind)
+  - [Hugging Face](https://huggingface.co/google)
+  - [Site](https://deepmind.google)
+  - [Gemma 4 31B](https://huggingface.co/google/gemma-4-31B-it)
+- **OpenAI, gpt-oss team.** Development only: the official MXFP4 checkpoint, model equations and the Harmony conversation format.
+  - [GitHub](https://github.com/openai)
+  - [Hugging Face](https://huggingface.co/openai)
+  - [Site](https://openai.com/)
+  - [gpt-oss](https://github.com/openai/gpt-oss)
+  - [Harmony](https://github.com/openai/harmony)
+- **Mistral AI.** Development only: Mistral Small 3.2's model contract, Tekken tokenizer and instruction format.
+  - [GitHub](https://github.com/mistralai)
+  - [Hugging Face](https://huggingface.co/mistralai)
+  - [Site](https://mistral.ai)
+  - [mistral-common](https://github.com/mistralai/mistral-common)
+- **Microsoft, Phi team.** Development only: the official BF16 checkpoint, architecture, tokenizer and chat format.
+  - [GitHub](https://github.com/microsoft)
+  - [Hugging Face](https://huggingface.co/microsoft)
+  - [X](https://x.com/OpenAtMicrosoft)
+  - [Phi-4](https://huggingface.co/microsoft/phi-4)
 
 <details>
 <summary><b>Models in detail</b>: what main serves, the draft models, Qwen's sampling defaults</summary>
@@ -56,7 +85,7 @@ A credit does not mean their code runs in Vade, or that their speed or correctne
 
 **Vade checks its answers against the makers' official code.** The agreement is measured and is not perfect; [Validation](validation.md) has the counts. Determinism is a separate promise: the same request gives the same answer, alone or batched, cached or fresh.
 
-Hugging Face: [GitHub](https://github.com/huggingface) · [Hugging Face](https://huggingface.co/huggingface) · [X](https://x.com/huggingface) · [Site](https://huggingface.co/)
+Hugging Face: [GitHub](https://github.com/huggingface), [Hugging Face](https://huggingface.co/huggingface), [X](https://x.com/huggingface), [Site](https://huggingface.co/)
 
 - **[Transformers](https://github.com/huggingface/transformers) contributors and model authors.** The official reference behind Vade's saved CPU and CUDA fixtures, the repetition-penalty direction, and the exact order and rounding of each operation. Reference tooling only; never linked into Vade.
 - **[Tokenizers](https://github.com/huggingface/tokenizers) contributors.** The `tokenizer.json` format, the reference tokenization, and the Unicode 12.1 behavior of version 0.23.2 that Vade's tokenizer reproduces for Qwen3.
@@ -64,14 +93,22 @@ Hugging Face: [GitHub](https://github.com/huggingface) · [Hugging Face](https:/
 
 Other reference tools:
 
-- **PyTorch contributors.** Runs the official reference models that produce the saved fixtures. Reference tooling only.\
-  [GitHub](https://github.com/pytorch) · [Hugging Face](https://huggingface.co/pytorch) · [Site](https://pytorch.org) · [PyTorch](https://github.com/pytorch/pytorch)
-- **Python and NumPy contributors.** The privately retained reference-data generators that produced the saved fixtures. Kept outside this repository; never run in the engine.\
-  [python.org](https://www.python.org/) · [numpy.org](https://numpy.org)
-- **ByteDance Seed and the VeOmni contributors.** Embedding-first fusion, final-normalized target features and unshifted rotary positions in the multi-token prediction (MTP) draft head for Qwen3.8-27B. Agreement with a maker MTP forward is unverified; the target model checks every drafted token.\
-  [GitHub](https://github.com/ByteDance-Seed) · [Hugging Face](https://huggingface.co/ByteDance-Seed) · [Site](https://seed.bytedance.com/) · [VeOmni MTP note](https://github.com/bytedance-seed/veomni/blob/86c5ec1dbba8270206b1ab7f439285215ae4ec92/docs/key_features/mtp.md)
-- **kernels-community.** Experimental FP8 activation path only: a per-128 maximum, a scale of maximum / 448, and guarded division before E4M3 rounding. The default keeps BF16 activations.\
-  [Hugging Face](https://huggingface.co/kernels-community) · [finegrained-fp8 recipe](https://huggingface.co/kernels-community/finegrained-fp8/blob/3c8fcc86c0e42b7abe5bcf666d3a3afdce93a0e8/build/torch-cuda/utils.py#L440)
+- **PyTorch contributors.** Runs the official reference models that produce the saved fixtures. Reference tooling only.
+  - [GitHub](https://github.com/pytorch)
+  - [Hugging Face](https://huggingface.co/pytorch)
+  - [Site](https://pytorch.org)
+  - [PyTorch](https://github.com/pytorch/pytorch)
+- **Python and NumPy contributors.** The privately retained reference-data generators that produced the saved fixtures. Kept outside this repository; never run in the engine.
+  - [python.org](https://www.python.org/)
+  - [numpy.org](https://numpy.org)
+- **ByteDance Seed and the VeOmni contributors.** Embedding-first fusion, final-normalized target features and unshifted rotary positions in the multi-token prediction (MTP) draft head for Qwen3.8-27B. Agreement with a maker MTP forward is unverified; the target model checks every drafted token.
+  - [GitHub](https://github.com/ByteDance-Seed)
+  - [Hugging Face](https://huggingface.co/ByteDance-Seed)
+  - [Site](https://seed.bytedance.com/)
+  - [VeOmni MTP note](https://github.com/bytedance-seed/veomni/blob/86c5ec1dbba8270206b1ab7f439285215ae4ec92/docs/key_features/mtp.md)
+- **kernels-community.** Experimental FP8 activation path only: a per-128 maximum, a scale of maximum / 448, and guarded division before E4M3 rounding. The default keeps BF16 activations.
+  - [Hugging Face](https://huggingface.co/kernels-community)
+  - [finegrained-fp8 recipe](https://huggingface.co/kernels-community/finegrained-fp8/blob/3c8fcc86c0e42b7abe5bcf666d3a3afdce93a0e8/build/torch-cuda/utils.py#L440)
 
 <details>
 <summary><b>Pinned sources</b>: the exact versions that settled each detail</summary>
@@ -116,15 +153,15 @@ Determinism:
 <details>
 <summary><b>Author profiles</b>: GitHub, Hugging Face, X and websites for the people above</summary>
 
-**Tri Dao**: [GitHub](https://github.com/tridao) · [Hugging Face](https://huggingface.co/tridao) · [Site](https://tridao.me)\
-**Daniel Y. Fu**: [GitHub](https://github.com/DanFu09) · [Hugging Face](https://huggingface.co/danfu09) · [X](https://x.com/realDanFu) · [Site](https://www.danfu.org)\
-**Vijay Thakkar**: [GitHub](https://github.com/thakkarV)\
-**Maxim Milakov**: [GitHub](https://github.com/milakov) · [Site](https://milakov.org)\
-**Natalia Gimelshein**: [GitHub](https://github.com/ngimel)\
-**Francisco Massa**: [GitHub](https://github.com/fmassa)\
-**Grigory Sizov**: [GitHub](https://github.com/sgrigory)\
-**Horace He**: [GitHub](https://github.com/Chillee) · [Hugging Face](https://huggingface.co/Chillee) · [X](https://x.com/cHHillee) · [Site](http://horace.io/)\
-**Thinking Machines Lab**: [GitHub](https://github.com/thinking-machines-lab) · [Site](https://thinkingmachines.ai)
+- **Tri Dao**: [GitHub](https://github.com/tridao), [Hugging Face](https://huggingface.co/tridao), [Site](https://tridao.me)
+- **Daniel Y. Fu**: [GitHub](https://github.com/DanFu09), [Hugging Face](https://huggingface.co/danfu09), [X](https://x.com/realDanFu), [Site](https://www.danfu.org)
+- **Vijay Thakkar**: [GitHub](https://github.com/thakkarV)
+- **Maxim Milakov**: [GitHub](https://github.com/milakov), [Site](https://milakov.org)
+- **Natalia Gimelshein**: [GitHub](https://github.com/ngimel)
+- **Francisco Massa**: [GitHub](https://github.com/fmassa)
+- **Grigory Sizov**: [GitHub](https://github.com/sgrigory)
+- **Horace He**: [GitHub](https://github.com/Chillee), [Hugging Face](https://huggingface.co/Chillee), [X](https://x.com/cHHillee), [Site](http://horace.io/)
+- **Thinking Machines Lab**: [GitHub](https://github.com/thinking-machines-lab), [Site](https://thinkingmachines.ai)
 
 </details>
 
@@ -138,10 +175,10 @@ Scheduling and memory:
   Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim and Byung-Gon Chun
 - **[PagedAttention](https://arxiv.org/abs/2309.06180).** KV memory in shared, read-only pages, copied only when a request diverges. Vade maps pages with CUDA virtual memory instead of block tables.\
   Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang and Ion Stoica
-- **[vLLM](https://github.com/vllm-project/vllm).** From v0.30.0's [scheduler](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/v1/core/sched/scheduler.py), [cancellation](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/v1/engine/async_llm.py) and [block pool](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/v1/core/block_pool.py): a token budget per step, stopping a cancelled request's work before closing it, and automatic prefix caching that finds reusable blocks by hash. Benchmarked at 0.31.0 and as NGC vLLM 25.09 (vLLM v0.10.1.1).\
-  vLLM team: [GitHub](https://github.com/vllm-project) · [Hugging Face](https://huggingface.co/vllm-project) · [Docs](https://docs.vllm.ai)
-- **[SGLang](https://github.com/sgl-project/sglang).** Mixing prompt chunks with decode steps, sizing attention per request, and sizing GB10 memory from Linux `MemAvailable`. The project's earlier SGLang work on Sparks produced the rule that a live request runs between chunks of a long background prefill. Benchmarked at 0.5.21.\
-  SGLang team: [GitHub](https://github.com/sgl-project) · [Docs](https://docs.sglang.ai)
+- **[vLLM](https://github.com/vllm-project/vllm).** From v0.30.0's [scheduler](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/v1/core/sched/scheduler.py), [cancellation](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/v1/engine/async_llm.py) and [block pool](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/v1/core/block_pool.py): a token budget per step, stopping a cancelled request's work before closing it, and automatic prefix caching that finds reusable blocks by hash. Benchmarked at 0.31.0 and as NGC vLLM 25.09 (vLLM v0.10.1.1).
+  - vLLM team: [GitHub](https://github.com/vllm-project), [Hugging Face](https://huggingface.co/vllm-project), [Docs](https://docs.vllm.ai)
+- **[SGLang](https://github.com/sgl-project/sglang).** Mixing prompt chunks with decode steps, sizing attention per request, and sizing GB10 memory from Linux `MemAvailable`. The project's earlier SGLang work on Sparks produced the rule that a live request runs between chunks of a long background prefill. Benchmarked at 0.5.21.
+  - SGLang team: [GitHub](https://github.com/sgl-project), [Docs](https://docs.sglang.ai)
 - **[TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM).** Design references for sharing KV blocks, replaying CUDA graphs over fixed buffers, and mixing prefill and decode work, from its [KV cache notes](https://github.com/NVIDIA/TensorRT-LLM/blob/a81da8a5a8380c4ec8c2d3eafabb8cfc55d7ad56/docs/source/features/kvcache.md). Benchmarked at 1.3.0rc13.\
   NVIDIA TensorRT-LLM team: [GitHub](https://github.com/NVIDIA)
 
@@ -157,24 +194,24 @@ Shared prompt beginnings:
 <details>
 <summary><b>Author profiles</b>: GitHub, Hugging Face, X and websites for the people above</summary>
 
-**Gyeong-In Yu**: [GitHub](https://github.com/gyeongin) · [Site](https://gyeongin.github.io)\
-**Woosuk Kwon**: [GitHub](https://github.com/WoosukKwon) · [X](https://x.com/woosuk_k) · [Site](https://woosuk.me)\
-**Zhuohan Li**: [GitHub](https://github.com/zhuohan123) · [X](https://x.com/zhuohan123) · [Site](https://zhuohan.li)\
-**Siyuan Zhuang**: [GitHub](https://github.com/suquark)\
-**Ying Sheng**: [GitHub](https://github.com/Ying1123)\
-**Lianmin Zheng**: [GitHub](https://github.com/merrymercy) · [Hugging Face](https://huggingface.co/lmzheng) · [X](https://x.com/lm_zheng) · [Site](http://lmzheng.net)\
-**Cody Hao Yu**: [GitHub](https://github.com/comaniac) · [Site](https://comaniac.github.io)\
-**Joseph E. Gonzalez**: [GitHub](https://github.com/jegonzal) · [X](https://x.com/profjoeyg) · [Site](http://eecs.berkeley.edu/~jegonzal)\
-**Hao Zhang**: [GitHub](https://github.com/zhisbug) · [X](https://x.com/haozhangml) · [Site](https://haozhang.ai/)\
-**Ion Stoica**: [GitHub](https://github.com/istoica) · [Site](http://www.cs.berkeley.edu/~istoica/)\
-**Liangsheng Yin**: [GitHub](https://github.com/hnyls2002) · [X](https://x.com/lsyincs)\
-**Zhiqiang Xie**: [GitHub](https://github.com/xiezhq-hermann) · [X](https://x.com/Zhiqiang_Xie) · [Site](https://zhiqiangxie.com)\
-**Zihao Ye**: [GitHub](https://github.com/yzh119) · [Site](https://expye.com/about)\
-**Lequn Chen**: [GitHub](https://github.com/abcdabcd987) · [Site](https://abcdabcd987.com)\
-**Ruihang Lai**: [GitHub](https://github.com/MasterJH5574) · [X](https://x.com/ruihanglai) · [Site](https://ruihanglai.com)\
-**FlashInfer team**: [GitHub](https://github.com/flashinfer-ai) · [Site](https://flashinfer.ai/)\
-**Daniel Y. Fu**: [GitHub](https://github.com/DanFu09) · [Hugging Face](https://huggingface.co/danfu09) · [X](https://x.com/realDanFu) · [Site](https://www.danfu.org)\
-**Scaling Intelligence Lab**: [GitHub](https://github.com/ScalingIntelligence) · [Site](https://scalingintelligence.stanford.edu/)
+- **Gyeong-In Yu**: [GitHub](https://github.com/gyeongin), [Site](https://gyeongin.github.io)
+- **Woosuk Kwon**: [GitHub](https://github.com/WoosukKwon), [X](https://x.com/woosuk_k), [Site](https://woosuk.me)
+- **Zhuohan Li**: [GitHub](https://github.com/zhuohan123), [X](https://x.com/zhuohan123), [Site](https://zhuohan.li)
+- **Siyuan Zhuang**: [GitHub](https://github.com/suquark)
+- **Ying Sheng**: [GitHub](https://github.com/Ying1123)
+- **Lianmin Zheng**: [GitHub](https://github.com/merrymercy), [Hugging Face](https://huggingface.co/lmzheng), [X](https://x.com/lm_zheng), [Site](http://lmzheng.net)
+- **Cody Hao Yu**: [GitHub](https://github.com/comaniac), [Site](https://comaniac.github.io)
+- **Joseph E. Gonzalez**: [GitHub](https://github.com/jegonzal), [X](https://x.com/profjoeyg), [Site](http://eecs.berkeley.edu/~jegonzal)
+- **Hao Zhang**: [GitHub](https://github.com/zhisbug), [X](https://x.com/haozhangml), [Site](https://haozhang.ai/)
+- **Ion Stoica**: [GitHub](https://github.com/istoica), [Site](http://www.cs.berkeley.edu/~istoica/)
+- **Liangsheng Yin**: [GitHub](https://github.com/hnyls2002), [X](https://x.com/lsyincs)
+- **Zhiqiang Xie**: [GitHub](https://github.com/xiezhq-hermann), [X](https://x.com/Zhiqiang_Xie), [Site](https://zhiqiangxie.com)
+- **Zihao Ye**: [GitHub](https://github.com/yzh119), [Site](https://expye.com/about)
+- **Lequn Chen**: [GitHub](https://github.com/abcdabcd987), [Site](https://abcdabcd987.com)
+- **Ruihang Lai**: [GitHub](https://github.com/MasterJH5574), [X](https://x.com/ruihanglai), [Site](https://ruihanglai.com)
+- **FlashInfer team**: [GitHub](https://github.com/flashinfer-ai), [Site](https://flashinfer.ai/)
+- **Daniel Y. Fu**: [GitHub](https://github.com/DanFu09), [Hugging Face](https://huggingface.co/danfu09), [X](https://x.com/realDanFu), [Site](https://www.danfu.org)
+- **Scaling Intelligence Lab**: [GitHub](https://github.com/ScalingIntelligence), [Site](https://scalingintelligence.stanford.edu/)
 
 </details>
 
@@ -190,8 +227,8 @@ Draft and verify:
   Charlie Chen, Sebastian Borgeaud, Geoffrey Irving, Jean-Baptiste Lespiau, Laurent Sifre and John Jumper
 - **[SpecInfer](https://arxiv.org/abs/2305.09781).** Checking a tree of guesses in one pass, each guess seeing only its ancestors. Development only: draft trees live on unmerged branches, and main drafts single chains.\
   Xupeng Miao, Gabriele Oliaro, Zhihao Zhang and others (15 authors); FlexFlow project
-- **[DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437).** Multi-token prediction as a draft mechanism. Qwen3.8-27B's actual MTP layout comes from Qwen's checkpoint and the [reference code](#reference-code).\
-  DeepSeek-AI: [GitHub](https://github.com/deepseek-ai) · [Hugging Face](https://huggingface.co/deepseek-ai) · [Site](https://www.deepseek.com/)
+- **[DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437).** Multi-token prediction as a draft mechanism. Qwen3.8-27B's actual MTP layout comes from Qwen's checkpoint and the [reference code](#reference-code).
+  - DeepSeek-AI: [GitHub](https://github.com/deepseek-ai), [Hugging Face](https://huggingface.co/deepseek-ai), [Site](https://www.deepseek.com/)
 - **[vLLM Ascend pull request 7374](https://github.com/vllm-project/vllm-ascend/pull/7374).** Published Qwen3-8B with Qwen3-0.6B acceptance numbers, which made a small official Qwen3 model the first draft-model choice. Their speeds are not Vade measurements.\
   KlyzhenkoVadim and the vLLM Ascend contributors
 
@@ -218,19 +255,19 @@ Choosing how far ahead to guess:
 <details>
 <summary><b>Author profiles</b>: GitHub, Hugging Face, X and websites for the people above</summary>
 
-**Gabriele Oliaro**: [GitHub](https://github.com/goliaro)\
-**FlexFlow project**: [GitHub](https://github.com/flexflow) · [Site](https://flexflow.ai/)\
-**KlyzhenkoVadim**: [GitHub](https://github.com/KlyzhenkoVadim)\
-**Apoorv Saxena**: [GitHub](https://github.com/apoorvumang) · [Hugging Face](https://huggingface.co/apoorvumang) · [X](https://x.com/apoorv_umang) · [Site](https://apoorvumang.github.io)\
-**Xianzhen Luo**: [GitHub](https://github.com/Luowaterbi) · [Site](https://luowaterbi.github.io)\
-**Zhenyu He**: [GitHub](https://github.com/zhenyuhe00) · [Site](https://zhenyuhe00.github.io)\
-**Tianle Cai**: [GitHub](https://github.com/ctlllll) · [X](https://x.com/tianle_cai) · [Site](https://tianle.website)\
-**Yichao Fu**: [GitHub](https://github.com/Viol2000) · [X](https://x.com/fuyichao123) · [Site](https://viol2000.github.io/)\
-**Peter Bailis**: [GitHub](https://github.com/pbailis) · [X](https://x.com/pbailis) · [Site](http://bailis.org)\
-**Ion Stoica**: [GitHub](https://github.com/istoica) · [Site](http://www.cs.berkeley.edu/~istoica/)\
-**Hao Zhang**: [GitHub](https://github.com/zhisbug) · [X](https://x.com/haozhangml) · [Site](https://haozhang.ai/)\
-**T.J. Purtell**: [GitHub](https://github.com/tpurtell)\
-**Victor Cruz**: [GitHub](https://github.com/vcruz305) · [Hugging Face](https://huggingface.co/vcruz305) · [X](https://x.com/ViC305)
+- **Gabriele Oliaro**: [GitHub](https://github.com/goliaro)
+- **FlexFlow project**: [GitHub](https://github.com/flexflow), [Site](https://flexflow.ai/)
+- **KlyzhenkoVadim**: [GitHub](https://github.com/KlyzhenkoVadim)
+- **Apoorv Saxena**: [GitHub](https://github.com/apoorvumang), [Hugging Face](https://huggingface.co/apoorvumang), [X](https://x.com/apoorv_umang), [Site](https://apoorvumang.github.io)
+- **Xianzhen Luo**: [GitHub](https://github.com/Luowaterbi), [Site](https://luowaterbi.github.io)
+- **Zhenyu He**: [GitHub](https://github.com/zhenyuhe00), [Site](https://zhenyuhe00.github.io)
+- **Tianle Cai**: [GitHub](https://github.com/ctlllll), [X](https://x.com/tianle_cai), [Site](https://tianle.website)
+- **Yichao Fu**: [GitHub](https://github.com/Viol2000), [X](https://x.com/fuyichao123), [Site](https://viol2000.github.io/)
+- **Peter Bailis**: [GitHub](https://github.com/pbailis), [X](https://x.com/pbailis), [Site](http://bailis.org)
+- **Ion Stoica**: [GitHub](https://github.com/istoica), [Site](http://www.cs.berkeley.edu/~istoica/)
+- **Hao Zhang**: [GitHub](https://github.com/zhisbug), [X](https://x.com/haozhangml), [Site](https://haozhang.ai/)
+- **T.J. Purtell**: [GitHub](https://github.com/tpurtell)
+- **Victor Cruz**: [GitHub](https://github.com/vcruz305), [Hugging Face](https://huggingface.co/vcruz305), [X](https://x.com/ViC305)
 
 </details>
 
@@ -287,25 +324,25 @@ Tokens, number formats and sampling:
 <details>
 <summary><b>Author profiles</b>: GitHub, Hugging Face, X and websites for the people above</summary>
 
-**Łukasz Kaiser**: [GitHub](https://github.com/lukaszkaiser)\
-**Biao Zhang**: [GitHub](https://github.com/bzhangGo)\
-**Rico Sennrich**: [GitHub](https://github.com/rsennrich)\
-**Jianlin Su**: [GitHub](https://github.com/bojone) · [Site](https://kexue.fm)\
-**Bowen Peng**: [Hugging Face](https://huggingface.co/bloc97)\
-**Jeffrey Quesnelle**: [GitHub](https://github.com/jquesnelle) · [X](https://x.com/theemozilla) · [Site](http://jeffq.com)\
-**Honglu Fan**: [GitHub](https://github.com/honglu2875) · [Site](https://honglu.fan)\
-**Enrico Shippole**: [GitHub](https://github.com/conceptofmind) · [Hugging Face](https://huggingface.co/conceptofmind) · [X](https://x.com/EnricoShippole) · [Site](https://www.teraflopai.com/)\
-**Nous Research**: [GitHub](https://github.com/NousResearch) · [Hugging Face](https://huggingface.co/NousResearch) · [X](https://x.com/nousresearch) · [Site](https://nousresearch.com)\
-**Songlin Yang**: [GitHub](https://github.com/sustcsonglin) · [X](https://x.com/SonglinYang4) · [Site](https://sustcsonglin.github.io/)\
-**Ali Hatamizadeh**: [GitHub](https://github.com/ahatamiz) · [X](https://x.com/ahatamiz1) · [Site](https://ahatamiz.github.io/)\
-**Bailin Wang**: [GitHub](https://github.com/berlino) · [X](https://x.com/bailin_28) · [Site](https://berlino.github.io/)\
-**Yu Zhang**: [GitHub](https://github.com/yzhangcs) · [X](https://x.com/yzhang_cs) · [Site](https://yzhang.site)\
-**Yikang Shen**: [GitHub](https://github.com/yikangshen)\
-**Yoon Kim**: [GitHub](https://github.com/yoonkim) · [Site](https://people.csail.mit.edu/yoonkim/)\
-**flash-linear-attention contributors**: [GitHub](https://github.com/fla-org) · [Hugging Face](https://huggingface.co/fla-hub)\
-**Barry Haddow**: [GitHub](https://github.com/bhaddow)\
-**OpenAI**: [GitHub](https://github.com/openai)\
-**Sebastiano Vigna**: [GitHub](https://github.com/vigna) · [Site](http://vigna.di.unimi.it/)
+- **Łukasz Kaiser**: [GitHub](https://github.com/lukaszkaiser)
+- **Biao Zhang**: [GitHub](https://github.com/bzhangGo)
+- **Rico Sennrich**: [GitHub](https://github.com/rsennrich)
+- **Jianlin Su**: [GitHub](https://github.com/bojone), [Site](https://kexue.fm)
+- **Bowen Peng**: [Hugging Face](https://huggingface.co/bloc97)
+- **Jeffrey Quesnelle**: [GitHub](https://github.com/jquesnelle), [X](https://x.com/theemozilla), [Site](http://jeffq.com)
+- **Honglu Fan**: [GitHub](https://github.com/honglu2875), [Site](https://honglu.fan)
+- **Enrico Shippole**: [GitHub](https://github.com/conceptofmind), [Hugging Face](https://huggingface.co/conceptofmind), [X](https://x.com/EnricoShippole), [Site](https://www.teraflopai.com/)
+- **Nous Research**: [GitHub](https://github.com/NousResearch), [Hugging Face](https://huggingface.co/NousResearch), [X](https://x.com/nousresearch), [Site](https://nousresearch.com)
+- **Songlin Yang**: [GitHub](https://github.com/sustcsonglin), [X](https://x.com/SonglinYang4), [Site](https://sustcsonglin.github.io/)
+- **Ali Hatamizadeh**: [GitHub](https://github.com/ahatamiz), [X](https://x.com/ahatamiz1), [Site](https://ahatamiz.github.io/)
+- **Bailin Wang**: [GitHub](https://github.com/berlino), [X](https://x.com/bailin_28), [Site](https://berlino.github.io/)
+- **Yu Zhang**: [GitHub](https://github.com/yzhangcs), [X](https://x.com/yzhang_cs), [Site](https://yzhang.site)
+- **Yikang Shen**: [GitHub](https://github.com/yikangshen)
+- **Yoon Kim**: [GitHub](https://github.com/yoonkim), [Site](https://people.csail.mit.edu/yoonkim/)
+- **flash-linear-attention contributors**: [GitHub](https://github.com/fla-org), [Hugging Face](https://huggingface.co/fla-hub)
+- **Barry Haddow**: [GitHub](https://github.com/bhaddow)
+- **OpenAI**: [GitHub](https://github.com/openai)
+- **Sebastiano Vigna**: [GitHub](https://github.com/vigna), [Site](http://vigna.di.unimi.it/)
 
 </details>
 
@@ -314,42 +351,59 @@ Tokens, number formats and sampling:
 **These people and projects published their work on the same hardware. Vade uses some of their ideas, never their code.**
 
 **[TensorFold](https://github.com/ashhart/TensorFold), by Ash Hart and the TensorFold contributors.** We studied eleven of its ideas; the fold at the end of this section lists them. Vade's kernel comments and build notes name TensorFold where one of these ideas is used, and each implementation is Vade's own Rust.\
-Ash Hart: [GitHub](https://github.com/ashhart) · [X](https://x.com/ashxhart)
+Ash Hart: [GitHub](https://github.com/ashhart), [X](https://x.com/ashxhart)
 
 Engines and recipes:
 
-- **Mia, Mia's AI Lab.** Every rank reaches transport decisions from shared state; BF16 KV cache experiments; fetching the next weights while waiting.\
-  [GitHub](https://github.com/MiaAI-Lab) · [X](https://x.com/MiaAI_lab) · [TensorFold fork](https://github.com/MiaAI-Lab/TensorFold) · [transport deadlock fix](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/blob/92bf731c3aac61927726ef0c422b21b42111f2c4/patches/0040-glm-parallel-deadlocks.patch)
-- **Victor Cruz.** Keeping the decode loop on the GPU with few readbacks, and optional placement of the launch thread on a chosen CPU core.\
-  [GitHub](https://github.com/vcruz305) · [Hugging Face](https://huggingface.co/vcruz305) · [X](https://x.com/ViC305) · [Flash Next recipe](https://github.com/vcruz305/Qwen3.8-Flash-Next-EXL3-DGX-Spark-recipe)
-- **[ExLlamaV3](https://github.com/turboderp-org/exllamav3) by turboderp, and [TabbyAPI](https://github.com/theroyallab/tabbyAPI) by The Royal Lab.** The runtimes Victor Cruz's recipe builds on; their contributors are credited as part of that chain. Vade uses neither.\
-  turboderp: [GitHub](https://github.com/turboderp-org) · [X](https://x.com/turboderp_)\
+- **Mia, Mia's AI Lab.** Every rank reaches transport decisions from shared state; BF16 KV cache experiments; fetching the next weights while waiting.
+  - [GitHub](https://github.com/MiaAI-Lab)
+  - [X](https://x.com/MiaAI_lab)
+  - [TensorFold fork](https://github.com/MiaAI-Lab/TensorFold)
+  - [transport deadlock fix](https://github.com/MiaAI-Lab/GLM-5.3-Flash-EXL3-2x-DGX-Sparks-TensorFold/blob/92bf731c3aac61927726ef0c422b21b42111f2c4/patches/0040-glm-parallel-deadlocks.patch)
+- **Victor Cruz.** Keeping the decode loop on the GPU with few readbacks, and optional placement of the launch thread on a chosen CPU core.
+  - [GitHub](https://github.com/vcruz305)
+  - [Hugging Face](https://huggingface.co/vcruz305)
+  - [X](https://x.com/ViC305)
+  - [Flash Next recipe](https://github.com/vcruz305/Qwen3.8-Flash-Next-EXL3-DGX-Spark-recipe)
+- **[ExLlamaV3](https://github.com/turboderp-org/exllamav3) by turboderp, and [TabbyAPI](https://github.com/theroyallab/tabbyAPI) by The Royal Lab.** The runtimes Victor Cruz's recipe builds on; their contributors are credited as part of that chain. Vade uses neither.
+  - turboderp: [GitHub](https://github.com/turboderp-org), [X](https://x.com/turboderp_)
   The Royal Lab: [GitHub](https://github.com/theroyallab)
-- **Local Inference Lab.** Clear ownership of every scratch buffer, testing small RDMA messages on their own, and keeping correctness evidence separate from speed measurements.\
-  [GitHub](https://github.com/local-inference-lab) · [b12x](https://github.com/local-inference-lab/b12x)
-- **Kindling AI.** Pinning exact software versions and recording system state. Vade adopts none of its OS or memory changes.\
-  [GitHub](https://github.com/kindlingai) · [Site](https://kindlingai.dev) · [Kindling Spark OS](https://github.com/kindlingai/kindling-spark-os)
+- **Local Inference Lab.** Clear ownership of every scratch buffer, testing small RDMA messages on their own, and keeping correctness evidence separate from speed measurements.
+  - [GitHub](https://github.com/local-inference-lab)
+  - [b12x](https://github.com/local-inference-lab/b12x)
+- **Kindling AI.** Pinning exact software versions and recording system state. Vade adopts none of its OS or memory changes.
+  - [GitHub](https://github.com/kindlingai)
+  - [Site](https://kindlingai.dev)
+  - [Kindling Spark OS](https://github.com/kindlingai/kindling-spark-os)
 
 Transport and measurement:
 
-- **JJ Eaton.** Measure the Spark's memory bandwidth first and judge every kernel against it; wide neighbouring reads with one warp per row block; the cost of small messages in two-Spark transport.\
-  [GitHub](https://github.com/jayleaton) · [X](https://x.com/jayleaton) · [Site](https://www.jayleaton.com/) · [Spark roofline analysis](https://github.com/jayleaton/glm53-tensorfold-spark/blob/main/docs/ROOFLINE.md)
-- **hughmadden, Turquoise Bay AI.** RDMA from Rust needs no outside crates; sums across machines in a fixed order.\
-  [GitHub](https://github.com/hughmadden) · [glm53f-afd](https://github.com/hughmadden/glm53f-afd)
-- **T.J. Purtell.** RDMA receive slots posted in advance, and polling for completions; both are also standard verbs practice.\
-  [GitHub](https://github.com/tpurtell) · [DS41RT](https://github.com/tpurtell/ds41rt)
-- **Jürgen Schmied.** Evidence that storing recurrent state in reduced precision changes predictions, which supports keeping Gated DeltaNet state in FP32.\
-  [GitHub](https://github.com/jschmied) · [GB10 recurrence measurements](https://github.com/jschmied/qwen38-flash-next-gb10/blob/main/notes/what-generalises.md)
-- **Artem Matskevych.** Which points in a conversation a prefix cache can really resume from.\
-  [GitHub](https://github.com/Reederey87) · [X](https://x.com/Reederey) · [Cache-tail analysis](https://github.com/Reederey87/glm53-flash-exl3-2x-dgx-spark/blob/fd87969cb43a5ba66573bd2508bc05651fc1579c/docs/17-apc-tail-floor.md)
+- **JJ Eaton.** Measure the Spark's memory bandwidth first and judge every kernel against it; wide neighbouring reads with one warp per row block; the cost of small messages in two-Spark transport.
+  - [GitHub](https://github.com/jayleaton)
+  - [X](https://x.com/jayleaton)
+  - [Site](https://www.jayleaton.com/)
+  - [Spark roofline analysis](https://github.com/jayleaton/glm53-tensorfold-spark/blob/main/docs/ROOFLINE.md)
+- **hughmadden, Turquoise Bay AI.** RDMA from Rust needs no outside crates; sums across machines in a fixed order.
+  - [GitHub](https://github.com/hughmadden)
+  - [glm53f-afd](https://github.com/hughmadden/glm53f-afd)
+- **T.J. Purtell.** RDMA receive slots posted in advance, and polling for completions; both are also standard verbs practice.
+  - [GitHub](https://github.com/tpurtell)
+  - [DS41RT](https://github.com/tpurtell/ds41rt)
+- **Jürgen Schmied.** Evidence that storing recurrent state in reduced precision changes predictions, which supports keeping Gated DeltaNet state in FP32.
+  - [GitHub](https://github.com/jschmied)
+  - [GB10 recurrence measurements](https://github.com/jschmied/qwen38-flash-next-gb10/blob/main/notes/what-generalises.md)
+- **Artem Matskevych.** Which points in a conversation a prefix cache can really resume from.
+  - [GitHub](https://github.com/Reederey87)
+  - [X](https://x.com/Reederey)
+  - [Cache-tail analysis](https://github.com/Reederey87/glm53-flash-exl3-2x-dgx-spark/blob/fd87969cb43a5ba66573bd2508bc05651fc1579c/docs/17-apc-tail-floor.md)
 
 From the NVIDIA developer forum. Its profile pages refuse automated requests, so these members are credited by name only, with their posts.
 
 - **[ConnectX-7 link capped at 13 Gbps](https://forums.developer.nvidia.com/t/connectx-7-inter-spark-link-capped-at-13-gbps-expected-200-gbps-pcie-power-throttling-27w/363461)**, by Ank-Chy, andrewc_actual, mashie and ccatzin. Evidence for diagnosing degraded link states, and why link health must be checked before any transport measurement. No system-change procedure is part of Vade.
 - **[Direct QSFP link at 13-16 Gbps](https://forums.developer.nvidia.com/t/dgx-spark-direct-qsfp-connection-only-getting-13-16-gbps-instead-of-expected-200g-performance/370035)**, by ugurbas and robert287. Independent evidence about hot-plug and low-power link behavior.
 - **[DGX Spark / GB10 FAQ](https://forums.developer.nvidia.com/t/dgx-spark-gb10-faq/347344)**, by NVIDIA forum staff. Hardware limits, including that the network card cannot reach GPU memory directly.
-- **[GB10 NVFP4 thread](https://forums.developer.nvidia.com/t/gb10-really-does-hit-1-pflop-nvfp4-2-4-sparse-measured-with-an-open-source-tool-to-reproduce-it/373618)**, by adg1, with a device-query result from pontostroy, and **[nvfp4bench](https://github.com/secYOUre/nvfp4bench)** by Alfonso De Gregorio, secYOUre. The GB10's reported 24 MB L2 cache size, used in Vade's research on cache hints for weight reads.\
-  secYOUre: [GitHub](https://github.com/secYOUre) · [Site](https://www.pwnshow.com/)
+- **[GB10 NVFP4 thread](https://forums.developer.nvidia.com/t/gb10-really-does-hit-1-pflop-nvfp4-2-4-sparse-measured-with-an-open-source-tool-to-reproduce-it/373618)**, by adg1, with a device-query result from pontostroy, and **[nvfp4bench](https://github.com/secYOUre/nvfp4bench)** by Alfonso De Gregorio, secYOUre. The GB10's reported 24 MB L2 cache size, used in Vade's research on cache hints for weight reads.
+  - secYOUre: [GitHub](https://github.com/secYOUre), [Site](https://www.pwnshow.com/)
 
 Christopher Owen and FujitsuPolycom are credited under [Studied, not used](#studied-not-used).
 
@@ -384,7 +438,7 @@ Across Sparks, and testing:
 
 **NVIDIA's documentation and libraries, studied as references, and the papers behind the multi-Spark transport.**
 
-NVIDIA CUDA documentation teams and the NVIDIA DGX Spark team: [GitHub](https://github.com/NVIDIA) · [Hugging Face](https://huggingface.co/nvidia) · [Site](https://nvidia.com)
+NVIDIA CUDA documentation teams and the NVIDIA DGX Spark team: [GitHub](https://github.com/NVIDIA), [Hugging Face](https://huggingface.co/nvidia), [Site](https://nvidia.com)
 
 - **[PTX ISA](https://docs.nvidia.com/cuda/parallel-thread-execution/).** Instruction and register layouts, tensor-core fragments (including FP8), BF16 and FP8 conversion, and background copies. Vade's small inline PTX blocks follow it.
 - **[CUDA Driver API](https://docs.nvidia.com/cuda/cuda-driver-api/), [virtual memory](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__VA.html), [graphs](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__GRAPH.html).** Loading kernels, managing memory, a growable KV cache at a fixed address, shared page mappings, and replaying recorded decode steps. The installed CUDA 13 `cuda.h` header defines Vade's interface declarations.
@@ -405,8 +459,8 @@ Libraries and papers:
 <details>
 <summary><b>Author profiles</b>: GitHub links for the people above</summary>
 
-**Mostofa Patwary**: [GitHub](https://github.com/mpatwary)\
-**Jared Casper**: [GitHub](https://github.com/jaredcasper)
+- **Mostofa Patwary**: [GitHub](https://github.com/mpatwary)
+- **Jared Casper**: [GitHub](https://github.com/jaredcasper)
 
 </details>
 
@@ -416,10 +470,12 @@ Libraries and papers:
 
 Compiler and system:
 
-- **[Rust](https://github.com/rust-lang/rust), [NVPTX target](https://doc.rust-lang.org/rustc/platform-support/nvptx64-nvidia-cuda.html), [rustup](https://rustup.rs).** The compiler, Cargo, the standard library and GPU `core` support. External build tools, not Vade code.\
-  [GitHub](https://github.com/rust-lang) · [Site](https://www.rust-lang.org)
-- **[LLVM NVPTX](https://llvm.org/docs/NVPTXUsage.html), [NVVM intrinsics](https://github.com/llvm/llvm-project/blob/main/llvm/include/llvm/IR/IntrinsicsNVVM.td).** Rust's GPU backend, and the exact names and arguments of GPU intrinsics and tensor-core register layouts.\
-  [GitHub](https://github.com/llvm) · [Site](https://llvm.org)
+- **[Rust](https://github.com/rust-lang/rust), [NVPTX target](https://doc.rust-lang.org/rustc/platform-support/nvptx64-nvidia-cuda.html), [rustup](https://rustup.rs).** The compiler, Cargo, the standard library and GPU `core` support. External build tools, not Vade code.
+  - [GitHub](https://github.com/rust-lang)
+  - [Site](https://www.rust-lang.org)
+- **[LLVM NVPTX](https://llvm.org/docs/NVPTXUsage.html), [NVVM intrinsics](https://github.com/llvm/llvm-project/blob/main/llvm/include/llvm/IR/IntrinsicsNVVM.td).** Rust's GPU backend, and the exact names and arguments of GPU intrinsics and tensor-core register layouts.
+  - [GitHub](https://github.com/llvm)
+  - [Site](https://llvm.org)
 - **[NetworkManager](https://networkmanager.dev), [CPU idle states](https://docs.kernel.org/admin-guide/pm/cpuidle.html).** The format of the network plan Vade prints, and CPU wake-up latency research. Vade makes no network or OS changes.
 
 Formats and standards:
@@ -437,8 +493,9 @@ Hardware and system:
 
 - **[SparkRing](https://github.com/FujitsuPolycom/sparkring), by FujitsuPolycom.** Uses ConnectX hardware forwarding so Sparks in a ring reach non-neighbours. Vade's rings pass data between neighbours in software.\
   [GitHub](https://github.com/FujitsuPolycom)
-- **[DGX Spark Memory Saver](https://github.com/christopherowen/dgx-spark-memory-saver), by Christopher Owen.** Recovers memory lost to GPU page tables, but needs a different kernel, a rebuilt driver module and a reboot. Vade changes nothing in the OS or driver.\
-  [GitHub](https://github.com/christopherowen) · [X](https://x.com/christopherowen)
+- **[DGX Spark Memory Saver](https://github.com/christopherowen/dgx-spark-memory-saver), by Christopher Owen.** Recovers memory lost to GPU page tables, but needs a different kernel, a rebuilt driver module and a reboot. Vade changes nothing in the OS or driver.
+  - [GitHub](https://github.com/christopherowen)
+  - [X](https://x.com/christopherowen)
 
 Draft heads and self-drafting:
 
@@ -455,16 +512,16 @@ Draft heads and self-drafting:
 <details>
 <summary><b>Author profiles</b>: GitHub, Hugging Face, X and websites for the people above</summary>
 
-**Tianle Cai**: [GitHub](https://github.com/ctlllll) · [X](https://x.com/tianle_cai) · [Site](https://tianle.website)\
-**Yuhong Li**: [GitHub](https://github.com/leeyeehoo) · [Site](http://leeyeehoo.github.io/)\
-**Hongwu Peng**: [GitHub](https://github.com/harveyp123) · [Site](https://harveyp123.github.io)\
-**Tri Dao**: [GitHub](https://github.com/tridao) · [Hugging Face](https://huggingface.co/tridao) · [Site](https://tridao.me)\
-**FasterDecoding**: [GitHub](https://github.com/FasterDecoding)\
-**Yuhui Li**: [GitHub](https://github.com/Liyuhui-12)\
-**Hongyang Zhang**: [GitHub](https://github.com/hongyanz) · [X](https://x.com/hongyangzh) · [Site](https://hongyanz.github.io/)\
-**SafeAI Lab**: [GitHub](https://github.com/SafeAILab)\
-**Mostafa Elhoushi**: [GitHub](https://github.com/mostafaelhoushi) · [X](https://x.com/m_elhoushi)\
-**Meta Research**: [GitHub](https://github.com/facebookresearch)
+- **Tianle Cai**: [GitHub](https://github.com/ctlllll), [X](https://x.com/tianle_cai), [Site](https://tianle.website)
+- **Yuhong Li**: [GitHub](https://github.com/leeyeehoo), [Site](http://leeyeehoo.github.io/)
+- **Hongwu Peng**: [GitHub](https://github.com/harveyp123), [Site](https://harveyp123.github.io)
+- **Tri Dao**: [GitHub](https://github.com/tridao), [Hugging Face](https://huggingface.co/tridao), [Site](https://tridao.me)
+- **FasterDecoding**: [GitHub](https://github.com/FasterDecoding)
+- **Yuhui Li**: [GitHub](https://github.com/Liyuhui-12)
+- **Hongyang Zhang**: [GitHub](https://github.com/hongyanz), [X](https://x.com/hongyangzh), [Site](https://hongyanz.github.io/)
+- **SafeAI Lab**: [GitHub](https://github.com/SafeAILab)
+- **Mostafa Elhoushi**: [GitHub](https://github.com/mostafaelhoushi), [X](https://x.com/m_elhoushi)
+- **Meta Research**: [GitHub](https://github.com/facebookresearch)
 
 </details>
 
@@ -487,7 +544,11 @@ Vade also declares the CUDA driver and RDMA functions it calls, written against 
 
 A credit names the original source of an idea and, if different, the project where we first saw it. An earlier original source is always welcome.
 
-**Where next:** [Link checks](link-checks.md) · [Provenance](provenance.md) · [Documentation index](README.md)
+**Where next:**
+
+- [Link checks](link-checks.md)
+- [Provenance](provenance.md)
+- [Documentation index](README.md)
 
 ## Per-row numerical rejection
 

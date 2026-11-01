@@ -21,8 +21,10 @@ This page explains new terms where they first come up. The
 
 ## What each command does
 
+<div align="center">
+
 | Command | What it does |
-| --- | --- |
+| :---: | :---: |
 | `vade` | Shows a short status and the next command. On a Spark, that is the same output as `vade status`. From a controller, it lists four choices: Start, Chat, Stop and Check (which runs `vade doctor`) |
 | `vade launch` | Starts the engine on the Spark itself |
 | `vade up` | From a controller with a config file, runs the model on one or more Sparks. On the Spark itself, it also starts the local engine |
@@ -46,6 +48,8 @@ This page explains new terms where they first come up. The
 | `vade test` | Runs the pass-or-fail checks a build has to clear (the gate checks): build, determinism (the same tokens, with the same settings, on every run), long-context, recurrent-state (GDN) and Unix-flags ABI checks. See [Gate commands](#gate-commands) |
 | `vade run qwen3-8b` | A separate, older workflow for the legacy model |
 | `vade version` | Prints the CLI version (also `vade --version` or `vade -V`) |
+
+</div>
 
 "The engine you own" is the one Vade started for you. Vade keeps private
 records of what it starts, called ownership records, and it stops only what
@@ -187,9 +191,9 @@ edited after download, builds as `unknown` and prints a notice.
 A source archive is not a launcher bundle, which holds ready-made programs. To
 stage those instead on the Spark itself, set `VADE_BUNDLE` to an existing local
 launcher bundle, then run `vade install` with no controller config selected
-(no `VADE_CONFIG`, and no default controller config file). The release
-bundle and its `SHA256SUMS` are on the GitHub release page, and
-[INSTALL.md](../INSTALL.md) shows the download. A controller can also use a
+(no `VADE_CONFIG`, and no default controller config file). Builds of main come
+from dl.vade.lol, and GitHub Releases holds only the old v0.1.0 bundle with its
+`SHA256SUMS`. [INSTALL.md](../INSTALL.md) shows the download. A controller can also use a
 launcher bundle when its engine and CLI revisions match the source checkout.
 Set `prebuilt_dir` in the controller config. See
 [Prebuilt bundles](#prebuilt-bundles).
@@ -393,10 +397,14 @@ of this page). If you work on the Spark itself, follow
 
 Choose the checkpoint profile deliberately:
 
+<div align="center">
+
 | Profile | Example config | How to start |
-| --- | --- | --- |
+| :---: | :---: | :---: |
 | Current FP4-Local model on 1 to 24 Sparks | [fp4-local.conf](examples/fp4-local.conf) | `vade up` (add `--sparks N` or ordered `--hosts` for a chain, or `--replicas N` for independent one-Spark copies) |
 | FP8 model on 2, 4 or 6 machines ([FP8 install](../docs/install-fp8.md)) | [vade.conf](examples/vade.conf) | `vade up --fp8` (the older flag `--fp8-legacy` also works) |
+
+</div>
 
 A chain is several Sparks linked one after another, serving one model together.
 With `--replicas`, each replica is a full, separate copy of the model on its own
@@ -523,10 +531,14 @@ and both directions of every configured fabric link (the direct links between
 Sparks). RDMA fabric checks use ICMP ping. TCP mode skips them. Engine startup
 checks the actual transport and health.
 
+<div align="center">
+
 | Computer | What it needs |
-| --- | --- |
+| :---: | :---: |
 | Machines | Linux with pidfd support, Rust with the engine's pinned toolchain and NVPTX build prerequisites, OpenSSH, rsync, curl, sha256sum, ping and nvidia-smi |
 | Controller | Rust, OpenSSH, rsync, curl and shasum |
+
+</div>
 
 Offline builds need the source toolchains already installed.
 
@@ -587,14 +599,16 @@ artifacts that have not changed. No release service or daemon is added.
 
 With `VADE_CONFIG` set, the lifecycle commands work like this:
 
+<div align="center">
+
 | Command | What happens |
-| --- | --- |
+| :---: | :---: |
 | `vade` | Short status and four choices: start, chat, stop, doctor. |
 | `vade up` (also `--fp4-local`) | Starts FP4-Local on one configured Spark. Add `--sparks N` for 2 to 24 or ordered `--hosts` for a chain. Larger chains need a current staged build, and each must still pass its own live checks on real Sparks. |
 | `vade up --replicas N` | FP4-Local only, N = 2 to 16: one independent one-Spark server on each of the first N configured machines (or the N `--hosts`), behind a local gateway. Details below the table. |
 | `vade up --replicas N --pairs` | FP4-Local only, N = 2 to 12: N two-Spark tensor-split servers on 2N machines, in pairs in list order, behind a local gateway. This mode is an option. It is not the four-Spark default ([two pairs behind one address](../docs/four-sparks.md#two-pairs-behind-one-address)). |
 | `vade up --fp8` | FP8: starts on the first two configured machines, tensor parallel on a ring. |
-| `vade up --fp8 --sparks 4` | FP8: four machines in config order, tensor parallel on a path. Its token IDs differ from two Sparks ([benchmarks](../docs/history/benchmarks-2026-10.md#fp8-on-two-and-four-sparks-different-token-ids)). |
+| `vade up --fp8 --sparks 4` | FP8: four machines in config order, tensor parallel on a path. It gives the two-Spark token IDs ([benchmarks](../docs/history/benchmarks-2026-10.md#fp8-on-two-and-four-sparks-different-token-ids)). |
 | `vade up --hosts machine-a,machine-b` | Selects connected machines in the given order. |
 | `vade status` | Machines, model, source build, MTP, context, output limit, how many chats the engine allows at once, memory/cache bytes per rank, ranks, tunnel, health, and speed when health reports it. |
 | `vade down` | Stops only the ranks Vade recorded and the SSH control connection it opened. |
@@ -603,6 +617,8 @@ With `VADE_CONFIG` set, the lifecycle commands work like this:
 | `vade doctor` | Machine checks plus the harness doctor and its two small cache test turns. |
 | `vade install` | Checks, builds, stages, and checks the harness. Without a running engine, it verifies that the harness doctor is available and explains the remaining engine check. |
 | `vade update` | Updates clean checkouts with `git pull --ff-only`, rebuilds, restages, and offers a restart. A checkout with no remote stays local. |
+
+</div>
 
 With `--replicas N`, each replica sits behind its own tunnel on the N local
 ports after `local_port`, and the local gateway listens on `local_port`. It needs

@@ -3,7 +3,9 @@
 This code of conduct applies in all spaces of the Vade community. It also
 applies when a person officially represents the community in public spaces.
 It is adapted from the Contributor Covenant, version 2.1. To report a
-problem, use the private reporting link under [Enforcement](#enforcement).
+problem, use [GitHub private reporting](https://github.com/wappy-x/Vade/security/advisories/new).
+For a security problem, read the [security policy](SECURITY.md). To take part
+in the project, read [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Our Pledge
 
@@ -64,8 +66,8 @@ representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement at
-[the maintainers via GitHub private reporting](https://github.com/wappy-x/Vade/security/advisories/new).
+reported to the community leaders responsible for enforcement through
+[GitHub private reporting](https://github.com/wappy-x/Vade/security/advisories/new).
 All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the

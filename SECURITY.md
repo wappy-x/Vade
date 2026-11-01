@@ -7,13 +7,18 @@ apply today.
 ## Report a security problem
 
 1. Open the repository's **Security** tab and choose **Report a
-   vulnerability**.
+   vulnerability**. This is
+   [GitHub private reporting](https://github.com/wappy-x/Vade/security/advisories/new).
 2. Send the report privately. Do not put exploit details in a public issue,
    pull request or discussion.
 
-If private reporting is not available, use a private maintainer contact that
-the repository lists. If the repository lists none, ask for a private
-reporting route. Do not post the exploit.
+If private reporting is not available, open a public issue that asks for a
+private reporting route. Do not post the exploit.
+
+To report a problem with someone's conduct, use the same private route. The
+[code of conduct](CODE_OF_CONDUCT.md) says how maintainers handle it. For a
+bug that is not a security problem, use the
+[issue forms](https://github.com/wappy-x/Vade/issues/new/choose).
 
 Put these items in the report:
 
@@ -105,7 +110,7 @@ reach an engine:
 | `Host` fails the loopback name or optional port check and is not allowed | HTTP 421 |
 | `Origin` is not allowed | HTTP 403 |
 | Configured gateway token is missing or wrong | HTTP 401 |
-| Allowed browser preflight | HTTP 204 from the gateway; no engine request |
+| Allowed browser preflight | HTTP 204 from the gateway, with no engine request |
 | Local request passes these checks | The gateway can send it to the configured engine |
 
 </div>
