@@ -10,6 +10,12 @@ pub fn save_if_funded<T>(bytes: usize, retained: usize, cache: usize, headroom: 
     save().map(Some)
 }
 
+/// Fund copies on the basis admission planned the pool on: unified available
+/// memory (reclaimable page cache counts) and the allocator's ceiling. CUDA
+/// free leaves page cache out, and CUDA allocates past it on GB10.
+pub fn snapshot_free(available: usize, budget: usize, accounted: usize) -> usize {
+    available.min(budget.saturating_sub(accounted))
+}
 /// Credit only private allocations already owned by admitted sessions.
 pub fn snapshot_headroom(free: usize, reserved: usize, allocated: usize) -> usize {
     free.saturating_sub(reserved.saturating_sub(allocated))
@@ -129,6 +135,23 @@ impl Request {
 #[test] fn snapshot_growth_protects_unopened_chats_and_each_rank() {
     for (free, reserved, allocated, expected) in [(100, 80, 30, 50), (100, 80, 0, 20), (40, 80, 30, 0), (100, 20, 30, 100), (0, usize::MAX, 1, 0)] { assert_eq!(snapshot_headroom(free, reserved, allocated), expected); }
     for free in [&[100, 40][..], &[40, 100][..], &[100, 100, 100, 40][..]] { let funded = free.iter().all(|&n| snapshot_headroom(n, 80, 30) >= 1); assert_eq!(save_collectively::<()>(true, |_| Ok(funded), || panic!("constrained rank allocated")), Ok(None)); } }
+#[test] fn page_cache_funds_snapshot_copies_like_the_pool() {
+    // Two-Spark FP8 rank 0 after load with a large page cache: CUDA free 1346539520 B,
+    // unified available 25758893944 B, budget 116500987904 B, device bytes 98232174728 B
+    // at load and 102381015896 B later; the 8K copy retained 535924936 B on the A arm.
+    let (cuda_free, budget, accounted, copy, reserved) = (1_346_539_520usize, 116_500_987_904usize, 102_381_015_896usize, 535_924_936usize, 1_396_116_856usize);
+    let available = 25_758_893_944 - (accounted - 98_232_174_728);
+    let old = snapshot_headroom(cuda_free.min(available).min(budget - accounted), reserved, 0);
+    assert!(copy > old, "the raw CUDA free term refused this copy before");
+    assert!(copy <= snapshot_headroom(snapshot_free(available, budget, accounted), reserved, 0));
+    // Unified available memory and the allocator ceiling still refuse.
+    for (available, budget) in [(reserved + copy - 1, budget), (available, accounted + reserved + copy - 1)] { assert!(copy > snapshot_headroom(snapshot_free(available, budget, accounted), reserved, 0)); }
+    assert_eq!(snapshot_free(10, 5, 9), 0); assert_eq!(snapshot_free(3, 20, 9), 3); assert_eq!(snapshot_free(30, 20, 9), 11);
+    // Removing one min term never refuses a copy the old check funded.
+    let values = [0, 1, 7, 1 << 30, 3 << 30, 20 << 30, usize::MAX];
+    for cuda in values { for available in values { for budget in values { for accounted in values { for reserved in [0, 1 << 30] {
+        assert!(snapshot_headroom(snapshot_free(available, budget, accounted), reserved, 0) >= snapshot_headroom(cuda.min(snapshot_free(available, budget, accounted)), reserved, 0));
+    } } } } } }
 #[test] fn snapshot_allocation_failure_rolls_back_every_rank() {
     for failed in [0, 1, 3] { for rank in 0..4 { let mut phase=0; let drops=std::cell::Cell::new(0); struct Copy<'a>(&'a std::cell::Cell<usize>); impl Drop for Copy<'_> { fn drop(&mut self) { self.0.set(self.0.get()+1); } } let result=save_collectively(true, |_| { phase+=1; Ok(phase==1) }, || if rank==failed { Err("allocation failed".into()) } else { Ok(Copy(&drops)) }); assert!(result.unwrap().is_none()); assert_eq!(drops.get(),usize::from(rank!=failed)); assert_eq!(phase,2); } }
     assert_eq!(save_collectively(true, |ok| Ok(ok), || Err::<(), _>("allocation failed".into())), Ok(None)); assert_eq!(save_collectively(true, |ok| Ok(ok), || Ok(7)), Ok(Some(7))); assert!(save_collectively(true, |_| Err("transport".into()), || Ok(7)).is_err()); }

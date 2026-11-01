@@ -171,16 +171,23 @@ impl Exchange for Data {
 // Every rank protects admitted growth, including chats not opened on device yet.
 fn save_snapshot<'a>(backend: &Backend<'a>, commands: &mut Commands, local: &Session<'a, '_, Data>,
     reserved: usize, allocated: usize, metadata: usize) -> Result<Option<Snapshot<'a>>> {
-    let free = backend.device_memory_info().map_or(0, |(free, _)| free)
-        .min(backend.available_memory_bytes().unwrap_or(0))
-        .min(backend.allocation_budget().saturating_sub(backend.accounted_bytes()));
-    let headroom = spark_tp::flash_pool::snapshot_headroom(free, reserved, allocated);
-    spark_tp::flash_pool::save_collectively(local.snapshot_bytes().saturating_add(metadata) <= headroom,
+    let (available, budget, accounted) = (backend.available_memory_bytes().unwrap_or(0),
+        backend.allocation_budget(), backend.accounted_bytes());
+    let headroom = spark_tp::flash_pool::snapshot_headroom(
+        spark_tp::flash_pool::snapshot_free(available, budget, accounted), reserved, allocated);
+    let (rank, needed) = (commands.rank(), local.snapshot_bytes().saturating_add(metadata));
+    // CUDA free is printed for diagnosis only; it does not decide.
+    if needed > headroom {
+        eprintln!("flash_serve snapshot_unfunded rank={rank} needed_bytes={needed} headroom_bytes={headroom} unified_available_bytes={available} budget_bytes={budget} accounted_bytes={accounted} reserved_bytes={reserved} allocated_private_bytes={allocated} cuda_free_bytes={}",
+            backend.device_memory_info().map_or_else(|_| "unavailable".into(), |(free, _)| free.to_string()));
+    }
+    spark_tp::flash_pool::save_collectively(needed <= headroom,
         |ok| {
-            let mut votes = vec![0; commands.world()]; votes[commands.rank()] = u8::from(ok);
+            let mut votes = vec![0; commands.world()]; votes[rank] = u8::from(ok);
             commands.all_gather(&mut votes, 1)?;
             Ok(votes.iter().all(|&v| v == 1))
-        }, || local.snapshot(backend))
+        }, || local.snapshot(backend).inspect_err(|error|
+            eprintln!("flash_serve snapshot_copy_failed rank={rank} needed_bytes={needed} error={error}")))
 }
 
 pub struct Engine<'m, 'b, 'a> {
