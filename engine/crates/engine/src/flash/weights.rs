@@ -98,25 +98,7 @@ impl<'a> Entry<'a> {
         let mut bytes = 0usize;
         let mut payload_bytes = 0usize;
         for entry in &mut entries {
-            // Preserve the official scalar alignment without padding every
-            // tiny scale grid to a whole vector or retaining another layout.
-            // E4M3 tensors start on 16 bytes: W8A8 tiles copy with cp.async.16.
-            // NVFP4 matrices start on 256 bytes: fp4_bw streams 64-byte row chunks
-            // with 256-byte L2 fills, and the file's 4-byte weight_scale_2 scalars
-            // leave most matrices 16-32 bytes off a 64-byte boundary, which cost
-            // fp4_bw_down +48-55 % (kbench KBENCH_MISALIGN 16/32). BF16 matrices
-            // (HC mix, router, lm_head) start on 256 bytes for the same streaming
-            // reads. Same bytes.
-            let alignment = if (checkpoint.config.format == WeightFormat::Nvfp4
-                && entry.tensor.dtype == Dtype::U8)
-                || entry.tensor.dtype == Dtype::Bf16
-            {
-                256
-            } else if entry.tensor.dtype == Dtype::F8E4M3 {
-                16
-            } else {
-                entry.tensor.dtype.bytes() as usize
-            };
+            let alignment = checkpoint.config.format.arena_alignment(entry.tensor.dtype);
             bytes = bytes
                 .checked_add(alignment - 1)
                 .ok_or("weight arena overflow")?

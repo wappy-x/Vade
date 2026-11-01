@@ -29,6 +29,23 @@ impl WeightFormat {
     pub fn name(self) -> &'static str {
         match self { Self::Fp8 => "FP8", Self::Nvfp4 => "NVFP4" }
     }
+    /// Start alignment of one tensor in the weight arena. Same bytes in every case.
+    /// Matrices start on 256 bytes: fp4_bw streams 64-byte row chunks with 256-byte L2
+    /// fills, and the file's 4-byte weight_scale_2 scalars leave most NVFP4 matrices
+    /// 16-32 bytes off a 64-byte boundary, which cost fp4_bw_down +48-55 % (kbench
+    /// KBENCH_MISALIGN 16/32). FP8 checkpoints: E4M3 expert slices follow 40-120 byte BF16
+    /// scale grids, so 16-byte starts put most of them off a 128-byte line (kbench
+    /// KBENCH_FP8MOE_WEIGHT_SHIFT). In NVFP4 checkpoints E4M3 holds the small block-scale
+    /// grids, which keep 16 bytes (W8A8 tiles copy with cp.async.16), so that layout does
+    /// not change. BF16 matrices (HC mix, router, lm_head) take the same streaming reads.
+    /// Other scalars keep their official alignment, so tiny scale grids are not padded.
+    pub fn arena_alignment(self, dtype: Dtype) -> usize {
+        match (self, dtype) {
+            (_, Dtype::Bf16) | (Self::Nvfp4, Dtype::U8) | (Self::Fp8, Dtype::F8E4M3) => 256,
+            (Self::Nvfp4, Dtype::F8E4M3) => 16,
+            _ => dtype.bytes() as usize,
+        }
+    }
     /// Loading a lower-precision checkpoint is always an explicit choice.
     pub fn require_opt_in(self, enabled: bool) -> Result<()> {
         if self == Self::Nvfp4 && !enabled {
@@ -641,4 +658,22 @@ pub fn partition(total: u64, rank: u64, ranks: u64) -> Result<std::ops::Range<u6
     let extra = total % ranks;
     let start = rank * base + rank.min(extra);
     Ok(start..start + base + u64::from(rank < extra))
+}
+
+#[cfg(test)]
+mod arena_alignment_tests {
+    use super::{Dtype, WeightFormat};
+
+    #[test]
+    fn matrices_start_on_256_bytes_and_scalars_keep_their_width() {
+        for format in [WeightFormat::Fp8, WeightFormat::Nvfp4] {
+            assert_eq!(format.arena_alignment(Dtype::Bf16), 256);
+            assert_eq!(format.arena_alignment(Dtype::F32), 4);
+        }
+        assert_eq!(WeightFormat::Fp8.arena_alignment(Dtype::F8E4M3), 256);
+        assert_eq!(WeightFormat::Nvfp4.arena_alignment(Dtype::U8), 256);
+        assert_eq!(WeightFormat::Fp8.arena_alignment(Dtype::U8), 1);
+        // NVFP4 block-scale grids (E4M3) keep main's 16-byte starts: same NVFP4 layout.
+        assert_eq!(WeightFormat::Nvfp4.arena_alignment(Dtype::F8E4M3), 16);
+    }
 }
