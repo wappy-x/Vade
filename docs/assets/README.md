@@ -30,7 +30,7 @@ To make it again: take the page as the site serves it, fix the palette and the l
 
 ## Rules for changes
 
-- Do not edit the moving banner by hand; record it again from the site.
+- Do not edit the moving banner by hand. Record it again from the site.
 - Keep the loop made by the renderer, never by cross-fading pictures. Measure the loop step against the ordinary frame steps on the committed file and write the numbers here; the loop step must not be larger than the largest ordinary step.
 - Keep 30 frames per second and continuous motion: no frame swaps, steps or blinking.
 - Keep a still frame next to the moving file.

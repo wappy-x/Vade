@@ -39,7 +39,7 @@ vade mcp test words
 
 `vade mcp test words` shows `Tools (1):` and `words__word_count`. In chat, ask
 for example "Use the word_count tool on: one two three". Vade asks before the
-call; answer `y`.
+call. Answer `y`.
 
 ### A server you install
 
@@ -56,7 +56,7 @@ vade tools
 
 `vade mcp add NAME [options] -- COMMAND [ARG...]` writes the server to your
 user list. Everything after `--` is the command and its arguments. Put
-the options and the name before `--`; any other word there is an error. The
+the options and the name before `--`. Any other word there is an error. The
 options are:
 
 | Option | What it does |
@@ -248,7 +248,7 @@ too large is cut, and the last line tells how many bytes were kept.
 - A server stops when its stdout closes. If a server stops, Vade starts it
   again once, at the next call to it. If it
   stops again, its calls fail until you restart the chat. A restart keeps the
-  tools the chat started with; it adds no new tool. A call that was
+  tools the chat started with. It adds no new tool. A call that was
   running when the server stopped has an unknown outcome, and the model is
   told so.
 - When chat ends, Vade closes each server's stdin, waits up to 500 ms for

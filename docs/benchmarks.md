@@ -4,7 +4,7 @@
 
 ## Current main
 
-The FP8 rows measured main `1a07e3a` on our DGX Sparks on the morning of 2026-11-01. The FP4-Local rows measured main `dc32b7c` on the morning of 2026-10-31. Each server start ran one card with drafting on and one card with drafting off. A card is the result file of one RigMark run. Drafting on means a fixed draft depth: 3 for FP4-Local and 2 for FP8. The one-Spark rows are the mean of two server starts. The other rows are one start each.
+The FP8 rows measured main `1a07e3a` on our DGX Sparks on the morning of 2026-11-01. The FP4-Local rows measured main `dc32b7c` on the morning of 2026-10-31. Each server start ran one card with drafting on and one card with drafting off. A card is the result file of one RigMark run. Drafting on means a fixed draft depth: 3 for FP4-Local and 2 for FP8. A default FP8 server chooses the depth itself. [Results](results.md#current-fp8-main-1a07e3a-2026-11-01-morning) gives those speeds too. The one-Spark rows are the mean of two server starts. The other rows are one start each.
 
 [Results and receipts](results.md) links the receipt of every row. It also gives the machines, the server commands and the request settings.
 
@@ -108,7 +108,7 @@ These are the builds:
 
 Every request used greedy decoding: temperature 0, top-p 1, top-k 0, repetition penalty 1, and presence and frequency penalties 0. Chat requests also set seed 20260905, thinking off and `cache` false.
 
-Drafting-on requests leave out the `draft` field, so the server uses its default: depth 3 on FP4-Local and depth 2 on FP8. Drafting-off requests send `"draft":"plain"`.
+Drafting-on requests leave out the `draft` field, so the server drafts at the depth of its start: depth 3 on FP4-Local and depth 2 on FP8. Drafting-off requests send `"draft":"plain"`.
 
 A RigMark card sends 66 requests. It uses the prompt set of RigMark commit `52c29c3fc1d741b9aef8895b23372aafa5dc6161` (prompts version 1.0.0). The prompt and reply lengths below are from the two-Spark FP4-Local card of 2026-10-30.
 
@@ -150,6 +150,7 @@ This page lists every speed we have published for Vade, newest first. It also sh
 
 | Section | What it is for |
 | :---: | :---: |
+| [2026-11-01 morning FP8 cards](results.md#current-fp8-main-1a07e3a-2026-11-01-morning) | Two and four Sparks at main `1a07e3a`, FP8, drafting on and off, with public receipts |
 | [2026-10-31 morning cards](#current-2026-10-31-morning-main-dc32b7c-home-dgx-sparks) | One, two and four Sparks at main `dc32b7c`, FP4-Local and FP8, drafting on and off, with public receipts |
 | [2026-10-30 morning cards](#previous-2026-10-30-morning-main-380d8e5-home-dgx-sparks) | One, two and four Sparks at main `380d8e5`, drafting on, with second starts |
 | [2026-10-29 cards](#current-2026-10-29-main-cbbb11b-home-dgx-sparks) | One and two Sparks at main `cbbb11b`, with 64K and 128K prompts on one Spark |
@@ -183,7 +184,7 @@ On the morning of 2026-10-31 we measured main `dc32b7c` on one, two and four Spa
 
 Each server start ran one card with drafting on and one with drafting off. The 32K chat ran on the two-Spark and four-Spark starts. On one Spark, the card ran on two starts, and the 32K chat on two more starts at context 65536.
 
-[Results and receipts](results.md) gives the table, the receipt of each card, the server commands and what you can run again. The speeds are in the [current table](#current-main).
+[Results and receipts](results.md) gives the table, the receipt of each card, the server commands and what you can run again. The FP4-Local speeds are in the [current table](#current-main). The [2026-11-01 FP8 cards](results.md#current-fp8-main-1a07e3a-2026-11-01-morning) replace the FP8 speeds of this section.
 
 **What changed since the 2026-10-30 cards.**
 
@@ -738,9 +739,9 @@ The [exactness rule](architecture.md#exactness-and-model-quality) asks for the s
 
 A host test found the cause: the order of additions differed between the two rank counts. On four Sparks, three projections split their inner sum across the ranks: the output projections of attention and of the linear-attention layers, and the down projection of the shared expert. The ranks then added their parts in a different order than on two Sparks, and the routed experts grouped their blocks differently. The results differed in the last bits, and greedy decoding could then pick a different token.
 
-**The fix.** A later change, approved on 2026-10-31, makes FP8 on four Sparks add its partial sums in the two-Spark order. Four Sparks now give the same token IDs as two Sparks. In the pre-merge check, four Sparks gave the same token IDs as two Sparks in 66 of 66 responses, with drafting on and with drafting off (private record, not in this repository). Six Sparks still give other IDs than two ([changelog](../CHANGELOG.md)).
+**The fix.** A later change, approved on 2026-10-31, makes FP8 on four Sparks add its partial sums in the two-Spark order. Four Sparks now give the same token IDs as two Sparks. The four-Spark cards of 2026-11-01, with drafting on and off, match the two-Spark cards of 2026-10-31 in 66 of 66 responses ([FP8 token IDs](results.md#fp8-token-ids)). Six Sparks still give other IDs than two ([changelog](../CHANGELOG.md)).
 
-The cards on this page predate the fix, so compare their FP8 results only at the same Spark count. `vade verify` checks one running engine, so it does not show a difference between Spark counts.
+The cards in the dated sections below predate the fix, so compare their FP8 results only at the same Spark count. `vade verify` checks one running engine, so it does not show a difference between Spark counts.
 
 ### A long chat and its second question
 

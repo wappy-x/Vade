@@ -74,7 +74,7 @@ The model thinks before it answers unless you turn that off, as this example doe
 
 ## Benchmarks
 
-The numbers are tokens per second. Drafting is Vade's speculative decoding: the model's own prediction head guesses a few tokens ahead, and the full model checks each guess. It is on by default, so the first column is what you get out of the box. The middle column shows the same runs with drafting off.
+The numbers are tokens per second. Drafting is Vade's speculative decoding: the model's own prediction head guesses a few tokens ahead, and the full model checks each guess. It is on by default. On FP4-Local, the first column is what you get out of the box. The middle column shows the same runs with drafting off.
 
 <!-- bench-docs:start -->
 
@@ -90,7 +90,7 @@ The numbers are tokens per second. Drafting is Vade's speculative decoding: the 
 
 </div>
 
-We measured main `1a07e3a` on our own Sparks on the morning of 2026-11-01 for the FP8 rows, and main `dc32b7c` on the morning of 2026-10-31 for the FP4-Local rows. One chat writes prose of up to 8192 tokens. The one-Spark row is the average of two server starts, and every other row is one start. Drafting on means a fixed draft depth: 3 for FP4-Local and 2 for FP8. The raw record of every run is in the receipts: [FP8](bench/receipts/2026-11-01/README.md) and [FP4-Local](bench/receipts/2026-10-31/README.md).
+We measured main `1a07e3a` on our own Sparks on the morning of 2026-11-01 for the FP8 rows, and main `dc32b7c` on the morning of 2026-10-31 for the FP4-Local rows. One chat writes prose of up to 8192 tokens. The one-Spark row is the average of two server starts, and every other row is one start. Drafting on means a fixed draft depth: 3 for FP4-Local and 2 for FP8. A default FP8 server chooses the depth itself. [Results](docs/results.md#current-fp8-main-1a07e3a-2026-11-01-morning) gives those speeds too. The raw record of every run is in the receipts: [FP8](bench/receipts/2026-11-01/README.md) and [FP4-Local](bench/receipts/2026-10-31/README.md).
 
 <!-- bench-docs:end -->
 
@@ -105,7 +105,7 @@ Exact means the same request with the same settings gives the same token IDs. Th
 **Covered today**
 
 - FP4-Local on 1, 2 and 4 Sparks.
-- FP8 on 2 and 4 Sparks with the default drafting mode, since 2026-10-31. The pre-merge check matched 66 of 66 replies ([changelog](CHANGELOG.md)).
+- FP8 on 2 and 4 Sparks with the default drafting mode, since 2026-10-31. The four-Spark cards of 2026-11-01 match the two-Spark cards of 2026-10-31 in 66 of 66 replies ([FP8 token IDs](docs/results.md#fp8-token-ids)).
 - Seeds. A request with a fixed `seed` gets the same sampled reply every time. Tested on FP4-Local on 1 and 2 Sparks, with drafting off.
 
 **Not covered yet**
@@ -127,7 +127,7 @@ To check your own engine, run `vade verify`. [Token IDs](docs/results.md#token-i
 
 - **Model.** Qwen3.8 Flash-Next, text only, at pinned revisions of `nvidia/Qwen3.8-Flash-Next-FP4-Local` and `Qwen/Qwen3.8-Flash-Next-FP8`. To add a model, read [Adding a model](docs/adding-a-model.md).
 - **Hardware.** DGX Spark (NVIDIA GB10) on Linux `aarch64`.
-- **Sparks.** FP4-Local runs on 1, 2 or 4 Sparks over RDMA, or as a layer chain of 3 to 24 Sparks over TCP. We have measured chains up to four Sparks. FP8 runs on 2, 4 or 6 Sparks. We have measured 2 and 4 Sparks, and they give the same token IDs. Six Sparks start, but no benchmark run has measured them, and they give other token IDs. FP8 does not fit on one Spark.
+- **Sparks.** FP4-Local runs on 1, 2 or 4 Sparks over RDMA, or as a layer chain of 3 to 24 Sparks. We have measured chains up to four Sparks. FP8 runs on 2, 4 or 6 Sparks. We have measured 2 and 4 Sparks, and they give the same token IDs. Six Sparks start, but no benchmark run has measured them, and they give other token IDs. FP8 does not fit on one Spark.
 - **Controller.** A controller drives linked Sparks over SSH. It runs on Linux or macOS. From Windows, connect to a Spark and work there ([how](INSTALL.md#from-a-windows-computer)).
 - **Coding agent.** The agent reads, searches and edits files anywhere. Its shell tool needs the macOS sandbox, so on the Spark itself it does not run commands.
 - **Prefix cache.** On by default on one Spark, on two FP4-Local Sparks and on FP8. Off for FP4-Local on three or more Sparks ([settings](INSTALL.md#the-prefix-cache)).

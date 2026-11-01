@@ -173,8 +173,9 @@ the steps, and writes nothing.
 
 ## Decisions
 
-- **A script only gets `vade`.** Before `vade` exists, something must build
-  it. `scripts/install.sh` installs the pinned Rust, builds `vade`, then calls
+- **A script only gets `vade`.** Before `vade` exists, something must supply
+  it. `scripts/install.sh` tries the prebuilt bundle of main. When the bundle
+  does not fit, it installs the pinned Rust and builds `vade`. Then it calls
   `vade install`. All the install logic lives in the CLI.
 - **No second install path.** Setup runs the same `vade` program for each
   step, so it shares the locks, checks and messages.

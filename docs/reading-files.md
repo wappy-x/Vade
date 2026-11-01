@@ -105,7 +105,7 @@ convert, so a small file cannot build a large result before the cut:
 | XML attribute value (DOCX, XLSX, PPTX, EPUB, ODT, ODS, ODP) | 4,096 bytes | The value is not read: a style, list, link target or image reads as if it had none, and `attribute values over 4096 bytes left out (attribute cap)` goes in `skipped:`. The text stays. Image alt text keeps its first 200 characters and then ends in `...`. A part path (an internal link target, an EPUB package or chapter path) is read up to 65,535 bytes, the ZIP name limit. A longer internal link target is left out with this warning. A longer path to the main document part, the EPUB package or a chapter refuses the file |
 
 After the character cap or the memory cap stops a reader, the pages, slides,
-sheets and chapters that start later get no marker; the page count in the
+sheets and chapters that start later get no marker. The page count in the
 header still counts them. For PDF, the page cap and the memory cap also limit
 the pages and text that the PDF reader extracts.
 
@@ -239,7 +239,7 @@ A PDF file (by its `%PDF-` bytes, up to 50 MiB) reads as its extracted text
 layer, page by page, not through these readers. `offset` and `limit` then count
 bytes of that text.
 A file named `.pdf` that this test does not take reads as text when it is UTF-8
-text; otherwise it is refused with one line. Files over 50 MiB are refused
+text. Otherwise it is refused with one line. Files over 50 MiB are refused
 before any read.
 
 The encoding selects the path before a size limit applies. UTF-8 text over
@@ -312,7 +312,7 @@ large, and assert the output size with a small character cap.
 - DOCX bold, italic and other character formatting is not kept. Footnotes,
   comments, headers and footers are not read.
 - XLSX merged cells show their value in the first cell only. A number shows
-  its saved value, not its number format, except for dates and times; for
+  its saved value, not its number format, except for dates and times. For
   example, a percentage shows as `0.25`.
 - ODT list numbers show as digits, also for letter and Roman number formats.
   A list that continues its numbering continues only the last top-level list

@@ -175,9 +175,13 @@ cards used RDMA.
 
 ## Defaults and drafting
 
-The FP8 defaults are context 131072, output `min(65536, context)` and drafting
-depth 2 ([CLI parser](../cli/src/cli.rs)). We have not yet checked the
-131072 default on real Sparks. The cards used 32768.
+The FP8 defaults are context 131072 and output `min(65536, context)`
+([CLI parser](../cli/src/cli.rs)). We have not yet checked the 131072 default
+on real Sparks. The cards used 32768.
+
+Drafting is on by default, and the server chooses the depth. The depth is how
+many tokens drafting guesses ahead. One chat alone picks its depth for each
+step, up to 7 ([settings](../engine/crates/tp/src/flash/settings.rs)).
 
 If the engine does not have enough memory for a context, it refuses to start.
 Then choose a smaller `--context`. The controller does not lower the context
@@ -185,7 +189,7 @@ for you.
 
 - `--context N` accepts 4096 to 262144.
 - `--output N` accepts 1024 to 262144, up to the context.
-- `--mtp 0` turns drafting off. `--mtp 1` to `--mtp 3` sets the depth.
+- `--mtp 0` turns drafting off. `--mtp 1` to `--mtp 3` sets a fixed depth.
 - A request with `"draft": "plain"` decodes without drafting.
 
 FP8 drafts only when one chat runs alone. Chats that overlap decode without
@@ -215,46 +219,78 @@ The gateways add the greedy fields to a request that sends no sampling field
 
 ## What to expect
 
-These rows come from the morning cards of 2026-10-31 at main `dc32b7c`. Each
-Spark count had one server start. Each start ran a card with drafting on, then
-a card with drafting off ([results and receipts](results.md)).
+These rows come from the morning cards of 2026-11-01 at main `1a07e3a`
+([results and receipts](results.md#current-fp8-main-1a07e3a-2026-11-01-morning)).
+Each Spark count had two server starts:
 
-The rates are completion tokens per second. Cold 8K is the time to the first
-token after an uncached prompt of 8192 tokens. Every card used context 32768,
-output 16384, MTP (drafting depth) 2, greedy decoding and thinking off.
+- **Fixed depth 2.** This start ran a card with drafting on and a card with
+  drafting off.
+- **Chosen by the server.** This start passed no depth, as `vade up --fp8`
+  does, and ran one card with drafting on.
 
-| Sparks | Drafting | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) |
-| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 | ON | 36.6 | 51.3 | 52.8 | 45.4 | 66.6 | 98.7 | 5.97 |
-| 2 | OFF | 27.1 | 26.9 | 27.1 | 26.1 | 66.3 | 98.1 | 5.95 |
-| 4 | ON | 49.5 | 69.3 | 72.2 | 61.4 | 88.0 | 131.0 | 6.92 |
-| 4 | OFF | 35.9 | 35.6 | 36.0 | 34.6 | 87.2 | 131.1 | 6.87 |
+The rates are completion tokens per second. Every card used context 32768,
+output 16384, greedy decoding and thinking off.
 
-A 32K-token prompt gave its first token in 24.12 s on two Sparks and 27.81 s
+**One chat (tok/s)**
+
+<div align="center">
+
+| Sparks and drafting | Prose | Code | Structured |
+| :---: | :---: | :---: | :---: |
+| 2, chosen by the server | 37.6 | 66.1 | 80.8 |
+| 2, fixed depth 2 | 37.8 | 53.0 | 54.5 |
+| 2, off | 27.7 | 27.5 | 27.7 |
+| 4, chosen by the server | 46.9 | 90.1 | 110.8 |
+| 4, fixed depth 2 | 51.4 | 72.3 | 74.5 |
+| 4, off | 37.2 | 37.0 | 36.7 |
+
+</div>
+
+**Chats at once (total tok/s)**
+
+<div align="center">
+
+| Sparks and drafting | C1 | C4 | C8 |
+| :---: | :---: | :---: | :---: |
+| 2, chosen by the server | 49.9 | 68.3 | 98.5 |
+| 2, fixed depth 2 | 46.4 | 67.8 | 98.3 |
+| 2, off | 26.4 | 67.9 | 98.6 |
+| 4, chosen by the server | 66.8 | 91.6 | 132.1 |
+| 4, fixed depth 2 | 62.4 | 92.3 | 131.4 |
+| 4, off | 35.8 | 89.2 | 131.6 |
+
+</div>
+
+The cold 8K prompt is an uncached prompt of 8192 tokens, sent with drafting
+off. On the fixed-depth start, its first token came in 5.96 s on two Sparks
+and 6.82 s on four.
+
+A 32K-token prompt gave its first token in 24.08 s on two Sparks and 27.38 s
 on four. The second question on that chat reused 32,064 tokens from the
-prefix cache and gave its first token in 0.94 s on two Sparks and 1.06 s on
+prefix cache and gave its first token in 0.89 s on two Sparks and 0.78 s on
 four.
 
 - **Four Sparks write faster than two.** Each Spark holds and reads a quarter
-  of each layer for each token, not a half. With drafting ON, prose went from
-  36.6 tok/s on two Sparks to 49.5 on four, and eight chats from 98.7 to
-  131.0 tok/s.
-- **Drafting helps one chat only.** On two Sparks at `dc32b7c`, code went
-  from 26.9 tok/s with drafting OFF to 51.3 with drafting ON. Overlapping
-  chats almost never draft. In the `dc32b7c` two-Spark ON card, 1 of 12 C4
-  streams and 0 of 24 C8 streams used drafting. In the four-Spark ON card,
-  no C4 or C8 stream used drafting (the `draft_used` field of each
-  stream). So ON and OFF are close (98.7 and 98.1 tok/s for C8 on two
-  Sparks at `dc32b7c`).
-- **FP8 reads prompts more slowly than FP4-Local.** At `dc32b7c`, the cold
-  8K prompt took 5.97 s on two FP8 Sparks, against 2.15 s on two FP4-Local
-  Sparks.
+  of each layer for each token, not a half. With a fixed depth 2, prose went
+  from 37.8 tok/s on two Sparks to 51.4 on four, and eight chats from 98.3 to
+  131.4 tok/s.
+- **Drafting helps one chat only.** On two Sparks, code went from 27.5 tok/s
+  with drafting off to 53.0 at a fixed depth 2 and 66.1 with the depth that
+  the server chose. Overlapping chats almost never draft. So on and off are
+  close (98.3 and 98.6 tok/s for C8 on two Sparks).
+- **The chosen depth does not win every cell.** It wrote code and structured
+  output faster than depth 2. On four Sparks, it wrote prose more slowly:
+  46.9 tok/s against 51.4.
+- **FP8 reads prompts more slowly than FP4-Local.** The cold 8K prompt took
+  5.96 s on two FP8 Sparks, against 2.15 s on two FP4-Local Sparks (main
+  `dc32b7c`).
 
-The cards started the engine with our lab launcher, not with `vade up`. The
-lab launcher gives each rank the same engine arguments as
-`vade up --fp8 --context 32768 --output 16384 --mtp 2`, with the same topology,
-transport and output settings. A CLI test checks that plan on two and four
-Sparks (`fp8_card_settings_reach_every_rank_on_two_and_four_sparks` in
+The cards started the engine with our lab launcher, not with `vade up`. On the
+fixed-depth starts, the lab launcher gives each rank the same engine arguments
+as `vade up --fp8 --context 32768 --output 16384 --mtp 2`, with the same
+topology, transport and output settings. The other starts leave out `--mtp 2`.
+A CLI test checks that plan on two and four Sparks
+(`fp8_card_settings_reach_every_rank_on_two_and_four_sparks` in
 [cli/src/app/tests.rs](../cli/src/app/tests.rs)). We have not yet run a card
 on a server that `vade up --fp8` started.
 
@@ -266,8 +302,10 @@ token IDs. On each Spark count, FP8 is stable for greedy requests.
 The 2026-10-31 cards at `dc32b7c` sent every sampling field. In those cards,
 drafting on and off gave the same token IDs in 66 of 66 responses, on two
 Sparks and on four Sparks. The 2026-10-28 cards gave the same result. The
-cards also
-matched earlier FP8 cards of the same Spark count. On two Sparks at main
+2026-11-01 cards at `1a07e3a` matched too, also with the depth that the server
+chose, in 64 of 64 responses on two Sparks and 66 of 66 on four
+([FP8 token IDs](results.md#fp8-token-ids)). The cards also matched earlier
+FP8 cards of the same Spark count. On two Sparks at main
 `cbbb11b`, drafting on and off gave the same token IDs in 64 of 64
 responses, in each of two server starts.
 
@@ -277,7 +315,9 @@ responses on 2026-10-28, on 2026-10-30 at `380d8e5` and on 2026-10-31 at
 `dc32b7c` (5 of 62 on 2026-10-25). A host test found the cause: on four
 Sparks, some projections split their inner sum across the ranks, and the ranks
 added their parts in a different order than on two Sparks. Main `504f885`
-makes four Sparks add in the two-Spark order. Six Sparks still give other
+makes four Sparks add in the two-Spark order. The four-Spark cards of
+2026-11-01 match the two-Spark cards of 2026-10-31 in 66 of 66 responses
+([FP8 token IDs](results.md#fp8-token-ids)). Six Sparks still give other
 token IDs than two, so compare six-Spark FP8 results only with six Sparks.
 [Benchmarks](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)
 has the details.

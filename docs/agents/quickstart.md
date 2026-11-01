@@ -63,7 +63,9 @@ engine. `endpoint` is the API address while the engine runs.
 
 ### On a Spark
 
-Without a `vade` program yet, clone and run the installer. It installs the
+Without a `vade` program yet, clone and run the installer. It tries the
+prebuilt bundle of main first. When the bundle fits, it installs the ready-made
+programs and builds nothing. When the bundle does not fit, it installs the
 pinned Rust toolchains if they are missing, builds `vade`, checks the Spark
 and runs `vade install`, which builds the GPU kernels, the engine and chat.
 It does not need the model, and it needs no sudo. Then get the model if the
@@ -104,7 +106,9 @@ On a Spark with no saved settings, it runs `vade install` first, with the
 FP4-Local checkpoint under `~/models`. For another folder, add `--model` with
 an absolute path or a path under `~/`.
 
-The `export` line lasts for one shell. Repeat it in each new shell.
+The `export` line above is for the source build. When the installer uses the
+bundle, it prints an `export` line for the bundle folder. Use the line that it
+prints. The `export` line lasts for one shell. Repeat it in each new shell.
 
 ### On another computer (a controller)
 

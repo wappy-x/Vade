@@ -127,14 +127,14 @@ vade launch
 - `vade pull` downloads the 102.26 GB model into
   `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local` and checks every file. Skip
   it if the model is already in `~/models`. To use a checkpoint outside
-  `~/models`, set `VADE_MODELS` before the first launch; see
+  `~/models`, set `VADE_MODELS` before the first launch. See
   [use a different checkpoint folder](#use-a-different-checkpoint-folder).
   [Step 3](#download) tells you how to keep a long download running over SSH.
 - `vade launch` finds the model, saves the settings in `~/.vade/config` and
   checks the model files. Then it starts the engine on
   `http://127.0.0.1:18080` and opens chat in the current folder. If another
   program has port 18080, it names the port it uses instead. Type `/exit` to
-  leave chat; `vade down` stops the engine.
+  leave chat. `vade down` stops the engine.
 
 When the model is already in `~/models`, one command can do the last three
 steps: `sh "$HOME/vade/scripts/install.sh" --launch` installs, starts and
@@ -200,9 +200,9 @@ When those are cached, `CARGO_NET_OFFLINE=true sh scripts/install.sh` works
 offline from the checkout. It reuses the tools it finds and does not ask
 rustup to update them. In record `2026-10-28_1744_source-install_285fa8a`,
 the Rust download and install took 16.7 s. We have not timed the model
-download. On 2026-10-30, on one Spark with the model on disk, `install.sh`
-took 227.7 s with no Rust (main `0bad2e6`). With Rust already installed and
-`--launch`, it printed `Install complete` at 209.4 s (main `54bcf05`).
+download. On 2026-10-30, on one Spark with the model on disk and no Rust,
+`sh scripts/install.sh` took 176.8 s
+([receipt](bench/receipts/2026-10-31/fresh-install-2026-10-30.txt)).
 
 **After launch.** Chat can edit files in the folder where it opens. For this
 first test, ask it only to say hello. Then type `/exit`. The engine keeps
@@ -519,7 +519,7 @@ has these files:
 | `LICENSE`, `NOTICE`, `engine/` | The license and notice files of the source |
 
 On 2026-10-31, the kernels of main use PTX ISA 8.8 (the `.version` line of
-`flash.ptx`; `MANIFEST` records it as `ptx_isa`). CUDA 12.9 introduced it
+`flash.ptx`, which `MANIFEST` records as `ptx_isa`). CUDA 12.9 introduced it
 ([PTX ISA 8.8](https://docs.nvidia.com/cuda/archive/12.9.2/parallel-thread-execution/index.html)),
 and the oldest Linux driver for CUDA 12.9 is 575.51.03 (Table 4 of the
 [CUDA Toolkit release notes](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html)).
@@ -976,7 +976,7 @@ that `vade setup` wrote is ready to use. Edit it only to change the setup.
   user.
 
 **Ports.** Keep the default `local_port` and `serve_port` of **18080** unless
-something already uses them. The first is on this computer; the second is on
+something already uses them. The first is on this computer. The second is on
 the Spark that serves. If the controller is one of the Sparks, both would land
 on the same machine, so set `local_port` to another free port, such as 18181.
 

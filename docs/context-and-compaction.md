@@ -131,7 +131,7 @@ The state block has four parts:
    word, oldest first, up to 4 KiB in total. The harness note of a resumed
    or forked chat is not an ask and is left out. Asks that an earlier state
    block carried come first, so a second rollover keeps them too. The last
-   summarized ask always stays; if it is longer than 4 KiB, it is cut and a
+   summarized ask always stays. If it is longer than 4 KiB, it is cut and a
    note says so. When older asks do not fit, a note gives their number
    (with the asks that an earlier block left out), and the model's summary
    covers them. The newest ask is always in the kept turns.
@@ -233,7 +233,7 @@ fewer cached tokens. An automatic compaction keeps the frozen prefix and the
 first user messages (the anchor) at the same indices with the same bytes, and
 puts its summary after them. The harness keeps each KV checkpoint hint whose
 messages the new request sends with the same bytes, so the next request can
-restore the engine state up to the anchor; later hints are dropped. A
+restore the engine state up to the anchor. Later hints are dropped. A
 tool-recovery boundary changes no message and keeps all hints. The engine
 checks every hint against the prompt it renders, so a hint that does not
 match is a miss, not a wrong reuse. The next response's reported usage gives

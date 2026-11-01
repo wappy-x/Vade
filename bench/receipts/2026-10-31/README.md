@@ -1,6 +1,6 @@
 # Receipts, 2026-10-31 morning, main dc32b7c
 
-These receipts back the [current results](../../../docs/results.md). A card is the result file of one RigMark run. Each JSON file here is a sanitized extract of one card file or of one 32K chat file.
+These receipts back the [current FP4-Local results](../../../docs/results.md#current-fp4-local-main-dc32b7c-2026-10-31-morning). The [2026-11-01 receipts](../2026-11-01/README.md) replace the FP8 numbers here. A card is the result file of one RigMark run. Each JSON file here is a sanitized extract of one card file or of one 32K chat file.
 
 The full card files are private. Each one is about 2 MB and holds the prompts, the replies and the run timestamps.
 

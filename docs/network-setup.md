@@ -44,7 +44,7 @@ and the [Glossary](GLOSSARY.md) has them all.
 
 **Cable speed matters.** A 100 Gb/s cable links at half speed. Vade ignores any
 interface slower than 100 Gb/s when it looks for fabric links. Our links report
-`200000Mb/s` over 4 lanes; check yours with `ethtool` (see [step 7](#7-check-every-link)).
+`200000Mb/s` over 4 lanes. Check yours with `ethtool` (see [step 7](#7-check-every-link)).
 
 <br>
 
@@ -211,7 +211,7 @@ links only connect direct neighbors.
 
 Choose eight distinct private `/24` subnets for a four-cable ring, two per
 cable. The labels below belong in your private cable map. The end using its
-**port 0** is host `.1`; the end using its **port 1** is host `.2`.
+**port 0** is host `.1`. The end using its **port 1** is host `.2`.
 
 | Cable | Ends | Rail 0 subnet | Rail 1 subnet |
 | --- | --- | --- | --- |
@@ -264,7 +264,7 @@ fabric.spark-1 = 192.0.2.2
 ```
 
 The full config file is in [cli/examples/vade.conf](../cli/examples/vade.conf).
-Never commit your real addresses; keep the config in an ignored `.local/` folder.
+Never commit your real addresses. Keep the config in an ignored `.local/` folder.
 
 <br>
 

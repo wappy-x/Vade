@@ -701,8 +701,10 @@ Manifests record whether the engine supports `FLASH_SERVE_OUTPUT_TOKENS`, a
 settable output limit. Older builds accept only their fixed `min(context,8192)`
 limit.
 
-In the FP8 profile, the model proposes up to two tokens ahead and checks
-each one against ordinary decoding before keeping it. When chats overlap, they
+In the FP8 profile, the model proposes tokens ahead and checks each one
+against ordinary decoding before keeping it. With no `--mtp`, a chat alone
+chooses its depth for each step, up to 7 tokens. With `--mtp 1` to `--mtp 3`,
+the depth is fixed. When chats overlap, they
 run without drafting (plain) until they finish, even if the other chats end
 first. A chat continued from the cache without its saved draft history also runs
 plain.

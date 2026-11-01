@@ -47,13 +47,13 @@ A task passes the dry-run gate when all of these are true:
 The exit status is 0 when every task passes the gate, 1 when one does not,
 and 2 on a usage or setup error. Without `--out`, the runner uses a new
 temporary folder and removes it at the end, also after a failure. `--out DIR`
-keeps the folder and prints its path; `--only ID,ID` runs only some tasks. On the lab Mac on 2026-10-30, the full dry run
+keeps the folder and prints its path. `--only ID,ID` runs only some tasks. On the lab Mac on 2026-10-30, the full dry run
 of 22 tasks took 35.58 s of wall time (`/usr/bin/time -p`, `real 35.58`).
 
 `cargo test` runs the same dry run in
 [`harness/tests/suite_dry_run.rs`](../harness/tests/suite_dry_run.rs). The
 command sandbox is on macOS only. On another host, a task whose scripts call
-`workspace_shell` shows `SKIP`; it is not counted as a pass.
+`workspace_shell` shows `SKIP`. It is not counted as a pass.
 
 ## Run the suite on a served model
 
@@ -171,7 +171,7 @@ The summary gives one card row, for example:
 | agent-suite-2 | qwen3.8-flash-next-fp4-local | 22 tasks | 3 runs | 66/66 task runs pass | quality 3.00 | 22/22 tasks exact | grade A |
 ```
 
-This example shows the form only; it is not a measured result.
+This example shows the form only. It is not a measured result.
 
 | Grade | Rule |
 | --- | --- |

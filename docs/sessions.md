@@ -95,7 +95,7 @@ The list reads up to 4096 entries of a session folder (a deleted session leaves
 its empty lock file, which counts too) and up to 1024 projects under the Vade
 home. When a folder has more, the list ends with a warning that it may miss
 sessions. A name or `last` then does not select a session from that folder,
-because the newest one may be missing; use the session ID. `--all` also warns
+because the newest one may be missing. Use the session ID. `--all` also warns
 about a project session folder that it cannot open, and lists the others.
 
 Inside a chat, `/sessions` prints the same table.
@@ -111,7 +111,7 @@ vade chat --resume last
 - An exact ID comes first.
 - `last` selects the newest session that has at least one turn, that no other
   chat has open, and that a resume accepts. When no session qualifies, the
-  error says so; `vade sessions` shows why for each one.
+  error says so. `vade sessions` shows why for each one.
 - A name selects the newest session with that name.
 
 A resume replays the journal into the model context: the system prompt, every
@@ -168,7 +168,7 @@ vade sessions delete ID
 ```
 
 Delete takes an ID only, not a name. It removes the journal file. It refuses a
-session that a chat has open; close that chat first. Engine cache hints that the
+session that a chat has open. Close that chat first. Engine cache hints that the
 session saved expire on their own.
 
 ## Commands at a glance

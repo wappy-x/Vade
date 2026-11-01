@@ -55,7 +55,7 @@ real command does:
 From the controller, `vade up` asks for a context of 32768 tokens and up to
 min(context, 8192) output tokens, the same defaults as `vade launch` on the
 Spark. A controller never lowers that context for you: if the Spark lacks the
-memory, the engine refuses it, and you choose a smaller `--context`; keep it
+memory, the engine refuses it, and you choose a smaller `--context`. Keep it
 at 8192 or more if you want `vade chat`. (On the Spark itself, a local launch
 lowers a default or saved context, but only when the engine refuses it for
 lack of memory.) See
@@ -80,8 +80,8 @@ files. Until then, repeat the two commands.
 
 ### Check that answers are exact
 
-Exactness means the same prompt and model give the same answer, token for
-token, on every run and every Spark. Vade's default is greedy decoding: it
+Exactness means the same prompt, model and settings give the same answer,
+token for token, on every run and every Spark. Vade's default is greedy decoding: it
 always picks the most likely next token. Drafting (guessing tokens ahead) can
 make the answer arrive sooner, but it must not change it.
 
@@ -288,7 +288,7 @@ minimum for free disk.
 The required programs are `cc`, `curl`, `git`, `sha256sum`, `cmp`, `less`,
 and `jq`. Vade needs no Python or CUDA toolkit. The model download helper uses
 Rust and curl. Rust is pinned to **1.99.0** and the
-GPU kernels to **nightly-2026-10-01**; keep both versions.
+GPU kernels to **nightly-2026-10-01**. Keep both versions.
 
 An administrator installs any missing Ubuntu packages **before** you start the
 user-level install. Refresh the package lists first, even on a fresh image:
@@ -329,7 +329,7 @@ Expected:
 - enough free disk and RAM.
 
 Compare disk `Avail` with the files you will download and build. Memory values
-are in kB. There is no measured minimum for free RAM; context is sized at
+are in kB. There is no measured minimum for free RAM. Context is sized at
 startup. Inside a container, read the RAM figures together with
 [Containers: large model refused despite free RAM](#containers-large-model-refused-despite-free-ram)
 below.
@@ -378,7 +378,7 @@ if a version check fails, even if rustup said “unchanged”.
 If you are already at the root of a Vade checkout, skip the next two blocks.
 
 Otherwise, clone into a new, empty parent folder. When prompted, enter the
-clone URL; for the public release that is
+clone URL. For the public release that is
 `https://github.com/wappy-x/vade.git`. Keep any access credentials out of the
 checkout.
 
@@ -492,7 +492,7 @@ cd "$VADE_ENGINE"
 
 Keep this terminal open. When the server is ready, it prints a line starting
 with `ready` that names `model=qwen3-8b` and the context, input and output
-limits it accepted. Write down your actual limits; they depend on available
+limits it accepted. Write down your actual limits. They depend on available
 memory.
 
 By default the server listens for local HTTP on port 8080, as set in
@@ -599,7 +599,7 @@ matched. It recorded:
 | The ice question | **609 bytes** | `4a55e40cf7906fffab5df6cb8339120faeb2e996327692cf88c598adb9d05873` |
 | “Calculate 17 times 23. Give the number and one sentence explaining it.” | **135 bytes** | `59eb112d62542c1919bfea67ccec4ca4667c3c0181508fa1eb1fe205b7130563` |
 
-These hashes belong to that one old build. Yours may differ; what matters is
+These hashes belong to that one old build. Yours may differ. What matters is
 that your two answers match each other.
 
 To check restarts as well, stop with Ctrl-C in the server terminal and repeat
@@ -647,7 +647,7 @@ unset VADE_CONFIG
 ```
 
 `run` checks the weights, builds, starts its server, answers and runs doctor.
-`chat` opens the harness; leave chat before `down`. See
+`chat` opens the harness. Leave chat before `down`. See
 [CLI recovery](../cli/README.md) and [harness usage](../harness/README.md).
 
 Time your own runs rather than relying on the dated timings in these docs.
@@ -715,7 +715,7 @@ Token refusals use the same first line, but report a token gap and say
 context names `vade --context` in that refusal. To fix it, shorten the prompt
 or lower `max_tokens`. To raise the server's context, restart it with the flag
 for the route you used: for Part 1, run `vade down` and then
-`vade up --context 262144` (or choose a smaller supported context); for Part 2,
+`vade up --context 262144` (or choose a smaller supported context). For Part 2,
 stop the foreground server with Ctrl+C and restart `spark-serve` with
 `--context-tokens N`, where N fits that checkpoint and the available memory.
 Memory overrides and extra Sparks cannot raise the checkpoint's token ceiling.
@@ -755,7 +755,7 @@ Expected: exit 0 and `PASS actual_checkpoint_prefill logit_comparisons=7`.
 The check confirms that skipping the logits for some prompt rows (head
 skipping) does not change results within a phase. It does not cover every mix
 of batch, cache, chunk and MTP, or model quality. Write down your SHA and
-result; old results say nothing about later builds.
+result. Old results say nothing about later builds.
 
 Some history: an older version of this check compared prompt logits (the
 model's raw scores for each next token) with decode logits. Those use

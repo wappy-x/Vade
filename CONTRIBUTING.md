@@ -148,7 +148,7 @@ install or start an engine. To install from source on a Spark, follow
 - **The ratchet only goes down.** The ratchet test counts third-party
   dependencies, Rust files over 1,500 lines and those fixed-count branches.
   It fails when a count rises above its ceiling. Don't raise the
-  [ratchet ceilings](cli/ratchet-baseline.txt); when a count drops, lower its
+  [ratchet ceilings](cli/ratchet-baseline.txt). When a count drops, lower its
   ceiling in the same commit.
 - **Nothing private.** Never commit secrets, credentials, model weights,
   generated PTX or private machine data. Keep local results outside the
@@ -226,18 +226,19 @@ Which proof a change needs:
      git patch-id --stable` gives the same ID for the screened commit on its
      base and for the rebased commit on the new main. Files outside `engine/`,
      such as `CHANGELOG.md`, can differ.
-   - The READY FOR MERGE line names the screened commit and its screen
-     receipts: each screen of that commit and its result.
+   - The merge request names the screened commit and its screen receipts:
+     each screen of that commit and its result.
 
    If the patch IDs differ, screen the rebased commit again.
 4. **Any other change to engine arithmetic, scheduling, caching or transport
    needs the full device gate.** Rebase it and run that proof again.
    Host-only changes use the host checks described above.
 
-The band is 0.8 % per cell against the A arms of the gate's A X X A block. A
-cell passes when it is at most 0.8 % slower than the A value of that cell.
-The gate card records the A value of each cell, so the limits are known before
-the screen and the confirm card run. Token IDs must be identical in every run.
+The gate runs main, the change, the change again and main again. The band is
+0.8 % per cell against the two main runs. A cell passes when it is at most
+0.8 % slower than the main value of that cell. The gate card records the main
+value of each cell, so the limits are known before the screen and the confirm
+card run. Token IDs must be identical in every run.
 
 The gate base is the main commit that the proof compared against. Each card
 and host log names the revision that it tested. Do not relabel old evidence
@@ -254,7 +255,7 @@ Two tools cover the checks today:
 1. Run `vade verify` against a running engine. It compares repeated greedy
    token IDs with drafting off and on, and saves a receipt (a record of what
    it checked).
-2. Run `vade test determinism` for the batch, cache and chunk cases; the
+2. Run `vade test determinism` for the batch, cache and chunk cases. The
    [gate guide](cli/docs/test.md) shows how. It runs saved test inputs
    (fixtures) through the older `flash-bench` benchmark, so a pass there
    doesn't yet prove that FP4-Local is qualified.

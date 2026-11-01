@@ -40,13 +40,13 @@ Three points apply to FP8:
 
 - **FP8 samples by default.** On FP8, a field that a request leaves out takes the checkpoint's sampled value. So a request with no sampling field is sampled. For greedy replies, send `temperature` 0 with neutral penalties. The gateways add a full greedy set when a request sends none ([FP8 install](install-fp8.md#defaults-and-drafting)).
 - **Two and four Sparks in the cards.** In the cards of 2026-10-28, 2026-10-30 and 2026-10-31 (main `dc32b7c`), FP8 on two Sparks and FP8 on four Sparks gave different token IDs. Their cards matched in 7 of 66 responses. Each Spark count was stable on its own: at `dc32b7c`, drafting on and off matched in 66 of 66 responses on two Sparks and on four ([benchmarks](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)).
-- **Two and four Sparks since the change.** A later change, approved on 2026-10-31, makes FP8 on four Sparks add its partial sums in the two-Spark order. Four Sparks now give the same token IDs as two. In the pre-merge check, they matched in 66 of 66 responses, with drafting on and with drafting off (private record, not in this repository). Six Sparks still give other IDs ([changelog](../CHANGELOG.md)).
+- **Two and four Sparks since the change.** A later change, approved on 2026-10-31, makes FP8 on four Sparks add its partial sums in the two-Spark order. Four Sparks now give the same token IDs as two. The four-Spark cards of 2026-11-01, with drafting on and off, match the two-Spark cards of 2026-10-31 in 66 of 66 responses ([FP8 token IDs](results.md#fp8-token-ids)). Six Sparks still give other IDs ([changelog](../CHANGELOG.md)).
 
 `vade verify` checks the drafting part of the rule on your own engine. It sends the same requests several times with drafting on and off, and it compares the token IDs. Neither `vade verify` nor our cards check every mix of batching and caching.
 
 ## How fast it is
 
-These numbers are from the 2026-10-31 morning cards at main `dc32b7c`. The one-Spark row is the mean of two server starts. The other rows are one start each.
+The FP4-Local rows are from the 2026-10-31 morning cards at main `dc32b7c`. The FP8 rows are from the 2026-11-01 morning cards at main `1a07e3a`, with a fixed drafting depth 2. The one-Spark row is the mean of two server starts. The other rows are one start each.
 
 Rates are completion tokens per second. Prose, code and C8 ran with drafting on. C8 is the total rate of eight chats at once.
 
@@ -57,8 +57,8 @@ Rates are completion tokens per second. Prose, code and C8 ran with drafting on.
 | FP4-Local, one Spark | 42.5 | 81.1 | 179.0 |
 | FP4-Local, two Sparks | 54.9 | 102.3 | 232.2 |
 | FP4-Local, four Sparks | 63.0 | 113.0 | 245.1 |
-| FP8, two Sparks | 36.6 | 51.3 | 98.7 |
-| FP8, four Sparks | 49.5 | 69.3 | 131.0 |
+| FP8, two Sparks | 37.8 | 53.0 | 98.3 |
+| FP8, four Sparks | 51.4 | 72.3 | 131.4 |
 
 </div>
 
@@ -71,8 +71,8 @@ The next table gives the time to the first token for a long prompt. The cards se
 | FP4-Local, one Spark | 3.77 s | 15.63 s |
 | FP4-Local, two Sparks | 2.15 s | 10.09 s |
 | FP4-Local, four Sparks | 1.92 s | 8.98 s |
-| FP8, two Sparks | 5.97 s | 24.12 s |
-| FP8, four Sparks | 6.92 s | 27.81 s |
+| FP8, two Sparks | 5.96 s | 24.08 s |
+| FP8, four Sparks | 6.82 s | 27.38 s |
 
 </div>
 
@@ -85,7 +85,7 @@ The next table gives the time to the first token for a long prompt. The cards se
 - **Not a trainer.** Vade serves models. It does not train or fine-tune them.
 - **Not for images.** Vade reads and writes text only.
 - **Not every checkpoint.** Vade supports two checkpoints of Qwen3.8 Flash-Next: FP4-Local and FP8.
-- **Not fast on every Spark count.** Four Sparks linked by RDMA write one chat faster than two (63.0 against 54.9 tok/s prose in the table above). Three Sparks, five or more, and four over TCP run the layer chain. One chat on the chain writes at about the speed of one Spark ([what works today](../README.md#what-works-today-and-what-doesnt-yet)). Four FP4-Local Sparks keep no prefix cache.
+- **Not fast on every Spark count.** Four Sparks linked by RDMA write one chat faster than two (63.0 against 54.9 tok/s prose in the table above). Three Sparks, five or more, and four over TCP run the layer chain. One chat on the chain writes at about the speed of one Spark ([what runs where](../README.md#what-runs-where)). Four FP4-Local Sparks keep no prefix cache.
 
 ## Where to go next
 

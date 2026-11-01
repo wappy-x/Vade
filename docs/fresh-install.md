@@ -10,7 +10,7 @@ launcher. Driving Sparks from another computer, the
 This page is a longer checklist for the FP8 model. It needs **two** DGX
 Sparks, yours or rented: the FP8 checkpoint does not fit on one. It takes them
 to a working Vade server that you drive with the `vade` command from a Mac
-(or a Linux computer; see step 0), which acts as the controller. FP4-Local is
+(or a Linux computer, as step 0 shows), which acts as the controller. FP4-Local is
 the default, so every FP8 start needs the explicit `--fp8` flag. The shorter
 guide, with the measured speeds, is
 [Install FP8 on 2, 4 or 6 Sparks](install-fp8.md).
@@ -71,7 +71,7 @@ Three terms come up in the questions below:
 - **RDMA**: direct memory-to-memory transfers between Sparks.
 - **RoCE switch**: a network switch that carries RDMA.
 - **PAM**: the login system that applies limits such as locked memory
-  (`memlock`); RDMA needs that limit set to unlimited.
+  (`memlock`). RDMA needs that limit set to unlimited.
 
 Ask the provider before you pay:
 
@@ -88,7 +88,7 @@ Ask the provider before you pay:
 - You will not see the cable. Trust `ibdev2netdev`, `ethtool` and the
   [link checks](network-setup.md#7-check-every-link), not a diagram.
 - Your Mac reaches the Sparks over the internet or a VPN. Make SSH aliases for
-  them (step 3). `vade up --fp8` opens its own SSH tunnel; no ports
+  them (step 3). `vade up --fp8` opens its own SSH tunnel. No ports
   need to be public.
 - Download the weights **on the Sparks**: data-center internet is usually
   faster than home internet.
@@ -100,7 +100,7 @@ Ask the provider before you pay:
   same absolute model and build paths. Write absolute paths (for example
   `/data/vade/models/...`) in the config instead of `~/`.
 - **Ping blocked?** With RDMA, `vade install` and `vade doctor` check each link
-  with ICMP ping; ask the provider to allow ping between the two Sparks. TCP
+  with ICMP ping. Ask the provider to allow ping between the two Sparks. TCP
   mode does not use ping.
 - **No Mac?** See the note under [step 0](#0-check-what-you-have).
 
@@ -114,7 +114,7 @@ with rentals), switch to **TCP mode** on the Mac before `vade install`,
 export SEQPAR_RDMA=0
 ```
 
-`0` means TCP and `1` means RDMA is required; any other value is refused.
+`0` means TCP and `1` means RDMA is required. Any other value is refused.
 Unset it to go back to the RDMA default.
 
 | | RDMA (default) | TCP mode (`SEQPAR_RDMA=0`) |
@@ -150,7 +150,7 @@ steps. All you need is for the two Sparks to reach each other on TCP ports
 29960 and 29961, plus SSH from spark-1 to spark-2 to copy the weights in step 5.
 
 **Install the base packages too.** The setup scripts add only the RDMA and
-network packages; building Vade and downloading the model need these as well.
+network packages. Building Vade and downloading the model need these as well.
 An administrator runs this once on each Spark. Refresh the package lists first,
 even on a fresh VM:
 
@@ -260,8 +260,8 @@ Hugging Face.
 > Qwen/Qwen3.8-Flash-Next-FP8@236dfdf285828023ca3bcd3f37366c58a3469b13` fetches
 > the files Vade serves from into the same folder. It writes a
 > `<folder>.sha256` list in the same form, which the `sha256sum -c` step on
-> spark-2 below reads; no FP8 start checks that list. `vade pull` skips files
-> such as `.gitattributes`, so the two folders are not identical; see
+> spark-2 below reads. No FP8 start checks that list. `vade pull` skips files
+> such as `.gitattributes`, so the two folders are not identical. See
 > [the differences](pull-models.md#difference-from-the-fetch-helper).
 
 **Download and verify on spark-1**, from the repository root you cloned in step 2.
@@ -276,7 +276,7 @@ sh ops/fetch-model.sh Qwen/Qwen3.8-Flash-Next-FP8 236dfdf285828023ca3bcd3f37366c
 Expected final line: `verified <file-count> files`.
 
 If the helper fails, stop, do what its one-line reason says and rerun the same
-command; finished downloads are reused. Continue only after it succeeds.
+command. Finished downloads are reused. Continue only after it succeeds.
 
 **What the [helper](../ops/fetch-model.sh) does.** Below, `MODEL_DIR` is the
 folder you passed to it.
@@ -317,7 +317,7 @@ sha256sum -c ../Qwen3.8-Flash-Next-FP8.sha256   # every file must report OK
 Sparks and builds there. (The Spark clones from step 2 are only for the
 OS-setup scripts.)
 
-The repository is <https://github.com/wappy-x/vade>. Clone it and build the
+The repository is <https://github.com/wappy-x/Vade>. Clone it and build the
 CLI:
 
 ```sh
@@ -339,7 +339,7 @@ config is missing.
 **Edit `.local/vade.conf`.** The `[global]` part applies to the whole setup,
 and each `[machine ...]` part describes one Spark. In each machine part,
 `fabric.<peer>` is that Spark's own address on its cable to the peer (in TCP
-mode, its ordinary address; see the [TCP table](#no-qsfp-link-use-tcp-mode)).
+mode, its ordinary address, as the [TCP table](#no-qsfp-link-use-tcp-mode) shows).
 Here is a filled-in example for two Sparks (the addresses are examples):
 
 ```ini
@@ -429,7 +429,7 @@ vade up --fp8
 
 ```text
 Starting qwen3.8-flash-next-fp8 on 2 Sparks over RDMA. Waiting for the model to load.
-qwen3.8-flash-next-fp8 ready on 2 Sparks at http://localhost:18080: context 131072 tokens, drafting depth 2.
+qwen3.8-flash-next-fp8 ready on 2 Sparks at http://localhost:18080: context 131072 tokens, drafting depth engine default.
   Chat: vade chat   Stop: vade down
 ```
 
@@ -483,7 +483,7 @@ curl -s http://localhost:18080/v1/models
 Health shows `"status":"ready"` and `"model":"qwen3.8-flash-next-fp8"`.
 Vade hashes the checkpoint in the background after it starts. In the same
 health response, `vade.checkpoint.hash_state` reads `"pending"` until that
-finishes and `"ready"` after; wait for `"ready"` before you time anything.
+finishes and `"ready"` after. Wait for `"ready"` before you time anything.
 
 **A first answer:**
 

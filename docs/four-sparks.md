@@ -6,7 +6,7 @@ pairs with no new cables, see
 [two pairs behind one address](#two-pairs-behind-one-address).
 
 **This build has not yet passed its qualification checks running natively on
-four Sparks.** We have measured FP8 on four of our Sparks four times in published cards:
+four Sparks.** We have measured FP8 on four of our Sparks five times in published cards:
 
 - 2026-10-25 at `6cb46bf`
   ([cards](benchmarks.md#previous-2026-10-25-main-80ac2d4-home-dgx-sparks)):
@@ -24,19 +24,27 @@ four Sparks.** We have measured FP8 on four of our Sparks four times in publishe
   matched in 66 of 66, and both matched the four-Spark cards of the
   evening before (main `7943f57`) in 66 of 66. One chat wrote prose at 49.508 tok/s and eight chats wrote 130.999
   tok/s in total.
+- 2026-11-01 at `1a07e3a`
+  ([results](results.md#current-fp8-main-1a07e3a-2026-11-01-morning)): one
+  server start with a fixed depth 2, drafting on and off, and one start with
+  the depth that the server chose. All three cards gave the same token IDs,
+  and they match the two-Spark cards of 2026-10-31 in 66 of 66. At depth 2,
+  one chat wrote prose at 51.362 tok/s and eight chats wrote 131.399 tok/s
+  in total.
 
-These cards gave different token IDs on four Sparks than on two: on 2026-10-28,
-2026-10-30 and 2026-10-31, 7 of 66 responses were the same. From main
-`504f885` on, four Sparks give the two-Spark token IDs
+The cards before main `504f885` gave different token IDs on four Sparks than
+on two: on 2026-10-28, 2026-10-30 and 2026-10-31, 7 of 66 responses were the
+same. From main `504f885` on, four Sparks give the two-Spark token IDs
 ([cause and fix](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)).
-These cards ran through a lab launcher with context 32768, output 16384 and
-drafting depth 2. They measure speed; they are not the four-Spark
-qualification. For the qualification, keep the official precision and the
+All these cards ran through a lab launcher with context 32768 and output
+16384. All but the 2026-11-01 start that let the server choose used drafting
+depth 2. They measure speed. They are not the four-Spark qualification. For
+the qualification, keep the official precision and the
 FP8 defaults: a 131,072-token context and an output limit of
 `min(65536, context)` (see
 [FP8 limits](../cli/README.md#fp8-limits-and-drafting)). No card has measured
 that default context yet ([not tested yet](install-fp8.md#not-tested-yet)). If
-you choose a smaller context on purpose, that is a separate configuration; it
+you choose a smaller context on purpose, that is a separate configuration. It
 is not a way to qualify the default.
 
 You will also need:
@@ -95,7 +103,7 @@ a rank still uses it.
    socket, and relabel both ends **DA**. You now have **A-B-C-D-A**.
 5. Follow every cable from end to end and write down the socket it actually
    sits in at each end. Do not guess the Ethernet or RDMA device from a
-   left/right sticker; use the
+   left/right sticker. Use the
    [interface-to-device mapping](spark-setup.md#1-make-a-private-cable-map).
 
 ```mermaid
@@ -109,7 +117,7 @@ flowchart LR
 One QSFP cable gives you **two Ethernet rails** (two separate network
 interfaces over the same cable), not two independent links to the neighbor.
 Configure and check both rails. A four-Spark path has three cables and six rail
-subnets; a four-Spark ring has four cables and eight rail subnets. There is no
+subnets. A four-Spark ring has four cables and eight rail subnets. There is no
 switch, and nothing routes fabric traffic between machines that are not cabled
 to each other.
 
@@ -143,7 +151,7 @@ forwarding.
 On each machine, create a **new** ignored configuration directory with
 `init-config.sh`, as in [step 1](spark-setup.md#1-make-a-private-cable-map).
 For a path, use the `pair` template on A and D (two rows each) and the `ring`
-template on B and C (four rows each); for a physical ring, use `ring` on all
+template on B and C (four rows each). For a physical ring, use `ring` on all
 four. The template names only choose how many local rail rows you get; they do
 not choose Vade's transport topology. Fill in the seven fields of each row in
 `links.tsv` from the new cable map: Ethernet device, RDMA device, local address
@@ -175,9 +183,9 @@ keep a console-backed rollback ready, and check that management access still
 works before you accept the activation, as described in
 [step 3 of Spark system setup](spark-setup.md#3-install-and-activate-the-fabric-network).
 
-Read the actual GIDs again after any address change; the placeholder GID index
+Read the actual GIDs again after any address change. The placeholder GID index
 used before addresses exist proves nothing. Keep the existing working account
-permissions, kernel and launch-session limits; changing them needs its own
+permissions, kernel and launch-session limits. Changing them needs its own
 setup procedure.
 
 Run [rail verification](spark-setup.md#8-verify-every-rail-and-the-actual-launch-session)
@@ -185,7 +193,7 @@ as the Vade account, in the same session you will launch from: first the
 prerequisite checks on every machine, then the bounded bandwidth server/client
 test on **both rails of every cable, in both directions**. That is 12 client
 results for a path or 16 for a ring, plus their matching server logs. Positive
-bandwidth shows the link connects; it is not a performance target. Stop on any
+bandwidth shows the link connects. It is not a performance target. Stop on any
 failure. Then confirm once more: management SSH, unlimited soft and hard
 memlock, matching MTUs, device access and trusted peer identities. Keep filled
 configurations and raw evidence out of Git.
@@ -212,7 +220,7 @@ same model path and the same staged PTX path, each written out in full
 [CLI setup](../cli/README.md#multi-spark-source-setup) shows how.
 
 `vade up --fp8 --sparks 4` takes the first four configured machines, in
-order; without `--fp8`, `vade up` refuses an FP8 config. If the
+order. Without `--fp8`, `vade up` refuses an FP8 config. If the
 configuration lists other machines too, prefer an explicit ordered `--hosts`
 list. Preview with `--dry-run`, then launch with the same settings while no one
 else is using the four Sparks. For the first smoke request, launch with
@@ -220,7 +228,7 @@ else is using the four Sparks. For the first smoke request, launch with
 tokens ahead).
 
 For four Sparks the launcher picks the **logical path** topology, even when
-the physical cables form a ring; Vade then leaves DA unused. Adding DA fabric
+the physical cables form a ring. Vade then leaves DA unused. Adding DA fabric
 entries does not turn `vade up` into a ring launcher, so do not label that run
 as a ring measurement. A native ring gate
 (a qualification run) must explicitly select `TP_TOPOLOGY=ring`, use all four
@@ -241,7 +249,7 @@ is one free port for the native gate run, the same on every rank:
 | C / 2 | `C-on-BC:PORT` | `D-on-CD:PORT` |
 | D / 3 | `D-on-CD:PORT` | `A-on-AB:PORT` (ignored) |
 
-For a native ring, replace A's LISTEN and D's NEXT with `A-on-DA:PORT`; every
+For a native ring, replace A's LISTEN and D's NEXT with `A-on-DA:PORT`. Every
 other entry stays the same. Give real numeric socket addresses even for the
 two ignored path arguments.
 
@@ -259,7 +267,7 @@ the OS level either way, and record which ones the transport actually uses.
 ## Qualify, then restore or hand over
 
 Follow the [world-four golden procedure](../cli/docs/test.md#world-four-goldens) ("world four"
-means four ranks; goldens are saved reference answers). First, on the same pair,
+means four ranks. Goldens are saved reference answers). First, on the same pair,
 confirm that the world-two (two-rank) bytes still match the base. Then capture
 world-four goldens twice, and compare only runs with matching world, topology
 and rank-order settings. The exactness rule asks for the same token IDs on
@@ -309,13 +317,13 @@ vade up --replicas 2 --pairs --hosts a,b,c,d
 request that does not set them. Then each pair's prefix cache can serve the
 later turns of a chat. The engine treats a `prompt_cache_key` as a request for
 the cache, so `"cache": false` alone does not turn the cache off through this
-gateway. Token IDs stay the same; memory use and first-turn time can change.
+gateway. Token IDs stay the same. Memory use and first-turn time can change.
 
 The gateway routes each request to one pair:
 
 - A first turn (nothing after its first user message) goes to the pair with
   fewer requests in flight through the gateway. On a tie, it goes to the pair
-  that served the same key before, if there is one; otherwise ties take turns.
+  that served the same key before, if there is one. Otherwise ties take turns.
   Identical prompts sent at the same time divide evenly between the pairs.
 - A later turn of the same chat (anything after the first user message:
   another user turn, a reply or a tool result) goes to the pair that served the
