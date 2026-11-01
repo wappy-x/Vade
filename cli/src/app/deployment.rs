@@ -390,6 +390,8 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
             )?;
             self.sync_source(&engine_source, machine, &remote_engine, "engine")?;
             self.sync_source(&cli_source, machine, &remote_cli, "CLI")?;
+            // The remote CLI build resolves its `../harness` path dependency here.
+            self.sync_source(&harness_source, machine, &format!("{remote_revision}/harness"), "harness")?;
             builds.push(SourceBuild { machine: machine.clone(), borrowed, storage,
                 remote_engine, remote_cli, build: format!("{}/builds/{engine_sha}-{cli_sha}-{install_id}", machine.stage_dir) });
         }

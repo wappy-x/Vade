@@ -485,7 +485,7 @@ fn machines_build_concurrently_and_report_in_machine_order() {
         // Every source copy is staged before any machine compiles.
         let first_build = calls.iter().position(|e| e.label.ends_with("helper build")).unwrap();
         assert!(calls.iter().enumerate().filter(|(_, e)| e.label.ends_with("source copy")).all(|(i, _)| i < first_build));
-        assert_eq!(calls.iter().filter(|e| e.label.ends_with("source copy")).count(), 4);
+        assert_eq!(calls.iter().filter(|e| e.label.ends_with("source copy")).count(), 6);
         if fail.is_none() {
             result.unwrap();
             assert!(at("b: building engine and helper.") < at("a: all model shards present.") && at("a: all model shards present.") < at("b: all model shards present."));
