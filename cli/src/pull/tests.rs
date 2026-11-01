@@ -32,6 +32,11 @@ struct Behavior {
     foreign_next: bool,
     /// Name the next tree page with an unquoted rel=next, after another link.
     bare_rel: bool,
+    /// Answer a file request with a 307 and a body of this many bytes, as the
+    /// Hub does; the address it names serves the file. 0 serves it at once.
+    redirect: usize,
+    /// Serve these files with their last byte missing, and a matching length.
+    short: BTreeSet<String>,
 }
 
 /// One request the fake Hub saw.
@@ -117,11 +122,16 @@ fn serve(mut stream: TcpStream, files: &[(String, Vec<u8>, bool)], state: &Mutex
         let link = if cursor + size < files.len() { format!("Link: {rel}<{url}{api}tree/{COMMIT}?recursive=true&cursor={}>; {next}\r\n", cursor + size) } else { String::new() };
         return reply(&mut stream, "200 OK", &link, format!("[{}]", entries.join(",")).as_bytes());
     }
-    let Some(path) = target.strip_prefix(&format!("/{REPO}/resolve/{COMMIT}/")) else { return reply(&mut stream, "404 Not Found", "", b"") };
+    let (resolve, cache) = (format!("/{REPO}/resolve/{COMMIT}/"), format!("/api/resolve-cache/models/{REPO}/{COMMIT}/"));
+    if let Some(path) = target.strip_prefix(&resolve).filter(|_| state.behavior.redirect > 0) {
+        return reply(&mut stream, "307 Temporary Redirect", &format!("Location: {cache}{path}\r\n"), &vec![b'r'; state.behavior.redirect]);
+    }
+    let Some(path) = target.strip_prefix(&resolve).or_else(|| target.strip_prefix(&cache)) else { return reply(&mut stream, "404 Not Found", "", b"") };
     let Some((_, bytes, _)) = files.iter().find(|(name, ..)| name == path) else { return reply(&mut stream, "404 Not Found", "", b"") };
     let mut bytes = bytes.clone();
     if state.behavior.corrupt.contains(path) { bytes[0] ^= 1; }
     if let Some(extra) = state.behavior.extra.get(path) { bytes.extend(std::iter::repeat_n(b'x', *extra)); }
+    if state.behavior.short.contains(path) { bytes.pop(); }
     let from: usize = range.as_deref().filter(|_| !state.behavior.no_range).and_then(|range| range.strip_prefix("bytes=")?.strip_suffix('-')?.parse().ok()).unwrap_or(0);
     if from >= bytes.len() && from > 0 { return reply(&mut stream, "416 Range Not Satisfiable", "", b""); }
     let (status, headers) = if from > 0 { ("206 Partial Content", format!("Content-Range: bytes {from}-{}/{}\r\n", bytes.len() - 1, bytes.len())) } else { ("200 OK", String::new()) };
@@ -601,6 +611,34 @@ fn a_reply_longer_than_the_listed_size_is_stopped_and_removed() {
     }
     f.hub.set(|behavior| behavior.endless.clear());
     f.pull(REPO, None, false).0.unwrap();
+}
+
+#[test]
+fn a_redirect_longer_than_a_small_file_still_gets_the_file() {
+    // The Hub answers resolve/ with a 307 whose body is longer than the small
+    // files but under the floor; curl checks its size limit against that body too.
+    let body = 1000;
+    let f = Fixture::new(Behavior { redirect: body, ..Behavior::default() });
+    assert!(f.hub.content("generation_config.json").len() < body && (body as u64) < fetch::REDIRECT_BODY);
+    // Behind the redirect, a reply longer than the listing is still stopped and removed.
+    f.hub.set(|behavior| behavior.extra = [("config.json".into(), 1000)].into());
+    let error = f.pull(REPO, None, false).0.unwrap_err();
+    assert!(error.starts_with("The Hub sent more bytes for the file config.json of org/model than its listing gives."), "{error}");
+    assert!(!f.part("config.json").exists() && !f.folder().join("config.json").exists());
+    // A reply one byte short is never taken as the whole file.
+    f.hub.set(|behavior| { behavior.extra.clear(); behavior.short = ["config.json".into()].into(); });
+    let error = f.pull(REPO, None, false).0.unwrap_err();
+    assert!(error.contains("config.json") && !error.starts_with("The Hub sent more bytes"), "{error}");
+    assert!(!f.folder().join("config.json").exists());
+    // The healthy redirect gives every file, and each download went through it.
+    f.hub.set(|behavior| behavior.short.clear());
+    f.pull(REPO, None, false).0.unwrap();
+    for name in ["README.md", "config.json", "generation_config.json", "model.safetensors", "model.safetensors.index.json", "tokenizer.json", "tokenizer_config.json"] {
+        assert_eq!(fs::read(f.folder().join(name)).unwrap(), f.hub.content(name), "{name}");
+    }
+    let seen = f.hub.seen();
+    let (asked, cached) = (seen.iter().filter(|seen| seen.path.contains("/resolve/")).count(), seen.iter().filter(|seen| seen.path.contains("/resolve-cache/")).count());
+    assert!(asked > 0 && asked == cached, "{asked} {cached}");
 }
 
 #[test]

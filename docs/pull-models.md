@@ -90,9 +90,11 @@ each file it then does these steps:
    again.
 2. Otherwise pull downloads it from `/<org>/<name>/resolve/<commit>/<path>`
    into a partial file in `.vade-pull/` inside the model folder. A partial
-   file from an earlier attempt continues from its last byte. A reply that
-   sends more bytes than the listing gives is stopped, and pull removes the
-   partial file.
+   file from an earlier attempt continues from its last byte. Pull follows
+   the redirect that the Hub sends for a file, also for a small file. A reply
+   that sends more bytes than the listing gives is stopped, and pull removes
+   the partial file. A reply that ends early is continued; pull never takes
+   it as the whole file.
 3. Pull checks the size, then the hash: the SHA-256 that the Hub keeps for
    large (LFS) files, or the Git blob ID for small files. A file that fails the
    check is removed, and pull stops with the file name and both values.

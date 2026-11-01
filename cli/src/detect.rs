@@ -293,9 +293,14 @@ fn gpu_driver(text: &str) -> Result<(String, String), String> {
     Ok((names.join(", "), drivers.join(", ")))
 }
 
+/// The CUDA version from the nvidia-smi header. Older drivers print
+/// "CUDA Version:"; newer drivers print "CUDA UMD Version:". The label that
+/// comes first in the text wins.
 fn cuda_version(text: &str) -> Result<String, String> {
-    let value = text
-        .split_once("CUDA Version:")
+    let value = ["CUDA Version:", "CUDA UMD Version:"]
+        .iter()
+        .filter_map(|label| text.find(label).map(|at| (at, &text[at + label.len()..])))
+        .min_by_key(|(at, _)| *at)
         .and_then(|(_, tail)| tail.split_whitespace().next())
         .filter(|value| version(value));
     value.map(str::to_owned).ok_or_else(|| {
@@ -623,6 +628,18 @@ mod tests {
         assert!(gpu_driver("NVIDIA GB10, N/A").is_err());
         assert!(gpu_driver("").is_err());
         assert_eq!(cuda_version("CUDA Version: 13.1 |"), Ok("13.1".into()));
+    }
+
+    #[test]
+    fn cuda_version_reads_the_old_and_the_new_driver_header() {
+        // Verbatim nvidia-smi header lines: driver 580.178.04, then driver 615.71.09.
+        let old = "| NVIDIA-SMI 580.178.04 Driver Version: 580.178.04 CUDA Version: 13.0 |";
+        let new = "| NVIDIA-SMI 615.71.09              KMD Version: 615.71.09     CUDA UMD Version: 13.4     |";
+        assert_eq!(cuda_version(old), Ok("13.0".into()));
+        assert_eq!(cuda_version(new), Ok("13.4".into()));
+        // The value check stays, and a header with neither label still fails.
+        assert!(cuda_version("CUDA UMD Version: N/A").is_err());
+        assert!(cuda_version("| NVIDIA-SMI 615.71.09 KMD Version: 615.71.09 |").is_err());
     }
 
     #[test]

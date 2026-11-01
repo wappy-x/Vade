@@ -8,6 +8,10 @@ const ATTEMPTS: u32 = 6;
 /// The largest API reply body and header block a pull reads.
 pub(super) const API_BODY: u64 = 64 << 20;
 pub(super) const API_HEADERS: u64 = 1 << 20;
+/// The smallest size limit a download gives curl. curl checks the limit against
+/// the length of every reply it reads, a redirect too, and the Hub answers a
+/// file request with a redirect whose body can be longer than a small file.
+pub(super) const REDIRECT_BODY: u64 = 64 << 10;
 
 /// Why one curl request did not finish.
 #[derive(Debug, PartialEq, Eq)]
@@ -158,9 +162,9 @@ impl Transport {
             if have > size { let _ = fs::remove_file(part); }
             // A transfer fails after 120 s below 1 byte per second; a healthy
             // one may run for hours. curl refuses a reply that announces more
-            // than `size` bytes (0 sets no limit); the watch stops any reply
-            // that writes more.
-            let extra = ["--speed-limit".into(), "1".into(), "--speed-time".into(), "120".into(), "--max-filesize".into(), size.to_string(),
+            // than `size` bytes, or [`REDIRECT_BODY`] for a smaller file; the
+            // watch and the length check after curl stop any reply that writes more.
+            let extra = ["--speed-limit".into(), "1".into(), "--speed-time".into(), "120".into(), "--max-filesize".into(), size.max(REDIRECT_BODY).to_string(),
                 "--continue-at".into(), "-".into(), "--output".into(), path(part), url.into()];
             let result = self.once(&extra, None, &mut || { let have = length(); watch(have.min(size)); have > size });
             if length() > size || matches!(result, Err(Failure::TooLarge | Failure::Curl(63, _))) {
