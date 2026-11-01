@@ -1,12 +1,12 @@
 ## What this changes
 
-Say what was wrong or missing, and what Vade does now. Link the issue if there
+Say what was wrong or missing. Say what Vade does now. Link the issue if there
 is one.
 
 ## Tests you ran
 
-List the commands and what they printed. For engine changes, also say which
-Sparks you ran on and attach or link the receipts.
+List the commands and what they printed. For an engine change, also say which
+Sparks you ran on, and attach or link the receipts.
 
 ```sh
 # for example, from engine/
@@ -30,5 +30,5 @@ cargo +1.99.0 run --offline --locked --manifest-path ../tools/Cargo.toml -p vade
   For engine changes I attached the receipts that show it. For host-only or
   docs changes, tick it and say "host-only" under Tests.
 
-The Rust is formatted densely on purpose. Please match the code around your
-change by hand and don't include a `cargo fmt` sweep.
+The Rust is formatted densely on purpose. Match the code around your change by
+hand. Do not include a `cargo fmt` sweep.

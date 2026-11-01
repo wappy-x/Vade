@@ -1,11 +1,14 @@
 Vade
 Copyright 2026 the Vade authors
 
-The Vade engine (engine/), harness (harness/) and CLI (cli/) are licensed
-under the Apache License, Version 2.0. See LICENSE. Third-party files
-retain the licenses listed below.
+This file lists the third-party material in this repository and its
+licenses.
 
-The harness includes no third-party code. The sources it studied are
+The Vade engine (engine/), harness (harness/) and CLI (cli/) are licensed
+under the Apache License, Version 2.0. See LICENSE. Third-party files keep
+the licenses listed below.
+
+The harness includes no third-party code. The sources that it studied are
 listed in harness/CREDITS-NOTES.md.
 
 Third-party material included in this repository

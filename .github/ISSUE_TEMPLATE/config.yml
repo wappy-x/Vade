@@ -1,5 +1,5 @@
 blank_issues_enabled: true
 contact_links:
   - name: Report a security vulnerability
-    url: https://github.com/wappy-x/vade/security/advisories/new
-    about: Please report vulnerabilities privately, not in a public issue. SECURITY.md explains what to include.
+    url: https://github.com/wappy-x/Vade/security/advisories/new
+    about: Report a vulnerability privately, not in a public issue. SECURITY.md says what to include.

@@ -2,46 +2,54 @@
 
 # Vade Harness
 
-Vade Harness is the terminal program you use to work with the model. It is both
-a coding agent and a chat client, written in first-party Rust with no
-third-party crates. The model itself runs in the [engine
-workspace](../engine/README.md) in this monorepo. The engine does the inference
-and keeps the KV state, the attention memory it holds for each conversation
-(see [KV cache](../docs/GLOSSARY.md#ho) in the glossary).
+Vade Harness is the terminal program that you use to work with the model. It
+is a coding agent and a chat client. It is written in first-party Rust with no
+third-party crates.
 
-It gives you:
+The model runs in the [engine workspace](../engine/README.md) in this
+monorepo. The engine does the inference and keeps the KV state, the attention
+memory that it holds for each conversation (see
+[KV cache](../docs/GLOSSARY.md#ho) in the glossary).
 
-- a native **tool-aware agent**. It reads and lists files, makes exact patch
-  edits and, on macOS, runs sandboxed commands once you approve them, all
-  inside a workspace you pick and within fixed limits;
-- direct streaming **text chat**. Its only tools are local commands you type,
-  such as `/ls` and `/read`;
-- an offline **demo**;
-- [project memory](docs/memory.md) for facts, preferences, decisions, and corrections across chats;
-- a **gateway** command that sits between another client and the engine;
-- a hand-off of each turn to **Codex** (through its app-server) or to a
-  **Hermes** agent (over ACP v1), if you have one installed.
+The harness gives you these parts:
 
-The native harness is not small. At main `ee5dafb` it had 101,731 lines of
-Rust in 217 files under `src/` (`wc -l`, tests inside `src/` included). The
-largest folders are `cli/` (10,748 lines), `readers/` (10,278), `shell/`
-(8,719) and `gateway/` (6,847). These counts leave out files beside the
-folders, such as `gateway.rs`, and the PDF reader in `pdf/`. It keeps its
-requests [greedy](../docs/GLOSSARY.md#dg) and cache-friendly.
+- **Native agent.** A tool-aware agent reads and lists files and makes exact
+  patch edits. On macOS, it also runs sandboxed commands after you approve
+  them. All of this stays inside a workspace that you pick, within fixed
+  limits.
+- **Text chat.** Direct chat streams the reply. Its only tools are local
+  commands that you type, such as `/ls` and `/read`.
+- **Demo.** An offline demo gives a scripted response and needs no engine.
+- **Memory.** [Project memory](docs/memory.md) keeps facts, preferences,
+  decisions and corrections across chats.
+- **Gateway.** A gateway command sits between another client and the engine.
+- **Hand-off.** The harness can hand each turn to **Codex** (through its
+  app-server) or to a **Hermes** agent (over ACP v1), if you have one
+  installed.
 
-Already have a coding client you like? You can keep it and put Vade's gateway in
-front of the engine instead; way 2 below shows how.
+The harness keeps its requests [greedy](../docs/GLOSSARY.md#dg) and
+cache-friendly.
+
+At main `ee5dafb`, the native harness had 101,731 lines of Rust in 217 files
+under `src/` (`wc -l`, tests inside `src/` included). The largest folders are
+`cli/` (10,748 lines), `readers/` (10,278), `shell/` (8,719) and `gateway/`
+(6,847). These counts leave out files beside the folders, such as
+`gateway.rs`, and the PDF reader in `pdf/`.
+
+If you already have a coding client that you like, you can keep it. Put
+Vade's gateway in front of the engine instead. Way 2 below shows how.
 
 This page starts with a first run and the four ways to use Vade. Then it
 covers the native agent, the terminal and client setup. The finer details
-(gateway routing, how requests are built, the agent's deeper limits) come after
-[Going deeper](#going-deeper). What has and has not been checked is under
-[What has been validated](#what-has-been-validated).
+come after [Going deeper](#going-deeper): gateway routing, how requests are
+built and the agent's deeper limits. [What has been
+validated](#what-has-been-validated) says what has and has not been checked.
 
 ## Build and run from source
 
-Start with the offline demo: it needs no engine, no Spark and no network. From
-`harness/` in this monorepo, use the pinned Rust `1.99.0` compiler:
+Start with the offline demo. It needs no engine, no Spark and no network. Run
+these commands from `harness/` in this monorepo, with the pinned Rust `1.99.0`
+compiler:
 
 ```sh
 cargo +1.99.0 build --offline
@@ -54,14 +62,22 @@ export PATH="$PWD/target/debug:$PATH"
 With no mode argument you get the **demo**. It gives a clearly labeled scripted
 response and makes no network requests.
 
-Talking to a model needs a running engine (next section). Direct mode needs both
-an endpoint and a model, and native agent mode also needs an explicit workspace.
-The commands below expect an OpenAI-compatible server that is already listening
-on `127.0.0.1:18080` and serves a model named `mock`. This page does not set
-one up, so bring your own, or start the engine first and put its model ID in
-place of `mock`. Choose one: `direct` and `agent` open a client for that server;
-`gateway` starts a listener on `127.0.0.1:8787` that forwards incoming requests
-to it. Stop the client or gateway with Ctrl+C before choosing another:
+To talk to a model, you need a running engine (next section). Direct mode
+needs an endpoint and a model. Native agent mode also needs an explicit
+workspace.
+
+The commands below expect an OpenAI-compatible server that already listens on
+`127.0.0.1:18080` and serves a model named `mock`. This page does not set one
+up. Bring your own, or start the engine first and put its model ID in place
+of `mock`.
+
+Choose one of the three commands:
+
+- **`direct` and `agent`.** Each one opens a client for that server.
+- **`gateway`.** It starts a listener on `127.0.0.1:8787` that forwards
+  incoming requests to that server.
+
+Stop the client or the gateway with Ctrl+C before you choose another:
 
 ```sh
 vade-harness direct --endpoint http://127.0.0.1:18080/v1/chat/completions --model mock
@@ -72,12 +88,17 @@ vade-harness gateway --upstream http://127.0.0.1:18080 --bind 127.0.0.1:8787
 ## Four ways to run Vade
 
 Start the engine first with [INSTALL.md](../INSTALL.md):
-[Route A](../INSTALL.md#route-a-on-this-spark) if you work on the Spark itself,
-or [Route B](../INSTALL.md#route-b-from-a-controller) if you drive it from
-another Linux or macOS computer (a controller). The engine listens on
-`http://127.0.0.1:18080`, and the FP4-Local server that INSTALL.md installs
-serves the model `qwen3.8-flash-next-fp4-local`. Wherever a command below says
-`MODEL`, put that ID (or your own server's exact model ID).
+
+- **On the Spark.** Use [Route A](../INSTALL.md#route-a-on-this-spark) if you
+  work on the Spark itself.
+- **From another computer.** Use
+  [Route B](../INSTALL.md#route-b-from-a-controller) if you drive the Spark
+  from another Linux or macOS computer (a controller).
+
+The engine listens on `http://127.0.0.1:18080`. The FP4-Local server that
+INSTALL.md installs serves the model `qwen3.8-flash-next-fp4-local`. Wherever
+a command below says `MODEL`, put that ID, or the exact model ID of your own
+server.
 
 - The engine keeps running until you type `vade down`. On a controller, the
   network tunnel to the Spark stays open until then too. Any client, direct or
@@ -93,29 +114,32 @@ Pick the way that fits how you work:
 
    `vade-harness agent --endpoint http://127.0.0.1:18080 --model MODEL --workspace .`
 
-   > **Heads-up:** the agent's shell tool runs only on macOS today, inside the
-   > macOS sandbox. On the Spark itself (Linux), the agent can read, search and
-   > patch files but cannot run commands, so build checks such as `cargo test`
-   > do not run either ([what that looks like](../INSTALL.md#chat-and-the-coding-agent-on-linux)).
+   > **Note:** The agent's shell tool runs only on macOS today, inside the
+   > macOS sandbox. On the Spark itself (Linux), the agent can read, search
+   > and patch files, but it cannot run commands. Build checks such as
+   > `cargo test` do not run either
+   > ([what that looks like](../INSTALL.md#chat-and-the-coding-agent-on-linux)).
    > For the full agent, drive the Spark from a Mac controller (Route B).
 
 2. **Put ours in front (your harness through Vade's gateway).** You keep your
-   own harness and point its provider at port 8787, where Vade's gateway sits
-   between it and the engine. Only the client's base URL changes. Start the
+   own harness and point its provider at port 8787. There, Vade's gateway sits
+   between your harness and the engine. Only the client's base URL changes.
+   Start the
    [`vade-gateway` binary](docs/invisible-gateway.md) as in INSTALL:
 
    `vade-gateway --upstream http://127.0.0.1:18080/v1`
 
    It forwards Chat Completions, Responses and every other HTTP path, including
-   `GET /v1/models`. It can also add stats, recording and replay, plus a few
-   optimizations that stay off until you turn them on with flags. The [client
+   `GET /v1/models`. It can also add stats, recording and replay. It also has
+   a few optimizations, which stay off until you turn them on with flags. The
+   [client
    setup guide and what we tested](docs/passthrough-matrix.md) covers each
    client.
 
    The harness also has a built-in gateway,
-   `vade-harness gateway --upstream http://127.0.0.1:18080`. It serves only the
-   API routes listed under [Gateway relay, Codex and Hermes in
-   detail](#gateway-relay-codex-and-hermes-in-detail), including the model
+   `vade-harness gateway --upstream http://127.0.0.1:18080`. It serves only
+   the API routes listed under [Gateway relay, Codex and Hermes in
+   detail](#gateway-relay-codex-and-hermes-in-detail). These include the model
    list that Open WebUI, Continue and the OpenAI SDKs read first. It answers
    501 to `/v1/embeddings` and 404 to any other path. The [OpenAI-compatible
    API](../docs/openai-api.md) page lists what each route accepts.
@@ -135,7 +159,7 @@ Pick the way that fits how you work:
 
    FP4-Local thinks by default (`default_thinking: true` in
    `/v1/capabilities`). A plain client therefore gets `reasoning_content`
-   first, then `content`. To get just the answer, add
+   first, then `content`. To get only the answer, add
    `"enable_thinking": false` to the request. The Vade harness sends that for
    you unless thinking is on.
 
@@ -146,21 +170,21 @@ needs `--endpoint`, `--model` and an **explicit `--workspace`**. The model gets
 these tools: `workspace_read`, `workspace_list`, `apply_patch`,
 `workspace_shell`, `tool_output_read`, `skill_read`, `workspace_manifest`,
 `workspace_symbols`, `workspace_search` and `workspace_read_lines`.
-The [web tools](docs/agent-tools.md#web-reads-and-search) read URLs and search the web; `--no-web` or `VADE_WEB=0` turns both off.
+The [web tools](docs/agent-tools.md#web-reads-and-search) read URLs and
+search the web. `--no-web` or `VADE_WEB=0` turns both off.
 
 The agent's tools always run on the computer where you start the harness, in
-the workspace you pick there. When you drive the Spark from a controller
+the workspace that you pick there. When you drive the Spark from a controller
 (another computer; see INSTALL's [Route
 B](../INSTALL.md#route-b-from-a-controller)), inference runs on the Spark and
 the tools run on the controller.
 
-Commands run only on macOS. On Linux, including the Spark itself, the agent is
-not offered `workspace_shell`, and its instructions say it cannot run
-commands; `--check` and `--child-shell` are refused there. A resumed session
-saved by an earlier version still lists the tool, but a call returns
-`unsupported_platform` without running anything. `VADE_HARNESS_SHELL=off`
-hides the tool on macOS too, which is how the tests cover the Linux shape on a
-Mac.
+Commands run only on macOS. On Linux, the Spark included, the agent is not
+offered `workspace_shell`. Its instructions say that it cannot run commands. The
+harness refuses `--check` and `--child-shell` there. A resumed session saved by
+an earlier version still lists the tool, but a call returns
+`unsupported_platform` and runs nothing. `VADE_HARNESS_SHELL=off` also hides the
+tool on macOS. The tests use it to cover the Linux shape on a Mac.
 
 The FP8 setup on 2, 4 or 6 Sparks has its own
 [connection and run recipe](../engine/docs/flash-server.md#run-the-native-coding-agent).
@@ -208,7 +232,7 @@ host checks says nothing about GPU behavior.
 ### Patches
 
 `apply_patch` adds, updates, deletes and moves bounded UTF-8 files. It needs
-exact, unique old text and existing parent directories; there is no fuzzy
+exact, unique old text and existing parent directories. There is no fuzzy
 matching. Patch text is limited to 64 KiB, and each target and result may be up
 to 4 MiB.
 
@@ -226,24 +250,24 @@ kept.
 
 Atomicity is **per file**, not a batch transaction. Once the first file is
 written, a cancel lets the checked patch finish. If another writer changes a
-later file first, Vade undoes the earlier adds, updates and deletes of the
-patch that still hold its bytes; moves are not undone. A combined move and edit
-can therefore leave both paths if it is interrupted between installing the new
-file and removing the source. Partial results and conflicts are reported
-explicitly.
-See [tool grammar and limits](docs/agent-tools.md).
+later file first, Vade undoes the earlier adds, updates and deletes of the patch
+that still hold its bytes. Moves are not undone. For this reason, a combined
+move and edit can leave both paths if it is interrupted between installing the
+new file and removing the source. Partial results and conflicts are reported
+explicitly. See [tool grammar and limits](docs/agent-tools.md).
 
 ### Shell commands and the sandbox
 
-On macOS every command runs in the OS sandbox (`sandbox-exec`). Inside it, a
-command:
+On macOS, every command runs in the OS sandbox (`sandbox-exec`). Inside it,
+these rules apply to a command:
 
-- runs with a cleared environment, the workspace as its working directory and
-  no network;
-- can read system and toolchain files;
-- can write only to the workspace and a private build folder.
+- **Environment.** The command runs with a cleared environment, the workspace
+  as its working directory and no network.
+- **Reads.** The command can read system and toolchain files.
+- **Writes.** The command can write only to the workspace and a private build
+  folder.
 
-`workspace_shell` takes an explicit `argv` and `timeout_ms`; to run a script,
+`workspace_shell` takes an explicit `argv` and `timeout_ms`. To run a script,
 ask for `/bin/sh -c` explicitly. Hidden paths, common credential files,
 `target/` and `node_modules/` stay out of reach, and hard links cannot be
 created. Add up to eight more folder names with `--shell-exclude NAME`.
@@ -254,22 +278,28 @@ exit, `/new`, resume, switch or fork. It is capped at 1 GiB / 100,000 entries,
 checked between commands. Cargo and npm run offline. System and Homebrew tools
 stay available.
 
-If your Rust toolchain lives under your home folder, launch with
-`--shell-toolchain DIR` pointing at the real distribution (with `bin/cargo`,
-`bin/rustc`, `bin/rustdoc` and `lib`); rustup shims are not used. Package
-installs are not possible, there is no unsandboxed fallback, and other
-platforms refuse to run commands. Full rules: [agent
-tools](docs/agent-tools.md#the-macos-sandbox).
+If your Rust toolchain is under your home folder, launch with
+`--shell-toolchain DIR`. Point it at the real distribution, with `bin/cargo`,
+`bin/rustc`, `bin/rustdoc` and `lib`. Rustup shims are not used. Package
+installs are not possible, and there is no unsandboxed fallback. Other
+platforms refuse to run commands. [Agent
+tools](docs/agent-tools.md#the-macos-sandbox) gives the full rules.
 
 ### Approvals and command limits
 
-There are three approval policies:
+There are three approval policies. Each one sets what runs without asking:
 
-| Policy | What runs without asking |
-| --- | --- |
-| `--approval ask` (default) | Only commands that an allow-list rule matches (empty by default; see [shell safety](../docs/shell-safety.md)). Edits and every other command wait for you. |
-| `--approval auto` | Validated exact patches and all validated commands, inside the existing macOS sandbox, after preview. `--yes` and `--dangerously-skip-prompts` select this policy. That includes programs inside the workspace, such as `./scripts/build.sh`, and explicit `/bin/sh -c` commands. |
-| `--approval never` | Nothing: it denies both writes and commands. |
+- **`--approval ask` (default).** Only commands that an allow-list rule
+  matches run without asking. The allow list is empty by default (see [shell
+  safety](../docs/shell-safety.md)). Edits and every other command wait for
+  you.
+- **`--approval auto`.** Validated exact patches and all validated commands
+  run without asking, inside the existing macOS sandbox, after preview. This
+  includes programs inside the workspace, such as `./scripts/build.sh`, and
+  explicit `/bin/sh -c` commands. `--yes` and `--dangerously-skip-prompts`
+  select this policy.
+- **`--approval never`.** Nothing runs without asking. This policy denies both
+  writes and commands.
 
 MCP tool calls follow the same policy: `ask` asks before each call, `auto`
 runs it after preview, and `never` denies it. See [MCP tools in
@@ -286,16 +316,16 @@ removals in color.
 
 - A `y`/`n` typed while there is a draft in the editor, during `/paste`, or
   within 400 ms of the prompt appearing is kept as text. In the full-screen
-  editor, if the whole draft is one line that you typed and it is only `y`,
-  `yes`, `n` or `no` (or `s` or `p` for a command), pressing Enter sends it
-  as the answer. A pasted, recalled or multiline draft stays text.
+  editor, Enter can send a one-line draft as the answer. The draft must be one
+  line that you typed, and it must be only `y`, `yes`, `n` or `no` (or `s` or
+  `p` for a command). A pasted, recalled or multiline draft stays text.
 - In plain line mode (`--plain`, or input from a pipe), a sent line of only
   `y`, `yes`, `n` or `no` (or `s` or `p` for a command) answers the prompt.
   During line-mode `/paste`, such a line is part of the pasted text.
 - `/approve` and `/deny` answer the displayed operation once, exactly like y/n,
   and sending them never authorizes a later operation.
 - With a draft already in the input, type `/approve` or `/deny` on its own final
-  line and press Enter; the earlier draft stays. Pasted or recalled multiline
+  line and press Enter. The earlier draft stays. Pasted or recalled multiline
   text cannot trigger this final-line shortcut.
 
 **What auto still denies.** Under `auto`, writes stay limited to the workspace
@@ -308,18 +338,19 @@ The UI shows the active policy, the command, the deadline and the patch diff.
 Noninteractive or one-shot requests that need approval are denied. Approvals
 expire after 120 seconds and never carry over into a resumed session.
 
-**Command limits.** Each command gets:
+**Command limits.** Each command gets these limits:
 
-- a 120-second maximum deadline;
-- at most 64 KiB of displayed output (the native adapter reserves room for
-  result framing and UTF-8 overhead);
-- null stdin and bounded pipes;
-- kernel limits on CPU, file size, processes and descriptors.
+- **Time.** The deadline is 120 seconds at most.
+- **Output.** The displayed output is 64 KiB at most. The native adapter
+  reserves room for result framing and UTF-8 overhead.
+- **Input and pipes.** Stdin is null, and the pipes are bounded.
+- **Kernel.** Kernel limits apply to CPU, file size, processes and
+  descriptors.
 
 When output is too long, the harness keeps a bounded start and end and drops
 the middle. It still drains both pipes, so long output does not stall the
 command, and you still get its exact exit status. It reports how many bytes it
-saw and dropped, and the elapsed time; the dropped middle cannot be recovered.
+saw and dropped, and the elapsed time. The dropped middle cannot be recovered.
 Cancellation, timeout and a normal child exit all kill the owned process group
 and reap the child.
 
@@ -338,15 +369,15 @@ another root.
 `--state-in-project` keeps the legacy `WORKSPACE/.vade` folder, which then gets
 a `.gitignore` of `*` (except `check`) so git ignores it. Every state folder
 gets that `.gitignore`. Journals that older versions wrote to `WORKSPACE/.vade`
-stay there; resume them with `--state-in-project`.
+stay there. Resume them with `--state-in-project`.
 
 **Naming, resuming and switching.** `--session ID` creates a session with that
-ID; otherwise an ID is generated. `--name NAME` gives the session a display
-name. `--resume ID|NAME|last` explicitly restores a past session (`last` is the
-newest one with a turn that no chat has open), and the model and tool
-definitions must match. A session belongs to
-its workspace folder: a copy or a fresh clone is a different folder, and resume
-refuses it. If you move or re-clone the workspace, start a new session there.
+ID. Otherwise, the harness generates an ID. `--name NAME` gives the session a
+display name. `--resume ID|NAME|last` explicitly restores a past session. `last`
+is the newest session with a turn that no chat has open. The model and tool
+definitions must match. A session belongs to its workspace folder. A copy or a
+fresh clone is a different folder, and resume refuses it. If you move or
+re-clone the workspace, start a new session there.
 
 - `/sessions` lists sessions, newest first.
 - `/resume ID|NAME|last` or `/switch ID|NAME|last` switches after cleanup.
@@ -364,7 +395,7 @@ workspace before repeating any side effect. Complete but corrupt records are
 refused.
 
 A journal failure stops execution, and no further prompt runs against a failed
-journal. Journals are capped at 64 MiB/8,192 records; start a new session when
+journal. Journals are capped at 64 MiB/8,192 records. Start a new session when
 one is full. The journal keeps old records even after you deliberately compact
 the context.
 
@@ -379,13 +410,17 @@ Forks, branches and the journal format are covered further down, under
 
 Each explicit user prompt has these limits:
 
+<div align="center">
+
 | Limit | Per prompt |
-| --- | --- |
+| :---: | :---: |
 | Tool rounds (one model reply that asks for tools; its calls share the round) | 60 |
 | Model turns | 61 |
 | Proposed tool calls | 240 |
 | Tool results | 64 KiB each, 256 KiB in total |
 | Active work time | 20 minutes (time waiting for your approval does not count) |
+
+</div>
 
 When the time runs out, the agent cleans up the current tool, keeps the
 conversation and journal, and says "Stopped after 20 minutes; say continue to
@@ -408,7 +443,7 @@ and there is no automatic retry. New requests, session changes and compaction
 wait for worker cleanup. Only a validated final `stop` answer counts as a
 successful turn. Exit cancels and joins the worker.
 
-Cancelling stops local work; the engine may still finish its current step.
+Cancelling stops local work. The engine can still finish its current step.
 [Cancelling with Esc](docs/performance.md#cancelling-with-esc) describes what
 is and is not interrupted.
 
@@ -416,23 +451,24 @@ is and is not interrupted.
 
 Use `--prompt TEXT` to get one answer and exit.
 
-**Steering.** In a normal session, typing a new message while the model is
-still answering **steers** it. Vade cancels the current reply, keeps what was
-written so far (marked as partial), and sends your new message. If you would
-rather wait your turn, `/queue on` lines up follow-ups instead. Piped input can
+**Steering.** In a normal session, a new message that you type while the model
+is still answering **steers** it. Vade cancels the current reply, keeps what
+was written so far (marked as partial), and sends your new message. To wait
+your turn instead, use `/queue on`. It lines up follow-ups. Piped input can
 still send control commands while a reply is running.
 
 Steering works directly against the engine and through either gateway. A
-gateway with one upstream forwards the cancel; one with several upstreams sends
-it to every upstream and answers with the first that confirms it.
+gateway with one upstream forwards the cancel. A gateway with several
+upstreams sends it to every upstream and answers with the first that confirms
+it.
 
 At end of input (EOF), Vade finishes the current work and any queued prompts
 that can run, then lists any held prompts as unsent. `--plain`, redirected
-input or output, or `TERM=dumb` switch to simple line input; `NO_COLOR` turns
+input or output, or `TERM=dumb` switch to simple line input. `NO_COLOR` turns
 off color only.
 
 **How a conversation looks.** A native TTY launch creates a fresh interactive
-journal; only `--resume NAME` loads an earlier conversation. The input wraps as
+journal. Only `--resume NAME` loads an earlier conversation. The input wraps as
 you type and when you resize. There are two voices and no boxes: your turns
 sit behind a bar, the model's answer has none, and one dim status strip sits
 above the `›` prompt.
@@ -457,20 +493,20 @@ Use /compact to shrink older turns, or /new to start over.
 ›
 ```
 
-- **▌** marks every row you wrote, in bold cyan; it reads the same without
-  colour.
+- **▌** marks every row that you wrote, in bold cyan. It reads the same
+  without color.
 - **Thinking** is one dim italic row with its start and end clocks. Ctrl+T
-  expands it; its text then sits behind a dim `┆` bar.
+  expands it. Its text then sits behind a dim `┆` bar.
 - **The answer** renders basic Markdown (headings, lists, code, rules, quotes,
-  links) and wraps between words. It ends with one dim footer: finish time,
-  elapsed time, tokens out, decode and prefill speed, time to first token,
-  model calls (requests sent to the model), context use and cached prompt
-  tokens, all raw counts. Missing measurements show `—`. Narrow terminals drop
+  links) and wraps between words. It ends with one dim footer of raw counts:
+  finish time, elapsed time, tokens out, decode and prefill speed, time to
+  first token, model calls (requests sent to the model), context use and
+  cached prompt tokens. Missing measurements show `—`. Narrow terminals drop
   the last facts first and keep elapsed time, tokens and decode speed.
-- **The status strip** shows context used of the window, tokens in and out and
-  the last decode speed; `VADE_CHAT_SETUP` (set by `vade chat`) adds the Spark
-  count and drafting. While the model works it shows the state, elapsed time
-  and live tokens per second.
+- **The status strip** shows the context used of the window, tokens in and out
+  and the last decode speed. `VADE_CHAT_SETUP` (set by `vade chat`) adds the
+  Spark count and drafting. While the model works it shows the state, elapsed
+  time and live tokens per second.
 - **▲ Warning** (yellow) always says what happened, what Vade is doing about it,
   and what you can do.
 
@@ -481,7 +517,7 @@ now`. When the model request fails, the next line names the check, such as
 `vade status` when nothing answers at the endpoint. The labels
 carry the meaning with `NO_COLOR` and in plain or redirected output. The UI uses
 the terminal's own foreground and background, so it works in light and dark
-themes. `/status` shows the full counters; `--verbose` also prints the contract
+themes. `/status` shows the full counters. `--verbose` also prints the contract
 details after each run.
 
 The terminal owns mouse selection and Cmd+C, and Vade does not turn on mouse
@@ -502,10 +538,10 @@ error line, applied operations or the written file). Full command and patch
 output needs `--verbose`, which describes the command sandbox once, and again
 only when it changes.
 
-**The command menu.** `/` opens a menu of the common commands, and typing
-searches every command for the mode. ↑/↓ select, and Enter runs the selection
-(an ambiguous prefix is completed into the editor first, as Tab does). Esc
-closes the menu.
+**The command menu.** `/` opens a menu of the common commands. Typing searches
+every command for the mode. ↑/↓ select, and Enter runs the selection. An
+ambiguous prefix is completed into the editor first, as Tab does. Esc closes
+the menu.
 
 ### Attach files
 
@@ -525,11 +561,16 @@ An absolute path inside a pasted log stays text.
 
 ## Commands and keys
 
-Use [chat hooks](docs/hooks.md) to run your host commands before tools, after tools, or when a native turn ends.
-Use [slash command templates](docs/slash-commands.md) for named prompts; `/clear` starts a fresh conversation.
+Use [chat hooks](docs/hooks.md) to run your host commands before tools, after
+tools, or when a native turn ends.
+
+Use [slash command templates](docs/slash-commands.md) for named prompts.
+`/clear` starts a fresh conversation.
+
+<div align="center">
 
 | Command | What it does |
-| --- | --- |
+| :---: | :---: |
 | `/help` | Show commands and keyboard controls |
 | `/children` | Show native child IDs and states; `on`/`off` before the first prompt; `cancel ID`/`cancel all` during work |
 | `/status` | Show mode, request state, queues, history bytes/turns, and metadata status |
@@ -559,10 +600,14 @@ Use [slash command templates](docs/slash-commands.md) for named prompts; `/clear
 | `/quit`, `/exit` | Exit |
 | `//text` | Send a prompt that starts with a slash |
 
+</div>
+
 In the raw terminal, these keys edit and send your input:
 
+<div align="center">
+
 | Key | What it does |
-| --- | --- |
+| :---: | :---: |
 | **Enter** | Send |
 | **Shift+Enter** | Insert a newline, when the terminal reports the modifier through CSI u or modifyOtherKeys |
 | **Option+Enter** or **Ctrl+J** | Insert a newline in Terminal.app, which does not report Shift+Enter by default; the input box shows the hint |
@@ -575,14 +620,16 @@ In the raw terminal, these keys edit and send your input:
 | Alt+B/F or Ctrl+Left/Right | Move by word |
 | Ctrl+L | Repaint |
 
-Recall is bounded and separate from model context and journal history; `/new`
+</div>
+
+Recall is bounded and separate from model context and journal history. `/new`
 or picking another session clears it. Home/End and Left/Right stay available for
 editing multiline input.
 
 The editor shows the end of long input and adapts to the terminal width. A
 bracketed multiline paste lands as one editable message and does not send until
 Enter. Input stays editable while work runs. The cursor moves by Unicode scalar,
-with approximate terminal cell widths; grapheme-cluster editing and autocomplete
+with approximate terminal cell widths. Grapheme-cluster editing and autocomplete
 are not implemented. On resize, a fresh frame avoids erasing old reflowed rows.
 
 **Interrupting.** **Esc** or **Ctrl+C** while a response streams interrupts it
@@ -590,14 +637,14 @@ and takes you back to the prompt. Direct and native modes keep the partial prose
 with an `[interrupted]` marker, and native mode also keeps completed tool
 results. Esc never throws away a draft (Ctrl+U clears it).
 
-Direct mode closes the connection and native mode cancels its runtime; Codex
+Direct mode closes the connection, and native mode cancels its runtime. Codex
 mode asks the core adapter to interrupt the turn and finish cleanup. In direct
 and native mode, closing the connection does not guarantee that the engine's
 work stops.
 
 **Queued follow-ups.** In delegated modes, or with `/queue on`, a prompt you
 type during work becomes a separate queued follow-up (at most eight prompts /
-64 KiB total). It runs after success; a failure or cancellation holds the queue
+64 KiB total). It runs after success. A failure or cancellation holds the queue
 until you type `/next`. Local commands and exit stay available. Codex `/new`
 waits for in-flight cleanup before it changes threads.
 
@@ -611,11 +658,11 @@ nonempty input or exits.
 cancel and join their workers before exit, and Codex drops its client. Codex
 initialization watches for cancellation while waiting on child I/O.
 
-The UI reports an interruption only once the stream's final event confirms it;
-otherwise the remote outcome stays unconfirmed. If a reply completes just as you
-cancel, it is reported as a completion and the local result is discarded. The
-terminal is restored on normal exit, I/O errors, unwinding, and SIGINT, SIGHUP
-or SIGTERM; only a termination that cannot be caught skips that cleanup.
+The UI reports an interruption only after the stream's final event confirms it.
+Otherwise, the remote outcome stays unconfirmed. If a reply completes just as
+you cancel, it is reported as a completion and the local result is discarded.
+The terminal is restored on normal exit, I/O errors, unwinding, and SIGINT,
+SIGHUP or SIGTERM. Only a termination that cannot be caught skips that cleanup.
 
 ## Set up a client and check the endpoint
 
@@ -645,8 +692,8 @@ from the workspace you want the client to use. The [client matrix and launch
 commands](docs/passthrough-matrix.md) lists the supported setup commands and
 what each has been validated against.
 
-Vade Engine serves `/v1/responses`, so Codex works both directly and through the
-gateway. Running Codex from a dedicated home? See [Codex from a dedicated
+Vade Engine serves `/v1/responses`, so Codex works both directly and through
+the gateway. To run Codex from a dedicated home, see [Codex from a dedicated
 home](#codex-from-a-dedicated-home) for the sandbox, Rust toolchain and token
 settings.
 
@@ -660,11 +707,9 @@ tests the cache with two made-up chat turns in one conversation. Both turns open
 with the same long text: more than two of the engine's advertised cache blocks,
 or more than 8192 tokens if it advertises no block size. If the engine offers
 admission, the doctor uses it first to confirm that the shared text is long
-enough. Finally it prints how much of the second turn's prompt the engine
-reports restoring from its cache:
-
-- only a reported hit passes the cache check;
-- a server that says its cache is off gets a warning instead.
+enough. Finally, it prints how much of the second turn's prompt the engine
+reports restoring from its cache. Only a reported hit passes the cache check.
+A server that says its cache is off gets a warning instead.
 
 It reads gateway stats only from a gateway that marks its responses with
 `X-Vade-Gateway: v1`. See [setup and doctor details, sources, and mock
@@ -712,7 +757,7 @@ Longer guides sit in `harness/docs/`:
 ## Workspace and privacy
 
 `--workspace PATH` picks the root. You must pass it explicitly for native agent
-and Codex modes; direct and demo default to the current directory.
+and Codex modes. Direct and demo modes default to the current directory.
 
 Read and list operations use directory handles on macOS and Linux. They refuse
 absolute paths, parent traversal, symlink traversal, hard-linked reads,
@@ -766,8 +811,8 @@ discovery, admission, generation and checkpoint release, child agents included.
 Gateways use it for upstream requests and replace incoming credential headers
 when configured. HTTP 401 is shown as
 `HTTP 401 Unauthorized: authentication failed`. Keys are never logged or
-written into session state; restart to rotate the file. The server's `/health`
-stays open.
+written into session state. To rotate the file, restart. The server's
+`/health` stays open.
 
 The standalone gateway also applies the selected key to capability and admission
 probes and to recorded replay. Without a configured key, it forwards the
@@ -784,19 +829,20 @@ you get one main session and five smaller ones, eight turns each. Tool results
 are made up and repeatable, histories grow each turn, and no real tools run.
 You get a table by role and session, plus a new private JSON metrics file.
 
-From turn 2 on, each role reports:
+From turn 2 on, each role reports these numbers:
 
-- cache ratio, TTFT percentiles and output speed;
-- admissions, overloads and errors;
-- for each turn, C, the cached prompt tokens the server reports, and U, our
-  estimate of how much of the prompt it shares with the previous turn, each
-  labeled with how it was counted.
+- **Cache and speed.** The cache ratio, the TTFT percentiles and the output
+  speed.
+- **Load.** Admissions, overloads and errors.
+- **C and U for each turn.** C is the cached prompt tokens that the server
+  reports. U is our estimate of how much of the prompt the turn shares with
+  the previous turn. Each one is labeled with how it was counted.
 
-U is always marked **estimated**. A healthy run reports C close to U from turn
-2 on: the workload guide's target is that C covers at
-least 98% of U for each role. See the [workload guide and coordinator
-command](docs/workload.md) for how we count and read these numbers.
-`workload --help` lists the size, concurrency, output and deadline flags.
+U is always marked **estimated**. A healthy run reports C close to U from turn 2
+on. The workload guide's target is that C covers at least 98% of U for each
+role. See the [workload guide and coordinator command](docs/workload.md) for how
+we count and read these numbers. `workload --help` lists the size, concurrency,
+output and deadline flags.
 
 ## Gateway relay, Codex and Hermes in detail
 
@@ -816,7 +862,7 @@ sampling defaults.
 The sampling fields are `temperature`, `top_p`, `top_k`, `min_p`,
 `typical_p`, `seed`, `frequency_penalty`, `presence_penalty`,
 `repetition_penalty`, `logit_bias`, `n`, `best_of`, `sampling` and
-`generation_config`; the response header `X-Vade-Sampling-Fields` lists them
+`generation_config`. The response header `X-Vade-Sampling-Fields` lists them
 too. `vade-gateway`'s opt-in optimization flags, such as `--stable-prefix` and
 `--clamp-limits`, change the body only when you turn them on.
 
@@ -830,15 +876,19 @@ unchanged:
 - `GET /v1/models` and `GET /models`, plus `GET /v1/capabilities`.
 
 Bodies up to 8 MiB are accepted. A larger one gets HTTP 413 before anything is
-sent upstream. Full rules: [engine contract](docs/engine-contract.md#opaque-gateway).
+sent upstream. The [engine contract](docs/engine-contract.md#opaque-gateway)
+gives the full rules.
 
 ### Several servers behind `vade-gateway`
 
-Both gateways accept several `--upstream` options, but they route differently.
-`vade-gateway` balances identical replicas by load and keeps a conversation on
-its last replica while that replica has room (this section),
-while `vade-harness gateway` routes by cache affinity across compatible
-endpoints ([next section](#several-servers-behind-vade-harness-gateway)).
+Both gateways accept several `--upstream` options, but they route differently:
+
+- **`vade-gateway`** balances identical replicas by load. It keeps a
+  conversation on its last replica while that replica has room. This section
+  covers it.
+- **`vade-harness gateway`** routes by cache affinity across compatible
+  endpoints. The [next section](#several-servers-behind-vade-harness-gateway)
+  covers it.
 
 With `vade-gateway`, repeat `--upstream` to add **replicas**: independent
 servers running the same one-Spark model (for example from
@@ -848,10 +898,11 @@ servers running the same one-Spark model (for example from
   ties take turns.
 - Turns of one chat share a key: `prompt_cache_key`, else a session header,
   else the prompt through the first user message. A later turn (anything after
-  the first user message) goes to the upstream that served the previous turn
-  while that upstream has fewer than 8 requests in flight or is among the
-  least busy; a first turn uses it only while it is among the least busy.
-  `--no-sticky` turns that off. FP4-Local prefix retention is ON by default,
+  the first user message) goes to the upstream that served the previous turn.
+  It does so while that upstream has fewer than 8 requests in flight or is
+  among the least busy. A first turn uses that upstream only while it is among
+  the least busy.
+  `--no-sticky` turns that off. FP4-Local prefix retention is on by default,
   but cache hits from this routing are unverified.
 - `GET /health` then reports every upstream, and fails when their model IDs
   differ.
@@ -885,14 +936,14 @@ response bytes have been forwarded, the gateway retries once on another
 verified healthy, compatible upstream.
 
 With a single upstream, the gateway holds and retries only the engine's
-admission refusal: a complete 503 of at most 4 KiB whose body is
-`{"error":{"type":"overloaded","message":"connection capacity reached"}}`,
-which the engine sends before doing any work.
+admission refusal. That refusal is a complete 503 of at most 4 KiB whose body
+is `{"error":{"type":"overloaded","message":"connection capacity reached"}}`.
+The engine sends it before it does any work.
 
 - Without `Retry-After`, the gateway sends the same request again after 50 ms,
   doubling up to 800 ms. With `Retry-After: 0` or `1`, it waits 1 s each time.
   A longer `Retry-After` is passed on at once.
-- The whole wait, including reading each refusal, is capped at 30 s; then the
+- The whole wait, including reading each refusal, is capped at 30 s. Then the
   last refusal is passed on. It is also passed on if a new connection to the
   upstream fails.
 - Every other 503 may follow work (capacity running out mid-reply, a model
@@ -901,9 +952,9 @@ which the engine sends before doing any work.
   `Retry-After: 1`.
 
 A retry sends your request unchanged, including the fields you set. Once a
-response has started forwarding, nothing is replayed, and read or write
-failures after the request was sent are not retried either: the client gets
-HTTP 502 because the outcome is unknown, even after an earlier refusal.
+response has started forwarding, nothing is replayed. Read or write failures
+after the request was sent are not retried either. The client gets HTTP 502
+because the outcome is unknown, even after an earlier refusal.
 
 With several `--upstream` options, `GET /_vade/gateway/stats` shows each
 endpoint's requests, failures and reported cached/prompt-token ratios. With one
@@ -918,15 +969,16 @@ upstream the gateway stays a plain relay, and that route answers HTTP 404. See
 carries any `Origin` header. That way browser pages and DNS rebinding cannot
 reach the engine through them. To allow a browser client on purpose:
 
-- pass its exact origin with `--allow-origin` (repeatable). It then gets CORS
-  headers and preflight answers, and `--allow-host` admits another Host name;
-- set `--token TOKEN` or `VADE_GATEWAY_TOKEN`, so that every request needs
-  `Authorization: Bearer TOKEN`. That header is not forwarded upstream.
+- **Origin.** Pass its exact origin with `--allow-origin` (repeatable). It
+  then gets CORS headers and preflight answers. `--allow-host` admits another
+  Host name.
+- **Token.** Set `--token TOKEN` or `VADE_GATEWAY_TOKEN`, so that every request
+  needs `Authorization: Bearer TOKEN`. That header is not forwarded upstream.
 
 **Claude Code system turns.** On `/v1/messages` and its token count, both
 gateways relabel `role: "system"` entries inside `messages` as `"user"`. The
 engine refuses such entries, and Claude Code sends one with every request.
-Only those role strings change; every other byte is forwarded as sent.
+Only those role strings change. Every other byte is forwarded as sent.
 
 **Streamed replies in chat history.** On `/v1/chat/completions`, both gateways
 relabel a message `role` of `null` as `"assistant"`. The openai Python client
@@ -934,20 +986,21 @@ sends that null when code adds a message it built from a stream, because the
 engine's deltas carry no role. See [Streamed tool calls in
 history](../docs/openai-api.md#streamed-tool-calls-in-history).
 
-**Errors the gateway answers itself.** Refusals such as these, a busy
-gateway or an unreachable upstream come back in the route's own dialect:
-`{"type":"error","error":{"type":"authentication_error","message":...}}` on
-Messages routes, and
-`{"error":{"type":"authentication_error","message":...,"param":null,"code":"invalid_api_key"}}`
-everywhere else, so Anthropic and OpenAI SDKs can tell a rate limit from a
-server failure. Upstream errors are relayed unchanged.
+**Errors the gateway answers itself.** Refusals such as these, a busy gateway or
+an unreachable upstream come back in the route's own dialect. On Messages
+routes, the shape is
+`{"type":"error","error":{"type":"authentication_error","message":...}}`. On
+every other route, it is
+`{"error":{"type":"authentication_error","message":...,"param":null,"code":"invalid_api_key"}}`.
+With these shapes, Anthropic and OpenAI SDKs can tell a rate limit from a server
+failure. Upstream errors are relayed unchanged.
 
 **Listener and transport.** The gateway listens on `127.0.0.1:8787` by default.
 The core handles HTTP routing, forwarding, response parsing and upstream
 timeouts. The CLI refuses HTTPS explicitly: there is no TLS implementation and
 no custom cryptography. URL credentials, query strings, fragments and control
 characters are rejected. Direct and native clients accept
-`--api-key-file PATH` or `VADE_API_KEY_FILE` for Bearer authentication; see
+`--api-key-file PATH` or `VADE_API_KEY_FILE` for Bearer authentication. See
 [API authentication](#api-authentication).
 
 ### Codex mode
@@ -963,22 +1016,22 @@ vade-harness codex --workspace . --permission read-only --thread THREAD_ID
 ```
 
 Both `--workspace` and `--permission` are required, and the policy is shown
-before launch. Note that Codex's read-only preset does not stop it reading
-files outside the workspace. Vade never reads Codex's credentials or approves
-its permission requests.
+before launch. Codex's read-only preset does not stop it from reading files
+outside the workspace. Vade never reads Codex's credentials or approves its
+permission requests.
 
 ### Hermes mode
 
 `hermes` mode runs `hermes acp` (ACP version 1) with an explicit
 `--workspace PATH` and `--permission deny-callbacks`. It turns down every
-permission request, but that is not a sandbox: Hermes' own tools are not
-confined. Protocol, limits and failure handling are in the [bridge
-contract](docs/bridge-contract.md).
+permission request.
+That is not a sandbox, and Hermes' own tools are not confined. Protocol, limits
+and failure handling are in the [bridge contract](docs/bridge-contract.md).
 
 ### Codex from a dedicated home
 
-Three things to know when you run Codex from a home that `setup
---dedicated-home` created:
+Know these three things when you run Codex from a home that
+`setup --dedicated-home` created:
 
 - **Sandbox.** The generated home picks Codex's read-only sandbox. For a task
   that edits files and runs commands, pass `-s workspace-write`, for example
@@ -997,14 +1050,14 @@ Three things to know when you run Codex from a home that `setup
 
 ## How the harness builds requests
 
-These sections cover the requests that direct chat and the native agent send:
-what they ask the cache for, how they keep history stable, and which sampling,
-output and thinking settings they use.
+These sections cover the requests that direct chat and the native agent send.
+They say what the requests ask the cache for, how they keep history stable,
+and which sampling, output and thinking settings they use.
 
 ### Caching and the engine contract
 
 The harness asks for caching whenever the engine supports it. The FP4-Local
-engine keeps prefix retention on by default on one and two Sparks: unless the
+engine keeps prefix retention on by default on one and two Sparks. Unless the
 server is started with retention off, it keeps the start of earlier prompts
 cached for reuse. [Cache defaults and measured tradeoffs](docs/cache-defaults.md)
 explains the difference between what a request asks for and what the server
@@ -1046,9 +1099,9 @@ its configured catalog family, and unknown model names do not get an invented
 family.
 
 The harness only ever appends to history, and it refuses any edit to earlier
-messages. Fixed options and tools come first, then history, and optional KV
-hints go after the messages, so each request starts byte for byte like the last
-one and the engine can reuse its cache when retention is on. Direct and native
+messages. Fixed options and tools come first, then history. Optional KV hints go
+after the messages. This way, each request starts byte for byte like the last
+one, and the engine can reuse its cache when retention is on. Direct and native
 clients also stay alive across user turns and keep their HTTP connections open
 for reuse. Details, including what this byte rule does not cover, are in [the
 prefix and performance contract](docs/performance.md).
@@ -1072,14 +1125,15 @@ from request bytes or affinity.
 
 A fresh direct or native session without sampling flags sends no sampling fields
 at all. Vade Engine then applies its shared [greedy](../docs/GLOSSARY.md#dg)
-default (same prompt, same answer), and any other upstream keeps its own default
-policy. `/retry` keeps the fields absent, so a greedy answer may simply repeat.
+default: the same prompt with the same settings gives the same answer. Any other
+upstream keeps its own default policy. `/retry` keeps the fields absent, so a
+greedy answer may simply repeat.
 
 To sample, pass `--temperature` (and optionally `--seed`). The harness never
-picks a seed for you: without `--seed` the seed stays unspecified. A seed you
+picks a seed for you: without `--seed` the seed stays unspecified. A seed that you
 set stays fixed across retry, resume, tool continuations and ordinary
-follow-ups; to pick a different one, restart with a different `--seed`
-(`/retry` reminds you when one is pinned). Other generation flags apply only to
+follow-ups. To pick a different one, restart with a different `--seed`.
+`/retry` reminds you when one is pinned. Other generation flags apply only to
 the launch that sets them.
 
 Direct and native agent modes accept `--greedy`. Every model request then uses
@@ -1113,7 +1167,7 @@ no effort set, the engine uses the model's default effort. For Qwen3.8 that is
 **Continuation.** When an answer is cut off at the output limit, direct chat and
 the native agent continue it automatically. Each continuation sends the same
 user message as `/continue`, keeps the seed and the earlier answer, and shows a
-short notice. If you would rather type `/continue` yourself, use
+short notice. To type `/continue` yourself, use
 `--no-auto-continue`. The native JSON config accepts `"auto_continue": false`
 for the same opt-out. Automatic continuations have limits:
 
@@ -1136,8 +1190,8 @@ reminder, at most twice in a row. A third empty reply stops the run with a
 notice saying why. Reminders use the same request limits.
 
 **Reply size.** Native replies also have a soft size limit, so one runaway reply
-cannot eat the whole task. Change it with `agent --reply-tokens N`; `0` turns it
-off. The limit is sized like this:
+cannot eat the whole task. Change it with `agent --reply-tokens N`. `0` turns
+it off. The limit is sized like this:
 
 - about 120 seconds of decoding at the measured speed, kept between 512 and
   4,096 estimated tokens (2,048 before the speed is known);
@@ -1159,10 +1213,10 @@ tools](docs/agent-tools.md#reply-budget).
 
 ### Tool results, replies and waits
 
-While the agent waits you will see **queued / awaiting upstream** until the
+While the agent waits, you see **queued / awaiting upstream** until the
 first text, reasoning or tool data arrives. Then you see **thinking** for
-reasoning and **generating** for the answer. These labels are local; they do
-not show your place in the engine's queue. In the interactive terminal,
+reasoning and **generating** for the answer. These labels are local. They
+do not show your place in the engine's queue. In the interactive terminal,
 reasoning starts folded behind a Thinking row, and Ctrl+T opens or closes it.
 
 When a reply is cut off:
@@ -1243,22 +1297,22 @@ conflicting writes by the parent and by siblings. A child never gets shell just
 because the parent advertises it.
 
 **Approvals.** Every child edit and command still follows the parent's
-`--approval` policy, and noninteractive runs deny anything that needs approval.
+`--approval` policy. Noninteractive runs deny anything that needs approval.
 Approval prompts come one at a time and name the child, and cancelling a child
 clears its pending approval. See [scope examples and
 limits](docs/child-agents.md).
 
 **Watching and cancelling.** The raw TUI shows a live child list with a bounded
 size. `/children` lists IDs and actual states. `/children cancel ID` asks one
-child to cancel, while `/children cancel all` also stops new children from
-starting for the rest of the current run (the work your latest prompt started,
-automatic continuations included). These commands leave the parent running, so
-it can collect results and fold in what the children found. `/cancel`, exit, or
-the parent finishing cancels and joins any remaining children. Cancelling
-reports local cleanup only; it never confirms that the engine stopped
-computing. `/context` includes each child's last reported cached-token count and
-its cumulative reported counts, separate from token reservations; absent
-telemetry is unknown.
+child to cancel. `/children cancel all` also stops new children from starting
+for the rest of the current run. The current run is the work that your latest
+prompt started, automatic continuations included. These commands leave the
+parent running, so it can collect results and fold in what the children found.
+`/cancel`, exit, or the parent finishing cancels and joins any remaining
+children. Cancelling reports local cleanup only. It never confirms that the
+engine stopped computing. `/context` includes each child's last reported
+cached-token count and its cumulative reported counts, separate from token
+reservations. Absent telemetry is unknown.
 
 **Changing the setting, and resume.** Child tool schemas are frozen along with
 the parent prefix. To change the setting after a prompt, wait for cleanup, use
@@ -1285,7 +1339,7 @@ are independent. The label is for bookkeeping, not a prompt sent to the model.
 
 `/branch` shows the parent checkpoint, the context generation and bounded
 metadata checks for up to 128 explicitly referenced paths. These checks do not
-verify content and are not a complete repository snapshot; commands may change
+verify content and are not a complete repository snapshot. Commands can change
 untracked files. Resume and fork add a revalidation notice before any future
 model request. **Branches share the workspace: switching never restores files or
 replays tools.** Unknown tool outcomes block new forks.
@@ -1304,22 +1358,22 @@ bounds. Without the capability, requests on the wire are unchanged.
 **What the engine checkpoints.** The current engine contract checkpoints the
 submitted **input**, not generated answers or a chosen system-only prefix.
 Exact prefix or completed-answer checkpoints, and prefix-only children, need an
-engine extension; no hidden warm-up inference runs. See [checkpoint boundaries,
+engine extension. No hidden warm-up inference runs. See [checkpoint boundaries,
 quotas, lifecycle and child integration](docs/engine-checkpoints.md).
 
 A fork resets the append-only request builder and the engine-contract client,
 so the next prompt you send negotiates the contract again and has the complete
 transcript admitted. Only a response's
-reported usage shows how much of the prompt came from the cache. A fork may copy
-up to the journal's 64 MiB cap, private transcript content included; there is
-no copy-on-write disk sharing or global quota across sessions you create by
-hand.
+reported usage shows how much of the prompt came from the cache. A fork can copy
+up to the journal's 64 MiB cap, private transcript content included. There is
+no copy-on-write disk sharing, and no global quota across sessions that you
+create by hand.
 
 **What the journal keeps.** The append-only journal keeps the exact typed
 messages, reasoning, tool arguments, results, and stable model and tool
 options. It does not store endpoints, the inherited environment, or automatic
-workspace-path metadata. Prompts, files and commands you send can contain
-sensitive information; journals are private transcripts, not a secret scanner
+workspace-path metadata. Prompts, files and commands that you send can contain
+sensitive information. Journals are private transcripts, not a secret scanner
 or encrypted storage. Direct, demo and Codex modes keep their separate
 metadata-counter behavior (see [Workspace and privacy](#workspace-and-privacy)).
 Locks are owned by the kernel and are released when the process exits. Files
@@ -1335,19 +1389,22 @@ the engine's advertised limit is used (for example 262,144), or 131,072 when the
 engine advertises none.
 
 When a conversation gets close to the context limit (80%), the agent compacts
-it: older turns are replaced with a shorter version so the next request fits.
+it. Older turns are replaced with a shorter version so that the next request
+fits.
 
 - `/compact` does this now.
 - `/compact-preview` shows the plan first.
 - `/compact KEEP SUMMARY` uses your own summary.
 
-Automatic compaction is local, with no model request: your messages,
-instructions, recent tool rounds (4 at a 32,768-token window, 8 at 65,536),
-the latest edit for each file, the latest run of each check, and the last
-answer stay word for word, and a harness-written ledger and excerpts replace
-the older rounds. `/compact` first asks the model to summarize the older turns
-into one state block, and the newest 2 turns stay word for word (see [context
-and compaction](../docs/context-and-compaction.md)).
+Automatic compaction is local and sends no model request. These parts stay
+word for word: your messages, instructions, recent tool rounds (4 at a
+32,768-token window, 8 at 65,536), the latest edit for each file, the latest
+run of each check, and the last answer. A harness-written ledger and excerpts
+replace the older rounds.
+
+`/compact` first asks the model to summarize the older turns into one state
+block. The newest 2 turns stay word for word (see [context and
+compaction](../docs/context-and-compaction.md)).
 
 Compaction has a cost. The engine's cache holds the conversation as one
 unbroken sequence, so changing anything in the middle means everything after it
@@ -1362,11 +1419,11 @@ rules and branches](docs/context-and-projects.md).
 excerpts, backed by the exact captured output in the private session journal.
 
 - `tool_output_read` fetches UTF-8 byte ranges, at most 4,096 source bytes in a
-  4 KiB result envelope; follow the returned `next_offset`.
+  4 KiB result envelope. Follow the returned `next_offset`.
 - `/output ID OFFSET LENGTH` inspects a range locally.
 - IDs are scoped to the active workspace and session, never paths.
 
-Each saved capture is an **artifact**. Their limits:
+Each saved capture is an **artifact**. Artifacts have these limits:
 
 - **Capture.** Each capture is capped at 64 KiB (commands reserve room for
   framing and UTF-8 overhead). The command status says when the source was
@@ -1395,7 +1452,7 @@ or override explicit user requests.
 when it needs them. No script, installer or dependency runs automatically.
 
 - The catalog lists up to 16 names, descriptions and visible
-  `skills/.../SKILL.md` paths. It is declarative JSON, at most 8 KiB; scripts and
+  `skills/.../SKILL.md` paths. It is declarative JSON, at most 8 KiB. Scripts and
   unknown entry fields are rejected.
 - Bodies are at most 16 KiB, and one is read only when `skill_read` asks for it.
 - A revision check on the local metadata the session froze refuses a skill file
@@ -1424,7 +1481,8 @@ fail.
 
 For your own client (ways 2 and 4), the [examples page](../examples/README.md)
 keeps recorded runs of Claude Code 2.1.310 and Codex 0.164.0 against FP4-Local
-on one Spark, driven from a Mac through an SSH tunnel (recorded 2026-10-25).
+on one Spark. A Mac drove them through an SSH tunnel, and they were recorded
+on 2026-10-25.
 That page lists the exact checkpoint, commit and engine settings behind them.
 
 Older measurements and their limits are in the [gateway measurement
@@ -1456,7 +1514,7 @@ methodology](docs/performance.md) and its linked sample files.
 
 The Codex and Hermes adapters are checked against our own protocol mocks and in
 a Mac pseudo-terminal. No installed Codex or Hermes, and no engine or Spark, was
-used in those checks, so they do not prove live compatibility; see [the bridge
+used in those checks, so they do not prove live compatibility. See [the bridge
 contract](docs/bridge-contract.md).
 
 ## Design references
@@ -1472,7 +1530,7 @@ These projects shaped our UI and interface choices:
 - [Codex CLI](https://github.com/openai/codex): a local terminal entry point for
   a coding assistant.
 
-We learned a lot from these projects. None of them is a dependency, and no code
-was copied from them or from any other coding agent: Vade's workspace boundary,
-session journal, coding tools and core/UI contract are our own, written from
-scratch in Rust for this project.
+We learned a lot from these projects. None of them is a dependency. No code
+was copied from them or from any other coding agent. Vade's workspace
+boundary, session journal, coding tools and core/UI contract are our own. We
+wrote them from scratch in Rust for this project.

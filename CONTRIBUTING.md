@@ -1,21 +1,26 @@
 # Contributing to Vade
 
-Vade is an inference engine for the NVIDIA DGX Spark / GB10, written in Rust
-using only the standard library. Version 0.1.0 runs one model,
-`nvidia/Qwen3.8-Flash-Next-FP4-Local`, as text only. Main also serves
-`Qwen/Qwen3.8-Flash-Next-FP8` on 2, 4 or 6 Sparks. Vade runs on a single
-Spark out of the box and can spread across more Sparks when you link them.
-Drafting is on by default: an extra model head guesses the next few tokens,
-and the model checks them in one pass.
+Vade is an inference engine for the NVIDIA DGX Spark / GB10. It is written in
+Rust and uses only the standard library.
 
-This page covers four things: how to check a change on your own computer, the
-house rules, what exactness asks of engine changes, and how to send a pull
-request.
-[Local CI](docs/ci.md) gives the current CI status and public host commands.
-Read [AGENTS.md](AGENTS.md) for the project rules. Run the affected host
-checks in [Local CI](docs/ci.md) and the [workflow](.github/workflows/ci.yml),
-including doctests and Rustdoc. The [glossary](docs/GLOSSARY.md) explains the terms used
-here.
+Version 0.1.0 runs one model, `nvidia/Qwen3.8-Flash-Next-FP4-Local`, as text
+only. Main also serves `Qwen/Qwen3.8-Flash-Next-FP8` on 2, 4 or 6 Sparks. Vade
+runs on a single Spark out of the box. It can spread across more Sparks when
+you link them. Drafting is on by default: an extra model head guesses the next
+few tokens, and the model checks them in one pass.
+
+This page covers four things:
+
+- **Checks.** It shows how to check a change on your own computer.
+- **Rules.** It lists the house rules.
+- **Exactness.** It says what exactness asks of engine changes.
+- **Pull requests.** It shows how to send a pull request.
+
+Read [AGENTS.md](AGENTS.md) for the project rules. [Local CI](docs/ci.md)
+gives the current CI status and the public host commands. Run the affected
+host checks in [Local CI](docs/ci.md) and the
+[workflow](.github/workflows/ci.yml), doctests and Rustdoc included. The
+[glossary](docs/GLOSSARY.md) explains the terms used here.
 
 ## Build and validate
 
@@ -35,20 +40,21 @@ rustup target add --toolchain 1.99.0 aarch64-unknown-linux-gnu
 rustup toolchain install nightly-2026-10-01 --profile minimal --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda
 ```
 
-To match CI, which denies warnings, run `export RUSTFLAGS="-D warnings"` in
-your shell. You don't need GPU flags: the kernel builder adds its own device
-flags.
+CI denies warnings. To match CI, run `export RUSTFLAGS="-D warnings"` in your
+shell. You do not need GPU flags, because the kernel builder adds its own
+device flags.
 
 ### Check your change
 
 There is no root Cargo workspace, so run these commands from `engine/`.
 
-Build the kernels first, even on a Mac: the host checks fail if the compiled
-kernels (PTX files) left from an earlier build are stale. The first build also
-compiles Rust's core library for the GPU target (the build-std cache) and can
-need downloads, so run it once while you're online. After that, everything
-here works offline. [Validation](engine/docs/validation.md#on-any-computer-host-checks)
-has the details.
+Build the kernels first, even on a Mac. The host checks fail if the compiled
+kernels (PTX files) from an earlier build are stale. The first build also
+compiles Rust's core library for the GPU target (the build-std cache). It can
+need downloads, so run it once while you are online. After that, everything here
+works offline.
+[Validation](engine/docs/validation.md#on-any-computer-host-checks) has the
+details.
 
 ```sh
 cargo +1.99.0 kernels
@@ -59,15 +65,17 @@ cargo +1.99.0 test --offline --locked --manifest-path ../cli/Cargo.toml --test r
 cargo +1.99.0 run --offline --locked --manifest-path ../tools/Cargo.toml -p vade-tools -- check-doc-links
 ```
 
-That block checks the CLI, the harness and the benchmark tools, runs the
+That block checks the CLI, the harness and the benchmark tools. It runs the
 ratchet test (explained under [rules](#rules-and-formatting)) and checks the
 documentation links. `--locked` makes Cargo use the committed `Cargo.lock`
-files as they are, the way CI does. If you changed the engine, check and test
-its workspace. On Linux without a GPU, first prepare the link-only CUDA stub
-with the commands in [AGENTS.md](AGENTS.md#engine-and-full-ci-checks). Then
-run the block below. Pass `--workspace` as CI does; a plain `cargo test`
-only covers the default members and skips some crates. `--all-targets` doesn't
-run doc tests, so CI runs them in a separate step, which is the last line here:
+files as they are, the way CI does.
+
+If you changed the engine, check and test its workspace. On Linux without a
+GPU, first prepare the link-only CUDA stub with the commands in
+[AGENTS.md](AGENTS.md#engine-and-full-ci-checks). Then run the block below.
+Pass `--workspace` as CI does. A plain `cargo test` covers only the default
+members and skips some crates. `--all-targets` does not run doc tests, so CI
+runs them in a separate step. That step is the last line here:
 
 ```sh
 cargo +1.99.0 check --offline --locked --all-targets --workspace --exclude spark-rust-kernels
@@ -75,11 +83,11 @@ cargo +1.99.0 test --offline --locked --all-targets --workspace --exclude spark-
 cargo +1.99.0 test --offline --locked --doc --workspace --exclude spark-rust-kernels
 ```
 
-Run the tests for the workspace you changed before you open a PR. The rest of
-CI's host recipes are in [AGENTS.md](AGENTS.md) and
-[engine validation](engine/docs/validation.md): the CUDA stub for Linux
-machines without a GPU, the separate build of the TP (tensor parallelism)
-kernels and the Linux cross-target checks.
+Run the tests for the workspace that you changed before you open a PR. The
+rest of CI's host recipes are in [AGENTS.md](AGENTS.md) and
+[engine validation](engine/docs/validation.md). They cover the CUDA stub for
+Linux machines without a GPU, the separate build of the TP (tensor
+parallelism) kernels and the Linux cross-target checks.
 
 These are host checks. Device-only tests are skipped when there is no GPU, so
 a host PASS does not prove GPU correctness, exactness, memory use or
@@ -91,10 +99,10 @@ Commit the change before its final checks. Run the public host commands
 against the committed revision. Save the commit ID, commands and results with
 the change review.
 
-Local checks can cover less than the [workflow](.github/workflows/ci.yml),
-and they do not replace the Spark gate below. [Local CI](docs/ci.md) lists
-the host commands and what they leave out. If the source
-changes after a check, run the affected checks on the new commit.
+Local checks can cover less than the [workflow](.github/workflows/ci.yml).
+They do not replace the Spark gate below. [Local CI](docs/ci.md) lists the
+host commands and what they leave out. If the source changes after a check,
+run the affected checks on the new commit.
 
 ### Build the CLI
 
@@ -104,8 +112,8 @@ To build the `vade` command yourself, also from `engine/`:
 cargo +1.99.0 build --release --offline --locked --manifest-path ../cli/Cargo.toml
 ```
 
-The binary lands at `cli/target/release/vade`. Building it does not install or
-start an engine. To install from source on a Spark, follow
+The build writes the binary to `cli/target/release/vade`. Building it does not
+install or start an engine. To install from source on a Spark, follow
 [INSTALL.md](INSTALL.md).
 
 ## Rules and formatting
@@ -150,7 +158,7 @@ start an engine. To install from source on a Spark, follow
 
 Exactness means **identical token IDs every run on every Spark with the same
 setup**. A request must give the same result whether it runs alone, batched,
-cached or chunked, and drafting ON must match drafting OFF. Check the same
+cached or chunked, and drafting on must match drafting off. Check the same
 request across the supported Spark counts too. Similar answer text is not
 enough. With FP4-Local, a request that doesn't specify sampling is decoded
 greedily (always the most likely next token). With FP8, a request is greedy
@@ -164,12 +172,12 @@ sequence length or occupancy.
 
 Host-only CLI and documentation changes don't need a Spark. Changes to engine
 arithmetic, scheduling, caching or transport must pass a gate on real hardware
-before they merge: run the change at least three times, and compare the
-results across at least two Sparks with the same setup. If you have one
+before they merge. Run the change at least three times. Compare the results
+across at least two Sparks with the same setup. If you have one
 Spark, run the repeats on it and say so in the PR. The change can't merge
-until the comparison on a second Spark is done. One exception: a gated change
-rebased onto a moved main can merge on its gate with an identical patch,
-disjoint files and a passing pre-merge screen on the Sparks (see
+until the comparison on a second Spark is done. There is one exception. A
+gated change rebased onto a moved main can merge on its gate with an identical
+patch, disjoint files and a passing pre-merge screen on the Sparks (see
 [Which proof a change needs](#exactness-and-evidence)).
 
 - If your change leaves the arithmetic order alone, it must keep main's
@@ -223,7 +231,7 @@ Which proof a change needs:
    needs the full device gate.** Rebase it and run that proof again.
    Host-only changes use the host checks described above.
 
-The band is 0.8 % per cell against the A arms of the gate's A X X A block: a
+The band is 0.8 % per cell against the A arms of the gate's A X X A block. A
 cell passes when it is at most 0.8 % slower than the A value of that cell.
 The gate card records the A value of each cell, so the limits are known before
 the screen and the confirm card run. Token IDs must be identical in every run.
@@ -241,7 +249,7 @@ card, the screen and the confirm card.
 Two tools cover the checks today:
 
 1. Run `vade verify` against a running engine. It compares repeated greedy
-   token IDs with drafting OFF and ON, and saves a receipt (a record of what
+   token IDs with drafting off and on, and saves a receipt (a record of what
    it checked).
 2. Run `vade test determinism` for the batch, cache and chunk cases; the
    [gate guide](cli/docs/test.md) shows how. It runs saved test inputs
@@ -268,13 +276,13 @@ similar-looking answer cannot support that claim. See the
 ## Commits and pull requests
 
 Make small commits with clear, imperative messages that say what changed and
-why. Keep one change per PR, and save unrelated cleanup for another PR. Open
-the PR against `main` at
-[github.com/wappy-x/vade](https://github.com/wappy-x/vade).
+why. Keep one change per PR. Save unrelated cleanup for another PR. Open the
+PR against `main` at
+[github.com/wappy-x/Vade](https://github.com/wappy-x/Vade).
 
-In the PR, explain the problem, the resulting behavior, the commands you ran
-and any limits of your validation. For engine changes, attach the Spark card
-and its exactness receipts. Include the output of `vade verify` and any
+In the PR, explain the problem, the resulting behavior, the commands that you
+ran and any limits of your validation. For an engine change, attach the Spark
+card and its exactness receipts. Include the output of `vade verify` and any
 `vade test determinism` checks, with their coverage limits.
 
 If users would notice the change, add one plain line about it to the
@@ -291,18 +299,18 @@ Unreleased section of [CHANGELOG.md](CHANGELOG.md).
    the review automatically. Expect questions about exactness, the house
    rules and anything the PR says it didn't check.
 3. **Engine changes pass the device gate.** A change to engine arithmetic,
-   scheduling, caching or transport also needs the runs on real Sparks
-   described under [exactness](#exactness-and-evidence) before it can land.
-   The commit, host logs and Spark card name the same source revision. One
-   exception: a gated change rebased onto a moved main can merge on its gate
-   with an identical patch, disjoint files and a passing pre-merge screen on
-   the Sparks; its cards name the revisions they tested (see
+   scheduling, caching or transport also needs the runs on real Sparks described
+   under [exactness](#exactness-and-evidence) before it can land. The commit,
+   host logs and Spark card name the same source revision. There is one
+   exception. A gated change rebased onto a moved main can merge on its gate
+   with an identical patch, disjoint files and a passing pre-merge screen on the
+   Sparks. Its cards name the revisions that they tested (see
    [exactness](#exactness-and-evidence)).
-4. **The maintainer applies it.** `main` here is published from the
-   maintainers' development tree, one commit per update, so the merge
-   button isn't used. The maintainer applies the accepted change there, runs
-   local CI again on the result, and the change reaches `main` in the next
-   published update. The PR is then closed, not merged.
+4. **The maintainer applies it.** The maintainers publish `main` here from
+   their development tree, one commit per update. For this reason, nobody
+   uses the merge button. The maintainer applies the accepted change in the
+   development tree and runs local CI again on the result. The change reaches
+   `main` in the next published update. Then the PR is closed, not merged.
 
 If you haven't measured performance, don't make a speed claim. A performance
 claim needs reproducible receipts that record:

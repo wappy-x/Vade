@@ -1,19 +1,30 @@
 # Security policy
 
+This page tells you how to report a security problem in Vade privately. It
+also says what is in scope and which access rules the gateways and the engine
+apply today.
+
 ## Report a security problem
 
-Use the repository's **Security** tab and choose **Report a vulnerability**.
-Send the report privately. Do not put exploit details in a public issue, pull
-request or discussion.
+1. Open the repository's **Security** tab and choose **Report a
+   vulnerability**.
+2. Send the report privately. Do not put exploit details in a public issue,
+   pull request or discussion.
 
-If private reporting is not available, use a private maintainer contact listed
-by the repository. If none is listed, ask for a private reporting route without
-posting the exploit.
+If private reporting is not available, use a private maintainer contact that
+the repository lists. If the repository lists none, ask for a private
+reporting route. Do not post the exploit.
 
-Include the Vade version or source commit, the command and settings, and the
-steps that show the problem. State what the attacker can access and where the
-attacker runs. Include a small log sample if it helps. Remove keys, tokens,
-private prompts, machine addresses and personal data before you send it.
+Put these items in the report:
+
+- **Version.** The Vade version or the source commit.
+- **Command.** The command and its settings.
+- **Steps.** The steps that show the problem.
+- **Attacker.** What the attacker can access and where the attacker runs.
+- **Log.** A small log sample, if it helps.
+
+Remove keys, tokens, private prompts, machine addresses and personal data
+before you send the report.
 
 ## What is in scope
 
@@ -24,10 +35,11 @@ Report faults in code that Vade ships:
 - CLI installation, remote commands, tunnels and files that Vade writes.
 - Harness tools, file and command access, and credential handling.
 
-Problems in the operating system, NVIDIA driver, CUDA, SSH or a model checkpoint
-belong to those projects. Wrong model answers are normally bugs. An answer
-that bypasses a Vade access check is a security report. A report must show what
-access the fault adds; access the caller already has is not a new boundary.
+Problems in the operating system, the NVIDIA driver, CUDA, SSH or a model
+checkpoint belong to those projects. A wrong model answer is normally a bug.
+An answer that bypasses a Vade access check is a security report. A report
+must show what access the fault adds. Access that the caller already has is
+not a new boundary.
 
 ## The gateway is local
 
@@ -63,7 +75,7 @@ give each local user a separate set of engine permissions.
 A gateway you start yourself has no token by default. Use `--token` or
 `VADE_GATEWAY_TOKEN` to require a bearer token. The flag takes precedence.
 The gateway consumes that token and does not send it to the engine. An allowed
-browser preflight is answered before the token check; it does not call the
+browser preflight is answered before the token check. It does not call the
 engine.
 
 Without a gateway token, a caller's `Authorization` header can reach the
@@ -83,8 +95,10 @@ out of source files, shell history and reports.
 The [access checks](harness/src/gateway/access.rs) apply before a request can
 reach an engine:
 
+<div align="center">
+
 | Request or setting | Result |
-| --- | --- |
+| :---: | :---: |
 | Bind name resolves to a non-loopback address | Startup fails |
 | Peer address is not loopback | Connection is dropped |
 | `Host` is missing or `Host` or `Origin` is duplicated | HTTP 400 |
@@ -93,6 +107,8 @@ reach an engine:
 | Configured gateway token is missing or wrong | HTTP 401 |
 | Allowed browser preflight | HTTP 204 from the gateway; no engine request |
 | Local request passes these checks | The gateway can send it to the configured engine |
+
+</div>
 
 `--allow-host` and `--allow-origin` do not permit a non-loopback bind or peer.
 They do not check which local user sends a request.

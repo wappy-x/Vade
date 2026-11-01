@@ -4,255 +4,224 @@
 
 ### Current main
 
-These rows measured main `dc32b7c` on our DGX Sparks on the morning of
-2026-10-31. Each server start ran one card with drafting ON and one with
-drafting OFF. The one-Spark rows are the mean of two server starts; the
-other rows are one start each.
-[Results and receipts](results.md) links the receipt of every row and gives
-the machines, the server commands and the request settings.
+These rows measured main `dc32b7c` on our DGX Sparks on the morning of 2026-10-31. Each server start ran one card with drafting on and one card with drafting off. A card is the result file of one RigMark run. The one-Spark rows are the mean of two server starts. The other rows are one start each.
 
-| Model | Sparks | Path | Drafting | Prose | Code | Structured | C1 | C4 | C8 | Cold 8K (s) |
-| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| fp4-local | 1 | local | ON | 42.530 | 81.138 | 100.808 | 65.688 | 144.681 | 178.981 | 3.769 |
-| fp4-local | 1 | local | OFF | 27.911 | 27.761 | 28.012 | 27.115 | 85.004 | 138.609 | 3.778 |
-| fp4-local | 2 | tensor split | ON | 54.878 | 102.314 | 130.800 | 79.632 | 166.796 | 232.198 | 2.153 |
-| fp4-local | 2 | tensor split | OFF | 36.047 | 35.840 | 36.142 | 34.375 | 88.178 | 134.414 | 2.131 |
-| fp4-local | 4 | tensor split in parts | ON | 63.036 | 113.025 | 145.238 | 86.962 | 177.581 | 245.145 | 1.924 |
-| fp4-local | 4 | tensor split in parts | OFF | 42.084 | 41.486 | 42.072 | 38.080 | 95.113 | 143.015 | 1.916 |
-| fp8 | 2 | tensor parallel | ON | 36.624 | 51.293 | 52.763 | 45.436 | 66.578 | 98.670 | 5.971 |
-| fp8 | 2 | tensor parallel | OFF | 27.072 | 26.913 | 27.114 | 26.089 | 66.273 | 98.059 | 5.952 |
-| fp8 | 4 | tensor parallel | ON | 49.508 | 69.340 | 72.248 | 61.435 | 88.017 | 130.999 | 6.923 |
-| fp8 | 4 | tensor parallel | OFF | 35.902 | 35.641 | 35.955 | 34.592 | 87.157 | 131.147 | 6.873 |
+[Results and receipts](results.md) links the receipt of every row. It also gives the machines, the server commands and the request settings.
 
-Rates are in completion tokens per second. Prose, code and structured output
-each use one chat. C1, C4 and C8 give the total rates for one, four and eight
-concurrent chats. Cold 8K is the time to the first token after an uncached
-8192-token prompt, sent with drafting OFF in both cards. The
-[2026-10-31 section](#current-2026-10-31-morning-main-dc32b7c-home-dgx-sparks)
-gives the 32K chat and the token ID checks.
+**One chat (tok/s)**
 
-This table is written by hand, because the one-Spark rows average two server
-starts. The `bench-docs` tool cannot make this table. It takes one card per
-setup, only from the newest main that has cards, and it does not average
-server starts ([bench_docs.rs](../tools/src/bench_docs.rs)). From the
-repository root, this command replaces this block and the README block with
-such a table, from a folder of RigMark card files:
+<div align="center">
+
+| Setup and drafting | Prose | Code | Structured |
+| :---: | :---: | :---: | :---: |
+| FP4-Local · 1 Spark · on | 42.530 | 81.138 | 100.808 |
+| FP4-Local · 1 Spark · off | 27.911 | 27.761 | 28.012 |
+| FP4-Local · 2 Sparks · on | 54.878 | 102.314 | 130.800 |
+| FP4-Local · 2 Sparks · off | 36.047 | 35.840 | 36.142 |
+| FP4-Local · 4 Sparks · on | 63.036 | 113.025 | 145.238 |
+| FP4-Local · 4 Sparks · off | 42.084 | 41.486 | 42.072 |
+| FP8 · 2 Sparks · on | 36.624 | 51.293 | 52.763 |
+| FP8 · 2 Sparks · off | 27.072 | 26.913 | 27.114 |
+| FP8 · 4 Sparks · on | 49.508 | 69.340 | 72.248 |
+| FP8 · 4 Sparks · off | 35.902 | 35.641 | 35.955 |
+
+</div>
+
+**Chats at once (total tok/s)**
+
+<div align="center">
+
+| Setup and drafting | C1 | C4 | C8 |
+| :---: | :---: | :---: | :---: |
+| FP4-Local · 1 Spark · on | 65.688 | 144.681 | 178.981 |
+| FP4-Local · 1 Spark · off | 27.115 | 85.004 | 138.609 |
+| FP4-Local · 2 Sparks · on | 79.632 | 166.796 | 232.198 |
+| FP4-Local · 2 Sparks · off | 34.375 | 88.178 | 134.414 |
+| FP4-Local · 4 Sparks · on | 86.962 | 177.581 | 245.145 |
+| FP4-Local · 4 Sparks · off | 38.080 | 95.113 | 143.015 |
+| FP8 · 2 Sparks · on | 45.436 | 66.578 | 98.670 |
+| FP8 · 2 Sparks · off | 26.089 | 66.273 | 98.059 |
+| FP8 · 4 Sparks · on | 61.435 | 88.017 | 130.999 |
+| FP8 · 4 Sparks · off | 34.592 | 87.157 | 131.147 |
+
+</div>
+
+**Path and cold 8K prompt**
+
+<div align="center">
+
+| Setup | Path | Cold 8K (s), drafting-on card | Cold 8K (s), drafting-off card |
+| :---: | :---: | :---: | :---: |
+| FP4-Local · 1 Spark | local | 3.769 | 3.778 |
+| FP4-Local · 2 Sparks | tensor split | 2.153 | 2.131 |
+| FP4-Local · 4 Sparks | tensor split in parts | 1.924 | 1.916 |
+| FP8 · 2 Sparks | tensor parallel | 5.971 | 5.952 |
+| FP8 · 4 Sparks | tensor parallel | 6.923 | 6.873 |
+
+</div>
+
+Rates are in completion tokens per second. Prose, code and structured output each use one chat. C1, C4 and C8 give the total rates for one, four and eight chats at once. Cold 8K is the time to the first token after an uncached 8192-token prompt. Both cards send it with drafting off. The [2026-10-31 section](#current-2026-10-31-morning-main-dc32b7c-home-dgx-sparks) gives the 32K chat and the token ID checks.
+
+These tables are written by hand, because the one-Spark rows average two server starts. The `bench-docs` tool cannot make these tables. It takes one card per setup, only from the newest main that has cards, and it does not average server starts ([bench_docs.rs](../tools/src/bench_docs.rs)). From the repository root, this command replaces this block and the README block with such a table, from a folder of RigMark card files:
 
 ```sh
 cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- bench-docs '<cards-dir>' .
 ```
 
-The full card files are private. Their sanitized extracts are in
-[bench/receipts/2026-10-31](../bench/receipts/2026-10-31/README.md).
+The full card files are private. Their sanitized extracts are in [bench/receipts/2026-10-31](../bench/receipts/2026-10-31/README.md).
 
-Each section below names its date and main. Its results apply only to that
-build.
+Each section below names its date and main. Its results apply only to that build.
 
 <!-- bench-docs:end -->
 
 ## How the current numbers were measured
 
-The recipe of the [current table](#current-main) (main `dc32b7c`) is on
-[results and receipts](results.md), with a sanitized receipt for each card.
-This section gives the recipe behind the
-[2026-10-30 section](#previous-2026-10-30-morning-main-380d8e5-home-dgx-sparks)
-and the 2026-10-28 and 2026-10-29 rows. Every number there comes from a card
-file or from a lab report line. Those records are not in the repository.
-A revision such as main `380d8e5` and a pull request such as #142 belong to the private development history, so they are
-not in this repository. The v0.1.0 commits `5a22651` and `99e8f62` are the
-exception ([glossary](GLOSSARY.md#ho), "Main `abc1234`").
+The recipe of the [current table](#current-main) (main `dc32b7c`) is on [results and receipts](results.md), with a sanitized receipt for each card.
+
+This section gives the recipe behind the [2026-10-30 section](#previous-2026-10-30-morning-main-380d8e5-home-dgx-sparks) and the 2026-10-28 and 2026-10-29 rows. Every number there comes from a card file or from a lab report line. Those records are not in the repository.
+
+A revision such as main `380d8e5` and a pull request such as #142 belong to the private development history, so they are not in this repository. The v0.1.0 commits `5a22651` and `99e8f62` are the exception ([glossary](GLOSSARY.md#ho), "Main `abc1234`").
 
 ### Models and builds
 
-| Model | Checkpoint | Checkpoint identity (SHA256 that the server reports) |
-| --- | --- | --- |
-| fp4-local | `nvidia/Qwen3.8-Flash-Next-FP4-Local`, revision `b9ce18a6887e18c089fdea8509a33e63429a3300` | `d99ccbed3a9db8a2f099eca98e17c0bc3a2ebe84df95852f3b07c87c20a32716` |
-| fp8 | `Qwen/Qwen3.8-Flash-Next-FP8`, revision `236dfdf285828023ca3bcd3f37366c58a3469b13` | `8f69659fb459c65ab2729022c87080c3eca51643db40288f9854632c4f0d0f03` |
+These are the two checkpoints. The identity is the SHA256 that the server reports.
+
+- **fp4-local.** The checkpoint is `nvidia/Qwen3.8-Flash-Next-FP4-Local` at revision `b9ce18a6887e18c089fdea8509a33e63429a3300`. Its identity is `d99ccbed3a9db8a2f099eca98e17c0bc3a2ebe84df95852f3b07c87c20a32716`.
+- **fp8.** The checkpoint is `Qwen/Qwen3.8-Flash-Next-FP8` at revision `236dfdf285828023ca3bcd3f37366c58a3469b13`. Its identity is `8f69659fb459c65ab2729022c87080c3eca51643db40288f9854632c4f0d0f03`.
+
+These are the builds:
+
+<div align="center">
 
 | Main | Date | Server build | Used for |
-| --- | --- | --- | --- |
+| :---: | :---: | :---: | :---: |
 | `dc32b7c` | 2026-10-31 | flash-serve `55bdc7a8`, PTX `84c09350` | The current table ([receipts](../bench/receipts/2026-10-31/README.md)) |
-| `380d8e5` | 2026-10-30 | flash-serve `d56d255c`, PTX `84c09350` | Drafting ON rows, the 32K chat, the context run |
+| `380d8e5` | 2026-10-30 | flash-serve `d56d255c`, PTX `84c09350` | Drafting-on rows, the 32K chat, the context run |
 | `51dce02` (engine `380d8e5`) | 2026-10-30 | flash-serve `44e95e44` | Two pairs at once |
-| `cbbb11b` | 2026-10-29 | flash-serve `cad21fbe`, PTX `4288b2a8` | Drafting OFF: fp4-local on one Spark, fp8 on two Sparks |
-| `76977df` | 2026-10-28 | flash-serve `4dedff9d`, PTX `4288b2a8` | Drafting OFF: fp4-local on two and four Sparks, fp8 on four Sparks |
+| `cbbb11b` | 2026-10-29 | flash-serve `cad21fbe`, PTX `4288b2a8` | Drafting off: fp4-local on one Spark, fp8 on two Sparks |
+| `76977df` | 2026-10-28 | flash-serve `4dedff9d`, PTX `4288b2a8` | Drafting off: fp4-local on two and four Sparks, fp8 on four Sparks |
+
+</div>
 
 ### Requests
 
-Every request used greedy decoding: temperature 0, top-p 1, top-k 0,
-repetition penalty 1 and presence and frequency penalties 0. Chat requests
-also set seed 20260905, thinking OFF and `cache` false. Drafting ON requests leave
-out the `draft` field, so the server uses its default: depth 3 on FP4-Local
-and depth 2 on FP8. Drafting OFF requests send `"draft":"plain"`.
+Every request used greedy decoding: temperature 0, top-p 1, top-k 0, repetition penalty 1, and presence and frequency penalties 0. Chat requests also set seed 20260905, thinking off and `cache` false.
 
-A RigMark card sends 66 requests. It uses the prompt set of RigMark commit
-`52c29c3fc1d741b9aef8895b23372aafa5dc6161` (prompts version 1.0.0). The
-prompt and reply lengths below are from the two-Spark FP4-Local card of
-2026-10-30.
+Drafting-on requests leave out the `draft` field, so the server uses its default: depth 3 on FP4-Local and depth 2 on FP8. Drafting-off requests send `"draft":"plain"`.
 
-| Cell | Prompt | Reply | Runs | Value in the table |
-| --- | --- | --- | --- | --- |
-| Prose, code, structured | One chat. Prompts of 117 to 145 tokens | Up to 8192 tokens, to the natural stop (551 to 1,794 tokens) | 5 of each | Median of the 5 writing rates |
-| C1, C2, C4, C8 | 1, 2, 4 or 8 chats at once, code prompts of 140 to 147 tokens | Exactly 256 tokens per chat | 3 rounds of each | Median of the 3 round rates |
-| Cold 8K | 8,192 tokens, sent with drafting OFF and a new cache salt for each pair | 8 tokens | 3 cold and replay pairs | Median time to the first token of the 3 cold requests |
+A RigMark card sends 66 requests. It uses the prompt set of RigMark commit `52c29c3fc1d741b9aef8895b23372aafa5dc6161` (prompts version 1.0.0). The prompt and reply lengths below are from the two-Spark FP4-Local card of 2026-10-30.
 
-When a setup has two or three server starts, each cell is the mean of the
-start medians. The `cbbb11b` rows used our own card client instead. It sends
-64 requests: no C2 round and five cold 8K prompts. In those rows, C4 and C8
-are the mean of the three round medians on FP4-Local and the median of the
-three rounds on FP8.
+- **Prose, code, structured.** Each is one chat, with prompts of 117 to 145 tokens. The reply is up to 8192 tokens, to the natural stop (551 to 1,794 tokens). Each runs 5 times. The table gives the median of the 5 writing rates.
+- **C1, C2, C4, C8.** These are 1, 2, 4 or 8 chats at once, with code prompts of 140 to 147 tokens. Each chat gets exactly 256 tokens. Each runs 3 rounds. The table gives the median of the 3 round rates.
+- **Cold 8K.** The prompt has 8,192 tokens and goes out with drafting off and a new cache salt for each pair. The reply is 8 tokens. The card sends 3 cold and replay pairs. The table gives the median time to the first token of the 3 cold requests.
+
+When a setup has two or three server starts, each cell is the mean of the start medians.
+
+The `cbbb11b` rows used our own card client instead. It sends 64 requests: no C2 round and five cold 8K prompts. In those rows, C4 and C8 are the mean of the three round medians on FP4-Local, and the median of the three rounds on FP8.
 
 ### Each table
 
-| Table | Sparks and server start | Drafting | Starts | Record |
-| --- | --- | --- | ---: | --- |
-| The 2026-10-30 speed table, drafting ON | 1 Spark: `vade up --sparks 1 --context 32768 --output 8192`. 2 Sparks: `vade up --sparks 2 --context 32768 --output 8192`. FP4-Local on 4 Sparks, FP8 on 2 and 4 Sparks: lab launcher, context 32768, output 8192 (FP4-Local) or 16384 (FP8) | ON | 3 on one and two Sparks, 2 on the others | Lab report `own-rigmark-eod-r2`, cards `2026-10-30_0702` to `0804` |
-| Drafting OFF at `76977df` (2026-10-28) | 2 and 4 Sparks: lab launcher, the same limits | OFF | 1 | The 2026-10-28 cards with drafting OFF |
-| Drafting OFF at `cbbb11b` (2026-10-29) | 1 Spark: `vade up --sparks 1`, context 32768, output 8192. FP8 on 2 Sparks: lab launcher, context 32768, output 16384 | OFF | 2 | Lab reports `own-card-1s-eod-2-r2` and `own-premerge-fp8b-r2` |
-| 32K chat | The card start. On one Spark, two other starts at context 65536 | ON | 2 or 3 | `own-rigmark-eod-r2` |
-| Context on one Spark | `vade up --sparks 1 --context 262144 --output 8192` | ON | 1 | `own-rigmark-eod-r2` |
-| Two pairs at once | `vade up --sparks 2` on each pair | ON | 2 | Lab report `own-two-pairs-r1` |
+- **The 2026-10-30 speed table, drafting on.** One Spark ran `vade up --sparks 1 --context 32768 --output 8192`. Two Sparks ran `vade up --sparks 2 --context 32768 --output 8192`. FP4-Local on four Sparks, and FP8 on two and four Sparks, ran the lab launcher with context 32768 and output 8192 (FP4-Local) or 16384 (FP8). There were 3 starts on one and two Sparks and 2 on the others. The record is lab report `own-rigmark-eod-r2`, cards `2026-10-30_0702` to `0804`.
+- **Drafting off at `76977df` (2026-10-28).** Two and four Sparks ran the lab launcher with the same limits, in 1 start. The record is the 2026-10-28 cards with drafting off.
+- **Drafting off at `cbbb11b` (2026-10-29).** One Spark ran `vade up --sparks 1` with context 32768 and output 8192. FP8 on two Sparks ran the lab launcher with context 32768 and output 16384. There were 2 starts. The records are lab reports `own-card-1s-eod-2-r2` and `own-premerge-fp8b-r2`.
+- **32K chat, drafting on.** It ran on the card start. On one Spark, it ran on two other starts at context 65536. There were 2 or 3 starts. The record is `own-rigmark-eod-r2`.
+- **Context on one Spark, drafting on.** It ran `vade up --sparks 1 --context 262144 --output 8192`, in 1 start. The record is `own-rigmark-eod-r2`.
+- **Two pairs at once, drafting on.** Each pair ran `vade up --sparks 2`, in 2 starts. The record is lab report `own-two-pairs-r1`.
 
-The 32K chat sends a 32,099-token question. Then it sends a second question
-on the same chat: 32,305 tokens with a 54-token reply, or with FP8 on two
-Sparks 32,238 tokens with a 53-token reply. The first reply was 179 tokens
-long, and 112 with FP8 on two Sparks. The "Second question, cache" column is
-the first of two cached runs. The context run sent prompts of 64,217 and
-129,220 tokens with replies of 200 and 179 tokens, and a 64,444-token second
-question with a 56-token reply. Its writing speed is the same decode rate
-that the cards use.
+The 32K chat sends a 32,099-token question. Then it sends a second question on the same chat: 32,305 tokens with a 54-token reply. With FP8 on two Sparks, the second question has 32,238 tokens and a 53-token reply. The first reply was 179 tokens long, and 112 with FP8 on two Sparks. The "Second question, cache" column is the first of two cached runs.
+
+The context run sent prompts of 64,217 and 129,220 tokens with replies of 200 and 179 tokens. It also sent a 64,444-token second question with a 56-token reply. Its writing speed is the same decode rate that the cards use.
 
 ### What you can run today
 
-| Step | Command | State |
-| --- | --- | --- |
-| Start one or two Sparks as in the cards | `vade up --sparks 1 --context 32768 --output 8192 --mtp 3` or `vade up --sparks 2 --context 32768 --output 8192 --mtp 3` | Available |
-| Start four Sparks or FP8 | `vade up --sparks 4 --context 32768 --output 8192 --mtp 3` or `vade up --fp8 --sparks 2 --context 32768 --output 16384 --mtp 2` (or `--sparks 4`) | Available, but the cards used a lab launcher, not these commands |
-| Check token IDs, drafting ON against OFF | `vade verify -n 3 --prompt 8k --max-tokens 256` | Available. It checks one server, not one card against another |
-| Run the 66-request card | `vade bench --card --prompts rigmark/prompts.json --receipt bench/receipts/2026-10-31/<file>.json`, from a RigMark checkout at `52c29c3` | Available. It sends the card's requests and prints `ids 66/66 identical` when the token IDs match the receipt. On 2026-10-31 it matched the one-Spark ON and OFF receipts; we have not run it against the other receipts ([details](results.md#what-a-stranger-can-and-cannot-re-run)) |
-| Time your own server | `vade bench --concurrency 1,2,4,8 --max-tokens 256 --repeats 3` | Available. It uses other prompts, so its numbers do not compare with the cards |
-| Run the 32K chat or the context run | None | Not available. No `vade` command times a second question with and without the cache, and the prompts are not in the repository |
+- **Start one or two Sparks as in the cards: available.** Run `vade up --sparks 1 --context 32768 --output 8192 --mtp 3` or `vade up --sparks 2 --context 32768 --output 8192 --mtp 3`.
+- **Start four Sparks or FP8: available, but the cards used a lab launcher, not these commands.** Run `vade up --sparks 4 --context 32768 --output 8192 --mtp 3` or `vade up --fp8 --sparks 2 --context 32768 --output 16384 --mtp 2` (or `--sparks 4`).
+- **Check token IDs, drafting on against off: available.** Run `vade verify -n 3 --prompt 8k --max-tokens 256`. It checks one server, not one card against another.
+- **Run the 66-request card: available.** From a RigMark checkout at `52c29c3`, run `vade bench --card --prompts rigmark/prompts.json --receipt bench/receipts/2026-10-31/<file>.json`. It sends the card's requests and prints `ids 66/66 identical` when the token IDs match the receipt. On 2026-10-31 it matched the one-Spark drafting-on and drafting-off receipts. We have not run it against the other receipts ([details](results.md#what-a-stranger-can-and-cannot-re-run)).
+- **Time your own server: available.** Run `vade bench --concurrency 1,2,4,8 --max-tokens 256 --repeats 3`. It uses other prompts, so its numbers do not compare with the cards.
+- **Run the 32K chat or the context run: not available.** No `vade` command times a second question with and without the cache, and the prompts are not in the repository.
 
-This page lists every speed we have published for Vade, newest first. It
-also shows how to measure your own:
+## All results, newest first
 
-- [2026-10-31 morning cards](#current-2026-10-31-morning-main-dc32b7c-home-dgx-sparks):
-  one, two and four DGX Sparks at main `dc32b7c`, FP4-Local and FP8,
-  drafting ON and OFF from the same start, a 32K chat with the prefix cache,
-  and sanitized receipts in the repository.
-- [2026-10-30 morning cards](#previous-2026-10-30-morning-main-380d8e5-home-dgx-sparks):
-  one, two and four DGX Sparks at main `380d8e5`, FP4-Local and FP8,
-  drafting ON, with second starts, and a 32K chat with the prefix cache.
-- [2026-10-29 cards](#current-2026-10-29-main-cbbb11b-home-dgx-sparks): one
-  and two DGX Sparks at main `cbbb11b`, FP4-Local and FP8, drafting ON and
-  OFF, a 32K chat with the prefix cache, and 64K and 128K prompts on one
-  Spark.
-- [Confirm run on main `285fa8a`](#confirm-run-main-285fa8a): two DGX Sparks,
-  drafting ON, the new main against the main before it, after the end-of-day
-  cards.
-- [2026-10-28 end-of-day cards](#current-2026-10-28-end-of-day-main-76977df-home-dgx-sparks):
-  one, two and four DGX Sparks at main `76977df`, FP4-Local and FP8,
-  drafting ON and OFF, and the second question on a 32K chat with the prefix
-  cache on and off.
-- [2026-10-28 cards after #142](#previous-2026-10-28-after-142-main-9d2ec6c-home-dgx-sparks):
-  two DGX Sparks on one pair at main `9d2ec6c`, drafting ON and OFF, and the
-  second question on a 32K and a 100K chat with the prefix cache on and off.
-- [2026-10-28 cards after #139 and #140](#previous-2026-10-28-main-8b7b866-and-104205a-home-dgx-sparks):
-  two DGX Sparks on one pair, one drafting-ON card at main `8b7b866` (#140),
-  and before it drafting ON and OFF at main `104205a`, with eight chats
-  faster after the arena reuse change.
-- [2026-10-28 morning cards](#previous-2026-10-28-morning-main-bb24e80-home-dgx-sparks):
-  two DGX Sparks at main `bb24e80`, drafting ON on one pair and OFF on the
-  other, first-token times for 32K, 64K and 128K prompts, and a second
-  question on a long chat with the prefix cache on one Spark.
-- [Final 2026-10-27 cards](#previous-2026-10-27-final-main-09e1fc4-home-dgx-sparks):
-  two DGX Sparks at main `09e1fc4`, drafting ON on one pair and OFF on the
-  other, and first-token times for 32K and 64K prompts.
-- [2026-10-27 morning cards](#previous-2026-10-27-morning-main-12142bb-home-dgx-sparks):
-  two DGX Sparks on the tensor split as the default, with no settings set, and
-  first-token times for 32K and 64K prompts.
-- [2026-10-26 cards](#previous-2026-10-26-main-262b0c3-home-dgx-sparks): two
-  DGX Sparks on the tensor split with its levels set by hand, next to the
-  layer pipeline it replaces.
-- [2026-10-25 cards](#previous-2026-10-25-main-80ac2d4-home-dgx-sparks): two
-  and four DGX Sparks on main, FP4-Local and FP8, on the layer pipeline.
-- [2026-10-24 cards](#previous-2026-10-24-v010-release-5a22651): the v0.1.0
-  release on one and two DGX Sparks and on cloud GB10 VMs.
-- [Earlier cards from the same day](#earlier-cards-from-the-same-day-main-4681d8b-and-73f7a9d),
-  then [how to reproduce a run](#reproduce-a-measurement-in-detail) with
-  RigMark or `vade bench`.
+This page lists every speed we have published for Vade, newest first. It also shows how to measure your own.
 
-Every result names the build and settings we measured, and its timings hold
-for that build only. The older FP8 measurements are kept at the end, as
-history.
+<div align="center">
 
-A **receipt** is the saved record of one run: its build, its settings and what
-it measured. The receipts behind the 2026-10-24 tables are in
-[bench/receipts/2026-10-24](../bench/receipts/2026-10-24/README.md), as
-sanitized copies: private details such as hostnames are replaced, so our
-machines appear as home-1 to home-6 and the rented ones as vm-a to vm-d. The
-[receipt status](../bench/receipts/README.md) page says what is public. The
-2026-10-25 to 2026-10-28 cards are not in the repository yet; each row names
-its result folder. The 2026-10-27 and 2026-10-28 folder names end in a pair
-suffix that uses internal machine names (and `-final`, `-am`, `-139`,
-`-139-c140`, `-142`, `-eod-1s`, `-eod-2s`, `-eod-4s`, `-eod-fp8-2s` or
-`-eod-fp8-4s`), so those
-names are given here without the suffix; the time, commit and
-drafting setting in each name still identify the card. The first-token,
-prefix-cache and repeated cold-prompt timings of 2026-10-28 after #139,
-after #142 and at the end of the day come from separate runs, not from the cards. Each of those tables
-or sentences names its run folder, such as `c139-l32`, `r142-wtT-x1` or
-`eod-wtT-x1`.
-These folders are not in the repository yet either.
+| Section | What it is for |
+| :---: | :---: |
+| [2026-10-31 morning cards](#current-2026-10-31-morning-main-dc32b7c-home-dgx-sparks) | One, two and four Sparks at main `dc32b7c`, FP4-Local and FP8, drafting on and off, with public receipts |
+| [2026-10-30 morning cards](#previous-2026-10-30-morning-main-380d8e5-home-dgx-sparks) | One, two and four Sparks at main `380d8e5`, drafting on, with second starts |
+| [2026-10-29 cards](#current-2026-10-29-main-cbbb11b-home-dgx-sparks) | One and two Sparks at main `cbbb11b`, with 64K and 128K prompts on one Spark |
+| [Confirm run on main `285fa8a`](#confirm-run-main-285fa8a) | Two Sparks, the new main against the main before it |
+| [2026-10-28 end-of-day cards](#current-2026-10-28-end-of-day-main-76977df-home-dgx-sparks) | One, two and four Sparks at main `76977df`, FP4-Local and FP8 |
+| [2026-10-28 cards after #142](#previous-2026-10-28-after-142-main-9d2ec6c-home-dgx-sparks) | Two Sparks at main `9d2ec6c`, with a 32K and a 100K chat |
+| [2026-10-28 cards after #139 and #140](#previous-2026-10-28-main-8b7b866-and-104205a-home-dgx-sparks) | Two Sparks at main `8b7b866` and `104205a` |
+| [2026-10-28 morning cards](#previous-2026-10-28-morning-main-bb24e80-home-dgx-sparks) | Two Sparks at main `bb24e80`, with 32K, 64K and 128K prompts |
+| [Final 2026-10-27 cards](#previous-2026-10-27-final-main-09e1fc4-home-dgx-sparks) | Two Sparks at main `09e1fc4`, with 32K and 64K prompts |
+| [2026-10-27 morning cards](#previous-2026-10-27-morning-main-12142bb-home-dgx-sparks) | Two Sparks on the tensor split as the default |
+| [2026-10-26 cards](#previous-2026-10-26-main-262b0c3-home-dgx-sparks) | Two Sparks on the tensor split, next to the layer pipeline |
+| [2026-10-25 cards](#previous-2026-10-25-main-80ac2d4-home-dgx-sparks) | Two and four Sparks on the layer pipeline, FP4-Local and FP8 |
+| [2026-10-24 cards](#previous-2026-10-24-v010-release-5a22651) | The v0.1.0 release on one and two Sparks and on cloud GB10 VMs |
+| [Earlier cards from the same day](#earlier-cards-from-the-same-day-main-4681d8b-and-73f7a9d) | The cards of 2026-10-24 at main `4681d8b` and `73f7a9d` |
+| [How to reproduce a run](#reproduce-a-measurement-in-detail) | RigMark or `vade bench` |
 
-## Current (2026-10-31 morning, main dc32b7c, home DGX Sparks)
+</div>
 
-On the morning of 2026-10-31 we measured main `dc32b7c` on one, two and
-four Sparks, with FP4-Local and with FP8. Every server ran the same
-`flash-serve` binary (SHA256 `55bdc7a8...`, PTX `84c09350`), with greedy
-decoding, thinking OFF and no `VADE_` setting. Each server start ran one
-card with drafting ON and one with drafting OFF, and the 32K chat ran on the
-two-Spark and four-Spark starts. On one Spark, the card ran on two starts,
-and the 32K chat on two more starts at context 65536.
-[Results and receipts](results.md) gives the table, the receipt of each
-card, the server commands and what you can re-run; the speeds are in the
-[current table](#current-main).
+Every result names the build and settings that we measured, and its timings hold for that build only. The older FP8 measurements are kept at the end, as history.
 
-What changed since the 2026-10-30 cards: FP4-Local on four Sparks linked by
-RDMA now runs the tensor split in parts, not the layer chain. Its prose
-went from 43.397 tok/s on the evening of 2026-10-30 (main `7943f57`, layer
-chain) to 63.036 tok/s. FP8 on four Sparks went from 46.759 to 49.508 tok/s
-after a change that sends the FP8 commands between ranks over RDMA. These two
-before values are private cards of 2026-10-30 that this page does not list
-elsewhere. The one-Spark and two-Spark rows changed by at most 2.2 % in any
-cell.
+A **receipt** is the saved record of one run: its build, its settings and what it measured. The receipts behind the 2026-10-24 tables are in [bench/receipts/2026-10-24](../bench/receipts/2026-10-24/README.md), as sanitized copies. Private details such as hostnames are replaced, so our machines appear as home-1 to home-6 and the rented ones as vm-a to vm-d. The [receipt status](../bench/receipts/README.md) page says what is public.
 
-**The 32K chat.** Times to the first token, in seconds. The one-Spark row
-is the mean of two starts.
+The 2026-10-25 to 2026-10-28 cards are not in the repository yet. Each row names its result folder. The 2026-10-27 and 2026-10-28 folder names end in a pair suffix that uses internal machine names (and `-final`, `-am`, `-139`, `-139-c140`, `-142`, `-eod-1s`, `-eod-2s`, `-eod-4s`, `-eod-fp8-2s` or `-eod-fp8-4s`). So this page gives those names without the suffix. The time, commit and drafting setting in each name still identify the card.
 
-| Setup | First question | Second question, cache | Tokens reused | Second question, no cache |
-| --- | ---: | ---: | ---: | ---: |
-| FP4-Local, one Spark | 15.63 | 0.36 | 32,064 | 15.79 |
-| FP4-Local, two Sparks | 10.09 | 0.76 | 32,064 | 9.95 |
-| FP4-Local, four Sparks | 8.98 | 8.72 | 0 | 8.74 |
-| FP8, two Sparks | 24.12 | 0.94 | 32,064 | 23.91 |
-| FP8, four Sparks | 27.81 | 1.06 | 32,064 | 28.47 |
+The first-token, prefix-cache and repeated cold-prompt timings of 2026-10-28 after #139, after #142 and at the end of the day come from separate runs, not from the cards. Each of those tables or sentences names its run folder, such as `c139-l32`, `r142-wtT-x1` or `eod-wtT-x1`. These folders are not in the repository yet either.
 
-Four FP4-Local Sparks keep no prefix cache, so the second question reads the
-whole prompt again.
+<a id="current-2026-10-31-morning-main-dc32b7c-home-dgx-sparks"></a>
+## Current (2026-10-31 morning, main dc32b7c, our DGX Sparks)
 
-**Token IDs.** All eight FP4-Local cards (one, two and four Sparks, drafting
-ON and OFF) gave the same token IDs in 66 of 66 responses. FP8 drafting ON
-and OFF gave the same token IDs in 66 of 66 on two Sparks, and on four. FP8
-two against four Sparks matched in 7 of 66
-([FP8 on two and four Sparks](#fp8-on-two-and-four-sparks-different-token-ids)).
+On the morning of 2026-10-31 we measured main `dc32b7c` on one, two and four Sparks, with FP4-Local and with FP8. Every server ran the same `flash-serve` binary (SHA256 `55bdc7a8...`, PTX `84c09350`), with greedy decoding, thinking off and no `VADE_` setting.
 
-**Limits.** One server start per setup, except one Spark. The four-Spark and
-FP8 starts used a private lab launcher. The 32K chat client is private. The
-card client is public: `vade bench --card`
-([details](results.md#what-a-stranger-can-and-cannot-re-run)).
+Each server start ran one card with drafting on and one with drafting off. The 32K chat ran on the two-Spark and four-Spark starts. On one Spark, the card ran on two starts, and the 32K chat on two more starts at context 65536.
 
-## Previous (2026-10-30 morning, main 380d8e5, home DGX Sparks)
+[Results and receipts](results.md) gives the table, the receipt of each card, the server commands and what you can run again. The speeds are in the [current table](#current-main).
+
+**What changed since the 2026-10-30 cards.**
+
+- **FP4-Local on four Sparks.** Four Sparks linked by RDMA now run the tensor split in parts, not the layer chain. Prose went from 43.397 tok/s on the evening of 2026-10-30 (main `7943f57`, layer chain) to 63.036 tok/s.
+- **FP8 on four Sparks.** Prose went from 46.759 to 49.508 tok/s after a change that sends the FP8 commands between ranks over RDMA.
+- **One and two Sparks.** The one-Spark and two-Spark rows changed by at most 2.2 % in any cell.
+
+The two before values are private cards of 2026-10-30 that this page does not list elsewhere.
+
+**The 32K chat.** These are the times to the first token, in seconds. The one-Spark row is the mean of two starts.
+
+<div align="center">
+
+| Setup | First question | Second question, cache | Second question, no cache |
+| :---: | :---: | :---: | :---: |
+| FP4-Local · 1 Spark | 15.63 | 0.36 | 15.79 |
+| FP4-Local · 2 Sparks | 10.09 | 0.76 | 9.95 |
+| FP4-Local · 4 Sparks | 8.98 | 8.72 | 8.74 |
+| FP8 · 2 Sparks | 24.12 | 0.94 | 23.91 |
+| FP8 · 4 Sparks | 27.81 | 1.06 | 28.47 |
+
+</div>
+
+The cached run reused 32,064 tokens on every setup except four FP4-Local Sparks, which reused 0. Four FP4-Local Sparks keep no prefix cache, so the second question reads the whole prompt again.
+
+**Token IDs.**
+
+- **FP4-Local.** All eight FP4-Local cards (one, two and four Sparks, drafting on and off) gave the same token IDs in 66 of 66 responses.
+- **FP8 at one Spark count.** FP8 drafting on and off gave the same token IDs in 66 of 66 responses on two Sparks, and on four.
+- **FP8, two against four Sparks.** The cards matched in 7 of 66 ([FP8 on two and four Sparks](#fp8-on-two-and-four-sparks-different-token-ids)). A later change, approved on 2026-10-31, makes FP8 on four Sparks add its partial sums in the two-Spark order, so four Sparks now give the same token IDs as two ([changelog](../CHANGELOG.md)). These cards predate that change.
+
+**Limits.**
+
+- **Starts.** There was one server start per setup, except on one Spark.
+- **Launcher.** The four-Spark and FP8 starts used a private lab launcher.
+- **Clients.** The 32K chat client is private. The card client is public: `vade bench --card` ([details](results.md#what-a-stranger-can-and-cannot-re-run)).
+
+<a id="previous-2026-10-30-morning-main-380d8e5-home-dgx-sparks"></a>
+## Previous (2026-10-30 morning, main 380d8e5, our DGX Sparks)
 
 On the morning of 2026-10-30 we measured main `380d8e5` (#201) on one, two
 and four Sparks, with FP4-Local and with FP8. Every server ran the prebuilt
@@ -388,7 +357,8 @@ main, and each stays as it was measured. They are not current: for the
 current numbers, use the [current table](#current-main).
 
 <a id="current-2026-10-29-main-cbbb11b-home-dgx-sparks"></a>
-## Previous (2026-10-29, main cbbb11b, home DGX Sparks)
+<a id="previous-2026-10-29-main-cbbb11b-home-dgx-sparks"></a>
+## Previous (2026-10-29, main cbbb11b, our DGX Sparks)
 
 On 2026-10-29 we measured main `cbbb11b` (#186) again on one Spark and on
 two Sparks. Four Sparks were not measured again. Every start ran the
@@ -514,7 +484,7 @@ They do not measure `285fa8a`.
 
 A confirm run on 2026-10-28 compared `285fa8a` with the main before it,
 `54392da`. Its record is `2026-10-28_1713_confirm_285fa8a-vs-54392da`. The
-record is not in the repository yet. The run used one pair of home DGX
+record is not in the repository yet. The run used one pair of our DGX
 Sparks, two Sparks on the tensor split, with drafting ON. It used our own
 64-request card client, not the RigMark recipe of the end-of-day cards: it
 has no C2 round and five cold 8K prompts per server start. Each card had its own server start. The four card starts ran in this
@@ -568,7 +538,7 @@ Limits of this run:
 
 On 2026-10-28, a context test checked that the large context windows start
 and answer. It used a build of main `285fa8a` (flash-serve
-`320bcc58`, PTX `4288b2a8`) on home DGX Sparks, with FP4-Local, drafting ON
+`320bcc58`, PTX `4288b2a8`) on our DGX Sparks, with FP4-Local, drafting ON
 (depth 3), greedy decoding and thinking OFF. Each setup had a fresh server
 start and two cold requests (`cache` false), each with a 64-token reply. The
 one-Spark setup ran on two Sparks, each as its own server.
@@ -628,7 +598,7 @@ change on that pair, `cap-c2b-x`, gave 1.02 s for chats 10 to 16; the
 changelog entry quotes that run. The token IDs did not change.
 
 **Speed.** On 2026-10-28, a card measured main `250fb49` on one pair of
-home DGX Sparks (tensor split), in three fresh server starts. It used our
+our DGX Sparks (tensor split), in three fresh server starts. It used our
 own card client, with context 32768, output 8192, drafting ON (depth 3),
 thinking OFF and five cold 8K prompt runs per start. The client sends the
 cold 8K prompt with drafting OFF (`"draft": "plain"`). Medians in tok/s:
@@ -649,7 +619,8 @@ Limits of this card:
   repository yet.
 
 <a id="current-2026-10-28-end-of-day-main-76977df-home-dgx-sparks"></a>
-## Previous (2026-10-28 end of day, main 76977df, home DGX Sparks)
+<a id="previous-2026-10-28-end-of-day-main-76977df-home-dgx-sparks"></a>
+## Previous (2026-10-28 end of day, main 76977df, our DGX Sparks)
 
 These cards ran at main `76977df`. They do not measure later engine changes
 on main. Main `76977df` changes only documentation after `9d2ec6c`
@@ -747,36 +718,28 @@ both cards, so this is the spread between server starts.
 
 ### FP8 on two and four Sparks: different token IDs
 
-FP8 is a supported route on two and on four Sparks
-([FP8 install](install-fp8.md)). But today the two Spark counts give
-different token IDs for the same request and settings:
+FP8 is a supported route on two and on four Sparks ([FP8 install](install-fp8.md)). In the cards below, the two Spark counts gave different token IDs for the same request and settings:
+
+<div align="center">
 
 | Cards | Main | Two-Spark against four-Spark responses with identical token IDs |
-| --- | --- | ---: |
+| :---: | :---: | :---: |
 | 2026-10-31 morning | `dc32b7c` | 7 of 66 |
 | 2026-10-30 morning | `380d8e5` | 7 of 66 |
 | 2026-10-28 end of day | `76977df` | 7 of 66 |
 | 2026-10-25 | `6cb46bf` | 5 of 62 |
 
-On each Spark count alone, FP8 is stable. At `76977df`, drafting ON and OFF
-matched in 66 of 66 responses on two Sparks and on four. The two-Spark cards
-matched the 2026-10-27 FP8 cards in 66 of 66. The four-Spark cards matched the
-2026-10-25 four-Spark cards in 62 of 62.
+</div>
 
-The [exactness rule](architecture.md#exactness-and-model-quality) asks for the
-same token IDs on every supported Spark count. FP4-Local meets it on one, two
-and four Sparks. FP8 does not meet it yet.
+On each Spark count alone, FP8 was stable. At `76977df`, drafting on and off matched in 66 of 66 responses on two Sparks and on four. The two-Spark cards matched the 2026-10-27 FP8 cards in 66 of 66. The four-Spark cards matched the 2026-10-25 four-Spark cards in 62 of 62.
 
-A host test found the cause: the order of additions differs between the two
-rank counts. On four Sparks, the output projections of attention and of the
-linear-attention layers, and the shared expert's down projection, split their
-inner sum across the ranks. The ranks then add their parts in a different order
-than on two Sparks, and the routed experts group their blocks differently. The
-results differ in the last bits, and greedy decoding can then pick a different
-token. Work on a fix is under way. It is not on main.
+The [exactness rule](architecture.md#exactness-and-model-quality) asks for the same token IDs on every supported Spark count. FP4-Local meets it on one, two and four Sparks. In these cards, FP8 did not meet it.
 
-Until the fix is on main, compare FP8 results only at the same Spark count.
-`vade verify` checks one running engine, so it does not show this difference.
+A host test found the cause: the order of additions differed between the two rank counts. On four Sparks, three projections split their inner sum across the ranks: the output projections of attention and of the linear-attention layers, and the down projection of the shared expert. The ranks then added their parts in a different order than on two Sparks, and the routed experts grouped their blocks differently. The results differed in the last bits, and greedy decoding could then pick a different token.
+
+**The fix.** A later change, approved on 2026-10-31, makes FP8 on four Sparks add its partial sums in the two-Spark order. Four Sparks now give the same token IDs as two Sparks. In the pre-merge check, four Sparks gave the same token IDs as two Sparks in 66 of 66 responses, with drafting on and with drafting off (private record, not in this repository). Six Sparks still give other IDs than two ([changelog](../CHANGELOG.md)).
+
+The cards on this page predate the fix, so compare their FP8 results only at the same Spark count. `vade verify` checks one running engine, so it does not show a difference between Spark counts.
 
 ### A long chat and its second question
 
@@ -802,7 +765,8 @@ FP8.
 
 <a id="current-2026-10-28-after-142-main-9d2ec6c-home-dgx-sparks"></a>
 
-## Previous (2026-10-28 after #142, main 9d2ec6c, home DGX Sparks)
+<a id="previous-2026-10-28-after-142-main-9d2ec6c-home-dgx-sparks"></a>
+## Previous (2026-10-28 after #142, main 9d2ec6c, our DGX Sparks)
 
 These cards ran at main `9d2ec6c`, after the merge of #142. With #142, the
 prefix cache can restore a prompt on both Sparks of the tensor split. The
@@ -878,7 +842,8 @@ the same chat would read the whole prompt again. These runs did not measure
 <a id="current-2026-10-28-after-139-main-104205a-home-dgx-sparks"></a>
 <a id="current-2026-10-28-main-8b7b866-and-104205a-home-dgx-sparks"></a>
 
-## Previous (2026-10-28, main 8b7b866 and 104205a, home DGX Sparks)
+<a id="previous-2026-10-28-main-8b7b866-and-104205a-home-dgx-sparks"></a>
+## Previous (2026-10-28, main 8b7b866 and 104205a, our DGX Sparks)
 
 The newest card of this set is one drafting-ON card at main `8b7b866`
 (#140), in the first row below. No drafting-OFF card ran at `8b7b866`. The
@@ -975,7 +940,8 @@ start gave a median of 2.18 s (receipt: the run folder `c140-c8x20`).
 
 <a id="current-2026-10-28-morning-main-bb24e80-home-dgx-sparks"></a>
 
-## Previous (2026-10-28 morning, main bb24e80, home DGX Sparks)
+<a id="previous-2026-10-28-morning-main-bb24e80-home-dgx-sparks"></a>
+## Previous (2026-10-28 morning, main bb24e80, our DGX Sparks)
 
 These are the morning RigMark cards of 2026-10-28, measured on the same two
 pairs of our own DGX Sparks as the
@@ -1036,7 +1002,8 @@ do not use the prefix cache yet.
 
 <a id="current-2026-10-27-final-main-09e1fc4-home-dgx-sparks"></a>
 
-## Previous (2026-10-27 final, main 09e1fc4, home DGX Sparks)
+<a id="previous-2026-10-27-final-main-09e1fc4-home-dgx-sparks"></a>
+## Previous (2026-10-27 final, main 09e1fc4, our DGX Sparks)
 
 These are the last RigMark cards of 2026-10-27, measured on two pairs of our
 own DGX Sparks at main `09e1fc4`. Each card passed its **15/15** basic output
@@ -1229,7 +1196,8 @@ of the table.
 
 <a id="current-2026-10-27-main-12142bb-home-dgx-sparks"></a>
 
-## Previous (2026-10-27 morning, main 12142bb, home DGX Sparks)
+<a id="previous-2026-10-27-morning-main-12142bb-home-dgx-sparks"></a>
+## Previous (2026-10-27 morning, main 12142bb, our DGX Sparks)
 
 Two Sparks now run the **tensor split** by default, with no settings to set
 (#121). `vade up --sparks 2` starts it as it is: both Sparks work on every
@@ -1307,7 +1275,8 @@ other.
 
 <a id="current-2026-10-26-main-262b0c3-home-dgx-sparks"></a>
 
-## Previous (2026-10-26, main 262b0c3, home DGX Sparks)
+<a id="previous-2026-10-26-main-262b0c3-home-dgx-sparks"></a>
+## Previous (2026-10-26, main 262b0c3, our DGX Sparks)
 
 `vade up --sparks 2` runs the **tensor split**. Both Sparks work on every
 token: each one computes half of every expert and of most projections, and for
@@ -1374,7 +1343,8 @@ levels, and the engine's serving receipt records them under
 
 <a id="current-2026-10-25-main-80ac2d4-home-dgx-sparks"></a>
 
-## Previous (2026-10-25, main 80ac2d4, home DGX Sparks)
+<a id="previous-2026-10-25-main-80ac2d4-home-dgx-sparks"></a>
+## Previous (2026-10-25, main 80ac2d4, our DGX Sparks)
 
 These are RigMark cards measured on the morning of 2026-10-25 on our own DGX
 Sparks, on main `80ac2d4` and on `6cb46bf`, the main commit from earlier that
@@ -2031,47 +2001,22 @@ Raw benchmark output stays private until it has been reviewed for publication;
 
 ## Reproduce a measurement in detail
 
-To compare your Spark with the tables, run RigMark as the next section shows.
-`vade bench` gives you a timing check of your own, but it does not produce
-cards.
+To compare your Spark with the tables, run RigMark as the next section shows. `vade bench` gives you a timing check of your own, but it does not make cards.
 
-Follow the [FP4-Local serving guide](../cli/docs/fp4-local.md) and keep the
-measured context and output limits explicit. `vade launch` (run on the Spark
-itself) and `vade up` (run from a controller, the computer that drives your
-Sparks) both start at context 32768 and output 8192. `vade launch` lowers a
-default context only when the engine refuses it for memory; a controller never
-lowers it, so check `vade status --json` before you compare runs.
+Follow the [FP4-Local serving guide](../cli/docs/fp4-local.md), and keep the measured context and output limits explicit. `vade launch` runs on the Spark itself. `vade up` runs from a controller, the computer that drives your Sparks. Both start at context 32768 and output 8192. `vade launch` lowers a default context only when the engine refuses it for memory. A controller never lowers it. So check `vade status --json` before you compare runs.
 
-After `vade launch` or `vade up`, `vade bench` works without flags. Keep the
-same `VADE_HOME` / `VADE_CONFIG` and it finds the endpoint, reads the model ID
-from `/health`, and measures the server's default drafting policy with a
-bundled offline prompt. Receipts go to `./vade-bench.json`, with a text table
-next to it.
+After `vade launch` or `vade up`, `vade bench` works without flags. Keep the same `VADE_HOME` and `VADE_CONFIG`. Then `vade bench` finds the endpoint, reads the model ID from `/health`, and measures the server's default drafting policy with a bundled offline prompt. Receipts go to `./vade-bench.json`, with a text table next to it.
 
-A zero-flag run uses a different recipe from a card, so its numbers don't line
-up with the tables:
+A run with no flags uses a different recipe from a card, so its numbers do not match the tables:
 
-- It sends one bundled writing prompt. RigMark uses its own prose, code and
-  structured prompts.
-- It runs C1, C2, C4, C8 and C16 once each, with no warmup. A card runs C1, C2,
-  C4 and C8 for 3 rounds each.
-- Like the card's group rounds, it stops each reply at 256 tokens, but it also
-  asks the server to keep going past the end-of-answer token, so every reply is
-  exactly 256 tokens long.
-- It has no single-stream cells with the 8192-token cap. It reads a cold 8K
-  prompt only when you add `--prefill-body` and `--checkpoint-hash` (see
-  [Run vade bench](#run-vade-bench)).
+- **Prompt.** It sends one bundled writing prompt. RigMark uses its own prose, code and structured prompts.
+- **Rounds.** It runs C1, C2, C4, C8 and C16 once each, with no warmup. A card runs C1, C2, C4 and C8 for 3 rounds each.
+- **Reply length.** Like the group rounds of a card, it stops each reply at 256 tokens. It also asks the server to continue past the end-of-answer token, so every reply is exactly 256 tokens long.
+- **Single-stream cells.** It has no single-stream cells with the 8192-token cap. It reads a cold 8K prompt only when you add `--prefill-body` and `--checkpoint-hash` (see [Run vade bench](#run-vade-bench)).
 
-Both keep greedy decoding, the cache off and thinking off. On the server behind
-the one-Spark v0.1.0 cards, a zero-flag `vade bench` with drafting as served
-gave C1 45.466 and C8 185.144 tok/s. The drafting-ON card from that same
-server shows C1 61.4 and C8 173.9. Both are recorded in the
-[ON card's receipt folder](../bench/receipts/2026-10-24/2026-10-24_1943_qwen3.8-flash-next-nvfp4_local-1spark_5a22651-drafting-on-thinking-off/).
+Both keep greedy decoding, the cache off and thinking off. On the server behind the one-Spark v0.1.0 cards, a `vade bench` run with no flags and with drafting as served gave C1 45.466 and C8 185.144 tok/s. The drafting-on card from that same server shows C1 61.4 and C8 173.9. Both are recorded in the [ON card's receipt folder](../bench/receipts/2026-10-24/2026-10-24_1943_qwen3.8-flash-next-nvfp4_local-1spark_5a22651-drafting-on-thinking-off/).
 
-To compare runs with the same saved prompts and plain decoding (drafting off),
-use `--draft plain`; it works on a drafting-enabled server without a restart.
-Set `VADE_API_URL` to the running server's HTTP base URL and keep the same
-prompt file between runs:
+To compare runs with the same saved prompts and plain decoding (drafting off), use `--draft plain`. It works on a server with drafting on, without a restart. Set `VADE_API_URL` to the running server's HTTP base URL, and keep the same prompt file between runs:
 
 ```sh
 vade bench --url "$VADE_API_URL" --model qwen3.8-flash-next-fp4-local --draft plain \
@@ -2079,39 +2024,25 @@ vade bench --url "$VADE_API_URL" --model qwen3.8-flash-next-fp4-local --draft pl
   --max-tokens 256 --repeats 3 --output ./vade-bench.json
 ```
 
-This times cohorts with the Rust client: groups of concurrent requests that
-each write exactly the capped number of tokens. It does not recreate the
-RigMark prompt set, and it does not turn a timing run into a card. The cards'
-ON recipes leave out the draft field to get the server default; the timing
-runs send `"draft":"strict"`, which you ask for with `--draft strict`. Current
-bench requests keep thinking off. Whenever you quote a result, keep its
-thinking setting, estimator and source folder with it. See
-[Run vade bench](#run-vade-bench) for every option.
+This command times cohorts with the Rust client. A cohort is a group of requests at once, and each request writes exactly the capped number of tokens. The command does not recreate the RigMark prompt set, and it does not turn a timing run into a card.
+
+The drafting-on recipes of the cards leave out the draft field to get the server default. The timing runs send `"draft":"strict"`, which you ask for with `--draft strict`. Current bench requests keep thinking off. When you quote a result, keep its thinking setting, estimator and source folder with it. See [Run vade bench](#run-vade-bench) for every option.
 
 ## Run RigMark against Vade
 
-[RigMark](https://github.com/alexellis/rigmark) is the public benchmark that
-produces the cards on this page. Run it on the Spark that serves HTTP (rank 0
-of a pair), against the loopback endpoint that `vade launch` or `vade up`
-reports (`http://127.0.0.1:18080` by default).
+[RigMark](https://github.com/alexellis/rigmark) is the public benchmark that makes the cards on this page. Run it on the Spark that serves HTTP (rank 0 of a pair). Point it at the loopback endpoint that `vade launch` or `vade up` reports (`http://127.0.0.1:18080` by default).
 
-**Turn thinking off in the request.** Vade answers chat requests with thinking
-ON unless the request says otherwise. The FP4-Local server has no
-server-level switch for that default, and neither `vade launch` nor `vade up`
-sets one. RigMark sends no thinking field by default, and each decode sample
-has an **8192-token cap shared by reasoning and the answer**. With RigMark's
-defaults, most code and prose samples spend the whole cap reasoning: they stop
-with `finish_reason` `length`, show no answer, and fail RigMark's output
-checks. Set the field yourself with RigMark's `--extra-body`, which merges JSON
-into every chat request. The server reads, in this order
-([protocol.rs](../engine/crates/serve/src/protocol.rs)):
+**Turn thinking off in the request.** Vade answers chat requests with thinking on unless the request says otherwise. The FP4-Local server has no server-level switch for that default, and neither `vade launch` nor `vade up` sets one.
 
-1. `chat_template_kwargs.enable_thinking`, or a top-level `enable_thinking`;
-2. `reasoning_effort`: `none` or `minimal` turns thinking off; `low`,
-   `medium`, `high` or `xhigh` turns it on at that effort;
-3. the server default, ON.
+RigMark sends no thinking field by default. Each decode sample has an **8192-token cap shared by reasoning and the answer**. With the RigMark defaults, most code and prose samples spend the whole cap on reasoning. They stop with `finish_reason` `length`, show no answer, and fail the RigMark output checks.
 
-This is the command we use on one Spark, from a RigMark checkout:
+Set the field yourself with the RigMark option `--extra-body`, which merges JSON into every chat request. The server reads these settings in this order ([protocol.rs](../engine/crates/serve/src/protocol.rs)):
+
+1. `chat_template_kwargs.enable_thinking`, or a top-level `enable_thinking`.
+2. `reasoning_effort`. `none` or `minimal` turns thinking off. `low`, `medium`, `high` or `xhigh` turns it on at that effort.
+3. The server default, which is on.
+
+This is the command that we use on one Spark, from a RigMark checkout:
 
 ```sh
 git clone https://github.com/alexellis/rigmark
@@ -2123,69 +2054,37 @@ cd rigmark
   --extra-body '{"chat_template_kwargs":{"enable_thinking":false}}'
 ```
 
-- `./rigmark configure` writes `metadata.json`. Set its `context_limit` to the
-  context your server reports (`Context` in `vade status`, or
-  `caps.context_limit` in `/health`); the cards used **32768**.
-- `--prefill-depths 8192`: by default RigMark also measures 32768 and 65536,
-  and it refuses any depth where depth + 8 exceeds `context_limit`. The cards
-  measure 8K only.
-- `--concurrency 1,2,4,8` adds C8 to RigMark's default C1/C2/C4. Every
-  2026-10-24 RigMark card on this page ran with it, the two-VM cloud card 1006
-  included (C8 **70.0 tok/s**).
-- Everything else is a RigMark default: 5 runs each of prose, code and
-  structured output with the 8192-token cap, 3 cold/replay prefill pairs, and
-  3 rounds of code at each concurrency with a 256-token cap. RigMark fixes
-  temperature 0, top-p 1 and seed 20260905.
-- Older RigMark checkouts call the `bench` subcommand `run`.
+- **`./rigmark configure`.** It writes `metadata.json`. Set its `context_limit` to the context that your server reports (`Context` in `vade status`, or `caps.context_limit` in `/health`). The cards used **32768**.
+- **`--prefill-depths 8192`.** By default, RigMark also measures 32768 and 65536. It refuses any depth where the depth + 8 is more than `context_limit`. The cards measure 8K only.
+- **`--concurrency 1,2,4,8`.** It adds C8 to the RigMark default of C1, C2 and C4. Every 2026-10-24 RigMark card on this page ran with it, including the two-VM cloud card 1006 (C8 **70.0 tok/s**).
+- **Everything else.** The rest is a RigMark default: 5 runs each of prose, code and structured output with the 8192-token cap, 3 cold and replay prefill pairs, and 3 rounds of code at each concurrency with a 256-token cap. RigMark fixes temperature 0, top-p 1 and seed 20260905.
+- **Older checkouts.** Older RigMark checkouts call the `bench` subcommand `run`.
 
-The published cards send a longer body. To compare with a card, send the
-identical body, because RigMark only compares receipts with the same request
-body:
+The published cards send a longer body. To compare with a card, send the identical body, because RigMark compares receipts only when they have the same request body:
 
 ```json
 {"cache": false, "chat_template_kwargs": {"enable_thinking": false}, "draft": "plain",
  "frequency_penalty": 0, "presence_penalty": 0, "repetition_penalty": 1, "top_k": 0}
 ```
 
-`"draft": "plain"` makes a drafting-OFF card; the drafting-ON cards leave the
-field out and get the server default. `cache`, the neutral penalties and
-`top_k` spell out the defaults. Thinking-ON cards replace
-`"enable_thinking": false` with `"enable_thinking": true, "reasoning_effort": "low"`
-inside `chat_template_kwargs`.
+`"draft": "plain"` makes a drafting-off card. The drafting-on cards leave the field out and get the server default. `cache`, the neutral penalties and `top_k` spell out the defaults. Cards with thinking on replace `"enable_thinking": false` with `"enable_thinking": true, "reasoning_effort": "low"` inside `chat_template_kwargs`.
 
-**What "DO NOT HEADLINE" means.** RigMark checks each of the 15 single-stream
-samples: code and prose need visible answer text and a normal stop; structured
-output needs the requested JSON values. If any sample fails, the card header
-marks the result `DO NOT HEADLINE`, and you should not quote its rates as a
-result. On 2026-10-24 a RigMark run with its default
-settings against a two-VM pair scored **6/15**: code 0/5 and prose 1/5 hit the
-cap while still reasoning, and structured passed 5/5. With thinking off
-through `--extra-body`, the cards above pass **15/15**. These checks, which
-RigMark calls gates, confirm that answers completed; they are not an exactness
-or quality check.
+**What "DO NOT HEADLINE" means.** RigMark checks each of the 15 single-stream samples. Code and prose need visible answer text and a normal stop. Structured output needs the requested JSON values. If any sample fails, the card header marks the result `DO NOT HEADLINE`. Then do not quote its rates as a result.
+
+On 2026-10-24, a RigMark run with its default settings against a two-VM pair scored **6/15**. Code (0/5) and prose (1/5) hit the cap while they were still reasoning, and structured output passed 5/5. With thinking off through `--extra-body`, the cards above pass **15/15**. These checks, which RigMark calls gates, confirm that the answers completed. They are not a check of exactness or quality.
 
 **What a good card looks like** with thinking off:
 
-- Header: `●  15/15 BASIC OUTPUT GATES PASSED`.
-- SINGLE STREAM: PROSE, CODE and STRUCTURED*, each `✓ 5/5`.
-- PREFILL: one 8K row with cold tok/s, cold TTFT and replay TTFT.
-- CAPPED CONCURRENT GENERATION: `C1 | C2 | C4 | C8`, then
-  `C8: 0/24 normal stops; 24/24 with visible output`. Every capped stream stops
-  at 256 tokens, so zero normal stops is expected. With thinking on, those 256
-  tokens are often all reasoning, and the visible-output count drops toward 0.
-- SETTINGS: `SUITE: CUSTOM SETTINGS`, `Changed: --prefill-depths=8192`,
-  `Changed: --concurrency=1,2,4,8`, and `REQUEST:` showing your body. Custom
-  settings are expected and do not mean "DO NOT HEADLINE".
-- Rates should land close to the [matching row](#current-results-2026-10-24)
-  for the same Spark count and drafting mode (thinking OFF; for thinking ON see
-  the [receipt folder](../bench/receipts/2026-10-24/README.md)).
+- **Header.** The header says `●  15/15 BASIC OUTPUT GATES PASSED`.
+- **SINGLE STREAM.** PROSE, CODE and STRUCTURED* each show `✓ 5/5`.
+- **PREFILL.** One 8K row shows the cold tok/s, the cold TTFT and the replay TTFT.
+- **CAPPED CONCURRENT GENERATION.** The section shows `C1 | C2 | C4 | C8`, then `C8: 0/24 normal stops; 24/24 with visible output`. Every capped stream stops at 256 tokens, so zero normal stops is expected. With thinking on, those 256 tokens are often all reasoning, and the visible-output count drops toward 0.
+- **SETTINGS.** The section shows `SUITE: CUSTOM SETTINGS`, `Changed: --prefill-depths=8192`, `Changed: --concurrency=1,2,4,8`, and `REQUEST:` with your body. Custom settings are expected and do not mean "DO NOT HEADLINE".
+- **Rates.** The rates should be close to the [matching row](#current-results-2026-10-24) for the same Spark count and drafting mode, with thinking off. For thinking on, see the [receipt folder](../bench/receipts/2026-10-24/README.md).
 
 ## Run vade bench
 
-Build the CLI once, then measure a running server with one command. After
-`vade launch` or `vade up`, a bare `vade bench` uses the selected endpoint, the
-model that `/health` reports and a bundled prompt. The explicit recipe below
-picks retained prompts and plain drafting instead:
+Build the CLI once. Then measure a running server with one command. After `vade launch` or `vade up`, a bare `vade bench` uses the selected endpoint, the model that `/health` reports and a bundled prompt. The explicit recipe below picks retained prompts and plain drafting instead:
 
 ```sh
 cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml
@@ -2195,77 +2094,44 @@ cli/target/release/vade bench --url "$VADE_API_URL" \
 cli/target/release/vade bench --self-test
 ```
 
-The prompt file holds one literal UTF-8 prompt per nonempty line. Keep the same
-prose, code and reasoning prompts between comparisons; the client cycles
-through them and never generates replacements. Concurrency 1 always uses the
-first prompt, so measure one-chat prose and code with separate retained files.
-`--bodies-dir` sends saved, unchanging request bodies from the shared-reader
-workload instead: 16 chats that share one long context, each asking for a
-separate response. That directory holds the shared context, and the complete
-requests sit in a `capture/` directory next to it.
+The prompt file holds one literal UTF-8 prompt per nonempty line. Keep the same prose, code and reasoning prompts between comparisons. The client cycles through them and never makes replacements. Concurrency 1 always uses the first prompt, so measure one-chat prose and code with separate retained files.
 
-For cold reading, add `--prefill-body tools/fixtures/probe-8192.json`,
-`--prefill-body-sha256 11869d33b6fe2411447a7c9fd34ef76895ca53017f7505e2d63ac77783df945f`
-and `--checkpoint-hash HASH`. It makes three uncached probes, requires exactly
-8,192 server-reported prompt tokens and checks the build and checkpoint
-identity. Those are three requests within one server start. For a performance
-claim, repeat after at least three fresh server starts per build and alternate
-A/B.
+`--bodies-dir` sends saved, unchanging request bodies from the shared-reader workload instead. That workload is 16 chats that share one long context, and each chat asks for a separate response. The directory holds the shared context. The complete requests are in a `capture/` directory next to it.
+
+For a cold read, add `--prefill-body tools/fixtures/probe-8192.json`, `--prefill-body-sha256 11869d33b6fe2411447a7c9fd34ef76895ca53017f7505e2d63ac77783df945f` and `--checkpoint-hash HASH`. The client then makes three uncached probes. It requires exactly 8,192 prompt tokens as the server reports them, and it checks the build and checkpoint identity. Those are three requests within one server start. For a performance claim, repeat after at least three fresh server starts per build, and alternate A and B.
 
 ### What the receipt records
 
-- The hash of each source file, and the hash of the exact compact UTF-8
-  request sent to the server.
-- The sampling settings every request sends explicitly: temperature 0, top-p
-  1, top-k 0, neutral penalties, cache off and thinking off. Drafting follows
-  the server default unless you pass `--draft plain` or `--draft strict`.
-- The server's sampling echo for every response. A response with no echo is
-  marked `sampling_source=request`, so the client never invents the settings
-  that took effect.
+- **Hashes.** The hash of each source file, and the hash of the exact compact UTF-8 request sent to the server.
+- **Sampling settings.** The settings that every request sends explicitly: temperature 0, top-p 1, top-k 0, neutral penalties, cache off and thinking off. Drafting follows the server default unless you pass `--draft plain` or `--draft strict`.
+- **The server's echo.** The server's sampling echo for every response. A response with no echo is marked `sampling_source=request`, so the client never invents the settings that took effect.
 
-The JSON receipt keeps the timing client's `schema_version`, `status`, `arms`,
-`cells`, `requests`, `prefill_8k`, `receipts`, sampling, identities, memory,
-observation and batch-log fields. The `.txt` file next to it gives readable
-results and response records. Failed or partial cells keep their records but
-publish no rate.
+The JSON receipt keeps these fields of the timing client: `schema_version`, `status`, `arms`, `cells`, `requests`, `prefill_8k`, `receipts`, sampling, identities, memory, observation and batch-log fields. The `.txt` file next to it gives readable results and response records. Failed or partial cells keep their records but publish no rate.
 
 ### How rates are computed
 
-Cohort throughput is all completion tokens divided by the time from the first
-request sent to the last one completed. `writing_tokens_per_s` uses the older
-scoreboard formula, `(completion_tokens - 1) * 1000 / (elapsed_ms - ttft_ms)`:
-every final completion token minus one. TTFT here counts the first nonempty
-answer, reasoning or tool-call data, so it can come before the first answer
-text. The receipt records `first_content_ms` on its own line. It leaves
-`answer_content_tokens_per_s` as null, because the server's final usage report
-does not say how many tokens came before the first answer text. Do not fill
-that gap by subtracting reasoning estimates or by counting streamed (SSE)
-chunks.
+Cohort throughput is all completion tokens divided by the time from the first request sent to the last one completed.
+
+`writing_tokens_per_s` uses the older scoreboard formula, `(completion_tokens - 1) * 1000 / (elapsed_ms - ttft_ms)`. That is every final completion token minus one. TTFT here counts the first nonempty answer, reasoning or tool-call data, so it can come before the first answer text. The receipt records `first_content_ms` on its own line.
+
+The receipt leaves `answer_content_tokens_per_s` as null. The final usage report of the server does not say how many tokens came before the first answer text. Do not fill that gap by a subtraction of reasoning estimates or by a count of streamed (SSE) chunks.
 
 ### Plain HTTP and drafting
 
-`vade bench` speaks plain HTTP, including through an existing local SSH
-tunnel. HTTPS is unsupported because the standard library has no TLS
-implementation; use an existing local HTTP tunnel or a trusted TLS terminator.
-Drafting-enabled servers are supported. Receipts keep each requested draft mode
-apart from the server-reported MTP depth and build SHA, and keep response
-observations separately. A reported depth of zero does not by itself prove
-drafting was off; only receipts where every request asked for plain are
-labeled drafting off. Neither the requested policy nor the server's reports
-independently prove that drafting took effect.
+`vade bench` speaks plain HTTP, also through an existing local SSH tunnel. HTTPS is not supported, because the standard library has no TLS implementation. Use an existing local HTTP tunnel or a trusted TLS terminator.
+
+Servers with drafting on are supported. Receipts keep each requested draft mode apart from the MTP depth and build SHA that the server reports. They keep response observations separately. A reported depth of zero does not by itself prove that drafting was off. Only receipts where every request asked for plain are labeled drafting off. Neither the requested policy nor the reports of the server prove by themselves that drafting took effect.
 
 ### Options
 
-Options carried over from the older timing client keep their names;
-`--draft plain|strict` is new. The table lists each option, its default and
-what it changes in the receipt.
+Options from the older timing client keep their names. `--draft plain|strict` is new. The table lists each option, its default and what it changes in the receipt.
 
-The A/B options alternate a baseline server (A) with a candidate (B). ABBA
-runs them A, B, B, A; ABA runs A, B, then A again (A′). Comparing the two A
-runs shows how much the baseline drifts on its own.
+The A/B options alternate a baseline server (A) with a candidate (B). ABBA runs them A, B, B, A. ABA runs A, B, then A again (A′). A comparison of the two A runs shows how much the baseline drifts on its own.
+
+<div align="center">
 
 | Option | Meaning or exception |
-| --- | --- |
+| :---: | :---: |
 | `-h`, `--help` | Show timing options without connecting. |
 | `--url URL` | Server base URL, with or without `/v1`; defaults to `VADE_API_URL` or the selected installation's endpoint; HTTP only. |
 | `--model ID` | Model sent and checked; defaults to `/health` model, falling back to `qwen3.8-flash-next-fp4-local`. |
@@ -2295,84 +2161,45 @@ runs shows how much the baseline drifts on its own.
 | `--api-key-file FILE` | Optional runtime Bearer credential file; `VADE_API_KEY_FILE` fallback remains. Credentials are excluded from receipts. |
 | `--self-test` | Small local mock-stream check; no Spark or model qualification. |
 
+</div>
+
 ### The older suite and the retired Python client
 
-The existing `vade-bench` crate is folded into the CLI as a library, so there
-is one command to run. `vade bench --suite` keeps its earlier decode,
-concurrency, cache, priority, long-prompt, follow-up and shared-system
-workloads; see [its guide](../engine/tools/bench/README.md) for those options.
-That suite uses a different, historical receipt format and workload, so for
-the current scoreboard choose the default timing protocol.
+The existing `vade-bench` crate is part of the CLI as a library, so there is one command to run. `vade bench --suite` keeps its earlier workloads: decode, concurrency, cache, priority, long prompts, follow-ups and shared system prompts. See [its guide](../engine/tools/bench/README.md) for those options. That suite uses a different, historical receipt format and workload. For the current scoreboard, choose the default timing protocol.
 
-The former Python client and its operational wrapper (shim) are retired. Their
-original files, and the evidence that the two clients matched on a real
-server, are kept outside this repository. A live check on a pair needs at
-least three runs of each client on identical inputs. A Mac mock check verifies
-parsing and receipt arithmetic, and supports no Spark speed claim.
+The former Python client and its operational wrapper (shim) are retired. Their original files, and the evidence that the two clients matched on a real server, are kept outside this repository. A live check on a pair needs at least three runs of each client on identical inputs. A mock check on a Mac verifies the parsing and the receipt arithmetic. It supports no claim about Spark speed.
 
 ## Rented cloud GB10 VMs
 
-Leave time for the model download before you benchmark rented VMs. The
-verified FP4-Local snapshot is about **102 GB**. On 2026-10-24, rented GB10 VMs
-downloaded from Hugging Face at **8 to 22 MB/s each**: about 80 minutes for one VM
-at the top of that range, and over three hours at the bottom. For the cloud
-cards we downloaded and verified the snapshot on one VM, copied it to the other
-over the 200G link between them, and checked its SHA-256 again there. Without
-such a link, copy the verified folder over the provider's network instead and
-run the [INSTALL.md step 3](../INSTALL.md#step-3-get-the-model) manifest check
-on the copy; the step 3 helper always fetches and verifies the whole snapshot.
+Leave time for the model download before you benchmark rented VMs. The verified FP4-Local snapshot is about **102 GB**. On 2026-10-24, rented GB10 VMs downloaded from Hugging Face at **8 to 22 MB/s each**. That is about 80 minutes for one VM at the top of that range, and over three hours at the bottom.
 
-In container-based VMs, the host page cache that holds the freshly downloaded
-files can be hidden from the container's view of memory. GB10 memory is shared
-by the CPU and GPU, so the engine's memory check can then refuse to start
-(`Requested size does not fit`, with only about 1 GiB available), even though
-the host could reclaim that cache. Main `2c64d0a`, part of v0.1.0, counts that
-cache as free (Linux `MemAvailable`); the cloud cards above predate it and set
-an explicit budget instead.
+For the cloud cards, we downloaded and verified the snapshot on one VM. We copied it to the other VM over the 200G link between them and checked its SHA-256 again there. Without such a link, copy the verified folder over the provider's network instead. Then run the [INSTALL.md step 3](../INSTALL.md#step-3-get-the-model) manifest check on the copy. The step 3 helper always fetches and verifies the whole snapshot.
+
+In container-based VMs, the container's view of memory can hide the host page cache that holds the newly downloaded files. The CPU and GPU of the GB10 share memory. So the memory check of the engine can then refuse to start (`Requested size does not fit`, with only about 1 GiB available), even though the host could reclaim that cache. Main `2c64d0a`, part of v0.1.0, counts that cache as free (Linux `MemAvailable`). The cloud cards above predate it and set an explicit budget instead.
 
 ## Client time and server time
 
-Client time is the wait seen by the program making the request. Server time is
-the work done inside one chosen part of the engine. Always say which boundary
-you measured.
+Client time is the wait that the program which makes the request sees. Server time is the work done inside one chosen part of the engine. Always say which boundary you measured.
 
-| Metric | Definition | What it includes |
-| --- | --- | --- |
-| Client time to first token (TTFT) | First observable generated stream data minus request-send time | Connection, request transfer, queueing, prompt processing and transfer of the first generated data. The client accepts nonempty answer text, reasoning text or tool-call data; an empty stream header does not count. |
-| Total client throughput | Sum of server `usage.completion_tokens` divided by the interval from the first request sent to the last `[DONE]` received | The whole cohort, including reading, queueing and response transfer. Adding individual chat rates does not produce this metric. |
-| Older RigMark one-chat writing rate | `(completion_tokens - 1) / (last nonempty output event time - first nonempty output event time)` | Answer text or reasoning counts as output. It excludes the initial wait and the tail from the last output event through `[DONE]`. |
-| Legacy one-chat scoreboard writing rate (default `vade bench`, and our earlier post-install check) | `(completion_tokens - 1) * 1000 / (elapsed_ms - ttft_ms)` | TTFT counts the first nonempty answer, reasoning or tool-call output. The denominator ends at stream completion after `[DONE]`, including terminal response-transfer overhead. It excludes the initial wait. |
-| Answer-content writing rate | `answer_content_tokens_per_s`, currently null | First answer arrival is recorded as `first_content_ms`, but final completion usage does not identify the token count before that arrival. A content clock alone cannot establish an answer-only rate. |
-| Server `prefill_ms` | Engine time spent processing the prompt | It excludes time before the engine admits the request and excludes client transfer. |
-| Server `admission_to_first_logits_ms` | First model scores minus engine admission time | It includes work after admission; it can miss a wait before admission. |
-| Server decode-step time | Time spent advancing the active decode group | It is a diagnostic, not a client rate. State whether ramp-up, partial groups, drain and host/RDMA waiting are included. |
+- **Client time to first token (TTFT).** It is the first observable stream data minus the time the request was sent. It includes the connection, the request transfer, the queue, the prompt processing and the transfer of the first generated data. The client accepts nonempty answer text, reasoning text or tool-call data. An empty stream header does not count.
+- **Total client throughput.** It is the sum of the server's `usage.completion_tokens` divided by the interval from the first request sent to the last `[DONE]` received. It includes the whole cohort, with reading, queueing and response transfer. A sum of individual chat rates does not give this metric.
+- **Older RigMark one-chat writing rate.** It is `(completion_tokens - 1) / (last nonempty output event time - first nonempty output event time)`. Answer text or reasoning counts as output. It excludes the initial wait and the tail from the last output event through `[DONE]`.
+- **Legacy one-chat scoreboard writing rate.** The default `vade bench` and our earlier post-install check use it. It is `(completion_tokens - 1) * 1000 / (elapsed_ms - ttft_ms)`. TTFT counts the first nonempty answer, reasoning or tool-call output. The denominator ends at stream completion after `[DONE]`, including the transfer overhead of the end of the response. It excludes the initial wait.
+- **Answer-content writing rate.** It is `answer_content_tokens_per_s`, which is null today. The client records the arrival of the first answer as `first_content_ms`. But the final usage report does not give the token count before that arrival. A content clock alone cannot give an answer-only rate.
+- **Server `prefill_ms`.** It is the engine time spent on the prompt. It excludes the time before the engine admits the request, and it excludes the client transfer.
+- **Server `admission_to_first_logits_ms`.** It is the time of the first model scores minus the engine admission time. It includes the work after admission. It can miss a wait before admission.
+- **Server decode-step time.** It is the time spent to advance the active decode group. It is a diagnostic, not a client rate. State whether it includes ramp-up, partial groups, drain and host or RDMA waits.
 
-`vade bench` implements the Rust client definitions; see
-[the Rust benchmark library](../engine/tools/bench/README.md). Count output
-tokens from final server usage. A streamed event can carry several tokens, so
-counting events as tokens is invalid unless that boundary has been checked for
-the tested server.
+`vade bench` implements the Rust client definitions. See [the Rust benchmark library](../engine/tools/bench/README.md). Count output tokens from the final usage of the server. A streamed event can carry several tokens. So a count of events as tokens is not valid, unless that boundary has been checked for the tested server.
 
-The former Python client is retired from the repository. Its source identity
-and the post-install check's writing method were recorded in the retired receipt
-`night-2026-10-11.json`, which is no longer published
-([receipt status](../bench/receipts/README.md)). That receipt also holds two
-lessons about timing:
+The former Python client is retired from the repository. Its source identity and the writing method of the post-install check were recorded in the retired receipt `night-2026-10-11.json`, which is no longer published ([receipt status](../bench/receipts/README.md)). That receipt also holds two lessons about timing:
 
-- The pinned RigMark estimator takes its token count from final usage and its
-  time interval from streamed events. The retained run reported one token per
-  output event, but buffering can still limit how precisely the client times
-  it. Its interval also ends at a different point from the post-install
-  check's, which runs through `[DONE]`.
-- The earlier RigMark run showed a wait, after a finished answer, before the
-  engine admitted (accepted) the next request. A server admission timer could
-  therefore look short while the next client waited much longer. Keep both
-  clocks in follow-up and agent-turn receipts.
+- **Two clocks in RigMark.** The pinned RigMark estimator takes its token count from the final usage and its time interval from streamed events. The retained run reported one token per output event, but buffering can still limit how precisely the client times it. Its interval also ends at a different point from that of the post-install check, which runs through `[DONE]`.
+- **A wait before admission.** The earlier RigMark run showed a wait after a finished answer, before the engine admitted (accepted) the next request. So a server admission timer could look short while the next client waited much longer. Keep both clocks in follow-up and agent-turn receipts.
 
 ## Request settings and cache state
 
-Send each sampling field explicitly. This example asks for plain drafting;
-current `vade bench` leaves out the draft field unless you pass `--draft`:
+Send each sampling field explicitly. This example asks for plain drafting. Current `vade bench` leaves out the draft field unless you pass `--draft`:
 
 ```json
 {
@@ -2389,171 +2216,95 @@ current `vade bench` leaves out the draft field unless you pass `--draft`:
 }
 ```
 
-Set the output cap explicitly too. Record the seed you sent, or the effective
-seed the server returns. From every response, save the effective sampling,
-thinking, draft mode, MTP depth and actual draft-use fields. FP4-Local uses
-greedy sampling when no sampling field is supplied. If any sampling field is
-supplied, the unspecified ones come from the checkpoint's
-`generation_config.json`. What a request asked for is not proof of the
-settings that took effect. See the
-[request parser](../engine/crates/serve/src/protocol.rs).
+Set the output cap explicitly too. Record the seed that you sent, or the effective seed that the server returns. From every response, save the fields for the effective sampling, thinking, draft mode, MTP depth and actual draft use.
 
-The older RigMark body, in the retired receipt `night-2026-10-11.json`, sent
-temperature, top-p and seed. Its effective echo filled top-k and neutral
-penalties from defaults; temperature zero made the run greedy. The receipt
-disclosed this rather than presenting it as compliance with the later
-all-fields-explicit protocol. That run also used a raised ceiling on streamed
-output bytes.
+FP4-Local uses greedy sampling when a request supplies no sampling field. If a request supplies any sampling field, the fields it does not give come from the checkpoint's `generation_config.json`. What a request asked for is not proof of the settings that took effect. See the [request parser](../engine/crates/serve/src/protocol.rs).
 
-Measure cache-off and cache-hit workloads separately. For cache-off timing,
-check that usage and the prefix-reuse header both show zero reused tokens. For
-a hit, keep the prime request, the replay request, the restored-token count,
-the cache budget and the eviction state. Similar text is not proof of a cache
-hit. Cache-accounting failure and answer-byte equality are separate results.
-The same retired receipt recorded both for a QSA candidate build. QSA is the
-model's indexed attention, which reads only the token blocks that a small
-indexer selects.
+The older RigMark body, in the retired receipt `night-2026-10-11.json`, sent temperature, top-p and seed. Its effective echo filled top-k and neutral penalties from the defaults. Temperature zero made the run greedy. The receipt disclosed this. It did not present it as compliance with the later protocol, in which every field is explicit. That run also used a raised ceiling on streamed output bytes.
 
-“Cold” in the reading rows means an uncached prompt with weights already
-loaded. It does not include model download, server build or weight loading.
-Record whether it was the first request after startup or a later uncached
-request. A fresh server start and another probe on the same server are
-different kinds of repetition.
+Measure cache-off and cache-hit workloads separately.
+
+- **Cache off.** Check that the usage and the prefix-reuse header both show zero reused tokens.
+- **Cache hit.** Keep the prime request, the replay request, the restored-token count, the cache budget and the eviction state. Similar text is not proof of a cache hit.
+
+A failure of cache accounting and the equality of answer bytes are separate results. The same retired receipt recorded both for a QSA candidate build. QSA is the model's indexed attention, which reads only the token blocks that a small indexer selects.
+
+"Cold" in the reading rows means an uncached prompt with the weights already loaded. It does not include the model download, the server build or the weight load. Record whether it was the first request after startup or a later uncached request. A fresh server start and another probe on the same server are different kinds of repetition.
 
 ## Repetition, noise and ties
 
-To compare a change, use the same Sparks and fresh servers that take turns
-between the baseline and the candidate. The current rule asks for at least
-three fresh starts per build. Keep the workload, client, context, output length
-and sampling fixed. Report medians and full ranges, and name any warmups or
-discarded runs. Overlapping ranges are a **tie**. A shorter median alone does
-not show a speed gain.
+To compare a change, use the same Sparks and fresh servers that take turns between the baseline and the candidate. The current rule asks for at least three fresh starts per build. Keep the workload, client, context, output length and sampling fixed. Report medians and full ranges, and name any warmups or discarded runs. Overlapping ranges are a **tie**. A shorter median alone does not show a speed gain.
 
-Record both the requested and the actual output lengths. A natural early stop
-is useful evidence about that answer, but it cannot count toward a
-fixed-output timing cell. Report failures and exclusions alongside the
-eligible runs. Do not rebuild a missing client rate from a GPU step timer.
+Record both the requested and the actual output lengths. A natural early stop is useful evidence about that answer, but it cannot count toward a fixed-output timing cell. Report failures and exclusions with the eligible runs. Do not build a missing client rate again from a GPU step timer.
 
-The retired receipt `night-2026-10-11.json` holds two different kinds of
-evidence. Its QSA comparison has eligible fresh-server results for the
-retained shared-reader workload, but its other prompt cells ended early, so
-its full timing matrix is incomplete. Its clean-install comparison measured
-against historical results from another pair, with a stated historical noise
-rule, and its raw cold-prompt ranges did not overlap.
+The retired receipt `night-2026-10-11.json` holds two different kinds of evidence:
+
+- **The QSA comparison.** It has eligible fresh-server results for the retained shared-reader workload. But its other prompt cells ended early, so its full timing matrix is incomplete.
+- **The clean-install comparison.** It measured against historical results from another pair, with a stated historical noise rule. Its raw cold-prompt ranges did not overlap.
 
 ## Columns for eight Sparks
 
-Eight Sparks form one ring ([Eight Sparks](eight-sparks.md)). A run uses an
-arc of that ring: neighbors in cable order, rank 0 first. Our version 2 cards
-(the card format we call RigMark v2; it is not a release of the public
-RigMark project) add the columns below. **No value is measured yet.** Every
-cell in these columns is to be measured.
+Eight Sparks form one ring ([Eight Sparks](eight-sparks.md)). A run uses an arc of that ring: neighbors in cable order, rank 0 first. Our version 2 cards add the columns below. We call that card format RigMark v2. It is not a release of the public RigMark project. **No value is measured yet.** Every cell in these columns is still to be measured.
 
-| Column | Sparks with a server | Arc in rank order | Path in this build | The other Sparks |
-| --- | ---: | --- | --- | --- |
-| **8 of 8** | 8 | `eight`: spark-1 to spark-8, rank 0 spark-1 | FP4-Local layer chain of eight | none |
-| **4 of 8** | 4 | `quad-a`: spark-1 to spark-4, rank 0 spark-1; then `quad-b`: spark-5 to spark-8, rank 0 spark-5 | FP4-Local tensor split in parts over RDMA (layer chain of four over TCP); FP8 four-way TP on a path | no server |
-| **2 × 4 of 8** | 8 | `quad-a` and `quad-b` at the same time | two FP4-Local four-Spark servers (the split in parts over RDMA, chains over TCP) | none |
-| **FP8, 8 of 8** | none | none | refused: `FP8 needs 2, 4, or 6 machines` ([cli/src/config.rs](../cli/src/config.rs)) | not measured |
+- **8 of 8.** Eight Sparks run a server. The arc in rank order is `eight`: spark-1 to spark-8, rank 0 spark-1. The path in this build is the FP4-Local layer chain of eight. No other Sparks are left.
+- **4 of 8.** Four Sparks run a server. The arcs in rank order are `quad-a` (spark-1 to spark-4, rank 0 spark-1), then `quad-b` (spark-5 to spark-8, rank 0 spark-5). The path in this build is the FP4-Local tensor split in parts over RDMA (a layer chain of four over TCP), and FP8 four-way TP on a path. The other Sparks run no server.
+- **2 × 4 of 8.** Eight Sparks run two servers, `quad-a` and `quad-b`, at the same time. The path in this build is two FP4-Local four-Spark servers (the split in parts over RDMA, chains over TCP). No other Sparks are left.
+- **FP8, 8 of 8.** This column has no server and no arc. The CLI refuses it with `FP8 needs 2, 4, or 6 machines` ([cli/src/config.rs](../cli/src/config.rs)). It is not measured.
 
-**What each column measures.** The same cells as the other columns, on the
-same build, checkpoint and request bodies: prose, code and structured output
-with one chat, C1, C4, C8 and C16 total rates, cold 8K and 32K first-token
-times, and the largest context that the server reports. Each cell gives
-drafting ON and OFF, each from two or more fresh server starts, with the
-spread between the starts.
+**What each column measures.** It measures the same cells as the other columns, on the same build, checkpoint and request bodies:
+
+- **One chat.** It measures prose, code and structured output with one chat.
+- **Chats at once.** It measures the C1, C4, C8 and C16 total rates.
+- **First token.** It measures the cold 8K and 32K first-token times.
+- **Context.** It records the largest context that the server reports.
+
+Each cell gives drafting on and off, each from two or more fresh server starts, with the spread between the starts.
 
 **Rules for these columns.**
 
-- **4 of 8** gives one value per arc, `quad-a` and `quad-b`, not a mean. The
-  difference between them is the arc-to-arc spread.
-- **2 × 4 of 8** runs the same cell on both servers at the same time. A
-  multi-chat cell gives the sum of the two servers' total rates and each
-  server's value beside it. A one-chat cell gives each server's value.
-- **Token IDs.** For the same request and settings, each column must give the
-  same token IDs as the one-, two- and four-Spark columns. The card states
-  this from the saved token ID hashes, as `vade verify` records them
-  (`reference_ids_sha256`).
-- **Shape.** A 4 of 8 arc and four neighbors of a six-Spark ring are both a
-  path of four over three cables. A difference between those two columns is a
-  machine or cable difference, not a shape difference. That difference is to
-  be measured.
-- Each card records the arc as the labels in rank order, with the revision,
-  hardware, checkpoint identity, settings and raw results. It names no
-  machine and no address.
+- **4 of 8.** It gives one value per arc, `quad-a` and `quad-b`, not a mean. The difference between them is the spread from arc to arc.
+- **2 × 4 of 8.** It runs the same cell on both servers at the same time. A multi-chat cell gives the sum of the total rates of the two servers, with the value of each server next to it. A one-chat cell gives the value of each server.
+- **Token IDs.** For the same request and settings, each column must give the same token IDs as the one-, two- and four-Spark columns. The card states this from the saved token ID hashes, as `vade verify` records them (`reference_ids_sha256`).
+- **Shape.** A 4 of 8 arc and four neighbors of a six-Spark ring are both a path of four over three cables. A difference between those two columns is a machine or cable difference, not a shape difference. That difference is still to be measured.
+- **Records.** Each card records the arc as the labels in rank order, with the revision, hardware, checkpoint identity, settings and raw results. It names no machine and no address.
 
 ## Build, hardware and memory identity
 
-A useful receipt records:
+A useful receipt records these items:
 
-- the checkpoint revision and hash scope;
-- the tokenizer and chat-template identity;
-- the source commit and its dirty state (whether there were uncommitted
-  changes);
-- the server, PTX (GPU kernel code) and client hashes;
-- toolchains and driver;
-- rank count and topology;
-- context and cache budgets;
-- prompt identity, output count, concurrency and arrival pattern.
+- **Checkpoint.** It records the checkpoint revision and the hash scope.
+- **Template.** It records the tokenizer and chat-template identity.
+- **Source.** It records the source commit and its dirty state (whether there were uncommitted changes).
+- **Binaries.** It records the server, PTX (GPU kernel code) and client hashes.
+- **Tools.** It records the toolchains and the driver.
+- **Topology.** It records the rank count and the topology.
+- **Budgets.** It records the context and cache budgets.
+- **Workload.** It records the prompt identity, output count, concurrency and arrival pattern.
 
-Record clocks, temperature and competing traffic when you have them. Keep the
-exact memory bytes for each rank with each rate. Mark missing fields as
-unmeasured, and never fill them in from an assumption.
+Record the clocks, the temperature and any competing traffic when you have them. Keep the exact memory bytes for each rank with each rate. Mark missing fields as unmeasured, and never fill them in from an assumption.
 
-Profiled runs explain where the time goes. Publish unprofiled timing
-separately: profiling overhead and overlapping spans do not make a performance
-receipt. Ranks run at the same time, so adding rank times does not give wall
-time.
+Profiled runs explain where the time goes. Publish unprofiled timing separately, because profiling overhead and overlapping spans do not make a performance receipt. Ranks run at the same time, so a sum of rank times does not give wall time.
 
 ## What these results do not show
 
-- These rows are not a matched speed comparison with another engine.
-- Writing speed and capped concurrent generation say nothing about useful
-  coding tasks completed, harness response time after tools, or agent
-  reliability.
-- Several things are checked separately and are not all shown by these
-  receipts: native repeatability (the same token IDs on every run), agreement
-  with a previous build, model quality, and whether a batch keeps running when
-  one of its rows is rejected. The default builds named here still skip that
-  last check, which deliberately feeds a bad row into a batch.
-- Neither a tested context setting nor a longer configured window proves
-  long-memory quality at every length. The October 12 quality evidence in the
-  [historical section](#historical-fp8-measurements) is still partial. The
-  failed context candidate was a historical guard (retired receipt
-  `context-candidate.json`).
-- A server with MTP enabled can fall back to plain decoding. In the extra run
-  that followed the post-install check, no drafting actually happened, so that run
-  supports no claim of a speculative-decoding speedup (retired receipt
-  `night-2026-10-11.json`).
-- A Mac build check says nothing about GPU arithmetic or speed.
+- **No matched comparison.** These rows are not a matched speed comparison with another engine.
+- **No task results.** Writing speed and capped concurrent generation say nothing about useful coding tasks completed, harness response time after tools, or agent reliability.
+- **Separate checks.** These receipts do not show all of the separate checks: native repeatability (the same token IDs on every run, with the same settings), agreement with a previous build, model quality, and whether a batch keeps running when one of its rows is rejected. The default builds named here still skip that last check, which deliberately feeds a bad row into a batch.
+- **Long-memory quality.** Neither a tested context setting nor a longer configured window proves long-memory quality at every length. The October 12 quality evidence in the [historical section](#historical-fp8-measurements) is still partial. The failed context candidate was a historical guard (retired receipt `context-candidate.json`).
+- **Drafting speedup.** A server with MTP on can fall back to plain decoding. In the extra run after the post-install check, no drafting happened. So that run supports no claim of a speedup from speculative decoding (retired receipt `night-2026-10-11.json`).
+- **Mac builds.** A Mac build check says nothing about GPU arithmetic or speed.
 
-Repeatability requires identical token IDs for the same request and settings
-across runs and Sparks, including plain and strict drafting.
-[Architecture](architecture.md#exactness-and-model-quality) explains the full
-byte-for-byte contract and the quality gates that arithmetic changes must pass.
+Repeatability requires identical token IDs for the same request and settings across runs and Sparks, including plain and strict drafting. [Architecture](architecture.md#exactness-and-model-quality) explains the full byte-for-byte contract and the quality gates that arithmetic changes must pass.
 
 ## Where the receipts are, and older comparisons
 
-Start with the tested setup and timing instructions in
-[INSTALL.md](../INSTALL.md). The
-[timing tools guide](../tools/README.md#timing-the-installed-server) describes
-the client. Measure only on Sparks with no other GPU work running.
+Start with the tested setup and timing instructions in [INSTALL.md](../INSTALL.md). The [timing tools guide](../tools/README.md#timing-the-installed-server) describes the client. Measure only on Sparks with no other GPU work running.
 
-The older public FP8 summaries have been removed; the
-[historical section](#historical-fp8-measurements) below still cites some of
-them as retired receipts. The tables name their source cards and timing
-records. Sanitized receipts for the 2026-10-24 tables are in
-[bench/receipts/2026-10-24](../bench/receipts/2026-10-24/README.md). Receipts
-for the later tables are not published here. The 2026-10-24 receipts are cards,
-READMEs and small JSON receipts, with hostnames, addresses and private paths
-replaced by neutral tokens. Original prompts, replies, logits and the full card
-JSON receipts are not included. See the
-[receipt status](../bench/receipts/README.md).
+The older public FP8 summaries are removed. The [historical section](#historical-fp8-measurements) below still cites some of them as retired receipts. The tables name their source cards and timing records.
 
-[Historical engine comparisons](../engine/docs/benchmarks.md) cover older
-models and workloads. Read their conditions before you compare rates. Use the
-explicit methods and limits that come with each receipt; a historical result
-says nothing about current-build performance.
+Sanitized receipts for the 2026-10-24 tables are in [bench/receipts/2026-10-24](../bench/receipts/2026-10-24/README.md). Receipts for the 2026-10-25 to 2026-10-30 tables are not published here. The 2026-10-24 receipts are cards, READMEs and small JSON receipts. Neutral tokens replace the hostnames, addresses and private paths. The original prompts, replies, logits and the full card JSON receipts are not included. See the [receipt status](../bench/receipts/README.md).
+
+[Historical engine comparisons](../engine/docs/benchmarks.md) cover older models and workloads. Read their conditions before you compare rates. Use the explicit methods and limits that come with each receipt. A historical result says nothing about the performance of the current build.
 
 ## Historical FP8 measurements
 

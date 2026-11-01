@@ -9,9 +9,10 @@ Spark. None is published yet, so today it builds from source. You start with
 one Spark and no other computer.
 
 Vade also supports the FP8 checkpoint, **Qwen/Qwen3.8-Flash-Next-FP8**, on
-2, 4 or 6 linked Sparks. Its weights do not fit on one Spark. It uses
-[Route B](#route-b-from-a-controller) and its own config, and it starts with
-`vade up --fp8`. See [Install FP8 on 2, 4 or 6 Sparks](docs/install-fp8.md).
+2, 4 or 6 linked Sparks. Its weights do not fit on one Spark. FP8 uses
+[Route B](#route-b-from-a-controller) and its own config. It starts with
+`vade up --fp8`. [Install FP8 on 2, 4 or 6 Sparks](docs/install-fp8.md) has
+the steps.
 
 **How long it takes.** We timed the source steps of this page on a DGX Spark
 with no Rust, no checkout and no Vade files. The run was on 2026-10-28 at
@@ -36,21 +37,25 @@ On one Spark, use the [quick start](#quick-start-on-one-spark). It also
 downloads the model when the Spark does not have it. For the long form, do
 steps 1 to 3: prerequisites, the code and the model. Then pick a route:
 
-- [Route A](#route-a-on-this-spark) runs everything on the Spark itself.
+- **[Route A](#route-a-on-this-spark).** Everything runs on the Spark itself.
   Start here.
-- [Route B](#route-b-from-a-controller) adds a controller: a second Linux or
-  macOS computer that drives the Spark over SSH.
-- [Linked Sparks](#two-and-more-sparks) build on Route B.
+- **[Route B](#route-b-from-a-controller).** A controller drives the Spark
+  over SSH. The controller is a second Linux or macOS computer.
+- **[Linked Sparks](#two-and-more-sparks).** This route builds on Route B.
 
 This guide explains each new term where it first appears. The
 [glossary](docs/GLOSSARY.md) has the rest.
 
-On one Spark, the steps are: build Vade with `scripts/install.sh`, get the
-model with `vade pull`, then run `vade launch`. From a controller, the steps
-are: get `vade`, then run `vade setup`. Setup asks a few questions, writes
-what it needs, then runs `vade install`, `vade up` and `vade doctor`. Each
-step prints what to do when it fails, and a second run is safe. [Install and flows](docs/design/install-and-flows.md)
-shows the whole flow on one page. If you are an AI agent, read the
+On one Spark, there are three steps. Build Vade with `scripts/install.sh`, get
+the model with `vade pull`, and run `vade launch`.
+
+From a controller, there are two steps. Get `vade`, and run `vade setup`.
+Setup asks a few questions and writes what it needs. Then it runs
+`vade install`, `vade up` and `vade doctor`.
+
+Each step prints what to do when it fails. You can run a step again safely.
+[Install and flows](docs/design/install-and-flows.md) shows the whole flow on
+one page. If you are an AI agent, read the
 [agent quickstart](docs/agents/quickstart.md).
 
 ## Quick start on one Spark
@@ -111,8 +116,8 @@ current, then runs `vade up` and `vade doctor`.
 ### For a script or an agent
 
 The Vade steps ask no questions. Each command exits 0 on success and 1 on a
-failure. A failure prints its cause and a next step (with `--json`, inside
-the JSON object):
+failure. A failure prints its cause and a next step. With `--json`, the cause
+and the next step are inside the JSON object:
 
 ```sh
 git clone --branch main https://github.com/wappy-x/vade.git "$HOME/vade"
@@ -166,13 +171,15 @@ download. On 2026-10-30, on one Spark with the model on disk, `install.sh`
 took 227.7 s with no Rust (main `0bad2e6`). With Rust already installed and
 `--launch`, it printed `Install complete` at 209.4 s (main `54bcf05`).
 
-**After launch.** Chat can edit files in the folder where it opens. So ask it
-only to say hello, then type `/exit`. The engine keeps running. Run later
-commands by their full path, `"$HOME/vade/cli/target/release/vade"`, or add
-that folder to `PATH`. Then `up` starts the engine without chat. `chat`
-connects again. `down` stops this installation's engine. When you run
-`launch` from a script without a terminal, it prints readiness and exits. The
-engine keeps running.
+**After launch.** Chat can edit files in the folder where it opens. For this
+first test, ask it only to say hello. Then type `/exit`. The engine keeps
+running.
+
+Run later commands by their full path, `"$HOME/vade/cli/target/release/vade"`,
+or add that folder to `PATH`. `vade up` starts the engine without chat.
+`vade chat` connects again. `vade down` stops this installation's engine.
+When you run `vade launch` from a script without a terminal, it prints
+readiness and exits. The engine keeps running.
 
 **If something goes wrong:**
 
@@ -194,28 +201,28 @@ later command.
 ## Before you start
 
 Once the CLI is built, run `vade doctor` before `vade up`. It checks the
-binary, model files, memory, driver, links, ports and disk, and it shows the
-four default settings. Each failed check names its fix. A controller checks
-the active Sparks, or the Sparks that `vade up` would select, over the same
-SSH path.
+binary, the model files, the memory, the driver, the links, the ports and the
+disk. It also shows the four default settings. Each failed check names its
+fix. A controller checks the active Sparks, or the Sparks that `vade up` would
+select, over the same SSH path.
 
 You need a DGX Spark (NVIDIA GB10) running Linux `aarch64`. `nvidia-smi` must
 work, and the GPU must be idle.
 
 We tested on the **580.x driver series**. The v0.1.0 benchmark receipts
-record 580.x drivers, and the install replay (our scripted run-through of
-this page) ran **580.178.04**. That is the version we tested, not a minimum.
+record 580.x drivers. The install replay, our scripted run of this page, used
+**580.178.04**. That is the version we tested, not a minimum.
 
-One Spark needs no fabric cable (the direct high-speed cable between Sparks)
-and no RDMA setup (the fast memory-to-memory transport that linked Sparks use).
+One Spark needs no fabric cable and no RDMA setup. The fabric cable is the
+direct high-speed cable between linked Sparks.
 
 ### Disk space
 
 The model needs **102,262,310,289 bytes** (102.26 GB / 95.24 GiB). That is
-the complete checkpoint (the model's published files, including its
-configuration and tokenizer files) at one pinned revision. The
+the complete checkpoint at one pinned revision, with its configuration and
+tokenizer files. The
 [committed SHA256 manifest](cli/examples/qwen3.8-flash-next-fp4-local.sha256)
-lists every file, and we checked its sizes against the
+lists every file. We checked its sizes against the
 [publisher's file list](https://huggingface.co/api/models/nvidia/Qwen3.8-Flash-Next-FP4-Local/tree/b9ce18a6887e18c089fdea8509a33e63429a3300?recursive=true)
 for that revision.
 
@@ -226,14 +233,14 @@ download caches. Before it starts, the launcher checks for free space:
 - **1 GiB free where the model lives**
 - **9 GiB free with the model already there**, if both are on the same disk
 
-These are minimum checks, not the most disk Vade will use.
+These checks are minimums. Vade can use more disk than this.
 
-For a rough idea, one of our source installs used **0.72 GiB** for the
-checkout, the build output and a fresh `VADE_HOME` (Vade's private folder,
-`~/.vade` by default). The Rust compilers and the model were already
-installed, so that figure leaves out Rust and the download caches, and it isn't
-the most an install can use at once. We haven't measured disk use with a fresh
-toolchain and its downloads.
+As an example, one of our source installs used **0.72 GiB** for the checkout,
+the build output and a fresh `VADE_HOME`. `VADE_HOME` is Vade's private
+folder, `~/.vade` by default. The Rust compilers and the model were already
+installed. So that figure leaves out Rust and the download caches. It is also
+not the most that an install can use at once. We have not measured disk use
+with a fresh toolchain and its downloads.
 
 ## Supported systems
 
@@ -253,12 +260,12 @@ the details.
 
 ### From a Windows computer
 
-Windows can't run the engine or build the `vade` CLI, but it can still drive a
-Spark. There are two ways.
+Windows cannot run the engine or build the `vade` CLI. It can still drive a
+Spark in two ways.
 
-**Route A over SSH.** This is the one to use. Windows 10 and 11 include an
-OpenSSH client, so open PowerShell or Windows Terminal, run
-`ssh you@spark-address`, and follow [Route A](#route-a-on-this-spark) in that
+**Route A over SSH.** We recommend this way. Windows 10 and 11 include an
+OpenSSH client. Open PowerShell or Windows Terminal and run
+`ssh you@spark-address`. Then follow [Route A](#route-a-on-this-spark) in that
 session. Everything runs on the Spark, and Windows is only the terminal.
 
 To reach the API from a program on Windows, forward the port when you connect:
@@ -271,19 +278,20 @@ While that session stays open, `http://127.0.0.1:18080/v1` on Windows reaches
 the engine on the Spark. If `vade status` shows a different port, use that one
 on both sides.
 
-**A controller inside WSL 2.** WSL 2 runs a real Linux, usually `x86_64`, and
+**A controller inside WSL 2.** WSL 2 runs a real Linux, usually on `x86_64`.
 Route B supports Linux `x86_64` controllers. So far we have only type-checked
 this path: `cargo check --all-targets --target x86_64-unknown-linux-gnu`
 passes for the CLI and the harness. Nobody has built, linked or run a
 controller inside WSL 2 yet. If you try it, follow
-[Route B](#route-b-from-a-controller) from the WSL shell, with your SSH keys
+[Route B](#route-b-from-a-controller) from the WSL shell. Keep your SSH keys
 inside WSL.
 
 **Native Windows** is not supported. The CLI and the harness use the Unix
-parts of Rust's standard library (file permissions, process groups, file
-descriptors), and so do two engine crates the CLI links (the model reader and
-the benchmark client). None of them compile for `x86_64-pc-windows-msvc`.
-Starting `ssh` and `rsync` from a native Windows build has never been tried.
+parts of Rust's standard library: file permissions, process groups and file
+descriptors. Two engine crates that the CLI links use them too: the model
+reader and the benchmark client. None of these compile for
+`x86_64-pc-windows-msvc`. Nobody has tried to start `ssh` and `rsync` from a
+native Windows build.
 
 ## Step 1: prerequisites
 
@@ -300,7 +308,7 @@ needs host Rust 1.99.0. Route A bundle users with an existing verified
 checkpoint can skip Rust setup.
 
 <a id="1-prepare-the-sparks"></a>
-On the Spark, install any missing Ubuntu packages (this needs `sudo`):
+On the Spark, install any missing Ubuntu packages. This step needs `sudo`:
 
 ```sh
 sudo apt-get update && sudo apt-get install -y build-essential git curl rsync zstd
@@ -316,14 +324,16 @@ nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader
 command -v cc git ssh rsync curl sha256sum find sort nvidia-smi
 ```
 
-You should see `aarch64`, GB10 and no running compute application. Run
-`nvidia-smi` alone too: its header must show `CUDA Version: 13.0` or newer. Each of
-the 9 names in the `command -v` line must print a path; nothing printed means
-that tool is missing. Install any missing one with `apt-get` (`ssh` is in
-`openssh-client`). If
-something else is using the GPU, stop it through its own launcher first. Leave
-driver and system changes to the Spark's administrator; Vade does not make
-them.
+The output must show `aarch64`, GB10 and no running compute application. Also
+run `nvidia-smi` alone. Its header must show `CUDA Version: 13.0` or newer.
+
+Each of the 9 names in the `command -v` line must print a path. A name with no
+path is a missing tool. Install any missing tool with `apt-get`. The `ssh`
+command is in the `openssh-client` package.
+
+If something else uses the GPU, stop it through its own launcher first. Vade
+does not change the driver or the system. Leave those changes to the Spark's
+administrator.
 
 <a id="2-install-the-pinned-rust-compilers"></a>
 <a id="install-rust-source-builds-only"></a>
@@ -331,9 +341,9 @@ them.
 
 The engine is written in Rust and has no third-party Rust dependencies.
 
-If `~/.cargo/bin/rustup` already exists, skip to the toolchains below. (It may
-be installed even when a new shell can't find it, because the installer below
-leaves your shell startup files alone.) Otherwise, download the installer and
+If `~/.cargo/bin/rustup` already exists, skip to the toolchains below. It can
+be there even when a new shell cannot find it, because the rustup installer
+leaves your shell startup files alone. Otherwise, download the installer and
 read it before you run it:
 
 ```sh
@@ -361,17 +371,18 @@ Source builds also need the pinned GPU toolchain:
 rustup toolchain install nightly-2026-10-01 --profile minimal --no-self-update --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda
 ```
 
-`--no-self-update` keeps rustup itself as it is, as `scripts/install.sh`
-does. These are the same commands that the installer runs and prints.
+`--no-self-update` keeps rustup itself as it is. `scripts/install.sh` does
+the same. The installer runs and prints these same commands.
 
 ### Extra tools for a controller or linked Sparks
 
 A controller needs the host toolchain, a native linker, Git, OpenSSH, rsync,
-curl and `shasum`. macOS includes `shasum`; on Ubuntu it comes with `perl`.
+curl and `shasum`. macOS includes `shasum`. On Ubuntu, `shasum` comes with
+`perl`.
 
-For linked Sparks, each machine must already have `ping`. On Ubuntu it is in
-the `iputils-ping` package. Networking is a separate job for the
-administrator; see [network setup](docs/network-setup.md).
+For linked Sparks, each machine must already have `ping`. On Ubuntu, `ping`
+is in the `iputils-ping` package. The network is a separate job for the
+administrator. See [network setup](docs/network-setup.md).
 
 ## Step 2: get the code
 
@@ -390,14 +401,14 @@ changes. Clone the v0.1.0 tag (`--branch v0.1.0`) to build the v0.1.0
 release.
 
 Once the repository is public, this clone needs no account or token. Do not
-put credentials in the clone URL. We recommend cloning, but a downloaded source
-archive (GitHub's Download ZIP or `git archive`) also works and records its
-commit as the build id.
+put credentials in the clone URL. We recommend a clone. A downloaded source
+archive also works, from GitHub's Download ZIP or from `git archive`. The
+archive records its commit as the build ID.
 
 ### Run one kernel build (source builds only)
 
-If you are building from source, run one kernel build now, while you are
-online and after installing the pinned toolchains above. Bundle users skip this
+If you build from source, run one kernel build now. Run it while you are
+online, after you install the pinned toolchains above. Bundle users skip this
 build:
 
 ```sh
@@ -408,7 +419,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 Expect compiler warnings from the kernel crate. The build worked if it ends
 with `Finished` and exit status 0. This step needs no GPU.
 
-This build is here for its downloads. The first time it runs, the kernel
+You run this build for its downloads. The first time it runs, the kernel
 compiler downloads its `build-std` dependencies into Cargo's cache. Later,
 `vade launch` builds the kernels again, offline, in its own private copy of the
 source. It does not reuse this build's output, only those downloads. Without
@@ -456,11 +467,11 @@ and `VADE_CHANNEL` is the channel (default `main`). The installer reads
 `$VADE_DL_BASE/$VADE_CHANNEL/latest.json`, then the file in the same folder.
 The default location is in [scripts/install.sh](scripts/install.sh). A
 folder that is already in `~/.vade/bundles` and passes the `MANIFEST` check is
-used again without downloading the bundle again; `latest.json` is still
-downloaded, so this step needs the network.
+used again without downloading the bundle again. The installer still
+downloads `latest.json`, so this step needs the network.
 
 The file is named `vade-<version>-<sha7>-linux-aarch64-gb10.tar.gz`, and it
-unpacks to one folder with the same name. It is a gzip file: Ubuntu marks
+unpacks to one folder with the same name. It is a gzip file. Ubuntu marks
 `tar` and `gzip` as essential packages, so every system has them. The folder
 has these files:
 
@@ -489,9 +500,9 @@ because step 3 uses its fetch helper and the committed model manifest.
 it.
 
 A controller (Route B) uses the bundle only when the controller checkout is at
-the bundle's commit: unpack it on the controller and set `prebuilt_dir` to the
-bundle folder. With any other commit, `vade install` builds from source on
-each Spark. See [bundle details](cli/docs/prebuilt.md) and
+the bundle's commit. To use it, unpack the bundle on the controller and set
+`prebuilt_dir` to the bundle folder. With any other commit, `vade install`
+builds from source on each Spark. See [bundle details](cli/docs/prebuilt.md) and
 [first run](harness/docs/first-run.md).
 
 ## Step 3: get the model
@@ -501,8 +512,9 @@ each Spark. See [bundle details](cli/docs/prebuilt.md) and
 <a id="4-put-the-official-weights-on-each-spark"></a>
 Use publisher revision
 [`b9ce18a6887e18c089fdea8509a33e63429a3300`](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-FP4-Local/tree/b9ce18a6887e18c089fdea8509a33e63429a3300).
-Keep the checkpoint complete, including the index, tokenizer and configuration,
-and use the files exactly as published: don't convert or re-quantize them.
+Keep the checkpoint complete, with the index, the tokenizer and the
+configuration. Use the files exactly as published. Do not convert or
+re-quantize them.
 
 The files at this revision download **without a Hugging Face token or
 click-through access approval**. The publisher's
@@ -515,18 +527,20 @@ The checkpoint is 102.26 GB. On 2026-10-24, rented GB10 VMs downloaded it at
 8 to 22 MB/s: about 80 minutes at the top of that range and over three hours
 at the bottom
 ([download rates on rented VMs](docs/benchmarks.md#rented-cloud-gb10-vms)).
-Over SSH, a dropped connection stops the download, so run it under `nohup` as
-below (or inside `tmux`, if you have it). If the complete checkpoint is
+Over SSH, a dropped connection stops the download. So run it under `nohup` as
+below, or inside `tmux` if you have it. If the complete checkpoint is
 already in `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local`, skip the download
 and go straight to the manifest check below.
 
 Use `vade pull`. It shows its progress, continues after an interruption and
-checks every file. If you ran `scripts/install.sh`, first run the
-`export PATH=...` line it printed: it puts `vade` on `PATH`, from the bundle
-folder in `~/.vade/bundles` or from `cli/target/release`. After a bundle
-install there is no `cargo`, so the second line below only works for a source
-build. If you did not run the script, the second line builds `vade` with the
-host toolchain from step 1. From the checkout root on the Spark:
+checks every file.
+
+If you ran `scripts/install.sh`, first run the `export PATH=...` line that it
+printed. That line puts `vade` on `PATH`, from the bundle folder in
+`~/.vade/bundles` or from `cli/target/release`. After a bundle install there
+is no `cargo`, so the second line below works only for a source build. If you
+did not run the script, the second line builds `vade` with the host toolchain
+from step 1. Run these lines from the checkout root on the Spark:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PWD/cli/target/release:$PATH"
@@ -536,7 +550,7 @@ nohup vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a3
 
 To follow it, run `tail -f ~/vade-pull.log` (`Ctrl-C` stops only `tail`). A
 good run prints `Verified 32 files, 102.26 GB in` and the model folder. If
-it stops, run the same `vade pull` line again; it continues from where it
+it stops, run the same `vade pull` line again. It continues from where it
 stopped. It writes the `.sha256` list beside the model folder, so the first
 `vade launch`, `vade up` or `vade install` checks the files.
 [Download models](docs/pull-models.md) has the details.
@@ -561,25 +575,28 @@ command again. Partial downloads stay in the sibling `.fetch` directory.
 The helper stops its downloader after an interruption. It keeps an operating
 system file lock until the downloader exits. A rerun can report
 `another fetch may be running` during that cleanup. Wait for cleanup, then
-rerun. A restart releases the lock too. The `.fetch/lock` file stays in place;
-do not remove it. Its presence does not mean that a fetch is running.
+rerun. A restart releases the lock too. The `.fetch/lock` file stays in place.
+Do not remove it. The file alone does not mean that a fetch is running.
 Metadata requests have a 120-second deadline. A transfer fails if its rate
 stays below 1 byte per second for 120 seconds. Large active downloads can
 continue for hours.
 
 Partial downloads can use space in addition to the model files. Leave
 headroom beyond the 102.26 GB checkpoint. A complete
-snapshot has the byte total given above; copying only the tensor shards is not
-enough. Vade's `install`, `up` and `launch` do not download these weights.
+snapshot has the byte total given above. A copy of only the tensor shards is
+not enough. Vade's `install`, `up` and `launch` do not download these weights.
 
 ### Check the files
 
 On Route A, the first `vade launch`, `vade up` or `vade install` checks every
-file for you while it compiles the GPU code, if it finds a checksum list: the
-`Qwen3.8-Flash-Next-FP4-Local.sha256` that `vade pull` or the fetch helper
-writes beside the checkpoint folder, or a `manifest.sha256` inside it. A file that differs stops the launch
-with its name. Nothing is written into the checkpoint; the result is kept in
-Vade's private state, so later starts skip the work.
+file for you while it compiles the GPU code. It does this when it finds a
+checksum list. The list is the `Qwen3.8-Flash-Next-FP4-Local.sha256` file
+that `vade pull` or the fetch helper writes beside the checkpoint folder, or a
+`manifest.sha256` file inside the folder.
+
+When a file differs, the launch stops and names the file. Vade writes nothing
+into the checkpoint. It keeps the result in its private state, so later starts
+skip the work.
 
 If you got the checkpoint another way, or you use Route B, check the files
 against the committed manifest once yourself. This reads all 102.26 GB of the
@@ -590,10 +607,11 @@ MODEL_SHA256_LIST="$PWD/cli/examples/qwen3.8-flash-next-fp4-local.sha256"
 (cd "$HOME/models/nvidia/Qwen3.8-Flash-Next-FP4-Local" && sha256sum -c "$MODEL_SHA256_LIST")
 ```
 
-Every file must pass. On macOS, use `shasum -a 256 -c` instead. Keep the
-checkpoint folder name `Qwen3.8-Flash-Next-FP4-Local`: the engine serves the
-model under that name in lowercase, `qwen3.8-flash-next-fp4-local`, and refuses
-requests that name any other model.
+Every file must pass. On macOS, use `shasum -a 256 -c` instead.
+
+Keep the checkpoint folder name `Qwen3.8-Flash-Next-FP4-Local`. The engine
+serves the model under that name in lowercase, `qwen3.8-flash-next-fp4-local`.
+It refuses requests that name any other model.
 
 A Route B Spark has no checkout. Download the same manifest from the v0.1.0
 release tag instead, then run the same check:
@@ -628,8 +646,8 @@ The build creates the CLI. `launch` does the rest:
 2. It builds and installs the engine, kernels and chat program if needed.
 3. It waits until the engine is ready, then opens chat.
 
-When a checksum list is present, `launch` also performs the file check
-described in [Check the files](#check-the-files). Later launches reuse the
+When a checksum list is there, `launch` also does the file check in
+[Check the files](#check-the-files). Later launches reuse the
 installed files and the saved check. Loading the model still takes time.
 When the engine is ready, it prints one line with how long the launch took,
 the address, the context and output limits and the Spark count, for example
@@ -637,18 +655,18 @@ the address, the context and output limits and the Spark count, for example
 `vade up` prints the same line, starting with `Up ready in`, then the chat
 and stop commands.
 
-Run from a script, where standard input is not a terminal, `launch` skips
-chat: after the ready line it prints
+When a script runs `launch` and standard input is not a terminal, `launch`
+skips chat. After the ready line, it prints
 `Standard input is not a terminal, so chat was not opened. Chat: vade chat`
 and exits.
 
-Chat opens in the checkout, and the agent can edit files there, so ask it only
+Chat opens in the checkout, and the agent can edit files there. So ask it only
 to say hello. Then type `/exit` to get back to your shell. The engine keeps
 running.
 
 The chat window needs an interactive terminal. A normal
 `ssh you@spark-address` login is one. To open chat with a single SSH command
-instead, add `-t`, and name the CLI by its path: that new shell does not have
+instead, add `-t` and name the CLI by its path. That new shell does not have
 the `PATH` line below.
 
 ```sh
@@ -675,10 +693,12 @@ vade doctor
 vade chat
 ```
 
-Type `/exit` again, then check and shut down. If you may later use this clone
-as a controller, first change to another folder, such as your home folder:
-`vade verify` and `vade bench` write their receipts into the current folder,
-and Route B's `vade install` refuses a clone with untracked files.
+Type `/exit` again. Then check the engine and stop it.
+
+If you may later use this clone as a controller, first change to another
+folder, such as your home folder. `vade verify` and `vade bench` write their
+receipts into the current folder, and Route B's `vade install` refuses a clone
+with untracked files.
 
 ```sh
 cd ~
@@ -687,8 +707,8 @@ vade down
 vade status
 ```
 
-After the last command, status should say the engine is stopped. Restart with
-`vade up`, or with `vade launch` to start and chat. See
+After the last command, `vade status` says that the engine is stopped.
+Restart with `vade up`, or with `vade launch` to start and chat. See
 [first run](harness/docs/first-run.md) for the whole lifecycle.
 
 ### Check the whole route in one go
@@ -701,8 +721,8 @@ Route A from start to finish, with no chat window. In order, it:
 3. runs `vade launch` and sends one chat request through the API;
 4. runs `vade verify` against that same engine, then `vade down`.
 
-Run it from the checkout root with the GPU idle (stop any running engine with
-`vade down` first):
+Run it from the checkout root with the GPU idle. Stop any running engine with
+`vade down` first:
 
 ```sh
 sh harness/scripts/route-a-check.sh
@@ -718,18 +738,19 @@ other `vade` command finds its engine. Because that home starts empty, the
 launch is a first setup and builds the engine and kernels again, however often
 you have launched before. At the end, and also when a step fails or the script
 is interrupted, it tries to stop its engine and reports FAIL if that stop
-fails. After a PASS it removes the private home; after a FAIL it keeps it for
-inspection and prints its path.
+fails. After a PASS, it removes the private home. After a FAIL, it keeps the
+private home for inspection and prints its path.
 
-Set `VADE_MODELS` to pick the checkpoint, as for `vade launch`; the model step
-fails when `vade` would load one outside it. `VADE_DRY=1` prints the commands
-without running anything, on any computer.
+Set `VADE_MODELS` to pick the checkpoint, as for `vade launch`. The model step
+fails when `vade` would load a checkpoint outside it. `VADE_DRY=1` prints the
+commands without running anything, on any computer.
 
 ### Launch from the bundle
 
 After the model check in step 3, run this instead of Route A's source-build
 block. First run the `export` line that `scripts/install.sh` printed. It puts
-the bundle folder, `~/.vade/bundles/<name>`, on your `PATH`. Then:
+the bundle folder, `~/.vade/bundles/<name>`, on your `PATH`. Then run these
+commands:
 
 ```sh
 unset VADE_CONFIG
@@ -742,30 +763,32 @@ folder. In a new shell, run the `export` line first.
 
 ### What `vade verify` checks
 
-Drafting is how the engine guesses tokens ahead so answers arrive sooner, and
-it must not change the answer. `verify` checks that. It repeats requests with
-drafting OFF and ON, compares the token IDs, and writes `vade-verify.json` in
+Drafting is how the engine guesses tokens ahead so answers arrive sooner. It
+must not change the answer, and `verify` checks that. It repeats requests with
+drafting off and on, compares the token IDs, and writes `vade-verify.json` in
 the current directory.
 
 A pass prints `IDENTICAL: 20/20 runs, 1 machine, N tokens`, where N is the
 reply's token count. That pass covers this set of requests. It is not the full
-cross-Spark exactness check (the same answer, token for token, on every run and
-every Spark) described in
-[architecture](docs/architecture.md#exactness-and-model-quality).
+cross-Spark exactness check in
+[architecture](docs/architecture.md#exactness-and-model-quality). That check
+needs the same token IDs, with the same settings, on every run and on every
+Spark.
 
 ### Where the API listens
 
 The default API is `http://127.0.0.1:18080/v1`. If that port is taken, first
 setup picks another free loopback port and saves it as `port=` in
-`~/.vade/config`; later launches reuse it. `vade status` prints the base
-address, such as `http://127.0.0.1:18080`, and the API lives under its `/v1`.
+`~/.vade/config`. Later launches reuse it. `vade status` prints the base
+address, such as `http://127.0.0.1:18080`. The API is under `/v1` at that
+address.
 Without `--url` or `VADE_API_URL`, local `vade verify` reads the running
 engine's port from `~/.vade/state/run.conf`. That record exists only while the
 engine runs.
 
-An API chat request makes the model think unless it says otherwise, and the
+The model thinks before it answers unless the request turns that off. The
 reasoning counts against the same `max_tokens` as the answer. To get the
-answer alone, send `"enable_thinking": false` (or `"reasoning_effort": "none"`).
+answer alone, send `"enable_thinking": false` or `"reasoning_effort": "none"`.
 `vade chat`, `vade verify` and `vade bench` already turn thinking off.
 
 ### Where Vade keeps its files
@@ -792,25 +815,26 @@ The engine checks whether that fits in memory. If it refuses the default or
 saved context for lack of memory, `vade launch` and `vade up` try smaller
 standard sizes in order: 32768, 16384, 8192, 4096. They skip sizes at or above
 the refused context and save the first size that starts. Vade prints one line
-telling you:
+that tells you:
 
 - the size it settled on
 - the sizes that were refused
 - any lowered output limit
 - the `--context` flag that retries your original size
 
-If no size starts, your saved config is left unchanged.
+If no size starts, Vade does not change your saved config.
 
-If you set output yourself, it is capped at **16384** and must fit in context.
-If the engine refuses a `--context` you set yourself, you get an error with the
-engine's message. It is never lowered silently.
+If you set the output yourself, the cap is **16384**, and the output must fit
+in the context. If the engine refuses a `--context` that you set yourself, you
+get an error with the engine's message. Vade never lowers it silently.
 
-Two other defaults: drafting is on, and the engine chooses how far ahead it
-drafts; the prefix cache (reusing the start of an earlier prompt) is on.
+There are two other defaults. Drafting is on, and the engine chooses how far
+ahead it drafts. The prefix cache is on: the engine reuses the start of an
+earlier prompt.
 
 Input and output share the context, so the real limit for each depends on the
-other. The engine's `/health` endpoint shows the limits that apply. (`--chats`
-works only from a controller; on the Spark itself it is refused.)
+other. The engine's `/health` endpoint shows the limits that apply. `--chats`
+works only from a controller. On the Spark itself, Vade refuses it.
 
 ### Chat and the coding agent on Linux
 
@@ -866,7 +890,7 @@ vade setup --yes --hosts you@spark-a-address
 The dry run prints the config that setup would write and the steps it would
 run, and changes nothing. Setup writes the config at the default path below,
 with this checkout as the source and private folders under `~/.vade`. It
-never replaces a config: a second run uses the file that is there. Then it
+never replaces a config. A second run uses the file that is there. Then it
 runs `vade install`, `vade up` and `vade doctor`, and stops at the first step
 that fails. Fix the cause, then run `vade setup` again. When the config
 already has an install, the second run skips `vade install`, so `vade up`
@@ -889,14 +913,14 @@ default config: `~/.config/vade/config` on Linux,
 ### Edit the config
 
 If you copied the example, edit that private file before you go on. A config
-that `vade setup` wrote is ready to use; edit it only to change the setup.
+that `vade setup` wrote is ready to use. Edit it only to change the setup.
 
 **Local folders.**
 
 - Set the local `engine_source`, `harness_source` and `cli_source` to this
   checkout's component folders.
 - Pick private local `stage_dir` and `state_dir` paths. Put `state_dir` under
-  your home, as the example does (`~/.vade-state`). It holds the record
+  your home, as the example does (`~/.vade-state`). It holds the record that
   `vade status` and `vade down` use to find a running engine. macOS clears its
   temporary folders, so a `state_dir` there could lose that record.
 - On macOS, `/tmp` is a symlink and is refused. Only a throwaway `stage_dir`
@@ -950,13 +974,13 @@ them.
 The curl command assumes you kept the example's port. Its JSON reply lists the
 served model ID. Keep `VADE_CONFIG` pointing at this same file.
 
-On macOS, the agent's sandboxed shell sees only system and Homebrew tools, so
-it can't find a Rust you installed with rustup in your home folder. You'll see
-`sandbox-exec: execvp() of 'cargo' failed`. `vade chat` has no option for
+On macOS, the agent's sandboxed shell sees only system and Homebrew tools. So
+it cannot find a Rust that you installed with rustup in your home folder. You
+see `sandbox-exec: execvp() of 'cargo' failed`. `vade chat` has no option for
 this. Instead, run `vade chat --dry-run` to print the command it would run.
-Then run that command yourself, adding
-`--shell-toolchain ~/.rustup/toolchains/<toolchain>` at the end. That is the
-folder that contains `bin/cargo`.
+Then run that command yourself, and add
+`--shell-toolchain ~/.rustup/toolchains/<toolchain>` at the end. That folder
+contains `bin/cargo`.
 
 After `/exit` from chat:
 
@@ -972,25 +996,28 @@ the checkout before your next `vade install`, which refuses untracked files.
 
 A controller asks for the same defaults as Route A: context **32768** and
 output **min(context, 8192)**. That holds however many Sparks you use, and
-whether or not you pass `--chats`. Drafting is on (the engine picks how far
-ahead), and the prefix cache is on by default (three or more Sparks run without it).
+whether or not you pass `--chats`. Drafting is on, and the engine picks how far
+ahead it drafts. The prefix cache is on by default. Three or more Sparks run
+without it.
 
 A controller never lowers the context for you. If a Spark lacks the memory for
-32768, the engine refuses it and you choose a smaller `--context`. Only Route A
-lowers it automatically, and only when the engine says there isn't enough
-memory. Stay at 8192 or above if you want `vade chat`: from a controller it
-always opens the coding agent, which needs at least 8192 tokens, and with a
-smaller context it stops with an error instead of falling back to plain chat.
+32768, the engine refuses it, and you choose a smaller `--context`. Only
+Route A lowers it automatically, and only when the engine says that there is
+not enough memory.
+
+If you want `vade chat`, stay at 8192 or above. From a controller, `vade chat`
+always opens the coding agent, which needs at least 8192 tokens. With a
+smaller context, it stops with an error and does not fall back to plain chat.
 
 The engine decides how many chats can run at once from context and memory. It
 reports that number when it starts, and the controller's `vade status` shows it
 as `Concurrent chats`. If the report is missing, status says the count was not
-reported. `--chats` does not change it on FP4-Local; the `--chats` row in the
+reported. `--chats` does not change it on FP4-Local. The `--chats` row in the
 [flag table](#settings-you-may-change) below has the details.
 
-For a larger context, start with `vade up --context 262144`
-(add `--output 16384` for longer replies). This sets the context, not the chat
-count. Check `Concurrent chats` in `vade status` for the admitted count.
+For a larger context, start with `vade up --context 262144`. For longer
+replies, add `--output 16384`. The `--context` flag sets the context, not the
+chat count. Check `Concurrent chats` in `vade status` for the admitted count.
 The controller starts at 32768 to leave more room for concurrent chats.
 Measured speeds at 32768 are on the
 [benchmarks page](docs/benchmarks.md).
@@ -1005,7 +1032,7 @@ Several Sparks can work together in two ways:
 | A chain: one engine spread across the Sparks | You want long prompts read faster, or the model is too big for one Spark | `vade up --sparks N` or `--hosts` |
 | [Replicas](#replicas): a separate copy on each Spark | The model fits on one Spark and you want many chats | `vade up --replicas N` |
 
-Both use Route B. The setup below is for the chain; replicas need less of it.
+Both use Route B. The setup below is for the chain. Replicas need less of it.
 
 ### Describe each Spark in the config
 
@@ -1045,9 +1072,9 @@ Spark's own host key on that Spark, run this once there:
 ssh -o StrictHostKeyChecking=accept-new you@spark-a-address true
 ```
 
-If that Spark then answers `Permission denied (publickey)`, it doesn't trust
-its own key yet. Add the key there (run `ssh-keygen -t ed25519` first if
-`~/.ssh/id_ed25519.pub` doesn't exist):
+If that Spark then answers `Permission denied (publickey)`, it does not trust
+its own key yet. Add the key there. If `~/.ssh/id_ed25519.pub` does not exist,
+run `ssh-keygen -t ed25519` first:
 
 ```sh
 cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
@@ -1056,9 +1083,10 @@ cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
 Running the controller on a separate computer avoids SSH to itself. Vade never
 edits SSH settings.
 
-You only need an alias for settings a plain destination cannot carry, such as a
-jump host, a non-default port or a specific key. For that case, a private
-`~/.ssh/config` block looks like this, and you then write `ssh = spark-b`:
+You need an alias only for settings that a plain destination cannot carry,
+such as a jump host, a non-default port or a specific key. For that case,
+write a private `~/.ssh/config` block like this one. Then write
+`ssh = spark-b` in the Vade config:
 
 ```text
 Host spark-b
@@ -1107,32 +1135,36 @@ There are two ways to choose the Sparks. Use one or the other, not both:
 - `vade up --hosts spark-a,spark-b,spark-c` picks named machines in cable
   order.
 
-With FP4-Local, two Sparks run the tensor split, the only two-Spark path: both
-Sparks work on every token, each on half of the experts and of most
-projections. With more Sparks over RDMA, Vade runs the tensor split in parts
-when every split width of the model cuts into whole parts for that many Sparks
-and the mailbox has room for that many ranks: for this checkpoint, four Sparks
-(with no prefix cache). Three, five or more Sparks, and any three or
-more over TCP, use the layer chain, which spreads the layers across all the
-Sparks you chose. FP8 runs tensor parallel on
-two and on four Sparks instead; see
+With FP4-Local, two Sparks run the tensor split, the only two-Spark path. Both
+Sparks work on every token, and each one works on half of the experts and of
+most projections.
+
+With more Sparks over RDMA, Vade runs the tensor split in parts when two
+things are true. Every split width of the model cuts into whole parts for that
+many Sparks, and the mailbox has room for that many ranks. For this
+checkpoint, that is four Sparks, with no prefix cache.
+
+Three, five or more Sparks, and any three or more over TCP, use the layer
+chain. The layer chain spreads the layers across all the Sparks that you
+chose. FP8 runs tensor parallel on two and on four Sparks instead. See
 [FP8 on 2, 4 or 6 Sparks](#fp8-on-2-4-or-6-sparks).
 
-List both end addresses for every cable between neighboring Sparks. You don't
+List both end addresses for every cable between neighboring Sparks. You do not
 need a cable that closes the chain into a ring.
 
-One caution: if nobody has tested your cabling layout, the checks Vade runs
-while building the chain don't prove exactness (the same tokens on every
-Spark).
+If nobody has tested your cabling layout, the checks that Vade runs while it
+builds the chain do not prove exactness. Exactness means the same token IDs,
+with the same settings, on every Spark.
 
 ### RDMA or TCP
 
-Linked Sparks use RDMA by default. That needs the RDMA (verbs) device and its
-user library already set up, and a locked-memory (memlock) limit of
+Linked Sparks use RDMA by default. RDMA needs the RDMA (verbs) device and its
+user library to be set up already. It also needs a locked-memory (memlock) limit of
 `unlimited`, both soft and hard (`ulimit -Sl` and `ulimit -Hl`), in the SSH
-session Vade uses.
-For TCP instead, set this **before install** and keep it set for `up` and
-`doctor`:
+session that Vade uses.
+
+For TCP instead, set this variable **before install**. Keep it set for `up`
+and `doctor`:
 
 ```sh
 export SEQPAR_RDMA=0
@@ -1156,17 +1188,19 @@ request to the replica with the fewest requests in flight.
 The gateway also tries to keep each conversation on one replica. Every turn of
 a chat has the same key: its `prompt_cache_key`, else a session header, else
 the model, instructions, system prompt, tools and messages through the first
-user message. A later turn (anything after the first user message: another
-user turn, a reply or a tool result) goes to the replica that served the
+user message.
+
+A later turn is anything after the first user message: another user turn, a
+reply or a tool result. A later turn goes to the replica that served the
 previous turn while that replica has fewer than 8 requests in flight or is
 among the least busy. A first turn uses that replica only while it is among
 the least busy, so identical prompts sent at the same time divide evenly.
 Otherwise the least busy replica wins. The prefix cache is on by default, but
-we haven't confirmed that this routing gives cache hits.
+we have not confirmed that this routing gives cache hits.
 
-A single chat runs at one-Spark speed; total throughput grows with the number
-of replicas. Every replica is the same one-Spark engine, so a request gets the
-same token IDs whichever replica answers.
+A single chat runs at one-Spark speed. The total throughput grows with the
+number of replicas. Every replica is the same one-Spark engine, so a request
+gets the same token IDs whichever replica answers.
 
 Replicas need no `fabric.*` entries or transport ports. Their tunnels use the
 local ports right after `local_port`. Each replica starts with the controller
@@ -1193,83 +1227,97 @@ These defaults apply when no saved override, launch flag or environment
 setting replaces them. The environment settings are `MTP` and the
 prefix-cache variable (`VADE_FLASHNEXT_PREFIX_CACHE`). Context covers both
 the input and the generated output. `/health` reports the limits that apply
-to a request.
+to a request. Drafting is multi-token prediction (MTP).
 
-| How you start | Context (tokens) | Output (tokens) | Drafting (multi-token prediction, MTP) | Prefix cache |
-| --- | --- | --- | --- | --- |
-| On this Spark: `vade launch` / `vade up` | 32768; lowered through 16384, 8192, 4096 only if the engine refuses it for memory | `min(context, 8192)` | ON, engine-selected | ON |
-| From a controller: `vade up` on any number of Sparks, with or without `--chats` | 32768 | `min(context, 8192)` | ON, engine-selected | ON on one or two FP4-Local Sparks and on FP8; OFF on three or more FP4-Local Sparks (the layer chain, or the split in parts on four Sparks over RDMA) |
-| From a controller: `vade up --replicas N`, each replica | 32768 | `min(context, 8192)` | ON, engine-selected | ON |
+- **On this Spark, with `vade launch` or `vade up`.** The context is 32768
+  tokens. Vade lowers it through 16384, 8192 and 4096 only if the engine
+  refuses it for memory. The output is `min(context, 8192)` tokens. Drafting
+  is on, and the engine selects the depth. The prefix cache is on.
+- **From a controller, with `vade up` on any number of Sparks.** These
+  defaults are the same with or without `--chats`. The context is 32768
+  tokens, and the output is `min(context, 8192)` tokens. Drafting is on, and
+  the engine selects the depth. On one or two FP4-Local Sparks and on FP8,
+  the prefix cache is on. It is off on three or more FP4-Local Sparks:
+  the layer chain, or the split in parts on four Sparks over RDMA.
+- **From a controller, with `vade up --replicas N`.** Each replica has a
+  context of 32768 tokens and an output of `min(context, 8192)` tokens.
+  Drafting is on, and the engine selects the depth. The prefix cache is on.
 
-`--context 262144` requests a larger context on either route
-(add `--output 16384` for longer replies). The engine still sets the chat
-count from memory. An explicit context must pass the engine's memory check;
-a refusal is reported and the context is not lowered.
+`--context 262144` requests a larger context on either route. For longer
+replies, add `--output 16384`. The engine still sets the chat count from
+memory. An explicit context must pass the engine's memory check. If the
+engine refuses it, Vade reports the refusal and does not lower the context.
 
 | Flag | What it does |
 | --- | --- |
-| `--context` | How many tokens the prompt and reply can use together. On the Spark, the value must fit the checkpoint's limit and pass the engine's memory check. If the engine refuses a value you set, you get an error; Vade does not lower it. Defaults are in the table above. |
-| `--output` | The most tokens a reply can use. It can't be larger than the context or the FP4-Local limit of 16384. |
+| `--context` | How many tokens the prompt and reply can use together. On the Spark, the value must fit the checkpoint's limit and pass the engine's memory check. If the engine refuses a value you set, you get an error. Vade does not lower it. The defaults are in the list above. |
+| `--output` | The most tokens a reply can use. It cannot be larger than the context or the FP4-Local limit of 16384. |
 | `--mtp` | Asks for a specific drafting depth. `0` turns drafting off. It overrides the `MTP` variable. A local launch saves the selected drafting depth for later starts. To restore engine-selected drafting, stop the engine, remove the `mtp=` line from `${VADE_HOME:-$HOME/.vade}/config`, unset `MTP`, and restart without `--mtp`. A controller uses the engine default when neither the flag nor `MTP` is set. |
-| `--chats` | Works only from a controller; on the Spark itself it is refused. Vade records it and passes it on, but FP4-Local sets the chat count from context and memory, so it changes neither the context nor how many chats run at once. (With FP8, `--chats N` reserves room for N chats.) |
+| `--chats` | It works only from a controller. On the Spark itself, Vade refuses it. Vade records it and passes it on, but FP4-Local sets the chat count from context and memory. So `--chats` changes neither the context nor how many chats run at once. With FP8, `--chats N` reserves room for N chats. |
 | `--memory-bytes` | Sets a memory budget. The engine's memory check and the memory actually free still apply. |
 | `--cache-bytes 0` | Turns the prefix cache off for a local install. Any local size above zero is refused. |
 
 ### The prefix cache
 
-The prefix cache (reusing a cached prompt prefix across requests) is ON by
+The prefix cache reuses a cached prompt prefix across requests. It is on by
 default on one Spark, on two FP4-Local Sparks (the tensor split) and on FP8.
 FP4-Local on three or more Sparks (the layer chain, or the split in parts on
-four Sparks over RDMA) runs without it. The cache
-keeps prompts only for requests that send
-`cache:true` or a `prompt_cache_key`. Other requests run as before. A cached
-answer has the same token IDs as an uncached one: the cache changes which
-prompt tokens the engine reads again, not how it computes them.
+four Sparks over RDMA) runs without it.
 
-At startup the cache takes a memory room of its own from the chat memory
+The cache keeps prompts only for requests that send `cache:true` or a
+`prompt_cache_key`. Other requests run as before. A cached answer has the same
+token IDs as an uncached one. The cache changes which prompt tokens the engine
+reads again, not how it computes them.
+
+At startup, the cache takes a memory room of its own from the chat memory
 (the session pool). The engine plans the chat slots so that the pool holds one
-full-context chat and at least 512 MiB beside it. Near the memory limit this
-can give fewer chat slots: on one Spark at a context of 262,144, a start that
-could fund 16 slots with 38,449,244 bytes left takes 8 slots. The room is
-half of the pool bytes that no full-context chat can use, at least 512 MiB
-and at most 4 GiB, and never more than those bytes. So the room never lowers
-the number of full-context chats in that plan. On two Sparks each engine rank
-keeps a copy of every kept prompt, so there the room is at least the memory
-of one full-context chat, up to 4 GiB: at a context of 32,768 a 32K-token
-prompt fits. Its copy was about 2.1 GB in a two-Spark cache test on
-2026-10-29 (lab report `own-cache-screen-x2-r1`, not in the repository). This can lower the number of
-full-context chats by one. Live chats never use the room, and memory
-pressure does not empty it. The cache also uses memory that live chats leave
-free, and gives that memory back first: memory a kept prompt holds beyond the
-room (a prompt kept in place on one Spark holds a whole chat's memory) yields
-to host memory pressure 30 seconds after the last live chat, when the engine
-gives spare memory back to the host. Before then, the engine would keep that
-memory anyway, so the next turn of a conversation can still use the prompt.
-The engine log line `flashnext ready` shows `prefix_cache_room_bytes`.
+full-context chat and at least 512 MiB beside it. Near the memory limit, this
+can give fewer chat slots. On one Spark at a context of 262,144, a start that
+could fund 16 slots with 38,449,244 bytes left takes 8 slots.
+
+The room is half of the pool bytes that no full-context chat can use, at least
+512 MiB and at most 4 GiB, and never more than those bytes. So the room never
+lowers the number of full-context chats in that plan.
+
+On two Sparks, each engine rank keeps a copy of every kept prompt. So there
+the room is at least the memory of one full-context chat, up to 4 GiB. At a
+context of 32,768, a 32K-token prompt fits. Its copy was about 2.1 GB in a
+two-Spark cache test on 2026-10-29 (lab report `own-cache-screen-x2-r1`, not
+in the repository). This can lower the number of full-context chats by one.
+
+Live chats never use the room, and memory pressure does not empty it. The
+cache also uses memory that live chats leave free, and it gives that memory
+back first. A kept prompt can hold memory beyond the room: a prompt kept in
+place on one Spark holds a whole chat's memory. That memory yields to host
+memory pressure 30 seconds after the last live chat, when the engine gives
+spare memory back to the host. Before then, the engine would keep that memory
+anyway, so the next turn of a conversation can still use the prompt. The
+engine log line `flashnext ready` shows `prefix_cache_room_bytes`.
 
 | Setting | What it does |
 | --- | --- |
-| `VADE_FLASHNEXT_PREFIX_CACHE=0` | Turns the cache off. `1` turns it on; FP4-Local on three or more Sparks (the layer chain, or the split in parts on four Sparks over RDMA) refuses `1`. |
+| `VADE_FLASHNEXT_PREFIX_CACHE=0` | Turns the cache off. `1` turns it on. FP4-Local on three or more Sparks (the layer chain, or the split in parts on four Sparks over RDMA) refuses `1`. |
 | `VADE_FLASHNEXT_CACHE_ROOM=<bytes>` | Sets the room. The slot plan keeps it beside one full-context chat, which can give fewer chat slots. `0` gives no room and the slot plan of a server without the cache. A room too large to keep beside one full-context chat at two or more slots gives one chat slot. A room that leaves less than one full-context chat is lowered to leave one. |
-| `VADE_FLASHNEXT_ADOPT=0` | Keeps every prompt as a copy on one Spark. `1` keeps long prompts in place on two Sparks too; that mode is not measured on two Sparks. |
+| `VADE_FLASHNEXT_ADOPT=0` | Keeps every prompt as a copy on one Spark. `1` keeps long prompts in place on two Sparks too. We have not measured that mode on two Sparks. |
 | `--cache-bytes 0` | Turns the cache off for a local install. |
 
-On one Spark, the cache keeps a long prompt in place: when a chat ends, its
+On one Spark, the cache keeps a long prompt in place. When a chat ends, its
 prompt memory stays in the cache, and the next turn of that conversation
 builds on it. The cache can use the whole chat memory for this, and live
 chats take it back first. A short prompt, whose memory is less than a
 quarter of one chat's reservation, is kept as a copy. On two Sparks, every
 kept prompt is a copy.
 
-A copy is made while its chat still holds its memory. The room and the
-memory live chats leave free must hold that copy. At a context of 262,144 on
+Vade copies a prompt while the prompt's chat still holds its memory. The
+room and the memory that live chats leave free must hold that copy. At a context of 262,144 on
 one Spark, one full-context chat reserves 16,017,732,932 bytes (the
 `flashnext ready` log line of each start at that context in lab report
 `own-cache-screen-1s-b-r1`, not in the repository), and the slot plan
 keeps only the room (at least 512 MiB) beside it. So with copies only
-(`VADE_FLASHNEXT_ADOPT=0`) a 200K-token prompt is not kept: in a test on
-2026-10-29, its copy needed 12,274,478,925 bytes (lab report
-`own-warm-200k-r1`, not in the repository). In place (the default) it is kept.
+(`VADE_FLASHNEXT_ADOPT=0`), the cache does not keep a 200K-token prompt. In a
+test on 2026-10-29, its copy needed 12,274,478,925 bytes (lab report
+`own-warm-200k-r1`, not in the repository). In place, which is the default,
+the cache keeps it.
 
 On two Sparks, both engine ranks must start with the same cache value, or
 the engine refuses to start. To turn the cache off for **local Route A**,
@@ -1280,13 +1328,14 @@ vade down
 VADE_FLASHNEXT_PREFIX_CACHE=0 vade up
 ```
 
-The environment setting is not saved: set it each time you start the engine.
+Vade does not save the environment setting. Set it each time you start the
+engine.
 A saved `--cache-bytes 0` stays in `${VADE_HOME:-$HOME/.vade}/config` until
 you remove the `cache_bytes=0` line.
 
 Route B has no launcher flag for the FP4-Local prefix cache. A setting must
-already be in the noninteractive SSH environment on every selected Spark.
-Setting it only in the controller shell has no effect. The engine makes the
+already be in the noninteractive SSH environment on every selected Spark. A
+setting only in the controller shell has no effect. The engine makes the
 final decision ([source](engine/crates/serve/src/prefix_switch.rs)).
 
 `GET /health` reports the cache in one object, `prefix_cache`: hits, misses,
@@ -1295,8 +1344,8 @@ a new snapshot, memory pressure or the cache limit), entries removed after
 their idle time (`expired`: a checkpoint at its expiry, or an idle prompt when
 the cache must give memory back), entries, retained bytes, the room, and the
 snapshots skipped for each reason (`no_room`, `too_large`, `fork_failed`,
-`insert_refused`). On two Sparks, a prompt the second engine rank could not
-capture is not counted there; the log shows `prefix_cache_worker_refused`.
+`insert_refused`). On two Sparks, a prompt that the second engine rank could
+not capture is not counted there. The log shows `prefix_cache_worker_refused`.
 The engine log prints the same counts on a
 `prefix_cache_status` line after each lookup and snapshot. After an eviction,
 an expiry or another change to the entries or retained bytes, it prints the
@@ -1325,18 +1374,18 @@ If `vade status` shows a different engine endpoint, use that one. Point your
 client at `http://127.0.0.1:8787/v1`. Ctrl-C stops the gateway.
 
 When the engine is full (16 open connections), it turns a new request away
-with HTTP 503 before doing any work. `vade-gateway` passes that refusal
-straight to your client. The harness's built-in gateway waits it out instead;
-start it in place of `vade-gateway`:
+with HTTP 503 before it does any work. `vade-gateway` passes that refusal
+straight to your client. The harness's built-in gateway waits instead. Start
+it in place of `vade-gateway`:
 
 ```sh
 harness/target/release/vade-harness gateway --upstream http://127.0.0.1:18080/v1 --bind 127.0.0.1:8787
 ```
 
-With one upstream it holds only that refusal (`connection capacity reached`)
-and sends the same bytes again after a short wait, for up to 30 s, so a client
-that opens its next round of chats while the last one is still closing just
-sees a slightly later first token. Any other 503 may come after work started,
+With one upstream, it holds only that refusal (`connection capacity reached`).
+It sends the same bytes again after a short wait, for up to 30 s. So a client
+that opens its next round of chats while the last one is still closing sees
+only a slightly later first token. Any other 503 can come after work started,
 so it reaches the client once. This gateway also passes `GET /health` to the
 engine, so `vade bench --url http://127.0.0.1:8787/v1` and health checks work
 through it. See the [harness documentation](harness/README.md) for the
@@ -1349,16 +1398,17 @@ The gateway guards against web pages driving it through your browser:
 - It answers 403 to any request with an `Origin` header.
 
 Command-line clients that use the loopback address and omit `Origin` pass
-these checks. To use a browser client, add `--allow-origin https://app.example` (exact origin,
-repeatable; `--allow-host NAME` allows another Host name). Ideally add
-`--token TOKEN` or `VADE_GATEWAY_TOKEN` too, which then requires
-`Authorization: Bearer TOKEN` on every request.
+these checks. To use a browser client, add
+`--allow-origin https://app.example`. It takes the exact origin, and you can
+repeat it. `--allow-host NAME` allows another Host name. We recommend that you
+also add `--token TOKEN` or `VADE_GATEWAY_TOKEN`. Then every request must send
+`Authorization: Bearer TOKEN`.
 
 <a id="6-run-the-timing-benchmark"></a>
 ## Run the benchmark
 
-Start the benchmark once the engine is running and has finished checking the
-checkpoint files in the background. At that point `/health` shows the
+Start the benchmark when the engine is running and has finished its
+background check of the checkpoint files. At that point, `/health` shows the
 checkpoint `hash_state` as `ready`.
 
 ```sh
@@ -1375,17 +1425,17 @@ your next `vade install`, which refuses untracked files. If health does not
 name the model, it falls back to
 `qwen3.8-flash-next-fp4-local`.
 
-By default it uses a bundled offline writing prompt and asks for the server's
-drafting policy, which for FP4-Local means drafting on. When many requests run
-at once, the server may answer some of them without drafting. `vade bench` then
-ends with a `Drafting:` line that names, for each concurrency, how many replies
-were plain; those rows measure plain speed, which is why a higher concurrency
-can show a lower rate than the one before it.
+By default, it uses a bundled offline writing prompt and asks for the server's
+drafting policy. For FP4-Local, that means drafting on. When many requests run
+at once, the server can answer some of them without drafting. `vade bench` then
+ends with a `Drafting:` line. For each concurrency, that line names how many
+replies were plain. Those rows measure plain speed. This is why a higher
+concurrency can show a lower rate than the one before it.
 
 Each receipt (the JSON result file) records the draft mode you asked for, the
-server's build SHA and the drafting (MTP) depth the server reports. What each
-response reported is stored separately in `draft_observations`. A reported
-depth of zero alone doesn't prove drafting was off.
+server's build SHA and the drafting (MTP) depth that the server reports.
+`draft_observations` keeps what each response reported. A reported depth of
+zero alone does not prove that drafting was off.
 
 To measure plain decoding on the same running engine:
 
@@ -1401,26 +1451,26 @@ To change the endpoint, model, receipt file or prompt, use `--url URL`,
 `--model ID`, `--output PATH` or `--prompts FILE`. In a prompt file, each
 non-empty UTF-8 line is one prompt.
 
-Every request uses greedy sampling with the cache and thinking off. It keeps
-generating past the end-of-answer token so every reply is the same length;
-`--max-tokens` sets that length. Requests are measured in groups (cohorts), and
-a group with a short or incomplete reply gets no rate.
+Every request uses greedy decoding with the cache and thinking off. Each
+request keeps generating past the end-of-answer token, so every reply has the
+same length. `--max-tokens` sets that length. The client measures requests in
+groups (cohorts). A group with a short or incomplete reply gets no rate.
 
-This is a quick check of your own setup, not a RigMark card, and its recipe
-differs from the published cards, so its numbers are not comparable with them.
+This is a quick check of your own setup, not a RigMark card. Its recipe
+differs from the published cards, so you cannot compare its numbers with them.
 [Reproduce a measurement in detail](docs/benchmarks.md#reproduce-a-measurement-in-detail)
 lists the differences and shows how to run a card.
 
 Read [benchmark recipes and results](docs/benchmarks.md) for workloads, receipt
-fields and measurement limits. A quick test or a short greeting doesn't
+fields and measurement limits. A quick test or a short greeting does not
 measure real speed. If you share a result, keep the exact source revision,
 checkpoint, settings and raw output with it so others can reproduce it.
 
 ## First-run problems
 
 The messages below are excerpts from the CLI and the engine. Whatever you see,
-leave the files under `~/.vade/state` in place (they tell `vade down` what to
-stop), and run `vade logs` and `vade doctor` before you retry.
+leave the files under `~/.vade/state` in place. They tell `vade down` what to
+stop. Run `vade logs` and `vade doctor` before you retry.
 
 | Message | What to do |
 | --- | --- |
@@ -1429,42 +1479,42 @@ stop), and run `vade logs` and `vade doctor` before you retry.
 | `Standard input is not a terminal, so setup cannot ask its questions.` | `vade setup` ran from a script. Add `--yes`, plus `--hosts` and `--link` where setup names them. |
 | `vade install failed, so setup stopped.` (or `vade doctor`, `vade up`) | Read the error that step printed just above, fix it, then run `vade setup` again. It reuses the config and the work already done. |
 | `This command runs only on a DGX Spark (Linux aarch64)` | You ran a local command such as `vade launch` on another computer. Run it on the Spark, add `--dry-run` to preview it, or use [Route B](#route-b-from-a-controller) to drive the Spark from this computer. |
-| `engine source has local changes. Commit or preserve them before install/update` | A controller's `vade install` stages only committed source, and an untracked file counts as a local change. The same check covers `harness` and `CLI` source. Nothing was overwritten. Use a clean clone for the controller; `git status` shows what is untracked. |
-| `The engine refused --context N for memory` | `vade launch` or `vade up` on the Spark prints this when the engine refuses a `--context` you set yourself; the engine's own memory message follows. Choose a smaller `--context`, or leave it out next time: Vade then tries the standard sizes (32768, 16384, 8192, 4096) in turn until the engine accepts one. Run `vade doctor` to inspect memory. A context you set yourself is never lowered silently. |
-| `Requested size does not fit.` / `Not enough memory` | Read the quantities in the message. A token-limit error asks for a shorter prompt or reply. A memory error gives the required and available memory. The engine's memory ceiling is MemAvailable minus a reserve of 10 % or 2 GiB, whichever is larger. Page cache already counts as free, so dropping caches won't help. Stop other programs that hold memory, or lower the context. FP4-Local chooses its chat count from memory; `--chats` does not lower it. A local launch or install also refuses to start when another engine holds the GPU memory. Stop that engine with its own `vade down` or the launcher that started it, then retry. |
-| `needs an NVIDIA GB10 GPU` or `must support CUDA 13.0 or newer` (from `vade install` or a controller's `vade doctor`, `has an NVIDIA driver with CUDA ...`) | Vade runs only on a DGX Spark's GB10, with an NVIDIA driver that supports CUDA 13.0 or newer. `nvidia-smi` prints the supported version as `CUDA Version` in its header. Driver updates are a job for the Spark's administrator; Vade does not change the driver. |
+| `engine source has local changes. Commit or preserve them before install/update` | A controller's `vade install` stages only committed source, and an untracked file counts as a local change. The same check covers `harness` and `CLI` source. Nothing was overwritten. Use a clean clone for the controller. `git status` shows what is untracked. |
+| `The engine refused --context N for memory` | `vade launch` or `vade up` on the Spark prints this when the engine refuses a `--context` you set yourself. The engine's own memory message follows. Choose a smaller `--context`, or leave it out next time. Vade then tries the standard sizes (32768, 16384, 8192, 4096) in turn until the engine accepts one. Run `vade doctor` to inspect memory. A context you set yourself is never lowered silently. |
+| `Requested size does not fit.` / `Not enough memory` | Read the quantities in the message. A token-limit error asks for a shorter prompt or reply. A memory error gives the required and available memory. The engine's memory ceiling is MemAvailable minus a reserve of 10 % or 2 GiB, whichever is larger. Page cache already counts as free, so dropping caches does not help. Stop other programs that hold memory, or lower the context. FP4-Local chooses its chat count from memory. `--chats` does not lower it. A local launch or install also refuses to start when another engine holds the GPU memory. Stop that engine with its own `vade down` or the launcher that started it, then retry. |
+| `needs an NVIDIA GB10 GPU` or `must support CUDA 13.0 or newer` (from `vade install` or a controller's `vade doctor`, `has an NVIDIA driver with CUDA ...`) | Vade runs only on a DGX Spark's GB10, with an NVIDIA driver that supports CUDA 13.0 or newer. `nvidia-smi` prints the supported version as `CUDA Version` in its header. Driver updates are a job for the Spark's administrator. Vade does not change the driver. |
 | `Cannot read the NVIDIA GPU and driver; ... nvidia-smi said: ...` | The text after `nvidia-smi said:` is the driver's own error. Run `nvidia-smi` to see it in full, and ask the administrator to fix the driver. |
 | `Prepare: no checksum list for this checkpoint` | Vade found no checksum list beside the model folder, so it cannot check the files against the published hashes. The install goes on. To check the files, follow [check the files](#check-the-files), or download the model with `vade pull`, which writes the list. |
 | `The model is missing or incomplete on at least one Spark` | A controller's `vade install` staged the build, but a Spark has no complete checkpoint. Copy the checkpoint to the path the message above it names, check it, then run `vade install` again. |
 | `Cannot reach ... over SSH, or its login shell failed.` | A controller's `vade up` or `vade doctor` could not run a command on that Spark. Run the `ssh ... true` command it prints to see the SSH error. Check that the Spark is on and that SSH logs in with no password prompt. |
 | `This machine's GPU is in use.` | On a controller, `vade up` puts the machine name in front of it. Stop the workload with the launcher that started it, run `vade doctor`, then retry. Never kill processes by name. |
 | `Install cache preparation failed; the previous activation was kept.` | A controller's `vade install` prints this when a Spark's GPU is busy or its files fail a check. The build you had before is still the active one. The message starts with the machine name and the reason (for example `This machine's GPU is in use.`), and the line above it gives the path of a saved log. Fix the reason, or read the log, then run `vade install` again. |
-| `Port ... is in use; close the application using it and retry vade launch.` (from `vade up`, it ends `retry vade up.`) | Find the program using the port and stop it through its own controls. A first local setup can pick another port, but later launches reuse the saved one. On a controller, choose free `local_port` and `serve_port` values in the private config. |
+| `Port ... is in use; close the application using it and retry vade launch.` (from `vade up`, it ends `retry vade up.`) | Find the program that uses the port and stop it through its own controls. A first local setup can pick another port, but later launches reuse the saved one. On a controller, choose free `local_port` and `serve_port` values in the private config. |
 | `Model loading timed out` | Run `vade logs`, then `vade doctor`. Read the saved startup log, and retry only once you have fixed the cause. |
 | `staged hashes differ from the manifest. Nothing started; run vade install.` | A controller's `vade up` prints this, with the machine name in front. Run `vade install` to restage the matching engine and PTX. A local `vade launch` or `vade up` rebuilds a changed staged build by itself. For stale PTX during a source build, run `cargo +1.99.0 kernels` again from `engine/` before you build again. |
-| HTTP 503 with `{"error":{"type":"overloaded","message":"connection capacity reached"}}` | The engine accepts 16 connections at once. A client that opens a 16th chat while an earlier one is still closing, or more than 16 at a time, gets this reply at the start; the server stays ready and nothing ran. Retry after a second: the engine sends no `Retry-After`, and the retry is accepted once a slot is free. `vade-harness gateway` ([client gateway](#client-gateway)) does this for you: with one upstream it waits up to 30 s for a slot, and it adds `Retry-After: 1` to any 429 or 503 it passes on without one. `vade-gateway` passes the refusal straight through. Otherwise lower the client's concurrency. |
-| `generation stopped before completion` | It can show up on the first 8- or 16-request `vade bench` after a controller start, when the engine log reports an allocation that did not fit. Run `vade logs`, then retry. |
+| HTTP 503 with `{"error":{"type":"overloaded","message":"connection capacity reached"}}` | The engine accepts 16 connections at once. A client that opens a 16th chat while an earlier one is still closing, or more than 16 at a time, gets this reply at the start. The server stays ready, and nothing ran. Retry after a second. The engine sends no `Retry-After`, and it accepts the retry once a slot is free. `vade-harness gateway` ([client gateway](#client-gateway)) does this for you. With one upstream, it waits up to 30 s for a slot. It also adds `Retry-After: 1` to any 429 or 503 that it passes on without one. `vade-gateway` passes the refusal straight through. Otherwise lower the client's concurrency. |
+| `generation stopped before completion` | It can appear on the first 8- or 16-request `vade bench` after a controller start, when the engine log reports an allocation that did not fit. Run `vade logs`, then retry. |
 | `Transport: ... did not reply to the pre-start check; nothing was started or recorded.` | Vade gives each SSH connection 10 seconds to connect and the check 90 seconds to finish, so a brief network or SSH hiccup can cause this. Nothing started, so run `vade up` again. If it keeps happening, test the machine with `ssh -o BatchMode=yes` and read the SSH error in the retained logs. |
 | `Directory ... is shared. Run chmod 700 ...` or `Directory ... on ... is open to other users.` | A `stage_dir` or `state_dir` is open to other users, on the controller or on a Spark. Run the `chmod 700` command the message prints, then run `vade install` again. Next time, create these folders with `mkdir -m 700` or let Vade create them. |
-| `Auto-compaction deferred: safe compaction cannot fit a useful reply reservation; history retained. Will retry on the next turn; /compact or /new may be needed.` | It can appear in a long chat when the context is 8192, because the output limit then equals the whole context and there is no room to shorten the history safely. Your history is kept and the reply still arrives. Type `/new` to start a fresh chat, which won't show this message. |
+| `Auto-compaction deferred: safe compaction cannot fit a useful reply reservation; history retained. Will retry on the next turn; /compact or /new may be needed.` | It can appear in a long chat when the context is 8192, because the output limit then equals the whole context and there is no room to shorten the history safely. Your history is kept and the reply still arrives. Type `/new` to start a fresh chat, which does not show this message. |
 | `Build GPU kernels failed; check the retained build log and the existing pinned Rust toolchains.` | Read the saved build log. Make sure you finished installing the pinned toolchains (step 1) and fetched the `build-std` files online (`sh scripts/install.sh` does this), which the offline kernel build needs, then retry. |
 | `Vade hit an internal error at ...` | This is a bug in Vade, not in your setup. Run the same command again with `RUST_BACKTRACE=1` in front of it and report the output, with the command you ran, to the Vade maintainers. |
 
 If shutdown cannot confirm which process it started, follow
-[CLI recovery](cli/README.md#recovery). Keep the state rather than deleting it.
+[CLI recovery](cli/README.md#recovery). Keep the state. Do not delete it.
 
 <a id="7-stop-the-server"></a>
 ## Stop the engine
 
 Leave chat, keep the same `VADE_HOME` / `VADE_CONFIG`, and run `vade down`.
-It stops the engine this installation started and, on Route B, its SSH tunnel.
-Run `vade status` to confirm it is down.
+It stops the engine that this installation started. On Route B, it also stops
+the SSH tunnel. Run `vade status` to confirm that the engine is down.
 
 ## FP8 on 2, 4 or 6 Sparks
 
 The FP8 checkpoint is a supported route. It runs on 2, 4 or 6 linked Sparks,
 from a controller, with its own config (`cli/examples/vade.conf`). Start it
-with `vade up --fp8` or `vade up --fp8 --sparks 4`. The older spelling
+with `vade up --fp8` or `vade up --fp8 --sparks 4`. The older flag
 `--fp8-legacy` still works. Follow
 [Install FP8 on 2, 4 or 6 Sparks](docs/install-fp8.md). Do not mix FP8 and
 FP4-Local weights, model IDs or defaults.

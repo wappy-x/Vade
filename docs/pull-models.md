@@ -7,24 +7,42 @@ tells you which Vade command can serve each one.
 
 ## The checkpoints Vade serves
 
-Each line downloads one checkpoint at the publisher revision that Vade is
-qualified on. The file counts and sizes come from `vade pull --dry-run` on
-2026-10-29.
+Each command below downloads one checkpoint at the publisher revision that
+Vade is qualified on. The file counts and sizes come from
+`vade pull --dry-run` on 2026-10-29.
 
-| Checkpoint | Command | Files | Size | Serve it with |
-| --- | --- | --- | --- | --- |
-| Qwen3.8 Flash-Next FP4-Local | `vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300` | 32 | 102.26 GB | `vade launch` or `vade up` |
-| Qwen3.8 Flash-Next FP8 | `vade pull Qwen/Qwen3.8-Flash-Next-FP8@236dfdf285828023ca3bcd3f37366c58a3469b13` | 143 | 185.56 GB | `vade up --fp8` from a controller ([FP8 install](install-fp8.md)) |
-| Legacy Qwen3-8B BF16 | `vade pull Qwen/Qwen3-8B@b968826d9c46dd6066d109eabc6255188de91218` | 14 | 16.40 GB | `vade run qwen3-8b --weights-source ~/models/Qwen/Qwen3-8B` |
+- **Qwen3.8 Flash-Next FP4-Local.** It has 32 files and 102.26 GB. Serve it
+  with `vade launch` or `vade up`.
 
-The FP4-Local line puts the model in `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local`.
-When no checkpoint is saved yet, `vade launch` looks in that folder first, so
-you can run it next with no other setting. A checkpoint that an earlier
-`vade launch` saved comes before `VADE_MODELS` and before that folder. To
-serve a new folder in that case, use a new Vade home. The `Next:` line of the
-pull output gives the command with a home that is not in use yet, such as
-`VADE_HOME=~/.vade-<org>-<name> VADE_MODELS=<folder> vade launch`, and a
-`Note:` line says why.
+  ```sh
+  vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300
+  ```
+
+- **Qwen3.8 Flash-Next FP8.** It has 143 files and 185.56 GB. Serve it with
+  `vade up --fp8` from a controller ([FP8 install](install-fp8.md)).
+
+  ```sh
+  vade pull Qwen/Qwen3.8-Flash-Next-FP8@236dfdf285828023ca3bcd3f37366c58a3469b13
+  ```
+
+- **Legacy Qwen3-8B BF16.** It has 14 files and 16.40 GB. Serve it with
+  `vade run qwen3-8b --weights-source ~/models/Qwen/Qwen3-8B`.
+
+  ```sh
+  vade pull Qwen/Qwen3-8B@b968826d9c46dd6066d109eabc6255188de91218
+  ```
+
+The FP4-Local command puts the model in
+`~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local`. When no checkpoint is saved
+yet, `vade launch` looks in that folder first, so you can run it next with no
+other setting.
+
+A checkpoint that an earlier `vade launch` saved comes before `VADE_MODELS`
+and before that folder. To serve a new folder in that case, use a new Vade
+home. The `Next:` line of the pull output gives the command with a home that
+is not in use yet, such as
+`VADE_HOME=~/.vade-<org>-<name> VADE_MODELS=<folder> vade launch`. A `Note:`
+line says why.
 
 The download takes a long time. Over SSH, run it inside `tmux`, or under
 `nohup` with its output in a log file:
@@ -71,9 +89,11 @@ Pull skips other files, such as `.gitattributes`, `*.bin` and `*.pth` weights
 and images. It also skips any path that has a part starting with a dot.
 
 `--include PATTERN` replaces this selection. Give it more than once to add more
-patterns. No pattern selects a path that has a part starting with a dot, so a
-repository cannot write into the pull state or over `.vade-model.json`. In a pattern, `*` matches any text, including `/`, and `?` matches
-one character. Put the pattern in quotes so that the shell does not expand it:
+patterns. No pattern selects a path that has a part starting with a dot. So a
+repository cannot write into the pull state or over `.vade-model.json`.
+
+In a pattern, `*` matches any text, including `/`, and `?` matches one
+character. Put the pattern in quotes so that the shell does not expand it:
 
 ```sh
 vade pull org/name --include '*.json' --include 'tokenizer*' --to ~/models/org/name-metadata
@@ -85,19 +105,19 @@ Pull reads the file list from the Hub API at the resolved commit
 (`/api/models/<org>/<name>/tree/<commit>?recursive=true`, page by page). For
 each file it then does these steps:
 
-1. If the file is already in the folder, pull checks it. A file that the same
-   folder's last pull checked, and that has not changed since, is not read
-   again.
-2. Otherwise pull downloads it from `/<org>/<name>/resolve/<commit>/<path>`
+1. If the file is already in the folder, pull checks it. Pull does not read a
+   file again when the same folder's last pull checked it and it has not
+   changed since.
+2. Otherwise, pull downloads it from `/<org>/<name>/resolve/<commit>/<path>`
    into a partial file in `.vade-pull/` inside the model folder. A partial
    file from an earlier attempt continues from its last byte. Pull follows
-   the redirect that the Hub sends for a file, also for a small file. A reply
-   that sends more bytes than the listing gives is stopped, and pull removes
-   the partial file. A reply that ends early is continued; pull never takes
-   it as the whole file.
+   the redirect that the Hub sends for a file, even for a small file. When a
+   reply sends more bytes than the listing gives, pull stops it and removes
+   the partial file. When a reply ends early, pull continues it. Pull never
+   takes a short reply as the whole file.
 3. Pull checks the size, then the hash: the SHA-256 that the Hub keeps for
-   large (LFS) files, or the Git blob ID for small files. A file that fails the
-   check is removed, and pull stops with the file name and both values.
+   large (LFS) files, or the Git blob ID for small files. When a file fails
+   the check, pull removes it and stops with the file name and both values.
 4. Pull moves the checked file into place.
 
 A transfer that stalls (less than 1 byte per second for 120 seconds), a broken
@@ -127,10 +147,10 @@ When every file passes its check, pull writes two files:
   `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local.sha256`. It has one
   `sha256sum` row for each file. For an FP4-Local checkpoint, `vade launch`,
   `vade up` and `vade install` read this list and hash every listed file
-  before they serve the model. The FP8 route keeps the engine's own
-  receipt and does not read this list, and `vade run qwen3-8b` checks its own
-  pinned hashes. The [fetch helper](../ops/fetch-model.sh) writes a list with
-  the same name and form.
+  before they serve the model. The FP8 route keeps the engine's own receipt
+  and does not read this list. `vade run qwen3-8b` checks its own pinned
+  hashes. The [fetch helper](../ops/fetch-model.sh) writes a list with the
+  same name and form.
 
 A pull with `--include` into a folder that an earlier pull of the same commit
 filled keeps the rows of the other files in both records. Before it changes a
@@ -187,8 +207,8 @@ weights, so the launcher checks stop at the first missing shard.
 
 ## Gated and private models
 
-Some repositories require you to accept the publisher's terms, or are
-private. For these:
+Some repositories are private, or they require you to accept the publisher's
+terms. For these repositories, do these steps:
 
 1. Accept the terms on the model page while you are signed in to the Hub.
 2. Make a read token in your Hugging Face settings.
@@ -198,17 +218,17 @@ private. For these:
    readable only by you: `chmod 600 ~/.vade/hf-token`.
 
 `HF_TOKEN` takes priority over the file. Pull gives the token to curl on its
-standard input, so it does not show in the process list. curl 7.58 and later send
-it only to the Hub host, not to the download host that the Hub redirects to. Pull never
-prints the token or writes it to a file. The checkpoints in the table above
-download without a token.
+standard input, so it does not show in the process list. curl 7.58 and later
+send it only to the Hub host, not to the download host that the Hub redirects
+to. Pull never prints the token or writes it to a file. The checkpoints in the
+list above download without a token.
 
 ## Mirrors and transport
 
 Set `HF_ENDPOINT` to use a Hub mirror, for example
 `HF_ENDPOINT=https://hub.example.org`. The address must use HTTPS and have no
-path. Plain HTTP is accepted only for an address on this machine
-(`127.0.0.1`, `localhost` or `[::1]`), which the tests use.
+path. Pull accepts plain HTTP only for an address on this machine
+(`127.0.0.1`, `localhost` or `[::1]`). The tests use such an address.
 
 Vade has no TLS code of its own. Pull runs the system `curl` from `PATH` with
 a fixed list of arguments and no shell. It skips your `.curlrc`, allows only

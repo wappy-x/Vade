@@ -5,16 +5,20 @@
 > Vade for a person, or to connect Claude Code or Codex to it, read the
 > [agent quickstart](docs/agents/quickstart.md) instead.
 
-Vade is an inference engine for the NVIDIA DGX Spark / GB10, written in Rust
-using only the standard library. Version 0.1.0 targets
-`nvidia/Qwen3.8-Flash-Next-FP4-Local` and handles text only. Main also serves
-`Qwen/Qwen3.8-Flash-Next-FP8` on 2, 4 or 6 Sparks. Vade runs on one Spark by
-default, and the topology supports 1..N Sparks. Drafting is on by default: an
-extra model head proposes tokens and the model verifies them. With FP4-Local,
-a request that doesn't say how to sample is decoded greedily. With FP8, such a
-request is sampled with the checkpoint's values
-([FP8 defaults](docs/install-fp8.md#defaults-and-drafting)). The source
-repository URL is defined by [`VADE_REPO_URL`](cli/src/repository.rs).
+Vade is an inference engine for the NVIDIA DGX Spark / GB10. It is written in
+Rust and uses only the standard library. This file gives the rules for a
+change to Vade's code.
+
+Version 0.1.0 targets `nvidia/Qwen3.8-Flash-Next-FP4-Local` and handles text
+only. Main also serves `Qwen/Qwen3.8-Flash-Next-FP8` on 2, 4 or 6 Sparks. Vade
+runs on one Spark by default, and the topology supports 1..N Sparks.
+
+Drafting is on by default. An extra model head proposes tokens, and the model
+verifies them. With FP4-Local, a request that does not say how to sample is
+decoded greedily. With FP8, such a request is sampled with the checkpoint's
+values ([FP8 defaults](docs/install-fp8.md#defaults-and-drafting)).
+
+[`VADE_REPO_URL`](cli/src/repository.rs) defines the source repository URL.
 
 ## House rules
 

@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in Vade doesn't work the way the docs say it should.
+description: Report a part of Vade that does not work the way the docs say.
 labels: ["bug"]
 body:
   - type: markdown
@@ -63,7 +63,7 @@ body:
     id: seen
     attributes:
       label: What you saw
-      description: State the result you got. Say whether it repeats and give the exact Spark count if it is not listed above.
+      description: State the result you got. Say whether it repeats. If your Spark count is not in the list above, give the exact count.
     validations:
       required: true
   - type: textarea
@@ -78,10 +78,10 @@ body:
     id: ids
     attributes:
       label: Token IDs and exactness receipt
-      description: For changing or wrong answers, attach the expected and seen token IDs, or the `vade verify` receipt. Include sampling, drafting and cache settings. Say which check is missing if you cannot collect it. Do not attach private prompt text.
+      description: For an answer that changes or is wrong, attach the expected and seen token IDs, or the `vade verify` receipt. Include the sampling, drafting and cache settings. If you cannot collect a check, say which one is missing. Do not attach private prompt text.
       render: text
   - type: textarea
     id: extra
     attributes:
       label: Anything else
-      description: Give the operating system, launcher source and any other settings needed to reproduce this bug. For more Sparks than the options above, give the exact count.
+      description: Give the operating system, the launcher source and any other settings that someone needs to reproduce this bug. For more Sparks than the options above, give the exact count.

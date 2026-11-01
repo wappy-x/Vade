@@ -1,5 +1,10 @@
 # Contributor Covenant Code of Conduct
 
+This code of conduct applies in all spaces of the Vade community. It also
+applies when a person officially represents the community in public spaces.
+It is adapted from the Contributor Covenant, version 2.1. To report a
+problem, use the private reporting link under [Enforcement](#enforcement).
+
 ## Our Pledge
 
 We as members, contributors, and leaders pledge to make participation in our
@@ -60,7 +65,7 @@ representative at an online or offline event.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the community leaders responsible for enforcement at
-[the maintainers via GitHub private reporting](https://github.com/wappy-x/vade/security/advisories/new).
+[the maintainers via GitHub private reporting](https://github.com/wappy-x/Vade/security/advisories/new).
 All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the

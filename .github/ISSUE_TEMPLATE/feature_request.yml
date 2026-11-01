@@ -1,24 +1,24 @@
 name: Feature request
-description: Suggest something Vade could do, or do better.
+description: Suggest something that Vade could do, or do better.
 labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
       value: |
-        Vade uses Rust's standard library, with no third-party dependencies or Python. The same request must give identical token IDs across runs and Sparks. New arithmetic-order switches and model-specific tuning do not fit the project rules.
+        Vade uses Rust's standard library, with no third-party dependencies and no Python. The same request with the same settings must give identical token IDs on every run and on every supported Spark count. New arithmetic-order switches and model-specific tuning do not fit the project rules.
 
         Remove private data and connection details before you attach examples.
   - type: textarea
     id: problem
     attributes:
-      label: What you're trying to do
-      description: The task or situation, and where Vade gets in the way today.
+      label: What you are trying to do
+      description: Describe the task or situation. Say where Vade gets in the way today.
     validations:
       required: true
   - type: textarea
     id: proposal
     attributes:
-      label: What you'd like Vade to do
+      label: What you want Vade to do
       description: Describe the result you want. Include an example command or request if it helps.
     validations:
       required: true
@@ -26,14 +26,14 @@ body:
     id: alternatives
     attributes:
       label: What you do today instead
-      description: Any workaround you use, or other approaches you considered.
+      description: Describe any workaround that you use, or other approaches that you considered.
   - type: input
     id: setup
     attributes:
       label: Your setup
-      description: How many Sparks, and whether you run on the Spark or from a controller, if that matters here.
+      description: If it matters here, give the number of Sparks and say whether you run on the Spark or from a controller.
   - type: textarea
     id: proof
     attributes:
       label: How to check the result
-      description: Describe a useful test. For an engine change, say how token IDs should match across runs, batching, caching, chunking and drafting modes.
+      description: Describe a useful test. For an engine change, say how the token IDs must match across runs, batching, caching, chunking and drafting modes.

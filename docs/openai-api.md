@@ -113,14 +113,18 @@ client does not know.
 
 ## Routes
 
+<div align="center">
+
 | Route | Engine | Core gateway | Standalone gateway |
-| --- | --- | --- | --- |
+| :---: | :---: | :---: | :---: |
 | `POST /v1/chat/completions` | Served | Forwarded | Forwarded |
 | `POST /v1/completions` (legacy) | Served | Forwarded | Forwarded |
 | `GET /v1/models` | Served | Forwarded | Forwarded |
 | `POST /v1/embeddings` | 404 | 501 with a reason | Forwarded, so 404 |
 | `GET /v1/models/{id}` | 404 | 404 | Forwarded, so 404 |
 | Audio, images, files, batches, moderations | 404 | 404 | Forwarded, so 404 |
+
+</div>
 
 Vade is a text generation server. It has no embedding model, so it cannot
 serve `/v1/embeddings`. The core gateway answers that route with HTTP 501 and
@@ -136,25 +140,23 @@ gives `context_length`, `max_model_len`, `max_output_tokens` and
 
 ## Chat request fields
 
-| Field | What Vade does |
-| --- | --- |
-| `model` | Optional. If you send it, it must equal the served model ID, or the engine returns 400 `unknown model`. |
-| `messages` | 1 to 4,096 messages. Roles `system`, `developer` (read as `system`), `user`, `assistant` and `tool`. |
-| `content` | A string, or an array of `{"type": "text"}` parts, which Vade joins in order. Image parts return 400. An assistant message with tool calls can send `null`. |
-| `name` on a message | Not used by the FP4-Local chat template. |
-| `stream` | `true` sends server-sent events. The default is `false`. |
-| `stream_options` | Accepted and ignored. Usage is always on the last chunk. |
-| `max_tokens`, `max_completion_tokens` | Positive integers. `max_completion_tokens` wins when you send both. Vade clamps the value to the server's output limit and to the room left after the prompt. |
-| `stop` | A string, or up to 4 strings. Each string must have 1 to 1,024 bytes. |
-| `n` | Only 1. It counts as a sampling field, even as 1; see [Sampling and exactness](#sampling-and-exactness). |
-| `tools` | Up to 64 function tools. |
-| `tool_choice` | `auto` (the default), `none`, `required`, or `{"type": "function", "function": {"name": ...}}`. |
-| `parallel_tool_calls` | `false` allows one call per reply. The default is `true`. |
-| `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `presence_penalty`, `frequency_penalty`, `repetition_penalty` | Used as sent. See [Sampling and exactness](#sampling-and-exactness) and [Sampling](sampling.md). |
-| `response_format` | Ignored. See [Structured output](#structured-output). |
-| `typical_p`, `logit_bias`, `best_of` | Ignored by the engine. They still count as sampling fields. |
-| `logprobs`, `top_logprobs`, `user`, `metadata`, `store` | Ignored. |
-| `enable_thinking`, `reasoning_effort`, `chat_template_kwargs` | Vade fields that turn thinking on or off. See the [engine server reference](../engine/docs/server.md). |
+- **`model`.** The field is optional. If you send it, it must equal the served model ID, or the engine returns 400 `unknown model`.
+- **`messages`.** Send 1 to 4,096 messages. The roles are `system`, `developer` (read as `system`), `user`, `assistant` and `tool`.
+- **`content`.** Send a string, or an array of `{"type": "text"}` parts, which Vade joins in order. Image parts return 400. An assistant message with tool calls can send `null`.
+- **`name` on a message.** The FP4-Local chat template does not use it.
+- **`stream`.** `true` sends server-sent events. The default is `false`.
+- **`stream_options`.** Vade accepts the field and ignores it. Usage is always on the last chunk.
+- **`max_tokens`, `max_completion_tokens`.** Send positive integers. `max_completion_tokens` wins when you send both. Vade clamps the value to the server's output limit and to the room left after the prompt.
+- **`stop`.** Send a string, or up to 4 strings. Each string must have 1 to 1,024 bytes.
+- **`n`.** Only 1 is allowed. It counts as a sampling field, even as 1. See [Sampling and exactness](#sampling-and-exactness).
+- **`tools`.** Send up to 64 function tools.
+- **`tool_choice`.** Send `auto` (the default), `none`, `required`, or `{"type": "function", "function": {"name": ...}}`.
+- **`parallel_tool_calls`.** `false` allows one call per reply. The default is `true`.
+- **`temperature`, `top_p`, `top_k`, `min_p`, `seed`, `presence_penalty`, `frequency_penalty`, `repetition_penalty`.** Vade uses them as sent. See [Sampling and exactness](#sampling-and-exactness) and [Sampling](sampling.md).
+- **`response_format`.** Vade ignores it. See [Structured output](#structured-output).
+- **`typical_p`, `logit_bias`, `best_of`.** The engine ignores them. They still count as sampling fields.
+- **`logprobs`, `top_logprobs`, `user`, `metadata`, `store`.** Vade ignores them.
+- **`enable_thinking`, `reasoning_effort`, `chat_template_kwargs`.** These Vade fields turn thinking on or off. See the [engine server reference](../engine/docs/server.md).
 
 The engine ignores fields that it does not know. A field that is ignored
 changes nothing in the reply.
@@ -197,11 +199,15 @@ from its prefix cache instead of computing them again.
 
 ### Finish reasons
 
+<div align="center">
+
 | `finish_reason` | Meaning |
-| --- | --- |
+| :---: | :---: |
 | `stop` | The model ended its answer, or the reply reached a `stop` string. |
 | `length` | The reply reached its token limit. |
 | `tool_calls` | The reply ends with one or more tool calls. |
+
+</div>
 
 Vade does not send `content_filter` or `function_call`.
 
@@ -255,16 +261,19 @@ at once.
 
 On FP4-Local, when a request sends no sampling field, Vade decodes greedily:
 it always picks the most likely token. Greedy is the default, and it is exact:
-the same request gives the same token IDs on every run. Vade's exactness
+the same request with the same settings gives the same token IDs on every run. Vade's exactness
 checks use greedy requests.
 
 FP8 is different. A request to the FP8 engine that leaves out a sampling
 field takes that field from the checkpoint, even when it sends no sampling
 field at all. The checkpoint's values sample, and a request without `seed`
-gets a new seed. For greedy replies on FP8, send `"temperature": 0` with
-neutral penalties (`repetition_penalty` 1, `presence_penalty` 0,
-`frequency_penalty` 0), send the full greedy set, or go through a gateway
-([FP8 install](install-fp8.md#defaults-and-drafting)).
+gets a new seed. For greedy replies on FP8, do one of these three things
+([FP8 install](install-fp8.md#defaults-and-drafting)):
+
+- Send `"temperature": 0` with neutral penalties (`repetition_penalty` 1,
+  `presence_penalty` 0, `frequency_penalty` 0).
+- Send the full greedy set.
+- Send the request through a gateway.
 
 The gateways make that default explicit. When a request has none of the
 fields `temperature`, `top_p`, `top_k`, `min_p`, `typical_p`, `seed`,
@@ -354,8 +363,8 @@ explains them.
   autocomplete would only continue the text before the cursor.
 - Open WebUI reads the model list, then streams chats. The gateways accept
   connections from loopback only. On Linux, a container on a bridge network
-  reaches the host through the bridge address, which is not loopback; run Open
-  WebUI with host networking there, or outside a container. This Linux note
+  reaches the host through the bridge address, which is not loopback. So on
+  Linux, run Open WebUI with host networking, or outside a container. This Linux note
   is not tested.
 
 **Cursor.** Not tested. Cursor sends requests for a custom base URL from its
@@ -379,9 +388,12 @@ own servers, so it cannot reach a loopback address.
 replays the requests in
 [`openai-clients.json`](../harness/tests/fixtures/openai-clients.json)
 through the core gateway and the standalone gateway, to a mock engine. For
-each request it checks that the engine receives the expected bytes, that the
-client receives the engine's reply byte for byte, and that the reply gives the
-client its text, tool calls, finish reason, usage, model IDs or error.
+each request, it checks three things:
+
+1. The engine receives the expected bytes.
+2. The client receives the engine's reply byte for byte.
+3. The reply gives the client its text, tool calls, finish reason, usage,
+   model IDs or error.
 
 - Each case is marked `verified`, `from memory` or `from docs`. In this
   version, 9 cases come from openai-python 3.41.0, 5 from memory (Continue and
