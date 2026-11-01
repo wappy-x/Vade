@@ -2,8 +2,9 @@
 
 This page covers starting `nvidia/Qwen3.8-Flash-Next-FP4-Local` from a
 controller, on one Spark or on a chain of up to 24. Start with
-[INSTALL.md](../../INSTALL.md); on the Spark itself, without a controller, use
-the [first-run guide](../../harness/docs/first-run.md) instead.
+[INSTALL.md](../../INSTALL.md). On the Spark itself, without a controller, use
+the [quick start](../../INSTALL.md#quick-start-on-one-spark) instead:
+`curl -fsSL https://vade.lol/install.sh | sh`, `vade pull`, then `vade up`.
 
 ## Defaults
 
@@ -71,13 +72,13 @@ RDMA: for the shipped checkpoint they run the tensor split in parts
 ([four-sparks.md](../../docs/four-sparks.md)), with no prefix cache. When `vade install` stages
 the engine, it records whether that engine supports chains. A build staged by
 an older install supports one or two Sparks only, and `vade up` refuses a
-larger count before it contacts any machine; run `vade install` from current
+larger count before it contacts any machine. Run `vade install` from current
 source to fix that. Vade never falls back to the older tensor-map rank path
 on its own.
 
 The FP8 profile needs `vade up --fp8` and its own FP8 config (see
-[the FP8 install](../../docs/install-fp8.md));
-a bare `vade up` always means FP4-Local.
+[the FP8 install](../../docs/install-fp8.md)). With no recorded launch, a bare
+`vade up` means FP4-Local.
 
 ## What has been tested
 

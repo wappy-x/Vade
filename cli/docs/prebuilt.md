@@ -1,12 +1,13 @@
 # Prebuilt installation
 
-Vade can run from ready-made binaries instead of compiling them. There are
+Vade can run from ready-made binaries instead of compiling them. The one-line
+install, `curl -fsSL https://vade.lol/install.sh | sh`, uses them. There are
 three packages, and they serve different setups:
 
 | Package | Use it when | Where it is |
 | --- | --- | --- |
-| Main bundle (`vade-<version>-<sha7>-linux-aarch64-gb10.tar.gz`) | `scripts/install.sh` installs it for you on one Spark | dl.vade.lol |
-| Launcher bundle archive (`vade-launch-bundle-v1-<sha7>-aarch64.tar.zst`) | You install the v0.1.0 release by hand | The v0.1.0 release page |
+| Main bundle (`vade-<version>-<sha7>-linux-aarch64-gb10.tar.gz`) | The one-line install installs it for you on one Spark | dl.vade.lol |
+| Launcher bundle archive (`vade-launch-bundle-v1-<sha7>-aarch64.tar.zst`) | You install the older v0.1.0 release by hand | The v0.1.0 release page on GitHub |
 | Controller bundle (`vade-prebuilt-v1`) | You install with `vade install` from a controller | You assemble it yourself |
 
 The main bundle and the launcher bundle archive hold the same files and the
@@ -16,13 +17,16 @@ rest of this page covers the launcher bundle archive. The
 [last section](#prebuilt-binaries-for-a-controller-install) covers the
 controller format. For other terms, see the [glossary](../../docs/GLOSSARY.md).
 
+Builds of main come from dl.vade.lol. GitHub Releases holds only the older
+v0.1.0 bundle.
+
 ## The main bundle
 
-`scripts/install.sh` downloads, checks and installs it;
+The installer, `scripts/install.sh`, downloads, checks and installs this
+bundle. The bundle of main is published on dl.vade.lol. The one-line install
+fetches the same script from vade.lol.
 [INSTALL: Prebuilt bundle](../../INSTALL.md#prebuilt-bundle) lists its checks
-in order. The bundle of main is published on dl.vade.lol. The one-line
-install, `curl -fsSL https://vade.lol/install.sh | sh`, downloads and installs
-it.
+in order.
 
 The file `vade-<version>-<sha7>-linux-aarch64-gb10.tar.gz` unpacks to one
 folder with the same name, so it never writes into the current folder. It is
@@ -62,7 +66,7 @@ packages binaries that are already built and builds nothing. `PAYLOAD_DIR`
 holds `build.json`, `source.tar` (a `git archive` of the commit) and
 `artifacts/engine/target`, with `flash-serve` and the PTX. `CLI_DIR` holds
 `vade`, `vade-harness` and `REVISION`. The script needs Git with that commit
-in the checkout, `tar`, `gzip`, `od` and `sha256sum` or `shasum`; it runs on
+in the checkout, `tar`, `gzip`, `od` and `sha256sum` or `shasum`. It runs on
 Linux or macOS.
 
 Before it packs anything, it checks that `source.tar`, `build.json` and
@@ -75,6 +79,9 @@ the same bytes. It writes the archive and `SHA256SUMS` to `OUTPUT_DIR`
 (default `.local/bundles`), which must not exist yet.
 
 ## One Spark: download and launch
+
+This section installs the older v0.1.0 release by hand. For the current build,
+use the one-line install instead.
 
 The launcher bundle has everything Vade needs to install its engine and its
 chat program (the harness) on Linux aarch64.
@@ -95,9 +102,9 @@ finds weights you already have, so keep your existing checkpoint at
 model and how the local launcher behaves.
 
 The bundle and its `SHA256SUMS` file are on the
-[v0.1.0 release page](https://github.com/wappy-x/vade/releases/tag/v0.1.0).
-If you'd rather build from source, follow [INSTALL.md](../../INSTALL.md), or
-make the bundle yourself as described in
+[v0.1.0 release page](https://github.com/wappy-x/Vade/releases/tag/v0.1.0).
+To build from source, follow [INSTALL.md](../../INSTALL.md), or make the bundle
+yourself as described in
 [Produce the launcher bundle](#produce-the-launcher-bundle).
 
 ### Download, check and unpack
@@ -109,7 +116,7 @@ release's `SHA256SUMS`:
 ```sh
 mkdir vade-launch
 cd vade-launch
-RELEASE_URL='https://github.com/wappy-x/vade/releases/download/v0.1.0'
+RELEASE_URL='https://github.com/wappy-x/Vade/releases/download/v0.1.0'
 BUNDLE='vade-launch-bundle-v1-5a22651-aarch64.tar.zst'
 ```
 

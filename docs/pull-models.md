@@ -12,7 +12,7 @@ Vade is qualified on. The file counts and sizes come from
 `vade pull --dry-run` on 2026-10-29.
 
 - **Qwen3.8 Flash-Next FP4-Local.** It has 32 files and 102.26 GB. Serve it
-  with `vade launch` or `vade up`.
+  with `vade up`. `vade launch` starts the same engine and opens chat.
 
   ```sh
   vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300
@@ -34,11 +34,11 @@ Vade is qualified on. The file counts and sizes come from
 
 The FP4-Local command puts the model in
 `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local`. When no checkpoint is saved
-yet, `vade launch` looks in that folder first, so you can run it next with no
+yet, `vade up` looks in that folder first, so you can run it next with no
 other setting.
 
-A checkpoint that an earlier `vade launch` saved comes before `VADE_MODELS`
-and before that folder. To serve a new folder in that case, use a new Vade
+A checkpoint that an earlier `vade up` or `vade launch` saved comes before
+`VADE_MODELS` and before that folder. To serve a new folder in that case, use a new Vade
 home. The `Next:` line of the pull output gives the command with a home that
 is not in use yet, such as
 `VADE_HOME=~/.vade-<org>-<name> VADE_MODELS=<folder> vade launch`. A `Note:`
@@ -69,7 +69,7 @@ vade models [DIR] [--json]
 - `--to DIR` sets the model folder. The default is `~/models/<org>/<name>`.
   The folder can be a symlink, for example to a larger disk. Pull then writes
   into the folder it points to, and puts the checksum list beside that folder,
-  where `vade launch` looks for it. A symlink inside the folder stops the pull.
+  where `vade up` looks for it. A symlink inside the folder stops the pull.
 - `--dry-run` lists the files and their sizes. It downloads nothing and does
   not create the model folder.
 

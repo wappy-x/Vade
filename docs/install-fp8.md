@@ -73,8 +73,20 @@ every weight shard. Do not convert the files. Do not mix in FP4-Local files.
 Keep the folder name `Qwen3.8-Flash-Next-FP8`. The engine serves the model
 under that name in lower case, `qwen3.8-flash-next-fp8`.
 
-To download the weights, run this command from the repository root. The
-computer needs Rust 1.99.0, curl and network access:
+To download the weights, run this command on each Spark. It puts them in
+`~/models/Qwen/Qwen3.8-Flash-Next-FP8` and checks every file:
+
+```sh
+vade pull Qwen/Qwen3.8-Flash-Next-FP8@236dfdf285828023ca3bcd3f37366c58a3469b13
+```
+
+The `vade` command comes from the one-line install,
+`curl -fsSL https://vade.lol/install.sh | sh`. If it is not found, run the
+export line that the installer prints last.
+[Download models](pull-models.md) has the details.
+
+You can also download the weights once and copy them. Run this command from
+the repository root. The computer needs Rust 1.99.0, curl and network access:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"

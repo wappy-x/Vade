@@ -3,15 +3,17 @@
 > [!NOTE]
 > This file is for agents that change Vade's code. To install, start or use
 > Vade for a person, or to connect Claude Code or Codex to it, read the
-> [agent quickstart](docs/agents/quickstart.md) instead.
+> [agent quickstart](docs/agents/quickstart.md) instead. On a Spark, the path
+> is `curl -fsSL https://vade.lol/install.sh | sh`, `vade pull`, then `vade up`.
 
 Vade is an inference engine for the NVIDIA DGX Spark / GB10. It is written in
 Rust and uses only the standard library. This file gives the rules for a
 change to Vade's code.
 
 Version 0.1.0 targets `nvidia/Qwen3.8-Flash-Next-FP4-Local` and handles text
-only. Main also serves `Qwen/Qwen3.8-Flash-Next-FP8` on 2, 4 or 6 Sparks. Vade
-runs on one Spark by default, and the topology supports 1..N Sparks.
+only. Main also serves `Qwen/Qwen3.8-Flash-Next-FP8` on 2 or 4 Sparks. Six
+Sparks start, but exactness does not cover them yet. Vade runs on one Spark by
+default, and the topology supports 1..N Sparks.
 
 Drafting is on by default. An extra model head proposes tokens, and the model
 verifies them. With FP4-Local, a request that does not say how to sample is

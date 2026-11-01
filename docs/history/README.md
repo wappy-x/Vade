@@ -6,5 +6,6 @@ qualify current main. Current installation starts at [INSTALL.md](../../INSTALL.
 - [Benchmark history of October 2026](benchmarks-2026-10.md)
 - [Earlier engine-comparison evidence](sglang/README.md)
 - [Single-Spark 35B FP8 route](serve-35b-one-spark.md)
+- [One-Spark Qwen3-8B route from source](quickstart-one-spark-qwen3-8b.md)
 - [Committed benchmark receipts](../../bench/receipts/README.md)
 - [Engine benchmark history](../../engine/docs/benchmarks.md)

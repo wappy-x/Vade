@@ -1,8 +1,9 @@
 # FP8 fresh install: from zero to a first answer
 
 **Installing Vade for the first time? Start with [INSTALL.md](../INSTALL.md).**
-The current model, [FP4-Local](GLOSSARY.md#dg), runs on a single Spark: you
-start it on the Spark itself with `vade launch`, and you need no second
+The current model, [FP4-Local](GLOSSARY.md#dg), runs on a single Spark. The
+one-line install, `curl -fsSL https://vade.lol/install.sh | sh`, then
+`vade pull` and `vade up` start it on the Spark itself, and you need no second
 computer. [First run](../harness/docs/first-run.md) explains that
 launcher. Driving Sparks from another computer, the
 [controller](GLOSSARY.md#ac) route, comes after that.
@@ -142,7 +143,7 @@ passes. In short:
 
 1. Cable port 0 of spark-1 to port 1 of spark-2.
 2. Give each cable link (a [rail](GLOSSARY.md#pr)) its own `/24` subnet with MTU 9000 (example: `192.0.2.1` ↔ `192.0.2.2`, `198.51.100.1` ↔ `198.51.100.2`).
-3. Clone Vade on **each Spark** (`git clone --branch main https://github.com/wappy-x/vade.git ~/vade`, then `cd ~/vade`) and run the OS-setup scripts from that repository root, in the order given in [Spark system setup](spark-setup.md). Together they install the RDMA packages, configure the network, set unlimited locked memory (`memlock`) for RDMA, apply NVIDIA's `kho=off` fix if your kernel is `7.0.0-1019-nvidia`, and create SSH keys between the Sparks.
+3. Clone Vade on **each Spark** (`git clone --branch main https://github.com/wappy-x/Vade.git ~/vade`, then `cd ~/vade`) and run the OS-setup scripts from that repository root, in the order given in [Spark system setup](spark-setup.md). Together they install the RDMA packages, configure the network, set unlimited locked memory (`memlock`) for RDMA, apply NVIDIA's `kho=off` fix if your kernel is `7.0.0-1019-nvidia`, and create SSH keys between the Sparks.
 4. Check: jumbo ping, `ib_write_bw` in both directions, `ulimit -l` = `unlimited`.
 
 **Using [TCP mode](#no-qsfp-link-use-tcp-mode)?** Skip the QSFP, RDMA and memlock
@@ -321,7 +322,7 @@ The repository is <https://github.com/wappy-x/Vade>. Clone it and build the
 CLI:
 
 ```sh
-git clone https://github.com/wappy-x/vade ~/vade
+git clone https://github.com/wappy-x/Vade ~/vade
 cd ~/vade
 cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml
 export PATH="$PWD/cli/target/release:$PATH"
