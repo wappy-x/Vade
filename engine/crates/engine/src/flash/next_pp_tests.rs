@@ -1458,42 +1458,42 @@ fn every_rank_derives_the_same_stage_intervals() {
 #[test]
 fn pp_kept_ack_is_read_while_the_front_waits_for_its_gpu() {
     static STOP: AtomicBool = AtomicBool::new(false);
-    let recipe = Recipe { limit: Duration::from_secs(2), asynchronous: true, mtp: true, tp: false };
-    let (near, mut far) = pair();
-    let peer = near.try_clone().unwrap();
-    let (written, ack) = mpsc::channel();
+    let (bound, (near, mut far)) = (Duration::from_secs(30), pair());
+    let (peer, (rest, resting)) = (near.try_clone().unwrap(), mpsc::channel());
     let back = std::thread::spawn(move || {
-        far.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        let mut hello = [0u8; 40];
-        far.read_exact(&mut hello).unwrap();
-        let mut reply = Vec::new();
-        put(&mut reply, MAGIC_HELLO);
-        put(&mut reply, 0);
-        far.write_all(&reply).unwrap();
-        let (kind, id, rows) = read_pipe_request(&mut far, Duration::from_secs(2)).unwrap();
-        assert_eq!(kind, KIND_ROWS_KEEP);
-        let answered: Vec<f32> = rows.iter().map(|v| v + 1.0).collect();
-        write_status(&mut far, id, Some(&answered));
-        written.send(()).unwrap();
+        read_rest(&mut far, &mut [0u8; 40], None, bound).unwrap();
+        far.write_all(&[MAGIC_HELLO, 0].map(u32::to_le_bytes).concat()).unwrap();
+        let Ok((KIND_ROWS_KEEP, id, rows)) = read_pipe_request(&mut far, bound) else { panic!("no KEEP request") };
+        let mut ack = [MAGIC_RESPONSE, 0, (rows.len() * 4) as u32, id].map(u32::to_le_bytes).concat();
+        ack.extend(rows.iter().flat_map(|v| (v + 1.0).to_ne_bytes()));
+        // Half a header first: header_ready wants a whole one, so the front cannot take it.
+        far.write_all(&ack[..REPLY_HEAD / 2]).unwrap();
+        resting.recv().unwrap();
+        far.write_all(&ack[REPLY_HEAD / 2..]).unwrap();
         // The front reads the ack without drain, then closes the link.
-        assert!(read_pipe_request(&mut far, Duration::from_secs(2)).is_err());
+        assert!(read_pipe_request(&mut far, bound).is_err());
     });
+    let recipe = Recipe { limit: 2 * bound, asynchronous: true, mtp: true, tp: false };
     let mut link = Link::connect(near, None, Stage::new(0, 2, None).unwrap(), 64, 8, 8, &STOP, recipe).unwrap();
     link.post(&[[1, 64, 0, 2]], vec![2.0; 2 * W], Some(vec![KeepPart { slot: 1, pos: 0, tokens: vec![1, 2], start: 0 }])).unwrap();
     assert_eq!(link.pending, 1);
-    // The GPU wait ends once the ack is on the socket and taken: nothing is left to peek.
+    // The wait ends once the reader took the ack. An ack still in flight also leaves the socket empty, so
+    // see the half header unread, send the rest, then wait until no byte is left (only the reader reads).
     link.reading_acks(|| {
-        ack.recv_timeout(Duration::from_secs(2)).map_err(err)?;
-        let begun = Instant::now();
-        peer.set_nonblocking(true).map_err(err)?;
-        while peer.peek(&mut [0u8; 1]).is_ok_and(|n| n > 0) && begun.elapsed() < Duration::from_secs(2) {
-            std::thread::sleep(Duration::from_millis(1));
+        let (begun, mut sent) = (Instant::now(), false);
+        while begun.elapsed() < bound {
+            match peer.peek(&mut [0u8; 1]).map_err(|e| e.kind()) {
+                Ok(0) => return Err("pipeline back closed".into()),
+                Ok(_) if !sent => sent = rest.send(()).is_ok(),
+                Err(ErrorKind::WouldBlock | ErrorKind::TimedOut) if sent => return Ok(()),
+                Ok(_) | Err(ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted) => std::thread::sleep(Duration::from_millis(1)),
+                Err(kind) => return Err(format!("peek: {kind}")),
+            }
         }
-        peer.set_nonblocking(false).map_err(err)
+        Err(format!("the front did not read the KEEP ack while it waited for its GPU ({} s; rest sent: {sent})", bound.as_secs()))
     }).unwrap();
     assert_eq!((link.pending, link.owed), (0, 0));
-    assert_eq!(link.kept.len(), 1);
-    assert!(link.kept[0].data.as_ref().unwrap().iter().all(|&v| v == 3.0));
+    assert!(matches!(&link.kept[..], [t] if t.data.as_ref().is_some_and(|d| d.iter().all(|&v| v == 3.0))));
     link.poisoned = true;
     drop((link, peer));
     back.join().unwrap();
