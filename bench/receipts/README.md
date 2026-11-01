@@ -4,7 +4,7 @@ A receipt is the saved record of one benchmark run: its build, its settings and 
 
 These are the folders, newest first:
 
-- **[2026-11-01](2026-11-01/README.md).** Current. FP8 on two and four Sparks, at main `1a07e3a`.
+- **[2026-11-01](2026-11-01/README.md).** Current. FP8 on two and four Sparks, at main `acb49bc` (afternoon). The morning cards at main `1a07e3a` are history, but its chooser cards are still the newest.
 - **[2026-10-31](2026-10-31/README.md).** Current for FP4-Local on one, two and four Sparks, at main `dc32b7c`. Its FP8 receipts are history: the 2026-11-01 receipts replace them.
 - **[2026-10-24](2026-10-24/README.md).** History. FP4-Local receipts behind the v0.1.0 tables, in the [2026-10-24 section](../../docs/benchmarks.md#current-results-2026-10-24) of the benchmark history.
 
