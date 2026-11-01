@@ -594,7 +594,7 @@ With `VADE_CONFIG` set, the lifecycle commands work like this:
 | `vade up --replicas N` | FP4-Local only, N = 2 to 16: one independent one-Spark server on each of the first N configured machines (or the N `--hosts`), behind a local gateway. Details below the table. |
 | `vade up --replicas N --pairs` | FP4-Local only, N = 2 to 12: N two-Spark tensor-split servers on 2N machines, in pairs in list order, behind a local gateway. This mode is an option. It is not the four-Spark default ([two pairs behind one address](../docs/four-sparks.md#two-pairs-behind-one-address)). |
 | `vade up --fp8` | FP8: starts on the first two configured machines, tensor parallel on a ring. |
-| `vade up --fp8 --sparks 4` | FP8: four machines in config order, tensor parallel on a path. Its token IDs differ from two Sparks ([benchmarks](../docs/benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)). |
+| `vade up --fp8 --sparks 4` | FP8: four machines in config order, tensor parallel on a path. Its token IDs differ from two Sparks ([benchmarks](../docs/history/benchmarks-2026-10.md#fp8-on-two-and-four-sparks-different-token-ids)). |
 | `vade up --hosts machine-a,machine-b` | Selects connected machines in the given order. |
 | `vade status` | Machines, model, source build, MTP, context, output limit, how many chats the engine allows at once, memory/cache bytes per rank, ranks, tunnel, health, and speed when health reports it. |
 | `vade down` | Stops only the ranks Vade recorded and the SSH control connection it opened. |

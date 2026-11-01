@@ -1,7 +1,7 @@
 # 2026-10-24 FP4-Local receipts
 
 These folders are sanitized copies of the source folders quoted in the
-[current benchmark tables](../../../docs/benchmarks.md#current-results-2026-10-24).
+[current benchmark tables](../../../docs/history/benchmarks-2026-10.md#current-results-2026-10-24).
 The table's Kind column uses four terms:
 
 - **RigMark card**: the result file that one run of the public RigMark

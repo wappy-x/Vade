@@ -296,9 +296,9 @@ The default request depth is three ([`next_lookup.rs`](../engine/crates/engine/s
 
 - **Adaptive depth.** This applies to a chat that runs alone, when its request names no depth or names depth 3. For that chat, the engine picks the depth of each cycle to get the most expected committed tokens per millisecond. It uses the acceptance of that request so far and the costs ([`draft.rs`](../engine/crates/engine/src/draft.rs)). The ceiling is 7 tokens, on one Spark, on the tensor split and on the layer chain. On FP4-Local, the costs are the verify cost prior and a draft price. Each chat measures that price over its first 16 cycles, rounds it to a power of two and keeps it. So the same request on the same setup drafts the same depths every run.
 - **Cohort drafting.** With several chats at once, the release server starts in a guarded mode. It drafts for groups of up to eight chats, on one Spark and on the two-Spark tensor split. It keeps the verify rows of each step within the width of the row kernels. The older automatic mode of the library stopped at five. Some engine notes still describe that mode.
-- **A cost guard.** With many chats at once, the engine compares the measured cost per token with and without drafting. It serves chats without drafting when that is at least 8 % cheaper per token ([`flash-serve.rs`](../engine/crates/tp/src/bin/flash-serve.rs)). Some setups work differently. On the two-Spark tensor split and on four Sparks (the split in parts or the layer chain) by default, and with `VADE_MTP_COHORT=wide` on one Spark, five to eight chats draft three tokens each in one 32-row verify step instead. There the guard is opt-in, and `VADE_MTP_COHORT=off` on every pipeline Spark brings it back ([c8-cohort-experiment.md](../engine/docs/c8-cohort-experiment.md)). In the 8-chat benchmark runs, some chats were served without drafting. The README of each card says how many ([Benchmarks](benchmarks.md#known-limits)).
+- **A cost guard.** With many chats at once, the engine compares the measured cost per token with and without drafting. It serves chats without drafting when that is at least 8 % cheaper per token ([`flash-serve.rs`](../engine/crates/tp/src/bin/flash-serve.rs)). Some setups work differently. On the two-Spark tensor split and on four Sparks (the split in parts or the layer chain) by default, and with `VADE_MTP_COHORT=wide` on one Spark, five to eight chats draft three tokens each in one 32-row verify step instead. There the guard is opt-in, and `VADE_MTP_COHORT=off` on every pipeline Spark brings it back ([c8-cohort-experiment.md](../engine/docs/c8-cohort-experiment.md)). In the 8-chat benchmark runs, some chats were served without drafting. The README of each card says how many ([Benchmarks](history/benchmarks-2026-10.md#known-limits)).
 
-On one Spark, drafting takes code from 27.8 to 76.7 tok/s and prose from 27.8 to 41.7 in the v0.1.0 cards ([what this means](benchmarks.md#what-this-means)). The older tensor-map rank path never drafts.
+On one Spark, drafting takes code from 27.8 to 76.7 tok/s and prose from 27.8 to 41.7 in the v0.1.0 cards ([what this means](history/benchmarks-2026-10.md#what-this-means)). The older tensor-map rank path never drafts.
 
 <a id="several-sparks-the-layer-pipeline-and-the-chain"></a>
 ## Several Sparks: the tensor split, layer pipeline and chain
@@ -358,7 +358,7 @@ The recipe of the pipeline covers drafting across stages, queued prompt tiles, t
 - **First token.** In those cards, the first token after a cold 8K prompt came in 2.80 s on two Sparks and 2.19 s on four. The v0.1.0 card on one Spark gave 3.86 s.
 - **One chat.** Only one pipeline GPU works on a given chat at a time. With drafting on, code ran at 79.3 tok/s on two Sparks and 80.3 on four, next to 76.7 on one.
 
-A chain is mainly for models too large for a single machine ([reading these cards](benchmarks.md#reading-these-cards)).
+A chain is mainly for models too large for a single machine ([reading these cards](history/benchmarks-2026-10.md#reading-these-cards)).
 
 ## The prefix cache
 
@@ -446,7 +446,7 @@ Vade measures at four levels and keeps their claims apart. Every published numbe
 
 `vade bench` counts real tokens from the server's usage figures, never streamed chunks. If any request in a group stops early or fails, the whole group gets no rate ([bench library](../engine/tools/bench/README.md), [run vade bench](benchmarks.md#run-vade-bench)). The published cards come from RigMark ([run RigMark](benchmarks.md#run-rigmark-against-vade)), and each card links its sanitized receipt folder.
 
-These are a few v0.1.0 results, all from [Benchmarks](benchmarks.md#previous-2026-10-24-v010-release-5a22651). They ran on one of our Sparks with drafting on, unless a line says otherwise.
+These are a few v0.1.0 results, all from [Benchmarks](history/benchmarks-2026-10.md#previous-2026-10-24-v010-release-5a22651). They ran on one of our Sparks with drafting on, unless a line says otherwise.
 
 <div align="center">
 
@@ -488,7 +488,7 @@ From a separate [controller](GLOSSARY.md#ac), `vade install` stages a build. The
 This page describes main after v0.1.0, the latest release. Its default is FP4-Local on one Spark. The benchmark page also has results from cabled pairs, from a group of four Sparks and from rented cloud VMs.
 
 - **FP4-Local on four Sparks.** FP4-Local gave the same token IDs on four Sparks as on one and two Sparks in 66 of 66 responses. That held on the layer chain in the 2026-10-28 cards at `76977df` and the 2026-10-30 morning cards at `380d8e5`. It held on the split in parts over RDMA in the 2026-10-31 morning cards at `dc32b7c` ([results](results.md#token-ids)).
-- **FP8 on two and four Sparks.** FP8 on two and on four Sparks gave the same token IDs in only 7 of 66 responses in those same cards ([benchmarks](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)). A later change, approved on 2026-10-31, makes FP8 on four Sparks add its partial sums in the two-Spark order, so four Sparks now give the same token IDs as two. The four-Spark cards of 2026-11-01 show it ([FP8 token IDs](results.md#fp8-token-ids)). Six Sparks still give other IDs ([changelog](../CHANGELOG.md)). The cards above predate that change, so compare their FP8 results only at the same Spark count.
+- **FP8 on two and four Sparks.** FP8 on two and on four Sparks gave the same token IDs in only 7 of 66 responses in those same cards ([benchmarks](history/benchmarks-2026-10.md#fp8-on-two-and-four-sparks-different-token-ids)). A later change, approved on 2026-10-31, makes FP8 on four Sparks add its partial sums in the two-Spark order, so four Sparks now give the same token IDs as two. The four-Spark cards of 2026-11-01 show it ([FP8 token IDs](results.md#fp8-token-ids)). Six Sparks still give other IDs ([changelog](../CHANGELOG.md)). The cards above predate that change, so compare their FP8 results only at the same Spark count.
 - **Long chains.** Chains longer than four Sparks have no live exactness check yet ([FP4-Local launch](../cli/docs/fp4-local.md)).
 - **Other code.** The other model parsers, servers and protocol routes in the source are not qualified to the same level.
 - **The prefix cache.** The prefix cache is on by default. It works locally, on the two-Spark tensor split and on FP8. FP4-Local on three or more Sparks (the layer chain, or the split in parts on four Sparks over RDMA) runs without it.

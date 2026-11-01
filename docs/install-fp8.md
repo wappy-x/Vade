@@ -319,7 +319,7 @@ makes four Sparks add in the two-Spark order. The four-Spark cards of
 2026-11-01 match the two-Spark cards of 2026-10-31 in 66 of 66 responses
 ([FP8 token IDs](results.md#fp8-token-ids)). Six Sparks still give other
 token IDs than two, so compare six-Spark FP8 results only with six Sparks.
-[Benchmarks](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)
+[Benchmarks](history/benchmarks-2026-10.md#fp8-on-two-and-four-sparks-different-token-ids)
 has the details.
 
 ## Not tested yet

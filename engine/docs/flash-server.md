@@ -22,7 +22,7 @@ Explicit context settings override the default. The retained manual installation
 receipt used 32,768 tokens. Native engine checks at `9bcb8170` passed startup
 with the 131,072-token context default and a near-full cached continuation,
 using an 8,192-token output cap. See the
-[October 12 results](../../docs/benchmarks.md#october-12-product-defaults).
+[October 12 results](../../docs/history/benchmarks-2026-10.md#october-12-product-defaults).
 Those checks do not qualify the current 65,536-token output default or a fresh
 `vade install` / `vade up` / `vade down` installation.
 The separate [one-Spark server guide](server.md) describes

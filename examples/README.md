@@ -263,7 +263,7 @@ Published (v0.1.0): C1 45.466 | C2 79.747 | C4 143.598 | C8 185.144 | C16 189.04
 One to four chats land within 0.5 % of the receipt. At eight chats, the
 engine chooses on each run which chats draft, so that rate moves more. The
 benchmarks page reports 130.6 to 173.9 tok/s for the eight-chat card rate
-across six Sparks ([known limits](../docs/benchmarks.md#known-limits)).
+across six Sparks ([known limits](../docs/history/benchmarks-2026-10.md#known-limits)).
 These are one run each, not a controlled comparison.
 
 Without a Spark, `sh examples/bench.sh --self-test` checks the client
