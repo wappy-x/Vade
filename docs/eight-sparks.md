@@ -109,7 +109,7 @@ with `--hosts` ([section 6](#6-start-a-run-on-an-arc)).
 | --- | --- | --- |
 | 1 | One Spark, no fabric. `--replicas 8` runs eight independent servers behind one local gateway. | Refused. |
 | 2 | The tensor split, the only two-Spark path. It needs RDMA. `--replicas 4 --pairs` runs four pairs behind one local gateway. | Two-way TP. |
-| 4 | Over RDMA, the tensor split in parts ([section 6](#6-start-a-run-on-an-arc) says which work it splits). Over TCP, the layer chain of four. | Four-way TP on a path. Today it gives other token IDs than two Sparks ([benchmarks.md](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)). |
+| 4 | Over RDMA, the tensor split in parts ([section 6](#6-start-a-run-on-an-arc) says which work it splits). Over TCP, the layer chain of four. | Four-way TP on a path. From main `504f885` on, it gives the two-Spark token IDs ([benchmarks.md](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)). |
 | 8 | The layer chain of eight. | Refused: `FP8 needs 2, 4, or 6 machines` ([cli/src/config.rs](../cli/src/config.rs)). |
 
 FP4-Local runs the tensor split on two Sparks, and the tensor split in parts on
@@ -453,9 +453,10 @@ vade up --hosts spark-7,spark-8,spark-1,spark-2              # an arc across cab
 vade up --fp8 --hosts spark-1,spark-2,spark-3,spark-4        # FP8, with an FP8 config
 ```
 
-FP8 on four Sparks gives other token IDs than FP8 on two Sparks today
-([benchmarks.md](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)).
-Compare FP8 token IDs only between runs on the same number of Sparks.
+From main `504f885` on, FP8 on four Sparks gives the same token IDs as FP8 on
+two Sparks ([benchmarks.md](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)).
+Six Sparks still give other FP8 token IDs, so compare six-Spark FP8 runs only
+with other six-Spark runs.
 
 **Eight Sparks (world 8).** FP4-Local runs the layer chain of eight. FP8 is
 refused.
@@ -842,8 +843,9 @@ FP8 on eight Sparks is refused by this build.
 - [ ] `VADE_GROUP=quad-a vade up`, then `VADE_GROUP=quad-b vade up`: two
       servers on two local ports. Check each with `vade verify` and the same
       `VADE_GROUP`.
-- [ ] FP8 on four Sparks needs an FP8 config. Compare its token IDs only
-      with other four-Spark FP8 runs.
+- [ ] FP8 on four Sparks needs an FP8 config. From main `504f885` on, its
+      token IDs must equal those of FP8 on two Sparks for the same request
+      and settings.
 
 ### When you are done
 

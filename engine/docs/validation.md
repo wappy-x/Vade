@@ -15,8 +15,9 @@ Flash's covered BF16 projections now always use one tensor-core mode: BF16
 high and residual operands with FP32 accumulation. There is no
 `FLASH_BF16_MMA` switch or scalar-FP32 alternative. A fixed build and setup
 must preserve the same bytes across batch widths, cache hit/miss, prompt
-chunks and greedy MTP. Answers may differ from older builds or other Spark
-counts. The measurements below belong to their named builds; they do not
+chunks and greedy MTP. Answers may differ from older builds. Each supported
+Spark count must give the same token IDs; FP8 on six Sparks does not yet. The
+measurements below belong to their named builds; they do not
 establish that the new Flash integration passed a GPU gate.
 
 The one-mode pair handoff compares full output rows with split `23d33f87`

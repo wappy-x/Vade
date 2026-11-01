@@ -282,7 +282,8 @@ The per-model table, with bytes, is on [Models](models.md#memory-and-context).
   and greedy-MTP paths. There is no scalar-FP32 alternative. Other models'
   native BF16 paths keep their existing arithmetic.
 - **Repeatability scope.** The same machine, build and setup must give the
-  same bytes. Flash answers may differ from older builds or Spark counts;
+  same bytes. Flash answers may differ from older builds. Each supported
+  Spark count must give the same token IDs (FP8 on six Sparks does not yet);
   new arithmetic gets new goldens and separate quality evidence.
 - **Opt-in changes.** Settings that can change the output, such as `fast`
   drafting and YaRN context extension, stay off unless they are turned on.

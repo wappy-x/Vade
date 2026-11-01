@@ -54,9 +54,9 @@ Notes:
     FP4-Local: both Sparks work on every token. It needs RDMA, so vade up
     refuses SEQPAR_RDMA=0 (TCP) for two FP4-Local Sparks. FP8 on two Sparks
     keeps its ring and may use TCP.
-  - FP8 needs an FP8 config such as cli/examples/vade.conf. In our checks, FP8
-    gave the same token IDs on each Spark count, but 2 and 4 Sparks gave
-    different IDs. See docs/benchmarks.md.
+  - FP8 needs an FP8 config such as cli/examples/vade.conf. FP8 gives the same
+    token IDs on 2 and 4 Sparks; 6 Sparks still give other IDs. See
+    docs/benchmarks.md.
   - Spark counts above 2 require a current install and linked hosts in cable
     order.
   - VADE_GROUP=NAME selects a [group NAME] from the config: its hosts in rank

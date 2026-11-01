@@ -94,7 +94,7 @@ We measured main `dc32b7c` on our own Sparks on the morning of 2026-10-31. One c
 
 <!-- bench-docs:end -->
 
-Later that day, FP8 on four Sparks changed. It now gives the same token IDs as FP8 on two Sparks. Until the speed fix lands, its first token after an 8K prompt takes about a third longer than the table shows. The fix is in testing.
+Later that day, FP8 on four Sparks changed. It now gives the same token IDs as FP8 on two Sparks. The speed fix that followed merged on 2026-11-01, and the next benchmark run replaces this table.
 
 [Results](docs/results.md) has every cell of these runs, with the build, the server commands and the request settings. [Benchmark history](docs/benchmarks.md) keeps every earlier run.
 
@@ -107,7 +107,7 @@ Exact means the same request with the same settings gives the same token IDs. Th
 **Covered today**
 
 - FP4-Local on 1, 2 and 4 Sparks.
-- FP8 on 2 and 4 Sparks, since 2026-10-31. The pre-merge check matched 66 of 66 replies ([changelog](CHANGELOG.md)).
+- FP8 on 2 and 4 Sparks with the default drafting mode, since 2026-10-31. The pre-merge check matched 66 of 66 replies ([changelog](CHANGELOG.md)).
 - Seeds. A request with a fixed `seed` gets the same sampled reply every time. Tested on FP4-Local on 1 and 2 Sparks, with drafting off.
 
 **Not covered yet**

@@ -428,7 +428,7 @@ Request IDs and timestamps in HTTP envelopes are not part of the answer. The mec
 Exactness is a different question from quality. Three checks answer three questions:
 
 - **Repeatability.** Does this build keep the same-setup rule on every execution path?
-- **Previous-build preservation.** Do the saved test cases still match an older Vade build? A new build or a different Spark count is a different setup. So its answers may change, but only if the quality checks pass.
+- **Previous-build preservation.** Do the saved test cases still match an older Vade build? A new build is a different setup. A different supported Spark count is not: it must give the same token IDs. So its answers may change, but only if the quality checks pass.
 - **Model quality.** Does a change keep task accuracy, instruction following and long-context retrieval? A match with an older Vade build is a separate question from a match with an outside reference runtime.
 
 An intentional change to the arithmetic order needs three things before it becomes the default: the full exactness gate, reviewed golden updates, and quality evidence against main. Record the change and its results in a benchmark card. Keep one production path. A runtime switch does not replace this evidence.

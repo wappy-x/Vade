@@ -327,10 +327,11 @@ are not byte references for four Sparks.
    previous-build noise and floor against a baseline with the **same
    world-four ranks, topology and settings**, plus GSM8K, IFEval and
    32k/128k retrieval against the current `main` branch. Two- and four-Spark
-   answers may differ. A ULP (unit in the last place) is the gap between two
-   neighboring floating-point values. The ULP floor comparison only applies
-   within one setup, so the logit difference between two and four Sparks is
-   not such a comparison. Keep PASS, FAIL and SKIP results separate, then stop
+   runs must give the same token IDs (FP8 from main `504f885` on; six Sparks
+   still give other FP8 IDs), but their logits are not compared. A ULP (unit
+   in the last place) is the gap between two neighboring floating-point
+   values. The ULP floor comparison only applies within one setup, so the
+   logit difference between two and four Sparks is not such a comparison. Keep PASS, FAIL and SKIP results separate, then stop
    everything you started on the Sparks. Goldens stay private. Promotion is a
    recorded decision based on evidence, not a rename that turns an incomplete
    run into a PASS.

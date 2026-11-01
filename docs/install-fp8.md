@@ -271,15 +271,14 @@ matched earlier FP8 cards of the same Spark count. On two Sparks at main
 `cbbb11b`, drafting on and off gave the same token IDs in 64 of 64
 responses, in each of two server starts.
 
-**Two and four Sparks give different token IDs.** The two-Spark and
-four-Spark cards matched in only 7 of 66 responses on 2026-10-28, on
-2026-10-30 at `380d8e5` and on 2026-10-31 at `dc32b7c` (5 of 62 on
-2026-10-25).
-The rule says that supported Spark counts must agree, so this is an exception.
-A host test found the cause: on four Sparks, some projections split their
-inner sum across the ranks, and the ranks add their parts in a different order
-than on two Sparks. Work on a fix is under way. Until a fix is on main,
-compare FP8 results only at the same Spark count.
+**Two and four Sparks give the same token IDs from main `504f885` on.** Before
+that main, the two-Spark and four-Spark cards matched in only 7 of 66
+responses on 2026-10-28, on 2026-10-30 at `380d8e5` and on 2026-10-31 at
+`dc32b7c` (5 of 62 on 2026-10-25). A host test found the cause: on four
+Sparks, some projections split their inner sum across the ranks, and the ranks
+added their parts in a different order than on two Sparks. Main `504f885`
+makes four Sparks add in the two-Spark order. Six Sparks still give other
+token IDs than two, so compare six-Spark FP8 results only with six Sparks.
 [Benchmarks](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)
 has the details.
 

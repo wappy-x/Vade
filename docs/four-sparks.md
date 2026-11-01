@@ -25,8 +25,9 @@ four Sparks.** We have measured FP8 on four of our Sparks four times in publishe
   evening before (main `7943f57`) in 66 of 66. One chat wrote prose at 49.508 tok/s and eight chats wrote 130.999
   tok/s in total.
 
-Four Sparks give different token IDs than two: on 2026-10-28, 2026-10-30 and
-2026-10-31, 7 of 66 responses were the same
+These cards gave different token IDs on four Sparks than on two: on 2026-10-28,
+2026-10-30 and 2026-10-31, 7 of 66 responses were the same. From main
+`504f885` on, four Sparks give the two-Spark token IDs
 ([cause and fix](benchmarks.md#fp8-on-two-and-four-sparks-different-token-ids)).
 These cards ran through a lab launcher with context 32768, output 16384 and
 drafting depth 2. They measure speed; they are not the four-Spark
