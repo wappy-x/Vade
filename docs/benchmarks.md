@@ -129,7 +129,7 @@ that the cards use.
 | Start one or two Sparks as in the cards | `vade up --sparks 1 --context 32768 --output 8192 --mtp 3` or `vade up --sparks 2 --context 32768 --output 8192 --mtp 3` | Available |
 | Start four Sparks or FP8 | `vade up --sparks 4 --context 32768 --output 8192 --mtp 3` or `vade up --fp8 --sparks 2 --context 32768 --output 16384 --mtp 2` (or `--sparks 4`) | Available, but the cards used a lab launcher, not these commands |
 | Check token IDs, drafting ON against OFF | `vade verify -n 3 --prompt 8k --max-tokens 256` | Available. It checks one server, not one card against another |
-| Run the 66-request card | None | Not available from the `vade` CLI. The card client and its token ID compare are private. RigMark at `52c29c3` runs the same cells, but its cold 8K request is different ([details](#reproduce-this-table)) |
+| Run the 66-request card | `vade bench --card --prompts rigmark/prompts.json --receipt bench/receipts/2026-10-31/<file>.json`, from a RigMark checkout at `52c29c3` | Available. It sends the card's requests and prints `ids 66/66 identical` when the token IDs match the receipt. On 2026-10-31 it matched the one-Spark ON and OFF receipts; we have not run it against the other receipts ([details](results.md#what-a-stranger-can-and-cannot-re-run)) |
 | Time your own server | `vade bench --concurrency 1,2,4,8 --max-tokens 256 --repeats 3` | Available. It uses other prompts, so its numbers do not compare with the cards |
 | Run the 32K chat or the context run | None | Not available. No `vade` command times a second question with and without the cache, and the prompts are not in the repository |
 
@@ -248,8 +248,9 @@ two against four Sparks matched in 7 of 66
 ([FP8 on two and four Sparks](#fp8-on-two-and-four-sparks-different-token-ids)).
 
 **Limits.** One server start per setup, except one Spark. The four-Spark and
-FP8 starts used a private lab launcher. The card client and the 32K chat
-client are private.
+FP8 starts used a private lab launcher. The 32K chat client is private. The
+card client is public: `vade bench --card`
+([details](results.md#what-a-stranger-can-and-cannot-re-run)).
 
 ## Previous (2026-10-30 morning, main 380d8e5, home DGX Sparks)
 
@@ -1201,13 +1202,13 @@ calls the command `run`.
   --extra-body '{"cache":false,"chat_template_kwargs":{"enable_thinking":false},"draft":"plain","top_k":0,"repetition_penalty":1,"presence_penalty":0,"frequency_penalty":0}'
 ```
 
-**Exact card replay is not yet available from this repository.** The pinned
-card client and its saved-card ID comparator are private measurement tools.
-The public [RigMark instructions](#run-rigmark-against-vade) give the workload
-settings. They do not supply that client or its token-ID comparison. A full
-replay must save every request and token-ID array, match requests across
-ON/OFF and Spark counts, and compare every ID in order. Saving IDs alone is
-not a match check.
+**Card replay.** `vade bench --card` sends this recipe and saves every token
+ID in card order. With `--receipt` or `--compare` it compares the IDs with a
+receipt or with another card
+([details](results.md#what-a-stranger-can-and-cannot-re-run)). This table's
+cards have no receipt in this repository, and we matched the client only
+against the 2026-10-31 one-Spark receipts. Saving IDs alone is not a match
+check: compare every ID in order, for the same requests.
 
 The Rust CLI can run this separate timing check on the same server:
 

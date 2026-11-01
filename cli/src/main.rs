@@ -20,7 +20,7 @@
 //! | Machine and artifacts | [`detect`], [`prebuilt`], [`build_job`], [`sha256`] |
 //! | Processes and files | [`runner`] (every subprocess), [`control_socket`], [`unix_file`], [`unix_flags`] |
 //! | Output | [`output`] (fallible stdout), [`style`] (color, errors, tables and help layout), [`status`] (`status --json` schema), [`text`] (terminal-safe text and `key=value` records), [`json`] (health replies) |
-//! | Client tools | [`bench`](mod@bench), [`verify`] (exact token IDs, drafting ON and OFF), [`pull`] (`vade pull` and `vade models`: Hugging Face downloads) |
+//! | Client tools | [`bench`](mod@bench), [`card`] (`vade bench --card`: the published card's 66 requests and token IDs), [`verify`] (exact token IDs, drafting ON and OFF), [`pull`] (`vade pull` and `vade models`: Hugging Face downloads) |
 //! | Local checks | [`test_gate`] (`vade test build` and `determinism`), [`evals`] (long-context, GDN and ABI checks) |
 mod output;
 mod prebuilt;
@@ -31,6 +31,7 @@ mod sha256;
 mod app;
 mod auth;
 mod bench;
+mod card;
 mod build_job;
 mod catalog;
 mod checks;
@@ -117,6 +118,16 @@ fn run_main(mut args: Vec<String>) {
             Some(runner::Interruptions::install())
         };
         bench::refuse_lifecycle_flags(&args[1..]).unwrap_or_else(|error| fail(&error));
+        // The card client has its own options and finds the endpoint only when it sends requests.
+        if args[1..].iter().any(|arg| arg == "--card") {
+            // Take --api-key-file (or VADE_API_KEY_FILE) here: this path returns before the global auth::configure.
+            let mut card_args = args[1..].to_vec();
+            auth::configure(&mut card_args).unwrap_or_else(|error| fail(&error));
+            match card::run(&card_args, runner::interrupted) {
+                Ok(code) => std::process::exit(if runner::interrupted() { 130 } else { code }),
+                Err(error) => fail(&error),
+            }
+        }
         let arguments = endpoint::bench_arguments(&args[1..]).unwrap_or_else(|error| fail(&error));
         match bench::run(&arguments, runner::interrupted) {
             Ok(code) => std::process::exit(if runner::interrupted() { 130 } else { code }),

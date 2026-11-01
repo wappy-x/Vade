@@ -5,8 +5,11 @@ Examples:
   vade bench
   vade bench --concurrency 1,8 --max-tokens 128
   vade bench --self-test
+  vade bench --card --prompts rigmark/prompts.json --receipt RECEIPT.json
 
 Usage: vade bench [OPTIONS]
+       vade bench --card --prompts FILE [--draft plain] [--receipt FILE]
+       vade bench --card --compare CARD OTHER
 
 Options:
   --url URL             Server to measure (default: VADE_API_URL, then the
@@ -15,19 +18,33 @@ Options:
                         1,2,4,8,16)
   --max-tokens N        Tokens each chat must generate (default 256)
   --repeats N           Repeats per cohort, none discarded (default 1)
-  --draft plain|strict  Override drafting on every request (default: server)
+  --draft plain|strict  Override drafting on every request (default: server);
+                        with --card: plain or served
   --output FILE         JSON receipt (default ./vade-bench.json) and a sibling
                         .txt table; --out is an alias
   --api-key-file FILE   Optional bearer credential; never stored in receipts
   --self-test           Run against a tiny local mock server; no GPU
   --help-all            List every option, including A/B runs and observation
+  --card                Send the 66 requests of the published card; save
+                        ./vade-card.json
+  --prompts FILE        With --card: RigMark prompts.json at revision 52c29c3
+  --receipt FILE        With --card: compare the token IDs with a receipt or
+                        card
+  --compare CARD OTHER  With --card: compare two saved files; send nothing
 
 Notes:
   - Wall time is measured on this client; token counts come from the server.
-    Requests are greedy with cache and thinking off and a fixed length.
+    Without --card, requests are greedy with cache and thinking off and a fixed
+    length.
   - Prints one row per cohort: tokens per second, time to first token and the
     bytes the server reported.
   - vade bench --suite URL runs the development workloads instead; see
     engine/tools/bench/README.md.
+  - --card sends the card's requests in its order with thinking off, saves every
+    token ID, and prints ids N/66 identical against --receipt. A receipt holds
+    only token_ids_sha256, so it gives 66/66 or a difference; a full card gives
+    the count. Without --draft plain, chats send no draft field, so the server's
+    setting decides; the published drafting-ON cards were sent this way. See
+    docs/results.md.
 --- stderr
 --- exit 0

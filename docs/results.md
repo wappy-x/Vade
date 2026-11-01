@@ -97,8 +97,8 @@ token IDs with the cache and without it (`turn2_ids_equal` in each receipt).
 | --- | --- |
 | Build the measured tree and start one or two Sparks as in the cards | Yes. Check out public commit `db6b7fc` (`db6b7fcd1f0ed97d6d21084eab1d206cc0d5ef3c`), whose tree `aea2c506` is the tree of main `dc32b7c`, then use the commands in the receipts page |
 | Start four Sparks or FP8 as in the cards | The cards used a private launcher. `vade up --sparks 4` and `vade up --fp8` start the same path, but we have not carded them on this date |
-| Send the 66 card requests | Not exactly. The card client is private. [RigMark](benchmarks.md#run-rigmark-against-vade) at revision `52c29c3` sends the same prompts with a different cold 8K request |
-| Compare token IDs with these receipts | Not from a public tool. The digest needs the token ID arrays in card order, and only the private client records them |
+| Send the 66 card requests | Yes. Clone [RigMark](https://github.com/alexellis/rigmark) and check out revision `52c29c3`, then run `vade bench --card --prompts rigmark/prompts.json`. It sends the card's 66 requests in the card's order with the card's request bodies, and saves every token ID in `vade-card.json`. Add `--draft plain` for a drafting-OFF card. Plain RigMark sends a different cold 8K request ([details](benchmarks.md#run-rigmark-against-vade)) |
+| Compare token IDs with these receipts | Yes. Add `--receipt bench/receipts/2026-10-31/<file>.json`. The client prints `ids 66/66 identical` when its `token_ids_sha256` equals the receipt's. On 2026-10-31 it printed that line against `fp4-local-1spark-start1-on.json` (drafting ON) and `fp4-local-1spark-start1-off.json` (`--draft plain`), on one rented GB10 machine that served main `acf5264` with the settings of `vade up --sparks 1 --context 32768 --output 8192`. We have not run it against the two-Spark, four-Spark or FP8 receipts |
 | Run the 32K chat | No. The client and its prompt are private |
 | Check drafting ON against OFF on your own server | Yes: `vade verify` |
 | Time your own server | Yes: `vade bench`. It uses other prompts, so its numbers do not compare with the cards |

@@ -61,15 +61,18 @@ four-Spark cards `b078ba58...`.
 The extract was made with `jq` from each card file. Nothing was measured
 again for these files, and no value was rounded.
 
-## What you cannot re-run from this repository
+## What you can and cannot re-run from this repository
 
-- **The card client is private.** It sends the RigMark prompt set of
-  revision `52c29c3fc1d741b9aef8895b23372aafa5dc6161` (prompts
-  `0c3ac401...`) with the request settings in each file, and it records the
-  token IDs. Public [RigMark](https://github.com/alexellis/rigmark) at that
-  revision runs the same cells, but its cold 8K request differs
-  ([details](../../../docs/benchmarks.md#run-rigmark-against-vade)). We have
-  not checked whether a public RigMark card records the same token ID arrays.
+- **The card client is now public.** `vade bench --card` sends the RigMark
+  prompt set of revision `52c29c3fc1d741b9aef8895b23372aafa5dc6161` (prompts
+  `0c3ac401...`) with the request settings in each file, records the token
+  IDs and compares them with a file here
+  ([details](../../../docs/results.md#what-a-stranger-can-and-cannot-re-run)).
+  On 2026-10-31 it matched the one-Spark ON and OFF receipts. We have not run
+  it against the two-Spark, four-Spark or FP8 receipts. Plain public
+  [RigMark](https://github.com/alexellis/rigmark) at that revision sends a
+  different cold 8K request
+  ([details](../../../docs/benchmarks.md#run-rigmark-against-vade)).
 - **The 32K chat client and its prompt are private.** `vade chat` prints the
   cached tokens and the time to the first token for each turn, but it sends
   other prompts.
