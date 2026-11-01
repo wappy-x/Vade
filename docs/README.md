@@ -2,7 +2,7 @@
 
 These are Vade's main pages, grouped by what you want to do. [Why Vade](why-vade.md) says what Vade is, why it exists and what "exact" means.
 
-- **One Spark.** Start with [INSTALL.md](../INSTALL.md). It takes you from the prerequisites to `vade launch` and a first chat. You need no cable between Sparks and no network setup.
+- **One Spark.** Run `curl -fsSL https://vade.lol/install.sh | sh`, then `vade pull` and `vade up`. [INSTALL.md](../INSTALL.md) has the full steps, the source build and every setting. You need no cable between Sparks and no network setup.
 - **Two or more Sparks.** Do the INSTALL steps 1 to 3 on every Spark. Cable the Sparks as [network setup](network-setup.md) shows. Then drive them from a controller, as [two and more Sparks](../INSTALL.md#two-and-more-sparks) shows.
 - **The FP8 checkpoint.** FP8 needs 2, 4 or 6 Sparks. Follow the [FP8 install](install-fp8.md).
 
@@ -81,7 +81,8 @@ These pages give what we measured, what backs it up, and who we credit.
 
 | Page | What it is for |
 | :---: | :---: |
-| [v0.2.0 release notes](release-notes/0.2.0.md) | What is new in v0.2.0, in plain words |
+| [Results](results.md) | Every current benchmark cell, with its build, settings and receipt |
+| [Draft notes for the next release](release-notes/0.2.0.md) | Notes for v0.2.0, which is not released yet |
 | [Benchmarks](benchmarks.md) | How we benchmark, the current results and older results |
 | [Agent task suite](harness-suite.md) | 22 tasks for the coding agent and its grades |
 | [Receipts](../bench/receipts/README.md) | Which run records (receipts) are public |

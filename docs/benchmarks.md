@@ -2,9 +2,9 @@
 
 <!-- bench-docs:start -->
 
-### Current main
+## Current main
 
-The FP8 rows measured main `1a07e3a` on our DGX Sparks on the morning of 2026-11-01. The FP4-Local rows measured main `dc32b7c` on the morning of 2026-10-31. Each server start ran one card with drafting on and one card with drafting off. A card is the result file of one RigMark run. Drafting on means the fixed draft depth 2. The one-Spark rows are the mean of two server starts. The other rows are one start each.
+The FP8 rows measured main `1a07e3a` on our DGX Sparks on the morning of 2026-11-01. The FP4-Local rows measured main `dc32b7c` on the morning of 2026-10-31. Each server start ran one card with drafting on and one card with drafting off. A card is the result file of one RigMark run. Drafting on means a fixed draft depth: 3 for FP4-Local and 2 for FP8. The one-Spark rows are the mean of two server starts. The other rows are one start each.
 
 [Results and receipts](results.md) links the receipt of every row. It also gives the machines, the server commands and the request settings.
 

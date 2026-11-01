@@ -13,7 +13,7 @@ Install it with one command:
 curl -fsSL https://vade.lol/install.sh | sh
 ```
 
-Then run `vade up`. The engine is ready for any OpenAI client, and for `vade chat`, a coding agent in your terminal.
+Then get the model with `vade pull` and run `vade up`. The engine is ready for any OpenAI client, and for `vade chat`, a coding agent in your terminal.
 
 <a id="what-it-is"></a>
 
@@ -31,7 +31,7 @@ Then run `vade up`. The engine is ready for any OpenAI client, and for `vade cha
 
 ## Quick start
 
-You need a DGX Spark with curl, a driver with CUDA 13.0 or newer, and nothing else using the GPU.
+You need a DGX Spark with curl, a C compiler (`cc`), a driver with CUDA 13.0 or newer, and nothing else using the GPU.
 
 Run these three commands on the Spark. Most of the time goes to the model download.
 
@@ -90,7 +90,7 @@ The numbers are tokens per second. Drafting is Vade's speculative decoding: the 
 
 </div>
 
-We measured main `1a07e3a` on our own Sparks on the morning of 2026-11-01 for the FP8 rows, and main `dc32b7c` on the morning of 2026-10-31 for the FP4-Local rows. One chat writes prose of up to 8192 tokens. The one-Spark row is the average of two server starts, and every other row is one start. Drafting on means the fixed draft depth 2 that every card uses; the shipped chooser column is coming. The raw record of every run is in the receipts: [FP8](bench/receipts/2026-11-01/README.md) and [FP4-Local](bench/receipts/2026-10-31/README.md).
+We measured main `1a07e3a` on our own Sparks on the morning of 2026-11-01 for the FP8 rows, and main `dc32b7c` on the morning of 2026-10-31 for the FP4-Local rows. One chat writes prose of up to 8192 tokens. The one-Spark row is the average of two server starts, and every other row is one start. Drafting on means a fixed draft depth: 3 for FP4-Local and 2 for FP8. The raw record of every run is in the receipts: [FP8](bench/receipts/2026-11-01/README.md) and [FP4-Local](bench/receipts/2026-10-31/README.md).
 
 <!-- bench-docs:end -->
 
@@ -100,7 +100,7 @@ We measured main `1a07e3a` on our own Sparks on the morning of 2026-11-01 for th
 
 Most inference engines give slightly different answers from one run to the next, and different answers again when you add GPUs. Vade does not.
 
-Exact means the same request with the same settings gives the same token IDs. This holds on every run and on every supported Spark count. It holds for a request alone or in a batch. It holds with or without the prefix cache. For greedy requests, it also holds with drafting on or off.
+Exact means the same request with the same settings gives the same token IDs. This holds on every run and on every supported Spark count. It holds for a request alone or in a batch. It holds with or without the prefix cache. For requests that always pick the most likely token, it also holds with drafting on or off.
 
 **Covered today**
 
@@ -116,10 +116,9 @@ Exact means the same request with the same settings gives the same token IDs. Th
 
 <a id="defaults-by-route"></a>
 
-**Defaults.** FP4-Local is greedy unless a request sets sampling fields, so it is exact out of the box. FP8 samples by default, with a new seed for each request. For exact FP8 replies, send `temperature` 0, `repetition_penalty` 1, `presence_penalty` 0 and `frequency_penalty` 0 ([FP8 defaults](docs/install-fp8.md#defaults-and-drafting)).
+**Defaults.** FP4-Local always picks the most likely token unless a request sets sampling fields, so it is exact out of the box. FP8 samples by default, with a new seed for each request. For exact FP8 replies, send `temperature` 0, `repetition_penalty` 1, `presence_penalty` 0 and `frequency_penalty` 0 ([FP8 defaults](docs/install-fp8.md#defaults-and-drafting)).
 
 To check your own engine, run `vade verify`. [Token IDs](docs/results.md#token-ids) shows our checks. On main `1a07e3a`, FP8 on two and four Sparks gave the same token IDs ([FP8 token IDs](docs/results.md#fp8-token-ids)). [Architecture](docs/architecture.md#exactness-and-model-quality) gives the full rule and what each check proves.
-
 
 <a id="supported-systems"></a>
 <a id="what-works-today-and-what-doesnt-yet"></a>
@@ -128,7 +127,7 @@ To check your own engine, run `vade verify`. [Token IDs](docs/results.md#token-i
 
 - **Model.** Qwen3.8 Flash-Next, text only, at pinned revisions of `nvidia/Qwen3.8-Flash-Next-FP4-Local` and `Qwen/Qwen3.8-Flash-Next-FP8`. To add a model, read [Adding a model](docs/adding-a-model.md).
 - **Hardware.** DGX Spark (NVIDIA GB10) on Linux `aarch64`.
-- **Sparks.** FP4-Local runs on 1, 2 or 4 Sparks over RDMA, or as a layer chain of 3 to 24 Sparks over TCP. We have measured chains up to four Sparks. FP8 runs on 2 or 4 Sparks. FP8 does not fit on one Spark.
+- **Sparks.** FP4-Local runs on 1, 2 or 4 Sparks over RDMA, or as a layer chain of 3 to 24 Sparks over TCP. We have measured chains up to four Sparks. FP8 runs on 2, 4 or 6 Sparks. We have measured 2 and 4 Sparks, and they give the same token IDs. Six Sparks start, but no benchmark run has measured them, and they give other token IDs. FP8 does not fit on one Spark.
 - **Controller.** A controller drives linked Sparks over SSH. It runs on Linux or macOS. From Windows, connect to a Spark and work there ([how](INSTALL.md#from-a-windows-computer)).
 - **Coding agent.** The agent reads, searches and edits files anywhere. Its shell tool needs the macOS sandbox, so on the Spark itself it does not run commands.
 - **Prefix cache.** On by default on one Spark, on two FP4-Local Sparks and on FP8. Off for FP4-Local on three or more Sparks ([settings](INSTALL.md#the-prefix-cache)).
@@ -148,11 +147,12 @@ To check your own engine, run `vade verify`. [Token IDs](docs/results.md#token-i
 | [Harness](harness/README.md) | The coding agent and its tools |
 | [Examples](examples/README.md) | Short scripts against a running engine |
 | [Results](docs/results.md) | Every benchmark cell with its settings |
-| [Receipts](bench/receipts/2026-10-31/README.md) | The records behind the numbers |
+| [Receipts](bench/receipts/README.md) | The records behind the numbers |
 | [Benchmarks](docs/benchmarks.md) | All runs, and how to repeat them |
 | [Architecture](docs/architecture.md) | How a request flows, and the exactness rule |
 | [Why Vade](docs/why-vade.md) | Why Vade exists |
 | [Security](SECURITY.md) | How to report a vulnerability privately |
+| [Code of conduct](CODE_OF_CONDUCT.md) | How we treat each other, and how to report a problem |
 | [Contributing](CONTRIBUTING.md) | House rules, validation and review |
 | [Changelog](CHANGELOG.md) | Changes since v0.1.0 |
 

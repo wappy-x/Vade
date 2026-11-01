@@ -10,7 +10,7 @@ A short revision such as `dc32b7c` names a commit of the private development his
 
 The receipts are in [bench/receipts/2026-11-01](../bench/receipts/2026-11-01/README.md).
 
-That page gives the build and binary hashes and the checkpoint identity. It names the machines: DGX Spark, NVIDIA GB10, with the clocks not locked. It also gives the server starts and the request settings. Main `d913e84` has the same engine as main `1a07e3a`.
+That page gives the build and binary hashes and the checkpoint identity. It names the machines: DGX Spark, NVIDIA GB10, with the clocks not locked. It also gives the server starts and the request settings. Main `d913e84` has the same engine as main `1a07e3a`. In the public repository, commit `3f02077` has the tree of main `1a07e3a`.
 
 **Server starts.** Each setup had two server starts, both from a private launcher with context 32768 and output limit 16384. The first start passed drafting depth 2 and ran the drafting-on card, the drafting-off card and the 32K chat. The second start passed no drafting depth, so the server chose it, and ran one drafting-on card. `/health` reported depth 7 on both chooser starts. These are the public commands for the same setups. We did not run a card with them on this date.
 
@@ -204,7 +204,9 @@ The run was on 2026-10-30, on one DGX Spark with no Rust and no Vade files and w
 2. `sh scripts/install.sh` took 176.8 s.
 3. The first `vade up` took 67.4 s.
 
-## Other numbers the README quotes
+<a id="other-numbers-the-readme-quotes"></a>
+
+## Earlier numbers on other pages
 
 These numbers come from earlier runs. Their records are private and not in this repository, except where a line links a record.
 

@@ -5,7 +5,7 @@ three packages, and they serve different setups:
 
 | Package | Use it when | Where it is |
 | --- | --- | --- |
-| Main bundle (`vade-<version>-<sha7>-linux-aarch64-gb10.tar.gz`) | `scripts/install.sh` installs it for you on one Spark | Not published yet |
+| Main bundle (`vade-<version>-<sha7>-linux-aarch64-gb10.tar.gz`) | `scripts/install.sh` installs it for you on one Spark | dl.vade.lol |
 | Launcher bundle archive (`vade-launch-bundle-v1-<sha7>-aarch64.tar.zst`) | You install the v0.1.0 release by hand | The v0.1.0 release page |
 | Controller bundle (`vade-prebuilt-v1`) | You install with `vade install` from a controller | You assemble it yourself |
 
@@ -20,7 +20,9 @@ controller format. For other terms, see the [glossary](../../docs/GLOSSARY.md).
 
 `scripts/install.sh` downloads, checks and installs it;
 [INSTALL: Prebuilt bundle](../../INSTALL.md#prebuilt-bundle) lists its checks
-in order. It is not published yet.
+in order. The bundle of main is published on dl.vade.lol. The one-line
+install, `curl -fsSL https://vade.lol/install.sh | sh`, downloads and installs
+it.
 
 The file `vade-<version>-<sha7>-linux-aarch64-gb10.tar.gz` unpacks to one
 folder with the same name, so it never writes into the current folder. It is

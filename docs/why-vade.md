@@ -16,7 +16,7 @@ Vade serves one model, Qwen3.8 Flash-Next, text only. It serves two checkpoints 
 
 Vade is built on three choices.
 
-**Answers you can repeat.** A floating-point sum can change in its last bits when the order of its terms changes. If that order follows the load, the model's answer can change with the load too. Vade's rules do not allow this. The order of each reduction follows the model's fixed tensor dimensions. It does not follow the batch, the prompt length or the number of chats. So with the same build and settings, you can test a prompt once and get the same reply later.
+**Answers you can repeat.** A floating-point sum can change in its last bits when the order of its terms changes. If that order follows the load, the model's answer can change with the load too. Vade's rules do not allow this. The order in which Vade adds the numbers follows the model's fixed tensor dimensions. It does not follow the batch, the prompt length or the number of chats. So with the same build and settings, you can test a prompt once and get the same reply later.
 
 **A tree you can read.** The engine, its GPU kernels, the CLI, the harness and the repository tools use no third-party crates and no Python. The engine does not use the CUDA toolkit, cuBLAS, CUTLASS or NCCL ([architecture](architecture.md)). Vade writes its own GPU kernels in Rust.
 

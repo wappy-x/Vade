@@ -16,7 +16,7 @@ This page covers four things:
 - **Exactness.** It says what exactness asks of engine changes.
 - **Pull requests.** It shows how to send a pull request.
 
-Read [AGENTS.md](AGENTS.md) for the project rules. [Local CI](docs/ci.md)
+Read [AGENTS.md](AGENTS.md) for the project rules. Everyone who takes part follows the [code of conduct](CODE_OF_CONDUCT.md). [Local CI](docs/ci.md)
 gives the current CI status and the public host commands. Run the affected
 host checks in [Local CI](docs/ci.md) and the
 [workflow](.github/workflows/ci.yml), doctests and Rustdoc included. The

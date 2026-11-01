@@ -1,12 +1,12 @@
 # Install Vade
 
 This guide installs Vade for text-only chat with the supported FP4-Local
-checkpoint, **nvidia/Qwen3.8-Flash-Next-FP4-Local**. The source commands
-build main, including the Unreleased changes in the
-[changelog](CHANGELOG.md). The installer uses a
-[prebuilt bundle](#prebuilt-bundle) of main when one is published for your
-Spark. None is published yet, so today it builds from source. You start with
-one Spark and no other computer.
+checkpoint, **nvidia/Qwen3.8-Flash-Next-FP4-Local**. The installer
+downloads the [prebuilt bundle](#prebuilt-bundle) of main from dl.vade.lol
+when the bundle fits your Spark. When it does not fit, you build from
+source. The source commands build main, including the Unreleased changes in
+the [changelog](CHANGELOG.md). You start with one Spark and no other
+computer.
 
 Vade also supports the FP8 checkpoint, **Qwen/Qwen3.8-Flash-Next-FP8**, on
 2, 4 or 6 linked Sparks. Its weights do not fit on one Spark. FP8 uses
@@ -46,8 +46,9 @@ steps 1 to 3: prerequisites, the code and the model. Then pick a route:
 This guide explains each new term where it first appears. The
 [glossary](docs/GLOSSARY.md) has the rest.
 
-On one Spark, there are three steps. Build Vade with `scripts/install.sh`, get
-the model with `vade pull`, and run `vade launch`.
+On one Spark, there are three steps. Install Vade with the one-line
+installer, get the model with `vade pull`, and start the engine with
+`vade up`.
 
 From a controller, there are two steps. Get `vade`, and run `vade setup`.
 Setup asks a few questions and writes what it needs. Then it runs
@@ -61,11 +62,44 @@ one page. If you are an AI agent, read the
 ## Quick start on one Spark
 
 <a id="quick-start-with-an-existing-model"></a>
-You need a DGX Spark with Git, `cc` and curl. Its NVIDIA driver must support
-CUDA 13.0 or newer (the `CUDA Version` in the `nvidia-smi` header). The GPU
-must be idle: `nvidia-smi` must list no compute processes.
+You need a DGX Spark with curl and a C compiler (`cc`). Its NVIDIA driver
+must support CUDA 13.0 or newer (the `CUDA Version` in the `nvidia-smi`
+header). The GPU must be idle: `nvidia-smi` must list no compute processes.
 
-Run these five commands:
+Run these three commands on the Spark. Most of the time goes to the model
+download.
+
+```sh
+curl -fsSL https://vade.lol/install.sh | sh
+vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300
+vade up
+```
+
+1. **Install** checks the GPU and the driver. Then it downloads the
+   [prebuilt bundle](#prebuilt-bundle) of main from dl.vade.lol. The bundle
+   holds ready-made programs for the GB10, so the Spark needs no Rust and no
+   build. The installer checks the bundle's hashes and installs it into
+   `~/.vade`. It does not need sudo or the model, and it does not change your
+   shell profile. At the end, it prints an `export` line that puts `vade` on
+   your `PATH`. Run that line if your shell cannot find `vade`.
+2. **Pull** downloads the model (102.26 GB) and checks every file. The long
+   hash after `@` pins the exact revision we tested. If the download stops,
+   run the same command again. It continues where it stopped.
+3. **Up** starts the engine on `http://127.0.0.1:18080`. `vade launch`
+   starts it and opens chat in the current folder. `vade down` stops it.
+
+The installer downloads the build of main from dl.vade.lol. GitHub Releases
+holds only the older v0.1.0 bundle.
+
+When the bundle does not fit your Spark, the installer prints one
+`Prebuilt:` line with the reason. The one-line install has no copy of the
+code to build, so it then stops with an error. In that case, use
+[the source build](#build-from-source-on-one-spark) below.
+
+### Build from source on one Spark
+
+Use this route when the prebuilt bundle does not fit your Spark, or when you
+want to build main yourself. You also need Git. Run these five commands:
 
 ```sh
 git clone --branch main https://github.com/wappy-x/vade.git "$HOME/vade"
@@ -76,10 +110,9 @@ vade launch
 ```
 
 - `scripts/install.sh` checks the Spark first. Then it tries the
-  [prebuilt bundle](#prebuilt-bundle): ready-made programs for the GB10, with
-  no Rust and no build. The prebuilt bundle is not published yet, so today
-  the script prints one `Prebuilt:` line with the reason and builds from
-  source. The source build installs the pinned Rust toolchains if they are
+  [prebuilt bundle](#prebuilt-bundle), as the one-line install does. When the
+  bundle does not fit, the script prints one `Prebuilt:` line with the reason
+  and builds from source. The source build installs the pinned Rust toolchains if they are
   missing, and builds `vade`, the GPU kernels, the engine and the chat
   program. It takes about three minutes on a GB10: the `INSTALL` step took
   176.8 s in the
@@ -300,8 +333,9 @@ There are two ways to get the Vade programs:
 - **Build from source.** Route B needs this for the controller's CLI and chat
   program.
 - **Use the prebuilt bundle** (see [Prebuilt bundle](#prebuilt-bundle) in
-  step 2). It is not published yet. The bundle is for running Vade on the
-  Spark itself (Route A).
+  step 2). The bundle of main is published on dl.vade.lol, and the installer
+  uses it when it fits. The bundle is for running Vade on the Spark itself
+  (Route A).
 
 Source builds need both pinned Rust toolchains. The model download helper
 needs host Rust 1.99.0. Route A bundle users with an existing verified
@@ -436,10 +470,10 @@ main for the GB10. With it, a Spark needs no Rust and no build.
 `scripts/install.sh` uses it when it fits. You do not need to download it
 yourself.
 
-**The prebuilt bundle is not published yet.** Until it is,
-`scripts/install.sh` prints `Prebuilt: cannot download ...; building from
-source.` and builds from source as before. The older v0.1.0 launcher bundle
-on the GitHub release page is not main, and the installer does not use it.
+**The bundle of main is published on dl.vade.lol.** The installer downloads
+the bundle that `latest.json` names for the `main` channel. The older v0.1.0
+launcher bundle on the GitHub release page is not main, and the installer
+does not use it.
 
 The installer does these checks in order. When one fails, it prints one
 `Prebuilt:` line with the reason and builds from source:
