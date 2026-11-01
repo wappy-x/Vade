@@ -6,7 +6,161 @@ set -eu
 fail() { printf '%s\n' "bundle: $*" >&2; exit 1; }
 if [ "${1-}" = --help ]; then
     printf '%s\n' 'Usage: sh scripts/make-bundle.sh [OUTPUT_DIR]' \
-        'Build committed HEAD for Linux aarch64; OUTPUT_DIR must not exist (default: .local/bundles).'
+        'Build committed HEAD for Linux aarch64; OUTPUT_DIR must not exist (default: .local/bundles).' \
+        '   or: sh scripts/make-bundle.sh --from-payload PAYLOAD_DIR --cli-dir CLI_DIR [OUTPUT_DIR]' \
+        'Package already built binaries without a build (Linux or macOS with git, tar, gzip and od; the' \
+        'payload commit must be in this checkout). PAYLOAD_DIR holds' \
+        'build.json, source.tar and artifacts/engine/target; CLI_DIR holds vade, vade-harness and REVISION.' \
+        'Writes vade-<version>-<sha7>-linux-aarch64-gb10.tar.gz and SHA256SUMS.'
+    exit 0
+fi
+if [ "${1-}" = --from-payload ]; then
+    # Package a payload that is already built (for example by a cross build), with no
+    # build here. It runs on Linux or macOS: GNU tar and BSD tar each give the same
+    # bytes on every run; MANIFEST holds per-file hashes that do not depend on tar.
+    [ "$#" -ge 4 ] && [ "$#" -le 5 ] && [ "$3" = --cli-dir ] || fail 'expected --from-payload PAYLOAD_DIR --cli-dir CLI_DIR [OUTPUT_DIR]'
+    for tool in git tar gzip od find sed sort grep head tail cut tr touch chmod cp mkdir mktemp mv rm wc dirname basename; do
+        command -v "$tool" >/dev/null 2>&1 || fail "missing tool: $tool"
+    done
+    if command -v sha256sum >/dev/null 2>&1; then sum() { sha256sum "$@"; }
+    elif command -v shasum >/dev/null 2>&1; then sum() { shasum -a 256 "$@"; }
+    else fail 'missing tool: sha256sum or shasum'; fi
+    digest() { sum "$1" | cut -d ' ' -f 1; }
+    root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+    payload=$(CDPATH= cd -- "$2" && pwd -P) || fail 'payload folder is missing'
+    clidir=$(CDPATH= cd -- "$4" && pwd -P) || fail 'CLI folder is missing'
+    engine="$payload/artifacts/engine/target/release/flash-serve"
+    ptx="$payload/artifacts/engine/target/nvptx64-nvidia-cuda/release/spark_layer_kernels.ptx"
+    for file in "$payload/build.json" "$payload/source.tar" "$engine" "$ptx" "$clidir/vade" "$clidir/vade-harness" "$clidir/REVISION"; do
+        [ -f "$file" ] && [ ! -L "$file" ] || fail "missing payload file: $file"
+    done
+    revision=$(git get-tar-commit-id < "$payload/source.tar") || fail 'source.tar has no commit id'
+    printf '%s\n' "$revision" | grep -Eqx '[0-9a-f]{40}' || fail 'source.tar has no commit id'
+    grep -Fq "\"sha\": \"$revision\"" "$payload/build.json" || fail 'build.json names another commit than source.tar'
+    [ "$(cat "$clidir/REVISION")" = "$revision" ] || fail 'CLI_DIR/REVISION names another commit than the payload'
+    json() { sed -n "s/.*\"$1\": *\"\\([0-9a-f]*\\)\".*/\\1/p" "$payload/build.json"; }
+    [ "$(json binary_sha256)" = "$(digest "$engine")" ] || fail 'flash-serve does not match build.json'
+    [ "$(json ptx_sha256)" = "$(digest "$ptx")" ] || fail 'PTX does not match build.json'
+    git -C "$root" cat-file -e "$revision^{commit}" 2>/dev/null || fail "commit $revision is not in this checkout; fetch it first"
+    epoch=$(git -C "$root" show -s --format=%ct "$revision")
+    date=$(TZ=UTC git -C "$root" show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ "$revision")
+    stamp=$(TZ=UTC git -C "$root" show -s --format=%cd --date=format-local:%Y%m%d%H%M.%S "$revision")
+    version=$(tar -xOf "$payload/source.tar" cli/Cargo.toml | sed -n 's/^version = "\([0-9A-Za-z.+-]*\)"$/\1/p' | head -n 1)
+    [ -n "$version" ] || fail 'cannot read the version from cli/Cargo.toml'
+    short=$(printf '%.7s' "$revision")
+    stem="vade-$version-$short-linux-aarch64-gb10"
+    archive="$stem.tar.gz"
+    # The PTX ISA version sets the oldest driver that can load the kernels. Add a row
+    # (from the CUDA release notes) when the kernel toolchain moves to a newer ISA.
+    isa=$(sed -n '1,40s/^\.version \([0-9.]*\)$/\1/p' "$ptx" | head -n 1)
+    gpu=$(sed -n '1,40s/^\.target \(sm_[0-9a-z]*\).*$/\1/p' "$ptx" | head -n 1)
+    case $isa in
+        8.8) ptx_cuda=12.9 ptx_driver=575.51.03 ;;
+        *) fail "no driver row for PTX ISA '$isa'; add it from the CUDA release notes" ;;
+    esac
+    [ "$gpu" = sm_121 ] || fail "PTX targets '$gpu', not the GB10 (sm_121)"
+    output=${5:-"$root/.local/bundles"}
+    [ ! -e "$output" ] && [ ! -L "$output" ] || fail 'output already exists; choose a fresh output directory'
+    mkdir -p -- "$(dirname -- "$output")"
+    output="$(CDPATH= cd -- "$(dirname -- "$output")" && pwd -P)/$(basename -- "$output")"
+    [ ! -e "$output" ] && [ ! -L "$output" ] || fail 'output already exists; choose a fresh output directory'
+    work=$(mktemp -d "$(dirname -- "$output")/.bundle-publish.XXXXXXXX")
+    trap 'rm -rf -- "$work"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    stage="$work/$stem"
+    mkdir "$work/src" "$work/out" "$stage"
+    (cd "$work/src" && tar -xf "$payload/source.tar" LICENSE NOTICE engine/LICENSE engine/NOTICE engine/licenses \
+        engine/crates/tokenizer/UNICODE-NOTICE.txt engine/crates/tokenizer/QWEN-NOTICE.txt) || fail 'license files are missing from source.tar'
+    mkdir -p "$stage/engine/crates/tokenizer"
+    cp "$engine" "$stage/flash-serve"
+    cp "$ptx" "$stage/flash.ptx"
+    cp "$clidir/vade" "$clidir/vade-harness" "$stage/"
+    cp "$work/src/LICENSE" "$work/src/NOTICE" "$stage/"
+    cp "$work/src/engine/LICENSE" "$work/src/engine/NOTICE" "$stage/engine/"
+    cp -R "$work/src/engine/licenses" "$stage/engine/licenses"
+    cp "$work/src/engine/crates/tokenizer/UNICODE-NOTICE.txt" "$work/src/engine/crates/tokenizer/QWEN-NOTICE.txt" "$stage/engine/crates/tokenizer/"
+    for binary in flash-serve vade vade-harness; do
+        # ELF magic, 64-bit class, little endian, machine 183 (AArch64).
+        head=$(od -An -tu1 -N20 "$stage/$binary" | tr -s ' \n' '  ' | sed 's/^ //; s/ $//')
+        case $head in "127 69 76 70 2 1 "*" 183 0") ;; *) fail "$binary is not a Linux aarch64 ELF64 file" ;; esac
+        for forbidden in "$payload" "$clidir" "$root" "$HOME"; do
+            if grep -aFq -- "$forbidden" "$stage/$binary"; then fail "$binary contains a producer path"; fi
+        done
+    done
+    grep -aFq libcuda.so.1 "$stage/flash-serve" || fail 'engine does not reference the installed CUDA driver SONAME'
+    glibc=$(grep -aho 'GLIBC_2\.[0-9][0-9.]*' "$stage/flash-serve" "$stage/vade" "$stage/vade-harness" |
+        sed 's/^GLIBC_//' | sort -u -t . -k1,1n -k2,2n -k3,3n | tail -n 1)
+    [ -n "$glibc" ] || fail 'cannot read the glibc version the binaries need'
+    cat > "$stage/launcher-bundle.conf" <<CONF
+format=vade-launch-bundle-v1
+target=aarch64-unknown-linux-gnu
+engine_sha=$revision
+cli_sha=$revision
+harness_sha=$revision
+engine_sha256=$(digest "$stage/flash-serve")
+ptx_sha256=$(digest "$stage/flash.ptx")
+harness_sha256=$(digest "$stage/vade-harness")
+vade_sha256=$(digest "$stage/vade")
+CONF
+    cat > "$stage/README-BUNDLE" <<README
+Vade $version ($revision), prebuilt for one GB10 system (a DGX Spark or
+another GB10 machine).
+
+This folder has the vade command, the inference engine (flash-serve), the GPU
+kernels as PTX (flash.ptx) and the chat program (vade-harness). It has no
+model weights.
+
+You need Linux aarch64 with glibc $glibc or newer and an NVIDIA driver from
+release 580 or newer (CUDA 13.0). MANIFEST lists every file
+with its SHA-256 hash.
+
+Install and start:
+
+    ./vade install
+    ./vade launch
+
+./vade install checks the hashes in launcher-bundle.conf and copies the files
+under ~/.vade (or VADE_HOME). Read INSTALL.md in the source repository for
+the model download and for more Sparks.
+README
+    (cd "$stage" && find . -type f ! -name MANIFEST | sed 's|^\./||' | LC_ALL=C sort) > "$work/files"
+    {
+        printf '%s\n' format=vade-release-v1 "name=$stem" "version=$version" "sha=$revision" "date=$date" \
+            target=gb10 arch=aarch64-unknown-linux-gnu "gpu=$gpu" "ptx_isa=$isa" "ptx_cuda=$ptx_cuda" \
+            "ptx_min_driver=$ptx_driver" min_cuda=13.0 min_driver=580 "glibc=$glibc"
+        while IFS= read -r file; do printf 'file=%s  %s\n' "$(digest "$stage/$file")" "$file"; done < "$work/files"
+    } > "$stage/MANIFEST"
+    for artifact in "$stage/flash.ptx" "$stage/launcher-bundle.conf" "$stage/MANIFEST"; do
+        for forbidden in "$payload" "$clidir" "$root" "$HOME"; do
+            if grep -aFq -- "$forbidden" "$artifact"; then fail "$(basename -- "$artifact") contains a producer path"; fi
+        done
+    done
+    # Fixed modes, times and member order; no owner names or extended attributes.
+    find "$stage" -type d -exec chmod 755 {} +
+    find "$stage" -type f -exec chmod 644 {} +
+    chmod 755 "$stage/flash-serve" "$stage/vade" "$stage/vade-harness"
+    find "$stage" -exec env TZ=UTC touch -t "$stamp" {} +
+    (cd "$work" && find "$stem" | LC_ALL=C sort) > "$work/members"
+    tarcmd=tar
+    command -v gtar >/dev/null 2>&1 && tarcmd=gtar
+    if "$tarcmd" --version 2>/dev/null | grep -q 'GNU tar'; then
+        (cd "$work" && "$tarcmd" --format=ustar --no-recursion --owner=0 --group=0 --numeric-owner \
+            --mtime="@$epoch" -cf "$work/bundle.tar" -T "$work/members")
+    else
+        (cd "$work" && COPYFILE_DISABLE=1 "$tarcmd" --format=ustar --no-recursion --uid 0 --gid 0 --numeric-owner \
+            --no-xattrs --no-mac-metadata --no-acls --no-fflags -cf "$work/bundle.tar" -T "$work/members")
+    fi
+    gzip -n -9 -c "$work/bundle.tar" > "$work/out/$archive"
+    # Check the archive as an installer reads it: unpack, then compare every file hash.
+    mkdir "$work/check"
+    (cd "$work/check" && gzip -dc "$work/out/$archive" | tar -xf - && cd "$stem" &&
+        sed -n 's/^file=//p' MANIFEST | sum -c - >/dev/null) || fail 'unpacked archive does not match MANIFEST'
+    (cd "$work/out" && sum "$archive" > SHA256SUMS && sum -c SHA256SUMS >/dev/null) || fail 'archive checksum failed'
+    [ ! -e "$output" ] && [ ! -L "$output" ] || fail 'output appeared during packaging; leaving it untouched'
+    mv "$work/out" "$output"
+    printf 'bundle: %s\nbytes: %s\nsha256: %s\ntar: %s\n' "$output/$archive" \
+        "$(wc -c < "$output/$archive" | tr -d ' ')" "$(digest "$output/$archive")" "$("$tarcmd" --version | head -n 1)"
     exit 0
 fi
 [ "$#" -le 1 ] || fail 'expected at most one output directory'

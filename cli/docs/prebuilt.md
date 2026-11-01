@@ -1,16 +1,76 @@
 # Prebuilt installation
 
-Vade can run from ready-made binaries instead of compiling them. There are two
-formats, and they serve different setups:
+Vade can run from ready-made binaries instead of compiling them. There are
+three packages, and they serve different setups:
 
-| Format | Use it when | In the v0.1.0 release |
+| Package | Use it when | Where it is |
 | --- | --- | --- |
-| Launcher bundle (`vade-launch-bundle-v1`) | You run Vade on one Spark, or install from a controller with matching source revisions | Yes |
-| Controller bundle (`vade-prebuilt-v1`) | You install with `vade install` from a controller | No, you assemble it yourself |
+| Main bundle (`vade-<version>-<sha7>-linux-aarch64-gb10.tar.gz`) | `scripts/install.sh` installs it for you on one Spark | Not published yet |
+| Launcher bundle archive (`vade-launch-bundle-v1-<sha7>-aarch64.tar.zst`) | You install the v0.1.0 release by hand | The v0.1.0 release page |
+| Controller bundle (`vade-prebuilt-v1`) | You install with `vade install` from a controller | You assemble it yourself |
 
-Most of this page covers the launcher bundle. The
+The main bundle and the launcher bundle archive hold the same files and the
+same `launcher-bundle.conf` (format `vade-launch-bundle-v1`). The
+[main bundle](#the-main-bundle) section covers the main bundle. Most of the
+rest of this page covers the launcher bundle archive. The
 [last section](#prebuilt-binaries-for-a-controller-install) covers the
 controller format. For other terms, see the [glossary](../../docs/GLOSSARY.md).
+
+## The main bundle
+
+`scripts/install.sh` downloads, checks and installs it;
+[INSTALL: Prebuilt bundle](../../INSTALL.md#prebuilt-bundle) lists its checks
+in order. It is not published yet.
+
+The file `vade-<version>-<sha7>-linux-aarch64-gb10.tar.gz` unpacks to one
+folder with the same name, so it never writes into the current folder. It is
+gzip, not zstd: Ubuntu marks `tar` and `gzip` as essential packages. The
+folder holds `vade`, `flash-serve`, `flash.ptx`, `vade-harness`,
+`launcher-bundle.conf`, `README-BUNDLE`, the license and notice files, and
+`MANIFEST`.
+
+`MANIFEST` is one `key=value` per line:
+
+```ini
+format=vade-release-v1
+name=vade-<version>-<sha7>-linux-aarch64-gb10
+version=<cli version>
+sha=<full-source-sha40>
+date=<commit date, UTC>
+target=gb10
+arch=aarch64-unknown-linux-gnu
+gpu=sm_121
+ptx_isa=8.8
+ptx_cuda=12.9
+ptx_min_driver=575.51.03
+min_cuda=13.0
+min_driver=580
+glibc=<newest GLIBC_ version the programs need>
+file=<SHA-256>  <path>
+```
+
+There is one `file=` line for every other file in the folder, in the format
+of `sha256sum -c`. The installer checks them all after it unpacks the folder.
+Then `vade install` checks `launcher-bundle.conf` again, as below.
+
+### Produce the main bundle
+
+`sh scripts/make-bundle.sh --from-payload PAYLOAD_DIR --cli-dir CLI_DIR [OUTPUT_DIR]`
+packages binaries that are already built and builds nothing. `PAYLOAD_DIR`
+holds `build.json`, `source.tar` (a `git archive` of the commit) and
+`artifacts/engine/target`, with `flash-serve` and the PTX. `CLI_DIR` holds
+`vade`, `vade-harness` and `REVISION`. The script needs Git with that commit
+in the checkout, `tar`, `gzip`, `od` and `sha256sum` or `shasum`; it runs on
+Linux or macOS.
+
+Before it packs anything, it checks that `source.tar`, `build.json` and
+`REVISION` name the same commit, that the engine and PTX match the hashes in
+`build.json`, that the three programs are Linux aarch64 ELF files without
+build-machine paths, and that the PTX targets `sm_121` with a PTX ISA it knows
+the oldest driver for. It sets fixed file modes, the commit time on every
+file, owner 0 and a sorted member order, so two runs on the same input give
+the same bytes. It writes the archive and `SHA256SUMS` to `OUTPUT_DIR`
+(default `.local/bundles`), which must not exist yet.
 
 ## One Spark: download and launch
 
@@ -120,9 +180,9 @@ response used, read the receipt's `draft_observations` fields. See
 
 ## What's in the launcher bundle
 
-The producer script (see the next section) writes two files: the archive,
-`vade-launch-bundle-v1-<sha7>-aarch64.tar.zst`, and `SHA256SUMS`. The archive
-unpacks these files straight into the current directory:
+Without options, the producer script (see the next section) writes two files:
+the archive, `vade-launch-bundle-v1-<sha7>-aarch64.tar.zst`, and `SHA256SUMS`.
+The archive unpacks these files straight into the current directory:
 
 | File | What it is |
 | --- | --- |
@@ -153,7 +213,10 @@ same archived repository commit. They record provenance: where the build came
 from.
 
 Today the local launcher checks the format, the target, and the engine, PTX
-and harness hashes. It doesn't compare the revision fields with the CLI.
+and harness hashes. It doesn't compare the revision fields with the CLI. When
+the installed files have other hashes than `launcher-bundle.conf`, from a
+source build or an earlier bundle, `vade install` copies the bundle's files
+over them.
 
 ## Produce the launcher bundle
 

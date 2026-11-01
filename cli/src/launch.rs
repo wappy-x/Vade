@@ -82,8 +82,8 @@ pub(crate) fn owner_configured() -> bool {
     root().is_ok_and(|p| p.join("config").exists() || p.join("state/run.conf").exists())
 }
 
-/// Whether the local setup has saved defaults and an install built from this
-/// checkout, so vade install would only reuse it. Any doubt is `false`:
+/// Whether the local setup has saved defaults and an install of this
+/// checkout or bundle, so vade install would only reuse it. Any doubt is `false`:
 /// vade install then runs and names the problem.
 pub(crate) fn owner_install_current() -> bool {
     let current = || -> Result<bool, String> {
@@ -510,10 +510,10 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
     }
 
     /// The Install phase: reuse the installed files, or build and stage them.
-    /// With `check_source`, files built from another checkout are rebuilt.
+    /// With `check_source`, files from another checkout or bundle are replaced.
     /// Returns the files and whether they are new.
     fn install_files(&mut self, installed: Option<Fields>, check_source: bool) -> Result<(Fields, bool), String> {
-        // vade install from a new checkout must not keep an engine that another one built.
+        // vade install from a new checkout or bundle must not keep an engine from another one.
         let outdated = check_source
             && installed.as_ref().map_or(Ok(false), |files| install::outdated(files, &mut self.runner))?;
         let start = phase("Install", if installed.is_some() && !outdated { "reuse installed files" } else { "prepare local engine and chat" })?;

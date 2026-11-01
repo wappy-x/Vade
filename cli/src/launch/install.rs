@@ -67,34 +67,43 @@ pub(super) fn ensure<R: Runner>(root: &Path, runner: &mut R) -> Result<Fields, S
     refresh(root, runner)
 }
 
-/// Whether `installed` came from another source than this Git checkout
-/// builds: its recorded revision differs or is missing. It says so in one
-/// line. Bundles and trees without Git metadata keep the file checks alone.
+/// Whether `installed` is not what this vade installs: its hashes differ from
+/// the bundle's launcher-bundle.conf, or it came from another revision than
+/// this Git checkout. It says so in one line. A checkout without Git
+/// metadata keeps the file checks alone.
 pub(super) fn outdated<R: Runner>(installed: &Fields, runner: &mut R) -> Result<bool, String> {
-    let Some((revision, built)) = changed_source(installed, runner)? else { return Ok(false) };
-    let short = |id: &str| id[..12].to_owned();
-    super::progress("Install", crate::style::Token::Warn, format_args!("this checkout is {}, but the installed engine was built from {}; building this checkout",
-        short(&revision), built.map_or_else(|| "an earlier install with no recorded revision".to_owned(), |id| short(&id))))?;
+    let Some(reason) = changed_source(installed, runner)? else { return Ok(false) };
+    super::progress("Install", crate::style::Token::Warn, format_args!("{reason}"))?;
     Ok(true)
 }
 
-/// The checkout revision and the installed one, when they differ, without
-/// any output. A bundle install or a checkout without Git never differs.
-pub(super) fn changed_source<R: Runner>(installed: &Fields, runner: &mut R) -> Result<Option<(String, Option<String>)>, String> {
-    if bundle_path()?.is_some() { return Ok(None); }
+/// Why `installed` differs from the bundle or this checkout, without any
+/// output, or `None`. A checkout without Git never differs.
+pub(super) fn changed_source<R: Runner>(installed: &Fields, runner: &mut R) -> Result<Option<String>, String> {
+    if let Some(bundle) = bundle_path()? {
+        let expected = bundle_fields(&bundle)?;
+        let differs = FILES.iter().any(|(key, _)| {
+            let key = format!("{key}_sha256");
+            installed.get(&key) != expected.get(&key)
+        });
+        return Ok(differs.then(|| format!("the installed files differ from the bundle in {}; installing the bundle",
+            text::terminal_text(&bundle.to_string_lossy()))));
+    }
     let source = source_path()?;
     if build_id::probe(&source) != build_id::Probe::Git { return Ok(None); }
     let revision = git(runner, &source, &["rev-parse", "HEAD"])?.trim().to_owned();
     if !text::is_lower_hex(&revision, 40) { return Err("Vade source has no complete Git revision.".into()); }
     let built = installed.get("source_revision").filter(|id| text::is_lower_hex(id, 40));
-    Ok((built != Some(&revision)).then(|| (revision, built.cloned())))
+    Ok((built != Some(&revision)).then(|| format!("this checkout is {}, but the installed engine was built from {}; building this checkout",
+        &revision[..12], built.map_or("an earlier install with no recorded revision", |id| &id[..12]))))
 }
 
-/// Build this checkout over an outdated install, then name the new generation.
+/// Install this checkout or bundle over an outdated install, then name the new generation.
 pub(super) fn rebuild<R: Runner>(root: &Path, runner: &mut R) -> Result<Fields, String> {
     let fields = refresh(root, runner)?;
-    let short = |key: &str| fields.get(key).map_or_else(String::new, |id| id.chars().take(12).collect());
-    super::progress("Install", crate::style::Token::Ok, format_args!("generation {} is now installed, built from {}", short("generation"), short("source_revision")))?;
+    let generation = fields.get("generation").map_or("", |id| &id[..id.len().min(12)]);
+    let source = fields.get("source_revision").map_or_else(|| "from the bundle".to_owned(), |id| format!("built from {}", &id[..id.len().min(12)]));
+    super::progress("Install", crate::style::Token::Ok, format_args!("generation {generation} is now installed, {source}"))?;
     Ok(fields)
 }
 
@@ -346,6 +355,18 @@ fn publish(root: &Path, input: &Path, expected: Option<Fields>, revision: Option
 pub(super) fn publish_test_bundle(root: &Path, input: &Path) -> Result<Fields, String> {
     // As if built from the checkout the mock Git reports (`rev-parse` = 40 'a').
     publish(root, input, None, Some(&"a".repeat(40)))
+}
+
+#[cfg(test)]
+pub(super) fn write_test_bundle_manifest(bundle: &Path) -> Result<Fields, String> {
+    // launcher-bundle.conf for the files already in `bundle`, as make-bundle.sh writes it.
+    let mut fields = Fields::from([
+        ("format".into(), "vade-launch-bundle-v1".into()),
+        ("target".into(), "aarch64-unknown-linux-gnu".into()),
+    ]);
+    for (key, name) in FILES { fields.insert(format!("{key}_sha256"), hash(&bundle.join(name))?); }
+    text::atomic_write(&bundle.join(BUNDLE_MANIFEST), &text::encode(&fields))?;
+    Ok(fields)
 }
 
 fn read_manifest(path: &Path) -> Result<Option<Fields>, String> {

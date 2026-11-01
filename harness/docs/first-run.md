@@ -97,8 +97,10 @@ chat program) and `launcher-bundle.conf`, which describes them. Because nothing
 needs building, it needs no Rust, only a working NVIDIA driver and the system
 tools listed in INSTALL.
 
-The v0.1.0 bundle and its `SHA256SUMS` are on the GitHub release page. Follow
-[INSTALL's download and checksum steps](../../INSTALL.md#optional-release-bundle)
+`scripts/install.sh` downloads, checks and unpacks a bundle of main when
+one is published ([INSTALL: Prebuilt bundle](../../INSTALL.md#prebuilt-bundle)).
+For the older v0.1.0 bundle on the GitHub release page, follow the
+[download and checksum steps](../../cli/docs/prebuilt.md#download-check-and-unpack)
 before you run it. The launcher uses the bundle that holds the `vade` you ran.
 `VADE_BUNDLE` can instead point to an existing bundle folder by absolute path.
 

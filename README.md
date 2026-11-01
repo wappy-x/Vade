@@ -156,20 +156,10 @@ when a step fails.
 `sh "$HOME/vade/scripts/install.sh" --launch` installs Vade, starts the
 engine and opens chat. Later, `vade launch` does the same.
 
-**Optional: the prebuilt bundle.** The
-[v0.1.0 release page](https://github.com/wappy-x/vade/releases/tag/v0.1.0)
-has a prebuilt launcher bundle and its `SHA256SUMS`. The bundle skips the
-Rust builds. It is an older build: v0.1.0, from 2026-10-24. It does not have
-the fixes merged since then. On one Spark with drafting ON, the v0.1.0 card
-of 2026-10-24 wrote code at 76.7 tok/s and C8 at 173.9 tok/s
-([v0.1.0 cards](docs/benchmarks.md#previous-2026-10-24-v010-release-5a22651)).
-Main `dc32b7c` gave 81.1 and 179.0 on 2026-10-31 (mean of two starts;
-[results](docs/results.md)).
-In our replay of the bundle steps, with the model already on the Spark, the
-first command to `Launch ready` took
-101.262 s (record `2026-10-28_1305_bundle-install_5a22651`, not in the
-repository yet). To get the Unreleased changes, build from source.
-[INSTALL](INSTALL.md#optional-release-bundle) shows how to use the bundle.
+**Prebuilt bundle.** `scripts/install.sh` installs a prebuilt bundle of main
+when one is published for your Spark: no Rust and no build. The bundle is not
+published yet, so today the script builds from source.
+[INSTALL](INSTALL.md#prebuilt-bundle) gives the checks and the bundle files.
 
 ### Two or more Sparks
 

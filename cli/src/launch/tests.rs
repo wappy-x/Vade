@@ -534,6 +534,62 @@ fn source_install_fixture_ignores_exported_installer_selectors() {
 }
 
 #[test]
+fn bundle_install_over_an_earlier_bundle_stages_the_new_files() {
+    let f = Fixture::new();
+    let bundle = |name: &str, ptx: &str| {
+        let dir = f.base.join(name);
+        text::private_dir(&dir).unwrap();
+        fake_elf(&dir.join("flash-serve"));
+        fake_elf(&dir.join("vade-harness"));
+        fs::write(dir.join("flash.ptx"), ptx).unwrap();
+        let fields = install::write_test_bundle_manifest(&dir).unwrap();
+        (dir, fields)
+    };
+    let (a, a_fields) = bundle("bundle-a", ".version 8.0\n");
+    let (b, b_fields) = bundle("bundle-b", ".version 8.8\n");
+    assert_ne!(a_fields["ptx_sha256"], b_fields["ptx_sha256"]);
+    // Installer selection reads VADE_BUNDLE: each install runs in a child.
+    let install = |dir: &Path, fields: &Fields| {
+        let mut exec = source_install_test_process("launch::tests::bundle_install_child");
+        exec.unset.push("VADE_MODELS".into());
+        exec.env.insert("VADE_BUNDLE".into(), dir.to_string_lossy().into_owned());
+        exec.env.insert("VADE_SOURCE".into(), f.base.join("missing").to_string_lossy().into_owned());
+        exec.env.insert("VADE_TEST_BUNDLE_BASE".into(), f.base.to_string_lossy().into_owned());
+        let output = crate::runner::SystemRunner { dry: false }.run(&exec).unwrap();
+        assert!(output.success && output.stdout.contains("bundle install child complete"), "{}", output.stdout);
+        let installed = install::load(&f.root).unwrap().unwrap();
+        for key in ["engine_sha256", "ptx_sha256", "harness_sha256"] {
+            assert_eq!(installed[key], fields[key], "{key}: {}", output.stdout);
+        }
+        output.stdout
+    };
+    let first = install(&a, &a_fields);
+    assert!(first.contains("prepare local engine and chat"), "{first}");
+    let upgrade = install(&b, &b_fields);
+    assert!(upgrade.contains("the installed files differ from the bundle in "), "{upgrade}");
+    assert!(upgrade.contains("is now installed, from the bundle"), "{upgrade}");
+    let again = install(&b, &b_fields);
+    assert!(again.contains("reuse installed files") && !again.contains("differ from the bundle"), "{again}");
+}
+
+#[test]
+fn bundle_install_child() {
+    let Some(base) = std::env::var_os("VADE_TEST_BUNDLE_BASE") else { return };
+    let home = PathBuf::from(base).join("home");
+    let root = home.join(".vade");
+    let mut launch = Launcher {
+        root: root.clone(),
+        home,
+        runner: MockRunner::new(&root),
+        detector: MockDetector { identity: identity(), calls: 0 },
+    };
+    let capture = crate::output::testing::Capture::default();
+    crate::output::with_writer(capture.clone(), || launch.execute(Command::Install, false)).unwrap();
+    print!("{}", String::from_utf8(capture.bytes.borrow().clone()).unwrap());
+    println!("bundle install child complete");
+}
+
+#[test]
 fn source_install_fixture_child() {
     if std::env::var("VADE_TEST_SOURCE_INSTALL").as_deref() != Ok("1") {
         return;

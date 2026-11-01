@@ -3,8 +3,10 @@
 This guide installs Vade for text-only chat with the supported FP4-Local
 checkpoint, **nvidia/Qwen3.8-Flash-Next-FP4-Local**. The source commands
 build main, including the Unreleased changes in the
-[changelog](CHANGELOG.md). The prebuilt bundle contains the older v0.1.0
-release. You start with one Spark and no other computer.
+[changelog](CHANGELOG.md). The installer uses a
+[prebuilt bundle](#prebuilt-bundle) of main when one is published for your
+Spark. None is published yet, so today it builds from source. You start with
+one Spark and no other computer.
 
 Vade also supports the FP8 checkpoint, **Qwen/Qwen3.8-Flash-Next-FP8**, on
 2, 4 or 6 linked Sparks. Its weights do not fit on one Spark. It uses
@@ -68,12 +70,22 @@ vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e6342
 vade launch
 ```
 
-- `scripts/install.sh` checks the Spark, installs the pinned Rust toolchains
-  if they are missing, and builds `vade`, the GPU kernels, the engine and the
-  chat program. It does not need the model.
+- `scripts/install.sh` checks the Spark first. Then it tries the
+  [prebuilt bundle](#prebuilt-bundle): ready-made programs for the GB10, with
+  no Rust and no build. The prebuilt bundle is not published yet, so today
+  the script prints one `Prebuilt:` line with the reason and builds from
+  source. The source build installs the pinned Rust toolchains if they are
+  missing, and builds `vade`, the GPU kernels, the engine and the chat
+  program. It takes about three minutes on a GB10: the `INSTALL` step took
+  176.8 s in the
+  [fresh-install receipt](bench/receipts/2026-10-31/fresh-install-2026-10-30.txt).
+  The script does not need the model. `--source` always builds from source.
+  `--check` prints what the script would do, writes nothing and exits 0.
 - The `export` line puts `cargo` and `vade` on your `PATH` for this shell
   only, because the installer does not edit shell profiles. Run it again in
-  each new shell, or add it to `~/.profile` yourself.
+  each new shell, or add it to `~/.profile` yourself. This line is for the
+  source build. When the script installs the prebuilt bundle, it prints an
+  `export` line for the bundle folder instead. Use the line that it prints.
 - `vade pull` downloads the 102.26 GB model into
   `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local` and checks every file. Skip
   it if the model is already in `~/models`. To use a checkpoint outside
@@ -120,11 +132,17 @@ The installer runs only on Linux `aarch64`. It does these steps:
 1. It checks that the GPU is a GB10, that the driver supports CUDA 13.0 or
    newer and that no compute process uses the GPU. It stops before any
    download if one of these fails.
-2. It finds Rust in `~/.cargo/bin`. It installs any missing pinned
+2. It tries the [prebuilt bundle](#prebuilt-bundle). When the bundle fits and
+   its checks pass, it runs `vade install` from the bundle folder. That
+   install copies the prebuilt files and builds nothing. Then the script
+   goes to step 6. When a check or the download fails, the script prints one
+   `Prebuilt:` line with the reason and continues with step 3. With
+   `--source`, it skips this step.
+3. It finds Rust in `~/.cargo/bin`. It installs any missing pinned
    toolchains and GPU components.
-3. It builds the CLI and fetches the Rust `build-std` files that the GPU
+4. It builds the CLI and fetches the Rust `build-std` files that the GPU
    kernel build needs. When they are cached, it downloads nothing.
-4. It runs local `vade install`. This checks the Spark once (preflight),
+5. It runs local `vade install`. This checks the Spark once (preflight),
    then builds the GPU kernels, the engine and chat once, offline. It also
    compiles the GPU code into Vade's private startup cache, so the first `up`
    does not have to. When the model is already under `~/models`, it saves
@@ -132,7 +150,7 @@ The installer runs only on Linux `aarch64`. It does these steps:
    settings and prints the `vade pull` command. If `~/.vade` already holds
    files that another checkout or revision built, it builds this checkout and
    prints the generation that is now installed.
-5. With `--launch`, it starts the engine and opens chat in the folder where
+6. With `--launch`, it starts the engine and opens chat in the folder where
    you started. Without that flag, it stops after the install.
 
 The installer does not download or edit models. It does not change shell
@@ -273,10 +291,9 @@ There are two ways to get the Vade programs:
 
 - **Build from source.** Route B needs this for the controller's CLI and chat
   program.
-- **Use the prebuilt launcher bundle** from the v0.1.0 release (see
-  [Optional release bundle](#optional-release-bundle) in step 2). The bundle is
-  only for running Vade on the Spark itself (Route A). A controller
-  (Route B) cannot use the v0.1.0 bundle; see the note in that section.
+- **Use the prebuilt bundle** (see [Prebuilt bundle](#prebuilt-bundle) in
+  step 2). It is not published yet. The bundle is for running Vade on the
+  Spark itself (Route A).
 
 Source builds need both pinned Rust toolchains. The model download helper
 needs host Rust 1.99.0. Route A bundle users with an existing verified
@@ -369,8 +386,8 @@ cd ~ && git clone --branch main https://github.com/wappy-x/vade.git && cd ~/vade
 
 This gives you the latest `main`: v0.1.0 plus the changes listed under
 Unreleased in the [changelog](CHANGELOG.md). Build main to use the Unreleased
-changes. Clone the v0.1.0 tag (`--branch v0.1.0`) to build the same release
-as the bundle.
+changes. Clone the v0.1.0 tag (`--branch v0.1.0`) to build the v0.1.0
+release.
 
 Once the repository is public, this clone needs no account or token. Do not
 put credentials in the clone URL. We recommend cloning, but a downloaded source
@@ -399,55 +416,83 @@ them, the first launch on a fresh machine fails at the kernel build.
 `scripts/install.sh` does not run this build: it fetches only the
 `build-std` files, with `cargo fetch`.
 
-### Optional release bundle
+### Prebuilt bundle
 
-The [release workflow](.github/workflows/release.yml) builds a Linux aarch64
-launcher bundle and `SHA256SUMS`. Both are on the
-[v0.1.0 release page](https://github.com/wappy-x/vade/releases/tag/v0.1.0).
-The bundle is optional. It is an older build: v0.1.0, from 2026-10-24. It
-does not have the speed and prefix-cache fixes merged since then. In our
-replay of these steps, with the model already on the Spark, the first command
-to `Launch ready` took 101.262 s (record
-`2026-10-28_1305_bundle-install_5a22651`, not in the repository yet). That
-time is for the v0.1.0 bundle only. Build main to use the Unreleased
-changes.
+<a id="optional-release-bundle"></a>
+The prebuilt bundle holds `vade`, the engine (`flash-serve`), the GPU kernels
+(`flash.ptx`) and the chat program (`vade-harness`), built from one commit of
+main for the GB10. With it, a Spark needs no Rust and no build.
+`scripts/install.sh` uses it when it fits. You do not need to download it
+yourself.
 
-Download them into a new, empty folder of their own, outside the checkout. The
-command below uses `~/vade-launch`. The checksum file gives you the exact
-bundle filename, which includes the revision. If a failed try left
-`~/vade-launch`, run `rm -r ~/vade-launch` before you retry, because the
-`mkdir` below stops the block when the folder already exists:
+**The prebuilt bundle is not published yet.** Until it is,
+`scripts/install.sh` prints `Prebuilt: cannot download ...; building from
+source.` and builds from source as before. The older v0.1.0 launcher bundle
+on the GitHub release page is not main, and the installer does not use it.
 
-```sh
-mkdir "$HOME/vade-launch" &&
-(cd "$HOME/vade-launch" && \
-  curl --fail --location --output SHA256SUMS https://github.com/wappy-x/vade/releases/download/v0.1.0/SHA256SUMS && \
-  read -r BUNDLE_SHA256 BUNDLE < SHA256SUMS && \
-  curl --fail --location --output "$BUNDLE" "https://github.com/wappy-x/vade/releases/download/v0.1.0/$BUNDLE" && \
-  sha256sum -c SHA256SUMS && tar --zstd -xf "$BUNDLE")
-```
+The installer does these checks in order. When one fails, it prints one
+`Prebuilt:` line with the reason and builds from source:
 
-Keeping the bundle outside the checkout leaves the clone clean, so you can
-later use the same clone as a controller. Take both files from that release
-page: a checksum catches changed bytes, but it does not prove who published
-them. Extraction needs `tar` and `zstd`.
+1. The tools it needs (`tar`, `gzip`, `sha256sum` and a few others) are
+   there, and the system is Ubuntu 24.04 or newer.
+2. It reads the local glibc version (`getconf GNU_LIBC_VERSION`) and the
+   NVIDIA driver version (`nvidia-smi`).
+3. It downloads `latest.json` for the channel. This record names the commit,
+   the file, its SHA-256 hash, the oldest driver and the oldest glibc.
+4. It compares the local glibc and driver with the oldest versions in
+   `latest.json` (driver 580: the driver branch of CUDA 13.0).
+5. It downloads the file and compares its SHA-256 hash with `latest.json`. A
+   stalled download (under 1 KB/s for a minute) or a file over 512 MiB stops.
+6. It checks that the file has only files and folders inside one folder,
+   unpacks it to `~/.vade/bundles/<name>` (under `VADE_HOME` when you set it)
+   and checks every file against the hashes in the bundle's `MANIFEST`.
+7. It runs `vade install` from that folder. `vade install` checks the hashes
+   in `launcher-bundle.conf` again and copies the engine, the kernels and
+   chat into `~/.vade`. When an earlier install has other files, from a
+   source build or another bundle, it replaces them.
+
+Two settings choose the download. `VADE_DL_BASE` is the download location,
+and `VADE_CHANNEL` is the channel (default `main`). The installer reads
+`$VADE_DL_BASE/$VADE_CHANNEL/latest.json`, then the file in the same folder.
+The default location is in [scripts/install.sh](scripts/install.sh). A
+folder that is already in `~/.vade/bundles` and passes the `MANIFEST` check is
+used again without downloading the bundle again; `latest.json` is still
+downloaded, so this step needs the network.
+
+The file is named `vade-<version>-<sha7>-linux-aarch64-gb10.tar.gz`, and it
+unpacks to one folder with the same name. It is a gzip file: Ubuntu marks
+`tar` and `gzip` as essential packages, so every system has them. The folder
+has these files:
+
+| File | What it is |
+| --- | --- |
+| `vade`, `flash-serve`, `vade-harness` | Linux aarch64 programs |
+| `flash.ptx` | The GPU kernels as PTX for `sm_121` (the GB10) |
+| `launcher-bundle.conf` | The launcher record that `vade install` reads ([bundle details](cli/docs/prebuilt.md)) |
+| `MANIFEST` | The commit, its date, the target, the PTX ISA version, the oldest driver and glibc, and the SHA-256 hash of every file |
+| `README-BUNDLE` | Short instructions |
+| `LICENSE`, `NOTICE`, `engine/` | The license and notice files of the source |
+
+On 2026-10-31, the kernels of main use PTX ISA 8.8 (the `.version` line of
+`flash.ptx`; `MANIFEST` records it as `ptx_isa`). CUDA 12.9 introduced it
+([PTX ISA 8.8](https://docs.nvidia.com/cuda/archive/12.9.2/parallel-thread-execution/index.html)),
+and the oldest Linux driver for CUDA 12.9 is 575.51.03 (Table 4 of the
+[CUDA Toolkit release notes](https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html)).
+Vade itself needs a driver for CUDA 13.0, branch R580 (Tables 2 and 3 of the
+same page). The driver compiles the PTX for the GPU at the first start, so
+newer drivers load it too. An older driver makes the installer build from
+source.
 
 The bundle replaces the Rust builds, not the model download. Keep the clone,
 because step 3 uses its fetch helper and the committed model manifest.
 [Launch from the bundle](#launch-from-the-bundle) in Route A shows how to start
 it.
 
-The launcher reads `launcher-bundle.conf`, the file next to `./vade` that
-records the hashes of the engine, the GPU kernels, the chat program and the
-launcher itself.
-
-Use the v0.1.0 release bundle only on the Spark itself (Route A). A controller
-(Route B) cannot use it. The v0.1.0 CLI does not read this bundle format. A
-newer CLI reads a launcher bundle only from the controller checkout's own
-commit. So with either checkout, `vade install` ignores the v0.1.0 bundle and
-builds the engine from source on each Spark. That build needs the pinned Rust
-toolchains. See
-[bundle details](cli/docs/prebuilt.md) and [first run](harness/docs/first-run.md).
+A controller (Route B) uses the bundle only when the controller checkout is at
+the bundle's commit: unpack it on the controller and set `prebuilt_dir` to the
+bundle folder. With any other commit, `vade install` builds from source on
+each Spark. See [bundle details](cli/docs/prebuilt.md) and
+[first run](harness/docs/first-run.md).
 
 ## Step 3: get the model
 
@@ -476,8 +521,12 @@ already in `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local`, skip the download
 and go straight to the manifest check below.
 
 Use `vade pull`. It shows its progress, continues after an interruption and
-checks every file. If you ran `scripts/install.sh`, `vade` is already built.
-If not, the second line below builds it with the host toolchain from step 1. From the checkout root on the Spark:
+checks every file. If you ran `scripts/install.sh`, first run the
+`export PATH=...` line it printed: it puts `vade` on `PATH`, from the bundle
+folder in `~/.vade/bundles` or from `cli/target/release`. After a bundle
+install there is no `cargo`, so the second line below only works for a source
+build. If you did not run the script, the second line builds `vade` with the
+host toolchain from step 1. From the checkout root on the Spark:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PWD/cli/target/release:$PATH"
@@ -558,8 +607,8 @@ curl -fsSL https://raw.githubusercontent.com/wappy-x/vade/v0.1.0/cli/examples/qw
 ## Route A: on this Spark
 
 <a id="one-spark-directly-on-the-spark"></a>
-If you use the release bundle, skip the block below and follow
-[Launch from the bundle](#launch-from-the-bundle) instead. Otherwise, once the
+If `scripts/install.sh` installed the prebuilt bundle, skip the block below
+and follow [Launch from the bundle](#launch-from-the-bundle) instead. Otherwise, once the
 steps above are done, run this from the checkout root in the same shell.
 `vade launch` selects the local Spark and requires `VADE_CONFIG` to be unset.
 If an earlier controller launch still owns an engine, stop it with that
@@ -586,14 +635,12 @@ When the engine is ready, it prints one line with how long the launch took,
 the address, the context and output limits and the Spark count, for example
 `Launch ready in 149.4 s: http://127.0.0.1:18080, context 32768 tokens, output 8192, 1 Spark.`
 `vade up` prints the same line, starting with `Up ready in`, then the chat
-and stop commands. The v0.1.0 bundle prints only `Launch ready in ...`.
+and stop commands.
 
 Run from a script, where standard input is not a terminal, `launch` skips
 chat: after the ready line it prints
 `Standard input is not a terminal, so chat was not opened. Chat: vade chat`
-and exits. The v0.1.0 bundle is older and prints
-`Chat: open local chat; /exit leaves the engine running.` and then
-`Chat: done in ...` instead.
+and exits.
 
 Chat opens in the checkout, and the agent can edit files there, so ask it only
 to say hello. Then type `/exit` to get back to your shell. The engine keeps
@@ -608,7 +655,8 @@ the `PATH` line below.
 ssh -t you@spark-address 'cd "$HOME/vade" && ./cli/target/release/vade chat'
 ```
 
-For the release bundle, use `'cd "$HOME/vade-launch" && ./vade chat'` instead.
+For the prebuilt bundle, use `'"$HOME/.vade/bundles/<name>/vade" chat'`
+instead, with the folder name that the installer printed.
 Without `-t` there is no terminal, so chat shows plain lines instead of its
 window.
 
@@ -680,20 +728,17 @@ without running anything, on any computer.
 ### Launch from the bundle
 
 After the model check in step 3, run this instead of Route A's source-build
-block:
+block. First run the `export` line that `scripts/install.sh` printed. It puts
+the bundle folder, `~/.vade/bundles/<name>`, on your `PATH`. Then:
 
 ```sh
-cd ~/vade-launch && unset VADE_CONFIG
-export PATH="$HOME/vade-launch:$PATH"
-./vade launch
+unset VADE_CONFIG
+vade launch
 ```
 
 Then follow Route A from "Next, run these in order". With the bundle folder on
-your `PATH`, `vade status`, `vade verify` and `vade down` work by name, also
-after `cd ~`. In a new shell, run the `export` line first. Status hints repeat
-the command the way you typed it, such as `Chat: ./vade chat`. The v0.1.0
-bundle is older and prints the bare `vade`, such as `Chat: vade chat`. With the
-bundle folder on your `PATH`, those commands work as printed.
+your `PATH`, `vade status`, `vade verify` and `vade down` work by name, in any
+folder. In a new shell, run the `export` line first.
 
 ### What `vade verify` checks
 
@@ -1052,8 +1097,8 @@ vade up --sparks 2
 
 `vade install` builds from source on each Spark, unless `prebuilt_dir` points
 at a bundle from the controller checkout's own commit (see
-[bundle details](cli/docs/prebuilt.md)). The v0.1.0 release bundle does not
-qualify. After `vade up --sparks 2`, `vade verify` reports `1 machine`,
+[bundle details](cli/docs/prebuilt.md)). A bundle from another commit does
+not qualify. After `vade up --sparks 2`, `vade verify` reports `1 machine`,
 because the two ranks form one engine, not two separate engines.
 
 There are two ways to choose the Sparks. Use one or the other, not both:
