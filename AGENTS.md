@@ -33,10 +33,15 @@ values ([FP8 defaults](docs/install-fp8.md#defaults-and-drafting)).
   first-party crates already in the tree. Registry, git, off-tree path, build
   and dev dependencies all count, and so do lockfile sources. Don't add a
   dependency to solve a small task.
-- **No new unsafe.** Don't add unsafe blocks, functions, implementations or
-  extern declarations. The existing CUDA, FFI, kernel and transport boundaries
-  are not permission to grow them. Keep their safety contracts and SAFETY
-  comments intact.
+- **No new unsafe, with one exception.** Don't add unsafe blocks, functions,
+  implementations or extern declarations. The existing CUDA, FFI, kernel and
+  transport boundaries are not permission to grow them. Keep their safety
+  contracts and SAFETY comments intact. The exception (2026-11-01): a kernel
+  may add one new unsafe block, in the GPU crate (`engine/crates/gpu`) only.
+  Write its safety contract in a comment directly above the block: what must
+  be true for the call to be sound and why it is true there. A reviewer
+  checks the contract before the merge. One block per kernel, never in any
+  other crate.
 - **Model-generic code.** Derive execution from the checkpoint configuration,
   tensor shapes and dtypes, and safetensors metadata. Don't dispatch on the
   model name for execution tuning, and don't add checkpoint-specific constants,
@@ -226,7 +231,9 @@ Use topology data instead of adding hardcoded count branches. Never raise a
 ceiling to make a change pass. When a count falls, lower the baseline in the
 same commit.
 
-Unsafe follows the same no-growth rule: no new unsafe sites in any crate. The
+Unsafe follows the same no-growth rule: no new unsafe sites in any crate,
+except one block per kernel in the GPU crate with a written safety contract
+above it and a reviewer check (see "No new unsafe, with one exception"). The
 current test has only the three counters above and does **not** count unsafe
 sites, so review the diff for them yourself. If the baseline later gains
 per-crate `unsafe_sites` counters, they are ceilings, not an allowance to add

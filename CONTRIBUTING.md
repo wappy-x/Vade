@@ -127,8 +127,11 @@ install or start an engine. To install from source on a Spark, follow
 - **No third-party dependencies.** Use only the Rust standard library and the
   first-party path crates already here. Registry, git, external path, dev and
   build dependencies all count.
-- **No new `unsafe`.** The unsafe code that already exists at the CUDA,
-  kernel and transport boundaries doesn't make room for more. The ratchet test
+- **No new `unsafe`, with one exception.** The unsafe code that already
+  exists at the CUDA, kernel and transport boundaries doesn't make room for
+  more. The exception: a kernel may add one new `unsafe` block in the GPU
+  crate (`engine/crates/gpu`) only. Put its safety contract in a comment
+  directly above the block, and a reviewer checks it. The ratchet test
   (below) doesn't count unsafe code, so check your diff for it yourself.
 - **Model-generic behavior.** Derive it from the checkpoint configuration and
   tensor metadata, with no dispatch on the model name and no model-specific
