@@ -25,7 +25,11 @@ impl Fixture {
 case "${1-}" in
     --query-gpu=name) printf '%s\n' "${INSTALL_GPU_NAME-NVIDIA GB10}" ;;
     --query-compute-apps=pid) [ "${INSTALL_GPU_BUSY-false}" = false ] || echo 1234 ;;
-    '') printf '| NVIDIA-SMI 580.95.05  Driver Version: 580.95.05  CUDA Version: %s |\n' "${INSTALL_CUDA-13.0}" ;;
+    '') if [ "${INSTALL_UMD-false}" = true ]; then
+            printf '| NVIDIA-SMI 615.71.09   KMD Version: 615.71.09   CUDA UMD Version: %s |\n' "${INSTALL_CUDA-13.4}"
+        else
+            printf '| NVIDIA-SMI 580.95.05  Driver Version: 580.95.05  CUDA Version: %s |\n' "${INSTALL_CUDA-13.0}"
+        fi ;;
 esac
 "#);
         fixture.tool("curl", "echo unexpected-download >> \"$INSTALL_CALLS\"; exit 91");
@@ -94,6 +98,19 @@ fn cached_source_install_fetches_build_std_and_leaves_detect_and_kernels_to_vade
     assert!(stdout.contains(&format!("   export PATH=\"$HOME/.cargo/bin:{}/cli/target/release:$PATH\"\n", f.root.display())), "{stdout}");
     assert!(stdout.contains("   vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300\n") && stdout.ends_with("   vade launch\n"), "{stdout}");
     assert!(!stdout.contains("setup"), "{stdout}");
+}
+
+#[test]
+fn newer_drivers_print_cuda_umd_version_and_pass_the_same_check() {
+    let f = Fixture::new();
+    let output = f.run(&[("INSTALL_UMD", "true")]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(f.calls().ends_with("vade install\n"), "{}", f.calls());
+    let old = Fixture::new();
+    let output = old.run(&[("INSTALL_UMD", "true"), ("INSTALL_CUDA", "12.8")]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success() && stderr.contains("must support CUDA 13.0 or newer") && stderr.contains("Next:"), "{stderr}");
+    assert!(!old.calls().contains("rustup "), "{}", old.calls());
 }
 
 #[test]

@@ -37,9 +37,10 @@ cd "$root"
 gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader) ||
     fail 'NVIDIA driver check failed (nvidia-smi error above). Next: ask your administrator to restore nvidia-smi, then retry.'
 case " $gpu " in *[!A-Za-z0-9]GB10[!A-Za-z0-9]*) ;; *) fail "this needs an NVIDIA GB10 GPU (a DGX Spark); nvidia-smi reports: $gpu. Next: run this script on a Spark." ;; esac
-cuda=$(nvidia-smi | sed -n 's/.*CUDA Version: *\([0-9][0-9]*\)\.[0-9].*/\1/p' | head -n 1)
+# Older drivers print "CUDA Version:"; newer drivers print "CUDA UMD Version:".
+cuda=$(nvidia-smi | sed -n 's/.*CUDA \(UMD \)\{0,1\}Version: *\([0-9][0-9]*\)\.[0-9].*/\2/p' | head -n 1)
 [ -n "$cuda" ] && [ "$cuda" -ge 13 ] ||
-    fail 'the NVIDIA driver must support CUDA 13.0 or newer (the "CUDA Version" that nvidia-smi prints). Next: ask your administrator to update the driver, then retry.'
+    fail 'the NVIDIA driver must support CUDA 13.0 or newer (the "CUDA Version" or "CUDA UMD Version" that nvidia-smi prints). Next: ask your administrator to update the driver, then retry.'
 gpu_processes=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader) ||
     fail 'NVIDIA driver check failed (nvidia-smi error above). Next: ask your administrator to restore nvidia-smi, then retry.'
 [ -z "$gpu_processes" ] ||
