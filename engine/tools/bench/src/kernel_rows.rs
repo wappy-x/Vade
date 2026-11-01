@@ -55,6 +55,12 @@ pub(crate) fn cases() -> Vec<Case> {
         out.push(Case { name: format!("fp8a-{tag}-lbf-m{m}"), kernel: entry(m, rows, 0, k), m, n: rows, k, kind: 75,
             mats: [rows, 0, 0, 2], calls: if m == 1 { calls } else { 0 }, ..Default::default() });
     } }
+    // FP8 HC injection + down at 2..8 FP32 rows (mats[3] bit 4): A = flash_bf16_mma1_10240 (main's
+    // entry), X = the engine's latency pack + one flash_bf16_mma_latency_group launch. Bytes A == X.
+    for m in [2, 3, 4, 5, 6, 7, 8] {
+        out.push(Case { name: format!("fp8k-hcgroup-m{m}"), kernel: "flash_bf16_mma1_10240", m, n: 324, k: 10240, kind: 75,
+            mats: [4, 320, 0, 4], ..Default::default() });
+    }
     // Wave probe: K2560 twin reads from 2560 to 3072 rows (320 to 384 split CTAs), M1 only.
     for rows in [2560, 2624, 2688, 2752, 2816, 2944, 3072] {
         out.push(Case { name: format!("fp8a-wave-{rows}-lbf-m1"), kernel: entry(1, rows, 0, 2560), m: 1, n: rows, k: 2560, kind: 75,
@@ -99,12 +105,14 @@ pub(super) fn fixture(g: &mut Gpu, c: &Case) -> Result<Fixture> {
     let input = if bf16 != 0 { g.fill(plane_words * 8 * 4, 2)? } else { g.fill(m * k * 4, 2)? };
     let out_bytes = m * (r1 + r2) * 4;
     let out = g.alloc(out_bytes)?;
+    // Group cases: arm X's packed hi/lo planes of the FP32 input (flash_bf16_input).
+    let aux = if c.kind == 75 && c.mats[3] & 4 != 0 { g.fill(plane_words * 2 * 4, 0)? } else { 0 };
     let rows = params::Bf16Rows { weight: ring[0], output: out, rows: r1 as u32, stride: r1 as u32,
         weight2: if r2 == 0 { 0 } else { ring[0] + (r1 * k * 2) as u64 }, output2: if r2 == 0 { 0 } else { out + (m * r1 * 4) as u64 },
         rows2: r2 as u32, stride2: r2 as u32, input, cols: k as u32, tokens: m as u32, input_bf16: bf16, hc_silu: silu,
         input_plane_words: plane_words as u64 };
     let (blocks, threads) = shape(c);
-    Ok(Fixture { rows, group: None, ring, out, out_bytes, aux: 0, aux_bytes: 0, grid: [blocks as u32, 1, 1], threads,
+    Ok(Fixture { rows, group: None, ring, out, out_bytes, aux, aux_bytes: 0, grid: [blocks as u32, 1, 1], threads,
         shared: 0, stored: weight_bytes + m * k * 4 + out_bytes, flops: 2 * m * (r1 + r2) * k, chunks: 1, down_slots: 0,
         raw: 0, pack: null_mut(), norms: [null_mut(); 2], weight_bytes, written: Vec::new(), qsa: None, gather: None,
         ring_x: vec![], scales_x: vec![] })
@@ -124,6 +132,19 @@ pub(super) fn launch(g: &Gpu, f: H, c: &Case, v: &mut Fixture, i: usize, arm: us
         let mut p = params::Bf16Pairs { pairs: [pair(m[0], m[1]), pair(m[2], m[3])] };
         let grid = [env("KBENCH_ROWS_X_BLOCKS").unwrap_or(v.grid[0]), 2, 1];
         return g.launch(f, grid, v.threads, 0, &mut [ptr(&mut p)]);
+    }
+    if c.kind == 75 && c.mats[3] & 4 != 0 && arm == 1 {
+        // As blocks.rs next_rows_group_at: pack_flash_latency_input, then the group launch.
+        let (lanes, words) = (params::flash_latency_lanes(c.m), c.m.div_ceil(16) * c.k.div_ceil(16) * 128);
+        let mut q = params::FlashBf16Input { input: v.rows.input, output: v.aux, tokens: c.m as u32, cols: c.k as u32, hc_silu: 0, lanes: lanes as u32 };
+        g.launch(v.pack, [(words / 128 * lanes).div_ceil(128) as u32, 1, 1], 128, 0, &mut [ptr(&mut q)])?;
+        let (r1, r2) = (c.mats[0], c.mats[1]);
+        let a = params::Bf16Rows { weight: v.ring[i], output: v.out, rows: r1 as u32, stride: r1 as u32,
+            weight2: v.ring[i] + (r1 * c.k * 2) as u64, output2: v.out + (c.m * r1 * 4) as u64, rows2: r2 as u32, stride2: r2 as u32,
+            input: v.aux, cols: c.k as u32, tokens: c.m as u32, input_bf16: 1, hc_silu: 0, input_plane_words: words as u64 };
+        let none = params::Bf16Rows { weight: 0, output: 0, rows: 0, stride: 0, weight2: 0, output2: 0, rows2: 0, stride2: 0, ..a };
+        let (mut p, mut partials) = (params::Bf16Pairs { pairs: [a, none] }, 0u64);
+        return g.launch(f, [192, 1, 1], 128, (4 * params::LATENCY_RING) as u32, &mut [ptr(&mut p), ptr(&mut partials)]);
     }
     v.rows.weight = v.ring[i];
     if c.kind == 75 && c.mats[3] & 2 != 0 {

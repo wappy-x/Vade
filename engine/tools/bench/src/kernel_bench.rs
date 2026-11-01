@@ -930,6 +930,8 @@ fn run() -> Result<()> {
                 + 3 // pgr-hc M2048 / M64 / M4096 (kind 74).
                 + 20 // gdn_fstep (kind 54).
                 + 8 // gdn_cfstep (kind 55).
+                + 74 // FP8 stack kernel_rows.rs: kind 75/76 decode rows + fp8a wave probe.
+                + 7 // fp8k-hcgroup-m2..m8 (kind 75, kernel_rows.rs).
                 ;
             assert_eq!(cases().len(), expect);
             // --case selects by name: every name names one case.

@@ -1217,16 +1217,14 @@ impl<'w> Hc<'w> {
         let u = scratch.normalized.device_address();
         let low = scratch.low.device_address();
         let gates = scratch.gates.as_ref().ok_or("Next-only HC scratch cannot run materialized gates")?.device_address();
-        // Full MMA tiles can consume BF16 operands emitted by normalization.
-        // Partial tiles keep the standalone packer's zero padding. The F32
-        // norm kernel emits no packed operands, so its projections pack FP32.
+        // Full MMA tiles can consume BF16 operands emitted by normalization; partial tiles keep the
+        // standalone packer's zero padding. The F32 norm kernel emits no packed operands (FP32 packs).
         let packed = !self.norm_f32 && (tokens == 1 || tokens % 16 == 0);
         let decode_packed = packed && tokens == 1;
         let operand = if packed { b.flash_dense_input()? } else { 0 };
         norm(b, r, self.norm, u, tokens, operand, self.norm_f32)?;
         let x = if packed { operand } else { u };
-        // Injection gates depend only on the normalized streams: one launch
-        // projects them beside the down rows.
+        // Injection gates depend only on the normalized streams: one launch projects them beside the down rows.
         let (first, second) = match self.inject {
             Some(inject) => ((inject, injection, 4, 4), (self.down, low, LOW, LOW)),
             None => ((self.down, low, LOW, LOW), (0, 0, 0, 0)),
@@ -1237,7 +1235,9 @@ impl<'w> Hc<'w> {
             project_rows(b, x, W, tokens, first, (0, 0, 0, 0), packed, false, BF16_ROWS_TOKENS)?;
         }
         else if !packed && self.inject.is_none() { bf16_rows(b, self.down, x, low, LOW, W, tokens, LOW)?; }
-        else { project_rows(b, x, W, tokens, first, second, packed, decode_packed, BF16_ROWS_TOKENS)?; }
+        // BF16-norm (FP8) HC at 2..8 FP32 rows: one latency group launch of injection + down (same graph).
+        else if !packed && !self.norm_f32 && tokens <= BF16_ROWS_TOKENS { if x % 8 != 0 || first.0 % 16 != 0 || second.0 % 16 != 0 { return Err("Flash BF16 MMA needs K >= 64, a multiple of 8, and aligned operands".into()); }
+            b.decode_weight_read(|| (first.2 + second.2) * W * 2); next_rows_group_at(b, x, W, tokens, [first, second, (0, 0, 0, 0), (0, 0, 0, 0)])?; } else { project_rows(b, x, W, tokens, first, second, packed, decode_packed, BF16_ROWS_TOKENS)?; }
         let up_packed = tokens > BF16_ROWS_TOKENS;
         let x = if decode_packed {
             // Down's epilogue already activated and packed this private row.
