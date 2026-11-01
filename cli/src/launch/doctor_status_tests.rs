@@ -30,7 +30,7 @@ fn doctor_reports_every_check_and_counts_the_failures() {
         row("ok", "vade binary"),
         row("ok", "VADE_HOME writable"),
         format!("{}no engine recorded", row("ok", "ownership")),
-        format!("{}Vade is not installed yet.\n      next: Run vade launch to install and start Vade.", row("FAIL", "installed binaries")),
+        format!("{}Vade is not installed yet.\n      next: Run vade up to install and start Vade.", row("FAIL", "installed binaries")),
         row("ok", "model files"),
         row("ok", "model folder"),
         row("ok", "config.json"),
@@ -131,7 +131,7 @@ fn status_dry_run_and_json_read_only_the_saved_records() {
     let mut launch = f.launcher();
     let (result, printed) = captured(|| launch.execute(Command::Status, true));
     result.unwrap();
-    assert_eq!(printed, format!("○ Vade is stopped.\n  Start: {}\n", text::command("launch")));
+    assert_eq!(printed, format!("○ Vade is stopped.\n  Start: {}\n", text::command("up")));
     let stopped = snapshot(&mut launch, false).unwrap();
     assert_eq!((stopped["phase"].as_str(), &stopped["ready"]), (Some("stopped"), &Value::Bool(false)));
     assert!(stopped["errors"].as_array().unwrap().is_empty());
@@ -168,7 +168,7 @@ fn down_status_logs_and_update_name_the_next_step_in_each_state() {
     let mut launch = f.launcher();
     let run = |launch: &mut Launcher<MockRunner, MockDetector>, command| captured(|| launch.execute(command, false));
     assert_eq!(run(&mut launch, Command::Down), (Ok(()), "Vade is already stopped.\n".into()));
-    assert_eq!(run(&mut launch, Command::Status), (Ok(()), format!("○ Vade is stopped.\n  Start: {}\n", text::command("launch"))));
+    assert_eq!(run(&mut launch, Command::Status), (Ok(()), format!("○ Vade is stopped.\n  Start: {}\n", text::command("up"))));
     assert_eq!(run(&mut launch, Command::Logs), (Ok(()), "No engine log yet.\n".into()));
     assert_eq!(run(&mut launch, Command::Update).0.unwrap_err(), "No local setup yet; run vade launch first.");
     let (result, printed) = run(&mut launch, Command::Detect);
@@ -324,7 +324,7 @@ fn a_load_in_progress_is_reported_without_asking_to_stop_it() {
     captured(|| launch.execute(Command::Down, false)).0.unwrap();
     // The other chat refusals of the "what you see when" table in cli/docs/ux.md.
     assert_eq!(captured(|| launch.execute(Command::Chat(Default::default()), false)).0.unwrap_err(),
-        "The engine is not running. Run vade launch to start it and open chat.");
+        "The engine is not running. Run vade up to start it, then run vade chat.");
     captured(|| launch.execute(Command::Up(Default::default()), false)).0.unwrap();
     launch.runner.health_ready = false;
     assert_eq!(captured(|| launch.execute(Command::Chat(Default::default()), false)).0.unwrap_err(),
@@ -345,7 +345,7 @@ fn a_dead_engine_record_is_reported_by_status_and_doctor_and_cleared_by_up() {
     launch.runner.listener_owned = false;
     let record = fs::read(f.root.join("state/run.conf")).unwrap();
     assert_eq!(captured(|| launch.execute(Command::Status, false)), (Ok(()), format!(
-        "○ Vade is stopped: the engine is not running (stale record found; the next start clears it).\n  Start: {}\n", text::command("launch"))));
+        "○ Vade is stopped: the engine is not running (stale record found; the next start clears it).\n  Start: {}\n", text::command("up"))));
     let (result, printed) = captured(|| launch.execute(Command::Doctor, false));
     result.unwrap();
     assert!(printed.contains(&format!("skip  engine process        not running; stale record found ({} clears it)\n", text::command("up"))), "{printed}");

@@ -13,8 +13,10 @@ Options:
   --yes                Ask nothing; take the defaults and the flags below
   --hosts a,b          Sparks to drive, as you type them after ssh, in cable
                        order
-  --fp8                The FP8 checkpoint (2, 4 or 6 Sparks); --fp4-local is the
-                       default
+  --fp8                The FP8 checkpoint on 2 or 4 Sparks (6 Sparks start but
+                       are not covered); --fp4-local is the default
+  --replace-local      Move the local setup aside, then write a controller
+                       config
   --model PATH         The model folder, absolute or under ~/ (on each Spark
                        from a controller)
   --link FROM:TO=ADDR  FROM's own address on its cable to TO; once per cable end
@@ -23,8 +25,9 @@ Options:
 
 Notes:
   - Asks which Sparks to use (on a Spark the default is this Spark), FP4-Local
-    or FP8 (only for 2, 4 or 6 Sparks), and where the model is. Each question
-    shows its default in brackets; press Enter to take it.
+    or FP8 (only for 2, 4 or 6 Sparks; 6 Sparks are not covered yet), and where
+    the model is. Each question shows its default in brackets; press Enter to
+    take it.
   - On this Spark, vade install saves the local defaults in ~/.vade/config. From
     another computer, setup writes a controller config at the path vade config
     shows (VADE_CONFIG, else the user config folder). It points at this checkout
@@ -36,6 +39,10 @@ Notes:
     setup it finds and repeats only the work that needs it. When a controller
     config already has an install, setup skips vade install; after a pull, run
     vade update.
+  - On a Spark with local setup, --hosts or another answer starts a new setup.
+    Setup names the local file and asks before it moves it. With --yes, or
+    without a terminal, add --replace-local. The file moves to config.local
+    beside it; setup deletes nothing.
   - Without a terminal, setup asks nothing; add --yes. It does not download
     models: see vade pull.
   - Explicit VADE_CONFIG selects the controller; otherwise generated local setup

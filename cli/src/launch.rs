@@ -424,15 +424,15 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             }
             Command::Chat(options) => {
                 let config = Config::load(&self.root)?
-                    .ok_or("Vade is not set up on this Spark yet. Run vade launch to install it, start it and open chat.")?;
-                let artifacts = install::load(&self.root)?.ok_or("The engine and chat are not installed yet. Run vade launch to install them and open chat.")?;
-                let record = self.record()?.ok_or("The engine is not running. Run vade launch to start it and open chat.")?;
+                    .ok_or("Vade is not set up on this Spark yet. Run vade up to install it and start it, then run vade chat.")?;
+                let artifacts = install::load(&self.root)?.ok_or("The engine and chat are not installed yet. Run vade up to install them and start the engine, then run vade chat.")?;
+                let record = self.record()?.ok_or("The engine is not running. Run vade up to start it, then run vade chat.")?;
                 if self.loading(&record) { return Err(STILL_LOADING.into()); }
                 self.ready(&config, &record)?;
                 self.chat(&config, &artifacts, &record, &options)
             }
             Command::Sessions(action) => {
-                let artifacts = install::load(&self.root)?.ok_or("The engine and chat are not installed yet. Run vade launch to install them.")?;
+                let artifacts = install::load(&self.root)?.ok_or("The engine and chat are not installed yet. Run vade up to install them.")?;
                 let exec = chat::sessions(required(&artifacts, "harness")?, &action)?;
                 if self.runner.interactive(&exec)? { Ok(()) } else { Err(chat::SESSIONS_FAILED.into()) }
             }

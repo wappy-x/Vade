@@ -50,8 +50,17 @@ pub fn command(subcommand: &str) -> String {
     format!("{} {subcommand}", invocation(program.as_deref(), std::env::var_os("PATH").as_deref()))
 }
 
-/// The bare name when it was typed bare or PATH finds this same program first;
-/// otherwise the path as typed, shell-quoted and safe to print.
+/// Whether `found` is a small script that names `program`, as the one that
+/// scripts/install.sh keeps in the Vade home's `bin` folder. It starts `program`
+/// by its full path, so that path is the name this program sees.
+fn script_runs(found: &Path, program: &Path) -> bool {
+    fs::metadata(found).is_ok_and(|meta| meta.len() <= 4096) && fs::read_to_string(found)
+        .is_ok_and(|text| text.starts_with("#!/bin/sh\n") && text.contains(program.to_string_lossy().as_ref()))
+}
+
+/// The bare name when it was typed bare, or PATH finds this same program first
+/// or the script that runs it; otherwise the path as typed, shell-quoted and
+/// safe to print.
 pub fn invocation(program: Option<&std::ffi::OsStr>, path: Option<&std::ffi::OsStr>) -> String {
     let Some(typed) = program.map(Path::new) else { return "vade".into() };
     let Some(name) = typed.file_name() else { return "vade".into() };
@@ -61,6 +70,7 @@ pub fn invocation(program: Option<&std::ffi::OsStr>, path: Option<&std::ffi::OsS
     }
     let executable = |candidate: &Path| fs::metadata(candidate).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
     let found = path.into_iter().flat_map(std::env::split_paths).map(|dir| dir.join(name)).find(|candidate| executable(candidate));
+    if found.as_deref().is_some_and(|found| script_runs(found, typed)) { return bare(); }
     match (found.and_then(|found| fs::canonicalize(found).ok()), fs::canonicalize(typed).ok()) {
         (Some(found), Some(this)) if found == this => bare(),
         _ => terminal_text(&crate::runner::quote(&typed.to_string_lossy())).into_owned(),
@@ -369,6 +379,12 @@ mod invocation_tests {
         // PATH would run a different vade first; a non-executable file is skipped.
         assert_eq!(invocation(Some(bundle.as_os_str()), Some(&path(&["other", "bundle"]))), typed);
         assert_eq!(invocation(Some(bundle.as_os_str()), Some(&path(&["plain", "bundle"]))), "vade");
+        // The script that the installer keeps on PATH runs this program by its full path.
+        fs::create_dir_all(root.join("fixed")).unwrap();
+        fs::write(root.join("fixed/vade"), format!("#!/bin/sh\nexec '{typed}' \"$@\"\n")).unwrap();
+        fs::set_permissions(root.join("fixed/vade"), fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(invocation(Some(bundle.as_os_str()), Some(&path(&["fixed"]))), "vade");
+        assert_eq!(invocation(Some(root.join("other/vade").as_os_str()), Some(&path(&["fixed"]))), root.join("other/vade").to_str().unwrap());
         let spaced = root.join("my folder/vade");
         assert_eq!(invocation(Some(spaced.as_os_str()), None), format!("'{}'", spaced.display()));
         assert_eq!(invocation(Some(OsStr::new("./vade\x1b[2J")), None), "'./vade\\u{1b}[2J'");

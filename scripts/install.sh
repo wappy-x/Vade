@@ -198,7 +198,6 @@ if prebuilt; then
     vade="$prebuilt_dir/vade"
     if "$vade" install </dev/null; then
         printf 'Install: installed prebuilt Vade %s.\n' "$sha"
-        bin_path="$prebuilt_dir"
     else
         why="\"$vade\" install failed (diagnostic above)"
         vade=
@@ -308,15 +307,28 @@ cargo "+$device" fetch --locked --manifest-path "$sysroot/lib/rustlib/src/rust/l
     fail 'Rust build-std fetch failed. Next: check access to https://index.crates.io and rerun the Retry command below; with CARGO_NET_OFFLINE=true, run it once online first.'
 "$vade" install </dev/null ||
     fail "local install failed. Next: follow the diagnostic above, run \"$vade\" doctor, then retry."
-bin_path='$HOME/.cargo/bin:'"$root/cli/target/release"
 fi
+# One folder stays on PATH across versions: a small script that runs the build
+# just installed, rewritten on each install. Not a copy or a link: the real
+# program must run from its own folder to find its bundle or checkout.
+vade_home=${VADE_HOME:-$HOME/.vade}
+bin_path=${VADE_HOME:+$VADE_HOME/bin}
+quoted=$(printf '%s\n' "$vade" | sed "s/'/'\\\\''/g")
+[ ! -d "$vade_home/bin/vade" ] && (umask 077 && mkdir -p "$vade_home/bin" &&
+    printf '#!/bin/sh\nexec '\''%s'\'' "$@"\n' "$quoted" > "$vade_home/bin/vade.new" &&
+    chmod 700 "$vade_home/bin/vade.new" && mv -f "$vade_home/bin/vade.new" "$vade_home/bin/vade") ||
+    fail "cannot write $vade_home/bin/vade. Next: check that path and its permissions, then retry."
 printf '%s\n' 'Install complete. Next steps:' \
-    '1. Put vade on PATH in this shell (add this line to ~/.profile to keep it):' \
-    "   export PATH=\"$bin_path:\$PATH\"" \
+    '1. Put vade on PATH: run the last line below.' \
     '2. If the model is not on this Spark yet, download and check it (102.26 GB):' \
     '   vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300' \
-    '3. Start the engine and open chat:' \
-    '   vade launch'
+    '3. Start the engine:' \
+    '   vade up' \
+    'To start the engine and open the coding agent in the current folder, run vade launch.' \
+    'To keep vade on PATH in new shells, add the last line to ~/.profile.' \
+    '' \
+    'Your shell cannot find vade until you run this line:' \
+    "   export PATH=\"${bin_path:-\$HOME/.vade/bin}:\$PATH\""
 if [ "$launch" = true ]; then
     cd "$workspace" || fail 'your starting folder is unavailable. Next: open an existing project folder, then use the launch command above.'
     [ "$piped" = false ] || (: </dev/tty) 2>/dev/null || {

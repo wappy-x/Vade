@@ -10,11 +10,13 @@ Usage: vade up [OPTIONS]
 
 Options:
   --fp4-local       Qwen3.8 Flash-Next FP4-Local (the default; optional)
-  --fp8             Qwen3.8 Flash-Next FP8 on 2, 4 or 6 Sparks (older spelling:
-                    --fp8-legacy): context 131072, output 65536 (or the context
-                    if smaller), drafting depth 2; output limit up to 262144
-  --sparks N        Number of Sparks; FP4 supports 1..24
-  --hosts a,b       Machine names in cable order, separated by commas
+  --fp8             Qwen3.8 Flash-Next FP8 on 2 or 4 Sparks; 6 Sparks start but
+                    are not covered (older spelling: --fp8-legacy): context
+                    131072, output 65536 (or the context if smaller), drafting
+                    depth 2; output limit up to 262144
+  --sparks N|a,b    A Spark count from 1 to 24, or the Sparks as you type them
+                    after ssh, in cable order
+  --hosts a,b       The Sparks as you type them after ssh, in cable order
   --replicas N      2..16 independent one-Spark FP4-Local servers behind a local
                     gateway
   --pairs           With --replicas 2..12: N two-Spark tensor-split servers on
@@ -33,6 +35,14 @@ Options:
 
 Notes:
   - Default: Qwen3.8 Flash-Next FP4-Local on one Spark.
+  - FP4-Local runs on 1, 2 or 4 Sparks over RDMA, or as a layer chain of 3 to 24
+    Sparks over TCP. We have measured chains up to four Sparks.
+  - FP8 runs on 2 or 4 Sparks, and the same request with the same settings gives
+    the same token IDs on both. FP8 also starts on 6 Sparks, but its token IDs
+    differ there, so 6 Sparks are not covered yet.
+  - --sparks a,b and --hosts a,b pick machines from your controller config. Each
+    entry is the ssh line of a machine, or its [machine NAME] name. vade setup
+    --hosts writes that config.
   - Local up and launch start with context 32768 and output 8192 (or the context
     if smaller). They reuse saved limits. A memory refusal lowers a default or
     saved context to a smaller size from 32768, 16384, 8192 and 4096. The first
@@ -54,8 +64,7 @@ Notes:
     FP4-Local: both Sparks work on every token. It needs RDMA, so vade up
     refuses SEQPAR_RDMA=0 (TCP) for two FP4-Local Sparks. FP8 on two Sparks
     keeps its ring and may use TCP.
-  - FP8 needs an FP8 config such as cli/examples/vade.conf. FP8 gives the same
-    token IDs on 2 and 4 Sparks; 6 Sparks still give other IDs. See
+  - FP8 needs an FP8 config such as cli/examples/vade.conf. See
     docs/benchmarks.md.
   - Spark counts above 2 require a current install and linked hosts in cable
     order.

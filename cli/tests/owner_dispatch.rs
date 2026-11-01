@@ -291,7 +291,8 @@ fn alternate_starts_require_a_consistent_installation_selector() {
     ] {
         let rejected = f.command(false).args(&args).bounded_output().unwrap();
         assert_eq!(rejected.status.code(), Some(1), "{args:?}: {rejected:?}");
-        assert!(String::from_utf8_lossy(&rejected.stderr).contains("VADE_CONFIG"));
+        let stderr = String::from_utf8_lossy(&rejected.stderr);
+        assert!(stderr.contains(if args[0] == "up" { "a controller config" } else { "VADE_CONFIG" }), "{args:?}: {stderr}");
         assert!(!String::from_utf8_lossy(&rejected.stdout).contains("Launch plan:"));
 
     }

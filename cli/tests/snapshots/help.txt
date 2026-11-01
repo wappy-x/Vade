@@ -1,11 +1,12 @@
 $ vade --help
-Vade runs Qwen3.8 Flash-Next FP4-Local on your DGX Spark.
+Vade runs Qwen3.8 Flash-Next on your DGX Spark, as FP4-Local or FP8.
 
 Examples:
-  vade setup   Answer a few questions, then install and start
-  vade launch  Start on this Spark, then chat
+  vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300
+               Download the model and check every file
+  vade up      Start the engine on this Spark
+  vade chat    Chat with the running engine
   vade status  See what is running
-  vade doctor  Check the setup, then PASS or FAIL
   vade down    Stop what vade started
 
 Usage: vade <COMMAND> [OPTIONS]
@@ -43,14 +44,14 @@ Maintain:
   install   Save local defaults and install the engine and chat
   update    Refresh the installed engine and chat
   run       Run the separate legacy Qwen3-8B BF16 workflow
-  version   Print the CLI version
+  version   Print the CLI version and the commit of this build
 
 Options:
   --json               JSON for status, doctor, config, detect, models, version
   --dry-run            Preview a lifecycle command; others run as usual
   --api-key-file PATH  Credential for chat, doctor, verify, bench and local run
   -h, --help           Show help
-  -V, --version        Print the CLI version
+  -V, --version        Print the CLI version and the commit of this build
 
 Environment:
   VADE_HOME          Local install root and saved defaults (default ~/.vade)

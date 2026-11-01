@@ -271,6 +271,6 @@ error: Set --mtp to a whole number from 0 to 3.
 
 ```text
 $ vade --version --json
-{"schema":"vade.version.v1","version":"0.1.0"}
+{"schema":"vade.version.v1","version":"0.1.0","sha":"4232680265c4fbf59858204fb1bbe92b1780a302","modified":false}
 [exit 0]
 ```

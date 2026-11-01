@@ -12,6 +12,11 @@ use crate::cli::{UpOptions, identifier};
 pub const MAX_FP4_SPARKS: usize = 24;
 /// Independent one-Spark servers behind one local gateway.
 pub const MAX_REPLICAS: usize = 16;
+/// What each Spark count gives with FP4-Local. The help and the errors print
+/// this text, so they cannot disagree. README.md says the same.
+pub const FP4_SPARKS: &str = "FP4-Local runs on 1, 2 or 4 Sparks over RDMA, or as a layer chain of 3 to 24 Sparks over TCP. We have measured chains up to four Sparks.";
+/// What each Spark count gives with FP8, for the help and the errors.
+pub const FP8_SPARKS: &str = "FP8 runs on 2 or 4 Sparks, and the same request with the same settings gives the same token IDs on both. FP8 also starts on 6 Sparks, but its token IDs differ there, so 6 Sparks are not covered yet.";
 
 /// The parsed controller config: source checkouts, staging and state folders,
 /// the model, ports and the machines.
@@ -140,9 +145,9 @@ impl Config {
         let path = config_path()?;
         let text = fs::read_to_string(&path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound && env::var_os("VADE_CONFIG").is_none() {
-                format!("Vade is not set up yet: there is no local setup and no controller config at {}. Run vade launch on a Spark, or copy cli/examples/fp4-local.conf there (or set VADE_CONFIG to it) to drive Sparks from this computer. See INSTALL.md.", crate::text::quoted(&path.to_string_lossy()))
+                format!("Vade is not set up yet: there is no local setup and no controller config at {}. Run vade up on a Spark, or run vade setup to write a controller config. See INSTALL.md.", crate::text::quoted(&path.to_string_lossy()))
             } else if error.kind() == std::io::ErrorKind::NotFound {
-                format!("VADE_CONFIG names a missing file: {}. Check the path, or copy cli/examples/fp4-local.conf there (cli/examples/vade.conf for FP8) and edit the placeholders. See INSTALL.md.", crate::text::quoted(&path.to_string_lossy()))
+                format!("VADE_CONFIG names a missing file: {}. Check the path, or run vade setup to write a controller config there. See INSTALL.md.", crate::text::quoted(&path.to_string_lossy()))
             } else if error.kind() == std::io::ErrorKind::InvalidData {
                 format!("Config {} is not UTF-8 text. Save it as plain UTF-8 text, then retry.", crate::text::quoted(&path.to_string_lossy()))
             } else {
@@ -485,7 +490,20 @@ impl Config {
         }
         Ok(selected)
     }
+    /// The machine that a `--hosts` entry selects: what you type after ssh, or
+    /// a `[machine NAME]` name. The name comes first, so a command written for
+    /// a section name keeps its meaning.
+    fn machine(&self, host: &str) -> Option<&Machine> {
+        self.machines.iter().find(|machine| machine.name == host).or_else(|| self.machines.iter().find(|machine| machine.ssh == host))
+    }
     fn selected_machines(&self, options: &UpOptions) -> Result<Vec<Machine>, String> {
+        // Section names from here on; an entry that names no machine stays as
+        // it is typed, for the error below.
+        let by_name = UpOptions {
+            hosts: options.hosts.iter().map(|host| self.machine(host).map_or_else(|| host.clone(), |machine| machine.name.clone())).collect(),
+            ..options.clone()
+        };
+        let options = &by_name;
         let from_group;
         let options = match &self.group {
             None => options,
@@ -497,11 +515,11 @@ impl Config {
                 let count = if options.hosts.is_empty() { options.sparks } else { Some(options.hosts.len()) };
                 if options.replicas && count != Some(group.hosts.len()) {
                     // Name only commands the parser accepts for this group size.
-                    // FP4-Local runs on 1..24 Sparks, so a larger group has no command.
+                    // FP4-Local stops at MAX_FP4_SPARKS, so a larger group has no command.
                     let size = group.hosts.len();
                     let machines = crate::text::count(size, "machine", "machines");
                     if size > MAX_FP4_SPARKS {
-                        return Err(format!("Group {} has {machines}. FP4-Local supports 1..{MAX_FP4_SPARKS} Sparks. Shorten the group, or unset VADE_GROUP.", group.name));
+                        return Err(format!("Group {} has {machines}. {FP4_SPARKS} Shorten the group, or unset VADE_GROUP.", group.name));
                     }
                     let mut runs = Vec::new();
                     if (2..=MAX_REPLICAS).contains(&size) { runs.push(format!("vade up --replicas {size} for one replica on each")); }
@@ -524,12 +542,12 @@ impl Config {
             options.sparks.unwrap_or(if options.fp4_local { 1 } else { 2 })
         } else { options.hosts.len() };
         if options.fp4_local && !(1..=MAX_FP4_SPARKS).contains(&requested) {
-            return Err("FP4-Local supports 1..24 Sparks. Choose --sparks 1..24 or list that many distinct --hosts.".into());
+            return Err(format!("{FP4_SPARKS} Choose --sparks from 1 to {MAX_FP4_SPARKS}, or list that many distinct --hosts."));
         }
         let selected = if !options.hosts.is_empty() {
             options.hosts.iter().map(|name| {
                 self.machines.iter().find(|machine| machine.name == *name).cloned()
-                    .ok_or_else(|| format!("Machine {name} is not in your config. Give --hosts the NAME of a [machine NAME] section; vade config lists them."))
+                    .ok_or_else(|| format!("{name} is not in your config. Give what you type after ssh for a machine in the config; vade config lists them."))
             }).collect::<Result<Vec<_>, _>>()?
         } else {
             let count = options.sparks.unwrap_or(if options.fp4_local { 1 } else { 2 });
@@ -543,7 +561,7 @@ impl Config {
             self.machines[..count].to_vec()
         };
         if !options.fp4_local && !matches!(selected.len(), 2 | 4 | 6) {
-            return Err("FP8 needs 2, 4, or 6 machines. Run vade up --fp8 --sparks 2, 4, or 6, or list that many --hosts. For one Spark, select an FP4-Local config with VADE_CONFIG and run vade up.".into());
+            return Err(format!("{FP8_SPARKS} Run vade up --fp8 --sparks 2, or list 2 or 4 Sparks in --hosts. For one Spark, select an FP4-Local config with VADE_CONFIG and run vade up."));
         }
         let names: BTreeSet<&str> = selected
             .iter()
@@ -837,6 +855,20 @@ mod tests {
         assert!(config.selected(&UpOptions { sparks: Some(4), ..UpOptions::default() }).is_err());
     }
     #[test]
+    fn hosts_take_what_you_type_after_ssh_or_a_section_name() {
+        let config = parse(PAIR).unwrap();
+        let hosts = |list: &[&str]| UpOptions { hosts: list.iter().map(|host| host.to_string()).collect(), ..UpOptions::default() };
+        let names = |list: &[&str]| config.selected(&hosts(list)).unwrap().iter().map(|machine| machine.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&["machine-b-alias", "machine-a-alias"]), ["machine-b", "machine-a"]);
+        assert_eq!(names(&["machine-a", "machine-b-alias"]), ["machine-a", "machine-b"]);
+        // A name wins over the ssh line of another machine, so old commands keep their meaning.
+        let crossed = parse(&PAIR.replace("ssh = machine-b-alias", "ssh = machine-a")).unwrap();
+        assert_eq!(crossed.machine("machine-a").unwrap().ssh, "machine-a-alias");
+        assert!(config.selected(&hosts(&["machine-a", "machine-a-alias"])).unwrap_err().contains("only once"));
+        assert_eq!(config.selected(&hosts(&["spark-z"])).unwrap_err(),
+            "spark-z is not in your config. Give what you type after ssh for a machine in the config; vade config lists them.");
+    }
+    #[test]
     fn reject_unknown_duplicate_and_shell_values() {
         for invalid in [
             PAIR.replace("ssh = machine-a-alias", "ssh = -oProxyCommand=bad"),
@@ -927,7 +959,7 @@ mod tests {
             sized.select_group("sized").unwrap();
             let error = sized.selected(&UpOptions { replicas: true, replica_sparks: 2, sparks: Some(size + 2), ..UpOptions::default() }).unwrap_err();
             if size > MAX_FP4_SPARKS {
-                assert_eq!(error, format!("Group sized has {size} machines. FP4-Local supports 1..24 Sparks. Shorten the group, or unset VADE_GROUP."));
+                assert_eq!(error, format!("Group sized has {size} machines. {FP4_SPARKS} Shorten the group, or unset VADE_GROUP."));
                 continue;
             }
             let runs = error.split_once(". Run ").and_then(|(_, runs)| runs.strip_suffix(", or unset VADE_GROUP.")).unwrap_or_else(|| panic!("{error}"));

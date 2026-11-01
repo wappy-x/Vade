@@ -693,14 +693,14 @@ fn the_next_step_names_the_checkpoint_launch_serves() {
     assert_eq!(crate::launch::saved_model(&root).as_deref(), Some(saved.as_path()));
     let fp4 = models::Support { route: models::Route::Fp4Local, reason: String::new() };
     let home = &f.root;
-    assert_eq!(fp4.next(&other, None, home).unwrap(), (format!("VADE_MODELS={} vade launch", other.display()), None));
-    assert_eq!(fp4.next(&saved, Some(&saved), home).unwrap(), ("vade launch".into(), None));
+    assert_eq!(fp4.next(&other, None, home).unwrap(), (format!("VADE_MODELS={} vade up", other.display()), None));
+    assert_eq!(fp4.next(&saved, Some(&saved), home).unwrap(), ("vade up".into(), None));
     // A valid saved checkpoint comes before VADE_MODELS, so the step uses a new home.
     // The suggested home names the org and skips a home that is already there.
     fs::create_dir_all(home.join(".vade-nvidia-new")).unwrap();
     let (next, note) = fp4.next(&other, Some(&saved), home).unwrap();
-    assert_eq!(next, format!("VADE_HOME={} VADE_MODELS={} vade launch", home.join(".vade-nvidia-new-2").display(), other.display()));
-    assert_eq!(note.unwrap(), format!("vade launch serves its saved checkpoint {} first, so this step uses a new, unused Vade home.", saved.display()));
+    assert_eq!(next, format!("VADE_HOME={} VADE_MODELS={} vade up", home.join(".vade-nvidia-new-2").display(), other.display()));
+    assert_eq!(note.unwrap(), format!("vade up serves its saved checkpoint {} first, so this step uses a new, unused Vade home.", saved.display()));
     // Each command is one valid shell line, also with a path that needs quotes.
     let spaced = f.root.join("models/nvidia/new model (2)");
     fs::create_dir_all(&spaced).unwrap();

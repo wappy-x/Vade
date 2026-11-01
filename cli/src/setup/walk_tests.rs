@@ -133,8 +133,8 @@ fn wrong_answers_write_nothing_and_name_the_fix() {
         (SetupOptions::default(), false, vec!["a,b", "", "", "192.0.2.1:80"], "without a port"),
         // vade up's own cable check runs before anything is written.
         (SetupOptions::default(), false, vec!["a,b", "", "", "192.0.2.1", "192.0.2.1"], "Nothing was written: vade up would refuse this setup. Machines a and b need different addresses"),
-        (SetupOptions { fp8: Some(true), ..flags(true, &["a", "b", "c"], &[]) }, false, vec![], "FP8 runs on 2, 4 or 6 Sparks, and this setup has 3"),
-        (SetupOptions { fp8: Some(true), ..flags(true, &[], &[]) }, true, vec![], "not on this Spark alone"),
+        (SetupOptions { fp8: Some(true), ..flags(true, &["a", "b", "c"], &[]) }, false, vec![], "This setup has 3. Use 2 or 4 Sparks in --hosts"),
+        (SetupOptions { fp8: Some(true), ..flags(true, &[], &[]) }, true, vec![], "This Spark alone cannot serve FP8"),
     ] {
         let error = scripted(&options, &facts(spark), &replies).0.unwrap_err();
         assert!(error.contains(expected), "{expected}: {error}");
@@ -264,4 +264,53 @@ fn the_local_model_shows_where_install_will_look() {
     let facts = Facts { models: Some("/data/models".into()), ..facts(true) };
     let (_, asked) = scripted(&SetupOptions::default(), &facts, &["", ""]);
     assert_eq!(asked[1], "Where is the FP4-Local model on this Spark? [/data/models from VADE_MODELS]:");
+}
+
+#[test]
+fn a_local_setup_moves_only_with_the_flag_or_a_yes_at_the_terminal() {
+    let setup = LocalSetup { file: "/home/you/.vade/config".into(), aside: "/home/you/.vade/config.local".into() };
+    let no_question = |_: &str| -> Result<String, String> { panic!("setup must not ask") };
+    let replace = SetupOptions { replace_local: true, ..flags(true, &["a"], &[]) };
+    setup.confirm(&replace, false, &mut no_question.clone()).unwrap();
+    let refused = "Run vade setup again with --replace-local to move \"/home/you/.vade/config\" aside and write a controller config";
+    // --yes asks nothing, and no terminal cannot ask: both refuse and name the file.
+    for (options, terminal) in [(flags(true, &["a"], &[]), true), (flags(false, &["a"], &[]), false)] {
+        assert!(setup.confirm(&options, terminal, &mut no_question.clone()).unwrap_err().contains(refused));
+    }
+    let asked = std::cell::RefCell::new(Vec::new());
+    for (reply, yes) in [("y", true), ("YES", true), ("", false), ("n", false), ("later", false)] {
+        let result = setup.confirm(&flags(false, &["a"], &[]), true, &mut |question| { asked.borrow_mut().push(question.to_owned()); Ok(reply.into()) });
+        assert_eq!(result.is_ok(), yes, "{reply}");
+    }
+    assert_eq!(asked.borrow()[0], "This Spark has local setup in \"/home/you/.vade/config\". Move it to \"/home/you/.vade/config.local\" and write a controller config? [y/N]:");
+}
+
+#[test]
+fn moving_a_local_setup_keeps_every_file_and_can_go_back() {
+    let root = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("vade-local-setup-{}", text::random_hex(8).unwrap()));
+    text::private_dir(&root).unwrap();
+    std::fs::write(root.join("config"), "saved\n").unwrap();
+    std::fs::write(root.join("config.local"), "older\n").unwrap();
+    let setup = LocalSetup::find(&root).unwrap();
+    assert_eq!(setup.aside, root.join("config.local-2"), "an older file keeps its name");
+    setup.move_aside(&root).unwrap();
+    assert_eq!(std::fs::read_to_string(&setup.aside).unwrap(), "saved\n");
+    assert_eq!(std::fs::read_to_string(root.join("config.local")).unwrap(), "older\n");
+    assert!(!root.join("config").exists());
+    setup.restore();
+    assert_eq!(std::fs::read_to_string(root.join("config")).unwrap(), "saved\n");
+    // A running engine still needs the file.
+    text::private_dir(&root.join("state")).unwrap();
+    std::fs::write(root.join("state/run.conf"), "version=1\n").unwrap();
+    let error = LocalSetup::find(&root).unwrap_err();
+    assert!(error.contains("The local engine is running") && error.contains("Run vade down"), "{error}");
+    assert!(setup.move_aside(&root).is_err() && root.join("config").exists());
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn more_sparks_with_no_checkout_name_the_clone_and_write_nothing() {
+    let facts = Facts { checkout: None, ..facts(true) };
+    let error = scripted(&flags(true, &["a"], &[]), &facts, &[]).0.unwrap_err();
+    assert!(error.starts_with("More Sparks need a Vade checkout on this computer") && error.contains("Run git clone "), "{error}");
 }

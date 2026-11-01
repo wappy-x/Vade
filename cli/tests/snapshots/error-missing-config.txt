@@ -1,5 +1,5 @@
 $ vade status
 --- stderr
 error: VADE_CONFIG names a missing file: "/nonexistent-vade-snapshot/config".
- hint: Check the path, or copy cli/examples/fp4-local.conf there (cli/examples/vade.conf for FP8) and edit the placeholders. See INSTALL.md.
+ hint: Check the path, or run vade setup to write a controller config there. See INSTALL.md.
 --- exit 1

@@ -14,7 +14,7 @@ impl Fixture {
         for file in ["cli/Cargo.toml", "engine/Cargo.toml", "harness/Cargo.toml"] { fs::write(root.join(file), "").unwrap(); }
         fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/install.sh"), root.join("scripts/install.sh")).unwrap();
         let fixture = Self { root: fs::canonicalize(root).unwrap() };
-        for tool in ["sh", "dirname", "mktemp", "rm", "mkdir", "cp", "chmod", "tail", "sed", "head", "ls"] {
+        for tool in ["sh", "dirname", "mktemp", "rm", "mkdir", "mv", "cp", "chmod", "tail", "sed", "head", "ls"] {
             let path = ["/usr/bin", "/bin"].into_iter().map(|dir| Path::new(dir).join(tool))
                 .find(|path| path.is_file()).unwrap();
             std::os::unix::fs::symlink(path, fixture.root.join("bin").join(tool)).unwrap();
@@ -70,9 +70,10 @@ printf 'vade %s\n' "$*" >> "$INSTALL_CALLS"
     }
     fn tool(&self, name: &str, script: &str) { self.write(&format!("bin/{name}"), script); }
     fn run(&self, env: &[(&str, &str)]) -> Output { self.run_args(env, &[]) }
-    fn run_args(&self, env: &[(&str, &str)], args: &[&str]) -> Output {
+    fn run_args(&self, env: &[(&str, &str)], args: &[&str]) -> Output { self.run_in("/bin/sh", env, args) }
+    fn run_in(&self, shell: &str, env: &[(&str, &str)], args: &[&str]) -> Output {
         // Ubuntu's default umask 002: a folder the script creates is group-writable unless it says otherwise.
-        Command::new("/bin/sh").args(["-c", "umask 002 && exec /bin/sh \"$0\" \"$@\""]).arg(self.root.join("scripts/install.sh"))
+        Command::new(shell).args(["-c", "umask 002 && exec \"$0\" \"$@\""]).arg(shell).arg(self.root.join("scripts/install.sh"))
             .args(args)
             .current_dir(&self.root).env_clear()
             .env("PATH", self.root.join("bin")).env("TMPDIR", self.root.join("tmp"))
@@ -99,9 +100,14 @@ fn cached_source_install_fetches_build_std_and_leaves_detect_and_kernels_to_vade
     assert!(!calls.contains("kernels") && !calls.contains("vade detect"), "{calls}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Install: fetching the Rust build-std files for the GPU kernels (none when cached).\n"), "{stdout}");
-    // One next path: PATH, the model when it is missing, then launch; no second install through vade setup.
-    assert!(stdout.contains(&format!("   export PATH=\"$HOME/.cargo/bin:{}/cli/target/release:$PATH\"\n", f.root.display())), "{stdout}");
-    assert!(stdout.contains("   vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300\n") && stdout.ends_with("   vade launch\n"), "{stdout}");
+    // One next path: PATH, the model when it is missing, then up; no second install through vade setup.
+    assert!(stdout.contains("   export PATH=\"$HOME/.vade/bin:$PATH\"\n"), "{stdout}");
+    assert!(stdout.contains("   vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300\n") && stdout.contains("3. Start the engine:\n   vade up\n"), "{stdout}");
+    assert!(stdout.contains("To start the engine and open the coding agent in the current folder, run vade launch.\n"), "{stdout}");
+    // The last thing on screen is the line that a new user must run, and it prints once.
+    assert!(stdout.contains("1. Put vade on PATH: run the last line below.\n"), "{stdout}");
+    assert!(stdout.ends_with("Your shell cannot find vade until you run this line:\n   export PATH=\"$HOME/.vade/bin:$PATH\"\n"), "{stdout}");
+    assert_eq!(stdout.matches("export PATH=").count(), 1, "{stdout}");
     assert!(!stdout.contains("setup"), "{stdout}");
 }
 
@@ -342,7 +348,7 @@ fn prebuilt_bundle_installs_from_its_folder_and_is_reused_without_a_second_downl
     assert!(stdout.contains(&format!("Install: downloading the prebuilt bundle {}.tar.gz.\n", stem())), "{stdout}");
     assert!(stdout.contains(&format!("Install: prebuilt Vade {SHA} is in {}.\n", folder.display())), "{stdout}");
     assert!(stdout.contains(&format!("Install: installed prebuilt Vade {SHA}.\n")), "{stdout}");
-    assert!(stdout.contains(&format!("   export PATH=\"{}:$PATH\"\n", folder.display())), "{stdout}");
+    assert!(stdout.contains("   export PATH=\"$HOME/.vade/bin:$PATH\"\n"), "{stdout}");
     assert!(!stdout.contains("Prebuilt:"), "{stdout}");
     // A second run reuses the checked folder: latest.json only, no bundle download.
     fs::remove_file(f.root.join("dl/main").join(format!("{}.tar.gz", stem()))).unwrap();
@@ -571,7 +577,8 @@ fn piped_bundle_install_needs_no_checkout() {
     assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
     assert_eq!(f.calls(), "bundle-vade install\n");
     let folder = f.bundles().join(stem());
-    assert!(stdout.contains(&format!("   export PATH=\"{}:$PATH\"\n", folder.display())) && !stdout.contains("Prebuilt:"), "{stdout}");
+    assert!(stdout.contains(PATH_LINE) && !stdout.contains("Prebuilt:"), "{stdout}");
+    assert_eq!(fs::read_to_string(f.script()).unwrap(), format!("#!/bin/sh\nexec '{}/vade' \"$@\"\n", folder.display()));
     assert!(f.clones().is_empty() && f.tmp_is_empty());
     // --launch opens chat on the terminal, never on the script; with no terminal it stops at the next steps.
     let output = f.piped_prebuilt(&env, &["--launch"]);
@@ -599,7 +606,8 @@ fn piped_source_build_clones_public_main_into_a_new_folder() {
     // The build runs in the clone, never in the folder above the current one.
     assert!(calls.contains(&format!("cargo build in {clone}\n")) && !calls.contains(&format!("in {}\n", f.root.display())), "{calls}");
     assert!(calls.ends_with(&format!("clone-vade install source {clone}\n")), "{calls}");
-    assert!(stdout.contains(&format!("   export PATH=\"$HOME/.cargo/bin:{clone}/cli/target/release:$PATH\"\n")), "{stdout}");
+    assert!(stdout.contains(PATH_LINE), "{stdout}");
+    assert_eq!(fs::read_to_string(f.script()).unwrap(), format!("#!/bin/sh\nexec '{clone}/cli/target/release/vade' \"$@\"\n"));
     f.assert_private("clone");
     assert_eq!(fs::metadata(&clones[0]).unwrap().permissions().mode() & 0o077, 0);
     assert!(f.tmp_is_empty() && !f.root.join("target").exists());
@@ -663,4 +671,88 @@ fn only_a_file_in_a_checkout_counts_as_a_checkout() {
     fs::remove_file(f.root.join("harness/Cargo.toml")).unwrap();
     let output = f.run_file(&f.root.join("scripts/install.sh"), &f.root, &["--source", "--check"]);
     assert!(String::from_utf8_lossy(&output.stdout).ends_with(&plan), "{}", String::from_utf8_lossy(&output.stdout));
+}
+
+impl Fixture {
+    /// The folder that stays on PATH, its script, and that script's text.
+    fn script(&self) -> PathBuf { self.root.join("home/.vade/bin/vade") }
+    /// Run the installed script as a new shell would, with the printed PATH.
+    fn run_script(&self, args: &[&str]) -> Output {
+        Command::new("/bin/sh").args(["-c", "export PATH=\"$HOME/.vade/bin:$PATH\" && exec vade \"$@\"", "sh"]).args(args).env_clear()
+            .env("PATH", self.root.join("bin")).env("HOME", self.root.join("home"))
+            .env("INSTALL_ROOT", &self.root).env("INSTALL_CALLS", self.root.join("calls")).env("VADE_SOURCE", &self.root)
+            .output().unwrap()
+    }
+}
+
+const PATH_LINE: &str = "   export PATH=\"$HOME/.vade/bin:$PATH\"\n";
+
+#[test]
+fn one_fixed_folder_runs_the_current_install_on_every_path_and_shell() {
+    for shell in ["/bin/sh", "/bin/dash"].into_iter().filter(|shell| Path::new(shell).is_file()) {
+        let f = Fixture::new();
+        let env = f.prebuilt(&bundle(Bad::None), Bad::None);
+        let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        // The source path first: this also proves the bundle path replaces the script.
+        let source = f.run_in(shell, &env, &["--source"]);
+        let source_out = String::from_utf8_lossy(&source.stdout).into_owned();
+        assert!(source.status.success() && source_out.contains(PATH_LINE), "{shell}: {source_out}");
+        assert_eq!(fs::read_to_string(f.script()).unwrap(), format!("#!/bin/sh\nexec '{}/cli/target/release/vade' \"$@\"\n", f.root.display()));
+        assert!(f.run_script(&["from-source"]).status.success());
+        assert!(f.calls().ends_with("vade from-source\n"), "{shell}: {}", f.calls());
+        let installed = f.run_in(shell, &env, &[]);
+        let installed_out = String::from_utf8_lossy(&installed.stdout).into_owned();
+        assert!(installed.status.success() && installed_out.contains(PATH_LINE), "{shell}: {installed_out}");
+        assert_eq!(fs::read_to_string(f.script()).unwrap(), format!("#!/bin/sh\nexec '{}/vade' \"$@\"\n", f.bundles().join(stem()).display()));
+        assert!(f.run_script(&["from-bundle", "a b"]).status.success());
+        assert!(f.calls().ends_with("bundle-vade from-bundle a b\n"), "{shell}: {}", f.calls());
+        // Private, a plain file and never a link, no new file left, and no shell profile.
+        assert_eq!(fs::metadata(f.root.join("home/.vade/bin")).unwrap().permissions().mode() & 0o077, 0);
+        assert_eq!(fs::symlink_metadata(f.script()).unwrap().permissions().mode() & 0o777, 0o700);
+        assert!(fs::symlink_metadata(f.script()).unwrap().is_file());
+        assert!(!f.script().with_file_name("vade.new").exists());
+        for profile in [".profile", ".bashrc"] { assert!(!f.root.join("home").join(profile).exists()); }
+    }
+}
+
+#[test]
+fn a_named_vade_home_gets_its_own_fixed_folder_and_a_quoted_script() {
+    let f = Fixture::new();
+    let home = f.root.join("home/it's here");
+    // The fixture bundle checks HOME/.vade, as the real CLI checks its home.
+    fs::create_dir(f.root.join("home/.vade")).unwrap();
+    fs::set_permissions(f.root.join("home/.vade"), fs::Permissions::from_mode(0o700)).unwrap();
+    let mut env = f.prebuilt(&bundle(Bad::None), Bad::None);
+    env.push(("VADE_HOME", home.display().to_string()));
+    let output = f.run_prebuilt(&env, &[]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains(&format!("   export PATH=\"{}/bin:$PATH\"\n", home.display())), "{stdout}");
+    let run = Command::new(home.join("bin/vade")).arg("quoted").env_clear().env("PATH", f.root.join("bin"))
+        .env("HOME", f.root.join("home")).env("INSTALL_CALLS", f.root.join("calls")).output().unwrap();
+    assert!(run.status.success(), "{run:?}");
+    assert!(f.calls().ends_with("bundle-vade quoted\n"), "{}", f.calls());
+}
+
+#[test]
+fn a_folder_in_place_of_the_script_stops_with_a_next_step() {
+    let f = Fixture::new();
+    fs::create_dir_all(f.script()).unwrap();
+    fs::set_permissions(f.root.join("home/.vade"), fs::Permissions::from_mode(0o700)).unwrap();
+    let output = f.run(&[]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success() && stderr.contains("/.vade/bin/vade. Next: check that path"), "{stderr}");
+}
+
+#[test]
+fn the_readme_the_installer_and_the_help_teach_the_same_three_commands() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let pull = "vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300";
+    let readme = fs::read_to_string(root.join("README.md")).unwrap();
+    assert!(readme.contains(&format!("curl -fsSL https://vade.lol/install.sh | sh\n{pull}\nvade up\n")));
+    let script = fs::read_to_string(root.join("scripts/install.sh")).unwrap();
+    assert!(script.contains(&format!("'   {pull}'")) && script.contains("'   vade up'"));
+    let help = Command::new(env!("CARGO_BIN_EXE_vade")).arg("--help").output().unwrap();
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains(&format!("\n  {pull}\n")) && help.contains("\n  vade up "), "{help}");
 }

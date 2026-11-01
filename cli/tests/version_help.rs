@@ -10,7 +10,7 @@ fn version_and_help_work_without_valid_setup() {
     for argument in ["--version", "-V", "version"] {
         let output = command().arg(argument).output().unwrap();
         assert!(output.status.success());assert!(output.stderr.is_empty());
-        assert_eq!(output.stdout, concat!("vade ", env!("CARGO_PKG_VERSION"), "\n").as_bytes());
+        assert_version(&String::from_utf8(output.stdout).unwrap());
     }
     for arguments in [&["--help"][..], &["help", "version"][..], &["status", "--help"][..]] {
         let output = command().args(arguments).output().unwrap();
@@ -144,4 +144,53 @@ fn read_ignores_key_settings_and_refuses_the_key_option() {
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// One line: the package version, then the short commit of this build, or a
+/// plain statement that the build has no commit.
+fn assert_version(line: &str) {
+    let rest = line.strip_prefix(concat!("vade ", env!("CARGO_PKG_VERSION"), " (")).and_then(|rest| rest.strip_suffix(")\n"));
+    let rest = rest.unwrap_or_else(|| panic!("{line:?}"));
+    if rest == "unknown commit" { return; }
+    let short = rest.strip_suffix(", modified").unwrap_or(rest);
+    assert!(short.len() == 7 && short.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)), "{line:?}");
+}
+
+#[test]
+fn version_json_names_the_same_commit_as_the_version_line() {
+    let line = String::from_utf8(command().arg("--version").output().unwrap().stdout).unwrap();
+    assert_version(&line);
+    for arguments in [&["--version", "--json"][..], &["version", "--json"], &["-V", "--json"]] {
+        let output = command().args(arguments).output().unwrap();
+        assert!(output.status.success() && output.stderr.is_empty(), "{output:?}");
+        let json = String::from_utf8(output.stdout).unwrap();
+        let start = concat!("{\"schema\":\"vade.version.v1\",\"version\":\"", env!("CARGO_PKG_VERSION"), "\",\"sha\":");
+        let rest = json.strip_prefix(start).unwrap_or_else(|| panic!("{json}"));
+        let (sha, modified) = rest.split_once(",\"modified\":").unwrap_or_else(|| panic!("{json}"));
+        assert_eq!(modified.trim_end().trim_end_matches('}').parse::<bool>().unwrap(), line.contains(", modified"), "{json}");
+        if sha == "null" {
+            assert!(line.contains("(unknown commit)"), "{line}");
+        } else {
+            let sha = sha.trim_matches('"');
+            assert!(sha.len() == 40 && line.contains(&sha[..7]), "{sha} {line}");
+        }
+    }
+}
+
+#[test]
+fn tools_and_mcp_help_print_with_no_harness_installed() {
+    let home = std::env::temp_dir().join(format!("vade-no-harness-{}", std::process::id()));
+    for (args, usage) in [(&["tools", "--help"][..], "Usage: vade tools"), (&["tools", "-h"], "Usage: vade tools"), (&["mcp", "--help"], "Usage: vade mcp"),
+        (&["mcp", "-h"], "Usage: vade mcp"), (&["mcp"], "Usage: vade mcp"), (&["help", "tools"], "Usage: vade tools"), (&["help", "mcp"], "Usage: vade mcp")] {
+        let output = Command::new(env!("CARGO_BIN_EXE_vade")).args(args).env_remove("VADE_CONFIG").env_remove("VADE_API_KEY_FILE")
+            .env("VADE_HOME", &home).env("HOME", &home).env("XDG_CONFIG_HOME", &home).output().unwrap();
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
+        assert!(output.stderr.is_empty() && String::from_utf8(output.stdout).unwrap().starts_with(usage), "{args:?}");
+    }
+    // A real run still needs the install, and says so.
+    let output = Command::new(env!("CARGO_BIN_EXE_vade")).arg("tools").env_remove("VADE_CONFIG").env_remove("VADE_API_KEY_FILE")
+        .env("VADE_HOME", &home).env("HOME", &home).env("XDG_CONFIG_HOME", &home).output().unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8(output.stderr).unwrap().contains("The chat harness is not installed."));
+    assert!(!home.exists(), "help and the install check write nothing");
 }

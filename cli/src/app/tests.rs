@@ -264,8 +264,12 @@ fn fp4_pair_reaches_user_at_host_ranks_without_ssh_aliases() {
 #[test]
 fn unsupported_fp4_rank_counts_fail_before_any_remote_command() {
     let mut f = Fixture::fp4(4, false);
+    // The parser stops these counts; a list of that many Sparks reaches the config check.
     for count in ["25", "48", "64"] {
-        assert!(f.app.up(&fp4_options(&["--sparks", count])).unwrap_err().contains("1..24 Sparks"));
+        assert!(crate::cli::parse(&["up".to_owned(), "--sparks".to_owned(), count.to_owned()]).unwrap_err().contains("from 1 to 24,"));
+        let hosts = (0..count.parse().unwrap()).map(|index: usize| format!("spark-{index}")).collect::<Vec<_>>().join(",");
+        let error = f.app.up(&fp4_options(&["--hosts", &hosts])).unwrap_err();
+        assert!(error.starts_with(crate::config::FP4_SPARKS), "{error}");
         assert!(f.app.runner.calls.is_empty());
         assert!(!f.recorded());
     }

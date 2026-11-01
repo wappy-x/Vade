@@ -566,7 +566,7 @@ fn legacy_local_state_takes_precedence_over_an_implicit_default_config() {
     let text = line(fixture.base_command().env_remove("VADE_CONFIG")
         .env("HOME", &fixture.0).env("XDG_CONFIG_HOME", fixture.0.join("config-home"))
         .output().unwrap(), 1);
-    assert!(text.contains("vade launch") && !text.contains("8080"), "{text}");
+    assert!(text.contains("vade up") && !text.contains("8080"), "{text}");
 }
 
 #[test]
@@ -660,6 +660,10 @@ fn invalid_owner_endpoint_state_fails_without_falling_back_or_changing_records()
             .env("XDG_CONFIG_HOME", fixture.0.join("unused-config"))
             .output().unwrap(), 1);
         assert!(text.starts_with("ERROR:"), "{fault}: {text}");
+        assert!(!text.contains("owner state"), "{fault}: {text}");
+        if matches!(fault, "missing-record" | "missing-config") {
+            assert_eq!(text, "ERROR: The engine is not running on this Spark. Start it with vade up, or give the address of a running engine with --url.\n", "{fault}");
+        }
         assert!(other.requests().is_empty(), "invalid owner state fell back: {fault}");
         assert_eq!(fs::read(&record).ok(), before, "verify changed owner evidence: {fault}");
     }

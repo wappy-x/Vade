@@ -148,9 +148,18 @@ To pick up a new bundle or source build, run `vade update`. It restages the
 current bundle or rebuilds the current source, then tells you the restart
 command.
 
+The installer writes one small script, `~/.vade/bin/vade`, that runs the build
+it just installed. The `export` line that the installer prints puts that folder
+on `PATH`, and that line stays the same for every version. For a newer Vade on
+a Spark, run the install command again: `curl -fsSL https://vade.lol/install.sh | sh`.
+
 `vade version` (also `vade --version` or `vade -V`) prints the CLI package
-version. It does not load your configuration or connect to a machine. Include
-it when you report an installation or launcher problem.
+version and the short commit of this build, such as `vade 0.1.0 (f7946e5)`. It
+says `(unknown commit)` for a build with no commit, and it adds `modified` for a
+build from a tree with uncommitted changes. `--json` gives the same facts as
+`sha` (40 digits, or null) and `modified`. It does not load your configuration
+or connect to a machine. Include it when you report an installation or launcher
+problem.
 
 Launcher errors name the command or option to fix. Invalid commands or options
 fail before Vade reads your config or touches the network.
@@ -402,7 +411,7 @@ Choose the checkpoint profile deliberately:
 | Profile | Example config | How to start |
 | :---: | :---: | :---: |
 | Current FP4-Local model on 1 to 24 Sparks | [fp4-local.conf](examples/fp4-local.conf) | `vade up` (add `--sparks N` or ordered `--hosts` for a chain, or `--replicas N` for independent one-Spark copies) |
-| FP8 model on 2, 4 or 6 machines ([FP8 install](../docs/install-fp8.md)) | [vade.conf](examples/vade.conf) | `vade up --fp8` (the older flag `--fp8-legacy` also works) |
+| FP8 model on 2 or 4 machines; 6 machines start but are not covered yet ([FP8 install](../docs/install-fp8.md)) | [vade.conf](examples/vade.conf) | `vade up --fp8` (the older flag `--fp8-legacy` also works) |
 
 </div>
 
@@ -604,12 +613,12 @@ With `VADE_CONFIG` set, the lifecycle commands work like this:
 | Command | What happens |
 | :---: | :---: |
 | `vade` | Short status and four choices: start, chat, stop, doctor. |
-| `vade up` (also `--fp4-local`) | Starts FP4-Local on one configured Spark. Add `--sparks N` for 2 to 24 or ordered `--hosts` for a chain. Larger chains need a current staged build, and each must still pass its own live checks on real Sparks. |
+| `vade up` (also `--fp4-local`) | Starts FP4-Local on one configured Spark. Add `--sparks N` for 2 to 24, or `--sparks a,b` or `--hosts a,b` to name the Sparks in cable order. Larger chains need a current staged build, and each must still pass its own live checks on real Sparks. |
 | `vade up --replicas N` | FP4-Local only, N = 2 to 16: one independent one-Spark server on each of the first N configured machines (or the N `--hosts`), behind a local gateway. Details below the table. |
 | `vade up --replicas N --pairs` | FP4-Local only, N = 2 to 12: N two-Spark tensor-split servers on 2N machines, in pairs in list order, behind a local gateway. This mode is an option. It is not the four-Spark default ([two pairs behind one address](../docs/four-sparks.md#two-pairs-behind-one-address)). |
 | `vade up --fp8` | FP8: starts on the first two configured machines, tensor parallel on a ring. |
 | `vade up --fp8 --sparks 4` | FP8: four machines in config order, tensor parallel on a path. It gives the two-Spark token IDs ([benchmarks](../docs/history/benchmarks-2026-10.md#fp8-on-two-and-four-sparks-different-token-ids)). |
-| `vade up --hosts machine-a,machine-b` | Selects connected machines in the given order. |
+| `vade up --hosts spark-a,spark-b` | Selects connected machines of your config in the given order. Give what you type after ssh, as in the `ssh` line of each machine, or its `[machine NAME]` name. `--sparks spark-a,spark-b` is the same. |
 | `vade status` | Machines, model, source build, MTP, context, output limit, how many chats the engine allows at once, memory/cache bytes per rank, ranks, tunnel, health, and speed when health reports it. |
 | `vade down` | Stops only the ranks Vade recorded and the SSH control connection it opened. |
 | `vade logs` | Recent redacted engine logs, including saved logs after shutdown. |
@@ -671,8 +680,9 @@ How the ranks connect:
 - One FP4 rank needs no fabric.
 - Two ranks link to each other.
 - Larger FP4 chains use an open path in the host order you picked.
-- The FP8 profile separately supports 2, 4 or 6 machines (two in a ring,
-  four or six on a path).
+- The FP8 profile separately supports 2 or 4 machines (two in a ring, four on
+  a path). It also starts on 6 machines on a path, but its token IDs differ
+  there, so 6 machines are not covered yet.
 
 Each `fabric.<peer>` value is this machine's own address on its link to that
 peer. Define both ends of every link between neighbors. Each rank gets its own

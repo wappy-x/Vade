@@ -31,7 +31,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         };
         // Before the first launch, nothing installed is the expected state, not damage.
         let (missing, next) = if config.is_none() {
-            ("Vade is not installed yet.", "Run vade launch to install and start Vade.")
+            ("Vade is not installed yet.", "Run vade up to install and start Vade.")
         } else {
             ("Local artifacts are missing or have changed.", "Run vade down, then vade install from your Vade checkout or with VADE_BUNDLE set.")
         };
@@ -153,7 +153,7 @@ mod tests {
         }, || {
             let result = (|| {
                 let mut report = Report::new("local", false);
-                report.check::<()>("config", Err("No saved local defaults.".into()), |_| String::new(), "Run vade launch to create defaults.")?;
+                report.check::<()>("config", Err("No saved local defaults.".into()), |_| String::new(), "Run vade up to create defaults.")?;
                 report.ok("ownership", "no engine recorded")?;
                 report.finish()
             })();

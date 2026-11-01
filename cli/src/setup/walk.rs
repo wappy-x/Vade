@@ -1,7 +1,8 @@
 //! `vade setup`: a few questions, then `vade install`, `vade up` and
 //! `vade doctor`. Each step runs as its own `vade` command, so setup shares their
 //! locks, checks and messages and has no install code of its own. Setup writes
-//! only a new controller config; it never replaces one.
+//! only a new controller config; it never replaces one. It moves a local setup
+//! aside only when the user says so, and it deletes nothing.
 use crate::{cli::SetupOptions, output, text};
 use std::io::{BufRead, IsTerminal};
 use std::path::{Path, PathBuf};
@@ -40,10 +41,18 @@ pub(super) struct Profile { pub fp8: bool, pub model: String, pub repo: String, 
 pub fn run(options: &SetupOptions, dry: bool) -> Result<(), String> {
     let path = crate::config::config_path()?;
     let explicit = std::env::var_os("VADE_CONFIG").is_some();
+    let local = !explicit && crate::launch::owner_configured();
+    // Answers on a local setup ask for a new setup, so the local one moves aside.
+    let replace = if local && answers(options) && !path.is_file() { Some(LocalSetup::find(&crate::launch::root()?)?) } else { None };
+    if let Some(setup) = replace.as_ref().filter(|_| !dry) {
+        let terminal = std::io::stdin().is_terminal();
+        let mut input = std::io::stdin().lock();
+        setup.confirm(options, terminal, &mut |question| prompt(&mut input, question))?;
+    }
     // The same order as main's dispatch: explicit VADE_CONFIG, saved local
     // defaults, the legacy setup, then the default controller config.
-    let target = if !explicit && crate::launch::owner_configured() {
-        refuse_answers(options, "This Spark already has local setup.")?;
+    let target = if local && replace.is_none() {
+        refuse_answers(options, &format!("This Spark already has local setup in {}.", text::quoted(&crate::launch::root()?.join("config").to_string_lossy())))?;
         output::line(format_args!("Using the local setup in {}. Setup does not change it.", crate::launch::root()?.join("config").display()))?;
         // scripts/install.sh already ran vade install; a second one only repeats Prepare.
         let installed = crate::launch::owner_install_current();
@@ -81,16 +90,12 @@ pub fn run(options: &SetupOptions, dry: bool) -> Result<(), String> {
             return Err("Standard input is not a terminal, so setup cannot ask its questions. Add --yes to take the defaults, with --hosts and --link where they are needed. Run vade setup --help.".into());
         }
         let mut input = std::io::stdin().lock();
-        let mut ask = |question: &str| -> Result<String, String> {
-            output::text(format_args!("{question} "))?;
-            std::io::Write::flush(&mut std::io::stdout()).map_err(|_| "Cannot show the setup question.")?;
-            read_answer(&mut input)
-        };
-        answer(options, &facts, &mut ask, profile)?
+        answer(options, &facts, &mut |question| prompt(&mut input, question), profile)?
     };
     let steps = steps(&target);
     if dry {
         output::line(format_args!("Dry run: setup writes nothing and starts nothing."))?;
+        if let Some(setup) = &replace { output::line(format_args!("Local setup: setup would move {} to {}.", text::quoted(&setup.file.to_string_lossy()), text::quoted(&setup.aside.to_string_lossy())))?; }
         match &target {
             Target::Local { model, .. } => output::line(format_args!("Where: this Spark\nModel: {}", local_model(model.as_deref(),
                 crate::launch::owner_configured(), std::env::var("VADE_MODELS").ok().filter(|models| !models.is_empty()).as_deref())))?,
@@ -101,9 +106,16 @@ pub fn run(options: &SetupOptions, dry: bool) -> Result<(), String> {
         for (args, _) in &steps { output::line(format_args!("  vade {}", args.join(" ")))?; }
         return Ok(());
     }
+    if let Some(setup) = &replace {
+        setup.move_aside(&crate::launch::root()?)?;
+        output::line(format_args!("Moved the local setup to {}. To use it again, move that file back to {}.", text::quoted(&setup.aside.to_string_lossy()), text::quoted(&setup.file.to_string_lossy())))?;
+    }
     if let Target::Controller { path, text: Some(config), .. } = &target {
         // Create only: another setup may have written this file while this one asked.
-        if !text::create_private(path, config)? {
+        let created = text::create_private(path, config);
+        // No controller config, so the local setup goes back to its place.
+        if !matches!(created, Ok(true)) && let Some(setup) = &replace { setup.restore(); }
+        if !created? {
             return Err(format!("{} appeared while setup asked its questions. Setup did not change it. Run vade setup again to use it.", text::quoted(&path.to_string_lossy())));
         }
         output::line(format_args!("Wrote the controller config at {}.", text::quoted(&path.to_string_lossy())))?;
@@ -143,10 +155,60 @@ pub(super) fn local_model(model: Option<&str>, saved: bool, environment: Option<
     }
 }
 
+/// Whether the options describe a new setup.
+fn answers(options: &SetupOptions) -> bool {
+    !options.hosts.is_empty() || options.fp8.is_some() || options.model.is_some() || !options.links.is_empty() || options.replace_local
+}
+
+/// The saved local defaults, and the free name that setup moves them to.
+#[derive(Debug, PartialEq)]
+pub(super) struct LocalSetup { pub file: PathBuf, pub aside: PathBuf }
+
+impl LocalSetup {
+    /// The local setup in `root`, if it can move: a running engine still needs it.
+    pub(super) fn find(root: &Path) -> Result<Self, String> {
+        let file = root.join("config");
+        if root.join("state/run.conf").exists() {
+            return Err(format!("The local engine is running, so setup cannot replace the local setup in {}. Run vade down, then run vade setup again.", text::quoted(&file.to_string_lossy())));
+        }
+        let aside = (1..).map(|number| root.join(if number == 1 { "config.local".to_owned() } else { format!("config.local-{number}") }))
+            .find(|path| std::fs::symlink_metadata(path).is_err()).unwrap_or_else(|| root.join("config.local"));
+        Ok(Self { file, aside })
+    }
+
+    /// Go on only with `--replace-local` or a yes at the terminal. Nothing moves here.
+    pub(super) fn confirm(&self, options: &SetupOptions, terminal: bool, ask: &mut dyn FnMut(&str) -> Result<String, String>) -> Result<(), String> {
+        if options.replace_local { return Ok(()); }
+        let file = text::quoted(&self.file.to_string_lossy());
+        if !options.yes && terminal {
+            let reply = ask(&format!("This Spark has local setup in {file}. Move it to {} and write a controller config? [y/N]:", text::quoted(&self.aside.to_string_lossy())))?;
+            if matches!(reply.to_ascii_lowercase().as_str(), "y" | "yes") { return Ok(()); }
+        }
+        Err(format!("This Spark already has local setup. Setup uses it as it is, so --hosts, --fp8, --fp4-local, --model and --link do not apply. Run vade setup again with --replace-local to move {file} aside and write a controller config, or run vade setup without those options."))
+    }
+
+    /// Move the file aside, under the lock that every local start takes.
+    pub(super) fn move_aside(&self, root: &Path) -> Result<(), String> {
+        let _lock = crate::state::Lock::acquire(root)?;
+        if Self::find(root)? != *self { return Err("The local setup changed while setup asked its questions. Nothing was moved. Run vade setup again.".into()); }
+        std::fs::rename(&self.file, &self.aside).map_err(|_| format!("Cannot move {} aside. Check its permissions, then run vade setup again.", text::quoted(&self.file.to_string_lossy())))
+    }
+
+    /// Put the file back. A failure leaves it at the path that setup printed.
+    fn restore(&self) { let _ = std::fs::rename(&self.aside, &self.file); }
+}
+
+/// Ask one question and read one answer line.
+fn prompt(input: &mut impl BufRead, question: &str) -> Result<String, String> {
+    output::text(format_args!("{question} "))?;
+    std::io::Write::flush(&mut std::io::stdout()).map_err(|_| "Cannot show the setup question.")?;
+    read_answer(input)
+}
+
 /// Answer flags conflict with a setup that already exists.
 fn refuse_answers(options: &SetupOptions, existing: &str) -> Result<(), String> {
-    if options.hosts.is_empty() && options.fp8.is_none() && options.model.is_none() && options.links.is_empty() { return Ok(()); }
-    Err(format!("{existing} Setup uses it as it is, so --hosts, --fp8, --fp4-local, --model and --link do not apply. Run vade setup without them, or move the setup away to start over."))
+    if !answers(options) { return Ok(()); }
+    Err(format!("{existing} Setup uses it as it is, so --hosts, --fp8, --fp4-local, --model, --link and --replace-local do not apply. Run vade setup without them, or set VADE_CONFIG to a new file to write a controller config."))
 }
 
 /// One answer line, without its line ending. End of input is an error, so a
@@ -192,7 +254,7 @@ pub(super) fn answer(options: &SetupOptions, facts: &Facts, ask: &mut dyn FnMut(
         }
     };
     if hosts.is_empty() {
-        if options.fp8 == Some(true) { return Err("FP8 runs on 2, 4 or 6 Sparks, not on this Spark alone. Add --hosts with those Sparks, or omit --fp8.".into()); }
+        if options.fp8 == Some(true) { return Err(format!("{} This Spark alone cannot serve FP8. Add --hosts with those Sparks, or omit --fp8.", crate::config::FP8_SPARKS)); }
         if !options.links.is_empty() { return Err("One Spark has no cables to describe. Omit --link.".into()); }
         let model = match (&options.model, options.yes) {
             (Some(model), _) => Some(model.clone()),
@@ -216,9 +278,9 @@ pub(super) fn answer(options: &SetupOptions, facts: &Facts, ask: &mut dyn FnMut(
         },
     };
     if fp8 && !matches!(hosts.len(), 2 | 4 | 6) {
-        return Err(format!("FP8 runs on 2, 4 or 6 Sparks, and this setup has {}. Use 2, 4 or 6 Sparks in --hosts, or omit --fp8.", hosts.len()));
+        return Err(format!("{} This setup has {}. Use 2 or 4 Sparks in --hosts, or omit --fp8.", crate::config::FP8_SPARKS, hosts.len()));
     }
-    let checkout = facts.checkout.as_deref().ok_or("Setup needs the Vade checkout that holds this vade program. Run it from your checkout, or set VADE_SOURCE to the checkout.")?;
+    let checkout = facts.checkout.as_deref().ok_or_else(|| format!("More Sparks need a Vade checkout on this computer, and this vade program has none. Run git clone {}, then run vade setup again from that folder, or set VADE_SOURCE to a checkout.", crate::repository::VADE_REPO_URL))?;
     let profile = profile(checkout, fp8)?;
     let default_model = format!("~/models/{}", profile.repo);
     let model = match (&options.model, options.yes) {

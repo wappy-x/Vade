@@ -114,7 +114,9 @@ pub(super) fn refresh<R: Runner>(root: &Path, runner: &mut R) -> Result<Fields, 
     text::private_dir(&stage)?;
     if let Some(bundle) = bundle {
         super::progress("Install", crate::style::Token::Dim, format_args!("checking the supplied local bundle"))?;
-        return publish(root, &bundle, Some(bundle_fields(&bundle)?), None);
+        let fields = publish(root, &bundle, Some(bundle_fields(&bundle)?), None)?;
+        follow_bundle(root, &bundle)?;
+        return Ok(fields);
     }
     let source = source_path()?;
     super::progress("Install", crate::style::Token::Dim, format_args!("building the local engine and chat program"))?;
@@ -140,6 +142,22 @@ pub(super) fn refresh<R: Runner>(root: &Path, runner: &mut R) -> Result<Fields, 
     let outcome = publish(root, &assembled, None, revision);
     let _ = fs::remove_dir_all(&assembled);
     outcome
+}
+
+/// Keep the one folder on PATH on the bundle that was staged last. scripts/install.sh
+/// makes `<root>/bin/vade`, a script and not a copy or a link: the real program
+/// must run from its bundle, because [`bundle_path`] looks next to it. Without
+/// that script this does nothing, so a bundle run by hand adds no file.
+fn follow_bundle(root: &Path, bundle: &Path) -> Result<(), String> {
+    let script = root.join("bin/vade");
+    if !fs::symlink_metadata(&script).is_ok_and(|meta| meta.is_file()) || !bundle.join("vade").is_file() { return Ok(()); }
+    let text = format!("#!/bin/sh\nexec {} \"$@\"\n", crate::runner::quote(&bundle.join("vade").to_string_lossy()));
+    if fs::read_to_string(&script).is_ok_and(|old| old == text) { return Ok(()); }
+    let error = |_| format!("Cannot update {}. Check its permissions, then run vade update.", text::quoted(&script.to_string_lossy()));
+    let new = root.join("bin/vade.new");
+    fs::write(&new, text).map_err(error)?;
+    fs::set_permissions(&new, fs::Permissions::from_mode(0o700)).map_err(error)?;
+    fs::rename(&new, &script).map_err(error)
 }
 
 /// The `vade install --dry-run` rows for the files: where they come from,
@@ -439,6 +457,28 @@ mod tests {
         }
         text::atomic_write(&bundle.join(BUNDLE_MANIFEST), &text::encode(&expected)).unwrap();
         (root, bundle, expected)
+    }
+
+    #[test]
+    fn a_staged_bundle_moves_the_script_on_path_only_if_the_script_exists() {
+        let (root, bundle, _) = fixture();
+        let home = root.join("home");
+        text::private_dir(&home).unwrap();
+        follow_bundle(&home, &bundle).unwrap();
+        assert!(!home.join("bin").exists(), "a bundle run by hand adds no file");
+        text::private_dir(&home.join("bin")).unwrap();
+        let script = home.join("bin/vade");
+        fs::write(&script, "#!/bin/sh\nexec '/old/bundle/vade' \"$@\"\n").unwrap();
+        // A bundle with no vade program leaves the script as it is.
+        follow_bundle(&home, &bundle).unwrap();
+        assert!(fs::read_to_string(&script).unwrap().contains("/old/bundle/vade"));
+        fs::write(bundle.join("vade"), "fixture").unwrap();
+        follow_bundle(&home, &bundle).unwrap();
+        let moved = fs::read_to_string(&script).unwrap();
+        assert_eq!(moved, format!("#!/bin/sh\nexec '{}/vade' \"$@\"\n", bundle.display()));
+        assert_eq!(fs::metadata(&script).unwrap().permissions().mode() & 0o777, 0o700);
+        assert!(!home.join("bin/vade.new").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     // Answers a clean checkout's Git queries; `None` refuses every command.

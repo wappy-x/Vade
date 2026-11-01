@@ -46,7 +46,7 @@ pub(crate) fn resolve(
                 (None, Some(config)) => config.local_port,
                 _ => {
                     let record = local_root.unwrap_or(crate::run::home()?).join("run.conf");
-                    recorded_port(&record)?.ok_or("No recorded local server endpoint; run vade launch (or vade run qwen3-8b for legacy setup) or supply --url URL.")?
+                    recorded_port(&record)?.ok_or("No recorded local server endpoint; run vade up (or vade run qwen3-8b for legacy setup) or supply --url URL.")?
                 }
             };
             format!("http://127.0.0.1:{port}")
@@ -76,20 +76,23 @@ fn recorded_port(path: &Path) -> Result<Option<u16>, String> {
         .ok_or_else(|| "Invalid local engine port; run vade doctor or supply --url.".into())
 }
 
+/// A client command with no engine to talk to, and no `--url`.
+const NOT_RUNNING: &str = "The engine is not running on this Spark. Start it with vade up, or give the address of a running engine with --url.";
+
 fn owner_endpoint(root: &Path) -> Result<String, String> {
+    let unreadable = "Cannot read the saved engine record; run vade status or give the address of a running engine with --url.";
     let read = |path: &Path| -> Result<crate::text::Fields, String> {
         // Never follow links or block on a FIFO while discovering an endpoint.
         let file = crate::unix_file::AnchoredPath::new(path)
             .and_then(|path| path.open(crate::unix_file::OpenMode::Read))
-            .map_err(|_| "Cannot read local owner state; run vade status or supply --url.")?;
-        if !file.metadata().map_err(|_| "Cannot inspect local owner state.")?.is_file() {
-            return Err("Local owner state must be a regular file; run vade status or supply --url.".into());
+            .map_err(|error| if error.kind() == std::io::ErrorKind::NotFound { NOT_RUNNING } else { unreadable })?;
+        if !file.metadata().map_err(|_| "Cannot inspect the saved engine record.")?.is_file() {
+            return Err("The saved engine record must be a regular file; run vade status or give the address of a running engine with --url.".into());
         }
         let mut data = String::new();
-        file.take(65537).read_to_string(&mut data)
-            .map_err(|_| "Cannot read local owner state; run vade status or supply --url.")?;
+        file.take(65537).read_to_string(&mut data).map_err(|_| unreadable)?;
         if data.len() > 65536 {
-            return Err("Local owner state exceeds 64 KiB; run vade status or supply --url.".into());
+            return Err("The saved engine record exceeds 64 KiB; run vade status or give the address of a running engine with --url.".into());
         }
         crate::text::parse(&data)
     };
@@ -104,7 +107,7 @@ fn owner_endpoint(root: &Path) -> Result<String, String> {
         || port.is_none()
         || config.get("port") != record.get("port")
     {
-        return Err("Local owner state has no consistent running endpoint; run vade status or supply --url.".into());
+        return Err("The saved engine record names no running engine. Start it with vade up, or give the address of a running engine with --url.".into());
     }
     Ok(format!("http://127.0.0.1:{}", port.unwrap()))
 }

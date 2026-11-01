@@ -1,5 +1,5 @@
 $ vade version --help
-Print the CLI version.
+Print the CLI version and the commit of this build.
 
 Examples:
   vade --version
@@ -13,6 +13,8 @@ Options:
   --json  Print one vade.version.v1 object
 
 Notes:
+  - A build with no commit says unknown commit. A build from a changed tree says
+    modified.
   - Loads no configuration and opens no connections.
 --- stderr
 --- exit 0

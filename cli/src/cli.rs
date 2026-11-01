@@ -74,6 +74,8 @@ pub struct ChatOptions {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SetupOptions {
     pub yes: bool,
+    /// `--replace-local`: move a local setup aside without asking.
+    pub replace_local: bool,
     /// SSH destinations in cable order; empty means this Spark (or ask).
     pub hosts: Vec<String>,
     /// `Some(true)` for `--fp8`, `Some(false)` for `--fp4-local`.
@@ -370,19 +372,14 @@ fn parse_setup(args: &[&str]) -> Result<SetupOptions, String> {
         }
         match flag {
             "--yes" => options.yes = true,
+            "--replace-local" => options.replace_local = true,
             "--fp8" | "--fp4-local" => {
                 if options.fp8.replace(flag == "--fp8").is_some() { return Err("Choose --fp4-local or --fp8. Run vade setup --help.".into()); }
             }
             "--hosts" | "--model" | "--link" => {
                 let value = option_value(args, index).ok_or_else(|| format!("Give {flag} a value. Run vade setup --help."))?;
                 match flag {
-                    "--hosts" => {
-                        options.hosts = value.split(',').map(str::to_owned).collect();
-                        let mut unique = std::collections::BTreeSet::new();
-                        if options.hosts.iter().any(|host| !crate::config::ssh_destination(host) || !unique.insert(host)) {
-                            return Err("Give --hosts distinct SSH destinations (what you type after ssh), separated by commas, with no spaces.".into());
-                        }
-                    }
+                    "--hosts" => options.hosts = ssh_targets(value).ok_or(HOSTS)?,
                     "--model" => options.model = Some(value.into()),
                     _ => {
                         let link = value.split_once('=').and_then(|(ends, address)| ends.split_once(':').map(|(from, to)| (from.to_owned(), to.to_owned(), address.to_owned())));
@@ -406,10 +403,21 @@ fn parse_setup(args: &[&str]) -> Result<SetupOptions, String> {
     Ok(options)
 }
 
+/// The error for a bad `--hosts`, which means the same in `vade up` and `vade setup`.
+const HOSTS: &str = "Give --hosts distinct SSH destinations (what you type after ssh), separated by commas, with no spaces.";
+
+/// Distinct SSH destinations from a comma list, in the order given.
+fn ssh_targets(value: &str) -> Option<Vec<String>> {
+    let hosts: Vec<String> = value.split(',').map(str::to_owned).collect();
+    let mut unique = std::collections::BTreeSet::new();
+    hosts.iter().all(|host| crate::config::ssh_destination(host) && unique.insert(host)).then(|| hosts.clone())
+}
+
 fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
     let mut options = UpOptions::default();
     let mut seen = std::collections::BTreeSet::new();
     let mut replicas = 0;
+    let mut listed = false;
     let mut index = 0;
     while index < args.len() {
         // --fp8-legacy is the older spelling of --fp8; both name the same profile.
@@ -441,25 +449,19 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
         let value = option_value(&args, index)
             .ok_or_else(|| format!("Give {flag} a value. Run vade up --help."))?;
         match flag {
-            "--sparks" => options.sparks = Some(number(value, flag, 1, 64)? as usize),
+            // A count, or the Sparks themselves, which is --hosts by another name.
+            "--sparks" if value.bytes().all(|byte| byte.is_ascii_digit()) => {
+                options.sparks = Some(number(value, flag, 1, crate::config::MAX_FP4_SPARKS as u32).map_err(|_| sparks_error())? as usize);
+            }
+            "--sparks" => {
+                options.hosts = ssh_targets(value).ok_or_else(sparks_error)?;
+                listed = true;
+            }
             "--replicas" => {
                 options.replicas = true;
                 replicas = number(value, flag, 2, crate::config::MAX_REPLICAS as u32)? as usize;
             }
-            "--hosts" => {
-                options.hosts = value.split(',').map(str::to_owned).collect();
-                let mut names = std::collections::BTreeSet::new();
-                if options
-                    .hosts
-                    .iter()
-                    .any(|name| !identifier(name) || !names.insert(name))
-                {
-                    return Err(
-                        "Give --hosts distinct machine names separated by commas, with no spaces. Use the NAME of each [machine NAME] section in your config, not an SSH target; vade config lists them."
-                            .into(),
-                    );
-                }
-            }
+            "--hosts" => options.hosts = ssh_targets(value).ok_or(HOSTS)?,
             "--mtp" => {
                 options.mtp = number(value, flag, 0, 3)?;
                 options.mtp_explicit = true;
@@ -497,8 +499,8 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
             return Err(format!("Use --replicas 2..{} with --pairs: each pair takes two of the {} Sparks FP4-Local supports. Run vade up --help.",
                 crate::config::MAX_FP4_SPARKS / options.replica_sparks, crate::config::MAX_FP4_SPARKS));
         }
-        if !options.fp4_local || options.sparks.is_some() || !(options.hosts.is_empty() || options.hosts.len() == machines) {
-            return Err("Use --replicas N with FP4-Local alone, or with N machine names in --hosts (2N with --pairs). Run vade up --help.".into());
+        if !options.fp4_local || seen.contains("--sparks") || !(options.hosts.is_empty() || options.hosts.len() == machines) {
+            return Err("Use --replicas N with FP4-Local alone, or with N Sparks in --hosts (2N with --pairs). Run vade up --help.".into());
         }
         if options.hosts.is_empty() { options.sparks = Some(machines); }
     }
@@ -512,8 +514,13 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
         if !seen.contains("--context") { options.context = 131072; }
         if !options.output_explicit { options.output = 65536; }
     }
-    if options.sparks.is_some() && !options.hosts.is_empty() {
+    if seen.contains("--sparks") && seen.contains("--hosts") {
         return Err("Choose --sparks or --hosts. Run vade up --help.".into());
+    }
+    // From here a Spark list is --hosts in every way.
+    if listed {
+        seen.remove("--sparks");
+        seen.insert("--hosts");
     }
     if !seen.contains("--output") {
         options.output = options.output.min(options.context);
@@ -547,6 +554,11 @@ pub const FP4_OUTPUT_LIMIT: u32 = 16384;
 
 /// Default FP4-Local output limit for a context.
 pub fn fp4_output(context: u32) -> u32 { context.min(FP4_OUTPUT) }
+
+/// The error for a bad `--sparks`: the range of the help, and the list form.
+fn sparks_error() -> String {
+    format!("Set --sparks to a whole number from 1 to {}, or to distinct SSH destinations separated by commas, with no spaces. Run vade up --help.", crate::config::MAX_FP4_SPARKS)
+}
 
 fn bytes(value: &str, flag: &str) -> Result<u64, String> {
     if !value.is_empty() && value.bytes().all(|c| c.is_ascii_digit()) {
@@ -736,6 +748,34 @@ mod tests {
             supplied_options: ["--hosts".into(), "--chats".into(), "--fast-prompts".into()].into(),
             hosts: vec!["a".into(), "b".into()], chats: Some(3), fast_prompts: true, context: 32768, ..UpOptions::default()
         }));
+    }
+    #[test]
+    fn setup_takes_replace_local_once() {
+        let Command::Setup(options) = cli("setup --yes --replace-local --hosts a").unwrap().command else { panic!() };
+        assert!(options.replace_local && options.yes);
+        assert!(cli("setup --replace-local --replace-local").unwrap_err().contains("only once"));
+    }
+    #[test]
+    fn sparks_takes_a_count_or_the_sparks_and_hosts_means_the_same_as_in_setup() {
+        let up = |args: &str| match cli(args).unwrap().command { Command::Up(options) => options, other => panic!("{other:?}") };
+        let list = up("up --sparks spark-a,user@spark-b,192.0.2.7");
+        assert_eq!((list.sparks, list.hosts.join(" ")), (None, "spark-a user@spark-b 192.0.2.7".to_owned()));
+        // A list is --hosts in every way, also in what the start records.
+        assert_eq!(list.supplied_options, ["--hosts".to_owned()].into());
+        assert_eq!(list, up("up --hosts spark-a,user@spark-b,192.0.2.7"));
+        assert_eq!(up("up --sparks spark-a").hosts, ["spark-a"]);
+        assert_eq!((up("up --sparks 24").sparks, up("up --sparks 1").sparks), (Some(24), Some(1)));
+        let setup = |args: &str| match cli(args).unwrap().command { Command::Setup(options) => options.hosts, other => panic!("{other:?}") };
+        assert_eq!(up("up --hosts user@spark-a,spark-b.lan").hosts, setup("setup --hosts user@spark-a,spark-b.lan"));
+        let sparks = "Set --sparks to a whole number from 1 to 24, or to distinct SSH destinations separated by commas, with no spaces. Run vade up --help.";
+        for bad in ["up --sparks 0", "up --sparks 25", "up --sparks 64", "up --sparks a,a", "up --sparks a,", "up --sparks ,a", "up --sparks -5", "up --sparks a;b", "launch --sparks 25"] {
+            assert_eq!(cli(bad).unwrap_err(), sparks.replace("vade up", if bad.starts_with("launch") { "vade launch" } else { "vade up" }), "{bad}");
+        }
+        let hosts = "Give --hosts distinct SSH destinations (what you type after ssh), separated by commas, with no spaces.";
+        for bad in ["up --hosts a,a", "up --hosts a,", "setup --hosts a,a", "setup --hosts a,"] { assert_eq!(cli(bad).unwrap_err(), hosts, "{bad}"); }
+        assert_eq!(cli("up --sparks a,b --hosts a,b").unwrap_err(), "Choose --sparks or --hosts. Run vade up --help.");
+        assert_eq!(cli("up --hosts a,b --sparks 2").unwrap_err(), "Choose --sparks or --hosts. Run vade up --help.");
+        assert!(cli("up --replicas 2 --sparks a,b").unwrap_err().contains("Use --replicas N"));
     }
     #[test]
     fn argument_errors_name_the_command_to_run_instead() {

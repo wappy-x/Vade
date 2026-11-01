@@ -155,5 +155,5 @@ fn inconsistent_owner_state_fails_before_contacting_the_server() {
     let output = fixture.command().output().unwrap();
     assert_eq!(output.status.code(), Some(1));
     let error = String::from_utf8(output.stderr).unwrap();
-    assert!(error.contains("no consistent running endpoint") && error.contains("--url"), "{error}");
+    assert!(error.contains("names no running engine") && error.contains("--url"), "{error}");
 }

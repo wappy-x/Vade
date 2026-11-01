@@ -77,7 +77,8 @@ fn every_help_page_is_one_summary_line_then_examples_then_usage() {
         assert_eq!(lines[2], "Examples:", "{page}: examples come first:\n{help}");
         let usage = help.find("\nUsage: vade").unwrap_or_else(|| panic!("{page}: no usage:\n{help}"));
         assert!(help.find("\nExamples:").unwrap() < usage, "{page}");
-        assert!(lines.iter().all(|line| line.chars().count() <= 80), "{page}: wider than 80 columns");
+        // The pinned model command stays on one line, so it pastes as it is.
+        assert!(lines.iter().all(|line| line.chars().count() <= 80 || line.trim_start().starts_with("vade pull nvidia/")), "{page}: wider than 80 columns");
         assert!(!help.chars().any(emoji), "{page}: no emoji");
         // `vade help <command>` is the same page.
         assert_eq!(text(&vade(&["help", page], &home).stdout), help, "{page}");
@@ -255,7 +256,7 @@ fn doctor_rows_keep_their_columns_and_end_with_pass_or_fail() {
     let stdout = text(&output.stdout);
     let rows: Vec<&str> = stdout.lines().collect();
     assert!(rows[0].starts_with("FAIL  config                "), "{stdout}");
-    assert!(rows[1].starts_with("      next: Run vade launch on a Spark"), "{stdout}");
+    assert!(rows[1].starts_with("      next: Run vade up on a Spark"), "{stdout}");
     assert!(rows.last().unwrap().starts_with("FAIL  0 ok, 1 failed, 0 skipped in "), "{stdout}");
     let stderr = text(&output.stderr);
     assert_eq!(stderr, "error: 1 doctor check failed.\n hint: Run the next: step under each FAIL row, then run vade doctor again.\n");

@@ -56,10 +56,10 @@ impl Support {
         let shown = quote(folder);
         match self.route {
             Route::Fp4Local => Some(match saved {
-                _ if same => ("vade launch".into(), None),
-                None => (format!("VADE_MODELS={shown} vade launch"), None),
-                Some(saved) => (format!("VADE_HOME={} VADE_MODELS={shown} vade launch", quote(&new_home())),
-                    Some(format!("vade launch serves its saved checkpoint {} first, so this step uses a new, unused Vade home.", quote(saved)))),
+                _ if same => ("vade up".into(), None),
+                None => (format!("VADE_MODELS={shown} vade up"), None),
+                Some(saved) => (format!("VADE_HOME={} VADE_MODELS={shown} vade up", quote(&new_home())),
+                    Some(format!("vade up serves its saved checkpoint {} first, so this step uses a new, unused Vade home.", quote(saved)))),
             }),
             Route::Fp8 => Some((format!("set model_path = {shown} in the controller config, then run vade up --fp8"), None)),
             Route::Qwen3Bf16 => Some((format!("vade run qwen3-8b --weights-source {shown}"), None)),

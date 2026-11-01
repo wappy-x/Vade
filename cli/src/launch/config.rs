@@ -123,8 +123,11 @@ impl Config {
     /// Refuse options a local launch cannot honour: FP8, more than one Spark,
     /// `--chats` or a nonzero `--cache-bytes`.
     pub fn validate_options(options: &UpOptions) -> Result<(), String> {
-        if !options.fp4_local || options.sparks.is_some_and(|n| n != 1) || !options.hosts.is_empty() {
-            return Err("Local launch serves FP4-Local on one Spark; set VADE_CONFIG and use vade up for multiple Sparks, or vade up --fp8 for FP8.".into());
+        if !options.fp4_local {
+            return Err("FP8 needs two or four linked Sparks and a controller config. Run vade setup --fp8, or read docs/install-fp8.md.".into());
+        }
+        if options.sparks.is_some_and(|n| n != 1) || !options.hosts.is_empty() {
+            return Err("Local launch serves FP4-Local on one Spark. More Sparks need a controller config that names them. Run vade setup --hosts spark-a,spark-b, or read INSTALL.md#two-and-more-sparks.".into());
         }
         Self::supported_controls(options.chats, options.cache_bytes)
     }

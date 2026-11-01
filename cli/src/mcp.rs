@@ -42,8 +42,25 @@ fn harness() -> Result<PathBuf, String> {
     Err("The chat harness is not installed. Run vade install or vade launch, then try again.".into())
 }
 
-/// Run the harness and return its exit code.
+/// The help page that `args` asks for, by the rule the harness uses. Help needs
+/// no install: these pages are compiled into `vade` too.
+fn help(args: &[String]) -> Option<&'static str> {
+    use vade_harness::mcp::cli::{MCP_HELP, TOOLS_HELP};
+    let (command, rest) = args.split_first()?;
+    let asked = |arg: &String| arg == "--help" || arg == "-h";
+    match command.as_str() {
+        "mcp" if rest.is_empty() || rest.iter().take_while(|arg| *arg != "--").any(asked) => Some(MCP_HELP),
+        "tools" if rest.iter().any(asked) => Some(TOOLS_HELP),
+        _ => None,
+    }
+}
+
+/// Print the help page, or run the harness and return its exit code.
 pub fn run(args: Vec<String>) -> Result<i32, String> {
+    if let Some(page) = help(&args) {
+        crate::output::text(format_args!("{page}"))?;
+        return Ok(0);
+    }
     let harness = harness()?;
     let status = std::process::Command::new(&harness)
         .args(args)
@@ -63,6 +80,21 @@ mod tests {
         assert_eq!(super::arguments(&owned(&["--help", "tools"])), Some(owned(&["tools", "--help"])));
         for other in [&["chat"][..], &["help"], &["help", "chat"], &[]] {
             assert_eq!(super::arguments(&owned(other)), None);
+        }
+    }
+    #[test]
+    fn help_needs_no_harness_and_a_real_run_does() {
+        use vade_harness::mcp::cli::{MCP_HELP, TOOLS_HELP};
+        let help = |args: &[&str]| super::help(&args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
+        for args in [&["mcp"][..], &["mcp", "--help"], &["mcp", "-h"], &["mcp", "add", "--help"]] {
+            assert_eq!(help(args), Some(MCP_HELP), "{args:?}");
+        }
+        for args in [&["tools", "--help"][..], &["tools", "-h"]] {
+            assert_eq!(help(args), Some(TOOLS_HELP), "{args:?}");
+        }
+        // After -- the word belongs to the server command, as in the harness.
+        for args in [&["tools"][..], &["mcp", "list"], &["mcp", "add", "x", "--", "srv", "--help"]] {
+            assert_eq!(help(args), None, "{args:?}");
         }
     }
 }

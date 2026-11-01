@@ -10,6 +10,8 @@ const API_KEY: (&str, &str) = ("--api-key-file PATH", "Bearer credential file (o
 const CONTEXT: (&str, &str) = ("--context N", "Context window in tokens, 4096..262144 (default 32768)");
 const OUTPUT: (&str, &str) = ("--output N", "Output limit in tokens, 1024..16384 (default 8192, or the context if smaller)");
 const MTP: (&str, &str) = ("--mtp N", "Drafting depth 0..3; 0 turns drafting off (default: the engine chooses)");
+/// The README's model command. It stays on one line, wider than [`style::WIDTH`], so it pastes as it is.
+pub const PINNED_PULL: &str = "vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300";
 
 /// The help page for `command`, or the top-level page; headings are styled
 /// when standard output takes color.
@@ -30,12 +32,12 @@ fn top(on: bool) -> String {
         let rows: Vec<(&str, String)> = rows.iter().map(|(name, text)| (*name, (*text).to_owned())).collect();
         format!("{}\n{}\n", heading(name), style::table_at(&rows, 2, width))
     };
-    let mut out = format!("{} runs Qwen3.8 Flash-Next FP4-Local on your DGX Spark.\n\n{}\n", style::style(Token::Title, "Vade", on), heading("Examples:"));
+    let mut out = format!("{} runs Qwen3.8 Flash-Next on your DGX Spark, as FP4-Local or FP8.\n\n{}\n  {PINNED_PULL}\n", style::style(Token::Title, "Vade", on), heading("Examples:"));
     out += &style::table(&[
-        ("vade setup", "Answer a few questions, then install and start".into()),
-        ("vade launch", "Start on this Spark, then chat".into()),
+        ("", "Download the model and check every file".into()),
+        ("vade up", "Start the engine on this Spark".into()),
+        ("vade chat", "Chat with the running engine".into()),
         ("vade status", "See what is running".into()),
-        ("vade doctor", "Check the setup, then PASS or FAIL".into()),
         ("vade down", "Stop what vade started".into()),
     ], 2);
     out += &format!("\n{} vade <COMMAND> [OPTIONS]\n\n", heading("Usage:"));
@@ -72,14 +74,14 @@ fn top(on: bool) -> String {
         ("install", "Save local defaults and install the engine and chat"),
         ("update", "Refresh the installed engine and chat"),
         ("run", "Run the separate legacy Qwen3-8B BF16 workflow"),
-        ("version", "Print the CLI version"),
+        ("version", "Print the CLI version and the commit of this build"),
     ], 8);
     out += &group("Options:", &[
         ("--json", "JSON for status, doctor, config, detect, models, version"),
         ("--dry-run", "Preview a lifecycle command; others run as usual"),
         ("--api-key-file PATH", "Credential for chat, doctor, verify, bench and local run"),
         ("-h, --help", "Show help"),
-        ("-V, --version", "Print the CLI version"),
+        ("-V, --version", "Print the CLI version and the commit of this build"),
     ], 0);
     out += &group("Environment:", &[
         ("VADE_HOME", "Local install root and saved defaults (default ~/.vade)"),
@@ -118,9 +120,9 @@ fn page(command: &str) -> Option<Page<'static>> {
             usage: &["vade up [OPTIONS]"],
             options: &[
                 ("--fp4-local", "Qwen3.8 Flash-Next FP4-Local (the default; optional)"),
-                ("--fp8", "Qwen3.8 Flash-Next FP8 on 2, 4 or 6 Sparks (older spelling: --fp8-legacy): context 131072, output 65536 (or the context if smaller), drafting depth 2; output limit up to 262144"),
-                ("--sparks N", "Number of Sparks; FP4 supports 1..24"),
-                ("--hosts a,b", "Machine names in cable order, separated by commas"),
+                ("--fp8", "Qwen3.8 Flash-Next FP8 on 2 or 4 Sparks; 6 Sparks start but are not covered (older spelling: --fp8-legacy): context 131072, output 65536 (or the context if smaller), drafting depth 2; output limit up to 262144"),
+                ("--sparks N|a,b", "A Spark count from 1 to 24, or the Sparks as you type them after ssh, in cable order"),
+                ("--hosts a,b", "The Sparks as you type them after ssh, in cable order"),
                 ("--replicas N", "2..16 independent one-Spark FP4-Local servers behind a local gateway"),
                 ("--pairs", "With --replicas 2..12: N two-Spark tensor-split servers on 2N Sparks instead"),
                 MTP, CONTEXT, OUTPUT,
@@ -133,12 +135,15 @@ fn page(command: &str) -> Option<Page<'static>> {
             examples: &["vade up", "vade up --context 262144 --output 16384", "VADE_CONFIG=cluster.conf vade up --sparks 2"],
             notes: &[
                 "Default: Qwen3.8 Flash-Next FP4-Local on one Spark.",
+                crate::config::FP4_SPARKS,
+                crate::config::FP8_SPARKS,
+                "--sparks a,b and --hosts a,b pick machines from your controller config. Each entry is the ssh line of a machine, or its [machine NAME] name. vade setup --hosts writes that config.",
                 "Local up and launch start with context 32768 and output 8192 (or the context if smaller). They reuse saved limits. A memory refusal lowers a default or saved context to a smaller size from 32768, 16384, 8192 and 4096. The first size that starts is saved. A refused explicit --context is an error. Local --chats and positive --cache-bytes are refused; --cache-bytes 0 disables retention.",
                 "Controller FP4 defaults match local ones on any Spark count: context 32768, output 8192 (or the context if smaller). --context 262144 requests a larger context. The engine still sets the chat count from context and memory.",
                 "Controller FP4 checks and passes on --chats and --cache-bytes, but its engine does not use them: it admits chats from memory and uses its own prefix cache setting.",
                 "The engine chooses the drafting depth (MTP). On one FP4-Local Spark, concurrent chats can draft; the default request depth is 3 with strict verification. FP8 concurrent chats do not draft. A request with draft=plain turns drafting off; draft=strict asks for it when supported. --mtp sets the depth, and 0 turns drafting off.",
                 "Two FP4-Local Sparks run the tensor split, the only two-Spark path for FP4-Local: both Sparks work on every token. It needs RDMA, so vade up refuses SEQPAR_RDMA=0 (TCP) for two FP4-Local Sparks. FP8 on two Sparks keeps its ring and may use TCP.",
-                "FP8 needs an FP8 config such as cli/examples/vade.conf. FP8 gives the same token IDs on 2 and 4 Sparks; 6 Sparks still give other IDs. See docs/benchmarks.md.",
+                "FP8 needs an FP8 config such as cli/examples/vade.conf. See docs/benchmarks.md.",
                 "Spark counts above 2 require a current install and linked hosts in cable order.",
                 "VADE_GROUP=NAME selects a [group NAME] from the config: its hosts in rank order, its own ownership record and its own local_port. A group must be an arc of the cabling: each host is cabled to the next, in rank order; a closing cable is not needed, so any run of neighbors on a ring works. Set the same VADE_GROUP for status, chat, logs and down. Groups in one layout can run at the same time. See docs/eight-sparks.md.",
                 "--replicas N starts one independent one-Spark server on each of the first N machines (or the N --hosts) and a local gateway on local_port; replica tunnels use the next N local ports. Each replica uses the FP4 defaults above. Use it when the model fits one Spark and many chats run at once; answers are the same on every replica.",
@@ -226,16 +231,18 @@ fn page(command: &str) -> Option<Page<'static>> {
             options: &[
                 ("--yes", "Ask nothing; take the defaults and the flags below"),
                 ("--hosts a,b", "Sparks to drive, as you type them after ssh, in cable order"),
-                ("--fp8", "The FP8 checkpoint (2, 4 or 6 Sparks); --fp4-local is the default"),
+                ("--fp8", "The FP8 checkpoint on 2 or 4 Sparks (6 Sparks start but are not covered); --fp4-local is the default"),
+                ("--replace-local", "Move the local setup aside, then write a controller config"),
                 ("--model PATH", "The model folder, absolute or under ~/ (on each Spark from a controller)"),
                 ("--link FROM:TO=ADDR", "FROM's own address on its cable to TO; once per cable end"),
                 ("--dry-run", "Print the answers, the config and the steps; change nothing"),
             ],
             examples: &["vade setup", "vade setup --yes", "vade setup --yes --hosts spark-a", "vade setup --yes --hosts spark-a --dry-run"],
             notes: &[
-                "Asks which Sparks to use (on a Spark the default is this Spark), FP4-Local or FP8 (only for 2, 4 or 6 Sparks), and where the model is. Each question shows its default in brackets; press Enter to take it.",
+                "Asks which Sparks to use (on a Spark the default is this Spark), FP4-Local or FP8 (only for 2, 4 or 6 Sparks; 6 Sparks are not covered yet), and where the model is. Each question shows its default in brackets; press Enter to take it.",
                 "On this Spark, vade install saves the local defaults in ~/.vade/config. From another computer, setup writes a controller config at the path vade config shows (VADE_CONFIG, else the user config folder). It points at this checkout and keeps Vade's private folders under ~/.vade. Setup never replaces a config.",
                 "Then it runs vade install, vade up and vade doctor, and stops at the first step that fails. Doctor runs last, so it checks the Sparks that up started. Run vade setup again after a fix, without the answer options: it uses the setup it finds and repeats only the work that needs it. When a controller config already has an install, setup skips vade install; after a pull, run vade update.",
+                "On a Spark with local setup, --hosts or another answer starts a new setup. Setup names the local file and asks before it moves it. With --yes, or without a terminal, add --replace-local. The file moves to config.local beside it; setup deletes nothing.",
                 "Without a terminal, setup asks nothing; add --yes. It does not download models: see vade pull.",
                 LIFECYCLE,
             ],
@@ -264,6 +271,7 @@ fn page(command: &str) -> Option<Page<'static>> {
             notes: &[
                 "Locally, restage the current bundle or rebuild the current source, then report how to restart.",
                 "With VADE_CONFIG, update source, rebuild and stage binaries, then offer a restart.",
+                "For a newer Vade on this Spark, run the install command again: curl -fsSL https://vade.lol/install.sh | sh",
             ],
         },
         "detect" => Page {
@@ -274,11 +282,11 @@ fn page(command: &str) -> Option<Page<'static>> {
             notes: &["Reads only; no files are changed and nothing is started."],
         },
         "version" => Page {
-            summary: "Print the CLI version.",
+            summary: "Print the CLI version and the commit of this build.",
             usage: &["vade --version [--json]", "vade version [--json]", "vade -V [--json]"],
             options: &[("--json", "Print one vade.version.v1 object")],
             examples: &["vade --version", "vade version --json"],
-            notes: &["Loads no configuration and opens no connections."],
+            notes: &["A build with no commit says unknown commit. A build from a changed tree says modified.", "Loads no configuration and opens no connections."],
         },
         "run" => Page {
             summary: "Run the separate legacy Qwen3-8B BF16 workflow on one Spark.",
@@ -317,8 +325,8 @@ fn page(command: &str) -> Option<Page<'static>> {
                 ("--dry-run", "Ask the Hub for the file list and sizes; download nothing"),
             ],
             examples: &[
-                "vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local",
-                "vade pull Qwen/Qwen3-8B --dry-run",
+                PINNED_PULL,
+                "vade pull org/name --dry-run",
                 "vade pull org/name --include '*.json' --to ~/models/org/name-metadata",
             ],
             notes: &[
@@ -394,10 +402,42 @@ mod tests {
         for command in [None, Some("launch"), Some("up"), Some("down"), Some("status"), Some("logs"), Some("chat"), Some("sessions"), Some("doctor"),
             Some("install"), Some("setup"), Some("update"), Some("detect"), Some("version"), Some("run"), Some("verify"), Some("read"), Some("config"), Some("bench"), Some("test"), Some("pull"), Some("models")] {
             let text = help(command);
-            assert!(text.lines().all(|line| line.chars().count() <= style::WIDTH), "{command:?}:\n{text}");
+            assert!(text.lines().all(|line| line.chars().count() <= style::WIDTH || line.trim_start() == PINNED_PULL), "{command:?}:\n{text}");
             assert!(text.contains(&format!("Usage: vade {}", command.unwrap_or("<COMMAND>").replace("version", "--version"))), "{command:?}:\n{text}");
             assert!(!text.contains('\x1b') && text.ends_with('\n') && !text.ends_with("\n\n"), "{command:?}");
             assert!(text.lines().nth(1) == Some("") && text.contains("\nExamples:\n"), "one-line summary, then examples: {command:?}:\n{text}");
         }
+    }
+    #[test]
+    fn the_top_page_names_both_checkpoints_and_the_readme_commands() {
+        let text = help(None);
+        assert_eq!(text.lines().next(), Some("Vade runs Qwen3.8 Flash-Next on your DGX Spark, as FP4-Local or FP8."));
+        let examples = text.split("\nUsage:").next().unwrap();
+        let mut at = 0;
+        for command in [PINNED_PULL, "vade up ", "vade chat ", "vade status ", "vade down "] {
+            at += examples[at..].find(&format!("\n  {command}")).unwrap_or_else(|| panic!("{command}:\n{examples}"));
+        }
+        assert!(help(Some("pull")).contains(&format!("\n  {PINNED_PULL}\n")));
+    }
+    #[test]
+    fn help_and_errors_give_the_same_spark_counts() {
+        use crate::config::{FP4_SPARKS, FP8_SPARKS, MAX_FP4_SPARKS};
+        // The wrapped help page, with its line breaks taken out.
+        let up = help(Some("up")).split_whitespace().collect::<Vec<_>>().join(" ");
+        for text in [FP4_SPARKS, FP8_SPARKS] { assert!(up.contains(text), "{text}:\n{up}"); }
+        assert!(FP4_SPARKS.contains(&format!("3 to {MAX_FP4_SPARKS} Sparks")));
+        assert!(up.contains(&format!("A Spark count from 1 to {MAX_FP4_SPARKS},")));
+        let parse = |args: &[&str]| crate::cli::parse(&args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
+        let beyond = (MAX_FP4_SPARKS + 1).to_string();
+        let error = parse(&["up", "--sparks", &beyond]).unwrap_err();
+        assert!(error.contains(&format!("from 1 to {MAX_FP4_SPARKS},")), "{error}");
+        assert!(parse(&["up", "--sparks", &MAX_FP4_SPARKS.to_string()]).is_ok());
+        for page in [Some("up"), Some("setup")] {
+            assert!(!help(page).contains("1..24") && !help(page).contains("1 to 64"), "{page:?}");
+        }
+        // Six Sparks stay accepted for FP8, and every text marks them as not covered.
+        let setup = help(Some("setup")).split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(setup.contains("(6 Sparks start but are not covered)") && setup.contains("6 Sparks are not covered yet"), "{setup}");
+        assert!(up.contains("6 Sparks start but are not covered"), "{up}");
     }
 }

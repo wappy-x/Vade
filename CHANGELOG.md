@@ -124,6 +124,7 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 
 ### Install
 
+- The installer writes one fixed folder, `~/.vade/bin`, with a small script that runs the build it just installed. It prints the same `export` line for every version and for a source build, and step 3 is now `vade up`. `vade update` keeps that script on the bundle it staged. For a newer Vade, run the install command again.
 - `curl -fsSL https://vade.lol/install.sh | sh` is now safe when the download stops early, and its source build no longer runs in the wrong folder.
   - Every statement of `scripts/install.sh` is now inside `main`, and the last line calls it, so a cut-off script is a syntax error and runs nothing.
   - With no checkout, the source build clones public main into a new folder in `~/.vade` and runs the installer of that clone.
@@ -195,6 +196,9 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 
 ### CLI
 
+- `vade --version` prints the short commit of the build, such as `vade 0.1.0 (f7946e5)`, and `vade.version.v1` has `sha` and `modified`. A build with no commit says `unknown commit`.
+- `vade setup --hosts` on a Spark with local setup offers to move `~/.vade/config` aside, names the file, and takes `--replace-local` with `--yes` or without a terminal. It deletes nothing, and it refuses while the local engine runs. `vade verify` with no engine says that the engine is not running. `vade chat`, `vade status`, `vade doctor` and the end of `vade pull` on one Spark now name `vade up`.
+- `vade --help` names FP4-Local and FP8 and shows the README commands. `vade tools --help` and `vade mcp --help` work with no install. `vade up --sparks` takes a count from 1 to 24 or the Sparks by SSH name, and `--hosts` means the same in `vade up` and `vade setup`. The help and the errors give the same Spark counts, and they mark FP8 on 6 Sparks as not covered yet.
 - A controller that is also one of its Sparks now runs that Spark's commands on it as local processes, with no SSH to itself.
   - Before, `vade install` and `vade up --sparks 2` on a fresh pair stopped at rank 0, because that Spark had no SSH key for itself.
   - Vade finds the machine by its `ssh =` entry: `localhost`, a loopback or own address, the host name, or an alias that `ssh -G` resolves to one of these.

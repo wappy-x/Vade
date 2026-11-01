@@ -14,7 +14,7 @@
 //!
 //! | Area | Modules |
 //! | --- | --- |
-//! | Arguments and help | [`cli`], [`help`] (help pages), [`auth`] (credential files), [`endpoint`] (which server a client command talks to) |
+//! | Arguments and help | [`cli`], [`help`] (help pages), [`version`] (the version and commit of this build), [`auth`] (credential files), [`endpoint`] (which server a client command talks to) |
 //! | Lifecycle owners | [`launch`], [`app`], [`run`], [`worker`] (the private helper that owns engine processes on a Spark) |
 //! | Configuration and records | [`config`] (controller config), [`state`] (controller ownership records and locks), [`catalog`], [`repository`] |
 //! | Machine and artifacts | [`detect`], [`prebuilt`], [`build_job`], [`sha256`] |
@@ -59,6 +59,7 @@ mod unix_file;
 mod unix_flags;
 mod worker;
 mod verify;
+mod version;
 
 fn main() {
     // A bug reaches the user as one plain error block, not a Rust panic
@@ -217,10 +218,9 @@ fn run_main(mut args: Vec<String>) {
     }, mode: owner(&parsed.command), dry: parsed.dry_run }));
     if parsed.command == cli::Command::Version {
         if parsed.json {
-            let value = evals::json::object(vec![("schema", "vade.version.v1".into()), ("version", env!("CARGO_PKG_VERSION").into())]);
-            checks::print_json(&value).unwrap_or_else(|error| fail(&error));
+            checks::print_json(&version::object()).unwrap_or_else(|error| fail(&error));
         } else {
-            public_output(concat!("vade ", env!("CARGO_PKG_VERSION"), "\n"));
+            public_output(&version::text());
         }
         return;
     }
@@ -294,7 +294,7 @@ fn run_main(mut args: Vec<String>) {
         // A fresh controller still gets one row per check and a FAIL line.
         Err(error) if parsed.command == cli::Command::Doctor => {
             let mut report = checks::Report::new(owner(&parsed.command), parsed.dry_run);
-            let next = "Run vade launch on a Spark, or copy cli/examples/fp4-local.conf, edit it and set VADE_CONFIG to drive Sparks from this computer (INSTALL.md).";
+            let next = "Run vade up on a Spark, or run vade setup to write a controller config (INSTALL.md).";
             let result = report.fail("config", &style::split(&error).0, next).and_then(|()| {
                 if !parsed.dry_run {
                     doctor::binary(&mut report)?;
@@ -314,7 +314,7 @@ fn run_main(mut args: Vec<String>) {
             // What is missing, the error's own next step, then where to start.
             let (fact, next) = style::split(&text::terminal_text(&error));
             let next = next.map_or(String::new(), |next| format!("  {next}\n"));
-            let start = if cfg!(all(target_os = "linux", target_arch = "aarch64")) { ("Start", "vade launch") } else { ("Preview", "vade launch --dry-run") };
+            let start = if cfg!(all(target_os = "linux", target_arch = "aarch64")) { ("Start", "vade up") } else { ("Preview", "vade launch --dry-run") };
             public_output(&format!("{} {fact}\n{next}\n{}", style::paint(style::Token::Warn, "▲", style::Stream::Out),
                 status::next_steps(&[start, ("Check", "vade doctor"), ("Help", "vade --help")])));
             return;

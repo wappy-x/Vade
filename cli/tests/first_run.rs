@@ -32,7 +32,8 @@ impl Drop for Home {
 #[cfg(not(target_os = "linux"))]
 fn names_cause_and_next_step(text: &str) {
     assert!(text.contains("Vade is not set up yet: there is no local setup and no controller config at "), "{text}");
-    assert!(text.contains("Run vade launch on a Spark") && text.contains("cli/examples/fp4-local.conf") && text.contains("VADE_CONFIG") && text.contains("INSTALL.md"), "{text}");
+    assert!(text.contains("Run vade up on a Spark") && text.contains("run vade setup to write a controller config") && text.contains("INSTALL.md"), "{text}");
+    assert!(!text.contains("cli/examples"), "a bundle has no such folder: {text}");
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -49,13 +50,13 @@ fn first_run_commands_name_what_is_missing_and_what_to_run() {
     assert_eq!(code, Some(1));
     let row = stdout.lines().position(|l| l.starts_with("FAIL  config ")).unwrap_or_else(|| panic!("{stdout}"));
     names_cause_and_next_step(&stdout);
-    assert!(stdout.lines().nth(row + 1).is_some_and(|l| l.trim_start().starts_with("next: Run vade launch on a Spark")), "{stdout}");
+    assert!(stdout.lines().nth(row + 1).is_some_and(|l| l.trim_start().starts_with("next: Run vade up on a Spark")), "{stdout}");
     // Everyday commands stop with the cause and a hint, before any engine call.
     for command in ["chat", "status", "down", "logs", "sessions"] {
         let (code, stdout, stderr) = home.run(&[command]);
         assert_eq!(code, Some(1), "{command}: {stderr}");
         assert!(stdout.is_empty(), "{command}: {stdout}");
-        assert!(stderr.starts_with("error: Vade is not set up yet") && stderr.contains("\n hint: Run vade launch on a Spark"), "{command}: {stderr}");
+        assert!(stderr.starts_with("error: Vade is not set up yet") && stderr.contains("\n hint: Run vade up on a Spark"), "{command}: {stderr}");
         names_cause_and_next_step(&stderr);
     }
     // Nothing was written into the new home.
@@ -66,24 +67,24 @@ fn first_run_commands_name_what_is_missing_and_what_to_run() {
 /// output of the Linux aarch64 build on a Spark with a new empty home.
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 #[test]
-fn first_run_on_a_spark_points_at_vade_launch() {
+fn first_run_on_a_spark_points_at_vade_up() {
     let home = Home::new();
     for command in [&[][..], &["status"]] {
         let (code, stdout, stderr) = home.run(command);
         assert_eq!(code, Some(0), "{command:?}: {stderr}");
-        assert!(stdout.starts_with("○ Vade is stopped.\n  Start: ") && stdout.ends_with("vade launch\n"), "{command:?}: {stdout}");
+        assert!(stdout.starts_with("○ Vade is stopped.\n  Start: ") && stdout.ends_with("vade up\n"), "{command:?}: {stdout}");
     }
     let (code, stdout, stderr) = home.run(&["doctor"]);
     assert_eq!(code, Some(1), "{stderr}");
     let row = stdout.lines().position(|l| l.starts_with("FAIL  installed binaries    Vade is not installed yet.")).unwrap_or_else(|| panic!("{stdout}"));
-    assert_eq!(stdout.lines().nth(row + 1).map(str::trim), Some("next: Run vade launch to install and start Vade."), "{stdout}");
+    assert_eq!(stdout.lines().nth(row + 1).map(str::trim), Some("next: Run vade up to install and start Vade."), "{stdout}");
     assert!(stderr.contains("\n hint: Run the next: step under each FAIL row, then run vade doctor again."), "{stderr}");
     for (command, expected) in [("down", "Vade is already stopped.\n"), ("logs", "No engine log yet.\n")] {
         assert_eq!(home.run(&[command]), (Some(0), expected.to_owned(), String::new()), "{command}");
     }
     for (command, expected) in [
-        ("chat", "error: Vade is not set up on this Spark yet.\n hint: Run vade launch to install it, start it and open chat.\n"),
-        ("sessions", "error: The engine and chat are not installed yet.\n hint: Run vade launch to install them.\n"),
+        ("chat", "error: Vade is not set up on this Spark yet.\n hint: Run vade up to install it and start it, then run vade chat.\n"),
+        ("sessions", "error: The engine and chat are not installed yet.\n hint: Run vade up to install them.\n"),
     ] {
         assert_eq!(home.run(&[command]), (Some(1), String::new(), expected.to_owned()), "{command}");
     }

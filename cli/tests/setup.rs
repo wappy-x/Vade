@@ -81,7 +81,7 @@ fn yes_off_a_spark_names_the_missing_flag() {
     let output = vade(&["setup", "--yes", "--hosts", "a,b"], &home, &[]);
     assert!(text(&output.stderr).contains("Add --link a:b=ADDRESS"), "{output:?}");
     let output = vade(&["setup", "--yes", "--hosts", "a,b,c", "--fp8"], &home, &[]);
-    assert!(text(&output.stderr).contains("FP8 runs on 2, 4 or 6 Sparks, and this setup has 3"), "{output:?}");
+    assert!(text(&output.stderr).contains("This setup has 3.") && text(&output.stderr).contains("Use 2 or 4 Sparks in --hosts"), "{output:?}");
     assert!(!home.join("config").exists());
 }
 
@@ -275,4 +275,41 @@ fn saved_local_defaults_win_over_a_default_controller_config_as_in_dispatch() {
     // An explicit VADE_CONFIG selects that controller config instead.
     let output = vade(&["setup", "--yes", "--dry-run"], &home, &[("VADE_CONFIG", home.join("config/vade/config").as_os_str())]);
     assert!(text(&output.stdout).starts_with("Using the controller config at"), "{output:?}");
+}
+
+#[test]
+fn hosts_over_a_local_setup_move_it_aside_only_when_told_to() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = home("replace-local");
+    let root = home.join(".vade");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let file = root.join("config");
+    std::fs::write(&file, "format=vade-owner-v1\n").unwrap();
+    let aside = root.join("config.local");
+    // Without the flag and without a terminal: a refusal that names the file. Nothing moves.
+    for args in [&["setup", "--yes", "--hosts", "spark-a"][..], &["setup", "--hosts", "spark-a"]] {
+        let output = vade(args, &home, &[]);
+        let stderr = text(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains(&format!("hint: Run vade setup again with --replace-local to move {:?} aside", file.display().to_string())), "{stderr}");
+        assert!(file.is_file() && !aside.exists());
+    }
+    let dry = vade(&["setup", "--yes", "--replace-local", "--hosts", "spark-a", "--dry-run"], &home, &[]);
+    assert!(dry.status.success(), "{dry:?}");
+    assert!(text(&dry.stdout).contains(&format!("Local setup: setup would move {:?} to {:?}.", file.display().to_string(), aside.display().to_string())), "{dry:?}");
+    assert!(file.is_file() && !aside.exists() && !home.join("config/vade/config").exists());
+    // A running engine keeps its setup.
+    std::fs::create_dir(root.join("state")).unwrap();
+    std::fs::write(root.join("state/run.conf"), "version=1\n").unwrap();
+    let running = vade(&["setup", "--yes", "--replace-local", "--hosts", "spark-a"], &home, &[]);
+    assert!(text(&running.stderr).contains("Run vade down"), "{running:?}");
+    assert!(file.is_file() && !aside.exists());
+    std::fs::remove_file(root.join("state/run.conf")).unwrap();
+    // The steps stop at the failing stub, after the move and the new config.
+    for tool in ["ssh", "rsync", "git"] { stub(&home.join("bin"), tool, 1); }
+    let moved = vade(&["setup", "--yes", "--replace-local", "--hosts", "spark-a"], &home, &[]);
+    assert!(text(&moved.stdout).contains(&format!("Moved the local setup to {:?}. To use it again, move that file back to {:?}.", aside.display().to_string(), file.display().to_string())), "{moved:?}");
+    assert_eq!(std::fs::read_to_string(&aside).unwrap(), "format=vade-owner-v1\n");
+    assert!(!file.exists() && home.join("config/vade/config").is_file(), "{moved:?}");
 }
