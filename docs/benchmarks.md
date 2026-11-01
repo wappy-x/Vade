@@ -4,7 +4,7 @@
 
 ### Current main
 
-These rows measured main `dc32b7c` on our DGX Sparks on the morning of 2026-10-31. Each server start ran one card with drafting on and one card with drafting off. A card is the result file of one RigMark run. The one-Spark rows are the mean of two server starts. The other rows are one start each.
+The FP8 rows measured main `1a07e3a` on our DGX Sparks on the morning of 2026-11-01. The FP4-Local rows measured main `dc32b7c` on the morning of 2026-10-31. Each server start ran one card with drafting on and one card with drafting off. A card is the result file of one RigMark run. Drafting on means the fixed draft depth 2. The one-Spark rows are the mean of two server starts. The other rows are one start each.
 
 [Results and receipts](results.md) links the receipt of every row. It also gives the machines, the server commands and the request settings.
 
@@ -20,10 +20,10 @@ These rows measured main `dc32b7c` on our DGX Sparks on the morning of 2026-10-3
 | FP4-Local · 2 Sparks · off | 36.047 | 35.840 | 36.142 |
 | FP4-Local · 4 Sparks · on | 63.036 | 113.025 | 145.238 |
 | FP4-Local · 4 Sparks · off | 42.084 | 41.486 | 42.072 |
-| FP8 · 2 Sparks · on | 36.624 | 51.293 | 52.763 |
-| FP8 · 2 Sparks · off | 27.072 | 26.913 | 27.114 |
-| FP8 · 4 Sparks · on | 49.508 | 69.340 | 72.248 |
-| FP8 · 4 Sparks · off | 35.902 | 35.641 | 35.955 |
+| FP8 · 2 Sparks · on | 37.845 | 52.981 | 54.460 |
+| FP8 · 2 Sparks · off | 27.650 | 27.534 | 27.721 |
+| FP8 · 4 Sparks · on | 51.362 | 72.301 | 74.507 |
+| FP8 · 4 Sparks · off | 37.172 | 36.951 | 36.667 |
 
 </div>
 
@@ -39,10 +39,10 @@ These rows measured main `dc32b7c` on our DGX Sparks on the morning of 2026-10-3
 | FP4-Local · 2 Sparks · off | 34.375 | 88.178 | 134.414 |
 | FP4-Local · 4 Sparks · on | 86.962 | 177.581 | 245.145 |
 | FP4-Local · 4 Sparks · off | 38.080 | 95.113 | 143.015 |
-| FP8 · 2 Sparks · on | 45.436 | 66.578 | 98.670 |
-| FP8 · 2 Sparks · off | 26.089 | 66.273 | 98.059 |
-| FP8 · 4 Sparks · on | 61.435 | 88.017 | 130.999 |
-| FP8 · 4 Sparks · off | 34.592 | 87.157 | 131.147 |
+| FP8 · 2 Sparks · on | 46.438 | 67.836 | 98.257 |
+| FP8 · 2 Sparks · off | 26.374 | 67.944 | 98.645 |
+| FP8 · 4 Sparks · on | 62.353 | 92.300 | 131.399 |
+| FP8 · 4 Sparks · off | 35.833 | 89.246 | 131.591 |
 
 </div>
 
@@ -55,12 +55,12 @@ These rows measured main `dc32b7c` on our DGX Sparks on the morning of 2026-10-3
 | FP4-Local · 1 Spark | local | 3.769 | 3.778 |
 | FP4-Local · 2 Sparks | tensor split | 2.153 | 2.131 |
 | FP4-Local · 4 Sparks | tensor split in parts | 1.924 | 1.916 |
-| FP8 · 2 Sparks | tensor parallel | 5.971 | 5.952 |
-| FP8 · 4 Sparks | tensor parallel | 6.923 | 6.873 |
+| FP8 · 2 Sparks | tensor parallel | 5.960 | 5.953 |
+| FP8 · 4 Sparks | tensor parallel | 6.821 | 6.821 |
 
 </div>
 
-Rates are in completion tokens per second. Prose, code and structured output each use one chat. C1, C4 and C8 give the total rates for one, four and eight chats at once. Cold 8K is the time to the first token after an uncached 8192-token prompt. Both cards send it with drafting off. The [2026-10-31 section](#current-2026-10-31-morning-main-dc32b7c-home-dgx-sparks) gives the 32K chat and the token ID checks.
+Rates are in completion tokens per second. Prose, code and structured output each use one chat. C1, C4 and C8 give the total rates for one, four and eight chats at once. Cold 8K is the time to the first token after an uncached 8192-token prompt. Both cards send it with drafting off. For FP8, [results and receipts](results.md) gives the 32K chat and the token ID checks. For FP4-Local, the [2026-10-31 section](#current-2026-10-31-morning-main-dc32b7c-home-dgx-sparks) gives them.
 
 These tables are written by hand, because the one-Spark rows average two server starts. The `bench-docs` tool cannot make these tables. It takes one card per setup, only from the newest main that has cards, and it does not average server starts ([bench_docs.rs](../tools/src/bench_docs.rs)). From the repository root, this command replaces this block and the README block with such a table, from a folder of RigMark card files:
 
@@ -68,7 +68,7 @@ These tables are written by hand, because the one-Spark rows average two server 
 cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- bench-docs '<cards-dir>' .
 ```
 
-The full card files are private. Their sanitized extracts are in [bench/receipts/2026-10-31](../bench/receipts/2026-10-31/README.md).
+The full card files are private. Their sanitized extracts are in [bench/receipts/2026-11-01](../bench/receipts/2026-11-01/README.md) for FP8 and in [bench/receipts/2026-10-31](../bench/receipts/2026-10-31/README.md) for FP4-Local.
 
 Each section below names its date and main. Its results apply only to that build.
 
@@ -76,7 +76,7 @@ Each section below names its date and main. Its results apply only to that build
 
 ## How the current numbers were measured
 
-The recipe of the [current table](#current-main) (main `dc32b7c`) is on [results and receipts](results.md), with a sanitized receipt for each card.
+The recipe of the [current table](#current-main) (main `1a07e3a` for FP8, main `dc32b7c` for FP4-Local) is on [results and receipts](results.md), with a sanitized receipt for each card.
 
 This section gives the recipe behind the [2026-10-30 section](#previous-2026-10-30-morning-main-380d8e5-home-dgx-sparks) and the 2026-10-28 and 2026-10-29 rows. Every number there comes from a card file or from a lab report line. Those records are not in the repository.
 
@@ -95,7 +95,8 @@ These are the builds:
 
 | Main | Date | Server build | Used for |
 | :---: | :---: | :---: | :---: |
-| `dc32b7c` | 2026-10-31 | flash-serve `55bdc7a8`, PTX `84c09350` | The current table ([receipts](../bench/receipts/2026-10-31/README.md)) |
+| `1a07e3a` | 2026-11-01 | flash-serve `c5edc3e1`, PTX `f5f78a91` | The current FP8 rows ([receipts](../bench/receipts/2026-11-01/README.md)) |
+| `dc32b7c` | 2026-10-31 | flash-serve `55bdc7a8`, PTX `84c09350` | The current FP4-Local rows ([receipts](../bench/receipts/2026-10-31/README.md)) |
 | `380d8e5` | 2026-10-30 | flash-serve `d56d255c`, PTX `84c09350` | Drafting-on rows, the 32K chat, the context run |
 | `51dce02` (engine `380d8e5`) | 2026-10-30 | flash-serve `44e95e44` | Two pairs at once |
 | `cbbb11b` | 2026-10-29 | flash-serve `cad21fbe`, PTX `4288b2a8` | Drafting off: fp4-local on one Spark, fp8 on two Sparks |
