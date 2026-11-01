@@ -6,9 +6,89 @@ All speeds are completion tokens per second (tok/s). Times are in seconds. A car
 
 A short revision such as `dc32b7c` names a commit of the private development history. The public repository holds squashed copies of those commits ([glossary](GLOSSARY.md#ho), "Main `abc1234`"). Each receipt gives the full 40-character revision.
 
-## Current main: dc32b7c, 2026-10-31 morning
+## Current FP8: main 1a07e3a, 2026-11-01 morning
+
+The receipts are in [bench/receipts/2026-11-01](../bench/receipts/2026-11-01/README.md).
+
+That page gives the build and binary hashes and the checkpoint identity. It names the machines: DGX Spark, NVIDIA GB10, with the clocks not locked. It also gives the server starts and the request settings. Main `d913e84` has the same engine as main `1a07e3a`.
+
+**Server starts.** Each setup had two server starts, both from a private launcher with context 32768 and output limit 16384. The first start passed drafting depth 2 and ran the drafting-on card, the drafting-off card and the 32K chat. The second start passed no drafting depth, so the server chose it, and ran one drafting-on card. `/health` reported depth 7 on both chooser starts. These are the public commands for the same setups. We did not run a card with them on this date.
+
+```sh
+vade up --fp8 --sparks 2 --context 32768 --output 16384
+vade up --fp8 --sparks 4 --context 32768 --output 16384
+```
+
+**One chat and the cold 8K prompt**
+
+<div align="center">
+
+| Setup | Drafting | Prose (tok/s) | Code (tok/s) | Structured (tok/s) | Cold 8K (s) |
+| :---: | :---: | :---: | :---: | :---: | :---: |
+| FP8 · 2 Sparks | on, depth 2 | 37.845 | 52.981 | 54.460 | 5.960 |
+| FP8 · 2 Sparks | on, chosen by the server | 37.562 | 66.130 | 80.845 | 5.959 |
+| FP8 · 2 Sparks | off | 27.650 | 27.534 | 27.721 | 5.953 |
+| FP8 · 4 Sparks | on, depth 2 | 51.362 | 72.301 | 74.507 | 6.821 |
+| FP8 · 4 Sparks | on, chosen by the server | 46.858 | 90.067 | 110.847 | 6.813 |
+| FP8 · 4 Sparks | off | 37.172 | 36.951 | 36.667 | 6.821 |
+
+</div>
+
+**Chats at once (total tok/s)**
+
+<div align="center">
+
+| Setup | Drafting | C1 | C2 | C4 | C8 |
+| :---: | :---: | :---: | :---: | :---: | :---: |
+| FP8 · 2 Sparks | on, depth 2 | 46.438 | not sent | 67.836 | 98.257 |
+| FP8 · 2 Sparks | on, chosen by the server | 49.928 | not sent | 68.266 | 98.457 |
+| FP8 · 2 Sparks | off | 26.374 | not sent | 67.944 | 98.645 |
+| FP8 · 4 Sparks | on, depth 2 | 62.353 | 58.652 | 92.300 | 131.399 |
+| FP8 · 4 Sparks | on, chosen by the server | 66.792 | 58.401 | 91.582 | 132.127 |
+| FP8 · 4 Sparks | off | 35.833 | 56.584 | 89.246 | 131.591 |
+
+</div>
+
+These are the receipts:
+
+- **FP8, two Sparks:** [drafting on, depth 2](../bench/receipts/2026-11-01/fp8-2spark-on.json), [drafting on, chosen by the server](../bench/receipts/2026-11-01/fp8-2spark-on-chooser.json) and [drafting off](../bench/receipts/2026-11-01/fp8-2spark-off.json).
+- **FP8, four Sparks:** [drafting on, depth 2](../bench/receipts/2026-11-01/fp8-4spark-on.json), [drafting on, chosen by the server](../bench/receipts/2026-11-01/fp8-4spark-on-chooser.json) and [drafting off](../bench/receipts/2026-11-01/fp8-4spark-off.json).
+
+How to read the tables:
+
+- **Medians.** Each cell is the card's own median. Prose, code and structured use 5 runs. C1, C2, C4 and C8 use 3 rounds. Cold 8K uses 5 cold requests on two Sparks and 3 on four Sparks. Every row is one server start.
+- **Two-Spark cards.** The two-Spark cards leave out the C2 round and send five cold and five warm 8K prompts. So they hold 64 responses, not 66.
+- **Requests.** The chat and 8K request settings are the same as in the [2026-10-31 cards](#current-fp4-local-main-dc32b7c-2026-10-31-morning): greedy chats with seed 20260905, thinking off and `cache` false; 8K token prompts with `"draft": "plain"`, a new cache salt for each cold request and a replay with the same salt. No cold request restored a cached token. Every replay restored all 8,192 tokens. The drafting-off card sends `"draft": "plain"` in its 60 chats. The drafting-on cards leave `draft` out.
+- **Noise.** Every row is one server start. Starts of the same setup have differed by up to 2.81 % in one cell ([history](benchmarks.md#speed)). So treat a smaller gap between two rows as noise.
+
+**The 32K-token chat**
+
+The chat client and the first question are the same as on 2026-10-31. The second question holds the first answer, so its length follows the token IDs. On both setups it is 32,238 tokens. The chat ran on the depth 2 start.
+
+<div align="center">
+
+| Setup | First question | Second question, cache | Second question, no cache |
+| :---: | :---: | :---: | :---: |
+| FP8 · 2 Sparks | 24.080 | 0.890 | 23.909 |
+| FP8 · 4 Sparks | 27.376 | 0.781 | 27.357 |
+
+</div>
+
+The cached run reused 32,064 tokens on both setups. The second question gave the same token IDs with the cache and without it (`turn2_ids_equal`). The receipts are [two Sparks](../bench/receipts/2026-11-01/fp8-2spark-chat32k.json) and [four Sparks](../bench/receipts/2026-11-01/fp8-4spark-chat32k.json).
+
+### FP8 token IDs
+
+- **FP8, four Sparks.** The drafting-on, drafting-off and chooser cards have the same `token_ids_sha256`, `2af8329ff3867b00165411156482d906c05cf6416bbabe2f3fe6bbe524e124a2`. This is also the value of the 2026-10-31 FP8 two-Spark cards. So these four-Spark cards gave the same token IDs as those two-Spark cards in all 66 responses.
+- **FP8, two Sparks.** The drafting-on, drafting-off and chooser cards have the same value, `f1c1a5ff1b333158bbc9f9e93bd24bc3f980966852f9050607493710c750bada`. It covers 64 responses.
+- **FP8, two against four Sparks on 2026-11-01.** We compared the full card files. Every response that both cards sent gave the same token IDs: the 15 single chats, the first three cold and warm 8K runs, and the C1, C4 and C8 streams.
+- **The 32K chat.** Both setups gave the turn digests `28a6dca8...` and `b01b5a6b...`, the same as the 2026-10-31 FP8 two-Spark chat.
+- **Re-run.** `vade bench --card --receipt` can check the four-Spark files. It cannot check the 64-response two-Spark files. We have not run it against these receipts.
+
+## Current FP4-Local: main dc32b7c, 2026-10-31 morning
 
 The receipts are in [bench/receipts/2026-10-31](../bench/receipts/2026-10-31/README.md).
+
+The FP4-Local rows of this section are current. Its FP8 rows are the earlier 2026-10-31 FP8 cards. The [2026-11-01 FP8 cards](#current-fp8-main-1a07e3a-2026-11-01-morning) replace them.
 
 That page gives the build and binary hashes and the checkpoint identities. It names the machines: DGX Spark, NVIDIA GB10, driver 580.178.04, with the clocks not locked. It also gives the server start command of each setup and the request settings.
 
@@ -102,7 +182,7 @@ These are the receipts:
 - **FP4-Local, one, two and four Sparks, drafting on and off.** All eight cards have the same `token_ids_sha256`. So every one of the 66 responses had the same token IDs.
 - **FP8, two Sparks.** The drafting-on and drafting-off cards have the same value.
 - **FP8, four Sparks.** The drafting-on and drafting-off cards have the same value.
-- **FP8, two against four Sparks.** The values differ. Compared response by response, 7 of 66 are the same and 59 differ. This count is from the private card comparison (private report `own-rigmark-morning-r1`), not from a file here. It broke the rule that supported Spark counts give the same token IDs. A later change, approved on 2026-10-31, makes FP8 on four Sparks add its partial sums in the two-Spark order, so four Sparks now give the same token IDs as two ([changelog](../CHANGELOG.md)). These cards predate that change.
+- **FP8, two against four Sparks.** The values differ. Compared response by response, 7 of 66 are the same and 59 differ. This count is from the private card comparison (private report `own-rigmark-morning-r1`), not from a file here. It broke the rule that supported Spark counts give the same token IDs. A later change, approved on 2026-10-31, makes FP8 on four Sparks add its partial sums in the two-Spark order, so four Sparks now give the same token IDs as two ([changelog](../CHANGELOG.md)). These cards predate that change. The [2026-11-01 FP8 cards](#fp8-token-ids) were made after it.
 
 ### What a stranger can and cannot re-run
 

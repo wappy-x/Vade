@@ -85,16 +85,14 @@ The numbers are tokens per second. Drafting is Vade's speculative decoding: the 
 | FP4-Local · 1 Spark | 42.5 | 27.9 | 179.0 |
 | FP4-Local · 2 Sparks | 54.9 | 36.0 | 232.2 |
 | FP4-Local · 4 Sparks | 63.0 | 42.1 | 245.1 |
-| FP8 · 2 Sparks | 36.6 | 27.1 | 98.7 |
-| FP8 · 4 Sparks | 49.5 | 35.9 | 131.0 |
+| FP8 · 2 Sparks | 37.8 | 27.7 | 98.3 |
+| FP8 · 4 Sparks | 51.4 | 37.2 | 131.4 |
 
 </div>
 
-We measured main `dc32b7c` on our own Sparks on the morning of 2026-10-31. One chat writes prose of up to 8192 tokens. The one-Spark row is the average of two server starts, and every other row is one start. The raw record of every run is in the [receipts](bench/receipts/2026-10-31/README.md).
+We measured main `1a07e3a` on our own Sparks on the morning of 2026-11-01 for the FP8 rows, and main `dc32b7c` on the morning of 2026-10-31 for the FP4-Local rows. One chat writes prose of up to 8192 tokens. The one-Spark row is the average of two server starts, and every other row is one start. Drafting on means the fixed draft depth 2 that every card uses; the shipped chooser column is coming. The raw record of every run is in the receipts: [FP8](bench/receipts/2026-11-01/README.md) and [FP4-Local](bench/receipts/2026-10-31/README.md).
 
 <!-- bench-docs:end -->
-
-Later that day, FP8 on four Sparks changed. It now gives the same token IDs as FP8 on two Sparks. The speed fix that followed merged on 2026-11-01, and the next benchmark run replaces this table.
 
 [Results](docs/results.md) has every cell of these runs, with the build, the server commands and the request settings. [Benchmark history](docs/benchmarks.md) keeps every earlier run.
 
@@ -120,7 +118,7 @@ Exact means the same request with the same settings gives the same token IDs. Th
 
 **Defaults.** FP4-Local is greedy unless a request sets sampling fields, so it is exact out of the box. FP8 samples by default, with a new seed for each request. For exact FP8 replies, send `temperature` 0, `repetition_penalty` 1, `presence_penalty` 0 and `frequency_penalty` 0 ([FP8 defaults](docs/install-fp8.md#defaults-and-drafting)).
 
-To check your own engine, run `vade verify`. [Token IDs](docs/results.md#token-ids) shows our checks. The FP8 runs there predate the FP8 change, so their two-Spark and four-Spark IDs still differ. [Architecture](docs/architecture.md#exactness-and-model-quality) gives the full rule and what each check proves.
+To check your own engine, run `vade verify`. [Token IDs](docs/results.md#token-ids) shows our checks. On main `1a07e3a`, FP8 on two and four Sparks gave the same token IDs ([FP8 token IDs](docs/results.md#fp8-token-ids)). [Architecture](docs/architecture.md#exactness-and-model-quality) gives the full rule and what each check proves.
 
 
 <a id="supported-systems"></a>
