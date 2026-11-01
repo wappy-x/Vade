@@ -577,7 +577,9 @@ unsafe fn grouped_project_impl<const PREFILL: bool, const GENERAL: bool>(p: crat
     };
     let map = if down { core::ptr::null() } else { (p.route.sorted_row as *const u32).add(start) };
     let output_map = if down { (p.route.output_row as *const u32).add(start) } else { core::ptr::null() };
-    let split_k = if GENERAL { (p.output_shard as usize & !65535) | expert } else if owned { (3 - expert % 2) * 128 } else { 0 };
+    // GENERAL folds the K128 blocks in the two-rank groups at every rank count,
+    // so its sums equal the TP2 entry's split_k fold bit for bit.
+    let split_k = if GENERAL { (crate::fp8_abi::EXPERT_FOLD_RANKS << 16) | expert } else if owned { (3 - expert % 2) * 128 } else { 0 };
     // Down partials stay FP32 until rank reduction, then round once to BF16.
     // Counts are device-resident. One uniform decision per CTA keeps the
     // complete tile's staging, scale loads and stores free of row guards.

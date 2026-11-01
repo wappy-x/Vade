@@ -26,6 +26,27 @@ pub(crate) fn range(tiles: usize, part: usize) -> (usize, usize) {
     (tiles * part / 4, tiles * (part + 1) / 4)
 }
 
+/// A merge part outside a K-split shard's ranges: -0.0 is the exact FP32
+/// identity, so the four-part merge equals the shard's own subtree.
+pub(crate) const EMPTY: Acc = Acc { a: -0.0, b: -0.0, c: -0.0, d: -0.0 };
+/// Tiles of merge part `part` in a shard with `ranges` canonical ranges (0 is
+/// four, the same bounds as `range`); None outside the shard's ranges.
+#[inline(always)]
+pub(crate) fn span(tiles: usize, part: usize, ranges: u32) -> Option<(usize, usize)> {
+    crate::kernel_params::canonical_span(tiles, part, ranges)
+}
+/// For walks that close ranges in tile order: the end tile of `part`, and the
+/// next part the shard holds. Ranges 0 give `range` and `part + 1`.
+#[inline(always)]
+pub(crate) fn end(tiles: usize, part: usize, ranges: u32) -> usize {
+    if ranges == 0 { return range(tiles, part).1; }
+    match span(tiles, part, ranges) { Some((_, end)) => end, None => usize::MAX }
+}
+#[inline(always)]
+pub(crate) fn next(part: usize, ranges: u32) -> usize {
+    part + if ranges == 2 { 2 } else { 1 }
+}
+
 /// Packed B fragments: contiguous 64x64 blocks, eight rows per MMA tile.
 #[inline(always)]
 pub(crate) fn weight_tile(row: usize, col: usize, kt: usize) -> usize {

@@ -9,7 +9,7 @@ use engine_model::{
 use spark_gpu_probe::{
     driver::{Backend, PromptBuffer, WeightArena},
     kernel_params::{
-        FlashBf16Pack, HybridCopy, HybridCopyRow, flash_bf16_element, flash_bf16_packed,
+        FlashBf16Pack, HybridCopy, HybridCopyRow, flash_bf16_element, flash_bf16_packed, shard_ranges,
     },
     load::{WeightFile, WeightRange},
 };
@@ -47,6 +47,8 @@ pub struct Weights<'a> {
     pub plan: RankPlan,
     pub tensors: BTreeMap<String, TensorSlice>,
     pub payload_bytes: usize,
+    /// K-split shard ranges; declared before the arena so they unregister first.
+    _split: Vec<crate::flash_split_ranges::Registration>,
     arena: WeightArena<'a>,
 }
 struct Entry<'a> {
@@ -235,6 +237,7 @@ impl<'a> Weights<'a> {
             plan: cp.plan.execution_plan().map_err(|e| e.to_string())?,
             tensors,
             payload_bytes,
+            _split: Vec::new(),
             arena,
         })
     }
@@ -425,12 +428,21 @@ impl<'a> Weights<'a> {
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
         eprintln!("flash_weights load plan_ms={:.0} arena_ms={:.0} pack_ms={:.0} bytes={bytes}",
             ms(planned), ms(streamed - planned), ms(started.elapsed() - streamed));
+        // A BF16 matrix stored by a column (K) range is a K-split shard.
+        let mut split = Vec::new();
+        for t in tensors.values() {
+            if let Selection::Columns(r) = &t.selection && t.tensor.dtype == Dtype::Bf16 && t.tensor.shape.len() == 2 {
+                split.extend(crate::flash_split_ranges::register(arena.device_address() + t.offset as u64,
+                    shard_ranges((r.end - r.start) as usize, t.tensor.shape[1] as usize))?);
+            }
+        }
         Ok(Self {
             format: checkpoint.config.format,
             mixed: checkpoint.config.mixed.is_some(),
             plan,
             tensors,
             payload_bytes,
+            _split: split,
             arena,
         })
     }

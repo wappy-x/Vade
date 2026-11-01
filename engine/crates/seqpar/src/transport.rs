@@ -18,6 +18,10 @@ mod connect;
 #[path = "transport/gather.rs"]
 mod gather;
 
+#[cfg(any(target_os = "linux", test))]
+#[path = "transport/path_reduce.rs"]
+mod path_reduce;
+
 #[cfg(target_os = "linux")]
 #[path = "rdma.rs"]
 mod rdma;
@@ -260,6 +264,22 @@ fn parallel_chunks<A: Send, B: Sync>(a: &mut [A], b: &[B], f: impl Fn(&mut [A], 
 #[cfg(any(target_os = "linux", test))]
 fn parallel_copy(source: &[u8], destination: &mut [u8]) {
     parallel_chunks(destination, source, |destination, source| destination.copy_from_slice(source));
+}
+
+/// The all-reduce additions in order, as (into, from) ranks; into 0 is the output.
+/// Rank 0 adds the sums of ranks [1, 2), [2, 4), [4, 8), ..., each formed in place
+/// by pairwise passes (kernel_params::fold_ranks). Two and three ranks add rank by rank.
+fn tree_adds(world: usize, mut add: impl FnMut(usize, usize)) {
+    let mut size = 1;
+    while size < world {
+        let (end, mut step) = ((2 * size).min(world), 1);
+        while size + step < end {
+            for first in (size..end - step).step_by(2 * step) { add(first, first + step); }
+            step *= 2;
+        }
+        add(0, size);
+        size *= 2;
+    }
 }
 
 impl Ring {
@@ -641,70 +661,6 @@ impl Ring {
         })
     }
 
-    /// Pipeline an ordered sum down the path, then broadcast it back. Each
-    /// element is still ((rank 0 + rank 1) + rank 2) ...; small pieces let
-    /// neighbouring links progress together without spawning copy workers.
-    #[cfg(target_os = "linux")]
-    fn reduce_path_mailboxes(&mut self, values: &mut [f32]) -> Result<()> {
-        if self.poisoned { return Err("ring is unusable after an earlier collective failure".into()); }
-        const PIECE: usize = 65536;
-        let profiling = self.profile.is_some();
-        let start = Instant::now();
-        let wall = if self.trace_transfers { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()) } else { 0 };
-        let before = self.stats;
-        let result = (|| -> Result<()> {
-            let base = self.collective.as_mut_ptr().cast::<u8>();
-            for (endpoint, mailbox) in self.endpoints.iter_mut().zip(&self.mailbox).chain(self.second.iter_mut().zip(&self.mailbox2)) {
-                if let (Some(endpoint), Some(m)) = (endpoint, mailbox) {
-                    if m.slot < PIECE * 4 || m.slot % 4 != 0 { return Err("path reduction needs aligned mailbox slots of at least 256 KiB".into()); }
-                    unsafe { endpoint.register_cached(base.add(m.offset), 3 * m.slot, &mut self.collective_regions)?; }
-                }
-            }
-            let deadline = start + TIMEOUT;
-            // Each element is prior + own; the first rail carries the piece's head.
-            let merge = |arrived: &[u8], piece: &mut [f32], broadcast: bool| {
-                let prefix = unsafe { std::slice::from_raw_parts(arrived.as_ptr().cast::<f32>(), piece.len()) };
-                if broadcast { piece.copy_from_slice(prefix); }
-                else { for (value, prior) in piece.iter_mut().zip(prefix) { *value = *prior + *value; } }
-            };
-            for broadcast in [false, true] {
-                let source = usize::from(!broadcast);
-                let destination = 1 - source;
-                for piece in values.chunks_mut(PIECE) {
-                    let bytes = std::mem::size_of_val(piece);
-                    let from = Self::first_rail(bytes, self.second[source].is_some());
-                    let to = Self::first_rail(bytes, self.second[destination].is_some());
-                    let (head, tail) = piece.split_at_mut(from / 4);
-                    if let (Some(endpoint), Some(m)) = (&mut self.endpoints[source], &mut self.mailbox[source]) {
-                        unsafe { m.receive(endpoint, base, from, deadline, |arrived| timed(profiling, &mut self.stats.consumer_ns, || { merge(arrived, head, broadcast); Ok(()) }))?; }
-                        self.stats.received += bytes as u64;
-                    }
-                    if let (Some(endpoint), Some(m)) = (&mut self.second[source], &mut self.mailbox2[source]) {
-                        unsafe { m.receive(endpoint, base, bytes - from, deadline, |arrived| timed(profiling, &mut self.stats.consumer_ns, || { merge(arrived, tail, broadcast); Ok(()) }))?; }
-                    }
-                    if let (Some(endpoint), Some(m)) = (&mut self.endpoints[destination], &mut self.mailbox[destination]) {
-                        unsafe { m.post(endpoint, base, to, deadline, |slot| timed(profiling, &mut self.stats.producer_ns, || { parallel_copy(std::slice::from_raw_parts(piece.as_ptr().cast(), to), slot); Ok(()) }))?; }
-                        self.stats.sent += bytes as u64;
-                    }
-                    if let (Some(endpoint), Some(m)) = (&mut self.second[destination], &mut self.mailbox2[destination]) {
-                        unsafe { m.post(endpoint, base, bytes - to, deadline, |slot| timed(profiling, &mut self.stats.producer_ns, || { parallel_copy(std::slice::from_raw_parts(piece.as_ptr().cast::<u8>().add(to), bytes - to), slot); Ok(()) }))?; }
-                    }
-                }
-            }
-            Ok(())
-        })();
-        if result.is_err() { self.abort(); }
-        let elapsed = start.elapsed().as_nanos();
-        self.stats.elapsed_ns += elapsed;
-        self.stats.exchanges += 1;
-        if self.trace_transfers {
-            let delta = self.stats.since(before);
-            println!("seqpar_transfer rank={} exchange={} rdma=true sent_bytes={} received_bytes={} control_sent_bytes=0 control_received_bytes=0 elapsed_ns={elapsed} post_ns=0 wait_ns={elapsed} start_unix_ns={wall} mailbox=true path_reduce=true ok={}",
-                self.rank, self.stats.exchanges, delta.sent, delta.received, result.is_ok());
-        }
-        result
-    }
-
     /// Host mailbox allocation bytes across every neighbour and rail. Multi-rank
     /// mailboxes consume unified memory even without the pair-only GPU handoff.
     #[cfg(target_os = "linux")]
@@ -999,8 +955,10 @@ impl Ring {
         Ok(())
     }
 
-    /// Gather partials, then add rank 1 through rank N-1 to rank 0 in FP32.
-    /// Every rank obtains the same result, independent of network arrival order.
+    /// Gather partials, then add them in FP32 as a pair tree: (r0 + r1) + (r2 + r3).
+    /// Two and three ranks keep the sequential order. Every rank obtains the
+    /// same result, independent of network arrival order.
+    /// Large sums on a path of three or four ranks pipeline in the same order.
     /// Scratch holds at least world * values.len() FP32 values and is reusable.
     pub fn all_reduce_f32(&mut self, values: &mut [f32], scratch: &mut [f32]) -> Result<()> {
         self.collective(Kind::ReduceF32, |ring| ring.all_reduce_f32_inner(values, scratch))
@@ -1016,9 +974,8 @@ impl Ring {
         #[cfg(target_os = "linux")]
         if self.link.duplex() && self.mailbox[0].is_some() && width != 0 { return self.reduce_mailbox(values); }
         #[cfg(target_os = "linux")]
-        if self.link.is_path() && self.world > 2 && width >= 262144 && self.mailbox.iter().any(Option::is_some) {
-            return self.reduce_path_mailboxes(values);
-        }
+        if self.link.is_path() && width >= 262144 && self.mailbox.iter().any(Option::is_some)
+            && let Some(steps) = path_reduce::path_tree_steps(self.rank, self.world) { return self.reduce_path_tree(values, steps); }
         #[cfg(target_os = "linux")]
         let partials = if self.staged() && width != 0 && self.mailbox.iter().all(Option::is_none) {
             // Gather in the registered buffer itself; the ordered sum below is unchanged.
@@ -1043,15 +1000,19 @@ impl Ring {
         }
         if width == 0 { return Ok(()); }
         let sum = profiling.then(Instant::now);
-        values.copy_from_slice(&partials[..width]);
-        for partial in partials[width..].chunks_exact(width) {
+        let add = |values: &mut [f32], partial: &[f32]| {
             #[cfg(target_os = "linux")]
             parallel_chunks(values, partial, |values, partial| {
                 for (value, addend) in values.iter_mut().zip(partial) { *value += *addend; }
             });
             #[cfg(not(target_os = "linux"))]
             for (value, addend) in values.iter_mut().zip(partial) { *value += *addend; }
-        }
+        };
+        values.copy_from_slice(&partials[..width]);
+        tree_adds(self.world, |into, from| {
+            let (low, high) = partials.split_at_mut(from * width);
+            add(if into == 0 { &mut *values } else { &mut low[into * width..(into + 1) * width] }, &high[..width]);
+        });
         if let Some(sum) = sum { self.stats.consumer_ns += sum.elapsed().as_nanos(); }
         // Gather already accounts for its span; include the ordered host sum
         // without counting that span twice in per-layer collective profiles.
@@ -1476,6 +1437,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn two_and_three_ranks_keep_the_sequential_adds() {
+        let adds = |world| { let mut adds = Vec::new(); tree_adds(world, |into, from| adds.push((into, from))); adds };
+        // Before the pair tree, rank 0's copy took ranks 1 through N-1 in turn.
+        assert_eq!(adds(1), []);
+        assert_eq!(adds(2), [(0, 1)]);
+        assert_eq!(adds(3), [(0, 1), (0, 2)]);
+        assert_eq!(adds(4), [(0, 1), (2, 3), (0, 2)]);
+        assert_eq!(adds(8), [(0, 1), (2, 3), (0, 2), (4, 5), (6, 7), (4, 6), (0, 4)]);
+    }
+    #[test]
+    fn all_reduce_adds_ranks_as_a_pair_tree() {
+        for (world, path) in [1, 2, 3, 4, 5, 6, 8].into_iter().flat_map(|n| [false, true].map(move |p| (n, p))) {
+            let listeners = (0..world).map(|_| TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap()).collect::<Vec<_>>();
+            let addresses = listeners.iter().map(|l| l.local_addr().unwrap()).collect::<Vec<_>>();
+            drop(listeners);
+            // Values whose sums round differently in other orders.
+            let value = |rank: usize, i: usize| [1.0e8f32, 1.0, -1.0e8, 3.0, 0.5, -7.25, 2.0e-3, 9.0e7][(rank + i) % 8] * (1.0 + i as f32 / 7.0);
+            let expected = (0..37).map(|i| {
+                let mut p = (0..world).map(|r| value(r, i)).collect::<Vec<_>>();
+                let mut step = 1;
+                while step < world { for first in (0..world - step).step_by(2 * step) { p[first] += p[first + step]; } step *= 2; }
+                p[0].to_bits()
+            }).collect::<Vec<_>>();
+            std::thread::scope(|scope| {
+                for rank in 0..world {
+                    let (addresses, expected) = (&addresses, &expected);
+                    scope.spawn(move || {
+                        let mut ring = Ring::connect_topology(rank, world, addresses[rank], addresses[(rank + 1) % world], "reduce-test", path, TIMEOUT).unwrap();
+                        let mut values = (0..37).map(|i| value(rank, i)).collect::<Vec<_>>();
+                        ring.all_reduce_f32(&mut values, &mut vec![0.0; 37 * world]).unwrap();
+                        assert_eq!(&values.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), expected, "world {world} path {path}");
+                    });
+                }
+            });
+        }
+    }
     #[test]
     fn disconnected_peer_poisoned_collective_fails_without_waiting() {
         let listeners = (0..2).map(|_| TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap()).collect::<Vec<_>>();

@@ -162,6 +162,8 @@ impl GraphAllowance {
 }
 
 #[cfg(test)]
+mod split_order_tests;
+#[cfg(test)]
 mod tests {
     use super::*;
 

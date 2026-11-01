@@ -86,6 +86,44 @@ below. This is not a claim of full-model official BF16 parity.
 The existing FP32 and BF16 fixtures are not a W8A8 reference. Their strict
 comparison remains enabled and can fail after this precision change.
 
+## Rank counts
+
+The FP8 split is built so that two and four Sparks give the same sums. Every
+sum that crosses ranks keeps the grouping of the two-rank split. A device run
+on each Spark count must confirm that the token IDs are identical.
+
+- Attention `o_proj`, GDN `out_proj` and the shared expert down split K. Two
+  ranks hold four canonical K ranges each. On four ranks a shard holds two of
+  those ranges, and the generic projection entries compute only those
+  ([`canonical_span`](../crates/gpu/kernel_params.rs)). A part that the shard
+  does not hold adds -0.0, the exact FP32 identity.
+- Rank partials add as a pair tree, `(r0 + r1) + (r2 + r3)`, in the host
+  all-reduce and in the shared expert fold
+  ([`fold_ranks`](../crates/gpu/kernel_params.rs)). Two and three ranks add
+  rank by rank, as before. On a path of three or four Sparks, large sums
+  (prompt rows) pipeline through the neighbours in this order
+  ([`path_reduce.rs`](../crates/seqpar/src/transport/path_reduce.rs)); other
+  rank counts gather all partials first.
+- The routed down sum of the 48 decoder layers groups its five K128 blocks as
+  the two-rank split does, at every rank count (`EXPERT_FOLD_RANKS`).
+- The MTP draft layer (`mtp.layers.0.mlp`) still splits each routed expert's
+  blocks by rank, and that sum is not covered. Its drafts can differ between
+  two and four Sparks. With Strict verification this changes speed, not the
+  token IDs. Sampled verification (`"draft":"sampled"`) can choose other
+  tokens for the same seed.
+
+The loader registers a four-rank shard by weight address
+([`split_ranges.rs`](../crates/engine/src/flash/split_ranges.rs)), and
+`project_rows` puts its ranges in the high bits of the launch's `cols` word
+(`bf16_cols_word`). Such a shard takes the generic entries and the 64-row
+prompt tiles, which keep the same canonical chains. Two ranks register nothing: each launch has the same
+descriptor bytes and kernel as before, and the fixed-shape decode entries keep
+their code. One Spark cannot hold the FP8 checkpoint. Six and eight ranks keep
+four ranges per shard and give their own IDs. `FLASH_BF16_EXPERTS=1` keeps
+rank-split routed down sums and is not covered. The host model
+[`split_order_tests.rs`](../crates/gpu/src/split_order_tests.rs) repeats
+these addition orders on the CPU for two and four ranks.
+
 ## Product controls and memory
 
 W8A8 is the default. `FLASH_BF16_EXPERTS=1` explicitly selects the previous

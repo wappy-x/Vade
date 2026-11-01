@@ -668,8 +668,8 @@ pub unsafe extern "ptx-kernel" fn fp8_middle_unpack_general(g: crate::fp8_abi::G
     } else {
         let col = at - 1650;
         let source = (p.receive as *const f32).add(token * words + 10 * record + col);
-        let mut value = *source;
-        for rank in 1..world { value += *source.add(rank * span); }
+        // The pair tree keeps the two-rank shared expert sum at every rank count.
+        let value = crate::kernel_params::fold_ranks(world, |rank| *source.add(rank * span));
         *((p.partials as *mut f32).add((token * 11 + 10) * 2560 + col)) = value;
     }
 }

@@ -788,6 +788,8 @@ fn project_rows(b: &Backend<'_>, x: u64, cols: usize, tokens: usize, first: (u64
         return Ok(());
     }
     let mut params = row_params(x, cols, tokens, first, second, input_bf16, hc_silu);
+    // Four ranks: a K-split shard computes only its two canonical K ranges (generic entries only).
+    let ranges = crate::flash_split_ranges::launch(&mut params.cols, first.0, (second.2 != 0).then_some(second.0))?;
     b.decode_weight_read(|| (first.2 + second.2) * cols * 2);
     let rows = first.2 + second.2;
     let mut threads = 128;
@@ -795,7 +797,7 @@ fn project_rows(b: &Backend<'_>, x: u64, cols: usize, tokens: usize, first: (u64
         return Err("Flash BF16 MMA needs K >= 64, a multiple of 8, and aligned operands".into());
     }
     if tokens > decode_width && !input_bf16 { params.input = b.pack_flash_dense_input(x, cols, tokens)?; }
-    if tokens >= 128 && cols % 64 == 0 && first.2 % 64 == 0 && second.2 % 64 == 0 {
+    if tokens >= 128 && cols % 64 == 0 && first.2 % 64 == 0 && second.2 % 64 == 0 && ranges == 0 { // no ranges copy: shards take mma64
         return profile_projection(b, rows, cols, || {
             let full = tokens / 128 * 128;
             params.tokens = full as u32;
@@ -818,11 +820,11 @@ fn project_rows(b: &Backend<'_>, x: u64, cols: usize, tokens: usize, first: (u64
         });
     }
     let (name, blocks) = if tokens <= decode_width {
-        if tokens == 1 && cols == 2560 && rows < 64 && !input_bf16 {
+        if tokens == 1 && cols == 2560 && rows < 64 && !input_bf16 && ranges == 0 {
             return b.profile_phase(16, || unsafe { b.launch_flash_rows("flash_bf16_mma1_2560_small", rows as u32, 1, 128, 0,
                 &mut [(&mut params as *mut Bf16Rows).cast()]) });
         }
-        let decode = match cols {
+        let decode = if ranges != 0 { "flash_bf16_mma1" } else { match cols {
             320 if rows >= 1024 && first.2 % 64 == 0 && second.2 % 64 == 0 => {
                 if input_bf16 { "flash_bf16_mma1_320_bf16" } else { "flash_bf16_mma1_320" }
             }
@@ -833,7 +835,7 @@ fn project_rows(b: &Backend<'_>, x: u64, cols: usize, tokens: usize, first: (u64
             10240 => "flash_bf16_mma1_10240",
             3072 if !input_bf16 && rows >= 1024 && rows < 16384
                 && first.2 % 64 == 0 && second.2 % 64 == 0 => "flash_bf16_mma1_3072_native",
-            _ => "flash_bf16_mma1" };
+            _ => "flash_bf16_mma1" } };
         let groups = first.2.div_ceil(8) + second.2.div_ceil(8);
         if !spark_gpu_probe::kernel_params::flash_bf16_decode_split(rows, cols) { threads = 64; (decode, groups.div_ceil(2)) }
         else { (decode, groups) }

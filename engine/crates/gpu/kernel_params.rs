@@ -822,6 +822,68 @@ pub const fn flash_bf16_element(row: usize, col: usize, width: usize, rows: usiz
         + col % 2 + col % 16 / 8 * 2
 }
 
+/// A K-split projection keeps the two-rank split's sum tree at every rank
+/// count: K divides into two shards of four canonical ranges (eight leaves). A
+/// four-rank shard computes only its two ranges, and the ranks fold as a pair
+/// tree.
+pub const SPLIT_LEAVES: usize = 8;
+/// Canonical ranges in a K shard of `shard` of `whole` columns: 2 for a shard
+/// of exactly two leaves (four ranks); any other shard keeps four of its own (0).
+#[inline]
+pub const fn shard_ranges(shard: usize, whole: usize) -> u32 {
+    if whole != 0 && shard * SPLIT_LEAVES == 2 * whole { 2 } else { 0 }
+}
+/// Bf16Rows.cols bit where a K-split shard's ranges start. Only the generic
+/// projection entries read it; zero keeps every launch byte-identical to a
+/// launch without ranges.
+pub const BF16_RANGES_SHIFT: u32 = 28;
+/// The Bf16Rows.cols word of a K-split shard: K, plus its ranges when not four.
+#[inline]
+pub const fn bf16_cols_word(cols: u32, ranges: u32) -> u32 { cols | ranges << BF16_RANGES_SHIFT }
+/// K and the ranges from a Bf16Rows.cols word.
+#[inline]
+pub const fn bf16_cols_ranges(word: u32) -> (u32, u32) {
+    (word & ((1 << BF16_RANGES_SHIFT) - 1), word >> BF16_RANGES_SHIFT)
+}
+/// K16 tiles of merge part `part` (0..4) in a shard with `ranges` ranges (2, or
+/// any other value for four). Parts 1 and 3 of a two-range shard are None:
+/// kernels give them -0.0, the exact FP32 identity, so `(p0 + p1) + (p2 + p3)`
+/// equals the shard's own subtree of the canonical tree.
+#[inline]
+pub const fn canonical_span(tiles: usize, part: usize, ranges: u32) -> Option<(usize, usize)> {
+    if ranges != 2 { return Some((tiles * part / 4, tiles * (part + 1) / 4)); }
+    if part % 2 != 0 { return None; }
+    Some((tiles * (part / 2) / 2, tiles * (part / 2 + 1) / 2))
+}
+/// Rank counts fold_ranks holds: rank 65535 would need a 17th carry entry.
+pub const FOLD_RANKS_LIMIT: usize = 1 << 16;
+/// FP32 partials of `count` ranks folded as a pair tree: ranks 2i and 2i+1
+/// first, then pairs of pairs. Two and three ranks keep the sequential order.
+/// A carry stack gives the same additions as the in-place pairwise passes. Its
+/// 16 entries hold any count below FOLD_RANKS_LIMIT; callers pass a rank count.
+#[inline]
+pub fn fold_ranks(count: usize, value: impl Fn(usize) -> f32) -> f32 {
+    debug_assert!(count < FOLD_RANKS_LIMIT, "fold_ranks holds at most 65535 ranks");
+    let (mut sums, mut sizes, mut depth) = ([0.0f32; 16], [0usize; 16], 0);
+    for rank in 0..count {
+        sums[depth] = value(rank);
+        sizes[depth] = 1;
+        depth += 1;
+        while depth > 1 && sizes[depth - 2] == sizes[depth - 1] {
+            sums[depth - 2] += sums[depth - 1];
+            sizes[depth - 2] *= 2;
+            depth -= 1;
+        }
+    }
+    if depth == 0 { return 0.0; }
+    let mut sum = sums[depth - 1];
+    while depth > 1 {
+        depth -= 1;
+        sum = sums[depth - 1] + sum;
+    }
+    sum
+}
+
 /// Raw BF16 KV words retained at a canonical hybrid prefill boundary.
 #[derive(Clone, Copy)]
 #[repr(C)]

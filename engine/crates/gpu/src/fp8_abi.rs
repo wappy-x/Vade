@@ -300,6 +300,9 @@ pub fn middle_columns(rank: usize, world: usize) -> core::ops::Range<usize> {
     let start = rank * (20 / world) + rank.min(20 % world);
     start * 128..(start + 20 / world + usize::from(rank < 20 % world)) * 128
 }
+/// Routed down sums group their K128 blocks as the two-rank split does, at
+/// every rank count, so the down output does not depend on the number of Sparks.
+pub const EXPERT_FOLD_RANKS: usize = 2;
 /// Same rotating contiguous five-block ownership as RankPlan::expert_blocks.
 pub fn middle_expert_end(expert: usize, rank: usize, world: usize) -> usize {
     let first = expert % world;

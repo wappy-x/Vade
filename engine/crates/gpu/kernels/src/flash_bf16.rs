@@ -160,17 +160,18 @@ unsafe fn write(p: Bf16Rows, value: Acc, token: usize, row: usize) {
 }
 
 #[inline(always)]
-unsafe fn dot_range<const DEEP: bool, const INPUT_BF16: bool>(p: Bf16Rows, row: usize, lane: usize, part: usize) -> Acc {
+unsafe fn dot_range<const DEEP: bool, const INPUT_BF16: bool, const RANGES: u32>(p: Bf16Rows, row: usize, lane: usize, part: usize) -> Acc {
     // Callers select one matrix first, so its layout is a constant of the loop.
+    // HC is never a K-split shard (one at four ranks is at most 1536 wide).
     if p.cols == 10240 && p.tokens == 1 && (p.rows == 320 || p.rows == 4) {
         return dot_hc::<INPUT_BF16>(p, row, lane, part);
     }
     if p.rows % 64 == 0 && p.cols % 16 == 0 {
-        return dot_inner::<true, true, DEEP, INPUT_BF16, false, false>(p, row, lane, part);
+        return dot_inner::<true, true, DEEP, INPUT_BF16, false, false, RANGES>(p, row, lane, part);
     }
     if flash_bf16_packed(p.rows as usize, p.cols as usize) {
-        dot_inner::<true, false, DEEP, INPUT_BF16, false, false>(p, row, lane, part)
-    } else { dot_inner::<false, false, DEEP, INPUT_BF16, false, false>(p, row, lane, part) }
+        dot_inner::<true, false, DEEP, INPUT_BF16, false, false, RANGES>(p, row, lane, part)
+    } else { dot_inner::<false, false, DEEP, INPUT_BF16, false, false, RANGES>(p, row, lane, part) }
 }
 
 /// Solo HC: forty native eight-row tiles plus one compact four-row matrix.
@@ -227,10 +228,12 @@ unsafe fn dot_hc<const INPUT_BF16: bool>(p: Bf16Rows, row: usize, lane: usize, p
 }
 
 #[inline(always)]
-unsafe fn dot_inner<const PACKED: bool, const NATIVE: bool, const DEEP: bool, const INPUT_BF16: bool, const SINGLE: bool, const LBF: bool>(p: Bf16Rows, row: usize, lane: usize, part: usize) -> Acc {
+unsafe fn dot_inner<const PACKED: bool, const NATIVE: bool, const DEEP: bool, const INPUT_BF16: bool, const SINGLE: bool, const LBF: bool, const RANGES: u32>(p: Bf16Rows, row: usize, lane: usize, part: usize) -> Acc {
     let k = p.cols as usize;
     let wr = row + if SINGLE { 0 } else { lane / 4 };
-    let (start, end) = canonical::range(k.div_ceil(16), part);
+    let (start, end) = if RANGES == 0 { canonical::range(k.div_ceil(16), part) } else {
+        match canonical::span(k.div_ceil(16), part, RANGES) { Some(span) => span, None => return canonical::EMPTY }
+    };
     let valid = NATIVE || wr < (p.rows + p.rows2) as usize;
     let (w, _, local, _) = target(p, wr);
     // Decode has already selected one matrix (rows2 == 0). Native tiles contain
@@ -297,7 +300,7 @@ unsafe fn dot_inner<const PACKED: bool, const NATIVE: bool, const DEEP: bool, co
         ([c0.0, c0.1, c8.0, c8.1], b)
     };
     let mut tile = start;
-    if k == 320 {
+    if k == 320 && RANGES == 0 {
         // Each canonical range is exactly five K16 tiles. Fetch the entire
         // range before its dependent MMAs, including the fifth operand.
         let (a0, b0) = load(tile);
@@ -357,8 +360,12 @@ fn planes(t: Acc) -> Acc { Acc { a: t.a + t.c, b: t.b + t.d, c: 0.0, d: 0.0 } }
 /// packing or a prompt tile.
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_bf16_mma1(p: Bf16Rows) {
-    if wide_decode_lookahead(&p) { decode::<true>(p); }
-    else { decode::<false>(p); }
+    // A four-rank K-split shard runs its own two-range copy; the four-range
+    // copies are the fixed-shape entries' code.
+    let (cols, ranges) = crate::kernel_params::bf16_cols_ranges(p.cols);
+    if ranges == 2 { decode::<false, 2>(Bf16Rows { cols, ..p }); }
+    else if wide_decode_lookahead(&p) { decode::<true, 0>(p); }
+    else { decode::<false, 0>(p); }
 }
 
 /// Wide singleton/draft heads issue sixteen independent operand reads ahead
@@ -429,7 +436,7 @@ pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_rows(mut p: Bf16Rows) {
     p.output += first as u64 * p.stride as u64 * 4;
     p.output2 += first as u64 * p.stride2 as u64 * 4;
     p.tokens = (p.tokens - first).min(8);
-    if deep { decode::<true>(p); } else { decode::<false>(p); }
+    if deep { decode::<true, 0>(p); } else { decode::<false, 0>(p); }
 }
 
 // Complete K=320 native tiles keep the generic edge/layout handling and FP32
@@ -438,44 +445,44 @@ pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_rows(mut p: Bf16Rows) {
 pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_320(mut p: Bf16Rows) {
     // hc_silu bit 1: weight2 holds the matrix's LBF12 twin (one matrix, rows2 == 0).
     p.cols = 320;
-    if p.hc_silu & 2 != 0 && p.rows2 == 0 { decode_input::<false, false, true, true>(p); }
-    else { decode_input::<false, false, true, false>(p); }
+    if p.hc_silu & 2 != 0 && p.rows2 == 0 { decode_input::<false, false, true, true, 0>(p); }
+    else { decode_input::<false, false, true, false, 0>(p); }
 }
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_320_bf16(mut p: Bf16Rows) {
     // hc_silu bit 1: weight2 holds the matrix's LBF12 twin (one matrix, rows2 == 0).
     p.cols = 320;
-    if p.hc_silu & 2 != 0 && p.rows2 == 0 { decode_input::<false, true, true, true>(p); }
-    else { decode_input::<false, true, true, false>(p); }
+    if p.hc_silu & 2 != 0 && p.rows2 == 0 { decode_input::<false, true, true, true, 0>(p); }
+    else { decode_input::<false, true, true, false, 0>(p); }
 }
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_3072_native(mut p: Bf16Rows) {
     // hc_silu bit 1: weight2 holds the matrix's LBF12 twin (one matrix, rows2 == 0).
     p.cols = 3072;
-    if p.hc_silu & 2 != 0 && p.rows2 == 0 { decode_input::<false, false, true, true>(p); }
-    else { decode_input::<false, false, true, false>(p); }
+    if p.hc_silu & 2 != 0 && p.rows2 == 0 { decode_input::<false, false, true, true, 0>(p); }
+    else { decode_input::<false, false, true, false, 0>(p); }
 }
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_2560_native(mut p: Bf16Rows) {
     // hc_silu bit 1: weight2 holds the matrix's LBF12 twin (one matrix, rows2 == 0).
     p.cols = 2560;
-    if p.hc_silu & 2 != 0 && p.rows2 == 0 { decode_input::<false, false, true, true>(p); }
-    else { decode_input::<false, false, true, false>(p); }
+    if p.hc_silu & 2 != 0 && p.rows2 == 0 { decode_input::<false, false, true, true, 0>(p); }
+    else { decode_input::<false, false, true, false, 0>(p); }
 }
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_2560(mut p: Bf16Rows) { p.cols = 2560; decode::<false>(p); }
+pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_2560(mut p: Bf16Rows) { p.cols = 2560; decode::<false, 0>(p); }
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_10240(mut p: Bf16Rows) { p.cols = 10240; decode::<true>(p); }
+pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_10240(mut p: Bf16Rows) { p.cols = 10240; decode::<true, 0>(p); }
 
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_2560_narrow(mut p: Bf16Rows) { p.cols = 2560; decode::<true>(p); }
+pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_2560_narrow(mut p: Bf16Rows) { p.cols = 2560; decode::<true, 0>(p); }
 
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_2560_pairs(p: crate::kernel_params::Bf16Pairs) {
     let mut pair = if core::arch::nvptx::_block_idx_y() == 0 { p.pairs[0] } else { p.pairs[1] };
     pair.cols = 2560;
-    if pair.tokens == 1 { decode_rows::<true, false, false, false, false>(pair, true); }
-    else { decode_rows::<true, false, false, true, false>(pair, true); }
+    if pair.tokens == 1 { decode_rows::<true, false, false, false, false, 0>(pair, true); }
+    else { decode_rows::<true, false, false, true, false, 0>(pair, true); }
 }
 
 /// Tiny gate matrices use one CTA per output instead of leaving most SMs
@@ -492,8 +499,8 @@ pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_2560_small(mut p: Bf16Rows) {
         p.weight = p.weight2; p.output = p.output2; p.rows = p.rows2; p.stride = p.stride2;
     }
     p.rows2 = 0; p.cols = 2560; p.tokens = 1;
-    let sum = if flash_bf16_packed(p.rows as usize, 2560) { dot_inner::<true, false, true, false, true, false>(p, row, lane, part) }
-        else { dot_inner::<false, false, true, false, true, false>(p, row, lane, part) };
+    let sum = if flash_bf16_packed(p.rows as usize, 2560) { dot_inner::<true, false, true, false, true, false, 0>(p, row, lane, part) }
+        else { dot_inner::<false, false, true, false, true, false, 0>(p, row, lane, part) };
     let sh = ptx::shared::<16>();
     if lane == 0 { ptx::store(sh + (part * 4) as u32, sum.a); }
     ptx::sync();
@@ -503,21 +510,21 @@ pub unsafe extern "ptx-kernel" fn flash_bf16_mma1_2560_small(mut p: Bf16Rows) {
 }
 
 #[inline(always)]
-unsafe fn decode<const DEEP: bool>(p: Bf16Rows) {
-    if p.input_bf16 != 0 { decode_input::<DEEP, true, false, false>(p); }
-    else { decode_input::<DEEP, false, false, false>(p); }
+unsafe fn decode<const DEEP: bool, const RANGES: u32>(p: Bf16Rows) {
+    if p.input_bf16 != 0 { decode_input::<DEEP, true, false, false, RANGES>(p); }
+    else { decode_input::<DEEP, false, false, false, RANGES>(p); }
 }
 
 #[inline(always)]
-unsafe fn decode_input<const DEEP: bool, const INPUT_BF16: bool, const NATIVE: bool, const LBF: bool>(p: Bf16Rows) {
+unsafe fn decode_input<const DEEP: bool, const INPUT_BF16: bool, const NATIVE: bool, const LBF: bool, const RANGES: u32>(p: Bf16Rows) {
     let split = if NATIVE { p.cols == 320 || LBF }
         else { flash_bf16_decode_split((p.rows + p.rows2) as usize, p.cols as usize) };
-    if p.tokens == 1 { decode_rows::<DEEP, INPUT_BF16, NATIVE, false, LBF>(p, split); }
-    else { decode_rows::<DEEP, INPUT_BF16, NATIVE, true, LBF>(p, split); }
+    if p.tokens == 1 { decode_rows::<DEEP, INPUT_BF16, NATIVE, false, LBF, RANGES>(p, split); }
+    else { decode_rows::<DEEP, INPUT_BF16, NATIVE, true, LBF, RANGES>(p, split); }
 }
 
 #[inline(always)]
-unsafe fn decode_rows<const DEEP: bool, const INPUT_BF16: bool, const NATIVE: bool, const BATCH: bool, const LBF: bool>(p: Bf16Rows, split: bool) {
+unsafe fn decode_rows<const DEEP: bool, const INPUT_BF16: bool, const NATIVE: bool, const BATCH: bool, const LBF: bool, const RANGES: u32>(p: Bf16Rows, split: bool) {
     let tid = _thread_idx_x() as usize;
     let lane = tid % 32;
     let tile = if split { _block_idx_x() as usize }
@@ -533,8 +540,8 @@ unsafe fn decode_rows<const DEEP: bool, const INPUT_BF16: bool, const NATIVE: bo
         (tile - first) * 8
     };
     p.rows2 = 0;
-    let dot = |part| if NATIVE { dot_inner::<true, true, DEEP, INPUT_BF16, false, LBF>(p, row, lane, part) }
-        else { dot_range::<DEEP, INPUT_BF16>(p, row, lane, part) };
+    let dot = |part| if NATIVE { dot_inner::<true, true, DEEP, INPUT_BF16, false, LBF, RANGES>(p, row, lane, part) }
+        else { dot_range::<DEEP, INPUT_BF16, RANGES>(p, row, lane, part) };
     if split {
         let part = tid / 32 & 3;
         let sum = dot(part);
@@ -634,7 +641,7 @@ unsafe fn b_fragment(at: u32) -> [u32; 2] {
 /// Both tile shapes stage resident fragments directly; every output executes
 /// the same K=16 instructions and balanced range merge as single-row decode.
 #[inline(always)]
-unsafe fn project<const WIDE: bool>(p: Bf16Rows) {
+unsafe fn project<const WIDE: bool, const RANGES: u32>(p: Bf16Rows) {
     let tid = _thread_idx_x() as usize;
     let (warp, lane) = (tid / 32, tid % 32);
     let (m, n) = if WIDE { (64, 64) } else { (16, 32) };
@@ -676,7 +683,7 @@ unsafe fn project<const WIDE: bool>(p: Bf16Rows) {
                     sum.d = madd(a1, b1, sum.d);
                     low.d = madd(a1_lo, b1, low.d);
                 }
-                if tile + z + 1 == canonical::range(kt, part).1 {
+                if tile + z + 1 == canonical::end(kt, part, RANGES) {
                     let partial = plus(sum, low);
                     match part {
                         0 => left = partial,
@@ -686,7 +693,8 @@ unsafe fn project<const WIDE: bool>(p: Bf16Rows) {
                     }
                     sum = TILE_ZERO;
                     low = TILE_ZERO;
-                    part += 1;
+                    // Parts outside the shard add -0.0, so skipping them is exact.
+                    part = canonical::next(part, RANGES);
                 }
             }
         }
@@ -704,13 +712,20 @@ unsafe fn project<const WIDE: bool>(p: Bf16Rows) {
     }
 }
 
-/// Block128, grid ceil(N/32)*ceil(T/16), shared16,384B.
+/// Block128, grid ceil(N/32)*ceil(T/16), shared16,384B. A four-rank K-split
+/// shard runs its own two-range copy; four ranges run the code without ranges.
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn flash_bf16_mma(p: Bf16Rows) { project::<false>(p); }
+pub unsafe extern "ptx-kernel" fn flash_bf16_mma(p: Bf16Rows) {
+    let (cols, ranges) = crate::kernel_params::bf16_cols_ranges(p.cols);
+    if ranges == 2 { project::<false, 2>(Bf16Rows { cols, ..p }); } else { project::<false, 0>(p); }
+}
 
 /// Block256, grid ceil(N/64)*ceil(T/64), dynamic shared49,152B.
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn flash_bf16_mma64(p: Bf16Rows) { project::<true>(p); }
+pub unsafe extern "ptx-kernel" fn flash_bf16_mma64(p: Bf16Rows) {
+    let (cols, ranges) = crate::kernel_params::bf16_cols_ranges(p.cols);
+    if ranges == 2 { project::<true, 2>(Bf16Rows { cols, ..p }); } else { project::<true, 0>(p); }
+}
 
 #[path = "flash_prefill.rs"]
 mod prefill;

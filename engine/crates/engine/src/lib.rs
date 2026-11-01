@@ -21,6 +21,10 @@ pub mod flash_tp_switch;
 #[path = "flash/mx8_registry.rs"]
 pub(crate) mod flash_mx8_registry;
 #[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[path = "flash/split_ranges.rs"]
+pub(crate) mod flash_split_ranges;
+#[cfg(any(target_os = "linux", test))]
 #[path = "flash/next_input.rs"]
 mod flash_next_input;
 #[cfg(any(target_os = "linux", test))]
