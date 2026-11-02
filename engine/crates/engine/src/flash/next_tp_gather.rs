@@ -21,17 +21,19 @@ fn held(rank: usize, world: usize) -> std::ops::Range<usize> {
 
 impl<'a> NextModel<'a> {
     /// Every rank, for the same chats in the same order (rank 0 after posting KIND_HANDOFF).
-    pub(super) fn tp_gather_state<'w>(&self, b: &Backend<'a>, sessions: &mut [&mut NextSession<'a, 'w>]) -> Result<()> {
+    /// `push`: rank 0 holds every layer and the other ranks hold none (a sequence split's state).
+    pub(super) fn tp_gather_state<'w>(&self, b: &Backend<'a>, sessions: &mut [&mut NextSession<'a, 'w>], push: bool) -> Result<()> {
         let started = Instant::now();
         let mailbox = self.tp_box.get().ok_or("tensor split mailbox missing")?;
         let channels = mailbox.layout();
         let slot = mailbox.slot_bytes() / 4;
         let (rank, world, origins, limit) = self.tp.borrow().as_ref().map(|s| (s.rank, s.layout.world, s.origins(), s.limit_ns))
             .ok_or("tensor split missing")?;
+        let held = |o: usize| if !push { held(o, world) } else if o == 0 { SPLIT..LAYERS } else { SPLIT..SPLIT };
         // This rank's head words and pieces.
         let (mut head, mut sends) = (Vec::new(), Vec::new());
         for (c, chat) in sessions.iter_mut().enumerate() {
-            for li in held(rank, world) {
+            for li in held(rank) {
                 let (flag, words) = layer_words(chat, li, None)?;
                 for w in std::iter::once(flag).chain(words) {
                     head.push(f32::from_bits(u32::try_from(w).map_err(|_| "tensor split gather: a state size exceeds 32 bits")?));
@@ -39,9 +41,10 @@ impl<'a> NextModel<'a> {
                 for (k, n) in words.into_iter().enumerate() { pieces(&mut sends, (c, li, k), n, slot); }
             }
         }
-        // Head messages, one per rank, of a length every rank knows.
-        let lens: Vec<usize> = (0..world).map(|o| sessions.len() * held(o, world).len() * 4).collect();
-        if lens.iter().any(|&n| n == 0 || n > slot) || head.len() != lens[rank] {
+        // Head messages, one per rank, of a length every rank knows (one pad word for no layer).
+        let lens: Vec<usize> = (0..world).map(|o| (sessions.len() * held(o).len() * 4).max(1)).collect();
+        if head.is_empty() { head.push(0.0); }
+        if lens.iter().any(|&n| n > slot) || head.len() != lens[rank] {
             return Err("tensor split gather: the head does not fit one mailbox message".into());
         }
         let mut heads: Vec<DeviceVector<'a>> = lens.iter().map(|&n| b.vector(n)).collect::<Result<_>>()?;
@@ -65,7 +68,7 @@ impl<'a> NextModel<'a> {
             b.read_vector_range_into(&heads[o], 0, &mut words)?;
             let mut fields = words.iter().map(|w| w.to_bits() as usize);
             for (c, chat) in sessions.iter_mut().enumerate() {
-                for li in held(o, world) {
+                for li in held(o) {
                     let mut field = || fields.next().ok_or("tensor split gather head too short");
                     let flag = field()?;
                     let peer = [field()?, field()?, field()?];

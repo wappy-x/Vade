@@ -347,7 +347,7 @@ The intervals depend only on the layer and rank counts. The layers are divided e
 
 The serving receipt names the path and the reason for it (`vade.numerics.path` and `path_reason`).
 
-**Transport.** Decode steps and short prompt tiles travel on a polled RDMA (RoCE) wire. Queued prompt tiles stay on TCP. A TCP-only chain of three or more Sparks is also supported ([`next_service.rs`](../engine/crates/tp/src/flash/next_service.rs), [FP4-Local launch](../cli/docs/fp4-local.md)).
+**Transport.** Decode steps and short prompt tiles travel on a polled RDMA (RoCE) wire. Queued prompt tiles stay on TCP, except on a chain of three or more Sparks: there a prompt tile with no unread ack and the final tile take the RDMA wire when they fit, while mirrored passes of the split stay on TCP. A TCP-only chain of three or more Sparks is also supported ([`next_service.rs`](../engine/crates/tp/src/flash/next_service.rs), [FP4-Local launch](../cli/docs/fp4-local.md)).
 
 The recipe of the pipeline covers drafting across stages, queued prompt tiles, the RDMA wire, 2048-row prompt tiles and a bounded output head. It is pinned at startup on every rank, so all of them read one setting ([`settings.rs`](../engine/crates/tp/src/flash/settings.rs)).
 

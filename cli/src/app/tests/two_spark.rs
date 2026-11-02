@@ -98,7 +98,7 @@ fn status_names_every_multi_spark_path_and_its_reason() {
     let split = health::MultiSparkPath::from_health(&format!("{{\"status\":\"ready\"{}}}", SPLIT.replace(r#""path_reason":"FP4-Local on two Sparks","#, ""))).unwrap();
     assert_eq!(split.label(), format!("tensor split ({split_levels})"));
     // The split over more ranks: its own reason, projection level 2 over the relay, the head in parts.
-    let parts = health::MultiSparkPath::from_health(r#"{"vade":{"numerics":{"path":"tensor_split","path_reason":"FP4-Local on more than two Sparks whose widths cut into whole parts","tensor_split":{"experts":"output_columns","long_prompts":"chain_tiles_then_state_gather","projection_level":2,"wire":"relay","head":"vocabulary_parts"}}}}"#).unwrap();
+    let parts = health::MultiSparkPath::from_health(r#"{"vade":{"numerics":{"path":"tensor_split","path_reason":"FP4-Local on more than two Sparks whose widths cut into whole parts","tensor_split":{"experts":"output_columns","long_prompts":"sequence_split_or_chain_tiles","projection_level":2,"wire":"relay","head":"vocabulary_parts"}}}}"#).unwrap();
     assert_eq!(parts.label(), "tensor split (FP4-Local on more than two Sparks whose widths cut into whole parts; projection level 2, relay wire, head split by vocabulary parts)");
     let rank = health::MultiSparkPath::from_health(r#"{"vade":{"numerics":{"path":"rank_path","path_reason":"FP4-Local with --tensor-map"}}}"#).unwrap();
     assert_eq!(rank.label(), "rank path (FP4-Local with --tensor-map)");

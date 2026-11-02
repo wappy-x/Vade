@@ -326,7 +326,7 @@ layer 2:
   `"experts"` (`"output_columns"`), `"long_prompts"`, `"projection_level"`,
   `"wire"` and `"head"`. On two Sparks these are
   `"pipeline_tiles_then_state_handoff"`, `3`, `"write"` and `"vocabulary_halves"`;
-  on more Sparks `"chain_tiles_then_state_gather"`, `2` (the linear-attention
+  on more Sparks `"sequence_split_or_chain_tiles"`, `2` (the linear-attention
   heads stay whole), `"relay"` and `"vocabulary_parts"`.
 
 ## Native rank backend

@@ -64,8 +64,9 @@ pub fn seq_first(pos: usize, end: usize, chunk: usize) -> Option<usize> {
     (pos == 0 && (2 * SEQ_MIN_ROWS..=2 * chunk).contains(&end)).then(|| end.div_ceil(2).div_ceil(64) * 64).filter(|&p| p <= chunk)
 }
 
-/// KIND_HANDOFF length field of SPLIT_PROMPT plus a row count (below SPLIT_PROMPT): rank 1 runs the
-/// layer-major prompt transaction's worker for that many rows (flash/next_split.rs).
+/// KIND_HANDOFF length field of SPLIT_PROMPT plus a row count (below SPLIT_PROMPT): on the pair
+/// rank 1 runs the layer-major prompt transaction's worker for that many rows (flash/next_split.rs);
+/// over more ranks each back runs its steps of the sequence split (flash/next_xsplit.rs).
 pub const SPLIT_PROMPT: u32 = 1 << 25;
 /// VADE_LONG_SPLIT (on unless 0): a cold prompt whose transaction has up to LONG_SPLIT_MAX rows
 /// takes the layer-major transaction (B8 round 2).
@@ -102,6 +103,19 @@ pub fn split_rows(pos: usize, end: usize, chunk: usize) -> Option<usize> { split
 fn split_rows_if(on: bool, pos: usize, end: usize, chunk: usize) -> Option<usize> {
     let rows = end.checked_sub(1)? / 64 * 64;
     (on && pos == 0 && end > 2 * chunk && rows >= 4 * PIPELINE_TILE && rows <= LONG_SPLIT_MAX).then_some(rows)
+}
+
+/// The most rows of a prompt's sequence split over more than two ranks: a part of 13,000 rows
+/// still sends each attention vector in one message of the mailbox's slots.
+pub const XSPLIT_MAX: usize = 48_000;
+/// The fewest rows of that split: below it the parts are short and the routed experts see few rows.
+pub const XSPLIT_MIN: usize = 3 * PIPELINE_TILE;
+/// Rows of a cold prompt at `pos` ending at `end` that the sequence split over more than two ranks
+/// runs (flash/next_xsplit_plan.rs), if it takes the prompt: XSPLIT_MIN to XSPLIT_MAX rows; it
+/// stops at the last 64-row edge before `end`, as split_rows.
+pub fn xsplit_rows(pos: usize, end: usize, chunk: usize) -> Option<usize> {
+    let rows = end.checked_sub(1)? / 64 * 64;
+    (pos == 0 && chunk >= PIPELINE_TILE && (XSPLIT_MIN..=XSPLIT_MAX).contains(&rows)).then_some(rows)
 }
 
 /// A token-split chat's stage on rank 0.
@@ -213,7 +227,7 @@ impl SeqChats {
     pub fn imported(&mut self, slot: u32) {
         for c in self.chats.iter_mut().filter(|c| c.0 == slot && c.2 == SeqStage::Tiled) { c.2 = SeqStage::Owed; }
     }
-    /// These slots' state is whole on both ranks again.
+    /// These slots' state is whole on every rank again.
     pub fn settled(&mut self, slots: &[u32]) {
         self.chats.retain(|c| !slots.contains(&c.0));
     }
@@ -243,8 +257,9 @@ pub fn select(path: Option<Path>) -> Result<(), String> {
 /// The ranks of the pair: every split level runs there (routed experts, projections, GDN heads,
 /// the head and token splits, prompt tiles and their handoffs, the prefix cache). On more ranks
 /// the split cuts the routed and shared experts, the projections and the greedy head into parts;
-/// long cold prompts run as chain tiles and a state gather (next_tp_gather), and every rank runs
-/// the GDN heads whole, with no token split. Each rank keeps its own prefix cache copies.
+/// long prompts run as chain tiles and a state gather (next_tp_gather), or cold ones of XSPLIT_MIN
+/// to XSPLIT_MAX rows, when no other chat decodes, as a sequence split (next_xsplit_plan), and
+/// every rank runs the GDN heads whole, with no token split. Each rank keeps its own prefix cache copies.
 pub const PAIR: usize = 2;
 static WORLD: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 /// flash-serve sets the split's ranks once at startup, with the path (unset: the pair).
@@ -393,6 +408,20 @@ impl TpLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sequence_split_takes_long_cold_prompts_at_a_row_edge() {
+        assert_eq!(xsplit_rows(0, 32_099, 4096), Some(32_064));
+        assert_eq!(xsplit_rows(0, 32_064, 4096), Some(32_000));
+        assert_eq!(xsplit_rows(0, 8192, 4096), Some(8128));
+        assert_eq!(xsplit_rows(0, 6145, 4096), Some(6144));
+        assert_eq!(xsplit_rows(0, 6144, 4096), None);
+        assert_eq!(xsplit_rows(0, 48_064, 4096), Some(48_000));
+        assert_eq!(xsplit_rows(0, 48_065, 4096), None);
+        assert_eq!(xsplit_rows(64, 32_099, 4096), None);
+        assert_eq!(xsplit_rows(0, 32_099, 1024), None);
+        assert_eq!(xsplit_rows(0, 0, 4096), None);
+    }
 
     /// One Spark selects no path, world or rank (flash-serve selects them only under the split), so
     /// world() stays the pair's: the head's result arena keeps main's three floats per pair rank

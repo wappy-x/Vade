@@ -1,6 +1,7 @@
 //! Over RDMA: the layer pipeline's polled message wire over one RoCE RC queue
 //! pair (spark-seqpar's mailbox slot API). Two receive slots stay posted; one send slot.
-//! Each side has at most one message in flight, so two receive slots never run short.
+//! At most two messages wait unread per side (a chain's wire tile and its final tile), so two
+//! receive slots never run short.
 use spark_seqpar::transport::RdmaEndpoint;
 use std::{
     collections::VecDeque,

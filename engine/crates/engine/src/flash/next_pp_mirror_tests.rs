@@ -62,6 +62,83 @@ fn a_split_middle_sends_each_pass_down_before_it_runs_it() {
     assert_eq!(tail.join().unwrap(), want);
 }
 
+/// A middle's step waits for the rank after it (the gather's takes, a mirrored pass's takes), and
+/// that rank may still have kept tiles to ack, with their rows. The middle reads those acks during
+/// its step, or the rank after it stops on its full reply queue and never reaches the same step.
+fn middle_reads_kept_acks_during(pass: u32, post: impl FnOnce(&mut Link)) {
+    use crate::flash_tp_switch::SPLIT;
+    use std::sync::Arc;
+    static STOP: AtomicBool = AtomicBool::new(false);
+    const TILES: u32 = 8;
+    const ROWS: usize = 128;
+    let recipe = Recipe { limit: Duration::from_secs(20), asynchronous: true, mtp: true, tp: true };
+    let (front_s, middle_in) = pair();
+    let (middle_out, back_s) = pair();
+    let (middle_there, last_there) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    let (middle_flag, last_flag) = (middle_there.clone(), last_there.clone());
+    let tail = std::thread::spawn(move || {
+        serve_stage(back_s, None, None, Stage::new(2, 3, Some(SPLIT)).unwrap(), 2048, 8, ROWS, &STOP, recipe, |_| Ok(()), || Ok(()),
+            move |kind, _, meta, _| {
+                if kind == pass { last_flag.store(true, Ordering::SeqCst); return Ok(()); }
+                // The last tiles run only after the middle started its step.
+                if meta[0][2] as usize >= 3 * ROWS {
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while !middle_flag.load(Ordering::SeqCst) {
+                        if Instant::now() > deadline { return Err("the middle did not reach its step".into()); }
+                        std::thread::yield_now();
+                    }
+                }
+                Ok(())
+            })
+    });
+    let (middle_flag, last_flag) = (middle_there.clone(), last_there.clone());
+    let middle = std::thread::spawn(move || {
+        serve_stage(middle_in, None, Some((middle_out, None)), Stage::new(1, 3, Some(SPLIT)).unwrap(), 2048, 8, ROWS, &STOP, recipe,
+            |_| Ok(()), || Ok(()), move |kind, _, _, _| {
+                if kind != pass { return Ok(()); }
+                middle_flag.store(true, Ordering::SeqCst);
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while !last_flag.load(Ordering::SeqCst) {
+                    if Instant::now() > deadline { return Err("the last rank did not reach the step".into()); }
+                    std::thread::yield_now();
+                }
+                Ok(())
+            })
+    });
+    let mut link = Link::connect(front_s, None, Stage::new(0, 3, Some(SPLIT)).unwrap(), 2048, 8, ROWS, &STOP, recipe).unwrap();
+    assert!(link.chain_kept);
+    for tile in 0..TILES {
+        let pos = tile as usize * ROWS;
+        link.tp_tile = true;
+        link.post(&[[1, 2048, pos as u32, ROWS as u32]], vec![0.0; ROWS * W], Some(vec![KeepPart { slot: 1, pos, tokens: vec![7; ROWS], start: 0 }])).unwrap();
+    }
+    link.drain().unwrap();
+    link.tp_tile = false;
+    post(&mut link);
+    link.drain().unwrap();
+    assert!(last_there.load(Ordering::SeqCst));
+    drop(link);
+    middle.join().unwrap().unwrap();
+    tail.join().unwrap().unwrap();
+}
+
+#[test]
+fn a_split_middle_reads_kept_acks_during_its_handoff() {
+    middle_reads_kept_acks_during(crate::flash_tp_switch::KIND_HANDOFF, |link| {
+        link.tp_handoff = true;
+        link.post(&[[1, 2048, 1024, 1]], vec![0.0; W], None).unwrap();
+    });
+}
+
+/// Another chat's mirrored pass runs while the first chat's kept tiles still come back.
+#[test]
+fn a_split_middle_reads_kept_acks_during_a_mirrored_pass() {
+    middle_reads_kept_acks_during(KIND_ROWS_ASYNC | crate::flash_tp_switch::MAIL, |link| {
+        link.tp_mail = true;
+        link.post(&[[2, 2048, 0, 1]], vec![0.0; W], None).unwrap();
+    });
+}
+
 /// A pass whose reply carries rows has no place on the split over more ranks: the middle stops.
 #[test]
 fn a_split_middle_refuses_a_pass_that_waits_for_rows() {

@@ -7,6 +7,8 @@ use super::*;
 use crate::flash_next_split_plan::{cut_at, fund, Funds, SplitPlan, Step};
 use crate::flash_tp_switch::SPLIT;
 use split_bank::Bank;
+#[path = "next_xsplit.rs"]
+mod xsplit;
 
 impl<'a, 'w> NextSession<'a, 'w> {
     /// Layer `li` of `layers` for bank rows `rows`, which are the chat's prompt rows from
@@ -63,10 +65,14 @@ impl<'a> Funds for Funding<'_, 'a, '_> {
 }
 
 impl<'a, 'w> NextSession<'a, 'w> {
-    /// Rank 0, a prompt call (prefill_inner, its `chunk`): with VADE_LONG_SPLIT on, a cold long
-    /// prompt's rows up to its last 64-row edge run as the layer-major transaction with rank 1;
-    /// the rows it ran (0: none), the call's tail runs as usual after them.
+    /// Rank 0, a prompt call (prefill_inner, its `chunk`): a cold long prompt's rows up to its
+    /// last 64-row edge run as the sequence split over more than two ranks, or on the pair, with
+    /// VADE_LONG_SPLIT on, as the layer-major transaction with rank 1. The rows it ran (0: none);
+    /// the call's tail runs as usual after them.
     pub(in crate::flash) fn split_prompt(&mut self, b: &Backend<'a>, tokens: &[u32], output: bool, chunk: usize) -> Result<usize> {
+        if let Some(n) = self.model.tp_xsplit_cut(self, output, tokens.len(), chunk) {
+            return Ok(if self.xsplit_front(b, &tokens[..n], chunk)? { n } else { 0 });
+        }
         let Some(n) = self.model.tp_split_cut(self, output, tokens.len(), chunk) else { return Ok(0) };
         Ok(if self.split_front(b, &tokens[..n])? { n } else { 0 })
     }

@@ -114,9 +114,10 @@ pub fn run(
             // Live sessions stop TRANSIENT_RESERVE short of the allocator ceiling. With the cache
             // on, the full chat the pool must hold carries the room floor (prefix_switch::plan_room).
             let full = (needed as usize).saturating_add(spark_serve::prefix_switch::plan_room(prefix_cache, spark_serve::prefix_switch::cache_room_setting()?));
+            let mailbox = if tp.is_some() { model.tp_mailbox_bytes()? } else { 0 };
             let (active, pool, shared) = model.session_pool_plan(
                 context, 1 + usize::from(limits.ab_ptx),
-                spark_serve::budget::after_transient_reserve(budget.saturating_sub(resident)), resident_tiles, [smallest, full])?;
+                spark_serve::budget::after_transient_reserve(budget.saturating_sub(resident).saturating_sub(mailbox)), resident_tiles, [smallest, full])?;
             // The prompt workspace is part of `shared`: allocate it before the first request.
             model.prepare_prompt_workspace(backend, context)?;
             if needed > pool as u128 {
@@ -332,7 +333,8 @@ pub fn run_back(
         // The same plan as the front: with the cache on, one full chat plus the room floor.
         let prefix_cache = spark_serve::prefix_switch::prefix_cache(tp.is_some())?;
         let full = (needed as usize).saturating_add(spark_serve::prefix_switch::plan_room(prefix_cache, spark_serve::prefix_switch::cache_room_setting()?));
-        let (active, pool, _shared) = model.session_pool_plan(context, 1, spark_serve::budget::after_transient_reserve(budget.saturating_sub(resident)), resident_tiles, [smallest, full])?;
+        let mailbox = if tp.is_some() { model.tp_mailbox_bytes()? } else { 0 };
+        let (active, pool, _shared) = model.session_pool_plan(context, 1, spark_serve::budget::after_transient_reserve(budget.saturating_sub(resident).saturating_sub(mailbox)), resident_tiles, [smallest, full])?;
         model.prepare_prompt_workspace(backend, context)?;
         // A workspace allocation under host pressure can clear the reserve before the session
         // plan exists. Restore the session bound so the funded plan below holds.

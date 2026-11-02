@@ -379,6 +379,9 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 
 ### Engine
 
+- On four FP4-Local Sparks over RDMA, a cold prompt of 6,145 to 48,064 tokens now runs as a sequence split when no other chat decodes: each Spark reads its own part of the prompt, so its first token comes sooner. Beside a decoding chat it runs as chain tiles. The token IDs do not change. Each of the four Sparks holds about 1 GiB more for its link, and the session pool counts it.
+- On a chain of three or more Sparks, kept rows of a long prompt that runs as chain tiles now come back during the prompt, not all at the end, and the first and final tiles take the RDMA wire when it is there.
+
 - The prefix cache now works on four FP4-Local Sparks over RDMA (the tensor split in parts), as on two Sparks.
   - Before, the cache was off there, so every later turn of a chat read its whole prompt again.
   - Each Spark keeps its own copy of its own state. Rank 0 alone picks a hit and its length. A refusal by any Spark refuses the copy on all of them, and the next turn then reads its whole prompt on every Spark.

@@ -18,14 +18,17 @@ use spark_gpu_probe::driver::TP_MAILBOX_SLOTS;
 #[path = "next_tp_split.rs"]
 mod split;
 
-/// KIND_HANDOFF length field of SEQ_PUSH or more: rank 1 receives layers SPLIT..L whole and
-/// advances by the field minus SEQ_PUSH rows. Tile handoffs send 1 and next_tp_heads' requests 2 and 3.
+/// KIND_HANDOFF length field of SEQ_PUSH or more: ranks 1.. receive layers SPLIT..L whole and
+/// advance by the field minus SEQ_PUSH rows. Tile handoffs send 1 and next_tp_heads' requests 2 and 3.
 pub(super) const SEQ_PUSH: u32 = 1 << 24;
 /// Mailbox slot size on two ranks: one attention layer's state at 4096 rows (keys, values, index)
 /// crosses in about three messages, and the four slots buffer about two layers. With the
 /// split's 1.31 MB slots an attention layer took 15 two-way rendezvous, and the ranks waited for
 /// each other about 0.4 s per cold 8K prompt (own-prefill-split r1, PROFILE ps-prof3-X).
 pub(super) fn slot_bytes(base: usize) -> usize { base.max(10 << 20) }
+/// Mailbox slot size over more ranks: one attention vector of a sequence split's part crosses in
+/// one message, so the messages of three layers fit the eight slots (next_xsplit_plan.rs).
+pub(super) fn chain_slot_bytes(base: usize) -> usize { base.max(32 << 20) }
 /// Rank 1 puts a layer's state LAG layers after it ran (the credits let it run ahead, up to the
 /// mailbox's slots; rank 0 runs its rows of a layer only after rank 1 ran it).
 const LAG: usize = 1;
@@ -56,11 +59,10 @@ impl<'a> NextModel<'a> {
     }
     /// Rank 0, before a pass: Some(first part) for a token-split prompt pass (the first part, or
     /// the second part or a tail here); None for any other pass, after it took the rest of an
-    /// export this pass does not import and sent owed chats' state to rank 1.
+    /// export this pass does not import and sent owed chats' state to the other ranks.
     pub(super) fn tp_seq_plan<'w>(&self, b: &Backend<'a>, sessions: &mut [&mut NextSession<'a, 'w>], spans: &[std::ops::Range<usize>],
         verify: bool, output: bool) -> Result<Option<bool>> {
-        // The token split runs on the pair only.
-        if !self.tp_pair() { return Ok(None); }
+        // Over more ranks the only chats here are a sequence split's: Tile needs a pair's tp_seq_cut.
         let chats: Vec<_> = sessions.iter().zip(spans).map(|(c, span)| (c.slot, c.pos, span.len(), !c.logits_ready)).collect();
         let plan = {
             let mut guard = self.tp.borrow_mut();
@@ -209,9 +211,9 @@ impl<'a> NextModel<'a> {
         let drained = pp.drain();
         drained.map_err(|e| pp.fail(e))
     }
-    /// Rank 0, before a pass: push the rest of the state to rank 1 for the owed chats at `push`
-    /// (index, rank 1's position): layers SPLIT..L whole and one way; afterwards both ranks hold
-    /// the chats' whole state.
+    /// Rank 0, before a pass: push the rest of the state to the other ranks for the owed chats at
+    /// `push` (index, their position): layers SPLIT..L whole and one way; afterwards every rank
+    /// holds the chats' whole state.
     fn tp_seq_handoffs<'w>(&self, b: &Backend<'a>, sessions: &mut [&mut NextSession<'a, 'w>], push: &[(usize, usize)]) -> Result<()> {
         if push.is_empty() { return Ok(()); }
         // A stale record (position behind its first part) is a request error, not an overflow.
@@ -231,7 +233,8 @@ impl<'a> NextModel<'a> {
         let mut chats: Vec<&mut NextSession<'a, 'w>> = Vec::new();
         for (i, chat) in sessions.iter_mut().enumerate() { if at.contains(&i) { chats.push(chat); } }
         // As tp_part's handoff: a failure leaves the chats' state partly installed.
-        if let Err(error) = self.tp_swap_state(b, &mut chats, SPLIT..LAYERS, SPLIT..SPLIT, link) {
+        let pushed = if self.tp_pair() { self.tp_swap_state(b, &mut chats, SPLIT..LAYERS, SPLIT..SPLIT, link) } else { self.tp_gather_state(b, &mut chats, true) };
+        if let Err(error) = pushed {
             chats.iter_mut().for_each(|chat| chat.valid = false);
             return Err(self.pp.borrow_mut().as_mut().map_or(error.clone(), |pp| pp.fail(error)));
         }
@@ -239,12 +242,14 @@ impl<'a> NextModel<'a> {
         if let Some(s) = self.tp.borrow_mut().as_mut() { s.seq.chats.settled(&settled); }
         Ok(())
     }
-    /// Rank 1, KIND_HANDOFF with every length at least SEQ_PUSH: receive layers SPLIT..L and
+    /// Ranks 1.., KIND_HANDOFF with every length at least SEQ_PUSH: receive layers SPLIT..L and
     /// advance by the field minus SEQ_PUSH. False: not a token-split handoff.
     pub(super) fn tp_seq_handoff_back<'w>(&self, b: &Backend<'a>, sessions: &mut [&mut NextSession<'a, 'w>], lens: &[usize]) -> Result<bool> {
         if lens.is_empty() || lens.iter().any(|&n| n < SEQ_PUSH as usize) { return Ok(false); }
-        let link = self.tp.borrow().as_ref().map(|s| s.link.try_clone()).ok_or("tensor split missing")?.map_err(err)?;
-        let swapped = self.tp_swap_state(b, sessions, SPLIT..SPLIT, SPLIT..LAYERS, link);
+        let swapped = if self.tp_pair() {
+            let link = self.tp.borrow().as_ref().map(|s| s.link.try_clone()).ok_or("tensor split missing")?.map_err(err)?;
+            self.tp_swap_state(b, sessions, SPLIT..SPLIT, SPLIT..LAYERS, link)
+        } else { self.tp_gather_state(b, sessions, true) };
         if swapped.is_err() { sessions.iter_mut().for_each(|chat| chat.valid = false); }
         swapped?;
         for (chat, &n) in sessions.iter_mut().zip(lens) { chat.pos += n - SEQ_PUSH as usize; }
@@ -255,10 +260,15 @@ impl<'a> NextModel<'a> {
 impl<'a> NextModel<'a> {
     /// Rows of a chat's next prompt slice on a two-rank split front (tp_switch::seq_slice), for a
     /// live chat or a cached one (None: pipeline tiles); None off the split front. Over more ranks
-    /// (no token split) every slice is a chain tile of prompt_options::chain_tile rows.
+    /// a prompt the sequence split takes comes whole; every other slice is a chain tile of
+    /// prompt_options::chain_tile rows.
     pub fn prompt_slice(&self, chat: Option<&NextSession<'a, '_>>, end: usize, chunk: usize) -> Option<usize> {
         self.tp.borrow().as_ref().filter(|s| s.rank == 0)?;
-        if !self.tp_pair() { return Some(crate::flash_prompt_options::chain_tile(end).min(chunk)); }
+        if !self.tp_pair() {
+            // A prompt the sequence split takes comes whole.
+            if let Some(c) = chat && crate::flash_tp_switch::xsplit_rows(c.pos, end, chunk).is_some() { return Some(end - c.pos); }
+            return Some(crate::flash_prompt_options::chain_tile(end).min(chunk));
+        }
         let tile = crate::flash_tp_switch::PIPELINE_TILE.min(chunk);
         Some(chat.map_or(tile, |c| crate::flash_tp_switch::seq_slice(c.pos, end, chunk)))
     }

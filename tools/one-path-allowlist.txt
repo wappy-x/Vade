@@ -251,7 +251,7 @@ topology-branch spark-engine flash::moe::Moe::project_inputs 1
 topology-branch spark-engine flash::moe::MoeScratch::exchange_small_middle 2
 topology-branch spark-engine flash::moe::MoeScratch::reserve_grouped 1
 topology-branch spark-engine flash::next_execution::Workspace::moe_at 2
-topology-branch spark-engine flash::next_pp::Link::connect 2
+topology-branch spark-engine flash::next_pp::Link::connect 3
 topology-branch spark-engine flash::next_pp::NextModel::set_pp_front 1
 topology-branch spark-engine flash::next_pp::Stage::new 2
 topology-branch spark-engine flash::next_pp::serve_stage 5
@@ -288,6 +288,14 @@ topology-branch spark-engine flash::next_tp_seq::NextModel::tp_seq_posted 1
 topology-branch spark-engine flash::next_tp_split::NextModel::tp_split_cut 1
 topology-branch spark-engine flash::next_tp_split::NextModel::tp_split_owed 1
 topology-branch spark-engine flash::next_tp_split::NextModel::tp_split_start 1
+topology-branch spark-engine flash::next_tp_split::NextModel::tp_xsplit_cut 1
+topology-branch spark-engine flash::next_tp_split::NextModel::tp_xsplit_end 2
+topology-branch spark-engine flash::next_xsplit::NextSession::xsplit_steps 1
+topology-branch spark-engine flash::next_xsplit_plan::Plan::new 1
+topology-branch spark-engine flash::next_xsplit_plan::Plan::ops 4
+topology-branch spark-engine flash::next_xsplit_plan::Plan::part 1
+topology-branch spark-engine flash::next_xsplit_plan_tests::each_rank_reads_every_earlier_row_of_each_layer_before_its_stages 2
+topology-branch spark-engine flash::next_xsplit_plan_tests::simulate 2
 topology-branch spark-engine flash::path_topology 1
 topology-branch spark-engine flash::qsa::Qsa::load_next_storage 1
 topology-branch spark-engine flash::qsa::Qsa::load_prefix 1
@@ -428,8 +436,8 @@ topology-branch spark-tp bin::tp_launch::run 9
 topology-branch spark-tp bin::tp_serve::run 3
 topology-branch spark-tp bin::tp_serve::run_typed 2
 topology-branch spark-tp bin::tp_serve::start_hybrid_rank 1
-topology-branch spark-tp flash::next_batched_service::run 4
-topology-branch spark-tp flash::next_batched_service::run_back 4
+topology-branch spark-tp flash::next_batched_service::run 5
+topology-branch spark-tp flash::next_batched_service::run_back 5
 topology-branch spark-tp flash::next_rank_service::run 3
 topology-branch spark-tp flash::next_service::run_pp 5
 topology-branch spark-tp flash::next_tp_proxy::Worker::run 1

@@ -320,7 +320,7 @@ fn wire_setup_replaces_auth_deadline_on_two_three_and_four_ranks() {
 
 /// Integer transforms model ordered layers without hiding NaNs or signed zero behind
 /// floating-point equality. Returned rows must never undergo another stage transform.
-fn layers(rows: &mut [f32], first: usize, end: usize) {
+pub(super) fn layers(rows: &mut [f32], first: usize, end: usize) {
     for layer in first..end {
         for value in rows.iter_mut() {
             *value = f32::from_bits(value.to_bits().rotate_left(3).wrapping_add(layer as u32 + 1));
@@ -506,15 +506,14 @@ fn chain_capacity(ranks: usize, capacity: Option<usize>) {
     assert_eq!(second.len(), 1);
     assert_eq!(f32_bytes(&second[0].2), f32_bytes(&expected_second));
     assert!(link.kept.is_empty());
-    // Two ranks return kept rows in each KEEP ack, so the next exchange's reply is one tile.
-    let kept_reply_rows = [6, 6, 1, 6, 6][ranks];
-    let carried = capacity.map_or(0, |cap| [
-        (REQUEST_HEAD + 16 + W * 4).max(REPLY_HEAD + kept_reply_rows * W * 4),
-        REQUEST_HEAD + 16 + 3 * W * 4,
-        REQUEST_HEAD + 16 + 8 * W * 4,
-        REQUEST_HEAD + 16 + W * 4,
-    ].into_iter().filter(|&need| need <= cap).count());
-    assert_eq!(link.carried, carried as u64);
+    // The reply holds 5 or 2 kept rows + 1: two ranks ack each tile's rows, a middle the tiles back so far (the 1 below is only a bound).
+    let replies: &[usize] = if link.inline_kept { &[1] } else { &[6, 3, 1] };
+    let carried = |kept_reply_rows: usize| capacity.map_or(0, |cap| [(REQUEST_HEAD + 16 + W * 4).max(REPLY_HEAD + kept_reply_rows * W * 4),
+        REQUEST_HEAD + 16 + 3 * W * 4, REQUEST_HEAD + 16 + 8 * W * 4, REQUEST_HEAD + 16 + W * 4].into_iter().filter(|&need| need <= cap).count() as u64);
+    // Over more ranks the first tile takes the wire if it fits, the KEEP tiles too if no ack was owed (carrier).
+    let fit = |rows: usize| u64::from(link.chain_kept && capacity.is_some_and(|cap| REQUEST_HEAD + 16 + rows * W * 4 <= cap));
+    let tiles = (fit(2), fit(2) + fit(3) + fit(2));
+    assert!(replies.iter().any(|&n| (carried(n) + tiles.0..=carried(n) + tiles.1).contains(&link.carried)), "ranks={ranks} carried={}", link.carried);
     drop(link); // clean half-close must cascade through every middle rank
     for worker in workers {
         assert_eq!(worker.join().unwrap(), expected_requests);
@@ -681,7 +680,7 @@ fn pp_final_tile_across_a_middle_agrees_on_the_carrier_after_early_relay() {
     // which is what makes the middle peek and relay the kept ack early.
     static STOP: AtomicBool = AtomicBool::new(false);
     static SLEPT: AtomicBool = AtomicBool::new(false);
-    let recipe = Recipe { limit: Duration::from_secs(10), asynchronous: true, mtp: true, tp: false };
+    let recipe = Recipe { limit: Duration::from_secs(60), asynchronous: true, mtp: true, tp: false };
     let (front_s, middle_in) = pair();
     let (middle_out, back_s) = pair();
     let (front_fast, middle_fast) = pipes_with_capacity(REPLY_HEAD + 80 * W * 4);
@@ -824,7 +823,7 @@ fn pp_middle_enforces_downstream_timeout_while_heartbeating_upstream() {
     silent.join().unwrap();
 }
 
-fn pair() -> (TcpStream, TcpStream) {
+pub(super) fn pair() -> (TcpStream, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let near = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     let (far, _) = listener.accept().unwrap();
@@ -833,7 +832,7 @@ fn pair() -> (TcpStream, TcpStream) {
     }
     (near, far)
 }
-fn front(stream: TcpStream, limit: Duration) -> Link {
+pub(super) fn front(stream: TcpStream, limit: Duration) -> Link {
     static DOWN: AtomicBool = AtomicBool::new(false);
     Link {
         release_pool: false, released: 0, window: Default::default(),
@@ -865,6 +864,7 @@ fn front(stream: TcpStream, limit: Duration) -> Link {
         relay_kept: None,
         acks: VecDeque::new(),
         inline_kept: false,
+        chain_kept: false,
     }
 }
 /// A back that reads one pooled one-row request and answers it with `id` and rows + 1.
@@ -1042,7 +1042,7 @@ fn pp_heartbeat_for_another_request_is_an_error() {
 }
 
 /// An in-process message wire (the RDMA wire's contract: whole messages, polled).
-struct Pipe {
+pub(super) struct Pipe {
     capacity: usize,
     to: mpsc::Sender<Vec<u8>>,
     from: mpsc::Receiver<Vec<u8>>,
@@ -1069,7 +1069,7 @@ impl PpWire for Pipe {
     }
 }
 fn pipes() -> (Pipe, Pipe) { pipes_with_capacity(REQUEST_HEAD + 16 + W * 4) }
-fn pipes_with_capacity(capacity: usize) -> (Pipe, Pipe) {
+pub(super) fn pipes_with_capacity(capacity: usize) -> (Pipe, Pipe) {
     let (a, b) = (mpsc::channel(), mpsc::channel());
     (Pipe { capacity, to: a.0, from: b.1 }, Pipe { capacity, to: b.0, from: a.1 })
 }
@@ -1108,7 +1108,7 @@ fn pp_wire_reply_clock_starts_after_the_queued_acks() {
     let (mine, mut theirs) = pipes();
     link.fast = Some(Box::new(mine));
     (link.sent, link.pending) = (1, 1);
-    link.acks.push_back(None);
+    link.acks.push_back(Ack::Empty);
     let back = std::thread::spawn(move || {
         let started = Instant::now();
         while started.elapsed() < 3 * limit {

@@ -17,7 +17,9 @@
 //! does, each rank computes its column part of every routed expert and, on one-chat passes, its
 //! row part of the projections (GDN qkv and z, both out projections, QSA q/gate), as `parts`: one
 //! put and a take from each other rank, relayed along the path by the wire threads. Long prompts
-//! run as chain tiles and a state gather (next_tp_gather.rs). The head split takes vocabulary
+//! run as chain tiles and a state gather (next_tp_gather.rs); cold ones from XSPLIT_MIN to
+//! XSPLIT_MAX rows, when no other chat decodes, run as a sequence split (next_xsplit_plan.rs) and
+//! rank 0's push. The head split takes vocabulary
 //! parts (head_split.rs). Everything else runs whole on every rank: the GDN heads and the token
 //! split stay on the pair (flash_tp_switch::pair). The prefix cache runs on every world: each
 //! rank keeps its own copy of its whole state (next_pp_cache.rs).
@@ -63,6 +65,13 @@ pub(super) fn shifted(descriptors: &mut Vec<spark_gpu_probe::driver::fp4_abi::Ex
             });
         }
     }
+}
+
+/// The mailbox's layout. The pair's token split moves state in large slots, as does the sequence
+/// split over more ranks, through relays (spark_gpu_probe::tp_route).
+fn mailbox_layout(layout: &TpLayout) -> Result<spark_gpu_probe::tp_route::Channels> {
+    let bytes = if crate::flash_tp_switch::pair() { seq::slot_bytes(layout.slot_bytes()) } else { seq::chain_slot_bytes(layout.slot_bytes()) };
+    spark_gpu_probe::tp_route::Channels::new(&spark_gpu_probe::tp_route::Links::new(layout.world, false)?, bytes / 4)
 }
 
 /// This rank's part and its mailbox counters (NextModel::tp_box holds the mailbox; the proxy
@@ -192,6 +201,11 @@ impl<'a> TpMoe<'_, 'a> {
 }
 
 impl<'a> NextModel<'a> {
+    /// The bytes of the mailbox that set_tp allocates; every rank takes them from its budget
+    /// before it plans its session pool, as set_tp runs after that plan.
+    pub fn tp_mailbox_bytes(&self) -> Result<usize> {
+        Ok(mailbox_layout(&layout(&self.checkpoint.config)?)?.words() * 4)
+    }
     /// Every rank, before serving: this rank's part and the mailbox. The proxy thread then takes
     /// the mailbox's one host endpoint (tp_mailbox_host). `link`: the split's TCP link to rank 0
     /// (rank 0: to rank 1), which carries the pair's state handoffs.
@@ -204,11 +218,8 @@ impl<'a> NextModel<'a> {
         if layout.hidden != H || layout.residual != W || layout.experts != EXPERTS {
             return Err(format!("tensor split geometry {layout:?} differs from the loaded world-one layout"));
         }
-        // The pair's token split moves state in large slots; more ranks move only expert parts and
-        // the residual, through relays (spark_gpu_probe::tp_route).
         let pair = crate::flash_tp_switch::pair();
-        let words = if pair { seq::slot_bytes(layout.slot_bytes()) } else { layout.slot_bytes() } / 4;
-        let channels = spark_gpu_probe::tp_route::Channels::new(&spark_gpu_probe::tp_route::Links::new(layout.world, false)?, words)?;
+        let channels = mailbox_layout(&layout)?;
         if self.tp_box.set(b.tp_mailbox_routed(channels)?).is_err() {
             return Err("the tensor split mailbox is already set".into());
         }
@@ -432,7 +443,7 @@ impl<'a> NextModel<'a> {
         for (i, chat) in sessions.iter_mut().enumerate() { if owed.contains(&i) { chats.push(chat); } }
         // The debt is settled only by a whole exchange: a failure leaves the chats' state partly
         // installed, so they stop being reusable and the link stops (the back sees it too).
-        let settle = if self.tp_pair() { self.tp_swap_state(b, &mut chats, SPLIT..LAYERS / 2, LAYERS / 2..LAYERS, link) } else { self.tp_gather_state(b, &mut chats) };
+        let settle = if self.tp_pair() { self.tp_swap_state(b, &mut chats, SPLIT..LAYERS / 2, LAYERS / 2..LAYERS, link) } else { self.tp_gather_state(b, &mut chats, false) };
         if let Err(error) = settle {
             chats.iter_mut().for_each(|chat| chat.valid = false);
             return Err(self.pp.borrow_mut().as_mut().map_or(error.clone(), |pp| pp.fail(error)));
@@ -446,13 +457,13 @@ impl<'a> NextModel<'a> {
         // Rank 0 asks for these chats' GDN whole rebuild (next_tp_heads.rs).
         if !lens.is_empty() && lens.iter().all(|&n| n == heads::GDN_WHOLE as usize) { return self.tp_gdn_frame(b, sessions, usize::MAX); }
         if !lens.is_empty() && lens.iter().all(|&n| n == heads::GDN_PROBE as usize) { return self.tp_gdn_probe(); }
+        if self.tp_seq_handoff_back(b, sessions, lens)? { return Ok(()); }
         // Over more ranks: the chain tiles' state gather (next_tp_gather.rs).
         if !self.tp_pair() {
-            let gathered = self.tp_gather_state(b, sessions);
+            let gathered = self.tp_gather_state(b, sessions, false);
             if gathered.is_err() { sessions.iter_mut().for_each(|chat| chat.valid = false); }
             return gathered;
         }
-        if self.tp_seq_handoff_back(b, sessions, lens)? { return Ok(()); }
         let link = self.tp.borrow().as_ref().map(|s| s.link.try_clone()).ok_or("tensor split missing")?.map_err(err)?;
         let swapped = self.tp_swap_state(b, sessions, LAYERS / 2..LAYERS, SPLIT..LAYERS / 2, link);
         if swapped.is_err() { sessions.iter_mut().for_each(|chat| chat.valid = false); }

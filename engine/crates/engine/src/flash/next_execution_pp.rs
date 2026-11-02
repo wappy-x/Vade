@@ -84,9 +84,9 @@ impl<'a, 'w> NextSession<'a, 'w> {
         }
         Ok(())
     }
-    /// Final prompt tile. On a direct last rank, kept rows arrive per tile during the wait
-    /// and are observed while the back still runs the later tiles. Other pipelines keep one
-    /// exchange and observe afterwards.
+    /// Final prompt tile. When the peer's acks carry kept rows (a direct last rank, or a middle
+    /// of a chain), they arrive during the wait and are observed while the back still runs the
+    /// later tiles. Other pipelines keep one exchange and observe afterwards.
     pub(super) fn pp_return_and_observe(b: &Backend<'a>, model: &NextModel<'a>, sessions: &mut [&mut Self], work: &mut Workspace<'a>, output: bool, verify: bool, meta: &[[u32; 4]], count: usize) -> Result<()> {
         if !(output && !verify && model.pp_async() && model.pp_inline_kept()) {
             return model.pp_return_rows(b, output, verify, meta, &mut work.residual, count);

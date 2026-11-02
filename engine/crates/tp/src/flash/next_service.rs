@@ -81,7 +81,8 @@ pub fn run_pp(
     let stage = spark_engine::flash::next_batched::PpStage::for_rank(rank, world)?;
     let limit = spark_engine::flash::next_batched::PP_LINK_TIMEOUT;
     // Over RDMA (SEQPAR_RDMA unset, auto or 1; the tensor split needs it): decode steps and short
-    // projected tiles ride a polled RoCE wire; queued tiles stay on TCP, and synchronous
+    // projected tiles ride a polled RoCE wire; queued tiles stay on TCP (on a chain see
+    // Link::tile_on_wire), and synchronous
     // requests/replies use the wire only when both complete messages fit. Both ranks agree capacity.
     let rdma = crate::settings::rdma(std::env::var("SEQPAR_RDMA"))?;
     let wire = |link: &mut std::net::TcpStream| -> Result<Option<Box<dyn spark_engine::flash::next_batched::PpWire>>, String> {

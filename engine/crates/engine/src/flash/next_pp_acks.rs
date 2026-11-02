@@ -1,5 +1,5 @@
-//! The front reads queued-tile acks while it waits for its own GPU. A KEEP ack carries its
-//! tile's rows; while it stays unread the back's pp-replier blocks, the back runs out of row
+//! The front reads queued-tile acks while it waits for its own GPU. A KEEP ack carries rows (from
+//! the last rank its tile's, from a middle the whole tiles back so far); while it stays unread the back's pp-replier blocks, the back runs out of row
 //! buffers and stops, and the front's sender then blocks on the next tile. Reading an ack
 //! as soon as its header is on the socket keeps every byte and its order.
 use super::*;
@@ -66,7 +66,7 @@ impl Link {
         // `raw` carries every bit; a chain tile's TILE flag stays off this pass (enqueue adds it).
         (self.tp_tile, self.tp_seq) = (false, false);
         self.enqueue(raw, meta, rows)?;
-        self.acks.push_back(None);
+        self.acks.push_back(Ack::Empty);
         Ok(())
     }
 }

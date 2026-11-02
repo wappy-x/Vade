@@ -53,6 +53,9 @@ pub(crate) mod flash_next_stage_plan;
 #[cfg(any(target_os = "linux", test))]
 #[path = "flash/next_split_plan.rs"]
 pub(crate) mod flash_next_split_plan;
+#[cfg(any(target_os = "linux", test))]
+#[path = "flash/next_xsplit_plan.rs"]
+pub(crate) mod flash_next_xsplit_plan;
 #[path = "flash/next_rows.rs"]
 pub mod flash_next_rows;
 #[cfg(any(target_os = "linux", test))]

@@ -35,6 +35,12 @@ mod prefetch;
 use prefetch::{Incoming, Prefetch};
 #[path = "next_pp_acks.rs"]
 mod acks;
+#[path = "next_pp_kept.rs"]
+mod kept;
+use kept::Ack;
+#[path = "next_pp_carrier.rs"]
+mod carrier;
+use carrier::Early;
 #[path = "next_pp_cache.rs"]
 pub(super) mod cache;
 #[path = "next_pp_overlap.rs"]
@@ -79,8 +85,8 @@ pub(super) const KIND_VERIFY: u32 = 4;
 /// When the peer is the last rank, the ack carries this tile's rows immediately. The
 /// back writes that ack on `pp-replier` so the next tile's compute is not behind the copy.
 pub(super) const KIND_ROWS_KEEP: u32 = 5;
-/// Final prompt tile. The request rides the sender thread (TCP, in order with the queued
-/// tiles) so its write overlaps the earlier acks instead of waiting behind `drain`.
+/// Final prompt tile. The request rides the sender thread (in order with the queued tiles), or
+/// the wire on a chain (Link::tile_on_wire), so its write overlaps the earlier acks, not behind `drain`.
 /// The reply still carries rows, including kept rows owed by earlier tiles, and uses the
 /// RDMA wire when that reply fits (same bound as a synchronous exchange).
 pub(super) const KIND_ROWS_FINAL: u32 = 6;
@@ -103,8 +109,8 @@ pub(super) fn capacity_word(capacity: usize, kv_rows: usize) -> u32 { capacity a
 /// idle while the back runs the last tiles; past it that observe runs between the front's tiles.
 /// Each ack on that link carries one tile, so no reply holds more than one tile's rows.
 const KEEP_ROWS: usize = 131072;
-/// The same limit on a chain: a middle rank returns every kept row with the final tile in one
-/// reply, whose length is a u32 of bytes (reply_len), so these rows plus the widest tile must fit.
+/// The same limit on a chain: at worst a middle rank returns every kept row with the final tile
+/// in one reply, whose length is a u32 of bytes (reply_len), so these rows and the widest tile must fit.
 const CHAIN_KEEP_ROWS: usize = 32768;
 const _: () = assert!((CHAIN_KEEP_ROWS + 8192) * W * 4 <= u32::MAX as usize);
 /// Bytes of a reply carrying `floats` row values, if the u32 length field can hold them.
@@ -127,8 +133,8 @@ struct KeptTile {
 }
 
 /// Over RDMA (SEQPAR_RDMA unset or 1): a polled message wire (RoCE send/receive, built by spark-tp) for the
-/// synchronous exchanges that fit `capacity` bytes (pooled decode steps, short projected
-/// tiles). Messages and their order are the TCP ones; only the carrier changes.
+/// synchronous exchanges that fit `capacity` bytes (pooled decode steps, short projected tiles),
+/// and on a chain for Link::tile_on_wire's tiles. Messages and their ids are the TCP ones.
 pub trait PpWire: Send {
     fn capacity(&self) -> usize;
     /// Send one message made of `parts`.
@@ -388,11 +394,12 @@ pub(super) struct Link {
     owed: usize,
     /// Middle ranks relay the final stage's kept rows without interpreting them.
     relay_kept: Option<Vec<f32>>,
-    /// Posted non-final tiles, oldest first. `Some(rows)` means the ack carries those
-    /// rows (the peer is the last rank). `None` is an empty ack.
-    acks: VecDeque<Option<usize>>,
+    /// Posted non-final tiles, oldest first, with what each ack carries.
+    acks: VecDeque<Ack>,
     /// The peer is the last rank, so each KEEP ack carries that tile's rows.
     inline_kept: bool,
+    /// The peer is a middle rank: each KEEP ack carries the whole kept tiles it has so far.
+    chain_kept: bool,
     /// A draft transition still has to release downstream pooled decode storage.
     release_pool: bool,
     cache: cache::Tickets,
@@ -486,6 +493,7 @@ impl Link {
             relay_kept: None,
             acks: VecDeque::new(),
             inline_kept: stage.rank + 2 == stage.ranks,
+            chain_kept: stage.rank + 2 < stage.ranks,
             release_pool: false,
             cache: cache::Tickets::default(),
             released: 0,
@@ -555,37 +563,6 @@ impl Link {
             }
         }
     }
-    /// One header owed by the oldest queued tile: a heartbeat (false) or its ack (true).
-    fn queued_frame(&mut self, heard: &mut Instant) -> Result<bool> {
-        let Some((status, len)) = self.frame(self.replied.wrapping_add(1), heard)? else { return Ok(false) };
-        self.pending -= 1;
-        let expect_rows = self.acks.pop_front().ok_or("pipeline queued ack without a tile")?;
-        if status != 0 {
-            let mut text = vec![0u8; len.min(1 << 16)];
-            read_rest(&mut self.stream, &mut text, None, self.limit)?;
-            return Err(format!("pipeline back failed a queued tile: {}", peer_text(&text)));
-        }
-        if let Some(n) = expect_rows {
-            if len != n * W * 4 {
-                return Err("pipeline kept ack size mismatch".into());
-            }
-            let mut data = vec![0f32; n * W];
-            read_rest(&mut self.stream, f32_bytes_mut(&mut data), None, self.limit)?;
-            if let Some(relay) = self.relay_kept.as_mut() {
-                relay.extend_from_slice(&data);
-            } else {
-                let tile = self.kept.iter_mut().find(|t| t.data.is_none()).ok_or("pipeline kept ack with no tile")?;
-                if tile.rows != n {
-                    return Err("pipeline kept ack does not match the tile".into());
-                }
-                tile.data = Some(data);
-            }
-            self.owed = self.owed.checked_sub(n).ok_or("pipeline kept ack exceeds owed rows")?;
-        } else if len != 0 {
-            return Err("pipeline queued-tile ack carries rows".into());
-        }
-        Ok(true)
-    }
     /// Read the acks of every queued tile (in order); the first back failure is returned.
     /// Afterwards the sender thread has handed every queued byte to the socket.
     pub(super) fn drain(&mut self) -> Result<()> {
@@ -595,7 +572,7 @@ impl Link {
         }
         Ok(())
     }
-    /// Queue a non-final prompt tile (rows already copied to `rows`) for the sender thread.
+    /// Queue a non-final prompt tile (rows already copied to `rows`) on its carrier (enqueue).
     /// `keep`: the back keeps the tile's rows for these chats' drafters (within keep_rows).
     pub(super) fn post(&mut self, meta: &[[u32; 4]], rows: Vec<f32>, keep: Option<Vec<KeepPart>>) -> Result<()> {
         if rows.len() % W != 0 || meta.is_empty() || meta.len() > POOL_SIZE {
@@ -606,17 +583,17 @@ impl Link {
             return Err("pipeline kept rows past the limit".into());
         }
         let kind = if keep.is_some() { KIND_ROWS_KEEP } else if std::mem::take(&mut self.tp_verify) { crate::flash_tp_switch::KIND_VERIFY } else if std::mem::take(&mut self.tp_handoff) { crate::flash_tp_switch::KIND_HANDOFF } else { KIND_ROWS_ASYNC };
-        let inline = keep.is_some() && self.inline_kept;
+        let ack = self.kept_ack(keep.is_some(), n);
         if let Some(parts) = keep {
             self.kept.push(KeptTile { parts, rows: n, data: None });
             self.owed += n;
         }
         let mail = if std::mem::take(&mut self.tp_mail) { crate::flash_tp_switch::MAIL } else { 0 } | if std::mem::take(&mut self.tp_heads) { crate::flash_tp_switch::HEADS } else { 0 }
             | if std::mem::take(&mut self.tp_head) { crate::flash_tp_switch::HEAD } else { 0 }; self.enqueue(kind | mail, meta, rows)?;
-        self.acks.push_back(inline.then_some(n));
+        self.acks.push_back(ack);
         Ok(())
     }
-    /// Queue the final prompt tile on the sender thread. Its reply carries rows, so
+    /// Queue the final prompt tile on its carrier (enqueue). Its reply carries rows, so
     /// `finish_final` collects it; `drain` must not (a queued ack with rows is an error).
     fn post_final(&mut self, meta: &[[u32; 4]], rows: Vec<f32>) -> Result<()> {
         if rows.len() % W != 0 || meta.is_empty() || meta.len() > POOL_SIZE {
@@ -625,7 +602,7 @@ impl Link {
         self.enqueue(KIND_ROWS_FINAL, meta, rows)
     }
     /// Read the acks of tiles queued before the final one, then the final tile's rows.
-    /// The sender thread writes the final tile during the ack reads.
+    /// The final tile goes out during the ack reads, or on the wire before them.
     fn finish_final(&mut self, residual: &mut [f32]) -> Result<()> {
         if self.pending == 0 {
             return Err("pipeline final tile was not posted".into());
@@ -636,8 +613,8 @@ impl Link {
             self.queued_frame(&mut heard)?;
         }
         let bytes = std::mem::size_of_val(residual);
-        // Same fit test the back uses for a KIND_ROWS_FINAL reply. The request itself
-        // stayed on TCP; only the row-bearing reply takes the wire.
+        // Same fit test the back uses for a KIND_ROWS_FINAL reply. The row-bearing reply's
+        // carrier does not depend on the carrier of the request.
         let fits = wire_reply_size(self.owed, bytes).is_some_and(|n| self.fast.as_ref().is_some_and(|f| n <= f.capacity()));
         if fits {
             let mut fast = self.fast.take().ok_or("pipeline wire missing")?;
@@ -670,7 +647,8 @@ impl Link {
             if let Some(relay) = self.relay_kept.as_mut() {
                 let mut back = vec![0f32; self.owed * W];
                 read_rest(&mut self.stream, f32_bytes_mut(&mut back), None, self.limit)?;
-                *relay = back;
+                // After the rows earlier acks brought (whole tiles, oldest first).
+                relay.extend_from_slice(&back);
             } else {
                 // Validate before consuming payload, including tiles whose chats ended.
                 let expected = self.kept.iter().filter(|t| t.data.is_none())
@@ -700,6 +678,12 @@ impl Link {
         let flagged = kind | if self.release_pool { RELEASE_POOLED } else { 0 } | self.released | if self.tp_tile { crate::flash_tp_switch::TILE } else { 0 } | if self.tp_seq { crate::flash_tp_switch::SEQ } else { 0 };
         let head = request_head(flagged, rows.len() / W, meta, self.sent);
         self.bytes += (rows.len() * 4) as u64;
+        if self.tile_on_wire(kind, &head, rows.len() * 4) {
+            self.fast.as_mut().ok_or("pipeline wire missing")?.send(&[&head, f32_bytes(&rows)])?;
+            self.carried += 1;
+            self.queued();
+            return Ok(());
+        }
         let queue = self.queue.clone().ok_or("pipeline queue missing")?;
         // At most QUEUED tiles wait for the socket; past that the front waits while the back
         // runs a tile. Meanwhile it reads the queued tiles' headers at once as they come
@@ -723,10 +707,7 @@ impl Link {
                 Err(mpsc::TrySendError::Disconnected(_)) => return Err("pipeline sender thread stopped".into()),
             }
         }
-        self.pending += 1;
-        self.posted += 1;
-        self.release_pool = false;
-        self.released = 0;
+        self.queued();
         Ok(())
     }
     /// A middle runs its layers first, then forwards in the same exchange sequence.
@@ -753,7 +734,7 @@ impl Link {
             let mut buffer = self.spare(rows.len());
             f32_bytes_mut(&mut buffer).copy_from_slice(f32_bytes(rows));
             self.enqueue(kind, meta, buffer)?;
-            self.acks.push_back((kind == KIND_ROWS_KEEP && self.inline_kept).then_some(n));
+            self.acks.push_back(self.kept_ack(kind == KIND_ROWS_KEEP, n));
             Ok(())
         } else {
             cache::forwarded(kind, rows, |rows| self.exchange(kind, meta, rows))?;
@@ -841,9 +822,10 @@ impl Link {
         let (kept, current) = message[REPLY_HEAD..].split_at(owed_bytes);
         if self.owed > 0 {
             if let Some(relay) = self.relay_kept.as_mut() {
-                let mut rows = vec![0f32; owed_bytes / 4];
-                f32_bytes_mut(&mut rows).copy_from_slice(kept);
-                *relay = rows;
+                // After the rows earlier acks brought (whole tiles, oldest first).
+                let at = relay.len();
+                relay.resize(at + owed_bytes / 4, 0.0);
+                f32_bytes_mut(&mut relay[at..]).copy_from_slice(kept);
             } else {
                 let expected = self.kept.iter().filter(|t| t.data.is_none())
                     .try_fold(0usize, |n, t| n.checked_add(t.rows));
@@ -940,7 +922,7 @@ impl Link {
         self.kept.iter().map(|t| t.rows).sum::<usize>() + n <= self.keep_rows()
     }
     /// KEEP_ROWS on a front linked directly to the last rank, else CHAIN_KEEP_ROWS (a chain's
-    /// front, and a middle's link to the last rank, which relays the rows in one reply).
+    /// front, and a middle's link to the last rank, which can relay the rows in one reply).
     fn keep_rows(&self) -> usize {
         if self.inline_kept && self.relay_kept.is_none() { KEEP_ROWS } else { CHAIN_KEEP_ROWS }
     }
@@ -1022,9 +1004,10 @@ impl<'a> NextModel<'a> {
     pub(super) fn pp_async(&self) -> bool {
         self.pp.borrow().as_ref().is_some_and(|l| l.queue.is_some())
     }
-    /// The peer is the last rank, so each KEEP ack already carries that tile's rows.
+    /// Each KEEP ack carries kept rows: that tile's (the peer is the last rank) or the whole
+    /// tiles a middle peer has so far.
     pub(super) fn pp_inline_kept(&self) -> bool {
-        self.pp.borrow().as_ref().is_some_and(|l| l.inline_kept)
+        self.pp.borrow().as_ref().is_some_and(|l| l.inline_kept || l.chain_kept)
     }
     /// Read one queued ack. `false` once only `left` replies are queued (1: the final tile's).
     pub(super) fn pp_pull_kept_ack(&self, left: usize) -> Result<bool> {
@@ -1048,7 +1031,7 @@ impl<'a> NextModel<'a> {
         let result = link.reading_acks(|| b.read_vector_range_into(vector, 0, &mut rows)).and_then(|()| link.post(meta, rows, keep));
         result.map_err(|e| link.fail(e))
     }
-    /// Front: copy the final prompt tile and hand it to the sender thread. Rows come back
+    /// Front: copy the final prompt tile and queue it on its carrier. Rows come back
     /// from `pp_collect_final`, after the acks of the tiles posted before it.
     pub(super) fn pp_post_final(&self, b: &Backend<'a>, meta: &[[u32; 4]], vector: &DeviceVector<'a>, count: usize) -> Result<()> {
         let mut guard = self.pp.borrow_mut();
@@ -1078,7 +1061,7 @@ impl<'a> NextModel<'a> {
             None => e,
         }
     }
-    /// Final prompt tile when asynchronous: the sender writes it while earlier acks are read.
+    /// Final prompt tile when asynchronous: it goes out while earlier acks are read.
     /// Verify rows and a synchronous pipeline stay on one exchange.
     pub(super) fn pp_return_rows(&self, b: &Backend<'a>, output: bool, verify: bool, meta: &[[u32; 4]], vector: &mut DeviceVector<'a>, count: usize) -> Result<()> {
         if output && !verify && self.pp_async() {
@@ -1223,8 +1206,8 @@ fn serve_stage(
     let mut kept: Vec<f32> = Vec::new();
     let mut out: Vec<f32> = Vec::new();
     let mut last = Instant::now();
-    // Exchange ids arrive 1, 2, 3, ... (TCP and wire share one sequence); anything else
-    // is a broken link, and the back stops rather than answer the wrong request.
+    // Exchange ids run 1, 2, 3, ... (TCP and wire share one sequence). A later id may come first
+    // on the other carrier and waits (Early); the back never answers out of id order.
     let mut expect = 1u32;
     // While a request runs (TCP or wire), the heartbeat thread sends a STATUS_WORKING
     // header with its id on the TCP link every beat_period, for as long as it runs (no
@@ -1302,10 +1285,11 @@ fn serve_stage(
     let (mut relayed, mut back_rows) = (overlap::Relayed::new(), Vec::new());
     // The tensor split's middle: when the rank after it last showed life (Link::frame).
     let mut heard_down = Instant::now();
+    let mut early = Early::new(limit);
     loop {
         // The reader alone owns TCP reads; changing nonblocking on any clone
         // would change its socket too. Poll the fast wire before completed TCP
-        // requests. A valid wire request follows all preceding async acks.
+        // requests. A request that comes early on one carrier waits for its id (Early).
         let mut incoming = None;
         let on_wire = loop {
             if stop.load(Ordering::Relaxed) {
@@ -1318,10 +1302,12 @@ fn serve_stage(
                 continue;
             }
             match downstream.as_mut().filter(|l| recipe.tp && l.pending > 0) { Some(link) => link.read_ready(&mut heard_down)?, None => heard_down = Instant::now() }
-            if let Some(f) = fast.as_mut() {
-                if f.try_recv(&mut message)? { break true; }
-            }
-            match prefetch.poll(fast.is_none())? {
+            // A request that came early on one carrier waits for the ids before it (Early).
+            match early.next(expect, &mut message)? { Some(true) => break true, Some(false) => { incoming = early.tcp.take(); break false; } None => () }
+            if early.poll_wire(fast.as_mut(), expect, &mut message)? { break true; }
+            match prefetch.poll(fast.is_none() && early.tcp.is_none())? {
+                Some(Incoming::Request(request)) if early.tcp.is_some() => early.later.push_back(request),
+                Some(Incoming::Request(request)) if request.id != expect && fast.is_some() => early.tcp = Some(request),
                 Some(Incoming::Request(request)) => { incoming = Some(request); break false; }
                 Some(Incoming::Closed) => {
                     eprintln!("flashnext pp back: front closed after {served} requests ({carried} by rdma) busy_ms={:.1}", busy.as_secs_f64() * 1e3);
@@ -1374,7 +1360,8 @@ fn serve_stage(
         let kind = kind & !RELEASE_POOLED & !RELEASE_SLOTS & !tp_bits;
         if !(cache::command(kind) || matches!(kind, KIND_ROWS | KIND_POOLED | KIND_ROWS_ASYNC | KIND_ROWS_KEEP | KIND_ROWS_FINAL | KIND_VERIFY | crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF))
             || matches!(kind, KIND_VERIFY | KIND_ROWS_KEEP | crate::flash_tp_switch::KIND_VERIFY) && !recipe.mtp || matches!(kind, crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF) && !recipe.tp
-            || matches!(kind, KIND_ROWS_ASYNC | KIND_ROWS_KEEP | KIND_ROWS_FINAL | crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF) && (!recipe.asynchronous || on_wire)
+            || matches!(kind, KIND_ROWS_ASYNC | KIND_ROWS_KEEP | KIND_ROWS_FINAL | crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF) && !recipe.asynchronous
+            || matches!(kind, crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF) && on_wire
         {
             return Err("pipeline request kind or carrier outside the agreed recipe".into());
         }
@@ -1402,8 +1389,15 @@ fn serve_stage(
         *working.lock().unwrap_or_else(|p| p.into_inner()) = Some((relayed.front().map_or(expect.wrapping_sub(1), |r| r.0), started));
         // Synchronize and drop pooled graphs/scratch before any session rollback,
         // verify allocation or execution. An error must prevent the step as well.
-        let mut result = if release { release_pool() } else { Ok(()) }
-            .and_then(|()| step(kind | tp_bits | slots, count, &meta, &mut residual));
+        let mut result = if release { release_pool() } else { Ok(()) }.and_then(|()| {
+            let word = kind | tp_bits | slots;
+            match downstream.as_mut().filter(|l| l.pending > 0 && (kind == KIND_ROWS_KEEP || l.acks.iter().any(|ack| *ack != Ack::Empty))) {
+                // A middle reads the next rank's acks and kept rows while its GPU runs a prompt tile.
+                // In any step it reads them while an ack with rows waits: an unread one stops that rank.
+                Some(link) => link.reading_acks(|| step(word, count, &meta, &mut residual)),
+                None => step(word, count, &meta, &mut residual),
+            }
+        });
         // The split's pass (mirrored or a chain tile) left the next rank unread: its limit counts from now.
         if recipe.tp { heard_down = Instant::now(); }
         if relay && result.is_ok() && let Some(link) = downstream.as_mut() {
@@ -1427,11 +1421,14 @@ fn serve_stage(
         *working.lock().unwrap_or_else(|p| p.into_inner()) = None;
         // Last rank: this tile's rows ride the ack. They are not held for the final reply.
         let inline_keep = downstream.is_none() && result.is_ok() && kind == KIND_ROWS_KEEP;
-        let queued_empty = result.is_ok() && matches!(kind, KIND_ROWS_ASYNC | KIND_ROWS_KEEP | crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF) && !inline_keep;
+        // A middle: this tile's ack carries the kept rows that came back to it so far (whole
+        // tiles, oldest first; the front's link reads them as Ack::Tiles). The rest rides the final reply.
+        let pass_up = downstream.is_some() && result.is_ok() && kind == KIND_ROWS_KEEP;
+        let queued_empty = result.is_ok() && matches!(kind, KIND_ROWS_ASYNC | KIND_ROWS_KEEP | crate::flash_tp_switch::KIND_VERIFY | crate::flash_tp_switch::KIND_HANDOFF) && !inline_keep && !pass_up;
         if downstream.is_none() && result.is_ok() && !queued_empty && !inline_keep && !kept.is_empty() {
             let reply_bytes = kept.len().checked_add(residual.len()).and_then(|n| n.checked_mul(4))
                 .and_then(|n| n.checked_add(REPLY_HEAD));
-            if on_wire && !reply_bytes.is_some_and(|n| fast.as_ref().is_some_and(|f| n <= f.capacity())) {
+            if on_wire && kind != KIND_ROWS_FINAL && !reply_bytes.is_some_and(|n| fast.as_ref().is_some_and(|f| n <= f.capacity())) {
                 result = Err("pipeline kept reply exceeds wire capacity".into());
             } else {
                 out.clear();
@@ -1451,6 +1448,8 @@ fn serve_stage(
             ReplySend::Bytes(Vec::new())
         } else if inline_keep {
             ReplySend::Rows(Vec::new(), std::mem::take(&mut residual))
+        } else if pass_up {
+            ReplySend::Rows(Vec::new(), downstream.as_mut().and_then(|l| l.relay_kept.as_mut()).map(std::mem::take).unwrap_or_default())
         } else if !out.is_empty() {
             ReplySend::Rows(Vec::new(), std::mem::take(&mut out))
         } else {
@@ -1465,12 +1464,13 @@ fn serve_stage(
         };
         put(&mut header, nbytes);
         put(&mut header, expect.wrapping_sub(1));
-        // A final tile arrives on TCP so it stays behind the queued tiles. Its reply uses
+        // A final tile runs after the queued tiles, on either carrier (Early). Its reply uses
         // the wire when the rows fit, which is the same test the front's finish_final applies.
         // KEEP rows stay on TCP: the front reads those acks before the final wire reply.
         let final_on_wire = kind == KIND_ROWS_FINAL
             && wire_reply_size(prefix_rows, tile_bytes).is_some_and(|n| fast.as_ref().is_some_and(|f| n <= f.capacity()));
-        if on_wire || final_on_wire {
+        // A queued tile from the wire is acked on TCP; a final reply takes the wire by the fit test.
+        if on_wire && !matches!(kind, KIND_ROWS_ASYNC | KIND_ROWS_KEEP | KIND_ROWS_FINAL) || final_on_wire {
             let payload_owned: Vec<u8> = match &body {
                 ReplySend::Bytes(buf) => buf.clone(),
                 ReplySend::Rows(_, rows) => f32_bytes(rows).to_vec(),

@@ -120,7 +120,7 @@ fn path_field(path: Option<spark_engine::flash_tp_switch::Path>) -> String {
     let split = if path == Path::TENSOR_SPLIT {
         ",\"tensor_split\":{\"experts\":\"output_columns\",\"long_prompts\":\"pipeline_tiles_then_state_handoff\",\"projection_level\":3,\"wire\":\"write\",\"head\":\"vocabulary_halves\"}"
     } else if path == Path::TENSOR_PARTS {
-        ",\"tensor_split\":{\"experts\":\"output_columns\",\"long_prompts\":\"chain_tiles_then_state_gather\",\"projection_level\":2,\"wire\":\"relay\",\"head\":\"vocabulary_parts\"}"
+        ",\"tensor_split\":{\"experts\":\"output_columns\",\"long_prompts\":\"sequence_split_or_chain_tiles\",\"projection_level\":2,\"wire\":\"relay\",\"head\":\"vocabulary_parts\"}"
     } else { "" };
     format!(",\"path\":{},\"path_reason\":{}{split}", quote(path.name), quote(path.reason))
 }
@@ -140,7 +140,7 @@ mod tests {
     fn receipt_names_the_path_and_the_split_recipe() {
         use spark_engine::flash_tp_switch::Path;
         assert_eq!(path_field(Some(Path::TENSOR_SPLIT)), ",\"path\":\"tensor_split\",\"path_reason\":\"FP4-Local on two Sparks\",\"tensor_split\":{\"experts\":\"output_columns\",\"long_prompts\":\"pipeline_tiles_then_state_handoff\",\"projection_level\":3,\"wire\":\"write\",\"head\":\"vocabulary_halves\"}");
-        assert_eq!(path_field(Some(Path::TENSOR_PARTS)), ",\"path\":\"tensor_split\",\"path_reason\":\"FP4-Local on more than two Sparks whose widths cut into whole parts\",\"tensor_split\":{\"experts\":\"output_columns\",\"long_prompts\":\"chain_tiles_then_state_gather\",\"projection_level\":2,\"wire\":\"relay\",\"head\":\"vocabulary_parts\"}");
+        assert_eq!(path_field(Some(Path::TENSOR_PARTS)), ",\"path\":\"tensor_split\",\"path_reason\":\"FP4-Local on more than two Sparks whose widths cut into whole parts\",\"tensor_split\":{\"experts\":\"output_columns\",\"long_prompts\":\"sequence_split_or_chain_tiles\",\"projection_level\":2,\"wire\":\"relay\",\"head\":\"vocabulary_parts\"}");
         assert_eq!(path_field(Some(Path::LAYER_PIPELINE)), ",\"path\":\"layer_pipeline\",\"path_reason\":\"FP4-Local on three or more Sparks without the tensor split (TCP, or a world the split does not take)\"");
         assert_eq!(path_field(Some(Path::RING)), ",\"path\":\"ring\",\"path_reason\":\"FP8: the tensor split does not serve FP8\"");
         assert_eq!(path_field(None), "");

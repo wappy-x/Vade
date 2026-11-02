@@ -487,8 +487,9 @@ impl Session for Chat<'_, '_> {
     fn prefill_chunk_size(&self, prompt_end: usize) -> usize {
         let chunk = self.live.as_ref().map_or(self.chunk, |s| s.chunk_size());
         // Two Sparks: a cold 2K..8K prompt whole (the engine runs the token split's two parts),
-        // others in pipeline tiles; elsewhere main's automatic prompt tile for live and lazily
-        // restored chats.
+        // others in pipeline tiles. More Sparks: a prompt the sequence split takes whole, others
+        // in chain tiles. One Spark: main's automatic prompt tile for live and lazily restored
+        // chats.
         self.model.prompt_slice(self.live.as_ref(), prompt_end, chunk)
             .unwrap_or_else(|| spark_engine::flash_next_rows::prompt_tile_for(prompt_end, chunk))
     }
