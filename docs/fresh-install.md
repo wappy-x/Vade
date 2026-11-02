@@ -256,7 +256,7 @@ build output. How long the download takes depends on your connection and on
 Hugging Face.
 
 > This page fetches the checkpoint with the repository's helper,
-> `ops/fetch-model.sh`. It uses curl for the download. Rust checks every file
+> `scripts/fetch-model.sh`. It uses curl for the download. Rust checks every file
 > against the pinned publisher metadata. `vade pull
 > Qwen/Qwen3.8-Flash-Next-FP8@236dfdf285828023ca3bcd3f37366c58a3469b13` fetches
 > the files Vade serves from into the same folder. It writes a
@@ -271,7 +271,7 @@ the model ID (`qwen3.8-flash-next-fp8`). The pinned Rust install in step 4 must
 pass first, and no other download may be writing into this folder.
 
 ```sh
-sh ops/fetch-model.sh Qwen/Qwen3.8-Flash-Next-FP8 236dfdf285828023ca3bcd3f37366c58a3469b13 "$HOME/models/Qwen/Qwen3.8-Flash-Next-FP8"
+sh scripts/fetch-model.sh Qwen/Qwen3.8-Flash-Next-FP8 236dfdf285828023ca3bcd3f37366c58a3469b13 "$HOME/models/Qwen/Qwen3.8-Flash-Next-FP8"
 ```
 
 Expected final line: `verified <file-count> files`.
@@ -279,7 +279,7 @@ Expected final line: `verified <file-count> files`.
 If the helper fails, stop, do what its one-line reason says and rerun the same
 command. Finished downloads are reused. Continue only after it succeeds.
 
-**What the [helper](../ops/fetch-model.sh) does.** Below, `MODEL_DIR` is the
+**What the [helper](../scripts/fetch-model.sh) does.** Below, `MODEL_DIR` is the
 folder you passed to it.
 
 - It keeps partial downloads in a private sibling folder, `MODEL_DIR.fetch`.

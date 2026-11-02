@@ -1,4 +1,4 @@
-# Flash Next arithmetic
+# Flash-Next arithmetic
 
 Flash's covered BF16 projections have one arithmetic mode: BF16 high and residual
 operands on tensor cores, with FP32 accumulation. This is always enabled; there

@@ -46,7 +46,7 @@ vade up
 ```
 
 1. **Install** checks the GPU and the driver, then installs the prebuilt Vade build. It does not need sudo, and it does not change your shell profile. If your shell cannot find `vade` afterwards, run the `export` line that the installer prints.
-2. **Pull** downloads the model (102.26 GB) and checks every file. The long hash after `@` pins the exact revision we tested. If the download stops, run the same command again. It continues where it stopped.
+2. **Pull** downloads the model (102 GB) and checks every file. The long hash after `@` pins the exact revision we tested. If the download stops, run the same command again. It continues where it stopped.
 3. **Up** starts the engine on this Spark. `vade launch` starts it and opens the coding agent in the current folder. `vade down` stops it.
 
 Next steps:
@@ -78,7 +78,7 @@ The model thinks before it answers unless you turn that off, as this example doe
 
 ## Benchmarks
 
-The numbers are tokens per second. Drafting is Vade's speculative decoding: the model's own prediction head guesses a few tokens ahead, and the full model checks each guess. It is on by default. On FP4-Local, the first column is what you get out of the box. The middle column shows the same runs with drafting off.
+The numbers are tokens per second (tok/s). Drafting is Vade's speculative decoding: the model's own prediction head guesses a few tokens ahead, and the full model checks each guess. It is on by default. On FP4-Local, the first column is what you get out of the box. The middle column shows the same runs with drafting off.
 
 <!-- bench-docs:start -->
 
@@ -106,13 +106,13 @@ By default, most inference engines give slightly different answers from one run 
 
 Exact means the same request with the same settings gives the same token IDs. This holds on every run and on every Spark count under "Covered today" below. It holds for a request alone or in a batch. It holds with or without the prefix cache. For requests that always pick the most likely token, it also holds with drafting on or off.
 
-**Covered today**
+### Covered today
 
 - FP4-Local on 1, 2 and 4 Sparks.
 - FP8 on 2 and 4 Sparks with the default drafting mode, since 2026-10-31. The four-Spark cards of 2026-11-01 match the two-Spark cards of 2026-10-31 in 66 of 66 replies ([FP8 token IDs](docs/results.md#fp8-token-ids)).
 - Seeds. A request with a fixed `seed` gets the same sampled reply every time. Tested on FP4-Local on 1 and 2 Sparks, with drafting off.
 
-**Not covered yet**
+### Not covered yet
 
 - FP8 on six Sparks.
 - The opt-in `fast` and `sampled` draft modes on FP8.

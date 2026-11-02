@@ -1,9 +1,9 @@
 # Long-context saved-input evaluation
 
 Use `vade test longctx` to prepare frozen inputs, capture teacher-forced logits
-and retrieval answers, and compare saved captures. The [CLI evaluation reference](../../../cli/evals.md)
+and retrieval answers, and compare saved captures. The [CLI evaluation reference](../cli/evals.md)
 documents the exact options, defaults, output schema and pass criteria.
-The implementation is in [cli/src/evals](../../../cli/src/evals/mod.rs).
+The implementation is in [cli/src/evals](../cli/src/evals/mod.rs).
 
 ## Prepare inputs
 
@@ -53,7 +53,7 @@ do not substitute successful subsets for the requested comparison.
 
 The recurrent-state command, `vade test gdn-state`, is separate. Its `--identity`
 mode compares raw bytes, including signed zero. Its numerical and floor modes
-have different criteria; consult the [option and result tables](../../../cli/evals.md)
+have different criteria; consult the [option and result tables](../cli/evals.md)
 before interpreting a result.
 
 Host tests establish parser and comparison behavior. Native model correctness,

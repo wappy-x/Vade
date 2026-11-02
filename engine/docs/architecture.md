@@ -154,7 +154,7 @@ layer.</dd>
 <dd>Generates official reference data with Transformers outside this repository.</dd>
 </dl>
 
-- `crates/engine` also holds the Flash Next engine, in `src/flash/`. Its
+- `crates/engine` also holds the Flash-Next engine, in `src/flash/`. Its
   server, `flash-serve`, lives in `crates/tp`.
 - `tools/export` is described on [Export](export.md).
 - The official reference oracle uses Hugging Face Transformers and is kept
@@ -423,7 +423,7 @@ revision, hash and notice.
   [Validation](validation.md#qwen3-cuda-acceptance-suite).
 - **Larger groups.** Each small exchange between Sparks still goes through
   the CPU side, which limits how much more Sparks help.
-- **Flash Next in this server.** Flash Next models run in their own server,
+- **Flash-Next in this server.** Flash-Next models run in their own server,
   `flash-serve`, on one Spark or across several.
 
 **Where next:** [Design principles](concepts.md) ·

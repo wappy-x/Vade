@@ -8,7 +8,7 @@
 | [`candidate.rs`](candidate.rs) | Host reduction for vocabulary candidates and the sticky routing verdict. |
 | [`gdn.rs`](gdn.rs) | Rank-local GatedDeltaNet: official BF16 projections, FP32 chunked prefill and cached recurrence. |
 | [`head.rs`](head.rs) | Untied, vocabulary-sharded BF16 output projection with FP32 activations. |
-| [`mod.rs`](mod.rs) | Flash Next text engine. |
+| [`mod.rs`](mod.rs) | Flash-Next text engine. |
 | [`moe.rs`](moe.rs) | Tensor-parallel routed/shared MLP and its four-stream HC injection. |
 | [`nvfp4.rs`](nvfp4.rs) | Borrowed device descriptors for the exact packed checkpoint layout. |
 | [`qsa.rs`](qsa.rs) | Head-sharded indexed attention. |

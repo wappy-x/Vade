@@ -1212,7 +1212,7 @@ fn read_fields(path: &Path) -> Result<Option<Fields>, String> {
 /// Open before validating the descriptor so a substituted FIFO cannot block
 /// the launcher. Nonblocking mode does not change regular-file reads.
 /// The publisher's checksum list for a checkpoint, in the engine's row form:
-/// `manifest.sha256` inside it, else the list ops/fetch-model.sh publishes
+/// `manifest.sha256` inside it, else the list scripts/fetch-model.sh publishes
 /// beside the folder (`<folder>.sha256`), written by sha256sum with `./` names.
 pub(crate) fn supplied_manifest(model: &Path) -> Result<Option<String>, String> {
     let sibling = model.file_name().zip(model.parent()).map(|(name, parent)| {

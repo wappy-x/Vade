@@ -80,8 +80,7 @@ the profile itself, on 2026-10-04.**
 - **Nothing guessed.** People with no verified profile are credited by name and
   paper only.
 
-<details>
-<summary><b>People</b>: 62 verified GitHub profiles, and what each one confirmed</summary>
+**People**: 62 verified GitHub profiles, and what each one confirmed
 
 Each entry gives the GitHub login and what its profile confirmed, then any
 Hugging Face account and what its profile showed. A person with no Hugging
@@ -258,10 +257,7 @@ owner).</dd>
 <dd>GitHub <code>secYOUre</code>: name, website pwnshow.com.</dd>
 </dl>
 
-</details>
-
-<details>
-<summary><b>Teams and projects</b>: 30 GitHub organizations, and their listed sites</summary>
+**Teams and projects**: 30 GitHub organizations, and their listed sites
 
 Each entry gives the GitHub organization and what its page lists, then any
 Hugging Face account with its displayed name in brackets.
@@ -348,10 +344,7 @@ scalingintelligence.stanford.edu.</dd>
 <dd>GitHub <code>facebookresearch</code>.</dd>
 </dl>
 
-</details>
-
-<details>
-<summary><b>Not linked</b>: logins tried and set aside</summary>
+**Not linked**: logins tried and set aside
 
 - **No name shown.** ermon, jayhshah, danthe3rd, bcatanzaro, nshazeer,
   FangyunWei: the GitHub page shows no name, so the login could not be tied
@@ -366,8 +359,6 @@ scalingintelligence.stanford.edu.</dd>
 - **NVIDIA forum.** Members Ank-Chy, andrewc_actual, mashie, ccatzin,
   ugurbas, robert287, adg1 and pontostroy: the forum's profile pages answer
   HTTP 403 to automated requests, so only their threads are linked.
-
-</details>
 
 ## Links checked by other means
 

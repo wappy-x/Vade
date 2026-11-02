@@ -138,7 +138,7 @@ Tools and reference data:
   [Qwen3-32B](../fixtures/qwen3-32b/README.md),
   [Qwen3-30B-A3B](../fixtures/qwen3-30b-a3b/README.md),
   [Qwen3-30B-A3B FP32](../fixtures/qwen3-30b-a3b-fp32/README.md) and
-  [Flash Next FP8](../fixtures/qwen3.8-flash-next-fp8/README.md).
+  [Flash-Next FP8](../fixtures/qwen3.8-flash-next-fp8/README.md).
 
 **Where next:** [README](../README.md) · [One-Spark quickstart](../../docs/quickstart-one-spark.md) ·
 [Benchmarks](benchmarks.md)

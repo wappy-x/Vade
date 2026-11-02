@@ -1,6 +1,6 @@
 # Documentation
 
-This page is the one map of Vade's public pages. It lists each page once, with one line and one link. People and coding agents can read it from top to bottom.
+This page is the one map of Vade's public pages. It lists every page with a one-line summary. People and coding agents can read it from top to bottom.
 
 Run these three commands on a DGX Spark to install Vade and start the engine:
 
@@ -29,6 +29,7 @@ A controller is a computer that drives one or more Sparks over SSH with the `vad
 
 - **[Install](../INSTALL.md)**: every install route and setting, and recovery.
 - **[Download models](pull-models.md)**: `vade pull` and `vade models`.
+- **[Context size](../INSTALL.md#context-size-on-one-spark)**: the default context window, and what Vade does when memory is short.
 - **[First chat on one Spark](../harness/docs/first-run.md)**: what `vade launch` does and the settings it saves.
 - **[One-Spark quickstart](quickstart-one-spark.md)**: FP4-Local on one Spark from a controller.
 - **[Launch FP4-Local](../cli/docs/fp4-local.md)**: FP4-Local from a controller, on one Spark or on a chain.
@@ -37,7 +38,7 @@ A controller is a computer that drives one or more Sparks over SSH with the `vad
 ### Linked Sparks
 
 - **[Network setup](network-setup.md)**: parts, cables, addresses and link checks.
-- **[Spark setup](spark-setup.md)**: the OS and network preparation for each linked Spark.
+- **[Spark setup](spark-setup.md)**: the OS and network preparation for each linked Spark, with the scripts in [scripts/spark-setup](../scripts/spark-setup/).
 - **[FP8 install](install-fp8.md)**: FP8 on linked Sparks.
 - **[Fresh install](fresh-install.md)**: a longer checklist for FP8 on two Sparks.
 - **[Four Sparks](four-sparks.md)**: how to recable two FP8 pairs into one group of four.
@@ -51,8 +52,6 @@ A controller is a computer that drives one or more Sparks over SSH with the `vad
 - **[Multiple Sparks](../engine/docs/multi-spark.md)**: the older BF16 `tp-serve` path.
 - **[Run, update, remove](../engine/docs/upkeep.md)**: how to keep Vade running, update it or remove it.
 - **[Engine install](../engine/docs/install.md)**: a pointer from the engine docs to INSTALL.
-- **[Product operations](../ops/README.md)**: a map from each everyday task to its guide.
-- **[OS setup scripts](../ops/scripts/README.md)**: the OS setup scripts and the Rust qualification references.
 - **[Ready-made engine files](../engine/contrib/README.md)**: files for running the engine on a Spark.
 - **[DGX Spark platform](../engine/docs/platform.md)**: the machine that Vade is built for.
 - **[Models](../engine/docs/models.md)**: the official models that have a serving path.
@@ -119,8 +118,8 @@ A controller is a computer that drives one or more Sparks over SSH with the `vad
 - **[Codex gateway card](../harness/docs/harness-card.md)**: an older measurement record.
 - **[Historical scale measurements](../engine/crates/tp/MEASUREMENTS.md)**: how an earlier build scaled from one Spark to three.
 - **[Owner attach benchmark](../cli/benches/README.md)**: an optional CLI benchmark.
-- **[Measurement commands](../ops/scripts/tools/README.md)**: the first-party measurement and evaluation commands.
-- **[Long-context evaluation](../ops/scripts/tools/longctx_eval.md)**: frozen inputs and saved captures.
+- **[Measurement commands](measurement-commands.md)**: the first-party measurement and evaluation commands.
+- **[Long-context evaluation](longctx-eval.md)**: frozen inputs and saved captures.
 - **[Link checks](../engine/docs/link-checks.md)**: the check of outside links in the public pages.
 
 ### Credits and licenses
@@ -171,7 +170,7 @@ A controller is a computer that drives one or more Sparks over SSH with the `vad
 - **[Module map](../engine/docs/module-map.md)**: which file to open for a given job.
 - **[Unsafe code](../engine/docs/unsafe.md)**: where the engine uses `unsafe`, and why.
 - **[Speculative decoding](../engine/docs/speculative-decoding.md)**: how drafting works.
-- **[Flash Next arithmetic](../engine/docs/flash-fp8-math.md)**: the FP8 arithmetic contract.
+- **[Flash-Next arithmetic](../engine/docs/flash-fp8-math.md)**: the FP8 arithmetic contract.
 - **[Flash-Next rows](../engine/docs/flash-next-rows.md)**: how one code path serves a prompt or up to sixteen chats.
 - **[Flash-Next execution options](../engine/docs/next-fast.md)**: the configuration that the engine reads at start.
 - **[Flash-Next native MXFP8 decode](../engine/docs/flashnext-native.md)**: the native FP8 projection route.

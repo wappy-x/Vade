@@ -59,10 +59,10 @@ Rust checks the pinned remote file list, sizes, LFS SHA-256 hashes and Git blob
 hashes. It rejects extra files and links. It resumes partial downloads in the
 private sibling `.fetch` directory. It writes a sorted sibling `.sha256`
 manifest only after all files pass. The shell entry point is
-[`ops/fetch-model.sh`](../ops/fetch-model.sh).
+[`scripts/fetch-model.sh`](../scripts/fetch-model.sh).
 An operating system file lock prevents concurrent fetches. The lock file stays
 in place. The operating system releases the lock after its owners exit.
-The internal [curl guard](../ops/fetch-curl.sh) stops and waits for curl when
+The internal [curl guard](../scripts/fetch-curl.sh) stops and waits for curl when
 the Rust process exits. Both processes hold the lock until curl has stopped.
 Metadata requests have a 120-second deadline. File transfers can run for hours,
 but fail if their rate stays below 1 byte per second for 120 seconds.

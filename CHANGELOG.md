@@ -1055,7 +1055,7 @@ Merges #105 through #110 were measured on October 26, 2026, with the FP4-Local c
   - A new [module map](engine/docs/module-map.md) follows one request through `flash-serve` and names the main modules per package and where the tests are.
   - Both are linked from the engine docs index.
 
-- Engine docs corrections: messages are capped at 4,096, and eight spare connections are kept for `/health` and `/v1/cancel` once requests fill the 32 (there is no single control connection); Flash Next is not a separate research engine, the v0.1.0 model runs in `flash-serve`, started by `vade launch` and `vade up`; and the architecture page says the layer pipeline's drafting ceiling is 7.
+- Engine docs corrections: messages are capped at 4,096, and eight spare connections are kept for `/health` and `/v1/cancel` once requests fill the 32 (there is no single control connection); Flash-Next is not a separate research engine, the v0.1.0 model runs in `flash-serve`, started by `vade launch` and `vade up`; and the architecture page says the layer pipeline's drafting ceiling is 7.
 
 - Smaller fixes: the harness guide puts the source-built harness on PATH, the network guide's RDMA GID example runs as written, the fresh-install guide's legacy controller examples match current output, the adding-a-model anchors point at the moved CLI module docs, and the benchmarks page and CLI guide are clearer about bench `ignore_eos`, `--checkpoint-hash` and the controller config.
 

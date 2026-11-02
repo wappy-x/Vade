@@ -149,7 +149,7 @@ When every file passes its check, pull writes two files:
   `vade up` and `vade install` read this list and hash every listed file
   before they serve the model. The FP8 route keeps the engine's own receipt
   and does not read this list. `vade run qwen3-8b` checks its own pinned
-  hashes. The [fetch helper](../ops/fetch-model.sh) writes a list with the
+  hashes. The [fetch helper](../scripts/fetch-model.sh) writes a list with the
   same name and form.
 
 On a Spark that a controller installs, `vade install` does not hash a file
@@ -246,7 +246,7 @@ HTTPS (also after redirects), resumes with `--continue-at -` and sets a
 
 ## Difference from the fetch helper
 
-[`ops/fetch-model.sh`](../ops/fetch-model.sh) is the older downloader. It needs a
+[`scripts/fetch-model.sh`](../scripts/fetch-model.sh) is the older downloader. It needs a
 full commit hash and a source checkout. It downloads every file in the
 repository, prints nothing until it finishes and refuses a folder that holds
 any other file. `vade pull` is part of the `vade` command. It downloads only

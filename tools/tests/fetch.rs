@@ -8,7 +8,7 @@ fn setup(t: &Temp) {
     write(&t.0.join("payload"),"hello\n");
 }
 fn command(t: &Temp, wrapper: bool) -> Command {
-    let mut c = if wrapper { let mut c = Command::new("sh"); c.arg(vade_tools::root().join("ops/fetch-model.sh")); c }
+    let mut c = if wrapper { let mut c = Command::new("sh"); c.arg(vade_tools::root().join("scripts/fetch-model.sh")); c }
         else { let mut c = Command::new(env!("CARGO_BIN_EXE_vade-tools")); c.arg("fetch-model"); c };
     c.args(["org/model",REV]).arg(t.0.join("model")).env("TEST_ROOT",&t.0).env("VADE_TOOLS",env!("CARGO_BIN_EXE_vade-tools"))
         .env("PATH",format!("{}:{}",t.0.join("bin").display(),std::env::var("PATH").unwrap())); c

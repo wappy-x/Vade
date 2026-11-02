@@ -1,11 +1,11 @@
 # Qwen3.8-Flash-Next-FP8 text architecture
 
 > **Historical specification.** Written on 2 October 2026 with the first
-> Flash Next research-engine work (main commit `efee11b`). It specifies the
+> Flash-Next research-engine work (main commit `efee11b`). It specifies the
 > official checkpoint's text path as the installed Hugging Face Transformers
 > code implemented it then. It is not a status report for Vade.
 >
-> Flash Next runs only in a separate two-Spark research engine. Neither
+> Flash-Next runs only in a separate two-Spark research engine. Neither
 > `spark-serve` nor `tp-serve` serves it, and it is distinct from the
 > supported Qwen3.8-27B hybrid. Current status is in
 > [Models](../models.md#qwen38-flash-next-fp8). The reference data is described

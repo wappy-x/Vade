@@ -90,13 +90,13 @@ the repository root. The computer needs Rust 1.99.0, curl and network access:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
-sh ops/fetch-model.sh Qwen/Qwen3.8-Flash-Next-FP8 \
+sh scripts/fetch-model.sh Qwen/Qwen3.8-Flash-Next-FP8 \
   236dfdf285828023ca3bcd3f37366c58a3469b13 \
   /absolute/path/to/Qwen3.8-Flash-Next-FP8
 ```
 
 The helper checks every file before it finishes
-([ops/fetch-model.sh](../ops/fetch-model.sh)). Copy the folder to the same
+([scripts/fetch-model.sh](../scripts/fetch-model.sh)). Copy the folder to the same
 absolute path on every Spark. Then check each copy with the hash steps in
 [INSTALL step 3](../INSTALL.md#check-the-files). Use an FP8 manifest that you
 trust. `vade install` and `vade up` do not download weights.

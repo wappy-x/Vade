@@ -4,7 +4,7 @@
 pages, kept so a past number or decision can be traced, for anyone checking
 how a result came about.
 
-- **[Flash Next architecture](flash-next-architecture.md).** The official
+- **[Flash-Next architecture](flash-next-architecture.md).** The official
   Qwen3.8-Flash-Next-FP8 text path, layer by layer, as the reference code had
   it. Main `efee11b`, 2 October 2026. Current information:
   [Models](../models.md#qwen38-flash-next-fp8).

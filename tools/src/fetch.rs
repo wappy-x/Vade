@@ -18,7 +18,7 @@ fn no_links(path: &Path) -> Result<()> {
 fn curl(lock: &File) -> Result<Command> {
     // The shell can trap signals without an unsafe handler. It keeps the same
     // open file description locked until curl stops, even if Rust is killed.
-    let mut c = Command::new("sh"); c.args(["-c",include_str!("../../ops/fetch-curl.sh"),"fetch-curl"])
+    let mut c = Command::new("sh"); c.args(["-c",include_str!("../../scripts/fetch-curl.sh"),"fetch-curl"])
         .arg(std::process::id().to_string()).stdin(Stdio::from(lock.try_clone()?));
     c.args(["--disable","--fail","--silent","--show-error","--location","--retry","3",
         "--connect-timeout","30","--speed-time","120","--speed-limit","1","--proto","=https","--proto-redir","=https"]); Ok(c)

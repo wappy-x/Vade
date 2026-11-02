@@ -24,5 +24,5 @@ If you add a receipt to this folder, keep it small and have it reviewed.
 - **Leave out** hostnames, usernames, machine addresses, private filesystem
   paths, credentials and raw conversations.
 
-Keep raw [benchmark output](../../ops/scripts/tools/README.md) private until
+Keep raw [benchmark output](../../docs/measurement-commands.md) private until
 it has been reviewed for publication.

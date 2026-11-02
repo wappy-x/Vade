@@ -6,7 +6,7 @@
 | --- | --- |
 | `*-cuda-suite/` | 24 test prompts per model, from 32 to 28,672 tokens, with the official model's top next-token choices. The main agreement check. |
 | `qwen3/`, `qwen3-32b/`, `qwen3-30b-a3b/`, `qwen3-30b-a3b-fp32/` | Older, narrower score rows (`.f32`) kept for debugging. Each has a README. |
-| `qwen3.8-flash-next-fp8/` | Reference rows for the Flash Next research engine. |
+| `qwen3.8-flash-next-fp8/` | Reference rows for the Flash-Next research engine. |
 
 **Why:** answers are compared with the official weights running in Hugging Face Transformers, so a wrong result is caught, not guessed at.
 

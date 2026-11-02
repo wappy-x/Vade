@@ -123,7 +123,7 @@ The repository holds more than one server, from different stages of the project.
 
 ## Standard-library Rust, and why
 
-Vade has **zero third-party dependencies**. Every Rust package uses only `std` (and `core` on the GPU) plus the first-party crates in this tree. A test in the CLI counts the dependencies in every manifest and lockfile. It fails if the count rises above zero ([`ratchet.rs`](../cli/tests/ratchet.rs), [baseline](../cli/ratchet-baseline.txt)).
+Vade has **zero third-party crates**. Every Rust package uses only `std` (and `core` on the GPU) plus the first-party crates in this tree. A test in the CLI counts the dependencies in every manifest and lockfile. It fails if the count rises above zero ([`ratchet.rs`](../cli/tests/ratchet.rs), [baseline](../cli/ratchet-baseline.txt)).
 
 So Vade carries its own versions of things that most projects import:
 

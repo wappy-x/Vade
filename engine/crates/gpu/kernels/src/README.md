@@ -13,7 +13,7 @@
 | [`flash_gdn.rs`](flash_gdn.rs) | Head-sharded Flash GatedDeltaNet. |
 | [`flash_gdn_chunk.rs`](flash_gdn_chunk.rs) | 64-token gated-delta chunks. |
 | [`flash_moe.rs`](flash_moe.rs) | Flash routing and ordered reduction of rank-sharded expert partials. |
-| [`flash_ops.rs`](flash_ops.rs) | Flash Next embedding, four-stream hyper-connections and lexical residuals. |
+| [`flash_ops.rs`](flash_ops.rs) | Flash-Next embedding, four-stream hyper-connections and lexical residuals. |
 | [`flash_qsa.rs`](flash_qsa.rs) | Head-sharded indexed attention. |
 | [`fp4.rs`](fp4.rs) | NVFP4 primitives for GB10, opt-in through `cargo kernels --fp4`. |
 | [`fp4_experts.rs`](fp4_experts.rs) | Resident NVFP4, register dequantization and canonical BF16 tensor cores. |
@@ -22,7 +22,7 @@
 | [`fp8_accurate_gate.rs`](fp8_accurate_gate.rs) | Rank-sharded W8A8 gate/up; explicit legacy BF16 operands remain available. |
 | [`fp8_bf16.rs`](fp8_bf16.rs) | Checkpoint E4M3 conversion and grouped BF16 tensor-core operands. |
 | [`fp8_decode.rs`](fp8_decode.rs) | Decode directly from checkpoint bytes; split K only inside each CTA. |
-| [`fp8_routing.rs`](fp8_routing.rs) | Device routing for the Flash Next grouped expert FFN. |
+| [`fp8_routing.rs`](fp8_routing.rs) | Device routing for the Flash-Next grouped expert FFN. |
 | [`gemm.rs`](gemm.rs) | Tensor-core projections through LLVM intrinsics and small packing PTX blocks. |
 | [`gemm_gate_packed.rs`](gemm_gate_packed.rs) | Larger gate/up tile retaining the native packed shared-memory layout. |
 | [`gemm_prefill_wide.rs`](gemm_prefill_wide.rs) | Full-row prefill tiles: 256x128x64, two L2-only asynchronous stages. |

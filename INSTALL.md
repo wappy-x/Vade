@@ -14,25 +14,6 @@ Vade also supports the FP8 checkpoint, **Qwen/Qwen3.8-Flash-Next-FP8**, on
 `vade up --fp8`. [Install FP8 on 2, 4 or 6 Sparks](docs/install-fp8.md) has
 the steps.
 
-**How long it takes.** We timed the source steps of this page on a DGX Spark
-with no Rust, no checkout and no Vade files. The run was on 2026-10-28 at
-main `285fa8a`. The model was already on the Spark. The times come from the
-timing log of record `2026-10-28_1744_source-install_285fa8a` and its
-`Launch ready` line. The record is not in the repository yet.
-
-| Step | Time (s) |
-| --- | ---: |
-| [Install Rust](#install-rust) and the two pinned toolchains | 16.7 |
-| Clone ([step 2](#step-2-get-the-code)), [one kernel build](#run-one-kernel-build-source-builds-only) and the [Route A](#route-a-on-this-spark) CLI build | 62.2 |
-| First `vade launch`, to `Launch ready in 149.4 s.` | 149.4 |
-| Total | 228.2 |
-
-Each row is rounded to 0.1 s, so the rows add up to 228.3 s, not the
-228.2 s total. The total does not include the model download (102.26 GB). It
-also does not include a network fetch of the source: the clone came from a
-local copy of the repository. Download times depend on your network. We
-have not timed these steps on a later main.
-
 On one Spark, use the [quick start](#quick-start-on-one-spark). It also
 downloads the model when the Spark does not have it. For the long form, do
 steps 1 to 3: prerequisites, the code and the model. Then pick a route:
@@ -58,6 +39,50 @@ Each step prints what to do when it fails. You can run a step again safely.
 [Install and flows](docs/design/install-and-flows.md) shows the whole flow on
 one page. If you are an AI agent, read the
 [agent quickstart](docs/agents/quickstart.md).
+
+## Before you start
+
+Once the CLI is built, run `vade doctor` before `vade up`. It checks the
+binary, the model files, the memory, the driver, the links, the ports and the
+disk. It also shows the four default settings. Each failed check names its
+fix. A controller checks the active Sparks, or the Sparks that `vade up` would
+select, over the same SSH path.
+
+You need a DGX Spark (NVIDIA GB10) running Linux `aarch64`. `nvidia-smi` must
+work, and the GPU must be idle.
+
+We tested on the **580.x driver series**. The v0.1.0 benchmark receipts
+record 580.x drivers. The install replay, our scripted run of this page, used
+**580.178.04**. That is the version we tested, not a minimum.
+
+One Spark needs no fabric cable and no RDMA setup. The fabric cable is the
+direct high-speed cable between linked Sparks.
+
+### Disk space
+
+The model needs about **102 GB** (102,262,310,289 bytes, 95.24 GiB). That is
+the complete checkpoint at one pinned revision, with its configuration and
+tokenizer files. The
+[committed SHA256 manifest](cli/examples/qwen3.8-flash-next-fp4-local.sha256)
+lists every file. We checked its sizes against the
+[publisher's file list](https://huggingface.co/api/models/nvidia/Qwen3.8-Flash-Next-FP4-Local/tree/b9ce18a6887e18c089fdea8509a33e63429a3300?recursive=true)
+for that revision.
+
+Beyond the model, leave room for Rust, the source, the build output and
+download caches. Before it starts, the launcher checks for free space:
+
+- **8 GiB free where Vade installs**
+- **1 GiB free where the model lives**
+- **9 GiB free with the model already there**, if both are on the same disk
+
+These checks are minimums. Vade can use more disk than this.
+
+As an example, one of our source installs used **0.72 GiB** for the checkout,
+the build output and a fresh `VADE_HOME`. `VADE_HOME` is Vade's private
+folder, `~/.vade` by default. The Rust compilers and the model were already
+installed. So that figure leaves out Rust and the download caches. It is also
+not the most that an install can use at once. We have not measured disk use
+with a fresh toolchain and its downloads.
 
 ## Quick start on one Spark
 
@@ -89,7 +114,7 @@ https://dl.vade.lol/install.sh.sha256.
    what to do. On the Spark's own desktop, a new terminal finds `vade` only
    after you log out and log in once. If your shell cannot find `vade`, run
    the `export` line from that last line.
-2. **Pull** downloads the model (102.26 GB) and checks every file. The long
+2. **Pull** downloads the model (102 GB) and checks every file. The long
    hash after `@` pins the exact revision we tested. If the download stops,
    run the same command again. It continues where it stopped.
 3. **Up** starts the engine on `http://127.0.0.1:18080`. `vade launch`
@@ -131,7 +156,7 @@ vade launch
   only, because the installer does not edit shell profiles. A new login finds
   `vade` through `~/.local/bin/vade`, which the script writes. It finds `cargo`
   only if you put `~/.cargo/bin` on your `PATH` yourself.
-- `vade pull` downloads the 102.26 GB model into
+- `vade pull` downloads the 102 GB model into
   `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local` and checks every file. Skip
   it if the model is already in `~/models`. To use a checkpoint outside
   `~/models`, set `VADE_MODELS` before the first launch. See
@@ -243,49 +268,26 @@ readiness and exits. The engine keeps running.
 Keep the same `VADE_HOME` (default `~/.vade`) for install, launch and every
 later command.
 
-## Before you start
+### How long a source install takes
 
-Once the CLI is built, run `vade doctor` before `vade up`. It checks the
-binary, the model files, the memory, the driver, the links, the ports and the
-disk. It also shows the four default settings. Each failed check names its
-fix. A controller checks the active Sparks, or the Sparks that `vade up` would
-select, over the same SSH path.
+We timed the source steps of this page on a DGX Spark
+with no Rust, no checkout and no Vade files. The run was on 2026-10-28 at
+main `285fa8a`. The model was already on the Spark. The times come from the
+timing log of record `2026-10-28_1744_source-install_285fa8a` and its
+`Launch ready` line. The record is not in the repository yet.
 
-You need a DGX Spark (NVIDIA GB10) running Linux `aarch64`. `nvidia-smi` must
-work, and the GPU must be idle.
+| Step | Time (s) |
+| --- | ---: |
+| [Install Rust](#install-rust) and the two pinned toolchains | 16.7 |
+| Clone ([step 2](#step-2-get-the-code)), [one kernel build](#run-one-kernel-build-source-builds-only) and the [Route A](#route-a-on-this-spark) CLI build | 62.2 |
+| First `vade launch`, to `Launch ready in 149.4 s.` | 149.4 |
+| Total | 228.2 |
 
-We tested on the **580.x driver series**. The v0.1.0 benchmark receipts
-record 580.x drivers. The install replay, our scripted run of this page, used
-**580.178.04**. That is the version we tested, not a minimum.
-
-One Spark needs no fabric cable and no RDMA setup. The fabric cable is the
-direct high-speed cable between linked Sparks.
-
-### Disk space
-
-The model needs **102,262,310,289 bytes** (102.26 GB / 95.24 GiB). That is
-the complete checkpoint at one pinned revision, with its configuration and
-tokenizer files. The
-[committed SHA256 manifest](cli/examples/qwen3.8-flash-next-fp4-local.sha256)
-lists every file. We checked its sizes against the
-[publisher's file list](https://huggingface.co/api/models/nvidia/Qwen3.8-Flash-Next-FP4-Local/tree/b9ce18a6887e18c089fdea8509a33e63429a3300?recursive=true)
-for that revision.
-
-Beyond the model, leave room for Rust, the source, the build output and
-download caches. Before it starts, the launcher checks for free space:
-
-- **8 GiB free where Vade installs**
-- **1 GiB free where the model lives**
-- **9 GiB free with the model already there**, if both are on the same disk
-
-These checks are minimums. Vade can use more disk than this.
-
-As an example, one of our source installs used **0.72 GiB** for the checkout,
-the build output and a fresh `VADE_HOME`. `VADE_HOME` is Vade's private
-folder, `~/.vade` by default. The Rust compilers and the model were already
-installed. So that figure leaves out Rust and the download caches. It is also
-not the most that an install can use at once. We have not measured disk use
-with a fresh toolchain and its downloads.
+Each row is rounded to 0.1 s, so the rows add up to 228.3 s, not the
+228.2 s total. The total does not include the model download (102 GB). It
+also does not include a network fetch of the source: the clone came from a
+local copy of the repository. Download times depend on your network. We
+have not timed these steps on a later main.
 
 ## Supported systems
 
@@ -572,7 +574,7 @@ still apply.
 
 ### Download
 
-The checkpoint is 102.26 GB. On 2026-10-24, rented GB10 VMs downloaded it at
+The checkpoint is 102 GB. On 2026-10-24, rented GB10 VMs downloaded it at
 8 to 22 MB/s: about 80 minutes at the top of that range and over three hours
 at the bottom
 ([download rates on rented VMs](docs/benchmarks.md#rented-cloud-gb10-vms)).
@@ -606,12 +608,12 @@ stopped. It writes the `.sha256` list beside the model folder, so the first
 
 #### Or use the fetch helper
 
-`ops/fetch-model.sh` is the older downloader. It prints nothing until it
+`scripts/fetch-model.sh` is the older downloader. It prints nothing until it
 finishes, and its output goes to `~/vade-fetch.log`. From the checkout root on
 the Spark, run this fetch exactly as written:
 
 ```sh
-nohup sh ops/fetch-model.sh nvidia/Qwen3.8-Flash-Next-FP4-Local b9ce18a6887e18c089fdea8509a33e63429a3300 "$HOME/models/nvidia/Qwen3.8-Flash-Next-FP4-Local" > ~/vade-fetch.log 2>&1 &
+nohup sh scripts/fetch-model.sh nvidia/Qwen3.8-Flash-Next-FP4-Local b9ce18a6887e18c089fdea8509a33e63429a3300 "$HOME/models/nvidia/Qwen3.8-Flash-Next-FP4-Local" > ~/vade-fetch.log 2>&1 &
 ```
 
 To follow it, even from a new SSH login, run `tail -f ~/vade-fetch.log`
@@ -631,7 +633,7 @@ stays below 1 byte per second for 120 seconds. Large active downloads can
 continue for hours.
 
 Partial downloads can use space in addition to the model files. Leave
-headroom beyond the 102.26 GB checkpoint. A complete
+headroom beyond the 102 GB checkpoint. A complete
 snapshot has the byte total given above. A copy of only the tensor shards is
 not enough. Vade's `install`, `up` and `launch` do not download these weights.
 
@@ -648,7 +650,7 @@ into the checkpoint. It keeps the result in its private state, so later starts
 skip the work.
 
 If you got the checkpoint another way, or you use Route B, check the files
-against the committed manifest once yourself. This reads all 102.26 GB of the
+against the committed manifest once yourself. This reads all 102 GB of the
 checkpoint. From the checkout root:
 
 ```sh
@@ -1109,7 +1111,7 @@ Before step 1, check these three things:
 - **The ports.** Keep HTTP port **18080** and transport ports **29960**
   (`tp_port`) and **29961** (`tp_port + 1`) free on each Spark.
 
-### Step 1 of 6: check SSH
+### Linked-Spark step 1 of 6: check SSH
 
 Check SSH from this Spark to the other Spark. Repeat this for each other
 Spark:
@@ -1128,7 +1130,7 @@ first.
 If it prints `Host key verification failed` or `Permission denied`, read
 [Check SSH from the controller](#check-ssh-from-the-controller).
 
-### Step 2 of 6: write the setup and start the engine
+### Linked-Spark step 2 of 6: write the setup and start the engine
 
 Give the Sparks in cable order. Give each Spark's own address on each cable
 with `--link FROM:TO=ADDRESS`:
@@ -1165,7 +1167,7 @@ If it fails, setup stops at the failed step and prints the cause. Fix that
 cause. Then run `vade setup` again, without `--hosts` or `--link`. Setup uses
 the config that it wrote and repeats only the steps that need it.
 
-### Step 3 of 6: check the answers
+### Linked-Spark step 3 of 6: check the answers
 
 ```sh
 vade verify
@@ -1184,7 +1186,7 @@ command writes `vade-verify.json` in the current folder.
 If it fails, run `vade doctor`, then follow the `next:` step of the row that
 says `FAIL`.
 
-### Step 4 of 6: start the engine
+### Linked-Spark step 4 of 6: start the engine
 
 Setup already started the engine, so this command only finds it. You need the
 same command to start the engine after step 6.
@@ -1207,7 +1209,7 @@ the config.
 If it fails, run `vade logs`, fix the cause that it shows, then run the command
 again.
 
-### Step 5 of 6: send one chat request
+### Linked-Spark step 5 of 6: send one chat request
 
 ```sh
 curl -sS http://127.0.0.1:18080/v1/chat/completions -H 'Content-Type: application/json' -d '{
@@ -1222,7 +1224,7 @@ It worked if it prints one JSON object with the answer in
 
 If it fails with `Connection refused`, go back to step 4.
 
-### Step 6 of 6: stop the engine
+### Linked-Spark step 6 of 6: stop the engine
 
 ```sh
 vade down
@@ -1471,7 +1473,7 @@ reads again, not how it computes them.
 At startup, the cache takes a memory room of its own from the chat memory
 (the session pool). The engine plans the chat slots so that the pool holds one
 full-context chat and at least 512 MiB beside it. Near the memory limit, this
-can give fewer chat slots. On one Spark at a context of 262,144, a start that
+can give fewer chat slots. On one Spark at a context of 256K (262144 tokens), a start that
 could fund 16 slots with 38,449,244 bytes left takes 8 slots.
 
 The room is half of the pool bytes that no full-context chat can use, at least
@@ -1480,7 +1482,7 @@ lowers the number of full-context chats in that plan.
 
 On two Sparks, each engine rank keeps a copy of every kept prompt. So there
 the room is at least the memory of one full-context chat, up to 4 GiB. At a
-context of 32,768, a 32K-token prompt fits. Its copy was about 2.1 GB in a
+context of 32K, a 32K-token prompt fits. Its copy was about 2.1 GB in a
 two-Spark cache test on 2026-10-29 (lab report `own-cache-screen-x2-r1`, not
 in the repository). This can lower the number of full-context chats by one.
 
@@ -1508,7 +1510,7 @@ quarter of one chat's reservation, is kept as a copy. On two Sparks, every
 kept prompt is a copy.
 
 Vade copies a prompt while the prompt's chat still holds its memory. The
-room and the memory that live chats leave free must hold that copy. At a context of 262,144 on
+room and the memory that live chats leave free must hold that copy. At a context of 256K on
 one Spark, one full-context chat reserves 16,017,732,932 bytes (the
 `flashnext ready` log line of each start at that context in lab report
 `own-cache-screen-1s-b-r1`, not in the repository), and the slot plan

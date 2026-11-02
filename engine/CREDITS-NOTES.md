@@ -511,7 +511,7 @@ rounded remainder.</dd>
   kernels stay unchanged. Raw source hashes and both loader results are kept
   with the records from that measurement round.
 
-- Flash Next W8A8 follows Transformers 5.18.0 `FP8Experts` and the same
+- Flash-Next W8A8 follows Transformers 5.18.0 `FP8Experts` and the same
   finegrained-fp8 revision recorded above. The grouped path reuses Vade's dense
   K128 helper and quantizer, with BF16 projection, SiLU, product and
   post-collective boundaries. Source provenance, reference dispatch differences

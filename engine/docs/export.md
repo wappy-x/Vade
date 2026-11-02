@@ -47,9 +47,9 @@ person publishes.**
   shareable repository.
 - **Allowlist only.** Only the exact files named in the allowlist are copied.
 - **Never copied.** Git metadata, build output, model weights, secrets and
-  private development notes. The public root `AGENTS.md` and `CLAUDE.md` are
-  contributor documentation and belong in a current source export; include
-  them when preparing its updated allowlist.
+  private development notes. The public root `AGENTS.md` is
+  contributor documentation and belongs in a current source export; include
+  it when preparing its updated allowlist.
 - **No commits.** The tool never commits or pushes. Publishing, and any
   licensing change, are owner decisions.
 

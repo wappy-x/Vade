@@ -54,7 +54,7 @@ You will also need:
 - the [Rust gates](../cli/docs/test.md) (the test suites a build must pass)
   for qualification
 
-The setup scripts live in `ops/scripts/spark-setup/`.
+The setup scripts live in `scripts/spark-setup/`.
 
 Two roles come up throughout: the **operator** runs these machines, and the
 **administrator** changes their OS and network. If you run your own Sparks,

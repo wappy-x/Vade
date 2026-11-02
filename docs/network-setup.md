@@ -273,7 +273,7 @@ Never commit your real addresses. Keep the config in an ignored `.local/` folder
 ## 6. Prepare the OS
 
 The repository ships **OS-setup shell scripts** in
-[ops/scripts/spark-setup/](../ops/scripts/spark-setup/). They are plain shell
+[scripts/spark-setup/](../scripts/spark-setup/). They are plain shell
 scripts, separate from the Rust build. **Every script only previews by
 default**; add `--apply` after you read the preview.
 
@@ -374,9 +374,9 @@ The `1` is the row number of that rail in each Spark's own `links.tsv`. Without
 
 ```sh
 # server end (spark-1)
-bash ops/scripts/spark-setup/verify.sh "$CFG" --bw-server 1 --apply
+bash scripts/spark-setup/verify.sh "$CFG" --bw-server 1 --apply
 # client end (spark-2)
-bash ops/scripts/spark-setup/verify.sh "$CFG" --bw-client 1 --apply
+bash scripts/spark-setup/verify.sh "$CFG" --bw-client 1 --apply
 ```
 
 Under the hood it runs `perftest`'s `ib_write_bw` for 5 seconds (`-D 5`),

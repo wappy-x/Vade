@@ -115,7 +115,7 @@ runtime, and credentials travel through stdin rather than command arguments.
 HTTPS timeouts rely on curl's connection and low-speed bounds, so they need
 separate runtime qualification. Base URLs and keys stay out of receipts.
 
-See the preserved [long-context procedure](../ops/scripts/tools/longctx_eval.md)
+See the preserved [long-context procedure](../docs/longctx-eval.md)
 for where the experiment came from and the observer's runtime requirements.
 Its earlier build references apply to that experiment.
 

@@ -36,7 +36,7 @@ A credit does not mean their code runs in Vade, or that their speed or correctne
 - Vade's own code covers the engine, the GPU kernels, the tokenizer, the Spark-to-Spark transport, the server and the tools.
 - Each entry says which idea or behavior Vade uses. Where a second line follows, it names the people or gives the links.
 - Papers list every author when there are nine or fewer. Longer lists show the first three names and the total; the paper link has them all.
-- Paper authors' profile links sit in a fold at the end of their section. An X account or website appears only when the person's own profile lists it; an author missing from the section's profile fold is credited by name and paper only.
+- Paper authors' profile links are listed under Author profiles at the end of their section. An X account or website appears only when the person's own profile lists it; an author missing from that list is credited by name and paper only.
 
 </details>
 
@@ -117,7 +117,7 @@ Model code:
 
 - [Transformers Qwen3, v4.51.3](https://github.com/huggingface/transformers/blob/5f4ecf2d9f867a1255131d2461d75793c0cf1db2/src/transformers/models/qwen3/modeling_qwen3.py): Qwen3 layer behavior used for the earlier fixtures.
 - [Transformers Qwen3.5 text, 5.18.0](https://github.com/huggingface/transformers/blob/v5.18.0/src/transformers/models/qwen3_5/modeling_qwen3_5.py): for Qwen3.8-27B, the hybrid layer schedule, zero-centered norms, partial rotary positions, BF16 gates, and the linear-attention recurrence with its FP32 chunk equations.
-- [Transformers Flash Next](https://github.com/huggingface/transformers/blob/9d8c3a24d434d4a958a23562f576126924358b7f/src/transformers/models/qwen4_exp/modeling_qwen4_exp.py): research engine only. Hyper-connections, n-gram and per-layer embeddings, the chunk-64 delta rule, indexed attention and pooling, full-softmax top-10 expert routing, ascending expert accumulation and scaled BF16 weight conversion.
+- [Transformers Flash-Next](https://github.com/huggingface/transformers/blob/9d8c3a24d434d4a958a23562f576126924358b7f/src/transformers/models/qwen4_exp/modeling_qwen4_exp.py): research engine only. Hyper-connections, n-gram and per-layer embeddings, the chunk-64 delta rule, indexed attention and pooling, full-softmax top-10 expert routing, ascending expert accumulation and scaled BF16 weight conversion.
 
 Precision and settings:
 
@@ -150,8 +150,7 @@ Determinism:
 - **[Defeating nondeterminism in LLM inference](https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/).** Batch-invariant arithmetic: sums that do not change when the batch changes. Vade keeps one order for alone, batched, verification and cached paths.\
   Horace He and Thinking Machines Lab
 
-<details>
-<summary><b>Author profiles</b>: GitHub, Hugging Face, X and websites for the people above</summary>
+**Author profiles**: GitHub, Hugging Face, X and websites for the people above
 
 - **Tri Dao**: [GitHub](https://github.com/tridao), [Hugging Face](https://huggingface.co/tridao), [Site](https://tridao.me)
 - **Daniel Y. Fu**: [GitHub](https://github.com/DanFu09), [Hugging Face](https://huggingface.co/danfu09), [X](https://x.com/realDanFu), [Site](https://www.danfu.org)
@@ -162,8 +161,6 @@ Determinism:
 - **Grigory Sizov**: [GitHub](https://github.com/sgrigory)
 - **Horace He**: [GitHub](https://github.com/Chillee), [Hugging Face](https://huggingface.co/Chillee), [X](https://x.com/cHHillee), [Site](http://horace.io/)
 - **Thinking Machines Lab**: [GitHub](https://github.com/thinking-machines-lab), [Site](https://thinkingmachines.ai)
-
-</details>
 
 ## Serving many requests
 
@@ -191,8 +188,7 @@ Shared prompt beginnings:
 - **[Hydragen](https://arxiv.org/abs/2402.05099).** Shared-prefix attention: avoid rereading a common prompt beginning for each request.\
   Jordan Juravsky, Bradley Brown, Ryan Ehrlich, Daniel Y. Fu, Christopher Ré and Azalia Mirhoseini; Scaling Intelligence Lab
 
-<details>
-<summary><b>Author profiles</b>: GitHub, Hugging Face, X and websites for the people above</summary>
+**Author profiles**: GitHub, Hugging Face, X and websites for the people above
 
 - **Gyeong-In Yu**: [GitHub](https://github.com/gyeongin), [Site](https://gyeongin.github.io)
 - **Woosuk Kwon**: [GitHub](https://github.com/WoosukKwon), [X](https://x.com/woosuk_k), [Site](https://woosuk.me)
@@ -212,8 +208,6 @@ Shared prompt beginnings:
 - **FlashInfer team**: [GitHub](https://github.com/flashinfer-ai), [Site](https://flashinfer.ai/)
 - **Daniel Y. Fu**: [GitHub](https://github.com/DanFu09), [Hugging Face](https://huggingface.co/danfu09), [X](https://x.com/realDanFu), [Site](https://www.danfu.org)
 - **Scaling Intelligence Lab**: [GitHub](https://github.com/ScalingIntelligence), [Site](https://scalingintelligence.stanford.edu/)
-
-</details>
 
 ## Speculative decoding
 
@@ -249,11 +243,10 @@ Choosing how far ahead to guess:
 
 - **[DS41RT draft policy](https://github.com/tpurtell/ds41rt/blob/main/docs/dspark-bandwidth-policy.md).** Choosing the guess depth from measured cost.\
   T.J. Purtell
-- **[Flash Next recipe](https://github.com/vcruz305/Qwen3.8-Flash-Next-EXL3-DGX-Spark-recipe).** Changing the guess depth according to whether guessing is paying off.\
+- **[Flash-Next recipe](https://github.com/vcruz305/Qwen3.8-Flash-Next-EXL3-DGX-Spark-recipe).** Changing the guess depth according to whether guessing is paying off.\
   Victor Cruz
 
-<details>
-<summary><b>Author profiles</b>: GitHub, Hugging Face, X and websites for the people above</summary>
+**Author profiles**: GitHub, Hugging Face, X and websites for the people above
 
 - **Gabriele Oliaro**: [GitHub](https://github.com/goliaro)
 - **FlexFlow project**: [GitHub](https://github.com/flexflow), [Site](https://flexflow.ai/)
@@ -268,8 +261,6 @@ Choosing how far ahead to guess:
 - **Hao Zhang**: [GitHub](https://github.com/zhisbug), [X](https://x.com/haozhangml), [Site](https://haozhang.ai/)
 - **T.J. Purtell**: [GitHub](https://github.com/tpurtell)
 - **Victor Cruz**: [GitHub](https://github.com/vcruz305), [Hugging Face](https://huggingface.co/vcruz305), [X](https://x.com/ViC305)
-
-</details>
 
 ## Model building blocks
 
@@ -294,7 +285,7 @@ Positions:
   Jianlin Su, Yu Lu, Shengfeng Pan, Ahmed Murtadha, Bo Wen and Yunfeng Liu
 - **[YaRN](https://arxiv.org/abs/2309.00071).** The optional Qwen3 context extension: frequency ramp and attention scaling.\
   Bowen Peng, Jeffrey Quesnelle, Honglu Fan and Enrico Shippole; Nous Research
-- **[Qwen2-VL](https://arxiv.org/abs/2409.12191).** Research engine only: the multimodal rotary positions behind Flash Next's text positions. Not multimodal serving.\
+- **[Qwen2-VL](https://arxiv.org/abs/2409.12191).** Research engine only: the multimodal rotary positions behind Flash-Next's text positions. Not multimodal serving.\
   Peng Wang, Shuai Bai, Sinan Tan and others (19 authors)
 
 Linear attention and gates, used by the Qwen3.8 models:
@@ -307,7 +298,7 @@ Linear attention and gates, used by the Qwen3.8 models:
   Songlin Yang, Yu Zhang and the flash-linear-attention contributors
 - **[Gated Attention for Large Language Models](https://arxiv.org/abs/2505.06708).** The output gate on Qwen3.8-27B's full-attention layers.\
   Zihan Qiu, Zekun Wang, Bo Zheng and others (13 authors)
-- **[Hyper-Connections](https://arxiv.org/abs/2409.19606).** Research engine only: the parallel residual streams in Flash Next.\
+- **[Hyper-Connections](https://arxiv.org/abs/2409.19606).** Research engine only: the parallel residual streams in Flash-Next.\
   Defa Zhu, Hongzhi Huang, Zihao Huang, Yutao Zeng, Yunyao Mao, Banggu Wu, Qiyang Min and Xun Zhou
 
 Tokens, number formats and sampling:
@@ -321,8 +312,7 @@ Tokens, number formats and sampling:
 - **[Fast splittable pseudorandom number generators](https://doi.org/10.1145/2660193.2660195), [SplitMix64 reference](https://prng.di.unimi.it/splitmix64.c).** SplitMix64's mixing constants turn a seed and a token position into a sampling value, so a guess and its check draw the same number. Written in Rust; not for cryptography.\
   Guy L. Steele, Doug Lea and Christine H. Flood; reference code by Sebastiano Vigna
 
-<details>
-<summary><b>Author profiles</b>: GitHub, Hugging Face, X and websites for the people above</summary>
+**Author profiles**: GitHub, Hugging Face, X and websites for the people above
 
 - **Łukasz Kaiser**: [GitHub](https://github.com/lukaszkaiser)
 - **Biao Zhang**: [GitHub](https://github.com/bzhangGo)
@@ -344,8 +334,6 @@ Tokens, number formats and sampling:
 - **OpenAI**: [GitHub](https://github.com/openai)
 - **Sebastiano Vigna**: [GitHub](https://github.com/vigna), [Site](http://vigna.di.unimi.it/)
 
-</details>
-
 ## DGX Spark community
 
 **These people and projects published their work on the same hardware. Vade uses some of their ideas, never their code.**
@@ -364,7 +352,7 @@ Engines and recipes:
   - [GitHub](https://github.com/vcruz305)
   - [Hugging Face](https://huggingface.co/vcruz305)
   - [X](https://x.com/ViC305)
-  - [Flash Next recipe](https://github.com/vcruz305/Qwen3.8-Flash-Next-EXL3-DGX-Spark-recipe)
+  - [Flash-Next recipe](https://github.com/vcruz305/Qwen3.8-Flash-Next-EXL3-DGX-Spark-recipe)
 - **[ExLlamaV3](https://github.com/turboderp-org/exllamav3) by turboderp, and [TabbyAPI](https://github.com/theroyallab/tabbyAPI) by The Royal Lab.** The runtimes Victor Cruz's recipe builds on; their contributors are credited as part of that chain. Vade uses neither.
   - turboderp: [GitHub](https://github.com/turboderp-org), [X](https://x.com/turboderp_)
   The Royal Lab: [GitHub](https://github.com/theroyallab)
@@ -456,13 +444,10 @@ Libraries and papers:
 - **[Optimization of Collective Communication Operations in MPICH](https://doi.org/10.1177/1094342005051521).** The ring all-gather with balanced slices, for any number of Sparks.\
   Rajeev Thakur, Rolf Rabenseifner and William Gropp
 
-<details>
-<summary><b>Author profiles</b>: GitHub links for the people above</summary>
+**Author profiles**: GitHub links for the people above
 
 - **Mostofa Patwary**: [GitHub](https://github.com/mpatwary)
 - **Jared Casper**: [GitHub](https://github.com/jaredcasper)
-
-</details>
 
 ## Compiler and standards
 
@@ -507,10 +492,9 @@ Draft heads and self-drafting:
   Mostafa Elhoushi, Akshat Shrivastava, Diana Liskovich and others (13 authors); Meta Research
 - **[Draft & Verify](https://arxiv.org/abs/2309.08168).** Self-drafting by skipping layers was weighed for prose and not built.\
   Jun Zhang, Jue Wang, Huan Li, Lidan Shou, Ke Chen, Gang Chen and Sharad Mehrotra
-- **A smaller-vocabulary draft head**, from Victor Cruz's [Flash Next recipe](https://github.com/vcruz305/Qwen3.8-Flash-Next-EXL3-DGX-Spark-recipe). Studied; not used today.
+- **A smaller-vocabulary draft head**, from Victor Cruz's [Flash-Next recipe](https://github.com/vcruz305/Qwen3.8-Flash-Next-EXL3-DGX-Spark-recipe). Studied; not used today.
 
-<details>
-<summary><b>Author profiles</b>: GitHub, Hugging Face, X and websites for the people above</summary>
+**Author profiles**: GitHub, Hugging Face, X and websites for the people above
 
 - **Tianle Cai**: [GitHub](https://github.com/ctlllll), [X](https://x.com/tianle_cai), [Site](https://tianle.website)
 - **Yuhong Li**: [GitHub](https://github.com/leeyeehoo), [Site](http://leeyeehoo.github.io/)
@@ -522,8 +506,6 @@ Draft heads and self-drafting:
 - **SafeAI Lab**: [GitHub](https://github.com/SafeAILab)
 - **Mostafa Elhoushi**: [GitHub](https://github.com/mostafaelhoushi), [X](https://x.com/m_elhoushi)
 - **Meta Research**: [GitHub](https://github.com/facebookresearch)
-
-</details>
 
 ## Reused data
 

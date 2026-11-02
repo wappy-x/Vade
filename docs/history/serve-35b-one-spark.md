@@ -30,7 +30,7 @@ Download the pinned official checkpoint with the repository's existing helper:
 
 ```sh
 MODEL="$VADE_ROOT/models/Qwen/Qwen3.6-35B-A3B-FP8"
-sh ops/fetch-model.sh Qwen/Qwen3.6-35B-A3B-FP8 \
+sh scripts/fetch-model.sh Qwen/Qwen3.6-35B-A3B-FP8 \
   95a723d08a9490559dae23d0cff1d9466213d989 "$MODEL"
 ```
 

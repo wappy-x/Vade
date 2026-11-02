@@ -136,9 +136,9 @@ for this Spark:
 ```sh
 (
 set -euo pipefail
-bash ops/scripts/spark-setup/init-config.sh pair .local/spark-setup/node
+bash scripts/spark-setup/init-config.sh pair .local/spark-setup/node
 # After reviewing the placeholder files and commands:
-bash ops/scripts/spark-setup/init-config.sh pair .local/spark-setup/node --apply
+bash scripts/spark-setup/init-config.sh pair .local/spark-setup/node --apply
 # For a ring, use `ring` instead of `pair` on a new directory.
 CFG="$PWD/.local/spark-setup/node/config.env"
 ip -br link
@@ -196,9 +196,9 @@ for d in /sys/class/infiniband/*; do
   ls "$d/device/net"
 done
 git check-ignore .local/spark-setup/node/config.env
-bash ops/scripts/spark-setup/render.sh "$CFG" .local/spark-setup/rendered
+bash scripts/spark-setup/render.sh "$CFG" .local/spark-setup/rendered
 # After reviewing the file differences:
-bash ops/scripts/spark-setup/render.sh "$CFG" .local/spark-setup/rendered --apply
+bash scripts/spark-setup/render.sh "$CFG" .local/spark-setup/rendered --apply
 cat .local/spark-setup/rendered/40-cx7.yaml
 cat .local/spark-setup/rendered/hosts.fragment
 )
@@ -220,9 +220,9 @@ safe to repeat, but it has not yet been tested on a fresh image.
 (
 set -euo pipefail
 CFG="$PWD/.local/spark-setup/node/config.env"
-sudo bash ops/scripts/spark-setup/apply.sh "$CFG" packages
+sudo bash scripts/spark-setup/apply.sh "$CFG" packages
 # After reviewing the package commands:
-sudo bash ops/scripts/spark-setup/apply.sh "$CFG" packages --apply
+sudo bash scripts/spark-setup/apply.sh "$CFG" packages --apply
 if command -v ibdev2netdev >/dev/null; then ibdev2netdev; else rdma link show; fi
 ibv_devinfo
 ldconfig -p | awk '$1 == "libibverbs.so.1" { found=1 } END { exit !found }'
@@ -309,11 +309,11 @@ the transaction, and check any reported recovery failure before you go on.
 (
 set -euo pipefail
 CFG="$PWD/.local/spark-setup/node/config.env"
-sudo --preserve-env=SSH_CONNECTION bash ops/scripts/spark-setup/apply.sh "$CFG" network
+sudo --preserve-env=SSH_CONNECTION bash scripts/spark-setup/apply.sh "$CFG" network
 # After reviewing the proposed commands and file differences:
 mkdir -p .local/spark-setup
 RESULT_DIR=$(mktemp -d "$PWD/.local/spark-setup/network-result.XXXXXX")
-sudo --preserve-env=SSH_CONNECTION bash ops/scripts/spark-setup/apply.sh "$CFG" network \
+sudo --preserve-env=SSH_CONNECTION bash scripts/spark-setup/apply.sh "$CFG" network \
   --result-file "$RESULT_DIR/result" --apply
 RESULT=$(cat "$RESULT_DIR/result")
 # From the local console, with both ends prepared:
@@ -352,7 +352,7 @@ Do not copy an index from another OS release or from an unrelated interface.
 (
 set -euo pipefail
 CFG="$PWD/.local/spark-setup/node/config.env"
-source ops/scripts/spark-setup/common.sh
+source scripts/spark-setup/common.sh
 load_config "$CFG"
 for i in "${!RDMA_DEVS[@]}"; do
   p="/sys/class/infiniband/${RDMA_DEVS[$i]}/ports/1"
@@ -404,13 +404,13 @@ the RDMA commands in [Undo a setup step](#undo-a-setup-step).
 (
 set -euo pipefail
 CFG="$PWD/.local/spark-setup/node/config.env"
-source ops/scripts/spark-setup/common.sh
+source scripts/spark-setup/common.sh
 load_config "$CFG"
-sudo bash ops/scripts/spark-setup/apply.sh "$CFG" rdma
+sudo bash scripts/spark-setup/apply.sh "$CFG" rdma
 # After reviewing the proposed files, group changes and reload commands:
 mkdir -p .local/spark-setup
 RESULT_DIR=$(mktemp -d "$PWD/.local/spark-setup/rdma-result.XXXXXX")
-sudo bash ops/scripts/spark-setup/apply.sh "$CFG" rdma \
+sudo bash scripts/spark-setup/apply.sh "$CFG" rdma \
   --result-file "$RESULT_DIR/result" --apply
 RESULT=$(cat "$RESULT_DIR/result")
 # From the console, retaining a recovery session; any Vade service must be idle:
@@ -450,7 +450,7 @@ too:
 (
 set -euo pipefail
 CFG="$PWD/.local/spark-setup/node/config.env"
-source ops/scripts/spark-setup/common.sh
+source scripts/spark-setup/common.sh
 load_config "$CFG"
 if [[ -n $SERVICE_UNIT ]]; then
   systemctl show "$SERVICE_UNIT" -p User -p LimitMEMLOCK -p LimitMEMLOCKSoft
@@ -515,9 +515,9 @@ CFG="$PWD/.local/spark-setup/node/config.env"
 uname -r
 cat /proc/cmdline
 # Only for 7.0.0-1019-nvidia when preparing this mitigation:
-sudo bash ops/scripts/spark-setup/apply.sh "$CFG" kernel
+sudo bash scripts/spark-setup/apply.sh "$CFG" kernel
 # After reviewing the GRUB file difference and generation command:
-sudo bash ops/scripts/spark-setup/apply.sh "$CFG" kernel --apply
+sudo bash scripts/spark-setup/apply.sh "$CFG" kernel --apply
 # Reboot manually from the console during the agreed maintenance window.
 # After the reboot:
 uname -r
@@ -569,7 +569,7 @@ or [ring playbook](https://build.nvidia.com/spark/connect-three-sparks/three-spa
 (
 set -euo pipefail
 CFG="$PWD/.local/spark-setup/node/config.env"
-source ops/scripts/spark-setup/common.sh
+source scripts/spark-setup/common.sh
 load_config "$CFG"
 KEY_DIR=$(dirname "$SSH_KEY_FILE")
 install -d -m 700 "$KEY_DIR"
@@ -639,10 +639,10 @@ other custom updaters. We have not tested how they behave during a pause.
 ```sh
 (
 set -euo pipefail
-sudo bash ops/scripts/spark-setup/updates.sh pause
+sudo bash scripts/spark-setup/updates.sh pause
 # After reviewing the saved-state and systemctl commands:
-sudo bash ops/scripts/spark-setup/updates.sh pause --apply
-bash ops/scripts/spark-setup/updates.sh status
+sudo bash scripts/spark-setup/updates.sh pause --apply
+bash scripts/spark-setup/updates.sh status
 )
 ```
 
@@ -675,10 +675,10 @@ even when everything passes; the next check does.
 set -euo pipefail
 CFG="$PWD/.local/spark-setup/node/config.env"
 mkdir -p .local/spark-setup/evidence
-bash ops/scripts/spark-setup/verify.sh "$CFG" \
+bash scripts/spark-setup/verify.sh "$CFG" \
   | tee .local/spark-setup/evidence/prerequisites-preview.txt
 # After reviewing the proposed checks and peer commands:
-bash ops/scripts/spark-setup/verify.sh "$CFG" --apply \
+bash scripts/spark-setup/verify.sh "$CFG" --apply \
   | tee .local/spark-setup/evidence/prerequisites.txt
 )
 ```
@@ -706,10 +706,10 @@ set -euo pipefail
 CFG="$PWD/.local/spark-setup/node/config.env"
 mkdir -p .local/spark-setup/evidence
 # Node at one end, its local row number (1-based):
-bash ops/scripts/spark-setup/verify.sh "$CFG" --bw-server 1 \
+bash scripts/spark-setup/verify.sh "$CFG" --bw-server 1 \
   | tee .local/spark-setup/evidence/rail-1-server-preview.txt
 # After reviewing the command; the peer must be ready to start its client:
-bash ops/scripts/spark-setup/verify.sh "$CFG" --bw-server 1 --apply \
+bash scripts/spark-setup/verify.sh "$CFG" --bw-server 1 --apply \
   | tee .local/spark-setup/evidence/rail-1-server.txt
 )
 ```
@@ -722,10 +722,10 @@ set -euo pipefail
 CFG="$PWD/.local/spark-setup/node/config.env"
 mkdir -p .local/spark-setup/evidence
 # Direct peer, matching rail's row number in THAT node's local config:
-bash ops/scripts/spark-setup/verify.sh "$CFG" --bw-client 1 \
+bash scripts/spark-setup/verify.sh "$CFG" --bw-client 1 \
   | tee .local/spark-setup/evidence/rail-1-client-preview.txt
 # After reviewing the command; its matching server must be running:
-bash ops/scripts/spark-setup/verify.sh "$CFG" --bw-client 1 --apply \
+bash scripts/spark-setup/verify.sh "$CFG" --bw-client 1 --apply \
   | tee .local/spark-setup/evidence/rail-1-client.txt
 )
 ```
@@ -788,9 +788,9 @@ start pending package jobs, so look into any failure before you continue.
 ```sh
 (
 set -euo pipefail
-sudo bash ops/scripts/spark-setup/updates.sh restore
+sudo bash scripts/spark-setup/updates.sh restore
 # After reviewing the restore commands:
-sudo bash ops/scripts/spark-setup/updates.sh restore --apply
+sudo bash scripts/spark-setup/updates.sh restore --apply
 )
 ```
 
@@ -816,10 +816,10 @@ set -euo pipefail
 CFG="$PWD/.local/spark-setup/node/config.env"
 # Network rollback, from the console:
 read -r -p 'Network transaction path printed by apply: ' SNAPSHOT
-sudo bash ops/scripts/spark-setup/apply.sh "$CFG" rollback "$SNAPSHOT"
+sudo bash scripts/spark-setup/apply.sh "$CFG" rollback "$SNAPSHOT"
 mkdir -p .local/spark-setup
 RESULT_DIR=$(mktemp -d "$PWD/.local/spark-setup/network-rollback-result.XXXXXX")
-sudo bash ops/scripts/spark-setup/apply.sh "$CFG" rollback "$SNAPSHOT" \
+sudo bash scripts/spark-setup/apply.sh "$CFG" rollback "$SNAPSHOT" \
   --result-file "$RESULT_DIR/result" --apply
 RESULT=$(cat "$RESULT_DIR/result")
 # Persistent files are restored; generation and activation are still manual.
@@ -839,13 +839,13 @@ esac
 set -euo pipefail
 CFG="$PWD/.local/spark-setup/node/config.env"
 # RDMA rollback, from the console with a recovery session retained:
-source ops/scripts/spark-setup/common.sh
+source scripts/spark-setup/common.sh
 load_config "$CFG"
 read -r -p 'RDMA transaction path printed by apply: ' SNAPSHOT
-sudo bash ops/scripts/spark-setup/apply.sh "$CFG" rollback "$SNAPSHOT"
+sudo bash scripts/spark-setup/apply.sh "$CFG" rollback "$SNAPSHOT"
 mkdir -p .local/spark-setup
 RESULT_DIR=$(mktemp -d "$PWD/.local/spark-setup/rdma-rollback-result.XXXXXX")
-sudo bash ops/scripts/spark-setup/apply.sh "$CFG" rollback "$SNAPSHOT" \
+sudo bash scripts/spark-setup/apply.sh "$CFG" rollback "$SNAPSHOT" \
   --result-file "$RESULT_DIR/result" --apply
 RESULT=$(cat "$RESULT_DIR/result")
 # The helper restores prior files, group membership and any group it created,
@@ -871,8 +871,8 @@ set -euo pipefail
 CFG="$PWD/.local/spark-setup/node/config.env"
 # Kernel rollback, before the next maintenance reboot:
 read -r -p 'Kernel transaction path printed by apply: ' SNAPSHOT
-sudo bash ops/scripts/spark-setup/apply.sh "$CFG" rollback "$SNAPSHOT"
-sudo bash ops/scripts/spark-setup/apply.sh "$CFG" rollback "$SNAPSHOT" --apply
+sudo bash scripts/spark-setup/apply.sh "$CFG" rollback "$SNAPSHOT"
+sudo bash scripts/spark-setup/apply.sh "$CFG" rollback "$SNAPSHOT" --apply
 # The helper restores/removes the drop-in and grub.cfg exactly as recorded.
 # Reboot manually from the console only during the agreed maintenance window.
 uname -r
