@@ -134,6 +134,11 @@ pub struct Chat<'s, 'a> {
     depth_cap: usize,
     /// The request's own depth (min resident): what the chat drafts in a cohort.
     base_depth: usize,
+    /// Admission's KV geometry (kv_charge) and the rows this request's charge covers: a
+    /// restored session maps them at once (NextModel::session_from_prefix).
+    pages: &'s Geometry,
+    ahead: u64,
+    kv_rows: usize,
     /// VADE_FLASHNEXT_ADOPT (default off): `reservation` charges an adopted arena; `arena`
     /// names this chat's arenas; `arenas` is where they go when its request ends (the prefix
     /// it published, else the one it adopted from) or, for a cached chat, where its prefix's
@@ -390,6 +395,9 @@ impl<'s, 'a> Chat<'s, 'a> {
             sampled_draft: self.sampled_draft,
             depth_cap: usize::MAX,
             base_depth: self.base_depth,
+            pages: self.pages,
+            ahead: self.ahead,
+            kv_rows: 0,
             adopt: self.adopt,
             reservation: self.reservation,
             arena: arenas.as_ref().map_or(0, |a| a.id),
@@ -399,6 +407,9 @@ impl<'s, 'a> Chat<'s, 'a> {
     }
 }
 impl Session for Chat<'_, '_> {
+    fn admission_tokens(&mut self, tokens: usize) {
+        self.kv_rows = self.pages.extent((tokens as u64).saturating_add(self.ahead)) as usize;
+    }
     fn configure_request(&mut self, request: &crate::protocol::Request) -> Result<(), String> {
         self.draft_disabled = false;
         if self.live.is_none() {
@@ -408,7 +419,7 @@ impl Session for Chat<'_, '_> {
                 Some(storage) => self.model.session_from_storage(self.backend, self.chunk, &prefix, storage)?,
                 None => {
                     if self.adopt { self.arena = arena_id(); *self.arenas.get_mut() = None; }
-                    self.model.session_from_prefix(self.backend, self.capacity, self.chunk, &prefix)?
+                    self.model.session_from_prefix(self.backend, self.capacity, self.chunk, &prefix, self.kv_rows)?
                 }
             });
         }
@@ -663,6 +674,9 @@ impl<'b, 'a, 'w> Engine for FlashNext<'b, 'a, 'w> {
             sampled_draft: self.sampled_draft,
             depth_cap: usize::MAX,
             base_depth: self.model.mtp_depth().min(spark_engine::flash_next_lookup::DEFAULT_MTP_DEPTH),
+            pages: &self.pages,
+            ahead: self.ahead,
+            kv_rows: 0,
             adopt: self.adopt,
             reservation: self.reservation,
             arena: if self.adopt { arena_id() } else { 0 },

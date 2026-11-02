@@ -92,12 +92,15 @@ inside the plan.
 Flash-Next serving admits a request by the KV pages it can use: its prompt,
 its output allowance, the draft verify rows and 64 more rows, in whole 2 MiB
 pages. Admission charges these bytes to the session pool when the request
-starts. The engine maps the pages when the rows need them. Segmented KV pages
+starts. A new chat and a restored chat map those pages when the session is
+built, and a chat that passes them maps more when the rows need them. Segmented KV pages
 have their own plan: the session pool bytes. Under pressure, the KV reserve
 keeps spare segmented pages while the segmented pages that the process holds,
 live or spare, are at most that pool. Above it, pressure releases them. If the
 device budget or the driver refuses a page during later growth, the growth
-stops with a capacity error (`KV segment growth` in the log).
+stops with a capacity error (`KV segment growth` in the log). If a page is
+refused while the session is built, the request fails with HTTP 503
+`session_unavailable`.
 
 The `flashnext kv_arenas` log gives per-operation counts and bytes for ordinary attention
 arena allocations, reuse, reserve returns, direct frees and reserve evictions.

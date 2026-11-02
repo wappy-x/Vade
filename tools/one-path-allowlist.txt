@@ -272,6 +272,7 @@ topology-branch spark-engine flash::next_tp::NextModel::tp_rows_to_front 3
 topology-branch spark-engine flash::next_tp::NextModel::tp_set_head_pass 1
 topology-branch spark-engine flash::next_tp::NextModel::tp_split_rows 1
 topology-branch spark-engine flash::next_tp::NextModel::tp_swap_state 1
+topology-branch spark-engine flash::next_tp::NextModel::tp_whole_tail 2
 topology-branch spark-engine flash::next_tp::Swap::origins 1
 topology-branch spark-engine flash::next_tp_gather::NextModel::tp_gather_state 1
 topology-branch spark-engine flash::next_tp_heads::NextModel::gdn_frame 2

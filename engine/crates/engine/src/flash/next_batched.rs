@@ -1128,7 +1128,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         while start < tokens.len() {
             // Prefix cache: the last 64-aligned row before the final partial tile (or inside it, arm_inside).
             if output && tokens.len() - start < 64 { self.capture_checkpoint(b)?; }
-            let keep = output && self.keeps_tail();
+            let keep = output && self.keeps_tail_of(tokens.len() - start);
             let mut n = self.model.tp_seq_cut(self, output, tokens.len() - start, chunk)
                 .unwrap_or_else(|| crate::flash_next_rows::final_rows(self.pos, tokens.len() - start, chunk, keep));
             // Debug dumps retain all per-token head/stage records. Custom hooks

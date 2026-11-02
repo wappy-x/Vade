@@ -50,6 +50,9 @@ pub trait Session {
     fn release_replay_snapshot(&mut self) {}
     /// Proposal capacity funded by this request's current admission reservation.
     fn reserve_model_draft(&mut self, _tokens: usize) {}
+    /// The tokens admission charges this request, before `configure_request` restores a cached
+    /// prefix: a restored session maps the pages a new session of that charge maps.
+    fn admission_tokens(&mut self, _tokens: usize) {}
     fn automatic_draft(&mut self, _prompt: usize, _remaining: usize) {}
     /// Local exact verification; other backends retain their ordinary step path.
     fn draft_target(&mut self) -> Option<&mut dyn spark_engine::draft::Target> { None }

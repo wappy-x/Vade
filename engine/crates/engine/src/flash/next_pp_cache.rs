@@ -57,12 +57,15 @@ impl Drop for Lease {
 }
 impl Link {
     fn cache_command(&mut self, kind: u32, meta: [u32; 4]) -> Result<usize> {
-        self.cache_command_live(kind, meta, 0)
+        self.cache_command_live(kind, meta, 0, 0)
     }
-    fn cache_command_live(&mut self, kind: u32, meta: [u32; 4], live: u32) -> Result<usize> {
+    /// `live`: the live slots (CAPTURE, RESTORE). `word`: for CAPTURE, a pass's row, in rows
+    /// past the position (0: at the position); for RESTORE, the KV rows the front's session maps.
+    fn cache_command_live(&mut self, kind: u32, meta: [u32; 4], live: u32, word: u32) -> Result<usize> {
         if self.poisoned { return Err("pipeline prefix link failed earlier".into()); }
         let mut rows = vec![0.0; W];
         rows[6] = f32::from_bits(live);
+        rows[7] = f32::from_bits(word);
         // No pass runs: the request carries no tile or token-split bit of the last pass.
         let bits = (std::mem::take(&mut self.tp_tile), std::mem::take(&mut self.tp_seq));
         let exchanged = self.exchange(kind, &[meta], &mut rows);
@@ -97,11 +100,11 @@ impl Link {
         if drain || self.pending == 0 { self.cache_releases()?; }
         Ok(())
     }
-    fn cache_capture(&mut self, mut meta: [u32; 4], live: u32) -> Result<Option<Lease>> {
+    fn cache_capture(&mut self, mut meta: [u32; 4], live: u32, inside: u32) -> Result<Option<Lease>> {
         self.cache_releases()?;
         self.cache.next = self.cache.next.checked_add(1).ok_or("pipeline prefix ticket overflow")?;
         meta[3] = self.cache.next;
-        let bytes = self.cache_command_live(CAPTURE, meta, live)?;
+        let bytes = self.cache_command_live(CAPTURE, meta, live, inside)?;
         if bytes == 0 {
             self.cache_command(RELEASE, [0, 0, 0, meta[3]])?;
             return Ok(None);
@@ -113,15 +116,17 @@ impl Link {
 }
 
 // Pending tickets hold only recurrent checkpoints; publication copies the source
-// session's still-intact attention rows before that slot can be reused.
+// session's still-intact attention rows before that slot can be reused. Armed tickets wait for
+// the source session's next pass, which fills its checkpoint (NextSession::arm_back).
 #[cfg(target_os = "linux")]
 pub(in super::super) enum Saved<'a> {
+    Armed { slot: u32, bytes: usize },
     Pending { slot: u32, checkpoint: prefix::Checkpoint<'a>, bytes: usize },
     Published(NextPrefix<'a>),
 }
 #[cfg(target_os = "linux")]
 impl Saved<'_> {
-    fn bytes(&self) -> usize { match self { Self::Pending { bytes, .. } => *bytes, Self::Published(p) => p.device_bytes() } }
+    fn bytes(&self) -> usize { match self { Self::Armed { bytes, .. } | Self::Pending { bytes, .. } => *bytes, Self::Published(p) => p.device_bytes() } }
 }
 #[cfg(target_os = "linux")]
 impl<'a> NextModel<'a> {
@@ -141,9 +146,11 @@ impl<'a> NextModel<'a> {
     pub fn pp_cache_maintain(&self, idle: bool) -> Result<()> {
         self.pp.borrow_mut().as_mut().map_or(Ok(()), |link| link.cache_releases_when(idle))
     }
-    pub(in super::super) fn pp_cache_capture(&self, slot: u32, capacity: usize, position: usize) -> Result<Option<Lease>> {
+    /// `inside`: the worker arms its next pass for the row `inside` rows past `position`
+    /// (0: it captures at `position` now).
+    pub(in super::super) fn pp_cache_capture(&self, slot: u32, capacity: usize, position: usize, inside: usize) -> Result<Option<Lease>> {
         let live = self.cache_live_slots();
-        self.pp.borrow_mut().as_mut().map_or(Ok(None), |l| l.cache_capture([slot, capacity as u32, position as u32, 0], live))
+        self.pp.borrow_mut().as_mut().map_or(Ok(None), |l| l.cache_capture([slot, capacity as u32, position as u32, 0], live, inside as u32))
     }
     fn cache_live_slots(&self) -> u32 {
         self.pool.borrow().used.iter().enumerate().skip(1).filter(|&(_, used)| *used).fold(0, |mask, (slot, _)| mask | 1 << (slot - 1))
@@ -155,11 +162,11 @@ impl<'a> NextModel<'a> {
         if link.cache_command(PUBLISH, lease.meta)? == 0 { return Err("pipeline stage could not publish a prefix".into()); }
         Ok(())
     }
-    pub(in super::super) fn pp_cache_restore(&self, lease: &Lease, slot: u32, capacity: usize, position: usize) -> Result<()> {
+    pub(in super::super) fn pp_cache_restore(&self, lease: &Lease, slot: u32, capacity: usize, position: usize, kv_rows: usize) -> Result<()> {
         let mut guard = self.pp.borrow_mut();
         let link = guard.as_mut().ok_or("prefix has no pipeline link")?;
         link.cache_releases()?;
-        link.cache_command_live(RESTORE, [slot, capacity as u32, position as u32, lease.id], self.cache_live_slots())?;
+        link.cache_command_live(RESTORE, [slot, capacity as u32, position as u32, lease.id], self.cache_live_slots(), kv_rows as u32)?;
         self.tp_prefix_restored(slot);
         Ok(())
     }
@@ -168,7 +175,10 @@ impl<'a> NextModel<'a> {
         if count != 1 || meta.len() != 1 || meta[0][3] == 0 { return Err("invalid pipeline prefix command".into()); }
         let [slot, capacity, position, id] = meta[0];
         let (capacity, position) = (capacity as usize, position as usize);
-        if kind == RELEASE { prefixes.remove(&id); return cache_reply(b, rows, 1); }
+        if kind == RELEASE {
+            if let Some(Saved::Armed { slot, .. }) = prefixes.remove(&id) && let Some(s) = sessions.get_mut(&slot) { s.set_prefix_checkpoint(false); }
+            return cache_reply(b, rows, 1);
+        }
         if kind == ROOM { return cache_reply(b, rows, 1); }
         if slot == 0 || slot as usize > POOL_SIZE || capacity > context || position == 0
             || !position.is_multiple_of(64) || position > capacity || kind == RESTORE && position == capacity {
@@ -181,7 +191,7 @@ impl<'a> NextModel<'a> {
             let before = sessions.len();
             // A pending checkpoint still refers to its source arena. Published copies do not.
             sessions.retain(|held, _| live & (1 << (*held - 1)) != 0
-                || prefixes.values().any(|p| matches!(p, Saved::Pending { slot: source, .. } if source == held)));
+                || prefixes.values().any(|p| matches!(p, Saved::Armed { slot: source, .. } | Saved::Pending { slot: source, .. } if source == held)));
             if sessions.len() != before {
                 engine_model::events::note("prefix_cache_worker_reclaim", format_args!("released_sessions={} retained_sessions={}", before - sessions.len(), sessions.len()));
             }
@@ -198,17 +208,29 @@ impl<'a> NextModel<'a> {
                 // publishes (pp_cache_publish sends their releases first), where the rest is checked.
                 if !cache_room_for(b, checkpoint_bytes, checkpoint_bytes, room as i128)? { return cache_reply(b, rows, 0); }
                 s.set_prefix_checkpoint(true);
-                let captured = s.capture_checkpoint(b).map(|()| s.prefix_bytes());
-                let checkpoint = s.checkpoint.borrow_mut().take();
-                s.set_prefix_checkpoint(false);
-                let bytes = captured?;
-                match checkpoint {
-                    // Older prefixes count only at PUBLISH, after the front's releases for this one.
-                    Some(checkpoint) if checkpoint_bytes <= budget => {
-                        prefixes.insert(id, Saved::Pending { slot, checkpoint, bytes: checkpoint_bytes }); bytes
+                let inside = rows[7].to_bits() as usize;
+                if inside != 0 {
+                    if !inside.is_multiple_of(64) || position + inside > capacity { return Err("invalid pipeline prefix row".into()); }
+                    let armed = s.arm_back(b, position + inside).map(|()| s.prefix_bytes());
+                    match armed? {
+                        bytes if bytes != 0 && checkpoint_bytes <= budget => {
+                            prefixes.insert(id, Saved::Armed { slot, bytes: checkpoint_bytes }); bytes
+                        }
+                        _ => { s.set_prefix_checkpoint(false); 0 }
                     }
-                    Some(_) => 0,
-                    None => 0,
+                } else {
+                    let captured = s.capture_checkpoint(b).map(|()| s.prefix_bytes());
+                    let checkpoint = s.checkpoint.borrow_mut().take();
+                    s.set_prefix_checkpoint(false);
+                    let bytes = captured?;
+                    match checkpoint {
+                        // Older prefixes count only at PUBLISH, after the front's releases for this one.
+                        Some(checkpoint) if checkpoint_bytes <= budget => {
+                            prefixes.insert(id, Saved::Pending { slot, checkpoint, bytes: checkpoint_bytes }); bytes
+                        }
+                        Some(_) => 0,
+                        None => 0,
+                    }
                 }
             }
             PUBLISH => {
@@ -238,7 +260,7 @@ impl<'a> NextModel<'a> {
                     _ => return Err("pipeline prefix ticket missing or position differs".into()),
                 };
                 sessions.remove(&slot);
-                sessions.insert(slot, self.session_from_prefix(b, capacity, tile, prefix)?);
+                sessions.insert(slot, self.session_from_prefix(b, capacity, tile, prefix, rows[7].to_bits() as usize)?);
                 1
             }
             _ => return Err("unknown pipeline prefix command".into()),
@@ -340,7 +362,14 @@ impl<'a> NextModel<'a> {
                     return Err("pipeline rows do not match the residual".into());
                 }
                 for (s, &n) in ordered.iter_mut().zip(&lens) { s.fit_kv(b, s.pos + n)?; }
-                NextSession::pp_back_rows(b, &mut ordered, &lens, residual, matches!(kind, KIND_VERIFY | crate::flash_tp_switch::KIND_VERIFY))
+                NextSession::pp_back_rows(b, &mut ordered, &lens, residual, matches!(kind, KIND_VERIFY | crate::flash_tp_switch::KIND_VERIFY))?;
+                // An armed pass ended: its ticket holds the checkpoint a capture would have left.
+                for (s, &[slot, ..]) in ordered.iter_mut().zip(meta) {
+                    let Some(checkpoint) = s.end_inside() else { continue };
+                    let armed = prefixes.iter().find(|(_, p)| matches!(p, Saved::Armed { slot: source, .. } if *source == slot)).map(|(&id, p)| (id, p.bytes()));
+                    if let Some((id, bytes)) = armed { prefixes.insert(id, Saved::Pending { slot, checkpoint, bytes }); }
+                }
+                Ok(())
             }
             KIND_POOLED => {
                 if lens.iter().any(|&n| n != 1) {
@@ -385,6 +414,7 @@ mod tests {
                 workers.push(std::thread::spawn(move || {
                     let mut live = BTreeMap::<u32, (usize, u32)>::new();
                     let mut saved = BTreeMap::<u32, (usize, u32)>::new();
+                    let mut armed = None::<(u32, u32, usize)>;
                     serve_stage(back, None, next, Stage::new(rank, ranks, None).unwrap(), 512, 8, 64, &STOP, recipe,
                         |_| Ok(()), || Ok(()), |kind, _, meta, rows| {
                             let [slot, _, pos, id] = meta[0];
@@ -394,9 +424,18 @@ mod tests {
                             let kind = kind & !bits;
                             if matches!(kind, CAPTURE | RESTORE) { assert!(valid_live_mask(rows[6].to_bits(), slot)); }
                             match kind {
+                                CAPTURE if rows[7].to_bits() != 0 => {
+                                    assert_eq!(live[&slot].0, pos as usize);
+                                    armed = Some((slot, id, pos as usize + rows[7].to_bits() as usize));
+                                    set_charge(rows, 128);
+                                }
                                 CAPTURE => { assert_eq!(live[&slot].0, pos as usize); if id != 2 { saved.insert(id, live[&slot]); } set_charge(rows, if id == 2 { 0 } else { 128 }); }
                                 PUBLISH => { assert!(saved.contains_key(&id)); set_charge(rows, 1); }
-                                RESTORE => { live.insert(slot, *saved.get(&id).ok_or("missing ticket")?); set_charge(rows, 1); }
+                                RESTORE => {
+                                    assert_eq!(rows[7].to_bits(), pos + 64, "the front's KV rows ride with the restore");
+                                    live.insert(slot, *saved.get(&id).ok_or("missing ticket")?);
+                                    set_charge(rows, 1);
+                                }
                                 RELEASE => { saved.remove(&id); set_charge(rows, 1); }
                                 ROOM => {
                                     ROOMS.fetch_add(1, Ordering::SeqCst);
@@ -410,6 +449,10 @@ mod tests {
                                     if pos == 0 { *state = (0, 0); }
                                     assert_eq!(state.0, pos as usize);
                                     for row in rows.chunks_mut(W) {
+                                        if let Some((_, id, _)) = armed.filter(|&(source, _, at)| source == slot && at == state.0) {
+                                            saved.insert(id, *state);
+                                            armed = None;
+                                        }
                                         state.1 = state.1.rotate_left(5).wrapping_add(row[0].to_bits()).wrapping_mul(17);
                                         state.0 += 1;
                                         row[0] = f32::from_bits(state.1);
@@ -433,8 +476,8 @@ mod tests {
             let mut first = vec![0.0; 64 * W];
             for (row, &token) in first.chunks_mut(W).zip(&prompt) { row[0] = f32::from_bits(token); }
             link.post(&[[1, 512, 0, 64]], first, None).unwrap();
-            let lease = std::rc::Rc::new(link.cache_capture([1, 512, 64, 0], 1).unwrap().unwrap());
-            assert!(link.cache_capture([1, 512, 64, 0], 1).unwrap().is_none(), "optional refusal must preserve the link");
+            let lease = std::rc::Rc::new(link.cache_capture([1, 512, 64, 0], 1, 0).unwrap().unwrap());
+            assert!(link.cache_capture([1, 512, 64, 0], 1, 0).unwrap().is_none(), "optional refusal must preserve the link");
             assert!(!link.poisoned && link.cache.owners.len() == 1);
             let other_owner = lease.clone();
             drop(lease);
@@ -457,12 +500,22 @@ mod tests {
             prefill(&mut link, 1, 0, &[999]);
             let cached_tokens = lease.meta[2];
             (link.tp_tile, link.tp_seq) = (true, true);
-            link.cache_command_live(RESTORE, [2, 512, cached_tokens, lease.id], 2).unwrap();
+            link.cache_command_live(RESTORE, [2, 512, cached_tokens, lease.id], 2, cached_tokens + 64).unwrap();
             assert!(link.tp_tile && link.tp_seq, "a prefix command keeps the last pass's bits");
             (link.tp_tile, link.tp_seq) = (false, false);
             let cached_ids = prefill(&mut link, 2, cached_tokens, &prompt[cached_tokens as usize..]);
             assert_eq!(cached_tokens, 64);
             assert_eq!(cached_ids, uncached_ids);
+            // A resumed tail in one pass: the capture arms the pass, and the ticket then holds
+            // the state at that row, so a later prompt resumes there with the same rows.
+            link.cache_command_live(RESTORE, [6, 512, 64, lease.id], 1 << 5, 128).unwrap();
+            let armed = link.cache_capture([6, 512, 64, 0], 1 << 5, 32).unwrap().unwrap();
+            let whole = prefill(&mut link, 6, 64, &prompt[64..]);
+            assert!(link.cache_command(PUBLISH, armed.meta).unwrap() > 0);
+            link.cache_command_live(RESTORE, [7, 512, 96, armed.id], 1 << 6, 160).unwrap();
+            assert_eq!(prefill(&mut link, 7, 96, &prompt[96..]), whole[32..]);
+            drop(armed);
+            link.cache_releases().unwrap();
             // A canceled request's tile can leave its reply unread: maintenance under load keeps
             // the release queued, and the idle server reads the reply and sends it.
             let mut tile = vec![0.0; W];
@@ -575,20 +628,20 @@ mod tests {
             link.post(&[[slot, 512, pos as u32, tokens.len() as u32]], rows, None).unwrap();
         };
         post(&mut link, 1, 0, &prompt[..64]);
-        let lease = link.cache_capture([1, 512, 64, 0], 1).unwrap().unwrap();
+        let lease = link.cache_capture([1, 512, 64, 0], 1, 0).unwrap().unwrap();
         assert_eq!((lease.bytes, link.cache.room.unwrap().1), (100 + RANKS - 1, 1000), "the largest charge and the smallest room");
-        assert!(link.cache_capture([1, 512, 64, 0], 1).unwrap().is_none(), "one rank's refusal refuses the capture");
+        assert!(link.cache_capture([1, 512, 64, 0], 1, 0).unwrap().is_none(), "one rank's refusal refuses the capture");
         assert!(!link.poisoned && link.cache.owners.len() == 1);
         assert!(link.cache_command(PUBLISH, lease.meta).unwrap() > 0);
         post(&mut link, 1, 64, &prompt[64..]);
         // The slot is reused by another chat; the ticket restores a new slot on every rank.
         post(&mut link, 1, 0, &[999]);
-        link.cache_command_live(RESTORE, [2, 512, 64, lease.id], 2).unwrap();
+        link.cache_command_live(RESTORE, [2, 512, 64, lease.id], 2, 0).unwrap();
         post(&mut link, 2, 64, &prompt[64..]);
         // One rank refuses PUBLISH: rank 0 sees the refusal, its lease drops, and RELEASE reaches
         // every rank. The next turn is a miss: a cold prompt from row 0 on all ranks.
         post(&mut link, 3, 0, &prompt[..64]);
-        let refused = link.cache_capture([3, 512, 64, 0], 4).unwrap().unwrap();
+        let refused = link.cache_capture([3, 512, 64, 0], 4, 0).unwrap().unwrap();
         assert_eq!(refused.id, 3);
         assert_eq!(link.cache_command(PUBLISH, refused.meta).unwrap(), 0, "one rank's refused publish refuses on rank 0");
         drop(refused);

@@ -213,6 +213,10 @@ impl SeqChats {
         self.chats.retain(|c| c.0 != slot);
         self.chats.push((slot, rows, SeqStage::Tiled));
     }
+    /// This slot's chat has a token-split record (a pending export, owed or lost state).
+    pub fn holds(&self, slot: u32) -> bool {
+        self.chats.iter().any(|c| c.0 == slot)
+    }
     /// The slot whose export is pending (at most one: a first part starts only without one).
     pub fn pending(&self) -> Option<u32> {
         self.chats.iter().find(|c| c.2 == SeqStage::Tiled).map(|c| c.0)
@@ -627,6 +631,7 @@ mod tests {
         seq.expect(1, seq_first(0, 8009, 4096).unwrap());
         assert_eq!(seq.plan(&[(1, 0, 4032, true)], false, false), Ok(SeqPlan::Tile));
         seq.posted(1, 4032);
+        assert!(seq.holds(1) && !seq.holds(2));
         assert_eq!(seq.pending(), Some(1));
         assert_eq!(seq.plan(&[(1, 4032, 3968, true)], false, false), Ok(SeqPlan::Here));
         assert_eq!(seq.mode, SeqMode::Import(4032));
@@ -637,6 +642,7 @@ mod tests {
         assert_eq!(seq.plan(&[(2, 7, 1, false), (1, 8009, 1, false)], true, true), normal(None, vec![(1, 4032)]));
         assert_eq!(seq.mode, SeqMode::Off);
         seq.settled(&[1]);
+        assert!(!seq.holds(1));
         assert_eq!(seq.plan(&[(1, 8010, 1, false)], true, true), normal(None, vec![]));
         // A longer later pass of an owed chat pushes first; a new chat on an owed slot owes nothing.
         seq.expect(6, 2048);

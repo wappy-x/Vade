@@ -533,8 +533,9 @@ pub(crate) fn prompt_rows(position: usize, remaining: usize, limit: usize) -> us
         n
     }
 }
-/// A prompt's final tile on one Spark (`keep`): it also takes the rows after its last
-/// 64-aligned row, so they need no whole-model pass of their own. Only when more than
+/// A prompt's final tile that keeps its tail (`keep`: one Spark, or a resumed tail of the pair,
+/// NextSession::keeps_tail_of): it also takes the rows after its last 64-aligned row, so they
+/// need no whole-model pass of their own. Only when more than
 /// CHUNK_ROWS_LIMIT rows follow that row: both GDN scans of the tile (before and after
 /// the prefix checkpoint row, next_prefix.rs) then stay fully fused.
 #[cfg(any(target_os = "linux", test))]

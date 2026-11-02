@@ -381,6 +381,8 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 
 ### Engine
 
+- On two FP4-Local Sparks, a cached later turn of a long chat starts about twice as fast. A resumed tail now runs as one pass with the prefix checkpoint inside it, and a restored session maps its KV pages when it is built. On a 32,000-token chat the cached turn went from 0.861 to 0.399 s (turn 1 cache) and from 0.675 to 0.249 s (turn 2 cache), medians of 3. The token IDs do not change. Cold prompts on two Sparks take up to 3.5 % longer; a follow-up works on that.
+
 - On four FP4-Local Sparks over RDMA, a cold prompt of 6,145 to 48,064 tokens now runs as a sequence split when no other chat decodes: each Spark reads its own part of the prompt, so its first token comes sooner. Beside a decoding chat it runs as chain tiles. The token IDs do not change. Each of the four Sparks holds about 1 GiB more for its link, and the session pool counts it.
 - On a chain of three or more Sparks, kept rows of a long prompt that runs as chain tiles now come back during the prompt, not all at the end, and the first and final tiles take the RDMA wire when it is there.
 

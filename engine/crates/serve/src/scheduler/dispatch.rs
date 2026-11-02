@@ -661,6 +661,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 }),
             };
             let state = state.and_then(|mut state| {
+                state.session.admission_tokens(tokens);
                 state.session.configure_request(&ready.request)?;
                 // Include explicit checkpoints even without a conversation key.
                 state.session.set_cache_retention(retain_prefix(&ready));

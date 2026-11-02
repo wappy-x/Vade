@@ -337,6 +337,14 @@ impl<'a> NextModel<'a> {
             s.seq.chats.settled(&[slot]);
         }
     }
+    /// Rank 0 of the pair: the last `rows` rows of a chat's prompt run as a whole pass on both
+    /// ranks and no state of the chat is owed: not a pipeline tile, no handoff, no token-split
+    /// record. Such a pass can keep its tail rows, as on one Spark (NextSession::keeps_tail_of).
+    pub(super) fn tp_whole_tail(&self, slot: u32, rows: usize) -> bool {
+        self.tp.borrow().as_ref().is_some_and(|s| s.rank == 0 && s.layout.world == crate::flash_tp_switch::PAIR
+            && !tile_pass(false, crate::flash_tp_switch::PIPELINE_TILE, [(rows, false)])
+            && !s.handoff.contains(&slot) && !s.seq.chats.holds(slot))
+    }
     /// This rank's mailbox layout (the relay's channels and slots).
     pub fn tp_mailbox_layout(&self) -> Option<spark_gpu_probe::tp_route::Channels> {
         self.tp_box.get().map(|m| m.layout())

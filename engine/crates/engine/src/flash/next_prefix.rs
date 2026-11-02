@@ -7,8 +7,9 @@
 //! live session later and moves the checkpoint in. `session_from_prefix` installs the
 //! copies in a fresh session and prefill resumes at that 64-aligned position (an unaligned
 //! resume would run single rows up to the next boundary). No kernel, tile or order change.
-//! On one Spark the final tile can also hold the rows after that position (`arm_inside`):
-//! the pass then copies the same pieces at that row inside the tile.
+//! On one Spark, and in a resumed tail of the pair, the final tile can also hold the rows
+//! after that position (`arm_inside`): the pass then copies the same pieces at that row inside
+//! the tile, on each rank (`arm_back`, `end_inside`).
 //! Adoption (VADE_FLASHNEXT_ADOPT, serve): `save_prefix_in_place` publishes the checkpoint
 //! alone; the finished session's QSA and draft arenas move out with `into_storage` (no pool
 //! slot), and `session_from_storage` builds the next turn's session on them, rewound to the
@@ -111,23 +112,24 @@ impl<'a, 'w> NextSession<'a, 'w> {
     /// the session and reaches the caller. Only local snapshot copies are best effort.
     pub(super) fn capture_checkpoint(&mut self, b: &Backend<'a>) -> Result<()> {
         if !self.checkpointing || self.pos == 0 || !self.pos.is_multiple_of(64) { return Ok(()); }
-        let remote = match self.prepare_checkpoint(b) {
-            Ok(remote) => remote,
-            Err(error) => {
-                self.valid = false;
-                self.logits_ready = false;
-                *self.checkpoint.get_mut() = None;
-                return Err(error);
-            }
-        };
+        let remote = self.prepared_checkpoint(b, 0)?;
         if self.model.pp_front() && remote.is_none() || self.try_capture(b, remote).is_err() {
             *self.checkpoint.get_mut() = None;
         }
         Ok(())
     }
+    /// `prepare_checkpoint`; a failure invalidates the session.
+    fn prepared_checkpoint(&mut self, b: &Backend<'a>, inside: usize) -> Result<Option<pp::cache::Lease>> {
+        self.prepare_checkpoint(b, inside).inspect_err(|_| {
+            self.valid = false;
+            self.logits_ready = false;
+            *self.checkpoint.get_mut() = None;
+        })
+    }
     /// One Spark: nothing to prepare. Split front: settle the state the ranks owe each other,
-    /// then the worker captures its own rows at the same position (pp_cache_capture).
-    fn prepare_checkpoint(&mut self, b: &Backend<'a>) -> Result<Option<pp::cache::Lease>> {
+    /// then the worker captures its own rows at the same position, or with `inside` rows arms
+    /// its next pass for that row (pp_cache_capture).
+    fn prepare_checkpoint(&mut self, b: &Backend<'a>, inside: usize) -> Result<Option<pp::cache::Lease>> {
         if !self.model.pp_front() { return Ok(None); }
         // The drafter observes the queued tiles' kept rows while the back runs them.
         self.observe_queued_kept(b)?;
@@ -136,7 +138,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         self.model.tp_part(b, &mut [self], &[0..0], true, false)?;
         self.model.tp_gdn_frame(b, &mut [self], usize::MAX)?;
         // The ordered capture drains the link, so the kept rows of queued tiles are back.
-        let remote = self.model.pp_cache_capture(self.slot, self.capacity, self.pos)?;
+        let remote = self.model.pp_cache_capture(self.slot, self.capacity, self.pos, inside)?;
         self.ingest_kept(b)?;
         self.flush_draft_feed(b)?;
         Ok(remote)
@@ -185,18 +187,47 @@ impl<'a, 'w> NextSession<'a, 'w> {
     pub(super) fn keeps_tail(&self) -> bool {
         !self.model.pp_front() && !self.model.tp_on() && self.dump.is_none()
     }
+    /// `keeps_tail`, or the pair for a chat that resumes (a restored prefix, a later turn) whose
+    /// last `rows` rows run as one whole pass on each rank (NextModel::tp_whole_tail).
+    pub(super) fn keeps_tail_of(&self, rows: usize) -> bool {
+        self.keeps_tail() || self.pos > 0 && self.dump.is_none() && self.model.tp_whole_tail(self.slot, rows)
+    }
     /// A final tile of `rows` rows that keeps its tail: the checkpoint storage exists before
     /// the pass, and the pass copies each piece at the tile's last 64-aligned row, where a
     /// shorter tile would have ended: the frontend the PLE hash (`inside_hash`), the PLE
     /// tiles the history (`inside_ple`), each GDN layer its state between two scans of the
     /// tile (`inside_gdn`; any cut gives the same bytes) and the end the draft's row
-    /// (`inside_last`). Best effort like `try_capture`: no storage, no checkpoint.
+    /// (`inside_last`). Best effort like `try_capture`: no storage, no checkpoint. Split front:
+    /// after `prepare_checkpoint`, whose capture arms the worker's pass at the same row.
     pub(super) fn arm_inside(&mut self, b: &Backend<'a>, rows: usize) -> Result<()> {
         if !self.checkpointing || !self.pos.is_multiple_of(64) || rows <= 64 || rows.is_multiple_of(64) { return Ok(()); }
-        if self.gdn_state.iter().flatten().any(|g| g.is_half()) { return Ok(()); }
-        *self.checkpoint.get_mut() = self.checkpoint_storage(b).ok()
-            .map(|c| Checkpoint { position: self.pos + rows / 64 * 64, remote: None, inside: true, ..c });
+        let inside = rows / 64 * 64;
+        let remote = self.prepared_checkpoint(b, inside)?;
+        if self.model.pp_front() && remote.is_none() { return Ok(()); }
+        self.arm_storage(b, self.pos + inside, remote);
         Ok(())
+    }
+    fn arm_storage(&mut self, b: &Backend<'a>, position: usize, remote: Option<pp::cache::Lease>) {
+        if self.gdn_state.iter().flatten().any(|g| g.is_half()) { return; }
+        *self.checkpoint.get_mut() = self.checkpoint_storage(b).ok()
+            .map(|c| Checkpoint { position, remote, inside: true, ..c });
+    }
+    /// Split worker: the front armed its pass for the checkpoint at `position` (a row of the next
+    /// pass). The pass's GDN layers copy their state there (next_stage.rs); the PLE history and
+    /// hash do not move on this rank, so they are copied now. No storage: no checkpoint.
+    pub(super) fn arm_back(&mut self, b: &Backend<'a>, position: usize) -> Result<()> {
+        self.arm_storage(b, position, None);
+        let Some(c) = self.checkpoint.get_mut().as_mut() else { return Ok(()) };
+        c.hash = self.hash.clone();
+        self.ple.copy_history(b, &mut c.ple)
+    }
+    /// Split worker, after a pass: the checkpoint it filled (`arm_back`), out of the session as a
+    /// capture leaves it. None when the session holds no armed checkpoint.
+    pub(super) fn end_inside(&mut self) -> Option<Checkpoint<'a>> {
+        let mut c = self.checkpoint.get_mut().take_if(|c| c.inside)?;
+        c.inside = false;
+        self.checkpointing = false;
+        Some(c)
     }
     /// The pass row of an armed checkpoint (`arm_inside`).
     pub(super) fn inside_row(&self) -> Option<usize> {
@@ -315,17 +346,23 @@ impl<'a> NextModel<'a> {
         (0..layers).flat_map(|_| widths).filter(|&w| w != 0).collect()
     }
     /// A fresh session holding `prefix`; prefill continues at its 64-aligned position.
+    /// `kv_rows`: the rows the request's charge covers, mapped at once, so a kept KV range of
+    /// that size is reused whole, with no trim and no second map per vector.
     pub fn session_from_prefix<'w>(
         &'w self,
         b: &Backend<'a>,
         capacity: usize,
         chunk: usize,
         prefix: &NextPrefix<'a>,
+        kv_rows: usize,
     ) -> Result<NextSession<'a, 'w>> {
         if prefix.in_place || prefix.position == 0 || !prefix.position.is_multiple_of(64) || prefix.position >= capacity {
             return Err("invalid Flash-Next prefix position".into());
         }
-        let mut s = self.session_with_chunk(b, capacity, chunk)?;
+        self.set_kv_rows_hint(kv_rows.max(prefix.position));
+        let session = self.session_with_chunk(b, capacity, chunk);
+        self.set_kv_rows_hint(0);
+        let mut s = session?;
         s.valid = false;
         s.fit_kv(b, prefix.position)?;
         for (live, saved) in s.qsa_state.iter_mut().zip(&prefix.qsa) {
@@ -350,7 +387,7 @@ impl<'a> NextModel<'a> {
             (Some(_), None) if self.prompt_frontend => s.disable_mtp(),
             _ => {}
         }
-        if let Some(remote) = &prefix.remote { self.pp_cache_restore(remote, s.slot, capacity, prefix.position)?; }
+        if let Some(remote) = &prefix.remote { self.pp_cache_restore(remote, s.slot, capacity, prefix.position, s.kv_rows())?; }
         s.pos = prefix.position;
         s.sync_pool_state(b)?;
         s.logits_ready = false;
@@ -400,7 +437,7 @@ impl<'a> NextModel<'a> {
             (Some(_), _) if self.prompt_frontend => s.disable_mtp(),
             _ => {}
         }
-        if let Some(remote) = &prefix.remote { self.pp_cache_restore(remote, s.slot, capacity, prefix.position)?; }
+        if let Some(remote) = &prefix.remote { self.pp_cache_restore(remote, s.slot, capacity, prefix.position, s.kv_rows())?; }
         s.pos = prefix.position;
         s.sync_pool_state(b)?;
         s.logits_ready = false;
