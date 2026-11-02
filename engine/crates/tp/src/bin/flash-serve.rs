@@ -92,6 +92,7 @@ fn run() -> Result<(), String> {
             let compiled = spark_gpu_probe::driver::with_backend(0, &ptx, 64 << 20,
                 |backend| backend.require_layer_kernels());
             println!("ptx_warmup_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+            if !spark_gpu_probe::CUBIN_STAMP.is_empty() { println!("{}", spark_gpu_probe::CUBIN_STAMP); }
             let verified = verification.map(|worker| worker.join()
                 .map_err(|_| "Model verification worker stopped unexpectedly".to_string())?).transpose();
             compiled?;

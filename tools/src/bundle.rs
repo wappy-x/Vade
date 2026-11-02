@@ -1,7 +1,7 @@
 //! Check tar headers and manifests without extracting archive members.
 use std::{collections::BTreeMap, fs::{self,File}, io::Read, path::{Path,PathBuf}, process::{Command,Stdio}};
 use crate::{Result,is_lower_hex,sha256};
-const REQUIRED: &[&str] = &["LICENSE","NOTICE","flash-serve","flash.ptx","vade","vade-harness","launcher-bundle.conf",
+const REQUIRED: &[&str] = &["LICENSE","NOTICE","flash-serve","flash.ptx","flash.cubin.conf","vade","vade-harness","launcher-bundle.conf",
     "engine/LICENSE","engine/NOTICE","engine/crates/tokenizer/UNICODE-NOTICE.txt","engine/crates/tokenizer/QWEN-NOTICE.txt"];
 const ARTIFACTS: &[(&str,&str)] = &[("engine","flash-serve"),("ptx","flash.ptx"),("harness","vade-harness"),("vade","vade")];
 struct Member { mode: u64, regular: bool, digest: String, data: Vec<u8>, retained: bool }
@@ -46,7 +46,7 @@ pub fn check_tar(mut input: impl Read, short: &str, forbidden: &[String]) -> Res
                 return Err(format!("unsafe archive member: {name}").into());
             }
             let mut audit = Audit { input: (&mut input).take(size), data: Vec::new(), tail: Vec::new(), forbidden,
-                manifest: name == "launcher-bundle.conf", retained: false };
+                manifest: matches!(name.as_str(),"launcher-bundle.conf"|"flash.cubin.conf"), retained: false };
             let digest = sha256::digest_reader(&mut audit)?;
             if audit.input.limit() != 0 { return Err("truncated tar member".into()); }
             members.insert(name, Member { mode: octal(&h[100..108])?, regular: matches!(kind,0|b'0'), digest,
@@ -79,7 +79,23 @@ pub fn check_tar(mut input: impl Read, short: &str, forbidden: &[String]) -> Res
         if m.digest != fields[format!("{key}_sha256").as_str()] { return Err(format!("manifest hash mismatch: {name}").into()); }
         if *name != "flash.ptx" && m.mode & 0o111 != 0o111 { return Err(format!("missing executable mode: {name}").into()); }
         if m.retained || members["launcher-bundle.conf"].retained { return Err(format!("producer path retained: {name}").into()); }
-    } Ok(())
+    }
+    if members["flash.cubin.conf"].retained { return Err("producer path retained: flash.cubin.conf".into()); }
+    check_cubin(std::str::from_utf8(&members["flash.cubin.conf"].data)?,fields["ptx_sha256"])
+}
+/// The engine's build script checks the image itself. Here the archive must name the same PTX.
+fn check_cubin(conf: &str, ptx: &str) -> Result<()> {
+    let mut fields = BTreeMap::new();
+    for line in conf.lines() {
+        let (k,v) = line.split_once('=').ok_or("invalid cubin fields")?;
+        if fields.insert(k,v).is_some() { return Err("invalid cubin fields".into()); }
+    }
+    let expected = ["format","target","ptx_sha256","cubin_sha256","min_driver_api","ptxas_version","ptxas_sha256","ptxas_args"];
+    if fields.len() != expected.len() || expected.iter().any(|k| !fields.contains_key(k)) { return Err("invalid cubin fields".into()); }
+    if fields["format"] != "vade-cubin-v1" || fields["target"] != "sm_121" { return Err("wrong cubin format or target".into()); }
+    if fields["ptx_sha256"] != ptx { return Err("cubin names other PTX bytes".into()); }
+    if !is_lower_hex(fields["cubin_sha256"],64) || !is_lower_hex(fields["ptxas_sha256"],64) { return Err("invalid cubin hash".into()); }
+    Ok(())
 }
 pub fn checksum(text: &str) -> Result<(&str,&str,&str)> {
     let invalid = || "invalid SHA256SUMS";

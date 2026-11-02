@@ -4,6 +4,12 @@ use std::{collections::BTreeMap, env, fs, io, path::Path};
 #[path = "../../tools/export/src/sha256.rs"]
 mod sha256;
 
+// The one compiler the token id proof covers. Keep these equal to scripts/make-cubin.sh.
+// Another compiler can emit other GPU code, so it needs a new proof and a change here.
+const PTXAS_VERSION: &str = "13.0.88";
+const PTXAS_SHA256: &str = "a1941a04ca4fd233b2fbe50c625b1e72b3d5f79ebe80209a272c85482dfbb487";
+const PTXAS_ARGS: &str = "--gpu-name=sm_121 -m64 -O3";
+
 fn invalid(message: &str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message) }
 
 fn validate(ptx: &[u8], image: &[u8], manifest: &str) -> io::Result<i32> {
@@ -12,9 +18,13 @@ fn validate(ptx: &[u8], image: &[u8], manifest: &str) -> io::Result<i32> {
         let (key, value) = line.split_once('=').ok_or_else(|| invalid("invalid cubin manifest"))?;
         if fields.insert(key, value).is_some() { return Err(invalid("duplicate cubin manifest field")); }
     }
-    if fields.len() != 5 || fields.get("format") != Some(&"vade-cubin-v1")
+    if fields.len() != 8 || fields.get("format") != Some(&"vade-cubin-v1")
         || fields.get("target") != Some(&"sm_121") {
         return Err(invalid("cubin manifest must describe vade-cubin-v1 for sm_121"));
+    }
+    if fields.get("ptxas_version") != Some(&PTXAS_VERSION) || fields.get("ptxas_sha256") != Some(&PTXAS_SHA256)
+        || fields.get("ptxas_args") != Some(&PTXAS_ARGS) {
+        return Err(invalid("cubin was not compiled by the pinned ptxas and arguments"));
     }
     if fields.get("ptx_sha256").copied() != Some(sha256::digest(ptx).as_str()) {
         return Err(invalid("cubin PTX SHA256 differs from this build's exact kernel bytes"));
@@ -40,16 +50,18 @@ fn validate(ptx: &[u8], image: &[u8], manifest: &str) -> io::Result<i32> {
 
 pub fn prepare(out: &Path, ptx: &[u8]) -> io::Result<()> {
     println!("cargo:rerun-if-env-changed=SPARK_CUBIN");
-    let (image, minimum) = if let Some(path) = env::var_os("SPARK_CUBIN") {
+    let (image, minimum, stamp) = if let Some(path) = env::var_os("SPARK_CUBIN") {
         let path = std::path::PathBuf::from(path);
         let manifest = path.with_extension("cubin.conf");
         println!("cargo:rerun-if-changed={}", path.display());
         println!("cargo:rerun-if-changed={}", manifest.display());
         let image = fs::read(&path)?;
         let minimum = validate(ptx, &image, &fs::read_to_string(manifest)?)?;
-        (image, minimum)
-    } else { (Vec::new(), 0) };
+        let stamp = format!("cubin_sha256={}", sha256::digest(&image));
+        (image, minimum, stamp)
+    } else { (Vec::new(), 0, String::new()) };
     fs::write(out.join("kernel.cubin"), image)?;
+    fs::write(out.join("cubin_stamp.rs"), format!("{stamp:?}\n"))?;
     fs::write(out.join("cubin_driver.rs"), format!("{minimum}i32\n"))
 }
 
@@ -58,7 +70,7 @@ mod tests {
     use super::*;
     fn fixture() -> (Vec<u8>, String) {
         let image = include_bytes!("fixtures/sm_121.elf-header").to_vec();
-        let manifest = format!("format=vade-cubin-v1\ntarget=sm_121\nptx_sha256={}\ncubin_sha256={}\nmin_driver_api=13000\n",
+        let manifest = format!("format=vade-cubin-v1\ntarget=sm_121\nptx_sha256={}\ncubin_sha256={}\nmin_driver_api=13000\nptxas_version={PTXAS_VERSION}\nptxas_sha256={PTXAS_SHA256}\nptxas_args={PTXAS_ARGS}\n",
             sha256::digest(b"exact PTX"), sha256::digest(&image));
         (image, manifest)
     }
@@ -81,6 +93,15 @@ mod tests {
         wrong[49] = 120;
         let wrong_manifest = manifest.replace(&sha256::digest(&image), &sha256::digest(&wrong));
         assert!(validate(b"exact PTX", &wrong, &wrong_manifest).is_err());
+    }
+    #[test]
+    fn producer_refuses_any_compiler_but_the_pinned_one() {
+        let (image, manifest) = fixture();
+        for bad in [manifest.replace(PTXAS_VERSION, "13.0.48"), manifest.replace(PTXAS_SHA256, &"0".repeat(64)),
+            manifest.replace(PTXAS_ARGS, "--gpu-name=sm_121 -m64 -O2"),
+            manifest.lines().filter(|line| !line.starts_with("ptxas_args=")).collect::<Vec<_>>().join("\n")] {
+            assert!(validate(b"exact PTX", &image, &bad).is_err());
+        }
     }
     #[test]
     fn producer_rejects_compiler_sm_121a_header_even_with_matching_digest() {

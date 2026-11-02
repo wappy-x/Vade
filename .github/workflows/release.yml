@@ -41,7 +41,8 @@ jobs:
           cargo +1.99.0 --version
       - name: Build the release bundle
         # The producer owns every build and packaging command, including the
-        # link-only CUDA stub on runners without a driver. PTX needs no GPU.
+        # link-only CUDA stub on runners without a driver. PTX needs no GPU. It also
+        # downloads the pinned ptxas, which compiles the PTX without a GPU.
         run: sh scripts/make-bundle.sh
       - name: Check the archive and every manifest hash
         run: cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- check-bundle .local/bundles "$GITHUB_WORKSPACE" "$HOME" bundle-build.

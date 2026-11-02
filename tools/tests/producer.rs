@@ -12,13 +12,23 @@ impl Producer {
             write(&root.join("fixture").join(name),"fixture notice or manifest\n");
         }
         write(&root.join("fixture/engine/crates/cuda.rs"),"fn cuInit(flags: u32);\n");
+        // A stand-in compiler with the real file layout. Only the two pinned hashes differ.
+        let folder = "cuda_nvcc-linux-sbsa-13.0.88-archive";
+        let compiler = "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'Cuda compilation tools, release 13.0, V13.0.88'; exit 0; fi\nprintf image > flash.cubin\n";
+        executable(&root.join("toolkit").join(folder).join("bin/ptxas"),compiler);
+        let archive = root.join("ptxas.tar");
+        assert!(Command::new("tar").arg("-cf").arg(&archive).arg("-C").arg(root.join("toolkit")).arg(folder).status().unwrap().success());
+        let script = fs::read_to_string(vade_tools::root().join("scripts/make-cubin.sh")).unwrap()
+            .replace("01b01e10aa2662ad1b3aeab3317151d7d6d4a650eeade55ded504f6b7fced18e",&vade_tools::sha256::digest(&fs::read(&archive).unwrap()))
+            .replace("a1941a04ca4fd233b2fbe50c625b1e72b3d5f79ebe80209a272c85482dfbb487",&vade_tools::sha256::digest(compiler.as_bytes()));
+        write(&root.join("fixture/scripts/make-cubin.sh"),script);
         for name in ["uname","git","cargo","rustup","cc","readelf","tar","zstd","sha256sum","rustc-probe","mv"] {
             executable(&root.join("bin").join(name),&format!("#!/bin/sh\nexec {} {} \"$@\"\n",quote(env!("CARGO_BIN_EXE_bundle-fixture")),quote(name)));
         }
         let output = root.join("published");
         let env = [("PATH",format!("{}:{}",root.join("bin").display(),std::env::var("PATH").unwrap())),
             ("TEST_ROOT",root.display().to_string()),("TEST_OUTPUT",output.display().to_string()),
-            ("TEST_REAL_MV",which("mv")),("TEST_REAL_TAR",which("tar"))].into_iter().map(|(k,v)|(k.into(),v)).collect();
+            ("TEST_REAL_MV",which("mv")),("TEST_REAL_TAR",which("tar")),("VADE_PTXAS_ARCHIVE",root.join("ptxas.tar").display().to_string())].into_iter().map(|(k,v)|(k.into(),v)).collect();
         Self {temp,output,env}
     }
     fn produce(&self, mode: &str, succeeds: bool) {
@@ -53,7 +63,7 @@ impl Producer {
     }
 }
 #[test] fn refusals_and_failure_cleanup() {
-    for mode in ["dirty","build-fails","interrupt","path-leak","remapped-path-leak","wrong-arch","rpath"] {
+    for mode in ["dirty","build-fails","interrupt","path-leak","remapped-path-leak","wrong-arch","rpath","no-cubin-in-engine"] {
         let p = Producer::new(); p.produce(mode,false); assert!(!p.output.exists(),"{mode}");
     }
 }

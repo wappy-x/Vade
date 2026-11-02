@@ -7,10 +7,12 @@ fail() { printf '%s\n' "bundle: $*" >&2; exit 1; }
 if [ "${1-}" = --help ]; then
     printf '%s\n' 'Usage: sh scripts/make-bundle.sh [OUTPUT_DIR]' \
         'Build committed HEAD for Linux aarch64; OUTPUT_DIR must not exist (default: .local/bundles).' \
-        '   or: sh scripts/make-bundle.sh --from-payload PAYLOAD_DIR --cli-dir CLI_DIR [OUTPUT_DIR]' \
+        'This build downloads the pinned ptxas; set VADE_PTXAS_ARCHIVE to the absolute path of a saved copy.' \
+        '   or: sh scripts/make-bundle.sh --from-payload PAYLOAD_DIR --cli-dir CLI_DIR [--cubin-dir CUBIN_DIR] [OUTPUT_DIR]' \
         'Package already built binaries without a build (Linux or macOS with git, tar, gzip and od; the' \
         'payload commit must be in this checkout). PAYLOAD_DIR holds' \
         'build.json, source.tar and artifacts/engine/target; CLI_DIR holds vade, vade-harness and REVISION.' \
+        'CUBIN_DIR is the make-cubin.sh output that the payload engine embeds. Without it the bundle has PTX only.' \
         'Writes vade-<version>-<sha7>-linux-aarch64-gb10.tar.gz and SHA256SUMS.'
     exit 0
 fi
@@ -18,8 +20,19 @@ if [ "${1-}" = --from-payload ]; then
     # Package a payload that is already built (for example by a cross build), with no
     # build here. It runs on Linux or macOS: GNU tar and BSD tar each give the same
     # bytes on every run; MANIFEST holds per-file hashes that do not depend on tar.
-    [ "$#" -ge 4 ] && [ "$#" -le 5 ] && [ "$3" = --cli-dir ] || fail 'expected --from-payload PAYLOAD_DIR --cli-dir CLI_DIR [OUTPUT_DIR]'
-    for tool in git tar gzip od find sed sort grep head tail cut tr touch chmod cp mkdir mktemp mv rm wc dirname basename; do
+    usage='expected --from-payload PAYLOAD_DIR --cli-dir CLI_DIR [--cubin-dir CUBIN_DIR] [OUTPUT_DIR]'
+    [ "$#" -ge 4 ] && [ "$3" = --cli-dir ] || fail "$usage"
+    payload_arg=$2 cli_arg=$4
+    shift 4
+    cubin_arg=
+    if [ "${1-}" = --cubin-dir ]; then
+        [ "$#" -ge 2 ] && [ -n "$2" ] || fail "$usage"
+        cubin_arg=$2
+        shift 2
+    fi
+    [ "$#" -le 1 ] || fail "$usage"
+    output_arg=${1-}
+    for tool in git tar gzip od find sed sort grep head tail cut tr touch chmod cmp cp mkdir mktemp mv rm wc dirname basename; do
         command -v "$tool" >/dev/null 2>&1 || fail "missing tool: $tool"
     done
     if command -v sha256sum >/dev/null 2>&1; then sum() { sha256sum "$@"; }
@@ -27,8 +40,8 @@ if [ "${1-}" = --from-payload ]; then
     else fail 'missing tool: sha256sum or shasum'; fi
     digest() { sum "$1" | cut -d ' ' -f 1; }
     root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
-    payload=$(CDPATH= cd -- "$2" && pwd -P) || fail 'payload folder is missing'
-    clidir=$(CDPATH= cd -- "$4" && pwd -P) || fail 'CLI folder is missing'
+    payload=$(CDPATH= cd -- "$payload_arg" && pwd -P) || fail 'payload folder is missing'
+    clidir=$(CDPATH= cd -- "$cli_arg" && pwd -P) || fail 'CLI folder is missing'
     engine="$payload/artifacts/engine/target/release/flash-serve"
     ptx="$payload/artifacts/engine/target/nvptx64-nvidia-cuda/release/spark_layer_kernels.ptx"
     for file in "$payload/build.json" "$payload/source.tar" "$engine" "$ptx" "$clidir/vade" "$clidir/vade-harness" "$clidir/REVISION"; do
@@ -41,6 +54,24 @@ if [ "${1-}" = --from-payload ]; then
     json() { sed -n "s/.*\"$1\": *\"\\([0-9a-f]*\\)\".*/\\1/p" "$payload/build.json"; }
     [ "$(json binary_sha256)" = "$(digest "$engine")" ] || fail 'flash-serve does not match build.json'
     [ "$(json ptx_sha256)" = "$(digest "$ptx")" ] || fail 'PTX does not match build.json'
+    cubin_sha= cubin_ptxas=
+    if [ -n "$cubin_arg" ]; then
+        cubindir=$(CDPATH= cd -- "$cubin_arg" && pwd -P) || fail 'cubin folder is missing'
+        for file in "$cubindir/flash.cubin" "$cubindir/flash.cubin.conf" "$cubindir/flash.ptx"; do
+            [ -f "$file" ] && [ ! -L "$file" ] || fail "missing cubin file: $file"
+        done
+        cubin_field() { sed -n "s/^$1=//p" "$cubindir/flash.cubin.conf"; }
+        # The merge train's byte check: the compiled PTX is the PTX in this bundle.
+        cmp -s "$cubindir/flash.ptx" "$ptx" || fail 'the cubin was compiled from other PTX bytes'
+        [ "$(cubin_field ptx_sha256)" = "$(digest "$ptx")" ] || fail 'flash.cubin.conf names other PTX bytes'
+        cubin_sha=$(digest "$cubindir/flash.cubin")
+        [ "$(cubin_field cubin_sha256)" = "$cubin_sha" ] || fail 'flash.cubin does not match flash.cubin.conf'
+        cubin_ptxas=$(cubin_field ptxas_version)
+        [ -n "$cubin_ptxas" ] || fail 'flash.cubin.conf names no ptxas version'
+        grep -aFq "cubin_sha256=$cubin_sha" "$engine" || fail 'flash-serve does not embed this cubin'
+    elif grep -aEq 'cubin_sha256=[0-9a-f]{64}' "$engine"; then
+        fail 'flash-serve embeds a cubin; pass its folder with --cubin-dir'
+    fi
     git -C "$root" cat-file -e "$revision^{commit}" 2>/dev/null || fail "commit $revision is not in this checkout; fetch it first"
     epoch=$(git -C "$root" show -s --format=%ct "$revision")
     date=$(TZ=UTC git -C "$root" show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ "$revision")
@@ -59,7 +90,7 @@ if [ "${1-}" = --from-payload ]; then
         *) fail "no driver row for PTX ISA '$isa'; add it from the CUDA release notes" ;;
     esac
     [ "$gpu" = sm_121 ] || fail "PTX targets '$gpu', not the GB10 (sm_121)"
-    output=${5:-"$root/.local/bundles"}
+    output=${output_arg:-"$root/.local/bundles"}
     [ ! -e "$output" ] && [ ! -L "$output" ] || fail 'output already exists; choose a fresh output directory'
     mkdir -p -- "$(dirname -- "$output")"
     output="$(CDPATH= cd -- "$(dirname -- "$output")" && pwd -P)/$(basename -- "$output")"
@@ -76,6 +107,7 @@ if [ "${1-}" = --from-payload ]; then
     cp "$engine" "$stage/flash-serve"
     cp "$ptx" "$stage/flash.ptx"
     cp "$clidir/vade" "$clidir/vade-harness" "$stage/"
+    [ -z "$cubin_sha" ] || cp "$cubindir/flash.cubin.conf" "$stage/flash.cubin.conf"
     cp "$work/src/LICENSE" "$work/src/NOTICE" "$stage/"
     cp "$work/src/engine/LICENSE" "$work/src/engine/NOTICE" "$stage/engine/"
     cp -R "$work/src/engine/licenses" "$stage/engine/licenses"
@@ -103,13 +135,19 @@ ptx_sha256=$(digest "$stage/flash.ptx")
 harness_sha256=$(digest "$stage/vade-harness")
 vade_sha256=$(digest "$stage/vade")
 CONF
+    compiled=
+    [ -z "$cubin_sha" ] || compiled="
+
+flash-serve also holds the same kernels compiled for the GB10, so an install
+does not wait for the driver to compile the PTX. flash.cubin.conf names the
+compiler and the hashes. flash.ptx stays as the fallback."
     cat > "$stage/README-BUNDLE" <<README
 Vade $version ($revision), prebuilt for one GB10 system (a DGX Spark or
 another GB10 machine).
 
 This folder has the vade command, the inference engine (flash-serve), the GPU
 kernels as PTX (flash.ptx) and the chat program (vade-harness). It has no
-model weights.
+model weights.$compiled
 
 You need Linux aarch64 with glibc $glibc or newer and an NVIDIA driver from
 release 580 or newer (CUDA 13.0). MANIFEST lists every file
@@ -129,9 +167,10 @@ README
         printf '%s\n' format=vade-release-v1 "name=$stem" "version=$version" "sha=$revision" "date=$date" \
             target=gb10 arch=aarch64-unknown-linux-gnu "gpu=$gpu" "ptx_isa=$isa" "ptx_cuda=$ptx_cuda" \
             "ptx_min_driver=$ptx_driver" min_cuda=13.0 min_driver=580 "glibc=$glibc"
+        [ -z "$cubin_sha" ] || printf '%s\n' "cubin_sha256=$cubin_sha" "cubin_ptx_sha256=$(digest "$stage/flash.ptx")" "cubin_ptxas=$cubin_ptxas"
         while IFS= read -r file; do printf 'file=%s  %s\n' "$(digest "$stage/$file")" "$file"; done < "$work/files"
     } > "$stage/MANIFEST"
-    for artifact in "$stage/flash.ptx" "$stage/launcher-bundle.conf" "$stage/MANIFEST"; do
+    for artifact in "$stage/flash.ptx" "$stage/launcher-bundle.conf" "$stage/MANIFEST" ${cubin_sha:+"$stage/flash.cubin.conf"}; do
         for forbidden in "$payload" "$clidir" "$root" "$HOME"; do
             if grep -aFq -- "$forbidden" "$artifact"; then fail "$(basename -- "$artifact") contains a producer path"; fi
         done
@@ -166,7 +205,7 @@ fi
 [ "$#" -le 1 ] || fail 'expected at most one output directory'
 [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = aarch64 ] || fail 'run on Linux aarch64 (no GPU required)'
 for tool in git cargo rustup cc readelf tar zstd sha256sum find sed sort date mktemp \
-    grep cut cp chmod mkdir mv rm rmdir wc tr dirname basename; do
+    grep cut cmp cp chmod mkdir mv rm rmdir wc tr dirname basename; do
     command -v "$tool" >/dev/null 2>&1 || fail "missing build tool: $tool"
 done
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
@@ -251,7 +290,11 @@ cd "$source/engine"
 # The first build-std may fetch Rust compiler components. Set
 # CARGO_NET_OFFLINE=true when these are already cached (as on a Spark).
 cargo +1.99.0 kernels
-cargo +1.99.0 build --release --offline --locked -p spark-tp --bin flash-serve
+# Compile the exact PTX before the engine build. SPARK_CUBIN goes to this one build
+# command only: it binds the image to the PTX that the engine embeds (gpu/cubin.rs).
+sh "$source/scripts/make-cubin.sh" "$source/engine/target/nvptx64-nvidia-cuda/release/spark_layer_kernels.ptx" \
+    "$work/cubin" ${VADE_PTXAS_ARCHIVE:+"$VADE_PTXAS_ARCHIVE"}
+SPARK_CUBIN="$work/cubin/flash.cubin" cargo +1.99.0 build --release --offline --locked -p spark-tp --bin flash-serve
 cd "$source/cli"
 cargo +1.99.0 build --release --offline --locked --bin vade
 cd "$source/harness"
@@ -262,8 +305,12 @@ cp "$CARGO_TARGET_DIR/release/flash-serve" "$payload/flash-serve"
 cp "$CARGO_TARGET_DIR/release/vade" "$payload/vade"
 cp "$CARGO_TARGET_DIR/release/vade-harness" "$payload/vade-harness"
 cp "$source/engine/target/nvptx64-nvidia-cuda/release/spark_layer_kernels.ptx" "$payload/flash.ptx"
+cp "$work/cubin/flash.cubin.conf" "$payload/flash.cubin.conf"
+cmp -s "$work/cubin/flash.ptx" "$payload/flash.ptx" || fail 'the cubin was compiled from other PTX bytes'
+grep -aFq "cubin_sha256=$(sha256sum "$work/cubin/flash.cubin" | cut -d ' ' -f 1)" "$payload/flash-serve" ||
+    fail 'flash-serve does not embed the cubin'
 chmod 755 "$payload/flash-serve" "$payload/vade" "$payload/vade-harness"
-chmod 644 "$payload/flash.ptx"
+chmod 644 "$payload/flash.ptx" "$payload/flash.cubin.conf"
 cp "$source/LICENSE" "$source/NOTICE" "$payload/"
 mkdir -p "$payload/engine/crates/tokenizer"
 cp "$source/engine/LICENSE" "$source/engine/NOTICE" "$payload/engine/"
@@ -297,7 +344,7 @@ EOF
 chmod 644 launcher-bundle.conf
 # Refuse the release if any compiler or generated input retained producer paths.
 # This also catches future env! paths that diagnostic remapping cannot sanitize.
-for artifact in flash-serve flash.ptx vade vade-harness launcher-bundle.conf; do
+for artifact in flash-serve flash.ptx flash.cubin.conf vade vade-harness launcher-bundle.conf; do
     for forbidden in "$work" "$(basename -- "$work")" "$root" "$HOME"; do
         [ -z "$forbidden" ] || if grep -aFq -- "$forbidden" "$artifact"; then
             fail "$artifact contains a producer path"
@@ -306,7 +353,7 @@ for artifact in flash-serve flash.ptx vade vade-harness launcher-bundle.conf; do
 done
 # Explicit members keep build inputs, link stubs and local paths out of releases.
 tar --format=gnu --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
-    -cf "$work/bundle.tar" LICENSE NOTICE engine flash-serve flash.ptx launcher-bundle.conf vade vade-harness
+    -cf "$work/bundle.tar" LICENSE NOTICE engine flash-serve flash.cubin.conf flash.ptx launcher-bundle.conf vade vade-harness
 zstd -q -T1 -10 "$work/bundle.tar" -o "$publication/$archive"
 cd "$publication"
 sha256sum "$archive" > SHA256SUMS

@@ -44,7 +44,13 @@ fn tool(name: &str, args: &[String]) -> Result<()> {
             let mut data = format!("portable artifact {}",variable("CARGO_MANIFEST_DIR"));
             if mode == "path-leak" { data.push_str(&work); }
             if mode == "remapped-path-leak" { data.push_str(Path::new(&work).file_name().unwrap().to_str().unwrap()); }
-            write(Path::new(&variable("TEST_ARTIFACT")),data)?;
+            let artifact = variable("TEST_ARTIFACT");
+            if artifact.ends_with(".ptx") { data.push_str("\n.target sm_121\n"); }
+            if let Ok(image) = env::var("SPARK_CUBIN") {
+                assert!(artifact.ends_with("/flash-serve"),"SPARK_CUBIN reached {artifact}");
+                if mode != "no-cubin-in-engine" { data.push_str(&format!(" cubin_sha256={}",sha256::digest_reader(fs::File::open(image)?)?)); }
+            }
+            write(Path::new(&artifact),data)?;
         },
         "readelf" => if args[0] == "-h" { println!("Class: ELF64\nMachine: {}",if mode == "wrong-arch" { "X86-64" } else { "AArch64" }); }
             else { println!("(NEEDED) Shared library: [libcuda.so.1]"); if mode == "rpath" { println!("(RUNPATH) producer-path"); } },
@@ -61,7 +67,7 @@ fn tool(name: &str, args: &[String]) -> Result<()> {
                 assert_eq!(sha256::digest_reader(fs::File::open(file)?)?,digest); println!("{file}: OK"); }
         } else { println!("{}  {}",sha256::digest_reader(fs::File::open(&args[0])?)?,args[0]); },
         "mv" => {
-            if matches!(mode.as_str(),"rename-race"|"empty-rename-race") { fs::create_dir(&output)?;
+            if args[0] == "-T" && matches!(mode.as_str(),"rename-race"|"empty-rename-race") { fs::create_dir(&output)?;
                 if mode == "rename-race" { fs::write(output.join("existing"),"keep me")?; } }
             if cfg!(target_os = "macos") { let source = &args[args.len()-2]; let dest = &args[args.len()-1];
                 if fs::symlink_metadata(dest).is_err() { fs::rename(source,dest)?; }

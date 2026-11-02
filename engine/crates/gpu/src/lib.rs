@@ -68,6 +68,10 @@ pub fn layer_ptx() -> Result<&'static std::ffi::CStr, String> {
     std::ffi::CStr::from_bytes_with_nul(bytes).map_err(|e| e.to_string())
 }
 
+/// `cubin_sha256=<hex>` when this build embeds a compiled image; empty otherwise.
+/// The release packager reads this text in the binary to prove the image is there.
+pub const CUBIN_STAMP: &str = include!(concat!(env!("OUT_DIR"), "/cubin_stamp.rs"));
+
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../cubin.rs"]

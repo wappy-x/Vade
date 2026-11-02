@@ -256,33 +256,42 @@ decode logits.
 This section is only for people building release binaries; most readers can
 skip it.
 
-If you build a release, you can spare owners the first PTX compile by
-embedding a trusted cubin (a compiled GPU image) in the engine. This is
-optional. It needs a CUDA toolkit on the machine that builds the release;
-owners still need only the CUDA driver.
+A release spares owners the first PTX compile by embedding a trusted cubin (a
+compiled GPU image) in the engine. Owners still need only the CUDA driver.
 
-Compile the exact PTX produced by `cargo kernels`, without arithmetic overrides:
+`scripts/make-cubin.sh` compiles the exact PTX that `cargo kernels` produced
+(`spark_layer_kernels.ptx`, which the engine embeds). It needs no GPU and no
+toolkit install. It downloads one file from NVIDIA, or takes a saved copy, and
+checks the file against the pinned hash. The compiler is Linux aarch64 only:
 
 ```sh
-ptxas --gpu-name=sm_121 spark_rust_kernels.ptx --output-file=flash.cubin
+sh scripts/make-cubin.sh spark_layer_kernels.ptx cubin-out
 ```
 
-Next to the image, create `flash.cubin.conf`. It records the SHA256 digests of
-both files and the lowest driver API version the build toolkit needs (CUDA 13.0
-uses `13000`):
+The script runs `ptxas --gpu-name=sm_121 -m64 -O3 flash.ptx -o flash.cubin`, with
+no arithmetic overrides. It writes three files: `flash.cubin`, `flash.ptx` (the
+bytes that the compiler read) and `flash.cubin.conf`. The manifest records the
+SHA256 digests, the lowest driver API version the build toolkit needs (CUDA 13.0
+uses `13000`) and the compiler:
 
 ```ini
 format=vade-cubin-v1
 target=sm_121
-ptx_sha256=<SHA256 of spark_rust_kernels.ptx>
+ptx_sha256=<SHA256 of the PTX>
 cubin_sha256=<SHA256 of flash.cubin>
 min_driver_api=13000
+ptxas_version=13.0.88
+ptxas_sha256=<SHA256 of the ptxas program>
+ptxas_args=--gpu-name=sm_121 -m64 -O3
 ```
 
 Set `SPARK_CUBIN=/absolute/path/flash.cubin` only for the engine build,
-including a Mac cross-build. The build refuses a changed PTX, image digest or
-CUDA ELF target. If validation fails on the build machine, it prints one plain
-error and exits with a failure.
+including a Mac cross-build. `scripts/make-bundle.sh` does this in its native
+build. The build refuses a changed PTX, image digest or CUDA ELF target, and any
+other compiler or arguments. Another compiler can emit other GPU code, so a new
+compiler needs a change in `make-cubin.sh` and `cubin.rs` and a new token id
+proof. If validation fails on the build machine, it prints one plain error and
+exits with a failure.
 
 Accepted images use CUDA ELF64 OSABI `0x41`, ABI version `8`, executable type
 `2`, ELF version `1`, and exact target flags `0x06007902` for `sm_121`. The
@@ -292,8 +301,10 @@ even when their numeric compute capability is 12.1 and their digests match.
 new compiler encoding needs review.
 
 The engine binary then contains the image, so its existing release digest
-covers it. Keep the compiler version, command and hashes with the release's
-build records (receipts), separate from measurements of owners' installs.
+covers it. It also contains the text `cubin_sha256=<digest>`, which
+`flash-serve --warm-ptx` prints and the release packager checks. The bundle
+carries `flash.cubin.conf` as the build record (receipt) of the compiler, command
+and hashes.
 
 At run time, the engine uses the compiled image when the PTX is
 byte-identical, the GPU has compute capability 12.1 and the driver is new

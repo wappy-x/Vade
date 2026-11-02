@@ -61,7 +61,7 @@ Then `vade install` checks `launcher-bundle.conf` again, as below.
 
 ### Produce the main bundle
 
-`sh scripts/make-bundle.sh --from-payload PAYLOAD_DIR --cli-dir CLI_DIR [OUTPUT_DIR]`
+`sh scripts/make-bundle.sh --from-payload PAYLOAD_DIR --cli-dir CLI_DIR [--cubin-dir CUBIN_DIR] [OUTPUT_DIR]`
 packages binaries that are already built and builds nothing. `PAYLOAD_DIR`
 holds `build.json`, `source.tar` (a `git archive` of the commit) and
 `artifacts/engine/target`, with `flash-serve` and the PTX. `CLI_DIR` holds
@@ -73,7 +73,11 @@ Before it packs anything, it checks that `source.tar`, `build.json` and
 `REVISION` name the same commit, that the engine and PTX match the hashes in
 `build.json`, that the three programs are Linux aarch64 ELF files without
 build-machine paths, and that the PTX targets `sm_121` with a PTX ISA it knows
-the oldest driver for. It sets fixed file modes, the commit time on every
+the oldest driver for. With `--cubin-dir`, the folder that `scripts/make-cubin.sh`
+wrote, it also checks that the compiled PTX is byte for byte the bundled PTX and
+that `flash-serve` holds that image, then adds `flash.cubin.conf` and three
+`cubin_` lines to `MANIFEST`. It refuses an engine that holds an image when
+that folder is missing. It sets fixed file modes, the commit time on every
 file, owner 0 and a sorted member order, so two runs on the same input give
 the same bytes. It writes the archive and `SHA256SUMS` to `OUTPUT_DIR`
 (default `.local/bundles`), which must not exist yet.
@@ -198,6 +202,7 @@ The archive unpacks these files straight into the current directory:
 | `vade` | Linux aarch64 launcher CLI |
 | `flash-serve` | Linux aarch64 inference engine |
 | `flash.ptx` | The production GPU kernels as PTX, stamped with the build they came from |
+| `flash.cubin.conf` | The compiler, command and hashes of the compiled kernels that `flash-serve` holds |
 | `vade-harness` | Linux aarch64 chat program |
 | `launcher-bundle.conf` | Launcher format, target, revisions and file hashes |
 | `LICENSE`, `NOTICE`, `engine/` notices and licenses | The license and notice files that ship with the source |
@@ -255,7 +260,10 @@ use only the standard library, so the build adds no third-party crate
 dependencies. The first nightly `build-std` run may fetch the compiler's own
 dependencies.
 
-You don't need a GPU or the CUDA toolkit to emit PTX or build the bundle.
+You don't need a GPU or the CUDA toolkit to emit PTX or build the bundle. The
+script downloads one compiler file from NVIDIA and checks its hash, so it also
+needs `curl` and `xz`. To build offline, set `VADE_PTXAS_ARCHIVE` to the absolute
+path of a saved copy. See [Precompile kernels for a release](../../engine/crates/gpu/README.md#precompile-kernels-for-a-release).
 
 ### Choose where the output goes
 
