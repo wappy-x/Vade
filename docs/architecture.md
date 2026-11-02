@@ -362,7 +362,7 @@ A chain is mainly for models too large for a single machine ([reading these card
 
 ## The prefix cache
 
-The prefix cache lets a new request skip the start of its prompt when an earlier request began the same way. It is **on by default** on one Spark, on the two-Spark tensor split and on FP8. FP4-Local on three or more Sparks (the layer chain, or the split in parts on four Sparks over RDMA) runs without it.
+The prefix cache lets a new request skip the start of its prompt when an earlier request began the same way. It is **on by default** on one Spark, on the FP4-Local tensor split (two Sparks, or the split in parts on four Sparks over RDMA) and on FP8. The FP4-Local layer chain runs without it. On the split in parts each rank keeps its own copy of its own state; rank 0 alone picks a hit, and a refusal by any rank refuses the copy on every rank.
 
 Requests that send `cache:true` or a `prompt_cache_key` keep their prompt for reuse. `VADE_FLASHNEXT_PREFIX_CACHE=0` turns the cache off ([`prefix_switch.rs`](../engine/crates/serve/src/prefix_switch.rs)).
 
@@ -388,7 +388,7 @@ Vade solves this with checkpoints at aligned positions. Prompt tiles always star
 
 For example, on two Sparks at `--context 131072`, a 100K-token prompt needs a 6.2 GB front snapshot. But the live request leaves 5.3 to 6.0 GB, so its second turn reads the whole prompt again. At `--context 110592`, the same snapshot fits.
 
-The layer chain and the split in parts on four Sparks still refuse the cache at startup ([`prefix_switch.rs`](../engine/crates/serve/src/prefix_switch.rs)).
+The layer chain still refuses the cache at startup ([`prefix_switch.rs`](../engine/crates/serve/src/prefix_switch.rs)).
 
 ## Ranks, memory and ownership
 
@@ -491,7 +491,7 @@ This page describes main after v0.1.0, the latest release. Its default is FP4-Lo
 - **FP8 on two and four Sparks.** FP8 on two and on four Sparks gave the same token IDs in only 7 of 66 responses in those same cards ([benchmarks](history/benchmarks-2026-10.md#fp8-on-two-and-four-sparks-different-token-ids)). A later change, approved on 2026-10-31, makes FP8 on four Sparks add its partial sums in the two-Spark order, so four Sparks now give the same token IDs as two. The four-Spark cards of 2026-11-01 show it ([FP8 token IDs](results.md#fp8-token-ids)). Six Sparks still give other IDs ([changelog](../CHANGELOG.md)). The cards above predate that change, so compare their FP8 results only at the same Spark count.
 - **Long chains.** Chains longer than four Sparks have no live exactness check yet ([FP4-Local launch](../cli/docs/fp4-local.md)).
 - **Other code.** The other model parsers, servers and protocol routes in the source are not qualified to the same level.
-- **The prefix cache.** The prefix cache is on by default. It works locally, on the two-Spark tensor split and on FP8. FP4-Local on three or more Sparks (the layer chain, or the split in parts on four Sparks over RDMA) runs without it.
+- **The prefix cache.** The prefix cache is on by default. It works locally, on the FP4-Local tensor split (two Sparks, or four over RDMA) and on FP8. The FP4-Local layer chain runs without it.
 - **Greedy requests.** On FP4-Local, a request with no sampling field is greedy. `"temperature": 0` alone is greedy too, because the checkpoint's own penalties are neutral. On FP8, a greedy request needs `"temperature": 0` and the three neutral penalties ([OpenAI API](openai-api.md)).
 - **Cancel.** The scheduler handles a cancel between model steps, so the cancel waits for the GPU work that is already running ([`dispatch.rs`](../engine/crates/serve/src/scheduler/dispatch.rs)).
 - **The shell tool.** The agent's shell tool needs macOS.

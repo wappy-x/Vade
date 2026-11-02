@@ -196,7 +196,7 @@ reports the request limits that are in effect.
 | Context | 32768, or the checkpoint's own limit if that is lower; stepped down only as described above |
 | Output | The smaller of the context and 8192 tokens |
 | [Drafting](../../docs/GLOSSARY.md#dg) | On (the engine's default), unless `--mtp` or an `MTP` variable in your shell says otherwise |
-| Prefix retention (reusing the start of an earlier prompt) | On, on one Spark and on two Sparks (the tensor split), unless `VADE_FLASHNEXT_PREFIX_CACHE=0` is set when the engine starts; three or more Sparks run without it |
+| Prefix retention (reusing the start of an earlier prompt) | On, on one Spark and on the tensor split (two Sparks, or four over RDMA), unless `VADE_FLASHNEXT_PREFIX_CACHE=0` is set when the engine starts; the layer chain runs without it |
 | Port | 18080 on loopback at first setup, or another free loopback port if that one is taken; then saved |
 
 </div>

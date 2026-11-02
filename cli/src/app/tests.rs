@@ -1045,13 +1045,13 @@ fn status_prints_the_engine_retention_state() {
     let mut session = Session::load(&f.app.config.state_dir).unwrap().unwrap();
     assert_eq!(retention_label(&session, Some(true)), "on (engine report)");
     assert_eq!(retention_label(&session, None), "on by default; engine not checked");
-    // The default follows the topology: on for the two-Spark split, off on three or more Sparks
-    // (the layer chain, or the split in parts on four Sparks over RDMA).
+    // The default follows the topology: on for the two-Spark split; on three or more Sparks the
+    // saved launch settings do not tell the layer chain (off) from the split in parts (on).
     let one = session.ranks[0].clone();
     session.ranks = vec![one.clone(); 2];
     assert_eq!(retention_label(&session, None), "on by default; engine not checked");
     session.ranks = vec![one.clone(); 3];
-    assert_eq!(retention_label(&session, None), "off by default on three or more Sparks; engine not checked");
+    assert_eq!(retention_label(&session, None), "off by default on the layer chain, on for four Sparks over RDMA; engine not checked");
     session.replicas = true;
     assert_eq!(retention_label(&session, None), "on by default; engine not checked");
     (session.ranks, session.replicas) = (vec![one], false);

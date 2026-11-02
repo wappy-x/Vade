@@ -244,7 +244,7 @@ pub fn select(path: Option<Path>) -> Result<(), String> {
 /// the head and token splits, prompt tiles and their handoffs, the prefix cache). On more ranks
 /// the split cuts the routed and shared experts, the projections and the greedy head into parts;
 /// long cold prompts run as chain tiles and a state gather (next_tp_gather), and every rank runs
-/// the GDN heads whole, with no token split and no prefix cache.
+/// the GDN heads whole, with no token split. Each rank keeps its own prefix cache copies.
 pub const PAIR: usize = 2;
 static WORLD: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 /// flash-serve sets the split's ranks once at startup, with the path (unset: the pair).

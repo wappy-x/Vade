@@ -352,6 +352,11 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 
 ### Engine
 
+- The prefix cache now works on four FP4-Local Sparks over RDMA (the tensor split in parts), as on two Sparks.
+  - Before, the cache was off there, so every later turn of a chat read its whole prompt again.
+  - Each Spark keeps its own copy of its own state. Rank 0 alone picks a hit and its length. A refusal by any Spark refuses the copy on all of them, and the next turn then reads its whole prompt on every Spark.
+  - The cache is on unless `VADE_FLASHNEXT_PREFIX_CACHE=0`. The layer chain still runs without it. Kernels, tiles and reduction order have no change.
+
 - A second FP4-Local start on two Sparks no longer stops at `NVFP4 SHA-256 manifest ... peer=unset`.
   - Before, rank 0 of a start with no list path wrote a checksum list into the checkpoint, and rank 1 never did. The next start saw two different histories and refused.
   - Now the rank that has the list sends it. The other rank saves it and checks its own weight files against it, one time, before the load.

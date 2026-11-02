@@ -3,14 +3,14 @@
 
 /// VADE_FLASHNEXT_PREFIX_CACHE: 1 = on (requests with `cache:true` or a `prompt_cache_key`
 /// retain their prompt); 0 = off (no snapshots); unset = on where a prefix restore exists
-/// (`supported`: one Spark or the two-Spark split), off on three or more Sparks (the chain or
-/// the split in parts). An explicit 1 there is refused: they have no prefix restore contract.
+/// (`supported`: one Spark or the tensor split, on two Sparks or in parts on four), off on the
+/// layer chain. An explicit 1 there is refused: the chain has no prefix restore contract.
 pub fn prefix_cache(supported: bool) -> Result<bool, String> {
     resolve(setting(PREFIX_CACHE.0, std::env::var(PREFIX_CACHE.0))?, supported)
 }
 fn resolve(setting: Option<bool>, supported: bool) -> Result<bool, String> {
     match setting {
-        Some(true) if !supported => Err("VADE_FLASHNEXT_PREFIX_CACHE=1 needs one Spark or two Sparks: three or more Sparks (the layer chain or the split in parts) have no prefix restore contract; unset it or set 0 there".into()),
+        Some(true) if !supported => Err("VADE_FLASHNEXT_PREFIX_CACHE=1 needs one Spark or the tensor split: the layer chain has no prefix restore contract; unset it or set 0 there".into()),
         Some(on) => Ok(on),
         None => Ok(supported),
     }

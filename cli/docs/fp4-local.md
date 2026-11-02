@@ -69,7 +69,7 @@ that many distinct --hosts."
 
 Three or more Sparks run as a layer chain. The exception is four Sparks over
 RDMA: for the shipped checkpoint they run the tensor split in parts
-([four-sparks.md](../../docs/four-sparks.md)), with no prefix cache. When `vade install` stages
+([four-sparks.md](../../docs/four-sparks.md)), with the prefix cache. When `vade install` stages
 the engine, it records whether that engine supports chains. A build staged by
 an older install supports one or two Sparks only, and `vade up` refuses a
 larger count before it contacts any machine. Run `vade install` from current

@@ -75,9 +75,9 @@ pub fn run_pp(
     if !sparse {
         return Err("rows require --indexer sparse".into());
     }
-    // The pair has paired prefix snapshots. The layer chain and the split over more ranks refuse
-    // an explicit 1 (unset: off).
-    spark_serve::prefix_switch::prefix_cache(spark_engine::flash_tp_switch::pair())?;
+    // The tensor split has per-rank prefix snapshots on every world it takes. The layer chain
+    // refuses an explicit 1 (unset: off).
+    spark_serve::prefix_switch::prefix_cache(spark_engine::flash_tp_switch::on())?;
     let stage = spark_engine::flash::next_batched::PpStage::for_rank(rank, world)?;
     let limit = spark_engine::flash::next_batched::PP_LINK_TIMEOUT;
     // Over RDMA (SEQPAR_RDMA unset, auto or 1; the tensor split needs it): decode steps and short

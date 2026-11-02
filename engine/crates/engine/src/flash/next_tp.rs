@@ -18,8 +18,9 @@
 //! row part of the projections (GDN qkv and z, both out projections, QSA q/gate), as `parts`: one
 //! put and a take from each other rank, relayed along the path by the wire threads. Long prompts
 //! run as chain tiles and a state gather (next_tp_gather.rs). The head split takes vocabulary
-//! parts (head_split.rs). Everything else runs whole on every rank: the GDN heads, the token
-//! split and the prefix cache stay on the pair (flash_tp_switch::pair).
+//! parts (head_split.rs). Everything else runs whole on every rank: the GDN heads and the token
+//! split stay on the pair (flash_tp_switch::pair). The prefix cache runs on every world: each
+//! rank keeps its own copy of its whole state (next_pp_cache.rs).
 use super::*;
 use crate::flash_tp_switch::{SeqMode, TpLayout};
 use std::time::Instant;
@@ -318,7 +319,7 @@ impl<'a> NextModel<'a> {
     pub(super) fn tp_pair(&self) -> bool {
         self.tp.borrow().as_ref().is_some_and(|s| s.layout.world == crate::flash_tp_switch::PAIR)
     }
-    /// A restored prefix is whole on both ranks. Its slot has no earlier transfer debt.
+    /// A restored prefix is whole on every rank. Its slot has no earlier transfer debt.
     pub(super) fn tp_prefix_restored(&self, slot: u32) {
         if let Some(s) = self.tp.borrow_mut().as_mut() {
             s.handoff.retain(|&held| held != slot);

@@ -1343,7 +1343,8 @@ most projections.
 With more Sparks over RDMA, Vade runs the tensor split in parts when two
 things are true. Every split width of the model cuts into whole parts for that
 many Sparks, and the mailbox has room for that many ranks. For this
-checkpoint, that is four Sparks, with no prefix cache.
+checkpoint, that is four Sparks. The split in parts keeps the prefix cache, as
+two Sparks do.
 
 Three, five or more Sparks, and any three or more over TCP, use the layer
 chain. The layer chain spreads the layers across all the Sparks that you
@@ -1461,9 +1462,9 @@ engine refuses it, Vade reports the refusal and does not lower the context.
 ### The prefix cache
 
 The prefix cache reuses a cached prompt prefix across requests. It is on by
-default on one Spark, on two FP4-Local Sparks (the tensor split) and on FP8.
-FP4-Local on three or more Sparks (the layer chain, or the split in parts on
-four Sparks over RDMA) runs without it.
+default on one Spark, on FP4-Local Sparks that run the tensor split (two
+Sparks, or the split in parts on four Sparks over RDMA) and on FP8. The
+FP4-Local layer chain runs without it.
 
 The cache keeps prompts only for requests that send `cache:true` or a
 `prompt_cache_key`. Other requests run as before. A cached answer has the same
@@ -1497,7 +1498,7 @@ engine log line `flashnext ready` shows `prefix_cache_room_bytes`.
 
 | Setting | What it does |
 | --- | --- |
-| `VADE_FLASHNEXT_PREFIX_CACHE=0` | Turns the cache off. `1` turns it on. FP4-Local on three or more Sparks (the layer chain, or the split in parts on four Sparks over RDMA) refuses `1`. |
+| `VADE_FLASHNEXT_PREFIX_CACHE=0` | Turns the cache off. `1` turns it on. The FP4-Local layer chain refuses `1`. |
 | `VADE_FLASHNEXT_CACHE_ROOM=<bytes>` | Sets the room. The slot plan keeps it beside one full-context chat, which can give fewer chat slots. `0` gives no room and the slot plan of a server without the cache. A room too large to keep beside one full-context chat at two or more slots gives one chat slot. A room that leaves less than one full-context chat is lowered to leave one. |
 | `VADE_FLASHNEXT_ADOPT=0` | Keeps every prompt as a copy on one Spark. `1` keeps long prompts in place on two Sparks too. We have not measured that mode on two Sparks. |
 | `--cache-bytes 0` | Turns the cache off for a local install. |

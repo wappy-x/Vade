@@ -17,6 +17,13 @@ pub fn agree(link: &mut TcpStream, local: usize, deadline: Instant, stop: &Atomi
 pub fn agree_room(link: &mut TcpStream, local: usize, deadline: Instant, stop: &AtomicBool) -> Result<usize, String> {
     Ok(local.min(exchange(link, local, deadline, stop)?))
 }
+/// A back's cache room in the pool's order: first the smallest room of the ranks after it
+/// (`down`, none on the last rank), then the smaller of that and the rank before (`up`).
+/// Rank 0 so gets the smallest room of every rank, and no rank's room is below rank 0's.
+pub fn agree_room_down(up: &mut TcpStream, down: Option<&mut TcpStream>, local: usize, deadline: Instant, stop: &AtomicBool) -> Result<usize, String> {
+    let local = match down { Some(down) => agree_room(down, local, deadline, stop)?, None => local };
+    agree_room(up, local, deadline, stop)
+}
 /// Send `local` and return the peer's value, the same frame for every agreement.
 fn exchange(link: &mut TcpStream, local: usize, deadline: Instant, stop: &AtomicBool) -> Result<usize, String> {
     let before = (link.read_timeout().map_err(err)?, link.write_timeout().map_err(err)?);
@@ -115,6 +122,26 @@ mod tests {
             assert_eq!(worker.join().unwrap(), Ok(agreed));
             assert_eq!(front.read_timeout().unwrap(), None);
             assert_eq!(front.write_timeout().unwrap(), None);
+        }
+    }
+    /// Four ranks on a path: rank 0 gets the smallest room of all, wherever it is, and each
+    /// back's room is the smallest of the rank before it and every rank after it.
+    #[test]
+    fn four_rank_room_agrees_down_then_up() {
+        for rooms in [[8usize, 4, 2, 1], [1, 2, 4, 8], [8, 1, 8, 8], [5, 5, 0, 5]] {
+            let links: Vec<(TcpStream, TcpStream)> = (1..rooms.len()).map(|_| pair()).collect();
+            let (mut ups, mut downs): (Vec<Option<TcpStream>>, Vec<Option<TcpStream>>) =
+                links.into_iter().map(|(front, back)| (Some(back), Some(front))).unzip();
+            let mut front = downs[0].take().unwrap();
+            let workers: Vec<_> = (1..rooms.len()).map(|rank| {
+                let mut up = ups[rank - 1].take().unwrap();
+                let mut down = downs.get_mut(rank).and_then(Option::take);
+                std::thread::spawn(move || agree_room_down(&mut up, down.as_mut(), rooms[rank], deadline(), &STOP))
+            }).collect();
+            assert_eq!(agree_room(&mut front, rooms[0], deadline(), &STOP), Ok(*rooms.iter().min().unwrap()), "{rooms:?}");
+            for (rank, worker) in (1..).zip(workers) {
+                assert_eq!(worker.join().unwrap(), Ok(*rooms[rank - 1..].iter().min().unwrap()), "{rooms:?} rank {rank}");
+            }
         }
     }
     #[test]

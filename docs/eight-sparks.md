@@ -115,8 +115,8 @@ with `--hosts` ([section 6](#6-start-a-run-on-an-arc)).
 FP4-Local runs the tensor split on two Sparks, and the tensor split in parts on
 four Sparks over RDMA. On four Sparks over TCP and on eight Sparks it runs the
 layer chain: each Spark holds a block of layers. Eight Sparks do not run the
-split: the mailbox has no room for eight ranks. The split in parts and the
-chain have no prefix cache. The model has 48 layers, so on eight Sparks each
+split: the mailbox has no room for eight ranks. The chain has no prefix
+cache. The model has 48 layers, so on eight Sparks each
 Spark runs 6 of them, and each token passes through all eight Sparks in turn
 (`Stage::new` in
 [engine/crates/engine/src/flash/next_pp.rs](../engine/crates/engine/src/flash/next_pp.rs)).

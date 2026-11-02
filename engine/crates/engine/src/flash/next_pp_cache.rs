@@ -1,5 +1,8 @@
 //! Ordered prefix ownership on every pipeline stage. Tickets outlive session slots;
 //! their last front-side owner queues a release, drained before cache work or allocation.
+//! On the tensor split over more ranks a middle runs each command on its own state, then
+//! forwards it in order and merges the reply of the ranks after it (`forwarded`): rank 0
+//! sees a refusal from any rank and the smallest room.
 use super::*;
 
 pub(in super::super) const CAPTURE: u32 = 9;
@@ -15,6 +18,32 @@ pub(in super::super) fn charge(rows: &[f32]) -> usize {
 pub(in super::super) fn set_charge(rows: &mut [f32], bytes: usize) {
     rows[0] = f32::from_bits(bytes as u32);
     rows[1] = f32::from_bits((bytes as u64 >> 32) as u32);
+}
+/// A reply's cache room (rows 2..6, a little-endian i128).
+fn room(rows: &[f32]) -> i128 {
+    let mut room = [0u8; 16];
+    for (part, word) in room.chunks_exact_mut(4).zip(&rows[2..6]) { part.copy_from_slice(&word.to_bits().to_le_bytes()); }
+    i128::from_le_bytes(room)
+}
+fn set_room(rows: &mut [f32], room: i128) {
+    for (word, part) in rows[2..6].iter_mut().zip(room.to_le_bytes().chunks_exact(4)) {
+        *word = f32::from_bits(u32::from_le_bytes(part.try_into().unwrap()));
+    }
+}
+/// A middle sends a prefix command down after its own step (`exchange` writes the reply of the
+/// ranks after it into `rows`). The merged reply refuses (charge 0) when any rank refused, else
+/// charges the most any rank holds, and gives the smallest room. Other kinds pass unchanged.
+pub(in super::super) fn forwarded(kind: u32, rows: &mut [f32], exchange: impl FnOnce(&mut [f32]) -> Result<()>) -> Result<()> {
+    if !command(kind) { return exchange(rows); }
+    let own = (charge(rows), room(rows));
+    exchange(rows)?;
+    merge(own, rows);
+    Ok(())
+}
+fn merge((bytes, own_room): (usize, i128), rows: &mut [f32]) {
+    let down = charge(rows);
+    set_charge(rows, if bytes == 0 || down == 0 { 0 } else { bytes.max(down) });
+    set_room(rows, own_room.min(room(rows)));
 }
 #[derive(Default)]
 pub(in super::super) struct Tickets {
@@ -39,9 +68,7 @@ impl Link {
         let exchanged = self.exchange(kind, &[meta], &mut rows);
         (self.tp_tile, self.tp_seq) = bits;
         exchanged.map_err(|e| self.fail(e))?;
-        let mut room = [0u8; 16];
-        for (part, word) in room.chunks_exact_mut(4).zip(&rows[2..6]) { part.copy_from_slice(&word.to_bits().to_le_bytes()); }
-        self.cache.room = Some((Instant::now(), i128::from_le_bytes(room)));
+        self.cache.room = Some((Instant::now(), room(&rows)));
         Ok(charge(&rows))
     }
     pub(super) fn cache_releases(&mut self) -> Result<()> {
@@ -98,7 +125,8 @@ impl Saved<'_> {
 }
 #[cfg(target_os = "linux")]
 impl<'a> NextModel<'a> {
-    pub fn tp_prefix_supported(&self) -> bool { self.pp.borrow().as_ref().is_some_and(|l| l.tp) && self.tp_pair() }
+    /// The tensor split on any world it takes: every rank holds whole state after a settle.
+    pub fn tp_prefix_supported(&self) -> bool { self.pp.borrow().as_ref().is_some_and(|l| l.tp) && self.tp_on() }
     pub fn pp_cache_releases(&self) -> Result<()> {
         if let Some(link) = self.pp.borrow_mut().as_mut() { link.cache_releases()?; }
         Ok(())
@@ -247,9 +275,7 @@ fn cache_room_for(b: &Backend<'_>, bytes: usize, slack: usize, owned: i128) -> R
 #[cfg(target_os = "linux")]
 fn cache_reply(b: &Backend<'_>, rows: &mut [f32], bytes: usize) -> Result<()> {
     set_charge(rows, bytes);
-    for (word, part) in rows[2..6].iter_mut().zip(cache_room(b)?.to_le_bytes().chunks_exact(4)) {
-        *word = f32::from_bits(u32::from_le_bytes(part.try_into().unwrap()));
-    }
+    set_room(rows, cache_room(b)?);
     Ok(())
 }
 fn valid_live_mask(mask: u32, slot: u32) -> bool {
@@ -450,6 +476,136 @@ mod tests {
             prefill(&mut link, 3, 0, &[17]);
             drop(link);
             for worker in workers { worker.join().unwrap(); }
+        }
+    }
+
+    /// A middle's reply merge: any refusal wins, else the largest charge; the smallest room.
+    #[test]
+    fn forwarded_merges_refusals_charges_and_rooms() {
+        let reply = |bytes: usize, room: i128| { let mut rows = vec![0.0; W]; set_charge(&mut rows, bytes); set_room(&mut rows, room); rows };
+        for ((own, down), want) in [((128, 128), 128), ((0, 128), 0), ((128, 0), 0), ((64, 1 << 40), 1 << 40)] {
+            for (own_room, down_room) in [(5i128, 7i128), (7, -3)] {
+                let mut rows = reply(own, own_room);
+                forwarded(CAPTURE, &mut rows, |rows| { rows.copy_from_slice(&reply(down, down_room)); Ok(()) }).unwrap();
+                assert_eq!((charge(&rows), room(&rows)), (want, own_room.min(down_room)));
+            }
+        }
+        // A pass is not a prefix command: the reply of the ranks after passes unchanged.
+        let mut rows = reply(9, 9);
+        forwarded(KIND_ROWS, &mut rows, |rows| { rows.copy_from_slice(&reply(3, 4)); Ok(()) }).unwrap();
+        assert_eq!((charge(&rows), room(&rows)), (3, 4));
+        assert!(forwarded(CAPTURE, &mut reply(1, 1), |_| Err("down failed".into())).is_err());
+    }
+
+    /// The tensor split in parts over four ranks with a CPU recurrence in place of CUDA: each
+    /// middle runs a prefix command on its own state, then sends it down in order behind the
+    /// mirrored passes. Every rank captures at the same position; a refusal by one rank refuses
+    /// the capture, and the front releases it on every rank; the front sees the smallest room;
+    /// a restored slot then reaches the same state on every rank as the uncached run.
+    #[test]
+    fn split_in_parts_prefix_restores_on_every_rank() {
+        use crate::flash_tp_switch::{SPLIT, MAIL, TILE, SEQ, HEADS, HEAD};
+        static STOP: AtomicBool = AtomicBool::new(false);
+        const RANKS: usize = 4;
+        let recipe = Recipe { limit: Duration::from_secs(2), asynchronous: true, mtp: true, tp: true };
+        let (mut outgoing, mut incoming) = (Vec::new(), Vec::new());
+        for _ in 1..RANKS {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            outgoing.push(Some(TcpStream::connect(listener.local_addr().unwrap()).unwrap()));
+            incoming.push(Some(listener.accept().unwrap().0));
+        }
+        let front = outgoing[0].take().unwrap();
+        let mut workers = Vec::new();
+        for rank in 1..RANKS {
+            let back = incoming[rank - 1].take().unwrap();
+            let next = outgoing.get_mut(rank).and_then(Option::take).map(|s| (s, None));
+            workers.push(std::thread::spawn(move || {
+                let mut live = BTreeMap::<u32, (usize, u32)>::new();
+                let mut saved = BTreeMap::<u32, (usize, u32)>::new();
+                let mut log = Vec::new();
+                serve_stage(back, None, next, Stage::new(rank, RANKS, Some(SPLIT)).unwrap(), 512, 8, 64, &STOP, recipe,
+                    |_| Ok(()), || Ok(()), |kind, _, meta, rows| {
+                        let [slot, _, pos, id] = meta[0];
+                        let kind = kind & !(MAIL | TILE | SEQ | HEADS | HEAD);
+                        if matches!(kind, CAPTURE | RESTORE) { assert!(valid_live_mask(rows[6].to_bits(), slot), "rank {rank} live mask"); }
+                        match kind {
+                            // Every rank holds the same position: the passes before reached it first.
+                            CAPTURE => {
+                                assert_eq!(live[&slot].0, pos as usize, "rank {rank} capture position");
+                                saved.insert(id, live[&slot]);
+                                // Rank 2 refuses ticket 2; the charge differs per rank.
+                                set_charge(rows, if id == 2 && rank == 2 { 0 } else { 100 + rank });
+                            }
+                            // Rank 3 alone drops ticket 3 at PUBLISH (no room there now), as a
+                            // worker drops a refused pending copy; ranks 1 and 2 publish it.
+                            PUBLISH if id == 3 && rank == 3 => { assert!(saved.remove(&id).is_some()); set_charge(rows, 0); }
+                            PUBLISH => { assert!(saved.contains_key(&id)); set_charge(rows, 1); }
+                            // Only rank 0's manifest picks a hit: a ticket it never published is never restored.
+                            RESTORE if id == 3 => return Err("a refused ticket was restored".into()),
+                            RESTORE => { live.insert(slot, *saved.get(&id).ok_or("missing ticket")?); set_charge(rows, 1); }
+                            RELEASE => { saved.remove(&id); set_charge(rows, 1); }
+                            ROOM => set_charge(rows, 1),
+                            KIND_ROWS_ASYNC => {
+                                let state = live.entry(slot).or_default();
+                                if pos == 0 { *state = (0, 0); }
+                                assert_eq!(state.0, pos as usize);
+                                for row in rows.chunks(W) {
+                                    state.1 = state.1.rotate_left(5).wrapping_add(row[0].to_bits()).wrapping_mul(17);
+                                    state.0 += 1;
+                                }
+                                log.push((slot, *state));
+                                return Ok(());
+                            }
+                            _ => return Err("unexpected CPU prompt command".into()),
+                        }
+                        // The last rank has the smallest room: the front sees it only through the merges.
+                        set_room(rows, (RANKS - rank) as i128 * 1000);
+                        Ok(())
+                    }).unwrap();
+                assert!(saved.is_empty(), "rank {rank}: the last owner did not release its checkpoint");
+                log
+            }));
+        }
+        let mut link = Link::connect(front, None, Stage::new(0, RANKS, Some(SPLIT)).unwrap(), 512, 8, 64, &STOP, recipe).unwrap();
+        link.tp_mail = true;
+        let prompt: Vec<u32> = (0..128).map(|i| i * 7 + 11).collect();
+        let post = |link: &mut Link, slot: u32, pos: usize, tokens: &[u32]| {
+            let mut rows = vec![0.0; tokens.len() * W];
+            for (row, &token) in rows.chunks_mut(W).zip(tokens) { row[0] = f32::from_bits(token); }
+            link.post(&[[slot, 512, pos as u32, tokens.len() as u32]], rows, None).unwrap();
+        };
+        post(&mut link, 1, 0, &prompt[..64]);
+        let lease = link.cache_capture([1, 512, 64, 0], 1).unwrap().unwrap();
+        assert_eq!((lease.bytes, link.cache.room.unwrap().1), (100 + RANKS - 1, 1000), "the largest charge and the smallest room");
+        assert!(link.cache_capture([1, 512, 64, 0], 1).unwrap().is_none(), "one rank's refusal refuses the capture");
+        assert!(!link.poisoned && link.cache.owners.len() == 1);
+        assert!(link.cache_command(PUBLISH, lease.meta).unwrap() > 0);
+        post(&mut link, 1, 64, &prompt[64..]);
+        // The slot is reused by another chat; the ticket restores a new slot on every rank.
+        post(&mut link, 1, 0, &[999]);
+        link.cache_command_live(RESTORE, [2, 512, 64, lease.id], 2).unwrap();
+        post(&mut link, 2, 64, &prompt[64..]);
+        // One rank refuses PUBLISH: rank 0 sees the refusal, its lease drops, and RELEASE reaches
+        // every rank. The next turn is a miss: a cold prompt from row 0 on all ranks.
+        post(&mut link, 3, 0, &prompt[..64]);
+        let refused = link.cache_capture([3, 512, 64, 0], 4).unwrap().unwrap();
+        assert_eq!(refused.id, 3);
+        assert_eq!(link.cache_command(PUBLISH, refused.meta).unwrap(), 0, "one rank's refused publish refuses on rank 0");
+        drop(refused);
+        link.cache_releases().unwrap();
+        assert_eq!(link.cache.owners.len(), 1, "only the published ticket stays owned");
+        post(&mut link, 3, 0, &prompt[..64]);
+        post(&mut link, 3, 64, &prompt[64..]);
+        link.drain().unwrap();
+        drop(lease);
+        link.cache_releases().unwrap();
+        assert!(link.cache.owners.is_empty());
+        drop(link);
+        for worker in workers {
+            let log = worker.join().unwrap();
+            let at = |slot: u32| log.iter().find(|(s, (pos, _))| *s == slot && *pos == 128).map(|e| e.1);
+            assert!(at(1).is_some() && at(1) == at(2), "cached state differs from the uncached run: {log:?}");
+            assert!(at(3) == at(1), "the cold run after a one-rank refusal differs from the uncached run: {log:?}");
         }
     }
 }

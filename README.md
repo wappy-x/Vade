@@ -137,7 +137,7 @@ To check your own engine, run `vade verify`. [Token IDs](docs/results.md#token-i
 - **Sparks.** FP4-Local runs on 1, 2 or 4 Sparks over RDMA, or as a layer chain of 3 to 24 Sparks. We have measured chains up to four Sparks. FP8 runs on 2, 4 or 6 Sparks. We have measured 2 and 4 Sparks, and they give the same token IDs. Six Sparks start, but no benchmark run has measured them, and they give other token IDs. FP8 does not fit on one Spark.
 - **Controller.** A controller drives linked Sparks over SSH. It runs on Linux or macOS. From Windows, connect to a Spark and work there ([how](docs/INSTALL.md#from-a-windows-computer)).
 - **Coding agent.** The agent reads, searches and edits files anywhere. Its shell tool needs the macOS sandbox, so on the Spark itself it does not run commands.
-- **Prefix cache.** On by default on one Spark, on two FP4-Local Sparks and on FP8. Off for FP4-Local on three or more Sparks ([settings](docs/INSTALL.md#the-prefix-cache)).
+- **Prefix cache.** On by default on one Spark, on the FP4-Local tensor split (two Sparks, or four over RDMA) and on FP8. Off on the FP4-Local layer chain ([settings](docs/INSTALL.md#the-prefix-cache)).
 
 ## Where things are
 

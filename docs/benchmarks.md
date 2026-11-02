@@ -198,7 +198,7 @@ The two before values are private cards of 2026-10-30 that this page does not li
 
 </div>
 
-The cached run reused 32,064 tokens on every setup except four FP4-Local Sparks, which reused 0. Four FP4-Local Sparks keep no prefix cache, so the second question reads the whole prompt again.
+The cached run reused 32,064 tokens on every setup except four FP4-Local Sparks, which reused 0. Those runs predate the prefix cache on the split in parts, so the second question read the whole prompt again.
 
 **Token IDs.**
 

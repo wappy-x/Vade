@@ -756,7 +756,7 @@ impl Link {
             self.acks.push_back((kind == KIND_ROWS_KEEP && self.inline_kept).then_some(n));
             Ok(())
         } else {
-            self.exchange(kind, meta, rows)?;
+            cache::forwarded(kind, rows, |rows| self.exchange(kind, meta, rows))?;
             if let Some(kept) = self.relay_kept.as_mut() && !kept.is_empty() {
                 if reply_len(kept.len() + rows.len()).is_none() { return Err("pipeline kept reply past the reply length".into()); }
                 out.append(kept);
@@ -1381,8 +1381,8 @@ fn serve_stage(
         // The tensor split over more than two ranks: ranks 1.. all run each pass, and a rank's
         // takes wait for the ranks after it, so a middle sends the request down before it runs it.
         // The downstream acks come back empty and are read as they arrive (read_ready below).
-        // A chain tile (TILE) runs this rank's tile layers and goes down after them, as on a chain.
-        let mirror = recipe.tp && downstream.is_some() && tp_bits & crate::flash_tp_switch::TILE == 0;
+        // A chain tile (TILE) or a prefix command runs on this rank first, then goes down, as on a chain.
+        let mirror = recipe.tp && downstream.is_some() && tp_bits & crate::flash_tp_switch::TILE == 0 && !cache::command(kind);
         if let Some(link) = downstream.as_mut().filter(|_| mirror) { link.mirror(kind, raw, &meta, &residual)?; }
         // Replies go up in request order: a request that does not relay waits for the relayed ones.
         let relay = overlap::relays(kind, u32::from(release) | slots | tp_bits, on_wire, downstream.as_ref(), meta.len(), count);

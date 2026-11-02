@@ -76,7 +76,7 @@ The next table gives the time to the first token for a long prompt. The cards se
 
 </div>
 
-[Results and receipts](results.md) gives the receipt of each row, the machines, the commands and what you can run again. With the prefix cache, the second question on a 32K-token chat gave its first token in 0.36 s on one Spark and in 0.76 s on two. Four FP4-Local Sparks keep no prefix cache.
+[Results and receipts](results.md) gives the receipt of each row, the machines, the commands and what you can run again. With the prefix cache, the second question on a 32K-token chat gave its first token in 0.36 s on one Spark and in 0.76 s on two. On four FP4-Local Sparks those runs predate the prefix cache on the split in parts.
 
 ## What it is not
 
@@ -85,7 +85,7 @@ The next table gives the time to the first token for a long prompt. The cards se
 - **Not a trainer.** Vade serves models. It does not train or fine-tune them.
 - **Not for images.** Vade reads and writes text only.
 - **Not every checkpoint.** Vade supports two checkpoints of Qwen3.8 Flash-Next: FP4-Local and FP8.
-- **Not fast on every Spark count.** Four Sparks linked by RDMA write one chat faster than two (63.0 against 54.9 tok/s prose in the table above). Three Sparks, five or more, and four over TCP run the layer chain. One chat on the chain writes at about the speed of one Spark ([what runs where](../README.md#what-runs-where)). Four FP4-Local Sparks keep no prefix cache.
+- **Not fast on every Spark count.** Four Sparks linked by RDMA write one chat faster than two (63.0 against 54.9 tok/s prose in the table above). Three Sparks, five or more, and four over TCP run the layer chain. One chat on the chain writes at about the speed of one Spark ([what runs where](../README.md#what-runs-where)). The layer chain keeps no prefix cache.
 
 ## Where to go next
 

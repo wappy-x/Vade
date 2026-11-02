@@ -109,8 +109,8 @@ pub fn run(
             // smallest chat funds a slot. Live sessions stop TRANSIENT_RESERVE short of the ceiling.
             let smallest = slot_bytes(&model, context, needed as usize, pp.is_some() && tp.is_none())?;
             // The prefix cache: on unless set to 0, where a prefix restore exists (one Spark,
-            // the tensor split on the pair); the layer chain and the split over more ranks run without it.
-            let prefix_cache = spark_serve::prefix_switch::prefix_cache(pp.is_none() || tp.is_some() && spark_engine::flash_tp_switch::pair())?;
+            // the tensor split on any world it takes); the layer chain runs without it.
+            let prefix_cache = spark_serve::prefix_switch::prefix_cache(pp.is_none() || tp.is_some())?;
             // Live sessions stop TRANSIENT_RESERVE short of the allocator ceiling. With the cache
             // on, the full chat the pool must hold carries the room floor (prefix_switch::plan_room).
             let full = (needed as usize).saturating_add(spark_serve::prefix_switch::plan_room(prefix_cache, spark_serve::prefix_switch::cache_room_setting()?));
@@ -330,7 +330,7 @@ pub fn run_back(
         let resident_tiles = backend.flash_dense_bytes() + backend.flash_mixed_bytes();
         let smallest = slot_bytes(&model, context, needed as usize, tp.is_none())?;
         // The same plan as the front: with the cache on, one full chat plus the room floor.
-        let prefix_cache = spark_serve::prefix_switch::prefix_cache(tp.is_some() && spark_engine::flash_tp_switch::pair())?;
+        let prefix_cache = spark_serve::prefix_switch::prefix_cache(tp.is_some())?;
         let full = (needed as usize).saturating_add(spark_serve::prefix_switch::plan_room(prefix_cache, spark_serve::prefix_switch::cache_room_setting()?));
         let (active, pool, _shared) = model.session_pool_plan(context, 1, spark_serve::budget::after_transient_reserve(budget.saturating_sub(resident)), resident_tiles, [smallest, full])?;
         model.prepare_prompt_workspace(backend, context)?;
@@ -352,9 +352,12 @@ pub fn run_back(
             let (_, chosen) = spark_tp::startup_pool::agree(&mut stream, active, load_deadline, shutdown)?;
             (chosen, spark_tp::startup_pool::agree(&mut stream, pool, load_deadline, shutdown)?.1)
         } else { (active, pool) };
-        // The same room as the front (prefix_switch::cache_room): the smaller of the two.
+        // The same room as the front (prefix_switch::cache_room), in the pool's order: first the
+        // smallest of the ranks after this one, then the smaller of that and the rank before.
         let room = if prefix_cache { spark_serve::prefix_switch::cache_room(spark_serve::prefix_switch::cache_room_setting()?, pool, active, needed as usize, tp.is_some()) } else { 0 };
-        let room = if prefix_cache && tp.is_some() { spark_tp::startup_pool::agree_room(&mut stream, room, load_deadline, shutdown)? } else { room };
+        let room = if prefix_cache && tp.is_some() {
+            spark_tp::startup_pool::agree_room_down(&mut stream, next.as_mut().map(|(down, _)| down), room, load_deadline, shutdown)?
+        } else { room };
         // VADE_VECTOR_POOL, as on the front: a chat that ends drops its back session (its slot's
         // release bit), and the next chat on the slot takes the freed vectors from the pool
         // instead of cuMemAlloc. Outside the plan, spares go under host pressure.

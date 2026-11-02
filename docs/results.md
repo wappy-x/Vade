@@ -306,7 +306,7 @@ The chat sends one 32,099-token question. Then it sends a second question on the
 
 </div>
 
-The cached run reused 32,064 tokens on every setup except four FP4-Local Sparks, which reused 0. Four FP4-Local Sparks keep no prefix cache, so their second question reads the whole prompt again. On every start of 2026-10-31, FP8 included, the second question gave the same token IDs with the cache and without it (`turn2_ids_equal` in each receipt).
+The cached run reused 32,064 tokens on every setup except four FP4-Local Sparks, which reused 0. Those runs predate the prefix cache on the split in parts, so their second question read the whole prompt again. On every start of 2026-10-31, FP8 included, the second question gave the same token IDs with the cache and without it (`turn2_ids_equal` in each receipt).
 
 These are the receipts:
 

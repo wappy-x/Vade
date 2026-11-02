@@ -148,8 +148,8 @@ Whispers deep thoughts out.
 ```
 
 The output above was recorded with the prefix cache off, so both counts are
-0. The cache is now on by default on one Spark and on two Sparks (the tensor
-split). `VADE_FLASHNEXT_PREFIX_CACHE=0` at the engine start, or a saved
+0. The cache is now on by default on one Spark and on the tensor split (two
+Sparks, or four over RDMA). `VADE_FLASHNEXT_PREFIX_CACHE=0` at the engine start, or a saved
 `--cache-bytes 0`, turns it off. [The prefix
 cache](../docs/INSTALL.md#the-prefix-cache) explains both.
 

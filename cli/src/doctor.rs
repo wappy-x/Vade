@@ -42,7 +42,7 @@ pub(crate) fn start_options() -> Result<cli::UpOptions, String> {
 }
 
 /// What the engine does with the prefix cache switch unset.
-const UNSET_CACHE: &str = "unset: on for one Spark and the two-Spark split, off on three or more Sparks";
+const UNSET_CACHE: &str = "unset: on for one Spark and the tensor split (two Sparks, or four over RDMA), off on the layer chain";
 
 /// The retained-prefix setting passed to the engine (None: unset, see UNSET_CACHE).
 pub(crate) fn prefix_cache() -> Result<Option<bool>, String> {
@@ -105,8 +105,8 @@ pub(crate) fn machine<R: Runner>(report: &mut Report, runner: &mut R, machine: &
         Some("1") => report.ok(&name("default prefix cache"), "on in the Spark SSH session")?,
         Some("unset") => report.ok(&name("default prefix cache"), match state.cache_default {
             Some(true) => "unset in the Spark SSH session: on for this topology",
-            Some(false) => "unset in the Spark SSH session: off on three or more Sparks",
-            None => "unset in the Spark SSH session: on for one Spark and the two-Spark split, off on three or more Sparks",
+            Some(false) => "unset in the Spark SSH session: off on the layer chain, on for four Sparks over RDMA",
+            None => "unset in the Spark SSH session: on for one Spark and the tensor split (two Sparks, or four over RDMA), off on the layer chain",
         })?,
         _ => report.fail(&name("default prefix cache"), "The Spark prefix cache setting is invalid or unavailable.",
             "Set VADE_FLASHNEXT_PREFIX_CACHE to 0 or 1 in the Spark SSH session, then run vade doctor.")?,

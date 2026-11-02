@@ -857,7 +857,7 @@ pub(crate) fn retention_label(session: &Session, reported: Option<bool>) -> Stri
         (Some(false), _) => "off (engine report)".into(),
         (None, Some(0)) => "off (--cache-bytes 0)".into(),
         (None, _) if session.fp4_local && session.prefix_restore() => "on by default; engine not checked".into(),
-        (None, _) if session.fp4_local => "off by default on three or more Sparks; engine not checked".into(),
+        (None, _) if session.fp4_local => "off by default on the layer chain, on for four Sparks over RDMA; engine not checked".into(),
         (None, Some(bytes)) => format!("{bytes} bytes/rank"),
         (None, None) => "automatic".into(),
     }
