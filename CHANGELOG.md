@@ -124,6 +124,7 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 
 ### Install
 
+- A failed `vade install` under a controller config now stops the one-line install at the cause. It used to build from source for this Spark alone and end with success, so the other Sparks stayed without the install.
 - The installer asks for a C compiler (`cc`) only for a build from source, so a prebuilt bundle installs without one. A build with no `cc` stops before it clones or downloads anything.
 - The installer now asks a login shell whether it adds `~/.local/bin`. If it does not, the output says so and gives only the `export` line, because a new terminal would not find `vade`.
 - `vade setup` is now the same code as `vade up --sparks`, with questions. It asks for the Sparks in one line, in any order, and for a cable address only when it cannot read one. INSTALL.md, cli/README.md and the agent quickstart now show one command for any number of Sparks.

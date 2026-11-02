@@ -199,6 +199,10 @@ if prebuilt; then
     if "$vade" install </dev/null; then
         printf 'Install: installed prebuilt Vade %s.\n' "$sha"
     else
+        # With a controller config that install reaches the other Sparks. A source
+        # build is for this Spark alone, so it would end with rc 0 and hide the fault.
+        [ ! -f "${XDG_CONFIG_HOME:-$HOME/.config}/vade/config" ] ||
+            fail "\"$vade\" install failed, and your controller config selects these Sparks, so a source build here does not help. Next: follow the diagnostic above, run \"$vade\" doctor, then retry."
         why="\"$vade\" install failed (diagnostic above)"
         vade=
     fi

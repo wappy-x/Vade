@@ -147,7 +147,8 @@ vade launch
 - `scripts/install.sh` checks the Spark first. Then it tries the
   [prebuilt bundle](#prebuilt-bundle), as the one-line install does. When the
   bundle does not fit, the script prints one `Prebuilt:` line with the reason
-  and builds from source. The source build installs the pinned Rust toolchains if they are
+  and builds from source. With a controller config, a failed `vade install` stops at its
+  cause instead, because a source build is for this Spark alone. The source build installs the pinned Rust toolchains if they are
   missing, and builds `vade`, the GPU kernels, the engine and the chat
   program. It takes about three minutes on a GB10: the `INSTALL` step took
   176.8 s in the

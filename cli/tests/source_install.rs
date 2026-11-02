@@ -388,6 +388,21 @@ fn each_refused_bundle_leaves_nothing_and_builds_from_source() {
 }
 
 #[test]
+fn a_failed_controller_install_stops_and_builds_nothing() {
+    let f = Fixture::new();
+    let mut env = f.prebuilt(&bundle(Bad::None), Bad::None);
+    env.push(("INSTALL_FAIL_BUNDLE", "true".into()));
+    fs::create_dir_all(f.root.join("home/.config/vade")).unwrap();
+    fs::write(f.root.join("home/.config/vade/config"), "[global]\n").unwrap();
+    let output = f.run_prebuilt(&env, &[]);
+    let (stdout, stderr) = (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert_eq!(output.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(stderr.contains("fixture bundle diagnostic") && stderr.contains("install failed, and your controller config selects these Sparks"), "{stderr}");
+    assert_eq!(f.calls(), "bundle-vade install\n");
+    assert!(!stdout.contains("building from source"), "{stdout}");
+}
+
+#[test]
 fn failed_bundle_install_and_unfit_systems_fall_back_to_the_source_build() {
     let f = Fixture::new();
     let mut env = f.prebuilt(&bundle(Bad::None), Bad::None);
