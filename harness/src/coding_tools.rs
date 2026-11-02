@@ -598,7 +598,7 @@ where
             }
             "web_fetch" | "web_search" => {
                 if !self.web { return Err(ToolError::Denied); }
-                crate::web::execute(&invocation.call.name, invocation.arguments, invocation.max_output_bytes, cancel)
+                crate::web::execute(&invocation.call.name, invocation.arguments, invocation.max_output_bytes, cancel, &mut |line| crate::web::append_log(self.workspace, line))
             }
             "workspace_search" | "workspace_read_lines" => {
                 let Value::Object(fields) = invocation.arguments else {

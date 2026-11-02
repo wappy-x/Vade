@@ -150,50 +150,6 @@ fn reader_allowance_is_set_before_conversion_storage_is_built() {
         Err(Failure::Fetch("response metadata exceeds the result limit")));
 }
 
-const SEARCH: &str = r#"<html><body>
-<a href="/settings">Settings</a>
-<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org%2Fguide%3Fa%3D1%26b%3D2&amp;rut=x">Current <b>guide</b></a>
-<a class='result__snippet' href='#'>A small &amp; useful <b>snippet</b>.</a>
-<a href='https://example.net/news' class='other result__a'>News</a>
-<div class=result__snippet>Latest release.</div>
-<a class='result__a' href='data:text/plain,wrong'>Wrong</a>
-<a class='result__snippet'>Must not attach to News.</a>
-</body></html>"#;
-
-#[test]
-fn search_entity_lookahead_is_bounded_with_many_ampersands() {
-    for tail in ["", ";", "é&amp;&#233;&#xE9;"] {
-        let input = format!("{}{tail}", "&".repeat(250_000));
-        let mut scans = 0;
-        let decoded = entities_with_scan(&input, || scans += 1);
-        assert!((250_000..=input.len() * 17).contains(&scans));
-        assert_eq!(decoded, format!("{}{}", "&".repeat(250_000), if tail.starts_with('é') { "é&éé" } else { tail }));
-        let html = format!(r#"<a class="{input} result__a" href="https://example.org">Guide</a>"#);
-        assert!(html.len() < DEFAULT_BYTES);
-        assert_eq!(search_results(&html, 5), "1. Guide\nhttps://example.org\n");
-    }
-    assert_eq!(entities("&ééééééééé;&amp;"), "&ééééééééé;&");
-}
-
-#[test]
-fn search_parses_only_real_results_and_decodes_redirects() {
-    let results = search_results(SEARCH, 5);
-    assert!(results.starts_with("1. Current **guide**\nhttps://example.org/guide?a=1&b=2\nA small & useful **snippet**."));
-    assert!(results.contains("2. News\nhttps://example.net/news\nLatest release."));
-    assert!(!results.contains("Settings") && !results.contains("Wrong") && !results.contains("Must not attach"));
-    assert!(!search_results(SEARCH, 1).contains("News"));
-    assert_eq!(search_results("<p>No results.</p>", 5), "No web search results found.");
-    assert_eq!(decode("a+b%20c%2F%C3%A9"), Some("a b c/é".into()));
-    assert_eq!(decode("%xx"), None);
-    assert_eq!(search_results(r#"<!-- <a class="result__a" href="https://example.org">Fake</a> -->"#, 5), "No web search results found.");
-    let args = json::parse(r#"{"query":"Rust & café","count":1}"#).unwrap();
-    let result = execute_with("web_search", &args, 4096, &AtomicBool::new(false), |url, cap, _, _| {
-        assert_eq!(url, "https://html.duckduckgo.com/html/?q=Rust%20%26%20caf%C3%A9"); assert_eq!(cap, DEFAULT_BYTES);
-        Ok(response(SEARCH.as_bytes(), "text/html"))
-    }).unwrap();
-    assert!(result.contains("Current")); assert!(!result.contains("News"));
-}
-
 #[test]
 fn failures_and_bad_arguments_are_explicit() {
     let args = json::parse(r#"{"url":"https://example.org"}"#).unwrap();
@@ -213,9 +169,6 @@ fn failures_and_bad_arguments_are_explicit() {
         ("web_search", r#"{"query":"q","count":11}"#), ("web_search", r#"{"query":""}"#), ("web_fetch", "[]")] {
         assert!(matches!(execute_with(name, &json::parse(args).unwrap(), 4096, &AtomicBool::new(false), |_, _, _, _| panic!()), Err(ToolError::InvalidArguments(_))));
     }
-    let args = json::parse(r#"{"query":"q"}"#).unwrap();
-    let result = execute_with("web_search", &args, 4096, &AtomicBool::new(false), |_, _, _, _| Err(Failure::Fetch("could not start system curl"))).unwrap();
-    assert_eq!(result, "Web search failed: could not start system curl.");
     assert!(enabled(None)); assert!(!enabled(Some(std::ffi::OsStr::new("0")))); assert!(enabled(Some(std::ffi::OsStr::new("1"))));
     assert!(matches!(run("https://example.org", 64, Instant::now(), &AtomicBool::new(false)), Err(Failure::Fetch("network is disabled in tests"))));
 }

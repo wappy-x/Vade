@@ -789,6 +789,10 @@ Merges #105 through #110 were measured on October 26, 2026, with the FP4-Local c
 
 ### Harness
 
+- `web_search` no longer reads a blocked search as an empty result.
+  - DuckDuckGo often answers curl with a bot challenge. The tool now retries, then reads Bing, and it says when Bing gave the list. A query that reaches Bing goes to a second company.
+  - When all tries fail, the tool says so and tells the model not to conclude that the thing does not exist. A true empty result gives `No results for <query> (provider said none).`
+  - Each try adds one line to `web-search.log` in the private project state folder. The line has no query text.
 - `vade-harness suite`: the task follow-agents-md now checks the CHANGELOG lines and their order with the new check `lines-equal`, which does not compare blank lines.
   - Before, its `file-equals` check also compared blank lines, so a correct entry failed when the list had a blank line between its items.
   - AGENTS.md in the task states the line, its heading and its order, but no blank-line layout.

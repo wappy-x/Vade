@@ -295,65 +295,6 @@ fn attr(mut attrs: &str, key: &str) -> Option<String> {
         } else if end == 0 { return None; }
     }
 }
-fn search_url(href: &str) -> Option<String> {
-    let href = if href.starts_with("//") { format!("https:{href}") }
-        else if href.starts_with('/') { format!("https://duckduckgo.com{href}") }
-        else { href.into() };
-    let host = href.split_once("://")?.1.split('/').next()?.to_ascii_lowercase();
-    let url = if matches!(host.as_str(), "duckduckgo.com" | "html.duckduckgo.com") {
-        let query = href.split_once('?')?.1.split('#').next()?;
-        let encoded = query.split('&').find_map(|p| p.strip_prefix("uddg="))?;
-        decode(encoded)?
-    } else { href };
-    validate_url(&url).ok()?;
-    Some(url)
-}
-fn plain_html(html: &str, cap: usize) -> String {
-    let caps = crate::readers::Caps { max_chars: cap, ..Default::default() };
-    crate::readers::html_to_markdown_in(html, &mut crate::readers::Budget::new(&caps))
-        .split_whitespace().collect::<Vec<_>>().join(" ")
-}
-fn search_results(html: &str, count: usize) -> String {
-    let lower = html.to_ascii_lowercase();
-    let mut results: Vec<(String, String, String)> = Vec::new();
-    let mut pos = 0;
-    let mut active = None;
-    while let Some(start) = html[pos..].find('<').map(|n| pos + n) {
-        if html[start..].starts_with("<!--") {
-            if let Some(end) = html[start + 4..].find("-->") { pos = start + 4 + end + 3; continue; }
-            break;
-        }
-        let Some(t) = tag(html, start) else { break; };
-        pos = t.end;
-        if t.closing { continue; }
-        if matches!(t.name.as_str(), "script" | "style") {
-            let closing = format!("</{}", t.name);
-            if let Some(end) = lower[pos..].find(&closing) { pos += end; }
-            else { break; }
-            continue;
-        }
-        let class = attr(t.attrs, "class").unwrap_or_default();
-        let title = t.name == "a" && class.split_whitespace().any(|s| s == "result__a");
-        let snippet = class.split_whitespace().any(|s| s == "result__snippet");
-        if !title && !snippet { continue; }
-        let close = format!("</{}", t.name);
-        let Some(end) = lower[pos..].find(&close) else { break; };
-        let text = plain_html(&html[pos..pos + end], if title { 512 } else { 2048 });
-        if title {
-            if results.len() == count { break; }
-            active = None;
-            if let Some(url) = attr(t.attrs, "href").and_then(|href| search_url(&href)).filter(|_| !text.is_empty()) {
-                if !results.iter().any(|(_, old, _)| old == &url) {
-                    active = Some(results.len());
-                    results.push((text, url, String::new()));
-                }
-            }
-        } else if let Some(i) = active.take() { results[i].2 = text; }
-        pos += end;
-    }
-    if results.is_empty() { return "No web search results found.".into(); }
-    results.iter().enumerate().map(|(i, (title, url, snippet))| format!("{}. {title}\n{url}\n{snippet}", i + 1)).collect::<Vec<_>>().join("\n\n")
-}
 
 // A known download cut can leave a partial UTF-8 character. Keep its valid
 // prefix before the reader selects an encoding. A complete response with a
@@ -423,11 +364,16 @@ fn render_with(page: Page, cap: usize, output_cap: usize, cancel: &AtomicBool,
     Ok(format!("{header}{}", cut(body, conversion_cap, truncated)))
 }
 
-pub(crate) fn execute(name: &str, args: &Value, output_cap: usize, cancel: &AtomicBool) -> Result<String, ToolError> {
-    execute_with(name, args, output_cap, cancel, run)
+pub(crate) fn execute(name: &str, args: &Value, output_cap: usize, cancel: &AtomicBool, log: &mut dyn FnMut(&str)) -> Result<String, ToolError> {
+    execute_logged(name, args, output_cap, cancel, run, log)
 }
+#[cfg(test)]
 fn execute_with(name: &str, args: &Value, output_cap: usize, cancel: &AtomicBool,
     runner: impl FnMut(&str, usize, Instant, &AtomicBool) -> Result<Reply, Failure>) -> Result<String, ToolError> {
+    execute_logged(name, args, output_cap, cancel, runner, &mut |_| ())
+}
+fn execute_logged(name: &str, args: &Value, output_cap: usize, cancel: &AtomicBool,
+    runner: impl FnMut(&str, usize, Instant, &AtomicBool) -> Result<Reply, Failure>, log: &mut dyn FnMut(&str)) -> Result<String, ToolError> {
     let search = name == "web_search";
     let allowed: &[&str] = if search { &["query", "count"] } else { &["url", "max_bytes", "timeout_s"] };
     let Value::Object(fields) = args else { return Err(ToolError::InvalidArguments("web arguments must be a JSON object")); };
@@ -446,18 +392,18 @@ fn execute_with(name: &str, args: &Value, output_cap: usize, cancel: &AtomicBool
     let count = if search { integer(args, "count", 5, 10)? } else { 0 };
     // Leave room for the explicit truncation marker inside the executor cap.
     if output_cap < 128 { return Err(ToolError::OutputLimit); }
-    let url = if search { format!("https://html.duckduckgo.com/html/?q={}", encode(input)) } else { input.into() };
-    let result = fetch_with(&url, max_bytes, timeout, cancel, runner).and_then(|page| {
-        if search { Ok(cut(search_results(&String::from_utf8_lossy(&page.body), count), max_bytes, page.truncated)) }
-        else { render(page, max_bytes, output_cap, cancel) }
-    });
+    if search { return search::run(input, count, max_bytes, timeout, output_cap, cancel, runner, log); }
+    let result = fetch_with(input, max_bytes, timeout, cancel, runner).and_then(|page| render(page, max_bytes, output_cap, cancel));
     let text = match result {
         Ok(text) => text,
         Err(Failure::Cancelled) => return Err(ToolError::Cancelled),
-        Err(failure) => format!("Web {} failed: {}.", if search { "search" } else { "fetch" }, failure.message()),
+        Err(failure) => format!("Web fetch failed: {}.", failure.message()),
     };
     Ok(cut(text, output_cap.saturating_sub(64), false))
 }
+
+mod search;
+pub(crate) use search::append_log;
 
 #[cfg(test)]
 mod tests;

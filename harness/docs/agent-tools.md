@@ -234,8 +234,34 @@ in `web.rs` reserves the response header and 128 bytes for cut markers.
 `web_search` takes `query` and optional `count`. Its schema sets the default
 count to 5 and the hard limit to 10. It reads the DuckDuckGo HTML search page
 through the same fetch path. It returns a numbered list of source titles,
-URLs and snippets. It unwraps DuckDuckGo result links. An empty search or
-failed request gives a short line. The harness does not make up results.
+URLs and snippets. It unwraps DuckDuckGo result links.
+
+DuckDuckGo answers many curl clients with an HTTP 202 bot challenge, so one
+call can make up to four tries inside one 20-second limit: DuckDuckGo, a
+1-second pause, DuckDuckGo, then the Bing HTML search page, a 3-second pause,
+Bing. Each try has a 6-second limit. The harness keeps its own user agent and
+does not answer a challenge. A query that reaches Bing goes to a second
+company. `--no-web` and `VADE_WEB=0` stop both.
+
+The harness gives each reply one class:
+
+| Class | Reply | Next step |
+| --- | --- | --- |
+| Results | Result links on the page | Return the list. |
+| No results | The provider's own no-results mark | Stop. `No results for <query> (provider said none).` From Bing, the text adds that only Bing answered and that the model must not conclude that the thing does not exist. |
+| Blocked | HTTP 202, 403 or 429, or a challenge page | Next try. |
+| Bad page | No known mark on the page | Next try. |
+| Failed | Timeout, network or other HTTP failure | Next try. |
+
+A list from Bing starts with one line that names Bing and tells the model to
+check each title, because Bing can return pages that do not match the query.
+When all tries fail, the result is `Web search failed: <reason> after N tries;
+the web may be unreachable from this machine. Do not conclude that the thing
+does not exist.` The harness does not make up results.
+
+Each try adds one line to `web-search.log` in the private project state folder:
+Unix time, provider, try, HTTP status, class, result count and milliseconds.
+The line has no query text. The file is reset at 1 MiB.
 
 Both tools are on by default. Launch the harness with `--no-web`, or set
 `VADE_WEB=0`, to turn both off. The setting also blocks execution from a saved
