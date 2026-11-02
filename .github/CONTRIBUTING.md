@@ -143,10 +143,13 @@ install or start an engine. To install from source on a Spark, follow
   implementations or extern declarations. The existing CUDA, FFI, kernel and
   transport boundaries are not permission to grow them. Keep their safety
   contracts and SAFETY comments intact. The exception: a kernel may add one
-  new `unsafe` block, in the GPU crate (`engine/crates/gpu`) only. Write its
-  safety contract in a comment directly above the block, and a reviewer checks
-  it before the merge. The ratchet test (below) doesn't count unsafe code, so
-  check your diff for it yourself.
+  new `unsafe` block in `engine/crates/gpu` or `engine/crates/gpu/kernels`.
+  Write its safety contract in a comment directly above the block, and a
+  reviewer checks it before the merge.
+  The [tools test](../tools/tests/unsafe_sites.rs) checks unsafe source sites during `cargo test` with a [legacy site allowlist](../tools/unsafe-allowlist.txt).
+  The allowlist is frozen at merge. Refresh it only on an orchestrator ruling.
+  CI never refreshes it. The [tools guide](../tools/README.md#unsafe-source-check)
+  gives the command, ruling field and `ptx-kernel` entry exception.
 - **Model-generic behavior.** Derive it from the checkpoint configuration and
   tensor metadata, with no dispatch on the model name and no model-specific
   tuning. See [adding a model](../docs/adding-a-model.md).

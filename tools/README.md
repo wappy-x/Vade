@@ -8,6 +8,77 @@ cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-to
 cargo +1.99.0 test --offline --locked --all-targets --manifest-path tools/Cargo.toml
 ```
 
+## Unsafe source check
+
+The [unsafe source test](tests/unsafe_sites.rs) runs in the existing CI test
+command. It reads tracked Rust files and new Rust files that Git does not
+ignore. It skips comments and literals. It does not expand macros.
+
+The [allowlist](unsafe-allowlist.txt) records each site by crate,
+source file, item name, site kind and site ordinal. The file and named scopes
+qualify the item name. The ordinal counts sites in that item. Keys do not
+include source lines, signatures or hashes. A new argument on a legacy unsafe
+function does not add a function. An impl key names its trait and type. It
+does not include generic bounds. An extra block in the same item needs its
+own entry. Review changes to legacy bodies and safety contracts in the diff.
+Equal missing and stale block counts can mean that a legacy block moved to
+another item or file. The check gives one refresh message for those blocks.
+It still fails. Keys do not prove that the block bodies match.
+
+The allowlist is frozen at merge time. Refresh it only on an orchestrator
+ruling. CI reads the allowlist. CI never runs the refresh command. Both the
+tree-match test and the check command require the keys to equal the current
+tree. A stale entry fails. A permitted kernel site still needs an entry.
+
+The optional last field names a site ruling, such as
+`ruling 2026-11-02 11:54`. Each legacy row records the freeze as
+`frozen ruling 2026-11-02 11:54`. The check accepts only this fixed freeze
+field. Do not add frozen rows for new sites.
+A new ordinary unsafe function needs its own ruling field even if its key
+is already listed. A source comment or a ruling on another row does not
+approve it. The check validates the field format. A reviewer must confirm
+that the named ruling grants approval for the site. Frozen rows skip the
+new-site rules unless the item's block count grows past its frozen row count.
+Then every block in that item needs a safety note. An inserted block can take
+a frozen ordinal. A possible move still fails and needs a reviewed allowlist
+diff. A new kernel still needs its safety notes and block limit when its rows
+carry a ruling.
+
+Except for an ordinary unsafe function with a ruling, a new unsafe site
+fails outside `engine/crates/gpu` and `engine/crates/gpu/kernels`.
+These crates allow a new block in a named kernel wrapper. They also allow an
+unsafe `extern "ptx-kernel"` entry with a body, including its
+`#[unsafe(no_mangle)]` attribute. Each function may add at most one new block.
+Each new block needs a nonempty `SAFETY:` comment directly above its source
+line. A new entry also needs a
+nonempty `SAFETY:` comment directly above the entry and its attributes.
+Adjacent comment lines may continue a contract. Other nested crates have no
+exception. A reviewer must still check the wrapper and the safety contracts.
+
+The refresh command requires the ruling as an argument. It writes the current
+keys in sorted order and preserves existing ruling fields. It removes stale
+rows. It leaves new rows without a ruling. It does not approve new sites.
+Review the diff and add only the site rulings that the orchestrator granted.
+For an approved legacy move, carry its frozen field to the new key after
+review.
+
+```sh
+cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- check-unsafe-sites
+cargo +1.99.0 test --offline --locked --manifest-path tools/Cargo.toml -p vade-tools --test unsafe_sites
+```
+
+After an orchestrator ruling, use its date and time. For example, the freeze
+ruling uses this command:
+
+```sh
+cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- refresh-unsafe-allowlist 'ruling 2026-11-02 11:54'
+```
+
+`check-unsafe-sites [ROOT]` checks the Git tree at `ROOT` with that tree's
+`tools/unsafe-allowlist.txt`. With no `ROOT`, it checks this checkout.
+CI checks the source and allowlist from the same checkout. The command does
+not build the engine or kernels.
+
 ## Documentation links
 
 `check-doc-links` checks local Markdown and text links, anchors and embedded

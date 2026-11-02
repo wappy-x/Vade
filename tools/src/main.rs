@@ -6,6 +6,11 @@ fn run() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("check-doc-links") if args.len() == 1 => vade_tools::docs::run(&vade_tools::root()),
         Some("check-one-path") if args.len() == 1 => vade_tools::one_path::run(&vade_tools::root()),
+        Some("check-unsafe-sites") if args.len() <= 2 => {
+            let root = args.get(1).map(std::path::PathBuf::from).unwrap_or_else(vade_tools::root);
+            vade_tools::unsafe_sites::check(&root)
+        },
+        Some("refresh-unsafe-allowlist") if args.len() == 2 => vade_tools::unsafe_sites::refresh(&vade_tools::root(),&args[1]),
         Some("check-bundle") if args.len() >= 2 => {
             let path = vade_tools::bundle::check(std::path::Path::new(&args[1]),&args[2..])?;
             println!("bundle manifest and archive hashes: PASS ({})",path.display()); Ok(())
@@ -29,7 +34,7 @@ fn run() -> Result<()> {
                 else { println!("{}",part.text()?); }
             } Ok(())
         },
-        _ => Err("usage: vade-tools {check-doc-links|check-one-path|check-bundle DIR [FORBIDDEN ...]|ci-no-gpu|benchmarks-chart|bench-docs CARDS_DIR REPO_DIR|fetch-model REPO REV DIR|json-get [KEY ...]|json-print [KEY ...]|json-value [KEY ...]|json-quote|json-stream-check}".into())
+        _ => Err("usage: vade-tools {check-doc-links|check-one-path|check-unsafe-sites [ROOT]|refresh-unsafe-allowlist 'ruling YYYY-MM-DD HH:MM'|check-bundle DIR [FORBIDDEN ...]|ci-no-gpu|benchmarks-chart|bench-docs CARDS_DIR REPO_DIR|fetch-model REPO REV DIR|json-get [KEY ...]|json-print [KEY ...]|json-value [KEY ...]|json-quote|json-stream-check}".into())
     }
 }
 fn main() { if let Err(error) = run() { eprintln!("vade-tools: {error}"); std::process::exit(1); } }
