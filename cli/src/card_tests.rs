@@ -1,8 +1,10 @@
 use super::*;
 use std::{
     net::TcpListener,
-    sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex},
+    sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc, Mutex},
 };
+
+static NEXT: AtomicU64 = AtomicU64::new(0);
 
 fn strings(arguments: &[&str]) -> Vec<String> { arguments.iter().map(|arg| (*arg).to_owned()).collect() }
 
@@ -316,7 +318,7 @@ fn an_interrupt_stops_before_the_next_request() {
 #[test]
 fn the_card_file_holds_the_digest_and_the_verdict_matches_a_receipt() {
     let fake = Fake::start();
-    let directory = std::env::temp_dir().join(format!("vade-card-test-{}-{}", std::process::id(), now()));
+    let directory = std::env::temp_dir().join(format!("vade-card-test-{}-{}-{}", std::process::id(), now(), NEXT.fetch_add(1, Ordering::Relaxed)));
     std::fs::create_dir_all(&directory).unwrap();
     let prompts = Prompts { version: "1.0.0".into(), system: "S".into(), prefill_unit: "u".into(),
         workloads: vec![("code".into(), "c".into()), ("prose".into(), "p".into()), ("structured".into(), "s".into())] };
@@ -476,7 +478,7 @@ fn the_bearer_key_goes_with_every_request() {
 
 #[test]
 fn a_run_with_no_reply_saves_nothing_and_a_stopped_run_keeps_its_replies() {
-    let directory = std::env::temp_dir().join(format!("vade-card-partial-{}-{}", std::process::id(), now()));
+    let directory = std::env::temp_dir().join(format!("vade-card-partial-{}-{}-{}", std::process::id(), now(), NEXT.fetch_add(1, Ordering::Relaxed)));
     std::fs::create_dir_all(&directory).unwrap();
     let prompts = Prompts { version: "1.0.0".into(), system: "S".into(), prefill_unit: "u".into(),
         workloads: vec![("code".into(), "c".into()), ("prose".into(), "p".into()), ("structured".into(), "s".into())] };
@@ -523,7 +525,7 @@ fn a_run_with_no_reply_saves_nothing_and_a_stopped_run_keeps_its_replies() {
 #[test]
 fn ctrl_c_returns_130_with_no_file_before_a_reply_and_a_partial_card_after() {
     static SEEN: std::sync::OnceLock<Arc<Mutex<Vec<(String, Value)>>>> = std::sync::OnceLock::new();
-    let directory = std::env::temp_dir().join(format!("vade-card-stop-{}-{}", std::process::id(), now()));
+    let directory = std::env::temp_dir().join(format!("vade-card-stop-{}-{}-{}", std::process::id(), now(), NEXT.fetch_add(1, Ordering::Relaxed)));
     std::fs::create_dir_all(&directory).unwrap();
     let prompts = Prompts { version: "1.0.0".into(), system: "S".into(), prefill_unit: "u".into(),
         workloads: vec![("code".into(), "c".into()), ("prose".into(), "p".into()), ("structured".into(), "s".into())] };

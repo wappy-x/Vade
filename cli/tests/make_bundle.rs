@@ -1,6 +1,8 @@
 //! Run `scripts/make-bundle.sh --from-payload` on a fixture payload: two runs
 //! must give the same bytes, and the archive must be one folder with MANIFEST.
-use std::{fs, os::unix::fs::PermissionsExt, path::{Path, PathBuf}, process::Command};
+use std::{fs, os::unix::fs::PermissionsExt, path::{Path, PathBuf}, process::Command, sync::atomic::{AtomicU64, Ordering}};
+
+static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct Temp(PathBuf);
 impl Drop for Temp { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
@@ -33,8 +35,8 @@ struct Fixture { temp: Temp, repo: PathBuf, payload: PathBuf, cli: PathBuf, home
 // `stamp` is what the engine build leaves in flash-serve when it embeds a cubin.
 fn fixture(stamp: &str) -> Fixture {
     let temp = Temp(fs::canonicalize(std::env::temp_dir()).unwrap()
-        .join(format!("vade-make-bundle-{}-{}", std::process::id(), std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos())));
+        .join(format!("vade-make-bundle-{}-{}-{}", std::process::id(), std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(), NEXT.fetch_add(1, Ordering::Relaxed))));
     let (repo, payload, cli, home) = (temp.0.join("repo"), temp.0.join("payload"), temp.0.join("cli"), temp.0.join("home"));
     fs::create_dir_all(&home).unwrap();
     write(&repo.join("scripts/make-bundle.sh"), &fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/make-bundle.sh")).unwrap(), 0o755);
@@ -125,7 +127,7 @@ fn cubin(folder: &Path, ptx: &Path, image: &[u8]) -> String {
 #[test]
 fn from_payload_lists_the_cubin_and_refuses_a_cubin_that_is_not_bound() {
     // The digest of b"compiled image", the bytes this test compiles below.
-    let scratch = Temp(std::env::temp_dir().join(format!("vade-make-bundle-digest-{}", std::process::id())));
+    let scratch = Temp(std::env::temp_dir().join(format!("vade-make-bundle-digest-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))));
     write(&scratch.0.join("image"), b"compiled image", 0o644);
     let image = sha256(&scratch.0.join("image"));
     let fixture = fixture(&format!("cubin_sha256={image}"));
@@ -183,8 +185,8 @@ fn from_payload_lists_the_cubin_and_refuses_a_cubin_that_is_not_bound() {
 struct Compiler { temp: Temp, archive: PathBuf, script: PathBuf, ptx: PathBuf }
 fn compiler(version: &str) -> Compiler {
     let temp = Temp(fs::canonicalize(std::env::temp_dir()).unwrap()
-        .join(format!("vade-make-cubin-{}-{version}-{}", std::process::id(), std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos())));
+        .join(format!("vade-make-cubin-{}-{version}-{}-{}", std::process::id(), std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(), NEXT.fetch_add(1, Ordering::Relaxed))));
     let folder = "cuda_nvcc-linux-sbsa-13.0.88-archive";
     let ptxas = temp.0.join("toolkit").join(folder).join("bin/ptxas");
     // It records its arguments as the image, so the test can read the exact command.
