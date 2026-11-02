@@ -929,4 +929,37 @@ mod tests {
             });
         }
     }
+    /// A hand-off longer than one 256 KiB relay piece crosses every hop to each destination
+    /// whole; ranks below the destination keep their bytes. The batch form sends each buffer.
+    #[test]
+    fn final_rank_transfer_relays_multi_piece_payloads() {
+        let pattern = |len: usize, salt: usize| (0..len).map(|i| ((i * 31 + salt) % 251) as u8).collect::<Vec<_>>();
+        for (world, path) in [3, 4].into_iter().flat_map(|n| [false, true].map(move |p| (n, p))) {
+            let listeners = (0..world).map(|_| TcpListener::bind("127.0.0.1:0").unwrap()).collect::<Vec<_>>();
+            let addresses = listeners.iter().map(|s| s.local_addr().unwrap()).collect::<Vec<_>>();
+            drop(listeners);
+            std::thread::scope(|scope| {
+                for rank in 0..world {
+                    let addresses = &addresses;
+                    scope.spawn(move || {
+                        let mut ring = Ring::connect_options(rank, world, addresses[rank], addresses[(rank + 1) % world], path).unwrap();
+                        let last = rank == world - 1;
+                        for destination in 0..world {
+                            let mut bytes = if last { pattern(600_001, destination) } else { vec![0; 600_001] };
+                            ring.transfer_from_last(destination, &mut bytes).unwrap();
+                            let expect = if rank >= destination { pattern(600_001, destination) } else { vec![0; 600_001] };
+                            assert!(bytes == expect, "world={world} path={path} rank={rank} destination={destination}");
+                            let (mut a, mut b) = if last { (pattern(300_000, 1), pattern(300_000, 2)) } else { (vec![0; 300_000], vec![0; 300_000]) };
+                            ring.transfer_from_last_batch(destination, &mut [&mut a[..], &mut [][..], &mut b[..]]).unwrap();
+                            let received = rank >= destination;
+                            assert!(a == if received { pattern(300_000, 1) } else { vec![0; 300_000] }, "batch a rank={rank} destination={destination}");
+                            assert!(b == if received { pattern(300_000, 2) } else { vec![0; 300_000] }, "batch b rank={rank} destination={destination}");
+                        }
+                        assert!(ring.transfer_from_last(world, &mut [0; 4]).is_err());
+                        ring.barrier().unwrap();
+                    });
+                }
+            });
+        }
+    }
 }

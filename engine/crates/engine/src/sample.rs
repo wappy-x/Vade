@@ -90,17 +90,11 @@ pub fn uniform(seed: u64, position: usize) -> f64 {
     (mix(seed ^ mix((position as u64).wrapping_add(0x9e3779b97f4a7c15))) >> 11) as f64
         * (1.0 / 9007199254740992.0)
 }
-/// Independent proposal, acceptance and target streams for speculative sampling.
-pub fn speculative_uniform(seed: u64, position: usize, stream: u64) -> f64 {
-    uniform(mix(seed ^ (stream + 1).wrapping_mul(0xd1b54a32d192ed03)), position)
-}
 
-/// Filtered, normalized support in the sampler's canonical arithmetic order.
+/// Filtered support in the sampler's canonical order with its unnormalized weights. A draw
+/// sums them exactly as the sampler does: draw(uniform(seed, position)) is its id there.
 pub struct Distribution(pub Vec<(u32, f64)>);
 impl Distribution {
-    pub fn probability(&self, token: u32) -> f64 {
-        self.0.iter().find(|v| v.0 == token).map_or(0.0, |v| v.1)
-    }
     pub fn draw(&self, uniform: f64) -> Result<u32, String> {
         let mass: f64 = self.0.iter().map(|v| v.1).sum();
         if !mass.is_finite() || mass <= 0.0 { return Err("empty sampling distribution".into()); }
@@ -112,15 +106,6 @@ impl Distribution {
         }
         Ok(self.0.last().unwrap().0)
     }
-    pub fn residual(&self, draft: &Self) -> Self {
-        let mut draft = draft.0.clone();
-        draft.sort_unstable_by_key(|v| v.0);
-        Self(self.0.iter().map(|&(id, p)| {
-            let q = draft.binary_search_by_key(&id, |v| v.0).map_or(0.0, |i| draft[i].1);
-            (id, (p - q).max(0.0))
-        })
-            .filter(|v| v.1 > 0.0).collect())
-    }
     pub fn memory_bytes(&self) -> usize { self.0.capacity() * std::mem::size_of::<(u32, f64)>() }
 }
 fn order(a: &(u32, f64), b: &(u32, f64)) -> std::cmp::Ordering {
@@ -130,6 +115,41 @@ fn order(a: &(u32, f64), b: &(u32, f64)) -> std::cmp::Ordering {
 /// best token weighs exactly 1 and always stays; each test reads one weight, never a sum.
 fn min_p(candidates: &mut Vec<(u32, f64)>, min_p: f64) {
     if min_p > 0.0 { candidates.retain(|v| v.1 >= min_p); }
+}
+/// Partitions by probability mass to size the nucleus without sorting the vocabulary, then
+/// sorts only that prefix. The partition's sums only guide the size; nucleus decides it.
+fn nucleus_guess(candidates: &mut [(u32, f64)], mut threshold: f64) -> usize {
+    let (mut lo, mut hi) = (0, candidates.len());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        candidates[lo..hi].select_nth_unstable_by(mid - lo, order);
+        let mass: f64 = candidates[lo..mid].iter().map(|v| v.1).sum();
+        if mass >= threshold { hi = mid; }
+        else if mass + candidates[mid].1 >= threshold { lo = mid + 1; break; }
+        else { threshold -= mass + candidates[mid].1; lo = mid + 1; }
+    }
+    let lo = lo.max(1);
+    candidates[..lo].sort_unstable_by(order);
+    lo
+}
+/// The smallest prefix in descending order whose running sum reaches `threshold`, else all.
+/// `candidates[..guess]` holds the largest weights in order. When rounding leaves that
+/// short, the next largest weights join one at a time; after eight, the rest sorts at once.
+fn nucleus(candidates: &mut [(u32, f64)], guess: usize, threshold: f64) -> usize {
+    let (mut sorted, mut cumulative) = (guess, 0.0);
+    for i in 0..candidates.len() {
+        if i == sorted {
+            if i >= guess + 8 { candidates[i..].sort_unstable_by(order); sorted = candidates.len(); }
+            else {
+                let next = candidates[i..].iter().enumerate().min_by(|a, b| order(a.1, b.1)).map_or(0, |v| v.0);
+                candidates.swap(i, i + next);
+                sorted += 1;
+            }
+        }
+        cumulative += candidates[i].1;
+        if cumulative >= threshold { return i + 1; }
+    }
+    candidates.len()
 }
 
 /// Request-owned scratch; options are validated once, buffers reused each draw.
@@ -148,8 +168,7 @@ impl Sampler {
     }
     fn distribution_from_candidates(&self, selected: u32) -> Distribution {
         if self.options.temperature == 0.0 { return Distribution(vec![(selected, 1.0)]); }
-        let mass: f64 = self.candidates.iter().map(|v| v.1).sum();
-        Distribution(self.candidates.iter().map(|&(id, value)| (id, value / mass)).collect())
+        Distribution(self.candidates.clone())
     }
     pub fn distribution(&mut self, logits: &[f32], history: &[u32], prompt_len: usize,
         allowed: impl Fn(u32) -> bool) -> Result<Distribution, String> {
@@ -163,9 +182,9 @@ impl Sampler {
         Some(self.distribution_from_candidates(selected))
     }
     /// Sorted, finite device top-k. None requests the original full-logit path.
-    /// Only nucleus membership depends on the old partition's summation order.
-    /// Away from a conservative rounding bound its support is identical; the
-    /// final sorted inverse CDF then executes precisely the original f64 math.
+    /// Nucleus membership defers to that path within a conservative rounding bound.
+    /// Elsewhere its support is identical; the final sorted inverse CDF then
+    /// executes precisely the full path's f64 math.
     pub fn sample_top_k(&mut self, logits: &[(u32, f32)], position: usize,
         allowed: impl Fn(u32) -> bool) -> Option<u32> {
         let start = self.profile.then(std::time::Instant::now);
@@ -198,8 +217,8 @@ impl Sampler {
         if p.top_p < 1.0 {
             let total: f64 = candidates.iter().map(|v| v.1).sum();
             let threshold = total * p.top_p;
-            // Each positive sum has at most k terms. This also covers every
-            // subtraction and partial sum in the legacy nucleus partition.
+            // Each positive sum has at most k terms. Near this bound the
+            // full path decides, so both paths keep one nucleus.
             let error = 64.0 * f64::EPSILON * (k*k) as f64;
             let mut cumulative = 0.0;
             let mut keep = k;
@@ -283,23 +302,19 @@ impl Sampler {
             *value = ((*value - best.1) / p.temperature).exp();
             total += *value;
         }
-        // Partition by probability mass to find the exact nucleus without sorting
-        // the vocabulary. Only the retained top-k set needs ordering for replay.
+        // Each sum and the draw follow a fixed order, never a partition's: descending weight
+        // after a top-k cut and in the nucleus, token-id order over the whole vocabulary.
+        if p.top_k > 0 {
+            candidates.sort_unstable_by(order);
+            total = candidates.iter().fold(0.0, |sum, v| sum + v.1);
+        }
         if p.top_p < 1.0 {
-            let mut threshold = total * p.top_p;
-            let (mut lo, mut hi) = (0, candidates.len());
-            while lo < hi {
-                let mid = lo + (hi - lo) / 2;
-                candidates[lo..hi].select_nth_unstable_by(mid - lo, order);
-                let mass: f64 = candidates[lo..mid].iter().map(|v| v.1).sum();
-                if mass >= threshold { hi = mid; }
-                else if mass + candidates[mid].1 >= threshold { lo = mid + 1; break; }
-                else { threshold -= mass + candidates[mid].1; lo = mid + 1; }
-            }
-            candidates.truncate(lo.max(1));
+            let threshold = total * p.top_p;
+            let guess = if p.top_k > 0 { candidates.len() } else { nucleus_guess(candidates, threshold) };
+            let keep = nucleus(candidates, guess, threshold);
+            candidates.truncate(keep);
         }
         min_p(candidates, p.min_p);
-        if p.top_k > 0 { candidates.sort_unstable_by(order); }
         let mass: f64 = candidates.iter().map(|v| v.1).sum();
         let draw = uniform(p.seed, position) * mass;
         let mut cumulative = 0.0;
@@ -449,7 +464,8 @@ mod tests {
         assert!(first[1..].iter().collect::<std::collections::BTreeSet<_>>().len() > 8);
     }
     /// Ids pinned from main 586d87947 before min_p existed: greedy, the checkpoint's sampling
-    /// and penalized nucleus sampling draw the same ids with min_p unset.
+    /// and penalized nucleus sampling draw the same ids with min_p unset. The nucleus row
+    /// (top_k 0) is pinned again since its draw follows descending weight, not a partition.
     #[test]
     fn unset_min_p_keeps_main_ids() {
         let pins: [(Sampling, [u32; 32]); 3] = [
@@ -459,8 +475,8 @@ mod tests {
                 [1319, 892, 2754, 3646, 3219, 3277, 2656, 3936, 1705, 1181, 2461, 1840, 1801, 2790, 559, 1548,
                 3313, 1276, 2265, 3545, 1702, 984, 1876, 4029, 3602, 3078, 556, 2030, 1215, 3174, 4066, 2029]),
             (Sampling { temperature: 0.8, top_p: 0.9, repetition_penalty: 1.1, presence_penalty: 0.3, seed: 11, ..Sampling::greedy() },
-                [3937, 1046, 1432, 1764, 1783, 3839, 869, 4089, 211, 2946, 2732, 1840, 2789, 171, 1955, 3641,
-                3176, 73, 1022, 1508, 1061, 33, 964, 382, 1836, 1408, 3077, 1118, 1795, 1466, 3365, 2940]),
+                [2598, 3045, 792, 2695, 464, 1762, 869, 2809, 1414, 2984, 3469, 2693, 3235, 986, 2634, 2613,
+                2303, 3177, 3351, 1178, 2788, 3079, 130, 1255, 3194, 1176, 12, 2728, 476, 2805, 242, 2940]),
         ];
         for (p, pin) in pins {
             assert_eq!(p.min_p, 0.0);
@@ -470,6 +486,171 @@ mod tests {
                 let logits: Vec<f32> = (0..4093usize).map(|i| (((i * 211 + step * 53) % 4093) as f32 - 2046.) / 400.).collect();
                 let id = s.sample(&logits, &history, 2, history.len(), |id| id != 7).unwrap();
                 history.push(id);
+            }
+            assert_eq!(history[2..], pin, "{p:?}");
+        }
+    }
+    /// The sampling rule with no partition: whole-vocabulary sums run in token-id order; after
+    /// a top-k cut, and for the nucleus and the draw, weights run in descending order.
+    fn reference(logits: &[f32], p: Sampling, position: usize, allowed: impl Fn(u32) -> bool) -> u32 {
+        let mut c: Vec<_> = logits.iter().enumerate().filter(|v| allowed(v.0 as u32)).map(|(id, &v)| (id as u32, v as f64)).collect();
+        let best = c.iter().map(|v| v.1).fold(f64::NEG_INFINITY, f64::max);
+        if p.temperature == 0.0 { return c.iter().find(|v| v.1 == best).unwrap().0; }
+        if p.top_k > 0 { c.sort_by(order); c.truncate(p.top_k); }
+        for v in &mut c { v.1 = ((v.1 - best) / p.temperature).exp(); }
+        if p.top_k > 0 { c.sort_by(order); }
+        let mut total = 0.0;
+        for v in &c { total += v.1; }
+        if p.top_p < 1.0 {
+            c.sort_by(order);
+            let mut cumulative = 0.0;
+            let keep = c.iter().position(|v| { cumulative += v.1; cumulative >= total * p.top_p }).map_or(c.len(), |i| i + 1);
+            c.truncate(keep);
+        }
+        c.retain(|v| v.1 >= p.min_p);
+        let mut mass = 0.0;
+        for v in &c { mass += v.1; }
+        let draw = uniform(p.seed, position) * mass;
+        let mut cumulative = 0.0;
+        for v in &c { cumulative += v.1; if draw < cumulative { return v.0; } }
+        c.last().unwrap().0
+    }
+    /// top_k 0 with top_p below 1. With top_k equal to the row length the same tokens stay, so on
+    /// these rows both settings draw the same id; their top_p sums run in other orders and can
+    /// round apart elsewhere. The audit's five-token row passes
+    /// on main too: the partition sorts slices this short. The 68-token row exposes the gap.
+    #[test]
+    fn nucleus_without_top_k_draws_in_descending_order() {
+        let rows: [(Vec<f32>, Sampling); 2] = [
+            (vec![1.0, 5.0, 2.0, 4.0, 3.0], Sampling { temperature: 0.8, top_k: 0, top_p: 0.9, seed: 7, ..Sampling::greedy() }),
+            ((0..68).map(|i| ((i * 13 + 5) % 97) as f32 / 8.0).collect(),
+                Sampling { temperature: 1.0, top_k: 0, top_p: 0.9, seed: 0, ..Sampling::greedy() }),
+        ];
+        for (logits, p) in rows {
+            let (mut s, mut cut) = (Sampler::new(p).unwrap(), Sampler::new(Sampling { top_k: logits.len(), ..p }).unwrap());
+            let mismatch: Vec<_> = (0..64).filter_map(|position| {
+                let (id, expected) = (s.sample(&logits, &[], 0, position, |_| true).unwrap(), reference(&logits, p, position, |_| true));
+                assert_eq!(expected, cut.sample(&logits, &[], 0, position, |_| true).unwrap());
+                (id != expected).then_some((position, id, expected))
+            }).collect();
+            assert!(mismatch.is_empty(), "{} of 64 positions differ on {} tokens, first {:?}", mismatch.len(), logits.len(), mismatch.first());
+        }
+    }
+    /// Random rows, ties, filters and settings: the fast path draws the reference's id.
+    #[test]
+    fn fast_path_matches_the_sorted_reference() {
+        let mut state = 0x9e3779b97f4a7c15u64;
+        let mut next = move || { state = mix(state.wrapping_add(0x9e3779b97f4a7c15)); state };
+        let mut checked = 0;
+        for case in 0..3000 {
+            let n = if case % 50 == 0 { 4000 + (next() % 4000) as usize } else { 1 + (next() % 300) as usize };
+            let (spread, steps) = ([0.5, 4.0, 20.0, 60.0][case % 4], [0, 3, 64][next() as usize % 3]);
+            let logits: Vec<f32> = (0..n).map(|_| {
+                let u = (next() >> 11) as f64 / 9007199254740992.0;
+                (if steps == 0 { u * spread } else { (u * steps as f64).floor() * spread / steps as f64 }) as f32
+            }).collect();
+            let top_k = [0, 0, 1, 2, 7, 64, n, n + 3][next() as usize % 8];
+            let p = Sampling { temperature: [0.05, 0.3, 0.8, 1.0, 1.9][next() as usize % 5], top_k,
+                top_p: [0.05, 0.5, 0.9, 0.95, 0.999, 1.0][next() as usize % 6], min_p: [0.0, 0.0, 0.01, 0.3][next() as usize % 4],
+                seed: next(), ..Sampling::greedy() };
+            let banned = next() as u32 % (n as u32 + 1);
+            let allowed = |id: u32| n == 1 || id != banned;
+            let mut s = Sampler::new(p).unwrap();
+            for position in [0, 1, 17, (next() % 100000) as usize] {
+                let id = s.sample(&logits, &[], 0, position, allowed).unwrap();
+                assert_eq!(id, reference(&logits, p, position, allowed), "case {case} position {position} {p:?} n {n}");
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 12000);
+    }
+    /// A sampled draft's distributions draw the sampler's own id at the same seed and position.
+    #[test]
+    fn distribution_draws_the_sampled_id() {
+        let mut state = 5u64;
+        for case in 0..400 {
+            let n = 2 + case % 90;
+            let logits: Vec<f32> = (0..n).map(|_| { state = mix(state.wrapping_add(1)); (state % 1000) as f32 / 97.0 }).collect();
+            let pairs = { let mut v: Vec<_> = logits.iter().enumerate().map(|(i, &x)| (i as u32, x)).collect();
+                v.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0))); v };
+            let p = Sampling { temperature: [0.4, 1.0, 1.7][case % 3], top_k: [0, 3, 20][case % 5 % 3], top_p: [1.0, 0.9, 0.3][case % 7 % 3],
+                min_p: [0.0, 0.1][case % 2], seed: state, ..Sampling::greedy() };
+            let mut s = Sampler::new(p).unwrap();
+            for position in [0, 9, 4096] {
+                let history = vec![1u32; position];
+                let id = s.sample(&logits, &history, position, position, |_| true).unwrap();
+                assert_eq!(s.distribution(&logits, &history, position, |_| true).unwrap().draw(uniform(p.seed, position)), Ok(id));
+                if let Some(id) = s.sample_top_k(&pairs, position, |_| true) {
+                    assert_eq!(s.distribution_top_k(&pairs, |_| true).unwrap().draw(uniform(p.seed, position)), Ok(id));
+                }
+            }
+        }
+    }
+    /// A guess that falls short adds the next largest weights one at a time, then sorts the rest.
+    #[test]
+    fn nucleus_extends_a_short_guess() {
+        let row: Vec<(u32, f64)> = (0..300u32).map(|id| (id, ((id * 37 % 101) as f64 + 1.0) / 64.0)).collect();
+        let mut sorted = row.clone();
+        sorted.sort_by(order);
+        let total: f64 = row.iter().map(|v| v.1).sum();
+        for top_p in [0.001, 0.02, 0.1, 0.5, 0.97, 1.0] {
+            let mut cumulative = 0.0;
+            let keep = sorted.iter().position(|v| { cumulative += v.1; cumulative >= total * top_p }).map_or(row.len(), |i| i + 1);
+            for guess in [0, 1, 5, 40] {
+                let mut c = row.clone();
+                c[..guess].copy_from_slice(&sorted[..guess]);
+                let mut rest = row.iter().filter(|v| !sorted[..guess].contains(v)).copied().collect::<Vec<_>>();
+                rest.reverse();
+                c[guess..].copy_from_slice(&rest);
+                assert_eq!(nucleus(&mut c, guess, total * top_p), keep, "top_p {top_p} guess {guess}");
+                assert!(c[..keep] == sorted[..keep]);
+            }
+        }
+    }
+    /// Greedy draws stay as on main a830f96e6, with and without penalties and a token filter.
+    #[test]
+    fn greedy_ids_unchanged() {
+        let varying = |step: usize| (0..4093usize).map(|i| (((i * 211 + step * 53) % 4093) as f32 - 2046.) / 400.
+            + if (i + step) % 97 == 0 { 0.4 } else { 0.0 }).collect::<Vec<f32>>();
+        let constant = |_: usize| (0..4093usize).map(|i| (((i * 211) % 4093) as f32 - 2046.) / 400.).collect::<Vec<f32>>();
+        let penalized = Sampling { repetition_penalty: 1.3, presence_penalty: 0.5, frequency_penalty: 0.25, ..Sampling::greedy() };
+        let pins: [(Sampling, &dyn Fn(usize) -> Vec<f32>, [u32; 32]); 4] = [
+            (Sampling::greedy(), &varying, [1998, 4073, 950, 426, 3995, 3471, 2947, 2423, 1899, 1375, 851, 327, 3896, 3372, 2848, 2324,
+                1800, 1276, 752, 2226, 3797, 3273, 2749, 2225, 1701, 3175, 653, 4047, 3698, 3174, 2650, 31]),
+            (penalized, &varying, [1998, 4073, 950, 426, 3995, 3471, 2947, 2423, 1899, 1375, 851, 327, 3896, 3372, 2848, 2324,
+                1800, 1276, 752, 2226, 3797, 3273, 2749, 2225, 1701, 3175, 653, 4047, 3698, 3174, 2650, 31]),
+            (Sampling::greedy(), &constant, [1998; 32]),
+            (penalized, &constant, [1998, 3996, 1901, 3899, 1804, 3802, 1707, 3705, 1610, 1513, 3511, 1416, 3414, 1319, 3317, 1222,
+                3220, 3123, 1028, 3026, 931, 2929, 834, 2832, 737, 2735, 640, 2638, 543, 2541, 446, 2444]),
+        ];
+        for (p, row, pin) in pins {
+            let mut s = Sampler::new(p).unwrap();
+            let mut history = vec![5u32, 9];
+            for step in 0..32 {
+                let id = s.sample(&row(step), &history, 2, history.len(), |id| id % 13 != 7).unwrap();
+                history.push(id);
+            }
+            assert_eq!(history[2..], pin, "{p:?}");
+        }
+    }
+    /// Without top_p below 1, the sampled paths also keep main's ids.
+    #[test]
+    fn uncut_and_top_k_sampling_ids_unchanged() {
+        let pins: [(Sampling, [u32; 32]); 2] = [
+            (Sampling { temperature: 0.9, min_p: 0.02, seed: 3, ..Sampling::greedy() },
+                [424, 3200, 289, 676, 287, 2420, 2710, 1739, 2514, 1737, 3779, 3256, 2730, 1838, 1469, 4046,
+                616, 170, 3447, 634, 945, 596, 672, 1991, 2242, 3815, 265, 2689, 554, 844, 3268, 3752]),
+            (Sampling { temperature: 0.7, top_k: 40, min_p: 0.05, seed: 4, ..Sampling::greedy() },
+                [2929, 2909, 2811, 2422, 2809, 1741, 2225, 1157, 962, 3968, 2706, 3578, 2219, 84, 1732, 82,
+                539, 112, 3778, 771, 1857, 3273, 654, 1546, 2729, 1235, 459, 2010, 2106, 2590, 3559, 939]),
+        ];
+        for (p, pin) in pins {
+            let mut s = Sampler::new(p).unwrap();
+            let mut history = vec![5u32, 9];
+            for step in 0..32usize {
+                let logits: Vec<f32> = (0..4093usize).map(|i| (((i * 211 + step * 53) % 4093) as f32 - 2046.) / 400.
+                    + if (i + step) % 97 == 0 { 6.0 } else { 0.0 }).collect();
+                history.push(s.sample(&logits, &history, 2, history.len(), |id| id % 13 != 7).unwrap());
             }
             assert_eq!(history[2..], pin, "{p:?}");
         }

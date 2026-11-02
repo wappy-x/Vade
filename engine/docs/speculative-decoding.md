@@ -104,8 +104,8 @@ pay. `fast` and `sampled` are explicit opt-ins.**
 <dt><code>fast</code></dt>
 <dd>Experimental, with a numerical guard; can change the output.</dd>
 <dt><code>sampled</code></dt>
-<dd>Speculative sampling with filtered draft probabilities; preserves the target
-sampling distribution, but can change the tokens for a given seed.</dd>
+<dd>The draft head samples its proposals from its filtered row. The target
+keeps its own draw, so host tests give the same tokens as with drafting off.</dd>
 </dl>
 
 - A request selects a mode with the `"draft"` field.
@@ -124,22 +124,20 @@ refuses ranks that disagree on the environment setting. An explicit request
 The environment flag selects verification; enable the head separately with
 `flash-serve ... --mtp 3`.
 
-For nonzero temperature, the MTP head samples each proposal from its own softmax
-after the request's temperature, top-k, top-p, penalties and token restrictions.
-The canonical target row undergoes the same filtering. A proposed token x is
-accepted with probability `min(1, p(x)/q(x))`. On the first rejection, the
-replacement is drawn from `normalize(max(0, p-q))` and the remaining proposals
-are discarded. When all proposals survive, one bonus token is drawn from the
-last target row. Proposal, acceptance and replacement/bonus draws use separate
-streams derived from the request seed and token position. The selected next
-token is committed on the next cycle, as in Strict decoding.
+For nonzero temperature, the MTP head proposes each token with the request's
+own draw: the same seed, position and filters (temperature, top-k, top-p,
+min-p and token restrictions) as the target, applied to the head's row. The
+target then makes its own draw from each canonical row, as in Strict decoding.
+It keeps a proposal only if its draw is the same token, and it stops at the
+first one that is different. When the head's row equals the target's row,
+every proposal survives (host test `sampled_drafts_commit_the_plain_ids`). The
+speed of this mode on a Spark is not measured.
 
-This preserves plain sampling's distribution; seed-for-seed equality with
-plain is **not** promised. Draws use the request seed; changing the proposal
-plan or cache state can change the token sequence for that seed.
-Temperature zero always selects Strict and retains token identity with greedy
-plain decoding. Targets without filtered draft distributions use single
-canonical rows. Strict and Fast behavior is unchanged.
+In host tests, the tokens are the same as with drafting off for the same
+seed. They do not depend on the proposals, the row count or whether another
+chat holds the drafter. A Spark run has not checked this mode. Temperature zero always selects Strict. Targets without filtered
+draft distributions use single canonical rows. Strict and Fast behavior is
+unchanged.
 
 ## Rules for each model
 

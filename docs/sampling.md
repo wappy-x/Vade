@@ -61,6 +61,15 @@ For each step, the engine applies these steps in this order
    table, and the best token always stays.
 7. It draws one token from the kept weights.
 
+Each sum and the draw run in one fixed order. When the request sets `top_k`,
+the kept tokens run from the highest weight down; equal weights go to the
+lower token ID first. With `top_k` 0, the sum for the `top_p` limit runs in
+token-ID order. The `top_p` set then runs from the highest weight down, as far
+as its sum reaches the limit. With `top_k` 0 and `top_p` 1, the draw runs in
+token-ID order.
+Thus the draw does not depend on how a sort or a partition left the tokens
+([`sample.rs`](../engine/crates/engine/src/sample.rs), `nucleus`).
+
 This is the order that the Hugging Face `transformers` library uses for
 temperature, top-k, top-p and min-p. The `min_p` step compares each weight
 with a fixed number. It adds no sum, so its result does not depend on the
@@ -121,7 +130,10 @@ change how many rows each step checks
 
 The classic speculative-sampling rule accepts a draft with a probability
 ratio. It gives the right distribution, but not the same token IDs as an
-undrafted run, so FP4-Local does not use it.
+undrafted run, so Vade does not use it. The `"draft":"sampled"` mode also
+checks each row with the same draw as an undrafted step; only its proposals
+come from the draft head's own draw
+([speculative decoding](../engine/docs/speculative-decoding.md)).
 
 ## What is exact
 
@@ -134,6 +146,10 @@ the host and are covered by the engine's host tests:
 - A position draws the same ID when the engine samples it again out of order.
 - Top-k, top-p and min-p keep the expected tokens on known scores, and the
   compact top-k path draws the same IDs as the full-score path.
+- On random scores and settings, the engine draws the same IDs as a plain
+  reference that applies the orders above with full sorts and no partition.
+- `"draft":"sampled"` commits the same IDs as drafting off, with any
+  proposals and when another chat holds the drafter.
 - A request with no sampling field gets the greedy settings, the same reply
   echo bytes and the same IDs as before `min_p` existed.
 

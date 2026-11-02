@@ -387,3 +387,18 @@ fn prefill_tags_and_disabled_probes() {
     }
     assert_eq!(p.prefill_end(true, 4096), Some(false));
 }
+#[cfg(test)]
+#[test]
+fn qsa_byte_probe_counts_only_the_selected_blocks() {
+    // Up to 512 four-row blocks every row is read; past that, the 512 selected blocks and the tail.
+    for length in [0, 1, 2048, 2051] { assert_eq!(selected_positions(length, &[]), Ok(length)); }
+    let ids: Vec<u32> = (0..512).map(|i| i * 2).collect();
+    assert_eq!(selected_positions(4099, &ids), Ok(512 * 4 + 3));
+    assert_eq!(selected_positions(2052, &(0..512).collect::<Vec<u32>>()), Ok(2048));
+    let mut last = ids.clone(); last[511] = 1024; // block 1024 is past 4099 / 4
+    let mut repeat = ids.clone(); repeat[7] = repeat[6];
+    let mut order = ids.clone(); order.swap(3, 4);
+    for bad in [&ids[..511], &[][..], &last[..], &repeat[..], &order[..]] {
+        assert_eq!(selected_positions(4099, bad), Err("decode byte probe: invalid QSA selection".into()));
+    }
+}

@@ -636,3 +636,34 @@ fn html_audit_items_and_close_tags() {
     assert!(doc.markdown.ends_with("w\n\nafter\n"), "{}", &doc.markdown[doc.markdown.len() - 20..]);
     assert_eq!(doc.warnings, Vec::<String>::new());
 }
+
+#[test]
+fn package_xml_parts_decode_every_mark_and_cut_parts_end_cleanly() {
+    use super::zip::{resolve, xml_text};
+    let le = |s: &str| s.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>();
+    let be = |s: &str| s.encode_utf16().flat_map(u16::to_be_bytes).collect::<Vec<u8>>();
+    let marked = |mark: &[u8], body: Vec<u8>| mark.iter().copied().chain(body).collect::<Vec<u8>>();
+    let text = "<a>\u{e9}\u{1f600}</a>";
+    for cut in [false, true] {
+        assert_eq!(xml_text(marked(b"\xff\xfe", le(text)), cut).unwrap(), text);
+        assert_eq!(xml_text(marked(b"\xfe\xff", be(text)), cut).unwrap(), text);
+        assert_eq!(xml_text(marked(b"\xef\xbb\xbf", text.as_bytes().to_vec()), cut).unwrap(), text);
+        assert_eq!(xml_text(text.as_bytes().to_vec(), cut).unwrap(), text);
+        // An odd trailing byte is not a code unit.
+        assert_eq!(xml_text(marked(b"\xff\xfe", [le("A"), vec![0x41]].concat()), cut).unwrap(), "A");
+    }
+    // A cap that splits a surrogate pair or a UTF-8 sequence keeps the text before it.
+    let split = marked(b"\xff\xfe", [le("A"), vec![0x3d, 0xd8]].concat());
+    assert_eq!(xml_text(split.clone(), true).unwrap(), "A");
+    assert_eq!(xml_text(split, false).unwrap_err(), "is not valid UTF-16 text");
+    let split = "ab\u{1f600}".as_bytes()[..4].to_vec();
+    assert_eq!(xml_text(split.clone(), true).unwrap(), "ab");
+    assert_eq!(xml_text(split, false).unwrap_err(), "is not UTF-8 text");
+    // A whole invalid byte is not a cut: it fails either way.
+    assert_eq!(xml_text(b"ab\xffcd".to_vec(), true).unwrap_err(), "is not UTF-8 text");
+    // Targets: query and fragment go, '..' stops at the package root, absolute targets drop the base.
+    assert_eq!(resolve("word", "media/a.png?x=1#f"), "word/media/a.png");
+    assert_eq!(resolve("word/slides", "../../../../etc/x.xml"), "etc/x.xml");
+    assert_eq!(resolve("word", "/docProps/../core.xml"), "core.xml");
+    assert_eq!(resolve("word", "./a/./b.xml"), "word/a/b.xml");
+}

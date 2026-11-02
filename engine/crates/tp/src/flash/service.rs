@@ -700,7 +700,7 @@ impl spark_engine::draft::Target for RemoteSession<'_, '_, '_, '_> {
     fn propose_sampled_model(&mut self, history: &[u32], prompt_len: usize, next: u32,
         limit: usize, sampling: spark_engine::sample::Sampling, allowed: &dyn Fn(u32) -> bool)
         -> Result<(spark_engine::draft::ModelProposal, Vec<spark_engine::sample::Distribution>)> {
-        use spark_engine::sample::{Sampler, speculative_uniform};
+        use spark_engine::sample::{Sampler, uniform};
         if history != self.tokens || prompt_len > history.len() { return Err("invalid sampled MTP history".into()); }
         let depth = limit.min(self.model_draft_width()).min(self.chosen_depth())
             .min(self.engine.context.saturating_sub(self.tokens.len() + 1));
@@ -729,7 +729,8 @@ impl spark_engine::draft::Target for RemoteSession<'_, '_, '_, '_> {
                             }
                             SampleRow::Logits(values) => sampler.distribution(&values, &prefix, prompt_len, allowed)?,
                         };
-                        let token = q.draw(speculative_uniform(sampling.seed, prefix.len(), 0))?;
+                        // The request's own draw here, as the target row will take it.
+                        let token = q.draw(uniform(sampling.seed, prefix.len()))?;
                         Ok(Some((token, q)))
                     })();
                     match choice {
@@ -1030,6 +1031,8 @@ impl<'m, 'b, 'a> spark_serve::Engine for Engine<'m, 'b, 'a> {
                         rows.len(), outputs.iter().find_map(|row| row.as_ref().ok()).map_or(0.0, |row| row.elapsed_ms), self.backend.allocated_bytes(), self.backend.peak_allocated_bytes()));
                 }
                 for ((i, row), output) in rows.iter_mut().zip(outputs) {
+                    // A planned sampled row with no proposal ends here, not in verify_sampled.
+                    row.session.sampled = false;
                     let output = match output {
                         Ok(output) => output,
                         Err(message) => {

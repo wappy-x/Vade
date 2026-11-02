@@ -537,3 +537,63 @@ fn text_completions_affinity_follows_the_prompt_prefix_in_its_own_namespace() {
     assert_eq!(admitted.index(), index);
     assert_eq!(cluster.stats().endpoints[index].affinity_hits, before + 1);
 }
+#[test]
+fn retry_after_is_clamped_and_overflowing_usage_changes_no_counter() {
+    // (status, Retry-After, cooldown seconds, overload): seconds clamp to 1..=300;
+    // an unparsable value takes the configured failure cooldown; a 4xx other than 429 sets none.
+    let default = RoutingConfig::default().failure_cooldown.as_secs();
+    for (status, header, seconds, overload) in [
+        (429, Some("0"), Some(1), true),
+        (503, Some("999999"), Some(300), true),
+        (529, Some("soon"), Some(default), true),
+        (500, Some("7"), Some(7), false),
+        (502, None, Some(default), false),
+        (404, Some("30"), None, false),
+    ] {
+        let cluster = cluster(RoutingConfig::default());
+        let mut lease = choose(&cluster, "a");
+        let index = lease.index;
+        lease.start();
+        let before = Instant::now();
+        lease.status(status, header);
+        let after = Instant::now();
+        let until = cluster.state().nodes[index].cooldown_until;
+        match seconds {
+            Some(s) => {
+                let until = until.unwrap();
+                let d = Duration::from_secs(s);
+                assert!(until >= before + d && until <= after + d, "{status} {header:?}");
+            }
+            None => assert!(until.is_none(), "{status} {header:?}"),
+        }
+        assert_eq!(cluster.stats().endpoints[index].overloads, u64::from(overload), "{status}");
+        lease.finish(status, None);
+    }
+    // Prompt or cached overflow leaves all three usage counters as they were.
+    let cluster = cluster(RoutingConfig::default());
+    let index = choose(&cluster, "a").index;
+    let seed = |prompt, cached| {
+        let mut state = cluster.state();
+        let stats = &mut state.nodes[index].stats;
+        (stats.prompt_tokens, stats.cached_tokens, stats.usage_responses) = (prompt, cached, 1);
+    };
+    let counters = || {
+        let s = &cluster.stats().endpoints[index];
+        (s.prompt_tokens, s.cached_tokens, s.usage_responses)
+    };
+    for (prompt, cached, usage) in [(u64::MAX - 5, 10, (10, 5)), (100, u64::MAX - 1, (10, 5))] {
+        seed(prompt, cached);
+        let mut lease = choose(&cluster, "a");
+        assert_eq!(lease.index, index);
+        lease.start();
+        lease.finish(200, Some(usage));
+        drop(lease);
+        assert_eq!(counters(), (prompt, cached, 1));
+    }
+    seed(u64::MAX - 10, 10);
+    let mut lease = choose(&cluster, "a");
+    lease.start();
+    lease.finish(200, Some((10, 5)));
+    drop(lease);
+    assert_eq!(counters(), (u64::MAX, 15, 2));
+}

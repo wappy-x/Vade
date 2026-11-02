@@ -20,6 +20,8 @@ fn long_paths_support_socket_probe_and_launcher_preview() {
     }
     let root = std::env::temp_dir().canonicalize().unwrap()
         .join(format!("vade-control-{}", std::process::id())).join("x".repeat(180));
+    // A failed run keeps its folder; a later run with the same process ID would find its socket.
+    let _ = fs::remove_dir_all(root.parent().unwrap());
     fs::create_dir_all(&root).unwrap();
     assert!(root.as_os_str().len() > 104);
     let mut listener = Command::new(std::env::current_exe().unwrap())

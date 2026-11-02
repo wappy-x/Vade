@@ -111,4 +111,32 @@ mod tests {
         assert_eq!(mxfp8(12288, 2560), 32_440_320);
     }
     #[test] fn nvfp4_bytes() { assert_eq!(nvfp4(640, 2560), 921_604); }
+    /// Hand-computed floors for each family `account` changes; the others keep the legacy count.
+    #[test] fn account_floors_per_kind() {
+        let case = |kind, m, n, k, real| Case { kind, m, n, k, real, ..Default::default() };
+        let legacy = 10_000_000;
+        let bytes = |c: Case, arm| account(&c, arm, legacy).0;
+        // The captured cold-8K chunk: 2048 tokens x top-10 over 205 experts, 302 tasks of 128 rows.
+        assert_eq!(COLD8K_COUNTS.iter().map(|&v| v as usize).sum::<usize>(), 2048 * 10);
+        assert_eq!(COLD8K_COUNTS.iter().filter(|&&v| v != 0).count(), 205);
+        // Head: LBF12 weights (1.5 B/elem + one scale per 32 + 2 B per row) once per 16 rows.
+        let lbf12 = 248320 * 2560 * 3 / 2 + 248320 * 2560 / 32 + 248320 * 2;
+        assert_eq!(lbf12, 973_911_040);
+        assert_eq!(bytes(case(1, 1, 248320, 2560, true), 0), lbf12 + 160 * 512 + 248320 * 4 + 2304);
+        assert_eq!(bytes(case(1, 17, 248320, 2560, true), 0), 2 * lbf12 + 3 * 160 * 512 + 17 * 248320 * 4 + 17 * 2304);
+        assert_eq!(bytes(case(1, 1, 248320, 2560, false), 0), 1_272_475_904);
+        // Dense latency: live input replaces the packed input; arm 1 reads MXFP8 weights.
+        let dense = legacy - 163_840 + 20_480;
+        assert_eq!(bytes(case(11, 1, 512, 2560, false), 0), dense);
+        assert_eq!(bytes(case(11, 1, 512, 2560, false), 1), dense - 2_621_440 + 1_351_680);
+        // Routed NVFP4: route tables; kind 4 writes BF16 per pair, not the reserved FP32 slot.
+        assert_eq!(bytes(case(3, 1, 2560, 640, false), 0), legacy + 724);
+        assert_eq!(bytes(case(4, 1, 2560, 640, false), 0), legacy - 10 * 2560 * 2 + 524);
+        assert_eq!(bytes(case(20, 8, 1280, 2560, false), 0), legacy + 4404);
+        assert_eq!(bytes(case(21, 8, 2560, 640, false), 0), legacy + 3284);
+        assert_eq!(bytes(case(5, 2048, 1280, 2560, true), 0), legacy + 96_640);
+        assert_eq!(bytes(case(6, 2048, 2560, 640, true), 0), legacy + 173_640);
+        assert_eq!(bytes(case(5, 2048, 1280, 2560, false), 0), legacy + 512 * 60 + 4 + 512 * 8 + 20480 * 4);
+        for kind in [0, 9, 30, 41, 74] { assert_eq!(bytes(case(kind, 8, 512, 2560, false), 0), legacy, "kind {kind}"); }
+    }
 }

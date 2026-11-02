@@ -1,5 +1,5 @@
 //! Interruptible speculative decoding. Every returned token already has KV.
-use crate::sample::{Distribution, Sampler, Sampling, speculative_uniform};
+use crate::sample::{Distribution, Sampler, Sampling, uniform};
 use std::collections::HashMap;
 use std::time::Instant;
 type Result<T> = std::result::Result<T, String>;
@@ -838,27 +838,15 @@ impl Speculator {
         self.finish_speculative(target, plan, &best, target_ms, 0.0, stop,
             |s, i| s.sampler.distribution_top_k(&output[i], &allowed).ok_or_else(|| "compact sampling needs full logits".into()))
     }
-    fn finish_speculative(&mut self, target: &mut (impl Target + ?Sized), mut plan: Proposal,
+    /// Mode::Sampled proposals come from the draft head's filtered rows. Each row still commits
+    /// only the canonical draw at its position: the ids equal drafting off, whatever was proposed.
+    fn finish_speculative(&mut self, target: &mut (impl Target + ?Sized), plan: Proposal,
         best: &[u32], target_ms: f64, learn_ms: f64, stop: impl Fn(u32) -> bool,
         mut distribution: impl FnMut(&mut Self, usize) -> Result<Distribution>) -> Result<&[u32]> {
-        let draft = std::mem::take(&mut plan.distributions);
-        if draft.len() + 1 != plan.input.len() { return Err("missing filtered draft distributions".into()); }
-        let proposals = plan.input[1..].to_vec();
+        if plan.distributions.len() + 1 != plan.input.len() { return Err("missing filtered draft distributions".into()); }
         self.finish_choices(target, plan, best, target_ms, learn_ms, stop, |s, i| {
-            let p = distribution(s, i)?;
             let position = s.history.len();
-            if let Some(&token) = proposals.get(i) {
-                let q = &draft[i];
-                let probability = q.probability(token);
-                if probability <= 0.0 { return Err("proposal outside draft support".into()); }
-                if speculative_uniform(s.options.seed, position, 1) < (p.probability(token) / probability).min(1.0) {
-                    return Ok(token);
-                }
-                let residual = p.residual(q);
-                let correction = if residual.0.is_empty() { &p } else { &residual };
-                return correction.draw(speculative_uniform(s.options.seed, position, 2));
-            }
-            p.draw(speculative_uniform(s.options.seed, position, 2))
+            distribution(s, i)?.draw(uniform(s.options.seed, position))
         })
     }
     fn finish_choices(&mut self, target: &mut (impl Target + ?Sized), plan: Proposal,
