@@ -166,6 +166,7 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
   - Different weights still stop the start, and the engine does not change.
 - `vade setup` shows `vade up --hosts` with the Sparks as you typed them, so you can paste the command, and it stops for a missing checkout before it asks any question.
 - `vade setup` says what each step does, also in `--dry-run`, and `vade install` prints `Checking SSH to <name>.` and `Copying Vade to <name>.` for each Spark.
+- `vade install` and `vade setup` now copy to and prepare every Spark at the same time instead of one after another. Vade prints the lines of each Spark in Spark order. If a Spark fails, the other Sparks finish their work, the error names the failed Spark, and the previous install stays active.
 - The installer writes one fixed folder, `~/.vade/bin`, with a small script that runs the build it just installed. It prints the same `export` line for every version and for a source build. `vade update` keeps that script on the bundle it staged. For a newer Vade, run the install command again.
 - `curl -fsSL https://vade.lol/install.sh | sh` is now safe when the download stops early, and its source build no longer runs in the wrong folder.
   - Every statement of `scripts/install.sh` is now inside `main`, and the last line calls it, so a cut-off script is a syntax error and runs nothing.

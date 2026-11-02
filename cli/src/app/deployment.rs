@@ -90,35 +90,104 @@ impl<R: Runner> App<R> {
         Ok(())
     }
 
-    /// Build every staged machine: one worker thread per machine when the
-    /// runner allows it, otherwise in machine order. Each worker's output is
-    /// printed in machine order, and the first failing machine fails install.
-    fn build_machines(&mut self, builds: &[SourceBuild], engine_sha: &str, warm_ptx: bool, prepare_model: bool) -> Result<Vec<(Artifact, bool)>, String> {
+    /// Run one step per machine: one worker thread per machine when the runner
+    /// allows it, otherwise in machine order on this thread. Each worker's output
+    /// is printed in machine order, as soon as that machine and those before it
+    /// are done. The first failing machine fails install, and the scope lets the
+    /// other workers run to their end. `start` is printed only before workers.
+    fn on_each_rank<S: RankStep>(&mut self, steps: &[S], start: Option<String>) -> Result<Vec<S::Done>, String> {
+        let workers = if steps.len() > 1 { steps.iter().map(|_| self.runner.worker()).collect::<Option<Vec<_>>>() } else { None };
+        let Some(workers) = workers else {
+            return steps.iter().map(|step| step.run(self)).collect();
+        };
+        if let Some(start) = start { crate::output::line(format_args!("{start}"))?; }
+        std::thread::scope(|scope| {
+            let handles = steps.iter().zip(workers).map(|(step, runner)| {
+                let (config, dry) = (self.config.clone(), self.dry);
+                scope.spawn(move || crate::output::buffered(|| step.run(&mut App { config, runner, dry })))
+            }).collect::<Vec<_>>();
+            let last = handles.len() - 1;
+            handles.into_iter().enumerate().map(|(rank, handle)| {
+                let (result, printed) = handle.join().map_err(|_| "Install worker stopped unexpectedly; inspect retained logs.")?;
+                crate::output::text(format_args!("{printed}"))?;
+                if result.is_err() && rank < last { crate::output::line(format_args!("A Spark failed; waiting for the other Sparks to end."))?; }
+                result
+            }).collect()
+        })
+    }
+
+    /// Build every staged machine.
+    fn build_machines(&mut self, builds: &[SourceBuild]) -> Result<Vec<(Artifact, bool)>, String> {
         for job in builds {
             crate::output::line(format_args!("{}: {} engine and helper.", job.machine.name, if self.dry { "plan to build" } else { "building" }))?;
         }
-        let workers = if builds.len() > 1 { builds.iter().map(|_| self.runner.worker()).collect::<Option<Vec<_>>>() } else { None };
-        let Some(workers) = workers else {
-            return builds.iter().map(|job| self.build_machine(job, engine_sha, warm_ptx, prepare_model)).collect();
-        };
-        let results = std::thread::scope(|scope| {
-            let handles = builds.iter().zip(workers).map(|(job, runner)| {
-                let (config, dry) = (self.config.clone(), self.dry);
-                scope.spawn(move || crate::output::buffered(|| App { config, runner, dry }.build_machine(job, engine_sha, warm_ptx, prepare_model)))
-            }).collect::<Vec<_>>();
-            handles.into_iter().map(|handle| handle.join()).collect::<Vec<_>>()
-        });
-        let mut built = Vec::new();
-        for result in results {
-            let (result, printed) = result.map_err(|_| "Install worker stopped unexpectedly; inspect retained logs.")?;
-            crate::output::text(format_args!("{printed}"))?;
-            built.push(result?);
-        }
-        Ok(built)
+        self.on_each_rank(builds, None)
     }
 
-    fn build_machine(&mut self, job: &SourceBuild, engine_sha: &str, warm_ptx: bool, prepare_model: bool) -> Result<(Artifact, bool), String> {
-        let SourceBuild { machine, borrowed, storage, remote_engine, remote_cli, build } = job;
+    /// One machine's part of install before any compile: the GPU check, then
+    /// the bundle copy and preparation, or the source copy for a later build.
+    fn stage_machine(&mut self, job: &Stage) -> Result<(Staged, bool), String> {
+        let Stage { machine, borrowed, bundle, reusable, engine_sha, cli_sha, install_id, warm_ptx, prepare_model } = *job;
+        if !borrowed {
+            let checked = self.checked(runner::ssh(&machine.ssh,BUILD_GPU_CHECK.into(),&format!("{} build GPU check",machine.name)),
+                &format!("{} GPU is in use or unavailable. Finish its current job with its original launcher before install; nothing was stopped.",machine.name))?;
+            if let Some(v) = checked.stdout.lines().find_map(|line| line.strip_prefix("stale_utilization="))
+                .and_then(|v| v.parse::<u32>().ok()).filter(|v| (1..=100).contains(v)) {
+                crate::output::line(format_args!("{}: {}", machine.name, crate::worker::stale_line(v)))?;
+            }
+        }
+        let mut present = true;
+        if let Some(bundle) = bundle {
+            let installed = if let Some(artifact) = reusable {
+                self.reuse_prebuilt(machine, bundle, artifact).map(|present| (artifact.clone(), present))
+            } else {
+                let build = format!("{}/builds/{engine_sha}-{cli_sha}-{install_id}-prebuilt", machine.stage_dir);
+                self.install_prebuilt(machine, bundle, &build)
+            };
+            match installed {
+                Ok((artifact, present)) => {
+                    if warm_ptx && !borrowed {
+                        self.prepare_install(machine, &artifact, prepare_model && present)?;
+                    }
+                    return Ok((Staged::Ready(artifact), present));
+                }
+                Err(error) if !self.config.installed_bundle && error.starts_with("Prebuilt artifact rejected:") => {
+                    crate::output::line(format_args!("{}: {}; building from source, which needs Rust there.", machine.name, text::terminal_text(&error)))?;
+                    present = self.machine_checks_for_build(machine, true)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        // Preserve the monorepo layout for CLI path dependencies while
+        // keeping each install's source pair and published builds immutable.
+        let remote_revision = format!(
+            "{}/revisions/{engine_sha}-{cli_sha}-{install_id}",
+            machine.engine_source
+        );
+        let remote_engine = format!("{remote_revision}/engine");
+        let remote_cli = format!("{remote_revision}/cli");
+        let storage = remote_build_storage(machine);
+        self.checked(
+            runner::ssh(
+                &machine.ssh,
+                format!("{storage}\nvade_private_dir {} new\n", remote_path(&remote_revision)),
+                &format!("{} build directories", machine.name),
+            ),
+            "Cannot prepare build folders on this machine. Use folders owned by your account, with no symlinks or access for other users, then run vade install again.",
+        )?;
+        if !self.dry { crate::output::line(format_args!("Copying the source to {}.", machine.name))?; }
+        let [engine_source, harness_source, cli_source] = [&self.config.engine_source, &self.config.harness_source, &self.config.cli_source].map(Clone::clone);
+        self.sync_source(&engine_source, machine, &remote_engine, "engine")?;
+        self.sync_source(&cli_source, machine, &remote_cli, "CLI")?;
+        // The remote CLI build resolves its `../harness` path dependency here.
+        self.sync_source(&harness_source, machine, &format!("{remote_revision}/harness"), "harness")?;
+        Ok((Staged::Build(SourceBuild { machine: machine.clone(), borrowed, storage, remote_engine, remote_cli,
+            build: format!("{}/builds/{engine_sha}-{cli_sha}-{install_id}", machine.stage_dir),
+            engine_sha: engine_sha.into(), warm_ptx, prepare_model }), present))
+    }
+
+    fn build_machine(&mut self, job: &SourceBuild) -> Result<(Artifact, bool), String> {
+        let SourceBuild { machine, borrowed, storage, remote_engine, remote_cli, build, engine_sha, warm_ptx, prepare_model } = job;
         let artifact = Artifact {
             worker: format!("{build}/vade"),
             binary: format!("{build}/flash-serve"),
@@ -190,8 +259,8 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
             artifact.worker_sha256 = hashes[2].clone();
         }
         let present = self.model_result(machine, checked)?;
-        if warm_ptx && !*borrowed {
-            self.prepare_install(machine, &artifact, prepare_model && present)?;
+        if *warm_ptx && !*borrowed {
+            self.prepare_install(machine, &artifact, *prepare_model && present)?;
         }
         Ok((artifact, present))
     }
@@ -351,78 +420,36 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
             supports_fp4_chain,
             artifacts: BTreeMap::new(),
         };
-        let mut builds = Vec::new();
-        for machine in &machines {
-            let borrowed = owned.iter().any(|session| {
+        let steps = machines.iter().map(|machine| Stage {
+            machine,
+            borrowed: owned.iter().any(|session| {
                 session.ranks.iter().any(|rank| {
                     rank.machine.name == machine.name && rank.machine.ssh == machine.ssh
                 })
-            });
-            if !borrowed {
-                let checked = self.checked(runner::ssh(&machine.ssh,BUILD_GPU_CHECK.into(),&format!("{} build GPU check",machine.name)),
-                    &format!("{} GPU is in use or unavailable. Finish its current job with its original launcher before install; nothing was stopped.",machine.name))?;
-                if let Some(v) = checked.stdout.lines().find_map(|line| line.strip_prefix("stale_utilization="))
-                    .and_then(|v| v.parse::<u32>().ok()).filter(|v| (1..=100).contains(v)) {
-                    crate::output::line(format_args!("{}: {}", machine.name, crate::worker::stale_line(v)))?;
-                }
+            }),
+            bundle: bundle.as_ref(),
+            reusable: bundle.as_ref().and_then(|bundle| previous.as_ref()
+                .filter(|(_, fields)| {
+                    fields.get(&format!("machine.{}.install_ssh", machine.name)) == Some(&machine.ssh)
+                        && fields.get(&format!("machine.{}.install_stage_dir", machine.name)) == Some(&machine.stage_dir)
+                })
+                .and_then(|(m, _)| m.artifacts.get(&machine.name))
+                .filter(|a| [&a.binary_sha256, &a.ptx_sha256, &a.worker_sha256] == bundle.hashes.each_ref())),
+            engine_sha: &engine_sha, cli_sha: &cli_sha, install_id: &install_id,
+            warm_ptx: supports_warm_ptx, prepare_model: supports_prepare_model,
+        }).collect::<Vec<_>>();
+        let names = machines.iter().map(|machine| machine.name.as_str()).collect::<Vec<_>>().join(", ");
+        let start = format!("Preparing {names} at the same time; each Spark's lines follow when it is done.");
+        let mut builds = Vec::new();
+        for (machine, (staged, present)) in machines.iter().zip(self.on_each_rank(&steps, Some(start))?) {
+            weights_present &= present;
+            match staged {
+                Staged::Ready(artifact) => { manifest.artifacts.insert(machine.name.clone(), artifact); }
+                Staged::Build(build) => builds.push(build),
             }
-            if let Some(bundle) = &bundle {
-                let reusable = previous.as_ref()
-                    .filter(|(_, fields)| {
-                        fields.get(&format!("machine.{}.install_ssh", machine.name)) == Some(&machine.ssh)
-                            && fields.get(&format!("machine.{}.install_stage_dir", machine.name)) == Some(&machine.stage_dir)
-                    })
-                    .and_then(|(m, _)| m.artifacts.get(&machine.name))
-                    .filter(|a| [&a.binary_sha256, &a.ptx_sha256, &a.worker_sha256] == bundle.hashes.each_ref());
-                let installed = if let Some(artifact) = reusable {
-                    self.reuse_prebuilt(machine, bundle, artifact).map(|present| (artifact.clone(), present))
-                } else {
-                    let build = format!("{}/builds/{engine_sha}-{cli_sha}-{install_id}-prebuilt", machine.stage_dir);
-                    self.install_prebuilt(machine, bundle, &build)
-                };
-                match installed {
-                    Ok((artifact, present)) => {
-                        weights_present &= present;
-                        if supports_warm_ptx && !borrowed {
-                            self.prepare_install(machine, &artifact, supports_prepare_model && present)?;
-                        }
-                        manifest.artifacts.insert(machine.name.clone(), artifact);
-                        continue;
-                    }
-                    Err(error) if !bundled && error.starts_with("Prebuilt artifact rejected:") => {
-                        crate::output::line(format_args!("{}: {}; building from source, which needs Rust there.", machine.name, text::terminal_text(&error)))?;
-                        weights_present &= self.machine_checks_for_build(machine, true)?;
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            // Preserve the monorepo layout for CLI path dependencies while
-            // keeping each install's source pair and published builds immutable.
-            let remote_revision = format!(
-                "{}/revisions/{engine_sha}-{cli_sha}-{install_id}",
-                machine.engine_source
-            );
-            let remote_engine = format!("{remote_revision}/engine");
-            let remote_cli = format!("{remote_revision}/cli");
-            let storage = remote_build_storage(machine);
-            self.checked(
-                runner::ssh(
-                    &machine.ssh,
-                    format!("{storage}\nvade_private_dir {} new\n", remote_path(&remote_revision)),
-                    &format!("{} build directories", machine.name),
-                ),
-                "Cannot prepare build folders on this machine. Use folders owned by your account, with no symlinks or access for other users, then run vade install again.",
-            )?;
-            if !self.dry { crate::output::line(format_args!("Copying the source to {}.", machine.name))?; }
-            self.sync_source(&engine_source, machine, &remote_engine, "engine")?;
-            self.sync_source(&cli_source, machine, &remote_cli, "CLI")?;
-            // The remote CLI build resolves its `../harness` path dependency here.
-            self.sync_source(&harness_source, machine, &format!("{remote_revision}/harness"), "harness")?;
-            builds.push(SourceBuild { machine: machine.clone(), borrowed, storage,
-                remote_engine, remote_cli, build: format!("{}/builds/{engine_sha}-{cli_sha}-{install_id}", machine.stage_dir) });
         }
         // Every source copy is staged; the machines now compile at once.
-        for (job, (artifact, present)) in builds.iter().zip(self.build_machines(&builds, &engine_sha, supports_warm_ptx, supports_prepare_model)?) {
+        for (job, (artifact, present)) in builds.iter().zip(self.build_machines(&builds)?) {
             weights_present &= present;
             manifest.artifacts.insert(job.machine.name.clone(), artifact);
         }
@@ -886,5 +913,39 @@ fn stage_local(source: &Path, destination: &Path) -> Result<(), String> {
     result
 }
 
+/// One machine's part of an install step. It is generic over the runner
+/// because a worker thread has its own runner.
+trait RankStep: Sync {
+    type Done: Send;
+    fn run<R: Runner>(&self, app: &mut App<R>) -> Result<Self::Done, String>;
+}
+
+/// `error`, with the machine's name first unless it starts with that name.
+fn name_rank(name: &str, error: String) -> String {
+    if error.strip_prefix(name).is_some_and(|rest| rest.starts_with([':', ' '])) { error } else { format!("{name}: {error}") }
+}
+
+/// What [`App::stage_machine`] needs for one machine.
+struct Stage<'a> {
+    machine: &'a Machine, borrowed: bool,
+    bundle: Option<&'a crate::prebuilt::Bundle>, reusable: Option<&'a Artifact>,
+    engine_sha: &'a str, cli_sha: &'a str, install_id: &'a str,
+    warm_ptx: bool, prepare_model: bool,
+}
+impl RankStep for Stage<'_> {
+    type Done = (Staged, bool);
+    fn run<R: Runner>(&self, app: &mut App<R>) -> Result<Self::Done, String> {
+        app.stage_machine(self).map_err(|error| name_rank(&self.machine.name, error))
+    }
+}
+
+/// A machine after its stage step: ready to use, or ready to compile.
+enum Staged { Ready(Artifact), Build(SourceBuild) }
+
 /// One machine whose engine and CLI sources are staged and ready to compile.
-struct SourceBuild { machine: Machine, borrowed: bool, storage: String, remote_engine: String, remote_cli: String, build: String }
+struct SourceBuild { machine: Machine, borrowed: bool, storage: String, remote_engine: String, remote_cli: String, build: String,
+    engine_sha: String, warm_ptx: bool, prepare_model: bool }
+impl RankStep for SourceBuild {
+    type Done = (Artifact, bool);
+    fn run<R: Runner>(&self, app: &mut App<R>) -> Result<Self::Done, String> { app.build_machine(self) }
+}

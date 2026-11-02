@@ -313,7 +313,7 @@ fn an_installed_bundle_fault_stops_the_install_and_never_builds_from_source() {
         reject: "a prebuilt helper hash", rejected: false, source_hashes: None } };
     let error = app.execute(Command::Install).unwrap_err();
     crate::prebuilt::LINUX_HOST.set(false);
-    assert!(app.runner.rejected && error.starts_with("Prebuilt artifact rejected:"), "{error}");
+    assert!(app.runner.rejected && error.starts_with("a: Prebuilt artifact rejected:"), "{error}");
     assert!(!app.runner.inner.calls.iter().any(|e| e.label.ends_with("source copy") || e.label.ends_with("build directories")));
     // This vade has no bundle beside it.
     let mut f = with_installed_bundle();
@@ -510,7 +510,7 @@ fn preparation_failure_names_the_helper_cause_first() {
             runner: PrepareRunner { inner: std::mem::take(&mut f.app.runner), fail: true, missing_model: false, helper_preparation: "warm-ptx-v1", cause } };
         let error = app.execute(Command::Install).unwrap_err();
         if cause.is_empty() {
-            assert!(error.starts_with("Install cache preparation failed;"), "{error}");
+            assert!(error.starts_with("a: Install cache preparation failed;"), "{error}");
         } else {
             assert_eq!(error, format!("a: {busy} Install cache preparation failed; the previous activation was kept."));
         }

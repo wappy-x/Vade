@@ -13,16 +13,19 @@ done
 for last in "$@"; do :; done
 host=${last%:./}
 home=$FAKE_HOSTS/$host
-printf 'rsync %s' "$host" >> "$FAKE_HOSTS/calls.log"
-[ -f "$home/known" ] || { echo >> "$FAKE_HOSTS/calls.log"; echo 'Host key verification failed.' >&2; exit 255; }
-[ ! -f "$home/denied" ] || { echo >> "$FAKE_HOSTS/calls.log"; echo "fake@$host: Permission denied (publickey)." >&2; exit 255; }
+# One write per call: two hosts copy at the same time.
+[ -f "$home/known" ] || { printf 'rsync %s
+' "$host" >> "$FAKE_HOSTS/calls.log"; echo 'Host key verification failed.' >&2; exit 255; }
+[ ! -f "$home/denied" ] || { printf 'rsync %s
+' "$host" >> "$FAKE_HOSTS/calls.log"; echo "fake@$host: Permission denied (publickey)." >&2; exit 255; }
 folder=${receiver#umask 077 && cd }
 folder=${folder% && exec rsync}
-folder=$(HOME=$home; eval "cd $folder" && pwd -P) || exit 12
+folder=$(HOME=$home; eval "cd $folder" && pwd -P) || { printf 'rsync %s\n' "$host" >> "$FAKE_HOSTS/calls.log"; exit 12; }
+row="rsync $host"
 while [ $# -gt 1 ]; do
-    printf ' %s' "$(basename -- "$1")" >> "$FAKE_HOSTS/calls.log"
+    row="$row $(basename -- "$1")"
     cp "$1" "$folder/"
     [ ! -f "$home/corrupt" ] || printf 'changed' >> "$folder/$(basename -- "$1")"
     shift
 done
-echo >> "$FAKE_HOSTS/calls.log"
+printf '%s\n' "$row" >> "$FAKE_HOSTS/calls.log"
