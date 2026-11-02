@@ -231,6 +231,12 @@ The gateways add the greedy fields to a request that sends no sampling field
 
 ## What to expect
 
+The newest FP8 runs are from the afternoon of 2026-11-01 at main `acb49bc`.
+With a fixed depth 2, they write prose at 39.5 tok/s on two Sparks and 52.6
+on four ([afternoon results](results.md#current-fp8-main-acb49bc-2026-11-01-afternoon)).
+The rows below are older, but they are the newest runs that also show the
+depth that the server chooses.
+
 These rows come from the morning cards of 2026-11-01 at main `1a07e3a`
 ([results and receipts](results.md#current-fp8-main-1a07e3a-2026-11-01-morning)).
 Each Spark count had two server starts:

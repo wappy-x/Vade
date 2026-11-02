@@ -1084,6 +1084,9 @@ Several Sparks can work together in two ways:
 Both use Route B. Follow the steps below for a chain. Replicas need less of
 them.
 
+Setup on two or more Sparks is still rough. It takes the six steps below,
+not one command, and SSH or the cable addresses can need a fix by hand.
+
 Run every step on one Spark. That Spark is the controller. The one-line
 install is enough, so you do not need a clone. `vade install` copies Vade to
 the other Sparks for you. These examples use `spark-a` for this Spark and
