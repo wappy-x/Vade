@@ -178,7 +178,7 @@ mod tests {
     fn a_new_vade_home_reuses_the_record_beside_the_model_and_the_list_still_rules() {
         use crate::runner::Runner;
         let _guard = crate::runner::process_test_lock();
-        let root = fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("vade-prepare-{}", crate::text::random_hex(8).unwrap()));
+        let root = crate::worker::seed::tests::private_base().join(format!("vade-prepare-{}", crate::text::random_hex(8).unwrap()));
         let model = root.join("model");
         fs::create_dir_all(&model).unwrap();
         fs::write(model.join("config.json"), crate::launch::test_mixed_config(32768)).unwrap();

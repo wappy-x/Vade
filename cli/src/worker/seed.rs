@@ -66,7 +66,7 @@ fn list(root: &Path, files: &BTreeMap<String, Verified>) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::path::PathBuf;
 
@@ -97,7 +97,7 @@ mod tests {
     /// engine uses its stamp cache only below such folders. A shared temporary
     /// folder such as `/tmp` on Linux fails that rule, so the test then uses the
     /// folder of its own test binary.
-    fn private_base() -> PathBuf {
+    pub(in crate::worker) fn private_base() -> PathBuf {
         let owner = fs::metadata(std::env::current_exe().unwrap()).unwrap().uid();
         let usable = |path: &Path| path.ancestors().all(|folder| fs::symlink_metadata(folder)
             .is_ok_and(|m| m.is_dir() && m.mode() & 0o022 == 0 && [0, owner].contains(&m.uid())));
