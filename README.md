@@ -100,7 +100,7 @@ We measured main `acb49bc` on our own Sparks on the afternoon of 2026-11-01 for 
 
 Most inference engines give slightly different answers from one run to the next, and different answers again when you add GPUs. Vade does not.
 
-Exact means the same request with the same settings gives the same token IDs. This holds on every run and on every supported Spark count. It holds for a request alone or in a batch. It holds with or without the prefix cache. For requests that always pick the most likely token, it also holds with drafting on or off.
+Exact means the same request with the same settings gives the same token IDs. This holds on every run and on every Spark count under "Covered today" below. It holds for a request alone or in a batch. It holds with or without the prefix cache. For requests that always pick the most likely token, it also holds with drafting on or off.
 
 **Covered today**
 
