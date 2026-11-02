@@ -13,10 +13,10 @@ fn mock() -> &'static Path {
     BINARY
         .get_or_init(|| {
             let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-            let directory = root
-                .join("target")
-                .join(format!("hermes-mock-{}", std::process::id()));
-            fs::create_dir_all(&directory).unwrap();
+            // Outside target/: CI restores it from an older run and a pid can repeat.
+            let directory = std::env::temp_dir().join(format!("vade-hermes-mock-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&directory);
+            fs::create_dir(&directory).unwrap();
             let source = directory.join("mock.rs");
             fs::write(
                 &source,

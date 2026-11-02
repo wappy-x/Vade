@@ -12,12 +12,23 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+/// How long a test waits for an event before it calls the child stuck. This is
+/// a limit on a hang, not a measure of speed, so a loaded host stays green.
+const HANG_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// One empty folder per test process, outside target/. CI restores target/
+/// from an older run and a process id can repeat, so a marker file left there
+/// by that run would end a wait before this run's fixture starts.
+fn fresh_folder(name: &str) -> PathBuf {
+    let directory = std::env::temp_dir().join(format!("vade-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir(&directory).unwrap();
+    directory
+}
+
 fn compile_mock(provider: &str, source_text: &str) -> PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let directory = root
-        .join("target")
-        .join(format!("{provider}-cli-{}", std::process::id()));
-    fs::create_dir_all(&directory).unwrap();
+    let directory = fresh_folder(&format!("{provider}-cli"));
     let source = directory.join("mock.rs");
     fs::write(
         &source,
@@ -130,7 +141,7 @@ fn finish(mut child: Child) -> Output {
         if child.try_wait().unwrap().is_some() {
             break;
         }
-        if started.elapsed() > std::time::Duration::from_secs(8) {
+        if started.elapsed() > HANG_LIMIT {
             let _ = child.kill();
             let _ = child.wait();
             panic!("mock CLI exceeded local test deadline");
@@ -145,6 +156,14 @@ fn stdout(output: &Output) -> &str {
 }
 fn stderr(output: &Output) -> &str {
     std::str::from_utf8(&output.stderr).unwrap()
+}
+
+#[test]
+fn a_repeated_process_id_starts_with_an_empty_folder() {
+    let folder = fresh_folder("cli-stale-check");
+    fs::write(folder.join("steering-received"), b"older run").unwrap();
+    assert_eq!(fresh_folder("cli-stale-check"), folder);
+    assert!(fs::read_dir(&folder).unwrap().next().is_none());
 }
 
 #[test]
@@ -216,7 +235,7 @@ fn line_controls_cancel_while_steering_ack_is_delayed() {
     input.write_all(b"steer-wait\n/steer adjustment\n").unwrap();
     let started = std::time::Instant::now();
     while !marker.exists() {
-        if started.elapsed() > std::time::Duration::from_secs(5) {
+        if started.elapsed() > HANG_LIMIT {
             child.kill().unwrap();
             child.wait().unwrap();
             panic!("fixture never received steering");
@@ -259,7 +278,7 @@ fn piped_exit_cancels_a_started_delegated_turn() {
     input.write_all(b"exit-wait\n").unwrap();
     let started = std::time::Instant::now();
     while !marker.exists() {
-        if started.elapsed() > std::time::Duration::from_secs(5) {
+        if started.elapsed() > HANG_LIMIT {
             child.kill().unwrap();
             child.wait().unwrap();
             panic!("fixture never sent its reply text");
@@ -338,7 +357,7 @@ fn hermes_cli_cancel_during_delayed_permission_reports_actual_ack() {
     input.write_all(b"cancel-permission\n").unwrap();
     let started = std::time::Instant::now();
     while !marker.exists() {
-        if started.elapsed() > std::time::Duration::from_secs(5) {
+        if started.elapsed() > HANG_LIMIT {
             child.kill().unwrap();
             child.wait().unwrap();
             panic!("ACP mock did not start its tool");
@@ -509,7 +528,7 @@ mod mac_terminal {
             let mut remaining = bytes;
             while !remaining.is_empty() {
                 assert!(
-                    started.elapsed() < Duration::from_secs(5),
+                    started.elapsed() < HANG_LIMIT,
                     "test PTY write timed out"
                 );
                 match self.master.write(remaining) {
@@ -537,7 +556,7 @@ mod mac_terminal {
             let start = Instant::now();
             while !self.contains(needle) {
                 assert!(
-                    start.elapsed() < Duration::from_secs(5),
+                    start.elapsed() < HANG_LIMIT,
                     "PTY did not emit {needle:?}; tail: {}",
                     String::from_utf8_lossy(&self.output[self.output.len().saturating_sub(1500)..])
                 );
@@ -566,7 +585,7 @@ mod mac_terminal {
             let start = Instant::now();
             while self.child.try_wait().unwrap().is_none() {
                 assert!(
-                    start.elapsed() < Duration::from_secs(5),
+                    start.elapsed() < HANG_LIMIT,
                     "PTY child did not exit"
                 );
                 if let Ok(bytes) = self.rx.recv_timeout(Duration::from_millis(10)) {

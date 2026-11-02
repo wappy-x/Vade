@@ -11,11 +11,10 @@ const MOCK: &str = include_str!("../../tests/fixtures/codex_child.rs");
 fn mock_binary() -> &'static PathBuf {
     static BINARY: OnceLock<PathBuf> = OnceLock::new();
     BINARY.get_or_init(|| {
-        let directory = std::env::current_dir()
-            .unwrap()
-            .join("target")
-            .join(format!("app-server-mock-{}", std::process::id()));
-        fs::create_dir_all(&directory).unwrap();
+        // Outside target/: CI restores it from an older run and a pid can repeat.
+        let directory = std::env::temp_dir().join(format!("vade-app-server-mock-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir(&directory).unwrap();
         let json_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/json.rs");
         let source = directory.join("mock.rs");
         fs::write(
