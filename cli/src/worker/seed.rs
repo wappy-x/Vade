@@ -93,13 +93,29 @@ mod tests {
         model
     }
 
+    /// A folder for the test whose parent folders no other user can write. The
+    /// engine uses its stamp cache only below such folders. A shared temporary
+    /// folder such as `/tmp` on Linux fails that rule, so the test then uses the
+    /// folder of its own test binary.
+    fn private_base() -> PathBuf {
+        let owner = fs::metadata(std::env::current_exe().unwrap()).unwrap().uid();
+        let usable = |path: &Path| path.ancestors().all(|folder| fs::symlink_metadata(folder)
+            .is_ok_and(|m| m.is_dir() && m.mode() & 0o022 == 0 && [0, owner].contains(&m.uid())));
+        let temporary = fs::canonicalize(std::env::temp_dir()).unwrap();
+        if usable(&temporary) { return temporary; }
+        let binary = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let folder = binary.parent().unwrap().to_path_buf();
+        assert!(usable(&folder), "no private folder for the seed test: {} and {} are shared", temporary.display(), folder.display());
+        folder
+    }
+
     /// The child test process sets the cache folder that the engine reads. Its
     /// current folder is the checkpoint. In `engine`, a copy with no pull records,
     /// it hashes every file and writes the two files as the engine writes them.
     #[test]
     fn the_engine_reuses_every_file_a_pull_checked() {
         let _guard = crate::runner::process_test_lock();
-        let root = fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("vade-seed-{}", crate::text::random_hex(8).unwrap()));
+        let root = private_base().join(format!("vade-seed-{}", crate::text::random_hex(8).unwrap()));
         crate::text::private_dir(&root).unwrap();
         let config = crate::launch::test_config(32768);
         let model = checkpoint(&root, &config);
