@@ -257,6 +257,7 @@ fn page(command: &str) -> Option<Page<'static>> {
             examples: &["vade install", "vade install --dry-run", "VADE_CONFIG=cluster.conf vade install --dry-run"],
             notes: &[
                 "Files come from the first that applies. On this Spark: the bundle in VADE_BUNDLE, a launcher bundle next to vade, then a source build of the checkout with the pinned Rust toolchains. From a controller: a prebuilt_dir bundle that matches the engine and CLI revisions, then a source build on each Spark.",
+                "Offline on this Spark: VADE_BUNDLE=/path/to/unpacked-bundle vade install.",
                 "On this Spark, running it again is safe: files that still match their record are reused. From a controller, each install builds a new generation that a running engine does not use; while an engine runs, use vade update, which asks before a restart. Model downloads stay in your hands.",
                 "On this Spark (saved local defaults, or no setup yet): find the model, save defaults once in ~/.vade/config, stage the engine, kernels and chat, and fill the GPU startup cache so the first vade up does not compile.",
                 "From a controller (VADE_CONFIG, or the default controller config): check the tools, SSH, GPUs, disks and models, copy or build on each Spark with SHA-256 checks, then build the chat program here.",

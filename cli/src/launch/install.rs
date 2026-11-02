@@ -573,6 +573,9 @@ mod tests {
         assert!(load(&home).unwrap().is_none());
         let installed = publish(&home, &bundle, Some(expected), None).unwrap();
         assert_eq!(load(&home).unwrap(), Some(installed.clone()));
+        for (key, name) in FILES {
+            assert_eq!(fs::read(&installed[key]).unwrap(), fs::read(bundle.join(name)).unwrap());
+        }
         fs::write(&installed["harness"], b"changed").unwrap();
         assert!(load(&home).unwrap().is_none());
         assert_eq!(inspect(&home).unwrap(), Installed::Changed("vade-harness"));
@@ -588,8 +591,15 @@ mod tests {
         let home = root.join("home");
         let installed = publish(&home, &bundle, Some(expected.clone()), None).unwrap();
         fs::write(bundle.join("flash.ptx"), b"changed").unwrap();
-        assert!(publish(&home, &bundle, Some(expected), None).unwrap_err().contains("checksum"));
+        let error = publish(&home, &bundle, Some(expected.clone()), None).unwrap_err();
+        assert_eq!(error, "Local bundle flash.ptx checksum does not match; nothing activated.");
+        assert_eq!(error.lines().count(), 1);
         assert_eq!(load(&home).unwrap(), Some(installed));
+        assert_eq!(fs::read_dir(home.join("stage/builds")).unwrap().count(), 1);
+        let fresh = root.join("fresh");
+        assert_eq!(publish(&fresh, &bundle, Some(expected), None).unwrap_err(), error);
+        assert!(!fresh.join("stage/install.conf").exists());
+        assert_eq!(fs::read_dir(fresh.join("stage/builds")).unwrap().count(), 0);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -669,8 +679,29 @@ mod tests {
             }
             "bundle-fifo" => { assert!(bundle_fields(&root).unwrap_err().contains("record")); }
             "install-fifo" => { assert!(load(&root).unwrap_err().contains("record")); }
+            "offline-bundle" => {
+                let bundle = bundle_path().unwrap().unwrap();
+                let home = root.join("installed");
+                let installed = ensure(&home, &mut GitSource(None)).unwrap();
+                assert_eq!(load(&home).unwrap(), Some(installed.clone()));
+                for (key, name) in FILES {
+                    assert_eq!(fs::read(&installed[key]).unwrap(), fs::read(bundle.join(name)).unwrap());
+                }
+                assert_eq!(ensure(&home, &mut GitSource(None)).unwrap(), installed);
+            }
             _ => panic!("unexpected install child mode"),
         }
+    }
+
+    #[test]
+    fn offline_bundle_installs_from_local_path_without_network_or_build_tools() {
+        let _guard = crate::runner::process_test_lock();
+        let (root, bundle, _) = fixture();
+        let mut process = ChildGuard(child("offline-bundle", &root)
+            .env("VADE_BUNDLE", &bundle).env_remove("VADE_SOURCE")
+            .env("PATH", root.join("no-programs")).spawn().unwrap());
+        assert!(bounded_status(&mut process.0).success(), "offline bundle must install with no external tools");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

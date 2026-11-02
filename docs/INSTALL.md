@@ -492,8 +492,8 @@ the bundle that `latest.json` names for the `main` channel. The older v0.1.0
 launcher bundle on the GitHub release page is not main, and the installer
 does not use it.
 
-The installer does these checks in order. When one fails, it prints one
-`Prebuilt:` line with the reason and builds from source:
+The installer does these checks in order. A bad archive hash stops the install.
+Other failures print one `Prebuilt:` line with the reason and build from source:
 
 1. The tools it needs (`tar`, `gzip`, `sha256sum` and a few others) are
    there, and the system is Ubuntu 24.04 or newer.
@@ -523,6 +523,9 @@ The default location is in [scripts/install.sh](../scripts/install.sh). A
 folder that is already in `~/.vade/bundles` and passes the `MANIFEST` check is
 used again without downloading the bundle again. The installer still
 downloads `latest.json`, so this step needs the network.
+The installer saves partial downloads and resumes them with HTTP Range.
+
+For an offline install on this Spark, use `VADE_BUNDLE=/path/to/unpacked-bundle vade install`.
 
 The file is named `vade-<version>-<sha7>-linux-aarch64-gb10.tar.gz`, and it
 unpacks to one folder with the same name. It is a gzip file. Ubuntu marks

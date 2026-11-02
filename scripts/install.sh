@@ -91,8 +91,20 @@ gpu_processes=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader) ||
 # The prebuilt bundle. Each check below runs before the next: the local tools, OS,
 # glibc and driver are read first, then latest.json is downloaded and the local
 # glibc and driver are compared with it, then the bundle is downloaded and checked.
-# Any failure leaves the bundle and builds from source as before.
-prebuilt_dir= why= download=
+# A bad archive hash stops the install. Other failures can build from source.
+prebuilt_dir= why= download= partial= keep_partial=false
+clean_download() {
+    if [ -n "$partial" ]; then
+        if [ "$keep_partial" = true ]; then
+            rm -rf "$partial/lock"
+        else
+            # Move the locked cache before removal. A new install can then make
+            # its own cache without losing files to this cleanup.
+            mv "$partial" "$download/partial" 2>/dev/null || return 1
+        fi
+    fi
+    [ -z "$download" ] || rm -rf "$download"
+}
 version_at_least() { # $1 >= $2, dotted decimal numbers
     set -- "$1." "$2."
     while [ -n "$1$2" ]; do
@@ -115,7 +127,7 @@ outside() { # true when a member line on stdin is not $1 or under $1/
 }
 prebuilt() {
     [ "$source" = false ] || { why='--source was given'; return 1; }
-    for tool in tar gzip sha256sum getconf grep tr cut sort mv mkdir rm; do
+    for tool in tar gzip sha256sum getconf grep tr cut sort mv mkdir rm wc; do
         command -v "$tool" >/dev/null 2>&1 || { why="missing $tool"; return 1; }
     done
     vade_home=${VADE_HOME:-$HOME/.vade}
@@ -166,16 +178,50 @@ prebuilt() {
     # Private like the folders vade makes: vade refuses a ~/.vade that others can read.
     (umask 077 && mkdir -p "$vade_home/bundles") || { why="cannot create $vade_home/bundles"; return 1; }
     download=$(mktemp -d "$vade_home/bundles/.download.XXXXXXXX") || { why="cannot create a folder in $vade_home/bundles"; return 1; }
-    trap 'rm -rf "$download"' EXIT
+    trap 'clean_download' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    # A stalled transfer (under 1 KB/s for 60 s) or a file over 512 MiB stops the
-    # download; the bundle is about 20 MB.
-    curl -q --proto "$protocol" --tlsv1.2 --fail --location --silent --show-error \
-        --connect-timeout 30 --speed-limit 1024 --speed-time 60 --max-filesize 536870912 \
-        --output "$download/$file" "$base/$channel/$file" || { why="download of $base/$channel/$file failed"; return 1; }
-    [ "$(sha256sum "$download/$file" | cut -d ' ' -f 1)" = "$sum" ] ||
-        { why="$file does not match the sha256 in latest.json"; return 1; }
+    # The expected hash names the partial file. A new release cannot resume it.
+    cache="$vade_home/bundles/.partial-$sum"
+    if [ -L "$cache" ] || { [ -e "$cache" ] && [ ! -d "$cache" ]; }; then
+        why='the bundle download cache is not a regular folder'; return 1
+    fi
+    (umask 077 && mkdir -p "$cache" && mkdir "$cache/lock") 2>/dev/null ||
+        { why="cannot lock the bundle download cache; if no other installer is running, remove $cache/lock and retry"; return 1; }
+    partial=$cache keep_partial=true
+    archive="$partial/bundle.part"
+    if [ -L "$archive" ] || { [ -e "$archive" ] && [ ! -f "$archive" ]; }; then
+        why='the partial bundle is not a regular file'; return 1
+    fi
+    [ ! -f "$archive" ] || [ "$(wc -c < "$archive")" -le 536870912 ] || rm -f "$archive"
+    attempt=0
+    # Keep a complete checked archive if an earlier run stopped before unpacking.
+    if [ ! -f "$archive" ] || [ "$(sha256sum "$archive" | cut -d ' ' -f 1)" != "$sum" ]; then
+        while :; do
+            attempt=$((attempt + 1))
+            code=0
+            status=$(curl -q --proto "$protocol" --tlsv1.2 --fail --location --silent --show-error \
+                --connect-timeout 30 --speed-limit 1024 --speed-time 60 --max-filesize 536870912 \
+                --continue-at - --write-out '%{http_code}' --output "$archive" "$base/$channel/$file" \
+                2>"$download/curl.error") || code=$?
+            if [ -f "$archive" ] && [ "$(wc -c < "$archive")" -gt 536870912 ]; then
+                keep_partial=false; why='the bundle download exceeds the size limit'; return 1
+            fi
+            case "$code:$status" in
+                33:*|*:416) rm -f "$archive" ;;
+                0:*) break ;;
+                5:*|6:*|7:*|16:*|18:*|28:*|35:*|52:*|55:*|56:*|92:*|*:408|*:429|*:5??) ;;
+                *) keep_partial=false; why="download of $base/$channel/$file failed"; return 1 ;;
+            esac
+            [ "$attempt" -lt 3 ] || { why="download of $base/$channel/$file failed; partial bytes were kept for retry"; return 1; }
+        done
+    fi
+    keep_partial=false
+    if [ "$(sha256sum "$archive" | cut -d ' ' -f 1)" != "$sum" ]; then
+        printf 'install: %s does not match the sha256 in latest.json; nothing installed.\n' "$file" >&2
+        exit 1
+    fi
+    mv "$archive" "$download/$file" || { why='cannot stage the checked bundle'; return 1; }
     members=$(gzip -dc "$download/$file" | tar -tf -) || { why="$file is not a readable archive"; return 1; }
     if printf '%s\n' "$members" | outside "$stem" ||
         printf '%s\n' "$members" | grep -e '\.\./' -e '/\.\.$' >/dev/null; then
@@ -189,7 +235,7 @@ prebuilt() {
         { why="cannot unpack $file"; return 1; }
     bundle_matches "$download/unpack/$stem" "$sha" || { why="$file does not match its MANIFEST"; return 1; }
     mv "$download/unpack/$stem" "$prebuilt_dir" || { why="cannot move the bundle to $prebuilt_dir"; return 1; }
-    rm -rf "$download"
+    clean_download
     trap - EXIT INT TERM
     printf 'Install: prebuilt Vade %s is in %s.\n' "$sha" "$prebuilt_dir"
 }
@@ -208,7 +254,7 @@ if prebuilt; then
     fi
 else
     vade=
-    [ -z "${download-}" ] || rm -rf "$download"
+    clean_download
     trap - EXIT INT TERM
 fi
 # With no checkout: clone public main into a new folder, then run the installer

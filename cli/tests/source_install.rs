@@ -1,5 +1,8 @@
-//! Exercise the actual source installer with fake host tools, never a GPU or network.
+//! Exercise the source installer with fake host probes, never a GPU or external network.
 use std::{fs, os::unix::fs::PermissionsExt, path::{Path, PathBuf}, process::{Command, Output}, time::{SystemTime, UNIX_EPOCH}};
+
+#[path = "source_install/http.rs"]
+mod http;
 
 static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 struct Fixture { root: PathBuf }
@@ -213,8 +216,8 @@ done
 }
 
 // The prebuilt path: real tar, gzip, sha256sum and curl reading a file:/// copy
-// of the download folder, so no network. Each bundle refusal must leave no
-// bundle folder and no download folder, then build from source.
+// of the download folder, so no network. Archive hash failures stop the install.
+// Other bundle refusals leave no staged files, then build from source.
 const SHA: &str = "1234567890abcdef1234567890abcdef12345678";
 fn stem() -> String { format!("vade-0.1.0-{}-linux-aarch64-gb10", &SHA[..7]) }
 fn system_tool(name: &str) -> PathBuf {
@@ -285,7 +288,7 @@ impl Fixture {
     /// Real archive tools, a fake Ubuntu 24.04 with glibc 2.39, and a download
     /// folder holding `archive` and its latest.json. Returns the run environment.
     fn prebuilt(&self, archive: &[u8], bad: Bad) -> Vec<(&'static str, String)> {
-        for tool in ["tar", "gzip", "sha256sum", "grep", "tr", "cut", "sort", "mv", "curl"] {
+        for tool in ["tar", "gzip", "sha256sum", "grep", "tr", "cut", "sort", "mv", "curl", "wc"] {
             let _ = fs::remove_file(self.root.join("bin").join(tool));
             std::os::unix::fs::symlink(system_tool(tool), self.root.join("bin").join(tool)).unwrap();
         }
@@ -364,7 +367,6 @@ fn prebuilt_bundle_installs_from_its_folder_and_is_reused_without_a_second_downl
 fn each_refused_bundle_leaves_nothing_and_builds_from_source() {
     let file = format!("{}.tar.gz", stem());
     for (bad, reason) in [
-        (Bad::Sha256, format!("{file} does not match the sha256 in latest.json")),
         (Bad::Manifest, format!("{file} does not match its MANIFEST")),
         (Bad::Link, format!("{file} has members that are not files or folders")),
         (Bad::Device, format!("{file} has members that are not files or folders")),

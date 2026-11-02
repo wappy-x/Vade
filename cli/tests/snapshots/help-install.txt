@@ -17,6 +17,7 @@ Notes:
     checkout with the pinned Rust toolchains. From a controller: a prebuilt_dir
     bundle that matches the engine and CLI revisions, then a source build on
     each Spark.
+  - Offline on this Spark: VADE_BUNDLE=/path/to/unpacked-bundle vade install.
   - On this Spark, running it again is safe: files that still match their record
     are reused. From a controller, each install builds a new generation that a
     running engine does not use; while an engine runs, use vade update, which
