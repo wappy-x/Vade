@@ -7,7 +7,7 @@
 
 Vade is an inference engine for the NVIDIA DGX Spark. It is written in Rust from the GPU kernels up, and it has zero third-party crates. Its one rule is exactness: the same request, with the same settings, gives the same answer every time, and linking Sparks together does not change that.
 
-The kernels compile to PTX, NVIDIA's portable GPU assembly, and use short inline PTX for the few instructions that have no Rust spelling. The installer and the Spark setup scripts are shell scripts. At run time, Vade needs only the NVIDIA driver. The installer also needs curl and a C compiler (`cc`), and a source build also needs Rust.
+The kernels compile to PTX, NVIDIA's portable GPU assembly, and use short inline PTX for the few instructions that have no Rust spelling. The installer and the Spark setup scripts are shell scripts. At run time, Vade needs only the NVIDIA driver. The installer also needs curl, and a source build also needs a C compiler (`cc`) and Rust.
 
 One command installs it. One more pulls the model, 102 GB. One more starts it.
 
@@ -35,7 +35,7 @@ Then get the model with `vade pull` and run `vade up`. The engine is ready for a
 
 ## Quick start
 
-You need a DGX Spark with curl, a C compiler (`cc`), a driver with CUDA 13.0 or newer, and nothing else using the GPU.
+You need a DGX Spark with curl, a driver with CUDA 13.0 or newer, and nothing else using the GPU. Only a build from source also needs a C compiler (`cc`).
 
 Run these three commands on the Spark. Most of the time goes to the model download.
 

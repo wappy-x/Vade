@@ -87,9 +87,10 @@ with a fresh toolchain and its downloads.
 ## Quick start on one Spark
 
 <a id="quick-start-with-an-existing-model"></a>
-You need a DGX Spark with curl and a C compiler (`cc`). Its NVIDIA driver
-must support CUDA 13.0 or newer (the `CUDA Version` in the `nvidia-smi`
-header). The GPU must be idle: `nvidia-smi` must list no compute processes.
+You need a DGX Spark with curl. Its NVIDIA driver must support CUDA 13.0 or
+newer (the `CUDA Version` in the `nvidia-smi` header). The GPU must be idle:
+`nvidia-smi` must list no compute processes. Only a build from source also
+needs a C compiler (`cc`).
 
 Run these three commands on the Spark. Most of the time goes to the model
 download.

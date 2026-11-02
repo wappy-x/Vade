@@ -608,7 +608,7 @@ It pulls each source checkout and stages the new build. Then it asks before a re
 | `source has local changes` | The checkout has uncommitted or untracked files | Show `git status` to the person |
 | `GPU is in use` | Another program uses the GPU | Tell the person. Do not stop it |
 | `needs an NVIDIA GB10` or `CUDA 13.0 or newer` | Not a Spark, or the NVIDIA driver is too old | Tell the person. Driver updates are an administrator job |
-| `missing cc` | The Spark has no C compiler | Tell the person. An administrator installs it |
+| `missing cc` | A build from source needs a C compiler, and the Spark has none | Tell the person. An administrator installs it |
 | `no checksum list for this checkpoint` | No `.sha256` list beside the model folder | Tell the person. [Check the files](../INSTALL.md#check-the-files) shows the check |
 | `Cannot reach ... over SSH` | A Spark is off, off the network or asks for a password | Step L1, then run the command again |
 | `Model folder ... is unavailable` | No checkpoint where Vade looks | Step 3 |

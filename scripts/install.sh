@@ -56,7 +56,7 @@ done
     fail 'VADE_CONFIG selects a controller. Next: unset VADE_CONFIG, then rerun the installer for this Spark.'
 [ -z "${VADE_BUNDLE+x}" ] ||
     fail 'VADE_BUNDLE selects a bundle. Next: unset VADE_BUNDLE and rerun this script, or run vade launch from that bundle.'
-for tool in cc curl nvidia-smi; do
+for tool in curl nvidia-smi; do
     command -v "$tool" >/dev/null 2>&1 ||
         fail "missing $tool. Next: ask your administrator to provide the prerequisites in docs/INSTALL.md#step-1-prerequisites, then retry."
 done
@@ -246,6 +246,10 @@ clone_source() {
 # The source build below is the same as before the prebuilt bundle existed.
 if [ -z "$vade" ]; then
 printf 'Prebuilt: %s; building from source.\n' "$why"
+# Only a build needs a compiler, so a bundle install runs without one. This comes
+# before the clone, so a Spark with no compiler downloads nothing.
+command -v cc >/dev/null 2>&1 ||
+    fail 'missing cc, which a build from source needs. Next: ask your administrator to provide the prerequisites in docs/INSTALL.md#step-1-prerequisites, then retry.'
 [ "$piped" = false ] || clone_source
 if [ "$check" = true ]; then
     printf '%s\n' "Check: would install the pinned Rust toolchains if missing, build vade in $root/cli/target," \

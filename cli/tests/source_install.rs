@@ -863,3 +863,51 @@ fn the_readme_the_installer_and_the_help_teach_the_same_three_commands() {
     let help = String::from_utf8(help.stdout).unwrap();
     assert!(help.contains(&format!("\n  {pull}\n")) && help.contains("\n  vade up "), "{help}");
 }
+
+#[test]
+fn a_bundle_install_needs_no_c_compiler() {
+    let f = Fixture::new();
+    let env = f.prebuilt(&bundle(Bad::None), Bad::None);
+    fs::remove_file(f.root.join("bin/cc")).unwrap();
+    let output = f.run_prebuilt(&env, &[]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(f.calls(), "bundle-vade install\n");
+    assert!(stdout.contains(&format!("Install: installed prebuilt Vade {SHA}.\n")) && !stdout.contains("Prebuilt:"), "{stdout}");
+    // The same through the pipe, in a new home.
+    let f = Fixture::new();
+    let env = f.prebuilt(&bundle(Bad::None), Bad::None);
+    fs::remove_file(f.root.join("bin/cc")).unwrap();
+    let output = f.piped_prebuilt(&env, &[]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(f.calls(), "bundle-vade install\n");
+}
+
+#[test]
+fn a_source_build_with_no_c_compiler_stops_before_any_download_or_clone() {
+    const STOP: &str = "missing cc, which a build from source needs. Next: ask your administrator to provide the prerequisites in docs/INSTALL.md#step-1-prerequisites, then retry.";
+    // From a checkout, with --source.
+    let f = Fixture::new();
+    fs::remove_file(f.root.join("bin/cc")).unwrap();
+    let output = f.run_args(&[], &["--source"]);
+    let (stdout, stderr) = (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert_eq!(output.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(stdout.contains("Prebuilt: --source was given; building from source.\n"), "{stdout}");
+    assert!(stderr.starts_with(&format!("install: {STOP}\nRetry: sh \"{}/scripts/install.sh\" --source\n", f.root.display())), "{stderr}");
+    assert_eq!(f.calls(), "", "no Rust tool ran");
+    // --check names the same stop and still exits 0.
+    let output = f.run_args(&[], &["--source", "--check"]);
+    assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).contains(&format!("Check: the install would stop here: {STOP}\n")), "{output:?}");
+    // Through the pipe, with a bundle that does not fit: no clone.
+    let f = Fixture::new();
+    let mut env = f.prebuilt(&bundle(Bad::None), Bad::None);
+    env.push(("INSTALL_DRIVER", "575.51.03".into()));
+    f.public_main();
+    fs::remove_file(f.root.join("bin/cc")).unwrap();
+    let output = f.piped_prebuilt(&env, &[]);
+    let (stdout, stderr) = (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert_eq!(output.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(stdout.contains("Prebuilt: the bundle needs NVIDIA driver 580 or newer and this Spark has 575.51.03; building from source.\n"), "{stdout}");
+    assert!(stderr.starts_with(&format!("install: {STOP}\nRetry: curl -fsSL https://vade.lol/install.sh | sh\n")), "{stderr}");
+    assert!(f.clones().is_empty() && f.calls().is_empty(), "{}", f.calls());
+}

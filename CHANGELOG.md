@@ -124,6 +124,7 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 
 ### Install
 
+- The installer asks for a C compiler (`cc`) only for a build from source, so a prebuilt bundle installs without one. A build with no `cc` stops before it clones or downloads anything.
 - A bundle-only `vade setup` now also passes on a controller with no Rust, and it says why when SSH or a Spark stops it.
   - `vade doctor` asks for Rust only when the config can build. Before, step 3 of setup failed with `Cannot run local rustc.`
   - A `vade` from a bundle uses that bundle also in the folder of a clone. `VADE_SOURCE` still selects a checkout.
