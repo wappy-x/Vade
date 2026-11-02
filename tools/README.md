@@ -14,6 +14,52 @@ cargo +1.99.0 test --offline --locked --all-targets --manifest-path tools/Cargo.
 asset paths. It reads tracked documents and new documents that are not ignored.
 It makes no network requests. CI runs the same command.
 
+## One execution path
+
+`check-one-path` scans tracked Rust source and new, unignored Rust source under
+`engine/`. It includes tests, build scripts, examples, kernels and inactive
+`cfg` blocks. It does not read build output or private scratch files.
+The `engine_source_uses_one_path_allowlist` test runs the same check in the
+existing repository CI job. It needs no GPU or network.
+
+```sh
+cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-tools -- check-one-path
+cargo +1.99.0 test --offline --locked --manifest-path tools/Cargo.toml -p vade-tools one_path
+```
+
+The `env-read` rule flags references to `std::env::{var,var_os,vars,vars_os}`.
+It also checks local `use` aliases, grouped imports and glob imports. A function
+reference is a finding even if the call occurs later. Comments and literals do
+not count.
+
+The `topology-branch` rule flags `if`, `while`, `match`, match guards and
+`matches!` that name a topology value. It also flags comparisons outside those
+conditions. These comparisons can set a path flag for a later call. Names
+include world and rank counts, `rank`, `topology`, `rank_path`, `tensor_split`,
+`tp` and `distributed`. Names with a `_world`, `_world_size`, `_rank`, `_ranks`
+or `_topology` suffix also count. Field access and method calls count. Match
+patterns that name `Topology` count even when the matched value has another
+name. Loops and shape calculations that use topology data alone do not count.
+
+Each finding gives the source file, line, Cargo package and qualified item.
+The item includes its source module, enclosing type and function name. Trait
+implementations use `Type@Trait`. Direct `rustc` tools use their file stem as
+the crate name. Source paths distinguish binary and test modules.
+
+The [allowlist](one-path-allowlist.txt) records current sites by rule, crate and
+item. Its keys do not use line numbers. Each row gives an exact site count.
+New items and extra sites in existing items fail. Removed sites require a
+smaller count or removal of the row. Do not expand this list to approve a new
+execution path. Review each new finding against [AGENTS.md](../AGENTS.md).
+
+This is a conservative token check, not a Rust type checker. A finding can be
+a validation check or an unrelated use of a name such as `rank`. It needs human
+review. The check does not expand macros, follow values through aliases or
+resolve imports across files. Import shadowing can produce extra findings.
+An unchanged site count can hide a replacement in the same item. This check
+does not prove that arithmetic has one path. Code review and device evidence
+still apply to engine changes.
+
 ## Bundle checks
 
 `check-bundle OUTPUT_DIR [FORBIDDEN_PATH ...]` checks the archive checksum,
