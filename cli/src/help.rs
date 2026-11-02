@@ -357,7 +357,7 @@ fn page(command: &str) -> Option<Page<'static>> {
         },
         "bench" => Page {
             summary: "Measure a running server from this client.",
-            usage: &["vade bench [OPTIONS]", "vade bench --card --prompts FILE [--draft plain] [--receipt FILE]", "vade bench --card --compare CARD OTHER"],
+            usage: &["vade bench [OPTIONS]", "vade bench verdict FILE... [OPTIONS]", "vade bench --card --prompts FILE [--draft plain] [--receipt FILE]", "vade bench --card --compare CARD OTHER"],
             options: &[
                 ("--url URL", "Server to measure (default: VADE_API_URL, then the selected installation's endpoint)"),
                 ("--concurrency LIST", "Concurrent chats per cohort, such as 1,2,4,8 (default 1,2,4,8,16)"),
@@ -376,6 +376,7 @@ fn page(command: &str) -> Option<Page<'static>> {
             examples: &["vade bench", "vade bench --concurrency 1,8 --max-tokens 128", "vade bench --self-test",
                 "vade bench --card --prompts rigmark/prompts.json --receipt RECEIPT.json"],
             notes: &[
+                "vade bench verdict judges saved A/X cells on this host with rule 2026-11-01. Run vade bench verdict --help for the input and limits.",
                 "Wall time is measured on this client; token counts come from the server. Without --card, requests are greedy with cache and thinking off and a fixed length.",
                 "Prints one row per cohort: tokens per second, time to first token and the bytes the server reported.",
                 "vade bench --suite URL runs the development workloads instead; see engine/tools/bench/README.md.",

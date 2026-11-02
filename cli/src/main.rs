@@ -60,6 +60,7 @@ mod unix_file;
 mod unix_flags;
 mod worker;
 mod verify;
+mod verdict;
 mod version;
 
 fn main() {
@@ -83,6 +84,10 @@ fn internal_error(location: Option<&std::panic::Location<'_>>) -> String {
 fn run_main(mut args: Vec<String>) {
     if args.first().is_some_and(|arg| arg == "__socket-probe") {
         std::process::exit(if args.len() == 2 { control_socket::probe(&args[1]) } else { 1 });
+    }
+    // The saved-cell judge needs no endpoint, credentials or engine setup.
+    if args.first().is_some_and(|arg| arg == "bench") && args.get(1).is_some_and(|arg| arg == "verdict") {
+        std::process::exit(output::exit_code(verdict::run(&args[2..])));
     }
     // `vade test`, `vade bench` and their help pages share the CLI's layout;
     // `vade bench --help-all` lists every benchmark option.

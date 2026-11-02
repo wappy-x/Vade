@@ -23,6 +23,7 @@ const CASES: &[(&str, &[&str])] = &[
     ("help-read", &["read", "--help"]),
     ("help-config", &["config", "--help"]),
     ("help-bench", &["bench", "--help"]),
+    ("help-bench-verdict", &["bench", "verdict", "--help"]),
     ("help-test", &["test", "--help"]),
     ("help-pull", &["pull", "--help"]),
     ("help-models", &["models", "--help"]),

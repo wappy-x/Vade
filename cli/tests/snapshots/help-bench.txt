@@ -8,6 +8,7 @@ Examples:
   vade bench --card --prompts rigmark/prompts.json --receipt RECEIPT.json
 
 Usage: vade bench [OPTIONS]
+       vade bench verdict FILE... [OPTIONS]
        vade bench --card --prompts FILE [--draft plain] [--receipt FILE]
        vade bench --card --compare CARD OTHER
 
@@ -33,6 +34,8 @@ Options:
   --compare CARD OTHER  With --card: compare two saved files; send nothing
 
 Notes:
+  - vade bench verdict judges saved A/X cells on this host with rule 2026-11-01.
+    Run vade bench verdict --help for the input and limits.
   - Wall time is measured on this client; token counts come from the server.
     Without --card, requests are greedy with cache and thinking off and a fixed
     length.

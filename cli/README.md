@@ -263,6 +263,71 @@ Leave the rest of that machine's configuration as it is. Then run
 on/off pair. Adding a rank to one distributed engine does not count as a
 comparison with a second, independent engine.
 
+## Judge saved benchmark cells
+
+`vade bench verdict cells.json` applies rule `2026-11-01` on this host.
+It reads saved measurements. It needs no engine or installation.
+Use `vade bench verdict --help` for the options and exit codes.
+
+Each cell has a name, a unit, and A and X measurements. A is the base.
+X is the candidate. Use `s` for seconds or `tok/s` for tokens per second.
+An array holds the per-start values. The judge compares their means.
+
+```json
+{"screen":"check","ids_equal":true,"cells":[
+  {"cell":"rate","unit":"tok/s","a":[100],"x":[99.3]},
+  {"cell":"warm_replay","unit":"s","a":[0.5],"x":[0.51]}
+]}
+```
+
+The base band is 0.8 %. The cell band is the larger of the base and its
+own A/A spread. A/A compares the even A mean with the odd A mean.
+A screen or cell can set `band_pct`. Use `--band PCT` to override both.
+The judge validates screen bands and selected cell bands, even with this override.
+The `band_pct` and `band_on_clean_pct` values must be finite and nonnegative.
+A null band is absent.
+The optional `aa_pct` and `band_on_clean_pct` fields also accept null.
+A selected cell's `aa_pct` must be a finite number for every arm form.
+A pooled A with at least two starts uses its absolute value.
+Lists use their own A/A. A pooled A with one start does not use `aa_pct`.
+A cell can set `band_on_clean_pct` to replace its base band.
+This value applies only when at least one judged cell has no such value
+and all those cells read `INSIDE` or `INSIDE (X faster)`.
+This also applies with `--band`.
+A null or zero `band_on_clean_pct` does not widen the band.
+
+A cached seconds cell with an A mean below 1 s also passes when its loss
+is at most 10 ms. This reads `FLOOR`.
+Cached names contain `warm_replay`, `warm replay` or `cache`. Case is ignored.
+Names with `nocache`, `no-cache` or `uncached` do not use the floor.
+For example, the `warm_replay` cell above goes from 0.5 s to 0.51 s.
+It passes by the floor.
+
+With one X start, a loss outside the base band needs a second X only
+when it is within twice the cell band. This reads `SECOND-START`.
+A larger loss fails. If the second X ran and the result is still outside
+the band, it fails. The judge does not request a third X.
+With at least two starts per arm, a loss within own A/A reads `NOISE`.
+A single failing cell within twice own A/A requests a cooled rerun.
+Use `--final --only CELL` to judge that rerun.
+
+Token IDs must match. Set `ids_equal` to the result of that check.
+Any present value other than JSON `true` fails the screen.
+An absent `ids_equal` leaves this check to the caller, as in the lab judge.
+The command uses no saved station history or environment rule switches.
+Use `--advisory CELL` to exclude a full name or a suffix.
+A suffix must start after a space or `/`.
+For example, `--advisory warm_replay` matches `OFF 8K/warm_replay`.
+Use `--only CELL` to select a full cell name.
+The `--band`, `--only` and `--sha` flags each accept one value.
+Repeated uses of these flags fail, even with the same value.
+Several files form one screen. At least one selected cell must be gating.
+A gating cell is a selected cell without `--advisory`.
+If no gating cells remain, the command refuses a verdict and exits with code 2.
+This includes empty input cells, all-advisory cells, and an empty `--only` result.
+The refusal prints no `SCREEN PASS` line.
+Use `--` before file names that start with a dash, such as `-- --help`.
+
 ## Measure a running server
 
 `vade bench` measures what the client sees: how long you wait before output

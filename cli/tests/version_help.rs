@@ -42,7 +42,7 @@ fn evaluation_and_benchmark_help_is_offline_and_tolerates_closed_consumers() {
         &["test", "longctx", "run", "--help"],
         &["test", "longctx", "compare", "--help"],
         &["test", "gdn-state", "--help"], &["test", "unix-flags-abi", "--help"],
-        &["bench", "--help"], &["bench", "--suite", "--help"], &["help", "bench"],
+        &["bench", "--help"], &["bench", "--suite", "--help"], &["help", "bench"], &["bench", "verdict", "--help"],
     ];
     for args in cases {
         // Invalid setup and tool paths prove help reaches no build, capture,
