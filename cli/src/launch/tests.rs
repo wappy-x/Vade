@@ -310,7 +310,7 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        // Forking subprocess tests can briefly inherit another test's lock fd.
+        // Run one process test at a time; see runner::PROCESS_TEST_LOCK.
         let process_guard = crate::runner::process_test_lock();
         let base = fs::canonicalize(std::env::temp_dir())
             .unwrap()

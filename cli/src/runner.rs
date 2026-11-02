@@ -12,8 +12,10 @@ use std::time::{Duration, Instant};
 /// before capture, rather than raise this bound for an unbounded reply.
 pub(crate) const MAX_CAPTURE_BYTES: u64 = 16 * 1024 * 1024;
 
-/// A pre_exec fork can briefly inherit another test's flock descriptor even
-/// with CLOEXEC. Serialize process-spawning tests with the worker lock test.
+/// A child holds a copy of every descriptor from its spawn to its exec, even
+/// with CLOEXEC. A flock that only closes can stay held by that copy. Serialize
+/// process-spawning tests with the worker lock test. `state::Lock` unlocks at
+/// drop, so such a copy cannot keep it.
 #[cfg(test)]
 pub(crate) static PROCESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
