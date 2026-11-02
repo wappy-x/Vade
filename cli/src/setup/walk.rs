@@ -116,8 +116,16 @@ pub fn run(options: &SetupOptions, dry: bool) -> Result<Option<Vec<String>>, Str
     let line = held.as_ref().and_then(|old| old.line(hosts_of(&target).map_or(options.hosts.len(), |hosts| hosts.len()), dry));
     if line.is_none() && options.from_up && let Target::Controller { text: None, up, installed: true, .. } = &target { return Ok(Some(up.clone())); }
     let steps = steps(&target);
+    let inventory = if let Target::Controller { path, text, .. } = &target {
+        let config = match text {
+            Some(text) => crate::config::Config::parse(text, path)?,
+            None => crate::config::Config::load()?,
+        };
+        crate::sets::inventory_text(&config)
+    } else { String::new() };
     if dry {
         output::line(format_args!("Dry run: setup writes nothing and starts nothing."))?;
+        output::text(format_args!("{inventory}"))?;
         if let Some(line) = &line { output::line(format_args!("{line}"))?; }
         match &target {
             Target::Local { model, .. } => output::line(format_args!("Where: this Spark\nModel: {}", local_model(model.as_deref(),
@@ -132,6 +140,7 @@ pub fn run(options: &SetupOptions, dry: bool) -> Result<Option<Vec<String>>, Str
         for (args, _) in &steps { output::line(format_args!("  vade {}\n    {}", args.join(" "), step_note(&args[0], &target)))?; }
         return Ok(None);
     }
+    output::text(format_args!("{inventory}"))?;
     let program = std::env::current_exe().map_err(|_| "Cannot find the vade program that runs setup.")?;
     let _interruptions = crate::runner::Interruptions::install();
     if let Some(old) = &held {
@@ -385,8 +394,15 @@ pub(super) fn answer(options: &SetupOptions, facts: &Facts, ask: &mut dyn FnMut(
     if cables.read() && hosts.len() > 1 { output::line(format_args!("Cable order: {}.", hosts.join(" - ")))?; }
     let names = machine_names(&hosts);
     let mut links = Vec::new();
-    for pair in hosts.windows(2) {
-        for (from, to) in [(&pair[0], &pair[1]), (&pair[1], &pair[0])] {
+    let mut neighbors: Vec<(&String, &String)> = hosts.windows(2).map(|pair| (&pair[0], &pair[1])).collect();
+    // Keep a closing cable when the inventory or explicit cable ends name it.
+    // A path still works. Setup does not ask for an extra cable.
+    if let [first, _, .., last] = hosts.as_slice()
+        && (cables.address(last, first).is_some() || options.links.iter().any(|(from, to, _)| (from == last && to == first) || (from == first && to == last))) {
+        neighbors.push((last, first));
+    }
+    for (a, b) in neighbors {
+        for (from, to) in [(a, b), (b, a)] {
             let given = options.links.iter().find(|(f, t, _)| f == from && t == to).map(|(_, _, address)| address.clone());
             let address = match given.or_else(|| cables.address(from, to)) {
                 Some(address) => address,
@@ -409,7 +425,7 @@ pub(super) fn answer(options: &SetupOptions, facts: &Facts, ask: &mut dyn FnMut(
     // same Spark and cable checks as vade up before setup writes it.
     let up: Vec<String> = up_options(fp8, &hosts).into_iter().chain(options.up.iter().cloned()).collect();
     let parsed = crate::config::Config::parse(&text, &facts.path)?;
-    if cables.read() || links.len() == 2 * (hosts.len() - 1) {
+    if cables.read() || links.len() >= 2 * (hosts.len() - 1) {
         check_start(&parsed, &up).map_err(|error| format!("Nothing was written: vade up would refuse this setup. {error}"))?;
     }
     Ok(Target::Controller { path: facts.path.clone(), text: Some(text), up, installed: false })
@@ -454,6 +470,7 @@ pub(super) fn render(checkout: Option<&Path>, home: &Path, profile: &Profile, ho
             out += &format!("fabric.{peer} = {address}\n");
         }
     }
+    out += &crate::sets::sections(names);
     out
 }
 

@@ -49,6 +49,7 @@ mod json;
 mod run;
 mod runner;
 mod setup;
+mod sets;
 mod state;
 mod status;
 mod style;

@@ -13,6 +13,14 @@ Options:
   --dry-run  Read saved state only; unchecked values are null
 
 Notes:
+  - Controller status lists the configured cabling, layouts and sets. A set is
+    one [group NAME]. Each server shows the sets that match its saved machines
+    in rank order, or unlisted when none match. Replica servers each have a set
+    row. JSON includes cabling, layouts, server_sets and group_server_sets.
+    Group summaries read saved records and do not check health.
+  - Setup names layouts by their set sizes: 4 + 2 + 2 (a quad and two pairs), 4
+    + 4 (two quads), or 8 (all together) for an inventory of eight. Select a set
+    with VADE_GROUP=NAME. Listed layouts do not prove device exactness or speed.
   - Checks share a 15-second deadline.
   - Explicit VADE_CONFIG selects the controller; otherwise generated local setup
     wins. Keep the same VADE_CONFIG and VADE_HOME from start through chat,

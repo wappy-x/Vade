@@ -240,6 +240,7 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 
 ### CLI
 
+- Controller setup saves named sets and layouts. Status lists those sets and shows each server's saved set, including replicas.
 - `vade --version` prints the short commit of the build, such as `vade 0.1.0 (f7946e5)`, and `vade.version.v1` has `sha` and `modified`. A build with no commit says `unknown commit`.
 - `vade setup --hosts` on a Spark with local setup offers to move `~/.vade/config` aside, names the file, and takes `--replace-local` with `--yes` or without a terminal. It deletes nothing, and it refuses while the local engine runs. `vade verify` with no engine says that the engine is not running. `vade chat`, `vade status`, `vade doctor` and the end of `vade pull` on one Spark now name `vade up`.
 - `vade --help` names FP4-Local and FP8 and shows the README commands. `vade tools --help` and `vade mcp --help` work with no install. `vade up --sparks` takes a count from 1 to 24 or the Sparks by SSH name, and `--hosts` means the same in `vade up` and `vade setup`. The help and the errors give the same Spark counts, and they mark FP8 on 6 Sparks as not covered yet.

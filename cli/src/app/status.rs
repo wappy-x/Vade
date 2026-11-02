@@ -10,15 +10,20 @@ impl<R: Runner> App<R> {
     /// Fill a status report from the controller's session and live checks.
     pub(crate) fn status_snapshot(&mut self, report: &mut Snapshot) -> Result<(), String> {
         report.set("model", self.config.model.clone());
+        report.set("layouts", crate::sets::inventory_json(&self.config));
+        report.set("cabling", Value::Array(crate::topology::cabling(&self.config.machines).into_iter().map(Value::from).collect()));
+        report.set("server_sets", Value::Array(Vec::new()));
         let Some(session) = Session::load(&self.config.state_dir)? else {
             report.set("phase", "stopped");
             report.set("ready", false);
             // Without VADE_GROUP, the groups that still own a server.
             let groups = self.group_records()?;
+            report.set("group_server_sets", crate::sets::group_servers(&self.config, &groups).1);
             if !groups.is_empty() { report.set("groups", Value::Array(groups.into_iter().map(Value::from).collect())); }
             return Ok(());
         };
         report.set("phase", session.phase.clone());
+        report.set("server_sets", crate::sets::servers_json(&self.config, &session));
         report.set("model", session.model.clone());
         report.set("build", session.build.clone());
         report.set(

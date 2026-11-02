@@ -170,7 +170,11 @@ fn page(command: &str) -> Option<Page<'static>> {
                 ("--dry-run", "Read saved state only; unchecked values are null"),
             ],
             examples: &["vade status", "vade status --json"],
-            notes: &["Checks share a 15-second deadline.", LIFECYCLE],
+            notes: &[
+                "Controller status lists the configured cabling, layouts and sets. A set is one [group NAME]. Each server shows the sets that match its saved machines in rank order, or unlisted when none match. Replica servers each have a set row. JSON includes cabling, layouts, server_sets and group_server_sets. Group summaries read saved records and do not check health.",
+                "Setup names layouts by their set sizes: 4 + 2 + 2 (a quad and two pairs), 4 + 4 (two quads), or 8 (all together) for an inventory of eight. Select a set with VADE_GROUP=NAME. Listed layouts do not prove device exactness or speed.",
+                "Checks share a 15-second deadline.", LIFECYCLE,
+            ],
         },
         "logs" => Page {
             summary: "Show recent engine logs.",
@@ -243,6 +247,7 @@ fn page(command: &str) -> Option<Page<'static>> {
             examples: &["vade setup", "vade setup --yes", "vade setup --yes --hosts spark-a,spark-b", "vade setup --yes --hosts spark-a,spark-b --dry-run"],
             notes: &[
                 "Asks which Sparks to use (on a Spark the default is this Spark), FP4-Local or FP8 (only for 2, 4 or 6 Sparks; 6 Sparks are not covered yet), and where the model is. Each question shows its default in brackets; press Enter to take it.",
+                "Controller setup lists the cabling and saves named sets in cable order. A set is one [group NAME]. A layout lists sets that can run together. For eight Sparks, the layouts are 4 + 2 + 2 (a quad and two pairs), 4 + 4 (two quads), or 8 (all together). Smaller inventories use the same partition rules. Setup keeps a detected closing cable. Use VADE_GROUP=NAME with up, status, chat, logs and down to select a set. Setup still starts the full inventory by default.",
                 "On this Spark, vade install saves the local defaults in ~/.vade/config. From another computer, setup writes a controller config at the path vade config shows (VADE_CONFIG, else the user config folder). It points at the installed bundle when vade runs from one, else at this checkout, and keeps Vade's private folders on this computer under ~/.vade. With no list of Sparks, setup uses the config that is there. A list moves that config aside.",
                 "Then it runs vade install, vade up and vade doctor, and stops at the first step that fails. Doctor runs last, so it checks the Sparks that up started. Run vade setup again after a fix, without the answer options: it uses the setup it finds and repeats only the work that needs it. When a controller config already has an install, setup skips vade install; after a pull, run vade update.",
                 "A list of Sparks, from --hosts or from the question, replaces the setup in place with no flag: a local setup moves to config.local, a controller config moves to config.before, and a running engine stops first. Setup deletes nothing. Press Enter at the question to keep the setup. It asks for a cable address only when it cannot read one.",

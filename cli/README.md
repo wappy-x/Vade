@@ -335,6 +335,22 @@ status fields. When several Sparks serve one model, `multi_spark_path` gives
 the path that the engine chose (`path`), why (`path_reason`) and, for the
 tensor split, its levels. It is `null` when the engine does not report a path.
 
+Controller setup saves named sets in cable order. A set is one `[group NAME]`.
+A layout lists sets that can run together. `vade setup` and `vade status`
+show the layouts and their members. For an inventory of eight, setup prints
+`4 + 2 + 2`, `4 + 4` and `8`. The first layout has a quad and two pairs.
+Select one set with `VADE_GROUP=NAME` for `up`, `status`, `chat`, `logs` and
+`down`. Setup starts the full inventory by default. A listed layout still
+needs its device gate before use.
+
+Controller JSON adds `cabling` and `layouts`. Each layout lists its `sets`,
+with a name, machines in rank order and local port. `server_sets` lists each
+server's saved machines, matching set names and local port. Each replica has
+its own entry. An empty set name list means that no configured set matches
+the saved rank order. Without a selected group, `group_server_sets` lists
+the same saved data for groups with ownership records. These group summaries
+do not check health. An unreadable group record has an `error` field.
+
 All checks share one 15-second deadline, so an unreachable rank cannot add
 another timeout to every later check.
 

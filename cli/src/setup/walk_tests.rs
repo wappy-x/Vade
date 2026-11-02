@@ -93,6 +93,60 @@ fn one_spark_from_a_controller_gets_a_config_the_parser_accepts() {
 }
 
 #[test]
+fn fake_inventories_save_sets_and_keep_the_closing_cable() {
+    for count in [1, 2, 4, 6, 8] {
+        let hosts: Vec<String> = (0..count).map(|index| format!("m{index}")).collect();
+        let mut links = Vec::new();
+        let mut join = |a: usize, b: usize| {
+            for (from, to) in [(a, b), (b, a)] {
+                let address = std::net::Ipv4Addr::new(192, 0, 2, (links.len() + 1) as u8).to_string();
+                links.push((hosts[from].clone(), hosts[to].clone(), address));
+            }
+        };
+        for index in 1..count { join(index - 1, index); }
+        if count > 2 { join(count - 1, 0); }
+        let options = SetupOptions { yes: true, hosts: hosts.clone(), links, ..Default::default() };
+        let (written, up) = controller(scripted(&options, &facts(false), &[]).0);
+        let config = crate::config::Config::parse(&written, Path::new("/fixture/config")).unwrap();
+        check_start(&config, &up).unwrap();
+        assert_eq!(config.groups, crate::sets::plan(&hosts));
+        for group in &config.groups {
+            let mut selected = config.clone();
+            selected.select_group(&group.name).unwrap();
+            assert_eq!(selected.selected(&crate::cli::UpOptions::default()).unwrap().len(), group.hosts.len());
+        }
+        if count > 2 { crate::topology::check_whole_ring(&config.machines).unwrap(); }
+        if count == 8 {
+            let text = crate::sets::inventory_text(&config);
+            for shape in ["4 + 2 + 2", "4 + 4", "8"] { assert!(text.contains(shape), "{text}"); }
+            assert!(text.contains("Cabling: ring of 8:"), "{text}");
+        }
+    }
+}
+
+#[test]
+fn a_detected_ring_keeps_both_ends_of_its_closing_cable() {
+    use crate::doctor::fabric::Interface;
+    use super::super::links::Spark;
+    let hosts: Vec<String> = (0..8).map(|index| format!("m{index}")).collect();
+    let mut sparks = vec![Spark::default(); hosts.len()];
+    for index in 0..hosts.len() {
+        for (at, end) in [(index, 1), ((index + 1) % hosts.len(), 2)] {
+            sparks[at].ports.push(Interface { name: format!("p{index}"),
+                address: std::net::Ipv4Addr::new(192, 0, 2, (index * 4 + end) as u8),
+                prefix: 30, speed: 200_000, mtu: 9000, rdma: None });
+        }
+    }
+    let options = SetupOptions { yes: true, hosts: hosts.clone(), ..Default::default() };
+    let (written, up) = controller(answer(&options, &facts(false), &mut |_| panic!("the fake inventory supplies every cable end"),
+        pinned, &mut |host| Ok(Some(sparks[hosts.iter().position(|name| name == host).unwrap()].clone()))));
+    let config = crate::config::Config::parse(&written, Path::new("/fixture/config")).unwrap();
+    check_start(&config, &up).unwrap();
+    crate::topology::check_whole_ring(&config.machines).unwrap();
+    assert!(config.machines.iter().all(|machine| machine.fabric.len() == 2));
+}
+
+#[test]
 fn questions_show_defaults_and_build_an_fp8_pair() {
     let (target, asked) = scripted(&SetupOptions::default(), &facts(false),
         &["spark-a, spark-b", "FP8", "", "192.0.2.1", "192.0.2.2"]);

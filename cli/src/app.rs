@@ -589,12 +589,15 @@ impl<R: Runner> App<R> {
                 // Groups still run: never headline this as stopped.
                 crate::output::line(format_args!("{} Vade has no server of its own; {} group(s) still own one.", style::paint(Token::Dim, "○", Stream::Out), owned.len()))?;
                 self.print_group_records(&owned)?;
+                crate::output::text(format_args!("{}", crate::sets::group_servers(&self.config, &owned).0))?;
             }
+            crate::output::text(format_args!("{}", crate::sets::inventory_text(&self.config)))?;
             return Ok(());
         };
         // Rows print as each check finishes, in one label column.
         let row = |label: &str, value: &str| crate::output::text(format_args!("{}", style::table_at(&[(label, value.to_owned())], 2, 21)));
         crate::output::line(format_args!("{} is {}.", style::paint(Token::Title, "Vade", Stream::Out), session.phase))?;
+        crate::output::text(format_args!("{}{}", crate::sets::inventory_text(&self.config), crate::sets::servers_text(&self.config, &session)))?;
         row("Machines", &session.ranks.iter().map(|r| r.machine.name.as_str()).collect::<Vec<_>>().join(", "))?;
         if session.replicas { row("Mode", if session.chained() { "tensor-split pairs behind the local gateway" } else { "independent one-Spark replicas behind the local gateway" })?; }
         row("Model", &session.model)?;

@@ -3,6 +3,9 @@
 use super::*;
 use crate::{evals::json, status::Snapshot};
 
+#[path = "sets.rs"]
+mod sets;
+
 #[test]
 fn update_restart_hints_keep_the_selected_group() {
     let mut f = Fixture::fp4(1, false);
