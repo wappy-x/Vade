@@ -179,6 +179,33 @@ folder to `LIBRARY_PATH` and `LD_LIBRARY_PATH`. Never ship this library.
 300 lines. It preserves each printed value and checks the receipt revision,
 headline, text margins and label collisions. It reproduces the committed SVGs.
 
+## Internal dashboard preview
+
+`rigmark-dashboard TEMPLATE_HTML BUILT_HTML SETS_JSON OUTPUT_DIR` adds columns
+for one, two, four and eight Sparks to an existing RigMark dashboard. It adds
+a Set column to the card table and set names to chart tips. The filters apply
+to the new columns. Each entry shows the latest card for its setup, set,
+thinking mode, drafting mode and status. Empty columns show no measured rate.
+
+The input page must come from the current dashboard builder. The command keeps
+its embedded card data and build label byte for byte. It does not read a device
+or change a measurement. The existing charts keep their groups and values.
+
+The set map is a private JSON object with a `sets` object. Each key in `sets`
+is a set name, such as `4H`, `4B`, `2A` or `2B`. Its value is an array of saved
+member labels. An optional `cards` object supplies member arrays for cards
+whose rows lack this record. Its keys are `folder/card`, as saved in the page.
+Use the archived run's member records for these arrays. Keep this file outside
+Git. A card gets a set name only when all its saved members match.
+Member order and letter case do not affect the match. A rented card or a card
+without a matching member list shows `Unlisted`. Spark count alone does not
+identify a set.
+
+The command writes `template.html` and `RigMark Dashboard.html` to a new output
+directory. It refuses an existing output directory. Check the preview before
+installing it. Use the new template for later rebuilds with the existing
+builder. Update the private set map and make a fresh preview when sets change.
+
 ## Model download
 
 `fetch-model REPOSITORY FULL_REVISION MODEL_DIRECTORY` uses `curl` for HTTPS.

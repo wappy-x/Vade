@@ -6,6 +6,7 @@ pub mod cuda;
 pub mod chart;
 pub mod fetch;
 pub mod bench_docs;
+pub mod rigmark_dashboard;
 pub mod one_path;
 pub mod unsafe_sites;
 // Share the existing safe, streaming implementation. No Cargo dependency is needed.
