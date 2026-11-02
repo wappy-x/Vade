@@ -4,7 +4,8 @@
 use crate::cli::UpOptions;
 use crate::config::{Config, Machine};
 use crate::text::{self, Fields, required};
-use std::fs::{self, File, OpenOptions};
+use crate::unix_file::HeldLock;
+use std::fs::{self, OpenOptions};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -643,7 +644,7 @@ const LOCK_BUSY: &str = "Vade is already changing this engine. Wait, then run va
 
 /// The exclusive operation lock on a state directory, held until dropped.
 pub struct Lock {
-    file: File,
+    _lock: HeldLock,
 }
 impl Lock {
     /// Take the lock without waiting; another running lifecycle command is an error.
@@ -659,10 +660,7 @@ impl Lock {
             .open(path)
             .map_err(|_| "Cannot open operation lock. Check state directory permissions.")?;
         // The file stays open for this value's lifetime; the inode is never removed.
-        if file.try_lock().is_err() {
-            return Err(LOCK_BUSY.into());
-        }
-        Ok(Self { file })
+        HeldLock::try_take(file).ok().flatten().map(|_lock| Self { _lock }).ok_or_else(|| LOCK_BUSY.into())
     }
     /// Whether another lifecycle command (such as a vade launch that still
     /// loads the model) holds the lock now. The kernel drops the lock when
@@ -671,23 +669,12 @@ impl Lock {
         matches!(Self::acquire(dir), Err(error) if error == LOCK_BUSY)
     }
 }
-impl Drop for Lock {
-    /// Release the lock now, not at close. The kernel keeps a flock until every
-    /// copy of the open file closes. A child holds a copy from its fork to its
-    /// exec, even with close-on-exec, and an unlock also clears that copy. After
-    /// an abrupt exit the kernel still releases the lock at the final close.
-    fn drop(&mut self) {
-        while self.file.unlock().is_err_and(|error| error.kind() == std::io::ErrorKind::Interrupted) {}
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::{Command, Stdio};
+    use crate::unix_file::ChildCopy;
 
-    /// The child holds a copy of the lock file as its stdin. This is the same
-    /// state as a child that another thread forks and that has not reached exec.
     #[test]
     fn a_child_with_a_copy_of_the_lock_file_does_not_keep_the_lock() {
         let _guard = crate::runner::process_test_lock();
@@ -697,15 +684,13 @@ mod tests {
         let root = base.join(".vade");
         let lock = Lock::acquire(&root).unwrap();
         assert!(Lock::acquire(&root).is_err() && Lock::held(&root));
-        let copy = Stdio::from(lock.file.try_clone().unwrap());
-        let mut child = Command::new("sleep").arg("300").stdin(copy).spawn().unwrap();
+        let mut child = ChildCopy::of(&lock._lock);
         drop(lock);
         let again = Lock::acquire(&root);
-        let alive = child.try_wait().unwrap().is_none();
-        child.kill().unwrap();
-        child.wait().unwrap();
+        let running = child.running();
+        drop(child);
         fs::remove_dir_all(&base).unwrap();
-        assert!(alive, "the child must still hold its copy");
+        assert!(running, "the child must still hold its copy");
         assert!(again.is_ok(), "the copy in a child kept the lock");
     }
 }

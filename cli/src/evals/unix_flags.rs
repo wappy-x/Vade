@@ -3,8 +3,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-const HELP: &str = "vade test unix-flags-abi [--target TARGET]\nCompile all twelve raw Unix flag assertions without linking or running target code.\nDefaults to the selected rustc's host. RUSTC selects the compiler.\nSupported: aarch64/x86_64 Linux GNU and macOS; target Rust libraries must be installed.\n";
-const NAMES: [&str; 12] = [
+const HELP: &str = "vade test unix-flags-abi [--target TARGET]\nCompile all ten raw Unix flag assertions without linking or running target code.\nDefaults to the selected rustc's host. RUSTC selects the compiler.\nSupported: aarch64/x86_64 Linux GNU and macOS; target Rust libraries must be installed.\n";
+const NAMES: [&str; 10] = [
     "O_NOFOLLOW",
     "O_DIRECTORY",
     "O_CLOEXEC",
@@ -15,8 +15,6 @@ const NAMES: [&str; 12] = [
     "O_RDWR",
     "F_GETFL",
     "F_SETFL",
-    "LOCK_EX",
-    "LOCK_NB",
 ];
 
 struct Scratch(PathBuf);
@@ -63,7 +61,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         _ => return Err(format!("unsupported ABI check target: {target}")),
     };
     let mut expected = first_six.to_vec();
-    expected.extend_from_slice(&[0, 2, 3, 4, 2, 4]);
+    expected.extend_from_slice(&[0, 2, 3, 4]);
     let root =
         std::env::temp_dir().join(format!("vade-flags-abi-{}", crate::text::random_hex(12)?));
     fs::create_dir(&root)
@@ -102,6 +100,6 @@ pub fn run(args: &[String]) -> Result<i32, String> {
     if !status.success() {
         return Err(format!("Unix flag ABI compilation failed for {target}"));
     }
-    crate::output::report(format_args!("PASS unix-flags-abi {target} constants=12 compile-only"), true);
+    crate::output::report(format_args!("PASS unix-flags-abi {target} constants=10 compile-only"), true);
     Ok(0)
 }

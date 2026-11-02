@@ -1,9 +1,10 @@
-//! Descriptor-anchored opens without symlinks in any path component.
+//! Descriptor-anchored opens without symlinks in any path component, and the
+//! file lock type that every lock owner in the CLI holds.
 use crate::unix_flags::{
     O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK, O_RDONLY, O_RDWR,
 };
 use std::ffi::{CStr, CString, OsStr};
-use std::fs::{File, Metadata, OpenOptions};
+use std::fs::{File, Metadata, OpenOptions, TryLockError};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
@@ -12,6 +13,58 @@ use std::path::{Component, Path};
 
 unsafe extern "C" {
     fn openat(dirfd: i32, path: *const std::ffi::c_char, flags: i32, ...) -> i32;
+}
+
+/// An exclusive flock on a file, held until this value drops.
+///
+/// The drop releases the lock now, not at close. The kernel keeps a flock until
+/// every copy of the open file closes. A child holds a copy from its fork to its
+/// exec, even with close-on-exec, and an unlock also clears that copy. After an
+/// abrupt exit the kernel still releases the lock at the final close.
+pub struct HeldLock(File);
+
+impl HeldLock {
+    /// Take the lock on `file` without waiting. None means that another open
+    /// file holds it.
+    pub fn try_take(file: File) -> io::Result<Option<Self>> {
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self(file))),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(error)) => Err(error),
+        }
+    }
+}
+
+impl Drop for HeldLock {
+    fn drop(&mut self) {
+        while self.0.unlock().is_err_and(|error| error.kind() == io::ErrorKind::Interrupted) {}
+    }
+}
+
+/// A child with a copy of a lock file as its stdin. This is the same state as a
+/// child that another thread forked and that has not reached exec. The drop
+/// stops the child.
+#[cfg(test)]
+pub struct ChildCopy(std::process::Child);
+
+#[cfg(test)]
+impl ChildCopy {
+    pub fn of(lock: &HeldLock) -> Self {
+        let copy = std::process::Stdio::from(lock.0.try_clone().unwrap());
+        Self(std::process::Command::new("sleep").arg("300").stdin(copy).spawn().unwrap())
+    }
+    /// A child that ended holds no copy, so a test proves nothing without it.
+    pub fn running(&mut self) -> bool {
+        self.0.try_wait().unwrap().is_none()
+    }
+}
+
+#[cfg(test)]
+impl Drop for ChildCopy {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 /// How [`AnchoredPath::open`] opens the final component.

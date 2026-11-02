@@ -73,7 +73,9 @@ fn serve(mode: &str) {
     let note = |line: &str| {
         if let Some(log) = &log {
             let mut file = std::fs::OpenOptions::new().create(true).append(true).open(log).unwrap();
-            writeln!(file, "{line}").unwrap();
+            // One write: a wrapper and its child append to the same log, and
+            // writeln! writes the text and the newline separately.
+            file.write_all(format!("{line}\n").as_bytes()).unwrap();
         }
     };
     if mode == "wrapper" || mode == "wrapper-exit" {
@@ -278,6 +280,18 @@ fn wait_for_line(log: &Path, line: &str, count: usize) {
     let end = Instant::now() + Duration::from_secs(10);
     while log_lines(log).iter().filter(|l| *l == line).count() < count {
         assert!(Instant::now() < end, "{line} x{count} never reached the log: {:?}", log_lines(log));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+/// Wait for a whole line that starts with `prefix`, and return the rest of it.
+fn wait_for_value(log: &Path, prefix: &str) -> String {
+    let end = Instant::now() + Duration::from_secs(10);
+    loop {
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        if let Some(value) = text.split_inclusive('\n').find_map(|line| line.strip_prefix(prefix)?.strip_suffix('\n')) {
+            return value.to_owned();
+        }
+        assert!(Instant::now() < end, "no {prefix:?} line reached the log: {text:?}");
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -545,13 +559,16 @@ fn wrapper_children_stop_with_the_server() {
     let temp = Temp::new("wrapper");
     for (mode, blocked) in [("wrapper", true), ("wrapper-exit", true), ("wrapper-exit", false)] {
         let log = temp.0.join(format!("log-{mode}-{blocked}"));
-        let mut hub = Hub::start(vec![spec(mode, 500, Some(&log))], &temp.0);
+        // A start on a busy host can take seconds, so only the call below has the short limit.
+        let mut hub = Hub::start(vec![spec(mode, 60_000, Some(&log))], &temp.0);
         assert!(hub.notes.is_empty(), "{mode}: {:?}", hub.notes);
-        let child = log_lines(&log).iter().find_map(|line| line.strip_prefix("child ").map(str::to_owned)).unwrap();
+        // The wrapper writes this line after the spawn, so its child can finish the whole start first.
+        let child = wait_for_value(&log, "child ");
         let alive = || std::process::Command::new("/bin/kill").args(["-0", &child]).stderr(std::process::Stdio::null()).status().unwrap().success();
-        assert!(alive(), "{mode}");
+        assert!(alive(), "{mode}: {:?}", log_lines(&log));
         if blocked {
             // The child never reads this request; the timeout stops the server.
+            hub.servers[0].spec.timeout = Duration::from_millis(500);
             let large = format!(r#"{{"text":"{}"}}"#, "a".repeat(256 * 1024));
             let (text, uncertain) = call(&mut hub, "fake__echo", &large);
             assert!(uncertain && text.contains("mcp_timeout"), "{mode}: {text}");

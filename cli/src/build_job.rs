@@ -2,11 +2,10 @@
 //! so a compiler leader's exit never releases the process-group identity.
 use crate::runner::{Exec, Output};
 use crate::text::{self, Fields, required};
-use crate::unix_file::{AnchoredPath, OpenMode};
-use crate::unix_flags::{F_GETFL, F_SETFL, LOCK_EX, LOCK_NB, O_NONBLOCK};
+use crate::unix_file::{AnchoredPath, HeldLock, OpenMode};
+use crate::unix_flags::{F_GETFL, F_SETFL, O_NONBLOCK};
 use std::fs::{self, File};
 use std::io::Read;
-use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -18,7 +17,6 @@ unsafe extern "C" {
     fn getsid(pid: i32) -> i32;
     fn getppid() -> i32;
     fn kill(pid: i32, number: i32) -> i32;
-    fn flock(fd: i32, operation: i32) -> i32;
     fn fcntl(fd: i32, command: i32, ...) -> i32;
 }
 
@@ -163,7 +161,7 @@ fn cancel(job: &Path) -> Result<(), String> {
         &Fields::from([("cancel".into(), "true".into())]),
     )
 }
-fn lock(job: &Path) -> Result<Option<File>, String> {
+fn lock(job: &Path) -> Result<Option<HeldLock>, String> {
     let path = job.join("supervisor.lock");
     text::reject_symlinks(&path)?;
     let file = AnchoredPath::new(&path).and_then(|path| path.open(OpenMode::Create))
@@ -171,13 +169,7 @@ fn lock(job: &Path) -> Result<Option<File>, String> {
     if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
         return Err("Build supervisor lock must be a regular file; keep the job directory.".into());
     }
-    if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
-        Ok(Some(file))
-    } else if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
-        Ok(None)
-    } else {
-        Err("Cannot lock build supervisor evidence.".into())
-    }
+    HeldLock::try_take(file).map_err(|_| "Cannot lock build supervisor evidence.".into())
 }
 
 /// Cancel and wait for any job under `root` that an earlier command did not

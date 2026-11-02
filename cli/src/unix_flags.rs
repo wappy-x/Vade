@@ -7,8 +7,7 @@
 //! Linux aarch64   0x8000     0x4000      0x80000   0x800      0x40    0x80
 //! Linux x86_64    0x20000    0x10000     0x80000   0x800      0x40    0x80
 //! macOS           0x100      0x100000    0x1000000 0x4        0x200   0x800
-//! All targets: O_RDONLY = 0, O_RDWR = 2, F_GETFL = 3, F_SETFL = 4,
-//! LOCK_EX = 2, LOCK_NB = 4.
+//! All targets: O_RDONLY = 0, O_RDWR = 2, F_GETFL = 3, F_SETFL = 4.
 //! ```
 //!
 //! Linux ARM64 overrides O_NOFOLLOW and O_DIRECTORY (0x20000 is O_LARGEFILE):
@@ -70,8 +69,6 @@ compile_error!(
 
 pub const F_GETFL: i32 = 3;
 pub const F_SETFL: i32 = 4;
-pub const LOCK_EX: i32 = 2;
-pub const LOCK_NB: i32 = 4;
 
 #[cfg(test)]
 mod tests {
@@ -97,9 +94,8 @@ mod tests {
         let source = root.0.join("flags.c");
         let binary = root.0.join("flags");
         fs::write(&source, r#"#include <fcntl.h>
-#include <sys/file.h>
 #include <stdio.h>
-int main(void) { printf("%d %d %d %d %d %d %d %d %d %d %d %d\n", O_NOFOLLOW, O_DIRECTORY, O_CLOEXEC, O_NONBLOCK, O_CREAT, O_EXCL, O_RDONLY, O_RDWR, F_GETFL, F_SETFL, LOCK_EX, LOCK_NB); return 0; }
+int main(void) { printf("%d %d %d %d %d %d %d %d %d %d\n", O_NOFOLLOW, O_DIRECTORY, O_CLOEXEC, O_NONBLOCK, O_CREAT, O_EXCL, O_RDONLY, O_RDWR, F_GETFL, F_SETFL); return 0; }
 "#).unwrap();
         let compiled = Command::new("cc")
             .arg(source)
@@ -123,7 +119,7 @@ int main(void) { printf("%d %d %d %d %d %d %d %d %d %d %d %d\n", O_NOFOLLOW, O_D
             O_CREAT,
             O_EXCL,
         ];
-        expected.extend_from_slice(&[O_RDONLY, O_RDWR, F_GETFL, F_SETFL, LOCK_EX, LOCK_NB]);
+        expected.extend_from_slice(&[O_RDONLY, O_RDWR, F_GETFL, F_SETFL]);
         assert_eq!(actual, expected);
     }
 

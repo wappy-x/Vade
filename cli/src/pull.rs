@@ -16,6 +16,7 @@ pub use models::run as models;
 
 use std::{collections::BTreeMap, fs, io::IsTerminal, os::unix::fs::MetadataExt, path::{Component, Path, PathBuf}, time::{Duration, Instant}};
 use crate::evals::json::{self, Value};
+use crate::unix_file::HeldLock;
 use fetch::{Failure, Transport};
 use hub::Remote;
 
@@ -234,12 +235,11 @@ fn target(request: &Request, setup: &Setup) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// Hold the pull lock for this folder. The OS drops it when the process ends.
-fn lock(scratch: &Path) -> Result<fs::File, String> {
+/// Hold the pull lock for this folder. A pull that dies loses it with its process.
+fn lock(scratch: &Path) -> Result<HeldLock, String> {
     let file = fs::File::options().read(true).write(true).create(true).truncate(false).open(scratch.join("lock"))
         .map_err(|_| "Cannot create the pull lock in the model folder.")?;
-    file.try_lock().map_err(|_| "Another vade pull is writing this model folder. Wait for it to finish, or stop it, then run vade pull again.")?;
-    Ok(file)
+    HeldLock::try_take(file).ok().flatten().ok_or_else(|| "Another vade pull is writing this model folder. Wait for it to finish, or stop it, then run vade pull again.".into())
 }
 
 /// GET one API reply as (headers, body), mapping refusals to the step the

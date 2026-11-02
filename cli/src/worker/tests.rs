@@ -235,3 +235,21 @@ fn cuda_cache_survives_runs_and_is_keyed_by_ptx() {
     assert_ne!(env["env.CUDA_CACHE_PATH"], first);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn a_child_with_a_copy_of_the_lock_file_does_not_keep_the_store() {
+    let _process_guard = crate::runner::process_test_lock();
+    let root = fs::canonicalize(std::env::temp_dir()).unwrap()
+        .join(format!("vade-worker-lock-{}", crate::text::random_hex(12).unwrap()));
+    let request = fields(&[("token", &"a".repeat(64)), ("state_dir", root.to_str().unwrap())]);
+    let store = Store::lock(&request).unwrap();
+    assert!(Store::lock(&request).is_err());
+    let mut child = crate::unix_file::ChildCopy::of(&store._lock);
+    drop(store);
+    let again = Store::lock(&request);
+    let running = child.running();
+    drop(child);
+    fs::remove_dir_all(&root).unwrap();
+    assert!(running, "the child must still hold its copy");
+    assert!(again.is_ok(), "the copy in a child kept the lock");
+}

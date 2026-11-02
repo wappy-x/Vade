@@ -794,3 +794,21 @@ fn an_api_reply_over_the_cap_is_stopped_by_pull_itself() {
     assert_eq!(result, Err(Failure::TooLarge));
     assert!(elapsed < Duration::from_secs(20), "{elapsed:?}");
 }
+
+#[test]
+fn a_child_with_a_copy_of_the_lock_file_does_not_keep_the_pull_lock() {
+    let _guard = crate::runner::process_test_lock();
+    let scratch = fs::canonicalize(std::env::temp_dir()).unwrap()
+        .join(format!("vade-pull-lock-{}", crate::text::random_hex(12).unwrap()));
+    crate::text::private_dir(&scratch).unwrap();
+    let held = lock(&scratch).unwrap();
+    assert!(lock(&scratch).is_err());
+    let mut child = crate::unix_file::ChildCopy::of(&held);
+    drop(held);
+    let again = lock(&scratch);
+    let running = child.running();
+    drop(child);
+    fs::remove_dir_all(&scratch).unwrap();
+    assert!(running, "the child must still hold its copy");
+    assert!(again.is_ok(), "the copy in a child kept the lock");
+}

@@ -267,3 +267,21 @@ fn mock_anchor_identity_recheck_refuses_reuse_reboot_and_incomplete_records() {
         saved.insert(key.into(), value);
     }
 }
+
+#[test]
+fn a_child_with_a_copy_of_the_lock_file_does_not_keep_the_supervisor_lock() {
+    let _process_guard = crate::runner::process_test_lock();
+    let job = fs::canonicalize(std::env::temp_dir()).unwrap()
+        .join(format!("vade-build-lock-{}", text::random_hex(12).unwrap()));
+    text::private_dir(&job).unwrap();
+    let held = lock(&job).unwrap().unwrap();
+    assert!(lock(&job).unwrap().is_none());
+    let mut child = crate::unix_file::ChildCopy::of(&held);
+    drop(held);
+    let again = lock(&job);
+    let running = child.running();
+    drop(child);
+    fs::remove_dir_all(&job).unwrap();
+    assert!(running, "the child must still hold its copy");
+    assert!(again.unwrap().is_some(), "the copy in a child kept the lock");
+}

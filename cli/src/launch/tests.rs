@@ -690,7 +690,8 @@ fn source_install_fixture_child() {
 }
 
 // Run the engine's actual CPU receipt planner in its own environment. The
-// fixture lock prevents fork/flock overlap; SystemRunner enforces the deadline.
+// fixture lock serializes it with the other process tests; SystemRunner
+// enforces the deadline.
 fn run_cpu_receipt(model: &Path, manifest: &Path, cache: &Path, format: &str) {
     cpu_receipt(model, manifest, cache, format, None);
 }

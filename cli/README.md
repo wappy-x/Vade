@@ -1123,7 +1123,7 @@ vade test unix-flags-abi
 vade test unix-flags-abi --target aarch64-unknown-linux-gnu
 ```
 
-The ABI command compiles twelve assertions about Unix flags without linking or
+The ABI command compiles ten assertions about Unix flags without linking or
 running any target code. The selected compiler needs that target's Rust
 libraries.
 

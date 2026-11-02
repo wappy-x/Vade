@@ -8,8 +8,7 @@
 //! - `gpu`: idle-GPU checks before start and after stop.
 //! - `prepare`: install preparation without a resident owner.
 use crate::text::to_hex;
-use crate::unix_file::{AnchoredPath, OpenMode, same_regular_file};
-use crate::unix_flags::{LOCK_EX, LOCK_NB};
+use crate::unix_file::{AnchoredPath, HeldLock, OpenMode, same_regular_file};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -40,7 +39,6 @@ const TERM: i32 = 15;
 const KILL: i32 = 9;
 
 unsafe extern "C" {
-    fn flock(fd: i32, operation: i32) -> i32;
     fn setsid() -> i32;
     fn getpid() -> i32;
     fn kill(pid: i32, signal: i32) -> i32;
@@ -143,7 +141,7 @@ struct Store {
     root: PathBuf,
     run: PathBuf,
     token: String,
-    _lock: File,
+    _lock: HeldLock,
 }
 
 impl Store {
@@ -165,9 +163,8 @@ impl Store {
         crate::text::private_dir(&root)?;
         let lock = private_open(&root.join(".lock"), false, true)?;
         // A permanent inode serializes probe/start/stop, including across tokens.
-        if unsafe { flock(lock.as_raw_fd(), LOCK_EX | LOCK_NB) } != 0 {
-            return Err("Another vade operation is using this machine. Retry shortly.".into());
-        }
+        let lock = HeldLock::try_take(lock).ok().flatten()
+            .ok_or("Another vade operation is using this machine. Retry shortly.")?;
         Ok(Self {
             run: root.join(token),
             root,

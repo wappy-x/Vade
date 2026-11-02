@@ -165,7 +165,7 @@ This command checks that the CLI's Unix file-flag constants match the ABI
 standard library, it runs
 `rustc --target TARGET --crate-type lib --emit metadata` on the flag
 definitions embedded when the CLI was built, with compile-time assertions for
-all twelve constants against an independent, audited ABI table. Rebuild the
+all ten constants against an independent, audited ABI table. Rebuild the
 CLI after you change its flag definitions. The table follows the ARM64 and
 generic UAPI file flags in Linux v6.12 and the file flags in macOS XNU, cited
 in [unix_flags.rs](src/unix_flags.rs).
@@ -178,7 +178,7 @@ paired with its pinned libc 0.2.189 reference.
 
 `cargo test --offline --manifest-path cli/Cargo.toml constants_match_host_system_headers`
 also compiles a temporary C program with `cc`, reads the host's system
-headers, and compares all twelve constants with the CLI values at runtime.
+headers, and compares all ten constants with the CLI values at runtime.
 
 | Input or output | Rust equivalent |
 | --- | --- |
@@ -186,7 +186,7 @@ headers, and compares all twelve constants with the CLI values at runtime.
 | `CARGO` override | `RUSTC` selects the Rust compiler for the new command |
 | Cargo flags such as `--offline` | Build the CLI with Cargo; the check itself uses rustc and never fetches dependencies |
 | `--target aarch64-unknown-linux-gnu` compile-only check | Same option; rustc selects Linux ARM64 cfgs even on a Mac |
-| Cargo success/failure | Exit 0 with `PASS` for twelve assertions; exit 2 for compilation or argument errors |
+| Cargo success/failure | Exit 0 with `PASS` for ten assertions; exit 2 for compilation or argument errors |
 
 The audited targets are `aarch64-unknown-linux-gnu`,
 `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin` and `x86_64-apple-darwin`;
