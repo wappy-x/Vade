@@ -75,6 +75,9 @@ vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e6342
 vade up
 ```
 
+If you want to check the script before you run it, its SHA-256 is at
+https://dl.vade.lol/install.sh.sha256.
+
 1. **Install** checks the GPU and the driver. Then it downloads the
    [prebuilt bundle](#prebuilt-bundle) of main from dl.vade.lol. The bundle
    holds ready-made programs for the GB10, so the Spark needs no Rust and no

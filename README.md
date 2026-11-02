@@ -9,11 +9,13 @@ Vade is an inference engine for the NVIDIA DGX Spark. It is written in Rust from
 
 The kernels compile to PTX, NVIDIA's portable GPU assembly, and use short inline PTX for the few instructions that have no Rust spelling. The installer and the Spark setup scripts are shell scripts. At run time, Vade needs only the NVIDIA driver. The installer also needs curl and a C compiler (`cc`), and a source build also needs Rust.
 
-Install it with one command:
+One command installs it. One more pulls the model, 102 GB. One more starts it.
 
 ```sh
 curl -fsSL https://vade.lol/install.sh | sh
 ```
+
+If you want to check the script before you run it, its SHA-256 is at https://dl.vade.lol/install.sh.sha256.
 
 Then get the model with `vade pull` and run `vade up`. The engine is ready for any OpenAI client, and for `vade chat`, a coding agent in your terminal.
 
