@@ -43,6 +43,8 @@ mod zip;
 #[cfg(test)]
 mod audit_tests;
 #[cfg(test)]
+mod corpus_tests;
+#[cfg(test)]
 mod office_tests;
 #[cfg(test)]
 mod tests;
