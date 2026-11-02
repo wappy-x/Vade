@@ -108,6 +108,23 @@ fn stopped_recovery_is_idempotent_and_foreign_owner_is_preserved() {
         .unwrap()
         .write_all(b"ready hidden\n")
         .unwrap();
+    let alias = root.join("server.log");
+    fs::write(&alias, "keep this file").unwrap();
+    assert!(store.publish_log().is_err());
+    assert_eq!(fs::read_to_string(&alias).unwrap(), "keep this file");
+    fs::rename(&alias, root.join("preserved-log")).unwrap();
+    std::os::unix::fs::symlink("../outside.log", &alias).unwrap();
+    assert!(store.publish_log().is_err());
+    assert_eq!(fs::read_link(&alias).unwrap(), Path::new("../outside.log"));
+    fs::rename(&alias, root.join("preserved-link")).unwrap();
+    store.publish_log().unwrap();
+    fs::rename(&alias, root.join("preserved-valid-link")).unwrap();
+    let previous = PathBuf::from("b".repeat(64)).join("server.log");
+    std::os::unix::fs::symlink(previous, &alias).unwrap();
+    store.publish_log().unwrap();
+    store.publish_log().unwrap();
+    assert_eq!(fs::read_link(&alias).unwrap(), Path::new(&token).join("server.log"));
+    assert_eq!(fs::read_to_string(&alias).unwrap(), "ready hidden\n");
     drop(store);
     assert_eq!(handle(&request).unwrap()["alive"], "false");
     request.insert("op".into(), "stop".into());
@@ -115,6 +132,9 @@ fn stopped_recovery_is_idempotent_and_foreign_owner_is_preserved() {
     request.insert("op".into(), "clean".into());
     assert_eq!(handle(&request).unwrap()["log"], "ready [redacted]\n");
     assert_eq!(handle(&request).unwrap()["phase"], "absent");
+    assert!(fs::symlink_metadata(&alias).unwrap().file_type().is_symlink());
+    assert!(!alias.exists());
+    Store::open(&request).unwrap().ensure_available().unwrap();
     let foreign = fields(&[("token", &"b".repeat(64))]);
     crate::text::atomic_write(&root.join("active.conf"), &crate::text::encode(&foreign))
         .unwrap();

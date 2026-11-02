@@ -15,6 +15,8 @@ mod pairs;
 mod local_rank;
 #[path = "tests/fake_hosts.rs"]
 mod fake_hosts;
+#[path = "tests/tunnels.rs"]
+mod tunnels;
 use super::*;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -719,20 +721,6 @@ fn update_restart_hints_parse_back_to_the_running_or_configured_profile() {
 }
 
 #[test]
-fn every_tunnel_operation_uses_the_same_private_directory_and_short_name() {
-    let f = Fixture::new(2, false);
-    let manifest = Manifest::load(&f.app.config.build_manifest).unwrap();
-    let session = Session::new(&f.app.config, &fp8_options(), &manifest, "a".repeat(64)).unwrap();
-    for operation in [None, Some("check"), Some("exit")] {
-        let exec = f.app.tunnel_at(&session, 0, operation);
-        assert_eq!(exec.cwd.as_ref(), Some(&f.app.config.state_dir));
-        let path = exec.args.windows(2).find(|pair| pair[0] == "-S").unwrap()[1].clone();
-        assert_eq!(Path::new(&path).file_name(), session.socket(&f.app.config.state_dir).file_name());
-        assert!(Path::new(&path).is_relative() && path.len() + 18 <= 104);
-    }
-}
-
-#[test]
 fn fp4_transport_selection_controls_both_pipeline_ranks_and_prerequisites() {
     const CASE: &str = "VADE_TEST_FP4_TRANSPORT";
     if let Ok(expected) = std::env::var(CASE) {
@@ -1105,6 +1093,8 @@ fn replicas_start_world_one_servers_with_own_tunnels_behind_an_owned_gateway() {
     assert!(starts.len() == 2 && starts.iter().all(|r| r["env.FLASH_SERVE_RANK"] == "0" && r["env.FLASH_SERVE_WORLD_SIZE"] == "1" && r["env.SEQPAR_RDMA"] == "0"));
     let tunnels: Vec<_> = f.app.runner.calls.iter().filter(|e| e.label == "controller tunnel start").map(|e| e.args[e.args.len() - 2..].join(" ")).collect();
     assert_eq!(tunnels, [format!("127.0.0.1:{}:127.0.0.1:{serve} a-ssh", port + 1), format!("127.0.0.1:{}:127.0.0.1:{serve} b-ssh", port + 2)]);
+    let logs: Vec<_> = f.app.runner.calls.iter().filter(|e| e.label == "controller tunnel start").map(|e| e.detached_log.clone().unwrap()).collect();
+    assert_eq!(logs, [f.app.config.state_dir.join("logs/tunnel-0.log"), f.app.config.state_dir.join("logs/tunnel-1.log")]);
     assert_eq!(f.app.runner.gateway.clone().unwrap(), format!("vade-gateway --bind 127.0.0.1:{port} --upstream http://127.0.0.1:{} --upstream http://127.0.0.1:{}", port + 1, port + 2));
     assert_eq!(super::chats_label(&s), "8 per replica, 16 across 2 replicas (engine-admitted at this context)");
     let gateway = f.app.runner.calls.iter().find(|e| e.label == "replica gateway").unwrap();

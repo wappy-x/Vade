@@ -122,6 +122,8 @@ https://dl.vade.lol/install.sh.sha256.
 3. **Up** starts the engine on `http://127.0.0.1:18080`. `vade launch`
    starts it and opens chat in the current folder. `vade down` stops it.
 
+The running engine writes stdout and stderr to `VADE_HOME/state/worker/server.log`; `vade up` prints the log path.
+
 The installer downloads the build of main from dl.vade.lol. GitHub Releases
 holds only the older v0.1.0 bundle.
 

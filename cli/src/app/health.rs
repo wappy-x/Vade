@@ -44,6 +44,9 @@ impl<R: Runner> App<R> {
         // OpenSSH opens its control socket relative to this private directory.
         // Start, status and stop all use the same base without changing our cwd.
         exec.cwd = Some(self.config.state_dir.clone());
+        if operation.is_none() {
+            exec.detached_log = Some(self.config.state_dir.join("logs").join(format!("tunnel-{index}.log")));
+        }
         exec
     }
 

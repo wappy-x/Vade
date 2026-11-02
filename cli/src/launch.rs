@@ -696,6 +696,9 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         let explicit = options.supplied_options.contains("--context");
         let (first, first_output) = (config.context, config.output);
         let mut refused = Vec::new();
+        if prior.is_none() {
+            output::line(format_args!("Engine log: {}", text::terminal_text(&self.root.join("state/worker/server.log").to_string_lossy())))?;
+        }
         loop {
             let mut refusal = None;
             let error = match self.up(config, artifacts, prior.clone(), retry, &mut refusal) {

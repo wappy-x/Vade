@@ -349,6 +349,9 @@ impl<R: Runner> App<R> {
                 crate::output::line(format_args!("{}: {}", rank.machine.name, text::terminal_text(note)))?;
             }
         }
+        if op == "start" {
+            crate::output::line(format_args!("Engine log on {}: {}/server.log", text::terminal_text(&rank.machine.name), text::terminal_text(rank.machine.state_dir.trim_end_matches('/'))))?;
+        }
         Ok(fields)
     }
 

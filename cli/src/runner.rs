@@ -50,6 +50,8 @@ pub struct Exec {
     pub transient_probe: bool,
     /// Overwrite this private file with the latest probe's output instead.
     pub probe_log: Option<PathBuf>,
+    /// A command that leaves a background child. Keep its output in this log.
+    pub detached_log: Option<PathBuf>,
 }
 
 impl Exec {
@@ -69,6 +71,7 @@ impl Exec {
             cancellable: true,
             transient_probe: false,
             probe_log: None,
+            detached_log: None,
         }
     }
     /// The [`Command`] with these arguments, environment changes and folder.
@@ -94,6 +97,7 @@ impl Exec {
             crate::output::line(format_args!("# folder: {}", crate::text::terminal_text(&cwd.to_string_lossy())))?;
         }
         crate::output::line(format_args!("$ {}", self.shell_line()))?;
+        if let Some(log) = &self.detached_log { print_log(&self.label, log)?; }
         if !self.stdin.is_empty() {
             crate::output::line(format_args!("# private stdin; environment values and ownership secrets are hidden"))?;
             if let Ok(fields) = crate::text::parse(&String::from_utf8_lossy(&self.stdin)) {
@@ -254,6 +258,9 @@ impl Runner for SystemRunner {
         if let Some(job) = &exec.job {
             return crate::build_job::run(job);
         }
+        if exec.detached_log.is_some() && !exec.stdin.is_empty() {
+            return Err("A detached command cannot receive a private request on stdin.".into());
+        }
         // Temporary files keep long compiler output out of RAM and prevent a pipe deadlock.
         let temp_root = std::fs::canonicalize(std::env::temp_dir())
             .map_err(|_| "Cannot open the system temporary directory. Check TMPDIR.")?;
@@ -265,22 +272,20 @@ impl Runner for SystemRunner {
             let out = private_file(&outpath)?;
             let err = private_file(&errpath)?;
             let mut command = owned_command(exec);
-            let mut child = command
-                .stdin(Stdio::piped())
-                .stdout(out)
-                .stderr(err)
-                .spawn()
+            if let Some(log) = &exec.detached_log {
+                detached_stdio(&mut command, open_detached_log(log)?)?;
+                print_log(&exec.label, log)?;
+            } else {
+                command.stdin(Stdio::piped()).stdout(out).stderr(err);
+            }
+            let mut child = command.spawn()
                 .map_err(|_| {
                     format!(
                         "Cannot run {}. Check that its program is installed.",
                         exec.label
                     )
                 })?;
-            let write = child
-                .stdin
-                .take()
-                .expect("piped stdin")
-                .write_all(&exec.stdin);
+            let write = child.stdin.take().map_or(Ok(()), |mut input| input.write_all(&exec.stdin));
             if write.is_err() {
                 stop_job(&mut child);
                 let _ = child.wait();
@@ -345,7 +350,7 @@ impl Runner for SystemRunner {
             }
             crate::text::atomic_write(path, &diagnostic)?;
         }
-        if result.as_ref().is_ok_and(|output| output.success || exec.transient_probe) {
+        if exec.detached_log.is_some() || result.as_ref().is_ok_and(|output| output.success || exec.transient_probe) {
             let _ = std::fs::remove_dir_all(&scratch);
         } else {
             crate::output::stderr_line(format_args!(
@@ -468,15 +473,11 @@ impl Runner for SystemRunner {
             crate::output::line(format_args!("# detached; output appended to {}", crate::text::terminal_text(&log.to_string_lossy())))?;
             return Ok(0);
         }
-        if let Some(dir) = log.parent() {
-            crate::text::private_dir(dir)?;
-        }
-        use std::os::unix::fs::OpenOptionsExt;
-        let file = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(log)
-            .map_err(|_| format!("Cannot open the {} log. Check the state folder.", exec.label))?;
-        let error = file.try_clone().map_err(|_| format!("Cannot open the {} log.", exec.label))?;
+        let mut command = exec.command();
+        detached_stdio(&mut command, open_detached_log(log)?)?;
+        print_log(&exec.label, log)?;
         // Its own process group: a later Ctrl-C in this terminal does not reach it.
-        let child = exec.command().stdin(Stdio::null()).stdout(file).stderr(error).process_group(0).spawn()
+        let child = command.process_group(0).spawn()
             .map_err(|_| format!("Cannot start {}. Run vade install.", exec.label))?;
         Ok(child.id())
     }
@@ -514,6 +515,33 @@ impl Runner for SystemRunner {
             "y" | "yes"
         ))
     }
+}
+
+/// Set the streams before a long-lived child starts. The engine helper replaces
+/// stdin with its private request pipe, then sets null stdin at the final exec.
+pub(crate) fn detached_stdio(command: &mut Command, log: std::fs::File) -> Result<(), String> {
+    let error = log.try_clone().map_err(|_| "Cannot copy the child log handle.")?;
+    command.stdin(Stdio::null()).stdout(log).stderr(error);
+    Ok(())
+}
+
+fn open_detached_log(log: &std::path::Path) -> Result<std::fs::File, String> {
+    if let Some(dir) = log.parent() { crate::text::private_dir(dir)?; }
+    crate::text::reject_symlinks(log)?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new().create(true).append(true).mode(0o600)
+        .custom_flags(crate::unix_flags::O_NOFOLLOW | crate::unix_flags::O_NONBLOCK).open(log)
+        .map_err(|_| "Cannot open the child log. Check the state folder.")?;
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = file.metadata().map_err(|_| "Cannot inspect the child log.")?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
+        return Err("The child log must be a private regular file.".into());
+    }
+    Ok(file)
+}
+
+fn print_log(label: &str, log: &std::path::Path) -> Result<(), String> {
+    crate::output::line(format_args!("{} log: {}", crate::text::terminal_text(label), crate::text::terminal_text(&log.to_string_lossy())))
 }
 
 fn private_file(path: &std::path::Path) -> Result<std::fs::File, String> {

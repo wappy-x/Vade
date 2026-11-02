@@ -182,6 +182,29 @@ impl Store {
     fn log(&self) -> PathBuf {
         self.run.join("server.log")
     }
+    fn publish_log(&self) -> Result<(), String> {
+        let alias = self.root.join("server.log");
+        let check = || match fs::symlink_metadata(&alias) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let target = fs::read_link(&alias).map_err(|_| "Cannot read the engine log link.")?;
+                if target.to_str().and_then(|path| path.strip_suffix("/server.log"))
+                    .is_some_and(|token| crate::text::is_lower_hex(token, 64)) {
+                    Ok(())
+                } else { Err("The engine log link has an unknown target. Keep it for inspection before retrying.") }
+            }
+            Ok(_) => Err("The engine log link is occupied by another file. Keep it for inspection before retrying."),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err("Cannot inspect the engine log link."),
+        };
+        check()?;
+        let temporary = self.root.join(format!(".server-log-{}.tmp", crate::text::random_hex(12)?));
+        // The store lock serializes publication. The relative link hides the
+        // ownership token from the printed path and keeps the run log in place.
+        std::os::unix::fs::symlink(Path::new(&self.token).join("server.log"), &temporary)
+            .map_err(|_| "Cannot create the engine log link.")?;
+        check()?;
+        fs::rename(&temporary, &alias).map_err(|_| "Cannot publish the engine log link.".into())
+    }
     fn env(&self) -> PathBuf {
         self.run.join("env.conf")
     }
@@ -404,21 +427,17 @@ fn start(store: &Store, request: &Fields) -> Result<Fields, String> {
             &crate::text::encode(&fields(&[("token", &store.token)])),
         )?;
         let log = private_open(&store.log(), true, false)?;
+        store.publish_log()?;
         // Only this separate private file contains environment values. Journals
         // and replies never contain them; it permits redacting future logs.
         crate::text::atomic_write(&store.env(), &crate::text::encode(&private_environment))?;
         let executable = std::env::current_exe().map_err(|_| "Cannot find the launch helper.")?;
         let mut command = Command::new(executable);
+        crate::runner::detached_stdio(&mut command, log)?;
         command
             .arg("__engine")
             .current_dir(cwd)
             .stdin(Stdio::piped());
-        command
-            .stdout(
-                log.try_clone()
-                    .map_err(|_| "Cannot open the private engine log.".to_string())?,
-            )
-            .stderr(log);
         // Detached ranks must not inherit numerical switches or an EOF watcher.
         for (name, _) in std::env::vars_os() {
             if ["FLASH_", "SPARK_", "TP_", "SEQPAR_"]

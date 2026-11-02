@@ -1034,6 +1034,9 @@ fn failed_start_cleans_only_its_ownership_and_keeps_install_for_retry() {
 #[path = "attach_tests.rs"]
 mod attach_tests;
 
+#[path = "stdio_tests.rs"]
+mod stdio_tests;
+
 #[test]
 fn resident_attach_with_real_subprocesses_reuses_saved_state() {
     attach_tests::check_resident_attach();
@@ -1073,6 +1076,7 @@ fn default_context_is_32768_and_steps_down_only_on_engine_memory_refusal() {
     output::with_writer(capture.clone(), || launch.execute(Command::Up(Default::default()), false).unwrap());
     let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
     assert!(printed.contains("Context 8192 selected (the engine refused 32768 and 16384 for memory); saved; run vade launch --context 32768 to try the default again.\n"), "{printed}");
+    assert_eq!(printed.matches("Engine log: ").count(), 1);
     // Refused 32768 and 16384; started 8192 and saved it only then.
     assert_eq!(launch.runner.starts, 8);
     let saved = Config::load(&f.root).unwrap().unwrap();
