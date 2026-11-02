@@ -123,8 +123,8 @@ fn cohort_identity_uses_the_frozen_recipe_without_rereading_its_switches() {
         let (mut back, _) = listener.accept().unwrap();
         std::thread::scope(|scope| {
             let limit = std::time::Duration::from_secs(2);
-            let peer = scope.spawn(move || super::exchange_pipeline_identity(&mut back, 2, &right, limit));
-            for result in [super::exchange_pipeline_identity(&mut front, 2, &left, limit), peer.join().unwrap()] {
+            let peer = scope.spawn(move || super::exchange_pipeline_identity(&mut back, 2, &right, std::path::Path::new("unused"), limit));
+            for result in [super::exchange_pipeline_identity(&mut front, 2, &left, std::path::Path::new("unused"), limit), peer.join().unwrap()] {
                 if accepted { assert!(result.is_ok(), "{result:?}"); }
                 else { let error = result.unwrap_err(); assert!(error.contains(PREFIX_CACHE) && error.contains("refusing startup"), "{error}"); }
             }

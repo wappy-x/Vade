@@ -190,8 +190,8 @@ pub(super) fn indexed_shards(index: &str) -> Result<BTreeSet<String>, String> {
 
 /// Where an FP4-Local engine keeps its checkpoint receipt, chosen by the
 /// controller's `model_receipt` field. Without one the engine writes the
-/// receipt into the checkpoint, and a chain whose ranks differ in that
-/// history refuses to form (its content identity includes the file).
+/// receipt into the checkpoint on rank 0 only, and a chain whose ranks differ
+/// in that history moves the file between them before the load.
 /// A checksum list supplied with the checkpoint is copied in at every start,
 /// so its hashes stay the strict expectation on every rank, in both modes.
 /// Without one, `private` keeps one receipt per checkpoint path in this

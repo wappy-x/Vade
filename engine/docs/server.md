@@ -269,6 +269,16 @@ permits a verified receipt, but logs persistence failure. A swap refreshes the
 receipt and retains the server start time. Files must remain immutable for the
 loaded checkpoint's lifetime. Requests never hash payloads.
 
+Neighbor ranks of an FP4-Local chain or tensor split compare their manifest
+bytes before any load, and two different manifests refuse the start. Only
+rank 0 seeds a missing manifest, so an earlier start can leave a manifest on
+one rank only. That rank then sends its manifest to the other rank. The other
+rank checks the SHA-256 and the rows, saves the file at its own manifest path,
+and hashes its own files against it during the load. It refuses on a
+difference. This costs one full hash on that rank; stamps cover later starts.
+Both logs name the digest: `pipeline manifest set on the peer` on the rank that
+sends, `pipeline manifest set from the peer` on the rank that takes it.
+
 `numerics.flash_dense_arithmetic` is the fixed string
 `"bf16_hi_lo_tensor_core"`: Flash's covered BF16 projections always use the
 one tensor-core mode. There are no `flash_bf16_mma_set` or `flash_bf16_mma`

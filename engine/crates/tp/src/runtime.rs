@@ -213,9 +213,18 @@ fn identity_names(format: u8) -> Vec<&'static str> {
         names.push("hf_quant_config.json");
     }
     if format != 0 {
-        names.push("NVFP4 SHA-256 manifest");
+        names.push(MANIFEST_ROW);
     }
     names
+}
+
+const MANIFEST_ROW: &str = "NVFP4 SHA-256 manifest";
+
+/// The checksum list of this rank: the path a start names, else the checkpoint's own file.
+fn manifest_path(root: &std::path::Path) -> std::path::PathBuf {
+    std::env::var_os("FLASH_NVFP4_MANIFEST")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| root.join("manifest.sha256"))
 }
 
 fn artifact_format(root: &std::path::Path) -> Result<u8> {
@@ -240,9 +249,7 @@ fn artifact_fingerprints(
     format: u8,
 ) -> Result<Vec<u8>> {
     use std::{fs::File, io::ErrorKind};
-    let manifest = std::env::var_os("FLASH_NVFP4_MANIFEST")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| root.join("manifest.sha256"));
+    let manifest = manifest_path(root);
     let names = identity_names(format);
     let mut local = vec![0u8; names.len() * 64];
     // /proc/self/exe pins the running inode even if its pathname was replaced.
@@ -259,7 +266,7 @@ fn artifact_fingerprints(
         } else {
             let path = if i == 0 {
                 executable.clone()
-            } else if *name == "NVFP4 SHA-256 manifest" {
+            } else if *name == MANIFEST_ROW {
                 manifest.clone()
             } else {
                 root.join(name)
@@ -270,7 +277,7 @@ fn artifact_fingerprints(
                 // Unsharded checkpoints have no index; optional config absence
                 // is an explicit all-zero marker, distinct from any SHA-256.
                 Err(e)
-                    if ((3..6).contains(&i) || format == 2 && *name == "NVFP4 SHA-256 manifest")
+                    if ((3..6).contains(&i) || format == 2 && *name == MANIFEST_ROW)
                         && e.kind() == ErrorKind::NotFound =>
                 {
                     continue;
@@ -286,6 +293,8 @@ fn artifact_fingerprints(
 /// Refuse a pipeline link before either rank loads weights or serves requests.
 /// The caller passes the same PTX buffers it will load, not paths to reread.
 /// Like native rank verification, this compares manifests, not tensor payloads.
+/// Two different manifests refuse. If only one rank has a manifest, that is a
+/// difference in history, not in content: `share_manifest` sets it on both.
 /// `prefix_restore`: the link is a tensor split, where an unset prefix cache means on.
 pub fn verify_pipeline_artifacts(
     stream: &mut std::net::TcpStream,
@@ -299,7 +308,7 @@ pub fn verify_pipeline_artifacts(
     let format = artifact_format(root)?;
     let mut local = artifact_fingerprints(ptx, root, ab_ptx, format)?;
     local.extend(pipeline_settings::fingerprints(experiments, prefix_restore, |name| std::env::var_os(name))?);
-    exchange_pipeline_identity(stream, format, &local, limit)?;
+    exchange_pipeline_identity(stream, format, &local, &manifest_path(root), limit)?;
     eprintln!("pipeline content identity passed (executable, loaded PTX, checkpoint metadata, numerical settings; weight payloads not hashed)");
     Ok(())
 }
@@ -308,6 +317,7 @@ fn exchange_pipeline_identity(
     stream: &mut std::net::TcpStream,
     format: u8,
     local: &[u8],
+    manifest: &std::path::Path,
     limit: std::time::Duration,
 ) -> Result<()> {
     use std::io::{Read, Write};
@@ -330,14 +340,72 @@ fn exchange_pipeline_identity(
     stream.write_all(local).map_err(io)?;
     let mut peer = vec![0u8; local.len()];
     stream.read_exact(&mut peer).map_err(io)?;
+    let unset = |row: &[u8]| row.iter().all(|byte| *byte == 0);
+    let mut one_sided = None;
     for (i, name) in pipeline_identity_names(format).iter().enumerate() {
         let span = i * 64..(i + 1) * 64;
         if local[span.clone()] != peer[span.clone()] {
+            // Every other row must still agree before any manifest moves.
+            if format == 2 && *name == MANIFEST_ROW && unset(&local[span.clone()]) != unset(&peer[span.clone()]) {
+                one_sided = Some(span);
+                continue;
+            }
             let local_value = pipeline_settings::describe(name, &local[span.clone()]);
             let peer_value = pipeline_settings::describe(name, &peer[span]);
             return Err(format!("pipeline content identity mismatch: {name} local={local_value}, peer={peer_value}; refusing startup"));
         }
     }
+    match one_sided {
+        Some(span) if unset(&local[span.clone()]) => take_manifest(stream, manifest, &peer[span]),
+        Some(span) => share_manifest(stream, manifest, &local[span]),
+        None => Ok(()),
+    }
+}
+
+/// An earlier start can leave a manifest on one rank only: rank 0 of a start
+/// with no manifest path writes its receipt into the checkpoint, and a rank
+/// can hold a publisher's list that the other rank does not. Such a rank
+/// sends its manifest, so both ranks start with the same one. The other rank
+/// hashes its own weight files against it during the load and refuses on a
+/// difference, so stale rows stop that rank; they never pass as a result.
+/// The rank that sends waits for the reply, so a refusal comes before any load.
+fn share_manifest(stream: &mut std::net::TcpStream, manifest: &std::path::Path, digest: &[u8]) -> Result<()> {
+    use std::io::{Read, Write};
+    let io = |e| format!("pipeline manifest handoff: {e}; refusing startup");
+    let bytes = engine_model::safetensors::read_bounded(manifest, engine_model::flash::manifest::MANIFEST_BYTES)
+        .map_err(|e| format!("pipeline manifest handoff: {e}; refusing startup"))?;
+    if sha256::digest(&bytes).as_bytes() != digest {
+        return Err("pipeline manifest changed during the identity exchange; refusing startup".into());
+    }
+    stream.write_all(&(bytes.len() as u32).to_le_bytes()).map_err(io)?;
+    stream.write_all(&bytes).map_err(io)?;
+    let mut saved = [0u8; 1];
+    stream.read_exact(&mut saved).map_err(io)?;
+    eprintln!("pipeline manifest set on the peer: {}", pipeline_settings::describe(MANIFEST_ROW, digest));
+    Ok(())
+}
+
+/// The peer's side of `share_manifest`: the bytes must have the digest the
+/// peer's row gave, and they go to this rank's own manifest path.
+fn take_manifest(stream: &mut std::net::TcpStream, manifest: &std::path::Path, digest: &[u8]) -> Result<()> {
+    use std::io::{Read, Write};
+    let io = |e| format!("pipeline manifest handoff: {e}; refusing startup");
+    let mut length = [0u8; 4];
+    stream.read_exact(&mut length).map_err(io)?;
+    let length = u32::from_le_bytes(length) as usize;
+    if length > engine_model::flash::manifest::MANIFEST_BYTES {
+        return Err("pipeline manifest from the peer is too large; refusing startup".into());
+    }
+    let mut bytes = vec![0u8; length];
+    stream.read_exact(&mut bytes).map_err(io)?;
+    if sha256::digest(&bytes).as_bytes() != digest {
+        return Err("pipeline manifest from the peer differs from its SHA-256; refusing startup".into());
+    }
+    engine_model::flash::manifest::adopt(manifest, &bytes)
+        .map_err(|e| format!("pipeline manifest from the peer cannot be saved: {e}; refusing startup"))?;
+    stream.write_all(&[1]).map_err(io)?;
+    eprintln!("pipeline manifest set from the peer: {}; this rank checks its weight files against it during the load",
+        pipeline_settings::describe(MANIFEST_ROW, digest));
     Ok(())
 }
 
@@ -400,7 +468,7 @@ pub fn verify_artifacts_with_ab(
 
 #[cfg(test)]
 mod identity_tests {
-    use std::{io::{Read, Write}, net::{TcpListener, TcpStream}, time::Duration};
+    use std::{io::{Read, Write}, net::{TcpListener, TcpStream}, path::Path, time::Duration};
 
     fn experiments() -> spark_serve::mtp_batch::Experiments {
         spark_serve::mtp_batch::Experiments::startup_with(2, true, |_| Ok(None)).unwrap()
@@ -416,8 +484,8 @@ mod identity_tests {
     fn exchange(a_format: u8, a: Vec<u8>, b_format: u8, b: Vec<u8>) -> (super::Result<()>, super::Result<()>) {
         let (mut front, mut back) = pair();
         std::thread::scope(|scope| {
-            let peer = scope.spawn(|| super::exchange_pipeline_identity(&mut back, b_format, &b, Duration::from_secs(2)));
-            let result = super::exchange_pipeline_identity(&mut front, a_format, &a, Duration::from_secs(2));
+            let peer = scope.spawn(|| super::exchange_pipeline_identity(&mut back, b_format, &b, Path::new("unused"), Duration::from_secs(2)));
+            let result = super::exchange_pipeline_identity(&mut front, a_format, &a, Path::new("unused"), Duration::from_secs(2));
             (result, peer.join().unwrap())
         })
     }
@@ -558,7 +626,7 @@ mod identity_tests {
     fn pipeline_identity_stalled_peer_times_out_without_serving() {
         let (mut front, _back) = pair();
         let local = vec![0; super::pipeline_identity_names(2).len() * 64];
-        let error = super::exchange_pipeline_identity(&mut front, 2, &local, Duration::from_millis(30)).unwrap_err();
+        let error = super::exchange_pipeline_identity(&mut front, 2, &local, Path::new("unused"), Duration::from_millis(30)).unwrap_err();
         assert!(error.contains("pipeline artifact handshake") && error.contains("refusing startup"), "{error}");
     }
 
@@ -581,12 +649,12 @@ mod identity_tests {
                     workers.push(std::thread::spawn(move || -> super::Result<()> {
                         // Same downstream-first ordering as run_back, before weight load.
                         if let Some(mut outgoing) = outgoing {
-                            super::exchange_pipeline_identity(&mut outgoing, 2, &local, Duration::from_secs(2))?;
+                            super::exchange_pipeline_identity(&mut outgoing, 2, &local, Path::new("unused"), Duration::from_secs(2))?;
                         }
-                        super::exchange_pipeline_identity(&mut incoming, 2, &local, Duration::from_secs(2))
+                        super::exchange_pipeline_identity(&mut incoming, 2, &local, Path::new("unused"), Duration::from_secs(2))
                     }));
                 }
-                let front_result = super::exchange_pipeline_identity(&mut front, 2, &local, Duration::from_secs(2));
+                let front_result = super::exchange_pipeline_identity(&mut front, 2, &local, Path::new("unused"), Duration::from_secs(2));
                 let results: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
                 assert_eq!(front_result.is_err(), mismatch, "{ranks} ranks: {front_result:?}");
                 for result in results { assert_eq!(result.is_err(), mismatch, "{ranks} ranks: {result:?}"); }
@@ -605,7 +673,7 @@ mod identity_tests {
                 back.write_all(&header).unwrap();
                 // A matching header followed by EOF is never successful agreement.
             });
-            let result = super::exchange_pipeline_identity(&mut front, 2, &vec![0; 448], Duration::from_secs(2));
+            let result = super::exchange_pipeline_identity(&mut front, 2, &vec![0; 448], Path::new("unused"), Duration::from_secs(2));
             assert!(result.unwrap_err().contains("refusing startup"));
             peer.join().unwrap();
         }
@@ -638,6 +706,247 @@ mod identity_tests {
             let (front, back) = exchange(2, a, 2, b);
             assert!(front.is_err() && back.is_err());
         }
+    }
+
+    /// One rank's checkpoint folder of a chosen weight format, removed at the end of a test.
+    struct Folder(std::path::PathBuf);
+    impl Drop for Folder {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+    impl std::ops::Deref for Folder {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path { &self.0 }
+    }
+    const FP8_QUANTIZATION: &str = r#"{"quant_method":"fp8","activation_scheme":"dynamic","weight_per_tensor":false,"act_per_tensor":false,"weight_block_size":[128,128]}"#;
+    const MIXED_QUANTIZATION: &str = r#"{"quant_method":"modelopt","quant_algo":"MIXED_PRECISION","kv_cache_quant_algo":null,"ignore":[],"quantized_layers":{"model.language_model.layers.0.mlp.experts":{"quant_algo":"NVFP4","group_size":16,"weight_scale_encoding":"csf"},"model.language_model.layers.0.self_attn.q_proj":{"quant_algo":"MXFP8","group_size":32}}}"#;
+    fn checkpoint(quantization: &str, weights: &[u8]) -> Folder {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!("pipeline-checkpoint-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        std::fs::create_dir(&root).unwrap();
+        let folder = Folder(root.canonicalize().unwrap());
+        let layers = (0..48).map(|i| if i % 4 == 3 { "\"full_attention\"" } else { "\"linear_attention\"" }).collect::<Vec<_>>().join(",");
+        std::fs::write(folder.join("config.json"), format!(r#"{{"model_type":"qwen4_exp","text_config":{{
+            "model_type":"qwen4_exp_text","hidden_act":"silu","output_gate_type":"sigmoid",
+            "mamba_ssm_dtype":"float32","attention_bias":false,"tie_word_embeddings":false,
+            "mtp_use_dedicated_embeddings":false,"hidden_size":2560,"num_hidden_layers":48,
+            "num_attention_heads":24,"num_key_value_heads":2,"head_dim":256,
+            "linear_num_key_heads":16,"linear_num_value_heads":48,"linear_key_head_dim":128,
+            "linear_value_head_dim":128,"linear_conv_kernel_dim":4,"num_experts":512,
+            "num_experts_per_tok":10,"moe_intermediate_size":640,"shared_expert_intermediate_size":640,
+            "hc_count":4,"hc_lowrank":320,"vocab_size":248320,"max_position_embeddings":262144,
+            "eos_token_id":248044,"rms_norm_eps":0.000001,"partial_rotary_factor":0.25,
+            "indexer_n_heads":4,"indexer_kv_heads":1,"indexer_head_dim":128,"indexer_budget":2048,
+            "indexer_compress_ratio":4,"ple_layer_ids":[2],"ngram_size":3,"heads_per_ngram":8,
+            "ple_embed_dim":2560,"ple_conv_kernel_size":4,"split_ngram_parts":128,
+            "mtp_num_hidden_layers":1,"layer_types":[{layers}],
+            "rope_parameters":{{"rope_type":"default","mrope_interleaved":true,"rope_theta":10000000,
+                "partial_rotary_factor":0.25,"mrope_section":[11,11,10]}},
+            "mtp":{{"num_hidden_layers":1,"layer_types":["full_attention"],"hybrid":true,
+                "mtp_use_hidden_state_from_layer":null,"rope_theta":10000000}}
+            }},"quantization_config":{quantization}}}"#)).unwrap();
+        std::fs::write(folder.join("model.safetensors"), weights).unwrap();
+        folder
+    }
+
+    /// What rank 0 does in the background of a start with no list path set, and rank 1 never does.
+    fn rank_zero_receipt(root: &std::path::Path) {
+        engine_model::flash::manifest::ReceiptPlan::open(root).unwrap().finish().unwrap();
+    }
+
+    /// Both ranks run the identity step of a start, as next_batched_service.rs calls it.
+    fn start(rank0: &std::path::Path, rank1: &std::path::Path) -> (super::Result<()>, super::Result<()>) {
+        let (mut front, mut back) = pair();
+        std::thread::scope(|scope| {
+            let peer = scope.spawn(|| super::verify_pipeline_artifacts(&mut back, c"ptx", rank1, None, experiments(), true, Duration::from_secs(5)));
+            let result = super::verify_pipeline_artifacts(&mut front, c"ptx", rank0, None, experiments(), true, Duration::from_secs(5));
+            (result, peer.join().unwrap())
+        })
+    }
+
+    fn list(root: &std::path::Path) -> Option<Vec<u8>> { std::fs::read(root.join("manifest.sha256")).ok() }
+
+    #[test]
+    fn fp4_local_starts_after_an_fp8_run_with_the_list_on_both_ranks() {
+        let (fp4, fp8) = ([checkpoint(MIXED_QUANTIZATION, b"fp4"), checkpoint(MIXED_QUANTIZATION, b"fp4")],
+            [checkpoint(FP8_QUANTIZATION, b"fp8"), checkpoint(FP8_QUANTIZATION, b"fp8")]);
+        // CARD 1 of the rented pairs: a fresh pair, no list on either rank, the identity passes.
+        let (front, back) = start(&fp4[0], &fp4[1]);
+        assert!(front.is_ok() && back.is_ok(), "{front:?} {back:?}");
+        assert_eq!((list(&fp4[0]), list(&fp4[1])), (None, None));
+        rank_zero_receipt(&fp4[0]);
+        // The FP8 run: the ring's receipt goes in its own checkpoint, on rank 0 only.
+        let (front, back) = start(&fp8[0], &fp8[1]);
+        assert!(front.is_ok() && back.is_ok(), "{front:?} {back:?}");
+        rank_zero_receipt(&fp8[0]);
+        // The later FP4-Local start.
+        let (front, back) = start(&fp4[0], &fp4[1]);
+        assert!(front.is_ok() && back.is_ok(), "{front:?} {back:?}");
+        assert!(list(&fp4[0]).is_some());
+        assert_eq!(list(&fp4[0]), list(&fp4[1]));
+    }
+
+    #[test]
+    fn a_second_fp4_local_start_needs_no_fp8_run_to_fail_or_to_pass() {
+        let fp4 = [checkpoint(MIXED_QUANTIZATION, b"fp4"), checkpoint(MIXED_QUANTIZATION, b"fp4")];
+        rank_zero_receipt(&fp4[0]);
+        let (front, back) = start(&fp4[0], &fp4[1]);
+        assert!(front.is_ok() && back.is_ok(), "{front:?} {back:?}");
+        assert_eq!(list(&fp4[0]), list(&fp4[1]));
+        // The same list on both ranks: the next start compares and sends nothing.
+        let (front, back) = start(&fp4[0], &fp4[1]);
+        assert!(front.is_ok() && back.is_ok(), "{front:?} {back:?}");
+    }
+
+    #[test]
+    fn rank_zero_takes_the_list_when_only_rank_one_holds_it() {
+        let fp4 = [checkpoint(MIXED_QUANTIZATION, b"fp4"), checkpoint(MIXED_QUANTIZATION, b"fp4")];
+        rank_zero_receipt(&fp4[1]);
+        let (front, back) = start(&fp4[0], &fp4[1]);
+        assert!(front.is_ok() && back.is_ok(), "{front:?} {back:?}");
+        assert!(list(&fp4[1]).is_some());
+        assert_eq!(list(&fp4[0]), list(&fp4[1]));
+    }
+
+    #[test]
+    fn fp8_starts_after_fp4_local_and_reads_no_list() {
+        let (fp4, fp8) = ([checkpoint(MIXED_QUANTIZATION, b"fp4"), checkpoint(MIXED_QUANTIZATION, b"fp4")],
+            [checkpoint(FP8_QUANTIZATION, b"fp8"), checkpoint(FP8_QUANTIZATION, b"fp8")]);
+        rank_zero_receipt(&fp4[0]);
+        // One rank holds an FP8 receipt: no row reads it, so nothing moves and the start passes.
+        rank_zero_receipt(&fp8[0]);
+        let (front, back) = start(&fp8[0], &fp8[1]);
+        assert!(front.is_ok() && back.is_ok(), "{front:?} {back:?}");
+        assert_eq!(list(&fp8[1]), None);
+        // Also from a checkpoint folder with a stale list that is not the FP8 receipt.
+        std::fs::write(fp8[1].join("manifest.sha256"), b"not a list").unwrap();
+        let (front, back) = start(&fp8[0], &fp8[1]);
+        assert!(front.is_ok() && back.is_ok(), "{front:?} {back:?}");
+        assert_eq!(list(&fp4[1]), None);
+    }
+
+    /// Rows of one rank's start with a chosen manifest row, for the cases a real list cannot reach.
+    fn rows(manifest: Option<&[u8]>) -> Vec<u8> {
+        let names = super::pipeline_identity_names(2);
+        let mut local = vec![b'a'; names.len() * 64];
+        let at = names.iter().position(|name| *name == super::MANIFEST_ROW).unwrap();
+        local[at * 64..(at + 1) * 64].copy_from_slice(&manifest.map_or([0; 64], |bytes| {
+            super::sha256::digest(bytes).into_bytes().try_into().unwrap()
+        }));
+        local
+    }
+
+    fn link(front: (&[u8], &Path), back: (&[u8], &Path)) -> (super::Result<()>, super::Result<()>) {
+        let (mut near, far) = pair();
+        std::thread::scope(|scope| {
+            let peer = scope.spawn(move || { let mut far = far; super::exchange_pipeline_identity(&mut far, 2, back.0, back.1, Duration::from_secs(5)) });
+            let result = super::exchange_pipeline_identity(&mut near, 2, front.0, front.1, Duration::from_secs(5));
+            (result, peer.join().unwrap())
+        })
+    }
+
+    fn valid_list(name: &str) -> Vec<u8> { format!("{}  {name}\n", "a".repeat(64)).into_bytes() }
+
+    #[test]
+    fn a_rank_with_a_named_list_path_takes_the_list_there_and_leaves_the_checkpoint_alone() {
+        // The vade route: the start names a list in the state folder of each rank.
+        let (rank0, rank1) = (checkpoint(MIXED_QUANTIZATION, b"fp4"), checkpoint(MIXED_QUANTIZATION, b"fp4"));
+        let list = valid_list("model.safetensors");
+        let (sent, taken) = (rank0.join("state-list"), rank1.join("state-list"));
+        std::fs::write(&sent, &list).unwrap();
+        let (front, back) = link((&rows(Some(&list)), &sent), (&rows(None), &taken));
+        assert!(front.is_ok() && back.is_ok(), "{front:?} {back:?}");
+        assert_eq!(std::fs::read(&taken).unwrap(), list);
+        assert!(!rank1.join("manifest.sha256").exists());
+    }
+
+    #[test]
+    fn two_different_lists_and_any_other_row_still_refuse_and_nothing_moves() {
+        let (rank0, rank1) = (checkpoint(MIXED_QUANTIZATION, b"fp4"), checkpoint(MIXED_QUANTIZATION, b"fp4"));
+        let (one, other) = (valid_list("model.safetensors"), valid_list("other.safetensors"));
+        let (sent, taken) = (rank0.join("list"), rank1.join("list"));
+        std::fs::write(&sent, &one).unwrap();
+        std::fs::write(&taken, &other).unwrap();
+        let (front, back) = link((&rows(Some(&one)), &sent), (&rows(Some(&other)), &taken));
+        assert!(front.unwrap_err().contains("mismatch: NVFP4 SHA-256 manifest local=sha256:"));
+        assert!(back.unwrap_err().contains("mismatch: NVFP4 SHA-256 manifest local=sha256:"));
+        assert_eq!(std::fs::read(&taken).unwrap(), other);
+        // One rank holds the list, and a config row differs: that row refuses, no list moves.
+        std::fs::remove_file(&taken).unwrap();
+        let (mut changed, unset) = (rows(None), rows(Some(&one)));
+        changed[2 * 64] = b'b';
+        let (front, back) = link((&unset, &sent), (&changed, &taken));
+        assert!(front.unwrap_err().contains("mismatch: config.json"));
+        assert!(back.unwrap_err().contains("mismatch: config.json"));
+        assert!(!taken.exists());
+    }
+
+    #[test]
+    fn a_list_that_fails_a_check_stops_both_ranks_before_any_load() {
+        let (rank0, rank1) = (checkpoint(MIXED_QUANTIZATION, b"fp4"), checkpoint(MIXED_QUANTIZATION, b"fp4"));
+        let sent = rank0.join("list");
+        // Not rows of a list: the taking rank refuses, and the sending rank sees no reply.
+        let bad = b"not a list".to_vec();
+        std::fs::write(&sent, &bad).unwrap();
+        let taken = rank1.join("list");
+        let (front, back) = link((&rows(Some(&bad)), &sent), (&rows(None), &taken));
+        assert!(front.unwrap_err().contains("pipeline manifest handoff"));
+        assert!(back.unwrap_err().contains("cannot be saved"));
+        assert!(!taken.exists());
+        // A folder that does not exist has the same result.
+        let list = valid_list("model.safetensors");
+        std::fs::write(&sent, &list).unwrap();
+        let (front, back) = link((&rows(Some(&list)), &sent), (&rows(None), &rank1.join("no-folder/list")));
+        assert!(front.unwrap_err().contains("pipeline manifest handoff"));
+        assert!(back.unwrap_err().contains("cannot be saved"));
+        // The file on disk no longer has the digest of the row.
+        let (front, back) = link((&rows(Some(b"before")), &sent), (&rows(None), &taken));
+        assert!(front.unwrap_err().contains("changed during the identity exchange"));
+        assert!(back.is_err());
+        assert!(!taken.exists());
+    }
+
+    #[test]
+    fn a_taking_rank_refuses_bytes_that_do_not_have_the_digest_of_the_row() {
+        let rank1 = checkpoint(MIXED_QUANTIZATION, b"fp4");
+        let (taken, list) = (rank1.join("list"), valid_list("model.safetensors"));
+        let row = super::sha256::digest(&list).into_bytes();
+        for (length, body) in [(list.len() as u32, valid_list("other.safetensors")), (1 << 21, Vec::new())] {
+            let (mut near, mut far) = pair();
+            near.write_all(&length.to_le_bytes()).unwrap();
+            near.write_all(&body).unwrap();
+            far.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let error = super::take_manifest(&mut far, &taken, &row).unwrap_err();
+            assert!(error.contains("differs from its SHA-256") || error.contains("too large"), "{error}");
+            assert!(!taken.exists());
+        }
+    }
+
+    #[test]
+    fn a_chain_moves_a_list_over_each_link_and_two_lists_meet_on_a_link() {
+        // Tail link first, as run_back does. The front holds the list: the next rank takes it.
+        let ranks = [checkpoint(MIXED_QUANTIZATION, b"fp4"), checkpoint(MIXED_QUANTIZATION, b"fp4"), checkpoint(MIXED_QUANTIZATION, b"fp4")];
+        rank_zero_receipt(&ranks[0]);
+        for (a, b) in [(1, 2), (0, 1)] {
+            let (front, back) = start(&ranks[a], &ranks[b]);
+            assert!(front.is_ok() && back.is_ok(), "{front:?} {back:?}");
+        }
+        assert_eq!(list(&ranks[0]), list(&ranks[1]));
+        assert_eq!(list(&ranks[2]), None);
+        // The next start reaches the next rank.
+        for (a, b) in [(1, 2), (0, 1)] {
+            let (front, back) = start(&ranks[a], &ranks[b]);
+            assert!(front.is_ok() && back.is_ok(), "{front:?} {back:?}");
+        }
+        assert_eq!(list(&ranks[0]), list(&ranks[2]));
+        // The tail holds another list: its link gives it to the middle rank, and the front refuses it.
+        let ranks = [checkpoint(MIXED_QUANTIZATION, b"one"), checkpoint(MIXED_QUANTIZATION, b"one"), checkpoint(MIXED_QUANTIZATION, b"two")];
+        rank_zero_receipt(&ranks[0]);
+        rank_zero_receipt(&ranks[2]);
+        let (front, back) = start(&ranks[1], &ranks[2]);
+        assert!(front.is_ok() && back.is_ok(), "{front:?} {back:?}");
+        let (front, back) = start(&ranks[0], &ranks[1]);
+        assert!(front.unwrap_err().contains("mismatch: NVFP4 SHA-256 manifest"));
+        assert!(back.unwrap_err().contains("mismatch: NVFP4 SHA-256 manifest"));
     }
 
     #[test]

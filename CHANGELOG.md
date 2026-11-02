@@ -343,6 +343,11 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 
 ### Engine
 
+- A second FP4-Local start on two Sparks no longer stops at `NVFP4 SHA-256 manifest ... peer=unset`.
+  - Before, rank 0 of a start with no list path wrote a checksum list into the checkpoint, and rank 1 never did. The next start saw two different histories and refused.
+  - Now the rank that has the list sends it. The other rank saves it and checks its own weight files against it, one time, before the load.
+  - Two different lists still refuse the start. The path, the token IDs and FP8 have no change.
+
 - The prefix cache now keeps a finished prompt when the memory that the engine planned its sessions on has room for the copy.
   - Before, the check also needed the same room in the free memory that CUDA reports.
   - That number leaves out the Linux page cache.

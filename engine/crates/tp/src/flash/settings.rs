@@ -655,6 +655,22 @@ fn the_engine_chooses_the_pipeline_service_from_peers_and_tensor_map() {
 
 #[cfg(test)]
 #[test]
+fn each_start_takes_its_path_from_its_own_checkpoint_in_any_order() {
+    // The path is a function of this start's checkpoint and arguments. The arguments have no
+    // room for an earlier run, so FP4-Local and FP8 on one pair keep their paths in both orders.
+    use spark_engine::flash_tp_switch::Path;
+    let choose = |mixed: bool| {
+        let tp = tensor_split(mixed, PIPELINE_RANKS, false, true, || true).unwrap();
+        let (pipeline, distributed) = pipeline_recipe(mixed, 0, PIPELINE_RANKS, false);
+        chosen_path(distributed, mixed, tp, pipeline, PIPELINE_RANKS)
+    };
+    for mixed in [true, false, true, false, false, true, true] {
+        assert_eq!(choose(mixed), Some(if mixed { Path::TENSOR_SPLIT } else { Path::RING }), "{mixed}");
+    }
+}
+
+#[cfg(test)]
+#[test]
 fn rank_mtp_adapts_only_the_default_depth() {
     // Unset: the resident ceiling, chosen per cycle; VADE_FLASH_MTP_DEPTH moves the ceiling.
     assert_eq!(rank_mtp(2, false, true, None), Ok((RANK_MTP_DEPTH, true)));

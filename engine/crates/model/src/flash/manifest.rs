@@ -72,11 +72,31 @@ fn verify_files(checkpoint: &Checkpoint, root: &Path, manifest: &Path, full: boo
     Ok(Verification { files: hashes.len(), bytes, hashed_bytes, reused_files, manifest_sha256, root })
 }
 
+/// The largest SHA-256 manifest a rank reads or takes from a peer.
+pub const MANIFEST_BYTES: usize = 1024 * 1024;
+
+/// Save a mixed checkpoint's manifest that another rank sent, at this rank's
+/// manifest path. Rows are checked first. An existing file is never replaced:
+/// it must hold the same bytes. The load then hashes this rank's own files
+/// against the manifest, so the rows are an expectation, never a result.
+pub fn adopt(manifest: &Path, bytes: &[u8]) -> Result<()> {
+    parse_manifest(bytes, true)?;
+    publish_file(manifest, bytes, false)?;
+    if read_manifest(manifest, true)?.1 != sha256::digest(bytes) {
+        return Err(invalid("checkpoint manifest changed while a peer's copy was saved"));
+    }
+    Ok(())
+}
+
 fn read_manifest(manifest: &Path, mixed: bool) -> Result<(BTreeMap<String, String>, String)> {
-    let bytes = safetensors::read_bounded(manifest, 1024 * 1024)
+    let bytes = safetensors::read_bounded(manifest, MANIFEST_BYTES)
         .map_err(|e| invalid(format!("cannot read SHA-256 manifest: {e}")))?;
+    parse_manifest(&bytes, mixed)
+}
+
+fn parse_manifest(bytes: &[u8], mixed: bool) -> Result<(BTreeMap<String, String>, String)> {
     let text =
-        std::str::from_utf8(&bytes).map_err(|_| invalid("SHA-256 manifest is not UTF-8"))?;
+        std::str::from_utf8(bytes).map_err(|_| invalid("SHA-256 manifest is not UTF-8"))?;
     let mut hashes = BTreeMap::new();
     for line in text.lines().filter(|line| !line.is_empty()) {
         if line.len() < 67
@@ -104,7 +124,7 @@ fn read_manifest(manifest: &Path, mixed: bool) -> Result<(BTreeMap<String, Strin
             return Err(invalid("unsafe or duplicate SHA-256 manifest filename"));
         }
     }
-    Ok((hashes, sha256::digest(&bytes)))
+    Ok((hashes, sha256::digest(bytes)))
 }
 type Hashes = (BTreeMap<String, String>, u64, u64, usize);
 fn hash_files(root: &Path, hashes: &BTreeMap<String, String>, full: bool, strict: bool) -> Result<Hashes> {
@@ -748,6 +768,31 @@ mod tests {
         assert!(verify(&legacy, &f.0, &path).is_err());
         fs::remove_file(path).unwrap();
         assert!(verify(&mixed, &f.0, &f.0.join("manifest.sha256")).is_err());
+    }
+
+    #[test]
+    fn a_list_from_a_peer_is_an_expectation_this_rank_checks_against_its_own_files() {
+        let (from, to) = (Fixture::new(), Fixture::new());
+        let c = to.checkpoint(true);
+        let bytes = fs::read(from.manifest(false)).unwrap();
+        let path = to.0.join("manifest.sha256");
+        adopt(&path, &bytes).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        // The same list again leaves the file as it is; another list never replaces it.
+        adopt(&path, &bytes).unwrap();
+        let other = format!("{}  a.safetensors\n{}  {INDEX}\n", "0".repeat(64), "1".repeat(64));
+        assert!(adopt(&path, other.as_bytes()).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        // Equal files pass the strict check, and a changed file on this rank refuses.
+        assert_eq!(verify_cached(&c, &to.0, &path).unwrap().manifest_sha256, sha256::digest(&bytes));
+        fs::write(to.0.join("a.safetensors"), b"corrupt").unwrap();
+        assert!(verify_cached(&c, &to.0, &path).err().unwrap().to_string().contains("SHA-256 mismatch"));
+        // Rows that a load cannot read never reach the disk.
+        let path = to.0.join("taken.sha256");
+        for bad in [&b"not a list"[..], &b"\xff"[..], format!("{}  ../a\n", "0".repeat(64)).as_bytes()] {
+            assert!(adopt(&path, bad).is_err());
+            assert!(!path.exists());
+        }
     }
 
     #[test]
