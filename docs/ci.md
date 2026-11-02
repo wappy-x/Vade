@@ -76,6 +76,14 @@ cargo +1.99.0 check --offline --locked --all-targets --manifest-path harness/Car
 
 These workspaces need no GPU and no kernel build. The public commands add `--locked`, so the committed lockfiles do not change.
 
+Run `sh scripts/test-install.sh` from the repository root to test the installer
+without a GPU or network. It uses fake host tools in a temporary folder. It
+sets `HOME` and `PREFIX` to folders there. It tests a pipe and a checkout with
+`sh`, `bash --posix`, and `dash`. If `dash` is absent, it uses `zsh --emulate sh`.
+It also checks that a half download runs nothing. Each case prints `PASS` or
+`FAIL`. Default installs use the source fallback. The script removes its
+temporary folder when it exits.
+
 A repeated run can find an old temporary fixture. If it does, use a new system temporary directory. Keep its path short and outside hidden directories, because sandbox tests can refuse fixtures under a hidden directory. Keep the failed log too.
 
 From the repository root, also run the repository checks and the separate benchmark tests:
