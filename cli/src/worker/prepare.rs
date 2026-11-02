@@ -24,14 +24,30 @@ fn verify_local(model: &Path, worker: &Path) -> Result<Fields, String> {
     let plan = engine_model::flash::manifest::ReceiptPlan::open(&model).map_err(|e| e.to_string())?;
     if plan.format != engine_model::flash::WeightFormat::Nvfp4 { return Ok(Fields::new()); }
     let began = Instant::now();
+    // The record beside the model saves the hash of a file checked before. A stamp
+    // counts only for the same hash as the list, so a mismatch still stops here.
+    let _ = super::seed::seed(&model, &cache);
+    let rows = listed_rows(&manifest)?;
+    let before = crate::pull::snapshot(&model, &rows);
+    let known = crate::pull::verified(&model);
     let receipt = match plan.cached().map_err(|e| e.to_string())? {
         Some(receipt) => receipt,
         None => plan.finish().map_err(|e| format!("Checkpoint check failed: {e}. Restore the file from the publisher, then retry."))?,
     };
     let listed = verify_listed(&model, &manifest)?;
+    // Every listed file matched, so the next install, in any Vade home, reuses this.
+    if rows.iter().any(|(name, sha256)| known.get(name).is_none_or(|file| file.sha256 != *sha256)) {
+        crate::pull::save(&model, "vade install", before);
+    }
     Ok(fields(&[("model_verify_ms", &format!("{:.3}", began.elapsed().as_secs_f64() * 1000.0)),
         ("model_hashed_bytes", &(receipt.hashed_bytes + listed).to_string()),
         ("model_reused_files", &receipt.reused_files.to_string())]))
+}
+
+/// The `(name, sha256)` rows of a checksum list.
+fn listed_rows(manifest: &Path) -> Result<Vec<(String, String)>, String> {
+    let rows = std::fs::read_to_string(manifest).map_err(|_| "Cannot read the private checkpoint receipt; retry.")?;
+    Ok(rows.lines().filter_map(|row| Some((row.get(66..)?.to_owned(), row.get(..64)?.to_ascii_lowercase()))).collect())
 }
 
 /// The receipt covers the index and the shards it names. Hash every other
@@ -130,7 +146,7 @@ fn ptx_warmup_command(root: &Path, engine: &Path, ptx: &Path, ptx_hash: &str, mo
 mod tests {
     use super::{Fields, fields, persistent_cuda_cache, ptx_warmup_command};
     use crate::worker::handle;
-    use std::{fs, path::Path};
+    use std::{fs, path::Path, time::Duration};
 
     #[test]
     fn checkpoint_check_refuses_receipts_outside_the_private_state() {
@@ -143,6 +159,59 @@ mod tests {
         let error = super::verify_local(&root.join("model"), &root.join("worker")).unwrap_err();
         assert!(error.contains("private receipt"), "{error}");
         assert!(!root.join("cache").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// One Prepare in the Vade state folder that is the current folder. The child
+    /// process sets the receipt and cache paths, as the launcher does.
+    #[test]
+    fn prepare_child() {
+        let state = std::env::current_dir().unwrap();
+        if !state.join("model-manifest.sha256").exists() { return; }
+        match super::verify_local(&state.join("../model"), &state.join("worker")) {
+            Ok(reply) => println!("hashed={} reused={}", reply["model_hashed_bytes"], reply["model_reused_files"]),
+            Err(error) => println!("refused: {error}"),
+        }
+    }
+
+    #[test]
+    fn a_new_vade_home_reuses_the_record_beside_the_model_and_the_list_still_rules() {
+        use crate::runner::Runner;
+        let _guard = crate::runner::process_test_lock();
+        let root = fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("vade-prepare-{}", crate::text::random_hex(8).unwrap()));
+        let model = root.join("model");
+        fs::create_dir_all(&model).unwrap();
+        fs::write(model.join("config.json"), crate::launch::test_mixed_config(32768)).unwrap();
+        fs::write(model.join("tokenizer.json"), "{}").unwrap();
+        fs::write(model.join("model.safetensors.index.json"), r#"{"metadata":{},"weight_map":{"a":"a.safetensors"}}"#).unwrap();
+        fs::write(model.join("a.safetensors"), [7; 64]).unwrap();
+        let hash = |name: &str| crate::sha256::digest_reader(fs::File::open(model.join(name)).unwrap()).unwrap();
+        let list: String = ["a.safetensors", "config.json", "model.safetensors.index.json", "tokenizer.json"].map(|name| format!("{}  {name}\n", hash(name))).concat();
+        let prepare = |home: &str| {
+            let state = root.join(home);
+            crate::text::private_dir(&state).unwrap();
+            fs::write(state.join("model-manifest.sha256"), &list).unwrap();
+            let mut child = crate::runner::Exec::new("Prepare fixture", std::env::current_exe().unwrap().to_str().unwrap(),
+                vec!["--exact".into(), "worker::prepare::tests::prepare_child".into(), "--nocapture".into()]);
+            child.env.insert("XDG_CACHE_HOME".into(), state.join("cache").to_string_lossy().into_owned());
+            child.env.insert("FLASH_NVFP4_MANIFEST".into(), state.join("model-manifest.sha256").to_string_lossy().into_owned());
+            child.cwd = Some(state);
+            child.cancellable = false;
+            crate::runner::SystemRunner { dry: false }.run(&child).unwrap().stdout
+        };
+        let small: u64 = ["config.json", "tokenizer.json"].iter().map(|name| fs::metadata(model.join(name)).unwrap().len()).sum();
+        // The first check hashes the weights and leaves the record beside them.
+        let first = prepare("first");
+        assert!(first.contains(&format!("hashed={} reused=0", 64 + small + fs::metadata(model.join("model.safetensors.index.json")).unwrap().len())), "{first}");
+        assert!(fs::read_to_string(model.join(crate::pull::RECORD)).unwrap().starts_with("# verified by vade install 20"));
+        // A new home has no stamps, and it hashes no weights: only the two small listed files.
+        let second = prepare("second");
+        assert!(second.contains(&format!("hashed={small} reused=2")), "{second}");
+        // Other bytes with a new identity get no reuse, and the list stops them.
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(model.join("a.safetensors"), [8; 64]).unwrap();
+        let third = prepare("third");
+        assert!(third.contains("refused:") && third.contains("SHA-256 mismatch"), "{third}");
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -102,7 +102,7 @@ fn cached_source_install_fetches_build_std_and_leaves_detect_and_kernels_to_vade
     assert!(stdout.contains("Install: fetching the Rust build-std files for the GPU kernels (none when cached).\n"), "{stdout}");
     // One next path: the model when it is missing, then up; no second install through vade setup.
     assert!(stdout.contains("1. If the model is not on this Spark yet, download and check it (102.26 GB):\n   vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300\n2. Start the engine:\n   vade up\n"), "{stdout}");
-    assert!(stdout.contains("\nvade launch starts the engine and opens chat.\n"), "{stdout}");
+    assert!(stdout.contains("2. Start the engine:\n   vade up\n\n") && !stdout.contains("vade launch"), "{stdout}");
     // The last thing on screen is the one line about PATH, and it prints once.
     assert!(stdout.ends_with(PATH_LINE), "{stdout}");
     assert_eq!(stdout.matches("export PATH=").count(), 1, "{stdout}");
@@ -848,7 +848,7 @@ fn every_numbered_step_names_pull_or_up_and_launch_is_never_a_step() {
     assert_eq!(commands.len(), 2, "{stdout}");
     assert!(commands[0].starts_with("vade pull ") && commands[1] == "vade up", "{stdout}");
     assert!(steps.iter().all(|line| !line.starts_with(|c: char| c.is_ascii_digit()) || !line.contains("launch")), "{stdout}");
-    assert_eq!(stdout.matches("vade launch").count(), 1, "{stdout}");
+    assert_eq!(stdout.matches("vade launch").count(), 0, "{stdout}");
 }
 
 #[test]

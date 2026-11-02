@@ -9,7 +9,7 @@ const STEP_DOWN: [u32; 4] = [32768, 16384, 8192, 4096];
 /// The engine's context refusal ("Requested size does not fit." whose Asked:
 /// line names `CONTEXT=<n>`), or None for any other stop. Weight and allocator
 /// refusals say "CONTEXT and OUTPUT not supplied"; a smaller context cannot help.
-pub(super) fn memory_refusal(log: &str) -> Option<String> {
+pub(crate) fn memory_refusal(log: &str) -> Option<String> {
     let lines: Vec<&str> = log.lines().collect();
     let start = lines.iter().position(|line| line.contains("Requested size does not fit."))?;
     let asked = lines.get(start + 1)?;

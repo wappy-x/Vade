@@ -477,7 +477,7 @@ vade up --sparks 2
 ```
 
 - **Expected output of `vade down`.** `Vade is stopped. The engines and the tunnel that vade started are closed.`, or `Vade is already stopped. Nothing to stop.`
-- **Expected output of `vade up`.** `Starting <model> on 2 Sparks over RDMA. Waiting for the model to load.`, then `<model> ready on 2 Sparks at http://127.0.0.1:18080: context 32768 tokens, drafting depth <depth>.`
+- **Expected output of `vade up`.** `Starting <model> on 2 Sparks over RDMA. Waiting for the model to load.`, then `<model> ready on 2 Sparks at http://127.0.0.1:18080: context 131072 tokens, drafting depth <depth>.`
 - **Exit code.** 0 for each command.
 - **Check.** `vade status --json` prints `"ready":true`.
 

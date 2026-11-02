@@ -18,7 +18,18 @@ impl<R: Runner> App<R> {
                 if options.mtp_explicit { recorded.mtp = options.mtp; recorded.mtp_explicit = true; }
                 recorded
             }
-            None => options.clone(),
+            None => {
+                let mut options = options.clone();
+                // A chain or a pair spreads the weights, so it has room for a long
+                // context. One Spark, as each plain replica is, keeps the short one.
+                if options.fp4_local && !options.supplied_options.contains("--context") {
+                    let sparks = if options.replicas { options.replica_sparks.max(1) } else { self.config.selected(&options)?.len() };
+                    // A running engine keeps its size, which may be the fallback.
+                    if let Some(session) = existing { options.context = session.context; }
+                    else if sparks > 1 { options.context = crate::cli::FP4_LONG_CONTEXT; }
+                }
+                options
+            }
         };
         let manifest = self.manifest()?;
         if !manifest.supports_output && !options.output_explicit {
@@ -89,7 +100,8 @@ impl<R: Runner> App<R> {
 
 pub(super) fn recorded_options(session: &Session) -> UpOptions {
     UpOptions {
-        supplied_options: Default::default(),
+        // The context of a running engine stays, also after a restart.
+        supplied_options: ["--context".to_owned()].into(),
         sparks: None,
         hosts: session
             .ranks

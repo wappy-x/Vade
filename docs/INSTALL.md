@@ -1406,7 +1406,8 @@ gets the same token IDs whichever replica answers.
 
 Replicas need no `fabric.*` entries or transport ports. Their tunnels use the
 local ports right after `local_port`. Each replica starts with the controller
-defaults (context 32768, output `min(context, 8192)`).
+defaults (context 32768, output `min(context, 8192)`). With `--pairs`, each
+pair is two Sparks, so its context is 131072.
 
 To verify the replicas, run `vade verify --url <replica address>` once for
 each one. With the default `local_port` of 18080, the first replica's tunnel
@@ -1444,6 +1445,11 @@ to a request. Drafting is multi-token prediction (MTP).
 - **From a controller, with `vade up --replicas N`.** Each replica has a
   context of 32768 tokens and an output of `min(context, 8192)` tokens.
   Drafting is on, and the engine selects the depth. The prefix cache is on.
+- **From a controller, on 2 or more Sparks in one group.** The context is
+  131072 tokens and the output is `min(context, 8192)` tokens. A longer context
+  leaves room for fewer chats at once: 2 on two Sparks, against 9 at a context
+  of 32768 (lab run on main `b4c7113`). If 131072 does not fit in memory,
+  `vade up` says so and starts with 32768.
 
 `--context 262144` requests a larger context on either route. For longer
 replies, add `--output 16384`. The engine still sets the chat count from

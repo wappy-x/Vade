@@ -222,8 +222,8 @@ fn fp4_context_rungs_reach_engine_argv() {
         (&["--chats", "4", "--context", "8192"][..], 1, "8192", "8192"),
         (&["--context", "262144"][..], 1, "262144", "8192"),
         (&["--chats", "1", "--context", "262144", "--output", "16384"][..], 1, "262144", "16384"),
-        (&["--sparks", "2"][..], 2, "32768", "8192"),
-        (&["--sparks", "2", "--chats", "1"][..], 2, "32768", "8192"),
+        (&["--sparks", "2"][..], 2, "131072", "8192"),
+        (&["--sparks", "2", "--chats", "1"][..], 2, "131072", "8192"),
     ] {
         let mut f = Fixture::fp4(sparks, false);
         f.app.up(&fp4_options(extra)).unwrap();
@@ -781,7 +781,7 @@ fn json_status_reports_observed_health_and_keeps_offline_checks_unknown() {
         assert_eq!(value["schema"].as_str(), Some("vade.status.v1"));
         assert_eq!(value["settings"]["mtp"], Value::Null);
         assert_eq!(value["settings"]["mtp_source"].as_str(), Some("engine_default"));
-        assert_eq!((&value["settings"]["context_limit"], &value["settings"]["admitted_chats"]), (&Value::from(32768usize), &Value::from(8usize)));
+        assert_eq!((&value["settings"]["context_limit"], &value["settings"]["admitted_chats"]), (&Value::from(131072usize), &Value::from(8usize)));
         assert_eq!(value["ranks"].as_array().unwrap().len(), 2);
         assert_eq!(code, i32::from(case == "unhealthy"));
         assert_eq!(value["ready"], if case == "offline" { Value::Null } else { Value::Bool(case == "ready") });

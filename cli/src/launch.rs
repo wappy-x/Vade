@@ -31,6 +31,7 @@ mod status;
 mod doctor;
 mod chat;
 use config::Config;
+pub(crate) use config::memory_refusal;
 pub(crate) use status::snapshot;
 pub(crate) use chat::chat_state_arguments;
 pub(crate) use chat::setup as chat_setup;

@@ -7,6 +7,7 @@
 //! The tests below ask the engine's own reader, so a change of its format fails
 //! a test here, and it costs a user only one more hash.
 use std::{collections::BTreeMap, fs, os::unix::{ffi::OsStrExt, fs::MetadataExt}, path::Path};
+use crate::pull::Verified;
 
 const INDEX: &str = "model.safetensors.index.json";
 /// The engine's stamp folder under the cache base (`vade-manifest-v1`).
@@ -22,21 +23,20 @@ fn stamp(path: &Path, meta: &fs::Metadata, sha256: &str) -> Option<String> {
 /// leaves the engine to hash, so it is never a reason to stop an install.
 pub(super) fn seed(model: &Path, base: &Path) -> Result<usize, String> {
     let root = model.canonicalize().map_err(|_| "Cannot read the checkpoint.")?;
-    let hashes = crate::pull::verified(&root);
-    if hashes.is_empty() { return Ok(0); }
+    let files = crate::pull::verified(&root);
+    if files.is_empty() { return Ok(0); }
     let stamps = base.join(STAMPS);
     crate::text::private_dir(&stamps)?;
-    let mut sizes = BTreeMap::new();
-    for (name, sha256) in &hashes {
+    let mut written = 0;
+    for (name, file) in &files {
+        // The metadata that the record check compared, so the stamp is that state.
         let path = root.join(name).canonicalize().map_err(|_| "Cannot read a checkpoint file.")?;
         if !path.starts_with(&root) { continue; }
-        let meta = fs::metadata(&path).map_err(|_| "Cannot read a checkpoint file.")?;
-        let Some(text) = stamp(&path, &meta, sha256) else { continue };
+        let Some(text) = stamp(&path, &file.meta, &file.sha256) else { continue };
         crate::text::atomic_write(&stamps.join(crate::sha256::sha(path.as_os_str().as_bytes())), &text)?;
-        sizes.insert(name.as_str(), meta.len());
+        written += 1;
     }
-    let written = sizes.len();
-    list(&root, &hashes, &sizes)?;
+    list(&root, &files)?;
     Ok(written)
 }
 
@@ -44,18 +44,18 @@ pub(super) fn seed(model: &Path, base: &Path) -> Result<usize, String> {
 /// that list and its size file. Write the two as the engine would, when the
 /// engine has not. NVFP4 lists are the operator's and part of the cross-rank
 /// identity, so this never writes one.
-fn list(root: &Path, hashes: &BTreeMap<String, String>, sizes: &BTreeMap<&str, u64>) -> Result<(), String> {
+fn list(root: &Path, files: &BTreeMap<String, Verified>) -> Result<(), String> {
     let manifest = root.join("manifest.sha256");
     let format = engine_model::flash::nvfp4::detect(root).map_err(|error| error.to_string())?;
     if format == engine_model::flash::WeightFormat::Nvfp4 || fs::symlink_metadata(&manifest).is_ok() { return Ok(()); }
     let index = fs::read_to_string(root.join(INDEX)).map_err(|_| "Cannot read the model shard index.")?;
     let shards = super::model::indexed_shards(&index)?;
-    let row = |name: &str| Some(format!("{}  {name}\n", hashes.get(name)?));
+    let row = |name: &str| Some(format!("{}  {name}\n", files.get(name)?.sha256));
     let Some(rows) = std::iter::once(INDEX).chain(shards.iter().map(String::as_str)).map(row).collect::<Option<String>>() else { return Ok(()) };
     let mut named = BTreeMap::new();
     for name in std::iter::once(INDEX).chain(shards.iter().map(String::as_str)) {
-        let Some(size) = sizes.get(name) else { return Ok(()) };
-        named.insert(name, *size);
+        let Some(file) = files.get(name) else { return Ok(()) };
+        named.insert(name, file.meta.len());
     }
     let lengths: String = named.iter().map(|(name, size)| format!("{size}  {name}\n")).collect();
     // Both create only, as vade pull leaves a folder that others can read, which
@@ -164,7 +164,7 @@ mod tests {
         fs::write(model.join(crate::pull::STATE).join("updating"), "commit\n").unwrap();
         assert_eq!(seed(&model, &base).unwrap(), 0);
         fs::remove_file(model.join(crate::pull::STATE).join("updating")).unwrap();
-        fs::remove_file(model.join(crate::pull::STATE).join("checked")).unwrap();
+        fs::remove_file(model.join(crate::pull::RECORD)).unwrap();
         assert_eq!(seed(&model, &base).unwrap(), 0);
         assert!(!model.join("manifest.sha256").exists() && !base.join(STAMPS).exists());
         fs::remove_dir_all(root).unwrap();

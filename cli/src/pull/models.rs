@@ -204,7 +204,7 @@ fn size(folder: &Path) -> u64 {
         for entry in fs::read_dir(&folder).into_iter().flatten().flatten() {
             seen += 1;
             if seen > 100_000 { return total; }
-            if entry.file_name() == super::STATE { continue; }
+            if entry.file_name() == super::STATE || entry.file_name() == super::RECORD { continue; }
             match entry.metadata() {
                 Ok(meta) if meta.is_dir() => pending.push(entry.path()),
                 Ok(meta) if meta.is_file() => total = total.saturating_add(meta.len()),

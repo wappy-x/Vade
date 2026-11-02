@@ -17,9 +17,11 @@ one. Any other count is
 refused with "FP4-Local supports 1..24 Sparks. Choose --sparks 1..24 or list
 that many distinct --hosts."
 
-- **Context and output.** However many Sparks you use, and with or without
-  `--chats`, the defaults match `vade launch`: a context of 32,768 tokens and
-  output of `min(context, 8192)`. The engine decides how many chats run at
+- **Context and output.** On one Spark, with or without `--chats`, the defaults
+  match `vade launch`: a context of 32,768 tokens and output of
+  `min(context, 8192)`. On 2 or more Sparks in one group, a chain or a pair, the
+  default context is 131,072. If that does not fit in memory, `vade up` says so
+  and starts with 32,768. The engine decides how many chats run at
   once from the context and its memory, and `vade status` prints that count.
   The controller accepts and saves `--chats` and `--cache-bytes`, but the
   current FP4-Local engine ignores them. Its memory admission and separate

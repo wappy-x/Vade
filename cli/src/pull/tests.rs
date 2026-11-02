@@ -407,7 +407,7 @@ fn dry_runs_patterns_targets_and_locks() {
     f.pull(&format!("{REPO} --include *.json --to {}", to.display()), None, false).0.unwrap();
     let mut names: Vec<_> = fs::read_dir(&to).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
     names.sort();
-    assert_eq!(names, [".vade-model.json", ".vade-pull", "config.json", "generation_config.json", "model.safetensors.index.json", "tokenizer.json", "tokenizer_config.json"]);
+    assert_eq!(names, [".vade-model.json", ".vade-pull", ".vade-verified", "config.json", "generation_config.json", "model.safetensors.index.json", "tokenizer.json", "tokenizer_config.json"]);
     // Without its shard the folder is not servable, and the record says why.
     let manifest = json::parse(&fs::read_to_string(to.join(MANIFEST)).unwrap()).unwrap();
     assert_eq!(manifest["support"]["state"].as_str(), Some("not supported yet"));

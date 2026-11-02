@@ -49,9 +49,11 @@ Notes:
     size that starts is saved. A refused explicit --context is an error. Local
     --chats and positive --cache-bytes are refused; --cache-bytes 0 disables
     retention.
-  - Controller FP4 defaults match local ones on any Spark count: context 32768,
-    output 8192 (or the context if smaller). --context 262144 requests a larger
-    context. The engine still sets the chat count from context and memory.
+  - Controller FP4 defaults match local ones on one Spark: context 32768, output
+    8192 (or the context if smaller). On 2 or more Sparks in one group, a chain
+    or a pair, the default context is 131072; if it does not fit in memory, up
+    falls to 32768 and says so. --context 262144 requests a larger context. The
+    engine still sets the chat count from context and memory.
   - Controller FP4 checks and passes on --chats and --cache-bytes, but its
     engine does not use them: it admits chats from memory and uses its own
     prefix cache setting.

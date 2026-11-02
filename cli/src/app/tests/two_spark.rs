@@ -114,3 +114,80 @@ fn status_names_every_multi_spark_path_and_its_reason() {
         f.app.down().unwrap();
     }
 }
+
+/// `FakeRunner`, with one first start that the engine refuses for memory.
+struct RefusesOnce { inner: FakeRunner, refused: bool }
+impl Runner for RefusesOnce {
+    fn run(&mut self, exec: &Exec) -> Result<Output, String> {
+        let request = text::parse(&String::from_utf8_lossy(&exec.stdin)).unwrap_or_default();
+        let op = request.get("op").map(String::as_str);
+        if op == Some("start") && !self.refused { self.inner.exit_on_health = Some("a".into()); }
+        if op == Some("logs") && !self.refused {
+            self.refused = true;
+            let log = "Requested size does not fit.\n  Asked: CONTEXT=131072 OUTPUT=8192\n  Available: 1 GiB\n";
+            return Ok(Output { success: true, stdout: text::encode(&Fields::from([("log".into(), log.into())])) });
+        }
+        self.inner.run(exec)
+    }
+    fn interactive(&mut self, exec: &Exec) -> Result<bool, String> { self.inner.interactive(exec) }
+    fn port_free(&mut self, port: u16) -> Result<(), String> { self.inner.port_free(port) }
+    fn pause(&mut self, duration: Duration) { self.inner.pause(duration); }
+}
+
+fn saved_context(f: &Fixture) -> u32 { Session::load(&f.app.config.state_dir).unwrap().unwrap().context }
+
+#[test]
+fn a_group_of_sparks_defaults_to_the_long_context_and_one_spark_does_not() {
+    let context = |sparks: usize, options: &[&str]| {
+        let mut f = Fixture::fp4(sparks, false);
+        f.app.up(&fp4_options(options)).unwrap();
+        saved_context(&f)
+    };
+    assert_eq!(context(1, &[]), 32768);
+    assert_eq!(context(2, &["--sparks", "2"]), 131072);
+    assert_eq!(context(4, &["--sparks", "4"]), 131072);
+    assert_eq!(context(2, &["--hosts", "a,b"]), 131072);
+    // A plain up after setup picks one Spark, and each plain replica is one Spark.
+    assert_eq!(context(2, &[]), 32768);
+    assert_eq!(context(2, &["--replicas", "2"]), 32768);
+    // Each pair is two Sparks.
+    assert_eq!(context(4, &["--replicas", "2", "--pairs"]), 131072);
+    // A context the person names stays, on any count.
+    assert_eq!(context(2, &["--sparks", "2", "--context", "32768"]), 32768);
+    assert_eq!(context(2, &["--sparks", "2", "--context", "8192"]), 8192);
+}
+
+#[test]
+fn a_running_engine_keeps_its_context_and_a_restart_keeps_it_too() {
+    let mut f = Fixture::fp4(2, false);
+    f.app.up(&fp4_options(&["--sparks", "2", "--context", "32768"])).unwrap();
+    let session = Session::load(&f.app.config.state_dir).unwrap().unwrap();
+    let recorded = crate::app::resident::recorded_options(&session);
+    // A bare up, and the same up with no --context, attach with the saved size.
+    let Command::Up(bare) = crate::cli::parse(&["up".to_string()]).unwrap().command else { panic!() };
+    f.app.up(&bare).unwrap();
+    f.app.up(&fp4_options(&["--sparks", "2"])).unwrap();
+    assert_eq!(saved_context(&f), 32768);
+    // vade update restarts from the saved options.
+    f.app.down().unwrap();
+    f.app.up(&recorded).unwrap();
+    assert_eq!(saved_context(&f), 32768);
+}
+
+#[test]
+fn a_long_default_that_does_not_fit_falls_to_the_short_one_and_says_so() {
+    let mut f = Fixture::fp4(2, false);
+    let mut app = App { config: f.app.config.clone(), dry: false, runner: RefusesOnce { inner: std::mem::take(&mut f.app.runner), refused: false } };
+    let capture = crate::output::testing::Capture::default();
+    crate::output::with_writer(capture.clone(), || app.up(&fp4_options(&["--sparks", "2"]))).unwrap();
+    let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+    assert!(printed.contains("Context 131072 does not fit in memory on these Sparks. Starting with context 32768.\n"), "{printed}");
+    assert!(printed.contains("context 32768 tokens"), "the ready line names the chosen size: {printed}");
+    assert_eq!(Session::load(&app.config.state_dir).unwrap().unwrap().context, 32768);
+    // A size that the person named stays their choice: the refusal is the answer.
+    let mut f = Fixture::fp4(2, false);
+    let mut app = App { config: f.app.config.clone(), dry: false, runner: RefusesOnce { inner: std::mem::take(&mut f.app.runner), refused: false } };
+    let error = app.up(&fp4_options(&["--sparks", "2", "--context", "131072"])).unwrap_err();
+    assert!(error.contains("Requested size does not fit."), "{error}");
+    assert!(Session::load(&app.config.state_dir).unwrap().is_none());
+}

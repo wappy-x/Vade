@@ -547,6 +547,9 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
 /// `--context 262144` selects the
 /// single-chat long-context preset explicitly.
 pub const FP4_CONTEXT: u32 = 32768;
+/// The FP4-Local default for a group of two or more Sparks, which `vade up` sets
+/// once it knows the group. A start that does not fit falls to [`FP4_CONTEXT`].
+pub const FP4_LONG_CONTEXT: u32 = 131072;
 /// Default FP4-Local output limit: `min(FP4_OUTPUT, context)`.
 pub const FP4_OUTPUT: u32 = 8192;
 /// Largest explicit FP4-Local output limit.

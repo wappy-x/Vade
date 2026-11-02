@@ -107,7 +107,22 @@ impl<R: Runner> App<R> {
 
     /// `vade up`: reuse an identical running launch, or start every rank, wait for
     /// readiness and record the session.
+    /// Start, or attach to, the engine. Only the long default context falls back
+    /// on a memory refusal: a context the person named stays their choice.
     pub fn up(&mut self, options: &UpOptions) -> Result<(), String> {
+        let result = self.start_engine(options);
+        let refused = result.as_ref().err().filter(|error| options.fp4_local && !options.supplied_options.contains("--context")
+            && error.contains(&format!("CONTEXT={}", crate::cli::FP4_LONG_CONTEXT)) && !error.contains("Cleanup could not finish")
+            && crate::launch::memory_refusal(error).is_some()).is_some();
+        if !refused { return result; }
+        crate::output::line(format_args!("Context {} does not fit in memory on these Sparks. Starting with context {}.", crate::cli::FP4_LONG_CONTEXT, crate::cli::FP4_CONTEXT))?;
+        let mut smaller = options.clone();
+        smaller.context = crate::cli::FP4_CONTEXT;
+        smaller.supplied_options.insert("--context".to_owned());
+        self.start_engine(&smaller)
+    }
+
+    fn start_engine(&mut self, options: &UpOptions) -> Result<(), String> {
         self.config.validate_model_revision()?;
         self.config.validate_control_socket()?;
         let rdma = rdma_enabled()?;

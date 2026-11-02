@@ -99,7 +99,7 @@ the [FP4-Local launcher guide](docs/fp4-local.md).
 
 The context is the most tokens the model considers at once: the prompt plus the
 answer so far. By default the context is 32768 tokens and each answer can be up
-to 8192. Those go lower only when the model requires it, or when the engine's
+to 8192. On 2 or more Sparks in one group, the default context is 131072. Those go lower only when the model requires it, or when the engine's
 memory check refuses the default or saved context. In that case startup tries
 the smaller sizes from 32768, 16384, 8192 and 4096. It saves the first one that
 starts and tells you which size it selected.

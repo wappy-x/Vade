@@ -11,8 +11,11 @@
 mod fetch;
 mod hub;
 mod models;
+mod record;
 
 pub use models::run as models;
+pub(crate) use record::{Verified, save, snapshot, verified};
+pub(crate) use record::RECORD;
 
 use std::{collections::BTreeMap, fs, io::IsTerminal, os::unix::fs::MetadataExt, path::{Component, Path, PathBuf}, time::{Duration, Instant}};
 use crate::evals::json::{self, Value};
@@ -202,6 +205,7 @@ fn pull(request: &Request, setup: &Setup, dry: bool, say: &mut dyn FnMut(&str) -
         let card = chosen.iter().any(|file| file.path == "README.md");
         write_manifest(request, setup, &folder, &commit, &records, card, &support)?;
         checksums(&folder, &records)?;
+        record::after_pull(&folder, &scratch, &commit, &records);
         match fs::remove_file(scratch.join(UPDATING)) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(crate::text::file_error("Cannot clear the update mark", &scratch, &error)),
             _ => {}
@@ -314,7 +318,12 @@ struct Checked { size: u64, inode: u64, modified: i64, nanos: i64, changed: i64,
 fn identity(meta: &fs::Metadata) -> (u64, u64, i64, i64, i64, i64) { (meta.len(), meta.ino(), meta.mtime(), meta.mtime_nsec(), meta.ctime(), meta.ctime_nsec()) }
 
 fn read_checked(scratch: &Path) -> BTreeMap<String, Checked> {
-    let text = read_small(&scratch.join("checked"), 16 << 20, false).map(|bytes| String::from_utf8_lossy(&bytes).into_owned()).unwrap_or_default();
+    parse_checked(&read_small(&scratch.join("checked"), 16 << 20, false).map(|bytes| String::from_utf8_lossy(&bytes).into_owned()).unwrap_or_default())
+}
+
+/// One row per file. A line that is not a row, such as the first line of the
+/// record beside the model, gives nothing.
+fn parse_checked(text: &str) -> BTreeMap<String, Checked> {
     text.lines().filter_map(|line| {
         // A row from an older pull has no change time, so its file is hashed again.
         let mut part = line.splitn(9, '\t');
@@ -325,34 +334,19 @@ fn read_checked(scratch: &Path) -> BTreeMap<String, Checked> {
     }).collect()
 }
 
-/// The SHA-256 of each file that a finished pull of `folder` checked and that
-/// has not changed since, by path in the folder. Empty while the records of a
-/// pull are unfinished, or when the folder has no pull.
-pub(crate) fn verified(folder: &Path) -> BTreeMap<String, String> {
-    let scratch = folder.join(STATE);
-    if fs::symlink_metadata(scratch.join(UPDATING)).is_ok() { return BTreeMap::new(); }
-    read_checked(&scratch).into_iter().filter(|(path, row)| {
-        let file = folder.join(path);
-        hub::safe_path(path) && no_links(folder, &file).is_ok() && crate::text::is_lower_hex(&row.sha256, 64) && fs::symlink_metadata(&file).is_ok_and(|meta|
-            meta.is_file() && (row.size, row.inode, row.modified, row.nanos, row.changed, row.changed_nanos) == identity(&meta))
-    }).map(|(path, row)| (path, row.sha256)).collect()
-}
-
-/// The records a finished pull leaves for these files of `folder`.
+/// The record a finished pull leaves beside these files of `folder`.
 #[cfg(test)]
 pub(crate) fn record_for_test(folder: &Path, names: &[&str]) {
-    let checked = names.iter().map(|name| {
-        let path = folder.join(name);
-        let (size, inode, modified, nanos, changed, changed_nanos) = identity(&fs::symlink_metadata(&path).unwrap());
-        let sha256 = crate::sha256::digest_reader(fs::File::open(path).unwrap()).unwrap();
-        (name.to_string(), Checked { size, inode, modified, nanos, changed, changed_nanos, expected: sha256.clone(), sha256 })
-    }).collect();
-    write_checked(&folder.join(STATE), &checked).unwrap();
+    let rows: Vec<(String, String)> = names.iter().map(|name| (name.to_string(), crate::sha256::digest_reader(fs::File::open(folder.join(name)).unwrap()).unwrap())).collect();
+    record::save(folder, "vade pull test", snapshot(folder, &rows));
+}
+
+fn checked_text(checked: &BTreeMap<String, Checked>) -> String {
+    checked.iter().map(|(path, c)| format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{path}\n", c.size, c.inode, c.modified, c.nanos, c.changed, c.changed_nanos, c.expected, c.sha256)).collect()
 }
 
 fn write_checked(scratch: &Path, checked: &BTreeMap<String, Checked>) -> Result<(), String> {
-    let text: String = checked.iter().map(|(path, c)| format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{path}\n", c.size, c.inode, c.modified, c.nanos, c.changed, c.changed_nanos, c.expected, c.sha256)).collect();
-    crate::text::atomic_write(&scratch.join("checked"), &text)
+    crate::text::atomic_write(&scratch.join("checked"), &checked_text(checked))
 }
 
 /// The SHA-256 of `path` if it matches `file`, else why not.

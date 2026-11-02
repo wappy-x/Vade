@@ -345,7 +345,6 @@ printf '%s\n' 'Install complete. Next steps:' \
     '   vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300' \
     '2. Start the engine:' \
     '   vade up' \
-    'vade launch starts the engine and opens chat.' \
     ''
 found=$(command -v vade 2>/dev/null || true)
 path_line="export PATH=\"${bin_path:-\$HOME/.vade/bin}:\$PATH\""

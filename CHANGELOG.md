@@ -131,8 +131,13 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
   - A missing `cargo` or `rustc` names the commands of INSTALL.md, only when a build needs them.
   - `vade install` compares each Spark with the bundle's `MANIFEST` before the copy, and a Spark that does not fit gives one line with the cause.
 - `sh scripts/install.sh --source` stays on one Spark when a controller config exists, and it says that the config stays as it was.
-- `vade install` on a controller no longer hashes a checkpoint that `vade pull` checked on that Spark. The engine reuses those hashes, on rank 1 too.
+- `vade install` no longer hashes a checkpoint that was checked on that Spark before. The record is `.vade-verified` in the model folder, so a reinstall, a new Vade home and a second account reuse it.
+  - `vade pull` writes the record, and a one-Spark `vade install` writes it after its first full check.
   - On the fresh pair of 2026-11-01, rank 1 hashed all 185,540,727,598 bytes (`model_verify_ms=103147.602`) after its own pull. No Spark has run this change yet.
+- `vade up` on 2 or more FP4-Local Sparks in one group now defaults to context 131072. One Spark keeps 32768, and each plain replica too.
+  - If 131072 does not fit in memory, `vade up` says so and starts with 32768.
+  - A longer context leaves room for fewer chats at once: 2 on two Sparks, against 9 at context 32768 (lab run on main `b4c7113`).
+- The installer's next steps end at `vade up`. `vade launch` stays a command.
 - `vade setup --hosts` now works after the one-line install, with no clone. Setup writes `source = installed-bundle`, and `vade install` takes every program and its revision from the bundle next to `vade`. A clone works as before.
 - The installer also writes `~/.local/bin/vade`, which the stock Ubuntu `~/.profile` puts on `PATH` at login, so a new SSH login finds `vade` with no `export` line.
   - It edits no shell profile, and it leaves a file there that is not from Vade.
