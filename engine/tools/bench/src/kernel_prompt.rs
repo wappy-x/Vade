@@ -453,8 +453,8 @@ pub(super) fn launch(g: &Gpu, f: H, merge: H, c: &Case, v: &mut Fixture, i: usiz
         let (mut s, mut n) = (0u64, 0u64);
         g.launch(f, grid, v.threads, shared.unwrap_or(v.shared), &mut [ptr(&mut tp), ptr(&mut s), ptr(&mut n)])?;
         if arm == 0 {
-            let (mut x, mut n) = (v.aux, (m * low) as u32);
-            g.launch(v.norms[0], [(m * low).div_ceil(128) as u32, 1, 1], 128, 0, &mut [ptr(&mut x), ptr(&mut n)])?;
+            let (mut x, mut n, mut none) = (v.aux, (m * low) as u32, 0u64);
+            g.launch(v.norms[0], [(m * low).div_ceil(128) as u32, 1, 1], 128, 0, &mut [ptr(&mut x), ptr(&mut n), ptr(&mut none)])?;
             let mut q = params::FlashBf16Input { input: v.aux, output: planes, tokens: m as u32, cols: low as u32, hc_silu: 0, lanes: 32 };
             g.launch(v.pack, [(plane / 128 * 32).div_ceil(128) as u32, 1, 1], 128, 0, &mut [ptr(&mut q)])?;
         }

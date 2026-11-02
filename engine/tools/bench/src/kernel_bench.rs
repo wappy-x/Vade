@@ -24,7 +24,7 @@ mod floor;
 type Result<T> = std::result::Result<T, String>;
 /// Case kinds (one registry for every kernel family): 0-6 general kernels (dense latency, head, hc_up,
 /// fp4_bw gate/down, fp4_prefill_tc gate/down); 8-10 flash_bf16_mma_latency grouped/fused;
-/// 20-21 fp4_bw routed C1/C8; 30-33 QSA attention scores/values/index scores, L2 gather;
+/// 20-21 fp4_bw routed C1/C8; 77 decode HC norm and activation (+ packed planes); 30-33 QSA attention scores/values/index scores, L2 gather;
 /// 40-45 GDN seq/chunk/slot/fla0/split/cslot (kernel_gdn.rs and kernel_qsa.rs still see their
 /// own 7.. numbering: the dispatch subtracts the family base); 75 FP8 ring BF16 decode rows.
 #[derive(Clone, Debug, Default)]
@@ -127,6 +127,27 @@ fn cases() -> Vec<Case> {
         out.push(Case { name: format!("hc_up-m{m}"), kernel: "flash_next_hc_up_latency", m, n: 10240, k: 320, kind: 2, ..Default::default() });
         // The production entry (one warp per stream, 128 threads); 97 per C1 token.
         out.push(Case { name: format!("hc_up4-m{m}"), kernel: "flash_next_hc_up_latency4", m, n: 10240, k: 320, kind: 2, calls: if m == 1 { 97 } else { 0 }, ..Default::default() });
+    }
+    // The M1 production entry when the up weight's LBF12 twin is built (97 per C1 token): real
+    // = BF16 middles, every slot packed; -lbf12raw- leaves one slot in seven raw (BF16 loads).
+    for raw in [false, true] {
+        out.push(Case { name: format!("hc_up4-lbf12{}-m1", if raw { "raw" } else { "" }), kernel: "flash_next_hc_up_latency4_lbf12",
+            m: 1, n: 10240, k: 320, kind: 2, real: true, calls: if raw { 0 } else { 97 }, ..Default::default() });
+    }
+    // Its M2-16 twin entry (drafted verify rows), same fixtures.
+    for (m, raw) in [(2, false), (4, false), (8, false), (16, false), (4, true)] {
+        out.push(Case { name: format!("hc_up16-lbf12{}-m{m}", if raw { "raw" } else { "" }), kernel: "flash_next_hc_up_latency16_lbf12",
+            m, n: 10240, k: 320, kind: 2, real: true, ..Default::default() });
+    }
+    // The decode HC norm before each HC down (100 per C1 token at M1; drafted verify rows M4),
+    // and with HC down's packed planes; the HC activation after it with HC up's planes. M3 and
+    // M12 leave staged padding rows unwritten / have t + 8 padding for only some rows.
+    for m in [1, 4] {
+        out.push(Case { name: format!("hc_norm-m{m}"), kernel: "flash_hc_norm_f32", m, n: 0, k: 10240, kind: 77, calls: if m == 1 { 100 } else { 0 }, ..Default::default() });
+    }
+    for m in [1, 3, 4, 12] {
+        out.push(Case { name: format!("hc_norm_pack-m{m}"), kernel: "flash_hc_norm_f32", m, n: 0, k: 10240, kind: 77, ..Default::default() });
+        out.push(Case { name: format!("hc_act_pack-m{m}"), kernel: "flash_next_hc_activate", m, n: 0, k: 320, kind: 77, ..Default::default() });
     }
     // Verify rows: HC up at M 12 / 20 / 32 (production hc_up4 at every M <= 63).
     for m in [12, 20, 32] {
@@ -932,6 +953,9 @@ fn run() -> Result<()> {
                 + 8 // gdn_cfstep (kind 55).
                 + 74 // FP8 stack kernel_rows.rs: kind 75/76 decode rows + fp8a wave probe.
                 + 7 // fp8k-hcgroup-m2..m8 (kind 75, kernel_rows.rs).
+                + 2 // hc_up4-lbf12-m1 / -lbf12raw-m1.
+                + 5 // hc_up16-lbf12-m2/4/8/16, -lbf12raw-m4.
+                + 10 // hc_norm-m1 / -m4, hc_norm_pack- and hc_act_pack-m1 / -m3 / -m4 / -m12 (kind 77).
                 ;
             assert_eq!(cases().len(), expect);
             // --case selects by name: every name names one case.

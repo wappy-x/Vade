@@ -395,6 +395,7 @@ fn fixture(g: &mut Gpu, c: &Case, order: bool) -> Result<Fixture> {
     if c.kind == 11 {
         return mx_fixture(g, c, order);
     }
+    if c.kind == 77 { return head::norm_fixture(g, c); }
     if c.kind == 12 {
         return law_fixture(g, c);
     }
@@ -640,7 +641,7 @@ fn fixture(g: &mut Gpu, c: &Case, order: bool) -> Result<Fixture> {
         } else {
             [n.div_ceil(32) as u32, 1, 1]
         },
-        threads: if c.kind == 2 && c.kernel.ends_with('4') { 128 } else if c.kind == 2 || (latency && n <= 640) { 32 } else { 128 },
+        threads: if c.kind == 2 && (c.kernel.contains("latency4") || c.kernel.contains("latency16")) { 128 } else if c.kind == 2 || (latency && n <= 640) { 32 } else { 128 },
         shared: if latency { if n <= 640 { RING } else { 4 * RING } } else { 0 },
         stored: weight_bytes + input_bytes + out_bytes + if c.kind == 1 || c.kind == 2 { aux_bytes } else { 0 },
         flops: 2 * m * n * k,
@@ -1001,6 +1002,7 @@ type Pre = (Option<H>, Option<u32>, Option<u32>);
 fn launch(g: &Gpu, f: H, merge: H, c: &Case, v: &mut Fixture, i: usize, arm: usize, (pre, shared, threads): Pre) -> Result<()> {
     if c.kind == 1 { return head::launch(g, f, c, v, i, arm); }
     if matches!(c.kind, 75 | 76) { return rows::launch(g, f, c, v, i, arm); }
+    if c.kind == 2 && c.real || c.kind == 77 { return head::launch_hc(g, f, c, v, i, arm); }
     if let Some(q) = v.qsa.as_mut() {
         return qsa::launch(g, f, q, arm);
     }
@@ -1234,7 +1236,7 @@ pub(super) fn run(o: &Options, cases: &[Case]) -> Result<()> {
         head::prepare(&mut g, modules[0], c, &mut v)?;
         if c.kind == 75 && c.mats[3] & 2 != 0 { rows::twins(&mut g, modules[1], c, &mut v)?; }
         if c.kind == 75 && c.mats[3] & 4 != 0 { v.pack = g.function(modules[1], "flash_bf16_input")?; }
-        if c.kind == 9 || c.kind == 10 || c.kind == 12 {
+        if c.kind == 9 || c.kind == 10 || c.kind == 12 || c.kind == 77 {
             v.pack = g.function(modules[0], "flash_bf16_input")?;
         }
         let prompt_functions = if (60..=69).contains(&c.kind) || c.kind == 74 { prompt::prepare(&mut g, modules, c, &mut v)? } else { None };

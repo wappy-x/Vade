@@ -367,10 +367,27 @@ pub unsafe extern "ptx-kernel" fn flash_next_k16_finish(p: crate::fp8_abi::MoeFi
 pub(crate) unsafe fn hc_sigmoid(x: f32) -> f32 {
     let (a,b)=crate::fp4_experts::exp_parts(-x); 1.0/(1.0+a*b)
 }
+/// HC low activation in place (x/4 * hc_sigmoid(x/4)) of `elements` = M x 320 FP32 values.
+/// With planes != 0 (decode rows) one thread per value pair also writes the pair's split2
+/// hi/lo words into flash_bf16_input's dense operand layout (K 320, M rows), as that pack of
+/// the activated rows would, so HC up skips it; row t + 8 of a 16-row tile past M gets its 0
+/// word, other rows past M stay unwritten (MMA rows are independent, those outputs masked).
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn flash_next_hc_activate(x: u64,elements: u32) {
-    let i=crate::index(); if i<elements as usize { let out=(x as *mut f32).add(i); let value=*out*0.25;
-        *out=value*hc_sigmoid(value); }
+pub unsafe extern "ptx-kernel" fn flash_next_hc_activate(x: u64,elements: u32,planes: u64) {
+    let i=crate::index();
+    let act=|v: f32| { let value=v*0.25; value*hc_sigmoid(value) };
+    if planes==0 { if i<elements as usize { let out=(x as *mut f32).add(i); *out=act(*out); } return; }
+    let (k, at)=(320usize, 2*i); if at>=elements as usize { return; }
+    let out=(x as *mut f32).add(at);
+    let (a, b)=(act(*out), act(*out.add(1)));
+    *out=a; *out.add(1)=b;
+    let (rows, t, c, kt)=(elements as usize/k, at/k, at%k, k/16);
+    let plane=rows.div_ceil(16)*kt*128;
+    let word=((t/16*kt+c/16)*32+t%8*4+c%8/2)*4+t%16/8+c%16/8*2;
+    let (hi, lo)=crate::gemm::split2_pair(a, b);
+    let p=planes as *mut u32;
+    *p.add(word)=hi; *p.add(plane+word)=lo;
+    if t%16<8 && t+8>=rows { *p.add(word+1)=0; *p.add(plane+word+1)=0; }
 }
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_next_hc_add(p: crate::kernel_params::FlashHcAdd) {

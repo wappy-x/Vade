@@ -492,10 +492,11 @@ unsafe fn hc_add_prompt(p: crate::kernel_params::FlashHcAdd) {
 
 /// FP32-weight twin of flash_hc_norm for checkpoints whose HC/PLE norm
 /// weights are stored F32: same warp split, square order and scale, reading
-/// `(1 + w)` as F32. With packed != 0 (prompt tiles) it also writes each stored
-/// value pair's BF16 hi/lo split (split2_pair) into the dense prompt operand
+/// `(1 + w)` as F32. With packed != 0 (prompt tiles and decode rows) it also writes each
+/// stored value pair's BF16 hi/lo split (split2_pair) into the dense prompt operand
 /// layout of flash_bf16_input (grid.y rows, K 10240), so the projections skip
-/// that pack; rows past grid.y in the last M16 tile stay unwritten (MMA rows are
+/// that pack; on the decode split row token + 8 of a 16-row tile past grid.y gets its 0
+/// word, other rows past grid.y in the last M16 tile stay unwritten (MMA rows are
 /// independent and those outputs are masked).
 /// Grid: block128, grid.y=rows, grid.x as flash_hc_norm (1 in-place or 8).
 #[no_mangle]
@@ -509,6 +510,16 @@ pub unsafe extern "ptx-kernel" fn flash_hc_norm_f32(p: crate::kernel_params::Fla
     let row = core::arch::nvptx::_block_idx_y() as usize * groups * group;
     let (x, y, w) = ((p.input as *const f32).add(row), (p.output as *mut f32).add(row), p.weight as *const f32);
     let (base, mut squares) = (g * group, 0.0f32);
+    let chunk = group.div_ceil(split).div_ceil(64) * 64;
+    let end = group.min((part + 1) * chunk);
+    // Decode split (chunk <= 320: at most 5 value pairs per lane, the packed loop's pairs): the
+    // outputs' values and weights are read before the squares too, so no output read waits
+    // behind the previous output's store. The same values, products and packed words as the
+    // loops below (the decode HC down reads these planes in place of its own pack).
+    let early = chunk <= 320;
+    let at = |j: usize| base + (part * chunk + lane * 2 + 64 * j).min(group - 2);
+    let pre = |j: usize| [*x.add(at(j)), *x.add(at(j) + 1), *w.add(at(j)), *w.add(at(j) + 1)];
+    let outs = if early { [pre(0), pre(1), pre(2), pre(3), pre(4)] } else { [[0.0f32; 4]; 5] };
     // The asm add is a memory clobber, so loads issued one per add would pay one L2
     // round trip each; loading first keeps the same values in the same order.
     // group = 2560 = 80 values per lane, all loaded before the first add.
@@ -520,31 +531,50 @@ pub unsafe extern "ptx-kernel" fn flash_hc_norm_f32(p: crate::kernel_params::Fla
     squares!(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39
         40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79);
     let scale = 1.0 / sqrt(sum(squares) / group as f32 + 1e-6);
-    let chunk = group.div_ceil(split).div_ceil(64) * 64;
-    let end = group.min((part + 1) * chunk);
-    if p.packed == 0 {
-        let mut i = part * chunk + lane;
-        while i < end { *y.add(base + i) = *x.add(base + i) * scale * (1.0 + *w.add(base + i)); i += 32; }
-        return;
-    }
-    // Same stored values, two per lane; each pair also lands in its A-fragment word.
+    // Same stored values, two per lane; with packed != 0 each pair also lands in its A-fragment word.
     let rows = core::arch::nvptx::_grid_dim_y() as usize;
     let token = core::arch::nvptx::_block_idx_y() as usize;
     let kt = groups * group / 16;
     let plane = rows.div_ceil(16) * kt * 128;
     let packed = p.packed as *mut u32;
+    let word = |c: usize| ((token / 16 * kt + c / 16) * 32 + token % 8 * 4 + c % 8 / 2) * 4 + token % 16 / 8 + c % 16 / 8 * 2;
+    if early {
+        macro_rules! store { ($($j:literal)*) => { $(
+            let i = part * chunk + lane * 2 + 64 * $j;
+            if i < end {
+                let o = outs[$j];
+                let (a, b) = (o[0] * scale * (1.0 + o[2]), o[1] * scale * (1.0 + o[3]));
+                *y.add(base + i) = a;
+                *y.add(base + i + 1) = b;
+                if p.packed != 0 {
+                    let (hi, lo) = crate::gemm::split2_pair(a, b);
+                    *packed.add(word(base + i)) = hi;
+                    *packed.add(plane + word(base + i)) = lo;
+                    // Row token + 8 of this 16-row tile is padding: its word is 0, as the pack's.
+                    if token % 16 < 8 && token + 8 >= rows {
+                        *packed.add(word(base + i) + 1) = 0;
+                        *packed.add(plane + word(base + i) + 1) = 0;
+                    }
+                }
+            }
+        )* } }
+        store!(0 1 2 3 4);
+        return;
+    }
+    if p.packed == 0 {
+        let mut i = part * chunk + lane;
+        while i < end { *y.add(base + i) = *x.add(base + i) * scale * (1.0 + *w.add(base + i)); i += 32; }
+        return;
+    }
     let mut i = part * chunk + lane * 2;
     while i < end {
         let a = *x.add(base + i) * scale * (1.0 + *w.add(base + i));
         let b = *x.add(base + i + 1) * scale * (1.0 + *w.add(base + i + 1));
         *y.add(base + i) = a;
         *y.add(base + i + 1) = b;
-        let c = base + i;
-        let word = ((token / 16 * kt + c / 16) * 32 + token % 8 * 4 + c % 8 / 2) * 4
-            + token % 16 / 8 + c % 16 / 8 * 2;
         let (hi, lo) = crate::gemm::split2_pair(a, b);
-        *packed.add(word) = hi;
-        *packed.add(plane + word) = lo;
+        *packed.add(word(base + i)) = hi;
+        *packed.add(plane + word(base + i)) = lo;
         i += 64;
     }
 }

@@ -1145,10 +1145,10 @@ impl<'w> Hc<'w> {
                     }
                 }
             } else {
-                let mut p = FlashHcNorm { input: r, weight: self.norm, output: u, packed: prepacked.unwrap_or(0) };
-                let name = if self.norm_f32 { "flash_hc_norm_f32" } else { "flash_next_hc_norm" };
-                unsafe { b.launch_flash_rows(name, 8, tokens as u32, 128, 0,
-                    &mut [(&mut p as *mut FlashHcNorm).cast()])?; }
+                let planes = if self.norm_f32 && prepacked.is_none() && tokens <= DECODE_ROWS { b.prepare_flash_dense()?; Some(b.flash_dense_input()?) } else { None }; // decode rows: + HC down's packed planes (its pack launch is skipped)
+                let (mut p, name) = (FlashHcNorm { input: r, weight: self.norm, output: u, packed: prepacked.or(planes).unwrap_or(0) }, if self.norm_f32 { "flash_hc_norm_f32" } else { "flash_next_hc_norm" });
+                unsafe { b.launch_flash_rows(name, 8, tokens as u32, 128, 0, &mut [(&mut p as *mut FlashHcNorm).cast()])?; }
+                if let Some(planes) = planes { b.offer_dense_planes(u, W, tokens, planes); }
             }
             if let (true, Some(packed)) = (hc_planes, prepacked) {
                 // on_read: the same A words, formed from the residual rows, the scales and the
@@ -1170,8 +1170,8 @@ impl<'w> Hc<'w> {
                 } else {
                     next_rows(b, self.down, u, low, LOW, W, tokens)?;
                 }
-                launch(b, "flash_next_hc_activate", (LOW * tokens).div_ceil(128),
-                    &mut [Ptr(low),U32((LOW*tokens) as u32)])?;
+                let planes = if tokens <= DECODE_ROWS { b.prepare_flash_dense()?; b.flash_dense_input()? } else { 0 }; // decode rows: + HC up's packed planes (its pack launch is skipped)
+                launch(b, "flash_next_hc_activate", (LOW * tokens).div_ceil(128), &mut [Ptr(low),U32((LOW*tokens) as u32),Ptr(planes)])?; if planes != 0 { b.offer_dense_planes(low, LOW, tokens, planes); }
             }
             let packed = b.pack_flash_dense_input(low, LOW, tokens)?;
             let mut p = row_params(packed, LOW, tokens, (self.up, output, W, H), (0,0,0,0), true, false);

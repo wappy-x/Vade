@@ -51,6 +51,17 @@ pub(super) fn account(c: &Case, arm: usize, legacy: usize) -> (usize, String) {
             bytes = weights * reads + m.div_ceil(8) * (k / 16) * 32 * 16 + m * n * 4 + m * 192 * 3 * 4;
             basis = format!("head {} as stored: {} B/pass x {} passes + packed input + FP32 logits/argmax partials", if c.real { "lossless LBF12" } else { "BF16" }, weights, reads);
         }
+        77 => basis = "HC norm / activation as stored: FP32 streams in (+ F32 weights) + FP32 streams out (+ hi/lo planes of the M rows)".into(),
+        2 if c.real => {
+            // HC up LBF12 twin as stored (every slot packed): 1.5 B/elem + one base byte per row
+            // and K32 + one flag word per 8 rows; packed input, FP32 streams in, FP32 output.
+            // -lbf12raw-: one slot in seven (slot % 7 == 3, head::prepare) is read as its 512
+            // BF16 bytes in place of its 384 twin bytes and 8 bases.
+            let twin = n * k * 3 / 2 + n * k / 32 + n / 8 * 4;
+            let raw = if c.name.contains("lbf12raw") { (n / 8 * (k / 32) + 3) / 7 } else { 0 };
+            bytes = twin + raw * (512 - 392) + m.div_ceil(16) * k.div_ceil(16) * 128 * 8 + m * n * 4 + m * n / 4 * 4;
+            basis = format!("hc_up LBF12 twin as stored: {twin} B + {raw} raw slots x 120 B + packed input + FP32 streams + FP32 output");
+        }
         11 => {
             let input = live_input(c);
             bytes = legacy - packed_input(c) + input;
