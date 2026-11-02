@@ -235,9 +235,96 @@ The cached run reused 32,064 tokens on both setups. The second question gave the
 - **The 32K chat.** Both setups gave the turn digests `28a6dca8...` and `b01b5a6b...`, the same as the 2026-10-31 FP8 two-Spark chat.
 - **Re-run.** `vade bench --card --receipt` can check the four-Spark files. It cannot check the 64-response two-Spark files. We have not run it against these receipts.
 
-## Current FP4-Local: main dc32b7c, 2026-10-31 morning
+## Current FP4-Local: main 8976c4f, 2026-11-02 morning
 
-These FP4-Local numbers are current. The FP8 cards of this date are [earlier cards](#earlier-fp8-cards-of-2026-10-31), and the [2026-11-01 FP8 cards](#current-fp8-main-acb49bc-2026-11-01-afternoon) replace them.
+These FP4-Local numbers are current. The [2026-10-31 cards](#current-fp4-local-main-dc32b7c-2026-10-31-morning) are history.
+
+The receipts page is [bench/receipts/2026-11-02](../bench/receipts/2026-11-02/README.md). It gives the build and binary hashes, the checkpoint identity, the server start command of each setup and the request settings. The machines are DGX Spark, NVIDIA GB10, driver 580.178.04, with the clocks not locked. Main `8976c4f` has the engine of main `407aa46`. Between the two, only the command line tool changed.
+
+**One chat, drafting on (tok/s)**
+
+<div align="center">
+
+| Setup | Prose | Code | Structured |
+| :---: | :---: | :---: | :---: |
+| FP4-Local · 1 Spark | 42.123 | 81.263 | 101.055 |
+| FP4-Local · 2 Sparks | 54.530 | 101.713 | 130.258 |
+| FP4-Local · 4 Sparks | 61.881 | 112.551 | 144.282 |
+
+</div>
+
+**Chats at once, drafting on (total tok/s)**
+
+<div align="center">
+
+| Setup | C1 | C4 | C8 |
+| :---: | :---: | :---: | :---: |
+| FP4-Local · 1 Spark | 65.965 | 145.338 | 179.802 |
+| FP4-Local · 2 Sparks | 79.461 | 167.075 | 230.931 |
+| FP4-Local · 4 Sparks | 87.485 | 176.042 | 243.521 |
+
+</div>
+
+**Path, prose with drafting off, and the cold 8K prompt**
+
+<div align="center">
+
+| Setup | Path | Prose, drafting off (tok/s) | Cold 8K (s) |
+| :---: | :---: | :---: | :---: |
+| FP4-Local · 1 Spark | local | 27.940 | 3.773 |
+| FP4-Local · 2 Sparks | tensor split | 36.061 | 2.119 |
+| FP4-Local · 4 Sparks | tensor split in parts | 41.845 | 1.933 |
+
+</div>
+
+The drafting-off cards come from the same server starts as the drafting-on cards. Each drafting-off receipt also holds every other cell of its card. These are the receipts:
+
+- **FP4-Local, one Spark:** [drafting on](../bench/receipts/2026-11-02/fp4-local-1spark-on.json) and [drafting off](../bench/receipts/2026-11-02/fp4-local-1spark-off.json).
+- **FP4-Local, two Sparks:** [drafting on](../bench/receipts/2026-11-02/fp4-local-2spark-on.json) and [drafting off](../bench/receipts/2026-11-02/fp4-local-2spark-off.json).
+- **FP4-Local, four Sparks:** [drafting on](../bench/receipts/2026-11-02/fp4-local-4spark-on.json) and [drafting off](../bench/receipts/2026-11-02/fp4-local-4spark-off.json).
+
+How to read the tables:
+
+- **Medians.** Each cell is the card's own median. Prose, code and structured use 5 runs. C1, C4 and C8 use 3 rounds. Cold 8K uses 5 cold requests on one Spark and 3 on two and four Sparks. Every row is one server start.
+- **Requests.** Prose, code and structured are one chat each, up to 8192 tokens, to the natural stop. C1, C4 and C8 are the total rate of 1, 4 or 8 chats at once, 256 tokens each. Cold 8K is the time to the first token of an uncached 8192-token prompt. Both cards send it with drafting off.
+- **Chat settings.** The 60 chat requests of each card are greedy: temperature 0, top-p 1, top-k 0, neutral penalties, seed 20260905, thinking off and `cache` false.
+- **8K settings.** The 8K requests send token prompts with temperature 0, top-p 1, top-k 0, neutral penalties and `"draft": "plain"`. They send no seed and no `cache` field. Each cold request has a new cache salt and a replay with the same salt. No cold request and no replay restored a cached token. The Cold 8K column uses the cold requests only.
+- **Card shape.** The one-Spark cards send five cold and five warm 8K prompts, not three, and they leave out the C2 round. So they hold 64 responses, not 66.
+- **Noise.** Each row has one server start. Starts of the same setup have differed by up to 2.81 % in one cell: code on FP8 on four Sparks gave 65.530 and 67.370 tok/s on 2026-10-30. So treat a smaller gap between two rows as noise ([history](history/benchmarks-2026-10.md#speed)).
+
+### FP4-Local 32K-token chat
+
+The chat sends one 32,099-token question. Then it sends a second question on the same chat (32,305 tokens). The second question ran twice with the cache and once with `cache` false. The table gives the time to the first token of the first question, of the first cached run and of the uncached run.
+
+<div align="center">
+
+| Setup | First question | Second question, cache | Second question, no cache |
+| :---: | :---: | :---: | :---: |
+| FP4-Local · 1 Spark | 15.758 | 0.366 | 15.937 |
+| FP4-Local · 2 Sparks | 10.139 | 0.767 | 9.894 |
+| FP4-Local · 4 Sparks | 9.696 | 1.058 | 9.061 |
+
+</div>
+
+The cached run reused 32,064 tokens on every setup, four Sparks included. On every start, the second question gave the same token IDs with the cache and without it (`turn2_ids_equal` in each receipt). Each start ran the chat three times. The receipts hold the first chat.
+
+These are the receipts:
+
+- **FP4-Local, one Spark:** [chat](../bench/receipts/2026-11-02/fp4-local-1spark-chat32k.json).
+- **FP4-Local, two Sparks:** [chat](../bench/receipts/2026-11-02/fp4-local-2spark-chat32k.json).
+- **FP4-Local, four Sparks:** [chat](../bench/receipts/2026-11-02/fp4-local-4spark-chat32k.json).
+
+### FP4-Local token IDs
+
+- **One Spark, drafting on and off.** Both cards have the same `token_ids_sha256`. So every one of the 64 responses had the same token IDs. In a private lab comparison, both cards also matched the lab's one-Spark reference cards in 64 of 64 responses.
+- **Two and four Sparks, drafting on and off.** All four cards have the same `token_ids_sha256`, `805f06d0...`. So every one of the 66 responses had the same token IDs. This is also the value of all eight FP4-Local cards of 2026-10-31.
+- **One against four Sparks.** In a private lab comparison, the four-Spark cards matched the lab's one-Spark reference card in 66 of 66 responses. So four Sparks give the same token IDs as two and as one.
+
+<a id="current-fp4-local-main-dc32b7c-2026-10-31-morning"></a>
+
+## Earlier FP4-Local: main dc32b7c, 2026-10-31 morning
+
+The [2026-11-02 FP4-Local cards](#current-fp4-local-main-8976c4f-2026-11-02-morning) replace these numbers. The FP8 cards of this date are [earlier cards](#earlier-fp8-cards-of-2026-10-31), and the [2026-11-01 FP8 cards](#current-fp8-main-acb49bc-2026-11-01-afternoon) replace them.
 
 The receipts page is [bench/receipts/2026-10-31](../bench/receipts/2026-10-31/README.md). It gives the build and binary hashes, the checkpoint identities, the server start command of each setup and the request settings. The machines are DGX Spark, NVIDIA GB10, driver 580.178.04, with the clocks not locked.
 

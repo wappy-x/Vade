@@ -86,15 +86,15 @@ The numbers are tokens per second (tok/s). Drafting is Vade's speculative decodi
 
 | Setup | One chat | One chat, drafting off | Eight chats at once (total) |
 | :---: | :---: | :---: | :---: |
-| FP4-Local · 1 Spark | 42.5 | 27.9 | 179.0 |
-| FP4-Local · 2 Sparks | 54.9 | 36.0 | 232.2 |
-| FP4-Local · 4 Sparks | 63.0 | 42.1 | 245.1 |
+| FP4-Local · 1 Spark | 42.1 | 27.9 | 179.8 |
+| FP4-Local · 2 Sparks | 54.5 | 36.1 | 230.9 |
+| FP4-Local · 4 Sparks | 61.9 | 41.8 | 243.5 |
 | FP8 · 2 Sparks | 39.5 | 28.4 | 106.4 |
 | FP8 · 4 Sparks | 52.6 | 36.9 | 136.2 |
 
 </div>
 
-We measured main `acb49bc` on our own Sparks on the afternoon of 2026-11-01 for the FP8 rows, and main `dc32b7c` on the morning of 2026-10-31 for the FP4-Local rows. One chat writes prose of up to 8192 tokens. The one-Spark row is the average of two server starts, and every other row is one start. Drafting on means a fixed draft depth: 3 for FP4-Local and 2 for FP8. A default FP8 server chooses the depth itself. [Results](docs/results.md#current-fp8-main-acb49bc-2026-11-01-afternoon) gives those speeds too. The raw record of every run is in the receipts: [FP8](bench/receipts/2026-11-01/README.md) and [FP4-Local](bench/receipts/2026-10-31/README.md).
+We measured main `acb49bc` on our own Sparks on the afternoon of 2026-11-01 for the FP8 rows, and main `8976c4f` on the morning of 2026-11-02 for the FP4-Local rows. One chat writes prose of up to 8192 tokens. Every row is one server start. Drafting on means a fixed draft depth: 3 for FP4-Local and 2 for FP8. A default FP8 server chooses the depth itself. [Results](docs/results.md#current-fp8-main-acb49bc-2026-11-01-afternoon) gives those speeds too. The raw record of every run is in the receipts: [FP8](bench/receipts/2026-11-01/README.md) and [FP4-Local](bench/receipts/2026-11-02/README.md).
 
 <!-- bench-docs:end -->
 

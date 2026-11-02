@@ -32,7 +32,7 @@ Greedy decoding is the default on FP4-Local. A request with no sampling fields a
 
 Our checks show these results today:
 
-- **FP4-Local.** On main `dc32b7c` (2026-10-31 morning), the FP4-Local cards on one, two and four Sparks gave the same token IDs in 66 of 66 responses. Each Spark count had cards with drafting on and with drafting off ([results](results.md#token-ids)).
+- **FP4-Local.** On main `8976c4f` (2026-11-02 morning), the FP4-Local cards on one, two and four Sparks gave the same token IDs in 66 of 66 responses (64 of 64 on one Spark, whose cards hold 64). Each Spark count had cards with drafting on and with drafting off ([results](results.md#fp4-local-token-ids)).
 - **The prefix cache.** In the same runs, the second question on a 32K-token chat gave the same token IDs with the prefix cache and without it.
 - **The merge rule.** Before a change to the engine's arithmetic, scheduling, caching or transport merges, it runs at least three times on real Sparks. The results are compared across at least two Sparks ([contributing](../.github/CONTRIBUTING.md)).
 
@@ -46,7 +46,7 @@ Three points apply to FP8:
 
 ## How fast it is
 
-The FP4-Local rows are from the 2026-10-31 morning cards at main `dc32b7c`. The FP8 rows are from the 2026-11-01 morning cards at main `1a07e3a`, with a fixed drafting depth 2. The one-Spark row is the mean of two server starts. The other rows are one start each.
+The FP4-Local rows are from the 2026-11-02 morning cards at main `8976c4f`. The FP8 rows are from the 2026-11-01 morning cards at main `1a07e3a`, with a fixed drafting depth 2. Every row is one server start.
 
 Rates are completion tokens per second. Prose, code and C8 ran with drafting on. C8 is the total rate of eight chats at once.
 
@@ -54,9 +54,9 @@ Rates are completion tokens per second. Prose, code and C8 ran with drafting on.
 
 | Setup | Prose | Code | C8 |
 | :---: | :---: | :---: | :---: |
-| FP4-Local, one Spark | 42.5 | 81.1 | 179.0 |
-| FP4-Local, two Sparks | 54.9 | 102.3 | 232.2 |
-| FP4-Local, four Sparks | 63.0 | 113.0 | 245.1 |
+| FP4-Local, one Spark | 42.1 | 81.3 | 179.8 |
+| FP4-Local, two Sparks | 54.5 | 101.7 | 230.9 |
+| FP4-Local, four Sparks | 61.9 | 112.6 | 243.5 |
 | FP8, two Sparks | 37.8 | 53.0 | 98.3 |
 | FP8, four Sparks | 51.4 | 72.3 | 131.4 |
 
@@ -68,15 +68,15 @@ The next table gives the time to the first token for a long prompt. The cards se
 
 | Setup | Cold 8K prompt | 32K prompt |
 | :---: | :---: | :---: |
-| FP4-Local, one Spark | 3.77 s | 15.63 s |
-| FP4-Local, two Sparks | 2.15 s | 10.09 s |
-| FP4-Local, four Sparks | 1.92 s | 8.98 s |
+| FP4-Local, one Spark | 3.77 s | 15.76 s |
+| FP4-Local, two Sparks | 2.12 s | 10.14 s |
+| FP4-Local, four Sparks | 1.93 s | 9.70 s |
 | FP8, two Sparks | 5.96 s | 24.08 s |
 | FP8, four Sparks | 6.82 s | 27.38 s |
 
 </div>
 
-[Results and receipts](results.md) gives the receipt of each row, the machines, the commands and what you can run again. With the prefix cache, the second question on a 32K-token chat gave its first token in 0.36 s on one Spark and in 0.76 s on two. On four FP4-Local Sparks those runs predate the prefix cache on the split in parts.
+[Results and receipts](results.md) gives the receipt of each row, the machines, the commands and what you can run again. With the prefix cache, the second question on a 32K-token chat gave its first token in 0.37 s on one Spark, in 0.77 s on two and in 1.06 s on four.
 
 ## What it is not
 
@@ -85,7 +85,7 @@ The next table gives the time to the first token for a long prompt. The cards se
 - **Not a trainer.** Vade serves models. It does not train or fine-tune them.
 - **Not for images.** Vade reads and writes text only.
 - **Not every checkpoint.** Vade supports two checkpoints of Qwen3.8 Flash-Next: FP4-Local and FP8.
-- **Not fast on every Spark count.** Four Sparks linked by RDMA write one chat faster than two (63.0 against 54.9 tok/s prose in the table above). Three Sparks, five or more, and four over TCP run the layer chain. One chat on the chain writes at about the speed of one Spark ([what runs where](../README.md#what-runs-where)). The layer chain keeps no prefix cache.
+- **Not fast on every Spark count.** Four Sparks linked by RDMA write one chat faster than two (61.9 against 54.5 tok/s prose in the table above). Three Sparks, five or more, and four over TCP run the layer chain. One chat on the chain writes at about the speed of one Spark ([what runs where](../README.md#what-runs-where)). The layer chain keeps no prefix cache.
 
 ## Where to go next
 
