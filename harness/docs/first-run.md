@@ -9,10 +9,10 @@ default checkpoint is **nvidia/Qwen3.8-Flash-Next-FP4-Local**.
 
 ## Start here
 
-Install with [INSTALL.md](../../INSTALL.md) first. It is the one place to
+Install with [INSTALL.md](../../docs/INSTALL.md) first. It is the one place to
 install the prerequisites, get a runnable copy of Vade, and download the
 pinned, verified model. Then finish
-[the on-Spark route](../../INSTALL.md#route-a-on-this-spark); it ends with your
+[the on-Spark route](../../docs/INSTALL.md#route-a-on-this-spark); it ends with your
 first `vade launch`, and later runs start the same way.
 
 If you use the release bundle, open its folder and run:
@@ -60,7 +60,7 @@ private Vade home of its own, so it never touches `~/.vade`. It sends one chat
 request, runs `vade verify` against that engine, tries to stop it again (also
 when a step fails or you interrupt the script; a failed stop is a FAIL), and
 prints PASS or FAIL with the seconds each step took. See
-[Check the whole route in one go](../../INSTALL.md#check-the-whole-route-in-one-go).
+[Check the whole route in one go](../../docs/INSTALL.md#check-the-whole-route-in-one-go).
 
 ### Where the API listens
 
@@ -98,7 +98,7 @@ needs building, it needs no Rust, only a working NVIDIA driver and the system
 tools listed in INSTALL.
 
 `scripts/install.sh` downloads, checks and unpacks a bundle of main when
-one is published ([INSTALL: Prebuilt bundle](../../INSTALL.md#prebuilt-bundle)).
+one is published ([INSTALL: Prebuilt bundle](../../docs/INSTALL.md#prebuilt-bundle)).
 Builds of main come from dl.vade.lol, and GitHub Releases holds only the old
 v0.1.0 bundle. For that bundle, follow the
 [download and checksum steps](../../cli/docs/prebuilt.md#download-check-and-unpack)
@@ -120,7 +120,7 @@ install, commit or restore any changes under `engine/`, `harness/` and
 there.
 
 Source launches build without the network, so run INSTALL's
-[one-time kernel build](../../INSTALL.md#run-one-kernel-build-source-builds-only)
+[one-time kernel build](../../docs/INSTALL.md#run-one-kernel-build-source-builds-only)
 first; it downloads what the build needs. Logs from failed builds stay under
 `~/.vade/build-jobs/`.
 
@@ -132,13 +132,13 @@ compilers or models, and does not change the driver or network.
 
 ## How the launcher finds the model
 
-Use INSTALL's [model download and manifest check](../../INSTALL.md#step-3-get-the-model)
+Use INSTALL's [model download and manifest check](../../docs/INSTALL.md#step-3-get-the-model)
 to put the checkpoint in `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local`. The
 engine serves it under the folder's name in lower case,
 `qwen3.8-flash-next-fp4-local`.
 The local launcher serves FP4-Local only. For FP8 on 2, 4 or 6 Sparks, see
-[INSTALL's FP8 section](../../INSTALL.md#fp8-on-2-4-or-6-sparks); for
-older models, see [INSTALL's legacy models](../../INSTALL.md#legacy-models).
+[INSTALL's FP8 section](../../docs/INSTALL.md#fp8-on-2-4-or-6-sparks); for
+older models, see [INSTALL's legacy models](../../docs/INSTALL.md#legacy-models).
 
 Vade picks the checkpoint in this order:
 
@@ -178,7 +178,7 @@ change. It never changes your model folder.
 ## Saved settings
 
 Local defaults are saved in `~/.vade/config`, and they match the defaults a
-[controller](../../INSTALL.md#route-b-from-a-controller) uses.
+[controller](../../docs/INSTALL.md#route-b-from-a-controller) uses.
 
 If you don't pick a context, the launcher starts at 32768 (or the size it saved
 last time). When the engine says it lacks the memory, it steps down through
@@ -224,7 +224,7 @@ change:
   applies.
 
 Other flags, such as `--cache-bytes 0` and `--chats`, are covered in
-[INSTALL settings](../../INSTALL.md#settings-you-may-change).
+[INSTALL settings](../../docs/INSTALL.md#settings-you-may-change).
 
 ## Where Vade keeps its files
 
@@ -265,7 +265,7 @@ An explicit absolute `VADE_HOME` replaces `~/.vade` for all of these paths.
 
 - For a separate [controller](../../docs/GLOSSARY.md#ac) install, set
   `VADE_CONFIG` and follow
-  [Route B](../../INSTALL.md#route-b-from-a-controller). While `VADE_CONFIG`
+  [Route B](../../docs/INSTALL.md#route-b-from-a-controller). While `VADE_CONFIG`
   is set, lifecycle commands use the controller install instead of these
   local defaults, and `vade launch` refuses to run.
 - If you already have a controller install that uses the default config, stop
@@ -275,6 +275,6 @@ An explicit absolute `VADE_HOME` replaces `~/.vade` for all of these paths.
 
 Run `vade logs` and `vade doctor` first, and don't delete anything under
 `~/.vade/state`; Vade uses it to know which engine is its own.
-[INSTALL's first-run problems](../../INSTALL.md#first-run-problems) maps each
+[INSTALL's first-run problems](../../docs/INSTALL.md#first-run-problems) maps each
 launcher message to the next step. If another application is in the way, stop
 it with the launcher that started it; never kill processes by name.

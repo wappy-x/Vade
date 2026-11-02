@@ -127,7 +127,7 @@ impl Config {
             return Err("FP8 needs two or four linked Sparks and a controller config. Run vade setup --fp8, or read docs/install-fp8.md.".into());
         }
         if options.sparks.is_some_and(|n| n != 1) || !options.hosts.is_empty() {
-            return Err("Local launch serves FP4-Local on one Spark. More Sparks need a controller config that names them. Run vade setup --hosts spark-a,spark-b, or read INSTALL.md#two-and-more-sparks.".into());
+            return Err("Local launch serves FP4-Local on one Spark. More Sparks need a controller config that names them. Run vade setup --hosts spark-a,spark-b, or read docs/INSTALL.md#two-and-more-sparks.".into());
         }
         Self::supported_controls(options.chats, options.cache_bytes)
     }

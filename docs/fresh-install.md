@@ -1,6 +1,6 @@
 # FP8 fresh install: from zero to a first answer
 
-**Installing Vade for the first time? Start with [INSTALL.md](../INSTALL.md).**
+**Installing Vade for the first time? Start with [INSTALL.md](INSTALL.md).**
 The current model, [FP4-Local](GLOSSARY.md#dg), runs on a single Spark. The
 one-line install, `curl -fsSL https://vade.lol/install.sh | sh`, then
 `vade pull` and `vade up` start it on the Spark itself, and you need no second
@@ -95,7 +95,7 @@ Ask the provider before you pay:
   faster than home internet.
 - **Ordinary Ethernet only, no QSFP link?** Use [TCP mode](#no-qsfp-link-use-tcp-mode).
 - **Only one Spark?** This guide's Flash-Next FP8 checkpoint does not fit on one.
-  Use the current FP4-Local [on-Spark install](../INSTALL.md#route-a-on-this-spark)
+  Use the current FP4-Local [on-Spark install](INSTALL.md#route-a-on-this-spark)
   and [first-run guide](../harness/docs/first-run.md).
 - **Different home folders on the two rentals?** Both Sparks must see the exact
   same absolute model and build paths. Write absolute paths (for example
@@ -238,7 +238,7 @@ Each Spark also needs `cc`, `rsync`, `curl`, `ping`, `sha256sum` and
 the CUDA toolkit: it builds its own GPU kernels.
 
 For full details, including a safe way to read the installer first, see
-[INSTALL.md compiler prerequisites](../INSTALL.md#step-1-prerequisites).
+[INSTALL.md compiler prerequisites](INSTALL.md#step-1-prerequisites).
 
 <br>
 

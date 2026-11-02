@@ -87,12 +87,12 @@ vade-harness gateway --upstream http://127.0.0.1:18080 --bind 127.0.0.1:8787
 
 ## Four ways to run Vade
 
-Start the engine first with [INSTALL.md](../INSTALL.md):
+Start the engine first with [INSTALL.md](../docs/INSTALL.md):
 
-- **On the Spark.** Use [Route A](../INSTALL.md#route-a-on-this-spark) if you
+- **On the Spark.** Use [Route A](../docs/INSTALL.md#route-a-on-this-spark) if you
   work on the Spark itself.
 - **From another computer.** Use
-  [Route B](../INSTALL.md#route-b-from-a-controller) if you drive the Spark
+  [Route B](../docs/INSTALL.md#route-b-from-a-controller) if you drive the Spark
   from another Linux or macOS computer (a controller).
 
 The engine listens on `http://127.0.0.1:18080`. The FP4-Local server that
@@ -118,7 +118,7 @@ Pick the way that fits how you work:
    > macOS sandbox. On the Spark itself (Linux), the agent can read, search
    > and patch files, but it cannot run commands. Build checks such as
    > `cargo test` do not run either
-   > ([what that looks like](../INSTALL.md#chat-and-the-coding-agent-on-linux)).
+   > ([what that looks like](../docs/INSTALL.md#chat-and-the-coding-agent-on-linux)).
    > For the full agent, drive the Spark from a Mac controller (Route B).
 
 2. **Put ours in front (your harness through Vade's gateway).** You keep your
@@ -176,7 +176,7 @@ search the web. `--no-web` or `VADE_WEB=0` turns both off.
 The agent's tools always run on the computer where you start the harness, in
 the workspace that you pick there. When you drive the Spark from a controller
 (another computer; see INSTALL's [Route
-B](../INSTALL.md#route-b-from-a-controller)), inference runs on the Spark and
+B](../docs/INSTALL.md#route-b-from-a-controller)), inference runs on the Spark and
 the tools run on the controller.
 
 Commands run only on macOS. On Linux, the Spark included, the agent is not

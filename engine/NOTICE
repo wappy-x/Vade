@@ -98,7 +98,7 @@ The same inventory is maintained in the repository's root NOTICE.
 9. Contributor Covenant 2.1 Code of Conduct
    By:       Contributor Covenant contributors
    License:  Creative Commons Attribution 4.0 International (CC BY 4.0)
-   Files:    ../CODE_OF_CONDUCT.md
+   Files:    ../.github/CODE_OF_CONDUCT.md
    Changes:  Enforcement contact set to the maintainers via GitHub private
              reporting for this repository.
    Text:     licenses/Contributor-Covenant-CC-BY-4.0.txt

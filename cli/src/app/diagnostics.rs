@@ -31,7 +31,7 @@ pub(super) struct Probe {
 pub(crate) const HOST_TOOLCHAIN: &str = "1.99.0";
 /// The nightly toolchain `cargo kernels` drives for the NVPTX build.
 pub(crate) const KERNEL_TOOLCHAIN: &str = "nightly-2026-10-01";
-/// The Rust install on one machine, as in INSTALL.md (Install Rust). A source
+/// The Rust install on one machine, as in docs/INSTALL.md (Install Rust). A source
 /// build needs it; the bundle route does not.
 pub(crate) const RUST_STEPS: &str = concat!(
     "curl --proto '=https' --tlsv1.2 -sSf -o /tmp/vade-rustup-init.sh https://sh.rustup.rs && ",
@@ -288,13 +288,13 @@ impl<R: Runner> App<R> {
         match probe.present {
             Some(true) => report.ok(&name("model files"), &format!("{} (config, tokenizer, weights; vade install checks every SHA256)", machine.model_path))?,
             Some(false) => report.fail(&name("model files"), &format!("missing or incomplete at {}", machine.model_path),
-                &format!("Copy {} at {} there (INSTALL.md step 3), then run vade install.", self.config.model_repo, self.config.model_revision))?,
+                &format!("Copy {} at {} there (docs/INSTALL.md step 3), then run vade install.", self.config.model_repo, self.config.model_revision))?,
             None => report.skip(&name("model files"), &format!("not checked; the script stopped at {}", missing.unwrap_or("an earlier check")))?,
         }
         match probe.toolchains {
             Some(true) => report.ok(&name("toolchains"), &format!("Rust {HOST_TOOLCHAIN} and {KERNEL_TOOLCHAIN} with the NVPTX target for the source build"))?,
             Some(false) => report.fail(&name("toolchains"), &probe.error.clone().unwrap_or_default(),
-                &format!("Install the pinned toolchains on {} (INSTALL.md), or set prebuilt_dir to a matching bundle, {rerun}", machine.name))?,
+                &format!("Install the pinned toolchains on {} (docs/INSTALL.md), or set prebuilt_dir to a matching bundle, {rerun}", machine.name))?,
             None => {}
         }
         Ok(())
@@ -476,7 +476,7 @@ fi"#, host = HOST_TOOLCHAIN.replace('.', "[.]")) } else { String::new() },
                 _ => match missing {
                     "driver" => format!("{} has nvidia-smi, but its GPU query failed. Run ssh {} nvidia-smi to see the driver error, then run vade doctor.", machine.name, machine.ssh),
                     tool @ ("cargo" | "rustc") => format!("{} has {tool}, but {tool} --version failed there. Repair that Rust toolchain, then run vade doctor.", machine.name),
-                    "rustup" => format!("{} has no rustup. A source build needs rustup with Rust {HOST_TOOLCHAIN} and {KERNEL_TOOLCHAIN} for the GPU kernels. Install them there (INSTALL.md), or set prebuilt_dir to a matching bundle, then run vade doctor.", machine.name),
+                    "rustup" => format!("{} has no rustup. A source build needs rustup with Rust {HOST_TOOLCHAIN} and {KERNEL_TOOLCHAIN} for the GPU kernels. Install them there (docs/INSTALL.md), or set prebuilt_dir to a matching bundle, then run vade doctor.", machine.name),
                     "toolchain" => format!("{} has no Rust {HOST_TOOLCHAIN} toolchain. Run rustup toolchain install {HOST_TOOLCHAIN} --profile minimal --no-self-update there, or set prebuilt_dir to a matching bundle, then run vade doctor.", machine.name),
                     "kernel-toolchain" => format!("{} lacks the {KERNEL_TOOLCHAIN} toolchain for the GPU kernels. Run rustup toolchain install {KERNEL_TOOLCHAIN} --profile minimal --no-self-update --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda there, or set prebuilt_dir to a matching bundle, then run vade doctor.", machine.name),
                     "ssh" => format!("ssh {} did not run the check script. Run ssh {} true to see the SSH error, then run vade doctor.", machine.ssh, machine.ssh),
@@ -516,7 +516,7 @@ fi"#, host = HOST_TOOLCHAIN.replace('.', "[.]")) } else { String::new() },
 
     pub(super) fn model_copy_instructions(&self, machine: &Machine) -> Result<(), String> {
         crate::output::line(format_args!(
-            "{}: the official checkpoint is missing or incomplete.\n  Model: {}\n  Revision: {}\n  Destination: {}\nFollow INSTALL.md step 3: copy this verified checkpoint revision to the configured destination on each machine. Verify the source and every destination copy against a trusted full-file SHA256 manifest, including supporting files, then rerun vade install.",
+            "{}: the official checkpoint is missing or incomplete.\n  Model: {}\n  Revision: {}\n  Destination: {}\nFollow docs/INSTALL.md step 3: copy this verified checkpoint revision to the configured destination on each machine. Verify the source and every destination copy against a trusted full-file SHA256 manifest, including supporting files, then rerun vade install.",
             machine.name,
             self.config.model_repo,
             self.config.model_revision,

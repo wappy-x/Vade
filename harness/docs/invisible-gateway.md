@@ -3,7 +3,7 @@
 `vade-gateway` sits between your existing client and the engine, so the client
 only has to change its base URL. Build it from the checkout root with
 `cargo +1.99.0 build --release --offline --manifest-path harness/Cargo.toml --bins`,
-as in [INSTALL.md](../../INSTALL.md#client-gateway); the binary ends up at
+as in [INSTALL.md](../../docs/INSTALL.md#client-gateway); the binary ends up at
 `harness/target/release/vade-gateway`.
 
 ## Run it

@@ -1,7 +1,7 @@
 # Two-Spark Flash server
 
 Connect a Mac, Vade's native harness or an existing application to the
-Qwen3.8-Flash-Next FP8 server started by [INSTALL.md](../../INSTALL.md).
+Qwen3.8-Flash-Next FP8 server started by [INSTALL.md](../../docs/INSTALL.md).
 
 **Start both ranks and pass INSTALL's smoke request first.** Rank zero accepts
 HTTP on its loopback port `18080`; rank one has no HTTP listener. Rust
@@ -54,7 +54,7 @@ serializes requests and disables request cache reuse. See the
 its configured local Mac port to rank zero's local HTTP listener. `localhost`
 on the Mac otherwise refers to the Mac, which has no engine running.
 
-Complete the [Rust lifecycle setup](../../INSTALL.md#5-start-the-two-spark-server)
+Complete the [Rust lifecycle setup](../../docs/INSTALL.md#5-start-the-two-spark-server)
 with your private `VADE_CONFIG`, then inspect the owned session from the Mac:
 
 ```sh
@@ -161,7 +161,7 @@ harness development or explicit client configuration.
 ### Build the Mac harness
 
 Use a Mac checkout of the same Vade revision as the installed Sparks. If you
-need a checkout ([clone and build](../../INSTALL.md#3-clone-and-build)), run
+need a checkout ([clone and build](../../docs/INSTALL.md#3-clone-and-build)), run
 the following on the Mac, from a parent directory of your choice.
 Enter the commit printed by `git rev-parse HEAD` in the rank-zero checkout:
 
@@ -177,7 +177,7 @@ For this client, build only the harness; the Spark engine, weights and GPU
 kernel steps remain on the Sparks.
 
 If `rustup` is missing, follow the installer in
-[pinned Rust setup](../../INSTALL.md#2-install-the-pinned-rust-compilers).
+[pinned Rust setup](../../docs/INSTALL.md#2-install-the-pinned-rust-compilers).
 The Mac harness needs only host Rust `1.99.0`. From the **Mac monorepo root**:
 
 ```sh
@@ -272,7 +272,7 @@ vade status
 Confirm both ranks exited and both GPUs are empty in your existing Spark
 sessions. Preserve unresolved records and follow
 [CLI recovery](../../cli/README.md#recovery) if shutdown cannot verify ownership.
-See [INSTALL.md](../../INSTALL.md#6-run-the-timing-benchmark) for the timing
+See [INSTALL.md](../../docs/INSTALL.md#6-run-the-timing-benchmark) for the timing
 recipe and its qualification limits.
 
 **Where next:** [Harness tools](../../harness/docs/agent-tools.md) ·

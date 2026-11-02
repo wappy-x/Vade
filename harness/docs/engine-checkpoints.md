@@ -191,6 +191,6 @@ and optional-metadata recovery. Existing no-capability fixtures remain unchanged
 These test the wire format and state against a mock we wrote. They are not
 evidence of native engine rendering parity or cache performance.
 
-Design references are credited in [Credits](../../CREDITS.md#harness).
+Design references are credited in [Credits](../../docs/CREDITS.md#harness).
 Implementation is first-party Rust using only the standard library; no competitor
 code or tests were copied.

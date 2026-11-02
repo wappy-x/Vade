@@ -58,7 +58,7 @@ done
     fail 'VADE_BUNDLE selects a bundle. Next: unset VADE_BUNDLE and rerun this script, or run vade launch from that bundle.'
 for tool in cc curl nvidia-smi; do
     command -v "$tool" >/dev/null 2>&1 ||
-        fail "missing $tool. Next: ask your administrator to provide the prerequisites in INSTALL.md#step-1-prerequisites, then retry."
+        fail "missing $tool. Next: ask your administrator to provide the prerequisites in docs/INSTALL.md#step-1-prerequisites, then retry."
 done
 workspace=$(pwd -P) || fail 'current folder is unavailable. Next: open an existing project folder and retry.'
 # A Vade checkout holds this file, the CLI, the engine and the harness.
@@ -291,7 +291,7 @@ if ! rustup run "$device" rustc --version >/dev/null 2>&1 || [ "$complete" = fal
     online "Rust $device with GPU components"
     rustup toolchain install "$device" --profile minimal --no-self-update \
         --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda ||
-        fail 'GPU compiler setup failed. Next: finish the pinned GPU toolchain command in INSTALL.md#install-rust-source-builds-only, then rerun this script.'
+        fail 'GPU compiler setup failed. Next: finish the pinned GPU toolchain command in docs/INSTALL.md#install-rust-source-builds-only, then rerun this script.'
 fi
 printf '%s\n' 'Install: building the vade command.'
 CARGO_TARGET_DIR="$root/cli/target" cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml ||

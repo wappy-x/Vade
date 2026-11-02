@@ -10,7 +10,7 @@ reviewers.
 [Credits](CREDITS.md) is the full list of people, papers and projects whose
 ideas Vade uses, with main and development scope marked. The parts designed
 and built in this project are listed under
-[Original work](../../CREDITS.md#original-work).
+[Original work](../../docs/CREDITS.md#original-work).
 
 <details>
 <summary><b>Terms on this page</b>: provenance, revision, SHA-256 hash, checkpoint, chat template, fixture, Unicode Character Database</summary>

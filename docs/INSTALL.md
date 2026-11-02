@@ -5,13 +5,13 @@ checkpoint, **nvidia/Qwen3.8-Flash-Next-FP4-Local**. The installer
 downloads the [prebuilt bundle](#prebuilt-bundle) of main from dl.vade.lol
 when the bundle fits your Spark. When it does not fit, you build from
 source. The source commands build main, including the Unreleased changes in
-the [changelog](CHANGELOG.md). You start with one Spark and no other
+the [changelog](../CHANGELOG.md). You start with one Spark and no other
 computer.
 
 Vade also supports the FP8 checkpoint, **Qwen/Qwen3.8-Flash-Next-FP8**, on
 2, 4 or 6 linked Sparks. Its weights do not fit on one Spark. FP8 uses
 [Route B](#route-b-from-a-controller) and its own config. It starts with
-`vade up --fp8`. [Install FP8 on 2, 4 or 6 Sparks](docs/install-fp8.md) has
+`vade up --fp8`. [Install FP8 on 2, 4 or 6 Sparks](install-fp8.md) has
 the steps.
 
 On one Spark, use the [quick start](#quick-start-on-one-spark). It also
@@ -25,7 +25,7 @@ steps 1 to 3: prerequisites, the code and the model. Then pick a route:
 - **[Linked Sparks](#two-and-more-sparks).** This route builds on Route B.
 
 This guide explains each new term where it first appears. The
-[glossary](docs/GLOSSARY.md) has the rest.
+[glossary](GLOSSARY.md) has the rest.
 
 On one Spark, there are three steps. Install Vade with the one-line
 installer, get the model with `vade pull`, and start the engine with
@@ -36,9 +36,9 @@ Setup asks a few questions and writes what it needs. Then it runs
 `vade install`, `vade up` and `vade doctor`.
 
 Each step prints what to do when it fails. You can run a step again safely.
-[Install and flows](docs/design/install-and-flows.md) shows the whole flow on
+[Install and flows](design/install-and-flows.md) shows the whole flow on
 one page. If you are an AI agent, read the
-[agent quickstart](docs/agents/quickstart.md).
+[agent quickstart](agents/quickstart.md).
 
 ## Before you start
 
@@ -63,7 +63,7 @@ direct high-speed cable between linked Sparks.
 The model needs about **102 GB** (102,262,310,289 bytes, 95.24 GiB). That is
 the complete checkpoint at one pinned revision, with its configuration and
 tokenizer files. The
-[committed SHA256 manifest](cli/examples/qwen3.8-flash-next-fp4-local.sha256)
+[committed SHA256 manifest](../cli/examples/qwen3.8-flash-next-fp4-local.sha256)
 lists every file. We checked its sizes against the
 [publisher's file list](https://huggingface.co/api/models/nvidia/Qwen3.8-Flash-Next-FP4-Local/tree/b9ce18a6887e18c089fdea8509a33e63429a3300?recursive=true)
 for that revision.
@@ -149,7 +149,7 @@ vade launch
   missing, and builds `vade`, the GPU kernels, the engine and the chat
   program. It takes about three minutes on a GB10: the `INSTALL` step took
   176.8 s in the
-  [fresh-install receipt](bench/receipts/2026-10-31/fresh-install-2026-10-30.txt).
+  [fresh-install receipt](../bench/receipts/2026-10-31/fresh-install-2026-10-30.txt).
   The script does not need the model. `--source` always builds from source.
   `--check` prints what the script would do, writes nothing and exits 0.
 - The `export` line puts `cargo` and `vade` on your `PATH` for this shell
@@ -194,7 +194,7 @@ vade up && vade doctor --json
 
 `vade up` starts the engine without chat and prints one `Up ready in` line.
 `vade doctor --json` prints one `vade.doctor.v1` object. The
-[agent quickstart](docs/agents/quickstart.md) gives the rules, the JSON
+[agent quickstart](agents/quickstart.md) gives the rules, the JSON
 forms and the controller commands.
 
 The installer runs only on Linux `aarch64`. It does these steps:
@@ -239,7 +239,7 @@ rustup to update them. In record `2026-10-28_1744_source-install_285fa8a`,
 the Rust download and install took 16.7 s. We have not timed the model
 download. On 2026-10-30, on one Spark with the model on disk and no Rust,
 `sh scripts/install.sh` took 176.8 s
-([receipt](bench/receipts/2026-10-31/fresh-install-2026-10-30.txt)).
+([receipt](../bench/receipts/2026-10-31/fresh-install-2026-10-30.txt)).
 
 **After launch.** Chat can edit files in the folder where it opens. For this
 first test, ask it only to say hello. Then type `/exit`. The engine keeps
@@ -430,7 +430,7 @@ curl and `shasum`. macOS includes `shasum`. On Ubuntu, `shasum` comes with
 
 For linked Sparks, each machine must already have `ping`. On Ubuntu, `ping`
 is in the `iputils-ping` package. The network is a separate job for the
-administrator. See [network setup](docs/network-setup.md).
+administrator. See [network setup](network-setup.md).
 
 ## Step 2: get the code
 
@@ -444,7 +444,7 @@ cd ~ && git clone --depth 1 --branch main https://github.com/wappy-x/Vade.git va
 ```
 
 This gives you the latest `main`: v0.1.0 plus the changes listed under
-Unreleased in the [changelog](CHANGELOG.md). Build main to use the Unreleased
+Unreleased in the [changelog](../CHANGELOG.md). Build main to use the Unreleased
 changes. Clone the v0.1.0 tag (`--branch v0.1.0`) to build the v0.1.0
 release.
 
@@ -516,7 +516,7 @@ The installer does these checks in order. When one fails, it prints one
 Two settings choose the download. `VADE_DL_BASE` is the download location,
 and `VADE_CHANNEL` is the channel (default `main`). The installer reads
 `$VADE_DL_BASE/$VADE_CHANNEL/latest.json`, then the file in the same folder.
-The default location is in [scripts/install.sh](scripts/install.sh). A
+The default location is in [scripts/install.sh](../scripts/install.sh). A
 folder that is already in `~/.vade/bundles` and passes the `MANIFEST` check is
 used again without downloading the bundle again. The installer still
 downloads `latest.json`, so this step needs the network.
@@ -530,7 +530,7 @@ has these files:
 | --- | --- |
 | `vade`, `flash-serve`, `vade-harness` | Linux aarch64 programs |
 | `flash.ptx` | The GPU kernels as PTX for `sm_121` (the GB10) |
-| `launcher-bundle.conf` | The launcher record that `vade install` reads ([bundle details](cli/docs/prebuilt.md)) |
+| `launcher-bundle.conf` | The launcher record that `vade install` reads ([bundle details](../cli/docs/prebuilt.md)) |
 | `MANIFEST` | The commit, its date, the target, the PTX ISA version, the oldest driver and glibc, and the SHA-256 hash of every file |
 | `README-BUNDLE` | Short instructions |
 | `LICENSE`, `NOTICE`, `engine/` | The license and notice files of the source |
@@ -553,8 +553,8 @@ it.
 A controller (Route B) uses the bundle only when the controller checkout is at
 the bundle's commit. To use it, unpack the bundle on the controller and set
 `prebuilt_dir` to the bundle folder. With any other commit, `vade install`
-builds from source on each Spark. See [bundle details](cli/docs/prebuilt.md) and
-[first run](harness/docs/first-run.md).
+builds from source on each Spark. See [bundle details](../cli/docs/prebuilt.md) and
+[first run](../harness/docs/first-run.md).
 
 ## Step 3: get the model
 
@@ -577,7 +577,7 @@ still apply.
 The checkpoint is 102 GB. On 2026-10-24, rented GB10 VMs downloaded it at
 8 to 22 MB/s: about 80 minutes at the top of that range and over three hours
 at the bottom
-([download rates on rented VMs](docs/benchmarks.md#rented-cloud-gb10-vms)).
+([download rates on rented VMs](benchmarks.md#rented-cloud-gb10-vms)).
 Over SSH, a dropped connection stops the download. So run it under `nohup` as
 below, or inside `tmux` if you have it. If the complete checkpoint is
 already in `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local`, skip the download
@@ -604,7 +604,7 @@ good run prints `Verified 32 files, 102.26 GB in` and the model folder. If
 it stops, run the same `vade pull` line again. It continues from where it
 stopped. It writes the `.sha256` list beside the model folder, so the first
 `vade launch`, `vade up` or `vade install` checks the files.
-[Download models](docs/pull-models.md) has the details.
+[Download models](pull-models.md) has the details.
 
 #### Or use the fetch helper
 
@@ -760,11 +760,11 @@ vade status
 
 After the last command, `vade status` says that the engine is stopped.
 Restart with `vade up`, or with `vade launch` to start and chat. See
-[first run](harness/docs/first-run.md) for the whole lifecycle.
+[first run](../harness/docs/first-run.md) for the whole lifecycle.
 
 ### Check the whole route in one go
 
-[`harness/scripts/route-a-check.sh`](harness/scripts/route-a-check.sh) runs
+[`harness/scripts/route-a-check.sh`](../harness/scripts/route-a-check.sh) runs
 Route A from start to finish, with no chat window. In order, it:
 
 1. checks the toolchains and the GPU, and builds the CLI;
@@ -822,7 +822,7 @@ the current directory.
 A pass prints `IDENTICAL: 20/20 runs, 1 machine, N tokens`, where N is the
 reply's token count. That pass covers this set of requests. It is not the full
 cross-Spark exactness check in
-[architecture](docs/architecture.md#exactness-and-model-quality). That check
+[architecture](architecture.md#exactness-and-model-quality). That check
 needs the same token IDs, with the same settings, on every run and on every
 Spark.
 
@@ -1076,7 +1076,7 @@ replies, add `--output 16384`. The `--context` flag sets the context, not the
 chat count. Check `Concurrent chats` in `vade status` for the admitted count.
 The controller starts at 32768 to leave more room for concurrent chats.
 Measured speeds at 32768 are on the
-[benchmarks page](docs/benchmarks.md).
+[benchmarks page](benchmarks.md).
 
 ## Two and more Sparks
 
@@ -1106,7 +1106,7 @@ Before step 1, check these three things:
   install and `vade pull` on each Spark.
   [Step 3](#step-3-get-the-model) has the other ways.
 - **The cables.** Each cable needs an address at both ends, and each address
-  must already work. [Network setup](docs/network-setup.md) shows how to set
+  must already work. [Network setup](network-setup.md) shows how to set
   them up.
 - **The ports.** Keep HTTP port **18080** and transport ports **29960**
   (`tp_port`) and **29961** (`tp_port + 1`) free on each Spark.
@@ -1244,7 +1244,7 @@ If it fails, run `vade status`. Keep the state folder, and read
 
 `vade setup` adds a `[machine name]` section for each Spark. To write the
 config by hand, the
-[example configuration](cli/examples/fp4-local.conf) has a commented-out pair.
+[example configuration](../cli/examples/fp4-local.conf) has a commented-out pair.
 
 For each link between two adjacent Sparks, put a `fabric.<peer>` line in both
 machine sections. Its value is that machine's **own address** on the link
@@ -1272,7 +1272,7 @@ the same files.
 From a clone, setup writes those three source folders instead. `vade install`
 then builds from source on each Spark, unless `prebuilt_dir` points at a bundle
 from the controller checkout's own commit (see
-[bundle details](cli/docs/prebuilt.md)). A bundle from another commit does not
+[bundle details](../cli/docs/prebuilt.md)). A bundle from another commit does not
 qualify. A source build also writes `~/vade-source` and `~/vade-cli-source` on
 each Spark.
 
@@ -1537,7 +1537,7 @@ you remove the `cache_bytes=0` line.
 Route B has no launcher flag for the FP4-Local prefix cache. A setting must
 already be in the noninteractive SSH environment on every selected Spark. A
 setting only in the controller shell has no effect. The engine makes the
-final decision ([source](engine/crates/serve/src/prefix_switch.rs)).
+final decision ([source](../engine/crates/serve/src/prefix_switch.rs)).
 
 `GET /health` reports the cache in one object, `prefix_cache`: hits, misses,
 reused tokens, kept snapshots, entries evicted for memory (`evicted`: room for
@@ -1589,7 +1589,7 @@ that opens its next round of chats while the last one is still closing sees
 only a slightly later first token. Any other 503 can come after work started,
 so it reaches the client once. This gateway also passes `GET /health` to the
 engine, so `vade bench --url http://127.0.0.1:8787/v1` and health checks work
-through it. See the [harness documentation](harness/README.md) for the
+through it. See the [harness documentation](../harness/README.md) for the
 supported API and tool behavior.
 
 The gateway guards against web pages driving it through your browser:
@@ -1659,10 +1659,10 @@ groups (cohorts). A group with a short or incomplete reply gets no rate.
 
 This is a quick check of your own setup, not a RigMark card. Its recipe
 differs from the published cards, so you cannot compare its numbers with them.
-[Reproduce a measurement in detail](docs/benchmarks.md#reproduce-a-measurement-in-detail)
+[Reproduce a measurement in detail](benchmarks.md#reproduce-a-measurement-in-detail)
 lists the differences and shows how to run a card.
 
-Read [benchmark recipes and results](docs/benchmarks.md) for workloads, receipt
+Read [benchmark recipes and results](benchmarks.md) for workloads, receipt
 fields and measurement limits. A quick test or a short greeting does not
 measure real speed. If you share a result, keep the exact source revision,
 checkpoint, settings and raw output with it so others can reproduce it.
@@ -1702,7 +1702,7 @@ stop. Run `vade logs` and `vade doctor` before you retry.
 | `Vade hit an internal error at ...` | This is a bug in Vade, not in your setup. Run the same command again with `RUST_BACKTRACE=1` in front of it and report the output, with the command you ran, to the Vade maintainers. |
 
 If shutdown cannot confirm which process it started, follow
-[CLI recovery](cli/README.md#recovery). Keep the state. Do not delete it.
+[CLI recovery](../cli/README.md#recovery). Keep the state. Do not delete it.
 
 <a id="7-stop-the-server"></a>
 ## Stop the engine
@@ -1717,13 +1717,13 @@ The FP8 checkpoint is a supported route. It runs on 2, 4 or 6 linked Sparks,
 from a controller, with its own config (`cli/examples/vade.conf`). Start it
 with `vade up --fp8` or `vade up --fp8 --sparks 4`. The older flag
 `--fp8-legacy` still works. Follow
-[Install FP8 on 2, 4 or 6 Sparks](docs/install-fp8.md). Do not mix FP8 and
+[Install FP8 on 2, 4 or 6 Sparks](install-fp8.md). Do not mix FP8 and
 FP4-Local weights, model IDs or defaults.
 
 ## Legacy models
 
 The separate Qwen3-8B catalog uses a different checkpoint and launches
 differently. Its source recipe is in the
-[legacy one-Spark quickstart](docs/quickstart-one-spark.md) and the
-[CLI reference](cli/README.md). Do not mix its weights, model IDs or defaults
+[legacy one-Spark quickstart](quickstart-one-spark.md) and the
+[CLI reference](../cli/README.md). Do not mix its weights, model IDs or defaults
 with the Flash-Next routes.

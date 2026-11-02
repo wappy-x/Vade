@@ -5,7 +5,7 @@ gateway. You run the commands on a controller. A controller is a second Linux
 or macOS computer that drives the Spark over SSH with the `vade` command.
 
 To work on the Spark itself, with no second computer, use the
-[quick start on one Spark](../INSTALL.md#quick-start-on-one-spark):
+[quick start on one Spark](INSTALL.md#quick-start-on-one-spark):
 `curl -fsSL https://vade.lol/install.sh | sh`, `vade pull`, then `vade up`.
 
 <a id="part-1-fp4-local-from-a-controller"></a>
@@ -18,8 +18,8 @@ check on the Spark, you run everything from the controller.
 
 ### Before you begin
 
-First finish [INSTALL steps 1–3](../INSTALL.md) and the setup at the start of
-[Route B](../INSTALL.md#route-b-from-a-controller). By then you have:
+First finish [INSTALL steps 1–3](INSTALL.md) and the setup at the start of
+[Route B](INSTALL.md#route-b-from-a-controller). By then you have:
 
 1. checked the Spark and the SSH prerequisites
 2. installed the pinned compilers
@@ -41,7 +41,7 @@ vade status
 vade doctor
 ```
 
-As in [INSTALL](../INSTALL.md#install-and-start), each `--dry-run` line
+As in [INSTALL](INSTALL.md#install-and-start), each `--dry-run` line
 previews the command after it without changing anything. Here is what each
 real command does:
 
@@ -58,7 +58,7 @@ memory, the engine refuses it, and you choose a smaller `--context`. Keep it
 at 8192 or more if you want `vade chat`. (On the Spark itself, a local launch
 lowers a default or saved context, but only when the engine refuses it for
 lack of memory.) See
-[Defaults on a controller](../INSTALL.md#defaults-on-a-controller).
+[Defaults on a controller](INSTALL.md#defaults-on-a-controller).
 
 If startup fails, see [launcher recovery](../cli/README.md#recovery).
 
@@ -122,7 +122,7 @@ engine already uses greedy decoding for those requests.
 
 Start the gateway in a second controller terminal, from the same checkout. If
 `harness/target/release/vade-gateway` is not there yet, first build it as
-shown in [Client gateway](../INSTALL.md#client-gateway).
+shown in [Client gateway](INSTALL.md#client-gateway).
 
 ```sh
 harness/target/release/vade-gateway \

@@ -2,8 +2,8 @@
 
 This page covers starting `nvidia/Qwen3.8-Flash-Next-FP4-Local` from a
 controller, on one Spark or on a chain of up to 24. Start with
-[INSTALL.md](../../INSTALL.md). On the Spark itself, without a controller, use
-the [quick start](../../INSTALL.md#quick-start-on-one-spark) instead:
+[INSTALL.md](../../docs/INSTALL.md). On the Spark itself, without a controller, use
+the [quick start](../../docs/INSTALL.md#quick-start-on-one-spark) instead:
 `curl -fsSL https://vade.lol/install.sh | sh`, `vade pull`, then `vade up`.
 
 ## Defaults
@@ -26,7 +26,7 @@ that many distinct --hosts."
   prefix-cache settings control those limits: `VADE_FLASHNEXT_PREFIX_CACHE=0`
   turns the cache off, `VADE_FLASHNEXT_CACHE_ROOM=<bytes>` sets the
   cache's own memory room, and `VADE_FLASHNEXT_ADOPT=0` keeps copies only
-  ([the prefix cache](../../INSTALL.md#the-prefix-cache)).
+  ([the prefix cache](../../docs/INSTALL.md#the-prefix-cache)).
   Set them in the noninteractive SSH environment on every selected Spark.
 - **Your own limits.** A `--context` you pass always wins, up to the engine's
   ceiling of 262,144. This long-context setting still lets the engine decide
@@ -47,7 +47,7 @@ that many distinct --hosts."
    its placeholders, and set `VADE_CONFIG` to that file's absolute path. Every
    Spark you use needs the same verified checkpoint, at the same absolute
    checkpoint and staging paths. See
-   [getting the model](../../INSTALL.md#step-3-get-the-model).
+   [getting the model](../../docs/INSTALL.md#step-3-get-the-model).
 3. Linked Sparks use RDMA by default. For TCP instead, run
    `export SEQPAR_RDMA=0` in the controller's shell **before you install**, and
    keep it set for `install`, `up` and `doctor`. `SEQPAR_RDMA=1` makes RDMA

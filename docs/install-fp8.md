@@ -11,7 +11,7 @@ supports both, and this page installs FP8.
 | Two Sparks | The tensor split | Tensor parallel on a ring |
 | Four Sparks | The tensor split in quarters (RDMA) | Tensor parallel on a path |
 | Start command | `vade up` | `vade up --fp8` |
-| Guide | [INSTALL.md](../INSTALL.md) | This page |
+| Guide | [INSTALL.md](INSTALL.md) | This page |
 
 FP8 is the publisher's own FP8 checkpoint. It stores most weights as FP8 in
 blocks of 128 x 128. Our notes record 131 files with 185,523,317,458 bytes on
@@ -37,7 +37,7 @@ The older flag `--fp8-legacy` still works and does the same thing. The
 ## What you need
 
 - **Sparks.** You need 2, 4 or 6 DGX Sparks. Prepare each one with INSTALL
-  [steps 1 and 2](../INSTALL.md#step-1-prerequisites). Each Spark needs disk
+  [steps 1 and 2](INSTALL.md#step-1-prerequisites). Each Spark needs disk
   space for the full checkpoint above and for the build.
 - **Cables.** Each pair of neighboring Sparks needs a cable, with an address
   on each end ([network setup](network-setup.md)). Four Sparks need three
@@ -45,7 +45,7 @@ The older flag `--fp8-legacy` still works and does the same thing. The
   ring of four is optional.
 - **A controller.** The controller is a Linux or macOS computer that reaches
   each Spark over SSH. One of the Sparks can be the controller. Set it up with
-  [Route B](../INSTALL.md#route-b-from-a-controller). `vade launch` is the
+  [Route B](INSTALL.md#route-b-from-a-controller). `vade launch` is the
   one-Spark route, and it serves FP4-Local only.
 
 ## Build the engine
@@ -98,7 +98,7 @@ sh scripts/fetch-model.sh Qwen/Qwen3.8-Flash-Next-FP8 \
 The helper checks every file before it finishes
 ([scripts/fetch-model.sh](../scripts/fetch-model.sh)). Copy the folder to the same
 absolute path on every Spark. Then check each copy with the hash steps in
-[INSTALL step 3](../INSTALL.md#check-the-files). Use an FP8 manifest that you
+[INSTALL step 3](INSTALL.md#check-the-files). Use an FP8 manifest that you
 trust. `vade install` and `vade up` do not download weights.
 
 ## Write the config
@@ -116,7 +116,7 @@ export VADE_CONFIG="$PWD/.local/fp8.conf"
 ```
 
 Edit `.local/fp8.conf` the same way as INSTALL's
-[edit the config](../INSTALL.md#edit-the-config) step:
+[edit the config](INSTALL.md#edit-the-config) step:
 
 - Set the local source, stage and state folders.
 - Delete the `build_manifest` line, or set it to `build.conf` inside your
@@ -354,7 +354,7 @@ has the details.
 | :---: | :---: |
 | [Fresh install](fresh-install.md) | A longer step-by-step checklist for two Sparks |
 | [Network setup](network-setup.md#fp8) | The FP8 layouts by Spark count |
-| [Client gateway](../INSTALL.md#client-gateway) | The INSTALL gateway steps, which work the same way for FP8 |
+| [Client gateway](INSTALL.md#client-gateway) | The INSTALL gateway steps, which work the same way for FP8 |
 
 </div>
 

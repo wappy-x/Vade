@@ -32,7 +32,7 @@ impl Drop for Home {
 #[cfg(not(target_os = "linux"))]
 fn names_cause_and_next_step(text: &str) {
     assert!(text.contains("Vade is not set up yet: there is no local setup and no controller config at "), "{text}");
-    assert!(text.contains("Run vade up on a Spark") && text.contains("run vade setup to write a controller config") && text.contains("INSTALL.md"), "{text}");
+    assert!(text.contains("Run vade up on a Spark") && text.contains("run vade setup to write a controller config") && text.contains("docs/INSTALL.md"), "{text}");
     assert!(!text.contains("cli/examples"), "a bundle has no such folder: {text}");
 }
 

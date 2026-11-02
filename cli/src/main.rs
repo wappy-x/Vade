@@ -304,7 +304,7 @@ fn run_main(mut args: Vec<String>) {
         // A fresh controller still gets one row per check and a FAIL line.
         Err(error) if parsed.command == cli::Command::Doctor => {
             let mut report = checks::Report::new(owner(&parsed.command), parsed.dry_run);
-            let next = "Run vade up on a Spark, or run vade setup to write a controller config (INSTALL.md).";
+            let next = "Run vade up on a Spark, or run vade setup to write a controller config (docs/INSTALL.md).";
             let result = report.fail("config", &style::split(&error).0, next).and_then(|()| {
                 if !parsed.dry_run {
                     doctor::binary(&mut report)?;

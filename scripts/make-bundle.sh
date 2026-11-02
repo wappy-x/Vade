@@ -121,7 +121,7 @@ Install and start:
     ./vade launch
 
 ./vade install checks the hashes in launcher-bundle.conf and copies the files
-under ~/.vade (or VADE_HOME). Read INSTALL.md in the source repository for
+under ~/.vade (or VADE_HOME). Read docs/INSTALL.md in the source repository for
 the model download and for more Sparks.
 README
     (cd "$stage" && find . -type f ! -name MANIFEST | sed 's|^\./||' | LC_ALL=C sort) > "$work/files"

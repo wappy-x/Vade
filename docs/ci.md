@@ -48,7 +48,7 @@ The script does not build kernels, run doctests, build Rustdoc or check document
 
 ## Run checks from a public checkout
 
-Use macOS or Linux with Git, a C linker and Rust. Put rustup's bin directory on `PATH`. Install the pinned toolchains with the commands in [CONTRIBUTING.md](../CONTRIBUTING.md#install-the-toolchains). The first setup needs network access. Later checks can run offline when those inputs are cached. Do not install or start an engine for these checks.
+Use macOS or Linux with Git, a C linker and Rust. Put rustup's bin directory on `PATH`. Install the pinned toolchains with the commands in [CONTRIBUTING.md](../.github/CONTRIBUTING.md#install-the-toolchains). The first setup needs network access. Later checks can run offline when those inputs are cached. Do not install or start an engine for these checks.
 
 1. Commit the change first.
 2. Run `git rev-parse HEAD` and keep its output with the logs.

@@ -38,7 +38,7 @@ pub fn show(json: bool) -> Result<(), String> {
     for (label, text, _, _) in rows.iter().flatten() { table.push((label, crate::text::terminal_text(text).into_owned())); }
     let mut out = style::table(&table, 0);
     if setup == "none" {
-        out += &crate::status::next_steps(&[("On a Spark", "vade launch"), ("From a controller", "set VADE_CONFIG (INSTALL.md)")]);
+        out += &crate::status::next_steps(&[("On a Spark", "vade launch"), ("From a controller", "set VADE_CONFIG (docs/INSTALL.md)")]);
     }
     let written = output::text(format_args!("{out}"));
     error.map_or(written, Err)

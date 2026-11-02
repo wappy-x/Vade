@@ -148,9 +148,9 @@ impl Config {
         let path = config_path()?;
         let text = fs::read_to_string(&path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound && env::var_os("VADE_CONFIG").is_none() {
-                format!("Vade is not set up yet: there is no local setup and no controller config at {}. Run vade up on a Spark, or run vade setup to write a controller config. See INSTALL.md.", crate::text::quoted(&path.to_string_lossy()))
+                format!("Vade is not set up yet: there is no local setup and no controller config at {}. Run vade up on a Spark, or run vade setup to write a controller config. See docs/INSTALL.md.", crate::text::quoted(&path.to_string_lossy()))
             } else if error.kind() == std::io::ErrorKind::NotFound {
-                format!("VADE_CONFIG names a missing file: {}. Check the path, or run vade setup to write a controller config there. See INSTALL.md.", crate::text::quoted(&path.to_string_lossy()))
+                format!("VADE_CONFIG names a missing file: {}. Check the path, or run vade setup to write a controller config there. See docs/INSTALL.md.", crate::text::quoted(&path.to_string_lossy()))
             } else if error.kind() == std::io::ErrorKind::InvalidData {
                 format!("Config {} is not UTF-8 text. Save it as plain UTF-8 text, then retry.", crate::text::quoted(&path.to_string_lossy()))
             } else {
@@ -165,7 +165,7 @@ impl Config {
             Err(env::VarError::NotUnicode(_)) => return Err("Set VADE_GROUP to a plain [group name] from your config.".into()),
         }
         if config.validate_model_revision().is_err() {
-            crate::output::stderr_line(format_args!("Warning: model_revision is missing or mutable; inspection and shutdown remain available. Set a verified immutable revision before vade install or vade up; see INSTALL.md."));
+            crate::output::stderr_line(format_args!("Warning: model_revision is missing or mutable; inspection and shutdown remain available. Set a verified immutable revision before vade install or vade up; see docs/INSTALL.md."));
         }
         Ok(config)
     }
@@ -178,7 +178,7 @@ impl Config {
             return Ok(());
         }
         let start = if self.model.ends_with("-fp8") { "vade up --fp8" } else { "vade up" };
-        Err(format!("Set model_revision to a verified immutable 40-hex publisher revision or local-sha256-<64-hex manifest digest>; missing values, placeholders such as REPLACE_WITH_VERIFIED_IMMUTABLE_REVISION, and mutable tags are refused for installation and startup. See INSTALL.md, then run {start}."))
+        Err(format!("Set model_revision to a verified immutable 40-hex publisher revision or local-sha256-<64-hex manifest digest>; missing values, placeholders such as REPLACE_WITH_VERIFIED_IMMUTABLE_REVISION, and mutable tags are refused for installation and startup. See docs/INSTALL.md, then run {start}."))
     }
 
     /// Parse config text; relative local paths resolve against `path`'s folder.
@@ -265,7 +265,7 @@ impl Config {
         if !config.model_revision.is_empty()
             && (!safe_model(&config.model_revision) || matches!(config.model_revision.as_str(), "." | ".."))
         {
-            return Err("Use a plain model_revision value in the config; see INSTALL.md.".into());
+            return Err("Use a plain model_revision value in the config; see docs/INSTALL.md.".into());
         }
         if config.serve_port == config.tp_port || config.serve_port == config.tp_port + 1 {
             return Err("Set serve_port apart from tp_port and tp_port + 1 in the config.".into());
@@ -344,7 +344,7 @@ impl Config {
         }
         if config.machines.is_empty() {
             return Err(
-                "Add at least one [machine name] section to your config. See cli/examples/fp4-local.conf and INSTALL.md."
+                "Add at least one [machine name] section to your config. See cli/examples/fp4-local.conf and docs/INSTALL.md."
                     .into(),
             );
         }

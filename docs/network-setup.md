@@ -12,7 +12,7 @@ and the [Glossary](GLOSSARY.md) has them all.
 > - Give each cable **two small private subnets** (one per rail) and **MTU 9000**.
 > - Check it: a jumbo ping, then an RDMA test. Expect **about 196 Gb/s per cable**.
 > - Vade finds the RDMA devices by itself from the addresses you give it.
-> - **No RDMA?** Vade can run in [TCP mode](../INSTALL.md#rdma-or-tcp) (`SEQPAR_RDMA=0`), except FP4-Local on two Sparks: the tensor split needs RDMA. Our cloud GB10 cards used TCP over 200G links; we have not measured TCP over ordinary Ethernet.
+> - **No RDMA?** Vade can run in [TCP mode](INSTALL.md#rdma-or-tcp) (`SEQPAR_RDMA=0`), except FP4-Local on two Sparks: the tensor split needs RDMA. Our cloud GB10 cards used TCP over 200G links; we have not measured TCP over ordinary Ethernet.
 
 <br>
 
@@ -114,7 +114,7 @@ choose more than two Sparks, run `vade install` from current source, so the
 copy staged on each Spark supports the chain. Vade's startup checks cannot
 prove that a cabling layout we have not tested gives the same tokens on every
 Spark, so test yours before you rely on it. The steps are in
-[INSTALL.md, Two and more Sparks](../INSTALL.md#two-and-more-sparks).
+[INSTALL.md, Two and more Sparks](INSTALL.md#two-and-more-sparks).
 
 ### FP8
 
@@ -483,4 +483,4 @@ Still stuck? Before you ask for help, collect `ibdev2netdev`, `ip -br address`,
 
 <br>
 
-**Back:** [README](../README.md) · **Next:** [INSTALL.md, Route B](../INSTALL.md#route-b-from-a-controller) and [Two and more Sparks](../INSTALL.md#two-and-more-sparks) → · FP8: [FP8 install](install-fp8.md) and [fresh install](fresh-install.md)
+**Back:** [README](../README.md) · **Next:** [INSTALL.md, Route B](INSTALL.md#route-b-from-a-controller) and [Two and more Sparks](INSTALL.md#two-and-more-sparks) → · FP8: [FP8 install](install-fp8.md) and [fresh install](fresh-install.md)

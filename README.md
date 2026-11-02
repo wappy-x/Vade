@@ -51,9 +51,9 @@ vade up
 
 Next steps:
 
-- Two or four Sparks: [Two and more Sparks](INSTALL.md#two-and-more-sparks).
+- Two or four Sparks: [Two and more Sparks](docs/INSTALL.md#two-and-more-sparks).
 - FP8: [FP8 install](docs/install-fp8.md).
-- A build from a clone, and every setting: [INSTALL.md](INSTALL.md).
+- A build from a clone, and every setting: [INSTALL.md](docs/INSTALL.md).
 - A coding agent is doing the setup for you: give it the [agent quickstart](docs/agents/quickstart.md).
 
 ## Use the API
@@ -72,7 +72,7 @@ reply = client.chat.completions.create(
 print(reply.choices[0].message.content)
 ```
 
-The model thinks before it answers unless you turn that off, as this example does. The [OpenAI API](docs/openai-api.md) page lists every endpoint and field. [INSTALL.md](INSTALL.md) shows how to reach the engine from another computer. The [client setup guide](harness/docs/passthrough-matrix.md) walks through Claude Code, Codex, Hermes, OpenCode and Pi.
+The model thinks before it answers unless you turn that off, as this example does. The [OpenAI API](docs/openai-api.md) page lists every endpoint and field. [INSTALL.md](docs/INSTALL.md) shows how to reach the engine from another computer. The [client setup guide](harness/docs/passthrough-matrix.md) walks through Claude Code, Codex, Hermes, OpenCode and Pi.
 
 <a id="benchmark-results"></a>
 
@@ -135,9 +135,9 @@ To check your own engine, run `vade verify`. [Token IDs](docs/results.md#token-i
 - **Model.** Qwen3.8 Flash-Next, text only, at pinned revisions of `nvidia/Qwen3.8-Flash-Next-FP4-Local` and `Qwen/Qwen3.8-Flash-Next-FP8`. To add a model, read [Adding a model](docs/adding-a-model.md).
 - **Hardware.** DGX Spark (NVIDIA GB10) on Linux `aarch64`.
 - **Sparks.** FP4-Local runs on 1, 2 or 4 Sparks over RDMA, or as a layer chain of 3 to 24 Sparks. We have measured chains up to four Sparks. FP8 runs on 2, 4 or 6 Sparks. We have measured 2 and 4 Sparks, and they give the same token IDs. Six Sparks start, but no benchmark run has measured them, and they give other token IDs. FP8 does not fit on one Spark.
-- **Controller.** A controller drives linked Sparks over SSH. It runs on Linux or macOS. From Windows, connect to a Spark and work there ([how](INSTALL.md#from-a-windows-computer)).
+- **Controller.** A controller drives linked Sparks over SSH. It runs on Linux or macOS. From Windows, connect to a Spark and work there ([how](docs/INSTALL.md#from-a-windows-computer)).
 - **Coding agent.** The agent reads, searches and edits files anywhere. Its shell tool needs the macOS sandbox, so on the Spark itself it does not run commands.
-- **Prefix cache.** On by default on one Spark, on two FP4-Local Sparks and on FP8. Off for FP4-Local on three or more Sparks ([settings](INSTALL.md#the-prefix-cache)).
+- **Prefix cache.** On by default on one Spark, on two FP4-Local Sparks and on FP8. Off for FP4-Local on three or more Sparks ([settings](docs/INSTALL.md#the-prefix-cache)).
 
 ## Where things are
 
@@ -145,7 +145,7 @@ To check your own engine, run `vade verify`. [Token IDs](docs/results.md#token-i
 
 | Page | What it is for |
 | :---: | :---: |
-| [INSTALL.md](INSTALL.md) | The full install, settings and recovery |
+| [INSTALL.md](docs/INSTALL.md) | The full install, settings and recovery |
 | [Agent quickstart](docs/agents/quickstart.md) | Setup steps written for coding agents |
 | [FP8 install](docs/install-fp8.md) | FP8 on two or more Sparks |
 | [CLI reference](cli/README.md) | Every `vade` command |
@@ -158,13 +158,13 @@ To check your own engine, run `vade verify`. [Token IDs](docs/results.md#token-i
 | [Benchmarks](docs/benchmarks.md) | All runs, and how to repeat them |
 | [Architecture](docs/architecture.md) | How a request flows, and the exactness rule |
 | [Why Vade](docs/why-vade.md) | Why Vade exists |
-| [Security](SECURITY.md) | How to report a vulnerability privately |
-| [Code of conduct](CODE_OF_CONDUCT.md) | How we treat each other, and how to report a problem |
-| [Contributing](CONTRIBUTING.md) | House rules, validation and review |
+| [Security](.github/SECURITY.md) | How to report a vulnerability privately |
+| [Code of conduct](.github/CODE_OF_CONDUCT.md) | How we treat each other, and how to report a problem |
+| [Contributing](.github/CONTRIBUTING.md) | House rules, validation and review |
 | [Changelog](CHANGELOG.md) | Changes since v0.1.0 |
 
 </div>
 
 Everything else is in [docs](docs/README.md). Coding agents that change Vade read [AGENTS.md](AGENTS.md) first.
 
-Vade is licensed under [Apache-2.0](LICENSE). The bundled tokenizer and template fixtures keep their own licenses, and so do the models. [NOTICE](NOTICE) lists them. [Credits](CREDITS.md) names the work Vade builds on.
+Vade is licensed under [Apache-2.0](LICENSE). The bundled tokenizer and template fixtures keep their own licenses, and so do the models. [NOTICE](NOTICE) lists them. [Credits](docs/CREDITS.md) names the work Vade builds on.

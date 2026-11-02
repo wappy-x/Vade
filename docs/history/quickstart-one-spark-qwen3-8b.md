@@ -3,7 +3,7 @@
 This is a **legacy route**. It is history, and it does not qualify current
 main. Vade now runs one model, Qwen3.8 Flash-Next. We keep this page because it shows how to build the engine from source. It uses
 the small Qwen3-8B model, and its download and disk notes apply only to that
-model. To install Vade today, start at [INSTALL.md](../../INSTALL.md).
+model. To install Vade today, start at [INSTALL.md](../INSTALL.md).
 
 On this page you build Vade, serve the official Qwen3-8B BF16, and check that
 the same request gives the same answer twice.

@@ -2,7 +2,7 @@
 
 These are retained reference fixtures for Vade's Qwen3.8-Flash-Next-FP8 engine.
 Flash-Next now serves HTTP requests through `flash-serve` across two Sparks;
-follow the [installation guide](../../../INSTALL.md) and
+follow the [installation guide](../../../docs/INSTALL.md) and
 [server guide](../../docs/flash-server.md) to run it. Current measured results
 and their limits are in [Benchmarks](../../../docs/benchmarks.md).
 

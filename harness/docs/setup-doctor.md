@@ -15,7 +15,7 @@ macOS. The [direct/gateway client matrix](passthrough-matrix.md) lists the home
 mode's files, launch arguments and interoperability limits.
 
 For the current FP4-Local setup, run `vade up` as described in
-[INSTALL](../../INSTALL.md). If you drive the Spark from a controller (another
+[INSTALL](../../docs/INSTALL.md). If you drive the Spark from a controller (another
 computer, INSTALL's Route B), keep the tunnel `vade up` opens; on the Spark
 itself there is no tunnel. Replace `MODEL` below with
 `qwen3.8-flash-next-fp4-local`, the model ID in
@@ -233,7 +233,7 @@ performance gain.
 ## Sources and credit
 
 These original templates follow the APIs and settings below, alongside the
-[design references](../../CREDITS.md#harness). No code from these or other
+[design references](../../docs/CREDITS.md#harness). No code from these or other
 competing clients was copied, bundled, or added as a dependency. Separately
 installed pinned clients are used only in the documented passthrough mock and
 live checks.

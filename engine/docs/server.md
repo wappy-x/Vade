@@ -119,7 +119,7 @@ memory message; `--chats` reserves explicit concurrent full-context sessions.
 Use `vade up --context 32768 --output 8192` for comparisons with the dated timing
 receipts.
 The new default still needs native startup, cache and capacity qualification.
-See [INSTALL.md](../../INSTALL.md#5-start-the-two-spark-server) for the product route.
+See [INSTALL.md](../../docs/INSTALL.md#5-start-the-two-spark-server) for the product route.
 
 ### Ask your coding agent
 

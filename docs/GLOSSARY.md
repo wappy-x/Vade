@@ -24,7 +24,7 @@ These terms come up when you link two or more Sparks:
 
 **aarch64 (Arm64).** aarch64 is the processor family of the Spark's CPU. On Linux, `uname -m` reports it.
 
-**Agent (coding agent).** The agent is the mode of chat that can use tools. It reads, searches and edits files in the [workspace](#sz), and on macOS it can run commands in a [sandbox](#sz). `vade chat` opens it when the context is at least 8192 tokens. See [chat and the coding agent on Linux](../INSTALL.md#chat-and-the-coding-agent-on-linux).
+**Agent (coding agent).** The agent is the mode of chat that can use tools. It reads, searches and edits files in the [workspace](#sz), and on macOS it can run commands in a [sandbox](#sz). `vade chat` opens it when the context is at least 8192 tokens. See [chat and the coding agent on Linux](INSTALL.md#chat-and-the-coding-agent-on-linux).
 
 **Allowlist.** An allowlist is a list of the only files that may be copied. Anything not on it stays behind.
 
@@ -69,11 +69,11 @@ These terms come up when you link two or more Sparks:
 
 **ConnectX-7 (CX7).** ConnectX-7 is NVIDIA's high-speed network chip inside each Spark. It provides the two QSFP ports and RDMA.
 
-**Context window.** The context window is the most tokens a model can consider at once: the prompt plus the answer so far. The configured limit depends on the launch route and the memory available. See [installation settings](../INSTALL.md).
+**Context window.** The context window is the most tokens a model can consider at once: the prompt plus the answer so far. The configured limit depends on the launch route and the memory available. See [installation settings](INSTALL.md).
 
 **Contract.** A contract is the set of rules that two parts agree on when they talk to each other. The engine and the harness share one. It covers what the engine can do, whether it has room for a request, and how its prompt cache is reused. See the [harness engine contract](../harness/docs/engine-contract.md).
 
-**Controller.** A controller is a computer that drives the Sparks over SSH with the `vade` CLI. It can be a second Linux or macOS computer, or a Spark that is its own controller. See [Route B](../INSTALL.md#route-b-from-a-controller).
+**Controller.** A controller is a computer that drives the Sparks over SSH with the `vade` CLI. It can be a second Linux or macOS computer, or a Spark that is its own controller. See [Route B](INSTALL.md#route-b-from-a-controller).
 
 **Crate.** A crate is one Rust package, either a library or a program. The engine is a workspace of several crates.
 
@@ -221,7 +221,7 @@ Under greedy decoding, drafting on and off must return the same token IDs. See [
 - **FP8.** `vade up --fp8 --cache-bytes 0` turns it off.
 - **FP4-Local from a controller.** Set `VADE_FLASHNEXT_PREFIX_CACHE=0` on every Spark instead.
 
-See [the prefix cache](../INSTALL.md#the-prefix-cache).
+See [the prefix cache](INSTALL.md#the-prefix-cache).
 
 **Preflight.** The preflight is the set of checks that Vade runs before it installs or starts anything: the machine, driver, memory, disk and model files. A failed preflight changes nothing.
 

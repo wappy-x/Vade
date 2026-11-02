@@ -1,6 +1,6 @@
 # Flash-Next NVFP4 serving
 
-Start at [INSTALL.md](../../INSTALL.md) for system and compiler prerequisites.
+Start at [INSTALL.md](../../docs/INSTALL.md) for system and compiler prerequisites.
 This page describes the native **FP4-Local** checkpoint route. The FP8
 `vade up` deployment has different defaults.
 

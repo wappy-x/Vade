@@ -14,7 +14,7 @@ Use one of these base URLs. Each one listens on loopback only.
 
 | Base URL | What answers | Start it with |
 | --- | --- | --- |
-| `http://127.0.0.1:18080/v1` | The engine | `vade up`, on the Spark or from a controller ([INSTALL.md](../INSTALL.md)) |
+| `http://127.0.0.1:18080/v1` | The engine | `vade up`, on the Spark or from a controller ([INSTALL.md](INSTALL.md)) |
 | `http://127.0.0.1:8787/v1` | The core gateway, in front of the engine | `vade-harness gateway --upstream http://127.0.0.1:18080` |
 | `http://127.0.0.1:8787/v1` | The standalone gateway, in front of the engine | `vade-gateway --upstream http://127.0.0.1:18080/v1` |
 

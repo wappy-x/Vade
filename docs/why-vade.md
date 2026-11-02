@@ -34,7 +34,7 @@ Our checks show these results today:
 
 - **FP4-Local.** On main `dc32b7c` (2026-10-31 morning), the FP4-Local cards on one, two and four Sparks gave the same token IDs in 66 of 66 responses. Each Spark count had cards with drafting on and with drafting off ([results](results.md#token-ids)).
 - **The prefix cache.** In the same runs, the second question on a 32K-token chat gave the same token IDs with the prefix cache and without it.
-- **The merge rule.** Before a change to the engine's arithmetic, scheduling, caching or transport merges, it runs at least three times on real Sparks. The results are compared across at least two Sparks ([contributing](../CONTRIBUTING.md)).
+- **The merge rule.** Before a change to the engine's arithmetic, scheduling, caching or transport merges, it runs at least three times on real Sparks. The results are compared across at least two Sparks ([contributing](../.github/CONTRIBUTING.md)).
 
 Three points apply to FP8:
 
@@ -93,7 +93,7 @@ The next table gives the time to the first token for a long prompt. The cards se
 
 | Page | What it is for |
 | :---: | :---: |
-| [INSTALL.md](../INSTALL.md) | Install Vade on one Spark |
+| [INSTALL.md](INSTALL.md) | Install Vade on one Spark |
 | [Benchmarks](benchmarks.md) | The measured results and how to repeat them |
 | [Architecture](architecture.md) | How a request reaches the engine |
 

@@ -10,8 +10,8 @@ vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e6342
 vade up
 ```
 
-- **One Spark.** The three commands are all you need. [INSTALL.md](../INSTALL.md) has the full steps, the source build and every setting. You need no cable between Sparks and no network setup.
-- **Two or more Sparks.** Do the INSTALL steps 1 to 3 on every Spark. Cable the Sparks as [network setup](network-setup.md) shows. Then drive them from a controller, as [Two and more Sparks](../INSTALL.md#two-and-more-sparks) shows.
+- **One Spark.** The three commands are all you need. [INSTALL.md](INSTALL.md) has the full steps, the source build and every setting. You need no cable between Sparks and no network setup.
+- **Two or more Sparks.** Do the INSTALL steps 1 to 3 on every Spark. Cable the Sparks as [network setup](network-setup.md) shows. Then drive them from a controller, as [Two and more Sparks](INSTALL.md#two-and-more-sparks) shows.
 - **The FP8 checkpoint.** FP8 needs 2, 4 or 6 Sparks. Follow the [FP8 install](install-fp8.md).
 
 A controller is a computer that drives one or more Sparks over SSH with the `vade` CLI and a config file. It is usually a second Linux or macOS computer. A Spark can also be its own controller.
@@ -27,9 +27,9 @@ A controller is a computer that drives one or more Sparks over SSH with the `vad
 
 ### Main routes
 
-- **[Install](../INSTALL.md)**: every install route and setting, and recovery.
+- **[Install](INSTALL.md)**: every install route and setting, and recovery.
 - **[Download models](pull-models.md)**: `vade pull` and `vade models`.
-- **[Context size](../INSTALL.md#context-size-on-one-spark)**: the default context window, and what Vade does when memory is short.
+- **[Context size](INSTALL.md#context-size-on-one-spark)**: the default context window, and what Vade does when memory is short.
 - **[First chat on one Spark](../harness/docs/first-run.md)**: what `vade launch` does and the settings it saves.
 - **[One-Spark quickstart](quickstart-one-spark.md)**: FP4-Local on one Spark from a controller.
 - **[Launch FP4-Local](../cli/docs/fp4-local.md)**: FP4-Local from a controller, on one Spark or on a chain.
@@ -124,7 +124,7 @@ A controller is a computer that drives one or more Sparks over SSH with the `vad
 
 ### Credits and licenses
 
-- **[Credits](../CREDITS.md)**: the work that Vade builds on.
+- **[Credits](CREDITS.md)**: the work that Vade builds on.
 - **[Engine credits](../engine/docs/CREDITS.md)**: the people, papers and projects behind the engine.
 - **[Engine ideas and references](../engine/CREDITS-NOTES.md)**: each source and what the engine uses from it.
 - **[Harness sources studied](../harness/CREDITS-NOTES.md)**: the client docs and designs that we studied.
@@ -142,10 +142,10 @@ A controller is a computer that drives one or more Sparks over SSH with the `vad
 
 ### Contribute
 
-- **[Contributing](../CONTRIBUTING.md)**: how to check a change and send a pull request.
+- **[Contributing](../.github/CONTRIBUTING.md)**: how to check a change and send a pull request.
 - **[Agent rules](../AGENTS.md)**: the rules for a coding agent that changes Vade.
-- **[Code of conduct](../CODE_OF_CONDUCT.md)**: how we treat each other, and how to report a problem.
-- **[Security](../SECURITY.md)**: how to report a vulnerability privately.
+- **[Code of conduct](../.github/CODE_OF_CONDUCT.md)**: how we treat each other, and how to report a problem.
+- **[Security](../.github/SECURITY.md)**: how to report a vulnerability privately.
 - **[Local CI](ci.md)**: the CI commands to run on your own computer.
 - **[Repository tools](../tools/README.md)**: the `vade-tools` crate.
 

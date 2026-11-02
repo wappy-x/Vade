@@ -432,7 +432,7 @@ Integration tests also exercise:
   children
 - private parent/child transcript replay without running tools again
 
-Design references are credited in [Credits](../../CREDITS.md#harness). The
+Design references are credited in [Credits](../../docs/CREDITS.md#harness). The
 implementation is first-party Rust using only the standard library; no code
 or tests from competing projects were copied.
 

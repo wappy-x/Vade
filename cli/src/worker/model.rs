@@ -44,10 +44,10 @@ pub(super) const MAX_MODEL_INDEX_BYTES: u64 = 64 * 1024 * 1024;
 
 pub(super) fn check_model(path: &Path) -> Result<(), String> {
     let entries = fs::read_dir(path).map_err(|_| {
-        "Model weights are missing. Check the configured model directory; for Flash-Next, follow INSTALL.md step 3 for verified weights.".to_string()
+        "Model weights are missing. Check the configured model directory; for Flash-Next, follow docs/INSTALL.md step 3 for verified weights.".to_string()
     })?;
     if !path.join("config.json").is_file() || !path.join("tokenizer.json").is_file() {
-        return Err("Model configuration or tokenizer is missing. Check the configured model directory; for Flash-Next, follow INSTALL.md step 3 for verified weights.".into());
+        return Err("Model configuration or tokenizer is missing. Check the configured model directory; for Flash-Next, follow docs/INSTALL.md step 3 for verified weights.".into());
     }
     let index_path = path.join("model.safetensors.index.json");
     match File::open(&index_path) {
@@ -61,15 +61,15 @@ pub(super) fn check_model(path: &Path) -> Result<(), String> {
                 })?;
             if text.len() as u64 > MAX_MODEL_INDEX_BYTES {
                 return Err(
-                    "Model shard index exceeds 64 MiB. Check the configured model directory and INSTALL.md step 3.".into(),
+                    "Model shard index exceeds 64 MiB. Check the configured model directory and docs/INSTALL.md step 3.".into(),
                 );
             }
             for shard in indexed_shards(&text)? {
                 let metadata = fs::metadata(path.join(shard)).map_err(|_| {
-                    "A model shard is missing. Check the configured model directory; for Flash-Next, follow INSTALL.md step 3 for verified weights.".to_string()
+                    "A model shard is missing. Check the configured model directory; for Flash-Next, follow docs/INSTALL.md step 3 for verified weights.".to_string()
                 })?;
                 if !metadata.is_file() || metadata.len() == 0 {
-                    return Err("A model shard is empty or invalid. Check the configured model directory; for Flash-Next, follow INSTALL.md step 3 for verified weights.".into());
+                    return Err("A model shard is empty or invalid. Check the configured model directory; for Flash-Next, follow docs/INSTALL.md step 3 for verified weights.".into());
                 }
             }
             return Ok(());
@@ -97,7 +97,7 @@ pub(super) fn check_model(path: &Path) -> Result<(), String> {
     }
     if !weights {
         return Err(
-            "Model weights are missing. Check the configured model directory; for Flash-Next, follow INSTALL.md step 3 for verified weights.".into(),
+            "Model weights are missing. Check the configured model directory; for Flash-Next, follow docs/INSTALL.md step 3 for verified weights.".into(),
         );
     }
     Ok(())
@@ -107,7 +107,7 @@ pub(super) fn check_model(path: &Path) -> Result<(), String> {
 /// small scanner decodes those strings, including escapes, without a JSON crate.
 pub(super) fn indexed_shards(index: &str) -> Result<BTreeSet<String>, String> {
     let invalid = || {
-        "Model shard index is invalid. Check the configured model directory; for Flash-Next, follow INSTALL.md step 3 for verified weights."
+        "Model shard index is invalid. Check the configured model directory; for Flash-Next, follow docs/INSTALL.md step 3 for verified weights."
             .to_string()
     };
     let mut characters = index.trim().chars().peekable();

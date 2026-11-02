@@ -7,7 +7,7 @@ native and HTTP byte comparisons.
 
 The former engine shell gates and operational wrappers have been retired.
 Host checks verify tool behavior; GPU correctness and performance require
-qualification runs on real Sparks, as described in [CONTRIBUTING.md](../../../CONTRIBUTING.md#exactness-and-evidence).
+qualification runs on real Sparks, as described in [CONTRIBUTING.md](../../../.github/CONTRIBUTING.md#exactness-and-evidence).
 
 See [Validation](../../docs/validation.md) and the
 [engine exactness contract](../../README.md#determinism).

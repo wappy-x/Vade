@@ -209,7 +209,7 @@ the legacy FP8 checkpoint on two.**
   one Spark through `flash-serve`, separately from `spark-serve`; with more
   Sparks, the same engine runs as a layer pipeline, one block of layers per
   Spark. Its checkpoint stores each module as NVFP4, MXFP8 or plain tensors.
-  To run it, follow the root [INSTALL.md](../../../INSTALL.md).
+  To run it, follow the root [INSTALL.md](../../../docs/INSTALL.md).
 - **Qwen3.8-Flash-Next-FP8** is the legacy checkpoint. It serves chat
   requests on two Sparks through `flash-serve` and starts with
   `vade up --fp8-legacy`.

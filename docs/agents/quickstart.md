@@ -12,7 +12,7 @@ vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e6342
 vade up
 ```
 
-FP4-Local is the checkpoint that this path downloads. It fits on one Spark. [INSTALL.md](../../INSTALL.md) has the long form for people.
+FP4-Local is the checkpoint that this path downloads. It fits on one Spark. [INSTALL.md](../INSTALL.md) has the long form for people.
 
 ## Rules
 
@@ -403,7 +403,7 @@ Run the later steps in this shell. In a new shell, run the two `export` lines ag
 The two most likely failures:
 
 - **`fatal: destination path ... already exists`.** A checkout is there. Ask the person whether to use it. Do not replace it.
-- **A `toolchain` or `rustup` error.** Rust 1.99.0 is missing. Follow [Install Rust](../../INSTALL.md#install-rust).
+- **A `toolchain` or `rustup` error.** Rust 1.99.0 is missing. Follow [Install Rust](../INSTALL.md#install-rust).
 
 ### Step L4. Preview the setup
 
@@ -609,7 +609,7 @@ It pulls each source checkout and stages the new build. Then it asks before a re
 | `GPU is in use` | Another program uses the GPU | Tell the person. Do not stop it |
 | `needs an NVIDIA GB10` or `CUDA 13.0 or newer` | Not a Spark, or the NVIDIA driver is too old | Tell the person. Driver updates are an administrator job |
 | `missing cc` | The Spark has no C compiler | Tell the person. An administrator installs it |
-| `no checksum list for this checkpoint` | No `.sha256` list beside the model folder | Tell the person. [Check the files](../../INSTALL.md#check-the-files) shows the check |
+| `no checksum list for this checkpoint` | No `.sha256` list beside the model folder | Tell the person. [Check the files](../INSTALL.md#check-the-files) shows the check |
 | `Cannot reach ... over SSH` | A Spark is off, off the network or asks for a password | Step L1, then run the command again |
 | `Model folder ... is unavailable` | No checkpoint where Vade looks | Step 3 |
 | A doctor row `model files` fails | The checkpoint is missing or incomplete | Step 3 |
@@ -619,4 +619,4 @@ It pulls each source checkout and stages the new build. Then it asks before a re
 | `did not reply to the pre-start check` | SSH failed or timed out | Step L1, then run the command again |
 | `Vade hit an internal error` | A bug in Vade | Stop. Give the person the output. Do not retry in a loop |
 
-The [first-run problems](../../INSTALL.md#first-run-problems) table lists more messages.
+The [first-run problems](../INSTALL.md#first-run-problems) table lists more messages.

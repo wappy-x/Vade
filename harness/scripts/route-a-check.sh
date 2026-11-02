@@ -1,5 +1,5 @@
 #!/bin/sh
-# Route A self-check: run on a Spark from the checkout root, after INSTALL.md
+# Route A self-check: run on a Spark from the checkout root, after docs/INSTALL.md
 # steps 1 to 3 (toolchains, clone and kernel build, verified model).
 #
 #   sh harness/scripts/route-a-check.sh
@@ -134,7 +134,7 @@ say "route-a-check: checkout $root"
 say "route-a-check: private VADE_HOME $vade_home, VADE_MODELS ${VADE_MODELS:-(unset)}"
 say "route-a-check: logs $logs"
 
-# 1. Toolchain and GPU: the INSTALL.md step 1 and 2 results this needs.
+# 1. Toolchain and GPU: the docs/INSTALL.md step 1 and 2 results this needs.
 step_no=1 t=$(date +%s) problems=
 if [ "$dry" = 1 ]; then
     say "  would check: uname -m, nvidia-smi (GB10, no compute processes), cc git curl sha256sum, rustup toolchains 1.99.0 and nightly-2026-10-01 (rust-src, nvptx64-nvidia-cuda)"
@@ -188,7 +188,7 @@ elif [ "$dry" = 1 ]; then
     run model "$vade" detect
     result model DRY "$t"
 elif ! run model "$vade" detect; then
-    result model FAIL "$t" "see $logs/model.log (INSTALL.md step 3)"
+    result model FAIL "$t" "see $logs/model.log (docs/INSTALL.md step 3)"
     tail_log model
 elif ! model_path=$(sed -n 's/^Models: "\(.*\)"$/\1/p' "$logs/model.log" | tail -n 1 | unescape 1) || [ -z "$model_path" ]; then
     result model FAIL "$t" "cannot read the model path from vade detect; see $logs/model.log"

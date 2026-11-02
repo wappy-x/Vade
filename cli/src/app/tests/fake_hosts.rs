@@ -104,7 +104,7 @@ fn a_host_below_the_floor_stops_a_bundle_install_before_any_copy() {
     fs::write(app.runner.root.join("host-b/driver"), "575.51.03\n").unwrap();
     let error = install(&mut app).unwrap_err();
     assert!(error.starts_with("b: the bundle does not fit: it needs NVIDIA driver 580 or newer, and this Spark has 575.51.03. A source build needs Rust on each Spark and a checkout on this computer."), "{error}");
-    assert!(error.contains("git clone") && error.contains("INSTALL.md#install-rust-source-builds-only"), "{error}");
+    assert!(error.contains("git clone") && error.contains("docs/INSTALL.md#install-rust-source-builds-only"), "{error}");
     assert!(!app.runner.log().lines().any(|row| row.starts_with("rsync ")), "{}", app.runner.log());
 }
 
@@ -118,8 +118,8 @@ fn a_source_build_that_lacks_rust_names_the_install_commands() {
         "rustup toolchain install nightly-2026-10-01 --profile minimal --no-self-update --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda"] {
         assert!(error.contains(command), "{error}");
     }
-    // Every command stays the same as in INSTALL.md.
-    let guide = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../INSTALL.md")).unwrap();
+    // Every command stays the same as in docs/INSTALL.md.
+    let guide = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/INSTALL.md")).unwrap();
     for command in crate::app::diagnostics::RUST_STEPS.split(" && ") {
         assert!(guide.lines().any(|line| line == command), "{command}");
     }

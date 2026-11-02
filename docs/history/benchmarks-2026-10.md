@@ -600,7 +600,7 @@ every Spark count, with the cache on or off.
 | 4 | 65536 | off | 10.77 | 10.33 | 0 | 10.90 | `long32k` |
 
 The prefix cache was turned on with `VADE_FLASHNEXT_PREFIX_CACHE=1` at the
-server start, as [the prefix cache](../../INSTALL.md#the-prefix-cache)
+server start, as [the prefix cache](../INSTALL.md#the-prefix-cache)
 says. These runs did not try the cache on four Sparks, and did not measure
 FP8.
 
@@ -935,7 +935,7 @@ cards' basic output checks. It covers these requests, not every prompt.
 ### Reproduce this table
 
 Use the build, checkpoint and request recipe named in the source card.
-Install it as [INSTALL.md](../../INSTALL.md) shows. Use the same private
+Install it as [INSTALL.md](../INSTALL.md) shows. Use the same private
 configuration for every command. Set `VADE_API_URL` to the endpoint that
 `vade status` reports. Keep model files, configuration and receipts outside
 the source tree.
@@ -1431,7 +1431,7 @@ v0.1.0 receipt, including the other Sparks and VMs behind these ranges.
 
 ### How to reproduce
 
-1. Install v0.1.0 as [INSTALL.md](../../INSTALL.md) shows, then start the engine
+1. Install v0.1.0 as [INSTALL.md](../INSTALL.md) shows, then start the engine
    with `vade launch` on one Spark or `vade up --sparks 2` from a controller.
    Keep the default context and output.
 2. Run `vade bench` with no flags for a quick timing check. It measures the

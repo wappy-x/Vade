@@ -8,7 +8,7 @@ the API that you pick. It keeps request bodies, tools, cache identity,
 response usage, SSE and errors as they are. The separate engine owns
 inference and KV caching.
 
-For a current FP4-Local server, follow [INSTALL.md](../../INSTALL.md):
+For a current FP4-Local server, follow [INSTALL.md](../../docs/INSTALL.md):
 
 - **On the Spark itself.** `vade launch` or `vade up` starts an engine that
   keeps running. It opens no tunnel.

@@ -26,7 +26,7 @@ what it checked.
 The CLI's own tests use stand-in programs to check how these commands start
 and supervise their steps. The GPU cases, and receipts from two Sparks, need a
 run on real Sparks. The full exactness gate in
-[CONTRIBUTING.md](../../CONTRIBUTING.md#exactness-and-evidence) decides which
+[CONTRIBUTING.md](../../.github/CONTRIBUTING.md#exactness-and-evidence) decides which
 checks qualify a change. These two commands replace older shell scripts;
 [the appendix](#appendix-the-retired-shell-gates) maps each old step to the
 new command.

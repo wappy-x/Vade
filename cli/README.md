@@ -10,7 +10,7 @@ library.
   [Chat, check and stop](#chat-check-and-stop).
 - **Two or more Sparks:** read
   [Multi-Spark source setup](#multi-spark-source-setup) after INSTALL's
-  [two and more Sparks](../INSTALL.md#two-and-more-sparks).
+  [two and more Sparks](../docs/INSTALL.md#two-and-more-sparks).
 - **Something broke:** see [Recovery](#recovery).
 
 Later sections cover checking and measuring the engine, the legacy Qwen3-8B
@@ -70,7 +70,7 @@ the [output contract](docs/ux.md).
 
 ## Install
 
-To install `vade` on your Spark, follow [INSTALL.md](../INSTALL.md), the current
+To install `vade` on your Spark, follow [INSTALL.md](../docs/INSTALL.md), the current
 FP4-Local route. Other ways in are under [Install from source or a
 bundle](#install-from-source-or-a-bundle).
 
@@ -119,7 +119,7 @@ The prompt cache is on by default: requests that send `cache:true` or a
 `prompt_cache_key` keep the start of their prompt cached between turns. Set
 `VADE_FLASHNEXT_PREFIX_CACHE=0` before `vade launch` to turn it off. The cache
 takes its own memory room at startup. See
-[the prefix cache](../INSTALL.md#the-prefix-cache).
+[the prefix cache](../docs/INSTALL.md#the-prefix-cache).
 
 The local launcher sizes both for you, so it refuses `--chats` and any
 `--cache-bytes` above zero before it saves anything. `--cache-bytes 0` is
@@ -202,7 +202,7 @@ stage those instead on the Spark itself, set `VADE_BUNDLE` to an existing local
 launcher bundle, then run `vade install` with no controller config selected
 (no `VADE_CONFIG`, and no default controller config file). Builds of main come
 from dl.vade.lol, and GitHub Releases holds only the old v0.1.0 bundle with its
-`SHA256SUMS`. [INSTALL.md](../INSTALL.md) shows the download. A controller can also use a
+`SHA256SUMS`. [INSTALL.md](../docs/INSTALL.md) shows the download. A controller can also use a
 launcher bundle when its engine and CLI revisions match the source checkout.
 Set `prebuilt_dir` in the controller config. See
 [Prebuilt bundles](#prebuilt-bundles).
@@ -402,7 +402,7 @@ Use a fresh `VADE_HOME` if you want to keep both local installations.
 
 This section is for a controller setup (a controller is described at the top
 of this page). If you work on the Spark itself, follow
-[INSTALL.md](../INSTALL.md) and the sections above instead.
+[INSTALL.md](../docs/INSTALL.md) and the sections above instead.
 
 Choose the checkpoint profile deliberately:
 
@@ -419,7 +419,7 @@ A chain is several Sparks linked one after another, serving one model together.
 With `--replicas`, each replica is a full, separate copy of the model on its own
 Spark.
 
-Start with [INSTALL.md](../INSTALL.md).
+Start with [INSTALL.md](../docs/INSTALL.md).
 
 With a controller config, FP4-Local asks for the same defaults as `vade launch`
 on the Spark, whatever the Spark count and with or without `--chats`: context
@@ -558,7 +558,7 @@ of the checkpoint.
 
 The Flash-Next weights stay under your control. If weights are missing or
 incomplete, Vade tells you the checkpoint, revision and destination it needs.
-Follow [step 3 of INSTALL](../INSTALL.md#step-3-get-the-model) to download and
+Follow [step 3 of INSTALL](../docs/INSTALL.md#step-3-get-the-model) to download and
 check the weights, then run `vade install` again. Install never downloads
 Flash-Next weights itself. A sharded checkpoint must have every nonempty shard
 named in its index.
@@ -633,7 +633,7 @@ With `--replicas N`, each replica sits behind its own tunnel on the N local
 ports after `local_port`, and the local gateway listens on `local_port`. It needs
 no `fabric.*` entries and cannot be combined with `--sparks` or `--fp8`.
 `vade down` stops the gateway, the tunnels and every replica. See
-[Replicas](../INSTALL.md#serve-many-chats-with-replicas). With `--pairs`, each
+[Replicas](../docs/INSTALL.md#serve-many-chats-with-replicas). With `--pairs`, each
 pair needs the `fabric.*` entries of its own link, only each pair's first
 machine gets a tunnel, and the gateway runs with `--stable-prefix`.
 
@@ -935,7 +935,7 @@ For the legacy Qwen3-8B catalog, start with the [Qwen3-8B section of the
 one-Spark
 quickstart](../docs/quickstart-one-spark.md#part-2-older-route-build-from-source-with-qwen3-8b),
 including its optional CLI step. The current FP4-Local route is
-[INSTALL.md](../INSTALL.md). On the Spark, with `vade` already installed:
+[INSTALL.md](../docs/INSTALL.md). On the Spark, with `vade` already installed:
 
 ```sh
 vade run qwen3-8b
@@ -1141,7 +1141,7 @@ records, command arguments and network requests keep their original bytes.
 
 ## Working on Vade itself
 
-To build and check a change, see [CONTRIBUTING.md](../CONTRIBUTING.md) and the
+To build and check a change, see [CONTRIBUTING.md](../.github/CONTRIBUTING.md) and the
 house rules in [AGENTS.md](../AGENTS.md). From `engine/`, this block is
 identical to the host block in AGENTS.md:
 

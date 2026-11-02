@@ -18,7 +18,7 @@ This page covers four things:
 
 These pages go with this one:
 
-- **Project rules.** [AGENTS.md](AGENTS.md) gives the rules for a change to
+- **Project rules.** [AGENTS.md](../AGENTS.md) gives the rules for a change to
   Vade's code. This page says the same rules for people.
 - **Code of conduct.** Everyone who takes part follows the
   [code of conduct](CODE_OF_CONDUCT.md).
@@ -27,10 +27,10 @@ These pages go with this one:
   as the [security policy](SECURITY.md) says.
 - **Bugs and ideas.** Use the
   [issue forms](https://github.com/wappy-x/Vade/issues/new/choose).
-- **CI.** [Local CI](docs/ci.md) gives the current CI status and the public
+- **CI.** [Local CI](../docs/ci.md) gives the current CI status and the public
   host commands. Run the host checks that your change affects, with doctests
-  and Rustdoc. The [workflow](.github/workflows/ci.yml) is the full list.
-- **Terms.** The [glossary](docs/GLOSSARY.md) explains the terms that this page
+  and Rustdoc. The [workflow](workflows/ci.yml) is the full list.
+- **Terms.** The [glossary](../docs/GLOSSARY.md) explains the terms that this page
   uses.
 
 ## Build and validate
@@ -41,7 +41,7 @@ Spark for the device checks described under
 
 ### Install the toolchains
 
-[CI](.github/workflows/ci.yml) pins two Rust toolchains: 1.99.0 for the host
+[CI](workflows/ci.yml) pins two Rust toolchains: 1.99.0 for the host
 code and nightly-2026-10-01 for the GPU kernels. Install them once, while
 you're online:
 
@@ -64,7 +64,7 @@ kernels (PTX files) from an earlier build are stale. The first build also
 compiles Rust's core library for the GPU target (the build-std cache). It can
 need downloads, so run it once while you are online. After that, everything here
 works offline.
-[Validation](engine/docs/validation.md#on-any-computer-host-checks) has the
+[Validation](../engine/docs/validation.md#on-any-computer-host-checks) has the
 details.
 
 ```sh
@@ -83,7 +83,7 @@ files as they are, the way CI does.
 
 If you changed the engine, check and test its workspace. On Linux without a
 GPU, first prepare the link-only CUDA stub with the commands in
-[AGENTS.md](AGENTS.md#engine-and-full-ci-checks). Then run the block below.
+[AGENTS.md](../AGENTS.md#engine-and-full-ci-checks). Then run the block below.
 Pass `--workspace` as CI does. A plain `cargo test` covers only the default
 members and skips some crates. `--all-targets` does not run doc tests, so CI
 runs them in a separate step. That step is the last line here:
@@ -95,8 +95,8 @@ cargo +1.99.0 test --offline --locked --doc --workspace --exclude spark-rust-ker
 ```
 
 Run the tests for the workspace that you changed before you open a PR. The
-rest of CI's host recipes are in [AGENTS.md](AGENTS.md) and
-[engine validation](engine/docs/validation.md). They cover the CUDA stub for
+rest of CI's host recipes are in [AGENTS.md](../AGENTS.md) and
+[engine validation](../engine/docs/validation.md). They cover the CUDA stub for
 Linux machines without a GPU, the separate build of the TP (tensor
 parallelism) kernels and the Linux cross-target checks.
 
@@ -110,8 +110,8 @@ Commit the change before its final checks. Run the public host commands
 against the committed revision. Save the commit ID, commands and results with
 the change review.
 
-Local checks can cover less than the [workflow](.github/workflows/ci.yml).
-They do not replace the Spark gate below. [Local CI](docs/ci.md) lists the
+Local checks can cover less than the [workflow](workflows/ci.yml).
+They do not replace the Spark gate below. [Local CI](../docs/ci.md) lists the
 host commands and what they leave out. If the source changes after a check,
 run the affected checks on the new commit.
 
@@ -125,7 +125,7 @@ cargo +1.99.0 build --release --offline --locked --manifest-path ../cli/Cargo.to
 
 The build writes the binary to `cli/target/release/vade`. Building it does not
 install or start an engine. To install from source on a Spark, follow
-[INSTALL.md](INSTALL.md).
+[INSTALL.md](../docs/INSTALL.md).
 
 ## Rules and formatting
 
@@ -149,7 +149,7 @@ install or start an engine. To install from source on a Spark, follow
   check your diff for it yourself.
 - **Model-generic behavior.** Derive it from the checkpoint configuration and
   tensor metadata, with no dispatch on the model name and no model-specific
-  tuning. See [adding a model](docs/adding-a-model.md).
+  tuning. See [adding a model](../docs/adding-a-model.md).
 - **No arithmetic-order switches.** Use one execution path for each topology.
   Do not add a flag or environment variable that selects a different order
   for the math. A speed claim does not make such a switch acceptable.
@@ -162,13 +162,13 @@ install or start an engine. To install from source on a Spark, follow
 - **The ratchet only goes down.** The ratchet test counts third-party
   dependencies, Rust files over 1,500 lines and those fixed-count branches.
   It fails when a count rises above its ceiling. Don't raise the
-  [ratchet ceilings](cli/ratchet-baseline.txt). When a count drops, lower its
+  [ratchet ceilings](../cli/ratchet-baseline.txt). When a count drops, lower its
   ceiling in the same commit.
 - **Nothing private.** Never commit secrets, credentials, machine addresses,
   local config, model weights, generated PTX or build output. Keep local
   results outside the tracked tree. Keep license notices intact. If you add non-code third-party
   material (allowed only when its license permits), list it in
-  [NOTICE](NOTICE), or in [engine/NOTICE](engine/NOTICE) for files under
+  [NOTICE](../NOTICE), or in [engine/NOTICE](../engine/NOTICE) for files under
   `engine/`.
 
 ## Exactness and evidence
@@ -271,7 +271,7 @@ Two tools cover the checks today:
    token IDs with drafting off and on, and saves a receipt (a record of what
    it checked).
 2. Run `vade test determinism` for the batch, cache and chunk cases. The
-   [gate guide](cli/docs/test.md) shows how. It runs saved test inputs
+   [gate guide](../cli/docs/test.md) shows how. It runs saved test inputs
    (fixtures) through the older `flash-bench` benchmark, so a pass there
    doesn't yet prove that FP4-Local is qualified.
 
@@ -290,7 +290,7 @@ For a speed claim, compare the candidate with main on the same setup and
 requests. Keep the timing plan fixed before you run it. Give the repeated
 results and their full ranges, not just the best run. A host test or a
 similar-looking answer cannot support that claim. See the
-[benchmark method](docs/benchmarks.md) for the public results and their limits.
+[benchmark method](../docs/benchmarks.md) for the public results and their limits.
 
 ## Commits and pull requests
 
@@ -305,17 +305,17 @@ card and its exactness receipts. Include the output of `vade verify` and any
 `vade test determinism` checks, with their coverage limits.
 
 If users would notice the change, add one plain line about it to the
-Unreleased section of [CHANGELOG.md](CHANGELOG.md), under the heading for its
+Unreleased section of [CHANGELOG.md](../CHANGELOG.md), under the heading for its
 area. Put the newest line first.
 
 ### How a pull request lands
 
-1. **Host checks pass.** Run the checks in [Local CI](docs/ci.md) before
+1. **Host checks pass.** Run the checks in [Local CI](../docs/ci.md) before
    every merge. Save the logs for the committed revision. On the public
-   repository, the [GitHub workflow](.github/workflows/ci.yml) also runs the
+   repository, the [GitHub workflow](workflows/ci.yml) also runs the
    host checks of the CPU crates on each pull request. A failed build or
    test blocks the change.
-2. **A maintainer reviews it.** [CODEOWNERS](.github/CODEOWNERS) requests
+2. **A maintainer reviews it.** [CODEOWNERS](CODEOWNERS) requests
    the review automatically. Expect questions about exactness, the house
    rules and anything the PR says it didn't check.
 3. **Engine changes pass the device gate.** A change to engine arithmetic,

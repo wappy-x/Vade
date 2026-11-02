@@ -725,14 +725,14 @@ It passes when every row passes:
 ### Step 7. Build and model files
 
 - [ ] On spark-7 and spark-8, install the prerequisites of
-      [INSTALL.md, step 1](../INSTALL.md#step-1-prerequisites), as on the other
+      [INSTALL.md, step 1](INSTALL.md#step-1-prerequisites), as on the other
       six: the Ubuntu packages and both pinned Rust toolchains. `vade install`
       builds from source on each Spark, unless `prebuilt_dir` in the
       controller config points at a bundle from the controller checkout's own
       commit.
 - [ ] Copy the checkpoint to spark-7 and spark-8 at the same absolute path
       as on the other Sparks
-      ([INSTALL.md, step 3](../INSTALL.md#step-3-get-the-model)). It is
+      ([INSTALL.md, step 3](INSTALL.md#step-3-get-the-model)). It is
       102.26 GB. Copy it from a neighbor over a measured fabric cable, not over
       a slow LAN. Copy the checksum list beside the folder too
       (`Qwen3.8-Flash-Next-FP4-Local.sha256`), if the neighbor has one. With
@@ -744,7 +744,7 @@ It passes when every row passes:
       that its size and header match the index. (A `manifest.sha256` inside
       the folder makes it hash every listed file.) So check all the files
       once yourself
-      ([INSTALL.md, check the files](../INSTALL.md#check-the-files)), with or
+      ([INSTALL.md, check the files](INSTALL.md#check-the-files)), with or
       without the list.
 - [ ] `vade install`, so that every Spark has the same staged build. It
       reports an error when a Spark does not have the model yet, so copy the

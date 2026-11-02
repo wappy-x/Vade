@@ -319,7 +319,7 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
             // No checkout here, so no source to build. Every other route builds on
             // every Spark: all ranks must run the same bytes (see the check below).
             match misfit {
-                Some(misfit) if bundled => return Err(format!("{misfit}. A source build needs Rust on each Spark and a checkout on this computer. Update that Spark, or run git clone {}, set engine_source, harness_source and cli_source in the config in place of source, and follow INSTALL.md#install-rust-source-builds-only.", crate::repository::VADE_REPO_URL)),
+                Some(misfit) if bundled => return Err(format!("{misfit}. A source build needs Rust on each Spark and a checkout on this computer. Update that Spark, or run git clone {}, set engine_source, harness_source and cli_source in the config in place of source, and follow docs/INSTALL.md#install-rust-source-builds-only.", crate::repository::VADE_REPO_URL)),
                 Some(misfit) => {
                     crate::output::line(format_args!("{misfit}; every Spark builds from source, which needs Rust on each Spark."))?;
                     (bundle, host_bundle) = (None, None);

@@ -242,7 +242,7 @@ per-crate `unsafe_sites` counters, they are ceilings, not an allowance to add
 unsafe or move it between crates. Don't claim automated enforcement that the
 test doesn't have.
 
-For the human workflow, read [CONTRIBUTING.md](CONTRIBUTING.md). To find your
+For the human workflow, read [CONTRIBUTING.md](.github/CONTRIBUTING.md). To find your
 way around, see [architecture](docs/architecture.md),
 [decisions](docs/decisions/README.md), [adding a model](docs/adding-a-model.md)
 and the [glossary](docs/GLOSSARY.md).

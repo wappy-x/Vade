@@ -6,7 +6,7 @@ on 2, 4 or 6 linked Sparks through `flash-serve`.**
 The single-Spark catalog below covers text models from Qwen3, Qwen3.8 and Gemma 4.
 Four more are in development and 29 are planned. Vade retains the official
 checkpoint weights at their published precision. For the current
-Flash-Next routes, use [INSTALL.md](../../INSTALL.md), the
+Flash-Next routes, use [INSTALL.md](../../docs/INSTALL.md), the
 [Flash server guide](flash-server.md) and its
 [dated benchmark evidence](../../docs/benchmarks.md).
 
@@ -453,7 +453,7 @@ Each revision's files on Hugging Face:
 **Revision pins for these are not recorded here, so pick one on the official page and keep every file from that one revision.**
 
 This section covers the single-Spark Qwen3.8-27B and Gemma paths. Flash-Next
-users should follow the [two-Spark installation guide](../../INSTALL.md),
+users should follow the [two-Spark installation guide](../../docs/INSTALL.md),
 which records its checkpoint revision and weight-verification procedure.
 
 Official pages: [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) ·

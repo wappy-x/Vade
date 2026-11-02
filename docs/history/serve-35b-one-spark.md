@@ -1,6 +1,6 @@
 # Serve Qwen3.6-35B on one Spark
 
-**History:** a dated single-Spark route that is not supported in v0.1.0; the supported model is in [INSTALL.md](../../INSTALL.md).
+**History:** a dated single-Spark route that is not supported in v0.1.0; the supported model is in [INSTALL.md](../INSTALL.md).
 
 Use the official **Qwen3.6-35B-A3B-FP8** checkpoint on one NVIDIA GB10.
 The engine runs on the Spark; the coding harness runs on your Mac against

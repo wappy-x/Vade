@@ -386,7 +386,7 @@ The former Python client and its operational wrapper (shim) are retired. Their o
 
 Leave time for the model download before you benchmark rented VMs. The verified FP4-Local snapshot is about **102 GB**. On 2026-10-24, rented GB10 VMs downloaded from Hugging Face at **8 to 22 MB/s each**. That is about 80 minutes for one VM at the top of that range, and over three hours at the bottom.
 
-For the cloud cards, we downloaded and verified the snapshot on one VM. We copied it to the other VM over the 200G link between them and checked its SHA-256 again there. Without such a link, copy the verified folder over the provider's network instead. Then run the [INSTALL.md step 3](../INSTALL.md#step-3-get-the-model) manifest check on the copy. The step 3 helper always fetches and verifies the whole snapshot.
+For the cloud cards, we downloaded and verified the snapshot on one VM. We copied it to the other VM over the 200G link between them and checked its SHA-256 again there. Without such a link, copy the verified folder over the provider's network instead. Then run the [INSTALL.md step 3](INSTALL.md#step-3-get-the-model) manifest check on the copy. The step 3 helper always fetches and verifies the whole snapshot.
 
 In container-based VMs, the container's view of memory can hide the host page cache that holds the newly downloaded files. The CPU and GPU of the GB10 share memory. So the memory check of the engine can then refuse to start (`Requested size does not fit`, with only about 1 GiB available), even though the host could reclaim that cache. Main `2c64d0a`, part of v0.1.0, counts that cache as free (Linux `MemAvailable`). The cloud cards predate it and set an explicit budget instead.
 
@@ -511,7 +511,7 @@ Repeatability requires identical token IDs for the same request and settings acr
 
 ## Where the receipts are, and older comparisons
 
-Start with the tested setup and timing instructions in [INSTALL.md](../INSTALL.md). The [timing tools guide](../tools/README.md#timing-the-installed-server) describes the client. Measure only on Sparks with no other GPU work running.
+Start with the tested setup and timing instructions in [INSTALL.md](INSTALL.md). The [timing tools guide](../tools/README.md#timing-the-installed-server) describes the client. Measure only on Sparks with no other GPU work running.
 
 The older public FP8 summaries are removed. The [historical section](history/benchmarks-2026-10.md#historical-fp8-measurements) still cites some of them as retired receipts. The tables name their source cards and timing records.
 

@@ -25,7 +25,7 @@ v0.1.0 bundle.
 The installer, `scripts/install.sh`, downloads, checks and installs this
 bundle. The bundle of main is published on dl.vade.lol. The one-line install
 fetches the same script from vade.lol.
-[INSTALL: Prebuilt bundle](../../INSTALL.md#prebuilt-bundle) lists its checks
+[INSTALL: Prebuilt bundle](../../docs/INSTALL.md#prebuilt-bundle) lists its checks
 in order.
 
 The file `vade-<version>-<sha7>-linux-aarch64-gb10.tar.gz` unpacks to one
@@ -103,7 +103,7 @@ model and how the local launcher behaves.
 
 The bundle and its `SHA256SUMS` file are on the
 [v0.1.0 release page](https://github.com/wappy-x/Vade/releases/tag/v0.1.0).
-To build from source, follow [INSTALL.md](../../INSTALL.md), or make the bundle
+To build from source, follow [INSTALL.md](../../docs/INSTALL.md), or make the bundle
 yourself as described in
 [Produce the launcher bundle](#produce-the-launcher-bundle).
 

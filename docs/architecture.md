@@ -15,7 +15,7 @@ Two ideas shape almost every design choice on this page:
 - **Exactness.** The same request, with the same settings, on the same setup returns the same token IDs every time. This holds when the request runs alone or in a batch with other chats. It holds when the prompt comes from the cache or is read fresh, and however the prompt is split into chunks. For greedy requests, it also holds with drafting on or off.
 - **The bytes as stored.** The speed at which Vade writes an answer is limited by how fast the GPU can read weights from memory. So the kernels read each weight in the format that the checkpoint stores it in. We judge each kernel against the time it would take just to move those bytes.
 
-First we follow one request from the network to the GPU and back. Then we explain each part: the model and its number formats, the kernels, drafting, several Sparks, the prefix cache, memory, exactness, and how we measure it. To install Vade, follow [INSTALL.md](../INSTALL.md). For the measured results, read [Benchmarks](benchmarks.md).
+First we follow one request from the network to the GPU and back. Then we explain each part: the model and its number formats, the kernels, drafting, several Sparks, the prefix cache, memory, exactness, and how we measure it. To install Vade, follow [INSTALL.md](INSTALL.md). For the measured results, read [Benchmarks](benchmarks.md).
 
 These words come up in every section of this page:
 
@@ -479,7 +479,7 @@ The gateway relays the requests of another client to one or more engines, as des
 
 `vade launch` runs on the Spark. It finds an existing checkpoint, builds or uses local artifacts, starts the engine and opens chat.
 
-From a separate [controller](GLOSSARY.md#ac), `vade install` stages a build. Then `vade up` starts the selected ranks over SSH, plus a tunnel that it owns ([`launch.rs`](../cli/src/launch.rs), [INSTALL.md](../INSTALL.md)).
+From a separate [controller](GLOSSARY.md#ac), `vade install` stages a build. Then `vade up` starts the selected ranks over SSH, plus a tunnel that it owns ([`launch.rs`](../cli/src/launch.rs), [INSTALL.md](INSTALL.md)).
 
 `vade status` and `vade logs` inspect the installation. `vade down` stops only the processes that the CLI recorded, after it checks the identity of each one.
 

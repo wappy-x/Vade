@@ -847,7 +847,7 @@ fn install_says_when_no_checksum_list_can_check_the_checkpoint() {
     };
     let printed = install(&mut f.launcher());
     assert!(printed.contains("Prepare: no checksum list for this checkpoint (checkpoint.sha256 beside it, or manifest.sha256 inside it)."), "{printed}");
-    assert!(printed.contains("see Check the files in INSTALL.md"), "{printed}");
+    assert!(printed.contains("see Check the files in docs/INSTALL.md"), "{printed}");
     fs::write(f.home.join("models/checkpoint.sha256"), format!("{}  ./model.safetensors\n", "0".repeat(64))).unwrap();
     fs::remove_file(f.root.join("config")).unwrap();
     let printed = install(&mut f.launcher());

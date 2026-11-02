@@ -1,6 +1,6 @@
 # Credits
 
-**This page names the people, papers and projects whose ideas or reference behavior Vade uses, and the part of Vade that uses each one.** No source code was copied from any of them. One file follows a reference closely: the FP32 CPU reference [refcpu.rs](../crates/model/src/flash/refcpu.rs) computes the formulas of the Transformers file `modeling_qwen4_exp.py` (revision `b0cdc61`) in the same order and cites its lines ([Reference code](#reference-code)). Vade's code is written here, in Rust; the parts designed and built in this project are listed under [Original work](../../CREDITS.md#original-work).
+**This page names the people, papers and projects whose ideas or reference behavior Vade uses, and the part of Vade that uses each one.** No source code was copied from any of them. One file follows a reference closely: the FP32 CPU reference [refcpu.rs](../crates/model/src/flash/refcpu.rs) computes the formulas of the Transformers file `modeling_qwen4_exp.py` (revision `b0cdc61`) in the same order and cites its lines ([Reference code](#reference-code)). Vade's code is written here, in Rust; the parts designed and built in this project are listed under [Original work](../../docs/CREDITS.md#original-work).
 
 A credit does not mean their code runs in Vade, or that their speed or correctness claims apply to it. Every profile link was checked against the person's own GitHub or Hugging Face profile, as [Link checks](link-checks.md) records.
 

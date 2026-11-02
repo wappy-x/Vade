@@ -165,7 +165,7 @@ df -Pk "$probe" | awk 'NR==2 {printf "disk_bytes=%.0f\n", $4 * 1024}'
             .map(String::as_str)
             != Some("ok")
         {
-            return Err("Safe Linux process handles are unavailable. Nothing downloaded. Check the supported Spark prerequisites in INSTALL.md.".into());
+            return Err("Safe Linux process handles are unavailable. Nothing downloaded. Check the supported Spark prerequisites in docs/INSTALL.md.".into());
         }
         Ok(())
     }

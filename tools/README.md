@@ -81,7 +81,7 @@ The shell stream example also requires a final `[DONE]` event.
 
 ## Timing the installed server
 
-Use `vade bench` for client timing. See [INSTALL.md](../INSTALL.md#run-the-benchmark)
+Use `vade bench` for client timing. See [INSTALL.md](../docs/INSTALL.md#run-the-benchmark)
 and the [benchmark options](../docs/benchmarks.md#run-vade-bench).
 The implementation is the [benchmark library](../engine/tools/bench/README.md).
 Its self-test uses a local mock server. It does not check GPU inference.

@@ -4,7 +4,7 @@ This page lists short scripts that run against a real Vade engine. Each
 script comes with the output that it printed.
 
 Start an engine first. Run `vade launch` on the Spark, or `vade up` from a
-controller ([INSTALL.md](../INSTALL.md)). Every script then talks to
+controller ([INSTALL.md](../docs/INSTALL.md)). Every script then talks to
 `http://127.0.0.1:18080`, the default API address. To use another address,
 set `VADE_API_URL`. `vade status` prints the address in use.
 
@@ -151,7 +151,7 @@ The output above was recorded with the prefix cache off, so both counts are
 0. The cache is now on by default on one Spark and on two Sparks (the tensor
 split). `VADE_FLASHNEXT_PREFIX_CACHE=0` at the engine start, or a saved
 `--cache-bytes 0`, turns it off. [The prefix
-cache](../INSTALL.md#the-prefix-cache) explains both.
+cache](../docs/INSTALL.md#the-prefix-cache) explains both.
 
 With the cache on, the second turn reads 1984 of its 2040 prompt tokens from
 the cache. A second run of the script also finds the first turn's prefix in
@@ -315,5 +315,5 @@ does three more things:
 We have not run `--live` for this page. Our published two-Spark results are
 on the [benchmarks page](../docs/benchmarks.md).
 [Hardware and network setup](../docs/network-setup.md) covers cabling and
-addresses. [INSTALL.md](../INSTALL.md#two-and-more-sparks) covers the
+addresses. [INSTALL.md](../docs/INSTALL.md#two-and-more-sparks) covers the
 controller config, RDMA and TCP.

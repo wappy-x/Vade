@@ -23,7 +23,7 @@ The engine keeps prefixes by default on one Spark and on the two-Spark tensor
 split; three or more Sparks (the layer chain and the split in parts) do not. Each
 engine start takes a memory room for the cache. On one Spark the room never
 lowers the number of full-context chats; on the two-Spark tensor split it holds one
-full-context copy up to 4 GiB (all of a 32,768 context) and can lower that number by one (see [the prefix cache](../../INSTALL.md#the-prefix-cache)).
+full-context copy up to 4 GiB (all of a 32,768 context) and can lower that number by one (see [the prefix cache](../../docs/INSTALL.md#the-prefix-cache)).
 Requests without `cache:true` or a `prompt_cache_key` do not keep prefixes, so
 their work does not change. The default-on gate measures repeated-prefix
 savings, cold requests, concurrent admission, memory pressure and exact

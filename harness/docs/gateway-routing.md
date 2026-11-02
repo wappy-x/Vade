@@ -257,6 +257,6 @@ ambiguity, Responses and admission, opaque unparseable payloads, gateway
 shutdown, scope separation, and real CLI routing with three mocks. The existing
 single-upstream conformance tests still run.
 
-Design references are credited in [Credits](../../CREDITS.md#harness). The
+Design references are credited in [Credits](../../docs/CREDITS.md#harness). The
 implementation is first-party Rust using only the standard library; no code
 or tests from competing projects were copied.

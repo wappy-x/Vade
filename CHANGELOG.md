@@ -1036,18 +1036,18 @@ Merges #105 through #110 were measured on October 26, 2026, with the FP4-Local c
   - Eight chats at once vary from run to run, and the figure shows the range we measured: 130.6 to 173.9 tokens per second on six single Sparks and 167.6 to 168.7 on three pairs, from the same-day cards with drafting on.
   - The headline is checked against all nine cards.
 
-- [INSTALL](INSTALL.md) covers more situations: an engine that turns away an extra chat with HTTP 503, checking each replica with `vade verify --url`, keeping the launcher bundle outside your checkout, and what to do when `vade install` refuses a checkout with local changes.
+- [INSTALL](docs/INSTALL.md) covers more situations: an engine that turns away an extra chat with HTTP 503, checking each replica with `vade verify --url`, keeping the launcher bundle outside your checkout, and what to do when `vade install` refuses a checkout with local changes.
 
 - The guides were rewritten in plainer language. Commands, numbers and links didn't change.
 
 - Two facts were corrected against the source: rule files are capped at 16 KiB each, and the automatic output reservation includes the 16,384-token cap.
 
-- README, [INSTALL](INSTALL.md) and the one-Spark quickstart say what chat, status, sampling and the bundle really do, checked against the source: controller `vade chat` always opens the agent, which refuses a context below 8192, and only local chat falls back to direct chat; local `vade up` steps a refused default or saved context down as `vade launch` does; controller `vade status` prints no URL, since the API is on the local port; naming any sampling field fills the rest from the checkpoint defaults; and the two legacy routes are named, with `vade run` needing a fresh `VADE_HOME` after `vade launch`.
+- README, [INSTALL](docs/INSTALL.md) and the one-Spark quickstart say what chat, status, sampling and the bundle really do, checked against the source: controller `vade chat` always opens the agent, which refuses a context below 8192, and only local chat falls back to direct chat; local `vade up` steps a refused default or saved context down as `vade launch` does; controller `vade status` prints no URL, since the API is on the local port; naming any sampling field fills the rest from the checkpoint defaults; and the two legacy routes are named, with `vade run` needing a fresh `VADE_HOME` after `vade launch`.
 
-- [INSTALL](INSTALL.md) and the CLI guide say that a controller install needs `vade-prebuilt-v1`, not the launcher bundle.
+- [INSTALL](docs/INSTALL.md) and the CLI guide say that a controller install needs `vade-prebuilt-v1`, not the launcher bundle.
   - INSTALL and the [benchmarks page](docs/benchmarks.md) say how a `vade bench` with no flags differs from a RigMark card.
 
-- The [security policy](SECURITY.md) describes the gateways' `VADE_GATEWAY_TOKEN`. It applies to the gateways you run by hand; the replica gateway behind `vade up --replicas` never takes a token.
+- The [security policy](.github/SECURITY.md) describes the gateways' `VADE_GATEWAY_TOKEN`. It applies to the gateways you run by hand; the replica gateway behind `vade up --replicas` never takes a token.
 
 - The harness guide and the invisible-gateway page list the complete gateway sampling policy again: every shared default with its exact value, every sampling field, and the null rule.
 
@@ -1095,7 +1095,7 @@ Merges #105 through #110 were measured on October 26, 2026, with the FP4-Local c
 
 - `harness/scripts/route-a-check.sh` checks Route A on one Spark in one command: toolchain, CLI build, model, `vade launch`, one chat request, `vade verify` and `vade down`, each with PASS or FAIL and its seconds.
   - It runs in a new private Vade home of its own, so it never touches `~/.vade`, and stops its engine also after a failed step or an interrupt.
-  - See [INSTALL](INSTALL.md#check-the-whole-route-in-one-go).
+  - See [INSTALL](docs/INSTALL.md#check-the-whole-route-in-one-go).
 
 ### Project
 
@@ -1114,7 +1114,7 @@ Merges #105 through #110 were measured on October 26, 2026, with the FP4-Local c
 
 - The security policy explains how to report a vulnerability privately, what it covers, and what Vade exposes on the network by default.
 
-- [CONTRIBUTING](CONTRIBUTING.md) says how a pull request lands: CI, a maintainer's review (requested through CODEOWNERS), the device gate for engine changes, and the published update that carries it.
+- [CONTRIBUTING](.github/CONTRIBUTING.md) says how a pull request lands: CI, a maintainer's review (requested through CODEOWNERS), the device gate for engine changes, and the published update that carries it.
 
 - Every public item in the CLI crate and the harness library has a doc comment (140 harness items had none), the CLI's `main.rs` maps its modules by area, and rustdoc builds without warnings.
 

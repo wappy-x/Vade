@@ -50,7 +50,7 @@ is not a way to qualify the default.
 You will also need:
 
 - [Spark system setup](spark-setup.md) for the OS and network
-- [INSTALL.md](../INSTALL.md) for the checkpoint and pinned compilers
+- [INSTALL.md](INSTALL.md) for the checkpoint and pinned compilers
 - the [Rust gates](../cli/docs/test.md) (the test suites a build must pass)
   for qualification
 

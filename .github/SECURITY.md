@@ -58,8 +58,8 @@ unless you allow them. `--allow-host` and `--allow-origin` change these checks.
 These checks do not authenticate a local program. A local program can send
 its own headers and call the API routes that the gateway serves. Those routes
 can use the configured engines, including engines reached through SSH tunnels.
-See the [gateway routes and bind checks](harness/src/gateway.rs) and
-[access checks](harness/src/gateway/access.rs).
+See the [gateway routes and bind checks](../harness/src/gateway.rs) and
+[access checks](../harness/src/gateway/access.rs).
 
 `vade-gateway` accepts arbitrary HTTP paths for the engines you configure.
 With replicas, it answers `GET /health` locally from engine probe results.
@@ -69,9 +69,9 @@ passes the gateway checks can use that key's engine access. The caller can
 submit generation, cancellation and cache release requests. The engine still
 checks those requests. With replicas, cancellation and cache release go to
 every configured engine. A request cannot select a new upstream address.
-See the [standalone gateway](harness/docs/invisible-gateway.md).
+See the [standalone gateway](../harness/docs/invisible-gateway.md).
 
-`vade-harness gateway` accepts its [listed API routes](harness/src/gateway.rs)
+`vade-harness gateway` accepts its [listed API routes](../harness/src/gateway.rs)
 and a local cluster status route. It refuses other paths. Neither gateway runs
 client tools, reads workspace files for a client or starts shell commands from
 a request. A configured engine can expose more routes. The gateways do not
@@ -91,13 +91,13 @@ The gateway started by `vade up --replicas` has no token. The CLI removes
 `VADE_GATEWAY_TOKEN` from its environment and does not pass `--token`.
 Setting that variable before `vade up` does not protect the replica gateway.
 Local programs can use it without a credential. See the
-[replica launcher](cli/src/app/replicas.rs).
+[replica launcher](../cli/src/app/replicas.rs).
 
 Use the gateway only on a machine whose local programs and users you trust.
 The gateway speaks plain HTTP. A token does not encrypt traffic. Keep tokens
 out of source files, shell history and reports.
 
-The [access checks](harness/src/gateway/access.rs) apply before a request can
+The [access checks](../harness/src/gateway/access.rs) apply before a request can
 reach an engine:
 
 <div align="center">
@@ -143,7 +143,7 @@ exactness.
 The installed CLI reaches the engine through SSH tunnels. Engine servers use
 loopback by default. A direct remote bind needs both `--allow-remote` and
 `--api-key-file`. Loopback serving does not require an API key by default.
-See the [engine key checks](engine/crates/serve/src/auth.rs).
+See the [engine key checks](../engine/crates/serve/src/auth.rs).
 
 The engine also uses plain HTTP. An API key does not encrypt prompts or
 credentials. Use a trusted SSH tunnel or TLS termination for remote access.

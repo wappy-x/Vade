@@ -8,14 +8,14 @@ it covers and who it is for, and ends with where to go next.
 
 **Set up and run Vade on one or more DGX Sparks.**
 
-- [Installation](../../INSTALL.md) and [Flash server](next-http.md).
+- [Installation](../../docs/INSTALL.md) and [Flash server](next-http.md).
   Current FP4-Local launcher, Mac tunnel, harness build and client setup.
   [FP8 installation](../../docs/install-fp8.md) remains separate.
 - [One-Spark quickstart](../../docs/quickstart-one-spark.md). Part 1 drives
   FP4-Local from a controller. Part 2 is the older Qwen3-8B route on the Spark:
   prerequisites, engine workspace paths, download and checksum commands, first
   chat and answer comparison. For the current install on the Spark itself, use
-  [INSTALL.md](../../INSTALL.md).
+  [INSTALL.md](../../docs/INSTALL.md).
 - [Older install page](install.md). Now points to INSTALL.md and keeps the
   anchors that older links use.
 - [One-Spark server and API](server.md). Run `spark-serve`, connect apps through the

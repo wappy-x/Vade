@@ -15,7 +15,7 @@ RDMA_GROUP=vade-rdma
 LINKS_FILE=links.tsv
 NETPLAN_RENDERER=NetworkManager
 SSH_KEY_FILE="$HOME/.ssh/vade-cluster"
-# Optional existing Vade systemd unit; empty for INSTALL.md's SSH launch.
+# Optional existing Vade systemd unit; empty for docs/INSTALL.md's SSH launch.
 SERVICE_UNIT=
 # Exact running kernel approved from NVIDIA release evidence and RDMA checks.
 # Leave empty for 7.0.0-1019-nvidia + kho=off. No fixed build is yet verified.

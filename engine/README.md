@@ -9,7 +9,7 @@ already has. You don't need a CUDA toolkit or NVIDIA's math libraries.
 
 ## Quick start
 
-Start with the repository [INSTALL.md](../INSTALL.md). It covers the pinned
+Start with the repository [INSTALL.md](../docs/INSTALL.md). It covers the pinned
 compilers, the model download and its checks, and the launcher for the default
 model, `nvidia/Qwen3.8-Flash-Next-FP4-Local` (the
 [FP4-Local](../docs/GLOSSARY.md#dg) profile).
@@ -52,7 +52,7 @@ speed.
 checkpoint must contain. The [model registry](crates/model/README.md) explains
 how a model's metadata is tied to the code that runs it. Download the whole
 pinned [checkpoint](../docs/GLOSSARY.md#ac) and check every file, not only the
-weights: [Check the files](../INSTALL.md#check-the-files) gives the command.
+weights: [Check the files](../docs/INSTALL.md#check-the-files) gives the command.
 
 ## Multiple Sparks
 

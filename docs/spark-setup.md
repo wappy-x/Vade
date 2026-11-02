@@ -6,7 +6,7 @@
 > reference.
 
 If you link Sparks, do this system setup on every Spark before
-[INSTALL.md](../INSTALL.md). One Spark on its own needs none of it. You will:
+[INSTALL.md](INSTALL.md). One Spark on its own needs none of it. You will:
 
 - cable the Sparks
 - give each half of every QSFP link its own network
@@ -539,7 +539,7 @@ test registration under the memory pressure of a loaded model either.
 An older build had a problem registering RDMA memory after the model loaded.
 Current builds register and seal that memory before loading the weights, so
 the old result does not apply. If you test a build, keep its startup log as
-your record, and use [INSTALL.md](../INSTALL.md) for the current launch.
+your record, and use [INSTALL.md](INSTALL.md) for the current launch.
 
 Earlier testing also set `vm.compaction_proactiveness=0` to reduce stalls seen
 at the time. RDMA does not need it, and these scripts leave it alone. Nobody
@@ -602,7 +602,7 @@ Then:
 
 INSTALL.md's SSH config names the sending machine's private key with an
 `IdentityFile` line (see
-[Check SSH from the controller](../INSTALL.md#check-ssh-from-the-controller)).
+[Check SSH from the controller](INSTALL.md#check-ssh-from-the-controller)).
 On a Spark prepared here, use this `SSH_KEY_FILE` path. On a
 different source machine, use that machine's own authorized key. A peer check
 with this custom key does not make OpenSSH pick it automatically anywhere
@@ -764,9 +764,9 @@ the per-cable figure. See
 
 ### Next: install Vade
 
-Once the checks pass, follow [INSTALL.md](../INSTALL.md) for the tools, the
+Once the checks pass, follow [INSTALL.md](INSTALL.md) for the tools, the
 code and the model, then
-[Two and more Sparks](../INSTALL.md#two-and-more-sparks) for the multi-Spark
+[Two and more Sparks](INSTALL.md#two-and-more-sparks) for the multi-Spark
 launch.
 
 Passing these OS checks on a ring does not make it a tested Vade setup. The

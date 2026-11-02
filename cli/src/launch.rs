@@ -217,7 +217,7 @@ pub fn run(command: Command, dry: bool) -> Result<(), String> {
     }
     if !dry && !cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         return Err(format!(
-            "This command runs only on a DGX Spark (Linux aarch64), and this computer is {} {}. Run it on the Spark, or add --dry-run to preview it here. To drive Sparks from this computer, set VADE_CONFIG (see INSTALL.md).",
+            "This command runs only on a DGX Spark (Linux aarch64), and this computer is {} {}. Run it on the Spark, or add --dry-run to preview it here. To drive Sparks from this computer, set VADE_CONFIG (see docs/INSTALL.md).",
             std::env::consts::OS, std::env::consts::ARCH,
         ));
     }
@@ -1050,7 +1050,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
             None => self.worker(&record, "warm-ptx", request, false),
             Some(model) => self.stage_manifest(model).and_then(|manifest| {
                 if supplied_manifest(model)?.is_none() {
-                    output::line(format_args!("Prepare: no checksum list for this checkpoint ({}.sha256 beside it, or manifest.sha256 inside it). Vade cannot check its files against the published hashes. To check them, see Check the files in INSTALL.md.",
+                    output::line(format_args!("Prepare: no checksum list for this checkpoint ({}.sha256 beside it, or manifest.sha256 inside it). Vade cannot check its files against the published hashes. To check them, see Check the files in docs/INSTALL.md.",
                         model.file_name().map_or_else(|| "<folder>".into(), |name| name.to_string_lossy())))?;
                 }
                 if manifest.is_some_and(|path| path.exists()) {

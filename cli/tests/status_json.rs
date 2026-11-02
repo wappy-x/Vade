@@ -83,7 +83,7 @@ fn stopped_and_invalid_configuration_remain_machine_readable() {
         let value = receipt(command.output().unwrap(), 1);
         assert_eq!(value["phase"].as_str(), Some("unknown"));
         assert_eq!(value["ready"], json::Value::Null);
-        assert!(value["errors"][0].as_str().unwrap().contains("INSTALL.md"));
+        assert!(value["errors"][0].as_str().unwrap().contains("docs/INSTALL.md"));
         let mut command = f.command();
         command.env("VADE_CONFIG", f.config());
         if dry {
