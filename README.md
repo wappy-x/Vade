@@ -121,7 +121,7 @@ Exact means the same request with the same settings gives the same token IDs. Th
 
 **Defaults.** FP4-Local always picks the most likely token unless a request sets sampling fields, so it is exact out of the box. FP8 samples by default, with a new seed for each request. For exact FP8 replies, send `temperature` 0, `repetition_penalty` 1, `presence_penalty` 0 and `frequency_penalty` 0 ([FP8 defaults](docs/install-fp8.md#defaults-and-drafting)).
 
-**Driver.** The promise covers the sampling settings above and the driver we tested. Our cards ran on NVIDIA driver 580.178.04 ([receipts](bench/receipts/2026-10-31/README.md#what-was-run)). A new driver compiles the GPU code again, so we run the cards again before we claim exactness for it.
+**Driver.** We tested the same-answer promise on one NVIDIA driver, version 580.178.04 ([receipts](bench/receipts/2026-10-31/README.md#what-was-run)). If NVIDIA ships a new driver, we test again before we say it still holds.
 
 To check your own engine, run `vade verify`. [Token IDs](docs/results.md#token-ids) shows our checks. On main `1a07e3a`, FP8 on two and four Sparks gave the same token IDs ([FP8 token IDs](docs/results.md#fp8-token-ids)). [Architecture](docs/architecture.md#exactness-and-model-quality) gives the full rule and what each check proves.
 
