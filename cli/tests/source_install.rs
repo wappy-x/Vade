@@ -783,6 +783,31 @@ fn a_new_login_finds_vade_through_a_second_script_on_every_shell() {
     }
 }
 
+/// A login shell is the only one that knows the profile. The fake one prints what a real one would.
+#[test]
+fn the_last_line_promises_a_new_terminal_only_when_a_login_shell_adds_the_folder() {
+    let f = Fixture::new();
+    let tool = |path: PathBuf, body: &str| { fs::write(&path, body).unwrap(); fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap(); path };
+    tool(f.root.join("bin/timeout"), "#!/bin/sh\nshift\nexec \"$@\"\n");
+    let shell = f.root.join("login-shell");
+    let home = f.root.join("home").display().to_string();
+    for (body, last) in [
+        // A profile that does not add the folder: zsh, or a ~/.bash_profile that hides ~/.profile.
+        ("#!/bin/sh\necho Welcome\necho vade-login-path=/usr/bin:/bin\n".to_owned(), "A new login here does not add ~/.local/bin to PATH, so a new terminal does not find vade.\nRun: export PATH=\"$HOME/.vade/bin:$PATH\"\n"),
+        (format!("#!/bin/sh\necho vade-login-path={home}/.local/bin:/usr/bin\n"), PATH_LINE),
+        ("#!/bin/sh\nexit 1\n".to_owned(), PATH_LINE),
+    ] {
+        tool(shell.clone(), &body);
+        let mut env = f.prebuilt(&bundle(Bad::None), Bad::None);
+        env.push(("SHELL", shell.display().to_string()));
+        let output = f.run_prebuilt(&env, &[]);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success() && stdout.ends_with(last), "{body}: {stdout}");
+        assert_eq!(stdout.matches("export PATH=").count(), 1, "{stdout}");
+    }
+    for profile in [".profile", ".bashrc", ".bash_profile"] { assert!(!f.root.join("home").join(profile).exists()); }
+}
+
 #[test]
 fn a_file_that_is_not_ours_in_local_bin_stays_as_it_was() {
     const FOREIGN: &str = "#!/bin/sh\nexec /opt/other/vade \"$@\"\n";

@@ -355,7 +355,17 @@ path_line="export PATH=\"${bin_path:-\$HOME/.vade/bin}:\$PATH\""
 if [ "$found" = "$vade_home/bin/vade" ] || { [ "$shim_written" = true ] && [ "$found" = "$shim" ]; }; then
     printf '%s\n' 'vade is on your PATH.'
 elif [ "$shim_written" = true ]; then
-    printf 'Open a new terminal, or run: %s\n' "$path_line"
+    # Ask a login shell, which reads the profile, and change nothing. No answer keeps the plain line.
+    login_path=
+    if [ -n "${SHELL-}" ] && command -v timeout >/dev/null 2>&1; then
+        login_path=$(timeout 5 "$SHELL" -lc 'printf "vade-login-path=%s\n" "$PATH"' </dev/null 2>/dev/null | sed -n 's/^vade-login-path=//p' | tail -n 1) || login_path=
+    fi
+    case ":$login_path:" in
+        "::" | *":$HOME/.local/bin:"*) printf 'Open a new terminal, or run: %s\n' "$path_line" ;;
+        *)
+            printf '%s\n' 'A new login here does not add ~/.local/bin to PATH, so a new terminal does not find vade.'
+            printf 'Run: %s\n' "$path_line" ;;
+    esac
 else
     printf 'Run: %s\n' "$path_line"
 fi

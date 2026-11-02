@@ -112,7 +112,8 @@ https://dl.vade.lol/install.sh.sha256.
    shell profile. It writes a small script at `~/.local/bin/vade`. The stock
    Ubuntu `~/.profile` puts that folder on your `PATH` when you log in, so a
    new SSH login finds `vade`. The last line of the installer output tells you
-   what to do. On the Spark's own desktop, a new terminal finds `vade` only
+   what to do, and it says so when a login does not add that folder. On the
+   Spark's own desktop, a new terminal finds `vade` only
    after you log out and log in once. If your shell cannot find `vade`, run
    the `export` line from that last line.
 2. **Pull** downloads the model (102 GB) and checks every file. The long
@@ -932,7 +933,7 @@ export PATH="$PWD/cli/target/release:$PATH"
 vade setup
 ```
 
-Setup asks for the Sparks (what you type after `ssh`, in cable order), the
+Setup asks for the Sparks (what you type after `ssh`, in any order), the
 checkpoint (for 2, 4 or 6 Sparks) and the model folder on each Spark. Each question shows its default
 in brackets. For a script or an agent, give the answers as flags:
 
@@ -945,9 +946,9 @@ The dry run prints the config that setup would write and the steps it would
 run, and changes nothing. Setup writes the config at the default path below,
 with this checkout as the source and private folders under `~/.vade`. A `vade`
 from the one-line install uses its bundle instead, also in the folder of a
-clone. To use a checkout with that `vade`, set `VADE_SOURCE`. Setup never
-replaces a config. A second run uses the file that is there. Then it
-runs `vade install`, `vade up` and `vade doctor`, and stops at the first step
+clone. To use a checkout with that `vade`, set `VADE_SOURCE`. With no list of
+Sparks, a second run uses the file that is there. A list moves that file aside.
+Then setup runs `vade install`, `vade up` and `vade doctor`, and stops at the first step
 that fails. Fix the cause, then run `vade setup` again. When the config
 already has an install, the second run skips `vade install`, so `vade up`
 can attach to an engine that runs. After you pull new code, run
@@ -1086,14 +1087,13 @@ Several Sparks can work together in two ways:
 
 | Use | When | Start it with |
 | --- | --- | --- |
-| A chain: one engine spread across the Sparks | You want long prompts read faster, or the model is too big for one Spark | `vade up --sparks N` or `--hosts` |
+| A chain: one engine spread across the Sparks | You want long prompts read faster, or the model is too big for one Spark | `vade up --sparks a,b` |
 | [Replicas](#replicas): a separate copy on each Spark | The model fits on one Spark and you want many chats | `vade up --replicas N` |
 
 Both use Route B. Follow the steps below for a chain. Replicas need less of
 them.
 
-Setup on two or more Sparks is still rough. It takes the six steps below,
-not one command, and SSH or the cable addresses can need a fix by hand.
+One command sets up any number of Sparks, and the six steps below show it.
 
 Run every step on one Spark. That Spark is the controller. The one-line
 install is enough, so you do not need a clone. `vade install` copies Vade to
@@ -1131,42 +1131,49 @@ first.
 If it prints `Host key verification failed` or `Permission denied`, read
 [Check SSH from the controller](#check-ssh-from-the-controller).
 
-### Linked-Spark step 2 of 6: write the setup and start the engine
+### Linked-Spark step 2 of 6: start the Sparks
 
-Give the Sparks in cable order. Give each Spark's own address on each cable
-with `--link FROM:TO=ADDRESS`:
+Type one command with the names of your Sparks:
 
 ```sh
-vade setup --hosts spark-a,spark-b \
-  --link spark-a:spark-b=192.0.2.1 --link spark-b:spark-a=192.0.2.2
+vade up --sparks spark-a,spark-b
 ```
 
-`spark-a` must name this Spark. Use its host name. Without the `--link` flags,
-setup asks for each address. At a terminal, setup also asks which checkpoint to
-use and where the model is. Press Enter to take the default of each question.
-
-If the one-line install saved a local setup, setup asks this question first:
+Each name is what you type after `ssh`, or `user@address`. You can type the
+names in any order. Vade reads the cables from each Spark and prints the chain
+before it starts:
 
 ```text
-This Spark has local setup in "/home/you/.vade/config". Move it to "/home/you/.vade/config.local" and write a controller config? [y/N]:
+Cable order: spark-a - spark-b.
 ```
 
-Type `y`. Setup deletes nothing, and it prints how to move the file back. To
-skip the question, add `--replace-local`. You need that flag with `--yes` or
-in a script. If the local engine runs, setup stops. Run `vade down`, then run
-setup again.
-
-Setup writes the controller config. Then it runs `vade install`, `vade up` and
-`vade doctor`, and it prints each step. It worked if the last step ends and
-this line prints:
+Vade then writes the setup, copies itself to each Spark, starts the engine and
+checks it. It prints each step. It worked if these lines print:
 
 ```text
+Vade is ready on 2 Sparks (spark-a, spark-b) at http://localhost:18080: context 131072 tokens, drafting depth engine default.
 Setup done.
 ```
 
-If it fails, setup stops at the failed step and prints the cause. Fix that
-cause. Then run `vade setup` again, without `--hosts` or `--link`. Setup uses
-the config that it wrote and repeats only the steps that need it.
+If this Spark already has a setup, the new list replaces it. One line says what
+happened, and Vade deletes nothing:
+
+```text
+Replacing the one-Spark setup with two Sparks. The old setup is now in "/home/you/.vade/config.local".
+```
+
+If a step fails, Vade stops and prints the cause. Fix that cause, then run the
+same command again. Vade repeats only the steps that need it.
+
+If Vade cannot read a cable, it names the two Sparks. Check that cable first.
+You can also give the address of each end yourself:
+
+```sh
+vade up --sparks spark-a,spark-b --link spark-a:spark-b=192.0.2.1 --link spark-b:spark-a=192.0.2.2
+```
+
+`vade setup` is the same command with questions. It asks for the names at a
+terminal, and it asks for an address only when it cannot read one.
 
 ### Linked-Spark step 3 of 6: check the answers
 
@@ -1189,11 +1196,11 @@ says `FAIL`.
 
 ### Linked-Spark step 4 of 6: start the engine
 
-Setup already started the engine, so this command only finds it. You need the
+Step 2 already started the engine, so this command only finds it. You need the
 same command to start the engine after step 6.
 
 ```sh
-vade up --hosts spark-a,spark-b
+vade up
 ```
 
 It worked if it prints a line that starts like this:
@@ -1204,8 +1211,9 @@ Vade is already running at http://127.0.0.1:18080/v1
 
 After a stop, it prints a line with `ready on 2 Sparks` instead.
 
-Always name the Sparks here. A plain `vade up` starts only the first Spark in
-the config.
+`vade up` alone starts the Sparks of the last setup. `vade status` names them
+while the engine is stopped. A config that you wrote by hand keeps the old
+rule: `vade up` starts its first Spark, so name the Sparks there.
 
 If it fails, run `vade logs`, fix the cause that it shows, then run the command
 again.
@@ -1685,8 +1693,8 @@ stop. Run `vade logs` and `vade doctor` before you retry.
 | --- | --- |
 | `Vade is not set up yet` | Nothing is set up for this user: no local setup in `~/.vade` and no controller config. On a Spark, run `vade launch` (or the installer above). To drive Sparks from another computer, follow [Route B](#route-b-from-a-controller). |
 | `This computer is not a Spark, and it has no controller config yet.` | You ran `vade install` on another computer before any setup. Run `vade setup` there to drive Sparks over SSH, or run `vade install` on the Spark itself. |
-| `Standard input is not a terminal, so setup cannot ask its questions.` | `vade setup` ran from a script. Add `--yes`, plus `--hosts` and `--link` where setup names them. |
-| `vade install failed, so setup stopped.` (or `vade doctor`, `vade up`) | Read the error that step printed just above, fix it, then run `vade setup` again. It reuses the config and the work already done. |
+| `Standard input is not a terminal, so setup cannot ask its questions.` | `vade setup` ran from a script. Use `vade up --sparks a,b`, or add `--yes` and `--hosts` to setup. |
+| `vade install failed, so setup stopped.` (or `vade doctor`, `vade up`) | Read the error that step printed just above, and fix it. Then run the same `vade up --sparks` or `vade setup` command again. It reuses the config and the work already done. |
 | `This command runs only on a DGX Spark (Linux aarch64)` | You ran a local command such as `vade launch` on another computer. Run it on the Spark, add `--dry-run` to preview it, or use [Route B](#route-b-from-a-controller) to drive the Spark from this computer. |
 | `engine source has local changes. Commit or preserve them before install/update` | A controller's `vade install` stages only committed source, and an untracked file counts as a local change. The same check covers `harness` and `CLI` source. Nothing was overwritten. Use a clean clone for the controller. `git status` shows what is untracked. |
 | `The engine refused --context N for memory` | `vade launch` or `vade up` on the Spark prints this when the engine refuses a `--context` you set yourself. The engine's own memory message follows. Choose a smaller `--context`, or leave it out next time. Vade then tries the standard sizes (32768, 16384, 8192, 4096) in turn until the engine accepts one. Run `vade doctor` to inspect memory. A context you set yourself is never lowered silently. |

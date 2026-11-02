@@ -121,8 +121,10 @@ fn page(command: &str) -> Option<Page<'static>> {
             options: &[
                 ("--fp4-local", "Qwen3.8 Flash-Next FP4-Local (the default; optional)"),
                 ("--fp8", "Qwen3.8 Flash-Next FP8 on 2 or 4 Sparks; 6 Sparks start but are not covered (older spelling: --fp8-legacy): context 131072, output 65536 (or the context if smaller), drafting depth 2; output limit up to 262144"),
-                ("--sparks N|a,b", "A Spark count from 1 to 24, or the Sparks as you type them after ssh, in cable order"),
-                ("--hosts a,b", "The Sparks as you type them after ssh, in cable order"),
+                ("--sparks a,b", "The Sparks as you type them after ssh, in any order. Vade reads the cables and sets them up"),
+                ("--sparks N", "How many Sparks of your setup to start, from 1 to 24"),
+                ("--link FROM:TO=ADDR", "With --sparks a,b: FROM's own address on its cable to TO, to override what Vade reads"),
+                ("--hosts a,b", "Machines of your config, in cable order; this never changes the setup"),
                 ("--replicas N", "2..16 independent one-Spark FP4-Local servers behind a local gateway"),
                 ("--pairs", "With --replicas 2..12: N two-Spark tensor-split servers on 2N Sparks instead"),
                 MTP, CONTEXT, OUTPUT,
@@ -132,19 +134,20 @@ fn page(command: &str) -> Option<Page<'static>> {
                 ("--fast-prompts", "Older option, kept for scripts; it has no effect"),
                 DRY_RUN,
             ],
-            examples: &["vade up", "vade up --context 262144 --output 16384", "VADE_CONFIG=cluster.conf vade up --sparks 2"],
+            examples: &["vade up", "vade up --sparks spark-a,spark-b,spark-c,spark-d", "vade up --context 262144 --output 16384", "VADE_CONFIG=cluster.conf vade up --sparks 2"],
             notes: &[
                 "Default: Qwen3.8 Flash-Next FP4-Local on one Spark.",
                 crate::config::FP4_SPARKS,
                 crate::config::FP8_SPARKS,
-                "--sparks a,b and --hosts a,b pick machines from your controller config. Each entry is the ssh line of a machine, or its [machine NAME] name. vade setup --hosts writes that config.",
+                "--sparks a,b is all you need for 1 to 24 Sparks. Vade checks each Spark over SSH, reads the cables, prints the chain, copies itself to each Spark and starts them. Type the Sparks in any order. Each name is what you type after ssh, or user@address.",
+                "A new list replaces the last setup: one line says so, the old file moves aside, and a running engine stops first. The same Sparks in the same order start with no new setup. After that, vade up alone starts the same Sparks, vade down stops them and vade chat opens a chat.",
                 "Local up and launch start with context 32768 and output 8192 (or the context if smaller). They reuse saved limits. A memory refusal lowers a default or saved context to a smaller size from 32768, 16384, 8192 and 4096. The first size that starts is saved. A refused explicit --context is an error. Local --chats and positive --cache-bytes are refused; --cache-bytes 0 disables retention.",
                 "Controller FP4 defaults match local ones on one Spark: context 32768, output 8192 (or the context if smaller). On 2 or more Sparks in one group, a chain or a pair, the default context is 131072; if it does not fit in memory, up falls to 32768 and says so. --context 262144 requests a larger context. The engine still sets the chat count from context and memory.",
                 "Controller FP4 checks and passes on --chats and --cache-bytes, but its engine does not use them: it admits chats from memory and uses its own prefix cache setting.",
                 "The engine chooses the drafting depth (MTP). On one FP4-Local Spark, concurrent chats can draft; the default request depth is 3 with strict verification. FP8 concurrent chats do not draft. A request with draft=plain turns drafting off; draft=strict asks for it when supported. --mtp sets the depth, and 0 turns drafting off.",
                 "Two FP4-Local Sparks run the tensor split, the only two-Spark path for FP4-Local: both Sparks work on every token. It needs RDMA, so vade up refuses SEQPAR_RDMA=0 (TCP) for two FP4-Local Sparks. FP8 on two Sparks keeps its ring and may use TCP.",
                 "FP8 needs an FP8 config such as cli/examples/vade.conf. See docs/benchmarks.md.",
-                "Spark counts above 2 require a current install and linked hosts in cable order.",
+                "--sparks N above 2 needs a setup with that many Sparks in cable order.",
                 "VADE_GROUP=NAME selects a [group NAME] from the config: its hosts in rank order, its own ownership record and its own local_port. A group must be an arc of the cabling: each host is cabled to the next, in rank order; a closing cable is not needed, so any run of neighbors on a ring works. Set the same VADE_GROUP for status, chat, logs and down. Groups in one layout can run at the same time. See docs/eight-sparks.md.",
                 "--replicas N starts one independent one-Spark server on each of the first N machines (or the N --hosts) and a local gateway on local_port; replica tunnels use the next N local ports. Each replica uses the FP4 defaults above. Use it when the model fits one Spark and many chats run at once; answers are the same on every replica.",
                 "--replicas N --pairs makes each replica a two-Spark tensor split: machines 1 and 2 form the first pair, 3 and 4 the next, and each pair must share a fabric link. Only each pair's first machine gets a tunnel. The gateway keeps a chat's later turns on its pair while that pair has fewer than 8 requests in flight or is among the least busy, and gives each chat a stable prompt cache key. This is an option; the default four-Spark mode is unchanged. See docs/four-sparks.md.",
@@ -230,19 +233,19 @@ fn page(command: &str) -> Option<Page<'static>> {
             usage: &["vade setup [OPTIONS]"],
             options: &[
                 ("--yes", "Ask nothing; take the defaults and the flags below"),
-                ("--hosts a,b", "Sparks to drive, as you type them after ssh, in cable order"),
+                ("--hosts a,b", "The Sparks, as you type them after ssh, in any order. This is the same as vade up --sparks a,b"),
                 ("--fp8", "The FP8 checkpoint on 2 or 4 Sparks (6 Sparks start but are not covered); --fp4-local is the default"),
-                ("--replace-local", "Move the local setup aside, then write a controller config"),
+                ("--replace-local", "Older option, kept for scripts; it has no effect"),
                 ("--model PATH", "The model folder, absolute or under ~/ (on each Spark from a controller)"),
-                ("--link FROM:TO=ADDR", "FROM's own address on its cable to TO; once per cable end"),
+                ("--link FROM:TO=ADDR", "FROM's own address on its cable to TO, to override what Vade reads; once per cable end"),
                 ("--dry-run", "Print the answers, the config and the steps; change nothing"),
             ],
-            examples: &["vade setup", "vade setup --yes", "vade setup --yes --hosts spark-a", "vade setup --yes --hosts spark-a --dry-run"],
+            examples: &["vade setup", "vade setup --yes", "vade setup --yes --hosts spark-a,spark-b", "vade setup --yes --hosts spark-a,spark-b --dry-run"],
             notes: &[
                 "Asks which Sparks to use (on a Spark the default is this Spark), FP4-Local or FP8 (only for 2, 4 or 6 Sparks; 6 Sparks are not covered yet), and where the model is. Each question shows its default in brackets; press Enter to take it.",
-                "On this Spark, vade install saves the local defaults in ~/.vade/config. From another computer, setup writes a controller config at the path vade config shows (VADE_CONFIG, else the user config folder). It points at the installed bundle when vade runs from one, else at this checkout, and keeps Vade's private folders on this computer under ~/.vade. Setup never replaces a config.",
+                "On this Spark, vade install saves the local defaults in ~/.vade/config. From another computer, setup writes a controller config at the path vade config shows (VADE_CONFIG, else the user config folder). It points at the installed bundle when vade runs from one, else at this checkout, and keeps Vade's private folders on this computer under ~/.vade. With no list of Sparks, setup uses the config that is there. A list moves that config aside.",
                 "Then it runs vade install, vade up and vade doctor, and stops at the first step that fails. Doctor runs last, so it checks the Sparks that up started. Run vade setup again after a fix, without the answer options: it uses the setup it finds and repeats only the work that needs it. When a controller config already has an install, setup skips vade install; after a pull, run vade update.",
-                "On a Spark with local setup, --hosts or another answer starts a new setup. Setup names the local file and asks before it moves it. With --yes, or without a terminal, add --replace-local. The file moves to config.local beside it; setup deletes nothing.",
+                "A list of Sparks, from --hosts or from the question, replaces the setup in place with no flag: a local setup moves to config.local, a controller config moves to config.before, and a running engine stops first. Setup deletes nothing. Press Enter at the question to keep the setup. It asks for a cable address only when it cannot read one.",
                 "Without a terminal, setup asks nothing; add --yes. It does not download models: see vade pull.",
                 LIFECYCLE,
             ],
@@ -426,7 +429,7 @@ mod tests {
         let up = help(Some("up")).split_whitespace().collect::<Vec<_>>().join(" ");
         for text in [FP4_SPARKS, FP8_SPARKS] { assert!(up.contains(text), "{text}:\n{up}"); }
         assert!(FP4_SPARKS.contains(&format!("3 to {MAX_FP4_SPARKS} Sparks")));
-        assert!(up.contains(&format!("A Spark count from 1 to {MAX_FP4_SPARKS},")));
+        assert!(up.contains(&format!("How many Sparks of your setup to start, from 1 to {MAX_FP4_SPARKS}")));
         let parse = |args: &[&str]| crate::cli::parse(&args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
         let beyond = (MAX_FP4_SPARKS + 1).to_string();
         let error = parse(&["up", "--sparks", &beyond]).unwrap_err();

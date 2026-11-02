@@ -6,12 +6,12 @@
 use super::*;
 use crate::runner::{Runner, SystemRunner};
 
-struct FakeHosts { root: PathBuf, tools: PathBuf, system: SystemRunner }
+struct FakeHosts { root: PathBuf, tools: PathBuf, system: SystemRunner, deny_on_copy: Option<String> }
 impl FakeHosts {
     fn new(root: PathBuf) -> Self {
         let tools = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_hosts");
-        for host in ["host-a", "host-b"] { fs::create_dir_all(root.join(host)).unwrap(); }
-        Self { root, tools, system: SystemRunner { dry: false } }
+        for host in ["host-a", "host-b", "host-c", "host-d"] { fs::create_dir_all(root.join(host)).unwrap(); }
+        Self { root, tools, system: SystemRunner { dry: false }, deny_on_copy: None }
     }
     fn log(&self) -> String { fs::read_to_string(self.root.join("calls.log")).unwrap_or_default() }
     fn know(&self, host: &str) { fs::write(self.root.join(host).join("known"), "").unwrap(); }
@@ -19,6 +19,10 @@ impl FakeHosts {
 impl Runner for FakeHosts {
     fn run(&mut self, exec: &Exec) -> Result<Output, String> {
         let mut exec = exec.clone();
+        // SSH breaks between the checks and the copy of the large files.
+        if let Some(host) = self.deny_on_copy.as_ref().filter(|_| exec.program == "rsync" && exec.args.iter().any(|arg| arg.ends_with("flash.ptx"))) {
+            fs::write(self.root.join(host).join("denied"), "").unwrap();
+        }
         // The stage holds Linux programs, which this computer may not start.
         if exec.label == "harness doctor availability" { return Ok(Output { success: true, stdout: String::new() }); }
         exec.env.insert("PATH".into(), format!("{}:/usr/bin:/bin", self.tools.display()));
@@ -31,8 +35,11 @@ impl Runner for FakeHosts {
 }
 
 /// An `installed-bundle` config for host-a and host-b, with a floor in `MANIFEST`.
-fn app() -> (Fixture, App<FakeHosts>) {
-    let f = Fixture::fp4(2, false);
+fn app() -> (Fixture, App<FakeHosts>) { sparks(2) }
+
+/// The same config for `count` fake hosts.
+fn sparks(count: usize) -> (Fixture, App<FakeHosts>) {
+    let f = Fixture::fp4(count, false);
     let bundle = f.dir.join("bundle");
     fs::create_dir_all(&bundle).unwrap();
     let mut conf = format!("format=vade-launch-bundle-v1\ntarget=aarch64-unknown-linux-gnu\nengine_sha={0}\ncli_sha={1}\nharness_sha={1}\n", "d".repeat(40), "e".repeat(40));
@@ -47,7 +54,7 @@ fn app() -> (Fixture, App<FakeHosts>) {
     let mut config = f.app.config.clone();
     config.prebuilt_dir = Some(fs::canonicalize(&bundle).unwrap());
     config.installed_bundle = true;
-    for (machine, host) in config.machines.iter_mut().zip(["host-a", "host-b"]) { machine.ssh = host.into(); }
+    for (machine, host) in config.machines.iter_mut().zip(["host-a", "host-b", "host-c", "host-d"]) { machine.ssh = host.into(); }
     let runner = FakeHosts::new(fs::canonicalize(&f.dir).unwrap().join("hosts"));
     (f, App { config, dry: false, runner })
 }
@@ -123,4 +130,71 @@ fn a_source_build_that_lacks_rust_names_the_install_commands() {
     for command in crate::app::diagnostics::RUST_STEPS.split(" && ") {
         assert!(guide.lines().any(|line| line == command), "{command}");
     }
+}
+
+/// A second Spark set on the same controller state, as a larger setup is: host-a
+/// and host-b have the bundle from the install before, and host-c has nothing.
+#[test]
+fn a_new_spark_moves_every_rank_to_one_folder() {
+    let _guard = crate::runner::process_test_lock();
+    let (_f, mut app) = app();
+    for host in ["host-a", "host-b", "host-c"] { app.runner.know(host); }
+    install(&mut app).unwrap();
+    let mut third = app.config.machines[1].clone();
+    (third.name, third.ssh) = ("c".into(), "host-c".into());
+    app.config.machines.push(third);
+    app.config.machines[1].fabric.insert("c".into(), "192.0.2.3".into());
+    app.config.machines[2].fabric = BTreeMap::from([("b".to_owned(), "192.0.2.4".to_owned())]);
+    fs::remove_file(app.runner.root.join("calls.log")).unwrap();
+    app.config.stage_dir = app.config.stage_root.clone();
+    app.config.resolve_generation().unwrap();
+    install(&mut app).unwrap();
+    let manifest = Manifest::load(&app.config.build_manifest).unwrap();
+    let folders: BTreeSet<&str> = manifest.artifacts.values().map(|artifact| artifact.ptx.as_str()).collect();
+    assert_eq!((manifest.artifacts.len(), folders.len()), (3, 1), "{:?}", manifest.artifacts);
+    let log = app.runner.log();
+    for host in ["host-a", "host-b", "host-c"] { assert!(log.contains(&format!("rsync {host} flash-serve flash.ptx\n")), "{log}"); }
+}
+
+/// Nothing changed, so a second install copies nothing, on every rank.
+#[test]
+fn a_second_install_of_the_same_sparks_copies_nothing() {
+    let _guard = crate::runner::process_test_lock();
+    let (_f, mut app) = app();
+    for host in ["host-a", "host-b"] { app.runner.know(host); }
+    install(&mut app).unwrap();
+    fs::remove_file(app.runner.root.join("calls.log")).unwrap();
+    app.config.stage_dir = app.config.stage_root.clone();
+    app.config.resolve_generation().unwrap();
+    install(&mut app).unwrap();
+    assert!(!app.runner.log().lines().any(|row| row.starts_with("rsync ")), "{}", app.runner.log());
+}
+
+/// The copy of the large files fails on ssh's own error, with its fix.
+#[test]
+fn a_copy_that_loses_ssh_shows_the_real_line() {
+    let _guard = crate::runner::process_test_lock();
+    let (_f, mut app) = app();
+    for host in ["host-a", "host-b"] { app.runner.know(host); }
+    app.runner.deny_on_copy = Some("host-b".into());
+    let error = install(&mut app).unwrap_err();
+    assert!(error.starts_with("ssh host-b failed: fake@host-b: Permission denied (publickey). Vade never edits ~/.ssh. Run ssh-copy-id host-b, then run vade doctor."), "{error}");
+    assert!(!error.contains("Prebuilt copy failed"), "{error}");
+}
+
+/// Four Sparks from one bundle: no Rust on a rank, no checkout, and one copy route.
+#[test]
+fn four_sparks_take_the_bundle_with_no_rust_and_one_copy_route() {
+    let _guard = crate::runner::process_test_lock();
+    let (_f, mut app) = sparks(4);
+    for host in ["host-a", "host-b", "host-c", "host-d"] { app.runner.know(host); }
+    install(&mut app).unwrap();
+    let log = app.runner.log();
+    assert!(!log.contains("rustc was asked") && !log.contains("cargo was asked") && !log.contains("for tool in cargo"), "{log}");
+    for host in ["host-a", "host-b", "host-c", "host-d"] {
+        assert_eq!(log.lines().filter(|row| row.starts_with(&format!("rsync {host} "))).count(), 2, "the helper, then the engine and the PTX: {log}");
+        assert!(log.contains(&format!("sha256sum {host}\n")), "the hash runs on the rank: {log}");
+    }
+    let manifest = Manifest::load(&app.config.build_manifest).unwrap();
+    assert_eq!(manifest.artifacts.values().map(|artifact| artifact.ptx.as_str()).collect::<BTreeSet<_>>().len(), 1);
 }

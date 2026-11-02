@@ -25,6 +25,14 @@ fn stub(dir: &Path, name: &str, code: i32) {
     std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// An ssh that reaches every Spark and finds no cables on it.
+fn reach(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("ssh"), "#!/bin/sh\necho vade-cables-end\n").unwrap();
+    std::fs::set_permissions(dir.join("ssh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 /// The binary in a sealed environment, with no terminal on standard input.
 fn vade(args: &[&str], home: &Path, env: &[(&str, &std::ffi::OsStr)]) -> Output {
     let mut path = vec![home.join("bin")];
@@ -75,11 +83,12 @@ fn without_a_terminal_setup_asks_for_yes() {
 fn yes_off_a_spark_names_the_missing_flag() {
     if SPARK { return; }
     let home = home("no-hosts");
+    reach(&home.join("bin"));
     let output = vade(&["setup", "--yes"], &home, &[]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(text(&output.stderr).contains("Add --hosts"), "{output:?}");
     let output = vade(&["setup", "--yes", "--hosts", "a,b"], &home, &[]);
-    assert!(text(&output.stderr).contains("Add --link a:b=ADDRESS"), "{output:?}");
+    assert!(text(&output.stderr).contains("a and b share no cable, so check that cable or add --link a:b=ADDRESS --link b:a=ADDRESS."), "{output:?}");
     let output = vade(&["setup", "--yes", "--hosts", "a,b,c", "--fp8"], &home, &[]);
     assert!(text(&output.stderr).contains("This setup has 3.") && text(&output.stderr).contains("Use 2 or 4 Sparks in --hosts"), "{output:?}");
     assert!(!home.join("config").exists());
@@ -108,7 +117,8 @@ fn bad_flags_name_the_fix() {
 fn setup_writes_a_private_config_then_stops_at_the_first_failed_step() {
     let home = home("write");
     // git fails, so vade install stops at its first check and nothing reaches a network.
-    for tool in ["git", "ssh", "rsync", "curl"] { stub(&home.join("bin"), tool, 1); }
+    for tool in ["git", "rsync", "curl"] { stub(&home.join("bin"), tool, 1); }
+    reach(&home.join("bin"));
     let bin = home.join("bin").into_os_string();
     let output = vade(&["setup", "--yes", "--hosts", "spark-a"], &home, &[("PATH", &bin)]);
     let (stdout, stderr) = (text(&output.stdout), text(&output.stderr));
@@ -123,13 +133,13 @@ fn setup_writes_a_private_config_then_stops_at_the_first_failed_step() {
     let written = std::fs::read_to_string(&config).unwrap();
     assert!(written.starts_with("# Written by vade setup. Start: vade up\n") && written.contains("[machine spark-a]\nssh = spark-a\n"), "{written}");
 
-    // A second run uses that config as it is, and refuses answers that would change it.
+    // A second run uses that config as it is, and refuses answers with no Sparks.
     let output = vade(&["setup", "--yes", "--dry-run"], &home, &[("PATH", &bin)]);
     assert!(output.status.success(), "{output:?}");
     assert!(text(&output.stdout).starts_with("Using the controller config at"), "{output:?}");
-    let output = vade(&["setup", "--yes", "--hosts", "spark-b"], &home, &[("PATH", &bin)]);
+    let output = vade(&["setup", "--yes", "--model", "/data/model"], &home, &[("PATH", &bin)]);
     assert_eq!(output.status.code(), Some(1));
-    assert!(text(&output.stderr).contains("A controller config already exists at"), "{output:?}");
+    assert!(text(&output.stderr).contains("A controller config already exists at") && text(&output.stderr).contains("add --hosts with the Sparks"), "{output:?}");
     assert_eq!(std::fs::read_to_string(&config).unwrap(), written);
 }
 
@@ -278,8 +288,10 @@ fn saved_local_defaults_win_over_a_default_controller_config_as_in_dispatch() {
     assert!(text(&output.stdout).starts_with("Using the controller config at"), "{output:?}");
 }
 
+/// A list of Sparks is the answer, so it needs no flag. --replace-local stays
+/// an accepted word, so old scripts still run.
 #[test]
-fn hosts_over_a_local_setup_move_it_aside_only_when_told_to() {
+fn hosts_over_a_local_setup_move_it_aside_with_no_flag() {
     use std::os::unix::fs::PermissionsExt;
     let home = home("replace-local");
     let root = home.join(".vade");
@@ -288,31 +300,50 @@ fn hosts_over_a_local_setup_move_it_aside_only_when_told_to() {
     let file = root.join("config");
     std::fs::write(&file, "format=vade-owner-v1\n").unwrap();
     let aside = root.join("config.local");
-    // Without the flag and without a terminal: a refusal that names the file. Nothing moves.
-    for args in [&["setup", "--yes", "--hosts", "spark-a"][..], &["setup", "--hosts", "spark-a"]] {
-        let output = vade(args, &home, &[]);
-        let stderr = text(&output.stderr);
-        assert_eq!(output.status.code(), Some(1), "{stderr}");
-        assert!(stderr.contains(&format!("hint: Run vade setup again with --replace-local to move {:?} aside", file.display().to_string())), "{stderr}");
-        assert!(file.is_file() && !aside.exists());
-    }
-    let dry = vade(&["setup", "--yes", "--replace-local", "--hosts", "spark-a", "--dry-run"], &home, &[]);
+    let dry = vade(&["setup", "--yes", "--hosts", "spark-a", "--dry-run"], &home, &[]);
     assert!(dry.status.success(), "{dry:?}");
-    assert!(text(&dry.stdout).contains(&format!("Local setup: setup would move {:?} to {:?}.", file.display().to_string(), aside.display().to_string())), "{dry:?}");
+    assert!(text(&dry.stdout).contains(&format!("Replacing the one-Spark setup with one Spark. Setup would move the old setup to {:?}.", aside.display().to_string())), "{dry:?}");
     assert!(file.is_file() && !aside.exists() && !home.join("config/vade/config").exists());
-    // A running engine keeps its setup.
-    std::fs::create_dir(root.join("state")).unwrap();
-    std::fs::write(root.join("state/run.conf"), "version=1\n").unwrap();
-    let running = vade(&["setup", "--yes", "--replace-local", "--hosts", "spark-a"], &home, &[]);
-    assert!(text(&running.stderr).contains("Run vade down"), "{running:?}");
+    // Another answer with no Sparks changes nothing.
+    let model = vade(&["setup", "--yes", "--model", "/data/model"], &home, &[]);
+    assert!(text(&model.stderr).contains("This Spark already has local setup in") && text(&model.stderr).contains("add --hosts with the Sparks"), "{model:?}");
     assert!(file.is_file() && !aside.exists());
-    std::fs::remove_file(root.join("state/run.conf")).unwrap();
     // The steps stop at the failing stub, after the move and the new config.
-    for tool in ["ssh", "rsync", "git"] { stub(&home.join("bin"), tool, 1); }
+    for tool in ["rsync", "git"] { stub(&home.join("bin"), tool, 1); }
+    reach(&home.join("bin"));
     let moved = vade(&["setup", "--yes", "--replace-local", "--hosts", "spark-a"], &home, &[]);
-    assert!(text(&moved.stdout).contains(&format!("Moved the local setup to {:?}. To use it again, move that file back to {:?}.", aside.display().to_string(), file.display().to_string())), "{moved:?}");
+    assert!(text(&moved.stdout).contains(&format!("Replacing the one-Spark setup with one Spark. The old setup is now in {:?}.", aside.display().to_string())), "{moved:?}");
     assert_eq!(std::fs::read_to_string(&aside).unwrap(), "format=vade-owner-v1\n");
     assert!(!file.exists() && home.join("config/vade/config").is_file(), "{moved:?}");
+}
+
+/// With no Spark list, the old word asks for nothing new.
+#[test]
+fn the_replace_local_word_alone_changes_nothing() {
+    let home = home("replace-word");
+    std::fs::create_dir_all(home.join("config/vade")).unwrap();
+    std::fs::write(home.join("config/vade/config"), "[machine spark-a]\nssh = spark-a\n").unwrap();
+    let output = vade(&["setup", "--yes", "--replace-local", "--dry-run"], &home, &[]);
+    assert!(output.status.success() && text(&output.stdout).starts_with("Using the controller config at"), "{output:?}");
+}
+
+/// A running local engine stops first. Off a Spark that stop fails, and then nothing moves.
+#[test]
+fn a_local_engine_that_does_not_stop_keeps_its_setup() {
+    if SPARK { return; }
+    use std::os::unix::fs::PermissionsExt;
+    let home = home("running");
+    let root = home.join(".vade");
+    std::fs::create_dir_all(root.join("state")).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(root.join("config"), "format=vade-owner-v1\n").unwrap();
+    std::fs::write(root.join("state/run.conf"), "version=1\n").unwrap();
+    reach(&home.join("bin"));
+    let output = vade(&["setup", "--yes", "--hosts", "spark-a"], &home, &[]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(text(&output.stdout).contains("Stopping the one-Spark engine.\n"), "{output:?}");
+    assert!(text(&output.stderr).contains("vade down did not finish, so the old setup stays in place."), "{output:?}");
+    assert!(root.join("config").is_file() && !root.join("config.local").exists() && !home.join("config/vade/config").exists());
 }
 
 /// The fake tools first on PATH, and a home folder for each fake host.

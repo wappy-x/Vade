@@ -7,9 +7,40 @@ use crate::{
     style,
 };
 
+mod links;
+mod replace;
 mod walk;
 /// `vade setup`: the walk-through from the first question to a running engine.
 pub use walk::run as walk;
+
+/// `vade up --sparks a,b`: the setup code with these Sparks. `None` when it did
+/// the whole job, and `Some` with the `vade up` options when these Sparks are
+/// already set up and `vade up` only has to start them.
+pub fn sparks(options: &crate::cli::UpOptions, dry: bool) -> Result<Option<Vec<String>>, String> {
+    let fp8 = options.supplied_options.contains("--fp8").then_some(true).or(options.supplied_options.contains("--fp4-local").then_some(false));
+    walk(&crate::cli::SetupOptions { yes: true, hosts: options.hosts.clone(), fp8, links: options.links.clone(), up: options.rest.clone(), from_up: true, ..Default::default() }, dry)
+}
+
+/// `vade up` with no Spark option: the `vade up` options of the last setup, from
+/// the first line of the config that setup wrote. A config by hand, a group and
+/// a running engine keep what `vade up` does with them.
+pub fn saved_start(options: &crate::cli::UpOptions) -> Option<Vec<String>> {
+    if ["--hosts", "--sparks", "--replicas", "--pairs"].iter().any(|flag| options.supplied_options.contains(*flag)) { return None; }
+    let file = std::fs::read_to_string(crate::config::config_path().ok()?).ok()?;
+    if !file.starts_with(replace::WRITTEN) { return None; }
+    let config = crate::config::Config::load().ok().filter(|config| config.group.is_none())?;
+    if crate::state::Session::load(&config.state_dir).ok()?.is_some() { return None; }
+    let typed = options.supplied_options.contains("--fp8") || options.supplied_options.contains("--fp4-local");
+    Some(walk::start_options(&file, &config).into_iter().filter(|option| !(typed && option == "--fp8")).collect())
+}
+
+/// The Sparks of the config that setup wrote, for `vade status` when nothing runs.
+pub fn last_setup() -> Option<String> {
+    let file = std::fs::read_to_string(crate::config::config_path().ok()?).ok()?;
+    if !file.starts_with(replace::WRITTEN) { return None; }
+    let sparks: Vec<String> = crate::config::Config::load().ok()?.machines.into_iter().map(|machine| machine.ssh).collect();
+    Some(format!("{} ({}).", crate::text::count(sparks.len(), "Spark", "Sparks"), sparks.join(", ")))
+}
 
 /// Print the selected setup as an aligned table, or one `vade.config.v1`
 /// object with `json`. A setup that cannot be read is still named, then its

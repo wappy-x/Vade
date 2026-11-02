@@ -37,7 +37,7 @@ fn scripted(options: &SetupOptions, facts: &Facts, replies: &[&str]) -> (Result<
     let result = answer(options, facts, &mut |question| {
         asked.push(question.to_owned());
         replies.pop_front().ok_or_else(|| format!("unexpected question: {question}"))
-    }, pinned);
+    }, pinned, &mut |_| Ok(Some(super::super::links::Spark::default())));
     (result, asked)
 }
 
@@ -98,7 +98,7 @@ fn questions_show_defaults_and_build_an_fp8_pair() {
         &["spark-a, spark-b", "FP8", "", "192.0.2.1", "192.0.2.2"]);
     let (text, up) = controller(target);
     assert_eq!(asked, [
-        "Which Sparks? Type what you type after ssh, in cable order, separated by commas:",
+        "Which Sparks? Type what you type after ssh, in any order, separated by commas:",
         "Which checkpoint? FP4-Local or FP8 [FP4-Local]:",
         "Where is the model on each Spark? [~/models/Qwen/Qwen3.8-Flash-Next-FP8]:",
         "Address of spark-a on its cable to spark-b:",
@@ -117,7 +117,7 @@ fn on_a_spark_enter_takes_this_spark_and_the_found_model() {
     let (target, asked) = scripted(&SetupOptions::default(), &facts(true), &["", ""]);
     assert_eq!(target, Ok(Target::Local { model: None, installed: false }));
     assert_eq!(asked, [
-        "Which Sparks? Type what you type after ssh, in cable order, separated by commas [this Spark]:",
+        "Which Sparks? Type what you type after ssh, in any order, separated by commas [this Spark]:",
         "Where is the FP4-Local model on this Spark? [found under ~/models]:",
     ]);
 }
@@ -268,25 +268,6 @@ fn the_local_model_shows_where_install_will_look() {
 }
 
 #[test]
-fn a_local_setup_moves_only_with_the_flag_or_a_yes_at_the_terminal() {
-    let setup = LocalSetup { file: "/home/you/.vade/config".into(), aside: "/home/you/.vade/config.local".into() };
-    let no_question = |_: &str| -> Result<String, String> { panic!("setup must not ask") };
-    let replace = SetupOptions { replace_local: true, ..flags(true, &["a"], &[]) };
-    setup.confirm(&replace, false, &mut no_question.clone()).unwrap();
-    let refused = "Run vade setup again with --replace-local to move \"/home/you/.vade/config\" aside and write a controller config";
-    // --yes asks nothing, and no terminal cannot ask: both refuse and name the file.
-    for (options, terminal) in [(flags(true, &["a"], &[]), true), (flags(false, &["a"], &[]), false)] {
-        assert!(setup.confirm(&options, terminal, &mut no_question.clone()).unwrap_err().contains(refused));
-    }
-    let asked = std::cell::RefCell::new(Vec::new());
-    for (reply, yes) in [("y", true), ("YES", true), ("", false), ("n", false), ("later", false)] {
-        let result = setup.confirm(&flags(false, &["a"], &[]), true, &mut |question| { asked.borrow_mut().push(question.to_owned()); Ok(reply.into()) });
-        assert_eq!(result.is_ok(), yes, "{reply}");
-    }
-    assert_eq!(asked.borrow()[0], "This Spark has local setup in \"/home/you/.vade/config\". Move it to \"/home/you/.vade/config.local\" and write a controller config? [y/N]:");
-}
-
-#[test]
 fn moving_a_local_setup_keeps_every_file_and_can_go_back() {
     let root = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("vade-local-setup-{}", text::random_hex(8).unwrap()));
     text::private_dir(&root).unwrap();
@@ -300,12 +281,15 @@ fn moving_a_local_setup_keeps_every_file_and_can_go_back() {
     assert!(!root.join("config").exists());
     setup.restore();
     assert_eq!(std::fs::read_to_string(root.join("config")).unwrap(), "saved\n");
-    // A running engine still needs the file.
+    // A running engine still needs the file, so vade down comes first.
     text::private_dir(&root.join("state")).unwrap();
     std::fs::write(root.join("state/run.conf"), "version=1\n").unwrap();
-    let error = LocalSetup::find(&root).unwrap_err();
-    assert!(error.contains("The local engine is running") && error.contains("Run vade down"), "{error}");
+    assert!(LocalSetup::find(&root).unwrap().running);
     assert!(setup.move_aside(&root).is_err() && root.join("config").exists());
+    // A record with no saved defaults has no file to move.
+    std::fs::remove_file(root.join("state/run.conf")).unwrap();
+    std::fs::remove_file(root.join("config")).unwrap();
+    LocalSetup::find(&root).unwrap().move_aside(&root).unwrap();
     std::fs::remove_dir_all(&root).unwrap();
 }
 

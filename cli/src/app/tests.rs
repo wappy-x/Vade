@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Default)]
-struct FakeRunner { calls: Vec<Exec>, started: BTreeSet<String>, fail: Option<String>, foreign: Option<String>, bad_hash: bool, ports: Vec<u16>, dry: bool, doctor_bad: bool, tunnel_bad: bool, refused_start: Option<String>, inspect_error: Option<String>, mac_secret_seen: bool, alter_build_outputs: bool, local_state: PathBuf, exit_on_health: Option<String>, ready_model: Option<String>, health_extra: String, silent_probe: bool, gateway: Option<String>, gateway_start: Option<String>, gateway_exits: bool, gateway_stubborn: bool, signals: Vec<String>, probe: Option<(bool, &'static str)>, hashes: Option<(bool, &'static str)> }
+struct FakeRunner { calls: Vec<Exec>, started: BTreeSet<String>, fail: Option<String>, foreign: Option<String>, bad_hash: bool, ports: Vec<u16>, dry: bool, doctor_bad: bool, tunnel_bad: bool, refused_start: Option<String>, inspect_error: Option<String>, mac_secret_seen: bool, alter_build_outputs: bool, local_state: PathBuf, exit_on_health: Option<String>, ready_model: Option<String>, health_extra: String, silent_probe: bool, gateway: Option<String>, gateway_start: Option<String>, gateway_exits: bool, gateway_stubborn: bool, signals: Vec<String>, probe: Option<(bool, &'static str)>, hashes: Option<(bool, &'static str)>, ssh_says: Option<&'static str> }
 impl Runner for FakeRunner {
     fn run(&mut self, exec: &Exec) -> Result<Output, String> {
         self.calls.push(exec.clone());
@@ -39,6 +39,7 @@ impl Runner for FakeRunner {
             let binary = &exec.args[exec.args.iter().position(|a| a == "--bin").unwrap()+1]; fs::create_dir_all(&target).unwrap(); fs::write(target.join(binary), b"Inert fake build artifact.\n").unwrap();
         }
         if op == "probe" && self.silent_probe { return Ok(Output { success: false, stdout: String::new() }); }
+        if let Some(said) = self.ssh_says.filter(|_| exec.label.starts_with("SSH check of")) { return Ok(Output { success: false, stdout: said.into() }); }
         if exec.label == "harness doctor" && self.doctor_bad { return Ok(Output { success: false, stdout: String::new() }); }
         if exec.label == "controller tunnel check" && self.tunnel_bad { return Ok(Output { success: false, stdout: String::new() }); }
         match exec.label.as_str() { "replica gateway" => { self.gateway = Some(exec.args.join(" ")); return Ok(Output { success: true, stdout: "4242\n".into() }) }

@@ -191,3 +191,57 @@ fn a_long_default_that_does_not_fit_falls_to_the_short_one_and_says_so() {
     assert!(error.contains("Requested size does not fit."), "{error}");
     assert!(Session::load(&app.config.state_dir).unwrap().is_none());
 }
+
+/// The manifest of an older vade: one rank kept the folder of an earlier install.
+#[test]
+fn a_rank_in_an_older_install_folder_makes_up_install_again_and_start() {
+    let mut f = Fixture::fp4(2, false);
+    let path = f.app.config.build_manifest.clone();
+    let mut manifest = Manifest::load(&path).unwrap();
+    manifest.artifacts.get_mut("b").unwrap().ptx = "~/stage/older/flash.ptx".into();
+    text::atomic_write(&path, &manifest.encode()).unwrap();
+    let capture = crate::output::testing::Capture::default();
+    crate::output::with_writer(capture.clone(), || f.app.up(&fp4_options(&["--sparks", "2"]))).unwrap();
+    let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+    assert!(printed.contains("These Sparks hold Vade in different install folders, so vade up installs Vade on each Spark again."), "{printed}");
+    let session = Session::load(&f.app.config.state_dir).unwrap().unwrap();
+    assert_eq!(session.ranks[0].artifact.ptx, session.ranks[1].artifact.ptx);
+    assert!(session.ranks[0].artifact.ptx.contains("/builds/"), "{}", session.ranks[0].artifact.ptx);
+    assert_eq!(f.app.runner.started, ["a".to_owned(), "b".to_owned()].into());
+}
+
+/// A hand-written config can name two stage folders. No install fixes that, so the refusal stays.
+#[test]
+fn two_configured_stage_folders_keep_the_refusal_and_install_nothing() {
+    let mut f = Fixture::fp4(2, false);
+    f.app.config.machines[1].stage_dir = "~/other-stage".into();
+    let path = f.app.config.build_manifest.clone();
+    let mut manifest = Manifest::load(&path).unwrap();
+    manifest.artifacts.get_mut("b").unwrap().ptx = "~/other-stage/flash.ptx".into();
+    text::atomic_write(&path, &manifest.encode()).unwrap();
+    let error = f.app.up(&fp4_options(&["--sparks", "2"])).unwrap_err();
+    assert!(error.contains("expanded absolute PTX paths differ"), "{error}");
+    assert!(!f.app.runner.calls.iter().any(|exec| exec.label == "harness build"), "no install");
+    assert!(!f.recorded());
+}
+
+/// A start that loses SSH shows ssh's own line and its fix, not a guess.
+#[test]
+fn the_check_before_a_start_shows_the_real_ssh_line() {
+    let mut f = Fixture::fp4(2, false);
+    f.app.runner.silent_probe = true;
+    f.app.runner.ssh_says = Some("you@a-ssh: Permission denied (publickey).\n");
+    let error = f.app.up(&fp4_options(&["--sparks", "2"])).unwrap_err();
+    assert!(error.starts_with("ssh a-ssh failed: you@a-ssh: Permission denied (publickey). Vade never edits ~/.ssh. Run ssh-copy-id a-ssh, then run vade doctor."), "{error}");
+    assert!(!error.contains("did not reply"), "{error}");
+    assert!(!f.recorded());
+}
+
+#[test]
+fn the_ready_line_names_each_spark_and_the_context() {
+    let mut f = Fixture::fp4(2, false);
+    let capture = crate::output::testing::Capture::default();
+    crate::output::with_writer(capture.clone(), || f.app.up(&fp4_options(&["--sparks", "2"]))).unwrap();
+    let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+    assert!(printed.contains("Vade is ready on 2 Sparks (a-ssh, b-ssh) at http://localhost:18080: context 131072 tokens, drafting depth "), "{printed}");
+}

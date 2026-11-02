@@ -110,7 +110,14 @@ impl<R: Runner> App<R> {
     /// Start, or attach to, the engine. Only the long default context falls back
     /// on a memory refusal: a context the person named stays their choice.
     pub fn up(&mut self, options: &UpOptions) -> Result<(), String> {
-        let result = self.start_engine(options);
+        let mut result = self.start_engine(options);
+        // Ranks left in two install folders by an older vade. A new install puts them
+        // in one, so this start can go on. Nothing has started at this point.
+        if result.as_ref().is_err_and(|error| error.contains(plan::PTX_FOLDERS)) && self.config.machines.windows(2).all(|pair| pair[0].stage_dir == pair[1].stage_dir) {
+            crate::output::line(format_args!("These Sparks hold Vade in different install folders, so vade up installs Vade on each Spark again."))?;
+            self.install()?;
+            result = self.start_engine(options);
+        }
         let refused = result.as_ref().err().filter(|error| options.fp4_local && !options.supplied_options.contains("--context")
             && error.contains(&format!("CONTEXT={}", crate::cli::FP4_LONG_CONTEXT)) && !error.contains("Cleanup could not finish")
             && crate::launch::memory_refusal(error).is_some()).is_some();
@@ -246,9 +253,9 @@ impl<R: Runner> App<R> {
                 ))?;
             } else {
                 crate::output::line(format_args!(
-                    "{} ready on {}{} at {}: context {} tokens, drafting depth {}.\n{}",
-                    session.model,
+                    "Vade is ready on {} ({}){} at {}: context {} tokens, drafting depth {}.\n{}",
                     crate::text::count(session.ranks.len(), "Spark", "Sparks"),
+                    session.ranks.iter().map(|rank| rank.machine.ssh.as_str()).collect::<Vec<_>>().join(", "),
                     if session.chained() && session.replicas { " (tensor-split pairs behind the gateway)" } else if session.replicas { " (independent replicas behind the gateway)" } else { "" },
                     session.endpoint(),
                     session.context,
@@ -314,6 +321,7 @@ impl<R: Runner> App<R> {
             return Ok(Fields::new());
         }
         if !output.success && output.stdout.trim().is_empty() {
+            if let Some(stop) = self.ssh_stop(&rank.machine.ssh) { return Err(format!("{} {}", stop.error, stop.fix)); }
             // The pre-start probe runs before any local or remote ownership record exists.
             return Err(if op == "probe" {
                 format!("Transport: {} did not reply to the pre-start check; nothing was started or recorded. Retry vade up; the retained logs show the SSH error.", rank.machine.name)
@@ -576,7 +584,7 @@ impl<R: Runner> App<R> {
         let Some(session) = Session::load(&self.config.state_dir)? else {
             let owned = self.group_records()?;
             if owned.is_empty() {
-                crate::output::text(format_args!("{}", crate::status::stopped(self.start_command())))?;
+                crate::output::text(format_args!("{}", crate::status::stopped(self.start_command(), crate::setup::last_setup().as_deref())))?;
             } else {
                 // Groups still run: never headline this as stopped.
                 crate::output::line(format_args!("{} Vade has no server of its own; {} group(s) still own one.", style::paint(Token::Dim, "○", Stream::Out), owned.len()))?;

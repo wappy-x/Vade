@@ -15,6 +15,7 @@ host=${last%:./}
 home=$FAKE_HOSTS/$host
 printf 'rsync %s' "$host" >> "$FAKE_HOSTS/calls.log"
 [ -f "$home/known" ] || { echo >> "$FAKE_HOSTS/calls.log"; echo 'Host key verification failed.' >&2; exit 255; }
+[ ! -f "$home/denied" ] || { echo >> "$FAKE_HOSTS/calls.log"; echo "fake@$host: Permission denied (publickey)." >&2; exit 255; }
 folder=${receiver#umask 077 && cd }
 folder=${folder% && exec rsync}
 folder=$(HOME=$home; eval "cd $folder" && pwd -P) || exit 12

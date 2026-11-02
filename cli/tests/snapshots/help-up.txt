@@ -3,35 +3,40 @@ Start the engine without opening chat.
 
 Examples:
   vade up
+  vade up --sparks spark-a,spark-b,spark-c,spark-d
   vade up --context 262144 --output 16384
   VADE_CONFIG=cluster.conf vade up --sparks 2
 
 Usage: vade up [OPTIONS]
 
 Options:
-  --fp4-local       Qwen3.8 Flash-Next FP4-Local (the default; optional)
-  --fp8             Qwen3.8 Flash-Next FP8 on 2 or 4 Sparks; 6 Sparks start but
-                    are not covered (older spelling: --fp8-legacy): context
-                    131072, output 65536 (or the context if smaller), drafting
-                    depth 2; output limit up to 262144
-  --sparks N|a,b    A Spark count from 1 to 24, or the Sparks as you type them
-                    after ssh, in cable order
-  --hosts a,b       The Sparks as you type them after ssh, in cable order
-  --replicas N      2..16 independent one-Spark FP4-Local servers behind a local
-                    gateway
-  --pairs           With --replicas 2..12: N two-Spark tensor-split servers on
-                    2N Sparks instead
-  --mtp N           Drafting depth 0..3; 0 turns drafting off (default: the
-                    engine chooses)
-  --context N       Context window in tokens, 4096..262144 (default 32768)
-  --output N        Output limit in tokens, 1024..16384 (default 8192, or the
-                    context if smaller)
-  --chats N         Concurrent FP8 chats, 1..32 (controller)
-  --memory-bytes N  Memory budget per rank, in bytes
-  --cache-bytes N   FP8 retained prompt cache, in bytes; 0 disables it. Local
-                    FP4 accepts only 0
-  --fast-prompts    Older option, kept for scripts; it has no effect
-  --dry-run         Show what would happen; change nothing
+  --fp4-local          Qwen3.8 Flash-Next FP4-Local (the default; optional)
+  --fp8                Qwen3.8 Flash-Next FP8 on 2 or 4 Sparks; 6 Sparks start
+                       but are not covered (older spelling: --fp8-legacy):
+                       context 131072, output 65536 (or the context if smaller),
+                       drafting depth 2; output limit up to 262144
+  --sparks a,b         The Sparks as you type them after ssh, in any order. Vade
+                       reads the cables and sets them up
+  --sparks N           How many Sparks of your setup to start, from 1 to 24
+  --link FROM:TO=ADDR  With --sparks a,b: FROM's own address on its cable to TO,
+                       to override what Vade reads
+  --hosts a,b          Machines of your config, in cable order; this never
+                       changes the setup
+  --replicas N         2..16 independent one-Spark FP4-Local servers behind a
+                       local gateway
+  --pairs              With --replicas 2..12: N two-Spark tensor-split servers
+                       on 2N Sparks instead
+  --mtp N              Drafting depth 0..3; 0 turns drafting off (default: the
+                       engine chooses)
+  --context N          Context window in tokens, 4096..262144 (default 32768)
+  --output N           Output limit in tokens, 1024..16384 (default 8192, or the
+                       context if smaller)
+  --chats N            Concurrent FP8 chats, 1..32 (controller)
+  --memory-bytes N     Memory budget per rank, in bytes
+  --cache-bytes N      FP8 retained prompt cache, in bytes; 0 disables it. Local
+                       FP4 accepts only 0
+  --fast-prompts       Older option, kept for scripts; it has no effect
+  --dry-run            Show what would happen; change nothing
 
 Notes:
   - Default: Qwen3.8 Flash-Next FP4-Local on one Spark.
@@ -40,9 +45,14 @@ Notes:
   - FP8 runs on 2 or 4 Sparks, and the same request with the same settings gives
     the same token IDs on both. FP8 also starts on 6 Sparks, but its token IDs
     differ there, so 6 Sparks are not covered yet.
-  - --sparks a,b and --hosts a,b pick machines from your controller config. Each
-    entry is the ssh line of a machine, or its [machine NAME] name. vade setup
-    --hosts writes that config.
+  - --sparks a,b is all you need for 1 to 24 Sparks. Vade checks each Spark over
+    SSH, reads the cables, prints the chain, copies itself to each Spark and
+    starts them. Type the Sparks in any order. Each name is what you type after
+    ssh, or user@address.
+  - A new list replaces the last setup: one line says so, the old file moves
+    aside, and a running engine stops first. The same Sparks in the same order
+    start with no new setup. After that, vade up alone starts the same Sparks,
+    vade down stops them and vade chat opens a chat.
   - Local up and launch start with context 32768 and output 8192 (or the context
     if smaller). They reuse saved limits. A memory refusal lowers a default or
     saved context to a smaller size from 32768, 16384, 8192 and 4096. The first
@@ -68,8 +78,7 @@ Notes:
     keeps its ring and may use TCP.
   - FP8 needs an FP8 config such as cli/examples/vade.conf. See
     docs/benchmarks.md.
-  - Spark counts above 2 require a current install and linked hosts in cable
-    order.
+  - --sparks N above 2 needs a setup with that many Sparks in cable order.
   - VADE_GROUP=NAME selects a [group NAME] from the config: its hosts in rank
     order, its own ownership record and its own local_port. A group must be an
     arc of the cabling: each host is cabled to the next, in rank order; a

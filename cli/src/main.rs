@@ -242,6 +242,26 @@ fn run_main(mut args: Vec<String>) {
         if let Err(error) = setup::walk(options, parsed.dry_run) { fail(&error); }
         return;
     }
+    // vade up --sparks a,b: the setup code, which ends with those Sparks running
+    // or names the start. vade up alone: the Sparks of the last setup.
+    let mut parsed = parsed;
+    if let cli::Command::Up(options) = &parsed.command {
+        let start = if options.listed {
+            match setup::sparks(options, parsed.dry_run) {
+                Ok(None) => return,
+                Ok(Some(start)) => Some(start),
+                Err(error) => fail(&error),
+            }
+        } else if launch::handles(&parsed.command) {
+            None
+        } else {
+            setup::saved_start(options).filter(|start| !start.is_empty()).map(|start| start.into_iter().chain(args.iter().filter(|arg| *arg != "up" && *arg != "--dry-run").cloned()).collect())
+        };
+        if let Some(start) = start {
+            let again: Vec<String> = std::iter::once("up".to_owned()).chain(start).chain(parsed.dry_run.then(|| "--dry-run".to_owned())).collect();
+            parsed = cli::parse(&again).unwrap_or_else(|error| fail(&error));
+        }
+    }
     // Keep every JSON status outcome (including owner-config errors) inside
     // the versioned schema; status::run uses the same owner selector below.
     if parsed.command == cli::Command::StatusJson {

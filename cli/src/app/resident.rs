@@ -103,6 +103,9 @@ pub(super) fn recorded_options(session: &Session) -> UpOptions {
         // The context of a running engine stays, also after a restart.
         supplied_options: ["--context".to_owned()].into(),
         sparks: None,
+        listed: false,
+        links: Vec::new(),
+        rest: Vec::new(),
         hosts: session
             .ranks
             .iter()

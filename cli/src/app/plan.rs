@@ -1,6 +1,9 @@
 //! Resolve launch paths, fabric addresses, artifacts and the worker environment.
 use super::*;
 
+/// The refusal of a start whose ranks hold their PTX in different folders.
+pub(super) const PTX_FOLDERS: &str = "expanded absolute PTX paths differ";
+
 impl<R: Runner> App<R> {
     pub(super) fn resolve_rank_paths(&mut self, session: &mut Session) -> Result<(), String> {
         let mut shared_paths = None;

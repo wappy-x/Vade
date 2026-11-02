@@ -430,7 +430,7 @@ vade up --fp8
 
 ```text
 Starting qwen3.8-flash-next-fp8 on 2 Sparks over RDMA. Waiting for the model to load.
-qwen3.8-flash-next-fp8 ready on 2 Sparks at http://localhost:18080: context 131072 tokens, drafting depth engine default.
+Vade is ready on 2 Sparks (spark-a, spark-b) at http://localhost:18080: context 131072 tokens, drafting depth engine default.
   Chat: vade chat   Stop: vade down
 ```
 

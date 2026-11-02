@@ -36,7 +36,7 @@ Vade commands exit 0 on success and 1 on a failure. Errors come in three forms:
 
 Do what the hint or the reason says. Then run the same command again.
 
-There is one exception. Once a setup exists, run `vade setup --yes` without `--hosts`, `--fp8`, `--model` and `--link`. Setup refuses these flags, because it uses the setup as it is. A setup exists when a controller config or `~/.vade/config` is there. Step L4 gives the one case where these flags stay: a new `VADE_CONFIG` path.
+There is one exception. Once a setup exists, only a list of Sparks changes it: `vade up --sparks` or `vade setup --hosts`. The other answer flags `--fp8`, `--model` and `--link` stop with an error on their own, because setup uses the setup as it is. A setup exists when a controller config or `~/.vade/config` is there.
 
 The [error table](#what-to-do-on-each-kind-of-error) at the end of this page lists the common messages.
 
@@ -85,7 +85,7 @@ vade config --json
 | --- | --- | --- |
 | `none` | Nothing is set up for this user | Go to Check C |
 | `local` | This Spark has saved defaults in `~/.vade/config` | Run `vade status --json`. If `ready` is true, go to step 5. Otherwise, go to step 3 |
-| `controller` | A controller config exists, and `path` names it | Run `vade setup --yes`. It reuses the config |
+| `controller` | A controller config exists, and `path` names it | Run `vade up`. It starts the Sparks of that setup |
 | `legacy` | The older `vade run qwen3-8b` setup | Use `vade run qwen3-8b`. Do not mix the two setups |
 
 **Check C. Find out if the disk has room.**
@@ -302,13 +302,12 @@ A receipt is the saved record of a run: its build, its settings and what it meas
 
 Linked Sparks need a controller, which is a computer that drives the Sparks over SSH. The controller can be one of the Sparks, or another Linux or macOS computer.
 
-Today a one-line install is not enough for this path. `vade setup --hosts` reads a checkout, and a controller install builds the engine on each Spark. So each Spark and the controller need the source build below. This changes when the setup fix lands.
+The one-line install is enough for this path. Vade copies itself to each other Spark, so a Spark needs no Rust and no checkout. One command does the rest: `vade up --sparks spark-a,spark-b`.
 
 **Ask the person for these answers:**
 
 - which computer is the controller
-- what they type after `ssh` for each Spark, in cable order
-- each Spark's own address on each cable
+- what they type after `ssh` for each Spark, in any order
 - whether the link checks in [network setup](../network-setup.md#7-check-every-link) pass
 
 If the link checks do not pass, stop. The network is a job for the administrator. Two FP4-Local Sparks need RDMA.
@@ -317,7 +316,7 @@ A clear yes from the person is enough for the link checks. `vade doctor` checks 
 
 Do the steps below in order. Do not run step 4 on a Spark in this path, because `vade setup` starts the engine.
 
-The examples use two names. `spark-a` is a controller Spark, and `spark-b` is the other Spark. `--hosts` follows the cable order. The controller does not need to be first.
+The examples use two names. `spark-a` is a controller Spark, and `spark-b` is the other Spark. The names can come in any order, because Vade reads the cables. The controller does not need to be first.
 
 ### Step L1. Check SSH from the controller
 
@@ -331,33 +330,25 @@ ssh -o BatchMode=yes spark-b 'ulimit -Sl; ulimit -Hl; echo "$HOME"'
 - **Exit code.** 0.
 - **Check.** Each Spark prints `unlimited` twice, and every Spark has the same home folder. RDMA needs the unlimited memory lock in this SSH session.
 
-A controller Spark needs no SSH key for itself. Vade finds it by its name in `--hosts`. Check that name with `ssh -G spark-a | grep -i '^hostname '`. The line must name this computer: `localhost`, a loopback address, the output of `hostname`, or an address that `ip -br address` lists. If it does not, ask the person which name to use.
+A controller Spark needs no SSH key for itself. Vade finds it by its name in `--sparks`. Check that name with `ssh -G spark-a | grep -i '^hostname '`. The line must name this computer: `localhost`, a loopback address, the output of `hostname`, or an address that `ip -br address` lists. If it does not, ask the person which name to use.
 
 The most likely failures:
 
 - **`Permission denied` or `Host key verification failed`.** The Spark does not trust the controller's key, or the controller does not know the Spark's host key. Ask the person to fix it. Vade never edits SSH settings.
 - **A number in place of `unlimited`.** The Spark is not ready for RDMA. Stop and tell the person. The fix is in [network setup](../network-setup.md).
-- **The home folders differ.** Every Spark needs the checkpoint at the same absolute path. Ask the person for one absolute model folder. Add `--to` and that folder to `vade pull`, and add `--model` and that folder to `vade setup`.
+- **The home folders differ.** Vade uses one folder path on every Spark, so `vade up --sparks` stops before it writes anything. Ask the person to use one account name on all Sparks.
 
 ### Step L2. Prepare each Spark
 
-Run [Check C](#before-step-1) on each Spark first, and use the [background form](#run-a-long-command). The command for this step is:
+Run [Check C](#before-step-1) on each Spark first, and use the [background form](#run-a-long-command). The command for this step is step 1 of this page. Run it on the controller Spark in the background form as it is. For another Spark, wrap the same form in `ssh`:
 
 ```sh
-curl -fsSL https://vade.lol/install.sh | sh -s -- --source
+ssh -o BatchMode=yes spark-b 'nohup sh -c "curl -fsSL https://vade.lol/install.sh | sh; echo exit \$?" > ~/vade-step.log 2>&1 < /dev/null & echo $! > ~/vade-step.pid'
 ```
-
-Run it on the controller Spark in the background form as it is. For another Spark, wrap the same form in `ssh`:
-
-```sh
-ssh -o BatchMode=yes spark-b 'nohup sh -c "curl -fsSL https://vade.lol/install.sh | sh -s -- --source; echo exit \$?" > ~/vade-step.log 2>&1 < /dev/null & echo $! > ~/vade-step.pid'
-```
-
-The `--source` flag builds from a new clone of public main in `~/.vade`, and it installs the pinned Rust toolchains if they are missing. It took 176.8 s with a local clone in the [fresh-install receipt](../../bench/receipts/2026-10-31/fresh-install-2026-10-30.txt). It needs `git` and `cc`.
 
 - **Expected output.** `Install complete. Next steps:`, then the next steps.
 - **Exit code.** 0.
-- **Check.** The output has `Install complete. Next steps:`, and `for tool in git rsync ping sha256sum; do command -v "$tool"; done` on that Spark prints four paths. On a controller Spark, add `ssh` and `shasum` to the list.
+- **Check.** The output has `Install complete. Next steps:`.
 
 Then run steps 2 and 3 on each Spark. Each Spark downloads its own copy of the checkpoint, and the downloads can overlap. Ask the person once, and name the total: 204.52 GB for two Sparks, or 409.04 GB for four. `vade pull` checks every file, so no other hash check is needed.
 
@@ -369,12 +360,12 @@ ssh -o BatchMode=yes spark-b 'export PATH="<the folders that the installer print
 
 The two most likely failures:
 
-- **`missing git`, or a path is missing from the `command -v` output.** Tell the person. An administrator installs the missing tools.
-- **`Build GPU kernels failed`.** Give the person the output. Do not retry in a loop.
+- **`install:` and a `Next:` action.** Follow the action. Do not retry in a loop.
+- **A driver or GPU error.** Tell the person. Driver updates are an administrator job.
 
 ### Step L3. Get vade on the controller
 
-If the controller is a Spark from step L2, skip this step. Its `vade` comes from the clone in `~/.vade`.
+If the controller is a Spark from step L2, skip this step. Its `vade` comes from the install in `~/.vade`.
 
 On another computer, the controller needs Git, a C linker (`cc`), curl, ssh, rsync and `shasum`. Check them with `for tool in git cc curl ssh rsync shasum; do command -v "$tool"; done`, which prints six paths. It needs Rust 1.99.0 too. If `rustup toolchain list` does not show `1.99.0`, run these commands:
 
@@ -405,16 +396,15 @@ The two most likely failures:
 - **`fatal: destination path ... already exists`.** A checkout is there. Ask the person whether to use it. Do not replace it.
 - **A `toolchain` or `rustup` error.** Rust 1.99.0 is missing. Follow [Install Rust](../INSTALL.md#install-rust).
 
-### Step L4. Preview the setup
+### Step L4. Preview the start
 
-Run this step and step L5 from any folder. `vade` finds its checkout from its own path. Replace the names and the example addresses with the values from the person. Give one `--link` for each cable end, in cable order. Two Sparks have one cable, so they need two `--link` flags. Four Sparks in a line have three cables, so they need six.
+Run this step and step L5 from any folder. Replace the names with the values from the person.
 
 ```sh
-vade setup --dry-run --yes --hosts spark-a,spark-b \
-  --link spark-a:spark-b=192.0.2.1 --link spark-b:spark-a=192.0.2.2
+vade up --sparks spark-a,spark-b --dry-run
 ```
 
-With `--yes` and no `--model`, setup uses `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local` on each Spark.
+A dry run opens no connection, so it shows no cable addresses. On a list with no setup yet, Vade uses `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local` on each Spark.
 
 For the FP8 checkpoint, add `--fp8`. FP8 needs two or four Sparks, and it does not fit on one. These values change for FP8:
 
@@ -422,36 +412,31 @@ For the FP8 checkpoint, add `--fp8`. FP8 needs two or four Sparks, and it does n
 - **Disk.** Check C needs at least `184G` on each Spark: about 173 GiB for the model and 10 GiB for the install.
 - **API request.** Use the model `qwen3.8-flash-next-fp8`. FP8 samples by default, so check `"finish_reason":"stop"`, not the word `Paris`.
 
-- **Expected output.** `Dry run: setup writes nothing and starts nothing.`, the config, then a `Steps:` list. The config has one `[machine NAME]` section for each Spark, with `ssh =`, `model_path =` and `fabric.<peer> =` lines.
+- **Expected output.** `Dry run: setup writes nothing and starts nothing.`, the config, then `Setup reads the cable addresses from each Spark when it runs.` and a `Steps:` list.
 - **Exit code.** 0.
-- **Check.** The config names each Spark in cable order and the right addresses.
+- **Check.** The config names each Spark.
 
-The two most likely failures:
-
-- **`Add --hosts` or `Add --link`.** An answer is missing. Ask the person for it. Do not guess.
-- **`This Spark already has local setup.`** A local setup exists on the controller Spark. Run `vade down`, then `export VADE_CONFIG="$HOME/.config/vade/config"`. Setup then writes a controller config there and leaves `~/.vade/config` alone. Keep that `VADE_CONFIG` for every later command, and keep the flags in this step. This changes when the setup fix lands.
-
-### Step L5. Run the setup
+### Step L5. Run the start
 
 Run the same command without `--dry-run`:
 
 ```sh
-vade setup --yes --hosts spark-a,spark-b \
-  --link spark-a:spark-b=192.0.2.1 --link spark-b:spark-a=192.0.2.2
+vade up --sparks spark-a,spark-b
 ```
 
-Setup writes the controller config. Then it runs `vade install`, `vade up` and `vade doctor`, so the engine is already running at the end. Setup never replaces a config, and it ends on its own. We have no timed record of this step.
+Vade checks each Spark over SSH and reads its cables. It prints one line such as `Cable order: spark-a - spark-b.`. Then it writes the config and runs `vade install`, `vade up` and `vade doctor`, so the engine is already running at the end. A setup that exists moves aside, and one line such as `Replacing the one-Spark setup with two Sparks.` says so. We have no timed record of this step.
 
-- **Expected output.** The output of `vade install`, `vade up` and `vade doctor`, then the line `Setup done.`
+- **Expected output.** The `Cable order:` line, the output of the three steps, then the line `Setup done.`
 - **Exit code.** 0.
-- **Check.** `vade status --json` prints `"ready":true` and an `endpoint`. Then send the step 5 request to that `endpoint`. It already ends in `/v1`. Setup keeps the default ports.
+- **Check.** `vade status --json` prints `"ready":true` and an `endpoint`. Then send the step 5 request to that `endpoint`. It already ends in `/v1`. The command keeps the default ports.
 
-The two most likely failures:
+The most likely failures:
 
-- **`vade install failed, so setup stopped.`** The same message can name `vade up` or `vade doctor`. Fix the error that the step printed just above it. Then run `vade setup --yes` without the other flags.
-- **`Cannot reach ... over SSH`.** A Spark is off or asks for a password. Go back to step L1.
+- **`ssh spark-b failed:`.** The line shows what ssh said, and the hint gives the one command to run. Vade never edits SSH settings. Ask the person to run it, then run the same command again.
+- **`share no cable`.** Two Sparks share no subnet on a fabric port. Ask the person to check that cable. Do not guess addresses. If the person gives the addresses, add `--link spark-a:spark-b=ADDRESS --link spark-b:spark-a=ADDRESS`.
+- **`vade install failed, so setup stopped.`** The same message can name `vade up` or `vade doctor`. Fix the error that the step printed just above it. Then run the same command again.
 
-Under `--yes`, the steps get no input. A step that needs an answer stops with an `error:` line and does not wait. To stop setup, send SIGTERM or SIGINT to it, as [Run a long command](#run-a-long-command) shows. Setup passes the stop on to the step that runs, waits for that step and exits 1.
+A step gets no input here. A step that needs an answer stops with an `error:` line and does not wait. To stop the command, send SIGTERM or SIGINT to it, as [Run a long command](#run-a-long-command) shows. Vade passes the stop on to the step that runs, waits for that step and exits 1.
 
 ### Step L6. Check exactness
 
@@ -465,7 +450,7 @@ cd "$HOME" && vade verify
 - **Exit code.** 0.
 - **Check.** The same check as step 6.
 
-The failures are the same as in step 6. In this path, "go back to step 4" means `vade up --sparks 2`.
+The failures are the same as in step 6. In this path, "go back to step 4" means `vade up`.
 
 ### Step L7. Stop and start again
 
@@ -473,20 +458,20 @@ The default is to leave the engine running. To restart it, run:
 
 ```sh
 vade down
-vade up --sparks 2
+vade up
 ```
 
 - **Expected output of `vade down`.** `Vade is stopped. The engines and the tunnel that vade started are closed.`, or `Vade is already stopped. Nothing to stop.`
-- **Expected output of `vade up`.** `Starting <model> on 2 Sparks over RDMA. Waiting for the model to load.`, then `<model> ready on 2 Sparks at http://127.0.0.1:18080: context 131072 tokens, drafting depth <depth>.`
+- **Expected output of `vade up`.** `Starting <model> on 2 Sparks over RDMA. Waiting for the model to load.`, then `Vade is ready on 2 Sparks (spark-a, spark-b) at http://localhost:18080: context 131072 tokens, drafting depth <depth>.`
 - **Exit code.** 0 for each command.
 - **Check.** `vade status --json` prints `"ready":true`.
 
-Name the Spark count in `vade up`: use `--sparks 4` for four Sparks. After `vade down`, a controller keeps no record of the last start. A plain `vade up` then starts one FP4-Local Spark, or two FP8 Sparks. `vade setup --yes` also starts the Sparks that a setup config names, with the default limits. The first line of that config names the same start command. Add `--fp8` to `vade up` for FP8.
+`vade up` alone starts the Sparks of the last setup, with its checkpoint and the default limits. `vade status` names them while the engine is stopped. A config written by hand keeps the old rule: a plain `vade up` starts one FP4-Local Spark, or two FP8 Sparks.
 
 The two most likely failures:
 
-- **`did not reply to the pre-start check`.** SSH failed or timed out. Nothing started. Run `vade up --sparks 2` again.
-- **`refused --context` or `Not enough memory`.** The engine has too little memory. Add `--context 16384` to `vade up --sparks 2`. If it refuses again, use `--context 8192`, then `--context 4096`.
+- **`ssh spark-b failed:` or `did not reply to the pre-start check`.** SSH failed or timed out. Nothing started. Follow the hint, then run `vade up` again.
+- **`refused --context` or `Not enough memory`.** The engine has too little memory. Add `--context 16384` to `vade up`. If it refuses again, use `--context 8192`, then `--context 4096`.
 
 ## Build from source
 
@@ -602,8 +587,8 @@ It pulls each source checkout and stages the new build. Then it asks before a re
 | `This computer is not a Spark, and it has no controller config yet.` | `vade install` on a controller before setup | Step L4 |
 | `This command runs only on a DGX Spark (Linux aarch64)` | A local command on another computer | Run it on the Spark, or use a controller |
 | `Standard input is not a terminal, so setup cannot ask` | `vade setup` without `--yes` | Add `--yes` and the flags it names |
-| `Setup needs the Vade checkout` | `vade setup --hosts` from a one-line install | Step L2 or L3 |
-| `Add --hosts` or `Add --link FROM:TO=ADDRESS` | A required answer is missing | Ask the person. Do not guess addresses |
+| `share no cable` | Two Sparks share no subnet on a fabric port | Ask the person to check that cable. Do not guess addresses |
+| `Add --hosts` or `add --link FROM:TO=ADDRESS` | A required answer is missing | Ask the person. Do not guess addresses |
 | A `toolchain` or `rustup` hint | A pinned Rust toolchain is missing | Run the `rustup` command in the hint |
 | `source has local changes` | The checkout has uncommitted or untracked files | Show `git status` to the person |
 | `GPU is in use` | Another program uses the GPU | Tell the person. Do not stop it |

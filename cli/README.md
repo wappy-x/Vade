@@ -613,7 +613,10 @@ With `VADE_CONFIG` set, the lifecycle commands work like this:
 | Command | What happens |
 | :---: | :---: |
 | `vade` | Short status and four choices: start, chat, stop, doctor. |
-| `vade up` (also `--fp4-local`) | Starts FP4-Local on one configured Spark. Add `--sparks N` for 2 to 24, or `--sparks a,b` or `--hosts a,b` to name the Sparks in cable order. Larger chains need a current staged build, and each must still pass its own live checks on real Sparks. |
+| `vade up` (also `--fp4-local`) | Starts the last setup, or FP4-Local on this Spark with no setup. |
+| `vade up --sparks a,b` | Sets up and starts these Sparks, from 1 to 24, in any order. Vade checks each one over SSH, reads the cables, prints the chain and copies itself to each Spark. A new list replaces the setup in place, and the old file moves aside. `--link FROM:TO=ADDRESS` overrides one cable end. |
+| `vade up --sparks N` | Starts N Sparks of your setup. Larger chains need a current staged build, and each must still pass its own live checks on real Sparks. |
+| `vade up --hosts a,b` | Starts these machines of your config, in cable order. It never changes the setup. |
 | `vade up --replicas N` | FP4-Local only, N = 2 to 16: one independent one-Spark server on each of the first N configured machines (or the N `--hosts`), behind a local gateway. Details below the table. |
 | `vade up --replicas N --pairs` | FP4-Local only, N = 2 to 12: N two-Spark tensor-split servers on 2N machines, in pairs in list order, behind a local gateway. This mode is an option. It is not the four-Spark default ([two pairs behind one address](../docs/four-sparks.md#two-pairs-behind-one-address)). |
 | `vade up --fp8` | FP8: starts on the first two configured machines, tensor parallel on a ring. |

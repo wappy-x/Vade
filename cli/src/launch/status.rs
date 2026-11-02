@@ -71,7 +71,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
 }
 
 /// `vade status` when nothing is running.
-pub(super) fn stopped() -> String { crate::status::stopped(&text::command("up")) }
+pub(super) fn stopped() -> String { crate::status::stopped(&text::command("up"), None) }
 
 /// `vade status` when the recorded engine process is gone, as after a crash or a kill.
 pub(super) fn stale() -> String {

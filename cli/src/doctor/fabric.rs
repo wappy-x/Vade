@@ -10,7 +10,7 @@ use std::net::Ipv4Addr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Slowest link that counts as a fabric cable, in Mb/s (one QSFP rail).
-const FABRIC_MBPS: u64 = 100_000;
+pub(crate) const FABRIC_MBPS: u64 = 100_000;
 /// The MTU every fabric interface needs (docs/network-setup.md, step 5).
 const FABRIC_MTU: u32 = 9000;
 /// Largest clock difference to the controller, beyond the SSH round trip.
@@ -30,7 +30,7 @@ pub(crate) struct Interface {
 }
 
 impl Interface {
-    fn subnet(&self) -> (Ipv4Addr, u8) { (network(self.address, self.prefix), self.prefix) }
+    pub(crate) fn subnet(&self) -> (Ipv4Addr, u8) { (network(self.address, self.prefix), self.prefix) }
     fn holds(&self, address: Ipv4Addr) -> bool { network(address, self.prefix) == network(self.address, self.prefix) }
 }
 

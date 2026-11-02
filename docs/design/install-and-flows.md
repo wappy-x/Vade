@@ -38,7 +38,7 @@ GPU code, saves no settings and prints the `vade pull` line. The first
 | Get vade | Spark: `sh scripts/install.sh`. Bundle: unpack it. Mac: build the CLI | `Install complete.` and the path to `vade` | Curl is missing, or a source build lacks Rust tools or `cc`; the GPU is not a GB10, its driver is older than CUDA 13.0, or it is busy; no network on the first run | Do what the `Next:` line says, then run the same command again |
 | Set up | `vade setup` | One `Setup step` line per step below, then `Setup done.` and exit status 0 | `--yes` is missing a required answer, such as the Sparks on a controller | Add the flag it names, then run it again |
 | Install | `vade install` | Exit status 0. Local: `Install done in <time>`, then the GPU startup cache fills. Controller: `Installed build <revision>.` | A toolchain is missing, the checkout has changes, a GPU is busy, the disk is full; from a controller, the model is missing. On a Spark with no model yet, install still passes and prints the `vade pull` line | Do what the `hint:` line says, then `vade install`. A second run is always safe |
-| Start | `vade up` | On a Spark: `Up ready in <time>: <address>, context <n> tokens, ...`. From a controller: `<model> ready on <n> Sparks at <address>: context <n> tokens, ...` | The engine refuses the memory, the port is taken, the model load times out | `vade logs`, then `vade doctor`, then `vade up` |
+| Start | `vade up` | On a Spark: `Up ready in <time>: <address>, context <n> tokens, ...`. From a controller: `Vade is ready on <n> Sparks (<names>) at <address>: context <n> tokens, ...` | The engine refuses the memory, the port is taken, the model load times out | `vade logs`, then `vade doctor`, then `vade up` |
 | Check | `vade doctor` | One row per check, then `PASS` | A row says `FAIL` | Run that row's `next:` step, then `vade doctor` |
 | Use | `vade chat`, `vade read FILE`, `vade tools`, or the API at `<address>/v1` | Chat opens; the API answers `/v1/models` | The engine is not running | `vade up` |
 | Stop | `vade down` | On a Spark: `Down done in <time>`. From a controller: `Vade is stopped.` When nothing runs: `Vade is already stopped.` | Vade cannot confirm which process it started | Keep the state folder; follow CLI recovery |
@@ -123,7 +123,10 @@ so and names `vade setup`. It does not print a Spark plan there.
 Enter to take it.
 
 1. **Which Sparks?** On a Spark: `[this Spark]`. On another computer: the
-   names you type after `ssh`, in cable order, such as `spark-a,spark-b`.
+   names you type after `ssh`, in any order, such as `spark-a,spark-b`. With a
+   setup in place: `[keep this setup]`. A list runs the same code as
+   `vade up --sparks`: Vade reads the cables and asks for an address only when
+   it cannot read one.
 2. **Which checkpoint?** `[FP4-Local]`. Setup asks only for 2, 4 or 6
    Sparks, because FP8 runs only there. Otherwise it is FP4-Local.
 3. **Where is the model?** On a Spark: `[found under ~/models]`. From a
@@ -138,10 +141,10 @@ For a controller, setup writes the controller config at the path that
 `vade config` reads by default. It starts from the matching example in
 `cli/examples`, points the sources at this checkout, or names the installed
 bundle when `vade` runs from one, and keeps the private folders under
-`~/.vade`. Only `VADE_SOURCE` makes a `vade` from a bundle use a checkout. Setup
-never replaces a config: it creates the file
-only if no file is there, also when two setups run at once. A second run uses
-the config it finds. It reads the checkpoint from that config's `model`, so
+`~/.vade`. Only `VADE_SOURCE` makes a `vade` from a bundle use a checkout. A list
+of Sparks moves a config aside. Setup then creates the new file only if no file
+is there, also when two setups run at once. A run with no list uses the config
+it finds. It reads the checkpoint from that config's `model`, so
 an FP8 config starts with `vade up --fp8` even if a person wrote it. It
 starts the Sparks that setup's first line names; a config without that line
 starts every machine it lists, in its order, except `vade verify` engines.

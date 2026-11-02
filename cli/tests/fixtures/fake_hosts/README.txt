@@ -6,4 +6,6 @@ A file named known in a home folder means that the controller has the host key
 of that host. With no such file, ssh and rsync fail as the real tools do.
 A file named driver holds the NVIDIA driver version of that host.
 A file named corrupt makes rsync change the files it copies to that host.
+A file named denied makes ssh and rsync fail as a refused key does.
+A file named interfaces holds what the cable check prints on that host.
 Each ssh and rsync call adds one row to $FAKE_HOSTS/calls.log.

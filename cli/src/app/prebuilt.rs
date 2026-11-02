@@ -102,7 +102,10 @@ printf 'driver=%s\n' "$(nvidia-smi --query-gpu=driver_version --format=csv,nohea
         let copy = self.bundle_copy(bundle, machine, build, &["flash-serve", "flash.ptx"]);
         let check = self.model_check(machine, &worker);
         let (copied, checked) = self.runner.parallel(&copy, &check)?;
-        if !copied.success { return Err("Prebuilt copy failed; no activation changed. Check SSH and free space.".into()); }
+        if !copied.success {
+            if let Some(stop) = self.ssh_stop(&machine.ssh) { return Err(format!("{} {}", stop.error, stop.fix)); }
+            return Err("Prebuilt copy failed; no activation changed. Check SSH and free space.".into());
+        }
         let mut verify = String::from("set -eu\n");
         for (name, hash) in crate::prebuilt::FILES.iter().zip(&bundle.hashes) {
             verify.push_str(&format!("test \"$(sha256sum {} | cut -d ' ' -f 1)\" = {}\n", remote_path(&format!("{build}/{name}")), quote(hash)));

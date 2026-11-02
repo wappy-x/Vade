@@ -74,15 +74,26 @@ pub struct ChatOptions {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SetupOptions {
     pub yes: bool,
-    /// `--replace-local`: move a local setup aside without asking.
+    /// `--replace-local`: an older word, kept for scripts. A list of Sparks replaces a setup by itself.
     pub replace_local: bool,
-    /// SSH destinations in cable order; empty means this Spark (or ask).
+    /// SSH destinations in any order; empty means this Spark (or ask).
     pub hosts: Vec<String>,
     /// `Some(true)` for `--fp8`, `Some(false)` for `--fp4-local`.
     pub fp8: Option<bool>,
     pub model: Option<String>,
     /// `--link FROM:TO=ADDRESS`: FROM's own address on its cable to TO.
     pub links: Vec<(String, String, String)>,
+    /// More `vade up` options for the start, from `vade up --sparks a,b`.
+    pub up: Vec<String>,
+    /// This setup comes from `vade up --sparks a,b`.
+    pub from_up: bool,
+}
+
+impl SetupOptions {
+    /// The command to run again after a fix.
+    pub fn retry(&self) -> String {
+        if self.from_up { format!("vade up --sparks {}", self.hosts.join(",")) } else { "vade setup".into() }
+    }
 }
 
 /// Options for `vade run qwen3-8b`: source checkouts or a release, local
@@ -113,6 +124,12 @@ pub struct UpOptions {
     /// Launch flags supplied on the command line, independent of defaults or environment.
     pub supplied_options: std::collections::BTreeSet<String>,
     pub sparks: Option<usize>,
+    /// `--sparks` named the Sparks. `hosts` holds them, as `--hosts` would.
+    pub listed: bool,
+    /// With `listed`: `--link FROM:TO=ADDRESS` cable ends, as `vade setup` takes them.
+    pub links: Vec<(String, String, String)>,
+    /// With `listed`: the options as given, without `--sparks`, `--link` and the checkpoint flag.
+    pub rest: Vec<String>,
     pub hosts: Vec<String>,
     /// Independent servers behind a local gateway: one per machine, or one per pair.
     pub replicas: bool,
@@ -137,6 +154,9 @@ impl Default for UpOptions {
         Self {
             supplied_options: Default::default(),
             sparks: None,
+            listed: false,
+            links: Vec::new(),
+            rest: Vec::new(),
             hosts: Vec::new(),
             replicas: false,
             replica_sparks: 1,
@@ -284,6 +304,9 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
         Command::Setup(parse_setup(&args[1..])?)
     } else if matches!(command, "up" | "launch") {
         let options = parse_up(&args[1..]).map_err(|error| error.replace("vade up", &format!("vade {command}")))?;
+        if command == "launch" && options.listed {
+            return Err("vade launch starts this Spark. To start Sparks over SSH, run vade up --sparks with their SSH names.".into());
+        }
         if command == "launch" { Command::Launch(options) } else { Command::Up(options) }
     } else {
         if args.len() != 1 {
@@ -382,16 +405,8 @@ fn parse_setup(args: &[&str]) -> Result<SetupOptions, String> {
                     "--hosts" => options.hosts = ssh_targets(value).ok_or(HOSTS)?,
                     "--model" => options.model = Some(value.into()),
                     _ => {
-                        let link = value.split_once('=').and_then(|(ends, address)| ends.split_once(':').map(|(from, to)| (from.to_owned(), to.to_owned(), address.to_owned())));
-                        match link {
-                            Some(link) if crate::config::fabric_address(&link.2) => {
-                                if options.links.iter().any(|(from, to, _)| *from == link.0 && *to == link.1) {
-                                    return Err(format!("Give --link {}:{} only once: each cable end has one address.", link.0, link.1));
-                                }
-                                options.links.push(link);
-                            }
-                            _ => return Err("Give --link as FROM:TO=ADDRESS: FROM's own address on its cable to TO, without a port. Run vade setup --help.".into()),
-                        }
+                        let link = link(value, &options.links, "setup")?;
+                        options.links.push(link);
                     }
                 }
                 index += 1;
@@ -441,6 +456,15 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
         if flag == "--pairs" {
             options.replica_sparks = 2;
             index += 1;
+            continue;
+        }
+        // One --link per cable end, as vade setup takes it.
+        if flag == "--link" {
+            seen.remove(flag);
+            let value = option_value(&args, index).ok_or("Give --link a value. Run vade up --help.")?;
+            let link = link(value, &options.links, "up")?;
+            options.links.push(link);
+            index += 2;
             continue;
         }
         if !UP_VALUE_OPTIONS.contains(&flag) {
@@ -517,10 +541,22 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
     if seen.contains("--sparks") && seen.contains("--hosts") {
         return Err("Choose --sparks or --hosts. Run vade up --help.".into());
     }
+    if !options.links.is_empty() && !listed {
+        return Err("Use --link with the Sparks in --sparks, for the config that vade up writes. Run vade up --help.".into());
+    }
     // From here a Spark list is --hosts in every way.
     if listed {
         seen.remove("--sparks");
         seen.insert("--hosts");
+    }
+    options.listed = listed;
+    let mut index = 0;
+    while listed && index < args.len() {
+        match args[index] {
+            "--sparks" | "--link" => index += 2,
+            "--fp8" | "--fp8-legacy" | "--fp4-local" => index += 1,
+            arg => { options.rest.push(arg.to_owned()); index += 1; }
+        }
     }
     if !seen.contains("--output") {
         options.output = options.output.min(options.context);
@@ -572,6 +608,20 @@ fn bytes(value: &str, flag: &str) -> Result<u64, String> {
     Err(format!(
         "Set {flag} to a whole number of bytes that fits in 64 bits."
     ))
+}
+
+/// `--link FROM:TO=ADDRESS`: FROM's own address on its cable to TO.
+fn link(value: &str, links: &[(String, String, String)], command: &str) -> Result<(String, String, String), String> {
+    let link = value.split_once('=').and_then(|(ends, address)| ends.split_once(':').map(|(from, to)| (from.to_owned(), to.to_owned(), address.to_owned())));
+    match link {
+        Some(link) if crate::config::fabric_address(&link.2) => {
+            if links.iter().any(|(from, to, _)| *from == link.0 && *to == link.1) {
+                return Err(format!("Give --link {}:{} only once: each cable end has one address.", link.0, link.1));
+            }
+            Ok(link)
+        }
+        _ => Err(format!("Give --link as FROM:TO=ADDRESS: FROM's own address on its cable to TO, without a port. Run vade {command} --help.")),
+    }
 }
 
 /// The `vade up` options that take a value.
@@ -685,6 +735,22 @@ mod tests {
         assert!(cli("up --fp4-local --output 32768").unwrap_err().contains("limited to 16384"));
     }
     #[test]
+    fn a_spark_list_keeps_its_links_and_the_other_options() {
+        let up = |args: &str| match cli(args).map(|cli| cli.command) { Ok(Command::Up(options)) => Ok(options), Ok(other) => panic!("{other:?}"), Err(error) => Err(error) };
+        let options = up("up --context 8192 --sparks you@spark-a,spark-b --fp8 --link spark-b:you@spark-a=192.0.2.2 --chats 4").unwrap();
+        assert!(options.listed);
+        assert_eq!(options.links, [("spark-b".to_owned(), "you@spark-a".to_owned(), "192.0.2.2".to_owned())]);
+        assert_eq!(options.rest, ["--context", "8192", "--chats", "4"]);
+        assert!(!up("up --sparks 2").unwrap().listed);
+        assert!(!up("up --hosts a,b").unwrap().listed);
+        for (args, error) in [("up --sparks 2 --link a:b=192.0.2.1", "Use --link with the Sparks in --sparks"), ("up --hosts a,b --link a:b=192.0.2.1", "Use --link with the Sparks in --sparks"),
+            ("up --sparks a,b --link a:b", "Give --link as FROM:TO=ADDRESS"), ("up --sparks a,b --link a:b=192.0.2.1 --link a:b=192.0.2.9", "Give --link a:b only once"),
+            ("up --sparks a,b --link", "Give --link a value"), ("launch --sparks a,b", "vade launch starts this Spark")] {
+            assert!(up(args).unwrap_err().contains(error), "{args}: {:?}", up(args));
+        }
+    }
+
+    #[test]
     fn parser_records_every_supplied_launch_option() {
         for args in [
             "--sparks 2", "--hosts a,b", "--mtp 2", "--fp4-local", "--fp8",
@@ -765,7 +831,7 @@ mod tests {
         assert_eq!((list.sparks, list.hosts.join(" ")), (None, "spark-a user@spark-b 192.0.2.7".to_owned()));
         // A list is --hosts in every way, also in what the start records.
         assert_eq!(list.supplied_options, ["--hosts".to_owned()].into());
-        assert_eq!(list, up("up --hosts spark-a,user@spark-b,192.0.2.7"));
+        assert_eq!(UpOptions { listed: false, ..list }, up("up --hosts spark-a,user@spark-b,192.0.2.7"));
         assert_eq!(up("up --sparks spark-a").hosts, ["spark-a"]);
         assert_eq!((up("up --sparks 24").sparks, up("up --sparks 1").sparks), (Some(24), Some(1)));
         let setup = |args: &str| match cli(args).unwrap().command { Command::Setup(options) => options.hosts, other => panic!("{other:?}") };

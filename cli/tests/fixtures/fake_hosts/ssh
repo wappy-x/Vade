@@ -9,8 +9,13 @@ command=$*
 home=$FAKE_HOSTS/$host
 printf 'ssh %s %s\n' "$host" "$command" >> "$FAKE_HOSTS/calls.log"
 [ -f "$home/known" ] || { echo 'Host key verification failed.' >&2; exit 255; }
+[ ! -f "$home/denied" ] || { echo "fake@$host: Permission denied (publickey)." >&2; exit 255; }
 [ "$command" != true ] || exit 0
 case $command in
+    *vade-cables-end*)
+        cat "$home/interfaces"
+        echo vade-cables-end
+        exit 0 ;;
     *__worker*)
         cat > /dev/null
         printf 'install_prepare=warm-ptx-v1\nptx_cache=warm\nmodel_hashed_bytes=0\nmodel_reused_files=132\n'

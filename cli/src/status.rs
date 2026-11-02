@@ -11,8 +11,9 @@ use crate::{
 use std::time::{Duration, Instant};
 
 /// The human state line when nothing is running, and the command that starts it.
-pub(crate) fn stopped(start: &str) -> String {
-    format!("{} Vade is stopped.\n{}", paint(Token::Dim, "○", Stream::Out), next_steps(&[("Start", start)]))
+pub(crate) fn stopped(start: &str, setup: Option<&str>) -> String {
+    let setup = setup.map_or_else(String::new, |setup| format!("  Last setup: {setup}\n"));
+    format!("{} Vade is stopped.\n{setup}{}", paint(Token::Dim, "○", Stream::Out), next_steps(&[("Start", start)]))
 }
 
 /// What to type next, on one indented line: `  Chat: vade chat   Stop: vade down`.

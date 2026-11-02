@@ -125,6 +125,24 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 ### Install
 
 - The installer asks for a C compiler (`cc`) only for a build from source, so a prebuilt bundle installs without one. A build with no `cc` stops before it clones or downloads anything.
+- The installer now asks a login shell whether it adds `~/.local/bin`. If it does not, the output says so and gives only the `export` line, because a new terminal would not find `vade`.
+- `vade setup` is now the same code as `vade up --sparks`, with questions. It asks for the Sparks in one line, in any order, and for a cable address only when it cannot read one. INSTALL.md, cli/README.md and the agent quickstart now show one command for any number of Sparks.
+- `vade up` names each Spark in its ready line, as `Vade is ready on 2 Sparks (spark-a, spark-b) at http://localhost:18080: context 131072 tokens, drafting depth engine default.`
+- The large bundle copy and the check before a start now print what ssh said and the one command that fixes it.
+- A new list of Sparks now replaces the setup that exists, with no flag and no file move by hand.
+  - `vade up --sparks a,b,c,d` and `vade setup --hosts a,b,c,d` move the old setup aside, and one line says what happened: `Replacing the two-Spark setup with four Sparks.` Nothing is deleted.
+  - A running engine of the old setup stops first, through `vade down`. Vade stops only what its own record names.
+  - The same Sparks in the same order rewrite nothing, and the command starts them.
+  - `vade up` alone reruns the last setup, on all of its Sparks. `vade status` names that setup when nothing runs.
+  - `vade setup --replace-local` still runs, and the flag now does nothing.
+- `vade up --sparks a,b,c,d` now works with no config and no `--link`.
+  - Vade reaches each Spark over SSH and reads its fabric ports. Two Sparks that share a subnet on those ports have a cable.
+  - You can type the Sparks in any order. Vade prints the chain in one line, such as `Cable order: spark-a - spark-b - spark-c.`, and then writes the same config as `vade setup`.
+  - A Spark with no shared cable stops the command with one sentence. `--link` stays as an override.
+- Every Spark of a start now runs from one install folder.
+  - Before, a Spark that kept its files from an earlier install stayed in that folder, and a new Spark got a new folder. Then `vade up` stopped with `expanded absolute PTX paths differ`.
+  - `vade install` now reuses the files only when it can reuse them on every Spark.
+  - `vade up` repairs a setup that an older Vade left in two folders. It installs again on each Spark and goes on.
 - A bundle-only `vade setup` now also passes on a controller with no Rust, and it says why when SSH or a Spark stops it.
   - `vade doctor` asks for Rust only when the config can build. Before, step 3 of setup failed with `Cannot run local rustc.`
   - A `vade` from a bundle uses that bundle also in the folder of a clone. `VADE_SOURCE` still selects a checkout.

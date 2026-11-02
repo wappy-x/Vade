@@ -299,6 +299,10 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
             }).filter(|(m, _)| m.engine_sha == engine_sha && m.cli_sha == cli_sha)
         } else { None };
         let machines = self.config.machines.clone();
+        // A reused rank keeps the folder of its own install, and a rank with a fresh
+        // copy gets this install's folder. vade up needs one folder on every rank, so
+        // reuse is for all ranks or for none.
+        let previous = previous.filter(|(manifest, fields)| one_folder(&machines, manifest, fields));
         let mut weights_present = true;
         for machine in &machines {
             if !self.dry {
@@ -839,6 +843,15 @@ fn staging_errors_name_the_program_that_failed() {
     }
     assert!(fs::read_dir(dir.join("generation")).unwrap().next().is_none(), "no temporary copy is left behind");
     fs::remove_dir_all(dir).unwrap();
+}
+
+/// Whether `manifest` has each of `machines` where this config puts it, all in one folder.
+fn one_folder(machines: &[Machine], manifest: &Manifest, fields: &Fields) -> bool {
+    let installed = |machine: &Machine| fields.get(&format!("machine.{}.install_ssh", machine.name)) == Some(&machine.ssh)
+        && fields.get(&format!("machine.{}.install_stage_dir", machine.name)) == Some(&machine.stage_dir);
+    let mut folders = machines.iter().map(|machine| manifest.artifacts.get(&machine.name).filter(|_| installed(machine)).map(|artifact| artifact.ptx.as_str()));
+    let first = folders.next().flatten();
+    first.is_some() && folders.all(|folder| folder == first)
 }
 
 /// Copy one controller program (the harness or the CLI) into a generation; errors name it.

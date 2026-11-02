@@ -926,6 +926,14 @@ mod tests {
         }
         assert!(parse(&PAIR.replace("machine-a-alias", "user@machine-b-alias").replace("ssh = machine-b-alias", "ssh = user@machine-b-alias")).is_err());
     }
+    /// `[global] stage_dir` is the folder of this computer, and a config from
+    /// vade setup names the Vade home there. Every rank keeps the one default.
+    #[test]
+    fn the_global_stage_folder_never_reaches_a_rank() {
+        let global = parse(&format!("stage_dir = /home/you/.vade/controller/stage\n{PAIR}")).unwrap();
+        assert_eq!(global.stage_root, PathBuf::from("/home/you/.vade/controller/stage"));
+        for machine in &global.machines { assert_eq!(machine.stage_dir, "~/vade-stage"); }
+    }
     #[test]
     fn revision_pin_is_required_for_startup_without_blocking_config_recovery() {
         for revision in ["", "main", "REPLACE_WITH_VERIFIED_IMMUTABLE_REVISION"] {
