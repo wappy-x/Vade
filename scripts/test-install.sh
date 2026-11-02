@@ -14,9 +14,15 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 matrix=$(cd -P "$matrix" && pwd)
 
-third=dash
-if ! command -v dash >/dev/null 2>&1; then third=zsh; fi
-for tool in sh bash "$third"; do
+shells='sh bash'
+for tool in dash zsh; do
+    if command -v "$tool" >/dev/null 2>&1; then shells="$shells $tool"; fi
+done
+if [ "$shells" = 'sh bash' ]; then
+    echo 'FAIL setup: missing dash or zsh'
+    exit 1
+fi
+for tool in sh bash; do
     command -v "$tool" >/dev/null 2>&1 || {
         printf 'FAIL setup: missing %s\n' "$tool"
         exit 1
@@ -43,7 +49,7 @@ fixture() {
 #!/bin/sh
 set -eu
 printf '%s\n' uname >> "$MATRIX_CALLS"
-case $1 in -s) echo Linux ;; -m) echo aarch64 ;; *) exit 1 ;; esac
+case $1 in -s) echo "$MATRIX_OS" ;; -m) echo "$MATRIX_ARCH" ;; *) exit 1 ;; esac
 EOF
     cat > "$case_dir/bin/nvidia-smi" <<'EOF'
 #!/bin/sh
@@ -69,10 +75,10 @@ EOF
     cat > "$case_dir/bin/git" <<'EOF'
 #!/bin/sh
 set -eu
+printf '%s\n' 'git clone' >> "$MATRIX_CALLS"
 [ "$GIT_TERMINAL_PROMPT" = 0 ]
 for target do :; done
 case $target in "$HOME"/.vade/source.*) ;; *) exit 99 ;; esac
-printf '%s\n' 'git clone' >> "$MATRIX_CALLS"
 cp -R "$MATRIX_CASE/checkout/." "$target/"
 EOF
     cat > "$case_dir/bin/rustup" <<'EOF'
@@ -88,9 +94,9 @@ EOF
     cat > "$case_dir/bin/cargo" <<'EOF'
 #!/bin/sh
 set -eu
+printf '%s\n' "cargo $*" >> "$MATRIX_CALLS"
 [ "$CARGO_NET_OFFLINE" = true ]
 case $PWD in "$MATRIX_CASE"/*) ;; *) exit 99 ;; esac
-printf '%s\n' "cargo $*" >> "$MATRIX_CALLS"
 case $2 in
     build)
         [ "$CARGO_TARGET_DIR" = "$PWD/cli/target" ]
@@ -134,6 +140,7 @@ install_shell() {
         XDG_CACHE_HOME="$case_dir/home/.cache" XDG_DATA_HOME="$case_dir/home/.local/share" \
         CARGO_HOME="$case_dir/home/.cargo" RUSTUP_HOME="$case_dir/home/.rustup" \
         CARGO_NET_OFFLINE=true MATRIX_CASE="$case_dir" MATRIX_CALLS="$case_dir/calls" \
+        MATRIX_OS="$host_os" MATRIX_ARCH="$host_arch" \
         "$@"
 }
 
@@ -146,6 +153,11 @@ reject_calls() {
 
 run_case() (
     set -eu
+    host_os=Linux host_arch=aarch64
+    case $test_case in
+        host-linux-x86_64) host_arch=x86_64 ;;
+        host-macos) host_os=Darwin host_arch=arm64 ;;
+    esac
     fixture
     snapshot > "$case_dir/before"
     cd "$case_dir/work"
@@ -181,14 +193,43 @@ run_case() (
             ;;
         no)
             # A complete function without its last call must also run nothing.
-            sed '$d' "$case_dir/checkout/scripts/install.sh" | install_shell -s \
-                > "$case_dir/stdout" 2> "$case_dir/stderr"
+            # Save the producer status because a pipe can hide it.
+            if (
+                set +e
+                sed '$d' "$case_dir/checkout/scripts/install.sh"
+                producer_status=$?
+                printf '%s\n' "$producer_status" > "$case_dir/producer-status"
+                exit "$producer_status"
+            ) | install_shell -s > "$case_dir/stdout" 2> "$case_dir/stderr"; then
+                consumer_status=0
+            else
+                consumer_status=$?
+            fi
+            [ "$(cat "$case_dir/producer-status")" = 0 ]
+            [ "$consumer_status" = 0 ]
+            [ ! -s "$case_dir/stderr" ]
+            ;;
+        host)
+            if install_shell "$case_dir/checkout/scripts/install.sh" \
+                > "$case_dir/stdout" 2> "$case_dir/stderr"; then
+                echo 'The installer must reject this host.'
+                exit 1
+            else
+                [ "$?" = 1 ]
+            fi
             ;;
     esac
     case $test_case in
         half-pipe|no-call)
             [ ! -s "$case_dir/calls" ]
             [ ! -s "$case_dir/stdout" ]
+            ;;
+        host-*)
+            grep -qxF 'install: run this on a Linux aarch64 DGX Spark. Next: open a terminal on your Spark and retry.' "$case_dir/stderr"
+            [ ! -s "$case_dir/stdout" ]
+            printf '%s\n' uname > "$case_dir/expected-calls"
+            if [ "$host_os" = Linux ]; then printf '%s\n' uname >> "$case_dir/expected-calls"; fi
+            cmp "$case_dir/expected-calls" "$case_dir/calls"
             ;;
         *-help)
             [ ! -s "$case_dir/calls" ]
@@ -220,7 +261,7 @@ run_case() (
     esac
     reject_calls '^unexpected-'
     case $test_case in
-        *-check|*-help|half-pipe|no-call)
+        *-check|*-help|half-pipe|no-call|host-*)
             snapshot > "$case_dir/after"
             cmp "$case_dir/before" "$case_dir/after"
             ;;
@@ -232,9 +273,10 @@ run_case() (
 )
 
 failed=0
-for shell in sh bash "$third"; do
+for shell in $shells; do
     for test_case in checkout-default pipe-default checkout-source pipe-source \
-        checkout-check pipe-check checkout-help pipe-help half-pipe no-call; do
+        checkout-check pipe-check checkout-help pipe-help half-pipe no-call \
+        host-linux-x86_64 host-macos; do
         case_dir="$matrix/$shell-$test_case"
         mkdir "$case_dir"
         set +e

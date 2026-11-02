@@ -79,10 +79,13 @@ These workspaces need no GPU and no kernel build. The public commands add `--loc
 Run `sh scripts/test-install.sh` from the repository root to test the installer
 without a GPU or network. It uses fake host tools in a temporary folder. It
 sets `HOME` and `PREFIX` to folders there. It tests a pipe and a checkout with
-`sh`, `bash --posix`, and `dash`. If `dash` is absent, it uses `zsh --emulate sh`.
-It also checks that a half download runs nothing. Each case prints `PASS` or
-`FAIL`. Default installs use the source fallback. The script removes its
-temporary folder when it exits.
+`sh` and `bash --posix`. It also uses each installed shell from `dash` and
+`zsh --emulate sh`. At least one of those shells must be present. It checks
+that a half download and a body without its last call run nothing. The
+no-call pipe must succeed at each stage. It checks that Linux x86_64 and
+macOS hosts fail before any GPU tool runs. Each case prints `PASS` or `FAIL`.
+Default installs use the source fallback. The script removes its temporary
+folder when it exits.
 
 A repeated run can find an old temporary fixture. If it does, use a new system temporary directory. Keep its path short and outside hidden directories, because sandbox tests can refuse fixtures under a hidden directory. Keep the failed log too.
 
