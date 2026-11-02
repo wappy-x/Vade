@@ -107,10 +107,20 @@ The `topology-branch` rule flags `if`, `while`, `match`, match guards and
 `matches!` that name a topology value. It also flags comparisons outside those
 conditions. These comparisons can set a path flag for a later call. Names
 include world and rank counts, `rank`, `topology`, `rank_path`, `tensor_split`,
-`tp` and `distributed`. Names with a `_world`, `_world_size`, `_rank`, `_ranks`
-or `_topology` suffix also count. Field access and method calls count. Match
-patterns that name `Topology` count even when the matched value has another
-name. Loops and shape calculations that use topology data alone do not count.
+`tp`, `pp`, `sparks` and `distributed`. Names with a `_world`, `_world_size`,
+`_rank`, `_ranks` or `_topology` suffix also count. Field access and method
+calls count. Match patterns that name `Topology` count even when the matched
+value has another name. Loops and shape calculations that use topology data
+alone do not count.
+
+The rank-name rule ignores `lora_rank`, `tensor_rank` and names that end in
+`_lora_rank` or `_tensor_rank`. The rule ignores letter case. These names
+describe tensor dimensions. For example, `q_lora_rank`, `kv_lora_rank` and
+`MAX_TENSOR_RANK` do not count as process ranks. This exception applies to
+each name, not the whole condition. A condition that also names `rank`,
+`world` or another topology value still counts. Other `_rank` names still
+count. This rule uses names only. It does not infer a value's type or follow
+an alias.
 
 Each finding gives the source file, line, Cargo package and qualified item.
 The item includes its source module, enclosing type and function name. Trait

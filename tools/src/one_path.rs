@@ -214,7 +214,9 @@ fn imports(t: &[Token]) -> (Aliases,BTreeSet<usize>) {
 fn topology(t: &[Token]) -> bool {
     t.iter().any(|v| {
         let s=v.text.to_ascii_lowercase();
-        matches!(s.as_str(),"world"|"world_size"|"boxes"|"box_count"|"num_boxes"|"n_boxes"|"ranks"|"rank_count"|"num_ranks"|"n_ranks"|"rank"|"rank_id"|"topology"|"rank_path"|"tensor_split"|"tp"|"distributed")
+        // These names describe tensor dimensions. Other tokens still count.
+        if matches!(s.as_str(),"lora_rank"|"tensor_rank") || s.ends_with("_lora_rank") || s.ends_with("_tensor_rank") {return false;}
+        matches!(s.as_str(),"world"|"world_size"|"boxes"|"box_count"|"num_boxes"|"n_boxes"|"ranks"|"rank_count"|"num_ranks"|"n_ranks"|"rank"|"rank_id"|"topology"|"rank_path"|"tensor_split"|"tp"|"pp"|"sparks"|"distributed")
             || ["_world","_world_size","_rank","_ranks","_topology"].iter().any(|end|s.ends_with(end))
     })
 }

@@ -26,6 +26,44 @@ fn topology_data_pass_fixture() {
     assert!(fixture(include_str!("../../tests/fixtures/one-path/topology-pass.rs.txt")).is_empty());
 }
 #[test]
+fn tensor_rank_names_do_not_select_topology_paths() {
+    for name in ["lora_rank","q_lora_rank","kv_lora_rank","tensor_rank","TENSOR_RANK","MAX_TENSOR_RANK","config.q_lora_rank","shape.tensor_rank()","r#kv_lora_rank"] {
+        for statement in [
+            format!("if {name} > 0 {{ choose(); }}"),
+            format!("while {name} > 0 {{ choose(); }}"),
+            format!("match {name} {{ 0 => first(), _ => second() }}"),
+            format!("match value {{ _ if {name} > 0 => first(), _ => second() }}"),
+            format!("let choice = matches!({name}, 1 | 2);"),
+            format!("let choice = {name} > 0;"),
+            format!("let choice = 0 < {name};"),
+        ] {
+            let hits=fixture(&format!("fn run() {{ {statement} }}"));
+            assert!(hits.is_empty(),"{statement}: {hits:#?}");
+        }
+    }
+}
+#[test]
+fn tensor_rank_exception_does_not_hide_other_topology_names() {
+    for name in ["rank","world","tp","pp","sparks","state.rank()","group.world_size()","tensor_parallel_rank","lora_process_rank","q_lora_ranks","notlora_rank","nontensor_rank","q_lora_rank_world","tensor_rank_topology"] {
+        for statement in [
+            format!("if {name} > 0 {{ choose(); }}"),
+            format!("if config.q_lora_rank > 0 && {name} > 0 {{ choose(); }}"),
+            format!("if {name} > 0 && shape.len() <= MAX_TENSOR_RANK {{ choose(); }}"),
+            format!("while kv_lora_rank > 0 && {name} > 0 {{ choose(); }}"),
+            format!("match (tensor_rank, {name}) {{ _ => choose() }}"),
+            format!("match value {{ _ if q_lora_rank > 0 && {name} > 0 => first(), _ => second() }}"),
+            format!("let choice = matches!((TENSOR_RANK, {name}), (_, 1 | 2));"),
+            format!("let choice = {name} > MAX_TENSOR_RANK;"),
+            format!("let choice = q_lora_rank < {name};"),
+        ] {
+            let hits=fixture(&format!("fn run() {{ {statement} }}"));
+            assert_eq!(hits.len(),1,"{statement}: {hits:#?}");
+            assert_eq!(hits[0].key.rule,"topology-branch");
+            assert_eq!(hits[0].key.item,"decode::run");
+        }
+    }
+}
+#[test]
 fn literals_comments_and_lifetimes_keep_lines_and_items() {
     let source=r####"
 /* std::env::var("unused"); /* if world == 2 {} */ */
