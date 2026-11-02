@@ -412,7 +412,7 @@ The engine tracks the device bytes that it allocates ([`flash-serve.rs`](../engi
 
 ## Exactness and model quality
 
-Vade's exactness rule is this: **the same setup and request produce identical token IDs on every Spark, every run**. The setup includes the build, checkpoint, tokenizer and template, rank layout, thinking and the sampling settings in effect.
+Vade's exactness rule is this: **the same setup and request produce identical token IDs on every Spark, every run**. The setup includes the build, checkpoint, tokenizer and template, rank layout, thinking, the sampling settings in effect and the NVIDIA driver. Our cards ran on driver 580.178.04 ([receipts](../bench/receipts/2026-10-31/README.md#what-was-run)). A new driver compiles the PTX again, so we run the cards again before we claim exactness for it.
 
 Within one setup, the answer must be byte-identical in each of these cases:
 

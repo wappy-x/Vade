@@ -5,7 +5,9 @@
   <img src="docs/assets/vade-banner.webp" width="100%" alt="VADE drawn in lit monospace characters over a slow field of dots and dashes, as on vade.lol, above one line of text: Pure-Rust engine and harness for the DGX Spark.">
 </picture>
 
-Vade is an inference engine for the NVIDIA DGX Spark. It is written in Rust from the GPU kernels up, and it has zero dependencies. Its one rule is exactness: the same request, with the same settings, gives the same answer every time, and linking Sparks together does not change that.
+Vade is an inference engine for the NVIDIA DGX Spark. It is written in Rust from the GPU kernels up, and it has zero third-party crates. Its one rule is exactness: the same request, with the same settings, gives the same answer every time, and linking Sparks together does not change that.
+
+The kernels compile to PTX, NVIDIA's portable GPU assembly, and use short inline PTX for the few instructions that have no Rust spelling. The installer and the Spark setup scripts are shell scripts. At run time, Vade needs only the NVIDIA driver. The installer also needs curl and a C compiler (`cc`), and a source build also needs Rust.
 
 Install it with one command:
 
@@ -98,7 +100,7 @@ We measured main `acb49bc` on our own Sparks on the afternoon of 2026-11-01 for 
 
 ## Exactness
 
-Most inference engines give slightly different answers from one run to the next, and different answers again when you add GPUs. Vade does not.
+By default, most inference engines give slightly different answers from one run to the next, and different answers again when you add GPUs. Vade does not.
 
 Exact means the same request with the same settings gives the same token IDs. This holds on every run and on every Spark count under "Covered today" below. It holds for a request alone or in a batch. It holds with or without the prefix cache. For requests that always pick the most likely token, it also holds with drafting on or off.
 
@@ -113,10 +115,13 @@ Exact means the same request with the same settings gives the same token IDs. Th
 - FP8 on six Sparks.
 - The opt-in `fast` and `sampled` draft modes on FP8.
 - Seeds with drafting on, on FP8, or on four Sparks.
+- Other NVIDIA driver versions.
 
 <a id="defaults-by-route"></a>
 
 **Defaults.** FP4-Local always picks the most likely token unless a request sets sampling fields, so it is exact out of the box. FP8 samples by default, with a new seed for each request. For exact FP8 replies, send `temperature` 0, `repetition_penalty` 1, `presence_penalty` 0 and `frequency_penalty` 0 ([FP8 defaults](docs/install-fp8.md#defaults-and-drafting)).
+
+**Driver.** The promise covers the sampling settings above and the driver we tested. Our cards ran on NVIDIA driver 580.178.04 ([receipts](bench/receipts/2026-10-31/README.md#what-was-run)). A new driver compiles the GPU code again, so we run the cards again before we claim exactness for it.
 
 To check your own engine, run `vade verify`. [Token IDs](docs/results.md#token-ids) shows our checks. On main `1a07e3a`, FP8 on two and four Sparks gave the same token IDs ([FP8 token IDs](docs/results.md#fp8-token-ids)). [Architecture](docs/architecture.md#exactness-and-model-quality) gives the full rule and what each check proves.
 
