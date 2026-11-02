@@ -811,6 +811,7 @@ Merges #105 through #110 were measured on October 26, 2026, with the FP4-Local c
 
 ### Harness
 
+- `vade-harness suite --replay DIR` grades recorded replies without a model and writes a card for each category with the recorded Spark count.
 - `web_search` no longer reads a blocked search as an empty result.
   - DuckDuckGo often answers curl with a bot challenge. The tool now retries, then reads Bing, and it says when Bing gave the list. A query that reaches Bing goes to a second company.
   - When all tries fail, the tool says so and tells the model not to conclude that the thing does not exist. A true empty result gives `No results for <query> (provider said none).`

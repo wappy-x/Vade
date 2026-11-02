@@ -8,9 +8,13 @@
 //! fail) through the real tool executor. `--live` records the exchanges with
 //! a served model through a proxy, writes a card per run and, over several
 //! runs, compares the streamed token IDs of every task.
+//! `--replay` runs saved proxy replies through the same checks and rubric.
+//! It writes completion and quality cards without a model or Spark.
 mod card;
 mod check;
 mod digest;
+mod replay;
+mod replay_record;
 mod rubric;
 mod serve;
 mod task;
@@ -27,6 +31,7 @@ use std::time::{Duration, Instant};
 
 const HELP: &str = "Usage:
   vade-harness suite --dry-run [--suite DIR] [--out DIR] [--only ID,ID] [--toolchain DIR]
+  vade-harness suite --replay DIR [--suite DIR] [--out DIR] [--only ID,ID] [--toolchain DIR]
   vade-harness suite --live --endpoint URL --model NAME --out DIR [--runs N] [--suite DIR]
                      [--only ID,ID] [--toolchain DIR] [--harness-arg ARG]...
 
@@ -38,6 +43,9 @@ rubric.txt). See docs/harness-suite.md.
                      (a check must fail) for every task. No model, no GPU.
   --live             Run every task against a served model through a recording
                      proxy. Writes OUT/run-N/card.{json,md} and OUT/card.{json,md}.
+  --replay DIR       Grade recorded replies without a model. DIR has replay.json
+                     with suite_version and spark_count, and tasks/ID/transcript.jsonl.
+                     Writes cards to DIR/replay-cards unless --out is set.
   --endpoint URL     The server address, for example http://127.0.0.1:18080
                      (live only). Chat calls go to /v1/chat/completions on it.
   --model NAME       The served model name (live only).
@@ -51,11 +59,11 @@ rubric.txt). See docs/harness-suite.md.
                      (default: the one that runs cargo or rustc).
   --harness-arg ARG  Pass ARG to each harness run (live only).
 
-Exit status: 0 when the dry-run gate passes or every live task passes,
+Exit status: 0 when the dry-run gate passes or every live or replay task passes,
 1 when a task fails, 2 on a usage or setup error.
 ";
 
-enum Mode { DryRun, Live { endpoint: String, model: String, runs: usize } }
+enum Mode { DryRun, Live { endpoint: String, model: String, runs: usize }, Replay { dir: PathBuf } }
 
 struct Opts {
     mode: Mode, suite: PathBuf, out: Option<PathBuf>, only: Vec<String>, toolchain: Option<PathBuf>, harness_args: Vec<String>, harness: PathBuf,
@@ -67,6 +75,7 @@ pub fn cli(args: impl IntoIterator<Item = String>) -> ExitCode {
     let result = parse_opts(&args).and_then(|o| match &o.mode {
         Mode::DryRun => dry_run(&o),
         Mode::Live { .. } => live(&o),
+        Mode::Replay { .. } => replay::run(&o),
     });
     match result {
         Ok(code) => ExitCode::from(code),
@@ -76,6 +85,7 @@ pub fn cli(args: impl IntoIterator<Item = String>) -> ExitCode {
 
 fn parse_opts(a: &[String]) -> Result<Opts, String> {
     let (mut dry, mut live, mut endpoint, mut model, mut runs) = (false, false, None, None, 1);
+    let mut replay_dir = None;
     let mut o = Opts { mode: Mode::DryRun, suite: PathBuf::new(), out: None, only: Vec::new(), toolchain: None, harness_args: Vec::new(), harness: PathBuf::new() };
     let mut i = 0;
     while i < a.len() {
@@ -84,11 +94,12 @@ fn parse_opts(a: &[String]) -> Result<Opts, String> {
             "--live" => { live = true; i += 1; continue; }
             _ => {}
         }
-        if !matches!(a[i].as_str(), "--suite" | "--out" | "--endpoint" | "--model" | "--runs" | "--only" | "--toolchain" | "--harness-arg") {
+        if !matches!(a[i].as_str(), "--suite" | "--out" | "--endpoint" | "--model" | "--runs" | "--only" | "--toolchain" | "--harness-arg" | "--replay") {
             return Err(format!("unknown option {}; see vade-harness suite --help", a[i]));
         }
         let v = a.get(i + 1).cloned().ok_or_else(|| format!("{} needs a value; see vade-harness suite --help", a[i]))?;
         match a[i].as_str() {
+            "--replay" => replay_dir = Some(PathBuf::from(&v)),
             "--suite" => o.suite = PathBuf::from(&v),
             "--out" => o.out = Some(PathBuf::from(&v)),
             "--endpoint" => endpoint = Some(v),
@@ -101,7 +112,12 @@ fn parse_opts(a: &[String]) -> Result<Opts, String> {
         }
         i += 2;
     }
-    o.mode = match (dry, live, endpoint, model) {
+    o.mode = if let Some(dir) = replay_dir {
+        if dry || live || endpoint.is_some() || model.is_some() || a.iter().any(|v| v == "--runs") || !o.harness_args.is_empty() {
+            return Err("--replay takes no --dry-run, --live, --endpoint, --model, --runs or --harness-arg".into());
+        }
+        Mode::Replay { dir }
+    } else { match (dry, live, endpoint, model) {
         (true, false, None, None) if o.harness_args.is_empty() => Mode::DryRun,
         (true, false, ..) => return Err("--dry-run takes no --endpoint, --model or --harness-arg".into()),
         (false, true, Some(endpoint), Some(model)) => {
@@ -110,8 +126,8 @@ fn parse_opts(a: &[String]) -> Result<Opts, String> {
             Mode::Live { endpoint, model, runs }
         }
         (false, true, ..) => return Err("--live needs --endpoint URL and --model NAME".into()),
-        _ => return Err("choose --dry-run or --live; see vade-harness suite --help".into()),
-    };
+        _ => return Err("choose --dry-run, --live or --replay; see vade-harness suite --help".into()),
+    } };
     if o.suite.as_os_str().is_empty() {
         o.suite = ["harness/tests/agent-suite", "tests/agent-suite"].iter().map(PathBuf::from).find(|p| p.join("tasks").is_dir())
             .ok_or("no tests/agent-suite under the current folder; give --suite DIR")?;
@@ -427,7 +443,7 @@ fn run_task(o: &Opts, dir: &Path, t: task::Task, out: &Path, source: Source, fix
     })();
     if let Err(e) = prep { fail(&mut r, e); return r; }
     let record = std::fs::File::create(out.join("transcript.jsonl")).ok();
-    let sse = matches!(source, Source::Replay(_));
+    let sse = matches!(o.mode, Mode::DryRun);
     let server = match Server::start(source, record, sse, &work) { Ok(s) => s, Err(e) => { fail(&mut r, e.to_string()); return r; } };
     // Check builds are scratch: outside the result folder, removed after the checks.
     let scratch = std::env::temp_dir().join(format!("vade-suite-check-{}-{}", std::process::id(), t.id));
@@ -437,7 +453,7 @@ fn run_task(o: &Opts, dir: &Path, t: task::Task, out: &Path, source: Source, fix
         let path = std::env::var("PATH").unwrap_or_default();
         env.push(("PATH".into(), format!("{}:{path}", tc.join("bin").display())));
     }
-    let model = match &o.mode { Mode::Live { model, .. } => model.as_str(), Mode::DryRun => "replay" };
+    let model = match &o.mode { Mode::Live { model, .. } => model.as_str(), Mode::DryRun | Mode::Replay { .. } => "replay" };
     let mut last_stdout = String::new();
     let mut unsupported = None;
     let checks_log = out.join("checks.log");
@@ -616,7 +632,7 @@ mod tests {
     #[test]
     fn options_choose_one_mode() {
         let a = |x: &[&str]| parse_opts(&x.iter().map(|s| s.to_string()).collect::<Vec<_>>()).err().unwrap_or_default();
-        assert!(a(&[]).contains("choose --dry-run or --live"));
+        assert!(a(&[]).contains("choose --dry-run, --live or --replay"));
         assert!(a(&["--dry-run", "--live"]).contains("choose"));
         assert!(a(&["--live", "--endpoint", "http://127.0.0.1:1/v1/chat/completions"]).contains("--model"));
         assert!(a(&["--live", "--endpoint", "http://h/v1", "--model", "m"]).contains("--out"));
@@ -625,6 +641,12 @@ mod tests {
         assert!(a(&["--dry-run", "--runs", "0"]).contains("1 to 9"));
         assert!(a(&["--dry-run", "--bogus", "1"]).contains("unknown option"));
         assert!(a(&["--dry-run", "--bogus"]).contains("unknown option --bogus"));
+        assert!(a(&["--replay"]).contains("needs a value"));
+        for extra in [&["--dry-run"][..], &["--live"], &["--endpoint", "unused"], &["--model", "unused"], &["--runs", "1"], &["--harness-arg", "unused"]] {
+            let mut args = vec!["--replay", "records"];
+            args.extend_from_slice(extra);
+            assert!(a(&args).contains("--replay takes no"));
+        }
         assert_eq!(upstream("http://[::1]/v1").unwrap(), "[::1]:80");
         assert_eq!(upstream("http://[::1]:8080/v1").unwrap(), "[::1]:8080");
         assert_eq!(upstream("http://h:18080/v1").unwrap(), "h:18080");

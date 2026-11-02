@@ -20,6 +20,8 @@ commands run in the command sandbox. Only the model differs. In a dry run, a
 loopback endpoint streams the replies of a script. In a live run, a
 recording proxy passes each call to the model server.
 
+Use `vade-harness suite --replay DIR` to grade saved `tasks/ID/transcript.jsonl` replies without a model. `DIR/replay.json` sets `suite_version` and `spark_count` (0 for host fixtures). `DIR/replay-cards` holds the summary and `categories/CATEGORY/card.{json,md}` with the recorded Spark count. `--out DIR` selects a new output folder.
+
 ## Run the dry run
 
 From the repository root, after a build of the harness:

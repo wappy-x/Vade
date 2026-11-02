@@ -53,7 +53,7 @@ pub struct Shared {
     pub exchanges: Mutex<Vec<Exchange>>,
     pub record: Mutex<Option<std::fs::File>>,
     pub stop: AtomicBool,
-    /// Replay as an SSE stream, like the engine.
+    /// Expand script tags and replay as an SSE stream, like the engine.
     pub sse: AtomicBool,
     /// The task workspace, for `{{edit_tag PATH}}` in replayed replies.
     pub work: std::path::PathBuf,
@@ -238,9 +238,10 @@ fn handle(s: &Shared, stream: TcpStream) -> io::Result<()> {
             if !chat {
                 (404, "application/json".to_string(), b"{}".to_vec())
             } else if let Some(mut reply) = queue.lock().unwrap().pop_front() {
-                reply.body = fill_tags(&reply.body, &s.work);
+                let scripted = s.sse.load(Ordering::Acquire);
+                if scripted { reply.body = fill_tags(&reply.body, &s.work); }
                 let streamed = !String::from_utf8_lossy(&req.body).contains("\"stream\":false");
-                if s.sse.load(Ordering::Acquire) && streamed && reply.content_type == "application/json" {
+                if scripted && streamed && reply.content_type == "application/json" {
                     // Stream like the engine: SSE, Connection: close, the body ends at EOF.
                     let events = to_sse(&reply.body, req.body.len());
                     let _ = out.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n");

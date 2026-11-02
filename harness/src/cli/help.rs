@@ -10,7 +10,7 @@ Usage:
   vade-harness codex --workspace PATH --permission POLICY [OPTIONS]
   vade-harness workload --endpoint URL --model NAME --json FILE [OPTIONS]
   vade-harness quality-card --endpoint URL --model NAME --json FILE [OPTIONS]
-  vade-harness suite (--dry-run | --live --endpoint URL --model NAME --out DIR) [OPTIONS]
+  vade-harness suite (--dry-run | --replay DIR | --live --endpoint URL --model NAME --out DIR) [OPTIONS]
   vade-harness setup CLIENT --endpoint URL --model NAME [OPTIONS]
   vade-harness doctor URL [--model NAME] [--max-seconds N]
   vade-harness sessions [list|export ID|delete ID] [--all] [OPTIONS]
@@ -26,7 +26,7 @@ Modes:
   codex                 Delegate exact prompts to optional installed Codex app-server
   workload              Concurrent native sessions; see workload --help
   quality-card          Answer quality and exactness cost cards; see quality-card --help
-  suite                 Agent task suite: dry-run gate or live card; see suite --help
+  suite                 Agent task suite: dry run, replay or live card; see suite --help
   setup                 Print offline client configuration; see setup --help
   doctor                Probe capabilities, admission and two-turn cache reuse
   sessions              List, export or delete saved agent sessions; see sessions --help
