@@ -18,3 +18,7 @@ harness = false
 [[test]]
 name = "tool_rerun"
 harness = false
+
+[[bench]]
+name = "gateway_passthrough"
+harness = false
