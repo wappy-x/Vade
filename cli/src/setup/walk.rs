@@ -79,12 +79,13 @@ pub fn run(options: &SetupOptions, dry: bool) -> Result<(), String> {
         }
         Target::Controller { up: reuse_start(running, &file, &config)?, path, text: None, installed }
     } else {
+        let bundle = crate::launch::bundle_folder().is_ok_and(|bundle| bundle.is_some());
         let facts = Facts {
             spark: cfg!(all(target_os = "linux", target_arch = "aarch64")),
             explicit,
             path,
-            checkout: crate::launch::checkout().ok(),
-            bundle: crate::launch::bundle_folder().is_ok_and(|bundle| bundle.is_some()),
+            checkout: crate::launch::setup_checkout(bundle),
+            bundle,
             home: crate::launch::root()?,
             models: std::env::var("VADE_MODELS").ok().filter(|models| !models.is_empty()),
         };
@@ -349,8 +350,8 @@ pub(super) fn machine_names(hosts: &[String]) -> Vec<String> {
     names
 }
 
-/// The controller config: this checkout as the source, or the installed bundle
-/// when there is no checkout, Vade's private folders under the Vade home, and
+/// The controller config: `checkout` as the source, or the installed bundle
+/// when setup gives no checkout, Vade's private folders under the Vade home, and
 /// one section per Spark with its cable addresses. Every other key keeps the
 /// parser's default.
 pub(super) fn render(checkout: Option<&Path>, home: &Path, profile: &Profile, hosts: &[String], names: &[String],

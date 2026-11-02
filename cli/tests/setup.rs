@@ -315,6 +315,97 @@ fn hosts_over_a_local_setup_move_it_aside_only_when_told_to() {
     assert!(!file.exists() && home.join("config/vade/config").is_file(), "{moved:?}");
 }
 
+/// The fake tools first on PATH, and a home folder for each fake host.
+fn fake_hosts(home: &Path, rust: bool) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let tools = home.join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    for entry in std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_hosts")).unwrap() {
+        let path = entry.unwrap().path();
+        if !rust && ["rustc", "cargo"].iter().any(|name| path.ends_with(name)) { continue; }
+        std::fs::copy(&path, tools.join(path.file_name().unwrap())).unwrap();
+        std::fs::set_permissions(tools.join(path.file_name().unwrap()), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    for host in ["host-a", "host-b"] { std::fs::create_dir_all(home.join("hosts").join(host)).unwrap(); }
+    std::fs::write(home.join("hosts/host-a/known"), "").unwrap();
+    tools
+}
+
+/// Bundle-only setup and doctor on two fake hosts, from a clone's folder with no
+/// Rust: host-b has no saved host key. The real binary stops here on a Mac, which
+/// cannot take a Linux bundle; cli/src/app/tests/fake_hosts.rs runs the install.
+#[test]
+fn a_bundle_setup_needs_no_rust_and_doctor_shows_the_ssh_error_with_its_fix() {
+    let home = home("fake-hosts");
+    let tools = fake_hosts(&home, true);
+    let (bundle, clone) = (home.join("bundle"), home.join("clone"));
+    std::fs::create_dir(&bundle).unwrap();
+    for folder in ["engine", "harness", "cli/examples"] { std::fs::create_dir_all(clone.join(folder)).unwrap(); }
+    for file in ["engine/Cargo.toml", "harness/Cargo.toml"] { std::fs::write(clone.join(file), "").unwrap(); }
+    std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/fp4-local.conf"), clone.join("cli/examples/fp4-local.conf")).unwrap();
+    let program = home.join("vade");
+    std::fs::copy(env!("CARGO_BIN_EXE_vade"), &program).unwrap();
+    let config = home.join("config-file");
+    let run = |args: &[&str], source: Option<&Path>| {
+        let mut command = Command::new(&program);
+        command.args(args).current_dir(&clone).env_clear().env("HOME", &home).env("VADE_BUNDLE", &bundle).env("VADE_CONFIG", &config)
+            .env("FAKE_HOSTS", home.join("hosts")).env("SEQPAR_RDMA", "0").env("PATH", format!("{}:/usr/bin:/bin", tools.display()));
+        if let Some(source) = source { command.env("VADE_SOURCE", source); }
+        command.output().unwrap()
+    };
+    // With no engine, doctor checks the first Spark, so host-b goes first.
+    let setup = ["setup", "--dry-run", "--yes", "--hosts", "host-b,host-a", "--link", "host-a:host-b=192.0.2.1", "--link", "host-b:host-a=192.0.2.2"];
+    let output = run(&setup, None);
+    let stdout = text(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    assert!(stdout.lines().any(|line| line == "source = installed-bundle") && !stdout.contains("engine_source"), "the bundle wins over this folder: {stdout}");
+    // VADE_SOURCE still asks for that checkout.
+    let output = run(&setup, Some(&clone));
+    assert!(text(&output.stdout).contains(&format!("engine_source = {}", clone.join("engine").display())), "{output:?}");
+    // The config from the dry run, then doctor on the two hosts.
+    let written: String = stdout.lines().skip_while(|line| !line.starts_with("# Written by vade setup")).take_while(|line| *line != "Steps:").map(|line| format!("{line}\n")).collect();
+    std::fs::write(&config, written).unwrap();
+    let output = run(&["doctor"], None);
+    let stdout = text(&output.stdout);
+    let row = |name: &str| stdout.lines().find(|line| line.split_whitespace().skip(1).collect::<Vec<_>>().join(" ").starts_with(name)).unwrap_or_else(|| panic!("{name}:\n{stdout}"));
+    assert!(row("controller tools").starts_with("ok") && row("controller tools").contains("rsync, curl and ssh found"), "{stdout}");
+    assert!(row("host-b ssh").starts_with("FAIL") && row("host-b ssh").contains("ssh host-b failed: Host key verification failed. Vade never edits ~/.ssh."), "{stdout}");
+    assert!(stdout.contains("next: Run ssh host-b true and accept the key, or run ssh-keyscan -H host-b >> ~/.ssh/known_hosts if host-b is the real host name, then run vade doctor."), "{stdout}");
+    let calls = std::fs::read_to_string(home.join("hosts/calls.log")).unwrap();
+    assert!(!calls.contains("was asked"), "{calls}");
+    assert!(!home.join("hosts/host-b/.ssh").exists() && !home.join(".ssh").exists());
+}
+
+#[test]
+fn a_source_config_with_no_rust_names_the_install_commands() {
+    let home = home("no-rust");
+    let tools = fake_hosts(&home, false);
+    let config = home.join("config-file");
+    std::fs::write(&config, format!("[global]\nengine_source = {0}\nharness_source = {0}\ncli_source = {0}\nstage_dir = {1}/stage\nstate_dir = {1}/state\n\n[machine a]\nssh = host-a\nmodel_path = ~/m\n", home.display(), home.display())).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_vade")).arg("doctor").env_clear().env("HOME", &home).env("VADE_CONFIG", &config)
+        .env("FAKE_HOSTS", home.join("hosts")).env("PATH", format!("{}:/usr/bin:/bin", tools.display())).stdin(Stdio::null()).output().unwrap();
+    let stdout = text(&output.stdout);
+    assert!(stdout.contains("This setup builds from source, so this computer needs Rust.") && stdout.contains("rustup toolchain install 1.99.0 --profile minimal --no-self-update"), "{stdout}");
+    assert!(!stdout.contains("Cannot run local rustc"), "{stdout}");
+}
+
+/// `scripts/install.sh --source` runs this. A controller config must not take it.
+#[test]
+fn the_private_one_spark_install_never_takes_the_controller_route() {
+    if SPARK { return; }
+    let home = home("install-here");
+    std::fs::create_dir_all(home.join("config/vade")).unwrap();
+    std::fs::write(home.join("config/vade/config"), "[global]\n\n[machine a]\nssh = host-a\nmodel_path = ~/m\n").unwrap();
+    // The controller route of vade install reads that config. This one does not.
+    let controller = vade(&["install"], &home, &[]);
+    assert!(!text(&controller.stderr).contains("This computer is not a Spark"), "{controller:?}");
+    let here = vade(&["__install-here"], &home, &[]);
+    assert_eq!(here.status.code(), Some(1), "{here:?}");
+    assert!(text(&here.stderr).contains("This computer is not a Spark"), "{here:?}");
+    let chosen = vade(&["__install-here"], &home, &[("VADE_CONFIG", std::ffi::OsStr::new("/no/such/config"))]);
+    assert!(text(&chosen.stderr).contains("VADE_CONFIG or VADE_GROUP selects the controller installation"), "{chosen:?}");
+}
+
 /// A one-line install: a copy of vade outside any checkout, with a launcher
 /// bundle named by VADE_BUNDLE, as the installed program has one next to it.
 #[test]

@@ -31,6 +31,7 @@ mod prepare;
 use gpu::{gpu_empty, gpu_settled};
 pub(crate) use gpu::{stale_line, BUSY_POWER_WATTS};
 mod process;
+mod seed;
 use process::*;
 
 type Fields = BTreeMap<String, String>;

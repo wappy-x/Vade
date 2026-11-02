@@ -76,6 +76,10 @@ pub(super) fn run(request: &Fields) -> Result<Fields, String> {
     check_hash(&ptx, ptx_hash)?;
     let model = request.get("model_path").map(|path| expanded_path(path)).transpose()?;
     let verify = request.get("verify_model").map(|path| expanded_path(path)).transpose()?;
+    // A file vade pull hashed here needs no second hash. A failure only means
+    // that the engine hashes it, so it never stops the install. The folder is the
+    // engine's default, as a start over SSH sets no cache folder.
+    if let (Some(model), Ok(base)) = (&model, expanded_path("~/.cache")) { let _ = super::seed::seed(model, &base); }
     let exec = ptx_warmup_command(&store.root, &engine, &ptx, ptx_hash, model.as_deref())?;
     let stale = gpu_empty()?;
     let began = Instant::now();

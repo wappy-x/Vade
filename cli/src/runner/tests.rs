@@ -187,3 +187,33 @@ fn parallel_jobs_both_start_before_either_can_finish() {
     assert!(a.success && b.success); assert_eq!((&*a.stdout, &*b.stdout), ("ready", "ready"));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn an_ssh_failure_shows_the_last_line_and_the_fix_for_that_cause() {
+    let keyscan = "Run ssh user@host-b true and accept the key, or run ssh-keyscan -H host-b >> ~/.ssh/known_hosts if host-b is the real host name, then run vade doctor.";
+    let stop = SshStop::from_output("user@host-b", "No ED25519 host key is known for host-b and you have requested strict checking.\nHost key verification failed.\n").unwrap();
+    assert_eq!((stop.error.as_str(), stop.fix.as_str()), ("ssh user@host-b failed: Host key verification failed. Vade never edits ~/.ssh.", keyscan));
+    // A saved key that changed is not a key to add: the fix asks the person first.
+    let stop = SshStop::from_output("host-b", "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\nHost key verification failed.\n").unwrap();
+    assert!(stop.fix.starts_with("Ask who runs host-b why its key changed.") && stop.fix.contains("run the ssh-keygen -R command that it prints") && !stop.fix.contains("ssh-keyscan"), "{stop:?}");
+    let stop = SshStop::from_output("host-b", "user@host-b: Permission denied (publickey).\n").unwrap();
+    assert_eq!(stop.error, "ssh host-b failed: user@host-b: Permission denied (publickey). Vade never edits ~/.ssh.");
+    assert_eq!(stop.fix, "Run ssh-copy-id host-b, then run vade doctor.");
+    let stop = SshStop::from_output("host-b", "ssh: connect to host host-b port 22: Connection refused\n\n").unwrap();
+    assert_eq!(stop.error, "ssh host-b failed: ssh: connect to host host-b port 22: Connection refused.");
+    assert_eq!(stop.fix, "Run ssh host-b true to see the full SSH error, then run vade doctor.");
+    // The text stays one short plain line, and no text means no claim.
+    assert!(SshStop::from_output("host-b", &format!("\x1b[31m{}\n", "x".repeat(900))).unwrap().error.len() < 240);
+    assert_eq!(SshStop::from_output("host-b", " \n"), None);
+}
+
+#[test]
+fn only_the_ssh_check_shows_standard_error_and_it_runs_nothing_remote() {
+    let exec = ssh_check("host-b").unwrap();
+    assert_eq!((exec.program.as_str(), exec.args[1].as_str()), ("sh", "ssh \"$@\" 2>&1 >/dev/null; test $? -ne 255"));
+    assert_eq!(exec.args[exec.args.len() - 2..], ["host-b", "true"]);
+    assert!(exec.args.windows(2).any(|pair| pair == ["-o", "BatchMode=yes"]) && exec.transient_probe);
+    assert_eq!(ssh_target(&ssh("host-b", "true".into(), "step")), Some("host-b"));
+    assert_eq!(ssh_target(&copy_to("step", "host-b", "~/stage", Vec::new(), vec!["file".into()])), Some("host-b"));
+    assert_eq!(ssh_target(&Exec::new("step", "git", Vec::new())), None);
+}

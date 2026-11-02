@@ -73,9 +73,10 @@ pub(crate) fn saved_model(root: &Path) -> Option<PathBuf> {
     serving_format(&model).is_ok().then_some(model)
 }
 
-/// The Vade checkout a source install builds from: VADE_SOURCE, else the
-/// checkout that holds this vade program or the current folder.
-pub(crate) fn checkout() -> Result<PathBuf, String> { install::source_path() }
+/// The checkout a new controller config points at, if any: VADE_SOURCE, else
+/// the checkout that holds this vade program or the current folder. `bundle`
+/// says that this vade has a bundle, which wins unless VADE_SOURCE names a checkout.
+pub(crate) fn setup_checkout(bundle: bool) -> Option<PathBuf> { install::setup_source(bundle).ok().flatten() }
 
 /// The launcher bundle that holds this vade program, or the one in VADE_BUNDLE.
 pub(crate) fn bundle_folder() -> Result<Option<PathBuf>, String> { install::bundle_path() }
@@ -227,6 +228,21 @@ pub fn run(command: Command, dry: bool) -> Result<(), String> {
         detector: Native,
     };
     launcher.execute(command, dry)
+}
+
+/// The install of `scripts/install.sh --source`: this Spark alone. It takes the
+/// local route even when a controller config exists, and leaves that file as it
+/// is. The refusal for a running controller stays, in [`run`].
+pub fn install_here() -> Result<(), String> {
+    if crate::config::controller_selected() {
+        return Err("VADE_CONFIG or VADE_GROUP selects the controller installation. Unset them, then rerun the installer for this Spark.".into());
+    }
+    run(Command::Install, false)?;
+    let path = crate::config::config_path()?;
+    if path.is_file() {
+        output::line(format_args!("Install: this Spark is set up alone. The controller config at {} stays as it was.", text::quoted(&path.to_string_lossy())))?;
+    }
+    Ok(())
 }
 
 trait Detector {

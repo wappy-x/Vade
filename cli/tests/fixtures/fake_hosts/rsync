@@ -1,0 +1,27 @@
+#!/bin/sh
+# A fake rsync: see README.txt. It copies into the folder of --rsync-path.
+[ "${1-}" != --version ] || { echo 'rsync fake'; exit 0; }
+receiver=
+while [ $# -gt 0 ]; do
+    case $1 in
+        -e) shift 2 ;;
+        --rsync-path=*) receiver=${1#--rsync-path=}; shift ;;
+        -*) shift ;;
+        *) break ;;
+    esac
+done
+for last in "$@"; do :; done
+host=${last%:./}
+home=$FAKE_HOSTS/$host
+printf 'rsync %s' "$host" >> "$FAKE_HOSTS/calls.log"
+[ -f "$home/known" ] || { echo >> "$FAKE_HOSTS/calls.log"; echo 'Host key verification failed.' >&2; exit 255; }
+folder=${receiver#umask 077 && cd }
+folder=${folder% && exec rsync}
+folder=$(HOME=$home; eval "cd $folder" && pwd -P) || exit 12
+while [ $# -gt 1 ]; do
+    printf ' %s' "$(basename -- "$1")" >> "$FAKE_HOSTS/calls.log"
+    cp "$1" "$folder/"
+    [ ! -f "$home/corrupt" ] || printf 'changed' >> "$folder/$(basename -- "$1")"
+    shift
+done
+echo >> "$FAKE_HOSTS/calls.log"

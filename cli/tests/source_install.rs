@@ -96,7 +96,7 @@ fn cached_source_install_fetches_build_std_and_leaves_detect_and_kernels_to_vade
     assert!(calls.contains("cargo +1.99.0 build --release --offline --locked --manifest-path cli/Cargo.toml"), "{calls}");
     // vade install detects this Spark and builds the kernels once (fresh install step 4).
     let fetch = format!("cargo +nightly-2026-10-01 fetch --locked --manifest-path {}/sysroot/lib/rustlib/src/rust/library/Cargo.toml\n", f.root.display());
-    assert!(calls.ends_with(&format!("{fetch}vade install\n")), "{calls}");
+    assert!(calls.ends_with(&format!("{fetch}vade __install-here\n")), "{calls}");
     assert!(!calls.contains("kernels") && !calls.contains("vade detect"), "{calls}");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Install: fetching the Rust build-std files for the GPU kernels (none when cached).\n"), "{stdout}");
@@ -115,7 +115,7 @@ fn newer_drivers_print_cuda_umd_version_and_pass_the_same_check() {
     let f = Fixture::new();
     let output = f.run(&[("INSTALL_UMD", "true")]);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert!(f.calls().ends_with("vade install\n"), "{}", f.calls());
+    assert!(f.calls().ends_with("vade __install-here\n"), "{}", f.calls());
     let old = Fixture::new();
     let output = old.run(&[("INSTALL_UMD", "true"), ("INSTALL_CUDA", "12.8")]);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -128,9 +128,9 @@ fn launch_option_starts_only_after_a_successful_install() {
     let f = Fixture::new();
     let output = f.run_args(&[], &["--launch"]);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert!(f.calls().ends_with("vade install\nvade launch\n"), "{}", f.calls());
+    assert!(f.calls().ends_with("vade __install-here\nvade launch\n"), "{}", f.calls());
     fs::write(f.root.join("calls"), "").unwrap();
-    let output = f.run_args(&[("INSTALL_FAIL_VADE", "install")], &["--launch"]);
+    let output = f.run_args(&[("INSTALL_FAIL_VADE", "__install-here")], &["--launch"]);
     assert!(!output.status.success());
     assert!(!f.calls().contains("vade launch"), "{}", f.calls());
 }
@@ -150,7 +150,7 @@ fn source_install_failures_stop_at_the_cause_and_print_a_next_step() {
         (("INSTALL_MISSING_DEVICE", "true"), "rerun this script online", "cargo "),
         (("INSTALL_FAIL_FETCH", "true"), "Rust build-std fetch failed", "vade install"),
         (("INSTALL_NO_SYSROOT", "true"), "cannot find the nightly-2026-10-01 sysroot", "fetch"),
-        (("INSTALL_FAIL_VADE", "install"), "fixture diagnostic: fix this cause", "vade launch"),
+        (("INSTALL_FAIL_VADE", "__install-here"), "fixture diagnostic: fix this cause", "vade launch"),
     ] {
         let f = Fixture::new();
         let output = f.run(&[env]);
@@ -203,7 +203,7 @@ done
         if failure.is_empty() {
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
             assert!(calls.contains("bootstrap -y --default-toolchain none --no-modify-path"), "{calls}");
-            assert!(calls.ends_with("vade install\n"), "{calls}");
+            assert!(calls.ends_with("vade __install-here\n"), "{calls}");
         } else {
             assert!(!output.status.success());
             assert!(String::from_utf8_lossy(&output.stderr).contains("Next:"));
@@ -382,7 +382,7 @@ fn each_refused_bundle_leaves_nothing_and_builds_from_source() {
         f.assert_private(&reason);
         assert!(!f.root.join("home/escape.txt").exists() && !f.bundles().join("escape.txt").exists(), "{reason}");
         let calls = f.calls();
-        assert!(calls.contains("cargo +1.99.0 build") && calls.ends_with("\nvade install\n"), "{reason}: {calls}");
+        assert!(calls.contains("cargo +1.99.0 build") && calls.ends_with("\nvade __install-here\n"), "{reason}: {calls}");
         assert!(!calls.contains("bundle-vade"), "{reason}: {calls}");
     }
 }
@@ -397,7 +397,7 @@ fn failed_bundle_install_and_unfit_systems_fall_back_to_the_source_build() {
     assert!(output.status.success(), "{stdout}");
     let vade = f.bundles().join(stem()).join("vade");
     assert!(stdout.contains(&format!("Prebuilt: \"{}\" install failed (diagnostic above); building from source.\n", vade.display())), "{stdout}");
-    assert!(f.calls().starts_with("bundle-vade install\n") && f.calls().ends_with("\nvade install\n"), "{}", f.calls());
+    assert!(f.calls().starts_with("bundle-vade install\n") && f.calls().ends_with("\nvade __install-here\n"), "{}", f.calls());
     f.assert_private("failed bundle install");
     for (key, value, reason) in [
         ("INSTALL_DRIVER", "575.51.03", "the bundle needs NVIDIA driver 580 or newer and this Spark has 575.51.03"),
@@ -604,7 +604,7 @@ fn piped_source_build_clones_public_main_into_a_new_folder() {
     assert!(calls.starts_with(&format!("git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=60 clone --quiet --depth 1 {CLONE_URL} {clone}\n")), "{calls}");
     // The build runs in the clone, never in the folder above the current one.
     assert!(calls.contains(&format!("cargo build in {clone}\n")) && !calls.contains(&format!("in {}\n", f.root.display())), "{calls}");
-    assert!(calls.ends_with(&format!("clone-vade install source {clone}\n")), "{calls}");
+    assert!(calls.ends_with(&format!("clone-vade __install-here source {clone}\n")), "{calls}");
     assert!(stdout.contains(PATH_LINE), "{stdout}");
     assert_eq!(fs::read_to_string(f.script()).unwrap(), format!("#!/bin/sh\nexec '{clone}/cli/target/release/vade' \"$@\"\n"));
     f.assert_private("clone");

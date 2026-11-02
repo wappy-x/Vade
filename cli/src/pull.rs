@@ -21,7 +21,7 @@ use hub::Remote;
 
 /// The pull folder's private state: partial files, the lock and the list of
 /// files already checked.
-const STATE: &str = ".vade-pull";
+pub(crate) const STATE: &str = ".vade-pull";
 /// In the pull state from the first file a pull moves into place until its
 /// records are written: the folder may mix two commits until then.
 const UPDATING: &str = "updating";
@@ -309,23 +309,49 @@ fn list(transport: &Transport, request: &Request, commit: &str) -> Result<Vec<Re
 
 /// One checked file, remembered so a rerun need not hash it again.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Checked { size: u64, inode: u64, modified: i64, nanos: i64, expected: String, sha256: String }
+struct Checked { size: u64, inode: u64, modified: i64, nanos: i64, changed: i64, changed_nanos: i64, expected: String, sha256: String }
 
-fn identity(meta: &fs::Metadata) -> (u64, u64, i64, i64) { (meta.len(), meta.ino(), meta.mtime(), meta.mtime_nsec()) }
+fn identity(meta: &fs::Metadata) -> (u64, u64, i64, i64, i64, i64) { (meta.len(), meta.ino(), meta.mtime(), meta.mtime_nsec(), meta.ctime(), meta.ctime_nsec()) }
 
 fn read_checked(scratch: &Path) -> BTreeMap<String, Checked> {
     let text = read_small(&scratch.join("checked"), 16 << 20, false).map(|bytes| String::from_utf8_lossy(&bytes).into_owned()).unwrap_or_default();
     text.lines().filter_map(|line| {
-        let mut part = line.splitn(7, '\t');
+        // A row from an older pull has no change time, so its file is hashed again.
+        let mut part = line.splitn(9, '\t');
         let mut next = || part.next();
-        let (size, inode, modified, nanos, expected, sha256, path) = (next()?, next()?, next()?, next()?, next()?, next()?, next()?);
+        let (size, inode, modified, nanos, changed, changed_nanos, expected, sha256, path) = (next()?, next()?, next()?, next()?, next()?, next()?, next()?, next()?, next()?);
         Some((path.to_owned(), Checked { size: size.parse().ok()?, inode: inode.parse().ok()?, modified: modified.parse().ok()?,
-            nanos: nanos.parse().ok()?, expected: expected.into(), sha256: sha256.into() }))
+            nanos: nanos.parse().ok()?, changed: changed.parse().ok()?, changed_nanos: changed_nanos.parse().ok()?, expected: expected.into(), sha256: sha256.into() }))
     }).collect()
 }
 
+/// The SHA-256 of each file that a finished pull of `folder` checked and that
+/// has not changed since, by path in the folder. Empty while the records of a
+/// pull are unfinished, or when the folder has no pull.
+pub(crate) fn verified(folder: &Path) -> BTreeMap<String, String> {
+    let scratch = folder.join(STATE);
+    if fs::symlink_metadata(scratch.join(UPDATING)).is_ok() { return BTreeMap::new(); }
+    read_checked(&scratch).into_iter().filter(|(path, row)| {
+        let file = folder.join(path);
+        hub::safe_path(path) && no_links(folder, &file).is_ok() && crate::text::is_lower_hex(&row.sha256, 64) && fs::symlink_metadata(&file).is_ok_and(|meta|
+            meta.is_file() && (row.size, row.inode, row.modified, row.nanos, row.changed, row.changed_nanos) == identity(&meta))
+    }).map(|(path, row)| (path, row.sha256)).collect()
+}
+
+/// The records a finished pull leaves for these files of `folder`.
+#[cfg(test)]
+pub(crate) fn record_for_test(folder: &Path, names: &[&str]) {
+    let checked = names.iter().map(|name| {
+        let path = folder.join(name);
+        let (size, inode, modified, nanos, changed, changed_nanos) = identity(&fs::symlink_metadata(&path).unwrap());
+        let sha256 = crate::sha256::digest_reader(fs::File::open(path).unwrap()).unwrap();
+        (name.to_string(), Checked { size, inode, modified, nanos, changed, changed_nanos, expected: sha256.clone(), sha256 })
+    }).collect();
+    write_checked(&folder.join(STATE), &checked).unwrap();
+}
+
 fn write_checked(scratch: &Path, checked: &BTreeMap<String, Checked>) -> Result<(), String> {
-    let text: String = checked.iter().map(|(path, c)| format!("{}\t{}\t{}\t{}\t{}\t{}\t{path}\n", c.size, c.inode, c.modified, c.nanos, c.expected, c.sha256)).collect();
+    let text: String = checked.iter().map(|(path, c)| format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{path}\n", c.size, c.inode, c.modified, c.nanos, c.changed, c.changed_nanos, c.expected, c.sha256)).collect();
     crate::text::atomic_write(&scratch.join("checked"), &text)
 }
 
@@ -360,7 +386,7 @@ fn download(transport: &Transport, request: &Request, commit: &str, folder: &Pat
         // A file this pull already checked, unchanged since, is not hashed again.
         let known = fs::symlink_metadata(&path).ok().filter(fs::Metadata::is_file).and_then(|meta| {
             let c = checked.get(&file.path)?;
-            ((c.size, c.inode, c.modified, c.nanos) == identity(&meta) && c.expected == expected && c.size == file.size).then(|| c.sha256.clone())
+            ((c.size, c.inode, c.modified, c.nanos, c.changed, c.changed_nanos) == identity(&meta) && c.expected == expected && c.size == file.size).then(|| c.sha256.clone())
         });
         let present = known.map(Ok).unwrap_or_else(|| verify(&path, file));
         // A check that Ctrl-C cut short is no reason to download the file.
@@ -392,8 +418,8 @@ fn download(transport: &Transport, request: &Request, commit: &str, folder: &Pat
             }
         };
         if let Ok(meta) = fs::symlink_metadata(&path) {
-            let (size, inode, modified, nanos) = identity(&meta);
-            checked.insert(file.path.clone(), Checked { size, inode, modified, nanos, expected, sha256: sha256.clone() });
+            let (size, inode, modified, nanos, changed, changed_nanos) = identity(&meta);
+            checked.insert(file.path.clone(), Checked { size, inode, modified, nanos, changed, changed_nanos, expected, sha256: sha256.clone() });
             write_checked(scratch, &checked)?;
         }
         done += file.size;

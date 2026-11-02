@@ -147,6 +147,16 @@ fn run_main(mut args: Vec<String>) {
         }
         return;
     }
+    // scripts/install.sh --source: this Spark alone, whatever controller config exists.
+    if args.first().is_some_and(|arg| arg == "__install-here") {
+        if args.len() != 1 {
+            fail("The private install takes no arguments. Use vade --help.");
+        }
+        if let Err(error) = launch::install_here() {
+            fail(&error);
+        }
+        return;
+    }
     if args.first().is_some_and(|arg| arg == "__engine") {
         if args.len() != 1 {
             std::process::exit(2);

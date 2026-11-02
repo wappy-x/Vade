@@ -567,6 +567,56 @@ pub fn ssh(alias: &str, command: String, label: &str) -> Exec {
     Exec::new(label, "ssh", args)
 }
 
+/// One more connection that runs only `true`, with ssh's own standard error on
+/// standard output, so a failed SSH step can show why. No other command shows
+/// its standard error ([`SystemRunner::run`] keeps that rule). This one fails
+/// only on exit status 255, the ssh client's own failure: after a login, a remote
+/// shell can print anything, and that text never counts. `None` for this computer.
+pub fn ssh_check(alias: &str) -> Option<Exec> {
+    if this_computer(alias) { return None; }
+    let mut args = vec!["-c".to_owned(), "ssh \"$@\" 2>&1 >/dev/null; test $? -ne 255".to_owned(), "sh".to_owned()];
+    args.extend(ssh_options());
+    args.extend([alias.to_owned(), "true".to_owned()]);
+    let mut exec = Exec::new(&format!("SSH check of {alias}"), "sh", args);
+    // A failure here is the expected case, and this text is all it has.
+    exec.transient_probe = true;
+    Some(exec)
+}
+
+/// The host a failed `ssh` or `rsync` command tried to reach.
+pub(crate) fn ssh_target(exec: &Exec) -> Option<&str> {
+    match exec.program.as_str() {
+        "ssh" => exec.args.iter().rev().nth(1).map(String::as_str),
+        "rsync" => exec.args.last()?.strip_suffix(":./"),
+        _ => None,
+    }
+}
+
+/// Why SSH to a machine stopped, and the one step that fixes it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SshStop { pub error: String, pub fix: String }
+impl SshStop {
+    /// The last line that `ssh alias true` printed, and the fix for that cause.
+    /// Vade only names the command: it never edits ~/.ssh.
+    pub fn from_output(alias: &str, printed: &str) -> Option<Self> {
+        let line = printed.lines().rev().map(str::trim).find(|line| !line.is_empty())?;
+        let line: String = crate::text::terminal_text(line).chars().take(200).collect();
+        let stop = if line.ends_with('.') { "" } else { "." };
+        let host = alias.rsplit('@').next().unwrap_or(alias);
+        let (note, fix) = if printed.contains("IDENTIFICATION HAS CHANGED") {
+            (" Vade never edits ~/.ssh.", format!("Ask who runs {alias} why its key changed. If that is expected, run ssh {alias} true, run the ssh-keygen -R command that it prints, run ssh {alias} true again and accept the new key, then run vade doctor."))
+        } else if line.contains("Host key verification failed") {
+            // ssh shows the key to check, and it reads ~/.ssh/config. ssh-keyscan does neither.
+            (" Vade never edits ~/.ssh.", format!("Run ssh {alias} true and accept the key, or run ssh-keyscan -H {host} >> ~/.ssh/known_hosts if {host} is the real host name, then run vade doctor."))
+        } else if line.contains("Permission denied") {
+            (" Vade never edits ~/.ssh.", format!("Run ssh-copy-id {alias}, then run vade doctor."))
+        } else {
+            ("", format!("Run ssh {alias} true to see the full SSH error, then run vade doctor."))
+        };
+        Some(Self { error: format!("ssh {alias} failed: {line}{stop}{note}"), fix })
+    }
+}
+
 /// Run `command` through `sh -c` on this computer, as SSH would run it on a
 /// remote one. The child gets only the names an SSH session gives a command
 /// (home, path, user, shell and locale), so no controller shell setting

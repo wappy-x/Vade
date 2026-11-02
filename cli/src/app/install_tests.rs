@@ -603,6 +603,37 @@ fn build_gpu_check_judges_recorded_samples() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// `FakeRunner`, with an old driver on the second Spark.
+struct OldDriver { inner: FakeRunner }
+impl Runner for OldDriver {
+    fn run(&mut self, exec: &Exec) -> Result<Output, String> {
+        let reply = self.inner.run(exec)?;
+        if exec.label == "b bundle fit" { return Ok(Output { success: true, stdout: "arch=aarch64\nglibc=2.39\ndriver=575.51.03\n".into() }); }
+        Ok(reply)
+    }
+    fn interactive(&mut self, exec: &Exec) -> Result<bool, String> { self.inner.interactive(exec) }
+    fn port_free(&mut self, port: u16) -> Result<(), String> { self.inner.port_free(port) }
+    fn pause(&mut self, duration: Duration) { self.inner.pause(duration); }
+}
+
+#[test]
+fn a_rank_below_the_floor_makes_every_rank_build_and_says_why_in_one_line() {
+    let mut f = with_bundle_machines(2);
+    let root = f.app.config.prebuilt_dir.clone().unwrap();
+    fs::write(root.join(format!("{}-{}", "a".repeat(40), "b".repeat(40))).join("MANIFEST"), "min_driver=580\nglibc=2.39\n").unwrap();
+    let mut app = App { config: f.app.config.clone(), dry: false, runner: OldDriver { inner: std::mem::take(&mut f.app.runner) } };
+    let capture = crate::output::testing::Capture::default();
+    crate::output::with_writer(capture.clone(), || app.execute(Command::Install)).unwrap();
+    let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+    assert_eq!(printed.lines().filter(|line| line.contains("does not fit")).collect::<Vec<_>>(),
+        ["b: the bundle does not fit: it needs NVIDIA driver 580 or newer, and this Spark has 575.51.03; every Spark builds from source, which needs Rust on each Spark."], "{printed}");
+    let calls = &app.runner.inner.calls;
+    assert!(!calls.iter().any(|e| e.label.ends_with("prebuilt copy")));
+    assert!(["a build and stage", "b build and stage"].iter().all(|label| calls.iter().any(|e| e.label == *label)));
+    // The second check of each rank asks for the toolchains that the build needs.
+    assert!(calls.iter().any(|e| e.label == "b prerequisites" && e.args.last().unwrap().contains("for tool in cargo rustc")));
+}
+
 #[test]
 fn a_prebuilt_dir_that_serves_nothing_is_named_before_the_source_build() {
     let mut f = with_bundle();
@@ -616,10 +647,10 @@ fn a_prebuilt_dir_that_serves_nothing_is_named_before_the_source_build() {
         String::from_utf8(capture.bytes.borrow().clone()).unwrap()
     };
     let printed = install(&mut f);
-    assert!(printed.contains(&format!("No prebuilt bundle in {} matches engine {} and CLI {}; building from source.\n", root.display(), "a".repeat(40), "b".repeat(40))), "{printed}");
+    assert!(printed.contains(&format!("No prebuilt bundle in {} matches engine {} and CLI {}; building from source, which needs Rust on each Spark.\n", root.display(), "a".repeat(40), "b".repeat(40))), "{printed}");
     f.app.config.prebuilt_dir = Some(root.join("missing"));
     let printed = install(&mut f);
-    assert!(printed.contains(&format!("prebuilt_dir {} is not a folder; building from source.\n", root.join("missing").display())), "{printed}");
+    assert!(printed.contains(&format!("prebuilt_dir {} is not a folder; building from source, which needs Rust on each Spark.\n", root.join("missing").display())), "{printed}");
     f.app.config.prebuilt_dir = None;
     let printed = install(&mut f);
     assert!(!printed.contains("prebuilt"), "no prebuilt_dir, no note: {printed}");

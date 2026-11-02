@@ -53,6 +53,17 @@ impl<R: Runner> App<R> {
         exec.timeout = Duration::from_secs(600);
         exec
     }
+    /// Why this bundle does not fit `machine`, or `None`. A rank that does not
+    /// answer refuses nothing here: the copy and the start still check it.
+    pub(super) fn bundle_misfit(&mut self, machine: &Machine, floors: &crate::prebuilt::Floors) -> Result<Option<String>, String> {
+        let script = r#"printf 'arch=%s\n' "$(uname -m)"
+printf 'glibc=%s\n' "$(getconf GNU_LIBC_VERSION 2>/dev/null | sed -n 's/^glibc //p')"
+printf 'driver=%s\n' "$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1)"
+"#;
+        let output = self.runner.run(&runner::ssh(&machine.ssh, script.into(), &format!("{} bundle fit", machine.name)))?;
+        let fact = |key: &str| output.stdout.lines().find_map(|line| line.strip_prefix(key)).unwrap_or("").trim().to_owned();
+        Ok(floors.misfit(&crate::prebuilt::Rank { arch: fact("arch="), glibc: fact("glibc="), driver: fact("driver=") }))
+    }
     pub(super) fn model_check(&self, machine: &Machine, worker: &str) -> Exec {
         let mut exec = runner::ssh(&machine.ssh, format!("exec {} __worker", remote_path(worker)), &format!("{} complete model check", machine.name));
         exec.stdin = text::encode(&Fields::from([

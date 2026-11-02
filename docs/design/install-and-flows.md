@@ -136,8 +136,10 @@ Enter to take it.
 For this Spark, setup writes nothing itself; install saves `~/.vade/config`.
 For a controller, setup writes the controller config at the path that
 `vade config` reads by default. It starts from the matching example in
-`cli/examples`, points the sources at this checkout and keeps the private
-folders under `~/.vade`. Setup never replaces a config: it creates the file
+`cli/examples`, points the sources at this checkout, or names the installed
+bundle when `vade` runs from one, and keeps the private folders under
+`~/.vade`. Only `VADE_SOURCE` makes a `vade` from a bundle use a checkout. Setup
+never replaces a config: it creates the file
 only if no file is there, also when two setups run at once. A second run uses
 the config it finds. It reads the checkpoint from that config's `model`, so
 an FP8 config starts with `vade up --fp8` even if a person wrote it. It

@@ -207,14 +207,24 @@ fn bundle_fields(bundle: &Path) -> Result<Fields, String> {
     Ok(fields)
 }
 
-pub(super) fn source_path() -> Result<PathBuf, String> {
-    if let Some(path) = std::env::var_os("VADE_SOURCE") {
-        let path = PathBuf::from(path);
-        if !path.is_absolute() || !is_source(&path) {
-            return Err("VADE_SOURCE must name an absolute Vade checkout with engine and harness folders.".into());
-        }
-        return Ok(path);
+/// The checkout VADE_SOURCE names, if it names one.
+fn named_source() -> Result<Option<PathBuf>, String> {
+    let Some(path) = std::env::var_os("VADE_SOURCE") else { return Ok(None) };
+    let path = PathBuf::from(path);
+    if !path.is_absolute() || !is_source(&path) {
+        return Err("VADE_SOURCE must name an absolute Vade checkout with engine and harness folders.".into());
     }
+    Ok(Some(path))
+}
+
+/// The checkout a new controller config points at. A vade from a bundle uses
+/// that bundle, also in a clone's folder: only VADE_SOURCE asks for a checkout.
+pub(super) fn setup_source(bundle: bool) -> Result<Option<PathBuf>, String> {
+    if bundle { named_source() } else { source_path().map(Some) }
+}
+
+pub(super) fn source_path() -> Result<PathBuf, String> {
+    if let Some(path) = named_source()? { return Ok(path); }
     let executable = std::env::current_exe().map_err(|_| "Cannot locate the vade program.")?;
     let cwd = std::env::current_dir().map_err(|_| "Open an existing folder and retry vade install.")?;
     executable.ancestors().chain(cwd.ancestors()).find(|p| is_source(p))

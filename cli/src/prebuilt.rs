@@ -11,7 +11,42 @@ pub struct HostBundle { pub cli: PathBuf, pub harness: PathBuf, pub hashes: [Str
 pub const FILES: [&str; 3] = ["flash-serve", "flash.ptx", "vade"];
 /// The release launcher bundle's manifest (`vade-launch-bundle-v1`).
 const LAUNCHER: &str = "launcher-bundle.conf";
+/// What a Spark needs for this bundle, from the `MANIFEST` of a main bundle.
+/// Other bundles have no such file and give no floor.
+#[derive(Debug, Default, PartialEq)]
+pub struct Floors { pub driver: Option<String>, pub glibc: Option<String> }
+/// What one Spark reports. An empty fact is not known and refuses nothing.
+#[derive(Debug, Default, PartialEq)]
+pub struct Rank { pub arch: String, pub glibc: String, pub driver: String }
+impl Floors {
+    /// Why this bundle does not fit `rank`, or `None`.
+    pub fn misfit(&self, rank: &Rank) -> Option<String> {
+        if !rank.arch.is_empty() && rank.arch != "aarch64" {
+            return Some(format!("it is for aarch64, and this Spark is {}", text::terminal_text(&rank.arch)));
+        }
+        let lower = |floor: &Option<String>, have: &str| floor.as_deref().filter(|floor| !at_least(have, floor)).map(str::to_owned);
+        if let Some(floor) = lower(&self.driver, &rank.driver) {
+            return Some(format!("it needs NVIDIA driver {floor} or newer, and this Spark has {}", text::terminal_text(&rank.driver)));
+        }
+        lower(&self.glibc, &rank.glibc).map(|floor| format!("it needs glibc {floor} or newer, and this Spark has {}", text::terminal_text(&rank.glibc)))
+    }
+}
+/// `have` >= `need`, as dotted numbers. A value that is not one refuses nothing.
+fn at_least(have: &str, need: &str) -> bool {
+    let parts = |value: &str| value.split('.').map(|part| part.parse::<u64>().ok()).collect::<Option<Vec<_>>>();
+    let (Some(have), Some(need)) = (parts(have), parts(need)) else { return true };
+    let width = have.len().max(need.len());
+    let pad = |mut list: Vec<u64>| { list.resize(width, 0); list };
+    pad(have) >= pad(need)
+}
 impl Bundle {
+    /// The floors in this bundle's `MANIFEST`, if it has one.
+    pub fn floors(&self) -> Floors {
+        let mut manifest = String::new();
+        if File::open(self.dir.join("MANIFEST")).and_then(|file| file.take(1 << 20).read_to_string(&mut manifest)).is_err() { return Floors::default(); }
+        let field = |key: &str| manifest.lines().find_map(|line| line.strip_prefix(key)).map(str::to_owned);
+        Floors { driver: field("min_driver="), glibc: field("glibc=") }
+    }
     /// The bundle in `root/<engine>-<cli>` after checking its manifest and hashes;
     /// `None` when there is none, an error when a matching one is corrupt.
     /// An unpacked release launcher bundle (`launcher-bundle.conf`) carries the
@@ -155,6 +190,20 @@ fn host_executable(header: &[u8; 20]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_rank_fits_unless_a_known_fact_is_below_the_floor() {
+        let floors = Floors { driver: Some("580".into()), glibc: Some("2.39".into()) };
+        let rank = |arch: &str, glibc: &str, driver: &str| Rank { arch: arch.into(), glibc: glibc.into(), driver: driver.into() };
+        for fits in [rank("aarch64", "2.39", "580"), rank("aarch64", "2.41", "580.178.04"), rank("", "", ""), rank("aarch64", "unknown", "n/a")] {
+            assert_eq!(floors.misfit(&fits), None, "{fits:?}");
+        }
+        assert_eq!(floors.misfit(&rank("x86_64", "2.39", "580")).unwrap(), "it is for aarch64, and this Spark is x86_64");
+        assert_eq!(floors.misfit(&rank("aarch64", "2.39", "575.51.03")).unwrap(), "it needs NVIDIA driver 580 or newer, and this Spark has 575.51.03");
+        assert_eq!(floors.misfit(&rank("aarch64", "2.35", "580.159.03")).unwrap(), "it needs glibc 2.39 or newer, and this Spark has 2.35");
+        // A bundle with no MANIFEST has no floor, so only the machine type can refuse it.
+        assert_eq!(Floors::default().misfit(&rank("aarch64", "2.0", "1")), None);
+    }
+
     #[test]
     fn exact_bundle_checks_hashes_target_and_source_before_use() {
         let root = std::env::temp_dir().join(format!("vade-prebuilt-{}", text::random_hex(8).unwrap()));

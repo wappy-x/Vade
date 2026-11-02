@@ -940,8 +940,10 @@ vade setup --yes --hosts you@spark-a-address
 
 The dry run prints the config that setup would write and the steps it would
 run, and changes nothing. Setup writes the config at the default path below,
-with this checkout as the source and private folders under `~/.vade`. It
-never replaces a config. A second run uses the file that is there. Then it
+with this checkout as the source and private folders under `~/.vade`. A `vade`
+from the one-line install uses its bundle instead, also in the folder of a
+clone. To use a checkout with that `vade`, set `VADE_SOURCE`. Setup never
+replaces a config. A second run uses the file that is there. Then it
 runs `vade install`, `vade up` and `vade doctor`, and stops at the first step
 that fails. Fix the cause, then run `vade setup` again. When the config
 already has an install, the second run skips `vade install`, so `vade up`
@@ -1255,6 +1257,15 @@ engine state to `~/.local/state/vade` on each Spark, and it makes no source
 folders there. After you run the one-line install again, the same config uses
 the new bundle. `vade update` has no checkout to update, so it
 tells you to run the install command.
+
+`vade install` copies `vade`, `flash-serve` and `flash.ptx` to each Spark and
+checks their SHA-256 hashes on that Spark. Before the copy, it compares each
+Spark with the `MANIFEST` of the bundle: the machine type, the NVIDIA driver and
+glibc. If a Spark does not fit, `vade install` prints one line that names the
+Spark and the cause. With `source = installed-bundle` it stops, because a source
+build needs a checkout and Rust. With a config that has `prebuilt_dir` and
+source folders, every Spark builds from source, because all Sparks must run
+the same files.
 
 From a clone, setup writes those three source folders instead. `vade install`
 then builds from source on each Spark, unless `prebuilt_dir` points at a bundle

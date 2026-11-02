@@ -13,6 +13,8 @@ mod groups;
 mod pairs;
 #[path = "tests/local_rank.rs"]
 mod local_rank;
+#[path = "tests/fake_hosts.rs"]
+mod fake_hosts;
 use super::*;
 use std::collections::BTreeSet;
 use std::path::PathBuf;

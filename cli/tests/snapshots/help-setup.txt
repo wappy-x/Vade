@@ -30,10 +30,10 @@ Notes:
     take it.
   - On this Spark, vade install saves the local defaults in ~/.vade/config. From
     another computer, setup writes a controller config at the path vade config
-    shows (VADE_CONFIG, else the user config folder). It points at this
-    checkout, or at the installed bundle when there is no checkout, and keeps
-    Vade's private folders on this computer under ~/.vade. Setup never replaces
-    a config.
+    shows (VADE_CONFIG, else the user config folder). It points at the installed
+    bundle when vade runs from one, else at this checkout, and keeps Vade's
+    private folders on this computer under ~/.vade. Setup never replaces a
+    config.
   - Then it runs vade install, vade up and vade doctor, and stops at the first
     step that fails. Doctor runs last, so it checks the Sparks that up started.
     Run vade setup again after a fix, without the answer options: it uses the

@@ -305,7 +305,8 @@ sysroot=$(rustup run "$device" rustc --print sysroot) && [ -n "$sysroot" ] ||
 printf '%s\n' 'Install: fetching the Rust build-std files for the GPU kernels (none when cached).'
 cargo "+$device" fetch --locked --manifest-path "$sysroot/lib/rustlib/src/rust/library/Cargo.toml" ||
     fail 'Rust build-std fetch failed. Next: check access to https://index.crates.io and rerun the Retry command below; with CARGO_NET_OFFLINE=true, run it once online first.'
-"$vade" install </dev/null ||
+# A source install is for this Spark alone: a controller config does not change that.
+"$vade" __install-here </dev/null ||
     fail "local install failed. Next: follow the diagnostic above, run \"$vade\" doctor, then retry."
 fi
 # One folder stays on PATH across versions: a small script that runs the build

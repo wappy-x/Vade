@@ -269,7 +269,7 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
                 let host = bundle.as_ref().map(|bundle| if bundled { bundle.launcher_host().map(Some) } else { bundle.host(&harness_sha) }).transpose()?.flatten();
                 Ok((bundle, host))
             });
-        let (bundle, host_bundle) = match selected {
+        let (mut bundle, mut host_bundle) = match selected {
             // No source to fall back on, so a bundle fault stops the install.
             Err(error) if bundled => return Err(format!("Cannot use the installed Vade bundle: {} Run the install command again.", text::terminal_text(&error))),
             Ok((None, _)) if self.config.prebuilt_dir.is_some() => {
@@ -277,15 +277,15 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
                 let dir = self.config.prebuilt_dir.clone().unwrap_or_default();
                 let shown = text::terminal_text(&dir.to_string_lossy()).into_owned();
                 crate::output::line(format_args!("{}", if dir.is_dir() {
-                    format!("No prebuilt bundle in {shown} matches engine {engine_sha} and CLI {cli_sha}; building from source.")
+                    format!("No prebuilt bundle in {shown} matches engine {engine_sha} and CLI {cli_sha}; building from source, which needs Rust on each Spark.")
                 } else {
-                    format!("prebuilt_dir {shown} is not a folder; building from source.")
+                    format!("prebuilt_dir {shown} is not a folder; building from source, which needs Rust on each Spark.")
                 }))?;
                 (None, None)
             }
             Ok(bundle) => bundle,
             Err(error) => {
-                crate::output::line(format_args!("Prebuilt bundle rejected: {}; building from source.", text::terminal_text(&error)))?;
+                crate::output::line(format_args!("Prebuilt bundle rejected: {}; building from source, which needs Rust on each Spark.", text::terminal_text(&error)))?;
                 (None, None)
             }
         };
@@ -306,6 +306,28 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
                 else { crate::output::line(format_args!("Checking SSH to {}.", machine.name))?; }
             }
             weights_present &= self.machine_checks_for_build(machine, bundle.is_none())?;
+        }
+        if let Some(found) = &bundle {
+            let floors = found.floors();
+            let mut misfit = None;
+            for machine in &machines {
+                if let Some(cause) = self.bundle_misfit(machine, &floors)? {
+                    misfit = Some(format!("{}: the bundle does not fit: {cause}", machine.name));
+                    break;
+                }
+            }
+            // No checkout here, so no source to build. Every other route builds on
+            // every Spark: all ranks must run the same bytes (see the check below).
+            match misfit {
+                Some(misfit) if bundled => return Err(format!("{misfit}. A source build needs Rust on each Spark and a checkout on this computer. Update that Spark, or run git clone {}, set engine_source, harness_source and cli_source in the config in place of source, and follow INSTALL.md#install-rust-source-builds-only.", crate::repository::VADE_REPO_URL)),
+                Some(misfit) => {
+                    crate::output::line(format_args!("{misfit}; every Spark builds from source, which needs Rust on each Spark."))?;
+                    (bundle, host_bundle) = (None, None);
+                    self.local_checks_for_build(true)?;
+                    for machine in &machines { weights_present &= self.machine_checks_for_build(machine, true)?; }
+                }
+                None => (),
+            }
         }
         self.network_checks(&machines)?;
         // An installed bundle is one build of this CLI's engine, so it has all four.
@@ -364,7 +386,7 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
                         continue;
                     }
                     Err(error) if !bundled && error.starts_with("Prebuilt artifact rejected:") => {
-                        crate::output::line(format_args!("{}: {}; building from source.", machine.name, text::terminal_text(&error)))?;
+                        crate::output::line(format_args!("{}: {}; building from source, which needs Rust there.", machine.name, text::terminal_text(&error)))?;
                         weights_present &= self.machine_checks_for_build(machine, true)?;
                     }
                     Err(error) => return Err(error),

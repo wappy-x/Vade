@@ -773,9 +773,21 @@ impl<R: Runner> App<R> {
                     }
                 }
             }
+            if let Some(stop) = runner::ssh_target(&exec).map(str::to_owned).and_then(|alias| self.ssh_stop(&alias)) {
+                return Err(format!("{} {}", stop.error, stop.fix));
+            }
             return Err(message.into());
         }
         Ok(output)
+    }
+
+    /// Why SSH to `alias` fails now, or `None` when it works: one more
+    /// connection that runs only `true`.
+    fn ssh_stop(&mut self, alias: &str) -> Option<runner::SshStop> {
+        if self.dry { return None; }
+        let output = self.runner.run(&runner::ssh_check(alias)?).ok()?;
+        if output.success { return None; }
+        runner::SshStop::from_output(alias, &output.stdout)
     }
 }
 

@@ -152,6 +152,15 @@ When every file passes its check, pull writes two files:
   hashes. The [fetch helper](../ops/fetch-model.sh) writes a list with the
   same name and form.
 
+On a Spark that a controller installs, `vade install` does not hash a file
+again when `vade pull` checked it on that Spark and the file has not changed
+since. The check compares the size, the inode, the modification time and the
+change time. It then writes the engine's own private stamp for that file, and
+for FP8 the `manifest.sha256` and `manifest.sha256.sizes` files. A file that
+another tool copied has no record, so the engine hashes it. A new `vade pull`
+hashes once more the files of a pull from an older Vade, because their records
+have no change time.
+
 A pull with `--include` into a folder that an earlier pull of the same commit
 filled keeps the rows of the other files in both records. Before it changes a
 file, pull stops in these cases:

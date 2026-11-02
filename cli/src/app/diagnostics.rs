@@ -18,6 +18,8 @@ pub(super) struct Probe {
     missing: Option<String>,
     /// The message `vade install` stops with for `missing`.
     error: Option<String>,
+    /// Why SSH stopped, when `missing` is `ssh` and ssh said why.
+    ssh_stop: Option<runner::SshStop>,
     /// Whether the pinned toolchains a source build needs are installed;
     /// `None` when the script did not check them.
     toolchains: Option<bool>,
@@ -29,6 +31,15 @@ pub(super) struct Probe {
 pub(crate) const HOST_TOOLCHAIN: &str = "1.99.0";
 /// The nightly toolchain `cargo kernels` drives for the NVPTX build.
 pub(crate) const KERNEL_TOOLCHAIN: &str = "nightly-2026-10-01";
+/// The Rust install on one machine, as in INSTALL.md (Install Rust). A source
+/// build needs it; the bundle route does not.
+pub(crate) const RUST_STEPS: &str = concat!(
+    "curl --proto '=https' --tlsv1.2 -sSf -o /tmp/vade-rustup-init.sh https://sh.rustup.rs && ",
+    "sh /tmp/vade-rustup-init.sh -y --default-toolchain none --no-modify-path && ",
+    "export PATH=\"$HOME/.cargo/bin:$PATH\" && ",
+    "rustup toolchain install 1.99.0 --profile minimal --no-self-update && ",
+    "rustup toolchain install nightly-2026-10-01 --profile minimal --no-self-update --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda",
+);
 /// The `failed=` values of the source-build toolchain checks.
 const TOOLCHAIN_FAILURES: [&str; 3] = ["rustup", "toolchain", "kernel-toolchain"];
 
@@ -63,9 +74,12 @@ impl<R: Runner> App<R> {
             Err(error) => { report.fail("launch defaults", &error, "Correct MTP, then run vade doctor.")?; None }
             _ => unreachable!(),
         };
-        let (result, _) = crate::output::buffered(|| self.local_checks());
-        stage(&mut report, self.dry, "controller tools", result, "rustc, cargo, rsync, curl and ssh found", "rustc, cargo, rsync, curl, ssh -V",
-            "Install Rust, rsync, curl and OpenSSH, then run vade doctor.")?;
+        // The bundle route builds nothing, so it needs no Rust.
+        let builds = !self.config.installed_bundle;
+        let (result, _) = crate::output::buffered(|| self.local_checks_for_build(builds));
+        stage(&mut report, self.dry, "controller tools", result, if builds { "rustc, cargo, rsync, curl and ssh found" } else { "rsync, curl and ssh found" },
+            if builds { "rustc, cargo, rsync, curl, ssh -V" } else { "rsync, curl, ssh -V" },
+            if builds { "Install Rust, rsync, curl and OpenSSH, then run vade doctor." } else { "Install rsync, curl and OpenSSH, then run vade doctor." })?;
         let session = match Session::load(&self.config.state_dir) {
             Ok(session) => session,
             Err(error) => {
@@ -211,7 +225,10 @@ impl<R: Runner> App<R> {
         };
         let missing = probe.missing.as_deref();
         if missing == Some("ssh") {
-            report.fail(&name("ssh"), &probe.error.clone().unwrap_or_default(), &format!("Run ssh {} true to see the SSH error, {rerun}", machine.ssh))?;
+            match &probe.ssh_stop {
+                Some(stop) => report.fail(&name("ssh"), &stop.error, &stop.fix)?,
+                None => report.fail(&name("ssh"), &probe.error.clone().unwrap_or_default(), &format!("Run ssh {} true to see the SSH error, {rerun}", machine.ssh))?,
+            }
             for check in ["nvidia-smi", "GPU use", "disk", "free memory", "model files"] { report.skip(&name(check), "needs SSH")?; }
             return Ok(());
         }
@@ -230,7 +247,8 @@ impl<R: Runner> App<R> {
                     // The script looks for cargo and rustc before nvidia-smi.
                     if matches!(tool, "cargo" | "rustc") { report.skip(&name("nvidia-smi"), &format!("not checked; the script stopped at {tool}"))?; }
                     else { report.ok(&name("nvidia-smi"), "present")?; }
-                    report.fail(&name("tools"), &error, &format!("Install {tool} on {}, {rerun}", machine.name))?;
+                    let next = if matches!(tool, "cargo" | "rustc") { format!("Run those commands on {}, {rerun}", machine.name) } else { format!("Install {tool} on {}, {rerun}", machine.name) };
+                    report.fail(&name("tools"), &error, &next)?;
                 }
                 let reason = if tool == "driver" { "needs a supported GPU and driver" } else { "needs the tool checks" };
                 for check in ["GPU use", "disk", "free memory", "model files"] { report.skip(&name(check), reason)?; }
@@ -282,9 +300,6 @@ impl<R: Runner> App<R> {
         Ok(())
     }
 
-    pub(super) fn local_checks(&mut self) -> Result<(), String> {
-        self.local_checks_for_build(true)
-    }
     pub(super) fn local_checks_for_build(&mut self, source_build: bool) -> Result<(), String> {
         for (program, args) in [
             (rust_tool("rustc"), vec!["--version".into()]),
@@ -292,8 +307,14 @@ impl<R: Runner> App<R> {
             ("rsync".into(), vec!["--version".into()]),
             ("curl".into(), vec!["--version".into()]),
         ] {
-            if !source_build && (program == rust_tool("rustc") || program == rust_tool("cargo")) { continue; }
-            self.checked(Exec::new(&format!("local {program}"),&program,args),"A controller prerequisite is unavailable. Install Rust, rsync, and curl, then run vade doctor.")?;
+            let rust = program == rust_tool("rustc") || program == rust_tool("cargo");
+            if !source_build && rust { continue; }
+            let message = if rust { format!("This setup builds from source, so this computer needs Rust. Run {RUST_STEPS}, then run vade doctor.") }
+                else if source_build { "A controller prerequisite is unavailable. Install Rust, rsync, and curl, then run vade doctor.".to_owned() }
+                else { "A controller prerequisite is unavailable. Install rsync and curl, then run vade doctor.".to_owned() };
+            let label = format!("local {program}");
+            // A tool that is not installed cannot start, so the runner has its own error.
+            self.checked(Exec::new(&label, &program, args), &message).map_err(|error| if error.starts_with(&format!("Cannot run {label}.")) { message.clone() } else { error })?;
         }
         // -V only prints OpenSSH's version; it never connects.
         self.checked(
@@ -396,6 +417,7 @@ fi"#, host = HOST_TOOLCHAIN.replace('.', "[.]")) } else { String::new() },
             rdma,
             missing: None,
             error: None,
+            ssh_stop: None,
             gpu_use: fields.get("gpu_apps").and_then(|apps| apps.parse().ok())
                 .map(|apps| (apps, fields.get("gpu_watts").and_then(|watts| watts.parse::<f64>().ok()).filter(|watts| watts.is_finite()))),
             toolchains: (fields.get("toolchains").map(String::as_str) == Some("ok")).then_some(true)
@@ -426,6 +448,7 @@ fi"#, host = HOST_TOOLCHAIN.replace('.', "[.]")) } else { String::new() },
                 _ if !fields.contains_key("reached") => "ssh",
                 _ => "script",
             };
+            let missing_ssh = missing == "ssh";
             probe.missing = Some(missing.into());
             probe.error = Some(match fields.get("missing").map(String::as_str) {
                 Some("disk") => format!(
@@ -440,8 +463,9 @@ fi"#, host = HOST_TOOLCHAIN.replace('.', "[.]")) } else { String::new() },
                     };
                     format!("{} needs {needed} for RDMA. Have the administrator prepare RDMA, or set SEQPAR_RDMA=0 for TCP over the existing network, then rerun this command. Vade does not change system settings.", machine.name)
                 }
+                Some(tool @ ("cargo" | "rustc")) => format!("{} is missing {tool}, and a source build there needs Rust. Run {RUST_STEPS}, then run vade doctor.", machine.name),
                 Some(tool)
-                    if ["cargo", "rustc", "nvidia-smi", "sha256sum", "rsync", "ping", "curl"]
+                    if ["nvidia-smi", "sha256sum", "rsync", "ping", "curl"]
                         .contains(&tool) =>
                 {
                     format!(
@@ -459,6 +483,10 @@ fi"#, host = HOST_TOOLCHAIN.replace('.', "[.]")) } else { String::new() },
                     _ => format!("{}'s check script stopped before naming a failed check. Rerun vade doctor; if this repeats, check the login shell with ssh {} true.", machine.name, machine.ssh),
                 },
             });
+            if missing_ssh {
+                probe.ssh_stop = self.ssh_stop(&machine.ssh);
+                if let Some(stop) = &probe.ssh_stop { probe.error = Some(format!("{} {}", stop.error, stop.fix)); }
+            }
         }
         Ok(probe)
     }

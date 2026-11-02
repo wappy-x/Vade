@@ -330,7 +330,15 @@ A controller that is a Spark needs no checkout. After the one-line install,
 source folders. `vade install` then reads the engine, harness and CLI revisions
 from the `launcher-bundle.conf` next to the `vade` that runs, checks the bundle's
 hashes, and stages its `vade` and `vade-harness` for this Spark. A fault in that
-bundle stops the install, because there is no source to build from.
+bundle stops the install, because there is no source to build from. A `vade`
+from a bundle uses that bundle also in the folder of a clone. `VADE_SOURCE`
+selects a checkout.
+
+Before the copy, `vade install` reads the machine type, the NVIDIA driver and
+glibc of each Spark, and compares them with `min_driver` and `glibc` in the
+bundle's `MANIFEST`. A bundle with no `MANIFEST` has no such floor. A Spark that
+does not fit stops the install with one line, or, with a `prebuilt_dir` config,
+makes every Spark build from source, because all Sparks must run the same files.
 
 ### What a controller bundle contains
 

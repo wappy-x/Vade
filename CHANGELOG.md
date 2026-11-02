@@ -124,6 +124,15 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 
 ### Install
 
+- A bundle-only `vade setup` now also passes on a controller with no Rust, and it says why when SSH or a Spark stops it.
+  - `vade doctor` asks for Rust only when the config can build. Before, step 3 of setup failed with `Cannot run local rustc.`
+  - A `vade` from a bundle uses that bundle also in the folder of a clone. `VADE_SOURCE` still selects a checkout.
+  - A failed SSH step prints what ssh said, such as `Host key verification failed.`, and the one command that fixes it. Vade never edits `~/.ssh`.
+  - A missing `cargo` or `rustc` names the commands of INSTALL.md, only when a build needs them.
+  - `vade install` compares each Spark with the bundle's `MANIFEST` before the copy, and a Spark that does not fit gives one line with the cause.
+- `sh scripts/install.sh --source` stays on one Spark when a controller config exists, and it says that the config stays as it was.
+- `vade install` on a controller no longer hashes a checkpoint that `vade pull` checked on that Spark. The engine reuses those hashes, on rank 1 too.
+  - On the fresh pair of 2026-11-01, rank 1 hashed all 185,540,727,598 bytes (`model_verify_ms=103147.602`) after its own pull. No Spark has run this change yet.
 - `vade setup --hosts` now works after the one-line install, with no clone. Setup writes `source = installed-bundle`, and `vade install` takes every program and its revision from the bundle next to `vade`. A clone works as before.
 - The installer also writes `~/.local/bin/vade`, which the stock Ubuntu `~/.profile` puts on `PATH` at login, so a new SSH login finds `vade` with no `export` line.
   - It edits no shell profile, and it leaves a file there that is not from Vade.
