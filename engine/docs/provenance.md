@@ -7,7 +7,7 @@ This page records each reused file's source, hash and notice, and what
 informed the work without supplying code. For maintainers and license
 reviewers.
 
-[Credits](CREDITS.md) is the full list of people, papers and projects whose
+[Credits](../../docs/CREDITS.md) is the full list of people, papers and projects whose
 ideas Vade uses, with main and development scope marked. The parts designed
 and built in this project are listed under
 [Original work](../../docs/CREDITS.md#original-work).
@@ -118,7 +118,7 @@ All templates are in `crates/tokenizer/templates/`. Llama 3.1/3.2 and Phi-4 sour
   and the license text in [LICENSE](../LICENSE).
 
 Model-maker credits and the official assistant's behaviour are listed in
-[Credits](CREDITS.md).
+[Credits](../../docs/CREDITS.md).
 
 </details>
 
@@ -238,5 +238,5 @@ Unicode generator and kernel build tool (`cargo kernels`, in
 - **Earlier private Python and C numerical mocks** were test evidence. They
   are not part of the runtime or the shareable source.
 
-**Where next:** [Credits](CREDITS.md) · [Export](export.md) ·
+**Where next:** [Credits](../../docs/CREDITS.md) · [Export](export.md) ·
 [Validation](validation.md)

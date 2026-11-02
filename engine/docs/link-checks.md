@@ -4,11 +4,11 @@
 > original check, before the monorepo import. They do not establish current
 > link status. Known failed URLs remain as historical text below. On October 13,
 > 2026, both recorded Oliaro portfolio addresses failed DNS resolution. Use the
-> [Credits](CREDITS.md) profile link instead.
+> [Credits](../../docs/CREDITS.md) profile link instead.
 
 **All 355 outside links in the public pages answered: 349 with HTTP 200, and
 6 refused automated requests (HTTP 403 or 405).** Those six were checked by
-other means, and every profile link on [Credits](CREDITS.md) was checked
+other means, and every profile link on [Credits](../../docs/CREDITS.md) was checked
 against the profile itself.
 
 This page records both checks and how to repeat them, for maintainers. The
@@ -60,12 +60,12 @@ Checked on 2026-10-04, from a development computer, not a Spark.
 - The six refusals are under
   [Links checked by other means](#links-checked-by-other-means).
 - Paper authors were checked separately: all 36 arXiv papers cited in
-  [Credits](CREDITS.md) had their titles and author lists compared with
+  [Credits](../../docs/CREDITS.md) had their titles and author lists compared with
   arXiv's own records, through `export.arxiv.org`, in the previous review.
 
 ## Profile links on Credits
 
-**Every person and team link on [Credits](CREDITS.md) was checked against
+**Every person and team link on [Credits](../../docs/CREDITS.md) was checked against
 the profile itself, on 2026-10-04.**
 
 - **GitHub.** The profile page at `https://github.com/<login>` was fetched
@@ -715,5 +715,5 @@ export allowlist and counts every link occurrence outside code blocks.
 - No build, GPU benchmark or reference suite was rerun for this
   documentation-only work.
 
-**Where next:** [Credits](CREDITS.md) · [Export](export.md) ·
+**Where next:** [Credits](../../docs/CREDITS.md) · [Export](export.md) ·
 [Documentation index](README.md)

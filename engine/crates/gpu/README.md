@@ -310,4 +310,4 @@ release gate (the pass-or-fail check before a release) must run the actual
 embedded payload, and an explicit PTX fallback, on the GPU.
 
 **Where next:** [spark-engine](../engine/README.md) ·
-[Credits](../../docs/CREDITS.md) · [Benchmarks](../../docs/benchmarks.md)
+[Credits](../../../docs/CREDITS.md) · [Benchmarks](../../docs/benchmarks.md)

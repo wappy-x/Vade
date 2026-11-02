@@ -579,4 +579,4 @@ and the BF16 checkpoint need their own qualification.
   configurations.
 
 **Where next:** [Server and API](server.md) · [Benchmarks](benchmarks.md) ·
-[Multiple Sparks](multi-spark.md) · [Credits](CREDITS.md)
+[Multiple Sparks](multi-spark.md) · [Credits](../../docs/CREDITS.md)

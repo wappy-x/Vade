@@ -162,9 +162,10 @@ To check your own engine, run `vade verify`. [Token IDs](docs/results.md#token-i
 | [Code of conduct](.github/CODE_OF_CONDUCT.md) | How we treat each other, and how to report a problem |
 | [Contributing](.github/CONTRIBUTING.md) | House rules, validation and review |
 | [Changelog](CHANGELOG.md) | Changes since v0.1.0 |
+| [Credits](docs/CREDITS.md) | Everyone Vade builds on, on one page |
 
 </div>
 
 Everything else is in [docs](docs/README.md). Coding agents that change Vade read [AGENTS.md](AGENTS.md) first.
 
-Vade is licensed under [Apache-2.0](LICENSE). The bundled tokenizer and template fixtures keep their own licenses, and so do the models. [NOTICE](NOTICE) lists them. [Credits](docs/CREDITS.md) names the work Vade builds on.
+Vade is licensed under [Apache-2.0](LICENSE). The bundled tokenizer and template fixtures keep their own licenses, and so do the models. [NOTICE](NOTICE) lists them. [Credits](docs/CREDITS.md) names everyone Vade builds on, on one page.

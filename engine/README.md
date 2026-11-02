@@ -81,5 +81,5 @@ Pick the guide for your setup: [Multiple Sparks](docs/multi-spark.md),
 ## Credits and license
 
 The source is licensed under [Apache-2.0](LICENSE). Each model keeps its own
-license. [Credits](docs/CREDITS.md), [implementation attribution](CREDITS-NOTES.md)
-and [NOTICE](NOTICE) record the sources used.
+license. [Credits](../docs/CREDITS.md) names everyone Vade builds on, on one page.
+[NOTICE](NOTICE) records the files kept from others.

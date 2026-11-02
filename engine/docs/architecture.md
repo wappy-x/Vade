@@ -427,4 +427,4 @@ revision, hash and notice.
   `flash-serve`, on one Spark or across several.
 
 **Where next:** [Design principles](concepts.md) ·
-[Speculative decoding](speculative-decoding.md) · [Credits](CREDITS.md)
+[Speculative decoding](speculative-decoding.md) · [Credits](../../docs/CREDITS.md)

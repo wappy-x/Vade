@@ -58,7 +58,7 @@ it covers and who it is for, and ends with where to go next.
 
 **Records that make the project checkable.**
 
-- [Credits](CREDITS.md). Every person, team, paper and project Vade learned
+- [Credits](../../docs/CREDITS.md). Every person, team, paper and project Vade learned
   from, with where to find them and what Vade used.
 - [Provenance](provenance.md). Reused data files with hashes and notices;
   which code is Vade's own.

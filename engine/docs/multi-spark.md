@@ -377,4 +377,4 @@ The helper transport and the TP transport are separate protocols.
 - Distributed conversation recovery and request load balancing.
 
 **Where next:** [Architecture](architecture.md#several-sparks-on-one-answer) ·
-[spark-tp crate](../crates/tp/README.md) · [Credits](CREDITS.md)
+[spark-tp crate](../crates/tp/README.md) · [Credits](../../docs/CREDITS.md)

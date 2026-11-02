@@ -124,10 +124,7 @@ A controller is a computer that drives one or more Sparks over SSH with the `vad
 
 ### Credits and licenses
 
-- **[Credits](CREDITS.md)**: the work that Vade builds on.
-- **[Engine credits](../engine/docs/CREDITS.md)**: the people, papers and projects behind the engine.
-- **[Engine ideas and references](../engine/CREDITS-NOTES.md)**: each source and what the engine uses from it.
-- **[Harness sources studied](../harness/CREDITS-NOTES.md)**: the client docs and designs that we studied.
+- **[Credits](CREDITS.md)**: everyone Vade builds on, on one page.
 - **[Provenance](../engine/docs/provenance.md)**: the origin of Vade's code and reused data files.
 - **[Reference data provenance](../engine/tools/truth/README.md)**: how the saved official reference data was made.
 - **[Prefill oracle](../engine/tools/oracles/README.md)**: a host test that checks how prompt rows map onto the GPU grid.
