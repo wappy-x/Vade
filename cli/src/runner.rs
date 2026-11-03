@@ -611,10 +611,18 @@ pub fn ssh_check(alias: &str) -> Option<Exec> {
     Some(exec)
 }
 
+const SSH_CHECK_FIX: &str = "Read docs/INSTALL.md for the SSH check command. Then run the same Vade command again.";
+
+/// Use the install guide when public output would replace an address with a label.
+pub(crate) fn ssh_fix(destination: &str, fix: String) -> String {
+    let host = destination.rsplit('@').next().unwrap_or(destination);
+    if host.parse::<std::net::Ipv4Addr>().is_ok() { SSH_CHECK_FIX.into() } else { fix }
+}
+
 /// Check every destination before the caller starts other remote work.
 pub(crate) fn check_ssh(runner: &mut impl Runner, machines: &[(&str, &str)]) -> Result<(), String> {
     let mut failed = Vec::new();
-    let fix = "Read docs/INSTALL.md for the SSH check command. Then run the same Vade command again.";
+    let fix = SSH_CHECK_FIX;
     for (name, alias) in machines {
         let Some(mut check) = ssh_check(alias) else { continue };
         check.timeout = Duration::from_secs(15);
@@ -660,7 +668,7 @@ impl SshStop {
         } else {
             ("", format!("Run ssh {alias} true to see the full SSH error, then run vade doctor."))
         };
-        Some(Self { error: format!("ssh {alias} failed: {line}{stop}{note}"), fix })
+        Some(Self { error: format!("ssh {alias} failed: {line}{stop}{note}"), fix: ssh_fix(alias, fix) })
     }
 }
 

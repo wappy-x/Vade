@@ -208,6 +208,17 @@ fn an_ssh_failure_shows_the_last_line_and_the_fix_for_that_cause() {
 }
 
 #[test]
+fn address_ssh_stop_fixes_point_to_the_install_guide_for_each_cause() {
+    for target in ["192.0.2.10", "user@203.0.113.10"] {
+        for printed in ["IDENTIFICATION HAS CHANGED\nHost key verification failed.", "Host key verification failed.", "Permission denied (publickey).", "Connection refused"] {
+            let stop = SshStop::from_output(target, printed).unwrap();
+            assert_eq!(stop.fix, "Read docs/INSTALL.md for the SSH check command. Then run the same Vade command again.");
+            assert_eq!(stop.error.contains("Vade never edits ~/.ssh."), !printed.contains("Connection refused"));
+        }
+    }
+}
+
+#[test]
 fn failed_and_unfinished_ssh_checks_point_to_the_install_guide() {
     struct Fails { calls: usize }
     impl Runner for Fails {

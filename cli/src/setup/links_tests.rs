@@ -1,5 +1,30 @@
 use super::*;
 
+#[test]
+fn setup_ssh_stop_fix_uses_the_destination_kind() {
+    struct Failed;
+    impl Runner for Failed {
+        fn run(&mut self, _: &runner::Exec) -> Result<runner::Output, String> {
+            Ok(runner::Output { success: false, stdout: "Host key verification failed.\n".into() })
+        }
+        fn interactive(&mut self, _: &runner::Exec) -> Result<bool, String> { unreachable!() }
+        fn port_free(&mut self, _: u16) -> Result<(), String> { unreachable!() }
+        fn pause(&mut self, _: std::time::Duration) { unreachable!() }
+    }
+    let _host = runner::fake_host(runner::Host::default());
+    for target in ["user@192.0.2.10", "203.0.113.10", "fixture-ssh"] {
+        let names = crate::config::PublicNames::hosts(&[target.into()]);
+        let error = names.run(|| probe(&mut Failed, target, "vade setup")).unwrap_err();
+        assert!(error.contains("Host key verification failed."), "{error}");
+        if target == "fixture-ssh" {
+            assert!(error.contains("Run ssh fixture-ssh true and accept the key") && error.ends_with("then run vade setup again."), "{error}");
+        } else {
+            assert!(error.contains("Read docs/INSTALL.md for the SSH check command."), "{error}");
+            assert!(!error.contains(" true") && !error.contains("ssh-keyscan") && !error.contains(target), "{error}");
+        }
+    }
+}
+
 fn iface(name: &str, cidr: &str, speed: u64, state: &str) -> String { format!("iface {name} {cidr} {speed} 9000 mlx5_0 {state}\n") }
 
 /// A Spark with these probe lines, reached over SSH at `reached` (or `-`).

@@ -218,7 +218,7 @@ impl<R: Runner> App<R> {
         let probe = match probe {
             Ok(probe) => probe,
             Err(error) => {
-                report.fail(&name("ssh"), &error, &format!("Run ssh {} true to see the SSH error, {rerun}", machine.ssh))?;
+                report.fail(&name("ssh"), &error, &runner::ssh_fix(&machine.ssh, format!("Run ssh {} true to see the SSH error, {rerun}", machine.ssh)))?;
                 for check in ["nvidia-smi", "GPU use", "disk", "free memory", "model files"] { report.skip(&name(check), "needs SSH")?; }
                 return Ok(());
             }
@@ -227,7 +227,7 @@ impl<R: Runner> App<R> {
         if missing == Some("ssh") {
             match &probe.ssh_stop {
                 Some(stop) => report.fail(&name("ssh"), &stop.error, &stop.fix)?,
-                None => report.fail(&name("ssh"), &probe.error.clone().unwrap_or_default(), &format!("Run ssh {} true to see the SSH error, {rerun}", machine.ssh))?,
+                None => report.fail(&name("ssh"), &probe.error.clone().unwrap_or_default(), &runner::ssh_fix(&machine.ssh, format!("Run ssh {} true to see the SSH error, {rerun}", machine.ssh)))?,
             }
             for check in ["nvidia-smi", "GPU use", "disk", "free memory", "model files"] { report.skip(&name(check), "needs SSH")?; }
             return Ok(());
@@ -235,7 +235,7 @@ impl<R: Runner> App<R> {
         report.ok(&name("ssh"), &format!("reached {}", machine.ssh))?;
         match missing {
             Some("script") => {
-                report.fail(&name("check script"), &probe.error.clone().unwrap_or_default(), &format!("Rerun vade doctor; if this repeats, check the login shell with ssh {} true.", machine.ssh))?;
+                report.fail(&name("check script"), &probe.error.clone().unwrap_or_default(), &runner::ssh_fix(&machine.ssh, format!("Rerun vade doctor; if this repeats, check the login shell with ssh {} true.", machine.ssh)))?;
                 for check in ["nvidia-smi", "GPU use", "disk", "free memory", "model files"] { report.skip(&name(check), "not checked; the script stopped early")?; }
                 return Ok(());
             }
@@ -479,8 +479,8 @@ fi"#, host = HOST_TOOLCHAIN.replace('.', "[.]")) } else { String::new() },
                     "rustup" => format!("{} has no rustup. A source build needs rustup with Rust {HOST_TOOLCHAIN} and {KERNEL_TOOLCHAIN} for the GPU kernels. Install them there (docs/INSTALL.md), or set prebuilt_dir to a matching bundle, then run vade doctor.", machine.name),
                     "toolchain" => format!("{} has no Rust {HOST_TOOLCHAIN} toolchain. Run rustup toolchain install {HOST_TOOLCHAIN} --profile minimal --no-self-update there, or set prebuilt_dir to a matching bundle, then run vade doctor.", machine.name),
                     "kernel-toolchain" => format!("{} lacks the {KERNEL_TOOLCHAIN} toolchain for the GPU kernels. Run rustup toolchain install {KERNEL_TOOLCHAIN} --profile minimal --no-self-update --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda there, or set prebuilt_dir to a matching bundle, then run vade doctor.", machine.name),
-                    "ssh" => format!("ssh {} did not run the check script. Run ssh {} true to see the SSH error, then run vade doctor.", machine.ssh, machine.ssh),
-                    _ => format!("{}'s check script stopped before naming a failed check. Rerun vade doctor; if this repeats, check the login shell with ssh {} true.", machine.name, machine.ssh),
+                    "ssh" => format!("ssh {} did not run the check script. {}", machine.ssh, runner::ssh_fix(&machine.ssh, format!("Run ssh {} true to see the SSH error, then run vade doctor.", machine.ssh))),
+                    _ => format!("{}'s check script stopped before naming a failed check. {}", machine.name, runner::ssh_fix(&machine.ssh, format!("Rerun vade doctor; if this repeats, check the login shell with ssh {} true.", machine.ssh))),
                 },
             });
             if missing_ssh {

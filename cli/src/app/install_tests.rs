@@ -1,6 +1,6 @@
 use super::*;
 
-fn with_bundle() -> Fixture {
+pub(super) fn with_bundle() -> Fixture {
     with_bundle_machines(1)
 }
 

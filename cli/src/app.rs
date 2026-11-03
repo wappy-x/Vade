@@ -386,7 +386,7 @@ impl<R: Runner> App<R> {
             return Err(if output.stdout.contains("hash_failed=1") {
                 "Cannot verify staged artifacts. Run vade install, then try vade up.".into()
             } else {
-                format!("Cannot reach {} over SSH, or its login shell failed. Run ssh {} true to see the error, then run vade doctor.", machine.name, machine.ssh)
+                format!("Cannot reach {} over SSH, or its login shell failed. {}", machine.name, runner::ssh_fix(&machine.ssh, format!("Run ssh {} true to see the error, then run vade doctor.", machine.ssh)))
             });
         }
         if !self.dry {

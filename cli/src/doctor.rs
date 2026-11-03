@@ -95,7 +95,7 @@ pub(crate) fn machine<R: Runner>(report: &mut Report, runner: &mut R, machine: &
         Ok(fields) => fields,
         Err(error) => {
             report.fail(&name("file and port check"), &error,
-                &format!("Run ssh {} true, then run vade doctor.", machine.ssh))?;
+                &runner::ssh_fix(&machine.ssh, format!("Run ssh {} true, then run vade doctor.", machine.ssh)))?;
             return Ok(());
         }
     };

@@ -411,6 +411,8 @@ Each of the 9 names in the `command -v` line must print a path. A name with no
 path is a missing tool. Install any missing tool with `apt-get`. The `ssh`
 command is in the `openssh-client` package.
 
+### Check SSH
+
 From a controller, Vade checks SSH to every selected Spark before it starts
 remote work. A failed check stops the run. One `SSH checks failed` message
 names every failed Spark and points to this page. For each failed Spark,
@@ -424,6 +426,17 @@ output hides SSH addresses, including in dry runs. If a label is not an SSH
 name, use the matching destination from your `--sparks` or `--hosts` list.
 For a saved setup, use that machine's `ssh` value in the controller config.
 Run the SSH command in your private terminal.
+
+An SSH error can give a check command when the destination is an alias.
+For an address destination, the error points to this section. Use the real
+destination for `DESTINATION`. Do not use the public machine label.
+
+If SSH reports a changed host key, ask the person who runs that Spark why
+it changed. Continue only if the change is expected. Run the `ssh-keygen -R`
+command that SSH prints. Then run the SSH check again. Check the new key
+before you accept it. If SSH reports `Permission denied`, check the account
+and its key. If you must copy your public key, run `ssh-copy-id DESTINATION`
+with the real destination. Then run the SSH check again.
 
 If something else uses the GPU, stop it through its own launcher first. Vade
 does not change the driver or the system. Leave those changes to the Spark's
@@ -1782,7 +1795,7 @@ stop. Run `vade logs` and `vade doctor` before you retry.
 | `Cannot read the NVIDIA GPU and driver; ... nvidia-smi said: ...` | The text after `nvidia-smi said:` is the driver's own error. Run `nvidia-smi` to see it in full, and ask the administrator to fix the driver. |
 | `Prepare: no checksum list for this checkpoint` | Vade found no checksum list beside the model folder, so it cannot check the files against the published hashes. The install goes on. To check the files, follow [check the files](#check-the-files), or download the model with `vade pull`, which writes the list. |
 | `The model is missing or incomplete on at least one Spark` | A controller's `vade install` staged the build, but a Spark has no complete checkpoint. Copy the checkpoint to the path the message above it names, check it, then run `vade install` again. |
-| `Cannot reach ... over SSH, or its login shell failed.` | A controller's `vade up` or `vade doctor` could not run a command on that Spark. Run the `ssh ... true` command it prints to see the SSH error. Check that the Spark is on and that SSH logs in with no password prompt. |
+| `Cannot reach ... over SSH, or its login shell failed.` | A controller's `vade up` or `vade doctor` could not run a command on that Spark. Use the [SSH check](#check-ssh) with the real destination to see the SSH error. Check that the Spark is on and that SSH logs in with no password prompt. |
 | `This machine's GPU is in use.` | On a controller, `vade up` puts the machine name in front of it. Stop the workload with the launcher that started it, run `vade doctor`, then retry. Never kill processes by name. |
 | `Install cache preparation failed; the previous activation was kept.` | A controller's `vade install` prints this when a Spark's GPU is busy or its files fail a check. The build you had before is still the active one. The message starts with the machine name and the reason (for example `This machine's GPU is in use.`), and the line above it gives the path of a saved log. Fix the reason, or read the log, then run `vade install` again. |
 | `Port ... is in use; close the application using it and retry vade launch.` (from `vade up`, it ends `retry vade up.`) | Find the program that uses the port and stop it through its own controls. A first local setup can pick another port, but later launches reuse the saved one. On a controller, choose free `local_port` and `serve_port` values in the private config. |

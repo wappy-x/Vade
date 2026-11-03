@@ -17,6 +17,8 @@ mod local_rank;
 mod fake_hosts;
 #[path = "tests/tunnels.rs"]
 mod tunnels;
+#[path = "tests/ssh_stop.rs"]
+mod ssh_stop;
 use super::*;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
