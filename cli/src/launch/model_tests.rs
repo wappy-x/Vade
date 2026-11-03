@@ -25,6 +25,17 @@ impl Drop for Fixture {
     }
 }
 #[test]
+fn missing_default_folder_has_a_plain_reason_but_broken_links_still_fail() {
+    let f = Fixture::new();
+    assert_eq!(find(&f.0).unwrap_err(), crate::detect::NO_MODELS);
+    let missing = f.0.join("missing");
+    std::os::unix::fs::symlink(&missing, f.0.join("models")).unwrap();
+    assert!(find(&f.0).unwrap_err().contains("is unavailable"));
+    assert!(discover_with(&f.0, None, Some(missing.as_os_str()), |reason| Err(reason.into()))
+        .unwrap_err().contains("is unavailable"));
+}
+
+#[test]
 fn environment_then_preferred_default_then_one_prompt_and_saved_path() {
     let f = Fixture::new();
     let env = f.model("elsewhere/checkpoint");

@@ -108,6 +108,8 @@ curl -fsSL https://vade.lol/install.sh | sh
 
 The installer checks the GPU and the driver. Then it installs the prebuilt bundle of main from dl.vade.lol. It needs no sudo and no model.
 
+When `~/models` does not exist, the install prints `No models yet. vade pull makes ~/models.`. The install continues.
+
 - **Expected output.** `Install complete. Next steps:`, then the next steps. Follow this page, not the steps that the installer lists.
 - **Exit code.** 0. Exit 0 alone does not prove that the install worked. If `curl` fails, `sh` receives no script and also exits 0.
 - **Check.** The output has the line `Install complete. Next steps:`.
@@ -203,9 +205,10 @@ The first `vade up` finds the model under `~/models`, saves the settings in `~/.
 
 The line gives the true values. The context can be smaller than 32768 on a Spark with less free memory. The port can differ if 18080 was in use at the first start. Use the address in this line in step 5, and add `/v1` to it.
 
-The two most likely failures:
+Common failures:
 
-- **`Model folder ... is unavailable` and a `vade pull` line.** The checkpoint is not where Vade looks. Go back to step 3.
+- **`No models yet. vade pull makes ~/models.`** The default folder does not exist. Go back to step 3.
+- **`Model folder ... is unavailable` for a chosen folder.** Check `VADE_MODELS`. Select an existing checkpoint folder, or go back to step 3.
 - **`GPU is in use`, or `Port ... is in use`.** Another program holds the GPU or the port. Tell the person. Do not stop it.
 
 ## Step 5. Send one API request
@@ -596,7 +599,8 @@ It pulls each source checkout and stages the new build. Then it asks before a re
 | `missing cc` | A build from source needs a C compiler, and the Spark has none | Tell the person. An administrator installs it |
 | `no checksum list for this checkpoint` | No `.sha256` list beside the model folder | Tell the person. [Check the files](../INSTALL.md#check-the-files) shows the check |
 | `Cannot reach ... over SSH` | A Spark is off, off the network or asks for a password | Step L1, then run the command again |
-| `Model folder ... is unavailable` | No checkpoint where Vade looks | Step 3 |
+| `No models yet. vade pull makes ~/models.` | The default folder does not exist | Step 3 |
+| `Model folder ... is unavailable` | The chosen folder is missing or cannot be read | Check `VADE_MODELS`, then step 3 |
 | A doctor row `model files` fails | The checkpoint is missing or incomplete | Step 3 |
 | `refused --context` or `Not enough memory` | The engine has too little memory | Run `vade up` with `--context` 16384, then 8192, then 4096 |
 | `Port ... is in use` | Another program has the port | Tell the person |

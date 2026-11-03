@@ -63,6 +63,10 @@ pub(super) fn find(home: &Path) -> Result<Model, String> {
     discover_with(home, None, None, |reason| Err(reason.into()))
 }
 
+pub(super) fn default_folder_missing(home: &Path) -> bool {
+    fs::symlink_metadata(home.join("models")).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+}
+
 fn check_interrupted() -> Result<(), String> {
     if crate::runner::interrupted() {
         Err("Model selection interrupted; nothing was installed.".into())
@@ -152,6 +156,8 @@ fn discover_with(
             Ok(model) => return Ok(model),
             Err(error) => reason = error,
         }
+    } else if saved.is_none() && default_folder_missing(home) {
+        reason = crate::detect::NO_MODELS.into();
     } else if saved.is_none() {
         let models = home.join("models");
         let preferred = [models.join("nvidia").join(DEFAULT_CHECKPOINT), models.join(DEFAULT_CHECKPOINT)]

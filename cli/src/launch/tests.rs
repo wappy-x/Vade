@@ -1,6 +1,9 @@
 use super::*;
 use crate::runner::Output;
 
+#[path = "fresh_models_tests.rs"]
+mod fresh_models_tests;
+
 const GIB: u64 = 1024 * 1024 * 1024;
 
 fn identity() -> detect::Identity {

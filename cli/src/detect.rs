@@ -14,6 +14,7 @@ const GIB: u64 = 1024 * 1024 * 1024;
 const WORKING_RESERVE: u64 = 8 * GIB;
 const MEMORY_RESERVE: u64 = WORKING_RESERVE;
 const MODEL_DISK_RESERVE: u64 = GIB;
+pub(crate) const NO_MODELS: &str = "No models yet. vade pull makes ~/models.";
 
 /// The engine's startup ceiling: MemAvailable less its 10% reserve, at least
 /// 2 GiB (flash-serve bootstrap). Reported only; the engine enforces it.
@@ -65,9 +66,9 @@ pub struct Identity {
 
 impl Identity {
     /// The report `vade detect` and `vade doctor` print.
-    pub fn display(&self, models: &Path) -> String {
+    pub fn display(&self, models: Option<&Path>) -> String {
         format!(
-            "Machine: {} / {}\nOS: {} ({})\nMemory: {}\nDisk free: {:.1} GiB install, {:.1} GiB models{}\nGPU: {}\nDriver: {}   CUDA supported: {}\nModels: {}\n",
+            "Machine: {} / {}\nOS: {} ({})\nMemory: {}\nDisk free: {:.1} GiB install, {:.1} GiB models{}\nGPU: {}\nDriver: {}   CUDA supported: {}\n{}\n",
             plain(&self.vendor),
             plain(&self.product),
             plain(&self.os),
@@ -83,7 +84,7 @@ impl Identity {
             plain(&self.gpu),
             plain(&self.driver),
             plain(&self.cuda),
-            crate::text::quoted(&models.to_string_lossy()),
+            models.map_or_else(|| NO_MODELS.to_owned(), |path| format!("Models: {}", crate::text::quoted(&path.to_string_lossy()))),
         )
     }
 
@@ -522,7 +523,7 @@ mod tests {
                 assert!(identity.volumes_shared);
                 assert!(
                     identity
-                        .display(&fixture.0.join("home/models"))
+                        .display(Some(&fixture.0.join("home/models")))
                         .contains($product)
                 );
                 assert!(
@@ -599,7 +600,7 @@ mod tests {
         for text in ["20.0 GiB available of 122.0 GiB", "need 104.0 GiB", "may use up to 18.0 GiB", ". Stop other programs"] {
             assert!(error.contains(text), "{error}");
         }
-        assert!(identity.display(Path::new("/m")).contains("Memory: 20.0 GiB available of 122.0 GiB (page cache counts as available); the engine may use up to 18.0 GiB"));
+        assert!(identity.display(Some(Path::new("/m"))).contains("Memory: 20.0 GiB available of 122.0 GiB (page cache counts as available); the engine may use up to 18.0 GiB"));
         assert_eq!(engine_ceiling(110 * GIB), 99 * GIB);
         assert_eq!(engine_ceiling(GIB), 0);
     }

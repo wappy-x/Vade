@@ -554,11 +554,13 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
     fn install_without_model(&mut self, installed: Option<Fields>, reason: &str) -> Result<(), String> {
         let start = phase("Detect", "read this Spark; the model is not on disk yet")?;
         let models = self.home.join("models");
-        let models = if models.is_dir() { models } else { self.home.clone() };
+        let missing = model::default_folder_missing(&self.home);
         let identity = self.detector.detect(&self.root, &models)?;
         identity.check_resources(0, if installed.is_some() { 0 } else { INSTALL_SPACE })?;
-        output::text(format_args!("{}", identity.display(&models)))?;
-        output::line(format_args!("Model: {reason} The install goes on without it; vade launch needs the model."))?;
+        output::text(format_args!("{}", identity.display((!missing).then_some(models.as_path()))))?;
+        if !missing {
+            output::line(format_args!("Model: {reason} The install goes on without it; vade launch needs the model."))?;
+        }
         done("Detect", start)?;
         let (artifacts, _) = self.install_files(installed, true)?;
         self.prepare(None, &artifacts, "install")?;
@@ -574,7 +576,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
         let start = phase("Detect", "read this Spark and the model on disk")?;
         let model = model::discover(&self.home, config.map(|c| c.model.as_path()))?;
         let identity = self.identify(&model, install_space)?;
-        output::text(format_args!("{}", identity.display(&model.path)))?;
+        output::text(format_args!("{}", identity.display(Some(&model.path))))?;
         done("Detect", start)?;
         Ok((model, identity))
     }
