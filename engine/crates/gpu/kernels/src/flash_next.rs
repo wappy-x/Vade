@@ -398,6 +398,77 @@ pub unsafe extern "ptx-kernel" fn flash_next_hc_add(p: crate::kernel_params::Fla
         let gate=*(p.gates as *const f32).add(row*4+stream);
         *x=math::hc_add(*x,gate,block,|v| hc_sigmoid(v)); }
 }
+/// Decode rows (M <= 16): flash_next_hc_add (peer 0) fused with the next mix's flash_hc_norm_f32
+/// and its packed planes. Grid 4 x M, block 128: CTA (stream, token) alone owns that row's stream.
+/// Warp 0 forms every value residual + 2 sigmoid(gate / 4) block (next_math::hc_add), adds its
+/// square in the norm's lane order and forms the norm's scale. Warp w forms its own 640 values
+/// again (lane l: pairs w * 640 + 2l + 64j, +1, j < 10) from the same words. The one barrier
+/// keeps every residual store behind every residual read of the CTA. Same values, products,
+/// square order and packed words as the two launches.
+/// # Safety
+/// `rows` = grid.y = M <= 16. residual covers M x 4H FP32 words, block M x H, gates M x 4, weight
+/// 4H, output M x 4H, packed the two dense planes of M x 4H; no two of these overlap.
+// SAFETY: Hc::mix_chunk (blocks.rs) and the kernel bench (kernel_head.rs launch_hc) launch this
+// entry, with buffers of those sizes. CTAs touch disjoint (stream, row) words, and the barrier orders each CTA's reads and stores.
+#[no_mangle]
+pub unsafe extern "ptx-kernel" fn flash_next_hc_add_norm_rows(p: crate::kernel_params::FlashHcAddNorm, rows: u32) {
+    let (group, groups) = (2560usize, 4usize);
+    let tid = core::arch::nvptx::_thread_idx_x() as usize;
+    let (warp, lane) = (tid / 32, tid % 32);
+    let (stream, token) = (core::arch::nvptx::_block_idx_x() as usize, core::arch::nvptx::_block_idx_y() as usize);
+    let base = token * groups * group + stream * group;
+    let (x, y) = ((p.residual as *mut f32).add(base), (p.output as *mut f32).add(base));
+    let (block, w) = ((p.block as *const f32).add(token * group), (p.weight as *const f32).add(stream * group));
+    let sig = hc_sigmoid(*(p.gates as *const f32).add(token * groups + stream) * 0.25);
+    let add = |r: f32, b: f32| crate::next_math::hc_add(r, 0.0, b, |_| sig);
+    let first = warp * 640 + lane * 2;
+    // Loads before the math: no value waits behind another value's store or square add.
+    let pair = |j: usize| {
+        let i = first + 64 * j;
+        ([*x.add(i), *x.add(i + 1)], [*block.add(i), *block.add(i + 1)], [*w.add(i), *w.add(i + 1)])
+    };
+    let raw = [pair(0), pair(1), pair(2), pair(3), pair(4), pair(5), pair(6), pair(7), pair(8), pair(9)];
+    let sh = crate::ptx::shared::<4>();
+    if warp == 0 {
+        let (lane_x, lane_b) = (x.add(lane), block.add(lane));
+        let mut squares = 0.0f32;
+        // Twenty values per batch: forty words in registers, then their adds in lane order.
+        macro_rules! batch { ($at:literal; $($j:literal)*) => {
+            let r = [$(*lane_x.add(($at + $j) * 32)),*];
+            let b = [$(*lane_b.add(($at + $j) * 32)),*];
+            $(squares = crate::flash_ops::norm_square_add(squares, add(r[$j], b[$j]));)*
+        } }
+        batch!(0; 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19);
+        batch!(20; 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19);
+        batch!(40; 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19);
+        batch!(60; 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19);
+        let scale = 1.0 / crate::layer::sqrt(crate::layer::sum(squares) / group as f32 + 1e-6);
+        if lane == 0 { crate::ptx::store(sh, scale); }
+    }
+    crate::ptx::sync();
+    let scale = crate::ptx::load(sh);
+    let rows = rows as usize;
+    let kt = groups * group / 16;
+    let plane = rows.div_ceil(16) * kt * 128;
+    let packed = p.packed as *mut u32;
+    let word = |c: usize| ((token / 16 * kt + c / 16) * 32 + token % 8 * 4 + c % 8 / 2) * 4 + token % 16 / 8 + c % 16 / 8 * 2;
+    macro_rules! store { ($($j:literal)*) => { $(
+        let i = first + 64 * $j;
+        let (r, b, g) = raw[$j];
+        let (v0, v1) = (add(r[0], b[0]), add(r[1], b[1]));
+        let (a, c) = (v0 * scale * (1.0 + g[0]), v1 * scale * (1.0 + g[1]));
+        *x.add(i) = v0; *x.add(i + 1) = v1;
+        *y.add(i) = a; *y.add(i + 1) = c;
+        let (hi, lo) = crate::gemm::split2_pair(a, c);
+        let at = word(stream * group + i);
+        *packed.add(at) = hi;
+        *packed.add(plane + at) = lo;
+        // Row token + 8 of this 16-row tile is padding: its word is 0, as the pack's.
+        if token % 16 < 8 && token + 8 >= rows { *packed.add(at + 1) = 0; *packed.add(plane + at + 1) = 0; }
+    )* } }
+    store!(0 1 2 3 4 5 6 7 8 9);
+}
+
 /// flash_next_hc_add whose block value is formed here exactly as flash_next_k16_finish forms
 /// it (decode rows: one launch fewer per deferred layer); the block row is still stored.
 #[no_mangle]

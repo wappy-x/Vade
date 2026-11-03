@@ -108,6 +108,7 @@ pub(crate) struct Pooled<'a> {
 impl<'a> Pooled<'a> {
     fn new(b: &Backend<'a>, model: &NextModel<'a>, capacity: usize, width: usize) -> Result<Self> {
         b.prepare_flash_dense()?;
+        b.flash_mixed_planes()?;
         let qsa = (0..width)
             .map(|_| QsaScratch::new(b, &model.weights.plan, 1, capacity))
             .collect::<Result<Vec<_>>>()?;
@@ -249,8 +250,7 @@ impl<'a> Pooled<'a> {
                     step,
                 )?;
             }
-            source.attn_hc[li].combine_tiled(b, &mut w.hc, &mut w.residual, &w.block, width)?;
-            source.mlp_hc[li].mix_tiled(b, &mut w.hc, &w.residual, &w.mixed, width)?;
+            source.mlp_hc[li].combine_mix_tiled(&source.attn_hc[li], b, &mut w.hc, &mut w.residual, &w.block, &w.mixed, width, None)?;
             // The MLP combine forms this layer's MoE finish (combine_finish_tiled).
             w.defer_finish = true;
             let moe = w.moe(b, model, li, width, Some(step));

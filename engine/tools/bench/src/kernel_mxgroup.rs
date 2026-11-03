@@ -8,7 +8,7 @@ pub(super) fn all_mx(c: &Case) -> bool {
 }
 pub(super) fn group_mx(c: &Case, j: usize) -> bool {
     let n = c.mats[j];
-    n > 0 && n % 4 == 0 && !c.name.starts_with("mxg-hc") && !(c.name.starts_with("mxg-moe") && j == 0)
+    n > 0 && n % 4 == 0 && !c.name.starts_with("mxg-hc") && !c.name.starts_with("hc_down_act") && !(c.name.starts_with("mxg-moe") && j == 0)
 }
 /// kind 13: a kind-8 group whose production-MXFP8 matrices (group_mx) are MXFP8; A = one group launch on
 /// their exact BF16 expansion, X = the same launch with the twins flagged (weight bit 0).

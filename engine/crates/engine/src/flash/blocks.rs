@@ -561,15 +561,6 @@ pub(super) fn next_rows_prepacked(b: &Backend<'_>, weight: u64, y: u64, rows: us
     }
     Ok(())
 }
-/// Rows per group when `tokens` rows of width `cols` exceed the packed-input scratch
-/// (VADE_PROMPT_TILE=8192 at the widest inputs): equal groups in multiples of 128
-/// rows, so the 128-row tiles and the final tail land on the same rows as one
-/// unsplit launch and every row keeps its kernel and K order.
-fn pack_groups(cols: usize, tokens: usize) -> Option<usize> {
-    use spark_gpu_probe::kernel_params::TERMS;
-    let cap = spark_gpu_probe::flash_dense_reserve_bytes() / 4 / (cols.div_ceil(16) * 128 * TERMS) * 16 / 128 * 128;
-    (tokens > cap && cap >= 1024).then(|| tokens.div_ceil(tokens.div_ceil(cap)).div_ceil(128) * 128)
-}
 fn next_prefill(
     b: &Backend<'_>,
     x: u64,
@@ -598,7 +589,7 @@ fn next_prefill_packed(
         return Ok(false);
     }
     // A prompt tile wider than the packed-input scratch runs in row groups.
-    if let Some(step) = pack_groups(cols, tokens) {
+    if let Some(step) = crate::flash_next_rows::pack_groups(cols, tokens) {
         let mut first = 0;
         while first < tokens {
             let n = step.min(tokens - first);
@@ -772,7 +763,7 @@ fn project_rows(b: &Backend<'_>, x: u64, cols: usize, tokens: usize, first: (u64
     } else if input_bf16 {
         tokens
     } else {
-        pack_groups(cols, tokens).unwrap_or(tokens)
+        crate::flash_next_rows::pack_groups(cols, tokens).unwrap_or(tokens)
     };
     if tokens > group {
         let width = if input_bf16 { 2 } else { 4 };
@@ -1057,7 +1048,7 @@ impl<'w> Hc<'w> {
     pub(super) fn combine_mix_tiled(&self, prev: &Hc<'w>, b: &Backend<'_>, scratch: &mut HcScratch<'_>,
         residual: &mut DeviceVector<'_>, block: &DeviceVector<'_>, output: &DeviceVector<'_>, tokens: usize,
         finish: Option<MoeFinishParams>) -> Result<()> {
-        if !(self.next && prev.next && self.norm_f32 && prev.inject.is_some() && tokens >= 64
+        if !(self.next && prev.next && self.norm_f32 && prev.inject.is_some() && (tokens >= 64 || tokens <= DECODE_ROWS && finish.is_none())
             && tokens <= HcScratch::workspace_tokens() && tokens <= scratch.tokens) {
             // Decode rows: the combine's add forms the finish per column (flash_next_hc_finish_add).
             let fused = finish.filter(|_| prev.next && b.has_flash("flash_next_hc_finish_add"));
@@ -1097,17 +1088,16 @@ impl<'w> Hc<'w> {
         injection: u64, tokens: usize, fused: Option<(u64, Option<MoeFinishParams>)>, output_a16:u64) -> Result<()> {
         if self.next {
             let (u, low) = (scratch.normalized.device_address(), scratch.low.device_address());
-            // Always use the solo normalization kernel/grid, with independent
-            // rows in grid Y; no prompt-only normalization or reduction.
-            // Prompt tiles: the F32 norm also writes the projections' packed operand.
-            let prepacked = if self.norm_f32 && tokens >= 64 {
+            // The unfused norm runs the solo grid, with independent rows in grid Y; no prompt-only reduction.
+            // Prompt tiles and fused decode rows: the F32 norm also writes the projections' packed operand.
+            let decode_add = fused.is_some() && tokens <= DECODE_ROWS;
+            let prepacked = if self.norm_f32 && (tokens >= 64 || decode_add) {
                 b.prepare_flash_dense()?;
                 Some(b.flash_dense_input()?)
             } else {
                 None
             };
-            let rows = [(self.inject.unwrap_or(0), injection, if self.inject.is_some() { 4 } else { 0 }, 4),
-                (self.down, low, LOW, LOW), (0, 0, 0, 0), (0, 0, 0, 0)];
+            let rows = [(self.inject.unwrap_or(0), injection, if self.inject.is_some() { 4 } else { 0 }, 4), (self.down, low, LOW, LOW), (0, 0, 0, 0), (0, 0, 0, 0)];
             // Prompt tiles: next_prefill_packed's HC down launch (injection in the last N tile)
             // whose epilogue applies flash_next_hc_activate and writes the activated low as the
             // HC up operand's planes in low's own words, offered to its pack. A last partial
@@ -1122,25 +1112,26 @@ impl<'w> Hc<'w> {
             if let (Some((block, finish)), Some(packed)) = (fused, prepacked) {
                 let mut p = spark_gpu_probe::kernel_params::FlashHcAddNorm { residual: r, block, gates: injection,
                     weight: self.norm, output: u, packed: if on_read { 0 } else { packed }, scales: if on_read { u } else { 0 } };
+                let mut rows = tokens as u32;
                 unsafe {
                     match finish {
                         // One CTA per token pair (t, t + 8) of each 16-row group.
                         Some(mut f) => {
-                            let mut rows = tokens as u32;
                             b.launch_flash_rows(if b.has_flash("flash_next_hc_finish_add_norm_fast") { "flash_next_hc_finish_add_norm_fast" }
                                 else { "flash_next_hc_finish_add_norm" }, 1, tokens.div_ceil(16) as u32 * 8, 256,
                                 8 * H as u32 * 4 + 32 + 2 * H as u32 * 2 + 2 * 16 * 4,
                                 &mut [(&mut p as *mut spark_gpu_probe::kernel_params::FlashHcAddNorm).cast(),
                                 (&mut f as *mut MoeFinishParams).cast(), (&mut rows as *mut u32).cast()])?
                         }
+                        // Decode rows: one CTA per (stream, row), which offers HC down its planes.
                         None => {
-                            let mut rows = tokens as u32;
-                            b.launch_flash_rows("flash_next_hc_add_norm", 1, tokens.div_ceil(16) as u32 * 8, 256,
-                                8 * H as u32 * 4 + 32, &mut [(&mut p as *mut spark_gpu_probe::kernel_params::FlashHcAddNorm).cast(),
+                            let (name, x, y, threads, shared) = if decode_add { ("flash_next_hc_add_norm_rows", 4, rows, 128, 0) } else { ("flash_next_hc_add_norm", 1, tokens.div_ceil(16) as u32 * 8, 256, 8 * H as u32 * 4 + 32) };
+                            b.launch_flash_rows(name, x, y, threads, shared, &mut [(&mut p as *mut spark_gpu_probe::kernel_params::FlashHcAddNorm).cast(),
                                 (&mut rows as *mut u32).cast()])?
                         }
                     }
                 }
+                if decode_add { b.offer_dense_planes(u, W, tokens, packed); }
             } else {
                 let planes = if self.norm_f32 && prepacked.is_none() && tokens <= DECODE_ROWS { b.prepare_flash_dense()?; Some(b.flash_dense_input()?) } else { None }; // decode rows: + HC down's packed planes (its pack launch is skipped)
                 let (mut p, name) = (FlashHcNorm { input: r, weight: self.norm, output: u, packed: prepacked.or(planes).unwrap_or(0) }, if self.norm_f32 { "flash_hc_norm_f32" } else { "flash_next_hc_norm" });
@@ -1161,14 +1152,21 @@ impl<'w> Hc<'w> {
                 b.offer_dense_planes(low, LOW, tokens, low);
             } else {
                 let done = prepacked.is_some() && next_prefill_packed(b, u, prepacked, W, tokens, rows)?;
-                if done {
+                // Decode BF16 rows: HC down activates its rows and writes HC up's planes, past its own input planes.
+                let act = !done && tokens <= DECODE_ROWS && self.norm_f32 && self.inject.is_some() && rows.iter().all(|r| r.2 == 0 || mx8_weight(r.0, r.2, W, tokens) & 1 == 0);
+                if act {
+                    let packed = b.pack_flash_latency_input(u, W, tokens)?;
+                    let planes = b.flash_dense_input()? + (2 * tokens.div_ceil(16) * (W / 16) * 128 * 4) as u64;
+                    b.flash_hc_down_group(&mut Bf16Pairs { pairs: [row_params(packed, W, tokens, rows[0], rows[1], true, false), row_params(packed, W, tokens, rows[2], rows[3], true, false)] }, planes)?;
+                    b.offer_dense_planes(low, LOW, tokens, planes);
+                } else if done {
                 } else if let Some(weight) = self.inject {
                     next_rows_group(b, u, W, tokens, [(weight, injection, 4), (self.down, low, LOW), (0, 0, 0), (0, 0, 0)])?;
                 } else {
                     next_rows(b, self.down, u, low, LOW, W, tokens)?;
                 }
                 let planes = if tokens <= DECODE_ROWS { b.prepare_flash_dense()?; b.flash_dense_input()? } else { 0 }; // decode rows: + HC up's packed planes (its pack launch is skipped)
-                launch(b, "flash_next_hc_activate", (LOW * tokens).div_ceil(128), &mut [Ptr(low),U32((LOW*tokens) as u32),Ptr(planes)])?; if planes != 0 { b.offer_dense_planes(low, LOW, tokens, planes); }
+                if !act { launch(b, "flash_next_hc_activate", (LOW * tokens).div_ceil(128), &mut [Ptr(low),U32((LOW*tokens) as u32),Ptr(planes)])?; if planes != 0 { b.offer_dense_planes(low, LOW, tokens, planes); } }
             }
             let packed = b.pack_flash_dense_input(low, LOW, tokens)?;
             let mut p = row_params(packed, LOW, tokens, (self.up, output, W, H), (0,0,0,0), true, false);
@@ -1199,15 +1197,15 @@ impl<'w> Hc<'w> {
                 b.offer_dense_planes(output, H, tokens, planes);
                 return Ok(());
             }
+            // M <= 8 FP32 consumers never read the dense tile, so the second tile can serve their pack.
+            let mut planes = if tokens <= BF16_ROWS_TOKENS && lbf12_of(self.up, None).is_some() { let t = b.flash_mixed_planes()?; b.offer_dense_planes(output, H, tokens, t); t } else { 0 };
             return unsafe {
-                // One warp per stream (gates mixed in stream order by warp 0); at M1-16 the LBF12
-                // twin of the up weight, when built, replaces its BF16 bytes (same bits; M2-16:
-                // hc_up_gate's chains on the twin's fragments).
+                // One warp per stream (gates mixed in stream order by warp 0); at M1-16 the LBF12 twin of the up
+                // weight, when built, replaces its BF16 bytes (M2-16: hc_up_gate's chains on the twin's fragments).
                 match lbf12_of(self.up, None).filter(|_| tokens <= 16) {
                     Some(mut twin) => b.launch_flash_rows(if tokens == 1 { "flash_next_hc_up_latency4_lbf12" } else { "flash_next_hc_up_latency16_lbf12" }, H.div_ceil(8) as u32, 1, 128, 0,
-                        &mut [(&mut p as *mut Bf16Rows).cast(), (&mut normalized as *mut u64).cast(), (&mut twin as *mut u64).cast()]),
-                    None => b.launch_flash_rows("flash_next_hc_up_latency4", H.div_ceil(8) as u32, tokens.div_ceil(16) as u32, 128, 0,
-                        &mut [(&mut p as *mut Bf16Rows).cast(), (&mut normalized as *mut u64).cast()]),
+                        &mut [(&mut p as *mut Bf16Rows).cast(), (&mut normalized as *mut u64).cast(), (&mut twin as *mut u64).cast(), (&mut planes as *mut u64).cast()]),
+                    None => b.launch_flash_rows("flash_next_hc_up_latency4", H.div_ceil(8) as u32, tokens.div_ceil(16) as u32, 128, 0, &mut [(&mut p as *mut Bf16Rows).cast(), (&mut normalized as *mut u64).cast()]),
                 }
             };
         }

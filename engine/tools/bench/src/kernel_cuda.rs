@@ -993,6 +993,7 @@ fn launch_group(g: &Gpu, f: H, merge: H, c: &Case, v: &mut Fixture, i: usize, ar
     }
     // Group launch: 128 threads always; groups of <= 640 rows merge inside the CTA.
     let _ = merge;
+    if c.name.starts_with("hc_down_act") { return head::launch_down_act(g, f, c, v, &mut pairs, arm); }
     let mut partials = v.aux;
     let shared = if rowsx { mxrows_shared(c, arm) } else if c.kind == 13 && arm == 1 && all_mx(c) { params::latency_mx8_shared(c.m, c.k, 4) as u32 } else { 4 * RING };
     g.launch(f, [192, 1, 1], 128, shared, &mut [ptr(&mut pairs), ptr(&mut partials)])
@@ -1237,7 +1238,7 @@ pub(super) fn run(o: &Options, cases: &[Case]) -> Result<()> {
         head::prepare(&mut g, modules[0], c, &mut v)?;
         if c.kind == 75 && c.mats[3] & 2 != 0 { rows::twins(&mut g, modules[1], c, &mut v)?; }
         if c.kind == 75 && c.mats[3] & 4 != 0 { v.pack = g.function(modules[1], "flash_bf16_input")?; }
-        if c.kind == 9 || c.kind == 10 || c.kind == 12 || c.kind == 77 {
+        if c.kind == 9 || c.kind == 10 || c.kind == 12 || c.kind == 77 || c.name.starts_with("hc_up_planes") {
             v.pack = g.function(modules[0], "flash_bf16_input")?;
         }
         let prompt_functions = if (60..=69).contains(&c.kind) || c.kind == 74 { prompt::prepare(&mut g, modules, c, &mut v)? } else { None };
@@ -1249,7 +1250,7 @@ pub(super) fn run(o: &Options, cases: &[Case]) -> Result<()> {
         // order mode; a same-bytes prompt entry such as _k8 / _wide otherwise) and of the
         // routed fp4_bw gate cases (a same-bytes entry such as fp4_bw_gate_c1); KBENCH_XDOWN
         // overrides X's down entry in the down and layer cases (fp4_bw_down_pdl / _x2 / _x4).
-        let xover = if c.kind == 75 && c.mats[3] & 4 != 0 { Some("flash_bf16_mma_latency_group".into()) } else if prompt::hcup_a16(c) {Some("flash_next_hc_up_tiled_a16".into())} else if c.name.starts_with("proute-") {std::env::var("KBENCH_ROUTE_PREFILL_X").ok()} else if c.name.starts_with("hc_up_prod-") && std::env::var("KBENCH_HCUP_M32").is_ok_and(|v|v=="1") {Some("flash_next_hc_up_m32".to_string())} else if c.name.starts_with("pgprod-") { std::env::var("KBENCH_PGPROD_X").ok().filter(|x|matches!(x.as_str(),"w16"|"u32"|"plan")).map(|x|format!("flash_bf16_mma_prefill_tiled_{x}")) } else if super::fold_x(c) { Some("flash_bf16_mma_latency_fold".to_string()) } else if (c.kind == 31 || c.kind == 32) && o.order && c.m < 64 && qsa::small_x().is_some() { qsa::small_x() }
+        let xover = if c.kind == 75 && c.mats[3] & 4 != 0 { Some("flash_bf16_mma_latency_group".into()) } else if c.name.starts_with("hc_add_norm") { Some("flash_next_hc_add_norm_rows".into()) } else if c.name.starts_with("hc_down_act") { Some("flash_hc_down_latency_group".into()) } else if prompt::hcup_a16(c) {Some("flash_next_hc_up_tiled_a16".into())} else if c.name.starts_with("proute-") {std::env::var("KBENCH_ROUTE_PREFILL_X").ok()} else if c.name.starts_with("hc_up_prod-") && std::env::var("KBENCH_HCUP_M32").is_ok_and(|v|v=="1") {Some("flash_next_hc_up_m32".to_string())} else if c.name.starts_with("pgprod-") { std::env::var("KBENCH_PGPROD_X").ok().filter(|x|matches!(x.as_str(),"w16"|"u32"|"plan")).map(|x|format!("flash_bf16_mma_prefill_tiled_{x}")) } else if super::fold_x(c) { Some("flash_bf16_mma_latency_fold".to_string()) } else if (c.kind == 31 || c.kind == 32) && o.order && c.m < 64 && qsa::small_x().is_some() { qsa::small_x() }
             else if c.kind == 21 || c.kind == 22 { std::env::var("KBENCH_XDOWN").ok() } else if c.kind == 27 { Some("flash_next_compact_route_ids".into()) } else if c.kind == 29 || c.kind == 28 { Some(format!("{}{}", if c.kind == 29 { "flash_next_compact_route" } else { "flash_next_route_compact1" }, if c.name.contains("pack") && c.name.contains("mask") { "_pack_mask" } else if c.name.contains("pack") { "_pack" } else if c.name.contains("mask") { "_silu_mask" } else { "_silu" })) } else if c.kind == 24 && c.name.contains("fast") { Some(if c.name.contains("silu") { "flash_moe_silu_fast" } else { "flash_moe_route_fast" }.into()) }
             else { std::env::var("KBENCH_XKERNEL").ok().filter(|_| c.kind == 1 || (30..=32).contains(&c.kind) || c.kind == 20 || matches!(c.kind,71..=73) || matches!(c.kind, 75 | 76) || c.kind == 34 || c.kind >= 37 && c.kind <= 38) };
         let xname: &str = match &xover { Some(n) => n.as_str(), None if o.order && !c.xkernel.is_empty() => c.xkernel, None => c.kernel };

@@ -172,6 +172,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hc_down_group_check_holds_the_safety_list() {
+        let row = |rows2, tokens, weight| kernel_params::Bf16Rows { weight, output: 0, rows: 4, stride: 4, weight2: 32, output2: 0, rows2, stride2: rows2,
+            input: 4096, cols: 10240, tokens, input_bf16: 1, hc_silu: 0, input_plane_words: 0 };
+        let pairs = |first| kernel_params::Bf16Pairs { pairs: [first, kernel_params::Bf16Rows { rows: 0, rows2: 0, ..row(0, 1, 0) }] };
+        let (good, input, down) = (pairs(row(320, 16, 16)), 2 * 640 * 128 * 4, 2 * 20 * 128 * 4);
+        let check = |p: &kernel_params::Bf16Pairs, planes| kernel_params::hc_down_group_check(p, planes, 4096, input + down);
+        assert!(check(&good, 4096 + input as u64).is_ok());
+        assert!(check(&good, 4096 + input as u64 - 4).is_err() && check(&good, 4096 + input as u64 + 4).is_err() && check(&good, u64::MAX).is_err());
+        assert!(check(&pairs(row(320, 17, 16)), 4096 + input as u64).is_err() && check(&pairs(row(320, 16, 17)), 4096 + input as u64).is_err());
+        assert!(check(&pairs(row(321, 16, 16)), 4096 + input as u64).is_err() && check(&kernel_params::Bf16Pairs { pairs: [good.pairs[0], good.pairs[0]] }, 4096 + input as u64).is_err());
+    }
+    #[test]
     fn register_decode_selection_boundaries() {
         for rows in [1,2,3,4,5,8,9,16,17,32] { for outputs in [128,256,512,640,1024] { for kind in [0,1,2] {
             assert_eq!(fp8_abi::register_decode(kind,rows,outputs), kind==0 && rows<=16 && outputs<=512);

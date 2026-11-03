@@ -10,6 +10,16 @@ pub fn layers(count: usize, mut phase: impl FnMut(usize, bool) -> Result<()>) ->
     Ok(())
 }
 type Result<T> = std::result::Result<T, String>;
+/// Rows per group when `tokens` rows of width `cols` exceed the packed-input scratch
+/// (VADE_PROMPT_TILE=8192 at the widest inputs): equal groups in multiples of 128
+/// rows, so the 128-row tiles and the final tail land on the same rows as one
+/// unsplit launch and every row keeps its kernel and K order.
+#[cfg(target_os = "linux")]
+pub(crate) fn pack_groups(cols: usize, tokens: usize) -> Option<usize> {
+    use spark_gpu_probe::kernel_params::TERMS;
+    let cap = spark_gpu_probe::flash_dense_reserve_bytes() / 4 / (cols.div_ceil(16) * 128 * TERMS) * 16 / 128 * 128;
+    (tokens > cap && cap >= 1024).then(|| tokens.div_ceil(tokens.div_ceil(cap)).div_ceil(128) * 128)
+}
 /// VADE_POOL_GRAPH_FALLBACK=1: a world-one pooled step may run the same
 /// kernels eagerly when a healthy context cannot retain its graph pair.
 pub fn pool_graph_fallback_value(value: Option<&str>) -> Result<bool> {

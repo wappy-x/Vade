@@ -135,19 +135,31 @@ fn cases() -> Vec<Case> {
             m: 1, n: 10240, k: 320, kind: 2, real: true, calls: if raw { 0 } else { 97 }, ..Default::default() });
     }
     // Its M2-16 twin entry (drafted verify rows), same fixtures.
-    for (m, raw) in [(2, false), (4, false), (8, false), (16, false), (4, true)] {
+    for (m, raw) in [(2, false), (3, false), (4, false), (8, false), (16, false), (4, true)] {
         out.push(Case { name: format!("hc_up16-lbf12{}-m{m}", if raw { "raw" } else { "" }), kernel: "flash_next_hc_up_latency16_lbf12",
             m, n: 10240, k: 320, kind: 2, real: true, ..Default::default() });
     }
     // The decode HC norm before each HC down (100 per C1 token at M1; drafted verify rows M4),
     // and with HC down's packed planes; the HC activation after it with HC up's planes. M3 and
     // M12 leave staged padding rows unwritten / have t + 8 padding for only some rows.
+    // hc_add_norm: the attention combine and the next norm, two launches (A) or one (X).
     for m in [1, 4] {
         out.push(Case { name: format!("hc_norm-m{m}"), kernel: "flash_hc_norm_f32", m, n: 0, k: 10240, kind: 77, calls: if m == 1 { 100 } else { 0 }, ..Default::default() });
     }
     for m in [1, 3, 4, 12] {
         out.push(Case { name: format!("hc_norm_pack-m{m}"), kernel: "flash_hc_norm_f32", m, n: 0, k: 10240, kind: 77, ..Default::default() });
         out.push(Case { name: format!("hc_act_pack-m{m}"), kernel: "flash_next_hc_activate", m, n: 0, k: 320, kind: 77, ..Default::default() });
+        out.push(Case { name: format!("hc_add_norm-m{m}"), kernel: "flash_hc_norm_f32", m, n: 0, k: 10240, kind: 77, ..Default::default() });
+    }
+    // One decode HC block's down group with HC up's planes: A = group + activation writing the
+    // planes, X = flash_hc_down_latency_group.
+    for m in [1, 3, 4, 8, 12] {
+        out.push(Case { name: format!("hc_down_act-m{m}"), kernel: "flash_bf16_mma_latency_group", m, n: 324, k: 10240, kind: 13, mats: [4, 320, 0, 0], ..Default::default() });
+    }
+    // HC up with the next projections' planes: A = HC up + the latency pack, X = HC up writing them.
+    for m in [1, 3, 4, 8] {
+        out.push(Case { name: format!("hc_up_planes-m{m}"), kernel: if m == 1 { "flash_next_hc_up_latency4_lbf12" } else { "flash_next_hc_up_latency16_lbf12" },
+            m, n: 10240, k: 320, kind: 2, real: true, ..Default::default() });
     }
     // Verify rows: HC up at M 12 / 20 / 32 (production hc_up4 at every M <= 63).
     for m in [12, 20, 32] {
@@ -960,8 +972,9 @@ fn run() -> Result<()> {
                 + 74 // FP8 stack kernel_rows.rs: kind 75/76 decode rows + fp8a wave probe.
                 + 7 // fp8k-hcgroup-m2..m8 (kind 75, kernel_rows.rs).
                 + 2 // hc_up4-lbf12-m1 / -lbf12raw-m1.
-                + 5 // hc_up16-lbf12-m2/4/8/16, -lbf12raw-m4.
-                + 10 // hc_norm-m1 / -m4, hc_norm_pack- and hc_act_pack-m1 / -m3 / -m4 / -m12 (kind 77).
+                + 6 // hc_up16-lbf12-m2/3/4/8/16, -lbf12raw-m4.
+                + 14 // hc_norm-m1 / -m4, hc_norm_pack-, hc_act_pack- and hc_add_norm-m1 / -m3 / -m4 / -m12 (kind 77).
+                + 9 // hc_up_planes- and hc_down_act-m1 / -m3 / -m4 / -m8, hc_down_act-m12.
                 + 5 // mxs-2560x640-m1..m4 and the solo mx-2560x640-m3.
                 ;
             assert_eq!(cases().len(), expect);

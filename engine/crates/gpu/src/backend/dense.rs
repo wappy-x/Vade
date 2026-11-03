@@ -45,13 +45,25 @@ impl<'a> Backend<'a> {
         let lanes = if tokens <= 16 && cols.is_multiple_of(64) { crate::kernel_params::flash_latency_lanes(tokens) } else { 32 };
         self.pack_flash_input(input, cols, tokens, false, lanes)
     }
+    /// One decode HC block's injection + down group (flash_hc_down_latency_group), which also
+    /// activates the down rows and writes their packed planes at `planes`.
+    pub fn flash_hc_down_group(&self, p: &mut crate::kernel_params::Bf16Pairs, mut planes: u64) -> Result<(), String> {
+        crate::kernel_params::hc_down_group_check(p, planes, self.flash_dense_input()?, self.flash_dense_bytes())?;
+        let blocks = p.pairs[0].rows.div_ceil(8) + p.pairs[0].rows2.div_ceil(8);
+        // SAFETY: p and planes outlive the launch's argument copy. The check above holds the entry's
+        // M, K, weight, pairs[1] and planes list; this call passes its grid and shared size.
+        unsafe { self.launch_flash_rows("flash_hc_down_latency_group", blocks, 1, 128, 4 * crate::kernel_params::LATENCY_RING as u32,
+            &mut [(p as *mut crate::kernel_params::Bf16Pairs).cast(), (&mut planes as *mut u64).cast()]) }
+    }
     /// Pack HC up operands without materializing a separate SiLU output.
     pub fn pack_flash_hc_input(&self, input: u64, tokens: usize) -> Result<u64, String> {
         self.pack_flash_input(input, 320, tokens, true, 32)
     }
     fn pack_flash_input(&self, input: u64, cols: usize, tokens: usize, hc_silu: bool, lanes: usize) -> Result<u64, String> {
         if let Some((x, c, t, planes)) = self.dense_offer.take() {
-            // Offered planes hold every lane's fragments; a latency pack's lanes subset is the same words.
+            // Offered planes hold the pack's words of rows below M; decode writers add the 0 words of
+            // padding rows t + 8. Other rows past M stay unwritten: each MMA output row reads only its
+            // own A row, and rows past M are not stored. A latency pack's lanes subset is the same words.
             if (x, c, t) == (input, cols, tokens) && !hc_silu { return Ok(planes); }
         }
         let (output, words) = self.flash_dense_words(cols, tokens, 8)?;

@@ -1041,13 +1041,37 @@ unsafe fn hcu_gate_m1(p: Bf16Rows, twin: u64, stream: usize, feature: usize, lan
     let (z0, z1, z2, z3) = (range(0), range(5), range(10), range(15));
     add(add(z0, z1), add(z2, z3))
 }
+/// HC up's or HC down's epilogue: output row t's elements f, f + 1 (`a`, `b`) also land in the
+/// next projection's packed operand, the hi/lo words flash_bf16_input forms from those rows
+/// (K, M rows, split2_pair, same layout); row t + 8 of a 16-row tile past M gets its 0 word,
+/// as the pack's; other rows past M stay unwritten (MMA rows are independent, outputs masked).
+/// A macro, so each expansion sits under its kernel's one safety contract: planes covers the two
+/// dense planes of `rows` x K. Row t and elements f, f + 1 name one word pair, written by the one
+/// lane that owns them.
+macro_rules! hc_planes { ($k:literal, $planes:expr, $rows:expr, $t:expr, $f:expr, $a:expr, $b:expr) => {{
+    let (rows, t): (usize, usize) = ($rows, $t);
+    let (plane, word) = hc_plane_word::<$k>(rows, t, $f);
+    let (hi, lo) = crate::gemm::split2_pair($a, $b);
+    let p = $planes as *mut u32;
+    *p.add(word) = hi;
+    *p.add(plane + word) = lo;
+    if t % 16 < 8 && t + 8 >= rows { *p.add(word + 1) = 0; *p.add(plane + word + 1) = 0; }
+}} }
+pub(crate) use hc_planes;
+/// One plane's words and the word of row t's elements f, f + 1 in the packed operand of `rows` x K.
+#[inline(always)]
+fn hc_plane_word<const K: usize>(rows: usize, t: usize, f: usize) -> (usize, usize) {
+    let kt = K / 16;
+    (rows.div_ceil(16) * kt * 128, ((t / 16 * kt + f / 16) * 32 + t % 8 * 4 + f % 8 / 2) * 4 + t % 16 / 8 + f % 16 / 8 * 2)
+}
 /// flash_next_hc_up_latency4 at M1 with its gate read from the up weight's LBF12 twin
-/// (flash_bf16_lbf12_twin): same gate bits, same stream mix in the same order.
+/// (flash_bf16_lbf12_twin): same gate bits, same stream mix in the same order. planes != 0:
+/// hc_planes writes the next projections' operand.
 /// # Safety
 /// As flash_next_hc_up_latency4 with M = 1 (grid H/8 x 1), plus twin = the up weight's
-/// flash_bf16_lbf12_twin image.
+/// flash_bf16_lbf12_twin image, and planes = 0 or the two dense planes of M x H.
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn flash_next_hc_up_latency4_lbf12(p: Bf16Rows, normalized: u64, twin: u64) {
+pub unsafe extern "ptx-kernel" fn flash_next_hc_up_latency4_lbf12(p: Bf16Rows, normalized: u64, twin: u64, planes: u64) {
     let tid = _thread_idx_x() as usize;
     let (warp, lane) = (tid / 32, tid % 32);
     let h = 2560usize;
@@ -1075,8 +1099,12 @@ pub unsafe extern "ptx-kernel" fn flash_next_hc_up_latency4_lbf12(p: Bf16Rows, n
         }
         stream += 1;
     }
-    if t < p.tokens as usize { *(p.output as *mut f32).add(t * h + f) = mixed.a * 0.25;
-        *(p.output as *mut f32).add(t * h + f + 1) = mixed.b * 0.25; }
+    if t < p.tokens as usize {
+        let (a, b) = (mixed.a * 0.25, mixed.b * 0.25);
+        *(p.output as *mut f32).add(t * h + f) = a;
+        *(p.output as *mut f32).add(t * h + f + 1) = b;
+        if planes != 0 { hc_planes!(2560, planes, p.tokens as usize, t, f, a, b); }
+    }
 }
 #[inline(always)]
 unsafe fn twin_shuffle(v: u32, d: u32) -> u32 { crate::shuffle_xor(u32::MAX, v, d, 31) }
@@ -1123,8 +1151,8 @@ pub unsafe extern "ptx-kernel" fn flash_bf16_lbf12_twin(p: crate::kernel_params:
 }
 
 // HC up at M2-16: flash_next_hc_up_latency4 with its gate read from the up weight's
-// LBF12 twin (flash_bf16_lbf12_twin). Private hc16_ copies of every helper, so no existing
-// entry's codegen changes.
+// LBF12 twin (flash_bf16_lbf12_twin). Private hc16_ copies of every helper except the shared
+// dense_latency::tmadd and dense_latency::untranspose, so no existing entry's codegen changes.
 #[cfg(target_arch = "nvptx64")]
 unsafe extern "llvm-intrinsic" {
     #[link_name = "llvm.nvvm.mma.m16n8k16.row.col.bf16"]
@@ -1185,6 +1213,26 @@ unsafe fn hc16_gate(p: crate::kernel_params::Bf16Rows, twin: u64, stream: usize,
     };
     let v = [load(0), load(1), load(2), load(3), load(4), load(5), load(6), load(7), load(8), load(9)];
     let frag = |t: usize| -> [u32; 2] { let w = v[t / 2]; if t % 2 == 0 { [w[0], w[1]] } else { [w[2], w[3]] } };
+    if p.tokens <= 4 {
+        // One transposed MMA per tile carries both chains of tokens 0-3 (dense_latency::tmadd,
+        // exact under the operand swap): lane 8t + 4p + q reads plane p of token t from
+        // normal-layout lane 4t + q; same tiles, ranges and merges, so hc_up_gate's bits.
+        let src = lane / 8 * 4 + lane % 4;
+        let plane = if lane / 4 % 2 == 0 { 0 } else { p.input_plane_words as usize };
+        let range = |s: usize| {
+            let mut c = crate::canonical::ZERO;
+            let mut i = 0;
+            while i < 5 {
+                let at = ((s + i) * 32 + src) * 4 + plane;
+                let a = if src < 16 { (*(x.add(at).cast::<Hc16Fragment>())).0 } else { [0; 4] };
+                c = dense_latency::tmadd(frag(s + i), a, c);
+                i += 1;
+            }
+            dense_latency::untranspose(c, lane)
+        };
+        let (z0, z1, z2, z3) = (range(0), range(5), range(10), range(15));
+        return hc16_add(hc16_add(z0, z1), hc16_add(z2, z3));
+    }
     let (mut left, mut right) = (crate::canonical::ZERO, crate::canonical::ZERO);
     let mut part = 0;
     while part < 4 {
@@ -1208,12 +1256,13 @@ unsafe fn hc16_gate(p: crate::kernel_params::Bf16Rows, twin: u64, stream: usize,
 }
 /// flash_next_hc_up_latency4 at M2-16 (one M tile) with its gate read from the up weight's
 /// LBF12 twin (hc16_gate: hc_up_gate's bits) and latency4's stream mix in the same order.
+/// planes != 0: hc_planes writes the next projections' operand.
 /// # Safety
 /// As flash_next_hc_up_latency4 with 2 <= M <= 16 (grid H/8 x 1, block 128), plus twin = the
-/// up weight's flash_bf16_lbf12_twin image.
+/// up weight's flash_bf16_lbf12_twin image, and planes = 0 or the two dense planes of M x H.
 #[cfg(target_arch = "nvptx64")]
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn flash_next_hc_up_latency16_lbf12(p: crate::kernel_params::Bf16Rows, normalized: u64, twin: u64) {
+pub unsafe extern "ptx-kernel" fn flash_next_hc_up_latency16_lbf12(p: crate::kernel_params::Bf16Rows, normalized: u64, twin: u64, planes: u64) {
     use core::arch::nvptx::{_block_idx_x, _thread_idx_x};
     let tid = _thread_idx_x() as usize;
     let (warp, lane) = (tid / 32, tid % 32);
@@ -1246,8 +1295,17 @@ pub unsafe extern "ptx-kernel" fn flash_next_hc_up_latency16_lbf12(p: crate::ker
         }
         stream += 1;
     }
-    if t < p.tokens as usize { *(p.output as *mut f32).add(t * h + f) = mixed.a * 0.25;
-        *(p.output as *mut f32).add(t * h + f + 1) = mixed.b * 0.25; }
-    if t + 8 < p.tokens as usize { *(p.output as *mut f32).add((t + 8) * h + f) = mixed.c * 0.25;
-        *(p.output as *mut f32).add((t + 8) * h + f + 1) = mixed.d * 0.25; }
+    let rows = p.tokens as usize;
+    if t < rows {
+        let (a, b) = (mixed.a * 0.25, mixed.b * 0.25);
+        *(p.output as *mut f32).add(t * h + f) = a;
+        *(p.output as *mut f32).add(t * h + f + 1) = b;
+        if planes != 0 { hc_planes!(2560, planes, rows, t, f, a, b); }
+    }
+    if t + 8 < rows {
+        let (a, b) = (mixed.c * 0.25, mixed.d * 0.25);
+        *(p.output as *mut f32).add((t + 8) * h + f) = a;
+        *(p.output as *mut f32).add((t + 8) * h + f + 1) = b;
+        if planes != 0 { hc_planes!(2560, planes, rows, t + 8, f, a, b); }
+    }
 }

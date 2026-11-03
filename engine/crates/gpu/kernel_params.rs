@@ -639,6 +639,19 @@ pub struct Bf16Rows {
 pub struct Bf16Pairs {
     pub pairs: [Bf16Rows; 2],
 }
+/// Refuses a flash_hc_down_latency_group launch outside its safety list: 1 <= M <= 16, K % 64 == 0,
+/// plain BF16 weights (bit 0 clear), 320 down rows, `pairs[1]` empty, and `planes` past the input
+/// planes inside the dense tile. The kernel writes `planes` with no range check of its own.
+#[cfg(not(target_arch = "nvptx64"))]
+pub fn hc_down_group_check(p: &Bf16Pairs, planes: u64, tile: u64, tile_bytes: usize) -> Result<(), String> {
+    let [a, b] = &p.pairs;
+    let (m, k) = (a.tokens as usize, a.cols as usize);
+    let plane_bytes = |cols: usize| (2 * m.div_ceil(16) * cols.div_ceil(16) * 128 * 4) as u64;
+    let inside = a.input >= tile && planes >= a.input.saturating_add(plane_bytes(k))
+        && planes.saturating_add(plane_bytes(320)) <= tile.saturating_add(tile_bytes as u64);
+    if (1..=16).contains(&m) && k % 64 == 0 && a.rows2 == 320 && b.rows == 0 && b.rows2 == 0 && (a.weight | a.weight2) & 1 == 0 && inside { return Ok(()); }
+    Err("flash_hc_down_latency_group: launch outside its safety list".into())
+}
 /// Scheduling only: both shapes execute the canonical per-output K16 graph.
 pub fn flash_bf16_prefill_blocks(p: Bf16Rows) -> usize {
     (p.tokens as usize).div_ceil(64)

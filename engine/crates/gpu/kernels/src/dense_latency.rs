@@ -8,7 +8,7 @@ fn input_word(tiles: usize, token: usize, tile: usize, lane: usize) -> usize {
 }
 
 #[cfg(target_arch = "nvptx64")]
-use super::{canonical, packed, ptx, weight_fragment, write, Bf16Rows, ZERO};
+use super::{canonical, hc_plane_word, hc_planes, packed, ptx, put, weight_fragment, write, Bf16Rows, ZERO};
 #[cfg(target_arch = "nvptx64")]
 use crate::kernel_params::LATENCY_RING as RING;
 
@@ -1308,6 +1308,7 @@ pub unsafe extern "ptx-kernel" fn flash_next_head_lbf12_encode(p: crate::kernel_
 
 include!("dense_latency_w16.rs");
 include!("dense_latency_fold.rs");
+include!("dense_latency_hc.rs");
 
 #[cfg(test)]
 mod tests {

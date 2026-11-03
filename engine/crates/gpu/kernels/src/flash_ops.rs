@@ -149,7 +149,7 @@ unsafe fn hc_norm_prompt(p: crate::kernel_params::FlashHcNorm) {
 
 // Keep the iterator loop's PTX operand order when its register batches unroll.
 #[inline(always)]
-unsafe fn norm_square_add(acc: f32, value: f32) -> f32 {
+pub(crate) unsafe fn norm_square_add(acc: f32, value: f32) -> f32 {
     let out: f32;
     core::arch::asm!("{{ .reg .f32 sq; mul.rn.f32 sq, {v}, {v}; add.rn.f32 {out}, {acc}, sq; }}",
         v = in(reg32) value, acc = in(reg32) acc, out = out(reg32) out);
@@ -495,9 +495,9 @@ unsafe fn hc_add_prompt(p: crate::kernel_params::FlashHcAdd) {
 /// `(1 + w)` as F32. With packed != 0 (prompt tiles and decode rows) it also writes each
 /// stored value pair's BF16 hi/lo split (split2_pair) into the dense prompt operand
 /// layout of flash_bf16_input (grid.y rows, K 10240), so the projections skip
-/// that pack; on the decode split row token + 8 of a 16-row tile past grid.y gets its 0
-/// word, other rows past grid.y in the last M16 tile stay unwritten (MMA rows are
-/// independent and those outputs are masked).
+/// that pack; on the 8-CTA split (decode rows and mix_chunk prompt tiles) row token + 8 of
+/// a 16-row tile past grid.y gets its 0 word, other rows past grid.y in the last M16 tile
+/// stay unwritten (MMA rows are independent and those outputs are masked).
 /// Grid: block128, grid.y=rows, grid.x as flash_hc_norm (1 in-place or 8).
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_hc_norm_f32(p: crate::kernel_params::FlashHcNorm) {
@@ -512,10 +512,11 @@ pub unsafe extern "ptx-kernel" fn flash_hc_norm_f32(p: crate::kernel_params::Fla
     let (base, mut squares) = (g * group, 0.0f32);
     let chunk = group.div_ceil(split).div_ceil(64) * 64;
     let end = group.min((part + 1) * chunk);
-    // Decode split (chunk <= 320: at most 5 value pairs per lane, the packed loop's pairs): the
-    // outputs' values and weights are read before the squares too, so no output read waits
-    // behind the previous output's store. The same values, products and packed words as the
-    // loops below (the decode HC down reads these planes in place of its own pack).
+    // 8-CTA split (decode rows and mix_chunk prompt tiles; chunk <= 320: at most 5 value pairs
+    // per lane, the packed loop's pairs): the outputs' values and weights are read before the
+    // squares too, so no output read waits behind the previous output's store. The same values,
+    // products and packed words as the loops below (the decode HC down reads these planes in
+    // place of its own pack).
     let early = chunk <= 320;
     let at = |j: usize| base + (part * chunk + lane * 2 + 64 * j).min(group - 2);
     let pre = |j: usize| [*x.add(at(j)), *x.add(at(j) + 1), *w.add(at(j)), *w.add(at(j) + 1)];

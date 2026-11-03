@@ -2,9 +2,20 @@
 //! LBF12 twin fixture.
 use super::{Case, Fixture, Gpu, H, Result, check, params, ptr};
 pub(super) fn prepare(g: &mut Gpu, module: H, c: &Case, v: &mut Fixture) -> Result<()> {
-if c.kind == 77 && c.name.starts_with("hc_act_pack") {
+if c.kind == 77 && (c.name.starts_with("hc_act_pack") || c.name.starts_with("hc_add_norm")) {
     let m = g.module(super::prompt::copy_ptx().as_bytes()).map_err(|e| format!("copy PTX: {e}"))?;
     v.norms[1] = g.function(m, "kb_copy")?;
+    if c.name.starts_with("hc_add_norm") { v.norms[0] = g.function(module, "flash_next_hc_add")?; }
+    return Ok(());
+}
+if c.name.starts_with("hc_down_act") {
+    // out = injection and low rows | HC up's packed planes. The activation is arm A's second launch.
+    let (m, low) = (c.m, 320);
+    let rows_bytes = m * c.n * 4;
+    v.out_bytes = rows_bytes + 2 * m.div_ceil(16) * (low / 16) * 128 * 4;
+    v.out = g.alloc(v.out_bytes)?;
+    v.norms[0] = g.function(module, "flash_next_hc_activate")?;
+    v.written = std::iter::once((0, rows_bytes)).chain(staged(m, low, 32).into_iter().skip(1).map(|(at, n)| (at - m * low * 4 + rows_bytes, n))).collect();
     return Ok(());
 }
 if c.kind == 2 && c.real {
@@ -38,6 +49,14 @@ if c.kind == 2 && c.real {
         if packed != slots - marked { return Err(format!("{} packed {packed} slots, expected {}", c.name, slots - marked)); }
     }
     eprintln!("hc_up LBF12 coverage case={} packed_slots={} raw_slots={marked}", c.name, slots - marked);
+    if c.name.starts_with("hc_up_planes") {
+        // out = output rows [M][H] | the two packed planes of those rows.
+        let (m, h) = (c.m, n / 4);
+        v.out_bytes = m * h * 4 + 2 * m.div_ceil(16) * (h / 16) * 128 * 4;
+        v.out = g.alloc(v.out_bytes)?;
+        v.rows.output = v.out;
+        v.written = staged(m, h, params::flash_latency_lanes(m));
+    }
     return Ok(());
 }
 if c.kind == 1 && c.real {
@@ -90,6 +109,7 @@ pub(super) fn launch(g: &Gpu, f: H, c: &Case, v: &mut Fixture, i: usize, arm: us
 /// (staged(): lanes 0..L-1, L = flash_latency_lanes(M), the words HC down stages).
 pub(super) fn norm_fixture(g: &mut Gpu, c: &Case) -> Result<Fixture> {
     if c.name.starts_with("hc_act_pack") { return act_fixture(g, c); }
+    if c.name.starts_with("hc_add_norm") { return add_norm_fixture(g, c); }
     let (m, k) = (c.m, c.k);
     let input: Vec<u8> = (0..m * k).flat_map(|i| ((((i / k) * 37 + (i % k) * 11) % 263) as f32 / 32. - 4.).to_le_bytes()).collect();
     let norm: Vec<u8> = (0..k).flat_map(|i| (((i * 7) % 61) as f32 / 256. - 0.1).to_le_bytes()).collect();
@@ -124,6 +144,29 @@ fn act_fixture(g: &mut Gpu, c: &Case) -> Result<Fixture> {
         threads: 128, shared: 0, stored: 3 * m * k * 4, flops: 0, chunks: 1, down_slots: 0, raw, pack: std::ptr::null_mut(),
         norms: [std::ptr::null_mut(); 2], weight_bytes: 0, written, qsa: None, gather: None, ring_x: vec![], scales_x: vec![] })
 }
+/// hc_add_norm-mM (kind 77): the attention HC combine and the next HC norm with HC down's
+/// planes. Both arms restore the residual [M][4H] (kb_copy); A = flash_next_hc_add +
+/// flash_hc_norm_f32 with planes, X = flash_next_hc_add_norm_rows; A==X on the residual, u and
+/// the words of rows < M. out = residual | u | planes; aux = block [M][H] | gates [M][4].
+fn add_norm_fixture(g: &mut Gpu, c: &Case) -> Result<Fixture> {
+    let (m, k, h) = (c.m, c.k, c.k / 4);
+    let input: Vec<u8> = (0..m * k).flat_map(|i| ((((i / k) * 37 + (i % k) * 11) % 263) as f32 / 32. - 4.).to_le_bytes()).collect();
+    let norm: Vec<u8> = (0..k).flat_map(|i| (((i * 7) % 61) as f32 / 256. - 0.1).to_le_bytes()).collect();
+    let block: Vec<u8> = (0..m * h).flat_map(|i| ((((i / h) * 13 + (i % h) * 5) % 211) as f32 / 64. - 1.5).to_le_bytes()).collect();
+    let gates: Vec<u8> = (0..m * 4).flat_map(|i| ((i % 9) as f32 - 4.25).to_le_bytes()).collect();
+    let copies = (64usize << 20).div_ceil(k * 4);
+    let slab = g.upload(&norm.repeat(copies))?;
+    let plane = m.div_ceil(16) * (k / 16) * 128;
+    let out_bytes = 2 * m * k * 4 + 2 * plane * 4;
+    let written: Vec<(usize, usize)> = std::iter::once((0, 2 * m * k * 4)).chain(staged(m, k, 32).into_iter().skip(1).map(|(at, n)| (at + m * k * 4, n))).collect();
+    let (raw, out, aux) = (g.upload(&input)?, g.alloc(out_bytes)?, g.upload(&[block, gates].concat())?);
+    let rows = params::Bf16Rows { weight: 0, output: 0, rows: 0, stride: 0, weight2: 0, output2: 0, rows2: 0, stride2: 0,
+        input: 0, cols: 0, tokens: 0, input_bf16: 0, hc_silu: 0, input_plane_words: 0 };
+    Ok(Fixture { rows, group: None, ring: (0..copies).map(|i| slab + (i * k * 4) as u64).collect(), out, out_bytes,
+        aux, aux_bytes: 0, grid: [8, m as u32, 1], threads: 128, shared: 0, stored: 4 * m * k * 4 + k * 4 + m * h * 4, flops: 0,
+        chunks: 1, down_slots: 0, raw, pack: std::ptr::null_mut(), norms: [std::ptr::null_mut(); 2], weight_bytes: k * 4,
+        written, qsa: None, gather: None, ring_x: vec![], scales_x: vec![] })
+}
 /// Byte ranges A==X compares for M rows [M][K] FP32 followed by the two packed planes: every
 /// FP32 row, then in lanes 0..lanes-1 of each K16 tile the words of rows < M and of padding
 /// row t + 8 of a row t < 8 (its 0 word); other padding rows stay unwritten by the fused
@@ -144,11 +187,25 @@ fn staged(m: usize, k: usize, lanes: usize) -> Vec<(usize, usize)> {
     }
     out
 }
+/// hc_down_act-mM: the group launch of [4, 320] x 10240, then (A) flash_next_hc_activate writing
+/// the planes, or (X) flash_hc_down_latency_group alone, 41 CTAs. The fixture's output offsets
+/// hold the rows; planes follow them.
+pub(super) fn launch_down_act(g: &Gpu, f: H, c: &Case, v: &mut Fixture, pairs: &mut params::Bf16Pairs, arm: usize) -> Result<()> {
+    let tile = v.out + (c.m * c.n * 4) as u64;
+    if arm == 1 {
+        let mut planes = tile;
+        return g.launch(f, [41, 1, 1], 128, 4 * params::LATENCY_RING as u32, &mut [ptr(pairs), ptr(&mut planes)]);
+    }
+    let mut partials = v.aux;
+    g.launch(f, [192, 1, 1], 128, 4 * params::LATENCY_RING as u32, &mut [ptr(pairs), ptr(&mut partials)])?;
+    let (mut x, mut e, mut p) = (pairs.pairs[0].output2, (c.m * 320) as u32, tile);
+    g.launch(v.norms[0], [(c.m * 320).div_ceil(128) as u32, 1, 1], 128, 0, &mut [ptr(&mut x), ptr(&mut e), ptr(&mut p)])
+}
 /// HC up at M1-16 from the LBF12 twin: grid H/8, 128 threads, (rows, FP32 streams, twin);
 /// kind 77: hc_norm-mM = the HC norm (input, weight copy, output, packed 0); hc_norm_pack-mM =
 /// that norm + main's latency pack (A) vs the norm writing the planes (X); hc_act_pack-mM =
 /// kb_copy of low + main's activation + main's dense pack (A) vs kb_copy + the activation
-/// writing the planes (X).
+/// writing the planes (X); hc_add_norm-mM = add_norm_fixture's two launches (A) or one (X).
 pub(super) fn launch_hc(g: &Gpu, f: H, c: &Case, v: &mut Fixture, i: usize, arm: usize) -> Result<()> {
     if c.kind == 77 && c.name.starts_with("hc_act_pack") {
         let (planes, words) = (v.out + (c.m * c.k * 4) as u64, c.m.div_ceil(16) * (c.k / 16) * 128);
@@ -162,6 +219,21 @@ pub(super) fn launch_hc(g: &Gpu, f: H, c: &Case, v: &mut Fixture, i: usize, arm:
             g.launch(v.pack, [(words / 128 * 32).div_ceil(128) as u32, 1, 1], 128, 0, &mut [ptr(&mut q)])?;
         }
         return Ok(());
+    }
+    if c.kind == 77 && c.name.starts_with("hc_add_norm") {
+        let (bytes, h) = (c.m * c.k * 4, c.k / 4);
+        let (u, planes, gates) = (v.out + bytes as u64, v.out + 2 * bytes as u64, v.aux + (c.m * h * 4) as u64);
+        let (mut dst, mut src, mut n) = (v.out, v.raw, (bytes / 16) as u32);
+        g.launch(v.norms[1], [n.div_ceil(128), 1, 1], 128, 0, &mut [ptr(&mut dst), ptr(&mut src), ptr(&mut n)])?;
+        if arm == 1 {
+            let mut p = params::FlashHcAddNorm { residual: v.out, block: v.aux, gates, weight: v.ring[i], output: u, packed: planes, scales: 0 };
+            let mut rows = c.m as u32;
+            return g.launch(f, [4, c.m as u32, 1], 128, 0, &mut [ptr(&mut p), ptr(&mut rows)]);
+        }
+        let mut a = params::FlashHcAdd { residual: v.out, block: v.aux, peer: 0, gates, hidden: h as u32, rank: 0 };
+        g.launch(v.norms[0], [h.div_ceil(128) as u32, c.m as u32, 1], 128, 0, &mut [ptr(&mut a)])?;
+        let mut p = params::FlashHcNorm { input: v.out, weight: v.ring[i], output: u, packed: planes };
+        return g.launch(f, v.grid, v.threads, v.shared, &mut [ptr(&mut p)]);
     }
     if c.kind == 77 {
         let (pack, planes) = (c.name.starts_with("hc_norm_pack"), v.out + (c.m * c.k * 4) as u64);
@@ -177,6 +249,17 @@ pub(super) fn launch_hc(g: &Gpu, f: H, c: &Case, v: &mut Fixture, i: usize, arm:
         return Ok(());
     }
     v.rows.weight = v.ring[i];
-    let (mut normalized, mut twin) = (v.aux, v.ring_x[i]);
-    g.launch(f, v.grid, v.threads, v.shared, &mut [ptr(&mut v.rows), ptr(&mut normalized), ptr(&mut twin)])
+    let h = c.n / 4;
+    let fused = c.name.starts_with("hc_up_planes");
+    let tile = v.out + (c.m * h * 4) as u64;
+    let (mut normalized, mut twin, mut planes) = (v.aux, v.ring_x[i], if fused && arm == 1 { tile } else { 0 });
+    g.launch(f, v.grid, v.threads, v.shared, &mut [ptr(&mut v.rows), ptr(&mut normalized), ptr(&mut twin), ptr(&mut planes)])?;
+    if fused && arm == 0 {
+        // dense.rs pack_flash_latency_input of the output rows.
+        let lanes = params::flash_latency_lanes(c.m);
+        let words = c.m.div_ceil(16) * (h / 16) * 128;
+        let mut q = params::FlashBf16Input { input: v.out, output: tile, tokens: c.m as u32, cols: h as u32, hc_silu: 0, lanes: lanes as u32 };
+        g.launch(v.pack, [(words / 128 * lanes).div_ceil(128) as u32, 1, 1], 128, 0, &mut [ptr(&mut q)])?;
+    }
+    Ok(())
 }
