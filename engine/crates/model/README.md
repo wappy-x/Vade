@@ -14,6 +14,9 @@ the scale-byte codec and its public source.
 [Sinkhorn stream blocks](MHC.md) documents the mHC math, host reference,
 device primitives, and pending device gates.
 
+The [logical layer program](LAYER-PLAN.md) describes deferred decoder
+execution, its host reference, and remaining device binding gaps.
+
 <details>
 <summary><b>Terms on this page</b>: checkpoint, tensor, shard, safetensors, tied embeddings</summary>
 

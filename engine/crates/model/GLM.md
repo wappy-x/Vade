@@ -51,6 +51,11 @@ The inspector never opens a shard. Its printed byte count comes from the
 index. It is not a measurement of resident memory. Kernel work, real header
 checks, tokenizer checks, and device exactness remain open.
 
+The [logical layer program](LAYER-PLAN.md) binds the operation descriptions
+to revision-qualified kernel targets. It has buffer shapes, tensor splits,
+an independent FP32 host forward, and an updated operation gap table.
+It preserves deferred device admission.
+
 The public metadata source and its saved revision are in the
 [fixture record](tests/fixtures/glm/README.md). The operation source is the
 saved Transformers `modeling_glm5_next.py` file. Its fetch used an unpinned

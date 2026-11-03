@@ -9,6 +9,8 @@
 | [`error.rs`](error.rs) | Typed failures while reading, validating and reconciling a model plan. |
 | [`glm.rs`](glm.rs) | Translate the GLM text schema into operation data for host inspection. |
 | [`glm_index.rs`](glm_index.rs) | Bind index names to tensor roles and scale components. |
+| [`layer.rs`](layer.rs) | Logical decoder order, kernel targets, buffers, and tensor splits. |
+| [`layer/`](layer/README.md) | Independent scalar forward and program replay. |
 | [`mod.rs`](mod.rs) | A checkpoint-derived, typed model plan, independent of loading and serving. |
 | [`profile.rs`](profile.rs) | Count logical compulsory reads from model geometry. |
 | [`runtime.rs`](runtime.rs) | Hybrid runtime geometry and tensor roles, including draft layers. |
