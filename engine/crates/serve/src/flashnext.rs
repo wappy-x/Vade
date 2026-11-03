@@ -301,8 +301,10 @@ impl<'s, 'a> Chat<'s, 'a> {
             s.defer_draft_feed(defer);
         }
     }
-    /// VADE_MTP_ADAPT: a chat alone drafts the chooser's depth (either draft path);
-    /// in a cohort, or with the switch off, it drafts its request depth.
+    /// VADE_MTP_ADAPT: a greedy chat alone drafts up to the resident depth.
+    /// The step rule (draft_steps.rs) can stop the chain before each step.
+    /// With VADE_MTP_CONF=off, the chat drafts the chooser's depth. Sampled chats use the chooser too.
+    /// A cohort chat, or VADE_MTP_ADAPT=0, keeps its request depth.
     fn model_draft_enabled(&self) -> bool {
         !self.draft_disabled && self.live.as_ref().is_some_and(|s| s.mtp_depth() > 0)
     }

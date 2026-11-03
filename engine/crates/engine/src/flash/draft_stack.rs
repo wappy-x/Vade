@@ -15,10 +15,12 @@
 //! VADE_MTP_CONF=off VADE_FLASHNEXT_DRAFT_VOCAB=0 VADE_VERIFY_MX4=0 VADE_VERIFY_MX4_PART=0
 //! VADE_VERIFY_MX4_MIXED=0 VADE_VERIFY_MX_SOLO97=0 VADE_FLASHNEXT_MTP_DEPTH=3.
 //!
-//! VADE_FLASHNEXT_MTP_DEPTH is the resident depth, the ceiling of the adaptive chooser
-//! (VADE_MTP_ADAPT, default on): a chat alone whose request names no mtp_depth (or 3) drafts
-//! the chooser's depth each cycle, up to the resident depth. Request depths 1-2, cohort chats
-//! and VADE_MTP_ADAPT=0 keep the request depth (flash_next_lookup::DEFAULT_MTP_DEPTH = 3).
+//! VADE_FLASHNEXT_MTP_DEPTH is the resident depth, the ceiling for VADE_MTP_ADAPT
+//! (default on). A greedy chat alone whose request names no mtp_depth (or 3) drafts
+//! up to the resident depth. The step rule (draft_steps.rs) can stop the chain before each step.
+//! With VADE_MTP_CONF=off, the chat drafts the chooser's depth. Sampled chats use the chooser too.
+//! Request depths 1-2, cohort chats and VADE_MTP_ADAPT=0 keep the request depth
+//! (flash_next_lookup::DEFAULT_MTP_DEPTH = 3).
 use std::sync::OnceLock;
 
 pub const DRAFT_FP4: u8 = 2;

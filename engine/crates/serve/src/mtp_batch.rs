@@ -298,8 +298,11 @@ pub fn parse(value: Option<&str>) -> Result<Mode, String> {
     }
 }
 
-/// VADE_MTP_ADAPT defaults to 1; explicit 0 disables it. One-chat Flash-Next MTP picks its draft depth per cycle from the
-/// request's measured depth survival and costs (explicit 0: always the request depth).
+/// VADE_MTP_ADAPT defaults to 1. Explicit 0 keeps the request depth.
+/// A greedy Flash-Next chat alone drafts up to the resident depth. The step rule
+/// (draft_steps.rs) can stop the chain before each step. With VADE_MTP_CONF=off,
+/// the chat drafts the chooser's depth from its measured depth survival and costs.
+/// Sampled chats also use the chooser.
 /// VADE_MTP_ADAPT=full (measurement): a request at the serving default depth drafts the
 /// whole resident depth (VADE_FLASHNEXT_MTP_DEPTH) every cycle, with no chooser.
 pub fn adapt_depth() -> Result<bool, String> {

@@ -45,8 +45,10 @@ pub trait Target {
     fn model_draft_exhausted(&self) -> bool { false }
     fn model_draft_catchup(&self) -> (usize, f64) { (0, 0.0) }
     fn model_draft_costs(&self) -> Option<CostCurve> { None }
-    /// Native policies: choose the model draft depth per cycle with this request's measured
-    /// depth survival and costs (Control::rows) instead of always drafting the full width.
+    /// Native policies: a greedy chat alone drafts up to the resident depth when the target
+    /// uses the step rule (draft_steps.rs). The rule can stop the chain before each step.
+    /// With VADE_MTP_CONF=off, or when the rule does not apply, the chooser uses this request's
+    /// measured depth survival and costs to choose the depth.
     fn adaptive_model_depth(&self) -> bool { false }
     /// Native policies: the model (not lookup) depth for the next proposal.
     fn limit_model_depth(&mut self, _depth: usize) {}
@@ -557,9 +559,10 @@ impl Speculator {
             if self.done { return Err("draft has no available rows".into()); }
             let cap = row_cap.min(self.config.max_rows).min(self.config.max_new-self.tokens().len());
             if target.adaptive_model_depth() && cap > 1 {
-                // Expected committed tokens per ms over this request's survival rates and the
-                // row costs (native_rows: measured passes where the target has them, else the
-                // prior and the guarded draft price); every 16th cycle explores one row deeper.
+                // A greedy chat alone drafts up to the resident depth when the target takes
+                // the step rule (draft_steps.rs). The rule can stop the chain before each step.
+                // With VADE_MTP_CONF=off, or when the rule does not apply, use the chooser's
+                // depth from this request's survival rates and row costs (native_rows).
                 if let Some(costs) = target.model_draft_costs() { self.config.costs = costs; }
                 if self.control.model_token_ms.is_none() {
                     self.control.rates[0] = [0.8; 15];
