@@ -11,6 +11,9 @@ To download a model, see [Models](../../docs/models.md).
 It does not enable model execution. [Host CSF decoding](CSF.md) describes
 the scale-byte codec and its public source.
 
+[Sinkhorn stream blocks](MHC.md) documents the mHC math, host reference,
+device primitives, and pending device gates.
+
 <details>
 <summary><b>Terms on this page</b>: checkpoint, tensor, shard, safetensors, tied embeddings</summary>
 

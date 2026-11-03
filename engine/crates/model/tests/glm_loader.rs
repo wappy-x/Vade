@@ -194,6 +194,24 @@ fn roles_keep_the_new_operations_and_scale_components_distinct() {
     assert_eq!(p.bind_tensor("model.visual.anything").unwrap().role.place,Place::Unused);
 }
 #[test]
+fn unused_vision_tensors_keep_scale_components() {
+    let p = description();
+    for (suffix,component,store) in [("weight",TensorStorage::Weight,Store::Weight),
+        ("weight_scale",TensorStorage::BlockScale,Store::BlockScale),
+        ("weight_scale_2",TensorStorage::GlobalScale,Store::Scalar),
+        ("input_scale",TensorStorage::InputScale,Store::Scalar),
+        ("weight_scale.csf32_bases",TensorStorage::Csf32(CsfComponent::Bases),Store::BlockScale),
+        ("weight_scale.csf32_codes",TensorStorage::Csf32(CsfComponent::Codes),Store::BlockScale),
+        ("weight_scale.csf32_page_bases",TensorStorage::Csf32(CsfComponent::PageBases),Store::BlockScale),
+        ("weight_scale.csf32_offsets",TensorStorage::Csf32(CsfComponent::Offsets),Store::BlockScale),
+        ("weight_scale.csf32_exceptions",TensorStorage::Csf32(CsfComponent::Exceptions),Store::BlockScale)] {
+        let b = p.bind_tensor(&format!("model.visual.proj.{suffix}")).unwrap();
+        assert_eq!((b.operation,b.role.place,b.role.part),(TensorRole::Vision,Place::Unused,Part::Whole));
+        assert_eq!((b.component,b.role.store,b.storage),(component,store,WeightStorage::Plain));
+    }
+    assert!(p.bind_tensor("model.visual.proj.weight_scale.csf32_unknown").is_err());
+}
+#[test]
 fn index_reader_is_payload_free_and_refuses_unknown_text_or_bad_paths() {
     let p = description();
     let index = br#"{"metadata":{"total_size":123},"weight_map":{"lm_head.weight":"absent.safetensors","model.language_model.layers.0.self_attn.q_proj.weight":"absent.safetensors","model.visual.x":"absent.safetensors"}}"#;

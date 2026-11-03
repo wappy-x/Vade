@@ -14,6 +14,17 @@ mod cuda;
 #[allow(dead_code)]
 #[path = "../../export/src/sha256.rs"]
 mod sha256;
+#[allow(dead_code)]
+#[path = "../../../crates/gpu/src/mhc_params.rs"]
+mod mhc_params;
+#[allow(dead_code)]
+#[path = "../../../crates/gpu/kernels/src/qsa_common.rs"]
+mod qsa_common;
+#[allow(dead_code)]
+#[path = "../../../crates/gpu/kernels/src/mhc_math.rs"]
+mod mhc_math;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod mhc_reference;
 #[path = "gdn_cpu_proof.rs"]
 mod gdn_cpu_proof;
 #[path = "gdn_rows_bounds.rs"]
@@ -887,6 +898,13 @@ fn run() -> Result<()> {
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
+        if flag == "--mhc-bytes" {
+            let path = args.next().ok_or("--mhc-bytes needs a PTX path")?;
+            #[cfg(target_os = "linux")]
+            return cuda::mhc_bytes(&path);
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("mHC device byte checks need Linux with CUDA: {path}"));
+        }
         if flag == "--list" {
             for c in cases() {
                 println!("{} {} M={} N={} K={} calls/token={}", c.name, c.kernel, c.m, c.n, c.k, c.calls);
@@ -1011,6 +1029,7 @@ fn run() -> Result<()> {
                     "kernel-bench --a A.ptx --x X.ptx [--case all|NAME,...] [--ms 5000]",
                     " [--det 1]",
                     " [--allow-diff]\n       kernel-bench --a A.ptx --x X.ptx --fp8-moe CONFIG.json [--ms 5000] [--allow-diff]",
+                    "\n       kernel-bench --mhc-bytes X.ptx (logical FP32 mHC byte checks)",
                     "\n",
                     "--det 1: order-change mode, A/X bytes may differ (each arm's SHA is printed; compare X across processes).\n",
                     "{} real shapes",
@@ -1064,6 +1083,17 @@ fn main() {
         eprintln!("kernel-bench: {e}");
         std::process::exit(1);
     }
+}
+#[test]
+fn hc_regression_kit_cases_exist() {
+    let inventory = cases();
+    let mut names = std::collections::BTreeSet::new();
+    for name in include_str!("../HC-REGRESSION-CASES.txt").trim().split(',') {
+        assert!(name.starts_with("hc_"),"not an HC case: {name}");
+        assert!(names.insert(name),"duplicate HC case: {name}");
+        assert!(inventory.iter().any(|c| c.name == name),"unknown HC case: {name}");
+    }
+    assert!(!names.is_empty());
 }
 /// KBENCH_LAT_FOLD=1: arm X launches BF16 latency cases with latency_fold1 (M1, N <= 64) as
 /// the engine does: flash_bf16_mma_latency_fold, one 128-thread launch.

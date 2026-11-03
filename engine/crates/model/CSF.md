@@ -17,17 +17,17 @@ The implementation uses local copies of these public files. No remote source
 or model payload was needed.
 
 - FlashInfer, revision `5a894aff27b53b627567ca72ee79454df66879ba`:
-  [`flashinfer/experimental/b12x/loader/_csf_blocks.py`](https://github.com/local-inference-lab/flashinfer/blob/5a894aff27b53b627567ca72ee79454df66879ba/flashinfer/experimental/b12x/loader/_csf_blocks.py).
+  [`flashinfer/experimental/b12x/loader/_csf_blocks.py`](https://github.com/flashinfer-ai/flashinfer/blob/5a894aff27b53b627567ca72ee79454df66879ba/flashinfer/experimental/b12x/loader/_csf_blocks.py).
   `CsfBlockPlane.validate` defines the component bounds.
   `export_csf_blocks` and `_from_logical_components` define packing.
   `block_order` and `logical_csf_components` define the logical mapping.
   File SHA256:
   `ed29be272ed682238a66f6e33f8d97d72f17652c9b743c3d8d23615764f05496`.
 - vLLM, revision `8244d1c44348ae8a5bbfc9f1b607021652283ed4`:
-  [`vllm/model_executor/model_loader/csf_utils.py`](https://github.com/local-inference-lab/vllm/blob/8244d1c44348ae8a5bbfc9f1b607021652283ed4/vllm/model_executor/model_loader/csf_utils.py).
+  [`vllm/model_executor/model_loader/csf_utils.py`](https://github.com/vllm-project/vllm/blob/8244d1c44348ae8a5bbfc9f1b607021652283ed4/vllm/model_executor/model_loader/csf_utils.py).
   `CsfTensorReader.matrix` binds the `csf32_*` components to `CsfBlockPlane`.
 - The same vLLM revision:
-  [`tests/quantization/csf_fixtures.py`](https://github.com/local-inference-lab/vllm/blob/8244d1c44348ae8a5bbfc9f1b607021652283ed4/tests/quantization/csf_fixtures.py).
+  [`tests/quantization/csf_fixtures.py`](https://github.com/vllm-project/vllm/blob/8244d1c44348ae8a5bbfc9f1b607021652283ed4/tests/quantization/csf_fixtures.py).
   `matrix` defines the synthetic known vectors.
   `decode_planes` gives an independent logical decoder.
   File SHA256:

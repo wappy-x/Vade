@@ -2223,3 +2223,7 @@ harness	tests/support/raw_ui.rs	impl:Ui::fn:start_with_flags	block:3	frozen ruli
 harness	tests/support/raw_ui.rs	impl:Ui::fn:start_with_flags	block:4	frozen ruling 2026-11-02 11:54
 harness	tests/support/raw_ui.rs	impl:Ui::fn:start_with_flags	block:5	frozen ruling 2026-11-02 11:54
 harness	tests/support/raw_ui.rs	impl:Ui::fn:start_with_flags	block:6	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/mhc.rs	fn:mhc_collapse	block:1
+engine/crates/gpu/kernels	src/mhc.rs	fn:mhc_combine	block:1
+engine/crates/gpu/kernels	src/mhc.rs	fn:mhc_head	block:1
+engine/crates/gpu/kernels	src/mhc.rs	fn:mhc_prepare	block:1

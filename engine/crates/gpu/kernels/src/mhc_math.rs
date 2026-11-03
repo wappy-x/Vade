@@ -1,0 +1,67 @@
+//! Fixed FP32 mHC operations. No reduction depends on row count or occupancy.
+use super::qsa_common::{dot, exponential, root};
+use crate::mhc_params::Shape;
+
+fn sigmoid(x: f32) -> f32 {
+    // Reuse the QSA nonpositive exponential, including its fixed polynomial.
+    let e = exponential(-x.abs());
+    if x >= 0.0 { 1.0 / (1.0 + e) } else { e / (1.0 + e) }
+}
+/// One token. The caller supplies exact extents and finite intermediates.
+pub fn prepare(s: Shape, x: &[f32], weights: &[f32], base: &[f32], scale: &[f32],
+    normalized: &mut [f32], coefficients: &mut [f32]) {
+    let n = s.streams as usize; let wide = s.wide();
+    let mut squares = 0.0f32;
+    for &v in x { squares += v * v; }
+    let inv = 1.0 / root(squares / wide as f32 + s.rms_eps);
+    for i in 0..wide { normalized[i] = x[i] * inv; }
+    for i in 0..s.coefficients() {
+        let group = if i < n { 0 } else if i < 2 * n { 1 } else { 2 };
+        coefficients[i] = dot(&weights[i * wide..(i + 1) * wide], normalized) * scale[group] + base[i];
+    }
+    for i in 0..n {
+        coefficients[i] = sigmoid(coefficients[i]) + s.eps;
+        coefficients[n + i] = 2.0 * sigmoid(coefficients[n + i]);
+    }
+    let comb = &mut coefficients[2 * n..];
+    for row in comb.chunks_exact_mut(n) {
+        let mut max = f32::NEG_INFINITY;
+        for &v in row.iter() { max = max.max(v); }
+        let mut sum = 0.0f32;
+        for v in row.iter_mut() { *v = exponential(*v - max); sum += *v; }
+        for v in row { *v = *v / sum + s.eps; }
+    }
+    columns(comb, n, s.eps);
+    for _ in 1..s.iterations {
+        for row in comb.chunks_exact_mut(n) {
+            let mut sum = 0.0f32;
+            for &v in row.iter() { sum += v; }
+            let divisor = sum + s.eps;
+            for v in row { *v /= divisor; }
+        }
+        columns(comb, n, s.eps);
+    }
+}
+fn columns(comb: &mut [f32], n: usize, eps: f32) {
+    for dst in 0..n {
+        let mut sum = 0.0f32;
+        for src in 0..n { sum += comb[src * n + dst]; }
+        let divisor = sum + eps;
+        for src in 0..n { comb[src * n + dst] /= divisor; }
+    }
+}
+pub fn collapse(x: &[f32], pre: &[f32], n: usize, h: usize, d: usize) -> f32 {
+    let mut value = 0.0f32;
+    for src in 0..n { value += pre[src] * x[src * h + d]; }
+    value
+}
+pub fn combine(x: &[f32], coefficients: &[f32], block: f32, n: usize, h: usize, dst: usize, d: usize) -> f32 {
+    let mut value = 0.0f32;
+    for src in 0..n { value += coefficients[2 * n + src * n + dst] * x[src * h + d]; }
+    coefficients[n + dst] * block + value
+}
+pub fn head(x: &[f32], n: usize, h: usize, d: usize) -> f32 {
+    let mut value = 0.0f32;
+    for src in 0..n { value += x[src * h + d]; }
+    value / n as f32
+}

@@ -66,11 +66,13 @@ impl TextDescription {
         Ok(MappedIndex { index,tensors })
     }
     pub fn bind_tensor(&self, name: &str) -> Result<TensorBinding> {
-        if name.starts_with("model.visual.") {
-            return Ok(TensorBinding { operation: TensorRole::Vision, role: Role { place: Place::Unused,part: Part::Whole,store: Store::Weight },
-                component: TensorStorage::Weight,storage: WeightStorage::Plain });
-        }
         let (module,component) = suffix(name)?;
+        if name.starts_with("model.visual.") {
+            let store = match component { TensorStorage::Weight => Store::Weight,
+                TensorStorage::GlobalScale | TensorStorage::InputScale => Store::Scalar, _ => Store::BlockScale };
+            return Ok(TensorBinding { operation: TensorRole::Vision, role: Role { place: Place::Unused,part: Part::Whole,store },
+                component,storage: WeightStorage::Plain });
+        }
         let (place,operation) = if module == "model.language_model.embed_tokens" { (Place::Model,TensorRole::Embedding) }
             else if module == "lm_head" { (Place::Model,TensorRole::Head) }
             else if module == "model.language_model.norm" { (Place::Model,TensorRole::FinalNorm) }

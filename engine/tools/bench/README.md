@@ -11,6 +11,10 @@ cold (uncached) 8k prompt probes. It keeps the same metrics and JSON receipt
 fields as before (a receipt is the saved record of a run). See the
 [current command guide and the full table of old and new options](../../../docs/benchmarks.md#run-vade-bench).
 
+The separate `kernel-bench --mhc-bytes X.ptx` command checks logical FP32
+[Sinkhorn stream primitives](../../crates/model/MHC.md) on a CUDA host.
+It uses synthetic inputs. It does not time a chat server or prove token IDs.
+
 ## Default timing benchmark
 
 With `vade launch` or `vade up` already running, use the same `VADE_HOME` and
@@ -566,6 +570,25 @@ the same parameters. `KBENCH_FP8MOE_A=fused` does the same for arm A.
 
 For placement diagnosis, `VADE_KBENCH_ARENA_PAD_MIB` reserves 0..64 MiB
 before each fixture; default zero. Allocation/upload stays outside timings.
+
+### HC regression kit
+
+[`HC-REGRESSION-CASES.txt`](HC-REGRESSION-CASES.txt) is the case list shipped
+with the mHC regression kit. `hc_regression_kit_cases_exist` checks that each
+name exists in this benchmark. Before packaging, build the main benchmark
+too. Check the shipped list against both `--list` outputs. A case must use
+the same kernel, dimensions, and fixture kind in both revisions.
+
+From an extracted prebuilt kit on an authorized, released Spark:
+
+```sh
+sha256sum -c SHA256SUMS && ./kernel-bench --a A.ptx --x X.ptx \
+  --case "$(cat HC-REGRESSION-CASES.txt)" --ms 100
+```
+
+Require identical A and X bytes for every case. Do not use `--allow-diff`,
+`--det`, or `--order`. Keep full output and compare result hashes across
+fresh processes and Sparks. Timing is incidental to this byte check.
 
 **Where next:** [Benchmarks](../../docs/benchmarks.md) · [Server and API](../../docs/server.md) ·
 [spark-serve](../../crates/serve/README.md)

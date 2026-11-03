@@ -34,6 +34,8 @@ mod fp4_prompt;
 #[path = "kernel_mxgroup.rs"]
 mod mxgroup;
 #[path = "kernel_fp8moe.rs"] mod fp8moe;
+#[path = "kernel_mhc.rs"] mod mhc;
+pub(super) use mhc::run as mhc_bytes;
 pub(super) use fp8moe::run as fp8_moe;
 use mxgroup::{all_mx, group_mx, mx_range_warps, mxgroup_fixture, mxgroup_weight, mxrows_a, mxrows_entries, mxrows_shared, mxrows_x};
 /// Latency-kernel shared bytes per warp, as the engine launches them.

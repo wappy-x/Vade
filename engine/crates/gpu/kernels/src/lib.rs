@@ -38,6 +38,10 @@ mod next_decode;
 mod flash_gdn_chunk;
 mod flash_qsa;
 mod qsa_common;
+#[path = "../../src/mhc_params.rs"]
+mod mhc_params;
+mod mhc_math;
+mod mhc;
 mod qsa_indexer;
 mod flash_moe;
 #[path = "../../src/router_abi.rs"]

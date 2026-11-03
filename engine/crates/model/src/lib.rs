@@ -2,6 +2,7 @@
 pub mod flash;
 pub mod csf;
 pub mod host_ops;
+pub mod mhc;
 pub mod placement;
 pub mod sampling_policy;
 pub mod plan;

@@ -32,6 +32,8 @@
 | [`lib.rs`](lib.rs) | Genuine Rust-authored kernels compiled by the official rustc NVPTX backend. |
 | [`math.rs`](math.rs) | BF16 bit conversion shared by Rust GPU kernels. |
 | [`matvec.rs`](matvec.rs) | Single-row projections use the same native BF16 MMA order as verification. |
+| [`mhc.rs`](mhc.rs) | Logical FP32 Sinkhorn preparation, stream collapse, residual mix, and mean head. |
+| [`mhc_math.rs`](mhc_math.rs) | Fixed-order FP32 math shared by mHC kernels and host byte checks. |
 | [`moe.rs`](moe.rs) | Sparse expert decode: device routing and only selected BF16 projections. |
 | [`moe_decode.rs`](moe_decode.rs) | Selected-expert decode over the resident MMA-packed BF16 weight arena. |
 | [`multi.rs`](multi.rs) | Ragged Qwen3 GQA rows with exactly the serial reduction order. |

@@ -14,6 +14,7 @@
 | [`gdn_params.rs`](gdn_params.rs) | Shared host/NVPTX row descriptor for canonical cached recurrence. |
 | [`lib.rs`](lib.rs) | GB10 CUDA driver ownership, packed-weight loading and kernel dispatch. |
 | [`load.rs`](load.rs) | Batched shard loading. |
+| [`mhc_params.rs`](mhc_params.rs) | Config-derived FP32 Sinkhorn stream ABI and shape checks. |
 | [`moe.rs`](moe.rs) | Device-resident expert selection over the model's existing weight arena. |
 | [`multi.rs`](multi.rs) | Arena row views and queued reductions for independent-session batches. |
 | [`projection_params.rs`](projection_params.rs) | Shared host/NVPTX ABI for independent BF16 decode projections. |

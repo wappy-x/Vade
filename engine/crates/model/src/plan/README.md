@@ -5,8 +5,14 @@
 | File | What it does (from its own summary comment) |
 | --- | --- |
 | [`config.rs`](config.rs) | Config adapters for checkpoint-derived geometry and supported semantics. |
+| [`description.rs`](description.rs) | Host descriptions for operations that have no execution binding. |
 | [`error.rs`](error.rs) | Typed failures while reading, validating and reconciling a model plan. |
+| [`glm.rs`](glm.rs) | Translate the GLM text schema into operation data for host inspection. |
+| [`glm_index.rs`](glm_index.rs) | Bind index names to tensor roles and scale components. |
 | [`mod.rs`](mod.rs) | A checkpoint-derived, typed model plan, independent of loading and serving. |
+| [`profile.rs`](profile.rs) | Count logical compulsory reads from model geometry. |
+| [`runtime.rs`](runtime.rs) | Hybrid runtime geometry and tensor roles, including draft layers. |
+| [`storage.rs`](storage.rs) | Read mixed storage recipes without device admission. |
 | [`tensors.rs`](tensors.rs) | Expected tensor names, storage, roles and header reconciliation. |
 
 **Why a folder:** Rust keeps one module per file; this folder groups the modules that belong to `plan`.
