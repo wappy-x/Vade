@@ -88,8 +88,11 @@ fn format(root: &Object, o: &Object, family: Family) -> Result<Format> {
     };
     let q = object(q, "quantization_config")?;
     if text(get(q, "quant_method")?, "quant_method")? == "modelopt" {
-        return crate::flash::mixed::Mixed::parse(q).map(Format::Mixed)
-            .map_err(|e| read_error("quantization_config", e));
+        let mixed = crate::flash::mixed::Mixed::parse(q).map_err(|e| read_error("quantization_config", e))?;
+        if mixed.layers.values().any(|s| matches!(s, crate::flash::mixed::Storage::Fp8Block { .. })) {
+            return Err(PlanError::MissingOps { ops: vec!["FP8_PB_WO weight_scale execution binding".into()] });
+        }
+        return Ok(Format::Mixed(mixed));
     }
     is(q, "quant_method", "fp8")?;
     is(q, "activation_scheme", "dynamic")?;

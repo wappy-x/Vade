@@ -16,6 +16,9 @@ device primitives, and pending device gates.
 
 The [logical layer program](LAYER-PLAN.md) describes deferred decoder
 execution, its host reference, and remaining device binding gaps.
+The [KDA host reference](src/kda/README.md) supplies config-based projections,
+short convolutions, and a fixed-order recurrence. It does not enable a model
+plan or change the serving path.
 
 <details>
 <summary><b>Terms on this page</b>: checkpoint, tensor, shard, safetensors, tied embeddings</summary>
@@ -126,7 +129,17 @@ Rejected with an error:
 - Tied embeddings as a main model. These load only as a draft model, such as
   Qwen3-0.6B.
 
+## Host CSF decoding
+
+The standalone [host CSF decoder](CSF.md) expands `csf_32x2_v1` scale bytes
+from caller buffers. It also converts NVFP4 weights to FP32 with the existing
+host routine. It does not change the accepted model layouts above.
+
 ## What the checks do not prove
+
+The standalone [DSA host reference](src/dsa/README.md) checks compressed-pool
+indexer operations with f32 inputs. It does not admit a checkpoint or change
+the serving path.
 
 **The checks cover names, shapes, types, index entries and byte counts, not
 the weight bytes themselves.** To prove the bytes are the published ones,
@@ -155,6 +168,9 @@ weights.</dd>
 start-up.</dd>
 <dt><code>flash</code></dt>
 <dd>Checkpoint layout for the Qwen3.8-Flash-Next research engine.</dd>
+<dt><code>mla</code></dt>
+<dd><a href="src/mla/README.md">Host f32 latent attention reference</a> with
+config dimensions and a compressed KV cache. It does not enable model serving.</dd>
 <dt><code>placement</code></dt>
 <dd>Pure ownership calculations in global model coordinates, independent of links.</dd>
 </dl>

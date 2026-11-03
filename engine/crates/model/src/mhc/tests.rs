@@ -52,6 +52,26 @@ fn configured_iteration_count_includes_initial_column_normalization() {
 }
 
 #[test]
+fn sinkhorn_iteration_limit_applies_to_json_and_direct_configs() {
+    let limit = MAX_SINKHORN_ITERS as usize;
+    let parse = |iterations: u64| Config::from_json(format!(r#"{{"hidden_size":2,"hc_mult":2,
+        "hc_sinkhorn_iters":{iterations},"rms_norm_eps":3.0,"hc_eps":0.25}}"#).as_bytes());
+    for iterations in [1, limit] {
+        assert_eq!(parse(iterations as u64).unwrap(), config(iterations));
+        let (projection, base, scale) = hand_weights();
+        let reference = Reference::new(config(iterations), Weights { projection: &projection, base: &base, scale: &scale }).unwrap();
+        assert!(reference.mix(&[0.0, 0.0, 2.0, 0.0]).is_ok());
+    }
+    for iterations in [0, MAX_SINKHORN_ITERS + 1, u64::MAX] {
+        assert!(parse(iterations).is_err(), "{iterations}");
+    }
+    for iterations in [0, limit + 1, usize::MAX] {
+        assert!(config(iterations).validate().is_err());
+        assert!(Reference::new(config(iterations), Weights { projection: &[], base: &[], scale: &[] }).is_err());
+    }
+}
+
+#[test]
 fn zero_weights_keep_epsilon_and_use_raw_streams() {
     let projection = [0.0; 32];
     let reference = Reference::new(config(1), Weights { projection: &projection, base: &[0.0; 8], scale: &[0.0; 3] }).unwrap();

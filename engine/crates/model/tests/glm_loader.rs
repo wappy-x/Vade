@@ -56,6 +56,38 @@ fn qwen_still_uses_the_existing_model_plan() {
         assert_eq!(ConfigPlan::from_config(bytes).unwrap().into_model_plan().unwrap(),old);
     }
 }
+
+#[test]
+fn description_and_header_adapter_keep_their_documented_boundaries() {
+    use engine_model::plan::{adapter::ConfigPlan as HeaderPlan, PlanError};
+    let ConfigPlan::Deferred(description) = ConfigPlan::from_config(CONFIG).unwrap() else { panic!() };
+    let HeaderPlan::Deferred(headers) = HeaderPlan::from_config(CONFIG).unwrap() else { panic!() };
+    assert_eq!(description.hidden, headers.hidden);
+    assert_eq!(description.layers.len() as u64, headers.decoder_layers);
+    assert_eq!(description.declared_draft_layers, headers.draft_layers);
+    assert!(matches!(ConfigPlan::Deferred(description).into_model_plan(), Err(PlanError::Unsupported { field: "execution", .. })));
+    let error = HeaderPlan::Deferred(headers).into_model_plan().unwrap_err();
+    assert!(matches!(error, PlanError::MissingOps { .. }));
+    assert_eq!(ModelPlan::from_config(CONFIG).unwrap_err(), error);
+    // Partial header admission does not claim full operation-field validation.
+    let bytes = changed(|o| { o.remove("hc_eps"); });
+    assert!(ConfigPlan::from_config(&bytes).is_err());
+    assert!(matches!(HeaderPlan::from_config(&bytes).unwrap(), HeaderPlan::Deferred(_)));
+}
+
+#[test]
+fn description_uses_the_host_sinkhorn_iteration_limit() {
+    use engine_model::shapes::MAX_SINKHORN_ITERS;
+    for iterations in [1, MAX_SINKHORN_ITERS] {
+        let bytes = changed(|o| { o.insert("hc_sinkhorn_iters".into(), Value::Number(iterations.to_string())); });
+        let ConfigPlan::Deferred(p) = ConfigPlan::from_config(&bytes).unwrap() else { panic!() };
+        assert_eq!(p.residual.iterations, iterations);
+    }
+    for iterations in [0, MAX_SINKHORN_ITERS + 1, u64::MAX] {
+        let bytes = changed(|o| { o.insert("hc_sinkhorn_iters".into(), Value::Number(iterations.to_string())); });
+        assert!(ConfigPlan::from_config(&bytes).unwrap_err().to_string().contains("hc_sinkhorn_iters"));
+    }
+}
 #[test]
 fn explicit_schedules_have_priority_and_dimensions_are_not_fixed() {
     let bytes = changed(|o| { o.insert("hidden_size".into(),Value::Number("3072".into()));

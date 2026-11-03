@@ -111,7 +111,7 @@ pub(super) fn parse(doc: &Value) -> Result<TextDescription> {
     if o.contains_key("first_k_dense_replace") { n(o,"first_k_dense_replace",count,true)?; }
     indices(linear,"kda_layers",&kda_ids)?; indices(linear,"full_attn_layers",&full_ids)?;
     let residual = SinkhornDescription { streams: n(o,"hc_mult",MAX_HEADS,false)?,
-        iterations: n(o,"hc_sinkhorn_iters",MAX_WIDTH,false)?, epsilon: number(o,"hc_eps")? };
+        iterations: n(o,"hc_sinkhorn_iters",MAX_SINKHORN_ITERS,false)?, epsilon: number(o,"hc_eps")? };
     check(residual.epsilon > 0.0,"hc_eps","must be positive")?;
     mul(residual.streams,hidden)?;
     let groups = n(o,"n_group",experts,false)?;

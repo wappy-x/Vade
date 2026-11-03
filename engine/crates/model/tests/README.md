@@ -5,8 +5,15 @@
 | File | What it does (from its own summary comment) |
 | --- | --- |
 | [`checkpoint_io.rs`](checkpoint_io.rs) | Integration tests for this crate. |
+| [`dsa_plan.rs`](dsa_plan.rs) | Synthetic headers connect DSA plan data to the host reference. |
 | [`flash_mixed.rs`](flash_mixed.rs) | Exhaustive MXFP8 oracle, mixed config and optional full checkpoint metadata reconciliation. |
 | [`flash_refcpu.rs`](flash_refcpu.rs) | Golden tests for the FP32 CPU qwen4_exp reference. |
+| [`glm_loader.rs`](glm_loader.rs) | Deferred GLM metadata and tensor role checks. |
+| [`glm_plan.rs`](glm_plan.rs) | Deferred config, storage and operation gap checks. |
+| [`host_ops_legacy_parity.rs`](host_ops_legacy_parity.rs) | Config reference parity with existing host operations. |
+| [`layer_binding.rs`](layer_binding.rs) | Deferred layer weight bindings and scalar replay checks. |
+| [`layout_fixture.rs`](layout_fixture.rs) | Header fixture reports, metadata bounds and path checks. |
+| [`reference_config_limits.rs`](reference_config_limits.rs) | Byte-boundary checks for the DSA, KDA, MLA and mHC config readers. |
 
 **Why a folder:** Rust keeps one module per file; this folder groups the modules that belong to `tests`.
 

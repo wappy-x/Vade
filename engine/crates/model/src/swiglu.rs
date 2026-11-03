@@ -1,4 +1,5 @@
 //! Host reference for a configurable SwiGLU epilogue. No model-name dispatch.
+//! This precision contract differs from the logical f32 `host_ops::Swiglu` formula.
 use crate::{Result, invalid, flash::nvfp4::{bf16_to_f32, f32_to_bf16, exp_ref}};
 
 /// A missing bound preserves the existing uncapped arithmetic.

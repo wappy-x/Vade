@@ -1,6 +1,7 @@
 //! Corrected sigmoid routing on one row of projected f32 logits.
 //! Source: `Glm5NextTextTopkRouter`, local public modeling source, lines 143-182.
 //! ROUTING.md records the source hash, fixed order, and supported limits.
+//! This is the deferred layer oracle. `host_ops::Router` keeps config defaults.
 use crate::{Result, invalid, json::{self, Value}, shapes::{CONFIG_BYTES, MAX_EXPERTS}};
 use std::collections::BTreeMap;
 

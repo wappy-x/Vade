@@ -220,6 +220,15 @@ pub(super) fn reconcile(
         l.part_rows = rows;
     }
     let mut inventory = expected(&plan)?;
+    // Served code reads singular shared expert names. Refuse the plural public names here.
+    // The deferred adapter maps the plural names itself.
+    for e in inventory.values().filter(|e| matches!(e.role.part, Part::Shared(_))) {
+        let plural = e.name.replace(".mlp.shared_expert.", ".mlp.shared_experts.");
+        if plural != e.name && headers.contains_key(&plural) {
+            return Err(PlanError::Unsupported { field: "shared expert tensor name",
+                value: format!("{plural}: the supported plan reads {}", e.name) });
+        }
+    }
     if let Format::Mixed(q) = &plan.format {
         crate::flash::mixed::inventory(q, &mut inventory, headers)
             .map_err(|e| super::read_error("mixed tensor inventory", e))?;

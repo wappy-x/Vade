@@ -16,11 +16,14 @@ pub const MAX_MIXED_TENSORS: usize = 500_000;
 type Object = BTreeMap<String, Value>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Storage { Plain, Mxfp8, Nvfp4 { csf: bool, activation_scale: bool } }
+pub enum Storage { Plain, Mxfp8, Fp8Block { block: [u64; 2] }, Nvfp4 { csf: bool, activation_scale: bool } }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mixed { pub ignore: Vec<String>, pub layers: BTreeMap<String, Storage> }
 fn require(ok: bool, why: &str) -> Result<()> {
     if ok { Ok(()) } else { Err(invalid(why)) }
+}
+fn block(o: &Object) -> Result<Option<Vec<u64>>> {
+    o.get("weight_block_size").map(|v| v.array()?.iter().map(Value::u64).collect()).transpose()
 }
 // ModelOpt ignore patterns use '*' across module-name components.
 fn glob(pattern: &str, text: &str) -> bool {
@@ -36,35 +39,61 @@ fn glob(pattern: &str, text: &str) -> bool {
     p == a.len()
 }
 impl Mixed {
+    pub(crate) fn exclusions(q: &Object) -> Result<Vec<String>> {
+        require(q.contains_key("ignore") || q.contains_key("exclude_modules"), "missing mixed exclusion list")?;
+        let mut ignore = Vec::new();
+        for key in ["ignore", "exclude_modules"] {
+            if let Some(v) = q.get(key) {
+                for p in v.array()? { ignore.push(p.string()?.to_owned()); }
+            }
+        }
+        Ok(ignore)
+    }
     pub fn parse(q: &Object) -> Result<Self> {
         require(field(q, "quant_method")?.string()? == "modelopt"
             && field(q, "quant_algo")?.string()? == "MIXED_PRECISION"
-            && field(q, "kv_cache_quant_algo")? == &Value::Null, "unsupported ModelOpt precision/cache")?;
-        let ignore = field(q, "ignore")?.array()?.iter()
-            .map(|v| Ok(v.string()?.to_owned())).collect::<Result<Vec<_>>>()?;
+            && q.get("kv_cache_quant_algo").is_none_or(|v| v == &Value::Null), "unsupported ModelOpt precision/cache")?;
+        let ignore = Self::exclusions(q)?;
         let mut layers = BTreeMap::new();
         for (name, v) in field(q, "quantized_layers")?.object()? {
             let o = v.object()?;
             let algo = field(o, "quant_algo")?.string()?;
             let csf = o.get("weight_scale_encoding").map(Value::string).transpose()?;
             require(csf.is_none() || csf == Some("csf") && algo == "NVFP4", "unsupported block scale encoding")?;
-            let (storage, group) = match algo {
-                "MXFP8" => (Storage::Mxfp8, 32),
-                "NVFP4" | "W4A16_NVFP4" => (Storage::Nvfp4 {
-                    csf: csf.is_some(), activation_scale: algo == "NVFP4" }, 16),
+            let group = o.get("group_size").map(Value::u64).transpose()?;
+            let block = block(o)?;
+            let storage = match algo {
+                "MXFP8" => {
+                    require(group.is_some() || block.is_some(), "missing MXFP8 group or block size")?;
+                    require(group.is_none_or(|v| v == 32) && block.as_deref().is_none_or(|v| v == [1, 32]),
+                        "invalid MXFP8 group or block size")?;
+                    Storage::Mxfp8
+                }
+                "FP8_PB_WO" => {
+                    require(block.as_deref() == Some(&[FP8_BLOCK, FP8_BLOCK]) && group.is_none_or(|v| v == FP8_BLOCK),
+                        "invalid FP8 block size")?;
+                    Storage::Fp8Block { block: [FP8_BLOCK, FP8_BLOCK] }
+                }
+                "NVFP4" | "W4A16_NVFP4" => {
+                    require(group == Some(16) && block.is_none(), "invalid NVFP4 group or block size")?;
+                    Storage::Nvfp4 { csf: csf.is_some(), activation_scale: algo == "NVFP4" }
+                }
                 _ => return Err(invalid(format!("unsupported quant_algo {algo}"))),
             };
-            require(!name.is_empty() && field(o, "group_size")?.u64()? == group, "invalid quantization target/group")?;
+            require(!name.is_empty(), "invalid quantization target")?;
             layers.insert(name.clone(), storage);
         }
         require(!layers.is_empty(), "empty mixed quantization map")?;
         Ok(Self { ignore, layers })
     }
     pub fn storage(&self, module: &str) -> Storage {
-        if self.ignore.iter().any(|p| glob(p, module)) { return Storage::Plain; }
+        if self.excluded(module) { return Storage::Plain; }
         self.layers.iter().filter(|(p, _)| module == p.as_str()
             || module.strip_prefix(p.as_str()).is_some_and(|s| s.starts_with('.')))
             .max_by_key(|(p, _)| p.len()).map_or(Storage::Plain, |(_, &s)| s)
+    }
+    pub(crate) fn excluded(&self, module: &str) -> bool {
+        self.ignore.iter().any(|p| glob(p, module))
     }
 }
 
@@ -96,7 +125,7 @@ pub(crate) fn inventory(q: &Mixed, entries: &mut BTreeMap<String, TensorEntry>, 
                     e.dtype = headers[&name].dtype;
                 }
             }
-            Storage::Mxfp8 | Storage::Nvfp4 { .. } => {
+            Storage::Mxfp8 | Storage::Fp8Block { .. } | Storage::Nvfp4 { .. } => {
                 require(e.shape.len() == 2, "quantized target is not a matrix")?;
                 let (rows, cols) = (e.shape[0], e.shape[1]);
                 match storage {
@@ -104,6 +133,22 @@ pub(crate) fn inventory(q: &Mixed, entries: &mut BTreeMap<String, TensorEntry>, 
                         require(cols % 32 == 0, "MXFP8 K must divide into 32-value groups")?;
                         e.dtype = Dtype::F8E4M3;
                         add("weight_scale", Dtype::U8, vec![rows, cols / 32], Store::BlockScale);
+                    }
+                    Storage::Fp8Block { block: [br, bc] } => {
+                        require(br == FP8_BLOCK && bc == FP8_BLOCK && cols % bc == 0,
+                            "FP8 block K must divide into the configured blocks")?;
+                        // KFp8Block128 in public vLLM commit
+                        // 355553ac22dca4080929ea8f88a446f15df1f3ba, file
+                        // vllm/model_executor/layers/quantization/modelopt.py,
+                        // stores F32 scales in either layout.
+                        // Keep the header layout. This plan does not reshape scale bytes.
+                        let scale = format!("{module}.weight_scale");
+                        let t = headers.get(&scale).ok_or_else(|| invalid(format!("missing tensor {scale}")))?;
+                        let (r, c) = (rows.div_ceil(br), cols / bc);
+                        require(t.dtype == Dtype::F32 && (t.shape == [r, c] || t.shape == [r, 1, c, 1]),
+                            "invalid FP8 weight_scale dtype or block grid")?;
+                        e.dtype = Dtype::F8E4M3;
+                        add("weight_scale", Dtype::F32, t.shape.clone(), Store::BlockScale);
                     }
                     Storage::Nvfp4 { csf, activation_scale } => {
                         require(cols % 16 == 0, "NVFP4 K must divide into 16-value groups")?;
@@ -134,7 +179,7 @@ pub(crate) fn inventory(q: &Mixed, entries: &mut BTreeMap<String, TensorEntry>, 
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Class { RoutedNvfp4, MtpNvfp4, AttentionMxfp8, SharedMxfp8, PleNvfp4, Bf16, Fp32, Constants, Vision }
+pub enum Class { RoutedNvfp4, MtpNvfp4, AttentionMxfp8, SharedMxfp8, PleNvfp4, Bf16, Fp32, Constants, Vision, BlockFp8 }
 #[derive(Debug, Default)]
 pub struct Total { pub tensors: usize, pub bytes: u64 }
 pub struct Plan { pub model: ModelPlan, pub files: BTreeMap<String, String>, pub classes: BTreeMap<Class, Total> }
@@ -200,12 +245,13 @@ impl Plan {
     }
     fn class(model: &ModelPlan, t: &TensorEntry) -> Result<Class> {
         if t.role.place == Place::Unused { return Ok(Class::Vision); }
+        let Format::Mixed(q) = &model.format else { return Err(invalid("expected mixed storage plan")); };
+        let module = t.name.split_once(".weight").map_or(t.name.as_str(), |(p, _)| p);
+        if matches!(q.storage(module), Storage::Fp8Block { .. }) { return Ok(Class::BlockFp8); }
         if matches!(t.role.part, Part::Lexical { .. }) || t.name.contains(".ngram_embedding.") { return Ok(Class::PleNvfp4); }
         if matches!(t.role.part, Part::Expert { .. }) {
             return Ok(if matches!(t.role.place, Place::Draft { .. }) { Class::MtpNvfp4 } else { Class::RoutedNvfp4 });
         }
-        let Format::Mixed(q) = &model.format else { return Err(invalid("expected mixed storage plan")); };
-        let module = t.name.split_once(".weight").map_or(t.name.as_str(), |(p, _)| p);
         if q.storage(module) == Storage::Mxfp8 {
             return Ok(if matches!(t.role.part, Part::Shared(_)) { Class::SharedMxfp8 } else { Class::AttentionMxfp8 });
         }
@@ -264,3 +310,77 @@ pub struct Nvfp4<'a> { pub weight: &'a TensorEntry, pub scales: ScaleView<'a>, p
     pub input: Option<&'a TensorEntry>, pub rows: u64, pub columns: u64 }
 pub struct PleRow<'a> { pub matrix: Nvfp4<'a>, pub packed_offset: u64, pub scale_offset: u64,
     pub packed_bytes: u64, pub scale_bytes: u64 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(text: &str) -> Result<Mixed> {
+        Mixed::parse(json::parse(text.as_bytes(), json::Limits::default())?.object()?)
+    }
+    const CONFIG: &str = r#"{"quant_method":"modelopt","quant_algo":"MIXED_PRECISION",
+        "ignore":["model.keep*"],"exclude_modules":["model.skip*"],"quantized_layers":{
+        "model":{"quant_algo":"MXFP8","weight_block_size":[1,32]},
+        "model.block":{"quant_algo":"FP8_PB_WO","weight_block_size":[128,128]}}}"#;
+
+    #[test]
+    fn public_mixed_schema_combines_exclusions_and_reads_blocks() {
+        let q = parse(CONFIG).unwrap();
+        for name in ["model.keep.q", "model.skip.q"] { assert_eq!(q.storage(name), Storage::Plain); }
+        assert_eq!(q.storage("model.q"), Storage::Mxfp8);
+        assert_eq!(q.storage("model.block.q"), Storage::Fp8Block { block: [128, 128] });
+        assert_eq!(q.storage("models"), Storage::Plain);
+        let only_public = CONFIG.replace("\"ignore\":[\"model.keep*\"],", "");
+        assert_eq!(parse(&only_public).unwrap().storage("model.skip.q"), Storage::Plain);
+        let both = CONFIG.replace("\"weight_block_size\":[1,32]", "\"group_size\":32,\"weight_block_size\":[1,32]");
+        assert_eq!(parse(&both).unwrap().storage("model.q"), Storage::Mxfp8);
+    }
+
+    #[test]
+    fn mixed_schema_rejects_conflicts_and_unknown_codec() {
+        for text in [
+            CONFIG.replace("\"weight_block_size\":[1,32]", "\"group_size\":16,\"weight_block_size\":[1,32]"),
+            CONFIG.replace("[1,32]", "[2,32]"), CONFIG.replace("[1,32]", "[1,16]"),
+            CONFIG.replace("[128,128]", "[64,128]"), CONFIG.replace("[128,128]", "[128]"),
+            CONFIG.replace("\"exclude_modules\":[\"model.skip*\"]", "\"exclude_modules\":null"),
+            CONFIG.replace("\"ignore\":", "\"kv_cache_quant_algo\":\"FP8\",\"ignore\":"),
+            CONFIG.replace("\"quant_algo\":\"MXFP8\",\"weight_block_size\":[1,32]",
+                "\"quant_algo\":\"NVFP4\",\"group_size\":16,\"weight_scale_encoding\":\"csf_32x2_v1\""),
+        ] { assert!(parse(&text).is_err(), "{text}"); }
+    }
+
+    fn logical(rows: u64, cols: u64) -> BTreeMap<String, TensorEntry> {
+        let name = "model.block.weight".to_owned();
+        BTreeMap::from([(name.clone(), TensorEntry { name, dtype: Dtype::Bf16, shape: vec![rows, cols],
+            role: Role { place: Place::Layer(0), part: Part::Shared(Proj::Gate), store: Store::Weight } })])
+    }
+    fn header(dtype: Dtype, shape: Vec<u64>) -> BTreeMap<String, Tensor> {
+        BTreeMap::from([("model.block.weight_scale".into(), Tensor { dtype, shape, start: 0, end: 0 })])
+    }
+
+    #[test]
+    fn fp8_block_headers_preserve_scale_layout_and_shared_role() {
+        let q = parse(CONFIG).unwrap();
+        // KFp8Block128 permits a partial output block and a full input block.
+        for shape in [vec![2, 2], vec![2, 1, 2, 1]] {
+            let mut entries = logical(129, 256);
+            inventory(&q, &mut entries, &header(Dtype::F32, shape.clone())).unwrap();
+            let weight = &entries["model.block.weight"];
+            let scale = &entries["model.block.weight_scale"];
+            assert_eq!((weight.dtype, &weight.shape), (Dtype::F8E4M3, &vec![129, 256]));
+            assert_eq!((scale.dtype, &scale.shape, scale.role.store), (Dtype::F32, &shape, Store::BlockScale));
+            assert_eq!(scale.role.part, Part::Shared(Proj::Gate));
+            assert!(!entries.contains_key("model.block.weight_scale_inv"));
+        }
+    }
+
+    #[test]
+    fn fp8_block_headers_reject_bad_grid_dtype_and_input_width() {
+        let q = parse(CONFIG).unwrap();
+        for h in [header(Dtype::Bf16, vec![2, 2]), header(Dtype::F32, vec![1, 2]),
+            header(Dtype::F32, vec![2, 2, 1, 1]), header(Dtype::F32, vec![2, 1, 2]), BTreeMap::new()] {
+            assert!(inventory(&q, &mut logical(129, 256), &h).is_err());
+        }
+        assert!(inventory(&q, &mut logical(129, 255), &header(Dtype::F32, vec![2, 2])).is_err());
+    }
+}

@@ -34,6 +34,8 @@ pub const MAX_HEAD_DIM: u64 = 4096;
 pub const MAX_EXPERTS: u64 = 1024;
 pub const MAX_VOCAB: u64 = 4_194_304;
 pub const MAX_POSITIONS: u64 = 1 << 32;
+/// Host resource limit for a configured Sinkhorn loop, not a model default.
+pub const MAX_SINKHORN_ITERS: u64 = 1024;
 
 /// A whole text model as the splitter sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]

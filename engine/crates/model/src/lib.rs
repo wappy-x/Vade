@@ -2,7 +2,9 @@
 pub mod flash;
 pub mod csf;
 pub mod host_ops;
+pub mod dsa;
 pub mod mhc;
+pub mod mla;
 pub mod placement;
 pub mod sampling_policy;
 pub mod plan;
@@ -15,7 +17,9 @@ pub mod qwen3;
 pub mod qwen3_5;
 pub mod phi4;
 pub mod llama;
+pub mod kda;
 pub mod safetensors;
+pub mod layout;
 pub mod shapes;
 pub mod swiglu;
 

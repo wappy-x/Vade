@@ -1,9 +1,20 @@
 # Deferred text metadata
 
-`plan::ConfigPlan::from_config` reads the GLM text schema beside the existing
-Qwen adapter. It returns `Deferred(TextDescription)` for `glm5_next` and
-`glm5_next_text`. The root vision config is ignored. Qwen still uses
-`ModelPlan::from_config` without a change to that parser.
+The crate has separate description and partial-header APIs:
+
+| API | Deferred result | Purpose |
+| --- | --- | --- |
+| `plan::ConfigPlan` (`plan::description::ConfigPlan`) | `TextDescription` | Validate operation fields and map index names. |
+| `plan::adapter::ConfigPlan` | `DeferredPlan` | Check partial shared-expert headers and list execution gaps. |
+
+Both APIs read `glm5_next` and `glm5_next_text`. They are distinct types and
+validate different fields. The description ignores the root vision config.
+The adapter records a vision gap when that config is present. It does not
+validate the vision fields. Neither deferred result can enable execution.
+
+`ModelPlan::from_config` now calls `plan::adapter::ConfigPlan::from_config`
+and then `into_model_plan`. GLM returns `MissingOps` at that boundary.
+Qwen continues to use `plan::config` through the supported adapter branch.
 
 The description carries operation data. It has KDA dimensions, latent
 attention dimensions, pooled-indexer settings, Sinkhorn settings, routing
@@ -26,7 +37,12 @@ The method does not check inventory completeness, dtypes, or shapes.
 `StorageMap` reads the config or sidecar recipe. It keeps MXFP8, FP8 block
 weights, direct NVFP4 scales, legacy CSF, and CSF32 distinct. It applies
 exclusions before the longest module-prefix match. Vision recipes are
-ignored. The current Qwen storage parser and device handoff are unchanged.
+ignored. The shared mixed Flash parser now accepts `exclude_modules`, an
+absent or null `kv_cache_quant_algo`, MXFP8 `weight_block_size`, and
+`FP8_PB_WO` metadata. These changes also apply to Qwen config parsing.
+Existing supported plans refuse `FP8_PB_WO` with `MissingOps` before device
+handoff. See [the mixed parser tests](src/plan/mixed_tests.rs) and
+[the Qwen plan changes](src/plan/README.md#qwen-plan-changes).
 
 [`csf::Csf32`](CSF.md) expands the new scale layout on the host. It uses the
 existing NVFP4 arithmetic after byte expansion. It is separate from the
@@ -36,8 +52,15 @@ bytes and FP32 results.
 
 The config declares appended prediction layers. The index reader labels
 their stored tensors as draft data. It does not define fusion order, head
-sharing, or a draft forward pass. `ConfigPlan::into_model_plan` refuses the
-deferred description before loading or execution.
+sharing, or a draft forward pass. Both `ConfigPlan::into_model_plan` methods
+refuse deferred metadata before loading or execution. The description API
+returns `Unsupported`; the adapter returns `MissingOps` with named gaps.
+
+The DSA, KDA, MLA and mHC config readers use `shapes::CONFIG_BYTES` as their
+byte limit. The mHC host
+reference and description use `shapes::MAX_SINKHORN_ITERS` as the iteration
+ceiling. This is a host resource limit, not a checkpoint default or a change
+to the configured iteration count. See [the mHC tests](src/mhc/tests.rs).
 
 Run the metadata inspector from `engine/`:
 

@@ -1,7 +1,7 @@
 //! Host f32 reference for manifold-constrained hyper-connections (mHC).
 //! This module does not change model admission or device execution.
 //! See `mhc/README.md` for the public source, tensor layout, and arithmetic order.
-use crate::{Result, invalid, json::{self, Value, field}, shapes::CONFIG_BYTES};
+use crate::{Result, invalid, json::{self, Value, field}, shapes::{CONFIG_BYTES, MAX_SINKHORN_ITERS}};
 
 fn need(ok: bool, message: &str) -> Result<()> {
     if ok { Ok(()) } else { Err(invalid(format!("mHC: {message}"))) }
@@ -49,8 +49,8 @@ impl Config {
     }
     pub fn validate(&self) -> Result<()> {
         need(self.hidden_size > 0 && self.hc_mult > 0, "dimensions must be positive")?;
-        need(self.hc_sinkhorn_iters > 0 && self.hc_sinkhorn_iters <= crate::shapes::MAX_WIDTH as usize,
-            "Sinkhorn iteration count is outside the plan limit")?;
+        need(self.hc_sinkhorn_iters > 0 && self.hc_sinkhorn_iters <= MAX_SINKHORN_ITERS as usize,
+            "Sinkhorn iteration count is outside its limit")?;
         need(self.rms_norm_eps.is_finite() && self.rms_norm_eps > 0.0, "invalid RMS norm epsilon")?;
         need(self.hc_eps.is_finite() && self.hc_eps > 0.0, "invalid HC epsilon")?;
         let streams_plus_two = self.hc_mult.checked_add(2).ok_or_else(|| invalid("mHC: dimension sum overflow"))?;

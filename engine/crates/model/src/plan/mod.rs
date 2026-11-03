@@ -8,6 +8,16 @@ pub mod glm_index;
 pub mod storage;
 pub mod layer;
 pub use description::{ConfigPlan, TextDescription};
+pub mod adapter;
+pub use adapter::{DeferredPlan, MappedTensor};
+#[cfg(test)]
+mod mtp_tests;
+pub mod dsa;
+#[cfg(test)]
+mod mixed_tests;
+#[cfg(test)]
+mod ffn_tests;
+pub use crate::host_ops::FfnKind;
 pub mod profile;
 pub mod runtime;
 pub use error::PlanError;
@@ -49,7 +59,7 @@ impl ModelPlan {
     }
     /// Parse bounded config metadata; tensor inventory, tying and lexical rows await headers.
     pub fn from_config(config_json: &[u8]) -> Result<Self> {
-        config::parse(config_json)
+        adapter::ConfigPlan::from_config(config_json)?.into_model_plan()
     }
     /// Reconcile stored inventory; absent lm_head reuses embeddings; config contradictions refuse.
     pub fn with_headers(self, tensors: &BTreeMap<String, Tensor>) -> Result<Self> {
@@ -105,13 +115,33 @@ fn add(a: u64, b: u64) -> Result<u64> {
 mod tests {
     use super::*;
     use crate::{flash, qwen3_5, safetensors::Dtype};
-    fn synthetic(h: u64, layers: u64, q: u64, kv: u64, v: u64, k: u64, experts: u64, top: u64, width: u64) -> String {
+    pub(super) fn synthetic(h: u64, layers: u64, q: u64, kv: u64, v: u64, k: u64, experts: u64, top: u64, width: u64) -> String {
         let interval = if layers == 2 { 2 } else { 4 }; let kinds = (0..layers).map(|i| if (i+1)%interval==0 { "\"full_attention\"" } else { "\"linear_attention\"" }).collect::<Vec<_>>().join(",");
         format!(r#"{{"model_type":"qwen3_5_moe","architectures":["Qwen3_5MoeForConditionalGeneration"],"tie_word_embeddings":false,"text_config":{{"model_type":"qwen3_5_moe_text","dtype":"bfloat16","hidden_act":"silu","output_gate_type":"swish","attn_output_gate":true,"attention_bias":false,"attention_dropout":0,"tie_word_embeddings":false,"use_cache":true,"mamba_ssm_dtype":"float32","hidden_size":{h},"vocab_size":248320,"max_position_embeddings":262144,"eos_token_id":248044,"rms_norm_eps":0.000001,"head_dim":256,"num_attention_heads":{q},"num_key_value_heads":{kv},"linear_num_key_heads":{k},"linear_num_value_heads":{v},"linear_key_head_dim":128,"linear_value_head_dim":128,"linear_conv_kernel_dim":4,"num_hidden_layers":{layers},"layer_types":[{kinds}],"full_attention_interval":{interval},"num_experts":{experts},"num_experts_per_tok":{top},"moe_intermediate_size":{width},"shared_expert_intermediate_size":{width},"mtp_num_hidden_layers":0,"rope_parameters":{{"rope_type":"default","rope_theta":10000000,"mrope_interleaved":true,"mrope_section":[11,11,10],"partial_rotary_factor":0.25}}}},"quantization_config":{{"quant_method":"fp8","fmt":"e4m3","activation_scheme":"dynamic","weight_block_size":[128,128],"modules_to_not_convert":["lm_head"]}}}}"#)
     }
-    fn hybrid_headers(text: &str) -> BTreeMap<String, Tensor> {
+    pub(super) fn hybrid_headers(text: &str) -> BTreeMap<String, Tensor> {
         let c=qwen3_5::Config::parse(text.as_bytes()).unwrap(); let mut shapes=c.stored_shapes(); if c.mtp_layers!=0 { for (name,shape) in c.mtp_shapes().unwrap() { if c.quantized(&name,&shape) { shapes.insert(format!("{name}_scale_inv"),vec![shape[0].div_ceil(FP8_BLOCK),shape[1].div_ceil(FP8_BLOCK)]); } shapes.insert(name,shape); } }
         shapes.into_iter().map(|(n,shape)| { let dtype=if c.quantized(&n,&shape) { Dtype::F8E4M3 } else { Dtype::Bf16 }; (n,Tensor { dtype,shape,start:0,end:0 }) }).collect()
+    }
+    fn flash_formats() -> [String; 2] {
+        let fp8 = flash_fixture();
+        let prefix = fp8.rsplit_once("\"quantization_config\":").unwrap().0;
+        let mixed = format!(r#"{prefix}"quantization_config":{{"quant_method":"modelopt","quant_algo":"MIXED_PRECISION","ignore":[],"quantized_layers":{{"model.language_model.layers":{{"quant_algo":"NVFP4","group_size":16}},"lm_head":{{"quant_algo":"MXFP8","group_size":32}}}}}}}}"#);
+        [fp8, mixed]
+    }
+    #[test]
+    fn qwen_flash_next_plans_match_base_bytes() {
+        let expected = [include_bytes!("../../tests/fixtures/ffn-plan/flash-next-fp8.plan.txt").as_slice(),
+            include_bytes!("../../tests/fixtures/ffn-plan/flash-next-mixed.plan.txt").as_slice()];
+        for (config, expected) in flash_formats().iter().zip(expected) {
+            // Invalid deferred fields must never reach the deferred FFN parser.
+            let unused = config.replace("\"hidden_size\":", "\"first_k_dense_replace\":true,\"mlp_layer_types\":false,\"hidden_size\":");
+            for config in [config, &unused] {
+                let plan = ModelPlan::from_config(config.as_bytes()).unwrap();
+                assert_eq!(format!("{plan:?}").as_bytes(), expected);
+                assert_eq!(ConfigPlan::from_config(config.as_bytes()).unwrap(), ConfigPlan::Supported(plan));
+            }
+        }
     }
     #[test]
     #[ignore = "skipped: no checkpoint; requires VADE_FLASH_CONFIG"]
@@ -170,10 +200,13 @@ mod tests {
         let mut per=p.clone(); for l in &mut per.shape.layers { if let Ffn::Experts(e)=&mut l.ffn { e.storage=ExpertStorage::PerExpert; } } let per_headers=tensors::expected(&per).unwrap().into_iter().map(|(n,e)| (n,Tensor { dtype:e.dtype,shape:e.shape,start:0,end:0 })).collect(); assert_eq!(p.clone().with_headers(&per_headers).unwrap().shape.layers,per.shape.layers);
         assert_eq!(p.clone().with_headers(&headers).unwrap().shape.tensors.iter().find(|e| e.name==scale).unwrap().role.store,Store::BlockScale); assert!(matches!(parse(&text.replace("\"shared_expert_intermediate_size\":128","\"shared_expert_intermediate_size\":0")),Err(PlanError::Invalid { .. })));
     }
+    pub(super) fn flash_fixture() -> String {
+        let text=synthetic(128,2,4,2,4,2,4,2,128).replace("qwen3_5_moe","qwen4_exp").replace("Qwen3_5Moe","Qwen4Exp").replace("swish","sigmoid").replace("\"fmt\":\"e4m3\"", "\"weight_per_tensor\":false,\"act_per_tensor\":false").replace("\"mtp_num_hidden_layers\":0",r#""hc_count":2,"hc_lowrank":8,"indexer_n_heads":2,"indexer_kv_heads":1,"indexer_head_dim":64,"indexer_budget":16,"indexer_compress_ratio":2,"ple_layer_ids":[2],"heads_per_ngram":2,"ngram_size":3,"ple_embed_dim":128,"ple_conv_kernel_size":4,"split_ngram_parts":2,"mtp_use_dedicated_embeddings":false,"mtp_num_hidden_layers":1,"mtp":{"num_hidden_layers":1,"hybrid":true,"mtp_use_hidden_state_from_layer":null,"rope_theta":10000000,"layer_types":["full_attention"]}"#);
+        text.replace("\"vocab_size\":248320","\"vocab_size\":256").replace("\"eos_token_id\":248044","\"eos_token_id\":255")
+    }
     #[test]
     fn synthetic_flash_headers() {
-        let text=synthetic(128,2,4,2,4,2,4,2,128).replace("qwen3_5_moe","qwen4_exp").replace("Qwen3_5Moe","Qwen4Exp").replace("swish","sigmoid").replace("\"fmt\":\"e4m3\"", "\"weight_per_tensor\":false,\"act_per_tensor\":false").replace("\"mtp_num_hidden_layers\":0",r#""hc_count":2,"hc_lowrank":8,"indexer_n_heads":2,"indexer_kv_heads":1,"indexer_head_dim":64,"indexer_budget":16,"indexer_compress_ratio":2,"ple_layer_ids":[2],"heads_per_ngram":2,"ngram_size":3,"ple_embed_dim":128,"ple_conv_kernel_size":4,"split_ngram_parts":2,"mtp_use_dedicated_embeddings":false,"mtp_num_hidden_layers":1,"mtp":{"num_hidden_layers":1,"hybrid":true,"mtp_use_hidden_state_from_layer":null,"rope_theta":10000000,"layer_types":["full_attention"]}"#);
-        let text=text.replace("\"vocab_size\":248320","\"vocab_size\":256").replace("\"eos_token_id\":248044","\"eos_token_id\":255"); let p=ModelPlan::from_config(text.as_bytes()).unwrap(); assert_eq!(p.shape.residual,Residual::Streams { count:2,rank:8 }); let Mixer::Attention(a)=p.shape.layers.get(1).unwrap().mixer else { panic!() }; assert_eq!(a.index,Some(IndexShape { heads:2,kv_heads:1,dim:64,budget:16,compression:2 })); assert_eq!(p.shape.draft.first().unwrap().mixer,Mixer::Attention(a));
+        let text=flash_fixture(); let p=ModelPlan::from_config(text.as_bytes()).unwrap(); assert_eq!(p.shape.residual,Residual::Streams { count:2,rank:8 }); let Mixer::Attention(a)=p.shape.layers.get(1).unwrap().mixer else { panic!() }; assert_eq!(a.index,Some(IndexShape { heads:2,kv_heads:1,dim:64,budget:16,compression:2 })); assert_eq!(p.shape.draft.first().unwrap().mixer,Mixer::Attention(a));
         let mut filled=p.clone(); filled.shape.lexical.as_mut().unwrap().part_rows=7; let headers=tensors::expected(&filled).unwrap().into_iter().map(|(n,e)| (n,Tensor { dtype:e.dtype,shape:e.shape,start:0,end:0 })).collect::<BTreeMap<_,_>>(); let plan=p.clone().with_headers(&headers).unwrap(); assert_eq!(plan.shape.lexical,Some(LexicalShape { layer:1,parts:2,part_rows:7,row_dim:32 }));
         for (name,shape,part) in [("model.language_model.layers.1.self_attn.indexer.index_qk_proj.weight",vec![192,128],Part::Index),("model.language_model.layers.0.attn_hyper_connection.hc_norm.weight",vec![256],Part::Whole),("model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_1.weight",vec![7,32],Part::Lexical { part:1 }),("mtp.fc_hidden.weight",vec![128,128],Part::Whole)] { let e=plan.shape.tensors.iter().find(|e| e.name==name).unwrap(); assert_eq!((&e.shape,e.role.part),(&shape,part)); }
         assert!(matches!(ModelPlan::from_config(text.replace("\"indexer_n_heads\":2,","").as_bytes()),Err(PlanError::Missing { field:"indexer_n_heads" }))); let mut wrong=headers.clone(); wrong.get_mut("model.language_model.layers.0.linear_attn.A_log").unwrap().dtype=Dtype::F32; assert!(p.clone().with_headers(&wrong).is_err());

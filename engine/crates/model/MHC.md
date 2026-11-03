@@ -26,7 +26,7 @@ checks these fields against the typed loader description.
 Its dimensions and both epsilon fields come from operation data. It reads no
 model name. `Config::from_json` also accepts direct operation fields with no
 model name. The deferred plan still refuses executable admission.
-The iteration limit follows the loader's `MAX_WIDTH` work limit in
+The iteration limit follows the host `MAX_SINKHORN_ITERS` work limit in
 [`shapes.rs`](src/shapes.rs). A zero iteration count is refused.
 The source always runs the first column pass, even when its count is zero.
 Vade requires a positive count so that the field names the number of column

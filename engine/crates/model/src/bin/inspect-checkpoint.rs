@@ -2,8 +2,16 @@ use engine_model::qwen3::Checkpoint;
 use std::{path::PathBuf, time::Instant};
 fn main() {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if args.len() == 2 && args[0] == "--layout-fixture" {
+        match engine_model::layout::LayoutReport::open_fixture(&PathBuf::from(&args[1])) {
+            Ok(report) => print!("{}", report.text),
+            Err(error) => { eprintln!("fixture rejected: {error}"); std::process::exit(1); }
+        }
+        return;
+    }
     if args.len() != 1 {
         eprintln!("usage: inspect-checkpoint CHECKPOINT_DIRECTORY");
+        eprintln!("       inspect-checkpoint --layout-fixture FIXTURE_DIRECTORY");
         std::process::exit(2);
     }
     let start = Instant::now();

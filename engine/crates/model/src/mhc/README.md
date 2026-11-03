@@ -21,3 +21,8 @@ fields. If `mhc` is present, it must be true. `from_description` binds the
 loader's typed Sinkhorn description. Neither adapter reads a model name.
 Deferred model admission stays closed. This module does not change the
 current low-rank HC path.
+
+The iteration count must not exceed `shapes::MAX_SINKHORN_ITERS`.
+This is a host resource ceiling, not a source default or a convergence rule.
+The [boundary tests](tests.rs) check the JSON parser and direct `Config`
+validation. The typed-description adapter uses the same validation.
