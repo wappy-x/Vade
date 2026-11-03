@@ -17,6 +17,7 @@
 | [`moe.rs`](moe.rs) | Device-resident expert selection over the model's existing weight arena. |
 | [`multi.rs`](multi.rs) | Arena row views and queued reductions for independent-session batches. |
 | [`projection_params.rs`](projection_params.rs) | Shared host/NVPTX ABI for independent BF16 decode projections. |
+| [`router_abi.rs`](router_abi.rs) | Checked corrected-sigmoid routing and ungated expert-finish spans. |
 | [`segments.rs`](segments.rs) | Fixed virtual KV addresses, append-only physical pages and shared prefixes. |
 | [`teardown.rs`](teardown.rs) | Serving processes bound fatal cleanup even when the driver stops responding. |
 | [`bin/`](bin/README.md) | Folder: see its README. |

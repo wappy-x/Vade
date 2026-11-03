@@ -12,6 +12,9 @@ from the config lists. The explicit MLP list has priority over the source
 default `first_k_dense_replace`. The redundant KDA and full-attention lists
 must agree with the attention list.
 
+The [SwiGLU reference](SWIGLU.md) defines the bound and dtype boundaries.
+It supplies activation data for a future binding. GLM execution stays deferred.
+
 `TextDescription::map_index` reads index JSON only. It maps names to
 `TensorRole` and storage components. It also supplies the existing `Role`
 for common placements and expert projections. New attention and residual
@@ -52,3 +55,7 @@ The public metadata source and its saved revision are in the
 [fixture record](tests/fixtures/glm/README.md). The operation source is the
 saved Transformers `modeling_glm5_next.py` file. Its fetch used an unpinned
 branch. This description does not claim a pinned operation implementation.
+
+The [routing math table](ROUTING.md) defines the corrected sigmoid kind,
+fixed tie order, host references, and device payload. The description checks
+group capacity and the FP32 routing scale. Device execution remains deferred.

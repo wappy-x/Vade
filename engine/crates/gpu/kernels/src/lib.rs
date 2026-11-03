@@ -25,6 +25,7 @@ mod fp8_abi;
 #[path = "../../src/fp4_abi.rs"]
 mod fp4_abi;
 mod layer;
+mod swiglu;
 mod decode_attention;
 mod flash_ops;
 #[path = "../../src/frontend_math.rs"]
@@ -39,6 +40,10 @@ mod flash_qsa;
 mod qsa_common;
 mod qsa_indexer;
 mod flash_moe;
+#[path = "../../src/router_abi.rs"]
+mod router_abi;
+mod corrected_router;
+mod ungated_moe;
 #[cfg(feature = "tensor-cores")]
 mod gemm;
 #[cfg(feature = "tensor-cores")]

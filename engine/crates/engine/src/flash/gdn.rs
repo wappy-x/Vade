@@ -85,7 +85,7 @@ fn launch_rows(b: &Backend<'_>, name: &str, threads: usize, rows: usize, block: 
     }
     unsafe { b.launch_flash_rows(name, threads.div_ceil(block as usize) as u32, rows as u32, block, shared, &mut pointers[..args.len()]) }
 }
-fn launch_batch<T>(b: &Backend<'_>, name: &str, threads: usize, mut params: T) -> Result<()> {
+pub(super) fn launch_batch<T>(b: &Backend<'_>, name: &str, threads: usize, mut params: T) -> Result<()> {
     if threads == 0 { return Ok(()); }
     unsafe { b.launch_flash(name, threads.div_ceil(128) as u32, 128,
         &mut [(&mut params as *mut T).cast()]) }

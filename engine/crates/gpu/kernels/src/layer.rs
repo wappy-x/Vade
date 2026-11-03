@@ -458,11 +458,8 @@ pub unsafe extern "ptx-kernel" fn layer_swiglu(a: crate::kernel_params::SwiGlu) 
     let (gate, up) = (a.gate as *mut f32, a.up as *const f32);
     let i = index();
     if i < a.width as usize {
-        let g = *gate.add(i);
-        *gate.add(i) = if a.bf16 != 0 {
-            let g = round_bf16(g);
-            round_bf16(round_bf16(g / (1.0 + exp(-g))) * round_bf16(*up.add(i)))
-        } else { g / (1.0 + exp(-g)) * *up.add(i) };
+        *gate.add(i) = crate::swiglu::apply(*gate.add(i), *up.add(i), a.bf16 != 0, a.limit,
+            |x| if a.limit > 0.0 { crate::next_math::exp(x) } else { exp(x) });
     }
 }
 

@@ -200,7 +200,7 @@ pub fn f32_to_bf16(value: f32) -> u16 {
     ((value.to_bits().wrapping_add(0x7fff + ((value.to_bits() >> 16) & 1))) >> 16) as u16
 }
 
-fn exp_ref(t: f32) -> f32 {
+pub(crate) fn exp_ref(t: f32) -> f32 {
     // FMA-only exp so the CPU oracle and the PTX kernel agree bit-for-bit:
     // range-reduce by ln2 (hi/lo split), degree-7 Taylor on [-ln2/2, ln2/2],
     // rescale by 2^n from raw exponent bits. Clamping t to [-87, 87] keeps

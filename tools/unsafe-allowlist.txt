@@ -429,7 +429,7 @@ engine/crates/gpu	src/backend/device.rs	impl:Backend::fn:residual_rms_device	blo
 engine/crates/gpu	src/backend/device.rs	impl:Backend::fn:residual_rms_partials_device	block:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu	src/backend/device.rs	impl:Backend::fn:rms_device	block:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu	src/backend/device.rs	impl:Backend::fn:round_logits_bf16	block:1	frozen ruling 2026-11-02 11:54
-engine/crates/gpu	src/backend/device.rs	impl:Backend::fn:swiglu_precision_device	block:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu	src/backend/device.rs	impl:Backend::fn:swiglu_config_device	block:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu	src/backend/weights.rs	impl:Backend::fn:shared_bf16_row	block:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu	src/batch.rs	impl:Backend::fn:attention_batch_device	block:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu	src/batch.rs	impl:Backend::fn:attention_batch_device	block:2	frozen ruling 2026-11-02 11:54
@@ -721,6 +721,7 @@ engine/crates/gpu/kernels	src/batch.rs	fn:stage_cache4	fn:1	frozen ruling 2026-1
 engine/crates/gpu/kernels	src/batch.rs	fn:values_split_gqa4	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/canonical.rs	extern:\"llvm-intrinsic\"	extern:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/canonical.rs	fn:madd	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/corrected_router.rs	fn:corrected_sigmoid_route	block:1
 engine/crates/gpu/kernels	src/decode_attention.rs	fn:attention_bounded_flash	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/decode_attention.rs	fn:attention_bounded_merge	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/decode_attention.rs	fn:attention_bounded_scores	fn:1	frozen ruling 2026-11-02 11:54
@@ -1748,6 +1749,7 @@ engine/crates/gpu/kernels	src/tp_mailbox.rs	fn:now_ns	fn:1	frozen ruling 2026-11
 engine/crates/gpu/kernels	src/tp_mailbox.rs	fn:store_release	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/tp_mailbox.rs	fn:tp_mailbox_put	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/tp_mailbox.rs	fn:tp_mailbox_take	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/ungated_moe.rs	fn:ungated_moe_finish	block:1
 engine/crates/gpu/kernels	src/verify_mma.rs	fn:load_acc	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/verify_mma.rs	fn:stage	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/verify_mma.rs	fn:verify	fn:1	frozen ruling 2026-11-02 11:54

@@ -9,6 +9,7 @@
 | [`gemma4_assistant.rs`](gemma4_assistant.rs) | Official 31B assistant: query-only decoder over the target's last local/global KV. |
 | [`json.rs`](../../base/src/json.rs) | Small strict JSON reader for bounded model metadata. |
 | [`lib.rs`](lib.rs) | Bounded model-file inspection and dense Qwen3 checkpoint validation. |
+| [`host_ops/`](host_ops/README.md) | Fixed-order router and expert-join references. |
 | [`llama.rs`](llama.rs) | Official Llama 3.1/3.2 BF16 dense checkpoint contract. |
 | [`phi4.rs`](phi4.rs) | Phi3ForCausalLM BF16 contract, read from the official Phi-4 checkpoint. |
 | [`placement.rs`](placement.rs) | Pure ownership calculations in global model coordinates. |

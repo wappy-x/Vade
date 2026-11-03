@@ -1,6 +1,7 @@
 //! Bounded model-file inspection and dense Qwen3 checkpoint validation.
 pub mod flash;
 pub mod csf;
+pub mod host_ops;
 pub mod placement;
 pub mod sampling_policy;
 pub mod plan;
@@ -15,6 +16,7 @@ pub mod phi4;
 pub mod llama;
 pub mod safetensors;
 pub mod shapes;
+pub mod swiglu;
 
 pub(crate) fn invalid(message: impl Into<String>) -> Error {
     Error(message.into())

@@ -1,6 +1,7 @@
 //! Translate the GLM text schema into operation data. This is host metadata only.
 use super::{description::*, storage::StorageMap, PlanError, Result, invalid, mul};
 use crate::{json::Value, shapes::*};
+use crate::host_ops::router::{Router, RouterKind};
 use std::collections::{BTreeMap, BTreeSet};
 type Object = BTreeMap<String, Value>;
 fn get<'a>(o: &'a Object, key: &'static str) -> Result<&'a Value> { o.get(key).ok_or(PlanError::Missing { field: key }) }
@@ -44,7 +45,9 @@ pub(super) fn parse(doc: &Value) -> Result<TextDescription> {
     let o = if kind == "glm5_next_text" { root } else { object(get(root,"text_config")?,"text_config")? };
     is(o,"model_type","glm5_next_text")?;
     is(o,"dtype","bfloat16")?; is(o,"hidden_act","silu")?;
-    is(o,"moe_router_dtype","float32")?; is(o,"scoring_func","sigmoid")?; is(o,"topk_method","noaux_tc")?;
+    is(o,"moe_router_dtype","float32")?;
+    let router_kind = RouterKind::from_selectors(string(get(o,"scoring_func")?,"scoring_func")?,
+        string(get(o,"topk_method")?,"topk_method")?).ok_or_else(|| invalid("scoring_func","unsupported routing selectors"))?;
     flags(o,&[("attention_bias",false),("use_cache",true),("mhc",true),("mla_use_nope",true)])?;
     check(number(o,"attention_dropout")? == 0.0,"attention_dropout","must be zero for inference")?;
     let tied_embeddings = boolean(o,"tie_word_embeddings")?;
@@ -113,12 +116,15 @@ pub(super) fn parse(doc: &Value) -> Result<TextDescription> {
     mul(residual.streams,hidden)?;
     let groups = n(o,"n_group",experts,false)?;
     check(experts % groups == 0,"n_group","expert count does not divide into groups")?;
-    let routing = RoutingDescription { score: RoutingScore::Sigmoid, correction_bias: true,
+    let routing = RoutingDescription { kind: router_kind,
         normalize_selected: boolean(o,"norm_topk_prob")?, scale: number(o,"routed_scaling_factor")?,
         groups, selected_groups: n(o,"topk_group",groups,false)?, shared_gate: false };
     check(routing.scale > 0.0,"routed_scaling_factor","must be positive")?;
+    let Ffn::Experts(expert_shape) = expert else { unreachable!() };
+    Router::from_description(&routing,expert_shape).map_err(|e| super::read_error("routing",e))?;
     let swiglu_limit = number(o,"swiglu_limit")?;
-    check(swiglu_limit > 0.0,"swiglu_limit","must be positive")?;
+    crate::swiglu::SwiGlu::new(Some(swiglu_limit))
+        .map_err(|e| super::read_error("swiglu_limit",e))?;
     let q = root.get("quantization_config").or_else(|| o.get("quantization_config"))
         .ok_or(PlanError::Missing { field: "quantization_config" })?;
     let storage = StorageMap::parse(q).map_err(|e| super::read_error("quantization_config",e))?;

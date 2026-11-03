@@ -21,11 +21,14 @@ pub mod teardown;
 pub mod host_prep;
 pub mod routing;
 pub mod frontend_math;
+pub mod router_abi;
 pub mod qsa;
 #[cfg(target_os = "linux")]
 mod qsa_device;
 #[path = "../kernels/src/bf16.rs"]
 pub mod bf16;
+#[path = "../kernels/src/swiglu.rs"]
+pub mod swiglu;
 #[cfg(test)]
 #[path = "../kernels/src/dense_latency.rs"]
 mod dense_latency;

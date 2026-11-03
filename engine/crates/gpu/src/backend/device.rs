@@ -149,9 +149,22 @@ impl<'a> Backend<'a> {
         self.swiglu_precision_device(gate, up, false)
     }
     pub fn swiglu_precision_device(&self, gate: &mut DeviceVector<'_>, up: &DeviceVector<'_>, bf16: bool) -> Result<(), String> {
+        self.swiglu_config_device(gate, up, bf16, None)
+    }
+    /// A checkpoint bound changes only the standalone epilogue. None preserves
+    /// the existing arithmetic. BF16 mode retains each tensor dtype boundary.
+    pub fn swiglu_config_device(&self, gate: &mut DeviceVector<'_>, up: &DeviceVector<'_>, bf16: bool,
+        limit: Option<f32>) -> Result<(), String> {
         self.check_vector(gate, up.len)?; self.check_vector(up, up.len)?;
+        if let Some(v) = limit {
+            let b = crate::bf16::rounded(v);
+            if !v.is_finite() || v <= 0.0 || !b.is_finite() || b <= 0.0 {
+                return Err("swiglu_limit must be positive and finite in FP32 and BF16".into());
+            }
+        }
+        if gate.len > u32::MAX as usize { return Err("SwiGLU width exceeds kernel range".into()); }
         let mut args = crate::kernel_params::SwiGlu { gate: gate.buffer.address,
-            up: up.buffer.address, width: gate.len as u32, bf16: u32::from(bf16) };
+            up: up.buffer.address, width: gate.len as u32, bf16: u32::from(bf16), limit: limit.unwrap_or(0.0) };
         unsafe { self.enqueue(self.layer_kernels()?.swiglu, gate.len, &mut [parameter(&mut args)]) }
     }
     /// Reuse the existing cast kernel, retaining no extra activation allocation.

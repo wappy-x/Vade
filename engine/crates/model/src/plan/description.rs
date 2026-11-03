@@ -2,6 +2,7 @@
 use super::{ModelPlan, PlanError, Rope};
 use crate::{json::{self, Value}, shapes::*};
 use super::storage::StorageMap;
+use crate::host_ops::router::RouterKind;
 
 /// Schema selection occurs once while reading config data. Kernels must use
 /// the operation fields below. A deferred description cannot supply ModelShape.
@@ -44,6 +45,13 @@ pub struct TextDescription {
     pub swiglu_limit: f64,
     pub storage: StorageMap,
 }
+impl TextDescription {
+    /// Activation data for a future execution binding. This does not make
+    /// the deferred model executable.
+    pub fn swiglu(&self) -> crate::Result<crate::swiglu::SwiGlu> {
+        crate::swiglu::SwiGlu::new(Some(self.swiglu_limit))
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DecoderDescription { pub mixer: TokenMixer, pub ffn: Ffn }
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -65,10 +73,8 @@ pub struct PoolIndexerDescription {
 }
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SinkhornDescription { pub streams: u64, pub iterations: u64, pub epsilon: f64 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RoutingScore { Sigmoid }
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RoutingDescription {
-    pub score: RoutingScore, pub correction_bias: bool, pub normalize_selected: bool,
+    pub kind: RouterKind, pub normalize_selected: bool,
     pub scale: f64, pub groups: u64, pub selected_groups: u64, pub shared_gate: bool,
 }

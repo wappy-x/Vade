@@ -263,6 +263,8 @@ impl QkRope {
 #[repr(C)]
 pub struct SwiGlu {
     pub gate: u64, pub up: u64, pub width: u32, pub bf16: u32,
+    /// Zero preserves uncapped arithmetic. Positive values clamp before SiLU.
+    pub limit: f32,
 }
 
 /// Canonical four-range projection with an optional BF16 output boundary.

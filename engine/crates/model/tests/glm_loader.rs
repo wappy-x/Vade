@@ -31,7 +31,8 @@ fn official_text_config_is_a_typed_deferred_description() {
     let Ffn::Experts(e) = p.layers[3].ffn else { panic!() };
     assert_eq!((e.count,e.selected,e.width,e.shared_width),(288,8,2048,2048));
     assert_eq!((p.residual.streams,p.residual.iterations,p.residual.epsilon),(4,20,1e-6));
-    assert!(p.routing.correction_bias && p.routing.normalize_selected); assert!(!p.routing.shared_gate);
+    assert_eq!(p.routing.kind,engine_model::host_ops::router::RouterKind::CorrectedSigmoid);
+    assert!(p.routing.normalize_selected); assert!(!p.routing.shared_gate);
     assert_eq!((p.routing.groups,p.routing.selected_groups,p.routing.scale,p.swiglu_limit),(1,1,2.5,10.0));
     assert!(ConfigPlan::from_config(CONFIG).unwrap().into_model_plan().is_err());
     assert!(ModelPlan::from_config(CONFIG).is_err());

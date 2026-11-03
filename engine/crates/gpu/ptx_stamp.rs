@@ -70,7 +70,7 @@ fn source_files(root: &Path) -> io::Result<Vec<PathBuf>> {
         Ok(())
     }
     let mut files = vec![root.join("kernels/Cargo.toml"), root.join("kernel_params.rs"), root.join("src/fp8_abi.rs"), root.join("src/fp4_abi.rs"),
-        root.join("src/projection_params.rs"), root.join("src/gdn_params.rs"), root.join("src/next_params.rs"),
+        root.join("src/projection_params.rs"), root.join("src/gdn_params.rs"), root.join("src/next_params.rs"), root.join("src/router_abi.rs"),
         root.join("build-kernels/src/main.rs"), root.join("ptx_stamp.rs")];
     visit(&root.join("kernels/src"), &mut files)?;
     files.sort();

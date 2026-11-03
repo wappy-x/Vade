@@ -8,6 +8,7 @@
 | [`batch.rs`](batch.rs) | Causal batch kernels with FP32, BF16, or explicitly selected scaled I16 KV. |
 | [`bf16.rs`](bf16.rs) | Software round-to-nearest-even conversion shared by host and GPU code. |
 | [`canonical.rs`](canonical.rs) | Decode projections use four fixed K ranges and one balanced FP32 merge. |
+| [`corrected_router.rs`](corrected_router.rs) | Fixed corrected-sigmoid selection and FP32 route weights. |
 | [`decode_attention.rs`](decode_attention.rs) | Grouped decode/verify attention: one K/V read, online softmax, bounded summaries. |
 | [`flash_bf16.rs`](flash_bf16.rs) | Flash projections, using the dense engine's canonical BF16 MMA. |
 | [`flash_gdn.rs`](flash_gdn.rs) | Head-sharded Flash GatedDeltaNet. |
@@ -35,6 +36,7 @@
 | [`moe_decode.rs`](moe_decode.rs) | Selected-expert decode over the resident MMA-packed BF16 weight arena. |
 | [`multi.rs`](multi.rs) | Ragged Qwen3 GQA rows with exactly the serial reduction order. |
 | [`ptx.rs`](ptx.rs) | Small instructions missing from Rust's NVPTX address-space interface. |
+| [`ungated_moe.rs`](ungated_moe.rs) | BF16 expert-ID fold and ungated shared-last addition. |
 | [`verify_mma.rs`](verify_mma.rs) | Canonical K ranges run in parallel warps; their balanced merge stays on chip. |
 
 **Why a folder:** Cargo looks for a crate's code in `src/`.

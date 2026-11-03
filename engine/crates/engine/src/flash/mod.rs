@@ -15,6 +15,8 @@ pub mod next_batched;
 mod next_load;
 pub mod next_native;
 pub mod session;
+#[cfg(test)]
+mod router_tests;
 
 /// NVFP4 uses explicit W4A16 routed experts; FP8 remains the default.
 pub fn require_inference(format: engine_model::flash::WeightFormat) -> Result<(), String> {
