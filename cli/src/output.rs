@@ -4,6 +4,20 @@ use std::{cell::Cell, fmt, io::{self, Write}};
 thread_local! {
     static FAILURE: Cell<Option<io::ErrorKind>> = const { Cell::new(None) };
     static OPERATION_FAILED: Cell<bool> = const { Cell::new(false) };
+    static NAMES: std::cell::RefCell<Vec<crate::config::PublicNames>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Keep private destinations out of a lifecycle command's public output.
+pub(crate) fn with_names<T>(names: crate::config::PublicNames, run: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset { fn drop(&mut self) { NAMES.with_borrow_mut(|names| { names.pop(); }); } }
+    NAMES.with_borrow_mut(|stack| stack.push(names));
+    let _reset = Reset;
+    run()
+}
+
+fn public(args: fmt::Arguments<'_>) -> String {
+    NAMES.with_borrow(|names| names.iter().rev().fold(args.to_string(), |text, names| names.text(&text)))
 }
 
 /// The error kind of the first failed write to standard output, if any.
@@ -36,6 +50,11 @@ pub fn buffered<T>(run: impl FnOnce() -> T) -> (T, String) {
 }
 
 fn write(args: fmt::Arguments<'_>, newline: bool) -> Result<(), String> {
+    let text = public(args);
+    write_public(format_args!("{text}"), newline)
+}
+
+fn write_public(args: fmt::Arguments<'_>, newline: bool) -> Result<(), String> {
     if let Some(result) = BUFFER.with_borrow_mut(|buffer| buffer.as_mut().map(|bytes| write_to(bytes, args, newline))) {
         return result.map_err(|_| "Cannot buffer standard output.".into());
     }
@@ -72,10 +91,10 @@ pub fn exit_code(code: i32) -> i32 {
 }
 
 /// Best-effort write to standard error.
-pub fn stderr(args: fmt::Arguments<'_>) { let _ = io::stderr().lock().write_fmt(args); }
+pub fn stderr(args: fmt::Arguments<'_>) { let _ = io::stderr().lock().write_all(public(args).as_bytes()); }
 /// Best-effort line on standard error.
 pub fn stderr_line(args: fmt::Arguments<'_>) {
-    let _ = writeln!(io::stderr().lock(), "{args}");
+    let _ = writeln!(io::stderr().lock(), "{}", public(args));
 }
 
 #[cfg(test)]

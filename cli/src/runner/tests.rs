@@ -208,9 +208,30 @@ fn an_ssh_failure_shows_the_last_line_and_the_fix_for_that_cause() {
 }
 
 #[test]
+fn failed_and_unfinished_ssh_checks_point_to_the_install_guide() {
+    struct Fails { calls: usize }
+    impl Runner for Fails {
+        fn run(&mut self, _: &Exec) -> Result<Output, String> {
+            self.calls += 1;
+            if self.calls == 1 { Err("probe did not finish".into()) } else { Ok(Output::default()) }
+        }
+        fn interactive(&mut self, _: &Exec) -> Result<bool, String> { unreachable!() }
+        fn port_free(&mut self, _: u16) -> Result<(), String> { unreachable!() }
+        fn pause(&mut self, _: Duration) { unreachable!() }
+    }
+    let _host = fake_host(Host::default());
+    let mut runner = Fails { calls: 0 };
+    let error = check_ssh(&mut runner, &[("first", "first"), ("second", "second")]).unwrap_err();
+    assert_eq!(runner.calls, 2);
+    assert!(error.contains("first: SSH did not finish.") && error.contains("second: SSH failed."), "{error}");
+    assert_eq!(error.matches("Read docs/INSTALL.md for the SSH check command.").count(), 2, "{error}");
+    assert!(!error.contains("Run ssh "), "{error}");
+}
+
+#[test]
 fn only_the_ssh_check_shows_standard_error_and_it_runs_nothing_remote() {
     let exec = ssh_check("host-b").unwrap();
-    assert_eq!((exec.program.as_str(), exec.args[1].as_str()), ("sh", "ssh \"$@\" 2>&1 >/dev/null; test $? -ne 255"));
+    assert_eq!((exec.program.as_str(), exec.args[1].as_str()), ("/bin/sh", "ssh \"$@\" 2>&1 >/dev/null; test $? -ne 255"));
     assert_eq!(exec.args[exec.args.len() - 2..], ["host-b", "true"]);
     assert!(exec.args.windows(2).any(|pair| pair == ["-o", "BatchMode=yes"]) && exec.transient_probe);
     assert_eq!(ssh_target(&ssh("host-b", "true".into(), "step")), Some("host-b"));

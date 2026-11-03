@@ -38,7 +38,7 @@ pub fn saved_start(options: &crate::cli::UpOptions) -> Option<Vec<String>> {
 pub fn last_setup() -> Option<String> {
     let file = std::fs::read_to_string(crate::config::config_path().ok()?).ok()?;
     if !file.starts_with(replace::WRITTEN) { return None; }
-    let sparks: Vec<String> = crate::config::Config::load().ok()?.machines.into_iter().map(|machine| machine.ssh).collect();
+    let sparks: Vec<String> = crate::config::Config::load().ok()?.machines.into_iter().map(|machine| machine.name).collect();
     Some(format!("{} ({}).", crate::text::count(sparks.len(), "Spark", "Sparks"), sparks.join(", ")))
 }
 

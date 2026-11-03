@@ -48,6 +48,10 @@ impl<R: Runner> App<R> {
 
     /// Run one lifecycle command against the configured machines.
     pub fn execute(&mut self, command: Command) -> Result<(), String> {
+        crate::config::PublicNames::controller(&self.config).run(|| self.execute_public(command))
+    }
+
+    fn execute_public(&mut self, command: Command) -> Result<(), String> {
         if self.dry && !crate::checks::json() {
             crate::output::line(format_args!("Dry run. No commands run, files written, or connections opened."))?;
         }
@@ -110,6 +114,10 @@ impl<R: Runner> App<R> {
     /// Start, or attach to, the engine. Only the long default context falls back
     /// on a memory refusal: a context the person named stays their choice.
     pub fn up(&mut self, options: &UpOptions) -> Result<(), String> {
+        crate::config::PublicNames::controller(&self.config).run(|| self.up_public(options))
+    }
+
+    fn up_public(&mut self, options: &UpOptions) -> Result<(), String> {
         let mut result = self.start_engine(options);
         // Ranks left in two install folders by an older vade. A new install puts them
         // in one, so this start can go on. Nothing has started at this point.
@@ -159,6 +167,7 @@ impl<R: Runner> App<R> {
             ("Transport", transport.clone()),
             ("Endpoint", format!("{}/v1", session.endpoint())),
         ]).collect::<Vec<_>>(), 2)))?;
+        self.check_ssh(&session.ranks.iter().map(|rank| rank.machine.clone()).collect::<Vec<_>>())?;
         self.resolve_fabric(&mut session)?;
         self.runner.port_free(session.local_port)?;
         if session.replicas {
@@ -255,7 +264,7 @@ impl<R: Runner> App<R> {
                 crate::output::line(format_args!(
                     "Vade is ready on {} ({}){} at {}: context {} tokens, drafting depth {}.\n{}",
                     crate::text::count(session.ranks.len(), "Spark", "Sparks"),
-                    session.ranks.iter().map(|rank| rank.machine.ssh.as_str()).collect::<Vec<_>>().join(", "),
+                    session.ranks.iter().map(|rank| rank.machine.name.as_str()).collect::<Vec<_>>().join(", "),
                     if session.chained() && session.replicas { " (tensor-split pairs behind the gateway)" } else if session.replicas { " (independent replicas behind the gateway)" } else { "" },
                     session.endpoint(),
                     session.context,
@@ -817,6 +826,12 @@ impl<R: Runner> App<R> {
         let output = self.runner.run(&runner::ssh_check(alias)?).ok()?;
         if output.success { return None; }
         runner::SshStop::from_output(alias, &output.stdout)
+    }
+
+    /// Check every selected box before a worker starts or an install changes it.
+    fn check_ssh(&mut self, machines: &[Machine]) -> Result<(), String> {
+        if self.dry { return Ok(()); }
+        runner::check_ssh(&mut self.runner, &machines.iter().map(|machine| (machine.name.as_str(), machine.ssh.as_str())).collect::<Vec<_>>())
     }
 }
 

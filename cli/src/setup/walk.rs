@@ -44,6 +44,14 @@ pub(super) struct Profile { pub fp8: bool, pub model: String, pub repo: String, 
 /// Run setup. `None` when it is done. `Some` for `vade up --sparks` when the
 /// Sparks are already set up and installed: the `vade up` options to go on with.
 pub fn run(options: &SetupOptions, dry: bool) -> Result<Option<Vec<String>>, String> {
+    crate::config::PublicNames::hosts(&options.hosts).run(|| {
+        let saved = crate::config::config_path().ok().filter(|path| path.is_file()).and_then(|_| crate::config::Config::load().ok());
+        let names = saved.as_ref().map(crate::config::PublicNames::controller).unwrap_or_default();
+        names.run(|| run_public(options, dry))
+    })
+}
+
+fn run_public(options: &SetupOptions, dry: bool) -> Result<Option<Vec<String>>, String> {
     let path = crate::config::config_path()?;
     let explicit = std::env::var_os("VADE_CONFIG").is_some();
     let local = !explicit && crate::launch::owner_configured();
@@ -66,6 +74,10 @@ pub fn run(options: &SetupOptions, dry: bool) -> Result<Option<Vec<String>>, Str
     let kept = SetupOptions { fp8: options.fp8.or(held.as_ref().and_then(|held| held.checkpoint(&options.hosts))), ..options.clone() };
     let options = &kept;
     let same = options.links.is_empty() && held.as_ref().is_some_and(|held| held.same(&options.hosts, options.fp8));
+    if chosen && !dry {
+        let mut runner = crate::runner::SystemRunner { dry: false };
+        crate::runner::check_ssh(&mut runner, &options.hosts.iter().map(|host| (host.as_str(), host.as_str())).collect::<Vec<_>>())?;
+    }
     // The same order as main's dispatch: explicit VADE_CONFIG, saved local
     // defaults, the legacy setup, then the default controller config.
     let target = if local && !chosen {
@@ -131,6 +143,7 @@ pub fn run(options: &SetupOptions, dry: bool) -> Result<Option<Vec<String>>, Str
             Target::Local { model, .. } => output::line(format_args!("Where: this Spark\nModel: {}", local_model(model.as_deref(),
                 crate::launch::owner_configured(), std::env::var("VADE_MODELS").ok().filter(|models| !models.is_empty()).as_deref())))?,
             Target::Controller { path, text: Some(config), .. } => {
+                output::line(format_args!("Public output hides private addresses. The config file keeps the real values."))?;
                 output::text(format_args!("Config to write at {}:\n{config}", text::quoted(&path.to_string_lossy())))?;
                 if options.links.is_empty() && options.hosts.len() > 1 { output::line(format_args!("Setup reads the cable addresses from each Spark when it runs."))?; }
             }
@@ -213,8 +226,11 @@ fn covered(config: &crate::config::Config) -> bool {
 
 /// The Sparks in the `vade up` options of `target`, in rank order.
 fn hosts_of(target: &Target) -> Option<Vec<String>> {
-    let Target::Controller { up, .. } = target else { return None };
-    up.iter().skip_while(|word| *word != "--hosts").nth(1).map(|list| list.split(',').map(str::to_owned).collect())
+    let Target::Controller { up, text, path, .. } = target else { return None };
+    let hosts: Vec<String> = up.iter().skip_while(|word| *word != "--hosts").nth(1)?.split(',').map(str::to_owned).collect();
+    let file = text.clone().or_else(|| std::fs::read_to_string(path).ok());
+    let config = file.and_then(|file| crate::config::Config::parse(&file, path).ok());
+    Some(hosts.into_iter().map(|host| config.as_ref().and_then(|config| config.machines.iter().find(|machine| machine.name == host)).map_or(host.clone(), |machine| machine.ssh.clone())).collect())
 }
 
 /// The Sparks in one answer line.
@@ -336,6 +352,7 @@ pub(super) fn answer(options: &SetupOptions, facts: &Facts, ask: &mut dyn FnMut(
             else { "Which Sparks? Type what you type after ssh, in any order, separated by commas:" })?;
         if reply.is_empty() && local_default { Vec::new() } else { sparks_in(&reply)? }
     };
+    crate::config::PublicNames::hosts(&hosts).run(|| {
     if hosts.is_empty() {
         if options.fp8 == Some(true) { return Err(format!("{} This Spark alone cannot serve FP8. Add --hosts with those Sparks, or omit --fp8.", crate::config::FP8_SPARKS)); }
         if !options.links.is_empty() { return Err("One Spark has no cables to describe. Omit --link.".into()); }
@@ -391,8 +408,8 @@ pub(super) fn answer(options: &SetupOptions, facts: &Facts, ask: &mut dyn FnMut(
         Err((a, b)) if options.yes => return Err(format!("{a} and {b} share no cable, so check that cable or add --link {a}:{b}=ADDRESS --link {b}:{a}=ADDRESS.")),
         Err(_) => given.clone(),
     };
-    if cables.read() && hosts.len() > 1 { output::line(format_args!("Cable order: {}.", hosts.join(" - ")))?; }
-    let names = machine_names(&hosts);
+    let names = machine_names(&hosts.iter().map(|host| cables.hostname(host).unwrap_or_default().to_owned()).collect::<Vec<_>>());
+    if cables.read() && hosts.len() > 1 { output::line(format_args!("Cable order: {}.", names.join(" - ")))?; }
     let mut links = Vec::new();
     let mut neighbors: Vec<(&String, &String)> = hosts.windows(2).map(|pair| (&pair[0], &pair[1])).collect();
     // Keep a closing cable when the inventory or explicit cable ends name it.
@@ -423,22 +440,20 @@ pub(super) fn answer(options: &SetupOptions, facts: &Facts, ask: &mut dyn FnMut(
     let text = render(checkout, &facts.home, &profile, &hosts, &names, &links, &model);
     // The steps read this file, so it must pass the same parser and the
     // same Spark and cable checks as vade up before setup writes it.
-    let up: Vec<String> = up_options(fp8, &hosts).into_iter().chain(options.up.iter().cloned()).collect();
+    let up: Vec<String> = up_options(fp8, &names).into_iter().chain(options.up.iter().cloned()).collect();
     let parsed = crate::config::Config::parse(&text, &facts.path)?;
     if cables.read() || links.len() >= 2 * (hosts.len() - 1) {
         check_start(&parsed, &up).map_err(|error| format!("Nothing was written: vade up would refuse this setup. {error}"))?;
     }
     Ok(Target::Controller { path: facts.path.clone(), text: Some(text), up, installed: false })
+    })
 }
 
-/// A config section name for each SSH destination: its host part with every
-/// other character as `-`, made unique.
+/// Use each short hostname, or a numbered label when it is absent or private.
 pub(super) fn machine_names(hosts: &[String]) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
-    for host in hosts {
-        let host = host.rsplit('@').next().unwrap_or(host);
-        let mut name: String = host.chars().take(56).map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') { c } else { '-' }).collect();
-        if !name.starts_with(|c: char| c.is_ascii_alphanumeric()) { name.insert_str(0, "spark"); }
+    for (position, host) in hosts.iter().enumerate() {
+        let mut name = if crate::config::public_hostname(host) { host.chars().take(56).collect() } else { format!("spark-{}", position + 1) };
         let base = name.clone();
         let mut index = 2;
         while names.contains(&name) { name = format!("{base}-{index}"); index += 1; }
@@ -453,7 +468,7 @@ pub(super) fn machine_names(hosts: &[String]) -> Vec<String> {
 /// parser's default.
 pub(super) fn render(checkout: Option<&Path>, home: &Path, profile: &Profile, hosts: &[String], names: &[String],
     links: &[(String, String, String)], model: &str) -> String {
-    let start = format!("vade {}", std::iter::once("up".to_owned()).chain(up_options(profile.fp8, hosts)).collect::<Vec<_>>().join(" "));
+    let start = format!("vade {}", std::iter::once("up".to_owned()).chain(up_options(profile.fp8, names)).collect::<Vec<_>>().join(" "));
     let mut out = format!("# Written by vade setup. Start: {start}\n# Edit this file to change the setup. A new list of Sparks moves it aside.\n[global]\n");
     match checkout {
         Some(checkout) => for (key, folder) in [("engine_source", "engine"), ("harness_source", "harness"), ("cli_source", "cli")] {
@@ -491,6 +506,7 @@ pub(super) fn start_options(file: &str, config: &crate::config::Config) -> Vec<S
     if config.model.ends_with("-fp8") { options.push("--fp8".to_owned()); }
     // Even one name: a plain vade up takes the first machine, which may be a verify engine.
     if !names.is_empty() && names.iter().all(|name| config.machines.iter().any(|machine| &machine.name == name || &machine.ssh == name)) {
+        let names: Vec<&str> = names.iter().filter_map(|name| config.machines.iter().find(|machine| &machine.name == name || &machine.ssh == name).map(|machine| machine.name.as_str())).collect();
         options.extend(["--hosts".to_owned(), names.join(",")]);
     }
     options

@@ -29,7 +29,7 @@ fn stub(dir: &Path, name: &str, code: i32) {
 fn reach(dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir).unwrap();
-    std::fs::write(dir.join("ssh"), "#!/bin/sh\necho vade-cables-end\n").unwrap();
+    std::fs::write(dir.join("ssh"), "#!/bin/sh\nwhile [ \"${1-}\" = -o ]; do shift 2; done\nprintf 'hostname %s\\n' \"$1\"\necho vade-cables-end\n").unwrap();
     std::fs::set_permissions(dir.join("ssh"), std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
@@ -58,7 +58,7 @@ fn dry_run_prints_the_config_and_steps_and_writes_nothing() {
     let stdout = text(&output.stdout);
     assert!(output.status.success(), "{output:?}");
     assert!(stdout.starts_with("Dry run: setup writes nothing and starts nothing.\n"), "{stdout}");
-    for line in ["[machine spark-a]", "ssh = spark-a", "model_path = ~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local", "Steps:", "  vade install", "  vade doctor", "  vade up"] {
+    for line in ["[machine spark-1]", "ssh = spark-a", "model_path = ~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local", "Steps:", "  vade install", "  vade doctor", "  vade up"] {
         assert!(stdout.lines().any(|row| row == line), "{line}:\n{stdout}");
     }
     assert!(stdout.contains(&format!("state_dir = {}", home.join(".vade/controller/state").display())), "{stdout}");
@@ -362,6 +362,91 @@ fn fake_hosts(home: &Path, rust: bool) -> PathBuf {
     tools
 }
 
+fn no_address(output: &Output) -> String {
+    let printed = format!("{}{}", text(&output.stdout), text(&output.stderr));
+    for private in ["192.0.2.", "192-0-2-", "user@"] { assert!(!printed.contains(private), "{printed}"); }
+    printed
+}
+
+#[test]
+fn address_targets_stay_private_in_up_setup_status_and_doctor() {
+    let home = home("private-addresses");
+    let tools = fake_hosts(&home, true);
+    let path = std::ffi::OsString::from(format!("{}:/usr/bin:/bin", tools.display()));
+    let config = home.join("controller-config");
+    std::fs::write(&config, format!("[global]\nmodel_revision = {}\nstate_dir = {}/state\nstage_dir = {}/stage\n[machine 192-0-2-10]\nssh = user@192.0.2.10\n", "a".repeat(40), home.display(), home.display())).unwrap();
+    let run = |args: &[&str]| vade(args, &home, &[("VADE_CONFIG", config.as_os_str()), ("FAKE_HOSTS", home.join("hosts").as_os_str()), ("PATH", path.as_os_str())]);
+    for args in [&["up", "--dry-run"][..], &["setup", "--yes", "--dry-run"], &["status"], &["status", "--json"], &["doctor", "--dry-run"], &["doctor", "--json", "--dry-run"]] {
+        let output = run(args);
+        let printed = no_address(&output);
+        assert!(output.status.success(), "{args:?}: {printed}");
+        assert!(printed.contains("spark-1"), "{args:?}: {printed}");
+    }
+    // Real fake SSH failures must protect stderr and the returned error too.
+    let output = run(&["doctor"]);
+    assert!(!output.status.success());
+    assert!(no_address(&output).contains("Host key verification failed."));
+}
+
+#[test]
+fn address_lists_report_all_ssh_failures_before_any_cable_probe() {
+    let home = home("all-ssh-failures");
+    let tools = fake_hosts(&home, true);
+    let path = std::ffi::OsString::from(format!("{}:/usr/bin:/bin", tools.display()));
+    let hosts = ["user@192.0.2.10", "user@192.0.2.11", "user@192.0.2.12"];
+    for host in hosts { std::fs::create_dir_all(home.join("hosts").join(host)).unwrap(); }
+    std::fs::write(home.join("hosts").join(hosts[1]).join("known"), "").unwrap();
+    // Linux checks local SSH config first. Exercise that lookup on macOS too.
+    for host in hosts {
+        let output = Command::new(tools.join("ssh")).args(["-G", host]).env_clear().env("FAKE_HOSTS", home.join("hosts")).output().unwrap();
+        assert!(output.status.success() && output.stdout.is_empty() && output.stderr.is_empty(), "{output:?}");
+    }
+    assert!(!home.join("hosts/calls.log").exists());
+    let config = home.join("controller-config");
+    let list = hosts.join(",");
+    let mut expected = String::new();
+    for args in [&["up", "--sparks", list.as_str()][..], &["setup", "--yes", "--hosts", list.as_str()]] {
+        let output = vade(args, &home, &[("VADE_CONFIG", config.as_os_str()), ("FAKE_HOSTS", home.join("hosts").as_os_str()), ("PATH", path.as_os_str())]);
+        assert!(!output.status.success());
+        let printed = no_address(&output);
+        assert_eq!(printed.matches("SSH checks failed.").count(), 1, "{printed}");
+        assert_eq!(printed.matches("Host key verification failed.").count(), 2, "{printed}");
+        for label in ["spark-1", "spark-3"] { assert!(printed.contains(&format!("{label}:")), "{printed}"); }
+        assert_eq!(printed.matches("Read docs/INSTALL.md for the SSH check command.").count(), 2, "{printed}");
+        assert!(!printed.contains("Run ssh "), "{printed}");
+        assert!(!config.exists());
+        for host in hosts { expected.push_str(&format!("ssh {host} true\n")); }
+        assert_eq!(std::fs::read_to_string(home.join("hosts/calls.log")).unwrap(), expected);
+    }
+    let calls = std::fs::read_to_string(home.join("hosts/calls.log")).unwrap();
+    assert_eq!(calls.lines().count(), 6, "{calls}");
+    for host in hosts {
+        assert_eq!(calls.lines().filter(|line| *line == format!("ssh {host} true")).count(), 2, "{calls}");
+        assert!(!home.join("hosts").join(host).join(".ssh").exists());
+    }
+}
+
+#[test]
+fn setup_reads_the_short_hostname_once_and_keeps_the_destination_in_config() {
+    let home = home("short-hostname");
+    let tools = fake_hosts(&home, true);
+    let path = std::ffi::OsString::from(format!("{}:/usr/bin:/bin", tools.display()));
+    let host = "user@192.0.2.10";
+    let remote = home.join("hosts").join(host);
+    std::fs::create_dir(&remote).unwrap();
+    std::fs::write(remote.join("known"), "").unwrap();
+    std::fs::write(remote.join("hostname"), "box-one").unwrap();
+    let config = home.join("controller-config");
+    let output = vade(&["setup", "--yes", "--hosts", host], &home,
+        &[("VADE_CONFIG", config.as_os_str()), ("FAKE_HOSTS", home.join("hosts").as_os_str()), ("PATH", path.as_os_str())]);
+    no_address(&output);
+    let written = std::fs::read_to_string(&config).unwrap();
+    assert!(written.contains("[machine box-one]\nssh = user@192.0.2.10\n"), "{written}");
+    assert_eq!(written.matches(host).count(), 1, "{written}");
+    let calls = std::fs::read_to_string(home.join("hosts/calls.log")).unwrap();
+    assert_eq!(calls.matches("hostname -s").count(), 1, "{calls}");
+}
+
 /// Bundle-only setup and doctor on two fake hosts, from a clone's folder with no
 /// Rust: host-b has no saved host key. The real binary stops here on a Mac, which
 /// cannot take a Linux bundle; cli/src/app/tests/fake_hosts.rs runs the install.
@@ -400,7 +485,7 @@ fn a_bundle_setup_needs_no_rust_and_doctor_shows_the_ssh_error_with_its_fix() {
     let stdout = text(&output.stdout);
     let row = |name: &str| stdout.lines().find(|line| line.split_whitespace().skip(1).collect::<Vec<_>>().join(" ").starts_with(name)).unwrap_or_else(|| panic!("{name}:\n{stdout}"));
     assert!(row("controller tools").starts_with("ok") && row("controller tools").contains("rsync, curl and ssh found"), "{stdout}");
-    assert!(row("host-b ssh").starts_with("FAIL") && row("host-b ssh").contains("ssh host-b failed: Host key verification failed. Vade never edits ~/.ssh."), "{stdout}");
+    assert!(row("spark-1 ssh").starts_with("FAIL") && row("spark-1 ssh").contains("ssh host-b failed: Host key verification failed. Vade never edits ~/.ssh."), "{stdout}");
     assert!(stdout.contains("next: Run ssh host-b true and accept the key, or run ssh-keyscan -H host-b >> ~/.ssh/known_hosts if host-b is the real host name, then run vade doctor."), "{stdout}");
     let calls = std::fs::read_to_string(home.join("hosts/calls.log")).unwrap();
     assert!(!calls.contains("was asked"), "{calls}");

@@ -9,6 +9,7 @@ use crate::{
 impl<R: Runner> App<R> {
     /// Fill a status report from the controller's session and live checks.
     pub(crate) fn status_snapshot(&mut self, report: &mut Snapshot) -> Result<(), String> {
+        report.protect(&self.config);
         report.set("model", self.config.model.clone());
         report.set("layouts", crate::sets::inventory_json(&self.config));
         report.set("cabling", Value::Array(crate::topology::cabling(&self.config.machines).into_iter().map(Value::from).collect()));

@@ -150,7 +150,8 @@ fn a_refused_key_shows_the_real_line_and_every_fix_at_once() {
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let text = stderr(&output);
     assert!(text.contains("ssh host-b failed: fake@host-b: Permission denied (publickey). Vade never edits ~/.ssh."), "{text}");
-    assert!(text.contains("Run ssh-copy-id host-b, then run vade up --sparks host-a,host-b,host-c,host-d again."), "{text}");
+    assert_eq!(text.matches("Read docs/INSTALL.md for the SSH check command.").count(), 2, "{text}");
+    assert!(!text.contains("Run ssh "), "{text}");
     assert!(text.contains("ssh host-d failed: Host key verification failed."), "{text}");
     assert!(!text.contains("did not run the check script"), "{text}");
     assert!(!fake.config().exists());
@@ -178,11 +179,12 @@ fn the_config_from_discovery_is_the_config_from_the_same_links_by_hand() {
     let found = std::fs::read_to_string(fake.config()).unwrap();
     let links = [("host-d", "host-c", "203.0.113.66"), ("host-c", "host-d", "203.0.113.65"), ("host-c", "host-b", "203.0.113.2"), ("host-b", "host-c", "203.0.113.1"), ("host-b", "host-a", "192.0.2.2"), ("host-a", "host-b", "192.0.2.1")]
         .map(|(from, to, address)| format!("{from}:{to}={address}"));
-    let mut args = vec!["setup", "--dry-run", "--yes", "--hosts", "host-d,host-c,host-b,host-a"];
+    let mut args = vec!["setup", "--yes", "--hosts", "host-d,host-c,host-b,host-a"];
     for link in &links { args.extend(["--link", link]); }
     std::fs::rename(fake.config(), fake.home.join("first")).unwrap();
-    let hand = stdout(&fake.run(&args));
-    let hand: String = hand.lines().skip_while(|line| !line.starts_with("# Written by vade setup")).take_while(|line| *line != "Steps:").map(|line| format!("{line}\n")).collect();
+    // Public dry runs hide addresses and do not read hostnames. Compare the private files.
+    let output = fake.run(&args);
+    let hand = std::fs::read_to_string(fake.config()).unwrap_or_else(|error| panic!("{error}: {output:?}"));
     assert_eq!(hand, found);
 }
 

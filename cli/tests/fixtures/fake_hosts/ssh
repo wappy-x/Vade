@@ -2,6 +2,8 @@
 # A fake ssh: see README.txt. It runs ordinary commands in the home of the host.
 # It answers the Vade helper and the check script, which need a real Spark.
 [ "${1-}" != -V ] || { echo 'OpenSSH_fake'; exit 0; }
+# No alias overrides. A local config lookup does not open an SSH connection.
+[ "${1-}" != -G ] || exit 0
 while [ "${1-}" = -o ]; do shift 2; done
 host=$1
 shift
@@ -13,6 +15,11 @@ printf 'ssh %s %s\n' "$host" "$command" >> "$FAKE_HOSTS/calls.log"
 [ "$command" != true ] || exit 0
 case $command in
     *vade-cables-end*)
+        if [ -f "$home/hostname" ]; then
+            printf 'hostname %s\n' "$(cat "$home/hostname")"
+        else
+            printf 'hostname %s\n' "$host"
+        fi
         cat "$home/interfaces"
         echo vade-cables-end
         exit 0 ;;

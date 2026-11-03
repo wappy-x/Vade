@@ -105,7 +105,8 @@ fn a_bundle_only_install_copies_to_each_host_and_shows_the_real_ssh_error() {
     app.runner.know("host-a");
     // host-b has no saved host key: the error is ssh's own, with its fix.
     let error = install(&mut app).unwrap_err();
-    assert!(error.starts_with("ssh host-b failed: Host key verification failed. Vade never edits ~/.ssh. Run ssh host-b true and accept the key, or run ssh-keyscan -H host-b >> ~/.ssh/known_hosts if host-b is the real host name, then run vade doctor."), "{error}");
+    assert!(error.starts_with("SSH checks failed. Vade never edits ~/.ssh."), "{error}");
+    assert!(error.contains("ssh host-b failed: Host key verification failed.") && error.contains("Read docs/INSTALL.md for the SSH check command."), "{error}");
     assert!(!app.runner.root.join("host-b/.ssh").exists() && !app.runner.root.join("host-a/.ssh").exists());
     // The person runs that command, then the same install passes.
     app.runner.know("host-b");
@@ -292,4 +293,21 @@ fn a_dry_run_has_no_workers_so_rank_a_ends_before_rank_b_starts() {
     assert!(at("Copying Vade to a.") < at("Copying Vade to b."));
     let last_of_a = printed.rfind("host-a").unwrap();
     assert!(last_of_a < at("Copying Vade to b."), "{printed}");
+}
+
+#[test]
+fn one_up_checks_every_box_and_names_both_host_key_failures() {
+    let _guard = crate::runner::process_test_lock();
+    let (_f, mut app) = sparks(3);
+    app.runner.know("host-b");
+    let capture = crate::output::testing::Capture::default();
+    let error = crate::output::with_writer(capture, || app.up(&fp4_options(&["--sparks", "3"]))).unwrap_err();
+    assert!(error.starts_with("SSH checks failed."), "{error}");
+    for host in ["host-a", "host-c"] { assert!(error.contains(&format!("ssh {host} failed: Host key verification failed.")), "{error}"); }
+    assert_eq!(error.matches("Read docs/INSTALL.md for the SSH check command.").count(), 2, "{error}");
+    assert_eq!(error.matches("Host key verification failed.").count(), 2, "{error}");
+    let calls = app.runner.log();
+    assert_eq!(calls.lines().collect::<Vec<_>>(), ["ssh host-a true", "ssh host-b true", "ssh host-c true"], "{calls}");
+    for host in ["host-a", "host-b", "host-c"] { assert!(!app.runner.root.join(host).join(".ssh").exists()); }
+    assert!(!app.config.state_dir.join("session.conf").exists());
 }

@@ -8,4 +8,5 @@ A file named driver holds the NVIDIA driver version of that host.
 A file named corrupt makes rsync change the files it copies to that host.
 A file named denied makes ssh and rsync fail as a refused key does.
 A file named interfaces holds what the cable check prints on that host.
-Each ssh and rsync call adds one row to $FAKE_HOSTS/calls.log.
+Each SSH connection and rsync call adds one row to $FAKE_HOSTS/calls.log.
+The fake ssh has no alias overrides. Its local -G lookup adds no row.

@@ -240,6 +240,7 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 
 ### CLI
 
+- A failed SSH check points to the install guide. The guide explains how to find the real SSH destination when output uses a public label.
 - Controller setup saves named sets and layouts. Status lists those sets and shows each server's saved set, including replicas.
 - `vade bench verdict` refuses a verdict if no gating cells remain. It exits with code 2 for this refusal. It rejects repeated `--band`, `--only` and `--sha` flags. It validates `aa_pct` for every selected arm form. Advisory suffixes need a space or `/` boundary. Pair bands need a judged cell without widening.
 - `vade bench verdict` judges saved A/X cells on the host with rule 2026-11-01. It uses the cached latency floor and the second-X rule.

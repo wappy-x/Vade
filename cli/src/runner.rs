@@ -605,10 +605,29 @@ pub fn ssh_check(alias: &str) -> Option<Exec> {
     let mut args = vec!["-c".to_owned(), "ssh \"$@\" 2>&1 >/dev/null; test $? -ne 255".to_owned(), "sh".to_owned()];
     args.extend(ssh_options());
     args.extend([alias.to_owned(), "true".to_owned()]);
-    let mut exec = Exec::new(&format!("SSH check of {alias}"), "sh", args);
+    let mut exec = Exec::new(&format!("SSH check of {alias}"), "/bin/sh", args);
     // A failure here is the expected case, and this text is all it has.
     exec.transient_probe = true;
     Some(exec)
+}
+
+/// Check every destination before the caller starts other remote work.
+pub(crate) fn check_ssh(runner: &mut impl Runner, machines: &[(&str, &str)]) -> Result<(), String> {
+    let mut failed = Vec::new();
+    let fix = "Read docs/INSTALL.md for the SSH check command. Then run the same Vade command again.";
+    for (name, alias) in machines {
+        let Some(mut check) = ssh_check(alias) else { continue };
+        check.timeout = Duration::from_secs(15);
+        match runner.run(&check) {
+            Ok(output) if output.success => (),
+            Ok(output) => {
+                let detail = SshStop::from_output(alias, &output.stdout).map_or_else(|| "SSH failed.".into(), |stop| stop.error);
+                failed.push(format!("{name}: {detail} {fix}"));
+            }
+            Err(_) => failed.push(format!("{name}: SSH did not finish. {fix}")),
+        }
+    }
+    if failed.is_empty() { Ok(()) } else { Err(format!("SSH checks failed. Vade never edits ~/.ssh.\n{}", failed.join("\n"))) }
 }
 
 /// The host a failed `ssh` or `rsync` command tried to reach.

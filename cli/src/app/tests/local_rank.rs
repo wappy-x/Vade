@@ -85,7 +85,7 @@ fn down_stops_a_local_rank_locally_and_opens_no_tunnel() {
 #[test]
 fn no_local_machine_keeps_every_ssh_argv_of_today() {
     let f = up_on(host("controller"), "spark-a");
-    assert!(f.app.runner.calls.iter().all(|c| c.program != "sh"));
+    assert!(f.app.runner.calls.iter().filter(|c| !c.label.starts_with("SSH check of")).all(|c| !matches!(c.program.as_str(), "sh" | "/bin/sh")));
     let probe = f.app.runner.calls.iter().find(|c| c.label == "a probe").unwrap();
     let expected = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2",
         "-o", "PermitLocalCommand=no", "-o", "ControlMaster=no", "-o", "ControlPath=none", "spark-a", "exec \"$HOME\"/stage/a/vade __worker"];

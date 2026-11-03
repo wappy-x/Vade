@@ -29,6 +29,7 @@ pub(crate) struct Snapshot {
     checks: Vec<Value>,
     errors: Vec<Value>,
     failed: bool,
+    names: crate::config::PublicNames,
 }
 impl Snapshot {
     /// An empty report whose phase is "unknown" until a lifecycle owner sets it.
@@ -51,12 +52,15 @@ impl Snapshot {
             checks: Vec::new(),
             errors: Vec::new(),
             failed: false,
+            names: crate::config::PublicNames::default(),
         }
     }
     /// Set one top-level field.
     pub(crate) fn set(&mut self, key: &str, value: impl Into<Value>) {
         self.value.insert(key, value.into());
     }
+    /// Keep config destinations out of the final JSON, including check errors.
+    pub(crate) fn protect(&mut self, config: &Config) { self.names = crate::config::PublicNames::controller(config); }
     /// Record an error; the report then fails.
     pub(crate) fn error(&mut self, error: String) {
         self.failed = true;
@@ -126,7 +130,7 @@ impl Snapshot {
                 text.push(ch);
             }
         }
-        (text, i32::from(self.failed))
+        (self.names.text(&text), i32::from(self.failed))
     }
 }
 

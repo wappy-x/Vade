@@ -232,7 +232,9 @@ fn the_check_before_a_start_shows_the_real_ssh_line() {
     f.app.runner.silent_probe = true;
     f.app.runner.ssh_says = Some("you@a-ssh: Permission denied (publickey).\n");
     let error = f.app.up(&fp4_options(&["--sparks", "2"])).unwrap_err();
-    assert!(error.starts_with("ssh a-ssh failed: you@a-ssh: Permission denied (publickey). Vade never edits ~/.ssh. Run ssh-copy-id a-ssh, then run vade doctor."), "{error}");
+    assert!(error.starts_with("SSH checks failed. Vade never edits ~/.ssh."), "{error}");
+    assert!(error.contains("ssh a-ssh failed: you@a-ssh: Permission denied (publickey)."), "{error}");
+    assert_eq!(error.matches("Read docs/INSTALL.md for the SSH check command.").count(), 2, "{error}");
     assert!(!error.contains("did not reply"), "{error}");
     assert!(!f.recorded());
 }
@@ -243,5 +245,35 @@ fn the_ready_line_names_each_spark_and_the_context() {
     let capture = crate::output::testing::Capture::default();
     crate::output::with_writer(capture.clone(), || f.app.up(&fp4_options(&["--sparks", "2"]))).unwrap();
     let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
-    assert!(printed.contains("Vade is ready on 2 Sparks (a-ssh, b-ssh) at http://localhost:18080: context 131072 tokens, drafting depth "), "{printed}");
+    assert!(printed.contains("Vade is ready on 2 Sparks (a, b) at http://localhost:18080: context 131072 tokens, drafting depth "), "{printed}");
+}
+
+/// Destinations stay private, including after a config edit.
+#[test]
+fn up_status_and_doctor_hide_address_destinations_and_old_machine_names() {
+    let mut f = Fixture::fp4(2, false);
+    let hosts = ["user@192.0.2.10", "user@192.0.2.11"];
+    for (machine, host) in f.app.config.machines.iter_mut().zip(hosts) { machine.ssh = host.into(); }
+    let capture = crate::output::testing::Capture::default();
+    crate::output::with_writer(capture.clone(), || f.app.execute(Command::Up(fp4_options(&["--sparks", "2"])))).unwrap();
+    let printed = String::from_utf8(capture.bytes.borrow().clone()).unwrap();
+    assert!(printed.contains("Machines") && printed.contains("Vade is ready on 2 Sparks (a, b)"), "{printed}");
+    for prefix in ["192.0.2.", "192-0-2-", "user@"] { assert!(!printed.contains(prefix), "{printed}"); }
+    let mut session = Session::load(&f.app.config.state_dir).unwrap().unwrap();
+    for (index, rank) in session.ranks.iter_mut().enumerate() { rank.machine.name = format!("192-0-2-{}", index + 10); }
+    session.save(&f.app.config.state_dir).unwrap();
+    // The current config no longer has these destinations. The old record still does.
+    for machine in &mut f.app.config.machines { machine.ssh = format!("{}-ssh", machine.name); }
+    for command in [Command::Status, Command::Doctor] {
+        let capture = crate::output::testing::Capture::default();
+        let result = crate::output::with_writer(capture.clone(), || f.app.execute(command));
+        let printed = format!("{}{}", String::from_utf8(capture.bytes.borrow().clone()).unwrap(), result.err().unwrap_or_default());
+        assert!(printed.contains("spark-1") && printed.contains("spark-2"), "{printed}");
+        for prefix in ["192.0.2.", "192-0-2-", "user@"] { assert!(!printed.contains(prefix), "{printed}"); }
+    }
+    let mut report = crate::status::Snapshot::new("configured", false);
+    f.app.status_snapshot(&mut report).unwrap();
+    let printed = report.finish(Duration::ZERO).0;
+    for prefix in ["192.0.2.", "192-0-2-", "user@"] { assert!(!printed.contains(prefix), "{printed}"); }
+    crate::evals::json::parse(&printed).unwrap();
 }

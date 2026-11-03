@@ -7,6 +7,8 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::cli::{UpOptions, identifier};
+mod names;
+pub(crate) use names::{PublicNames, hostname as public_hostname};
 
 /// The most Sparks one FP4-Local launch may chain.
 pub const MAX_FP4_SPARKS: usize = 24;

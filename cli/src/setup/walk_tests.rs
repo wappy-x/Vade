@@ -37,7 +37,7 @@ fn scripted(options: &SetupOptions, facts: &Facts, replies: &[&str]) -> (Result<
     let result = answer(options, facts, &mut |question| {
         asked.push(question.to_owned());
         replies.pop_front().ok_or_else(|| format!("unexpected question: {question}"))
-    }, pinned, &mut |_| Ok(Some(super::super::links::Spark::default())));
+    }, pinned, &mut |host| Ok(Some(super::super::links::Spark { hostname: crate::config::public_hostname(host).then(|| host.to_owned()), ..Default::default() })));
     (result, asked)
 }
 
@@ -83,7 +83,7 @@ fn one_spark_from_a_controller_gets_a_config_the_parser_accepts() {
     assert!(up.is_empty(), "{up:?}");
     assert!(text.starts_with("# Written by vade setup. Start: vade up\n"), "{text}");
     for line in ["engine_source = /home/you/vade/engine", "stage_dir = /home/you/.vade/controller/stage", "state_dir = /home/you/.vade/controller/state",
-        "model_revision = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "[machine 192-0-2-10]", "ssh = you@192.0.2.10",
+        "model_revision = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "[machine spark-1]", "ssh = you@192.0.2.10",
         "model_path = ~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local"] {
         assert!(text.lines().any(|row| row == line), "{line}:\n{text}");
     }
@@ -209,9 +209,9 @@ fn three_fp4_sparks_link_each_neighbor_pair_in_cable_order() {
 }
 
 #[test]
-fn machine_names_come_from_the_host_and_stay_unique() {
-    let hosts = ["you@192.0.2.10", "box-a.example", "tester@box-a.example", "_x"].map(String::from);
-    assert_eq!(machine_names(&hosts), ["192-0-2-10", "box-a-example", "box-a-example-2", "spark_x"]);
+fn machine_names_use_short_hostnames_and_stay_unique() {
+    let hosts = ["192.0.2.10", "box-a", "box-a", "", "192-0-2-11", "spark-4"].map(String::from);
+    assert_eq!(machine_names(&hosts), ["spark-1", "box-a", "box-a-2", "spark-4", "spark-5", "spark-4-2"]);
     assert!(machine_names(&hosts).iter().all(|name| crate::cli::identifier(name)));
 }
 
@@ -363,11 +363,11 @@ fn more_sparks_with_no_checkout_use_the_installed_bundle() {
 }
 
 #[test]
-fn the_start_command_shows_the_sparks_as_they_were_typed() {
-    let options = flags(true, &["192.0.2.10", "192.0.2.11"], &[("192.0.2.10", "192.0.2.11", "198.51.100.1"), ("192.0.2.11", "192.0.2.10", "198.51.100.2")]);
+fn the_start_command_uses_labels_and_the_config_keeps_destinations() {
+    let options = flags(true, &["192.0.2.10", "192.0.2.11"], &[("192.0.2.10", "192.0.2.11", "192.0.2.1"), ("192.0.2.11", "192.0.2.10", "192.0.2.2")]);
     let (text, up) = controller(scripted(&options, &facts(true), &[]).0);
-    assert_eq!(up, ["--hosts", "192.0.2.10,192.0.2.11"]);
-    assert!(text.starts_with("# Written by vade setup. Start: vade up --hosts 192.0.2.10,192.0.2.11\n") && text.contains("[machine 192-0-2-10]\nssh = 192.0.2.10\n"), "{text}");
+    assert_eq!(up, ["--hosts", "spark-1,spark-2"]);
+    assert!(text.starts_with("# Written by vade setup. Start: vade up --hosts spark-1,spark-2\n") && text.contains("[machine spark-1]\nssh = 192.0.2.10\n"), "{text}");
     // A second setup finds the same Sparks from that line, and the start passes the same checks.
     let config = crate::config::Config::parse(&text, &facts(true).path).unwrap();
     assert_eq!(start_options(&text, &config), up);

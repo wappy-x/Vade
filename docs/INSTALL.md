@@ -411,6 +411,20 @@ Each of the 9 names in the `command -v` line must print a path. A name with no
 path is a missing tool. Install any missing tool with `apt-get`. The `ssh`
 command is in the `openssh-client` package.
 
+From a controller, Vade checks SSH to every selected Spark before it starts
+remote work. A failed check stops the run. One `SSH checks failed` message
+names every failed Spark and points to this page. For each failed Spark,
+run `ssh DESTINATION true` in your own terminal. Use the real SSH destination
+for `DESTINATION`, as described below. Check the host key before you accept it.
+Then run the same Vade command again. Vade never edits `~/.ssh`.
+
+Setup reads `hostname -s` in its SSH check. It uses that short hostname as
+the machine label, or `spark-<n>` when the name is not available. Public
+output hides SSH addresses, including in dry runs. If a label is not an SSH
+name, use the matching destination from your `--sparks` or `--hosts` list.
+For a saved setup, use that machine's `ssh` value in the controller config.
+Run the SSH command in your private terminal.
+
 If something else uses the GPU, stop it through its own launcher first. Vade
 does not change the driver or the system. Leave those changes to the Spark's
 administrator.

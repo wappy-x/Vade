@@ -20,12 +20,13 @@ const SEARCH_STEPS: usize = 200_000;
 
 /// The doctor probe, then the home folder and the address that SSH reached.
 pub(super) fn script() -> String {
-    format!("{}printf 'home %s\\n' \"$HOME\"\nset -- ${{SSH_CONNECTION:-}}\nprintf 'reached %s\\n' \"${{3:--}}\"\nprintf '{END}\\n'\n", fabric::PROBE_SCRIPT)
+    format!("{}printf 'hostname %s\\n' \"$(hostname -s 2>/dev/null)\"\nprintf 'home %s\\n' \"$HOME\"\nset -- ${{SSH_CONNECTION:-}}\nprintf 'reached %s\\n' \"${{3:--}}\"\nprintf '{END}\\n'\n", fabric::PROBE_SCRIPT)
 }
 
 /// What [`script`] found on one Spark.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Spark {
+    pub hostname: Option<String>,
     /// Up fabric ports only: 100 Gb/s or faster, with an active RDMA port.
     pub ports: Vec<Interface>,
     pub home: String,
@@ -52,7 +53,8 @@ pub(super) fn parse(destination: &str, output: &str) -> Option<Spark> {
         let ports = fabric::parse_probe(output).interfaces.into_iter()
             .filter(|port| port.speed >= fabric::FABRIC_MBPS && port.rdma.as_ref().is_some_and(|(_, state)| state == "ACTIVE")).collect();
         let named = destination.rsplit('@').next().and_then(|host| host.parse().ok());
-        Spark { ports, home: value("home").unwrap_or_default().to_owned(), reached: value("reached").and_then(|address| address.parse().ok()).or(named) }
+        Spark { hostname: value("hostname").filter(|name| crate::config::public_hostname(name)).map(str::to_owned),
+            ports, home: value("home").unwrap_or_default().to_owned(), reached: value("reached").and_then(|address| address.parse().ok()).or(named) }
     })
 }
 
@@ -162,6 +164,8 @@ impl<'a> Cables<'a> {
     pub(super) fn read(&self) -> bool { self.sparks.iter().all(Option::is_some) }
 
     fn index(&self, host: &str) -> Option<usize> { self.hosts.iter().position(|name| name == host) }
+
+    pub(super) fn hostname(&self, host: &str) -> Option<&str> { self.sparks.get(self.index(host)?)?.as_ref()?.hostname.as_deref() }
 
     /// The cable that the probes found between two given Sparks.
     fn found(&self, a: usize, b: usize) -> Cable {

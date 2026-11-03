@@ -104,7 +104,7 @@ impl<R: Runner> App<R> {
         std::thread::scope(|scope| {
             let handles = steps.iter().zip(workers).map(|(step, runner)| {
                 let (config, dry) = (self.config.clone(), self.dry);
-                scope.spawn(move || crate::output::buffered(|| step.run(&mut App { config, runner, dry })))
+                scope.spawn(move || crate::output::buffered(|| crate::config::PublicNames::config(&config).run(|| step.run(&mut App { config, runner, dry }))))
             }).collect::<Vec<_>>();
             let last = handles.len() - 1;
             handles.into_iter().enumerate().map(|(rank, handle)| {
@@ -373,6 +373,7 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
         // reuse is for all ranks or for none.
         let previous = previous.filter(|(manifest, fields)| one_folder(&machines, manifest, fields));
         let mut weights_present = true;
+        self.check_ssh(&machines)?;
         for machine in &machines {
             if !self.dry {
                 if runner::this_computer(&machine.ssh) { crate::output::line(format_args!("Checking {} on this computer.", machine.name))?; }
