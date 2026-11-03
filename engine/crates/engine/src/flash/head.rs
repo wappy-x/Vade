@@ -46,11 +46,13 @@ pub struct Head<'a, 'w> {
     /// [0, part_start(1))) here and every other rank its part; its argmax rows are merged on
     /// readback (take_split) and its logits are sparse.
     split: Option<usize>,
-    /// The plain split head (head_split) over this many ranks: this rank projected its part; `result`
-    /// holds each rank's argmax row in rank order. The logits are sparse: full-logit readers project
-    /// the whole head again from `input` (NextSession::canonical_split_logits).
+    /// The plain split head (head_split) over this many ranks, or Some(1) after a bounded plain
+    /// step: this rank projected its part; `result` holds each part's argmax row in rank order. The
+    /// logits are sparse: full-logit readers project the whole head again from `input`
+    /// (NextSession::canonical_split_logits).
     halves: Option<usize>,
-    /// The plain split head's retained input row (H floats; under the tensor split only).
+    /// The retained input row (H floats) of the plain split head (under the tensor split) or the
+    /// bounded plain step (one Spark with head bounds, retain_input).
     input: Option<DeviceVector<'a>>,
     ready: bool,
     max_ready: bool,
@@ -78,7 +80,8 @@ impl<'a, 'w> Head<'a, 'w> {
         Ok(bounds)
     }
 
-    /// Sparse greedy verification; the session retains inputs for canonical full-logit readers.
+    /// Sparse greedy verification or plain step; the session retains inputs for canonical
+    /// full-logit readers.
     #[allow(clippy::too_many_arguments)]
     /// Head rows [start, start + rows) of `weight` (the bounds' range); argmax ids count from `start`.
     pub(super) fn project_bound_rows(b: &Backend<'_>, weight: u64, start: usize, rows: usize, count: usize,
@@ -581,9 +584,28 @@ impl<'a, 'w> Head<'a, 'w> {
         self.halves = Some(parts);
         Ok(())
     }
-    /// The head keeps an input row for the plain split head (Head::load under the tensor split).
+    /// One Spark with head bounds: this session's plain greedy steps keep their input row.
+    pub(super) fn retain_input(&mut self, b: &Backend<'a>) -> Result<()> {
+        if self.input.is_none() { self.input = Some(b.vector(H)?); }
+        Ok(())
+    }
+    /// A pooled plain greedy step took the bounded head: chat `row`'s argmax row, and its head
+    /// input row for full-logit readers, as after the plain split head of one part. The logits
+    /// stay sparse.
+    pub(super) fn publish_bound(&mut self, b: &Backend<'_>, result: &DeviceVector<'_>, hidden: &DeviceVector<'_>,
+        row: usize) -> Result<()> {
+        self.ready = false; self.max_ready = false; self.split = None; self.halves = None;
+        let input = self.input.as_mut().ok_or("bounded plain head has no retained input")?;
+        b.copy_range(hidden, input, row * H, 0, H)?;
+        b.copy_range(result, &mut self.result, row * 3, 0, 3)?;
+        self.halves = Some(1);
+        Ok(())
+    }
+    /// The head keeps an input row for the plain split head (Head::load under the tensor split)
+    /// or the bounded plain head (retain_input).
     pub(super) fn retains_input(&self) -> bool { self.input.is_some() }
-    /// After a plain split step: the retained input row the whole head projects again.
+    /// After a plain split step or a bounded plain step: the retained input row the whole head
+    /// projects again.
     pub(super) fn split_input(&self) -> Option<&DeviceVector<'a>> { self.halves.and(self.input.as_ref()) }
     /// A full-logit reader projected the whole head again (canonical_split_logits): these are this
     /// step's logits, so the head is whole again (top-k reads them).

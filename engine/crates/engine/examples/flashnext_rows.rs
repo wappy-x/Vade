@@ -28,21 +28,22 @@ fn run() -> Result<(), String> {
         } else {NextModel::load(b, &root)?};
         println!("NEW FOLDER model_load_s={:.6} allocated_bytes={} sparse=true temperature=0 top_p=1 top_k=0 repetition_penalty=1 presence_penalty=0 frequency_penalty=0", load.elapsed().as_secs_f64(), b.allocated_bytes());
         if fallback {
-            for count in 2..=spark_engine::flash_head_options::RETAINED_ROWS {
+            for count in 1..=spark_engine::flash_head_options::RETAINED_ROWS {
                 let prompt:Vec<_>=(0..129).map(|i|100+(i*31%4096) as u32).collect();
                 let input:Vec<_>=(0..count).map(|i|9707+i as u32).collect();
                 let mut canonical=model.session(b,1024)?;
                 let mut bounded=model.session(b,1024)?;
                 // Lookup width admits verify rows past the resident MTP depth.
-                canonical.enable_lookup(b,count-1)?;bounded.enable_lookup(b,count-1)?;
+                if count>1 {canonical.enable_lookup(b,count-1)?;bounded.enable_lookup(b,count-1)?;}
                 canonical.prefill_advance(b,&prompt)?;bounded.prefill_advance(b,&prompt)?;
                 let ids=NextSession::verify_batch(b,&mut[&mut canonical],&[&input])?;
                 let expected=canonical.decode_logits(b,count)?;
                 let top=canonical.decode_top_k(b,count,8)?;
                 let got=NextSession::verify_batch_greedy(b,&mut[&mut bounded],&[&input])?;
                 if got!=ids {return Err("bounded greedy IDs disagree".into());}
-                // Reuse shared scratch for a later request before asking for full rows.
-                canonical.commit_mtp(b,canonical.position())?;canonical.step(b,198)?;
+                if !bounded.verify_left_sparse() {return Err(format!("verify of {count} rows took the whole head"));}
+                // Another verify pass overwrites the shared workspace before asking for full rows.
+                canonical.commit_mtp(b,canonical.position())?;NextSession::verify_batch(b,&mut[&mut canonical],&[&input])?;
                 let actual=bounded.decode_logits(b,count)?;
                 if actual.iter().flatten().map(|v|v.to_bits()).collect::<Vec<_>>()
                     !=expected.iter().flatten().map(|v|v.to_bits()).collect::<Vec<_>>() {
@@ -58,6 +59,28 @@ fn run() -> Result<(), String> {
                     .sample(row,&prompt,prompt.len(),prompt.len()+1,|id|id!=forbidden);
                 if sample(&actual[0])?!=sample(&expected[0])? {return Err("rejected-token fallback differs".into());}
                 println!("CHECK bounded_head rows={count} IDs/full_logits/top_k/rejected_winner/overwritten_workspace PASS");
+            }
+            // The plain greedy step: full cohorts take the bounded head, a padded one (3) does not.
+            for chats in [1usize,2,3,4,8] {
+                let prompts:Vec<Vec<u32>>=(0..chats).map(|i|(0..129).map(|t|100+((i*113+t*31)%4096) as u32).collect()).collect();
+                let inputs:Vec<_>=(0..chats).map(|i|9707+i as u32).collect();
+                let mut canonical=(0..chats).map(|_|model.session(b,1024)).collect::<Result<Vec<_>,_>>()?;
+                let mut greedy=(0..chats).map(|_|model.session(b,1024)).collect::<Result<Vec<_>,_>>()?;
+                for (i,(c,g)) in canonical.iter_mut().zip(&mut greedy).enumerate() {
+                    c.disable_mtp();g.disable_mtp();c.prefill_advance(b,&prompts[i])?;g.prefill_advance(b,&prompts[i])?;
+                }
+                let rows=NextSession::step_batch(b,&mut canonical.iter_mut().collect::<Vec<_>>(),&inputs)?;
+                let ids=NextSession::step_batch_greedy(b,&mut greedy.iter_mut().collect::<Vec<_>>(),&inputs)?;
+                if greedy.iter().any(|s|s.step_was_sparse()!=(chats!=3)) {return Err(format!("plain greedy head path at {chats} chats"));}
+                if ids!=rows.iter().map(|r|greedy_token(r)).collect::<Result<Vec<_>,_>>()? {return Err("plain greedy IDs disagree".into());}
+                let top=canonical.iter_mut().map(|s|s.decode_top_k(b,1,8)).collect::<Result<Vec<_>,_>>()?;
+                // Same width: this step overwrites the workspace the greedy step used.
+                NextSession::step_batch(b,&mut canonical.iter_mut().collect::<Vec<_>>(),&vec![198;chats])?;
+                for (i,s) in greedy.iter_mut().enumerate() {
+                    if bits(s.logits(b)?)!=bits(rows[i].clone()) {return Err("plain greedy full-logit fallback changed bits".into());}
+                    if s.decode_top_k(b,1,8)?!=top[i] {return Err("plain greedy top-k fallback changed values".into());}
+                }
+                println!("CHECK bounded_plain chats={chats} IDs/full_logits/top_k/overwritten_workspace PASS");
             }
         }
         if check {

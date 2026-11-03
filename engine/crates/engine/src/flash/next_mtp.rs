@@ -696,7 +696,8 @@ impl<'a, 'w> NextSession<'a, 'w> {
         let rows = (max + 1).max(self.mtp_depth() + 1);
         if rows != self.verify_rows {
             if let Some(d) = &mut self.draft {
-                d.verification = b.vector(rows * self.model.vocabulary())?;
+                // Arena storage, as the first `verification`: top_k_rows takes row slices of it.
+                d.verification = b.vector_arena(&[rows * self.model.vocabulary()])?.pop().ok_or("missing verification rows")?;
             }
             self.saved.clear();
             self.rollback = None;

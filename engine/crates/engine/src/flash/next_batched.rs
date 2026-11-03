@@ -914,7 +914,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             mlp_hc,
             mixer: Hc::mixer_rows(w, "model.language_model.hyper_connection_mixer")?,
             ple: Ple::load(b, w)?,
-            head: Head::load(b, w)?,
+            head: { let mut head = Head::load(b, w)?; if model.head_bounds.is_some() { head.retain_input(b)?; } head },
             gdn_state,
             qsa_state,
             chunk: 512,

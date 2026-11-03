@@ -73,8 +73,8 @@ Arithmetic and ownership:
   Four fixed K ranges retain independent high/residual chains and the same
   balanced merge. Fused partial maxima preserve lowest-ID ties and reject
   nonfinite logits. Full logits remain available to the serving sampler.
-  Eager prompt spans project only their last token; the single decode graph also
-  computes the head for advance-only calls. Debug dumps use eager one-token slices.
+  Eager prompt spans project only their last token; a decode step also computes
+  the head for advance-only calls. Debug dumps use eager one-token slices.
 - Validation precedes history changes. Execution failures invalidate every cohort
   participant until reset. Prompt advance invalidates old logits. Workspace may
   grow; it borrows dead expert-output storage for QSA projection rows.
@@ -127,8 +127,13 @@ reset keeps state addresses and clears their histories and device position.
 The graph is destroyed before its table, weights and scratch allocations.
 
 Embedding/lexical I/O and uploads precede replay. Full-logit/result publication
-and the existing sampler follow replay. The graph captures PLE, all 48 layer
-traversals, final mixer, head and device position commit. Custom Dense hooks and
+and the existing sampler follow replay. On one Spark the graphs capture PLE and
+all 48 layer traversals. Final mixer, head and device position commit end the
+graphs at 16 rows or with no head bounds. With head bounds at up to 8 rows they
+run behind the graphs as eager launches: a full cohort whose reader takes the ids
+only uses the bounded head, and every other reader uses the whole head. On a
+layer chain each rank's graphs capture its own layers, and the front runs mixer,
+whole head and position commit in a third graph after the rows return. Custom Dense hooks and
 debug dumps keep the same eager arithmetic. Prompt tiles still start only on
 absolute 64-token boundaries; this path has no snapshot API.
 

@@ -34,7 +34,8 @@ pub(super) struct Workspace<'a> {
     pub(super) head_logits: DeviceVector<'a>,
     pub(super) head_partials: DeviceVector<'a>,
     pub(super) head_result: DeviceVector<'a>,
-    /// Only the private greedy verification API permits sparse head logits.
+    /// A greedy verify pass may leave sparse head logits (verify_batch_greedy). A plain step has
+    /// its own rules (flash_next_rows::bounded_step, head_split::plain_eligible).
     pub(super) bound_head: bool,
     shared_gate: DeviceVector<'a>,
     lexical: DeviceVector<'a>,
@@ -722,7 +723,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             },
         );
         if source == crate::flash_next_rows::ResultSource::Pooled {
-            Self::run_pooled(b, sessions, tokens, output)?;
+            Self::run_pooled(b, sessions, tokens, output, greedy_head)?;
             return Ok(source);
         }
         if count > crate::flash_next_rows::prompt_tile() {
@@ -791,7 +792,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
     /// The single-chat verify head projects only rows above the retained bound.
     fn bound_head(model: &NextModel<'a>, sessions: &[&mut Self], count: usize, greedy_head: bool, verify: bool, result: usize) -> bool {
         greedy_head && verify && sessions.len() == 1 && (head_split::eligible(model, sessions.len(), count, verify, result)
-            || (2..=crate::flash_head_options::RETAINED_ROWS).contains(&count) && model.head_bounds.is_some())
+            || (1..=crate::flash_head_options::RETAINED_ROWS).contains(&count) && model.head_bounds.is_some())
             && sessions.iter().all(|s| s.dump.is_none() && s.layer_bytes.is_none())
     }
     fn check_ops(

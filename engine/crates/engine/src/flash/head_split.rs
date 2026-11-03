@@ -1,5 +1,5 @@
 //! The tensor split's head split: the verify head of a one-chat pass of
-//! 2..=RETAINED_ROWS rows, split by vocabulary parts across the tensor split's ranks (halves on
+//! 1..=RETAINED_ROWS rows, split by vocabulary parts across the tensor split's ranks (halves on
 //! the pair; flash_head_options::part_start). Every rank holds the pass's final residual (every
 //! split layer gathers its parts), mixes it (no head weight is read for the mix), and projects
 //! its part of the head rows with the whole head's launches (Head::project_next_rows_at: each
@@ -147,9 +147,9 @@ impl<'a, 'w> NextSession<'a, 'w> {
         }
         Ok(())
     }
-    /// Full-logit readers after a plain split step (for example serving's fallback when the greedy
+    /// Full-logit readers after a plain split step or a bounded plain step (for example serving's fallback when the greedy
     /// id is not in the tokenizer): the whole head projected again from the chat's retained input
-    /// row, so the logits main's whole head gave for this step. None: the step did not split.
+    /// row, so the logits main's whole head gave for this step. None: the step kept whole logits.
     pub(in super::super) fn canonical_split_logits(&self, b: &Backend<'a>) -> Result<Option<Vec<f32>>> {
         let Some(input) = self.head.split_input() else { return Ok(None) };
         if !self.valid || !self.logits_ready { return Ok(None); }

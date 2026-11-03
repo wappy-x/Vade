@@ -128,6 +128,33 @@ fn session_pool_funds_graph_cliffs_and_refuses_shortfall() {
     let (sessions, pool, _) = fit_session_pool(available, 1_000_000_000, full + (512 << 20), wide).unwrap();
     assert_eq!((sessions, pool - full), (8, 995_666_292));
 }
+/// A pooled step's tail graph stops after the last layer, and mixer, head and positions run
+/// behind it, on a rank that is not a pipeline front, with head bounds loaded, at up to
+/// RETAINED_ROWS rows: the graph is captured once, and each step's reader then picks its head.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn head_after_tail(pipeline_front: bool, width: usize, bounds: bool) -> bool {
+    !pipeline_front && width <= crate::flash_head_options::RETAINED_ROWS && bounds
+}
+/// The bounded head runs for a step whose reader takes the ids only, with every session keeping
+/// its input row. A padded row would make its bound useless, so the whole cohort must be real
+/// rows: the screen and the whole head would both run.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn bounded_step(later: bool, output: bool, ids_only: bool, chats: usize, width: usize, retained: bool) -> bool {
+    later && output && ids_only && chats == width && retained
+}
+#[test]
+fn only_a_full_ids_only_cohort_behind_the_tail_takes_the_bounded_head() {
+    let rows = crate::flash_head_options::RETAINED_ROWS;
+    assert!(head_after_tail(false, 1, true) && head_after_tail(false, rows, true));
+    assert!(!head_after_tail(true, 1, true), "the pipeline front's head runs in fin");
+    assert!(!head_after_tail(false, 1, false), "no bounds: the head stays in the tail graph");
+    assert!(!head_after_tail(false, rows * 2, true), "wider cohorts keep the whole head in the graph");
+    assert!(bounded_step(true, true, true, 4, 4, true));
+    for (later, output, ids, chats, width, retained) in [(false, true, true, 4, 4, true), (true, false, true, 4, 4, true),
+        (true, true, false, 4, 4, true), (true, true, true, 3, 4, true), (true, true, true, 4, 4, false)] {
+        assert!(!bounded_step(later, output, ids, chats, width, retained));
+    }
+}
 /// Missing owners cannot be reconstructed while published pool addresses remain live.
 /// Such a session must be replaced; reset and pooled admission share this check.
 /// `layers`: the owned interval (all 48, or a pipeline stage's own layers).

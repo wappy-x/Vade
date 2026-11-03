@@ -20,7 +20,7 @@ pub fn validate() -> Result<(), String> {
 }
 /// Rows of rank 0's vocabulary half under the tensor split's head split on the pair: the lower
 /// half in whole 64-row tiles (the bounded screen's unit); rank 1 takes the rest. The split head
-/// covers the greedy verify head of one-chat passes of 2..=RETAINED_ROWS rows.
+/// covers the greedy verify head of one-chat passes of 1..=RETAINED_ROWS rows.
 pub fn split_rows(vocabulary: usize) -> usize { part_start(vocabulary, crate::flash_tp_switch::PAIR, 1) }
 /// The first row of rank `rank`'s vocabulary part under the head split over `world` ranks: equal
 /// parts of whole 64-row tiles, the last rank also takes the rest (`rank` = `world`: the end).
@@ -67,7 +67,7 @@ fn configured() -> Result<Option<bool>, String> {
     ENABLED.get_or_init(|| parse(std::env::var("VADE_HEAD_BOUNDS"))).clone()
 }
 /// Existing explicit switches keep their meaning; automatic mode must fund the
-/// full twin, norms and retained inputs for every possible session, not just C1.
+/// full twin, norms and the verify rows' retained inputs for every possible session, not just C1.
 pub fn load_funded(saved: usize, twin: usize, vocabulary: usize, sessions: usize, mtp: bool) -> Result<bool, String> {
     configured().map(|enabled| enabled.unwrap_or_else(|| {
         let on = funded(saved, twin, vocabulary, sessions, mtp);
@@ -91,13 +91,20 @@ fn funded(saved: usize, twin: usize, vocabulary: usize, sessions: usize, mtp: bo
 pub fn load_local<T>(enabled: bool, headless: bool, load: impl FnOnce() -> Result<T, String>) -> Result<Option<T>, String> {
     if enabled && !headless { load().map(Some) } else { Ok(None) }
 }
-/// Verify passes of up to eight rows (one canonical head group) take the bounded head.
+/// The most rows of a pass that can take the bounded head (one canonical head group):
+/// Workspace::bound_head rules a verify pass, flash_next_rows::bounded_step a plain step.
 pub const RETAINED_ROWS: usize = 8;
 pub const RETAINED_INPUT_BYTES: usize = RETAINED_ROWS * 2560 * 4;
 pub fn retained_input_bytes(enabled: bool) -> usize { if enabled { RETAINED_INPUT_BYTES } else { 0 } }
 #[cfg(test)]
 mod tests {
     use super::{parse, load_local, retained_input_bytes, funded, split_bounds_rows, split_rows, merge_split, merge_parts, part_start};
+    /// One Spark's bounded plain step publishes one part: its argmax row is the head's.
+    #[test]
+    fn one_part_keeps_the_rows() {
+        let rows = [(7u32, 1.5f32), (0, -2.0)];
+        assert_eq!(merge_parts(&rows, 100, 1).unwrap(), rows.to_vec());
+    }
     /// One argmax over a row: the larger logit, ties to the lower id (logits_argmax_finish).
     fn whole(row: &[f32]) -> (u32, f32) {
         row.iter().enumerate().fold((u32::MAX, f32::NEG_INFINITY), |best, (i, &v)| {

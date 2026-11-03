@@ -73,9 +73,22 @@ fn graph_allowance_is_the_funded_decode_graph_term() {
     // One session: whole_model(1, 1) + whole_model(47, 1) at 16 KiB per node + 256 KiB each.
     assert_eq!(Pool::graph_allowance_bytes(1, 1).unwrap(), 51_904_512);
 }
+/// What a pooled part does after its last layer.
+#[derive(Clone, Copy, PartialEq)]
+enum Finish {
+    /// Nothing: a later part holds the head and the position update.
+    Later,
+    /// Mixer, the head (the bounded head when `bounded`), positions, for a part that ends at
+    /// layer 48. A chain front's tail ends at `split` and does none of these: `fin` runs them.
+    Head { bounded: bool },
+    /// A pipeline worker: positions only.
+    Position,
+}
 // Drop the graphs before their scratch and template views. One step replays
-// (layer 0, layers 1-47 + head): the host reads the step's PLE rows while
-// layer 0 runs; they are first used by layer 1's PLE projection.
+// (layer 0, layers 1-47): the host reads the step's PLE rows while layer 0 runs;
+// they are first used by layer 1's PLE projection. On one Spark, mixer, head and
+// positions end the second graph, or run behind it as eager launches when a step's
+// reader picks its head (head_after_tail). A chain front's head runs in `fin`.
 pub(crate) struct Pooled<'a> {
     graph: [Option<(DecodeGraph<'a>, DecodeGraph<'a>)>; 2],
     capture_retry: [crate::flash_next_rows::CaptureBackoff; 2],
@@ -145,7 +158,7 @@ impl<'a> Pooled<'a> {
         source: &NextSession<'a, '_>,
         mut step: SlotStep,
         layers: std::ops::Range<usize>,
-        head: bool,
+        finish: Finish,
     ) -> Result<()> {
         let width = step.rows as usize;
         let w = &mut self.work;
@@ -246,27 +259,25 @@ impl<'a> Pooled<'a> {
             let finish = w.deferred_finish.take();
             source.mlp_hc[li].combine_finish_tiled(b, &mut w.hc, &mut w.residual, &w.block, width, finish)?;
         }
-        // Front fragments defer position publication until the final head graph. Every
+        // Front fragments defer position publication until the final head part. Every
         // worker publishes once after its own last layer, including middle ranks whose
         // interval ends before layer 48; otherwise its next pooled step reuses old KV pos.
-        if !super::super::pp::pool_advances_position(layers.end, head) {
+        if finish == Finish::Later || !super::super::pp::pool_advances_position(layers.end, finish != Finish::Position) {
             return Ok(());
         }
-        // `head` false: a pipeline worker, which only advances its slot positions.
-        if head {
+        // Finish::Position: a pipeline worker, which only advances its slot positions.
+        if let Finish::Head { bounded } = finish {
             source
                 .mixer
                 .mix_tiled(b, &mut w.hc, &w.residual, &w.mixed, width)?;
-            Head::project_next_rows(
-                b,
-                model.weights.device_address("lm_head.weight")?,
-                model.vocabulary(),
-                width,
-                &w.mixed,
-                &mut w.head_logits,
-                &mut w.head_partials,
-                &mut w.head_result,
-            )?;
+            let weight = model.weights.device_address("lm_head.weight")?;
+            if bounded {
+                Head::project_bound_rows(b, weight, 0, model.vocabulary(), width, &w.mixed, &mut w.head_logits,
+                    &mut w.head_partials, &mut w.head_result, model.head_bounds.as_ref().ok_or("head bounds missing")?)?;
+            } else {
+                Head::project_next_rows(b, weight, model.vocabulary(), width, &w.mixed, &mut w.head_logits,
+                    &mut w.head_partials, &mut w.head_result)?;
+            }
         }
         unsafe {
             b.launch_flash(
@@ -279,15 +290,25 @@ impl<'a> Pooled<'a> {
     }
 }
 impl<'a, 'w> NextSession<'a, 'w> {
-    /// Same head arithmetic, one compact cohort read instead of full vocabulary downloads.
-    /// Full logits remain session-owned and available through logits().
+    /// This session's last pass was a verify pass that left sparse logits: the bounded head or
+    /// the verify split head (Draft::bound_at). A later pass, a reset, a rollback and decode_top_k
+    /// clear the mark. For checks of the path a pass took.
+    pub fn verify_left_sparse(&self) -> bool { self.draft.as_ref().is_some_and(|d| d.bound_at.get().is_some()) }
+    /// This session's last plain step left sparse logits (the bounded head or the plain split
+    /// head): a full-logit reader projects the whole head again. For checks of the path a step
+    /// took; a bounded verify pass keeps its own mark (Draft::bound_at).
+    pub fn step_was_sparse(&self) -> bool { self.valid && self.logits_ready && self.head.split_input().is_some() }
+    /// Same argmax ids, one compact cohort read instead of full vocabulary downloads. A step
+    /// that took the bounded head or the plain split head holds no full logits: logits() and
+    /// decode_top_k project the whole head again from the session's retained input row.
     pub fn step_batch_greedy(
         b: &Backend<'a>,
         sessions: &mut [&mut Self],
         tokens: &[u32],
     ) -> Result<Vec<u32>> {
         let inputs = tokens.iter().map(std::slice::from_ref).collect::<Vec<_>>();
-        // Only the ids are read: under the tensor split the head may split by vocabulary halves.
+        // Only the ids are read: the tensor split may split the head by vocabulary parts, and
+        // one Spark may take the bounded head (bounded_step).
         let source = Self::run_rows_inner(b, sessions, &inputs, true, false, true)?;
         let model = sessions[0].model;
         let count = sessions.len();
@@ -326,6 +347,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         sessions: &mut [&mut Self],
         tokens: &[&[u32]],
         output: bool,
+        ids_only: bool,
     ) -> Result<()> {
         let model = sessions[0].model;
         let fallback = model.pp_front_split().is_none() && sessions[0].pool_graph_fallback;
@@ -389,16 +411,22 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 rows: width as u32,
             };
             // Pipeline front: the tail graph stops at `split`; `fin` runs the head after
-            // the back's rows return (otherwise `end` is 48 and nothing changes).
+            // the back's rows return (otherwise `end` is 48).
             let split = model.pp_front_split();
             let end = split.unwrap_or(LAYERS);
+            // When head_after_tail holds, the head of this step's reader runs behind the tail.
+            // Every reader gets the whole head's argmax.
+            let later = crate::flash_next_rows::head_after_tail(split.is_some(), width, model.head_bounds.is_some());
+            let bounded = crate::flash_next_rows::bounded_step(later, output, ids_only, sessions.len(), width,
+                sessions.iter().all(|s| s.head.retains_input()));
+            let tail = if later { Finish::Later } else { Finish::Head { bounded: false } };
             if pool.graph[b.arm_index()].is_none() {
                 if fallback {
                     let arm = b.arm_index();
                     if pool.capture_retry[arm].attempt() {
                         pool.graph[arm] = crate::flash_next_rows::capture_pair(|head| unsafe {
                             b.try_capture_batch(if head { 1 } else { end - 1 }, width, || {
-                                pool.enqueue(b, model, sessions[0], step, if head { 0..1 } else { 1..end }, true)
+                                pool.enqueue(b, model, sessions[0], step, if head { 0..1 } else { 1..end }, if head { Finish::Later } else { tail })
                             })
                         })?;
                         if pool.graph[arm].is_none() {
@@ -408,11 +436,11 @@ impl<'a, 'w> NextSession<'a, 'w> {
                     }
                 } else {
                     let head = unsafe {
-                        b.capture_batch(1, width, || pool.enqueue(b, model, sessions[0], step, 0..1, true))?
+                        b.capture_batch(1, width, || pool.enqueue(b, model, sessions[0], step, 0..1, Finish::Later))?
                     };
                     let tail = unsafe {
                         b.capture_batch(end - 1, width, || {
-                            pool.enqueue(b, model, sessions[0], step, 1..end, true)
+                            pool.enqueue(b, model, sessions[0], step, 1..end, tail)
                         })?
                     };
                     pool.graph[b.arm_index()] = Some((head, tail));
@@ -420,14 +448,14 @@ impl<'a, 'w> NextSession<'a, 'w> {
             }
             if split.is_some() && pool.fin[b.arm_index()].is_none() {
                 let fin = unsafe {
-                    b.capture_batch(1, width, || pool.enqueue(b, model, sessions[0], step, LAYERS..LAYERS, true))?
+                    b.capture_batch(1, width, || pool.enqueue(b, model, sessions[0], step, LAYERS..LAYERS, Finish::Head { bounded: false }))?
                 };
                 pool.fin[b.arm_index()] = Some(fin);
             }
             if let Some((head, _)) = &pool.graph[b.arm_index()] {
                 unsafe { b.replay_decode(head)?; }
             } else {
-                pool.enqueue(b, model, sessions[0], step, 0..1, true)?;
+                pool.enqueue(b, model, sessions[0], step, 0..1, Finish::Later)?;
             }
             {
                 // Layer 0 runs while the host reads the rows; layer 1 is their first use.
@@ -452,7 +480,10 @@ impl<'a, 'w> NextSession<'a, 'w> {
             if let Some((_, tail)) = &pool.graph[b.arm_index()] {
                 unsafe { b.replay_decode(tail)?; }
             } else {
-                pool.enqueue(b, model, sessions[0], step, 1..end, true)?;
+                pool.enqueue(b, model, sessions[0], step, 1..end, tail)?;
+            }
+            if later {
+                pool.enqueue(b, model, sessions[0], step, LAYERS..LAYERS, Finish::Head { bounded })?;
             }
             if split.is_some() {
                 let meta: Vec<[u32; 4]> = sessions
@@ -467,8 +498,11 @@ impl<'a, 'w> NextSession<'a, 'w> {
             // Queue session output copies while the graph is still running.
             if output {
                 for (row, s) in sessions.iter_mut().enumerate() {
-                    s.head
-                        .publish_next(b, &pool.work.head_logits, &pool.work.head_result, row)?;
+                    if bounded {
+                        s.head.publish_bound(b, &pool.work.head_result, &pool.work.mixed, row)?;
+                    } else {
+                        s.head.publish_next(b, &pool.work.head_logits, &pool.work.head_result, row)?;
+                    }
                 }
             }
             b.synchronize()?;
@@ -584,7 +618,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             if pool.back[b.arm_index()].is_none() {
                 let graph = unsafe {
                     b.capture_batch(model.pp_end.get() - split, width, || {
-                        pool.enqueue(b, model, sessions[0], step, split..model.pp_end.get(), false)
+                        pool.enqueue(b, model, sessions[0], step, split..model.pp_end.get(), Finish::Position)
                     })?
                 };
                 pool.back[b.arm_index()] = Some(graph);
