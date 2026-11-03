@@ -80,8 +80,11 @@ fn chunk_bytes(v: &[GdnChunkNext]) -> &[u8] {
 /// Run a cohort verify layer's collected launches (cohort_kernels): upload the parameter
 /// tables into `table` and launch every non-empty group with the chat in grid-Y, in the
 /// per-chat order (rows, rest rows, history).
-pub(crate) fn launch_cohort(b: &Backend<'_>, s: &GdnScratch<'_>, table: &mut DeviceVector<'_>) -> Result<()> {
+pub(crate) fn launch_cohort_scratch(b: &Backend<'_>, s: &GdnScratch<'_>, table: &mut DeviceVector<'_>) -> Result<()> {
     let Some(c) = s.cohort.borrow_mut().take() else { return Ok(()); };
+    launch_cohort(b, table, c)
+}
+fn launch_cohort(b: &Backend<'_>, table: &mut DeviceVector<'_>, c: CohortLaunches) -> Result<()> {
     let total = (c.rows[0].len() + c.rows[1].len()) * std::mem::size_of::<GdnChunkNext>() + c.history.len() * std::mem::size_of::<GdnHistory>();
     if total == 0 { return Ok(()); }
     if total > table.len() * 4 { return Err("cohort GDN launches exceed their table".into()); }
@@ -130,6 +133,16 @@ pub(crate) fn hybrid_copy_rows(b: &Backend<'_>, table: &mut DeviceVector<'_>,
         first += group.len();
     }
     Ok(())
+}
+/// Commit-time history rebuild (gdn_replay::table_commit): one GdnHistory per
+/// GDN layer through the cohort history launch (launch_cohort), layer in grid-Y.
+/// Each entry reads its entry history taps and tape rows and writes the
+/// accepted history to its live history (history_token destination rule);
+/// history_token overwrites the entry history first, so no reader may use
+/// an entry history after this launch.
+pub(crate) fn launch_history_table(b: &Backend<'_>, table: &mut DeviceVector<'_>,
+    entries: Vec<spark_gpu_probe::kernel_params::GdnHistory>) -> Result<()> {
+    launch_cohort(b, table, CohortLaunches { rows: [vec![], vec![]], history: entries })
 }
 /// Whether the process's PTX exports the cohort GDN entries (gdn::cohort_kernels).
 pub(crate) fn cohort_kernel_entries(b: &Backend<'_>) -> bool {

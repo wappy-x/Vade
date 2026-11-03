@@ -25,6 +25,9 @@ pub(crate) mod flash_mx8_registry;
 #[path = "flash/split_ranges.rs"]
 pub(crate) mod flash_split_ranges;
 #[cfg(any(target_os = "linux", test))]
+#[path = "flash/gdn_commit.rs"]
+pub(crate) mod flash_gdn_commit;
+#[cfg(any(target_os = "linux", test))]
 #[path = "flash/next_input.rs"]
 mod flash_next_input;
 #[cfg(any(target_os = "linux", test))]

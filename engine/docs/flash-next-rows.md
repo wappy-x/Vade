@@ -214,9 +214,12 @@ Mixed ModelOpt metadata alone permits 500,000 tensors. Nonmixed typed FP8
 keeps main's 320,000 ceiling; the Flash FP8 index keeps its 200,000 limit.
 Legacy nonmixed Flash NVFP4 retains main's 320,000 limit in both loader and receipt.
 
-MTP retains one recurrent entry snapshot, projection tapes and small PLE/hash/
-hidden prefixes. Verification scans every causal GDN row in one pass. Rollback
-selects the entry owner and replays only the accepted GDN projection prefix.
+MTP retains one recurrent entry snapshot, projection tapes and small
+PLE/hash/hidden prefixes. Verification scans every causal GDN row in one
+pass. A partial accept rebuilds the accepted history from the tape in one
+launch and, for a short window over a chunk end whose accept stops before
+the chunk end, copies the accepted tail slots. Only
+a long window over a chunk end replays the accepted GDN projection prefix.
 `mtp_depth:0` requests plain. `--mtp` sets the request default, which is 3 for
 one-Spark Next and the pipeline service. The
 [draft settings](../crates/engine/src/flash/draft_stack.rs) keep depth 7 resident
@@ -251,7 +254,9 @@ overrides that budget. The [request parser](../crates/serve/src/protocol.rs)
 allows lookup for greedy requests with drafting enabled, nonzero depth and
 `draft` other than `"plain"`. Cohort size does not clear that request setting.
 Every proposed token is target-verified. Verification scans GDN once for all
-rows, including lookup rows; rejected prefixes replay only retained GDN projections.
+rows, including lookup rows. A rejected prefix keeps the verify rows and
+rebuilds its history in one launch. Only long lookup windows over a chunk end replay
+retained GDN projections.
 
 The [HTTP scheduler](../crates/serve/src/scheduler/dispatch.rs) uses its configured
 prompt chunk while other chats decode. Otherwise it can use the

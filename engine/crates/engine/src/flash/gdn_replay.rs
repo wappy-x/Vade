@@ -2,6 +2,14 @@
 //! rounded deltas or inverse updates: replay preserves the ascending FP32 fold.
 use super::*;
 
+/// Table commit (flash_gdn_history_cohort at commit): the commit rebuilds the
+/// accepted conv history from the tape in one launch over all GDN layers.
+/// Needs chunk form and the cohort history entry; without them the replay runs.
+pub(crate) fn table_commit(b: &Backend<'_>) -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| chunk_form() && b.has_flash("flash_gdn_history_cohort"))
+}
+
 const WIDTHS: [usize; 3] = [10240, 48, 48];
 
 pub(in crate::flash) struct GdnReplay<'a> {
@@ -24,6 +32,12 @@ impl<'a> GdnReplay<'a> {
     pub(in crate::flash) fn widths(rows: usize) -> [usize; 3] {
         WIDTHS.map(|n| n * rows)
     }
+
+    /// Device address of the qkv projection tape (row 0).
+    pub(in crate::flash) fn x_address(&self) -> u64 { self.projected[0].device_address() }
+    /// Rows the last capture wrote and the per-row widths it used.
+    pub(in crate::flash) fn tape_rows(&self) -> usize { self.rows }
+    pub(in crate::flash) fn tape_widths(&self) -> [usize; 3] { self.widths }
 
     /// A tape over caller-provided storage of `widths(rows)` lengths (gdn::session_arena).
     pub(in crate::flash) fn from_projected(projected: [DeviceVector<'a>; 3]) -> Self {

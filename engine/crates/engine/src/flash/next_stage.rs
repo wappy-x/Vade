@@ -272,6 +272,9 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 if verify {
                     let rollback = s.rollback.as_mut().ok_or("MTP rollback missing")?;
                     rollback.shallow = gdn::shallow_verify(pos, span.len());
+                    rollback.slots = gdn::table_commit(b);
+                    rollback.base = pos;
+                    rollback.tokens = span.len();
                     let tape = rollback.inputs[li].as_mut().ok_or("MTP GDN tape missing")?;
                     // With gdn::cohort_copies the layer's tapes and entry histories are already copied.
                     let tape = if copies { None } else if taped { Some([(0, 0, 0); 3]) } else if gdn::fused_verify_copy(b, &work.recurrence) {
@@ -300,7 +303,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                     g.recur_next(b, &work.gdn, span.start, span.len(), &mut work.recurrence, pos)?;
                 }
             }
-            if kernels { gdn::launch_cohort(b, &work.gdn, &mut work.gdn_launches)?; }
+            if kernels { gdn::launch_cohort_scratch(b, &work.gdn, &mut work.gdn_launches)?; }
             Ok(())
             });
             work.gdn.entry_copied.set(false);

@@ -48,6 +48,8 @@ impl<'a> GdnState<'a> {
             Ok(s)
         }).collect()
     }
+    /// Words in this state's own conv history buffer.
+    pub(in crate::flash) fn history_words(&self) -> usize { self.history.len() }
     /// Entry-snapshot storage for every live state (as next_snapshot_storage) and a replay
     /// tape of `rows` rows for every `tapes` entry that is true (as GdnReplay::new), carved
     /// from one allocation (session_arena).

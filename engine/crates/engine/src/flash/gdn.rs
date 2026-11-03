@@ -23,12 +23,12 @@ mod workspace;
 mod replay;
 #[path = "gdn_cohort.rs"]
 mod cohort;
-pub(crate) use cohort::{cohort_copies, cohort_kernel_entries, cohort_kernels, cohort_verify, hybrid_copy_rows, launch_cohort, CohortLaunches, COHORT_LAUNCH_BYTES, COPY_ROWS_PER_CHAT, COPY_ROW_WORDS};
+pub(crate) use cohort::{cohort_copies, cohort_kernel_entries, cohort_kernels, cohort_verify, hybrid_copy_rows, launch_cohort_scratch, launch_history_table, CohortLaunches, COHORT_LAUNCH_BYTES, COPY_ROWS_PER_CHAT, COPY_ROW_WORDS};
 #[path = "gdn_arena.rs"]
 mod arena;
 #[path = "gdn_half.rs"] mod half;
 pub(crate) use arena::session_arena;
-pub(super) use replay::GdnReplay;
+pub(super) use replay::{table_commit, GdnReplay};
 
 /// Chunk-form GDN for Flash-Next (default on;
 /// VADE_GDN_CHUNK=0 = the previous sequential scan). On: states carry the open 64-row chunk

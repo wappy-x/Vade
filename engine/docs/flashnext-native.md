@@ -54,19 +54,25 @@ for the prefetch idea; implementation is first-party.
 MTP verification scans every chat's causal rows in one GDN launch per layer.
 The verifier retains the 128 recurrent cells per value column in registers and
 uses the same ascending `next_math::column` arithmetic as plain decoding. The
-entry matrix is written to one reusable snapshot during its initial load;
-convolution history is copied once. Small QKV/a/b projection tapes restore a
-rejected prefix by replaying only GDN, using the session's existing scratch.
+entry matrix is written to one reusable snapshot during its initial load.
+A partial accept rebuilds the accepted convolution history from the tape in
+one launch over all GDN layers. In most forms it runs no GDN scan again.
+Small QKV/a/b projection tapes still restore the forms that keep the replay:
+a window over 8 rows that crosses a chunk end with an early accept, and the
+chunk-off form.
 PLE history and draft hidden prefixes remain separately retained. No dense,
 attention, expert or head projection is repeated during rollback.
 
 For depth 2, retained state/tapes/prefixes total 124,838,400 bytes per chat,
-versus 358,662,144 bytes for three complete prefixes. Recurrent matrix traffic
-falls from six matrix transfers to three: entry load, entry snapshot store and
-final live-state store. Rejection swaps entry/live owners without copying state,
-republishes pool addresses, and replays only the accepted GDN rows;
-accepting the complete verifier needs no restore or replay. Admission funds the
-single snapshot, maximum-depth tapes and every small prefix, including padding.
+versus 358,662,144 bytes for three complete prefixes. The commit table adds 96,768 bytes at that depth.
+Recurrent matrix traffic falls from six matrix transfers to three: entry load,
+entry snapshot store and final live-state store. A window inside one chunk
+keeps the live state and rebuilds its history. A short window over a chunk
+end whose accept stops before the chunk end swaps entry/live owners and
+copies the accepted tail slots back. An accept through the chunk end keeps
+the live state. Only the
+forms above replay GDN rows. Accepting the complete verifier runs no commit work. Admission funds the single snapshot, maximum-depth
+tapes, the copy table and every small prefix, with padding.
 
 `VADE_DECODE_PROFILE=gpu` enables the existing event collector around target
 verification, including preparation and argmax readback. `next_rows_profile`

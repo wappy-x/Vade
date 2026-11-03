@@ -155,6 +155,7 @@ impl<'a, 'w> Draft<'a, 'w> {
             + (depth + 1)
                 * (crate::flash_next_rows::PREFIX_BYTES - crate::flash_next_rows::RECURRENT_BYTES)
             + 36 * gdn::GdnReplay::reservation_bytes(depth + 1)
+            + (copy_table_words(model, 36) * 4).div_ceil(64) * 64
             + if defer_feed() { (DEFER_ROWS * W * 4).div_ceil(64) * 64 } else { 0 })
     }
     /// `attention`: a finished session's draft attention arena to reuse (next_prefix.rs adoption).
@@ -690,9 +691,53 @@ pub(super) struct Prefix<'a> {
 pub(super) struct Rollback<'a> {
     pub(super) gdn: Vec<Option<GdnState<'a>>>,
     pub(super) inputs: Vec<Option<gdn::GdnReplay<'a>>>,
+    /// Parameter table of a table commit: history entries and tail copy rows.
+    /// Arena storage: the launchers slice the table (DeviceVector::slice).
+    pub(super) copies: DeviceVector<'a>,
     /// The last verify window stayed inside one GDN chunk (gdn::shallow_verify):
     /// its entry snapshots hold the conv history only.
     pub(super) shallow: bool,
+    /// The last verify can take the table commit (gdn_replay::table_commit):
+    /// its commit rebuilds the history in one launch (flash_gdn_commit::commit_form).
+    pub(super) slots: bool,
+    /// Absolute position and row count of the last verify window.
+    pub(super) base: usize,
+    pub(super) tokens: usize,
+}
+/// Words of Rollback::copies: one wide row per key and value head and one
+/// narrow row per value head, per GDN layer, at the plan's whole head counts.
+/// The history table (10 words per layer) fits in the same storage.
+fn copy_table_words(model: &NextModel<'_>, layers: usize) -> usize {
+    let plan = &model.weights.plan;
+    let (heads, keys) = ((plan.value_heads.end - plan.value_heads.start) as usize,
+        (plan.key_heads.end - plan.key_heads.start) as usize);
+    layers * (keys + 2 * heads) * gdn::COPY_ROW_WORDS
+}
+/// Table-commit entries: rebuild the history after `prefix` tape rows of every
+/// layer into its live history. With `in_place`, the live history already holds
+/// the entry words (Swap form, after the state swap); else the entry snapshot
+/// in `entries` holds them. Prefix 0 copies the entry taps (history at 0 rows).
+fn history_table_entries(states: &[Option<GdnState<'_>>], entries: &[Option<GdnState<'_>>],
+    inputs: &[Option<gdn::GdnReplay<'_>>], prefix: usize, in_place: bool)
+    -> Result<Vec<spark_gpu_probe::kernel_params::GdnHistory>> {
+    let mut out = Vec::new();
+    for ((live, entry), tape) in states.iter().zip(entries).zip(inputs) {
+        if live.is_some() && (entry.is_none() || tape.is_none()) {
+            return Err("MTP projection tape missing".into());
+        }
+        if let (Some(live), Some(entry), Some(tape)) = (live.as_ref(), entry.as_ref(), tape.as_ref()) {
+            let words = live.history_words();
+            if words == 0 || words % 4 != 0 || prefix > tape.tape_rows() || tape.tape_widths()[0] != words / 4 {
+                return Err("GDN history table shape".into());
+            }
+            let live_at = live.pool_addresses()[1];
+            out.push(spark_gpu_probe::kernel_params::GdnHistory {
+                x: tape.x_address() as _, history: (if in_place { live_at } else { entry.pool_addresses()[1] }) as _,
+                rows: live_at, channels: (words / 4) as u32, tokens: prefix as u32, precision: 0,
+            });
+        }
+    }
+    Ok(out)
 }
 impl<'a, 'w> NextSession<'a, 'w> {
     /// Set the admitted lookup limit; zero restores the resident MTP width.
@@ -862,9 +907,11 @@ impl<'a, 'w> NextSession<'a, 'w> {
         if self.rollback.is_none() && gdn::session_arena() {
             let tapes: Vec<bool> = (0..LAYERS).map(|li| li % 4 != 3 && self.model.owns_state(li)).collect();
             let (gdn, inputs) = gdn::GdnState::rollback_arena(b, &self.gdn_state, &tapes, self.verify_rows)?;
-            self.rollback = Some(Rollback { gdn, inputs, shallow: false });
+            let copies = b.vector_arena(&[copy_table_words(self.model, gdn.iter().flatten().count())])?.into_iter().next().ok_or("GDN copy table shape")?;
+            self.rollback = Some(Rollback { gdn, inputs, copies, shallow: false, slots: false, base: 0, tokens: 0 });
         }
         if self.rollback.is_none() {
+            let copies = b.vector_arena(&[copy_table_words(self.model, self.gdn_state.iter().flatten().count())])?.into_iter().next().ok_or("GDN copy table shape")?;
             self.rollback = Some(Rollback {
                 gdn: self
                     .gdn_state
@@ -880,8 +927,8 @@ impl<'a, 'w> NextSession<'a, 'w> {
                         }
                     })
                     .collect::<Result<_>>()?,
-            
-                shallow: false,
+                copies,
+                shallow: false, slots: false, base: 0, tokens: 0,
             });
         }
         let mut hash = self.hash.clone();
@@ -915,6 +962,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             self.verify_rows = rows;
         }
         if self.rollback.is_none() {
+            let copies = b.vector_arena(&[copy_table_words(self.model, self.gdn_state.iter().flatten().count())])?.into_iter().next().ok_or("GDN copy table shape")?;
             self.rollback = Some(Rollback {
                 gdn: self
                     .gdn_state
@@ -924,11 +972,41 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 inputs: (0..LAYERS)
                     .map(|li| if li % 4 == 3 || !self.model.owns_state(li) { Ok(None) } else { gdn::GdnReplay::new(b, self.verify_rows).map(Some) })
                     .collect::<Result<_>>()?,
-                shallow: false,
+                copies,
+                shallow: false, slots: false, base: 0, tokens: 0,
             });
         }
         self.retained = rows;
         Ok(())
+    }
+    /// Slots form: rebuild the accepted history from the tape in one launch
+    /// (gdn::launch_history_table), reading the entry snapshots' histories.
+    fn rebuild_history(&mut self, b: &Backend<'a>, prefix: usize) -> Result<()> {
+        let Self { gdn_state, rollback, .. } = self;
+        let rollback = rollback.as_mut().ok_or("MTP rollback missing")?;
+        let entries = history_table_entries(gdn_state, &rollback.gdn, &rollback.inputs, prefix, false)?;
+        gdn::launch_history_table(b, &mut rollback.copies, entries)
+    }
+    /// Swap form (flash_gdn_commit::commit_form): swap live and entry states, rebuild the
+    /// history, then copy the accepted tail slots back over `layers`. No scan runs.
+    fn swap_tail_slots(&mut self, b: &Backend<'a>, prefix: usize, layers: std::ops::Range<usize>) -> Result<()> {
+        let Self { gdn_state, rollback, model, .. } = self;
+        let rollback = rollback.as_mut().ok_or("MTP rollback missing")?;
+        std::mem::swap(gdn_state, &mut rollback.gdn);
+        if prefix == 0 { return Ok(()); }
+        let plan = &model.weights.plan;
+        let (whole_h, whole_k) = ((plan.value_heads.end - plan.value_heads.start) as usize,
+            (plan.key_heads.end - plan.key_heads.start) as usize);
+        let (mut wide, mut narrow) = (Vec::new(), Vec::new());
+        for li in layers {
+            if li % 4 == 3 { continue; }
+            let (Some(live), Some(from)) = (gdn_state[li].as_ref(), rollback.gdn[li].as_ref()) else { continue };
+            let (h, k) = if live.is_half() { (whole_h / 2, whole_k / 2) } else { (whole_h, whole_k) };
+            crate::flash_gdn_commit::tail_slot_rows(from.pool_addresses()[0], live.pool_addresses()[0], h, k, rollback.base, prefix, &mut wide, &mut narrow);
+        }
+        let entries = history_table_entries(gdn_state, &rollback.gdn, &rollback.inputs, prefix, true)?;
+        gdn::launch_history_table(b, &mut rollback.copies, entries)?;
+        gdn::hybrid_copy_rows(b, &mut rollback.copies, &[&wide, &narrow])
     }
     /// Pipeline back: keep `position` (the front's commit) of the last verify's rows:
     /// the GDN restore + replay and QSA rewind of commit_mtp, for layers [split, 48).
@@ -943,19 +1021,26 @@ impl<'a, 'w> NextSession<'a, 'w> {
         }
         let prefix = position - base;
         self.valid = false;
-        let rollback = self.rollback.as_mut().ok_or("MTP rollback missing")?;
-        if rollback.shallow {
-            for (live, entry) in self.gdn_state.iter_mut().zip(rollback.gdn.iter_mut()) {
-                if let (Some(live), Some(entry)) = (live.as_mut(), entry.as_mut()) { live.restore_history(entry); }
-            }
-        } else {
-            std::mem::swap(&mut self.gdn_state, &mut rollback.gdn);
-        }
-        let mut work = self.model.take_work(b, self.capacity, 1)?;
         let layers = self.model.pp_split.get()..self.model.pp_end.get();
-        let replayed = work.replay_gdn(b, self.model, &mut self.gdn_state, rollback, prefix, base, layers);
-        self.model.return_work(work);
-        replayed?;
+        let form = self.rollback.as_ref().map(|r| crate::flash_gdn_commit::commit_form(r.slots, r.base, r.tokens, prefix));
+        match form.ok_or("MTP rollback missing")? {
+            crate::flash_gdn_commit::CommitForm::Slots => self.rebuild_history(b, prefix)?,
+            crate::flash_gdn_commit::CommitForm::Swap => self.swap_tail_slots(b, prefix, layers.clone())?,
+            crate::flash_gdn_commit::CommitForm::Replay => {
+                let rollback = self.rollback.as_mut().ok_or("MTP rollback missing")?;
+                if rollback.shallow {
+                    for (live, entry) in self.gdn_state.iter_mut().zip(rollback.gdn.iter_mut()) {
+                        if let (Some(live), Some(entry)) = (live.as_mut(), entry.as_mut()) { live.restore_history(entry); }
+                    }
+                } else {
+                    std::mem::swap(&mut self.gdn_state, &mut rollback.gdn);
+                }
+                let mut work = self.model.take_work(b, self.capacity, 1)?;
+                let replayed = work.replay_gdn(b, self.model, &mut self.gdn_state, rollback, prefix, base, layers);
+                self.model.return_work(work);
+                replayed?;
+            }
+        }
         for q in self.qsa_state.iter_mut().flatten() {
             q.rewind(position);
         }
@@ -1078,23 +1163,30 @@ impl<'a, 'w> NextSession<'a, 'w> {
             .position(|s| s.position == position)
             .ok_or("MTP prefix was not retained")?;
         self.valid = false;
-        let rollback = self.rollback.as_mut().ok_or("MTP rollback missing")?;
-        // Restore by ownership exchange, moving zero state bytes. Pool graphs
-        // resolve the republished addresses after the accepted GDN prefix replays.
-        if rollback.shallow {
-            for (live, entry) in self.gdn_state.iter_mut().zip(rollback.gdn.iter_mut()) {
-                if let (Some(live), Some(entry)) = (live.as_mut(), entry.as_mut()) { live.restore_history(entry); }
-            }
-        } else {
-            std::mem::swap(&mut self.gdn_state, &mut rollback.gdn);
-        }
-        let mut work = self.model.take_work(b, self.capacity, 1)?;
-        // Replayed rows sit at positions position - prefix .. position (chunk form).
         // Pipeline front: only layers [0, split) live on this rank.
         let layers = 0..self.model.pp_front_split().unwrap_or(LAYERS);
-        let replayed = work.replay_gdn(b, self.model, &mut self.gdn_state, rollback, prefix, position - prefix, layers);
-        self.model.return_work(work);
-        replayed?;
+        let form = self.rollback.as_ref().map(|r| crate::flash_gdn_commit::commit_form(r.slots, r.base, r.tokens, prefix));
+        match form.ok_or("MTP rollback missing")? {
+            crate::flash_gdn_commit::CommitForm::Slots => self.rebuild_history(b, prefix)?,
+            crate::flash_gdn_commit::CommitForm::Swap => self.swap_tail_slots(b, prefix, layers.clone())?,
+            crate::flash_gdn_commit::CommitForm::Replay => {
+                let rollback = self.rollback.as_mut().ok_or("MTP rollback missing")?;
+                // Restore by ownership exchange, moving zero state bytes. Pool graphs
+                // resolve the republished addresses after the accepted GDN prefix replays.
+                if rollback.shallow {
+                    for (live, entry) in self.gdn_state.iter_mut().zip(rollback.gdn.iter_mut()) {
+                        if let (Some(live), Some(entry)) = (live.as_mut(), entry.as_mut()) { live.restore_history(entry); }
+                    }
+                } else {
+                    std::mem::swap(&mut self.gdn_state, &mut rollback.gdn);
+                }
+                let mut work = self.model.take_work(b, self.capacity, 1)?;
+                // Replayed rows sit at positions position - prefix .. position (chunk form).
+                let replayed = work.replay_gdn(b, self.model, &mut self.gdn_state, rollback, prefix, position - prefix, layers);
+                self.model.return_work(work);
+                replayed?;
+            }
+        }
         let saved = &mut self.saved[prefix];
         self.ple.select_history(&mut saved.ple);
         self.hash = saved.hash.clone();
