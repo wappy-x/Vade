@@ -1,4 +1,5 @@
 //! The `decode_fuse` engine option (off | on), set once at startup from the server arguments.
+//! It defaults to on for one Spark and off for more Sparks.
 //! On: the launches of a decode step of up to four rows run as a programmatic chain. Each
 //! kernel's bytes stay the same; only the start of each kernel moves.
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -6,6 +7,8 @@ static ON: AtomicBool = AtomicBool::new(false);
 /// Freeze the option before the model loads.
 pub fn set(on: bool) { ON.store(on, Ordering::Relaxed); }
 pub fn on() -> bool { ON.load(Ordering::Relaxed) }
+/// Use the topology default unless the user sets the option.
+pub fn resolve(option: Option<bool>, single: bool) -> bool { option.unwrap_or(single) }
 /// The server argument value.
 pub fn parse(value: &str) -> Result<bool, String> {
     match value { "on" => Ok(true), "off" => Ok(false), _ => Err("--decode-fuse must be off or on".into()) }
@@ -58,4 +61,14 @@ fn the_option_takes_two_words() {
     assert_eq!(parse("on"), Ok(true));
     assert_eq!(parse("off"), Ok(false));
     for bad in ["", "ON", "1", "true"] { assert!(parse(bad).is_err()); }
+}
+#[cfg(test)]
+#[test]
+fn the_default_follows_the_topology_and_off_overrides_it() {
+    assert!(resolve(None, true));
+    assert!(!resolve(None, false));
+    for single in [false, true] {
+        assert!(!resolve(Some(false), single));
+        assert!(resolve(Some(true), single));
+    }
 }

@@ -314,7 +314,7 @@ impl Session {
             fast_prompts: options.fast_prompts,
             memory_bytes,
             cache_bytes,
-            decode_fuse: options.decode_fuse == Some(true),
+            decode_fuse: options.decode_fuse.unwrap_or(options.fp4_local && group == 1),
             local_port: config.local_port,
             serve_port: config.serve_port,
             ranks,
@@ -372,7 +372,7 @@ impl Session {
             format!("127.0.0.1:{}", self.serve_port), "0".into()];
         if self.fp4_local { args.push("--fp4-local".into()); }
         if self.mtp_explicit { args.extend(["--mtp".into(), self.mtp.to_string()]); }
-        if self.decode_fuse { args.extend(["--decode-fuse".into(), "on".into()]); }
+        if self.decode_fuse || size == 1 { args.extend(["--decode-fuse".into(), if self.decode_fuse { "on" } else { "off" }.into()]); }
         args
     }
     /// `TP_TOPOLOGY` for this session: "ring" for a two-Spark chain, else "path".

@@ -830,7 +830,7 @@ impl<R: Runner, D: Detector> Launcher<R, D> {
                 "0".into(),
                 "--fp4-local".into(),
             ];
-            let args = args.into_iter().chain(config.decode_fuse().then(|| ["--decode-fuse".to_string(), "on".to_string()]).into_iter().flatten());
+            let args = args.into_iter().chain(["--decode-fuse".to_string(), if config.decode_fuse() { "on" } else { "off" }.to_string()]);
             for (index, value) in args.enumerate() {
                 request.insert(format!("arg.{index}"), value);
             }

@@ -881,9 +881,10 @@ Optional flags:
   `FLASH_SERVE_KV_BYTES`, including `0` to turn retention off. Local FP4-Local
   supports only `--cache-bytes 0`, which it translates to its own prefix-cache
   switch. A positive capacity is refused.
-- `--decode-fuse off|on` is off by default. On one Spark, `on` runs decode
+- `--decode-fuse off|on` is on by default for one Spark. Use `off` to disable it.
+  More Sparks default to off and refuse `on`. On one Spark, `on` runs decode
   steps of up to four rows as a chain of kernels: the next kernel starts while
-  the kernel before it ends. The token ids stay the same. More Sparks refuse `on`.
+  the kernel before it ends. The token ids stay the same.
 
 The controller accepts and saves `--chats` and `--cache-bytes` for FP4-Local,
 but the current FP4-Local engine does not use those values. This includes

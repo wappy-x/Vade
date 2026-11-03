@@ -55,7 +55,7 @@ impl Config {
             .or_else(|_| std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)))
             .map_err(|_| "Cannot reserve a local chat port.")?;
         Ok(Self {
-            mtp: None, chats: None, memory_bytes: None, cache_bytes: None, decode_fuse: false,
+            mtp: None, chats: None, memory_bytes: None, cache_bytes: None, decode_fuse: true,
             model: model.path.clone(),
             model_bytes: model.bytes,
             context,
@@ -111,7 +111,7 @@ impl Config {
             chats: chats.map(|n| n as usize),
             memory_bytes: optional("memory_bytes", u64::MAX)?,
             cache_bytes: optional("cache_bytes", u64::MAX)?,
-            decode_fuse: optional("decode_fuse", 1)? == Some(1),
+            decode_fuse: optional("decode_fuse", 1)?.unwrap_or(1) == 1,
             model,
             model_bytes: number("model_bytes")?,
             context: context as u32,
@@ -298,7 +298,7 @@ impl Config {
         ]);
         for (key, value) in [("mtp", self.mtp.map(u64::from)), ("chats", self.chats.map(|n| n as u64)),
             ("memory_bytes", self.memory_bytes), ("cache_bytes", self.cache_bytes),
-            ("decode_fuse", self.decode_fuse.then_some(1))] {
+            ("decode_fuse", Some(u64::from(self.decode_fuse)))] {
             if let Some(value) = value { fields.insert(key.into(), value.to_string()); }
         }
         text::encode(&fields)

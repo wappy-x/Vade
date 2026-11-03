@@ -292,10 +292,23 @@ fn parsed_bare_up_with_environment_mtp_reuses_recorded_fp4_launch() {
 fn decode_fuse_rides_the_controller_args_on_one_spark_and_stops_early_on_more() {
     // The controller path passes decode_fuse to the engine and keeps it across a reload.
     let f = Fixture::fp4(1, false);
-    let fused = Session::new(&f.app.config, &fp4_options(&["--sparks", "1", "--decode-fuse", "on"]), &f.app.manifest().unwrap(), "a".repeat(64)).unwrap();
+    let fused = Session::new(&f.app.config, &fp4_options(&["--sparks", "1"]), &f.app.manifest().unwrap(), "a".repeat(64)).unwrap();
     assert!(fused.engine_args(0).ends_with(&["--decode-fuse".to_string(), "on".to_string()]));
     fused.save(&f.app.config.state_dir).unwrap();
     assert!(Session::load(&f.app.config.state_dir).unwrap().unwrap().decode_fuse);
+    let plain = Session::new(&f.app.config, &fp4_options(&["--sparks", "1", "--decode-fuse", "off"]), &f.app.manifest().unwrap(), "a".repeat(64)).unwrap();
+    assert!(!plain.decode_fuse);
+    assert!(plain.engine_args(0).ends_with(&["--decode-fuse".to_string(), "off".to_string()]));
+    plain.save(&f.app.config.state_dir).unwrap();
+    assert!(!Session::load(&f.app.config.state_dir).unwrap().unwrap().decode_fuse);
+    for count in [2, 4] {
+        let f = Fixture::fp4(count, false);
+        let plain = Session::new(&f.app.config, &fp4_options(&["--sparks", &count.to_string()]), &f.app.manifest().unwrap(), "a".repeat(64)).unwrap();
+        assert!(!plain.decode_fuse);
+        for index in 0..count {
+            assert!(!plain.engine_args(index).iter().any(|arg| arg == "--decode-fuse"));
+        }
+    }
     // More Sparks refuse before any remote start.
     let mut f = Fixture::fp4(2, false);
     let mut options = fp4_options(&["--sparks", "2"]);

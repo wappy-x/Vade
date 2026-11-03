@@ -131,7 +131,7 @@ fn page(command: &str) -> Option<Page<'static>> {
                 ("--chats N", "Concurrent FP8 chats, 1..32 (controller)"),
                 ("--memory-bytes N", "Memory budget per rank, in bytes"),
                 ("--cache-bytes N", "FP8 retained prompt cache, in bytes; 0 disables it. Local FP4 accepts only 0"),
-                ("--decode-fuse MODE", "off (the default) or on: decode steps on one Spark run as a kernel chain"),
+                ("--decode-fuse MODE", "on for one Spark by default; off disables the decode kernel chain"),
                 ("--fast-prompts", "Older option, kept for scripts; it has no effect"),
                 DRY_RUN,
             ],

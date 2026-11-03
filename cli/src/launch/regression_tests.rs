@@ -210,7 +210,7 @@ fn decode_fuse_reaches_the_local_engine_and_a_change_needs_down() {
     let f = Fixture::new();
     f.installed();
     let mut launch = f.launcher();
-    launch.execute(crate::cli::parse(&["launch", "--decode-fuse", "on"].map(str::to_owned)).unwrap().command, false).unwrap();
+    launch.execute(Command::Launch(Default::default()), false).unwrap();
     let request = launch.runner.calls.iter().rev().find(|exec| exec.label == "local start").unwrap();
     let request = text::parse(std::str::from_utf8(&request.stdin).unwrap()).unwrap();
     assert_eq!((request["arg.10"].as_str(), request["arg.11"].as_str()), ("--decode-fuse", "on"));
@@ -219,6 +219,20 @@ fn decode_fuse_reaches_the_local_engine_and_a_change_needs_down() {
     let error = launch.execute(crate::cli::parse(&["up", "--decode-fuse", "off"].map(str::to_owned)).unwrap().command, false).unwrap_err();
     assert!(error.contains("launch limits") && error.contains("vade down"), "{error}");
     launch.execute(Command::Down, false).unwrap();
+    launch.execute(crate::cli::parse(&["up", "--decode-fuse", "off"].map(str::to_owned)).unwrap().command, false).unwrap();
+    let request = launch.runner.calls.iter().rev().find(|exec| exec.label == "local start").unwrap();
+    let request = text::parse(std::str::from_utf8(&request.stdin).unwrap()).unwrap();
+    assert_eq!((request["arg.10"].as_str(), request["arg.11"].as_str()), ("--decode-fuse", "off"));
+    assert_eq!(read_fields(&f.root.join("config")).unwrap().unwrap()["decode_fuse"], "0");
+    assert!(!Config::load(&f.root).unwrap().unwrap().decode_fuse());
+    launch.execute(Command::Down, false).unwrap();
+    launch.execute(Command::Launch(Default::default()), false).unwrap();
+    assert_eq!(launch.record().unwrap().unwrap()["decode_fuse"], "off");
+    launch.execute(Command::Down, false).unwrap();
+    let mut fields = read_fields(&f.root.join("config")).unwrap().unwrap();
+    fields.remove("decode_fuse");
+    text::atomic_write(&f.root.join("config"), &text::encode(&fields)).unwrap();
+    assert!(Config::load(&f.root).unwrap().unwrap().decode_fuse());
 }
 
 #[test]
