@@ -119,6 +119,14 @@ impl<'a, 'w> Draft<'a, 'w> {
     }
     /// Physical pages of the draft layer's attention rows 0..rows.
     pub(super) fn fit(&mut self, b: &Backend<'a>, rows: usize) -> Result<()> { self.attention.fit(b, rows) }
+    /// The sequence split: `hidden`'s first row is the target row before the next position.
+    pub(super) fn start_at(&mut self, b: &Backend<'a>, hidden: &DeviceVector<'a>) -> Result<()> {
+        b.copy_range(hidden, &mut self.last, 0, 0, W)?;
+        self.ready = true;
+        Ok(())
+    }
+    /// The sequence split: the draft layer's state vectors and their words per row.
+    pub(super) fn attention_rows(&mut self) -> ([&mut DeviceVector<'a>; 3], [usize; 3]) { self.attention.rows_state() }
     /// Release the draft layer's attention pages above rows 0..rows.
     pub(super) fn trim(&mut self, b: &Backend<'a>, rows: usize) -> Result<()> { self.attention.trim(b, rows) }
     pub(super) fn reservation_bytes(model: &NextModel<'a>, capacity: usize) -> Result<usize> {
@@ -892,8 +900,8 @@ impl<'a, 'w> NextSession<'a, 'w> {
         self.retained = tokens.len();
         Ok(())
     }
-    /// Pipeline back: GDN rollback storage for `rows` verify rows at `pos` (the back
-    /// keeps no draft, token hash or PLE history; the front owns those).
+    /// Pipeline back: GDN rollback storage for `rows` verify rows at `pos` (a verify pass reads
+    /// no draft, token hash or PLE history on the back; the front owns those).
     pub(super) fn prepare_back_verify(&mut self, b: &Backend<'a>, rows: usize) -> Result<()> {
         // The front widens its verify rows for lookup drafts (enable_lookup: at most 16 rows);
         // the back widens its GDN tape to match.

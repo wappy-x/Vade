@@ -102,7 +102,8 @@ impl<'a> NextModel<'a> {
     /// Rank 0: ask the next rank to run its side of a `rows`-row transaction for this chat (a
     /// handoff request with the SPLIT_PROMPT length; its ack comes with the next drain). The word
     /// `cut` rides in the row's first word: the pair's cut, or over more ranks the plan's tile.
-    pub(in crate::flash) fn tp_split_post(&self, slot: u32, capacity: usize, rows: usize, cut: usize) -> Result<()> {
+    /// The second word says whether the chat has a drafter (only the sequence split reads it).
+    pub(in crate::flash) fn tp_split_post(&self, slot: u32, capacity: usize, rows: usize, cut: usize, draft: bool) -> Result<()> {
         let mut guard = self.pp.borrow_mut();
         let pp = guard.as_mut().filter(|l| !l.poisoned).ok_or("tensor split link failed earlier; the front is stopping")?;
         let meta = [[slot, capacity as u32, 0, crate::flash_tp_switch::SPLIT_PROMPT + rows as u32]];
@@ -110,6 +111,7 @@ impl<'a> NextModel<'a> {
         (pp.tp_tile, pp.tp_seq) = (false, false);
         let mut row = vec![0.0; W];
         row[0] = cut as f32;
+        row[1] = f32::from(u8::from(draft));
         let posted = pp.drain().and_then(|()| { pp.tp_handoff = true; pp.post(&meta, row, None) });
         posted.map_err(|e| pp.fail(e))
     }
@@ -148,7 +150,8 @@ impl<'a> NextModel<'a> {
         // Over more ranks the word is the plan's tile (next_xsplit.rs).
         if !self.tp_pair() {
             let rank = self.tp_rank().ok_or("tensor split missing")?;
-            return NextSession::xsplit_back(b, chat, n - mark, cut as usize, rank).map(|()| true);
+            let draft = row.get(1).is_some_and(|&word| word != 0.0);
+            return NextSession::xsplit_back(b, chat, n - mark, cut as usize, rank, draft).map(|()| true);
         }
         NextSession::split_worker(b, chat, n - mark, cut as usize).map(|()| true)
     }
@@ -160,17 +163,18 @@ impl<'a> NextModel<'a> {
     pub(in crate::flash) fn tp_xsplit_cut(&self, chat: &NextSession<'a, '_>, output: bool, rows: usize, chunk: usize) -> Option<usize> {
         let owns = crate::flash_next_rows::check_owners(&chat.gdn_state, &chat.qsa_state, self.state_range()).is_ok();
         if !crate::flash_tp_switch::split_session(output, chat.valid, chat.pos, chat.dump.is_some() || chat.layer_bytes.is_some(), owns)
-            || !self.pp_async() || crate::flash_next_rows::prompt_tile() < crate::flash_tp_switch::PIPELINE_TILE || self.tp_pair() { return None; }
+            || !self.pp_async() || crate::flash_next_rows::prompt_tile() < crate::flash_tp_switch::PIPELINE_TILE || self.tp_pair()
+            || !crate::flash_next_prefill::gpu_prompt() { return None; }
         let n = crate::flash_tp_switch::xsplit_rows(0, rows, chunk)?;
         self.tp.borrow().as_ref().filter(|s| s.rank == 0 && s.seq.chats.pending().is_none())?;
         (3..LAYERS).step_by(4).all(|li| (1..n).all(|i| chat.indexer.select(li, i, i + 1) == chat.indexer.select(li, 0, 1))).then_some(n)
     }
     /// The shape every rank builds the plan from, and the ranks.
-    pub(in crate::flash) fn tp_xsplit_shape(&self, chat: &mut NextSession<'a, '_>) -> Result<(crate::flash_next_xsplit_plan::Shape, usize)> {
+    pub(in crate::flash) fn tp_xsplit_shape(&self, chat: &mut NextSession<'a, '_>, draft: bool) -> Result<(crate::flash_next_xsplit_plan::Shape, usize)> {
         use crate::flash_next_xsplit_plan::{LayerState, Shape};
         let mailbox = self.tp_box.get().ok_or("tensor split mailbox missing")?;
         let world = self.tp.borrow().as_ref().map(|s| s.layout.world).ok_or("tensor split missing")?;
-        let mut state = Vec::with_capacity(LAYERS - SPLIT);
+        let mut state = Vec::with_capacity(LAYERS);
         for li in SPLIT..LAYERS {
             state.push(if li % 4 == 3 {
                 let (_, widths, _) = chat.qsa_state[li].as_mut().ok_or("QSA state missing for the split")?.handoff()?;
@@ -180,7 +184,13 @@ impl<'a> NextModel<'a> {
                 LayerState::Whole([state.len(), history.len(), 0])
             });
         }
-        Ok((Shape { slot: mailbox.slot_bytes() / 4, slots: mailbox.layout().slots, residual: W, split: SPLIT, state }, world))
+        // Every GDN layer's vectors have one length, and no back owns the layers before SPLIT.
+        // The PLE update ends layer 0's stage, so its history crosses with layer 0's state.
+        let &LayerState::Whole([words, history, _]) = state.iter().find(|s| matches!(s, LayerState::Whole(_))).ok_or("no GDN layer for the split")? else { return Err("no GDN layer for the split".into()) };
+        let first = (0..SPLIT).map(|li| LayerState::Whole([words, history, if li == 0 { chat.ple.history_len() } else { 0 }]));
+        state.splice(0..0, first);
+        let draft = if draft { Some(chat.draft.as_mut().ok_or("the split asks for a drafter and the chat has none")?.attention_rows().1) } else { None };
+        Ok((Shape { slot: mailbox.slot_bytes() / 4, slots: mailbox.layout().slots, input: PROMPT_INPUT_WORDS, state, draft }, world))
     }
     /// Every rank: all ranks funded the split? Each puts its answer and takes every other's.
     pub(in crate::flash) fn tp_xsplit_agree(&self, b: &Backend<'a>, funded: bool) -> Result<bool> {
@@ -204,6 +214,14 @@ impl<'a> NextModel<'a> {
         let mut all = funded;
         for &o in &origins { all &= b.read_vector_range(&words[o], 0, 1)?[0] == 1.0; }
         Ok(all)
+    }
+    /// Rank 0, after a sequence split of `rows` rows: the chat owes the push (tp_switch::split_owed).
+    pub(in crate::flash) fn tp_xsplit_owed(&self, slot: u32, rows: usize) {
+        if let Some(s) = self.tp.borrow_mut().as_mut() { s.seq.chats.split_owed(slot, rows); }
+    }
+    /// The first rows of a split of `rows` rows whose attention state every rank holds after it.
+    pub(in crate::flash) fn tp_xsplit_shared(&self, rows: usize) -> usize {
+        self.tp.borrow().as_ref().map_or(0, |s| crate::flash_next_xsplit_plan::shared_rows(rows, s.layout.world))
     }
     /// This rank's message counts when a plan starts: its sends and each origin's takes.
     pub(in crate::flash) fn tp_xsplit_counts(&self) -> Result<(u64, Vec<u64>)> {
@@ -248,10 +266,25 @@ impl<'a> NextModel<'a> {
     }
     #[allow(clippy::too_many_arguments)]
     pub(in crate::flash) fn tp_xsplit_state_put(&self, b: &Backend<'a>, chat: &mut NextSession<'a, '_>, li: usize, k: usize, words: usize, from: usize, seq: u64) -> Result<()> {
-        self.tp_xsplit_put(b, state_vector(chat, li, k)?, words, from, seq)
+        self.tp_xsplit_put(b, xsplit_vector(chat, li, k)?, words, from, seq)
     }
     #[allow(clippy::too_many_arguments)]
     pub(in crate::flash) fn tp_xsplit_state_take(&self, b: &Backend<'a>, chat: &mut NextSession<'a, '_>, li: usize, k: usize, words: usize, from: usize, origin: usize, seq: u64) -> Result<()> {
-        self.tp_xsplit_take(b, state_vector(chat, li, k)?, words, from, origin, seq)
+        self.tp_xsplit_take(b, xsplit_vector(chat, li, k)?, words, from, origin, seq)
     }
+    pub(in crate::flash) fn tp_xsplit_draft_put(&self, b: &Backend<'a>, chat: &mut NextSession<'a, '_>, k: usize, words: usize, from: usize, seq: u64) -> Result<()> {
+        let (vectors, _) = chat.draft.as_mut().ok_or("the split's plan has a drafter and the chat has none")?.attention_rows();
+        self.tp_xsplit_put(b, &*vectors.into_iter().nth(k).ok_or("draft state vector missing")?, words, from, seq)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::flash) fn tp_xsplit_draft_take(&self, b: &Backend<'a>, chat: &mut NextSession<'a, '_>, k: usize, words: usize, from: usize, origin: usize, seq: u64) -> Result<()> {
+        let (vectors, _) = chat.draft.as_mut().ok_or("the split's plan has a drafter and the chat has none")?.attention_rows();
+        self.tp_xsplit_take(b, vectors.into_iter().nth(k).ok_or("draft state vector missing")?, words, from, origin, seq)
+    }
+}
+
+/// State vector `k` of a chat's layer `li` as the sequence split names it: the third vector of a
+/// GDN layer is the PLE history.
+fn xsplit_vector<'s, 'a>(chat: &'s mut NextSession<'a, '_>, li: usize, k: usize) -> Result<&'s mut DeviceVector<'a>> {
+    if li % 4 != 3 && k == 2 { Ok(&mut chat.ple.history) } else { state_vector(chat, li, k) }
 }

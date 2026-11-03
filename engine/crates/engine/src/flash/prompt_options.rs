@@ -44,7 +44,7 @@ impl Options {
     pub fn route_workspace_bytes(self, rows: usize) -> usize {
         if self.cold8k_r2 && Self::kernel_rows(rows) {(((rows*10).div_ceil(10240)*512+rows*10)*4).div_ceil(64)*64} else {0}
     }
-    /// DeviceVector allocations are rounded to64bytes. Back ranks need no input expansion.
+    /// DeviceVector allocations are rounded to64bytes. Back ranks need no packed workspace.
     pub fn packed_workspace_bytes(self, rows: usize, frontend: bool) -> usize {
         if self.frontend_gpu && frontend { (rows * 1508).div_ceil(64) * 64 } else { 0 }
     }

@@ -292,6 +292,7 @@ topology-branch spark-engine flash::next_tp_seq::NextModel::tp_seq_cut 2
 topology-branch spark-engine flash::next_tp_seq::NextModel::tp_seq_handoffs 1
 topology-branch spark-engine flash::next_tp_seq::NextModel::tp_seq_layer 1
 topology-branch spark-engine flash::next_tp_seq::NextModel::tp_seq_mail 1
+topology-branch spark-engine flash::next_tp_seq::NextModel::tp_seq_owes 1
 topology-branch spark-engine flash::next_tp_seq::NextModel::tp_seq_plan 1
 topology-branch spark-engine flash::next_tp_seq::NextModel::tp_seq_posted 1
 topology-branch spark-engine flash::next_tp_split::NextModel::tp_split_cut 1
@@ -299,12 +300,17 @@ topology-branch spark-engine flash::next_tp_split::NextModel::tp_split_owed 1
 topology-branch spark-engine flash::next_tp_split::NextModel::tp_split_start 1
 topology-branch spark-engine flash::next_tp_split::NextModel::tp_xsplit_cut 1
 topology-branch spark-engine flash::next_tp_split::NextModel::tp_xsplit_end 2
-topology-branch spark-engine flash::next_xsplit::NextSession::xsplit_steps 1
+topology-branch spark-engine flash::next_tp_split::NextModel::tp_xsplit_owed 1
+topology-branch spark-engine flash::next_xsplit::funded 1
+topology-branch spark-engine flash::next_xsplit::plan_ids 1
 topology-branch spark-engine flash::next_xsplit_plan::Plan::new 1
-topology-branch spark-engine flash::next_xsplit_plan::Plan::ops 4
+topology-branch spark-engine flash::next_xsplit_plan::Plan::ops 5
 topology-branch spark-engine flash::next_xsplit_plan::Plan::part 1
 topology-branch spark-engine flash::next_xsplit_plan_tests::each_rank_reads_every_earlier_row_of_each_layer_before_its_stages 2
+topology-branch spark-engine flash::next_xsplit_plan_tests::every_rank_starts_from_its_input_and_the_ple_history 5
+topology-branch spark-engine flash::next_xsplit_plan_tests::parts_cover_the_rows_in_wave_order_on_the_grid 2
 topology-branch spark-engine flash::next_xsplit_plan_tests::simulate 2
+topology-branch spark-engine flash::next_xsplit_plan_tests::the_drafter_observes_each_position_once_on_its_rank 1
 topology-branch spark-engine flash::path_topology 1
 topology-branch spark-engine flash::qsa::Qsa::load_next_storage 1
 topology-branch spark-engine flash::qsa::Qsa::load_prefix 1

@@ -21,15 +21,21 @@ fn held(rank: usize, world: usize) -> std::ops::Range<usize> {
 
 impl<'a> NextModel<'a> {
     /// Every rank, for the same chats in the same order (rank 0 after posting KIND_HANDOFF).
-    /// `push`: rank 0 holds every layer and the other ranks hold none (a sequence split's state).
-    pub(super) fn tp_gather_state<'w>(&self, b: &Backend<'a>, sessions: &mut [&mut NextSession<'a, 'w>], push: bool) -> Result<()> {
+    /// `shared`: rank 0 holds every layer and the other ranks hold none, but each chat's first
+    /// rows of attention state in `shared` are on every rank (a sequence split's state).
+    pub(super) fn tp_gather_state<'w>(&self, b: &Backend<'a>, sessions: &mut [&mut NextSession<'a, 'w>], shared: Option<&[usize]>) -> Result<()> {
         let started = Instant::now();
         let mailbox = self.tp_box.get().ok_or("tensor split mailbox missing")?;
         let channels = mailbox.layout();
         let slot = mailbox.slot_bytes() / 4;
         let (rank, world, origins, limit) = self.tp.borrow().as_ref().map(|s| (s.rank, s.layout.world, s.origins(), s.limit_ns))
             .ok_or("tensor split missing")?;
-        let held = |o: usize| if !push { held(o, world) } else if o == 0 { SPLIT..LAYERS } else { SPLIT..SPLIT };
+        let held = |o: usize| if shared.is_none() { held(o, world) } else if o == 0 { SPLIT..LAYERS } else { SPLIT..SPLIT };
+        // The first word of state vector `words` of chat `c`'s layer `li` at `rows` rows.
+        let first = |c: usize, li: usize, rows: usize, words: usize| match shared {
+            Some(rows_held) if li % 4 == 3 => crate::flash_next_xsplit_plan::push_first_word(words, rows, rows_held[c]),
+            _ => 0,
+        };
         // This rank's head words and pieces.
         let (mut head, mut sends) = (Vec::new(), Vec::new());
         for (c, chat) in sessions.iter_mut().enumerate() {
@@ -38,7 +44,7 @@ impl<'a> NextModel<'a> {
                 for w in std::iter::once(flag).chain(words) {
                     head.push(f32::from_bits(u32::try_from(w).map_err(|_| "tensor split gather: a state size exceeds 32 bits")?));
                 }
-                for (k, n) in words.into_iter().enumerate() { pieces(&mut sends, (c, li, k), n, slot); }
+                for (k, n) in words.into_iter().enumerate() { pieces_from(&mut sends, (c, li, k), first(c, li, flag, n), n, slot); }
             }
         }
         // Head messages, one per rank, of a length every rank knows (one pad word for no layer).
@@ -78,7 +84,7 @@ impl<'a> NextModel<'a> {
                     if words != peer {
                         return Err(format!("tensor split gather: rank {o}'s state sizes differ from this rank's"));
                     }
-                    for (k, n) in words.into_iter().enumerate() { pieces(&mut recvs[o], (c, li, k), n, slot); }
+                    for (k, n) in words.into_iter().enumerate() { pieces_from(&mut recvs[o], (c, li, k), first(c, li, flag, n), n, slot); }
                 }
             }
         }

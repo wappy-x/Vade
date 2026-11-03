@@ -172,7 +172,7 @@ impl<'a> Workspace<'a> {
             .into_iter();
         let status = Fp8RoutingFlag::new(b, rows)?;
         let prompt = (vec![0.0; rows * W], vec![0.0; rows * H]);
-        let prompt_packed = if crate::flash_next_prefill::gpu_prompt() && model.prompt_frontend {Some(b.vector(rows*377)?)}else{None};
+        let prompt_packed = if crate::flash_next_prefill::gpu_prompt() && model.prompt_frontend {Some(b.vector(rows*PROMPT_INPUT_WORDS)?)}else{None};
         let prompt_route_packed = {let bytes=crate::flash_prompt_options::cached().route_workspace_bytes(rows);if bytes>0 {Some(b.vector(bytes/4)?)}else{None}};
         let hc = HcScratch::next_rows(b, rows)?;
         let gdn = Gdn::next_scratch(b, &model.weights, rows, hc.normalized_workspace())?;
@@ -856,11 +856,8 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 else {model.prefill_reader.frontend_packed(&frontend)?};
             let input=work.prompt_packed.as_mut().ok_or("missing packed prompt workspace")?;
             b.write_vector_bytes(input,&packed)?;
-            gdn::launch_threads(b,if dedup {"flash_next_prompt_frontend_dedup"}else{"flash_next_prompt_frontend"},count*H,256,&mut[
-                gdn::Arg::Ptr(input.device_address()),gdn::Arg::Ptr(model.weights.device_address(EMBED)?),
-                gdn::Arg::Ptr(work.residual.device_address()),gdn::Arg::Ptr(work.lexical.device_address()),
-                gdn::Arg::U32(count as u32),gdn::Arg::F32(model.ple_global),
-            ])?;
+            let input=input.device_address();
+            Self::frontend_rows(b,work,model,input,count)?;
         } else {
         let half = if verify && unobserved { Half::Embedding } else { Half::Both };
         model.prefill_reader.frontend_prompt(&frontend, model.ple_global, &mut work.prompt, half)?;
@@ -879,6 +876,21 @@ impl<'a, 'w> NextSession<'a, 'w> {
         b.write_vector(&mut work.lexical.slice(0..count * H)?, &work.prompt.1[..count * H])?;
         }
         Ok(None)
+    }
+    /// The compact frontend input at `input` into the workspace's residual and lexical rows.
+    pub(super) fn frontend_rows(b: &Backend<'a>, work: &Workspace<'a>, model: &NextModel<'a>, input: u64, count: usize) -> Result<()> {
+        let kernel = if crate::flash_next_prefill::gpu_prompt_dedup() {"flash_next_prompt_frontend_dedup"} else {"flash_next_prompt_frontend"};
+        gdn::launch_threads(b,kernel,count*H,256,&mut[
+            gdn::Arg::Ptr(input),gdn::Arg::Ptr(model.weights.device_address(EMBED)?),
+            gdn::Arg::Ptr(work.residual.device_address()),gdn::Arg::Ptr(work.lexical.device_address()),
+            gdn::Arg::U32(count as u32),gdn::Arg::F32(model.ple_global),
+        ])
+    }
+    /// The compact frontend input of the chat's next rows `tokens`: each row hashed in order and
+    /// its PLE rows read, as `frontend` does for a GPU prompt pass.
+    pub(super) fn pack_rows(&mut self, tokens: &[u32]) -> Result<Vec<u8>> {
+        let rows: Vec<_> = tokens.iter().map(|&token| (token, self.hash.advance(token))).collect();
+        if crate::flash_next_prefill::gpu_prompt_dedup() { self.model.prefill_reader.frontend_packed_dedup(&rows) } else { self.model.prefill_reader.frontend_packed(&rows) }
     }
     /// A verify pass's PLE rows (`frontend`'s second half), read and uploaded before layer 1.
     fn frontend_ple(b: &Backend<'a>, work: &mut Workspace<'a>, model: &NextModel<'a>, rows: &[(u32, Vec<u64>)]) -> Result<()> {

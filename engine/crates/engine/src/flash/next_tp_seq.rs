@@ -13,13 +13,14 @@
 //! first takes and drops the rest of the export, so rank 1 finishes pass A and the link goes on;
 //! the chat's later passes then fail (tp_switch::SeqChats).
 use super::*;
-use crate::flash_tp_switch::{SeqChats, SeqMode, SeqPlan};
+use crate::flash_tp_switch::{seq_push_tail, SeqChats, SeqMode, SeqPlan, SEQ_LIVE};
 use spark_gpu_probe::driver::TP_MAILBOX_SLOTS;
 #[path = "next_tp_split.rs"]
 mod split;
 
-/// KIND_HANDOFF length field of SEQ_PUSH or more: ranks 1.. receive layers SPLIT..L whole and
-/// advance by the field minus SEQ_PUSH rows. Tile handoffs send 1 and next_tp_heads' requests 2 and 3.
+/// KIND_HANDOFF length field of SEQ_PUSH or more: ranks 1.. receive layers SPLIT..L, as
+/// tp_seq_handoffs sends them, and advance by the field's tail rows (tp_switch::seq_push_tail).
+/// Tile handoffs send 1 and next_tp_heads' requests 2 and 3.
 pub(super) const SEQ_PUSH: u32 = 1 << 24;
 /// Mailbox slot size on two ranks: one attention layer's state at 4096 rows (keys, values, index)
 /// crosses in about three messages, and the four slots buffer about two layers. With the
@@ -95,6 +96,10 @@ impl<'a> NextModel<'a> {
             s.seq.owed = messages;
         }
         Ok(())
+    }
+    /// Rank 0: this chat owes a sequence split's push, so a tail runs alone before it.
+    pub(in crate::flash) fn tp_seq_owes(&self, slot: u32) -> bool {
+        !self.tp_pair() && self.tp.borrow().as_ref().is_some_and(|s| s.rank == 0 && s.seq.chats.owes(slot))
     }
     /// Rank 0, after a failed pass: take and drop the rest of a pending export now, as rank 1
     /// waits for its credits only up to the link's timeout and the front may stay idle; that
@@ -212,28 +217,37 @@ impl<'a> NextModel<'a> {
         drained.map_err(|e| pp.fail(e))
     }
     /// Rank 0, before a pass: push the rest of the state to the other ranks for the owed chats at
-    /// `push` (index, their position): layers SPLIT..L whole and one way; afterwards every rank
-    /// holds the chats' whole state.
+    /// `push` (index, their position): layers SPLIT..L one way, whole on the pair; over more ranks
+    /// without the attention rows every rank already holds. Afterwards every rank holds the
+    /// chats' whole state. A checkpoint that only rank 0 holds crosses first (tp_seq_checkpoint).
     fn tp_seq_handoffs<'w>(&self, b: &Backend<'a>, sessions: &mut [&mut NextSession<'a, 'w>], push: &[(usize, usize)]) -> Result<()> {
         if push.is_empty() { return Ok(()); }
+        // The row of a checkpoint only rank 0 holds, at or after the other ranks' position.
+        let saved = match push {
+            [(i, rows)] => sessions[*i].checkpoint_unsent().filter(|at| (*rows..=sessions[*i].pos).contains(at)),
+            _ => None,
+        };
         // A stale record (position behind its first part) is a request error, not an overflow.
         let meta: Vec<[u32; 4]> = push.iter().map(|&(i, rows)| {
             let s = &sessions[i];
             let tail = s.pos.checked_sub(rows).ok_or_else(|| format!("token split: slot {} at {} is behind its first part ({rows} rows)", s.slot, s.pos))?;
-            Ok([s.slot, s.capacity as u32, rows as u32, SEQ_PUSH + tail as u32])
+            Ok([s.slot, s.capacity as u32, rows as u32, SEQ_PUSH + saved.map_or(tail, |at| at - rows) as u32])
         }).collect::<Result<_>>()?;
         let at: Vec<usize> = push.iter().map(|&(i, _)| i).collect();
         let link = self.tp.borrow().as_ref().map(|s| s.link.try_clone()).ok_or("tensor split missing")?.map_err(err)?;
-        {
-            let mut guard = self.pp.borrow_mut();
-            let pp = guard.as_mut().filter(|l| !l.poisoned).ok_or("tensor split link failed earlier; the front is stopping")?;
-            let posted = pp.drain().and_then(|()| { pp.tp_handoff = true; pp.post(&meta, vec![0.0; meta.len() * W], None) });
-            posted.map_err(|e| pp.fail(e))?;
-        }
+        self.tp_seq_post(&meta)?;
         let mut chats: Vec<&mut NextSession<'a, 'w>> = Vec::new();
         for (i, chat) in sessions.iter_mut().enumerate() { if at.contains(&i) { chats.push(chat); } }
+        if saved.is_some() { chats[0].swap_checkpoint_gdn(); } else { chats.iter_mut().for_each(|chat| chat.drop_unsent_checkpoint()); }
         // As tp_part's handoff: a failure leaves the chats' state partly installed.
-        let pushed = if self.tp_pair() { self.tp_swap_state(b, &mut chats, SPLIT..LAYERS, SPLIT..SPLIT, link) } else { self.tp_gather_state(b, &mut chats, true) };
+        let mut pushed = if self.tp_pair() { self.tp_swap_state(b, &mut chats, SPLIT..LAYERS, SPLIT..SPLIT, link) } else {
+            let shared: Vec<usize> = push.iter().map(|&(_, rows)| self.tp_xsplit_shared(rows)).collect();
+            self.tp_gather_state(b, &mut chats, Some(&shared))
+        };
+        if let Some(at) = saved {
+            chats[0].swap_checkpoint_gdn();
+            pushed = pushed.and_then(|()| self.tp_seq_checkpoint(b, chats[0], meta[0], at));
+        }
         if let Err(error) = pushed {
             chats.iter_mut().for_each(|chat| chat.valid = false);
             return Err(self.pp.borrow_mut().as_mut().map_or(error.clone(), |pp| pp.fail(error)));
@@ -242,17 +256,43 @@ impl<'a> NextModel<'a> {
         if let Some(s) = self.tp.borrow_mut().as_mut() { s.seq.chats.settled(&settled); }
         Ok(())
     }
-    /// Ranks 1.., KIND_HANDOFF with every length at least SEQ_PUSH: receive layers SPLIT..L and
-    /// advance by the field minus SEQ_PUSH. False: not a token-split handoff.
+    /// Rank 0: post a KIND_HANDOFF request with these chats' `meta`.
+    fn tp_seq_post(&self, meta: &[[u32; 4]]) -> Result<()> {
+        let mut guard = self.pp.borrow_mut();
+        let pp = guard.as_mut().filter(|l| !l.poisoned).ok_or("tensor split link failed earlier; the front is stopping")?;
+        let posted = pp.drain().and_then(|()| { pp.tp_handoff = true; pp.post(meta, vec![0.0; meta.len() * W], None) });
+        posted.map_err(|e| pp.fail(e))
+    }
+    /// Rank 0, after the push of a chat's checkpoint: the push held the recurrent state at row
+    /// `at`, and the other ranks stand at that row, so they capture as at any checkpoint. A tail
+    /// rank 0 ran alone after that row then crosses: the live recurrent state in a second push,
+    /// as the first push held every attention row. So the first token of a sequence split comes
+    /// before the push, on every prompt (next_prefix.rs, capture_checkpoint).
+    fn tp_seq_checkpoint<'w>(&self, b: &Backend<'a>, chat: &mut NextSession<'a, 'w>, [slot, capacity, ..]: [u32; 4], at: usize) -> Result<()> {
+        let remote = self.pp_cache_capture(slot, capacity as usize, at, 0)?;
+        chat.checkpoint_sent(remote);
+        if chat.pos == at { return Ok(()); }
+        self.tp_seq_post(&[[slot, capacity, at as u32, SEQ_PUSH + SEQ_LIVE + (chat.pos - at) as u32]])?;
+        let shared = [chat.pos];
+        self.tp_gather_state(b, &mut [chat], Some(&shared))
+    }
+    /// Ranks 1.., KIND_HANDOFF with every length at least SEQ_PUSH: receive layers SPLIT..L, as
+    /// tp_seq_handoffs sends them, and advance by the field's tail rows. False: not a token-split
+    /// handoff.
     pub(super) fn tp_seq_handoff_back<'w>(&self, b: &Backend<'a>, sessions: &mut [&mut NextSession<'a, 'w>], lens: &[usize]) -> Result<bool> {
         if lens.is_empty() || lens.iter().any(|&n| n < SEQ_PUSH as usize) { return Ok(false); }
+        let tail = |n: usize| seq_push_tail(n - SEQ_PUSH as usize);
         let swapped = if self.tp_pair() {
             let link = self.tp.borrow().as_ref().map(|s| s.link.try_clone()).ok_or("tensor split missing")?.map_err(err)?;
             self.tp_swap_state(b, sessions, SPLIT..SPLIT, SPLIT..LAYERS, link)
-        } else { self.tp_gather_state(b, sessions, true) };
+        } else {
+            let live = |n: usize| n & SEQ_LIVE as usize != 0;
+            let shared: Vec<usize> = sessions.iter().zip(lens).map(|(chat, &n)| if live(n) { chat.pos + tail(n) } else { self.tp_xsplit_shared(chat.pos) }).collect();
+            self.tp_gather_state(b, sessions, Some(&shared))
+        };
         if swapped.is_err() { sessions.iter_mut().for_each(|chat| chat.valid = false); }
         swapped?;
-        for (chat, &n) in sessions.iter_mut().zip(lens) { chat.pos += n - SEQ_PUSH as usize; }
+        for (chat, &n) in sessions.iter_mut().zip(lens) { chat.pos += tail(n); }
         Ok(true)
     }
 }

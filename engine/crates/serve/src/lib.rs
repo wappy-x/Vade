@@ -128,6 +128,10 @@ pub trait Session {
     /// backend funds from its own retained budget only when it forks. The cache makes room
     /// for these bytes before it forks.
     fn fork_storage_bytes(&self) -> usize { 0 }
+    /// Settle state a prompt's checkpoint still owes other ranks. The scheduler calls it at the
+    /// prompt's end, before a snapshot or a KV checkpoint copies that state. Before a snapshot,
+    /// the step's first token, if it has one, is written first.
+    fn settle_prefix(&mut self) -> Result<(), String> { Ok(()) }
     /// Prefix guaranteed reusable on append; recurrent backends replay a tail.
     fn checkpoint_reusable_tokens(&self, tokens: usize) -> usize { tokens }
     /// Actual immutable allocation bound after completion, including scratch.

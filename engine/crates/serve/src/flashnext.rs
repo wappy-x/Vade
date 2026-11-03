@@ -515,6 +515,10 @@ impl Session for Chat<'_, '_> {
         self.prefix_position() == Some(position) && (self.live.is_none() || self.existing_prefix().is_some())
             && (!self.in_place() || self.adoptable())
     }
+    fn settle_prefix(&mut self) -> Result<(), String> {
+        let backend = self.backend;
+        self.live.as_mut().map_or(Ok(()), |s| s.settle_checkpoint(backend))
+    }
     fn checkpoint_reusable_tokens(&self, tokens: usize) -> usize {
         self.prefix_position().filter(|&p| p <= tokens).unwrap_or(0)
     }

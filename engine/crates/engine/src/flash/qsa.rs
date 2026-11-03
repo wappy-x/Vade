@@ -928,6 +928,11 @@ impl<'a, 'w> Qsa<'a, 'w> {
     }
     pub fn reset(&mut self) { self.past = 0; self.pending = None; }
     pub(super) fn rewind(&mut self, position: usize) { self.past = position; self.pending = None; }
+    /// The sequence split: the keys, values and raw index vectors, and their words per row.
+    pub(super) fn rows_state(&mut self) -> ([&mut DeviceVector<'a>; 3], [usize; 3]) {
+        let width = (self.plan.kv_heads.end - self.plan.kv_heads.start) as usize * DIM;
+        ([&mut self.keys, &mut self.values, &mut self.raw_index], [width, width, self.index_width])
+    }
     /// Bytes `snapshot_prefix(rows)` allocates.
     pub(super) fn prefix_bytes(&self, rows: usize) -> usize {
         let width = (self.plan.kv_heads.end - self.plan.kv_heads.start) as usize * DIM;

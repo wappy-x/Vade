@@ -435,13 +435,13 @@ vade up --hosts spark-8,spark-1            # the pair on cable 8
 ```
 
 **Four Sparks (world 4).** FP4-Local runs the four-way tensor split over RDMA
-and the layer chain of four over TCP. In the split, rank 0 runs layers 0 and 1
+and the layer chain of four over TCP. In a pass of the split, rank 0 runs layers 0 and 1
 alone. On a pass of at most 16 rows (32 for a drafting verify pass), each Spark
 computes a quarter of every routed expert, and a one-chat pass also splits most
 projections. A plain greedy step of that size splits the output head; a verify
 step splits it only for one chat and 1 to 8 rows. A cold prompt of 6,145 to
 48,064 tokens runs as a sequence split when no other chat decodes: each Spark reads its own part of the
-prompt through layers 2 to 47. Other long prompts run as chain tiles, in which
+prompt through every layer. Other long prompts run as chain tiles, in which
 each Spark runs 12 whole layers
 ([architecture.md](architecture.md#several-sparks-the-layer-pipeline-and-the-chain)). FP8 runs four-way TP with `--fp8` and a config that selects the FP8 checkpoint
 (`vade up --fp8` refuses an FP4-Local config). Each group below is its own

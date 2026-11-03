@@ -22,7 +22,7 @@ pub(crate) enum Half {
     Embedding,
     Ple,
 }
-/// Experimental prompt input expansion on the GPU; default remains the CPU path.
+/// Prompt input expansion on the GPU, on by default (prompt_options.rs).
 pub(crate) fn gpu_prompt() -> bool {
     crate::flash_prompt_options::cached().frontend_gpu
 }

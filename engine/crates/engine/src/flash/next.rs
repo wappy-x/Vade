@@ -41,6 +41,9 @@ pub(super) const LAYERS: usize = 48;
 pub(super) const EXPERTS: usize = 512;
 pub(super) const SCALE_BYTES: usize = 640 * 2560 / 16; // rows*cols/16 of every expert projection
 pub(super) const EMBED: &str = "model.language_model.embed_tokens.weight";
+/// Most words of one row's compact frontend input (flash_next_prompt_frontend): 68 bytes of token
+/// and row indices and 16 PLE rows of 90 bytes.
+pub(super) const PROMPT_INPUT_WORDS: usize = 377;
 pub(super) fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }

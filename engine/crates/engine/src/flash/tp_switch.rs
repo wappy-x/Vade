@@ -18,7 +18,8 @@ pub const HEADS: u32 = 1 << 28;
 /// Request kind bit: rank 0 splits this plain pass's greedy head by vocabulary parts, so ranks 1..
 /// project their part of each chat's last row and send the argmax rows (execution::head_split).
 pub const HEAD: u32 = 1 << 27;
-/// The first layer rank 1 runs: rank 0 keeps the frontend and layer 1's PLE (pp::Stage).
+/// The first layer rank 1 runs: rank 0 keeps the frontend and layer 1's PLE (pp::Stage). Only a
+/// sequence split runs the layers before it on the other ranks (flash/next_xsplit_plan.rs).
 pub const SPLIT: usize = 2;
 
 /// Request kind bit (with TILE): a token-split prompt tile (next_tp_seq.rs). Rank 1 runs it from
@@ -118,13 +119,19 @@ pub fn xsplit_rows(pos: usize, end: usize, chunk: usize) -> Option<usize> {
     (pos == 0 && chunk >= PIPELINE_TILE && (XSPLIT_MIN..=XSPLIT_MAX).contains(&rows)).then_some(rows)
 }
 
+/// Added to a push's tail rows in its KIND_HANDOFF length field: this push follows a checkpoint's
+/// push and capture, so it carries the live recurrent state and no attention rows.
+pub const SEQ_LIVE: u32 = 1 << 23;
+/// The tail rows of a push's length field after SEQ_PUSH, with SEQ_LIVE cleared.
+pub fn seq_push_tail(field: usize) -> usize { field & !(SEQ_LIVE as usize) }
+
 /// A token-split chat's stage on rank 0.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SeqStage {
     /// The first part ran: rank 1 holds layers SPLIT..L of rows 0..rows and owes rank 0 their
     /// state in the mailbox (the pending export); rank 0 holds layers 0..SPLIT.
     Tiled,
-    /// Rank 0 took the whole export: it holds every layer; rank 1 still needs rows..pos.
+    /// Rank 0 took the whole export: it holds every layer; the other ranks still need rows of it.
     Owed,
     /// The export was discarded before its import (another pass came first): the chat's state on
     /// rank 0 is incomplete, so its later passes fail; a new chat on the slot starts clean.
@@ -147,7 +154,7 @@ pub enum SeqMode {
 pub enum SeqPlan {
     /// Neither part. First, `discard`: take the remaining messages of the pending export of that
     /// slot (a pass other than its import came first) and return their credits; then `push`
-    /// (index, rank 1's position): send rank 1 the rest of these owed chats' state.
+    /// (index, the other ranks' position): send them the rest of these owed chats' state.
     Normal { discard: Option<u32>, push: Vec<(usize, usize)> },
     /// The first part: run layers 0..SPLIT here and post a SEQ tile.
     Tile,
@@ -161,6 +168,8 @@ pub struct SeqChats {
     /// First parts the engine cut (slot, rows): only such a pass runs as the first part, so a long
     /// prompt's first pipeline tile never does.
     expected: Vec<(u32, usize)>,
+    /// A sequence split's chat (over more than two ranks): a whole 64-row tail runs alone too.
+    whole_tail: Option<u32>,
     pub mode: SeqMode,
 }
 impl SeqChats {
@@ -182,7 +191,10 @@ impl SeqChats {
                     Some(c) if c.2 == SeqStage::Tiled && pos == c.1 => { self.mode = SeqMode::Import(c.1); return Ok(SeqPlan::Here); }
                     // A tail after the second part's last 64-row boundary: rank 0 alone, so the
                     // first token comes before the push; a longer pass pushes first.
-                    Some(c) if c.2 == SeqStage::Owed && rows < 64 => { self.mode = SeqMode::Alone; return Ok(SeqPlan::Here); }
+                    Some(c) if c.2 == SeqStage::Owed && (rows < 64 || rows == 64 && self.whole_tail == Some(slot)) => {
+                        self.mode = SeqMode::Alone;
+                        return Ok(SeqPlan::Here);
+                    }
                     Some(_) => (),
                     // The record follows the tile's post (posted): a pass that fails before it
                     // leaves nothing pending.
@@ -227,9 +239,20 @@ impl SeqChats {
         for c in self.chats.iter_mut().filter(|c| c.0 == slot) { c.2 = SeqStage::Lost; }
         Some(slot)
     }
-    /// Rank 0 queued the takes of this slot's whole export: it now owes rank 1 the push.
+    /// Rank 0 queued the takes of this slot's whole export: it now owes the other ranks the push.
     pub fn imported(&mut self, slot: u32) {
         for c in self.chats.iter_mut().filter(|c| c.0 == slot && c.2 == SeqStage::Tiled) { c.2 = SeqStage::Owed; }
+    }
+    /// A sequence split ended on this slot at row `rows`: it owes the push, and the prompt's tail
+    /// runs alone up to its whole 64 rows (xsplit_rows leaves 64 on a prompt of whole 64-row edges).
+    pub fn split_owed(&mut self, slot: u32, rows: usize) {
+        self.posted(slot, rows);
+        self.imported(slot);
+        self.whole_tail = Some(slot);
+    }
+    /// This slot still owes the other ranks the push.
+    pub fn owes(&self, slot: u32) -> bool {
+        self.chats.iter().any(|c| c.0 == slot && c.2 == SeqStage::Owed)
     }
     /// These slots' state is whole on every rank again.
     pub fn settled(&mut self, slots: &[u32]) {
@@ -635,14 +658,18 @@ mod tests {
         assert_eq!(seq.pending(), Some(1));
         assert_eq!(seq.plan(&[(1, 4032, 3968, true)], false, false), Ok(SeqPlan::Here));
         assert_eq!(seq.mode, SeqMode::Import(4032));
+        assert!(!seq.owes(1));
         seq.imported(1);
         assert_eq!(seq.pending(), None);
+        assert!(seq.owes(1) && !seq.owes(2));
         assert_eq!(seq.plan(&[(1, 8000, 9, true)], false, true), Ok(SeqPlan::Here));
         assert_eq!(seq.mode, SeqMode::Alone);
+        assert!(seq.owes(1), "a tail alone keeps the push owed");
         assert_eq!(seq.plan(&[(2, 7, 1, false), (1, 8009, 1, false)], true, true), normal(None, vec![(1, 4032)]));
         assert_eq!(seq.mode, SeqMode::Off);
         seq.settled(&[1]);
         assert!(!seq.holds(1));
+        assert!(!seq.owes(1));
         assert_eq!(seq.plan(&[(1, 8010, 1, false)], true, true), normal(None, vec![]));
         // A longer later pass of an owed chat pushes first; a new chat on an owed slot owes nothing.
         seq.expect(6, 2048);
@@ -658,6 +685,26 @@ mod tests {
         seq.imported(7);
         assert_eq!(seq.plan(&[(7, 0, 100, true)], false, true), normal(None, vec![]));
         assert_eq!(seq.plan(&[(7, 100, 1, false)], true, true), normal(None, vec![]));
+    }
+    /// A whole 64-row tail runs alone after a sequence split only: the pair's tail rule stays.
+    #[test]
+    fn a_sequence_split_takes_a_whole_tail_alone() {
+        let mut seq = SeqChats::default();
+        seq.split_owed(1, 8128);
+        assert!(seq.owes(1));
+        assert_eq!(seq.plan(&[(1, 8128, 64, true)], false, true), Ok(SeqPlan::Here));
+        assert_eq!(seq.mode, SeqMode::Alone);
+        assert_eq!(seq.plan(&[(1, 8128, 65, true)], false, true), Ok(SeqPlan::Normal { discard: None, push: vec![(0, 8128)] }));
+        let mut pair = SeqChats::default();
+        pair.posted(2, 4032);
+        pair.imported(2);
+        assert_eq!(pair.plan(&[(2, 8128, 64, true)], false, true), Ok(SeqPlan::Normal { discard: None, push: vec![(0, 4032)] }));
+    }
+    /// A second push names its tail rows as a first push does.
+    #[test]
+    fn a_live_push_keeps_its_tail_rows() {
+        assert_eq!((seq_push_tail(0), seq_push_tail(63)), (0, 63));
+        assert_eq!((seq_push_tail(SEQ_LIVE as usize), seq_push_tail(SEQ_LIVE as usize + 63)), (0, 63));
     }
     /// An admission failure after the plan leaves the first part pending: a retry of the same
     /// pass imports again (no push, no tail alone without the import).

@@ -93,7 +93,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         };
         model.tp_split_start(self.slot);
         let mut answer = b.vector(1)?;
-        let asked = model.tp_split_post(self.slot, self.capacity, tokens.len(), plan.cut)
+        let asked = model.tp_split_post(self.slot, self.capacity, tokens.len(), plan.cut, false)
             .and_then(|()| model.tp_split_begin(b))
             .and_then(|()| model.tp_split_word(b, &mut answer, false))
             .and_then(|()| Ok(b.read_vector_range(&answer, 0, 1)?[0] == 1.0));
@@ -204,8 +204,8 @@ impl<'a, 'w> NextSession<'a, 'w> {
         if let Some(entered) = entered { Bank::leave(b, work, entered); }
         run
     }
-    /// Rank 0: final rows `hidden` of positions `at..` enter the draft history, as a pass's
-    /// rows do (execute).
+    /// Final rows `hidden` of positions `at..` enter this rank's draft history, as a pass's
+    /// rows do (execute). A sequence split runs it on every rank, each pair's front on rank 0.
     fn split_observe(&mut self, b: &Backend<'a>, work: &mut Workspace<'a>, hidden: &DeviceVector<'a>, at: usize, tokens: &[u32]) -> Result<()> {
         let model = self.model;
         let tiled = self.batch_drafts || (tokens.len() > 1 && super::mtp::tile_all());

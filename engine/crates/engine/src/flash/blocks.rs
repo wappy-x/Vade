@@ -1310,7 +1310,7 @@ pub struct Ple<'a, 'w> {
     norms: [u64; 3],
     norm_f32: bool,
     conv: u64,
-    history: DeviceVector<'a>,
+    pub(super) history: DeviceVector<'a>,
     query_work: DeviceVector<'a>,
     /// Up to PLE_SLICE lexical rows and their key and value projections.
     lexical: DeviceVector<'a>,

@@ -451,7 +451,7 @@ impl<'a> NextModel<'a> {
         for (i, chat) in sessions.iter_mut().enumerate() { if owed.contains(&i) { chats.push(chat); } }
         // The debt is settled only by a whole exchange: a failure leaves the chats' state partly
         // installed, so they stop being reusable and the link stops (the back sees it too).
-        let settle = if self.tp_pair() { self.tp_swap_state(b, &mut chats, SPLIT..LAYERS / 2, LAYERS / 2..LAYERS, link) } else { self.tp_gather_state(b, &mut chats, false) };
+        let settle = if self.tp_pair() { self.tp_swap_state(b, &mut chats, SPLIT..LAYERS / 2, LAYERS / 2..LAYERS, link) } else { self.tp_gather_state(b, &mut chats, None) };
         if let Err(error) = settle {
             chats.iter_mut().for_each(|chat| chat.valid = false);
             return Err(self.pp.borrow_mut().as_mut().map_or(error.clone(), |pp| pp.fail(error)));
@@ -468,7 +468,7 @@ impl<'a> NextModel<'a> {
         if self.tp_seq_handoff_back(b, sessions, lens)? { return Ok(()); }
         // Over more ranks: the chain tiles' state gather (next_tp_gather.rs).
         if !self.tp_pair() {
-            let gathered = self.tp_gather_state(b, sessions, false);
+            let gathered = self.tp_gather_state(b, sessions, None);
             if gathered.is_err() { sessions.iter_mut().for_each(|chat| chat.valid = false); }
             return gathered;
         }
@@ -683,7 +683,11 @@ fn exchange(link: &std::net::TcpStream, out: &[u8], limit: usize) -> Result<Vec<
 struct Piece { at: (usize, usize, usize), from: usize, words: usize }
 /// `words` words of state vector `at` as pieces of at most `slot` words, in order.
 fn pieces(out: &mut Vec<Piece>, at: (usize, usize, usize), words: usize, slot: usize) {
-    out.extend((0..words).step_by(slot).map(|from| Piece { at, from, words: slot.min(words - from) }));
+    pieces_from(out, at, 0, words, slot);
+}
+/// Words `first..words` of state vector `at` as pieces of at most `slot` words, in order.
+fn pieces_from(out: &mut Vec<Piece>, at: (usize, usize, usize), first: usize, words: usize, slot: usize) {
+    out.extend((first..words).step_by(slot).map(|from| Piece { at, from, words: slot.min(words - from) }));
 }
 /// A chat's layer `li` in the handoff: its head word (QSA past, the GDN cached flag) and the words
 /// of each state vector that cross (QSA keys, values, raw index rows 0..past; GDN state, conv

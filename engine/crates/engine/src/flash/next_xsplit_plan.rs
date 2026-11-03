@@ -1,24 +1,29 @@
 //! Host plan of a cold prompt's sequence split over more than two ranks. The rows split in one
 //! contiguous part per rank, in wave order: rank 1 holds the first part, then rank 2 and so on,
-//! and rank 0 the last part (the head, the drafter and the first token). Rank 0 runs the frontend
-//! and layers [0, split) of every row and sends each part its seed tiles. Each rank then sweeps
-//! its part layer by layer. Before layer l it takes layer l's rows of every earlier part (keys,
-//! values, raw index) and the GDN state at the end of the part before it, so its rows keep world
-//! one's arithmetic. Rank 0 last takes every part's final rows for its drafter, in token order.
+//! and rank 0 the last part (the head and the first token). Rank 0 hashes every row
+//! in token order, reads its compact frontend input and sends each part its input tiles. Each
+//! rank then runs the frontend on its tiles and sweeps its part layer by layer. Before layer l it
+//! takes layer l's rows of every earlier part (keys, values, raw index) and the GDN state at the
+//! end of the part before it, so its rows keep world one's arithmetic. The PLE history crosses
+//! with layer 0's state, as the PLE update ends layer 0's stage. The drafter is one more stage:
+//! its row i reads final row i and token i + 1 and no other row, so each rank writes the draft
+//! rows of its own part, on the 4-row groups the index pools. Rank 0 takes every other part's
+//! draft rows.
 //!
 //! Every message of a world-wide mailbox reaches every rank, and a relay reads each origin's
 //! messages in strict order (spark_gpu_probe::tp_route). So no origin may reuse a slot before the
 //! ranks that read its message and both path ends took it: the ends take every message (one
 //! word where they do not need it), and a sender waits for a credit that follows those takes.
-//! Rank 0's pad of layer l follows its takes of every part's layer l, and each of those follows
+//! Rank 0's pad after layer l follows its takes of every part's layer l, and each of those follows
 //! that rank's own takes of layer l, so one pad credits every sender. `Plan::ops` fixes every
 //! put and take of every rank from the shape of the work, with no run-time count.
 
 use std::collections::HashMap;
 use std::ops::Range;
 
-/// A rank's export of layer l waits for rank 0's pad of layer l - PAD_LAG. The wave's first rank
-/// runs world - 2 layers ahead of rank 0's takes, so three layers keep four ranks from waiting.
+/// A rank's export of layer l waits for rank 0's pad of the layers below l + 1 - PAD_LAG. The
+/// wave's first rank runs world - 2 layers ahead of rank 0's takes, so three layers keep four
+/// ranks from waiting.
 pub(crate) const PAD_LAG: usize = 3;
 /// The fewest rows of a part.
 pub(crate) const MIN_PART: usize = 1024;
@@ -28,7 +33,8 @@ pub(crate) const MIN_PART: usize = 1024;
 pub(crate) enum LayerState {
     /// Attention: words per row of each state vector (keys, values, raw index).
     Rows([usize; 3]),
-    /// GDN: the whole length of each state vector (state, conv history); only the next part reads it.
+    /// GDN: the whole length of each state vector (state, conv history, and at layer 0 the PLE
+    /// history); only the next part reads it.
     Whole([usize; 3]),
 }
 
@@ -38,49 +44,48 @@ pub(crate) struct Shape {
     /// Words of one mailbox message and slots per channel.
     pub slot: usize,
     pub slots: usize,
-    /// Words of one residual row.
-    pub residual: usize,
-    /// The first layer the ranks run; `state[l - split]` is layer l's state.
-    pub split: usize,
+    /// Most words of one row's compact frontend input.
+    pub input: usize,
+    /// Each layer's state.
     pub state: Vec<LayerState>,
+    /// Words per row of the drafter's state vectors; None: the chat has no drafter.
+    pub draft: Option<[usize; 3]>,
 }
 
 /// One mailbox message, named so that a message of an origin has one name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Msg {
-    /// Rank 0's credit: its takes of layer `layer` are queued (split - 1: its seeds are out).
+    /// Rank 0's credit: its takes of the layers below `layer` are queued (0: its seeds are out).
     LayerPad { layer: usize },
-    /// A credit for tile `tile` of rank `owner`'s part: seed rows taken.
+    /// A credit for tile `tile` of rank `owner`'s part: its input taken.
     SeedPad { owner: usize, tile: usize },
-    /// A credit for tile `tile` of rank `owner`'s part: final rows taken.
-    RowsPad { owner: usize, tile: usize },
-    /// Words [from, from + words) of a seed tile's rows.
-    Seed { owner: usize, tile: usize, from: usize, words: usize },
+    /// The compact frontend input of a tile, one message.
+    Seed { owner: usize, tile: usize, words: usize },
     /// Words [from, from + words) of state vector `k` of layer `layer`.
     State { layer: usize, k: usize, from: usize, words: usize },
-    /// Words [from, from + words) of a tile's final rows.
-    Rows { owner: usize, tile: usize, from: usize, words: usize },
+    /// The token after rank `owner`'s part (its last draft row reads it), one word.
+    Next { owner: usize },
+    /// Words [from, from + words) of the drafter's state vector `k`, in rank `owner`'s rows.
+    Draft { owner: usize, k: usize, from: usize, words: usize },
 }
 
 /// One step of a rank, in the order the rank runs it. `at` counts the origin's messages from 1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Op {
-    /// Rank 0: frontend and layers [0, split) of tile `tile` of rank `owner`'s part, its rows left
-    /// in the workspace for the seed messages that follow.
-    Lead { owner: usize, tile: usize },
-    /// Rank 0: frontend and layers [0, split) of its own tile, in its bank.
-    Head { tile: usize },
+    /// Rank 0: hash the rows of tile `tile` of rank `owner`'s part and read their compact
+    /// frontend input, for the seed message that follows or for rank 0's own stage.
+    Pack { owner: usize, tile: usize },
     /// Set layer `layer`'s position at this rank's part (attention rows, GDN cached flag).
     Enter { layer: usize },
-    /// Layer `layer` of this rank's tile `tile`.
+    /// Layer `layer` of this rank's tile `tile`; layer 0 starts with the tile's frontend.
     Stage { layer: usize, tile: usize },
     Put(Msg),
     /// Take message `at` of `origin`, which is `msg`.
     Take { origin: usize, at: u64, msg: Msg },
     /// Take one word of message `at` of `origin`.
     Drop { origin: usize, at: u64 },
-    /// Rank 0: the drafter observes tile `tile` of rank `owner`'s part.
-    Observe { owner: usize, tile: usize },
+    /// The drafter observes this rank's tile `tile`.
+    Observe { tile: usize },
 }
 
 /// Marks a take of no words it needs, until `Plan::place`.
@@ -97,20 +102,19 @@ pub(crate) struct Plan {
 
 impl Plan {
     /// The plan of `rows` rows over `world` ranks in `tile`-row tiles, or None when the rows do
-    /// not give every rank MIN_PART rows, an edge leaves the 64-row grid, or one tile's messages
-    /// fill the mailbox's slots (each needs room beside its credit) or three layers' messages
-    /// pass them.
+    /// not give every rank MIN_PART rows, an edge leaves the 64-row grid, a tile's input passes
+    /// one message, or three layers' messages or a part's draft rows pass the mailbox's slots.
     pub(crate) fn new(rows: usize, world: usize, tile: usize, shape: &Shape) -> Option<Self> {
         if tile == 0 || !tile.is_multiple_of(64) || !rows.is_multiple_of(64) { return None; }
         let part = part_rows(rows, world);
         let mut edges: Vec<usize> = (0..world).map(|i| i * part).collect();
         edges.push(rows);
         let plan = Self { rows, world, tile, edges };
-        let layers = shape.split..shape.split + shape.state.len();
-        let fits = slices(tile * shape.residual, shape.slot).count() < shape.slots
+        let fits = tile * shape.input <= shape.slot
             && (0..world).all(|r| plan.part(r).len() >= MIN_PART)
-            && (1..world).all(|r| layers.clone().all(|l| {
-                (l.saturating_sub(PAD_LAG - 1).max(shape.split)..=l).map(|l| plan.state(r, l, shape).len()).sum::<usize>() <= shape.slots
+            && (1..world).all(|r| plan.draft_rows(r, shape).len() < shape.slots)
+            && (1..world).all(|r| (0..shape.state.len()).all(|l| {
+                (l.saturating_sub(PAD_LAG - 1)..=l).map(|l| plan.state(r, l, shape).len()).sum::<usize>() <= shape.slots
             }));
         fits.then_some(plan)
     }
@@ -127,12 +131,27 @@ impl Plan {
         let start = part.start + k * self.tile;
         start..(start + self.tile).min(part.end)
     }
+    /// The positions the drafter observes in tile `k` of rank `rank`. Draft row i reads final row
+    /// i and token i + 1, and position 0 only starts the history, so a tile observes the positions
+    /// one past its rows; its last row's draft row needs the next tile's first token, and a part's
+    /// last one the token after the part (Msg::Next).
+    pub(crate) fn observed(&self, rank: usize, k: usize) -> Range<usize> {
+        let span = self.span(rank, k);
+        span.start + 1..(span.end + 1).min(self.rows)
+    }
+    /// Words of rank `rank`'s input vector: its tiles' input and the token after its part.
+    pub(crate) fn input_words(&self, rank: usize, shape: &Shape) -> usize { self.tiles(rank) * self.tile * shape.input + 1 }
+    /// Words of tile `k`'s input in rank `rank`'s input vector.
+    pub(crate) fn input(&self, rank: usize, k: usize, shape: &Shape) -> Range<usize> {
+        let at = k * self.tile * shape.input;
+        at..at + self.span(rank, k).len() * shape.input
+    }
     /// The state rank `rank` exports after layer `layer`, in order.
     fn state(&self, rank: usize, layer: usize, shape: &Shape) -> Vec<Msg> {
         let part = self.part(rank);
         let mut out = Vec::new();
         for k in 0..3 {
-            let (start, words) = match shape.state[layer - shape.split] {
+            let (start, words) = match shape.state[layer] {
                 LayerState::Rows(width) => (part.start * width[k], part.len() * width[k]),
                 LayerState::Whole(len) => (0, len[k]),
             };
@@ -140,81 +159,82 @@ impl Plan {
         }
         out
     }
-    fn tile_msgs(&self, rank: usize, k: usize, shape: &Shape, make: impl Fn(usize, usize) -> Msg) -> Vec<Msg> {
-        slices(self.span(rank, k).len() * shape.residual, shape.slot).map(|(from, n)| make(from, n)).collect()
+    /// The draft rows rank `owner` sends rank 0, in order.
+    fn draft_rows(&self, owner: usize, shape: &Shape) -> Vec<Msg> {
+        let part = self.part(owner);
+        let Some(width) = shape.draft else { return Vec::new() };
+        (0..3).flat_map(|k| slices(part.len() * width[k], shape.slot)
+            .map(move |(from, n)| Msg::Draft { owner, k, from: part.start * width[k] + from, words: n })).collect()
     }
     /// Every rank's steps. The ranks' streams are built side by side in one walk of the work;
     /// then each take finds its message's place in the origin's stream.
     pub(crate) fn ops(&self, shape: &Shape) -> Vec<Vec<Op>> {
         let (world, end) = (self.world, self.world - 1);
-        let (split, layers) = (shape.split, shape.split + shape.state.len());
+        let layers = shape.state.len();
         let mut ops: Vec<Vec<Op>> = vec![Vec::new(); world];
         let take = |origin, msg| Op::Take { origin, at: 0, msg };
         let dropped = |origin, msg| Op::Take { origin, at: DROPPED, msg };
-        // Seeds, in wave order. Rank 0 keeps one tile unconfirmed. The far end takes every seed.
+        // Seeds, in wave order and one message per tile. Rank 0 keeps one tile unconfirmed. The
+        // far end takes every seed.
         let mut last = None;
         for owner in 1..world {
             for k in 0..self.tiles(owner) {
-                let msgs = self.tile_msgs(owner, k, shape, |from, words| Msg::Seed { owner, tile: k, from, words });
+                let seed = Msg::Seed { owner, tile: k, words: self.input(owner, k, shape).len() };
                 let pad = Msg::SeedPad { owner, tile: k };
-                ops[0].push(Op::Lead { owner, tile: k });
+                ops[0].push(Op::Pack { owner, tile: k });
                 if let Some(paid) = last.replace((owner, pad)) { seed_credits(&mut ops[0], paid, end); }
-                ops[0].extend(msgs.iter().map(|&m| Op::Put(m)));
-                ops[owner].extend(msgs.iter().map(|&m| take(0, m)));
+                ops[0].push(Op::Put(seed));
+                ops[owner].push(take(0, seed));
                 ops[owner].push(Op::Put(pad));
                 if owner != end {
-                    ops[end].extend(msgs.iter().map(|&m| dropped(0, m)));
+                    ops[end].push(dropped(0, seed));
                     ops[end].push(dropped(owner, pad));
                     ops[end].push(Op::Put(pad));
                 }
             }
+            if shape.draft.is_some() {
+                let next = Msg::Next { owner };
+                ops[0].push(Op::Put(next));
+                ops[owner].push(take(0, next));
+                if owner != end { ops[end].push(dropped(0, next)); }
+            }
         }
         if let Some(paid) = last { seed_credits(&mut ops[0], paid, end); }
-        ops[0].push(Op::Put(Msg::LayerPad { layer: split - 1 }));
-        ops[0].extend((0..self.tiles(0)).map(|tile| Op::Head { tile }));
+        ops[0].push(Op::Put(Msg::LayerPad { layer: 0 }));
+        ops[0].extend((0..self.tiles(0)).map(|tile| Op::Pack { owner: 0, tile }));
         // Layers, in wave order within a layer.
-        for l in split..layers {
+        for l in 0..layers {
             for rank in (1..world).chain(std::iter::once(0)) {
                 let earlier = if rank == 0 { world } else { rank };
                 if earlier > 1 { ops[rank].push(Op::Enter { layer: l }); }
-                let whole = matches!(shape.state[l - split], LayerState::Whole(_));
+                let whole = matches!(shape.state[l], LayerState::Whole(_));
                 for o in 1..earlier {
                     for m in self.state(o, l, shape) {
                         if !whole || o + 1 == earlier { ops[rank].push(take(o, m)); } else if rank == 0 || rank == end { ops[rank].push(dropped(o, m)); }
                     }
                 }
-                if rank == 0 { ops[0].push(Op::Put(Msg::LayerPad { layer: l })); }
+                if rank == 0 { ops[0].push(Op::Put(Msg::LayerPad { layer: l + 1 })); }
                 ops[rank].extend((0..self.tiles(rank)).map(|tile| Op::Stage { layer: l, tile }));
                 if rank != 0 {
-                    if l + 1 >= split + PAD_LAG { ops[rank].push(take(0, Msg::LayerPad { layer: l - PAD_LAG })); }
+                    if l + 1 >= PAD_LAG { ops[rank].push(take(0, Msg::LayerPad { layer: l + 1 - PAD_LAG })); }
                     ops[rank].extend(self.state(rank, l, shape).into_iter().map(Op::Put));
                 }
             }
         }
         // The last exports are read before a rank's rows start.
-        for rank in 1..world { ops[rank].extend((layers - PAD_LAG..layers).map(|layer| take(0, Msg::LayerPad { layer }))); }
-        // Final rows, in token order: rank 0 takes and observes a tile, then credits it.
-        for owner in 1..world {
-            let tiles = self.tiles(owner);
-            for k in 0..tiles {
-                let msgs = self.tile_msgs(owner, k, shape, |from, words| Msg::Rows { owner, tile: k, from, words });
-                let pad = Msg::RowsPad { owner, tile: k };
-                if k > 0 { rows_credits(&mut ops[owner], owner, k - 1, end); }
-                ops[owner].extend(msgs.iter().map(|&m| Op::Put(m)));
-                ops[0].extend(msgs.iter().map(|&m| take(owner, m)));
-                ops[0].push(Op::Observe { owner, tile: k });
-                if owner != end { ops[end].extend(msgs.iter().map(|&m| dropped(owner, m))); }
-                // The last tile needs no credit: the owner puts nothing more before rank 0's next request.
-                if k + 1 == tiles { continue; }
-                ops[0].push(Op::Put(pad));
-                if owner != end {
-                    ops[end].push(Op::Put(pad));
-                    ops[0].push(dropped(end, pad));
-                    ops[end].push(dropped(0, pad));
+        for rank in 1..world { ops[rank].extend((layers + 1 - PAD_LAG..=layers).map(|layer| take(0, Msg::LayerPad { layer }))); }
+        // The drafter, one more stage: each rank observes its rows, and rank 0 takes the draft
+        // rows of every other part. The takes above confirm every earlier message of these origins.
+        if shape.draft.is_some() {
+            for (rank, stream) in ops.iter_mut().enumerate() { stream.extend((0..self.tiles(rank)).map(|tile| Op::Observe { tile })); }
+            for rank in 1..world {
+                for m in self.draft_rows(rank, shape) {
+                    ops[rank].push(Op::Put(m));
+                    ops[0].push(take(rank, m));
+                    if rank != end { ops[end].push(dropped(rank, m)); }
                 }
             }
         }
-        ops[0].extend((0..self.tiles(0)).map(|tile| Op::Observe { owner: 0, tile }));
         place(ops)
     }
     /// Messages each rank put, for the ranks' counts after the transaction.
@@ -229,6 +249,14 @@ impl Plan {
 fn part_rows(rows: usize, world: usize) -> usize {
     (rows / world + 32) / 64 * 64
 }
+/// The first rows every rank holds after the split: rank r holds the rows up to its part's end
+/// (it takes each earlier part's rows), and the first part ends here. Rank 0's push skips them.
+pub(crate) fn shared_rows(rows: usize, world: usize) -> usize { part_rows(rows, world) }
+/// The first word of a state vector of `words` words at `rows` rows that a push sends, when every
+/// rank holds its first `shared` rows. Both ends of the push compute their piece lists from it.
+pub(crate) fn push_first_word(words: usize, rows: usize, shared: usize) -> usize {
+    if rows == 0 { 0 } else { (words / rows * shared).min(words) }
+}
 /// `words` words as (first word, words) of at most `slot` words each.
 fn slices(words: usize, slot: usize) -> impl Iterator<Item = (usize, usize)> {
     (0..words).step_by(slot.max(1)).map(move |from| (from, slot.min(words - from)))
@@ -236,11 +264,6 @@ fn slices(words: usize, slot: usize) -> impl Iterator<Item = (usize, usize)> {
 fn seed_credits(front: &mut Vec<Op>, (owner, pad): (usize, Msg), end: usize) {
     front.push(Op::Take { origin: owner, at: DROPPED, msg: pad });
     if owner != end { front.push(Op::Take { origin: end, at: DROPPED, msg: pad }); }
-}
-fn rows_credits(ops: &mut Vec<Op>, owner: usize, k: usize, end: usize) {
-    let pad = Msg::RowsPad { owner, tile: k };
-    ops.push(Op::Take { origin: 0, at: DROPPED, msg: pad });
-    if owner != end { ops.push(Op::Take { origin: end, at: DROPPED, msg: pad }); }
 }
 /// Give each take its message's place in the origin's stream; a take of no words it needs
 /// becomes a drop.

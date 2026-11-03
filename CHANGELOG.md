@@ -394,7 +394,7 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 
 - A cached later question starts sooner on two FP4-Local Sparks. The [main result](docs/results.md#fp4-local-cached-turn-main-2de87be-2026-11-02-afternoon) gives the cold and cached times (#290).
 
-- On four FP4-Local Sparks over RDMA, a cold prompt of 6,145 to 48,064 tokens now runs as a sequence split when no other chat decodes: each Spark reads its own part of the prompt, so its first token comes sooner. Beside a decoding chat it runs as chain tiles. The token IDs do not change. Each of the four Sparks holds about 1 GiB more for its link, and the session pool counts it.
+- On four FP4-Local Sparks over RDMA, a cold prompt of 6,145 to 48,064 tokens now runs as a sequence split when no other chat decodes: each Spark reads its own part of the prompt, so its first token comes sooner. Beside a decoding chat it runs as chain tiles. The token IDs do not change. Each of the four Sparks holds about 1 GiB more for its link, and the session pool counts it. The first token comes before the Sparks exchange their state, also with the prefix cache on.
 - On a chain of three or more Sparks, kept rows of a long prompt that runs as chain tiles now come back during the prompt, not all at the end, and the first and final tiles take the RDMA wire when it is there.
 
 - The prefix cache now works on four FP4-Local Sparks over RDMA (the tensor split in parts), as on two Sparks.

@@ -35,7 +35,7 @@ use std::{
 };
 type Result<T> = std::result::Result<T, String>;
 pub use super::next::{DenseIndexer, IndexSelection, IndexerHook, SparseIndexer};
-use super::next::{EMBED, EXPERTS, LAYERS, SCALE_BYTES, err, module_of, pack_bf16, read_all};
+use super::next::{EMBED, EXPERTS, LAYERS, PROMPT_INPUT_WORDS, SCALE_BYTES, err, module_of, pack_bf16, read_all};
 struct MoeAddr<'a> {
     router: u64,
     shared_gate: u64,
@@ -130,8 +130,8 @@ impl<'a> NextModel<'a> {
     pub(super) fn owns_state(&self, li: usize) -> bool {
         self.state_range().contains(&li)
     }
-    /// Pipeline backs receive the residual and never expand token inputs. Call before
-    /// admission and workspace preparation; changing a live model is refused.
+    /// Pipeline backs hash no token and need no packed workspace (a sequence split sends them
+    /// their compact input). Call before admission and workspace preparation; a live model refuses.
     pub fn disable_prompt_frontend(&mut self) -> Result<()> {
         if self.work.borrow().is_some() || !self.pool.borrow().decode.is_empty() {
             return Err("pipeline frontend role must be set before workspace allocation".into());

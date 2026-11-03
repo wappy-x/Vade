@@ -1139,16 +1139,24 @@ impl<'e, 't, E: Engine, T: Tokenizer> Active<'e, 't, E, T> {
         self.generation.usage.timing = self.usage_clock.as_ref().map(crate::usage::Clock::elapsed);
     }
     /// The cache snapshot of a finished prompt (or of a turn that ended on EOS).
-    fn snapshot(&self, engine: &'e E, cache: &mut SessionCache<E::Session<'e>>) {
-        let (Some(key), state) = (self.key, &self.generation.state) else { return };
-        if engine.eos_token_ids().contains(state.tokens.last().unwrap()) || state.tokens.len() == self.ready.prompt.len() {
-            cache.fund_pages(state.session.prefix_allocations(state.tokens.len()).unwrap_or_default());
-            cache.snapshot_scoped(key, self.ready.scope.as_deref(), state, Instant::now(), state.tokens.len() == self.ready.prompt.len());
-        }
+    fn snapshot(&mut self, engine: &'e E, cache: &mut SessionCache<E::Session<'e>>) {
+        let Some(key) = self.key else { return };
+        let tokens = &self.generation.state.tokens;
+        if !engine.eos_token_ids().contains(tokens.last().unwrap()) && tokens.len() != self.ready.prompt.len() { return; }
+        self.settle_prefix();
+        let state = &self.generation.state;
+        cache.fund_pages(state.session.prefix_allocations(state.tokens.len()).unwrap_or_default());
+        cache.snapshot_scoped(key, self.ready.scope.as_deref(), state, Instant::now(), state.tokens.len() == self.ready.prompt.len());
+    }
+    /// A failed settle stops the link on its next pass, and this chat restores no prefix.
+    fn settle_prefix(&mut self) {
+        if let Err(error) = self.generation.state.session.settle_prefix() { eprintln!("prefix_settle_failed error={error}"); }
     }
     fn checkpoint(&mut self, cache: &mut SessionCache<E::Session<'e>>) {
         let Some(kv) = &mut self.generation.usage.kv else { return; };
         if kv.retention != "pending" || self.generation.state.tokens.len() != self.ready.prompt.len() { return; }
+        self.settle_prefix();
+        let Some(kv) = &mut self.generation.usage.kv else { return; };
         let state = &self.generation.state;
         cache.fund_pages(state.session.prefix_allocations(state.tokens.len()).unwrap_or_default());
         match cache.checkpoint(self.ready.handle_scope.as_deref(), self.ready.authorization.as_deref(), state, Instant::now()) {
@@ -1295,8 +1303,9 @@ impl<'e, 't, E: Engine, T: Tokenizer> Active<'e, 't, E, T> {
         }
         {
             let mut prefill = false;
-            // The prompt's cache snapshot copies its checkpoint (on two Sparks with an exchange):
-            // a first token of the same step is written and flushed first. No state changes between.
+            // The prompt's cache snapshot copies its checkpoint (with exchanges on more Sparks, and
+            // after a sequence split with its push). A first token of the same step, if any, is
+            // written first, and flushed when the reply streams. No state changes between.
             let mut snapshot = false;
             for (index, event) in events.iter().copied().enumerate() { match event {
                 Event::Prefill => {

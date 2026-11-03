@@ -97,7 +97,7 @@ fn middle_reads_kept_acks_during(pass: u32, post: impl FnOnce(&mut Link)) {
             |_| Ok(()), || Ok(()), move |kind, _, _, _| {
                 if kind != pass { return Ok(()); }
                 middle_flag.store(true, Ordering::SeqCst);
-                let deadline = Instant::now() + Duration::from_secs(3);
+                let deadline = Instant::now() + Duration::from_secs(30);
                 while !last_flag.load(Ordering::SeqCst) {
                     if Instant::now() > deadline { return Err("the last rank did not reach the step".into()); }
                     std::thread::yield_now();

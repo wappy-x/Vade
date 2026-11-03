@@ -18,6 +18,8 @@ struct Model {
     live: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
     heads: Arc<AtomicUsize>,
+    /// Session::settle_prefix and Session::fork, in the order they ran.
+    order: Arc<Mutex<Vec<&'static str>>>,
     /// Engine::prefix_cache_opt_in (Flash-Next): only asking requests use the prefix cache.
     opt_in: bool,
     retention_extra: usize,
@@ -27,6 +29,7 @@ struct Kv {
     live: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
     heads: Arc<AtomicUsize>,
+    order: Arc<Mutex<Vec<&'static str>>>,
 }
 impl Drop for Kv {
     fn drop(&mut self) {
@@ -55,13 +58,19 @@ impl Session for Kv {
         self.history.truncate(position);
         Ok(())
     }
+    fn settle_prefix(&mut self) -> Result<(), String> {
+        self.order.lock().unwrap().push("settle");
+        Ok(())
+    }
     fn fork(&self) -> Result<Self, String> {
         self.live.fetch_add(1, Ordering::Relaxed);
+        self.order.lock().unwrap().push("fork");
         Ok(Self {
             history: self.history.clone(),
             live: self.live.clone(),
             calls: self.calls.clone(),
             heads: self.heads.clone(),
+            order: self.order.clone(),
         })
     }
 }
@@ -91,6 +100,7 @@ impl Engine for Model {
             live: self.live.clone(),
             calls: self.calls.clone(),
             heads: self.heads.clone(),
+            order: self.order.clone(),
         })
     }
     fn vocab_size(&self) -> usize {
@@ -239,6 +249,7 @@ struct Server {
     live: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
     heads: Arc<AtomicUsize>,
+    order: Arc<Mutex<Vec<&'static str>>>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 impl Server {
@@ -270,6 +281,7 @@ impl Server {
         let live = Arc::new(AtomicUsize::new(0));
         let calls = Arc::new(AtomicUsize::new(0));
         let heads = Arc::new(AtomicUsize::new(0));
+        let order: Arc<Mutex<Vec<&'static str>>> = Default::default();
         let ab = (limits.ab_ptx || retention_extra > 0).then(|| Arc::new(Mutex::new(Vec::new())));
         let cohort = limits.ab_cohorts.then(|| Arc::new(Mutex::new((None, 0))));
         let model = Model {
@@ -278,6 +290,7 @@ impl Server {
             live: live.clone(),
             calls: calls.clone(),
             heads: heads.clone(),
+            order: order.clone(),
             opt_in,
             retention_extra,
         };
@@ -318,6 +331,7 @@ impl Server {
             live,
             calls,
             heads,
+            order,
             worker: Some(worker),
         }
     }
@@ -332,7 +346,7 @@ impl Server {
         let address = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let (live, calls, heads) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        let model = Tiled(Model { ab: None, cohort: None, live: live.clone(), calls: calls.clone(), heads: heads.clone(), opt_in: false, retention_extra: 0 }, observation.as_ref().map(|o| o.0.clone()), turn);
+        let model = Tiled(Model { ab: None, cohort: None, live: live.clone(), calls: calls.clone(), heads: heads.clone(), order: Default::default(), opt_in: false, retention_extra: 0 }, observation.as_ref().map(|o| o.0.clone()), turn);
         let shutdown = stop.clone();
         let worker = std::thread::spawn(move || {
             if let Some((_, start)) = observation {
@@ -349,7 +363,7 @@ impl Server {
                 sharing: scheduler::Sharing { report_prefix_reuse: true, client_priority_cap: 1, ..Default::default() } },
             &shutdown, "tiled", requests).unwrap()
         });
-        Self { ab: None, cohort: None, address, stop, live, calls, heads, worker: Some(worker) }
+        Self { ab: None, cohort: None, address, stop, live, calls, heads, order: Default::default(), worker: Some(worker) }
     }
     /// Production sets the active and session budgets equal (next_batched_service.rs): both are
     /// `admission`, the pool less the `room`. `retained`: the retained-bytes ceiling.
@@ -358,7 +372,7 @@ impl Server {
         let address = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let (live, calls, heads) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        let model = Pressured(Model { ab: None, cohort: None, live: live.clone(), calls: calls.clone(), heads: heads.clone(), opt_in: true, retention_extra: 0 }, room);
+        let model = Pressured(Model { ab: None, cohort: None, live: live.clone(), calls: calls.clone(), heads: heads.clone(), order: Default::default(), opt_in: true, retention_extra: 0 }, room);
         let shutdown = stop.clone();
         let worker = std::thread::spawn(move || {
             scheduler::serve(listener, &model, Some(&Codec(1, false)),
@@ -372,14 +386,14 @@ impl Server {
                 sharing: scheduler::Sharing { report_prefix_reuse: true, ..Default::default() } },
             &shutdown).unwrap()
         });
-        Self { ab: None, cohort: None, address, stop, live, calls, heads, worker: Some(worker) }
+        Self { ab: None, cohort: None, address, stop, live, calls, heads, order: Default::default(), worker: Some(worker) }
     }
     fn reserved(requests: usize, probe: Arc<ReserveProbe>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let (live, calls, heads) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-        let model = Reserved(Model { ab: None, cohort: None, live: live.clone(), calls: calls.clone(), heads: heads.clone(), opt_in: false, retention_extra: 0 }, probe);
+        let model = Reserved(Model { ab: None, cohort: None, live: live.clone(), calls: calls.clone(), heads: heads.clone(), order: Default::default(), opt_in: false, retention_extra: 0 }, probe);
         let shutdown = stop.clone();
         let worker = std::thread::spawn(move || {
             scheduler::serve_requests(listener, &model, Some(&Codec(1, false)),
@@ -393,7 +407,7 @@ impl Server {
                 sharing: scheduler::Sharing { report_prefix_reuse: true, ..Default::default() } },
             &shutdown, "reserved", requests).unwrap()
         });
-        Self { ab: None, cohort: None, address, stop, live, calls, heads, worker: Some(worker) }
+        Self { ab: None, cohort: None, address, stop, live, calls, heads, order: Default::default(), worker: Some(worker) }
     }
     fn send(&self, tokens: &[u32], max: usize, extra: &str) -> TcpStream {
         let body = format!(
@@ -918,6 +932,25 @@ fn stream_head_carries_the_warm_cache_estimate() {
     }
 }
 
+/// A sequence split's prefix owes other ranks its state until settle_prefix runs (Flash-Next), so
+/// the prompt's snapshot settles first, and the next turn restores it.
+#[test]
+fn a_prompt_settles_before_its_snapshot_forks() {
+    let server = Server::with_opt_in();
+    let send = || {
+        let body = r#"{"stream":true,"temperature":0,"prompt_token_ids":[1,2,3],"max_tokens":1,"prompt_cache_key":"k"}"#;
+        let mut reply = String::new();
+        server.send_body(body).read_to_string(&mut reply).unwrap();
+        assert!(reply.ends_with("data: [DONE]\n\n"), "{reply}");
+        header(&reply, "X-Prefix-Reused-Tokens:").to_owned()
+    };
+    assert_eq!(send(), "0");
+    assert_eq!(send(), "3");
+    let order = server.order.lock().unwrap();
+    assert_eq!(order.first(), Some(&"settle"), "{order:?}");
+    assert!(order.contains(&"fork"), "{order:?}");
+}
+
 #[test]
 fn branches_reuse_longest_prefix_and_match_fresh_without_mutating_parent() {
     let server = Server::start();
@@ -961,6 +994,7 @@ fn sampled_branches_match_full_history_draws_and_sequential_generation() {
         live: Arc::new(AtomicUsize::new(0)),
         calls: Arc::new(AtomicUsize::new(0)),
         heads: Arc::new(AtomicUsize::new(0)),
+        order: Default::default(),
         opt_in: false,
         retention_extra: 0,
     };

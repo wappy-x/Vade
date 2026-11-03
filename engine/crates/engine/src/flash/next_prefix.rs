@@ -29,6 +29,8 @@ pub(super) struct Checkpoint<'a> {
     remote: Option<pp::cache::Lease>,
     /// Armed by `arm_inside`: the running final tile still copies its pieces at `position`.
     inside: bool,
+    /// Only rank 0 holds this checkpoint: the sequence split's push still carries it.
+    unsent: bool,
 }
 
 /// Immutable prompt prefix at a 64-aligned position, independent of any live session.
@@ -112,15 +114,43 @@ impl<'a, 'w> NextSession<'a, 'w> {
     /// the session and reaches the caller. Only local snapshot copies are best effort.
     pub(super) fn capture_checkpoint(&mut self, b: &Backend<'a>) -> Result<()> {
         if !self.checkpointing || self.pos == 0 || !self.pos.is_multiple_of(64) { return Ok(()); }
-        let remote = self.prepared_checkpoint(b, 0)?;
-        if self.model.pp_front() && remote.is_none() || self.try_capture(b, remote).is_err() {
+        // A sequence split's chat: the tail after this row runs on rank 0 alone, so the first token
+        // comes before the push. The push carries this copy (next_tp_seq.rs, tp_seq_checkpoint).
+        let unsent = self.model.tp_seq_owes(self.slot);
+        let remote = self.prepared_checkpoint(b, 0, unsent)?;
+        if self.model.pp_front() && remote.is_none() && !unsent || self.try_capture(b, remote).is_err() {
             *self.checkpoint.get_mut() = None;
         }
+        if let Some(c) = self.checkpoint.get_mut() { c.unsent = unsent; }
         Ok(())
     }
+    /// Rank 0, once the first token is out: settle a checkpoint that only this rank holds.
+    pub fn settle_checkpoint(&mut self, b: &Backend<'a>) -> Result<()> {
+        if self.checkpoint.get_mut().as_ref().is_some_and(|c| c.unsent) { self.model.tp_part(b, &mut [self], &[0..0], true, false)?; }
+        Ok(())
+    }
+    /// The row of a checkpoint that the other ranks do not hold yet.
+    pub(super) fn checkpoint_unsent(&self) -> Option<usize> {
+        self.checkpoint.borrow().as_ref().filter(|c| c.unsent).map(|c| c.position)
+    }
+    /// A push that cannot carry the checkpoint leaves it to this rank alone: no prefix.
+    pub(super) fn drop_unsent_checkpoint(&mut self) {
+        if self.checkpoint.get_mut().as_ref().is_some_and(|c| c.unsent) { *self.checkpoint.get_mut() = None; }
+    }
+    /// The live recurrent state and the checkpoint's change places, for the push's reads.
+    pub(super) fn swap_checkpoint_gdn(&mut self) {
+        if let Some(c) = self.checkpoint.get_mut() { std::mem::swap(&mut self.gdn_state, &mut c.gdn); }
+    }
+    /// The other ranks captured the checkpoint (None: one of them refused, so no prefix).
+    pub(super) fn checkpoint_sent(&mut self, remote: Option<pp::cache::Lease>) {
+        match (self.checkpoint.get_mut().as_mut(), remote) {
+            (Some(c), Some(remote)) => (c.remote, c.unsent) = (Some(remote), false),
+            _ => *self.checkpoint.get_mut() = None,
+        }
+    }
     /// `prepare_checkpoint`; a failure invalidates the session.
-    fn prepared_checkpoint(&mut self, b: &Backend<'a>, inside: usize) -> Result<Option<pp::cache::Lease>> {
-        self.prepare_checkpoint(b, inside).inspect_err(|_| {
+    fn prepared_checkpoint(&mut self, b: &Backend<'a>, inside: usize, unsent: bool) -> Result<Option<pp::cache::Lease>> {
+        self.prepare_checkpoint(b, inside, unsent).inspect_err(|_| {
             self.valid = false;
             self.logits_ready = false;
             *self.checkpoint.get_mut() = None;
@@ -129,10 +159,11 @@ impl<'a, 'w> NextSession<'a, 'w> {
     /// One Spark: nothing to prepare. Split front: settle the state the ranks owe each other,
     /// then the worker captures its own rows at the same position, or with `inside` rows arms
     /// its next pass for that row (pp_cache_capture).
-    fn prepare_checkpoint(&mut self, b: &Backend<'a>, inside: usize) -> Result<Option<pp::cache::Lease>> {
+    fn prepare_checkpoint(&mut self, b: &Backend<'a>, inside: usize, unsent: bool) -> Result<Option<pp::cache::Lease>> {
         if !self.model.pp_front() { return Ok(None); }
         // The drafter observes the queued tiles' kept rows while the back runs them.
         self.observe_queued_kept(b)?;
+        if unsent { self.flush_draft_feed(b)?; return Ok(None); }
         // Prompt tiles can leave TP state split by layers, and short passes by GDN heads.
         // Both settle by copies only (no sum), before the same whole-state checkpoint on each rank.
         self.model.tp_part(b, &mut [self], &[0..0], true, false)?;
@@ -171,7 +202,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         Ok(())
     }
     fn checkpoint_storage(&mut self, b: &Backend<'a>) -> Result<Checkpoint<'a>> {
-        if let Some(c) = self.checkpoint.get_mut().take() { return Ok(Checkpoint { inside: false, ..c }); }
+        if let Some(c) = self.checkpoint.get_mut().take() { return Ok(Checkpoint { inside: false, unsent: false, ..c }); }
         // One arena (one allocation, one free) holds the whole checkpoint: a cold
         // request must not pay a driver allocation per layer.
         let mut lengths: Vec<usize> = self.gdn_state.iter().flatten().flat_map(|g| g.storage_lengths()).collect();
@@ -181,7 +212,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         let gdn = self.gdn_state.iter()
             .map(|g| g.as_ref().map(|g| g.with_storage(v.next().unwrap(), v.next().unwrap())))
             .collect();
-        Ok(Checkpoint { position: 0, gdn, ple: v.next().unwrap(), hash: self.hash.clone(), last: v.next(), remote: None, inside: false })
+        Ok(Checkpoint { position: 0, gdn, ple: v.next().unwrap(), hash: self.hash.clone(), last: v.next(), remote: None, inside: false, unsent: false })
     }
     /// One Spark, no debug dump: the final prompt tile keeps its tail rows (next_rows::final_rows).
     pub(super) fn keeps_tail(&self) -> bool {
@@ -202,7 +233,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
     pub(super) fn arm_inside(&mut self, b: &Backend<'a>, rows: usize) -> Result<()> {
         if !self.checkpointing || !self.pos.is_multiple_of(64) || rows <= 64 || rows.is_multiple_of(64) { return Ok(()); }
         let inside = rows / 64 * 64;
-        let remote = self.prepared_checkpoint(b, inside)?;
+        let remote = self.prepared_checkpoint(b, inside, false)?;
         if self.model.pp_front() && remote.is_none() { return Ok(()); }
         self.arm_storage(b, self.pos + inside, remote);
         Ok(())
@@ -258,7 +289,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
         self.checkpoint
             .borrow()
             .as_ref()
-            .filter(|c| self.valid && (c.last.is_some() || self.model.mtp_depth == 0 || !self.model.prompt_frontend))
+            .filter(|c| self.valid && !c.unsent && (c.last.is_some() || self.model.mtp_depth == 0 || !self.model.prompt_frontend))
             .map(|c| c.position)
     }
     /// Device bytes `save_prefix` allocates for the current checkpoint.
