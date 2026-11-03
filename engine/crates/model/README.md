@@ -7,6 +7,10 @@ instead of halfway through a load. It uses only the Rust standard library.
 This page is for people reading or changing how Vade reads model folders.
 To download a model, see [Models](../../docs/models.md).
 
+[Deferred GLM text metadata](GLM.md) describes config and index inspection.
+It does not enable model execution. [Host CSF decoding](CSF.md) describes
+the scale-byte codec and its public source.
+
 <details>
 <summary><b>Terms on this page</b>: checkpoint, tensor, shard, safetensors, tied embeddings</summary>
 

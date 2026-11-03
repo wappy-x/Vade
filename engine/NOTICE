@@ -103,3 +103,15 @@ The same inventory is maintained in the repository's root NOTICE.
              reporting for this repository.
    Text:     licenses/Contributor-Covenant-CC-BY-4.0.txt
    Source:   https://www.contributor-covenant.org/version/2/1/code_of_conduct.html
+
+10. GLM-5.3-Flash FP4-Local configuration and tensor-name fixture
+   By:       Z.ai and NVIDIA
+   Files:    crates/model/tests/fixtures/glm/config.json
+             crates/model/tests/fixtures/glm/index-patterns.txt
+   Source:   https://huggingface.co/nvidia/GLM-5.3-Flash-FP4-Local
+   Revision: 76348ddb2be2e35e39ecfc00e75dc07703f4f3d5
+   License:  The checkpoint card names the NVIDIA Open Model Agreement.
+   Changes:  Config kept as fetched; index names grouped into patterns.
+             No model weights are included.
+   Record:   crates/model/tests/fixtures/glm/README.md
+   These model data files are not covered by Vade's Apache-2.0 license.

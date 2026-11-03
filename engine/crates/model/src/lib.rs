@@ -1,5 +1,6 @@
 //! Bounded model-file inspection and dense Qwen3 checkpoint validation.
 pub mod flash;
+pub mod csf;
 pub mod placement;
 pub mod sampling_policy;
 pub mod plan;

@@ -2,6 +2,11 @@
 mod config;
 mod tensors;
 mod error;
+pub mod description;
+pub mod glm;
+pub mod glm_index;
+pub mod storage;
+pub use description::{ConfigPlan, TextDescription};
 pub mod profile;
 pub mod runtime;
 pub use error::PlanError;
