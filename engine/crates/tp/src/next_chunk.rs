@@ -230,7 +230,7 @@ impl<'a> Gpu<'_, 'a, '_> {
                 }
                 project_rows(b, &[(m[4], c.at(QSA_GATED, 0), c.at(ATTENTION, 0))], n)?;
             } else {
-                c.gs.copy_norm(b, &s.norms[li])?;
+                c.gs.use_norm(&s.norms[li])?;
                 let m = s.gdn_matrices(li)?;
                 s.owner(li)?;
                 let g = s.g[li].as_mut().ok_or("missing GDN owner")?;
@@ -421,7 +421,7 @@ impl<'a> Gpu<'_, 'a, '_> {
                 }
                 project_rows(b, &[(m[4], c.at(QSA_GATED, 0), c.at(ATTENTION, 0))], n)?;
             } else {
-                c.gs.copy_norm(b, &rows[0].norms[li])?;
+                c.gs.use_norm(&rows[0].norms[li])?;
                 let m = rows[0].gdn_matrices(li)?;
                 let ys = c.gs.row_addresses();
                 project_rows(b, &(0..4).map(|i| (m[i], mixed, ys[i])).collect::<Vec<_>>(), n)?;

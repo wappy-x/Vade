@@ -1028,7 +1028,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 self.qsa_state[li] = Some(qsa.into_state());
             } else {
                 self.gdn_scratch
-                    .copy_norm(b, self.gdn_norms[li].as_ref().unwrap())?;
+                    .use_norm(self.gdn_norms[li].as_ref().unwrap())?;
                 let mut gdn = Gdn::load_next(
                     b,
                     &self.model.weights,

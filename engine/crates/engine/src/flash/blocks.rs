@@ -225,15 +225,7 @@ pub fn bf16_rows(b: &Backend<'_>, weight: u64, x: u64, y: u64, rows: usize, cols
 }
 /// Flash-Next uses this same K16 operation graph for every M, including one.
 /// Prompt scheduling may change M/N tiling while keeping that operation graph.
-pub(super) fn next_rows(
-    b: &Backend<'_>,
-    weight: u64,
-    x: u64,
-    y: u64,
-    rows: usize,
-    cols: usize,
-    tokens: usize,
-) -> Result<()> {
+pub(super) fn next_rows(b: &Backend<'_>, weight: u64, x: u64, y: u64, rows: usize, cols: usize, tokens: usize) -> Result<()> {
     next_rows_strided(b, weight, x, y, rows, cols, tokens, rows)
 }
 pub(super) fn next_rows_strided(
@@ -302,6 +294,11 @@ pub(super) fn next_rows_strided(
         // A flagged (MXFP8) matrix runs the twin entry; its scales follow its bytes.
         let mut scales = 0u64;
         unsafe {
+            if p.weight & 1 != 0 && spark_gpu_probe::kernel_params::latency_mx8_range_warps(tokens, cols, rows) {
+                let mut group = Bf16Pairs { pairs: [p, row_params(packed, cols, tokens, (0, 0, 0, 0), (0, 0, 0, 0), true, false)] };
+                return b.launch_flash_rows("flash_mx8_mma_latency_group", 192, 1, 128, 4 * spark_gpu_probe::kernel_params::LATENCY_RING as u32,
+                    &mut [(&mut group as *mut Bf16Pairs).cast(), (&mut partials as *mut u64).cast()]);
+            }
             if p.weight & 1 != 0 {
                 let r1 = threads == 128 && verify_mx_solo97(tokens, rows, cols);
                 b.launch_flash_rows(

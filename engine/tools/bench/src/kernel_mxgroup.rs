@@ -1,6 +1,6 @@
 //! Kind 13 (MXFP8 groups): fixture, twin addresses and production-MXFP8 membership (moved
 //! verbatim from kernel_cuda.rs), plus KBENCH_MXROWS_X arms.
-use super::{fixture, mx_matrix, params, Case, Fixture, Gpu, Result, RING};
+use super::{fixture, mx_matrix, params, ptr, Case, Fixture, Gpu, Result, H, RING};
 /// Whether matrix j of a kind-13 group is MXFP8 in production: N % 4 == 0 and stored as
 /// MXFP8 in the checkpoint (the MoE router and every HC matrix are BF16 there).
 pub(super) fn all_mx(c: &Case) -> bool {
@@ -37,6 +37,17 @@ pub(super) fn mxgroup_fixture(g: &mut Gpu, c: &Case, order: bool) -> Result<Fixt
         }
     }
     Ok(v)
+}
+/// mxs- X arm: one MXFP8 matrix through the group entry, its four ranges on a CTA's warps.
+pub(super) fn mx_range_warps(g: &Gpu, f: H, v: &mut Fixture, i: usize) -> Result<()> {
+    let mut none = v.rows;
+    (none.weight, none.output, none.rows, none.stride) = (0, 0, 0, 0);
+    let mut pairs = params::Bf16Pairs { pairs: [v.rows, none] };
+    (pairs.pairs[0].weight, pairs.pairs[0].weight2) = (v.ring_x[i] | 1, 0);
+    let mut partials = v.aux;
+    let result = g.launch(f, v.grid, 128, 4 * RING, &mut [ptr(&mut pairs), ptr(&mut partials)]);
+    v.rows.weight = v.ring[i];
+    result
 }
 /// Matrix j's twin in X ring copy i (kind 13), flagged; BF16 matrices keep their address.
 pub(super) fn mxgroup_weight(c: &Case, v: &Fixture, i: usize, j: usize, bf16: u64) -> u64 {

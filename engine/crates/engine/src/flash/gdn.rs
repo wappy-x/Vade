@@ -67,6 +67,7 @@ pub(crate) fn shallow_verify(base: usize, tokens: usize) -> bool {
 const CHUNK_PIECE: usize = 8192;
 /// flash_next_gdn_chunk_scan dynamic shared bytes (kernel SCAN_BYTES).
 const CHUNK_SCAN_BYTES: u32 = spark_gpu_probe::gdn_params::CHUNK_SCAN_BYTES;
+const CHUNK_ROWS_BYTES: u32 = spark_gpu_probe::gdn_params::CHUNK_ROWS_BYTES;
 
 pub(crate) enum Arg { Ptr(u64), U32(u32), F32(f32) }
 use Arg::{F32, Ptr, U32};
@@ -188,6 +189,8 @@ pub struct GdnScratch<'a> {
     pub(crate) gated: DeviceVector<'a>,
     output: DeviceVector<'a>,
     norm: DeviceVector<'a>,
+    /// use_norm's address, 0 = `norm`.
+    norm_source: std::cell::Cell<u64>,
     cumulative: DeviceVector<'a>,
     system: DeviceVector<'a>,
     attention: DeviceVector<'a>,
@@ -277,7 +280,7 @@ impl<'a> GdnScratch<'a> {
             qkv: v.next().unwrap(), z: v.next().unwrap(), a: v.next().unwrap(), b: v.next().unwrap(),
             convolved: v.next().unwrap(), q: v.next().unwrap(), k: v.next().unwrap(), v: v.next().unwrap(),
             beta: v.next().unwrap(), decay: v.next().unwrap(), core: v.next().unwrap(), gated: v.next().unwrap(),
-            output: v.next().unwrap(), norm: v.next().unwrap(), cumulative: v.next().unwrap(),
+            output: v.next().unwrap(), norm: v.next().unwrap(), norm_source: std::cell::Cell::new(0), cumulative: v.next().unwrap(),
             system: v.next().unwrap(), attention: v.next().unwrap(), values: v.next().unwrap(),
             decayed_keys: v.next().unwrap(), chunk_decay: v.next().unwrap(), bytes,
             packed_out: std::cell::Cell::new(None), defer_gate: std::cell::Cell::new(false),
@@ -308,10 +311,6 @@ impl<'a> GdnScratch<'a> {
     }
     pub fn set_norm(&mut self, b: &Backend<'_>, full_norm: &[f32; DIM]) -> Result<()> {
         b.write_vector(&mut self.norm, full_norm)
-    }
-    /// Take a layer's gathered norm from a device copy (no host upload on the stream).
-    pub fn copy_norm(&mut self, b: &Backend<'_>, full_norm: &DeviceVector<'_>) -> Result<()> {
-        b.copy_range(full_norm, &mut self.norm, 0, 0, DIM)
     }
     /// Active shape is exactly tokens * 2560, including after a cached step.
     pub fn output(&self) -> &DeviceVector<'a> { &self.output }
@@ -912,32 +911,28 @@ impl<'a, 'w> Gdn<'a, 'w> {
         // A cohort table (chunk form only) already holds this layer's words at `table`; a fused
         // verify copy rewrites them there (the same words). Otherwise the descriptor is uploaded,
         // or written by the fused copy.
+        // The rows kernel takes the state address as a parameter: only larger pieces read the descriptor.
+        let small = chunked && tokens <= spark_gpu_probe::gdn_params::CHUNK_ROWS_LIMIT;
+        // One chat's window inside a chunk, its tape already holding the rows: the history launch
+        // writes the entry's storage and the two swap, so the entry keeps the old words with no copy.
+        let swapped = tape.is_some_and(|t| t.iter().all(|r| r.2 == 0)) && shallow_verify(base, tokens);
         let rows = match table {
             Some(at) if chunked => at,
             Some(_) => return Err("GDN cohort descriptor table needs the chunk form".into()),
             None => {
-                if tape.is_none() {
+                if tape.is_none() && !small {
                     b.write_vector(descriptor, &addresses.map(address).concat())?;
                 }
                 descriptor.device_address()
             }
         };
-        if let Some(entry) = entry {
+        let mut entry = entry;
+        if let Some(entry) = entry.as_mut() {
             if chunked && !shallow_verify(base, tokens) { b.copy_range(&self.state, &mut entry.state, 0, 0, self.state.len())?; }
-            if let Some(t) = tape {
-                if entry.history.len() < self.history.len() { return Err("GDN entry history too small".into()); }
-                let mut copy = spark_gpu_probe::kernel_params::GdnVerifyCopy {
-                    source: [t[0].0, t[1].0, t[2].0, self.history.device_address()],
-                    destination: [t[0].1, t[1].1, t[2].1, entry.history.device_address()],
-                    words: [t[0].2, t[1].2, t[2].2, u32::try_from(self.history.len()).map_err(|_| "GDN history words")?],
-                    descriptor: rows,
-                    addresses,
-                };
-                let blocks = copy.words.iter().copied().max().unwrap_or(0).max(1).div_ceil(1024);
-                unsafe {
-                    b.launch_flash_rows("flash_gdn_verify_copy", blocks, 4, 256, 0,
-                        &mut [(&mut copy as *mut spark_gpu_probe::kernel_params::GdnVerifyCopy).cast()])?;
-                }
+            if swapped {
+                // No copy: flash_gdn_history_to below leaves the old words in place.
+            } else if let Some(t) = tape {
+                self.verify_copy(b, t, entry, if small { 0 } else { rows }, addresses)?;
             } else if !s.entry_copied.get() {
                 // gdn::cohort_copies already copied this chat's entry history for the layer.
                 b.copy_range(&self.history, &mut entry.history, 0, 0, self.history.len())?;
@@ -959,7 +954,7 @@ impl<'a, 'w> Gdn<'a, 'w> {
         let mut history = GdnHistory {
             x: at(&s.qkv, width) as _,
             history: self.history.device_address() as _,
-            rows: 0,
+            rows: if swapped { entry.as_ref().map_or(0, |e| e.history.device_address()) } else { 0 },
             channels: width as u32,
             tokens: tokens as u32,
             precision: 0,
@@ -967,7 +962,7 @@ impl<'a, 'w> Gdn<'a, 'w> {
         let mut gate = GdnGate {
             x: core as _,
             z: at(&s.z, hd) as _,
-            norm: s.norm.device_address() as _,
+            norm: s.norm_address() as _,
             output: at(&s.gated, hd) as _,
             heads: (self.heads * tokens) as u32,
             tokens: 1,
@@ -1016,10 +1011,11 @@ impl<'a, 'w> Gdn<'a, 'w> {
                         beta: beta + done as u64 * h4, g: g + done as u64 * h4,
                         rows, out: core + done as u64 * hd4,
                         a: s.system.device_address(), p: s.attention.device_address(),
-                        gamma: s.cumulative.device_address(), k0: s.decayed_keys.device_address(),
+                        gamma: s.cumulative.device_address(),
+                        k0: if n <= spark_gpu_probe::gdn_params::CHUNK_ROWS_LIMIT { self.state.device_address() } else { s.decayed_keys.device_address() },
                         heads: self.heads as u32, keys: self.keys as u32, count: n as u32,
                         base: u32::try_from(at).map_err(|_| "GDN position past u32")?,
-                        z: if fuse_gate { z0 + done as u64 * hd4 } else { 0 }, norm: if fuse_gate { s.norm.device_address() } else { 0 },
+                        z: if fuse_gate { z0 + done as u64 * hd4 } else { 0 }, norm: if fuse_gate { s.norm_address() } else { 0 },
                         gated: if fuse_gate { gated0 + done as u64 * hd4 } else { 0 }, epsilon: self.epsilon, spare: 0,
                         x: x0, w: self.conv, history: self.history.device_address(),
                         channels: width as u32, x_start: done as u32,
@@ -1045,7 +1041,7 @@ impl<'a, 'w> Gdn<'a, 'w> {
                             s.collect(|batch| { batch.rows[0].push(c); batch.rows[1].extend(rest); })?;
                         } else {
                             for mut c in std::iter::once(c).chain(rest) {
-                                b.launch_flash_shared("flash_next_gdn_chunk_rows", self.heads as u32, 128, 0, &mut [(&mut c as *mut spark_gpu_probe::gdn_params::GdnChunkNext).cast()])?;
+                                b.launch_flash_shared("flash_next_gdn_chunk_rows", self.heads as u32, 128, CHUNK_ROWS_BYTES, &mut [(&mut c as *mut spark_gpu_probe::gdn_params::GdnChunkNext).cast()])?;
                             }
                         }
                         done += n;
@@ -1059,7 +1055,7 @@ impl<'a, 'w> Gdn<'a, 'w> {
                         // The scan applies the output gate itself (same words as
                         // flash_gdn_gate); these rows skip the gate launch below.
                         c.z = z0 + done as u64 * hd4;
-                        c.norm = s.norm.device_address();
+                        c.norm = s.norm_address();
                         c.gated = gated0 + done as u64 * hd4;
                     }
                     let param = (&mut c as *mut spark_gpu_probe::gdn_params::GdnChunkNext).cast();
@@ -1088,8 +1084,9 @@ impl<'a, 'w> Gdn<'a, 'w> {
             if collect {
                 s.collect(|batch| batch.history.push(history))?;
             } else {
-                b.launch_flash_shared("flash_gdn_history", width.div_ceil(128) as u32, 128, 0,
+                b.launch_flash_shared(if swapped { "flash_gdn_history_to" } else { "flash_gdn_history" }, width.div_ceil(128) as u32, 128, 0,
                     &mut [(&mut history as *mut GdnHistory).cast()])?;
+                if let Some(entry) = entry.as_mut().filter(|_| swapped) { std::mem::swap(&mut self.history, &mut entry.history); }
             }
             if emit && gated_rows < tokens && s.defer_gate.get() {
                 // Cohort verify: Gdn::gate_rows gates the whole pass (no fused gate there).
@@ -1432,7 +1429,7 @@ impl<'a, 'w> Gdn<'a, 'w> {
         })?;
         launch_gate(b, "flash_gdn_gate", GdnGate {
             x: s.core.device_address() as _, z: z as _,
-            norm: if self.precision { self.norm as _ } else { s.norm.device_address() as _ },
+            norm: if self.precision { self.norm as _ } else { s.norm_address() as _ },
             output: if packed_output.0 == 0 { gated as _ } else { packed_output.0 as _ },
             heads: self.heads as u32, tokens: tokens as u32, precision: self.parameter_precision,
             packed: if packed_output.0 == 0 { 0 } else { packed_output.1 }, epsilon: self.epsilon, sessions: 0 }, 1)

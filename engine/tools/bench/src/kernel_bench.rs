@@ -757,6 +757,12 @@ fn cases() -> Vec<Case> {
             }
         }
     }
+    // mxs-: one MXFP8 matrix of N > 640 rows through the group entry (X): its four K ranges
+    // run on a CTA's four warps; A = the BF16 latency launch, bytes equal.
+    for m in [1, 2, 3, 4] {
+        out.push(Case { name: format!("mxs-2560x640-m{m}"), kernel: "flash_mx8_mma_latency_group", m, n: 2560, k: 640, kind: 11, calls: 0, mats: [0; 4], ..Default::default() });
+    }
+    out.push(Case { name: "mx-2560x640-m3".into(), kernel: "flash_mx8_mma_latency", m: 3, n: 2560, k: 640, kind: 11, calls: 0, mats: [0; 4], ..Default::default() });
     // mx-r-: the wide-eligible MXFP8 cases with N % 64 == 0 and X =
     // flash_mx8_mma_latency_r (16-row warp tasks); mx- runs _r too instead of _w;
     // the mx- prefix keeps the latency fixture at M > 16.
@@ -956,6 +962,7 @@ fn run() -> Result<()> {
                 + 2 // hc_up4-lbf12-m1 / -lbf12raw-m1.
                 + 5 // hc_up16-lbf12-m2/4/8/16, -lbf12raw-m4.
                 + 10 // hc_norm-m1 / -m4, hc_norm_pack- and hc_act_pack-m1 / -m3 / -m4 / -m12 (kind 77).
+                + 5 // mxs-2560x640-m1..m4 and the solo mx-2560x640-m3.
                 ;
             assert_eq!(cases().len(), expect);
             // --case selects by name: every name names one case.

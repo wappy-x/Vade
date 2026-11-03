@@ -35,7 +35,7 @@ mod fp4_prompt;
 mod mxgroup;
 #[path = "kernel_fp8moe.rs"] mod fp8moe;
 pub(super) use fp8moe::run as fp8_moe;
-use mxgroup::{all_mx, group_mx, mxgroup_fixture, mxgroup_weight, mxrows_a, mxrows_entries, mxrows_shared, mxrows_x};
+use mxgroup::{all_mx, group_mx, mx_range_warps, mxgroup_fixture, mxgroup_weight, mxrows_a, mxrows_entries, mxrows_shared, mxrows_x};
 /// Latency-kernel shared bytes per warp, as the engine launches them.
 const RING: u32 = params::LATENCY_RING as u32;
 type H = *mut c_void;
@@ -1037,6 +1037,7 @@ fn launch(g: &Gpu, f: H, merge: H, c: &Case, v: &mut Fixture, i: usize, arm: usi
             return if c.m > 16 { let r0 = v.rows; for (h, t) in [(0usize, 16usize), (1, c.m - 16)] { v.rows.input = r0.input + (h * c.k / 16 * 512) as u64; v.rows.output = r0.output + (h * 16 * c.n * 4) as u64; v.rows.tokens = t as u32; launch(g, f, merge, &Case { kind: 0, m: t, ..c.clone() }, v, i, arm, (pre, shared, threads))?; } v.rows = r0; Ok(()) } else { launch(g, f, merge, &Case { kind: 0, ..c.clone() }, v, i, arm, (pre, shared, threads)) };
         }
         v.rows.weight = v.ring_x[i];
+        if c.kernel == "flash_mx8_mma_latency_group" { return mx_range_warps(g, f, v, i); }
         let mut scales = v.scales_x[i];
         let shared = if c.kernel == "flash_verify_mx_solo97" { params::verify_solo97_shared(c.k) } else { params::latency_mx8_shared(c.m, c.k, v.threads as usize / 32) } as u32;
         g.launch(f, v.grid, v.threads, shared, &mut [ptr(&mut v.rows), ptr(&mut scales), ptr(&mut v.aux)])?;

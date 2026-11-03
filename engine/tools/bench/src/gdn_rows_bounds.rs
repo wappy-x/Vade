@@ -6,7 +6,7 @@
 //!   x `[rows][channels]`, w BF16 `[channels][4]`, history `[channels][4]`;
 //!   ga/gb, beta/g `[rows][heads]`; A_log/dt_bias `[heads]`; norm `[128]`;
 //!   q/k/v, out, z, gated `[rows][heads][128]`; the chunk-form state (chunk_state_floats);
-//!   static shared CHUNK_ROW_BYTES.
+//!   dynamic shared CHUNK_ROWS_BYTES.
 //! Row indices are absolute in the conv call: piece p starts at row x_start.
 //! A write that two CTAs make to one word, or that one CTA makes to a word another
 //! CTA reads in the same launch, is a failure too (q/k slots, tail rows).
@@ -14,8 +14,8 @@ use std::collections::HashMap;
 
 const D: usize = 128;
 const C: usize = 64;
-/// Static shared bytes of the rows kernel: kd `[64][128]` (stride 65 as `[128][65]`),
-/// q_i, k_i `[128]`, A_ij, P_ij, f_j `[64]` (gdn_params::CHUNK_ROW_BYTES).
+/// Shared bytes of the rows kernel (dynamic): kd `[64][128]` (stride 65 as `[128][65]`),
+/// q_i, k_i `[128]`, A_ij, P_ij, f_j `[64]` (gdn_params::CHUNK_ROWS_BYTES with the v' rows).
 const SLOT_KD: usize = 0;
 const SLOT_Q: usize = D * (C + 1) * 4;
 const SLOT_K: usize = SLOT_Q + D * 4;
@@ -23,6 +23,9 @@ const SLOT_A: usize = SLOT_K + D * 4;
 const SLOT_P: usize = SLOT_A + C * 4;
 const SLOT_F: usize = SLOT_P + C * 4;
 const SLOT_BYTES: usize = SLOT_F + C * 4;
+/// The open chunk's v' rows `[64][128]` after the slot layout (`SHARED_BYTES` in all).
+const ROWS_TW: usize = SLOT_BYTES;
+const SHARED_BYTES: usize = ROWS_TW + C * D * 4;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Buf { X, W, History, Ga, Gb, Alog, Dt, Q, K, V, Beta, G, Out, Z, Gated, Norm, State }
@@ -44,7 +47,7 @@ impl Walk {
         *map.entry((b, index as usize)).or_insert(0) |= 1u64 << cta;
     }
     fn shared(&mut self, byte: usize) {
-        if byte + 4 > SLOT_BYTES && self.errors.len() < 8 { self.errors.push(format!("shared byte {byte} outside {SLOT_BYTES}")); }
+        if byte + 4 > SHARED_BYTES && self.errors.len() < 8 { self.errors.push(format!("shared byte {byte} outside {SHARED_BYTES}")); }
     }
 }
 
@@ -64,7 +67,10 @@ fn launch(w: &mut Walk, heads: usize, keys: usize, n: usize, base: usize, x_star
             let mut idx = tid;
             while idx < base % C * 32 {
                 let (j, d4) = (idx / 32, idx % 32 * 4);
-                for x in 0..4 { state(w, tk + j * D + d4 + x, h, false); w.shared(SLOT_KD + ((d4 + x) * (C + 1) + j) * 4); }
+                for x in 0..4 {
+                    state(w, tk + j * D + d4 + x, h, false); w.shared(SLOT_KD + ((d4 + x) * (C + 1) + j) * 4);
+                    state(w, tw + j * D + d4 + x, h, false); w.shared(ROWS_TW + (j * D + d4 + x) * 4);
+                }
                 idx += 128;
             }
         }
@@ -112,11 +118,11 @@ fn launch(w: &mut Walk, heads: usize, keys: usize, n: usize, base: usize, x_star
                     w.shared(SLOT_A + tid * 4); w.shared(SLOT_P + tid * 4);
                 } else if tid == i { w.shared(SLOT_P + tid * 4); }
                 w.word(Buf::V, (at + h * D + tid) as isize, h, false);
-                for j in 0..i { state(w, tw + j * D + tid, h, false); w.shared(SLOT_A + j * 4); w.shared(SLOT_P + j * 4); }
+                for j in 0..i { w.shared(ROWS_TW + (j * D + tid) * 4); w.shared(SLOT_A + j * 4); w.shared(SLOT_P + j * 4); }
                 w.shared(SLOT_P + i * 4);
                 w.word(Buf::Out, (at + h * D + tid) as isize, h, true);
                 if i + 1 < C {
-                    state(w, tw + i * D + tid, h, true);
+                    state(w, tw + i * D + tid, h, true); w.shared(ROWS_TW + (i * D + tid) * 4);
                     if tid == 0 { state(w, tg + i, h, true); }
                     if h == h0 { state(w, tk + i * D + tid, h, true); }
                     w.shared(SLOT_KD + (tid * (C + 1) + i) * 4);

@@ -167,6 +167,22 @@ pub unsafe extern "ptx-kernel" fn flash_gdn_conv(
 
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_gdn_history(p: crate::kernel_params::GdnHistory) { history_token(p); }
+/// flash_gdn_history's words written to `p.rows` instead of `p.history`, which keeps its own
+/// (one chat's shallow verify: the host swaps the two, so no snapshot copy runs). Precision 0.
+// SAFETY: the caller launches width.div_ceil(128) CTAs of 128 threads, so each channel has one
+// thread. `p.history` and `p.rows` hold channels * 4 words and do not overlap, and `p.x` holds
+// tokens * channels words, so every load and store stays in its vector and no word is written twice.
+#[no_mangle]
+pub unsafe extern "ptx-kernel" fn flash_gdn_history_to(p: crate::kernel_params::GdnHistory) {
+    let channel = index();
+    if channel >= p.channels as usize { return; }
+    let (old, new, rows) = (p.history as *const f32, p.rows as *mut f32, p.tokens as isize);
+    for tap in 0..4 {
+        let source = rows + tap as isize - 4;
+        *new.add(channel * 4 + tap) = if source >= 0 { *p.x.add(source as usize * p.channels as usize + channel) }
+            else { *old.add(channel * 4 + (source + 4) as usize) };
+    }
+}
 /// Grid (ceil(max words / 1024), 4) x 256: range blockIdx.y copies 16-byte group
 /// g = x * 256 + tid (words 4g..4g+4; a misaligned range or its last partial group goes
 /// word by word). CTA (0, 0) thread 0 also writes the descriptor. Ranges must not overlap

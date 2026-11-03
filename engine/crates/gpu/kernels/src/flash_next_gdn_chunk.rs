@@ -889,6 +889,15 @@ const SLOT_P: u32 = SLOT_A + (C * 4) as u32;
 const SLOT_F: u32 = SLOT_P + (C * 4) as u32;
 const SLOT_BYTES: usize = SLOT_F as usize + C * 4;
 const _: () = assert!(SLOT_BYTES as u32 == crate::gdn_params::CHUNK_ROW_BYTES);
+/// flash_next_gdn_chunk_rows: the open chunk's v' rows `[64][128]` after the slot layout. A call
+/// loads them once and keeps its own rows there; the row steps never wait on a global load. The
+/// cohort entry keeps the slot layout: with this block its closing windows ran 13 % slower.
+/// The rows entry has no static shared allocation: the host launches it with ROWS_BYTES of
+/// dynamic shared memory (over the 48 KiB static cap; the launch sets the attribute), and the
+/// driver's dynamic region starts at 0.
+const ROWS_TW: u32 = SLOT_BYTES as u32;
+const ROWS_BYTES: usize = SLOT_BYTES + C * D * 4;
+const _: () = assert!(ROWS_BYTES as u32 == crate::gdn_params::CHUNK_ROWS_BYTES && ROWS_BYTES <= 101376);
 
 /// `$body` once per d = 0 .. 127 with `$d` a literal (register arrays stay in
 /// registers).
@@ -911,18 +920,18 @@ macro_rules! d128 {
 /// key rows while other CTAs still read); earlier rows come from the tail.
 /// Same bytes as prep + scan over the same rows (kernel-bench split checks).
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn flash_next_gdn_chunk_rows(p: GdnChunkNext) { chunk_rows(p) }
+pub unsafe extern "ptx-kernel" fn flash_next_gdn_chunk_rows(p: GdnChunkNext) { chunk_rows::<true>(p) }
 /// Cohort verify form (VADE_GDN_COHORT_KERNELS): grid-Y = chat, whose GdnChunkNext is
 /// entry y of the table at `table`. Each CTA runs flash_next_gdn_chunk_rows' code on its
 /// chat's parameters, and no chat reads or writes another's state, tail or rows, so every
 /// chat gets that kernel's words.
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_next_gdn_chunk_rows_cohort(table: u64) {
-    chunk_rows(core::ptr::read((table as *const GdnChunkNext).add(_block_idx_y() as usize)))
+    chunk_rows::<false>(core::ptr::read((table as *const GdnChunkNext).add(_block_idx_y() as usize)))
 }
 #[inline(always)]
-unsafe fn chunk_rows(p: GdnChunkNext) {
-    let sh = crate::ptx::shared::<SLOT_BYTES>();
+unsafe fn chunk_rows<const STAGED: bool>(p: GdnChunkNext) {
+    let sh = if STAGED { opaque(0) } else { crate::ptx::shared::<SLOT_BYTES>() };
     let tid = _thread_idx_x() as usize;
     let h = _block_idx_x() as usize;
     let (heads, keys) = (p.heads as usize, p.keys as usize);
@@ -933,13 +942,13 @@ unsafe fn chunk_rows(p: GdnChunkNext) {
     let h0 = kh * repeat;
     let hd = heads * D;
     let (base, count) = (p.base as usize, p.count as usize);
-    let state = (*(p.rows as *const GdnDecodeRow)).state as *mut f32;
+    let state = p.k0 as *mut f32;
     let (tk_at, tw_at, tg_at) = tail(heads, keys);
     let (tk, tw, tg) = (state.add(tk_at + kh * C * D), state.add(tw_at + h * C * D), state.add(tg_at + h * C));
     let s = state.add(h * D * D);
     let (q, k, v) = (p.q as *const f32, p.k as *const f32, p.v as *const f32);
     let mut scol = [0.0f32; D];
-    d128!(d => scol[d] = *s.add(d * D + tid));
+    if !STAGED { d128!(d => scol[d] = *s.add(d * D + tid)); }
     // Key rows of the open chunk, transposed into the kd region as [d][j]
     // (stride 65): the tail's rows now (whole-row loads), each new row's key
     // after its step; the chunk close rewrites the region, the next chunk
@@ -949,6 +958,7 @@ unsafe fn chunk_rows(p: GdnChunkNext) {
         let (j, d4) = (idx / 32, idx % 32 * 4);
         let k4 = ldg4(tk.add(j * D + d4));
         for x in 0..4 { sts(sh + SLOT_KD + (((d4 + x) * (C + 1) + j) * 4) as u32, k4[x]); }
+        if STAGED { sts4(sh + ROWS_TW + ((j * D + d4) * 4) as u32, ldg4(tw.add(j * D + d4))); }
         idx += 128;
     }
     // Fused prepare (ga != 0): this CTA writes flash_gdn_conv_prepare_tokens_khs'
@@ -974,6 +984,8 @@ unsafe fn chunk_rows(p: GdnChunkNext) {
         }
         sync();
     }
+    // S after the prepare: its 64 KB stream would hold back the convolution's loads.
+    if STAGED { d128!(d => scol[d] = *s.add(d * D + tid)); }
     for r in 0..count {
         let pos = base + r;
         let i = pos % C;
@@ -1013,7 +1025,7 @@ unsafe fn chunk_rows(p: GdnChunkNext) {
         let mut w = fma(-e, ks, *v.add(at + h * D + tid)) * beta;
         let mut o = 0.0f32;
         for j in 0..i {
-            let t = *tw.add(j * D + tid);
+            let t = if STAGED { lds(sh + ROWS_TW + ((j * D + tid) * 4) as u32) } else { *tw.add(j * D + tid) };
             w = fma(-lds(sh + SLOT_A + (j * 4) as u32), t, w);
             o = fma(lds(sh + SLOT_P + (j * 4) as u32), t, o);
         }
@@ -1021,6 +1033,7 @@ unsafe fn chunk_rows(p: GdnChunkNext) {
         *(p.out as *mut f32).add(at + h * D + tid) = fma(e, qs, o);
         if i + 1 < C {
             *tw.add(i * D + tid) = w;
+            if STAGED { sts(sh + ROWS_TW + ((i * D + tid) * 4) as u32, w); }
             if tid == 0 { *tg.add(i) = gamma; }
             if h == h0 { *tk.add(i * D + tid) = lds(sh + SLOT_K + (tid * 4) as u32); }
             sts(sh + SLOT_KD + ((tid * (C + 1) + i) * 4) as u32, lds(sh + SLOT_K + (tid * 4) as u32));

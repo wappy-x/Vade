@@ -284,10 +284,10 @@ impl<'a, 'w, E: Exchange> Session<'a, 'w, E> {
                         } else { None };
                         let spans = if projected.is_some() {
                             this.gdn_group.get_mut(r).ok_or("missing Flash prompt GDN workspace")?
-                                .copy_norm(b, this.gdn_norms[r][layer].as_ref().unwrap())?;
+                                .use_norm(this.gdn_norms[r][layer].as_ref().unwrap())?;
                             recurrence_spans(count, boundary.saturating_sub(g * this.group))
                         } else {
-                            scratch.copy_norm(b, this.gdn_norms[r][layer].as_ref().unwrap())?;
+                            scratch.use_norm(this.gdn_norms[r][layer].as_ref().unwrap())?;
                             vec![(0, count)]
                         };
                         for &(start, n) in &spans {

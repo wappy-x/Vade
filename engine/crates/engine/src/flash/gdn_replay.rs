@@ -68,6 +68,17 @@ impl<'a> GdnReplay<'a> {
         Ok(out)
     }
 
+    /// One verify chat: `rows` rows of the tape as the views that take the layer's projections,
+    /// so no capture copy runs (GdnScratch::use_projections). None: the tape is too short.
+    pub(in crate::flash) fn views(&mut self, rows: usize, widths: [usize; 3]) -> Result<Option<[DeviceVector<'a>; 3]>> {
+        self.rows = 0;
+        if self.projected.iter().zip(widths).any(|(v, width)| rows * width > v.len() || v.is_segmented()) { return Ok(None); }
+        self.widths = widths;
+        let [qkv, a, b] = std::array::from_fn(|i| self.projected[i].slice(0..rows * widths[i]));
+        self.rows = rows;
+        Ok(Some([qkv?, a?, b?]))
+    }
+
     /// capture's three copies as flash_hybrid_copy rows [qkv, a, b] (gdn::cohort_copies); the
     /// caller launches them before the layer scratch is reused.
     pub(in crate::flash) fn capture_rows(
@@ -114,6 +125,23 @@ impl<'a> GdnReplay<'a> {
 }
 
 impl<'a> Gdn<'a, '_> {
+    /// `tape`'s non-empty ranges, this layer's history into `entry` and the descriptor in one
+    /// flash_gdn_verify_copy launch (gdn::fused_verify_copy).
+    pub(super) fn verify_copy(&self, b: &Backend<'_>, tape: [(u64, u64, u32); 3], entry: &GdnState<'_>, descriptor: u64, addresses: [u64; 3]) -> Result<()> {
+        if entry.history.len() < self.history.len() { return Err("GDN entry history too small".into()); }
+        let history = (self.history.device_address(), entry.history.device_address(),
+            u32::try_from(self.history.len()).map_err(|_| "GDN history words")?);
+        let (mut ranges, mut used) = ([(0, 0, 0); 4], 0);
+        for r in tape.into_iter().filter(|r| r.2 != 0).chain([history]) { ranges[used] = r; used += 1; }
+        let mut copy = spark_gpu_probe::kernel_params::GdnVerifyCopy {
+            source: ranges.map(|r| r.0), destination: ranges.map(|r| r.1), words: ranges.map(|r| r.2), descriptor, addresses,
+        };
+        let blocks = copy.words.iter().copied().max().unwrap_or(0).max(1).div_ceil(1024);
+        unsafe {
+            b.launch_flash_rows("flash_gdn_verify_copy", blocks, used as u32, 256, 0,
+                &mut [(&mut copy as *mut spark_gpu_probe::kernel_params::GdnVerifyCopy).cast()])
+        }
+    }
     /// Shallow rejection (gdn::shallow_verify): S is untouched and the
     /// accepted rows' tail entries are in place (the verify wrote the same
     /// bytes the row replay would), so only the conv history advances over

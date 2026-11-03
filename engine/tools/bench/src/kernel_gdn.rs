@@ -51,6 +51,13 @@ fn function(g: &Gpu, m: H, name: &str, shared: u32) -> Result<H> {
     }
     Ok(f)
 }
+/// flash_next_gdn_chunk_rows and its dynamic shared bytes. A module whose rows entry has no static
+/// shared takes gdn::CHUNK_ROWS_BYTES. An older module with a static layout either refuses that
+/// attribute (static + dynamic over the per-block cap) and launches with 0, or ignores the bytes.
+fn rows_function(g: &Gpu, m: H) -> Result<(H, u32)> {
+    const ROWS: &str = "flash_next_gdn_chunk_rows";
+    match function(g, m, ROWS, gdn::CHUNK_ROWS_BYTES) { Ok(f) => Ok((f, gdn::CHUNK_ROWS_BYTES)), Err(_) => Ok((function(g, m, ROWS, 0)?, 0)) }
+}
 
 struct Rng(u64);
 impl Rng {
@@ -273,7 +280,7 @@ fn chunk_gated(g: &mut Gpu, m: H, dev: [u64; 5], calls: &[(usize, usize, u8)], p
     let slot = function(g, m, "flash_next_gdn_chunk_slot", 0)?;
     // Small prompt calls take the row kernel exactly as the engine dispatches
     // them (X modules without it, e.g. older branches, keep prep + scan).
-    let rows = if count_small(calls) { g.function(m, "flash_next_gdn_chunk_rows").ok() } else { None };
+    let rows = if count_small(calls) { rows_function(g, m).ok() } else { None };
     let state = g.alloc(CHUNK_STATE * 4)?;
     let desc = g.upload(&[state.to_le_bytes(), 0u64.to_le_bytes(), 0u64.to_le_bytes()].concat())?;
     let width = HEADS * D;
@@ -316,8 +323,9 @@ fn chunk_gated(g: &mut Gpu, m: H, dev: [u64; 5], calls: &[(usize, usize, u8)], p
         };
         if kind == REJECT { launches.push(copy(snap, state)); }
         match rows {
-            Some(f) if count <= gdn::CHUNK_ROWS_LIMIT => {
-                launches.push(Launch { f, grid: [HEADS as u32, 1, 1], block: 128, shared: 0, params: vec![blob(&params)] });
+            Some((f, bytes)) if count <= gdn::CHUNK_ROWS_LIMIT => {
+                let params = gdn::GdnChunkNext { k0: state, ..params };
+                launches.push(Launch { f, grid: [HEADS as u32, 1, 1], block: 128, shared: bytes, params: vec![blob(&params)] });
             }
             _ => {
                 launches.push(Launch { f: prep, grid: [chunks as u32, KEYS as u32, 1], block: 256, shared: 0, params: vec![blob(&params)] });
@@ -579,6 +587,7 @@ fn fstep(g: &mut Gpu, modules: [H; 2], rows: usize, open: usize, keys: usize) ->
             let (state, history) = (g.alloc(floats_state * 4)?, g.alloc(width * 16)?);
             let (core, gated) = (g.alloc(rows * hd * 4)?, g.alloc(rows * hd * 4)?);
             let mut launches = vec![];
+            let mut next_history = 0u64;
             if arm == 0 {
                 let (q, k, v) = (g.alloc(rows * hd * 4)?, g.alloc(rows * hd * 4)?, g.alloc(rows * hd * 4)?);
                 let (beta, gg) = (g.alloc(rows * heads * 4)?, g.alloc(rows * heads * 4)?);
@@ -591,10 +600,11 @@ fn fstep(g: &mut Gpu, modules: [H; 2], rows: usize, open: usize, keys: usize) ->
                 for &(at, n) in &pieces {
                     let (f4, h4) = ((at * hd * 4) as u64, (at * heads * 4) as u64);
                     let c = gdn::GdnChunkNext { q: q + f4, k: k + f4, v: v + f4, beta: beta + h4, g: gg + h4, rows: desc, out: core + f4,
-                        a: 0, p: 0, gamma: 0, k0: 0, heads: heads as u32, keys: keys as u32, count: n as u32, base: (base + at) as u32,
+                        a: 0, p: 0, gamma: 0, k0: state, heads: heads as u32, keys: keys as u32, count: n as u32, base: (base + at) as u32,
                         z: 0, norm: 0, gated: 0, epsilon: 1e-6, spare: 0, x: 0, w: 0, history: 0, channels: 0, x_start: 0,
                         ga: 0, gb: 0, alog: 0, dt: 0, pk: 0, pk_tokens: 0, pk_row0: 0 };
-                    launches.push(Launch { f: function(g, modules[0], "flash_next_gdn_chunk_rows", 0)?, grid: [heads as u32, 1, 1], block: 128, shared: 0, params: vec![blob(&c)] });
+                    let (f, shared) = rows_function(g, modules[0])?;
+                    launches.push(Launch { f, grid: [heads as u32, 1, 1], block: 128, shared, params: vec![blob(&c)] });
                 }
                 let hp = GdnHistory { x: xd as _, history: history as _, rows: 0, channels: width as u32, tokens: rows as u32, precision: 0 };
                 launches.push(Launch { f: function(g, modules[0], "flash_gdn_history", 0)?, grid: [width.div_ceil(128) as u32, 1, 1], block: 128, shared: 0, params: vec![blob(&hp)] });
@@ -610,16 +620,25 @@ fn fstep(g: &mut Gpu, modules: [H; 2], rows: usize, open: usize, keys: usize) ->
                 for &(at, n) in &pieces {
                     let (f4, h4) = ((at * hd * 4) as u64, (at * heads * 4) as u64);
                     let c = gdn::GdnChunkNext { q: q + f4, k: k + f4, v: v + f4, beta: beta + h4, g: gg + h4, rows: desc, out: core + f4,
-                        a: 0, p: 0, gamma: 0, k0: 0, heads: heads as u32, keys: keys as u32, count: n as u32, base: (base + at) as u32,
+                        a: 0, p: 0, gamma: 0, k0: state, heads: heads as u32, keys: keys as u32, count: n as u32, base: (base + at) as u32,
                         z: zd + f4, norm: nd, gated: gated + f4, epsilon: 1e-6, spare: 0, x: xd, w: wd, history, channels: width as u32, x_start: at as u32,
                         ga: ad + h4, gb: bd + h4, alog: sd, dt: sd + (heads * 2) as u64, pk: 0, pk_tokens: 0, pk_row0: 0 };
-                    launches.push(Launch { f: function(g, modules[1], "flash_next_gdn_chunk_rows", 0)?, grid: [heads as u32, 1, 1], block: 128, shared: 0, params: vec![blob(&c)] });
+                    let (f, shared) = rows_function(g, modules[1])?;
+                    launches.push(Launch { f, grid: [heads as u32, 1, 1], block: 128, shared, params: vec![blob(&c)] });
                 }
-                let hp = GdnHistory { x: xd as _, history: history as _, rows: 0, channels: width as u32, tokens: rows as u32, precision: 0 };
-                launches.push(Launch { f: function(g, modules[1], "flash_gdn_history", 0)?, grid: [width.div_ceil(128) as u32, 1, 1], block: 128, shared: 0, params: vec![blob(&hp)] });
+                // The X history out of place, as a one-chat shallow verify runs it: the old
+                // words stay in `history` (bytes A == X on the new words at `next`).
+                let (to, target) = match g.function(modules[1], "flash_gdn_history_to") {
+                    Ok(_) => ("flash_gdn_history_to", g.alloc(width * 16)?),
+                    Err(_) => ("flash_gdn_history", 0),
+                };
+                next_history = target;
+                let hp = GdnHistory { x: xd as _, history: history as _, rows: target, channels: width as u32, tokens: rows as u32, precision: 0 };
+                launches.push(Launch { f: function(g, modules[1], to, 0)?, grid: [width.div_ceil(128) as u32, 1, 1], block: 128, shared: 0, params: vec![blob(&hp)] });
             }
             let resets = vec![(state, sp, floats_state * 4), (history, hp, width * 16)];
-            let hashed = vec![(core, rows * hd * 4), (gated, rows * hd * 4), (state, floats_state * 4), (history, width * 16)];
+            let written = if next_history != 0 { next_history } else { history };
+            let hashed = vec![(core, rows * hd * 4), (gated, rows * hd * 4), (state, floats_state * 4), (written, width * 16)];
             arms[arm].push(Arm { resets, launches, hashed, layout: 0 });
         }
     }
@@ -711,7 +730,7 @@ fn cfstep(g: &mut Gpu, modules: [H; 2], rows: usize, open: usize, chats: usize) 
                     let (f4, h4) = (((c * rows + at) * hd * 4) as u64, ((c * rows + at) * heads * 4) as u64);
                     let fused = arm == 1;
                     blob(&gdn::GdnChunkNext { q: q + f4, k: k + f4, v: v + f4, beta: beta + h4, g: gg + h4, rows: descs[c], out: core + f4,
-                        a: 0, p: 0, gamma: 0, k0: 0, heads: heads as u32, keys: keys as u32, count: n as u32, base: (base + at) as u32,
+                        a: 0, p: 0, gamma: 0, k0: chat[c].0, heads: heads as u32, keys: keys as u32, count: n as u32, base: (base + at) as u32,
                         z: 0, norm: 0, gated: 0, epsilon: 1e-6, spare: 0,
                         x: if fused { xd + (c * rows * width * 4) as u64 } else { 0 }, w: if fused { wd } else { 0 }, history: if fused { chat[c].1 } else { 0 },
                         channels: if fused { width as u32 } else { 0 }, x_start: if fused { at as u32 } else { 0 },

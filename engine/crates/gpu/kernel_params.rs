@@ -747,6 +747,12 @@ pub const fn latency_wide_chunk_tiles(cols: usize, g: usize) -> usize {
 /// 8 ring stages x (two 16-token input tiles, hi and lo planes, 2048 bytes + two 256-byte B fragments
 /// for the task's two 8-row groups).
 pub const LATENCY_GROUP2_SHARED: usize = 4 * 8 * 2560;
+/// One MXFP8 matrix at M3-4 whose K has no K64 ring (K % 256 != 0), N > 640: the group entry runs
+/// its four K ranges on a CTA's four warps instead of one warp per row group (same chains, same
+/// merge). kernel-bench mx- vs mxs-: M3 and M4 gain, M1 and M2 lose.
+pub const fn latency_mx8_range_warps(tokens: usize, cols: usize, rows: usize) -> bool {
+    tokens >= 3 && tokens <= 4 && cols % 256 != 0 && rows > 640 && latency_split(rows, true)
+}
 /// Kernel split predicate: grouped launches merge inside the CTA.
 pub const fn latency_split(total_rows: usize, grouped: bool) -> bool {
     total_rows <= if grouped { 4096 } else { 640 }

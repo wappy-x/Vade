@@ -817,7 +817,7 @@ impl RankKernels for Gpu<'_, '_, '_> {
             q.attend(b, &mut self.qs)?;
             out.copy_from_slice(&b.read_vector(self.qs.output())?);
         } else {
-            self.gs.copy_norm(b, &self.norms[li])?;
+            self.gs.use_norm(&self.norms[li])?;
             let m = self.projections(
                 li,
                 "linear_attn",
@@ -859,7 +859,7 @@ impl RankKernels for Gpu<'_, '_, '_> {
             let mut matrices = Vec::new();
             for (s, _, _) in rows.iter_mut() {
                 s.prepare_attention(li)?;
-                s.gs.copy_norm(b, &s.norms[li])?;
+                s.gs.use_norm(&s.norms[li])?;
                 let m = s.projections(
                     li,
                     "linear_attn",

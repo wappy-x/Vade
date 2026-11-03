@@ -1,6 +1,22 @@
 //! Next-only GDN workspace sharing, separate from recurrence execution.
 use super::*;
 
+impl<'a> GdnScratch<'a> {
+    /// The next projections and scans use `views` as qkv, a, b; returns the views they replace.
+    pub(in crate::flash) fn use_projections(&mut self, [qkv, a, b]: [DeviceVector<'a>; 3]) -> [DeviceVector<'a>; 3] {
+        [std::mem::replace(&mut self.qkv, qkv), std::mem::replace(&mut self.a, a), std::mem::replace(&mut self.b, b)]
+    }
+    /// The gates of the next scans read `full_norm` (the layer's gathered norm) in place.
+    pub fn use_norm(&self, full_norm: &DeviceVector<'_>) -> Result<()> {
+        if full_norm.len() < DIM { return Err("GDN norm shape".into()); }
+        self.norm_source.set(full_norm.device_address());
+        Ok(())
+    }
+    pub(crate) fn norm_address(&self) -> u64 {
+        match self.norm_source.get() { 0 => self.norm.device_address(), at => at }
+    }
+}
+
 impl<'a, 'w> Gdn<'a, 'w> {
     /// Ordered mixed-checkpoint rows need full token-major Q/K/V, without
     /// chunk64's triangular-system workspaces or its 64-token constructor cap.

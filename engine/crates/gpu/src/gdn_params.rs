@@ -54,7 +54,8 @@ pub struct GdnStepGateBatch {
 /// chunk holds base % 64 rows). Workspace per (call chunk, value head): a holds A
 /// in the substitution layout [64 j][4 m%4][16 m/4], p holds qk per (call chunk,
 /// key head) as [64 j][64 i] packed (the scan forms P from it and gamma),
-/// gamma holds `[64]`; k0 holds the first chunk's tail key rows `[keys][64][128]`.
+/// gamma holds `[64]`; k0 holds the first chunk's tail key rows `[keys][64][128]`
+/// (flash_next_gdn_chunk_rows: k0 is the state address, it reads no descriptor).
 #[repr(C)]
 pub struct GdnChunkNext {
     pub q: u64, pub k: u64, pub v: u64, pub beta: u64, pub g: u64,
@@ -98,10 +99,13 @@ pub const CHUNK_SCAN_BYTES: u32 = (128 * 128 + 64 * 128 + 4 * 64) * 4 + 16;
 /// function per row, S column in registers) instead of prep + scan; the bytes
 /// are the same either way (kernel-bench split checks).
 pub const CHUNK_ROWS_LIMIT: usize = 8;
-/// Static shared bytes of flash_next_gdn_chunk_rows and _slot (launch with 0
+/// Static shared bytes of flash_next_gdn_chunk_slot (launch with 0
 /// dynamic bytes): kd `[64][128]` (the slot kernel stages tail keys there as
 /// `[128][65]`), q_i and k_i `[128]`, A_ij, P_ij and f_j `[64]`.
 pub const CHUNK_ROW_BYTES: u32 = (128 * 65 + 2 * 128 + 3 * 64) * 4;
+/// Dynamic shared bytes of flash_next_gdn_chunk_rows (the launch sets the attribute; the
+/// entry has no static shared): CHUNK_ROW_BYTES, then the open chunk's v' rows `[64][128]`.
+pub const CHUNK_ROWS_BYTES: u32 = CHUNK_ROW_BYTES + 64 * 128 * 4;
 /// FP32 words of one layer's chunk-form GDN state: S `[heads][128][128]`, then the
 /// open chunk's tail: key rows `[keys][64][128]`, v' rows `[heads][64][128]` and
 /// gamma `[heads][64]`. Rows at or past base % 64 are stale and never read.

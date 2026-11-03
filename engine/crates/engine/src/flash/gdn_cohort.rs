@@ -168,7 +168,7 @@ impl<'a> Gdn<'a, '_> {
         let hd = self.heads * DIM;
         let core = s.token_workspace(start, tokens)?[5];
         let at = |v: &DeviceVector<'_>| v.device_address() + (start * hd * 4) as u64;
-        let mut gate = GdnGate { x: core as _, z: at(&s.z) as _, norm: s.norm.device_address() as _, output: at(&s.gated) as _,
+        let mut gate = GdnGate { x: core as _, z: at(&s.z) as _, norm: s.norm_address() as _, output: at(&s.gated) as _,
             heads: (self.heads * tokens) as u32, tokens: 1, precision: 0, packed: 0, epsilon: self.epsilon, sessions: 0 };
         unsafe {
             b.launch_flash_shared("flash_gdn_gate", (self.heads * tokens * 32).div_ceil(128) as u32, 128, 0,

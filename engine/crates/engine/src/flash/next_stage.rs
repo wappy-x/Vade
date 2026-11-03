@@ -218,9 +218,20 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 .iter_mut()
                 .map(|s| model.gdn_load(b, li, s.gdn_state[li].take()))
                 .collect::<Result<Vec<_>>>()?;
-            work.gdn
-                .copy_norm(b, model.gdn_norms[li].as_ref().unwrap())?;
-            if !model.tp_gdn_project(b, li, &attention[0], &mut work.gdn, &work.mixed, count, attention.len())? { attention[0].project_next(b, &work.gdn, &work.mixed, count)?; }
+            work.gdn.use_norm(model.gdn_norms[li].as_ref().unwrap())?;
+            // One verify chat outside the tensor split: its layer projects straight into the chat's
+            // replay tape (the same rows), so no tape copy runs. The scratch views come back below.
+            let direct = verify && sessions.len() == 1 && gdn::fused_verify_copy(b, &work.recurrence) && model.tp_moe(li, count).is_none();
+            let own_views = match direct.then(|| sessions[0].rollback.as_mut().ok_or("MTP rollback missing")).transpose()? {
+                Some(rollback) => rollback.inputs[li].as_mut().ok_or("MTP GDN tape missing")?.views(count, attention[0].tape_widths())?
+                    .map(|views| work.gdn.use_projections(views)),
+                None => None,
+            };
+            let taped = own_views.is_some();
+            let projected = (|| -> Result<()> {
+                if !model.tp_gdn_project(b, li, &attention[0], &mut work.gdn, &work.mixed, count, attention.len())? { attention[0].project_next(b, &work.gdn, &work.mixed, count)?; }
+                Ok(())
+            })();
             // Every session's call fully fused (prompt rows, no verify): the
             // gated scans write the out projection's packed input directly.
             if !verify && count >= 64 && spans.iter().all(|span| gdn::fuses_fully(span.len())) {
@@ -242,7 +253,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             let copies = cohort && gdn::cohort_copies();
             // gdn::cohort_kernels: every chat's rows and history in one launch each.
             let kernels = cohort && gdn::cohort_kernels() && gdn::cohort_kernel_entries(b);
-            let scans = (|| -> Result<()> {
+            let scans = projected.and_then(|()| {
             if copies {
                 let (mut wide, mut narrow) = (Vec::with_capacity(2 * sessions.len()), Vec::with_capacity(2 * sessions.len()));
                 for ((s, g), span) in sessions.iter_mut().zip(attention.iter()).zip(spans) {
@@ -263,7 +274,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                     rollback.shallow = gdn::shallow_verify(pos, span.len());
                     let tape = rollback.inputs[li].as_mut().ok_or("MTP GDN tape missing")?;
                     // With gdn::cohort_copies the layer's tapes and entry histories are already copied.
-                    let tape = if copies { None } else if gdn::fused_verify_copy(b, &work.recurrence) {
+                    let tape = if copies { None } else if taped { Some([(0, 0, 0); 3]) } else if gdn::fused_verify_copy(b, &work.recurrence) {
                         Some(tape.capture_ranges(&work.gdn, span.start, span.len(), g.tape_widths())?)
                     } else {
                         tape.capture(b, &work.gdn, span.start, span.len(), g.tape_widths())?;
@@ -291,7 +302,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
             }
             if kernels { gdn::launch_cohort(b, &work.gdn, &mut work.gdn_launches)?; }
             Ok(())
-            })();
+            });
             work.gdn.entry_copied.set(false);
             work.gdn.cohort.borrow_mut().take();
             if cohort {
@@ -303,6 +314,7 @@ impl<'a, 'w> NextSession<'a, 'w> {
                 attention[0].gate_rows(b, &work.gdn, 0, count)?;
             }
             if !model.tp_gdn_finish(b, li, &attention[0], &work.gdn, &mut work.block, count, attention.len())? { attention[0].finish_next(b, &work.gdn, &work.block, count)?; }
+            if let Some(views) = own_views { work.gdn.use_projections(views); }
             for (s, g) in sessions.iter_mut().zip(attention) {
                 s.gdn_state[li] = Some(g.into_state());
             }
