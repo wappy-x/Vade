@@ -235,9 +235,35 @@ The cached run reused 32,064 tokens on both setups. The second question gave the
 - **The 32K chat.** Both setups gave the turn digests `28a6dca8...` and `b01b5a6b...`, the same as the 2026-10-31 FP8 two-Spark chat.
 - **Re-run.** `vade bench --card --receipt` can check the four-Spark files. It cannot check the 64-response two-Spark files. We have not run it against these receipts.
 
+## FP4-Local rates: main 2de87be, 2026-11-02 afternoon
+
+These cards measure FP4-Local on two Sparks at main `2de87be`. They use the same server start and checkpoint as the [cached-turn run](#fp4-local-cached-turn-main-2de87be-2026-11-02-afternoon). The private RigMark archive holds `thinking-off.card.json` in these folders:
+
+- **Drafting on.** `2026-11-02/2026-11-02_1639_qwen3.8-flash-next-fp4-local_local-2spark_2de87be-drafting-on-thinking-off-own-premerge-fp8b.f28.ma1` holds the card.
+- **Drafting off.** `2026-11-02/2026-11-02_1646_qwen3.8-flash-next-fp4-local_local-2spark_2de87be-drafting-off-thinking-off-own-premerge-fp8b.f28.ma1` holds the card.
+
+Both rows in the dashboard CSV have `kind=main`. Both cards are complete. The list gives each median.
+
+- **Prose.** One chat gives 55.211 tok/s with drafting on and 36.870 tok/s with drafting off.
+- **Code.** One chat gives 103.031 tok/s with drafting on and 36.625 tok/s with drafting off.
+- **Structured text.** One chat gives 130.709 tok/s with drafting on and 36.709 tok/s with drafting off.
+- **C1.** One short chat gives 80.342 tok/s with drafting on and 35.418 tok/s with drafting off.
+- **C4.** Four chats at once give a total of 167.134 tok/s with drafting on and 89.479 tok/s with drafting off.
+- **C8.** Eight chats at once give a total of 231.346 tok/s with drafting on and 134.920 tok/s with drafting off.
+- **Cold 8K.** The time to the first token is 2.158 s in the card with drafting on and 2.273 s in the card with drafting off. Both cards send this request with drafting off.
+
+The cards use these request settings:
+
+- **Single chats.** Prose, code and structured text use five runs each. Each request has an output limit of 8192 tokens and seed 20260905.
+- **Concurrent chats.** C1, C4 and C8 use three rounds. Each request has an output limit of 256 tokens. The fixed seed differs by stream.
+- **Sampling.** All chat requests are greedy, with neutral penalties and thinking off. They set `cache` false.
+- **Cold prompts.** Each card sends three uncached 8192-token prompts. These requests set `draft` to `plain` and send no seed.
+
+The rate fields are `decode.<task>.decode_tokens_per_second.median` and `concurrency.<count>.aggregate_end_to_end_tokens_per_second.median`. The cold time field is `prefill.8192.cold.ttft_seconds.median`. The full cards are private. These runs do not measure later engine changes on main.
+
 ## FP4-Local cached turn: main 2de87be, 2026-11-02 afternoon
 
-The result for the cached turn on two Sparks comes from main `2de87be`. The rates and the other setups stay in the [morning tables](#current-fp4-local-main-8976c4f-2026-11-02-morning).
+The result for the cached turn on two Sparks comes from main `2de87be`. The [afternoon cards](#fp4-local-rates-main-2de87be-2026-11-02-afternoon) give the rates from the same server start. The other setups stay in the [morning tables](#current-fp4-local-main-8976c4f-2026-11-02-morning).
 
 The private RigMark archive holds the card in this folder: `2026-11-02/2026-11-02_1639_qwen3.8-flash-next-fp4-local_local-2spark_2de87be-drafting-on-thinking-off-own-premerge-fp8b.f28.ma1`. The dashboard lists the card at 16:39 CST on 2026-11-02, with `kind=main`. Its file is `thinking-off.card.json`.
 
@@ -261,7 +287,7 @@ The card folder holds the first chat in `chat/cache.json`. The private source ru
 
 ## Current FP4-Local: main 8976c4f, 2026-11-02 morning
 
-These FP4-Local rates and the one-Spark and four-Spark chat times are current. The two-Spark cached-turn median is in the [afternoon result](#fp4-local-cached-turn-main-2de87be-2026-11-02-afternoon). The [2026-10-31 cards](#current-fp4-local-main-dc32b7c-2026-10-31-morning) are history.
+These one-Spark and four-Spark FP4-Local rates and chat times are current. The [afternoon cards](#fp4-local-rates-main-2de87be-2026-11-02-afternoon) replace the two-Spark rates. The two-Spark cached-turn median is in the [afternoon result](#fp4-local-cached-turn-main-2de87be-2026-11-02-afternoon). The [2026-10-31 cards](#current-fp4-local-main-dc32b7c-2026-10-31-morning) are history.
 
 The receipts page is [bench/receipts/2026-11-02](../bench/receipts/2026-11-02/README.md). It gives the build and binary hashes, the checkpoint identity, the server start command of each setup and the request settings. The machines are DGX Spark, NVIDIA GB10, driver 580.178.04, with the clocks not locked. Main `8976c4f` has the engine of main `407aa46`. Between the two, only the command line tool changed.
 

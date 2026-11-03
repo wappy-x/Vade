@@ -11,13 +11,14 @@ The [benchmark history](history/benchmarks-2026-10.md) keeps every older run.
 These are the facts behind the tables:
 
 - **FP8 rows.** We measured main `acb49bc` on our DGX Sparks on the afternoon of 2026-11-01.
-- **FP4-Local rows.** We measured main `8976c4f` on our DGX Sparks on the morning of 2026-11-02.
+- **FP4-Local, two Sparks.** We measured main `2de87be` on the afternoon of 2026-11-02. The [afternoon results](results.md#fp4-local-rates-main-2de87be-2026-11-02-afternoon) name the private card folders.
+- **FP4-Local, one and four Sparks.** We measured main `8976c4f` on our DGX Sparks on the morning of 2026-11-02.
 - **Cards.** Each server start ran one card with drafting on and one card with drafting off. A card is the result file of one RigMark run.
 - **Drafting.** The model's own prediction head guesses a few tokens ahead, and the full model checks each guess. Drafting on means a fixed draft depth: 3 for FP4-Local and 2 for FP8.
 - **Default FP8 depth.** A default FP8 server chooses the depth itself. The [morning cards of 2026-11-01](results.md#current-fp8-main-1a07e3a-2026-11-01-morning) give those speeds.
 - **Server starts.** Every row is one server start.
 
-[Results and receipts](results.md) links the receipt of every row. It also gives the machines, the server commands and the request settings.
+[Results and receipts](results.md) names the card folders and links the published receipts. It gives the checkpoint and request settings.
 
 **One chat (tok/s)**
 
@@ -27,8 +28,8 @@ These are the facts behind the tables:
 | :---: | :---: | :---: | :---: |
 | FP4-Local · 1 Spark · on | 42.123 | 81.263 | 101.055 |
 | FP4-Local · 1 Spark · off | 27.940 | 27.763 | 28.047 |
-| FP4-Local · 2 Sparks · on | 54.530 | 101.713 | 130.258 |
-| FP4-Local · 2 Sparks · off | 36.061 | 35.840 | 36.196 |
+| FP4-Local · 2 Sparks · on | 55.211 | 103.031 | 130.709 |
+| FP4-Local · 2 Sparks · off | 36.870 | 36.625 | 36.709 |
 | FP4-Local · 4 Sparks · on | 61.881 | 112.551 | 144.282 |
 | FP4-Local · 4 Sparks · off | 41.845 | 41.149 | 41.949 |
 | FP8 · 2 Sparks · on | 39.504 | 55.734 | 57.265 |
@@ -46,8 +47,8 @@ These are the facts behind the tables:
 | :---: | :---: | :---: | :---: |
 | FP4-Local · 1 Spark · on | 65.965 | 145.338 | 179.802 |
 | FP4-Local · 1 Spark · off | 27.350 | 85.155 | 138.450 |
-| FP4-Local · 2 Sparks · on | 79.461 | 167.075 | 230.931 |
-| FP4-Local · 2 Sparks · off | 34.725 | 88.707 | 134.379 |
+| FP4-Local · 2 Sparks · on | 80.342 | 167.134 | 231.346 |
+| FP4-Local · 2 Sparks · off | 35.418 | 89.479 | 134.920 |
 | FP4-Local · 4 Sparks · on | 87.485 | 176.042 | 243.521 |
 | FP4-Local · 4 Sparks · off | 39.877 | 95.415 | 142.624 |
 | FP8 · 2 Sparks · on | 48.842 | 72.889 | 106.440 |
@@ -64,7 +65,7 @@ These are the facts behind the tables:
 | Setup | Path | Drafting-on card (s) | Drafting-off card (s) |
 | :---: | :---: | :---: | :---: |
 | FP4-Local · 1 Spark | local | 3.773 | 3.721 |
-| FP4-Local · 2 Sparks | tensor split | 2.119 | 2.150 |
+| FP4-Local · 2 Sparks | tensor split | 2.158 | 2.273 |
 | FP4-Local · 4 Sparks | tensor split in parts | 1.933 | 1.915 |
 | FP8 · 2 Sparks | tensor parallel | 5.899 | 5.891 |
 | FP8 · 4 Sparks | tensor parallel | 6.866 | 6.801 |
@@ -77,10 +78,10 @@ How to read the tables:
 - **Prose, code and structured.** Each uses one chat.
 - **C1, C4 and C8.** These give the total rates for one, four and eight chats at once.
 - **Cold 8K.** This is the time to the first token after an uncached 8192-token prompt. Both cards send it with drafting off.
-- **More numbers.** For FP8, [results and receipts](results.md) gives the 32K chat and the token ID checks. For FP4-Local, the [2026-11-02 section](#current-2026-11-02-morning-main-8976c4f) gives them.
+- **More numbers.** The [afternoon results](results.md#fp4-local-rates-main-2de87be-2026-11-02-afternoon) give the two-Spark FP4-Local rates. The [morning section](#current-2026-11-02-morning-main-8976c4f) keeps the earlier FP4-Local cards. [Results and receipts](results.md) gives the chats and token ID checks for both formats.
 - **Cached turn on two FP4-Local Sparks.** The [2026-11-02 16:39 CST card run](results.md#fp4-local-cached-turn-main-2de87be-2026-11-02-afternoon) gives a median first-token time of 0.395 s for the second question on a 32K-token chat. That section gives the card folder, the cold times and the raw samples.
 
-We write these tables by hand, because the FP8 rows and the FP4-Local rows come from two different mains. The `bench-docs` tool cannot make these tables. It takes one card per setup, only from the newest main that has cards ([bench_docs.rs](../tools/src/bench_docs.rs)).
+We write these tables by hand, because the rows come from different mains. The `bench-docs` tool cannot make these tables. It takes one card per setup, only from the newest main that has cards ([bench_docs.rs](../tools/src/bench_docs.rs)).
 
 This command writes such a table into this block and into the README block. It reads a folder of RigMark card files. Run it from the repository root:
 
@@ -145,6 +146,7 @@ Every speed that we have published for Vade is on one of these pages or sections
 
 | Section | What it is for |
 | :---: | :---: |
+| [2026-11-02 afternoon FP4-Local rates](results.md#fp4-local-rates-main-2de87be-2026-11-02-afternoon) | Two FP4-Local Sparks at main `2de87be`, with drafting on and off |
 | [2026-11-02 afternoon cached turn](results.md#fp4-local-cached-turn-main-2de87be-2026-11-02-afternoon) | Two FP4-Local Sparks at main `2de87be`, with cold and cached chat medians |
 | [2026-11-02 morning FP4-Local cards](#current-2026-11-02-morning-main-8976c4f) | One, two and four Sparks at main `8976c4f`, FP4-Local, drafting on and off, with public receipts |
 | [2026-11-01 afternoon FP8 cards](results.md#current-fp8-main-acb49bc-2026-11-01-afternoon) | Two and four Sparks at main `acb49bc`, FP8, drafting on and off, with public receipts |

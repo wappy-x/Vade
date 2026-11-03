@@ -311,6 +311,42 @@ If users would notice the change, add one plain line about it to the
 Unreleased section of [CHANGELOG.md](../CHANGELOG.md), under the heading for its
 area. Put the newest line first.
 
+### How a change merges
+
+Keep your PR small and attach its check results.
+The maintainer records acceptance after the required checks and review pass.
+A merge train applies accepted changes to current `main` and checks the result.
+Keep the commit and proof references current in your PR.
+
+A pile combines several small changes on a branch with one proof set.
+The maintainer records the pile commit, its members and its proof.
+The maintainer accepts the pile as a unit after its required proofs pass.
+Its members need no separate acceptance.
+
+If a pile fails, the maintainer bisects it:
+
+1. Split the pile into halves.
+2. Check each half.
+3. Split each failed half again.
+4. Reject a change that fails alone.
+5. Continue with the changes that pass.
+
+The process uses these rules, called bends:
+
+- **Bend 1.** Maintainers screen a pile against `main` with one proof set, then bisect the pile if it fails.
+- **Bend 2.** A maintainer can post `READY FOR MERGE` after recorded acceptance with receipts, once the author's automated task stops.
+- **Bend 3.** Engine changes outside communication paths need timed 1-Spark proof and 2-Spark and 4-Spark token ID checks.
+- **Bend 4.** Maintainers assign routine tasks to a lower-cost API model and keep code, reviews and proof runs with the stronger model.
+
+The ready line names the accepted commit and acceptance time.
+Routine tasks include ready lines, CI watches, documentation copies, card copies and pile builds.
+The exactness rules and performance limits still apply.
+
+- **TRAIN-UNBLOCK.** If `main` moves while a candidate waits, the maintainer immediately screens its merge commit again on the first free Spark.
+- **Engine train order.** Engine trains merge in acceptance order.
+  A newer engine train waits while an older train needs its TRAIN-UNBLOCK screen.
+  Host-side trains can merge during that wait.
+
 ### How a pull request lands
 
 1. **Host checks pass.** Run the checks in [Local CI](../docs/ci.md) before

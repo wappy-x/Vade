@@ -27,7 +27,7 @@ Then get the model with `vade pull` and run `vade up`. The engine is ready for a
 - **Speed from more Sparks.** Link two or four Sparks together and one chat gets faster. The answers stay the same.
 - **FP4 and FP8.** Vade runs Qwen3.8 Flash-Next in both formats. FP4-Local fits on one Spark. FP8 needs two or more.
 - **An OpenAI-compatible API.** Any OpenAI client works. Claude Code, Codex and other coding tools connect with a short setup. `vade chat` opens Vade's own coding agent.
-- **Receipts.** Every row of the benchmark table has its records on GitHub.
+- **Receipts.** [Results](docs/results.md) names the source of each benchmark row and links the published receipts.
 
 <a id="pick-your-path"></a>
 <a id="install"></a>
@@ -91,14 +91,22 @@ The numbers are tokens per second (tok/s). Drafting is Vade's speculative decodi
 | Setup | One chat | One chat, drafting off | Eight chats at once (total) |
 | :---: | :---: | :---: | :---: |
 | FP4-Local · 1 Spark | 42.1 | 27.9 | 179.8 |
-| FP4-Local · 2 Sparks | 54.5 | 36.1 | 230.9 |
+| FP4-Local · 2 Sparks | 55.2 | 36.9 | 231.3 |
 | FP4-Local · 4 Sparks | 61.9 | 41.8 | 243.5 |
 | FP8 · 2 Sparks | 39.5 | 28.4 | 106.4 |
 | FP8 · 4 Sparks | 52.6 | 36.9 | 136.2 |
 
 </div>
 
-We measured main `acb49bc` on our own Sparks on the afternoon of 2026-11-01 for the FP8 rows, and main `8976c4f` on the morning of 2026-11-02 for the FP4-Local rows. One chat writes prose of up to 8192 tokens. Every row is one server start. Drafting on means a fixed draft depth: 3 for FP4-Local and 2 for FP8. A default FP8 server chooses the depth itself. [Results](docs/results.md#current-fp8-main-acb49bc-2026-11-01-afternoon) gives those speeds too. The raw record of every run is in the receipts: [FP8](bench/receipts/2026-11-01/README.md) and [FP4-Local](bench/receipts/2026-11-02/README.md).
+These rows come from separate main revisions:
+
+- **FP4-Local, two Sparks.** We measured main `2de87be` on the afternoon of 2026-11-02. The [afternoon results](docs/results.md#fp4-local-rates-main-2de87be-2026-11-02-afternoon) name the private card folders and give the exact values.
+- **FP4-Local, one and four Sparks.** We measured main `8976c4f` on the morning of 2026-11-02. The [receipts](bench/receipts/2026-11-02/README.md) hold the raw records.
+- **FP8.** We measured main `acb49bc` on the afternoon of 2026-11-01. The [receipts](bench/receipts/2026-11-01/README.md) hold the raw records.
+
+One chat writes prose of up to 8192 tokens. Every row is one server start.
+
+Drafting on means a fixed draft depth: 3 for FP4-Local and 2 for FP8. A default FP8 server chooses the depth itself. [Results](docs/results.md#current-fp8-main-acb49bc-2026-11-01-afternoon) gives those speeds too.
 
 <!-- bench-docs:end -->
 

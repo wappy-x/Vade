@@ -241,6 +241,7 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 ### CLI
 
 - A failed SSH check points to the install guide. The guide explains how to find the real SSH destination when output uses a public label.
+- Commands that start background processes save their output and errors in the state logs. The CLI prints the log paths (#293).
 - Controller setup saves named sets and layouts. Status lists those sets and shows each server's saved set, including replicas.
 - `vade bench verdict` refuses a verdict if no gating cells remain. It exits with code 2 for this refusal. It rejects repeated `--band`, `--only` and `--sha` flags. It validates `aa_pct` for every selected arm form. Advisory suffixes need a space or `/` boundary. Pair bands need a judged cell without widening.
 - `vade bench verdict` judges saved A/X cells on the host with rule 2026-11-01. It uses the cached latency floor and the second-X rule.
@@ -382,7 +383,7 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 
 ### Engine
 
-- On two FP4-Local Sparks, a cached later turn of a long chat starts about twice as fast. A resumed tail now runs as one pass with the prefix checkpoint inside it, and a restored session maps its KV pages when it is built. On a 32,000-token chat the cached turn went from 0.861 to 0.399 s (turn 1 cache) and from 0.675 to 0.249 s (turn 2 cache), medians of 3. The token IDs do not change. Cold prompts on two Sparks take up to 3.5 % longer; a follow-up works on that.
+- A cached later question starts sooner on two FP4-Local Sparks. The [main result](docs/results.md#fp4-local-cached-turn-main-2de87be-2026-11-02-afternoon) gives the cold and cached times (#290).
 
 - On four FP4-Local Sparks over RDMA, a cold prompt of 6,145 to 48,064 tokens now runs as a sequence split when no other chat decodes: each Spark reads its own part of the prompt, so its first token comes sooner. Beside a decoding chat it runs as chain tiles. The token IDs do not change. Each of the four Sparks holds about 1 GiB more for its link, and the session pool counts it.
 - On a chain of three or more Sparks, kept rows of a long prompt that runs as chain tiles now come back during the prompt, not all at the end, and the first and final tiles take the RDMA wire when it is there.
@@ -1106,6 +1107,10 @@ Merges #105 through #110 were measured on October 26, 2026, with the FP4-Local c
 - Smaller fixes: the harness guide puts the source-built harness on PATH, the network guide's RDMA GID example runs as written, the fresh-install guide's legacy controller examples match current output, the adding-a-model anchors point at the moved CLI module docs, and the benchmarks page and CLI guide are clearer about bench `ignore_eos`, `--checkpoint-hash` and the controller config.
 
 ### Tools
+
+- Dashboard previews group measurements by Spark count. They show set labels for cards that match a saved set (#292).
+- The path check no longer treats `lora_rank` or `tensor_rank` names as process ranks. It still checks conditions on the number of Sparks (#291).
+- The unsafe code check requires safety notes when a function gains an unsafe block. It rejects a change to the `frozen ruling` field (#289).
 
 - `examples/openai_client.sh` now gives curl the `VADE_API_KEY_FILE` key in a header file in its private temporary folder.
   - Before, the key was a curl argument, which other users of the computer can see while the request runs.
