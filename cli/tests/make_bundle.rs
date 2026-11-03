@@ -5,6 +5,19 @@ use std::{fs, os::unix::fs::PermissionsExt, path::{Path, PathBuf}, process::Comm
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct Temp(PathBuf);
+impl Temp {
+    fn new(label: &str) -> Self {
+        let root = fs::canonicalize(std::env::temp_dir()).unwrap();
+        loop {
+            let path = root.join(format!("vade-{label}-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            match fs::create_dir(&path) {
+                Ok(()) => return Self(path),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("create test folder: {error}"),
+            }
+        }
+    }
+}
 impl Drop for Temp { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
 
 fn write(path: &Path, bytes: &[u8], mode: u32) {
@@ -30,13 +43,35 @@ fn sha256(path: &Path) -> String {
     let mut command = match tool { Some(tool) => Command::new(tool), None => { let mut c = Command::new("shasum"); c.args(["-a", "256"]); c } };
     run(command.arg(path))[..64].to_owned()
 }
+fn set_times(path: &Path, seconds: u64) {
+    if path.is_dir() {
+        for entry in fs::read_dir(path).unwrap() { set_times(&entry.unwrap().path(), seconds); }
+    }
+    let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+    fs::File::open(path).unwrap().set_times(fs::FileTimes::new().set_accessed(time).set_modified(time)).unwrap();
+}
+fn check_archive_times(path: &Path, epoch: u64) {
+    let gzip = fs::read(path).unwrap();
+    // No source name or current time may enter the gzip header.
+    assert_eq!(&gzip[..8], b"\x1f\x8b\x08\x00\x00\x00\x00\x00");
+    let tar = Command::new("gzip").args(["-dc"]).arg(path).output().unwrap();
+    assert!(tar.status.success());
+    let octal = |bytes: &[u8]| u64::from_str_radix(std::str::from_utf8(bytes).unwrap().trim_matches(['\0', ' ']), 8).unwrap();
+    let mut at = 0;
+    while tar.stdout[at..at + 512].iter().any(|&b| b != 0) {
+        let header = &tar.stdout[at..at + 512];
+        assert_eq!(&header[257..263], b"ustar\0");
+        assert_eq!(octal(&header[136..148]), epoch, "member {:?}", String::from_utf8_lossy(&header[..100]));
+        let size = usize::try_from(octal(&header[124..136])).unwrap();
+        at += 512 + size.div_ceil(512) * 512;
+    }
+    assert!(at > 0 && tar.stdout[at..].iter().all(|&b| b == 0));
+}
 
 struct Fixture { temp: Temp, repo: PathBuf, payload: PathBuf, cli: PathBuf, home: PathBuf, revision: String, ptx: PathBuf }
 // `stamp` is what the engine build leaves in flash-serve when it embeds a cubin.
 fn fixture(stamp: &str) -> Fixture {
-    let temp = Temp(fs::canonicalize(std::env::temp_dir()).unwrap()
-        .join(format!("vade-make-bundle-{}-{}-{}", std::process::id(), std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(), NEXT.fetch_add(1, Ordering::Relaxed))));
+    let temp = Temp::new("make-bundle");
     let (repo, payload, cli, home) = (temp.0.join("repo"), temp.0.join("payload"), temp.0.join("cli"), temp.0.join("home"));
     fs::create_dir_all(&home).unwrap();
     write(&repo.join("scripts/make-bundle.sh"), &fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/make-bundle.sh")).unwrap(), 0o755);
@@ -84,15 +119,18 @@ fn from_payload_gives_the_same_bytes_twice_and_one_checked_folder() {
     let fixture = fixture("");
     let (temp, revision) = (&fixture.temp, &fixture.revision);
     let stem = format!("vade-0.1.0-{}-linux-aarch64-gb10", &revision[..7]);
-    let produce = |out: &str| {
+    let epoch = run(Command::new("git").arg("-C").arg(&fixture.repo).args(["show", "-s", "--format=%ct", revision])).trim().parse().unwrap();
+    let produce = |out: &str, seconds| {
+        set_times(&fixture.payload, seconds);
+        set_times(&fixture.cli, seconds);
         run(&mut fixture.command(&[temp.0.join(out).as_os_str()]));
         let output = temp.0.join(out);
+        check_archive_times(&output.join(format!("{stem}.tar.gz")), epoch);
         (fs::read(output.join(format!("{stem}.tar.gz"))).unwrap(), fs::read_to_string(output.join("SHA256SUMS")).unwrap())
     };
-    let first = produce("out-1");
-    // Another second, so any file time or gzip time that leaks in changes the bytes.
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-    let second = produce("out-2");
+    // Distinct input times and exact header checks do not depend on a clock tick.
+    let first = produce("out-1", 1_000_000_000);
+    let second = produce("out-2", 2_000_000_000);
     assert!(first == second, "two runs gave different bytes");
     assert_eq!(first.1, format!("{}  {stem}.tar.gz\n", sha256(&temp.0.join("out-1").join(format!("{stem}.tar.gz")))));
     // One top folder; MANIFEST names the commit, the oldest driver and glibc.
@@ -127,7 +165,7 @@ fn cubin(folder: &Path, ptx: &Path, image: &[u8]) -> String {
 #[test]
 fn from_payload_lists_the_cubin_and_refuses_a_cubin_that_is_not_bound() {
     // The digest of b"compiled image", the bytes this test compiles below.
-    let scratch = Temp(std::env::temp_dir().join(format!("vade-make-bundle-digest-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))));
+    let scratch = Temp::new("make-bundle-digest");
     write(&scratch.0.join("image"), b"compiled image", 0o644);
     let image = sha256(&scratch.0.join("image"));
     let fixture = fixture(&format!("cubin_sha256={image}"));
@@ -184,9 +222,7 @@ fn from_payload_lists_the_cubin_and_refuses_a_cubin_that_is_not_bound() {
 // make-cubin.sh with its two pins moved to a stand-in compiler in a saved archive.
 struct Compiler { temp: Temp, archive: PathBuf, script: PathBuf, ptx: PathBuf }
 fn compiler(version: &str) -> Compiler {
-    let temp = Temp(fs::canonicalize(std::env::temp_dir()).unwrap()
-        .join(format!("vade-make-cubin-{}-{version}-{}-{}", std::process::id(), std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(), NEXT.fetch_add(1, Ordering::Relaxed))));
+    let temp = Temp::new("make-cubin");
     let folder = "cuda_nvcc-linux-sbsa-13.0.88-archive";
     let ptxas = temp.0.join("toolkit").join(folder).join("bin/ptxas");
     // It records its arguments as the image, so the test can read the exact command.

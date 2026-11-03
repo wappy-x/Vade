@@ -323,11 +323,10 @@ fn odt_numbered_lists_follow_their_list_styles() {
 }
 
 /// Astra review of 4a72078, finding 2: each list finds its style in a
-/// binary search, so 2,000 list styles and 20,000 lists read in well under
-/// one second with at most 13 name compares for each list (a scan of all
-/// styles for each list does 2,000 and fails the step bound).
+/// binary search. The fixture below bounds scan work and name compares.
+/// A scan of all styles for each list fails the step bound.
 #[test]
-fn many_odt_list_styles_read_fast() {
+fn many_odt_list_styles_use_bounded_work() {
     let (n, lists) = (2_000, 20_000);
     let pad = "x".repeat(40);
     let styles: String = (0..n)
@@ -340,11 +339,9 @@ fn many_odt_list_styles_read_fast() {
         n - 1
     );
     let file = zip_file(&[stored("mimetype", "application/vnd.oasis.opendocument.text"), deflated("content.xml", &content)]);
-    let start = std::time::Instant::now();
     SCANNED.with(|s| s.set(0));
     let (_, doc) = read(&file, "a.odt", &Caps::default()).unwrap();
     let steps = SCANNED.with(|s| s.get());
-    assert!(start.elapsed() < std::time::Duration::from_secs(1), "{:?}", start.elapsed());
     // The unzip and XML scans count each byte a few times.
     assert!(steps <= 4 * content.len() + 13 * (lists + 1), "{steps} for {}", content.len());
     assert_eq!(doc.markdown, "<!-- page 1 of 1 -->\n## Page 1\n\n5. last\n");

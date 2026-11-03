@@ -91,6 +91,17 @@ struct Nic<'m> { local: &'m [AtomicU32], peer: &'m [AtomicU32], queue: VecDeque<
     flying: VecDeque<(u64, u32)>, seed: u32, torn: &'m AtomicBool, posts: usize, refuse_after: usize }
 impl Nic<'_> {
     fn delay(&mut self, most: u32) -> u32 { self.seed ^= self.seed << 13; self.seed ^= self.seed >> 17; self.seed ^= self.seed << 5; self.seed % most }
+    fn write(&mut self) {
+        let (snapshot, from, to, flag, flag_to, id, _) = self.queue.pop_front().unwrap();
+        for (i, w) in from.enumerate() {
+            let now = self.local[w].load(Ordering::Relaxed);
+            if now != snapshot[i] { self.torn.store(true, Ordering::Relaxed); }
+            self.peer[to + i].store(now, Ordering::Relaxed);
+        }
+        self.peer[flag_to].store(self.local[flag].load(Ordering::Relaxed), Ordering::Release);
+        let late = self.delay(120);
+        self.flying.push_back((id, late));
+    }
 }
 impl TpDoorbell for Nic<'_> {
     fn post(&mut self, from: Range<usize>, to: usize, flag: usize, flag_to: usize, id: u64) -> Result<(), String> {
@@ -106,27 +117,26 @@ impl TpDoorbell for Nic<'_> {
     fn reap(&mut self, done: &mut dyn FnMut(u64)) -> Result<(), String> {
         if let Some(head) = self.queue.front_mut() { head.6 = head.6.saturating_sub(1); }
         while self.queue.front().is_some_and(|q| q.6 == 0) {
-            let (snapshot, from, to, flag, flag_to, id, _) = self.queue.pop_front().unwrap();
-            for (i, w) in from.enumerate() {
-                let now = self.local[w].load(Ordering::Relaxed);
-                if now != snapshot[i] { self.torn.store(true, Ordering::Relaxed); }
-                self.peer[to + i].store(now, Ordering::Relaxed);
-            }
-            self.peer[flag_to].store(self.local[flag].load(Ordering::Relaxed), Ordering::Release);
-            let late = self.delay(120);
-            self.flying.push_back((id, late));
+            self.write();
         }
         if let Some(head) = self.flying.front_mut() { head.1 = head.1.saturating_sub(1); }
         while self.flying.front().is_some_and(|f| f.1 == 0) { done(self.flying.pop_front().unwrap().0); }
         Ok(())
     }
-    fn notify(&mut self, from: usize, to: usize) -> Result<(), String> { self.post(from..from + 1, to, from, to, u64::MAX) }
+    fn notify(&mut self, from: usize, to: usize) -> Result<(), String> {
+        self.post(from..from + 1, to, from, to, u64::MAX)?;
+        // Deliver prior writes, then the failure, before the relay can exit.
+        // A paused host thread must not consume the failure delivery budget.
+        while !self.queue.is_empty() { self.write(); }
+        for (_, wait) in &mut self.flying { *wait = 0; }
+        Ok(())
+    }
 }
 
 /// One rank's GPU stream: puts its parts tagged (rank, sequence) and takes each origin's parts
 /// from that origin's channel, checking every word. A take that waits past `limit` sets ERROR,
 /// as the take kernel does.
-struct Gpu<'m> { m: &'m [AtomicU32], l: Channels, rank: usize, sent: u64, taken: Vec<u64>, limit: Duration, seed: u32, slow: bool }
+struct Gpu<'m> { m: &'m [AtomicU32], l: Channels, rank: usize, sent: u64, taken: Vec<u64>, limit: Option<Duration>, seed: u32, slow: bool }
 impl Gpu<'_> {
     fn nap(&mut self) {
         if !self.slow { return; }
@@ -147,10 +157,10 @@ impl Gpu<'_> {
         self.taken[o] += 1;
         let s = self.taken[o];
         let (c, slot) = (self.l.channel(o, self.rank), s as usize % self.l.slots);
-        let deadline = Instant::now() + self.limit;
+        let deadline = self.limit.map(|limit| Instant::now() + limit);
         while self.m[self.l.recv_seq(c, slot)].load(Ordering::Acquire) != s as u32 {
             if self.m[ERROR].load(Ordering::Acquire) != 0 { return Err(format!("rank {} error before take {s} of {o}", self.rank)); }
-            if Instant::now() > deadline { self.m[ERROR].store(1, Ordering::Release); return Err(format!("rank {} take {s} of {o} timed out", self.rank)); }
+            if deadline.is_some_and(|deadline| Instant::now() > deadline) { self.m[ERROR].store(1, Ordering::Release); return Err(format!("rank {} take {s} of {o} timed out", self.rank)); }
             std::thread::yield_now();
         }
         let rows = self.l.recv_slot(c, slot) + self.l.frame;
@@ -183,8 +193,8 @@ impl Gpu<'_> {
 /// Build `world` mailboxes, run each rank's relay over fake NICs and each rank's GPU stream.
 /// `refuse`: (rank, side, posts) whose NIC refuses data writes after that many. `dead`: a rank
 /// whose relay never runs. Returns the GPU streams' results, the relays' results (None: never
-/// ran) and whether a NIC saw a torn slot.
-fn simulate(links: Links, first: u64, refuse: Option<(usize, Side, usize)>, dead: Option<usize>, limit: Duration)
+/// ran) and whether a NIC saw a torn slot. With no limit, takes do not create timeout errors.
+fn simulate(links: Links, first: u64, refuse: Option<(usize, Side, usize)>, dead: Option<usize>, limit: Option<Duration>)
     -> (Vec<Result<(), String>>, Vec<Option<Result<(), String>>>, bool) {
     let world = links.world();
     let most = 40;
@@ -192,7 +202,7 @@ fn simulate(links: Links, first: u64, refuse: Option<(usize, Side, usize)>, dead
     let memory: Vec<Vec<AtomicU32>> = (0..world).map(|_| (0..l.words()).map(|_| AtomicU32::new(0)).collect()).collect();
     let (stop, torn) = (AtomicBool::new(false), AtomicBool::new(false));
     let relays = Mutex::new(vec![None; world]);
-    let timing = Ring { reuse: Duration::from_secs(5), notify: Duration::from_millis(200), ..Ring::default() };
+    let timing = Ring { reuse: limit.map_or(Duration::MAX, |_| Duration::from_secs(5)), notify: Duration::from_millis(200), ..Ring::default() };
     let gpus = std::thread::scope(|scope| {
         struct Stop<'s>(&'s AtomicBool);
         impl Drop for Stop<'_> { fn drop(&mut self) { self.0.store(true, Ordering::Relaxed); } }
@@ -233,7 +243,7 @@ fn ranks_gather_whole_parts_through_relays() {
     for (world, ring) in [(4, false), (4, true), (3, false), (5, false)] {
         let links = Links::new(world, ring).unwrap();
         let first = u64::from(u32::MAX) - 50;
-        let (gpus, relays, torn) = simulate(links, first, None, None, Duration::from_secs(20));
+        let (gpus, relays, torn) = simulate(links, first, None, None, Some(Duration::from_secs(20)));
         for (rank, g) in gpus.iter().enumerate() { assert_eq!(g, &Ok(()), "{world} {ring} rank {rank}"); }
         for (rank, r) in relays.iter().enumerate() { assert_eq!(r, &Some(Ok(())), "{world} {ring} relay {rank}"); }
         assert!(!torn, "{world} {ring}: a NIC read a slot while it was rewritten");
@@ -245,7 +255,7 @@ fn ranks_gather_whole_parts_through_relays() {
 #[test]
 fn a_failed_wire_fails_every_rank() {
     let links = Links::new(4, false).unwrap();
-    let (gpus, relays, _) = simulate(links, 1, Some((1, Side::Right, 25)), None, Duration::from_secs(20));
+    let (gpus, relays, _) = simulate(links, 1, Some((1, Side::Right, 25)), None, None);
     for (rank, g) in gpus.iter().enumerate() {
         let error = g.as_ref().unwrap_err();
         assert!(error.contains("error before take"), "rank {rank}: {error}");
@@ -260,7 +270,7 @@ fn a_failed_wire_fails_every_rank() {
 fn a_dead_relay_fails_every_rank_by_timeout() {
     let links = Links::new(4, false).unwrap();
     let at = Instant::now();
-    let (gpus, relays, _) = simulate(links, 1, None, Some(1), Duration::from_millis(500));
+    let (gpus, relays, _) = simulate(links, 1, None, Some(1), Some(Duration::from_millis(500)));
     assert!(gpus.iter().all(|g| g.is_err()), "{gpus:?}");
     assert!(relays[1].is_none() && relays.iter().flatten().all(|r| r.is_err()));
     assert!(at.elapsed() < Duration::from_secs(10), "failure took {:?}", at.elapsed());
