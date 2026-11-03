@@ -111,16 +111,20 @@ https://dl.vade.lol/install.sh.sha256.
    `~/.vade`. It does not need sudo or the model, and it does not change your
    shell profile. It writes a small script at `~/.local/bin/vade`. The stock
    Ubuntu `~/.profile` puts that folder on your `PATH` when you log in, so a
-   new SSH login finds `vade`. The last line of the installer output tells you
-   what to do, and it says so when a login does not add that folder. On the
-   Spark's own desktop, a new terminal finds `vade` only
-   after you log out and log in once. If your shell cannot find `vade`, run
-   the `export` line from that last line.
+   new SSH login finds `vade`. Follow its PATH advice before you run the next
+   command. When a login shell finds Vade, it prints `Open a new terminal, then run: vade up`.
+   Otherwise, run its `export PATH="$HOME/.vade/bin:$PATH"` line.
+   Pull the model before you run `vade up`. On the Spark's desktop, log out
+   and log in if a new terminal cannot find `vade`.
 2. **Pull** downloads the model (102 GB) and checks every file. The long
    hash after `@` pins the exact revision we tested. If the download stops,
    run the same command again. It continues where it stopped.
 3. **Up** starts the engine on `http://127.0.0.1:18080`. `vade launch`
    starts it and opens chat in the current folder. `vade down` stops it.
+
+The chat hint uses `vade launch` when a login shell finds Vade.
+Otherwise, it uses `~/.vade/bin/vade launch`. A custom `VADE_HOME` uses
+its own `bin/vade` path.
 
 The running engine writes stdout and stderr to `VADE_HOME/state/worker/server.log`; `vade up` prints the log path.
 
@@ -674,12 +678,14 @@ for the same file are at least five seconds apart. Each file ends with a
 `done` or `present` line, even if an update just printed. The final `Verified`
 line gives the file count, GiB, elapsed time and count of files that resumed.
 
-If you ran `scripts/install.sh`, your shell finds `vade` after a new login. In
-the same shell, first run the `export PATH=...` line that it printed. That
-line puts `vade` on `PATH` through `~/.vade/bin`. After a bundle install there
-is no `cargo`, so the second line below works only for a source build. If you
-did not run the script, the second line builds `vade` with the host toolchain
-from step 1. Run these lines from the checkout root on the Spark:
+If you ran `scripts/install.sh`, follow its last advice line. If it prints
+`Open a new terminal, then run: vade up`, open a new terminal before you run
+`vade pull`. No export line is printed in that case. If it prints
+`Run: export PATH=...`, run that export command in this shell first. It puts
+`vade` on `PATH`. The default folder is `~/.vade/bin`. After a bundle install
+there is no `cargo`, so the second line below works only for a source build.
+If you did not run the script, the second line builds `vade` with the host
+toolchain from step 1. Run these lines from the checkout root on the Spark:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PWD/cli/target/release:$PATH"
@@ -944,7 +950,7 @@ A local install keeps its files here:
 | `~/.vade/state` | Records of the engine Vade started (so `vade down` stops the right process), and logs |
 | `~/.vade/projects` | Chat history, never in the folder you chat from (`VADE_CHAT_IN_PROJECT=1` keeps it in a git-ignored `./.vade`) |
 | `~/.vade/bin/vade` | A small script that runs the installed build |
-| `~/.local/bin/vade` | A small script outside `~/.vade`, so a new login finds `vade` |
+| `~/.local/bin/vade` | A small script for login shells that put `~/.local/bin` on `PATH` |
 
 Use `vade logs` to read engine diagnostics. `VADE_HOME` picks a different
 private root. Keep it the same through launch, chat, verify and shutdown.

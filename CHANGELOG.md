@@ -126,7 +126,7 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 
 - A failed `vade install` under a controller config now stops the one-line install at the cause. It used to build from source for this Spark alone and end with success, so the other Sparks stayed without the install.
 - The installer asks for a C compiler (`cc`) only for a build from source, so a prebuilt bundle installs without one. A build with no `cc` stops before it clones or downloads anything.
-- The installer now asks a login shell whether it adds `~/.local/bin`. If it does not, the output says so and gives only the `export` line, because a new terminal would not find `vade`.
+- The installer checks which `vade` command a login shell finds. If it finds this install, the output says to open a new terminal. Otherwise, the output gives an `export` command. The check has a time limit. A failed check also gives the export command.
 - `vade setup` is now the same code as `vade up --sparks`, with questions. It asks for the Sparks in one line, in any order, and for a cable address only when it cannot read one. INSTALL.md, cli/README.md and the agent quickstart now show one command for any number of Sparks.
 - `vade up` names each Spark in its ready line, as `Vade is ready on 2 Sparks (spark-a, spark-b) at http://localhost:18080: context 131072 tokens, drafting depth engine default.`
 - The large bundle copy and the check before a start now print what ssh said and the one command that fixes it.
@@ -159,7 +159,7 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
   - A longer context leaves room for fewer chats at once: 2 on two Sparks, against 9 at context 32768 (lab run on main `b4c7113`).
 - The installer's next steps end at `vade up`. `vade launch` stays a command.
 - `vade setup --hosts` now works after the one-line install, with no clone. Setup writes `source = installed-bundle`, and `vade install` takes every program and its revision from the bundle next to `vade`. A clone works as before.
-- The installer also writes `~/.local/bin/vade`, which the stock Ubuntu `~/.profile` puts on `PATH` at login, so a new SSH login finds `vade` with no `export` line.
+- The installer also writes `~/.local/bin/vade` for login shells that put `~/.local/bin` on `PATH`. The stock Ubuntu `~/.profile` does this.
   - It edits no shell profile, and it leaves a file there that is not from Vade.
   - The steps are now `vade pull`, then `vade up`, and the output ends with one line about `PATH`.
 - Two or more FP4-Local Sparks now start when one Spark has the full checksum list from `vade pull` and another has the engine's shorter list, such as after a copy of the model.
@@ -168,7 +168,7 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 - `vade setup` shows `vade up --hosts` with the Sparks as you typed them, so you can paste the command, and it stops for a missing checkout before it asks any question.
 - `vade setup` says what each step does, also in `--dry-run`, and `vade install` prints `Checking SSH to <name>.` and `Copying Vade to <name>.` for each Spark.
 - `vade install` and `vade setup` now copy to and prepare every Spark at the same time instead of one after another. Vade prints the lines of each Spark in Spark order. If a Spark fails, the other Sparks finish their work, the error names the failed Spark, and the previous install stays active.
-- The installer writes one fixed folder, `~/.vade/bin`, with a small script that runs the build it just installed. It prints the same `export` line for every version and for a source build. `vade update` keeps that script on the bundle it staged. For a newer Vade, run the install command again.
+- The installer writes one fixed folder, `~/.vade/bin`, with a small script that runs the build it just installed. When the output gives an `export` command, it uses that folder for a bundle or source build. `vade update` keeps that script on the bundle it staged. For a newer Vade, run the install command again.
 - `curl -fsSL https://vade.lol/install.sh | sh` is now safe when the download stops early, and its source build no longer runs in the wrong folder.
   - Every statement of `scripts/install.sh` is now inside `main`, and the last line calls it, so a cut-off script is a syntax error and runs nothing.
   - With no checkout, the source build clones public main into a new folder in `~/.vade` and runs the installer of that clone.

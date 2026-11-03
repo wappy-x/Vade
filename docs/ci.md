@@ -81,8 +81,10 @@ without a GPU or network. It uses fake host tools in a temporary folder. It
 sets `HOME` and `PREFIX` to folders there. It tests a pipe and a checkout with
 `sh` and `bash --posix`. It also uses each installed shell from `dash` and
 `zsh --emulate sh`. At least one of those shells must be present. It checks
-that a half download and a body without its last call run nothing. The
-no-call pipe must succeed at each stage. It checks that Linux x86_64 and
+that a hanging login profile stops within the probe limit. This case needs
+the system `timeout` command. It also checks that a half download and a body
+without its last call run nothing. The no-call pipe must succeed at each
+stage. It checks that Linux x86_64 and
 macOS hosts fail before any GPU tool runs. Each case prints `PASS` or `FAIL`.
 Default installs use the source fallback. The script removes its temporary
 folder when it exits.

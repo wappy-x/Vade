@@ -63,6 +63,10 @@ printf 'vade %s\n' "$*" >> "$INSTALL_CALLS"
 # Like the real CLI's lock: a group or other bit on ~/.vade stops it.
 [ ! -d "$HOME/.vade" ] || case $(ls -ld "$HOME/.vade") in d???------*) ;; *) echo 'Directory ~/.vade is shared.' >&2; exit 46 ;; esac
 [ "${INSTALL_FAIL_VADE-}" != "$1" ] || { echo 'fixture diagnostic: fix this cause' >&2; exit 43; }
+if [ "$1" = __install-here ]; then
+    printf '%s\n' 'Fixture install progress.'
+    printf 'Then start the engine and open chat: %s launch\n' "$0"
+fi
 "#);
         fixture
     }
@@ -76,7 +80,9 @@ printf 'vade %s\n' "$*" >> "$INSTALL_CALLS"
     fn run_args(&self, env: &[(&str, &str)], args: &[&str]) -> Output { self.run_in("/bin/sh", env, args) }
     fn run_in(&self, shell: &str, env: &[(&str, &str)], args: &[&str]) -> Output {
         // Ubuntu's default umask 002: a folder the script creates is group-writable unless it says otherwise.
-        Command::new(shell).args(["-c", "umask 002 && exec \"$0\" \"$@\""]).arg(shell).arg(self.root.join("scripts/install.sh"))
+        let start = if shell == "/bin/zsh" { "umask 002 && exec \"$0\" --emulate sh -f \"$@\"" }
+            else { "umask 002 && exec \"$0\" \"$@\"" };
+        Command::new(shell).args(["-c", start]).arg(shell).arg(self.root.join("scripts/install.sh"))
             .args(args)
             .current_dir(&self.root).env_clear()
             .env("PATH", self.root.join("bin")).env("TMPDIR", self.root.join("tmp"))
@@ -105,7 +111,9 @@ fn cached_source_install_fetches_build_std_and_leaves_detect_and_kernels_to_vade
     assert!(stdout.contains("Install: fetching the Rust build-std files for the GPU kernels (none when cached).\n"), "{stdout}");
     // One next path: the model when it is missing, then up; no second install through vade setup.
     assert!(stdout.contains("1. If the model is not on this Spark yet, download and check it (102.26 GB):\n   vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300\n2. Start the engine:\n   vade up\n"), "{stdout}");
-    assert!(stdout.contains("2. Start the engine:\n   vade up\n\n") && !stdout.contains("vade launch"), "{stdout}");
+    assert!(stdout.contains("2. Start the engine:\n   vade up\n\n"), "{stdout}");
+    assert!(stdout.contains("Then start the engine and open chat: ~/.vade/bin/vade launch\n"), "{stdout}");
+    assert_eq!(stdout.matches("Then start the engine and open chat:").count(), 1, "{stdout}");
     // The last thing on screen is the one line about PATH, and it prints once.
     assert!(stdout.ends_with(PATH_LINE), "{stdout}");
     assert_eq!(stdout.matches("export PATH=").count(), 1, "{stdout}");
@@ -136,6 +144,28 @@ fn launch_option_starts_only_after_a_successful_install() {
     let output = f.run_args(&[("INSTALL_FAIL_VADE", "__install-here")], &["--launch"]);
     assert!(!output.status.success());
     assert!(!f.calls().contains("vade launch"), "{}", f.calls());
+}
+
+#[test]
+fn missing_or_invalid_install_status_never_reports_success() {
+    for shell in ["/bin/sh", "/bin/dash", "/bin/zsh"].into_iter().filter(|shell| Path::new(shell).is_file()) {
+        for status in ["", "bad", "0\n0"] {
+            let f = Fixture::new();
+            let script = f.root.join("scripts/install.sh");
+            let text = fs::read_to_string(&script).unwrap();
+            let writer = "printf '%s\\n' \"$result\" >&3";
+            assert_eq!(text.matches(writer).count(), 1);
+            // Damage only the status writer. The real wrapper must reject its reply.
+            fs::write(&script, text.replace(writer, &format!("printf '%s' '{status}' >&3"))).unwrap();
+            let output = f.run_in(shell, &[], &["--launch"]);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.code(), Some(1), "{shell} {status:?}: {stdout}{stderr}");
+            assert!(stderr.contains("local install failed. Next:"), "{stderr}");
+            assert!(!stdout.contains("Install complete.") && !f.script().exists(), "{stdout}");
+            assert!(!f.calls().contains("vade launch"), "{}", f.calls());
+        }
+    }
 }
 
 #[test]
@@ -253,7 +283,8 @@ fn member(tar: &mut Vec<u8>, name: &str, kind: u8, mode: u32, data: &[u8], link:
 }
 const BUNDLE_VADE: &str = "#!/bin/sh\nprintf 'bundle-vade %s\\n' \"$*\" >> \"$INSTALL_CALLS\"\n\
 case $(ls -ld \"$HOME/.vade\") in d???------*) ;; *) echo 'Directory ~/.vade is shared.' >&2; exit 46 ;; esac\n\
-[ \"${INSTALL_FAIL_BUNDLE-false}\" = false ] || { echo 'fixture bundle diagnostic' >&2; exit 44; }\n";
+[ \"${INSTALL_FAIL_BUNDLE-false}\" = false ] || { echo 'fixture bundle diagnostic' >&2; exit 44; }\n\
+if [ \"$1\" = install ]; then printf 'Fixture install progress.\\nThen start the engine and open chat: %s launch\\n' \"$0\"; fi\n";
 #[derive(Clone, Copy, PartialEq)]
 enum Bad { None, Sha256, Manifest, Link, Device, Outside, DotDot }
 fn bundle(bad: Bad) -> Vec<u8> {
@@ -701,8 +732,9 @@ impl Fixture {
     }
 }
 
-const PATH_LINE: &str = "Open a new terminal, or run: export PATH=\"$HOME/.vade/bin:$PATH\"\n";
-const NO_SCRIPT_LINE: &str = "Run: export PATH=\"$HOME/.vade/bin:$PATH\"\n";
+const PATH_LINE: &str = "Run: export PATH=\"$HOME/.vade/bin:$PATH\"\n";
+const NO_SCRIPT_LINE: &str = PATH_LINE;
+const LOGIN_LINE: &str = "Open a new terminal, then run: vade up\n";
 
 #[test]
 fn one_fixed_folder_runs_the_current_install_on_every_path_and_shell() {
@@ -746,6 +778,8 @@ fn a_named_vade_home_gets_its_own_fixed_folder_and_a_quoted_script() {
     assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
     // No script in ~/.local/bin, so a new terminal would not find vade: the line says only what works.
     assert!(stdout.ends_with(&format!("Run: export PATH=\"{}/bin:$PATH\"\n", home.display())), "{stdout}");
+    assert!(stdout.contains(&format!("Then start the engine and open chat: '{}/bin/vade' launch\n",
+        home.display().to_string().replace('\'', "'\\''"))), "{stdout}");
     assert!(!f.path_script().exists() && !f.root.join("home/.local").exists(), "{stdout}");
     let run = Command::new(home.join("bin/vade")).arg("quoted").env_clear().env("PATH", f.root.join("bin"))
         .env("HOME", f.root.join("home")).env("INSTALL_CALLS", f.root.join("calls")).output().unwrap();
@@ -774,9 +808,71 @@ impl Fixture {
             .output().unwrap()
     }
     fn on_path(&self, folder: &str) -> String { format!("{}:{}", self.root.join(folder).display(), self.root.join("bin").display()) }
+    fn login_shell(&self) -> String {
+        self.tool("timeout", "shift\nexec \"$@\"");
+        self.write("login-shell", r#"
+[ "$1" = -lc ]
+[ ! -f "$HOME/.profile" ] || . "$HOME/.profile"
+exec /bin/sh -c "$2"
+"#);
+        self.root.join("login-shell").display().to_string()
+    }
 }
 
 const PATH_SCRIPT: &str = "#!/bin/sh\n# Written by the Vade installer. vade-path-shim-v1\nexec \"$HOME/.vade/bin/vade\" \"$@\"\n";
+
+#[test]
+fn a_fresh_home_gets_one_login_advice_line_and_a_short_chat_hint() {
+    for prebuilt in [false, true] {
+        let f = Fixture::new();
+        let profile = "if [ -d \"$HOME/.local/bin\" ]; then PATH=\"$HOME/.local/bin:$PATH\"; fi\nexport PATH\n";
+        fs::write(f.root.join("home/.profile"), profile).unwrap();
+        let shell = f.login_shell();
+        let mut env = if prebuilt { f.prebuilt(&bundle(Bad::None), Bad::None) } else { Vec::new() };
+        env.push(("SHELL", shell.clone()));
+        assert!(!f.path_script().exists() && !f.script().exists());
+        let output = f.run_prebuilt(&env, &[]);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+        assert!(stdout.contains("Fixture install progress.\n"), "{stdout}");
+        assert!(stdout.ends_with(LOGIN_LINE) && !stdout.contains("export PATH="), "{stdout}");
+        assert_eq!(stdout.lines().filter(|line| line.starts_with("Open a new terminal") || line.starts_with("Run: export PATH=")).count(), 1, "{stdout}");
+        let hints: Vec<_> = stdout.lines().filter(|line| line.starts_with("Then start the engine and open chat:")).collect();
+        assert_eq!(hints, ["Then start the engine and open chat: vade launch"], "{stdout}");
+        assert_eq!(fs::read_to_string(f.root.join("home/.profile")).unwrap(), profile);
+        let login = Command::new(&shell).args(["-lc", "exec vade launch"]).env_clear()
+            .env("PATH", f.root.join("bin")).env("HOME", f.root.join("home"))
+            .env("INSTALL_ROOT", &f.root).env("INSTALL_CALLS", f.root.join("calls")).env("VADE_SOURCE", &f.root)
+            .output().unwrap();
+        assert!(login.status.success(), "{login:?}");
+        assert!(f.calls().ends_with("vade launch\n"), "{}", f.calls());
+    }
+}
+
+#[test]
+fn a_hanging_login_profile_is_stopped_before_the_outer_limit() {
+    let f = Fixture::new();
+    let shell = f.login_shell();
+    let timeout = ["/usr/bin/timeout", "/bin/timeout"].into_iter().find(|tool| Path::new(tool).is_file())
+        .expect("the hanging login test needs the system timeout command");
+    fs::remove_file(f.root.join("bin/timeout")).unwrap();
+    std::os::unix::fs::symlink(timeout, f.root.join("bin/timeout")).unwrap();
+    let profile = "printf '%s\\n' started > \"$HOME/login-started\"\nexec /bin/sleep 30\n";
+    fs::write(f.root.join("home/.profile"), profile).unwrap();
+    // The outer limit fails the test if the installer's shorter probe limit stops working.
+    let output = Command::new(timeout).args(["15", "/bin/sh"]).arg(f.root.join("scripts/install.sh"))
+        .current_dir(&f.root).env_clear()
+        .env("PATH", f.root.join("bin")).env("TMPDIR", f.root.join("tmp"))
+        .env("HOME", f.root.join("home")).env("CARGO_NET_OFFLINE", "true").env("SHELL", shell)
+        .env("INSTALL_ROOT", &f.root).env("INSTALL_CALLS", f.root.join("calls"))
+        .output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    assert!(f.root.join("home/login-started").is_file(), "the login profile did not run");
+    assert!(stdout.ends_with(PATH_LINE), "{stdout}");
+    assert!(stdout.contains("Then start the engine and open chat: ~/.vade/bin/vade launch\n"), "{stdout}");
+    assert_eq!(fs::read_to_string(f.root.join("home/.profile")).unwrap(), profile);
+}
 
 #[test]
 fn a_new_login_finds_vade_through_a_second_script_on_every_shell() {
@@ -810,9 +906,12 @@ fn the_last_line_promises_a_new_terminal_only_when_a_login_shell_adds_the_folder
     let home = f.root.join("home").display().to_string();
     for (body, last) in [
         // A profile that does not add the folder: zsh, or a ~/.bash_profile that hides ~/.profile.
-        ("#!/bin/sh\necho Welcome\necho vade-login-path=/usr/bin:/bin\n".to_owned(), "A new login here does not add ~/.local/bin to PATH, so a new terminal does not find vade.\nRun: export PATH=\"$HOME/.vade/bin:$PATH\"\n"),
-        (format!("#!/bin/sh\necho vade-login-path={home}/.local/bin:/usr/bin\n"), PATH_LINE),
+        ("#!/bin/sh\necho Welcome\necho vade-login-command=\n".to_owned(), PATH_LINE),
+        (format!("#!/bin/sh\necho Welcome\necho vade-login-command={home}/.local/bin/vade\n"), LOGIN_LINE),
         ("#!/bin/sh\nexit 1\n".to_owned(), PATH_LINE),
+        (format!("#!/bin/sh\necho vade-login-command={home}/.local/bin/vade\nexit 1\n"), PATH_LINE),
+        (format!("#!/bin/sh\necho vade-login-command={home}/.vade/bin/vade\n"), LOGIN_LINE),
+        ("#!/bin/sh\necho Welcome\n".to_owned(), PATH_LINE),
     ] {
         tool(shell.clone(), &body);
         let mut env = f.prebuilt(&bundle(Bad::None), Bad::None);
@@ -820,9 +919,22 @@ fn the_last_line_promises_a_new_terminal_only_when_a_login_shell_adds_the_folder
         let output = f.run_prebuilt(&env, &[]);
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success() && stdout.ends_with(last), "{body}: {stdout}");
-        assert_eq!(stdout.matches("export PATH=").count(), 1, "{stdout}");
+        assert_eq!(stdout.matches("export PATH=").count(), usize::from(last == PATH_LINE), "{stdout}");
+        let command = if last == LOGIN_LINE { "vade" } else { "~/.vade/bin/vade" };
+        assert!(stdout.contains(&format!("Then start the engine and open chat: {command} launch\n")), "{stdout}");
     }
     for profile in [".profile", ".bashrc", ".bash_profile"] { assert!(!f.root.join("home").join(profile).exists()); }
+}
+
+#[test]
+fn an_explicit_default_home_keeps_the_short_export_and_hint() {
+    let f = Fixture::new();
+    let home = f.root.join("home/.vade").display().to_string();
+    let output = f.run(&[("VADE_HOME", &home)]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.ends_with(PATH_LINE), "{stdout}");
+    assert!(stdout.contains("Then start the engine and open chat: ~/.vade/bin/vade launch\n"), "{stdout}");
+    assert!(f.path_script().is_file(), "{stdout}");
 }
 
 #[test]
@@ -863,21 +975,27 @@ fn a_local_folder_that_cannot_be_made_does_not_fail_the_install() {
 }
 
 #[test]
-fn a_shell_that_already_finds_vade_is_told_so() {
+fn the_login_shell_selects_the_advice_instead_of_the_current_path() {
     for folder in ["home/.vade/bin", "home/.local/bin"] {
         let f = Fixture::new();
         let path = f.on_path(folder);
-        let output = f.run(&[("PATH", &path)]);
+        let shell = f.login_shell();
+        let output = f.run(&[("PATH", &path), ("SHELL", &shell)]);
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success(), "{folder}: {stdout}");
-        assert!(stdout.ends_with("vade is on your PATH.\n") && !stdout.contains("export PATH="), "{folder}: {stdout}");
+        assert!(stdout.ends_with(LOGIN_LINE) && !stdout.contains("export PATH="), "{folder}: {stdout}");
+        fs::write(f.root.join("home/.profile"), "PATH=\"$INSTALL_ROOT/bin\"\n").unwrap();
+        let output = f.run(&[("PATH", &path), ("SHELL", &shell)]);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success() && stdout.ends_with(PATH_LINE), "{folder}: {stdout}");
     }
     // Another vade first on PATH is not this install, so the export line stays.
     let f = Fixture::new();
     fs::create_dir(f.root.join("other")).unwrap();
     f.write("other/vade", "exit 0");
     let path = format!("{}:{}", f.on_path("other"), f.root.join("home/.vade/bin").display());
-    let stdout = String::from_utf8_lossy(&f.run(&[("PATH", &path)]).stdout).into_owned();
+    let shell = f.login_shell();
+    let stdout = String::from_utf8_lossy(&f.run(&[("PATH", &path), ("SHELL", &shell)]).stdout).into_owned();
     assert!(stdout.ends_with(PATH_LINE), "{stdout}");
 }
 
@@ -890,7 +1008,7 @@ fn every_numbered_step_names_pull_or_up_and_launch_is_never_a_step() {
     assert_eq!(commands.len(), 2, "{stdout}");
     assert!(commands[0].starts_with("vade pull ") && commands[1] == "vade up", "{stdout}");
     assert!(steps.iter().all(|line| !line.starts_with(|c: char| c.is_ascii_digit()) || !line.contains("launch")), "{stdout}");
-    assert_eq!(stdout.matches("vade launch").count(), 0, "{stdout}");
+    assert_eq!(stdout.matches("vade launch").count(), 1, "{stdout}");
 }
 
 #[test]
@@ -901,6 +1019,26 @@ fn the_readme_the_installer_and_the_help_teach_the_same_three_commands() {
     assert!(readme.contains(&format!("curl -fsSL https://vade.lol/install.sh | sh\n{pull}\nvade up\n")));
     let script = fs::read_to_string(root.join("scripts/install.sh")).unwrap();
     assert!(script.contains(&format!("'   {pull}'")) && script.contains("'   vade up'"));
+    let guide = fs::read_to_string(root.join("docs/INSTALL.md")).unwrap();
+    let quickstart = fs::read_to_string(root.join("docs/agents/quickstart.md")).unwrap();
+    let fp8 = fs::read_to_string(root.join("docs/install-fp8.md")).unwrap();
+    let cli_guide = fs::read_to_string(root.join("cli/README.md")).unwrap();
+    for page in [&readme, &guide, &quickstart, &fp8, &cli_guide] {
+        assert!(page.contains(LOGIN_LINE.trim()) && page.contains("export PATH="));
+    }
+    for page in [&readme, &guide, &quickstart, &cli_guide] {
+        assert!(page.contains(LOGIN_LINE.trim()) && page.contains("export PATH=\"$HOME/.vade/bin:$PATH\""));
+        assert!(page.contains("`vade launch`"));
+    }
+    let extract = quickstart.lines().find(|line| line.starts_with("sed -n ") && line.contains("~/vade-step.log")).unwrap();
+    let f = Fixture::new();
+    for advice in [LOGIN_LINE, PATH_LINE] {
+        fs::write(f.root.join("home/vade-step.log"), format!("Install complete. Next steps:\n{advice}exit 0\n")).unwrap();
+        let output = Command::new("/bin/sh").args(["-c", extract]).env_clear()
+            .env("PATH", "/usr/bin:/bin").env("HOME", f.root.join("home")).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), advice.strip_prefix("Run: ").unwrap_or(advice));
+    }
     let help = Command::new(env!("CARGO_BIN_EXE_vade")).arg("--help").output().unwrap();
     let help = String::from_utf8(help.stdout).unwrap();
     assert!(help.contains(&format!("\n  {pull}\n")) && help.contains("\n  vade up "), "{help}");

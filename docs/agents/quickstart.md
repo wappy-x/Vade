@@ -132,26 +132,29 @@ vade --version
 - **Expected output.** A line that starts with `vade` and a version number, such as `vade 0.1.0`.
 - **Exit code.** 0 when `vade` is on `PATH`. Then go to step 3.
 
-If `vade` is not found, the shell prints `vade: command not found` and the exit code is 127. Then run the export line that the installer prints last. The command in that line starts with `export PATH=` and looks like this example:
+If `vade` is not found, the shell prints `vade: command not found` and the exit code is 127. Read the installer's last advice line:
+
+- **`Open a new terminal, then run: vade up`.** The login shell finds this install. No export line is printed. Open a new terminal or a new login shell. Run `vade --version` there before step 3.
+- **`Run: export PATH=...`.** Run the printed export command in this shell. It looks like this example:
 
 ```sh
 export PATH="$HOME/.vade/bin:$PATH"
 ```
 
-The folder in the line can differ between Vade versions, so run the line that the installer printed. Copy that line now, because the next long command replaces `~/vade-step.log`. This command prints it from the log:
+The folder in the export line can differ between Vade versions. Use the printed folder when that line is present. Save the advice now, because the next long command replaces `~/vade-step.log`. This command prints either the advice to open a new terminal or the export command from the log:
 
 ```sh
-sed -n 's/.*\(export PATH=.*\)/\1/p' ~/vade-step.log | tail -n 1
+sed -n '/^Open a new terminal, then run: vade up$/p; s/^Run: \(export PATH=.*\)$/\1/p' ~/vade-step.log | tail -n 1
 ```
 
-Then run `vade --version` again.
+If your tool starts each command in a shell without a login profile, use `export PATH="$HOME/.vade/bin:$PATH"` before each `vade` command. Use the printed folder instead if the installer gave a different export command. Then run `vade --version` again. Continue with step 3 before you run `vade up` or `vade launch`.
 
 - **Check.** `vade --version` prints a line that starts with `vade` and a version number, and exits 0.
 
 The two most likely failures:
 
 - **`vade: command not found` in a later step.** The `export` line lasts for one shell. If your tool starts a new shell for each command, put the `export` line in front of every `vade` command.
-- **The output has no `export PATH=` text.** The install did not finish. Go back to step 1.
+- **The output has neither advice line.** Check for `Install complete. Next steps:`. If that line is missing too, the install did not finish. Go back to step 1. Otherwise, use `export PATH="$HOME/.vade/bin:$PATH"` and check `vade --version` again.
 
 Do not add the line to `~/.profile`, unless the person asks you to.
 
@@ -358,7 +361,7 @@ Then run steps 2 and 3 on each Spark. Each Spark downloads its own copy of the c
 Over SSH, the `export` line must be in the same quoted command as `vade`. For example:
 
 ```sh
-ssh -o BatchMode=yes spark-b 'export PATH="<the folders that the installer printed>:$PATH"; nohup sh -c "vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300; echo exit \$?" > ~/vade-step.log 2>&1 < /dev/null & echo $! > ~/vade-step.pid'
+ssh -o BatchMode=yes spark-b 'export PATH="$HOME/.vade/bin:$PATH"; nohup sh -c "vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300; echo exit \$?" > ~/vade-step.log 2>&1 < /dev/null & echo $! > ~/vade-step.pid'
 ```
 
 The two most likely failures:
@@ -487,7 +490,7 @@ sh "$HOME/vade/scripts/install.sh"
 
 - **Expected output.** `Install complete. Next steps:`, then the next steps.
 - **Exit code.** 0 for each command.
-- **Check.** The output has an `export PATH=` line. Continue with step 2.
+- **Check.** The output has `Install complete. Next steps:` and either `Open a new terminal, then run: vade up` or `Run: export PATH=...`. Continue with step 2.
 
 If `git clone` prints `fatal: destination path ... already exists`, a checkout is there. Ask the person whether to use it. Do not replace it.
 
@@ -546,7 +549,7 @@ vade down
 curl -fsSL https://vade.lol/install.sh | sh
 ```
 
-Run the export line that the installer prints last, because the folder can change with the version. Then run `vade up`. The checks are the same as in steps 7, 1 and 4.
+Follow the last advice line as in step 2. Open a new terminal when the installer says to do so. Otherwise, run its export command in this shell. Then run `vade up`. The checks are the same as in steps 7, 1 and 4.
 
 **After a build from source in `$HOME/vade` on a Spark.**
 

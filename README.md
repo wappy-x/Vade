@@ -45,9 +45,12 @@ vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e6342
 vade up
 ```
 
-1. **Install** checks the GPU and the driver, then installs the prebuilt Vade build. It does not need sudo, and it does not change your shell profile. If your shell cannot find `vade` afterwards, run the `export` line that the installer prints.
+1. **Install** checks the GPU and the driver, then installs the prebuilt Vade build. It does not need sudo. It does not change your shell profile. Follow its PATH advice before you run the next command. When a login shell finds Vade, it prints `Open a new terminal, then run: vade up`. Otherwise, run its `export PATH="$HOME/.vade/bin:$PATH"` line. Pull the model before you run `vade up`.
 2. **Pull** downloads the model (102 GB) and checks every file. The long hash after `@` pins the exact revision we tested. If the download stops, run the same command again. It continues where it stopped.
 3. **Up** starts the engine on this Spark. `vade launch` starts it and opens the coding agent in the current folder. `vade down` stops it.
+
+The chat hint uses `vade launch` when a login shell finds Vade.
+Otherwise, it uses `~/.vade/bin/vade launch`. A custom `VADE_HOME` uses its own `bin/vade` path.
 
 **First-run time.** The [download record](docs/benchmarks.md#rented-cloud-gb10-vms) gives about 80 minutes to over three hours on rented GB10 VMs. With the model on disk, the full check still takes time on each Spark. The [install record for build 5a22651](bench/receipts/2026-10-24/2026-10-24_2014_qwen3.8-flash-next-nvfp4_local-2spark_5a22651-drafting-off-thinking-off/README.txt) gives 74.2 s and 77.9 s for the checks on a pair of Sparks. After the checks and install, `vade up` took 27.0 s. Times depend on the network, disk and build.
 

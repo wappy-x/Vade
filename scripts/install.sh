@@ -74,6 +74,19 @@ case $0 in */install.sh|install.sh)
     fi ;;
 esac
 if [ -n "$root" ]; then cd "$root"; else piped=true; fi
+# Keep install progress and errors. Print the chat hint after the login PATH check.
+install_vade() {
+    # Descriptor 3 returns the child status. Descriptor 4 keeps stdout live.
+    install_status=$(
+        {
+            { result=0; "$vade" "$@" </dev/null 3>&- 4>&- || result=$?
+              printf '%s\n' "$result" >&3; } |
+                sed '/^Then start the engine and open chat: /d' >&4
+        } 3>&1
+    ) || return 1
+    case $install_status in ''|*[!0-9]*) return 1 ;; esac
+    return "$install_status"
+} 4>&1
 # Check the GPU and driver before any download; vade install checks them again.
 gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader) ||
     fail 'NVIDIA driver check failed (nvidia-smi error above). Next: ask your administrator to restore nvidia-smi, then retry.'
@@ -242,7 +255,7 @@ prebuilt() {
 if prebuilt; then
     [ "$check" = false ] || exit 0
     vade="$prebuilt_dir/vade"
-    if "$vade" install </dev/null; then
+    if install_vade install; then
         printf 'Install: installed prebuilt Vade %s.\n' "$sha"
     else
         # With a controller config that install reaches the other Sparks. A source
@@ -360,14 +373,15 @@ printf '%s\n' 'Install: fetching the Rust build-std files for the GPU kernels (n
 cargo "+$device" fetch --locked --manifest-path "$sysroot/lib/rustlib/src/rust/library/Cargo.toml" ||
     fail 'Rust build-std fetch failed. Next: check access to https://index.crates.io and rerun the Retry command below; with CARGO_NET_OFFLINE=true, run it once online first.'
 # A source install is for this Spark alone: a controller config does not change that.
-"$vade" __install-here </dev/null ||
+install_vade __install-here ||
     fail "local install failed. Next: follow the diagnostic above, run \"$vade\" doctor, then retry."
 fi
 # One folder stays on PATH across versions: a small script that runs the build
 # just installed, rewritten on each install. Not a copy or a link: the real
 # program must run from its own folder to find its bundle or checkout.
 vade_home=${VADE_HOME:-$HOME/.vade}
-bin_path=${VADE_HOME:+$VADE_HOME/bin}
+bin_path=
+if [ "$vade_home" != "$HOME/.vade" ]; then bin_path="$vade_home/bin"; fi
 quoted=$(printf '%s\n' "$vade" | sed "s/'/'\\\\''/g")
 [ ! -d "$vade_home/bin/vade" ] && (umask 077 && mkdir -p "$vade_home/bin" &&
     printf '#!/bin/sh\nexec '\''%s'\'' "$@"\n' "$quoted" > "$vade_home/bin/vade.new" &&
@@ -400,25 +414,27 @@ printf '%s\n' 'Install complete. Next steps:' \
     '2. Start the engine:' \
     '   vade up' \
     ''
-found=$(command -v vade 2>/dev/null || true)
 path_line="export PATH=\"${bin_path:-\$HOME/.vade/bin}:\$PATH\""
-if [ "$found" = "$vade_home/bin/vade" ] || { [ "$shim_written" = true ] && [ "$found" = "$shim" ]; }; then
-    printf '%s\n' 'vade is on your PATH.'
-elif [ "$shim_written" = true ]; then
-    # Ask a login shell, which reads the profile, and change nothing. No answer keeps the plain line.
-    login_path=
-    if [ -n "${SHELL-}" ] && command -v timeout >/dev/null 2>&1; then
-        login_path=$(timeout 5 "$SHELL" -lc 'printf "vade-login-path=%s\n" "$PATH"' </dev/null 2>/dev/null | sed -n 's/^vade-login-path=//p' | tail -n 1) || login_path=
-    fi
-    case ":$login_path:" in
-        "::" | *":$HOME/.local/bin:"*) printf 'Open a new terminal, or run: %s\n' "$path_line" ;;
-        *)
-            printf '%s\n' 'A new login here does not add ~/.local/bin to PATH, so a new terminal does not find vade.'
-            printf 'Run: %s\n' "$path_line" ;;
-    esac
-else
-    printf 'Run: %s\n' "$path_line"
+# Ask the login shell after writing the scripts. A failed probe keeps the export advice.
+# Check the first command found, so another vade cannot hide this install.
+login_vade=
+if [ -n "${SHELL-}" ] && command -v timeout >/dev/null 2>&1; then
+    login_reply=$(timeout 5 "$SHELL" -lc 'printf "vade-login-command=%s\n" "$(command -v vade 2>/dev/null)"' </dev/null 2>/dev/null) || login_reply=
+    login_vade=$(printf '%s\n' "$login_reply" | sed -n 's/^vade-login-command=//p' | tail -n 1)
 fi
+if [ "$login_vade" = "$vade_home/bin/vade" ] || { [ "$shim_written" = true ] && [ "$login_vade" = "$shim" ]; }; then
+    launch_command=vade
+    path_advice='Open a new terminal, then run: vade up'
+else
+    launch_command='~/.vade/bin/vade'
+    if [ -n "$bin_path" ]; then
+        quoted_bin=$(printf '%s\n' "$bin_path" | sed "s/'/'\\\\''/g")
+        launch_command="'$quoted_bin/vade'"
+    fi
+    path_advice="Run: $path_line"
+fi
+printf 'Then start the engine and open chat: %s launch\n' "$launch_command"
+printf '%s\n' "$path_advice"
 if [ "$launch" = true ]; then
     cd "$workspace" || fail 'your starting folder is unavailable. Next: open an existing project folder, then use the launch command above.'
     [ "$piped" = false ] || (: </dev/tty) 2>/dev/null || {

@@ -22,12 +22,13 @@ if [ "$shells" = 'sh bash' ]; then
     echo 'FAIL setup: missing dash or zsh'
     exit 1
 fi
-for tool in sh bash; do
+for tool in sh bash timeout; do
     command -v "$tool" >/dev/null 2>&1 || {
         printf 'FAIL setup: missing %s\n' "$tool"
         exit 1
     }
 done
+system_timeout=$(command -v timeout)
 
 # A file in PATH is either a local fake or a known system file tool.
 # In particular, no real curl, git, compiler, Rust tool or GPU tool is in PATH.
@@ -72,6 +73,18 @@ EOF
 printf '%s\n' unexpected-compiler >> "$MATRIX_CALLS"
 exit 99
 EOF
+    cat > "$case_dir/bin/timeout" <<'EOF'
+#!/bin/sh
+shift
+exec "$@"
+EOF
+    cat > "$case_dir/bin/login-shell" <<'EOF'
+#!/bin/sh
+set -eu
+[ "$1" = -lc ]
+. "$HOME/.profile"
+exec /bin/sh -c "$2"
+EOF
     cat > "$case_dir/bin/git" <<'EOF'
 #!/bin/sh
 set -eu
@@ -113,8 +126,9 @@ set -eu
 [ "$1" = __install-here ]
 case $VADE_SOURCE in "$MATRIX_CASE"/*) ;; *) exit 99 ;; esac
 printf '%s\n' "vade $*" >> "$MATRIX_CALLS"
+printf 'Then start the engine and open chat: %s launch\n' "$0"
 EOF
-    for tool in uname nvidia-smi curl cc git rustup cargo; do
+    for tool in uname nvidia-smi curl cc git rustup cargo timeout login-shell; do
         chmod 700 "$case_dir/bin/$tool"
     done
     chmod 700 "$case_dir/fake-vade"
@@ -135,12 +149,13 @@ install_shell() {
         dash) set -- "$(command -v dash)" "$@" ;;
         zsh) set -- "$(command -v zsh)" --emulate sh -f "$@" ;;
     esac
+    case $test_case in login-hanging) set -- "$system_timeout" 15 "$@" ;; esac
     env -i PATH="$case_dir/bin" HOME="$case_dir/home" PREFIX="$case_dir/prefix" \
         TMPDIR="$case_dir/tmp" XDG_CONFIG_HOME="$case_dir/home/.config" \
         XDG_CACHE_HOME="$case_dir/home/.cache" XDG_DATA_HOME="$case_dir/home/.local/share" \
         CARGO_HOME="$case_dir/home/.cargo" RUSTUP_HOME="$case_dir/home/.rustup" \
         CARGO_NET_OFFLINE=true MATRIX_CASE="$case_dir" MATRIX_CALLS="$case_dir/calls" \
-        MATRIX_OS="$host_os" MATRIX_ARCH="$host_arch" \
+        MATRIX_OS="$host_os" MATRIX_ARCH="$host_arch" SHELL="$login_shell" \
         "$@"
 }
 
@@ -159,6 +174,23 @@ run_case() (
         host-macos) host_os=Darwin host_arch=arm64 ;;
     esac
     fixture
+    login_shell= profile_contents='Keep this profile.'
+    case $test_case in
+        login-shim) profile_contents='if [ -d "$HOME/.local/bin" ]; then PATH="$HOME/.local/bin:$PATH"; fi; export PATH' ;;
+        login-bin) profile_contents='PATH="$HOME/.vade/bin:$PATH"; export PATH' ;;
+        login-missing) profile_contents='PATH="$MATRIX_CASE/bin"; export PATH' ;;
+        login-failed) profile_contents='exit 1' ;;
+        login-hanging)
+            profile_contents='printf "%s\n" started > "$MATRIX_CASE/login-started"; exec /bin/sleep 30'
+            rm "$case_dir/bin/timeout"
+            ln -s "$system_timeout" "$case_dir/bin/timeout"
+            ;;
+    esac
+    case $test_case in login-*)
+        login_shell="$case_dir/bin/login-shell"
+        printf '%s\n' "$profile_contents" > "$case_dir/home/.profile"
+        ;;
+    esac
     snapshot > "$case_dir/before"
     cd "$case_dir/work"
     mode=${test_case%%-*}
@@ -171,7 +203,7 @@ run_case() (
         help) set -- --help ;;
     esac
     case $mode in
-        checkout)
+        checkout|login)
             # Run from a different folder to test discovery through the file path.
             install_shell "$case_dir/checkout/scripts/install.sh" "$@" \
                 > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -247,6 +279,19 @@ run_case() (
                 default) grep -qF 'Prebuilt: missing tar; building from source.' "$case_dir/stdout" ;;
                 source) grep -qF 'Prebuilt: --source was given; building from source.' "$case_dir/stdout" ;;
             esac
+            case $test_case in
+                login-shim|login-bin)
+                    grep -qxF 'Open a new terminal, then run: vade up' "$case_dir/stdout"
+                    grep -qxF 'Then start the engine and open chat: vade launch' "$case_dir/stdout"
+                    [ "$(grep -c 'export PATH=' "$case_dir/stdout" || true)" = 0 ]
+                    ;;
+                *)
+                    grep -qxF 'Run: export PATH="$HOME/.vade/bin:$PATH"' "$case_dir/stdout"
+                    grep -qxF 'Then start the engine and open chat: ~/.vade/bin/vade launch' "$case_dir/stdout"
+                    ;;
+            esac
+            [ "$(grep -cE '^(Open a new terminal|Run: export PATH=)' "$case_dir/stdout")" = 1 ]
+            [ "$(grep -c '^Then start the engine and open chat:' "$case_dir/stdout")" = 1 ]
             grep -q '^cargo .* build --release --offline --locked ' "$case_dir/calls"
             grep -q '^cargo .* fetch --locked ' "$case_dir/calls"
             [ "$(tail -n 1 "$case_dir/calls")" = 'vade __install-here' ]
@@ -254,19 +299,21 @@ run_case() (
             [ -x "$case_dir/home/.vade/bin/vade" ]
             [ -x "$case_dir/home/.local/bin/vade" ]
             case $mode in
-                checkout) reject_calls '^git clone$' ;;
+                checkout|login) reject_calls '^git clone$' ;;
                 pipe) grep -q '^git clone$' "$case_dir/calls" ;;
             esac
             ;;
     esac
     reject_calls '^unexpected-'
+    case $test_case in login-hanging) [ -f "$case_dir/login-started" ] ;; esac
     case $test_case in
         *-check|*-help|half-pipe|no-call|host-*)
             snapshot > "$case_dir/after"
             cmp "$case_dir/before" "$case_dir/after"
             ;;
     esac
-    for profile in .profile .bashrc .zshrc; do
+    [ "$(cat "$case_dir/home/.profile")" = "$profile_contents" ]
+    for profile in .bashrc .zshrc; do
         [ "$(cat "$case_dir/home/$profile")" = 'Keep this profile.' ]
     done
     [ "$(cat "$case_dir/prefix/keep")" = 'Keep this prefix.' ]
@@ -276,7 +323,7 @@ failed=0
 for shell in $shells; do
     for test_case in checkout-default pipe-default checkout-source pipe-source \
         checkout-check pipe-check checkout-help pipe-help half-pipe no-call \
-        host-linux-x86_64 host-macos; do
+        host-linux-x86_64 host-macos login-shim login-bin login-missing login-failed login-hanging; do
         case_dir="$matrix/$shell-$test_case"
         mkdir "$case_dir"
         set +e

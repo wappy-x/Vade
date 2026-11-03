@@ -149,9 +149,12 @@ current bundle or rebuilds the current source, then tells you the restart
 command.
 
 The installer writes one small script, `~/.vade/bin/vade`, that runs the build
-it just installed. The `export` line that the installer prints puts that folder
-on `PATH`, and that line stays the same for every version. For a newer Vade on
-a Spark, run the install command again: `curl -fsSL https://vade.lol/install.sh | sh`.
+it just installed. Follow its last advice line. If it prints
+`Open a new terminal, then run: vade up`, open a new terminal before the next
+command. If it prints `Run: export PATH=...`, run that command in this shell.
+The default export command is `export PATH="$HOME/.vade/bin:$PATH"`.
+For a newer Vade on a Spark, run the install command again:
+`curl -fsSL https://vade.lol/install.sh | sh`.
 
 `vade version` (also `vade --version` or `vade -V`) prints the CLI package
 version and the short commit of this build, such as `vade 0.1.0 (f7946e5)`. It

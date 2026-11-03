@@ -81,8 +81,11 @@ vade pull Qwen/Qwen3.8-Flash-Next-FP8@236dfdf285828023ca3bcd3f37366c58a3469b13
 ```
 
 The `vade` command comes from the one-line install,
-`curl -fsSL https://vade.lol/install.sh | sh`. If it is not found, run the
-export line that the installer prints last.
+`curl -fsSL https://vade.lol/install.sh | sh`. Follow its last advice line.
+If it prints `Open a new terminal, then run: vade up`, open a new terminal
+before you run `vade pull`. No export line is printed in that case.
+If it prints `Run: export PATH=...`, run that export command in this shell
+before you run `vade pull`.
 [Download models](pull-models.md) has the details.
 
 You can also download the weights once and copy them. Run this command from
