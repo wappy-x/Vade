@@ -210,6 +210,103 @@ pub(crate) fn background(job: Job) {
         }
     }
 }
+/// Decode keeps the checkpoint drive awake. A drive idle for about 100 ms drops to a low-power
+/// state, and the next cold PLE row then waits for its wake-up (about 9 ms in the one-Spark
+/// trace, against about 0.6 ms awake). Two read paths tick: the pooled plain step
+/// (Reader::prefetch_ple_rows) and the CPU frontend (Reader::frontend_prompt: verify passes,
+/// observed passes, CPU prompt tiles). While a tick is at most WARM_IDLE_MS old, one thread
+/// reads one WARM_BLOCK of the PLE table directly (page cache bypassed) every WARM_PERIOD_MS.
+/// With no tick for WARM_IDLE_MS it parks until the next one and logs that burst's reads.
+/// Reads only: no byte the engine uses changes.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const WARM_PERIOD_MS: u64 = 50;
+const WARM_IDLE_MS: u64 = 250;
+const WARM_BLOCK: u64 = 4096;
+static WARM_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WARM_THREAD: OnceLock<std::thread::Thread> = OnceLock::new();
+fn warm_now() -> u64 {
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64 + 1
+}
+/// A decode read happened now: start the warm thread once for `file` (the span
+/// `start..start + len` is the table it reads in) and mark the drive busy.
+pub(crate) fn keep_warm(file: &File, start: u64, len: u64) {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    WARM_TICK.store(warm_now(), std::sync::atomic::Ordering::Relaxed);
+    STARTED.get_or_init(|| spawn_warm(file, start, len));
+    if let Some(thread) = WARM_THREAD.get() { thread.unpark(); }
+}
+/// A warm read is due while the last decode read is at most WARM_IDLE_MS old.
+fn warm_due(now: u64, tick: u64) -> bool {
+    tick != 0 && now.saturating_sub(tick) <= WARM_IDLE_MS
+}
+/// The k-th warm read's aligned block inside `start..start + len`, spread over the span.
+fn warm_offset(k: u64, start: u64, len: u64) -> Option<u64> {
+    let first = start.div_ceil(WARM_BLOCK) * WARM_BLOCK;
+    let blocks = start.saturating_add(len).saturating_sub(first) / WARM_BLOCK;
+    (blocks > 0).then(|| first + k.wrapping_mul(2_654_435_761) % blocks * WARM_BLOCK)
+}
+#[cfg(target_os = "linux")]
+fn spawn_warm(file: &File, start: u64, len: u64) {
+    use std::os::unix::fs::OpenOptionsExt;
+    #[cfg(target_arch = "aarch64")]
+    const O_DIRECT: i32 = 0o200000;
+    #[cfg(not(target_arch = "aarch64"))]
+    const O_DIRECT: i32 = 0o40000;
+    // A second open file description, so the shared descriptor's buffered preads stay buffered.
+    let direct = match std::fs::OpenOptions::new().read(true).custom_flags(O_DIRECT)
+        .open(format!("/proc/self/fd/{}", file.as_raw_fd())) {
+        Ok(direct) => direct,
+        Err(error) => { eprintln!("flash_next ple_warm off: direct open failed: {error}"); return; }
+    };
+    let spawned = std::thread::Builder::new().name("ple-warm".into()).spawn(move || {
+        let mut buf = vec![0u8; 2 * WARM_BLOCK as usize];
+        let at = buf.as_ptr().align_offset(WARM_BLOCK as usize);
+        if at >= WARM_BLOCK as usize { eprintln!("flash_next ple_warm off: no aligned buffer"); return; }
+        let (mut reads, mut burst, mut since, mut failed) = (0u64, 0u64, 0u64, false);
+        loop {
+            if !warm_due(warm_now(), WARM_TICK.load(std::sync::atomic::Ordering::Relaxed)) {
+                if burst > 0 {
+                    eprintln!("flash_next ple_warm reads={reads} burst={burst} ms={}", warm_now().saturating_sub(since));
+                    burst = 0;
+                }
+                std::thread::park(); // no decode: no reads until keep_warm unparks
+                continue;
+            }
+            if burst == 0 { since = warm_now(); }
+            std::thread::sleep(std::time::Duration::from_millis(WARM_PERIOD_MS));
+            let Some(offset) = warm_offset(reads + 1, start, len) else { return };
+            match direct.read_at(&mut buf[at..at + WARM_BLOCK as usize], offset) {
+                Ok(_) => { reads += 1; burst += 1; }
+                Err(error) if !failed => { failed = true; eprintln!("flash_next ple_warm read failed: {error}"); }
+                Err(_) => {}
+            }
+        }
+    });
+    match spawned {
+        Ok(handle) => { let _ = WARM_THREAD.set(handle.thread().clone()); eprintln!("flash_next ple_warm on"); }
+        Err(error) => eprintln!("flash_next ple_warm off: no thread: {error}"),
+    }
+}
+#[cfg(not(target_os = "linux"))]
+fn spawn_warm(_: &File, _: u64, _: u64) {}
+#[cfg(test)]
+#[test]
+fn warm_reads_only_while_decode_ticks_and_stay_inside_the_table() {
+    assert!(!warm_due(1000, 0));
+    assert!(warm_due(1000, 1000) && warm_due(1250, 1000));
+    assert!(!warm_due(1251, 1000));
+    assert!(warm_due(900, 1000)); // a tick newer than the check
+    assert_eq!(warm_offset(1, 100, 4000), None); // no whole aligned block
+    for (start, len) in [(0u64, 4096u64), (100, 1 << 20), (5000, 3 << 30)] {
+        for k in 0..1000 {
+            let o = warm_offset(k, start, len).unwrap();
+            assert!(o % WARM_BLOCK == 0 && o >= start && o + WARM_BLOCK <= start + len);
+        }
+    }
+    let seen: std::collections::BTreeSet<_> = (0..64).map(|k| warm_offset(k, 0, 1 << 30).unwrap()).collect();
+    assert!(seen.len() > 60);
+}
 #[cfg(test)]
 mod tests {
     use super::*;

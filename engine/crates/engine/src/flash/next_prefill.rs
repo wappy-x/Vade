@@ -150,6 +150,7 @@ impl Reader {
     /// serial cold preads cost one NVMe round trip each (C1 decode: ~28 per step,
     /// 5.7 ms). With the hints the set costs about one round trip.
     pub(crate) fn prefetch_ple_rows(&self, rows: &[u64]) {
+        self.decode_tick();
         for &row in rows {
             if row >= PLE_ROWS {
                 continue;
@@ -158,6 +159,13 @@ impl Reader {
             let local = row % PLE_PART_ROWS;
             pair[0].advise(local * 80, 80);
             pair[1].advise(local * 10, 10);
+        }
+    }
+    /// A decode or prompt read is about to happen: keep the drive of the PLE table awake
+    /// (read_plan::keep_warm).
+    fn decode_tick(&self) {
+        if let Some([nibbles, _]) = self.ple.first() {
+            read_plan::keep_warm(&nibbles.file, nibbles.start, nibbles.len);
         }
     }
     /// MTP drafts: page-cache hints for rows a later frontend reads (each
@@ -426,6 +434,7 @@ impl Reader {
         half: Half,
     ) -> Result<()> {
         let n = rows.len();
+        self.decode_tick();
         let ready = self.prestaged.lock().ok().filter(|_| half == Half::Both).and_then(|mut slot| {
             slot.take_if(|p| p.global == global.to_bits() && p.key == rows)
         });

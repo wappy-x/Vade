@@ -59,6 +59,9 @@ pub(super) struct Draft<'a, 'w> {
     copy_rows: Option<DeviceVector<'a>>,
     /// VADE_MTP_CONF: the (value, id, valid, probability) readback row; allocated on first use.
     conf_out: Option<DeviceVector<'a>>,
+    /// This chat's stop for the next proposal (draft_steps.rs), and p of each step of the last one.
+    rule: Option<crate::draft::StepRule>,
+    confidence: Vec<f32>,
 }
 const OBSERVE_MAX: usize = 128;
 const COPY_ROW_WORDS: usize = std::mem::size_of::<spark_gpu_probe::kernel_params::HybridCopyRow>() / 4;
@@ -77,7 +80,7 @@ pub(super) const DEFER_ROWS: usize = 64;
 /// drafter softmax probability is below p, and that token is not proposed, so verification
 /// spends rows (each new row adds its own routed experts to the verify pass) only on likely
 /// accepts. Verification still picks every token, so output bytes equal the undrafted run's;
-/// only the rows per cycle change. VADE_MTP_CONF_LOG=1 prints each proposal's probabilities
+/// only the rows per cycle change. VADE_MTP_CONF_LOG=1 prints each proposal's probabilities and ids
 /// (p=0 logs without stopping, for calibration). NextModel's load refuses a malformed value.
 pub(super) fn conf_threshold() -> Option<f32> {
     static T: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
@@ -204,6 +207,8 @@ impl<'a, 'w> Draft<'a, 'w> {
             backlog_entry: 0,
             copy_rows: None,
             conf_out: None,
+            rule: None,
+            confidence: Vec::new(),
         })
     }
     pub(super) fn backlog_len(&self) -> usize {
@@ -469,10 +474,13 @@ impl<'a, 'w> Draft<'a, 'w> {
         b.copy_range(&self.last, &mut self.saved, 0, 0, W)?;
         self.attention.rewind(position - 1);
         let conf = conf_threshold();
-        let mut probs = Vec::new();
+        let rule = self.rule.take();
+        let (mut probs, mut candidates) = (Vec::new(), Vec::new());
         let result = (|| {
             let mut out = Vec::new();
-            for _ in 0..depth {
+            let mut chain = 1.0;
+            for step in 0..depth {
+                if rule.is_some_and(|r| r.halts(chain, step)) { break; }
                 self.fuse(b, model, token)?;
                 self.attention
                     .project(b, &mut self.scratch, &self.input, 1)?;
@@ -506,6 +514,7 @@ impl<'a, 'w> Draft<'a, 'w> {
                     let out_row = self.conf_out.as_ref().ok_or("missing draft confidence row")?;
                     let (candidate, p) = self.head.draft_confidence(b, &self.partials, out_row)?;
                     probs.push(p);
+                    if conf_log() { candidates.push(candidate.token); }
                     unsure = p < threshold;
                     candidate.token
                 } else {
@@ -521,14 +530,16 @@ impl<'a, 'w> Draft<'a, 'w> {
                 }
                 if unsure { break; }
                 out.push(token);
+                if let (Some(r), Some(&p)) = (rule, probs.last()) { chain *= r.keep(p); }
             }
             Ok(out)
         })();
         if conf.is_some() && conf_log() {
-            eprintln!("mtpconf pos={position} depth={depth} proposed={} p={probs:?}", result.as_ref().map_or(0, |o| o.len()));
+            eprintln!("mtpconf pos={position} depth={depth} proposed={} p={probs:?} ids={candidates:?}", result.as_ref().map_or(0, |o| o.len()));
         }
         b.copy_range(&self.saved, &mut self.last, 0, 0, W)?;
         self.attention.rewind(position - 1);
+        self.confidence = probs;
         result
     }
 }
@@ -728,6 +739,15 @@ impl<'a, 'w> NextSession<'a, 'w> {
             .as_mut()
             .ok_or("MTP disabled")?
             .propose(b, self.model, self.pos, token, depth, self.batch_drafts.then(|| self.hash.clone()))
+    }
+    /// The stop of the next `propose_mtp`. It needs the drafter's p of each step (VADE_MTP_CONF).
+    pub fn set_draft_step_rule(&mut self, rule: crate::draft::StepRule) -> bool {
+        match self.draft.as_mut().filter(|_| conf_threshold().is_some()) { Some(d) => { d.rule = Some(rule); true } None => false }
+    }
+    /// Ends a cycle: p of its steps. Its stop ends with it, so a stop that no draft read (a
+    /// lookup proposal, no room) cannot reach a later cycle of a chat in a batch.
+    pub fn take_draft_confidence(&mut self) -> Vec<f32> {
+        self.draft.as_mut().map_or(Vec::new(), |d| { d.rule = None; std::mem::take(&mut d.confidence) })
     }
     /// VADE_MTP_BATCH: `propose_mtp` for every chat (same tokens), with the drafting
     /// chats' depth steps run together in tiles of DRAFT_ROWS; a lone drafter (or a chat

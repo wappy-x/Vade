@@ -2,6 +2,7 @@
 use crate::sample::{Distribution, Sampler, Sampling, uniform};
 use std::collections::HashMap;
 use std::time::Instant;
+#[path = "draft_steps.rs"] mod steps; pub use steps::StepRule;
 type Result<T> = std::result::Result<T, String>;
 /// VADE_MTP_SAMPLED=1 (default off): verified sampled rows draw in parallel (sample_rows).
 fn parallel_rows() -> bool {
@@ -49,6 +50,8 @@ pub trait Target {
     fn adaptive_model_depth(&self) -> bool { false }
     /// Native policies: the model (not lookup) depth for the next proposal.
     fn limit_model_depth(&mut self, _depth: usize) {}
+    /// This cycle's stop for a target that stops drafts step by step (draft_steps.rs): it then drafts the full width. Each finished cycle takes the confidence and ends the stop.
+    fn draft_step_rule(&mut self, _rule: StepRule) -> bool { false } fn take_draft_confidence(&mut self) -> Vec<f32> { Vec::new() }
     /// Adaptive model depth: this target's measured ms for one verify pass of `rows` rows,
     /// shared by every request it serves. When known, the chooser uses it as is instead of
     /// the cost prior times this request's learned scale.
@@ -433,6 +436,7 @@ pub struct Speculator {
     tail: Vec<u32>,
     seed: Vec<u32>,
     control: Control,
+    steps: steps::Steps,
     guard: Guard,
     pub stats: Stats,
 }
@@ -455,7 +459,7 @@ impl Speculator {
         Ok(Self { config, options, sampler, row_samplers: Vec::new(), presampled: None, history: prompt.to_vec(), prompt_len: prompt.len(),
             next, done: config.max_new == 0, skip_model: false, lookup: Lookup::default(),
             recycling, tail: Vec::new(), seed: Vec::new(),
-            control: Control::new(), guard: Guard::default(), stats: Stats::default() })
+            control: Control::new(), steps: Default::default(), guard: Guard::default(), stats: Stats::default() })
     }
     pub fn history(&self) -> &[u32] { &self.history }
     /// Resume at the committed KV prefix with the already sampled pending token.
@@ -471,7 +475,7 @@ impl Speculator {
         if let Some(slot) = recycling.successors.get_mut(*history.last().unwrap() as usize) { *slot = next; }
         Ok(Self { config, options, sampler: Sampler::new(options)?, row_samplers: Vec::new(), presampled: None, history: history.to_vec(),
             prompt_len, next, done: false, skip_model: false, lookup: Lookup::default(), recycling,
-            tail: Vec::new(), seed: Vec::new(), control: Control::new(), guard: Guard::default(), stats: Stats::default() })
+            tail: Vec::new(), seed: Vec::new(), control: Control::new(), steps: Default::default(), guard: Guard::default(), stats: Stats::default() })
     }
     /// A previously verified continuation is only a proposal. The target must
     /// verify it again, including when sampling options or the prefix change.
@@ -571,6 +575,7 @@ impl Speculator {
                     || rows < available && self.native_rows(available, &measured, &prior, Some(rows - 1)) > rows) {
                     rows = (rows + 1).min(available);
                 }
+                if !self.sampled_verifier() && target.draft_step_rule(self.steps.rule(self.config.costs, self.control.draft_price(), self.stats.cycles)) { rows = available; }
                 target.limit_model_depth(rows - 1);
             }
             let started = Instant::now();
@@ -872,6 +877,7 @@ impl Speculator {
                 self.tail.extend(predictions[committed..].iter().copied().take_while(|&t| t != u32::MAX));
             }
             self.observe_drafts(&plan.drafts, plan.class, &choices);
+            self.steps.observe(&target.take_draft_confidence(), &plan.drafts[0], &choices, plan.input.len(), self.config.costs, self.control.draft_price());
             self.control.observe_cost(plan.input.len(), target_ms, learn_ms, self.config.costs);
             self.next = next;
             self.stats.cycles += 1;

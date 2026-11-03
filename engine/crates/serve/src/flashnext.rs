@@ -597,6 +597,12 @@ impl spark_engine::draft::Target for Chat<'_, '_> {
     fn limit_model_depth(&mut self, depth: usize) {
         self.depth_cap = depth;
     }
+    fn draft_step_rule(&mut self, rule: spark_engine::draft::StepRule) -> bool {
+        self.live.as_mut().is_some_and(|s| s.set_draft_step_rule(rule))
+    }
+    fn take_draft_confidence(&mut self) -> Vec<f32> {
+        self.live.as_mut().map_or(Vec::new(), |s| s.take_draft_confidence())
+    }
     fn model_draft_costs(&self) -> Option<spark_engine::draft::CostCurve> {
         // VADE_MTP_ADAPT prior: verify pass ms by rows 1/2/4/8/16 (one chat, short context,
         // main df70005f: 41.8 + 4.76 per row); the speculator learns the scale online.

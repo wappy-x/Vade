@@ -393,6 +393,10 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
   - Each Spark keeps its own copy of its own state. Rank 0 alone picks a hit and its length. A refusal by any Spark refuses the copy on all of them, and the next turn then reads its whole prompt on every Spark.
   - The cache is on unless `VADE_FLASHNEXT_PREFIX_CACHE=0`. The layer chain still runs without it. Kernels, tiles and reduction order have no change.
 - Sampled replies follow a fixed order in two more cases. With `top_k` 0 and `top_p` below 1, the engine draws from the `top_p` set from the highest weight down, not in the order a partition left it, so such a request can get other IDs than before for the same seed. With `top_k` above 0 and `top_p` below 1, the `top_p` sum now runs from the highest weight down, so a draw can also change where two sums round differently. In host tests, `"draft":"sampled"` and `FLASH_MTP_SAMPLED=1` now commit the same IDs as drafting off, whatever the draft head proposes and whichever chat holds the drafter; before, they accepted proposals with a probability ratio. Greedy replies do not change. See [Sampling](docs/sampling.md#order-of-operations).
+- With FP4-Local, a chat alone now decides before each draft step if that step can pay.
+  - Before, the chat picked one row limit per cycle from the acceptance of each depth.
+  - Now the chat reads the drafter's probability of each draft in the chain, its own acceptance for that probability, and the cost of one more row and draft step.
+  - Exact verification still picks every token, so the token IDs have no change. FP8 and chats in a batch have no change.
 
 - A second FP4-Local start on two Sparks no longer stops at `NVFP4 SHA-256 manifest ... peer=unset`.
   - Before, rank 0 of a start with no list path wrote a checksum list into the checkpoint, and rank 1 never did. The next start saw two different histories and refused.

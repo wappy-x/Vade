@@ -65,7 +65,8 @@ pub fn parse_draft_vocab(value: Option<&str>) -> Result<Option<u32>, String> {
             .map_err(|_| format!("VADE_FLASHNEXT_DRAFT_VOCAB must be a row count, 0 = full head (got {v:?})")),
     }
 }
-/// VADE_MTP_CONF: unset = 0.4, "off" = no threshold, otherwise p in [0, 1).
+/// VADE_MTP_CONF: unset = 0.4, "off" = no threshold, otherwise p in [0, 1). "off" also ends the
+/// one-chat step stop (draft_steps.rs), which reads p, and a chat alone keeps the width chooser.
 pub fn parse_mtp_conf(value: Option<&str>) -> Result<Option<f32>, String> {
     match value {
         None => Ok(Some(MTP_CONF)),
