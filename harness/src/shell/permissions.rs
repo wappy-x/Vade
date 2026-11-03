@@ -653,24 +653,61 @@ mod tests {
         // drops the rules of the others.
         let temp = Temp::new("race");
         let project = temp.0.join(".vade").join(FILE_NAME);
+        let mut expected = Vec::new();
         for round in 0..4 {
             let rules: Vec<Rule> = (0..16).map(|n| words(&format!("touch r{round}-{n}"))).collect();
             let stores: Vec<Approvals> = rules.iter().map(|_| Approvals::for_workspace(&temp.0, None, true).unwrap()).collect();
             let start = std::sync::Barrier::new(stores.len());
-            std::thread::scope(|scope| {
-                for (store, rule) in stores.iter().zip(&rules) {
+            let results = std::thread::scope(|scope| {
+                let writers: Vec<_> = stores.iter().zip(&rules).map(|(store, rule)| {
                     let start = &start;
                     scope.spawn(move || {
                         start.wait();
-                        store.remember(Scope::Project, std::slice::from_ref(rule)).unwrap();
-                    });
-                }
+                        store.remember(Scope::Project, std::slice::from_ref(rule))
+                    })
+                }).collect();
+                writers.into_iter().map(|writer| writer.join().unwrap()).collect::<Vec<_>>()
             });
             let saved = load(&project).unwrap();
-            for rule in &rules {
+            for (rule, result) in rules.iter().zip(&results) {
+                match result {
+                    Ok(_) => assert!(saved.contains(rule), "round {round}: {} lost", rule_text(rule)),
+                    Err(error) => assert_eq!(error, &format!("{}: another session is saving it, or its lock does not open; the file is unchanged", project.display())),
+                }
+            }
+            // A busy save can reach its deadline on a loaded host. Check all
+            // successful writes first, then retry only busy saves in input order.
+            for ((store, rule), result) in stores.iter().zip(&rules).zip(&results) {
+                if result.is_err() {
+                    store.remember(Scope::Project, std::slice::from_ref(rule)).unwrap();
+                }
+            }
+            expected.extend(rules);
+            let saved = load(&project).unwrap();
+            assert_eq!(saved.len(), expected.len(), "round {round}");
+            for rule in &expected {
                 assert!(saved.contains(rule), "round {round}: {} lost", rule_text(rule));
             }
         }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_busy_rules_file_stays_unchanged_until_a_retry() {
+        let temp = Temp::new("busy");
+        let project = temp.0.join(".vade").join(FILE_NAME);
+        let store = Approvals::for_workspace(&temp.0, None, true).unwrap();
+        let first = words("touch first");
+        let next = words("touch next");
+        store.remember(Scope::Project, std::slice::from_ref(&first)).unwrap();
+        let before = std::fs::read(&project).unwrap();
+        let held = lock_file(&project).unwrap();
+        let error = store.remember(Scope::Project, std::slice::from_ref(&next)).unwrap_err();
+        assert_eq!(error, format!("{}: another session is saving it, or its lock does not open; the file is unchanged", project.display()));
+        assert_eq!(std::fs::read(&project).unwrap(), before);
+        drop(held);
+        store.remember(Scope::Project, std::slice::from_ref(&next)).unwrap();
+        assert_eq!(load(&project).unwrap(), vec![first, next]);
     }
 
     #[test]
