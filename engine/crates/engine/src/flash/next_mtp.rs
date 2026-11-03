@@ -521,7 +521,7 @@ impl<'a, 'w> Draft<'a, 'w> {
                 token = if let Some(threshold) = conf {
                     if self.conf_out.is_none() { self.conf_out = Some(b.vector(4)?); }
                     let out_row = self.conf_out.as_ref().ok_or("missing draft confidence row")?;
-                    let (candidate, p) = self.head.draft_confidence(b, &self.partials, out_row)?;
+                    let (candidate, p) = self.head.draft_confidence(b, &self.logits, &self.partials, out_row)?;
                     probs.push(p);
                     if conf_log() { candidates.push(candidate.token); }
                     unsure = p < threshold;

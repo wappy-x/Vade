@@ -207,11 +207,13 @@ macro_rules! ten { ($m:ident) => { $m!(0); $m!(1); $m!(2); $m!(3); $m!(4); $m!(5
 
 /// Drafter-only M1 projection through flash_next_head_fp4_pack's image (K = 2560):
 /// out[r] = sum over 16-column blocks of (sum of e2m1 * x) * scale, times 2^-6, r < rows.
+/// Bit j of `words` keeps each lane's word j: a part of the words reads that part of the image,
+/// and its sums only rank rows for the rescore (VADE_FLASHNEXT_DRAFT_FP4=2).
 /// FP32 throughout; not the head's arithmetic (drafter proposals only). Grid any x 256
 /// threads: warp g takes row pairs (2g, 2g + 1) + 2 * warps * i; lane l keeps x for its
 /// eight-column words l + 32 j (j < 10) in registers and streams one word per row each.
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn flash_next_head_fp4(weights: u64, x: u64, out: u64, rows: u32) {
+pub unsafe extern "ptx-kernel" fn flash_next_head_fp4(weights: u64, x: u64, out: u64, rows: u32, words: u32) {
     const K: usize = 2560;
     const J: usize = K / 8 / 32;
     let n = rows as usize;
@@ -232,18 +234,18 @@ pub unsafe extern "ptx-kernel" fn flash_next_head_fp4(weights: u64, x: u64, out:
         let (wr0, wr1) = (weights + (r * K / 2 + lane * 4) as u64, weights + (r1 * K / 2 + lane * 4) as u64);
         let (sr0, sr1) = (scales + (r * (K / 16) + lane / 2) as u64, scales + (r1 * (K / 16) + lane / 2) as u64);
         let (mut wa, mut wb, mut sa, mut sb) = ([0u32; J], [0u32; J], [0u32; J], [0u32; J]);
-        macro_rules! load_w { ($j:literal) => {
+        macro_rules! load_w { ($j:literal) => { if words >> $j & 1 != 0 {
             wa[$j] = ld_stream_u32(wr0 + 128 * $j);
             wb[$j] = ld_stream_u32(wr1 + 128 * $j);
             sa[$j] = ld_u8(sr0 + 16 * $j);
             sb[$j] = ld_u8(sr1 + 16 * $j);
-        }; }
+        } }; }
         ten!(load_w);
         let (mut a, mut b) = (0f32, 0f32);
-        macro_rules! acc { ($j:literal) => {
+        macro_rules! acc { ($j:literal) => { if words >> $j & 1 != 0 {
             a += dot8(wa[$j], &xv[$j]) * crate::fp8_bf16::decode(sa[$j] as u8);
             b += dot8(wb[$j], &xv[$j]) * crate::fp8_bf16::decode(sb[$j] as u8);
-        }; }
+        } }; }
         ten!(acc);
         let (a, b) = (sum_xor(a), sum_xor(b));
         if lane == 0 {
@@ -254,28 +256,39 @@ pub unsafe extern "ptx-kernel" fn flash_next_head_fp4(weights: u64, x: u64, out:
     }
 }
 
-/// FP4 drafter screen (VADE_FLASHNEXT_DRAFT_FP4=2): the four 1024-row chunks whose FP4
-/// maxima (logits_argmax partials: value, id, valid) are highest, ascending chunk order,
-/// into sel[0..4] (u32). One warp; ties pick the lower chunk.
+/// FP4 drafter screen: the sixteen 256-row tiles with the highest row sums, ascending, into
+/// sel[0..16] (u32). One warp; ties pick the lower tile. At most 1024 tiles.
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn flash_next_head_fp4_select(partials: u64, chunks: u32, sel: u64) {
+pub unsafe extern "ptx-kernel" fn flash_next_head_fp4_select(sums: u64, rows: u32, sel: u64) {
     let lane = _thread_idx_x() as usize;
     if lane >= 32 { return; }
-    let p = partials as *const f32;
-    let n = chunks as usize;
+    let p = sums as *const f32;
+    let n = (rows as usize).div_ceil(256);
+    // Lane l holds tiles l + 32 i: each tile's best row sum.
+    let mut tile = [f32::NEG_INFINITY; 32];
+    let mut c = lane;
+    let mut bit = 0;
+    while c < n {
+        let mut r = c * 256;
+        while r < (c + 1) * 256 && r < rows as usize {
+            let v = *p.add(r);
+            if v > tile[bit] { tile[bit] = v; }
+            r += 1;
+        }
+        c += 32; bit += 1;
+    }
     let mut taken = 0u32;
-    let mut picks = [u32::MAX; 4];
-    for pick in 0..4 {
+    let mut picks = [u32::MAX; 16];
+    for pick in 0..16 {
         let (mut best, mut id) = (f32::NEG_INFINITY, u32::MAX);
         let mut c = lane;
         let mut bit = 0;
         while c < n {
-            let v = *p.add(c * 3);
-            let ok = *p.add(c * 3 + 2) == 1.0 && v == v;
-            if ok && taken & (1 << bit) == 0 && (v > best || id == u32::MAX) { best = v; id = c as u32; }
+            let v = tile[bit];
+            if v != f32::NEG_INFINITY && taken & (1 << bit) == 0 && (v > best || id == u32::MAX) { best = v; id = c as u32; }
             c += 32; bit += 1;
         }
-        // Warp max (value, then lower chunk).
+        // Warp max (value, then lower tile).
         for d in [16u32, 8, 4, 2, 1] {
             let (ov, oi): (u32, u32);
             asm!("shfl.sync.bfly.b32 {o}, {v}, {d}, 31, -1;", o = out(reg32) ov, v = in(reg32) best.to_bits(), d = in(reg32) d);
@@ -287,28 +300,28 @@ pub unsafe extern "ptx-kernel" fn flash_next_head_fp4_select(partials: u64, chun
         if id != u32::MAX && id as usize % 32 == lane { taken |= 1 << (id as usize / 32); }
     }
     if lane == 0 {
-        // Ascending chunk order (unused picks = u32::MAX sort last).
-        for i in 0..4 { for j in 0..3 - i { if picks[j] > picks[j + 1] { picks.swap(j, j + 1); } } }
-        for i in 0..4 { *(sel as *mut u32).add(i) = picks[i]; }
+        // Ascending tile order (unused picks = u32::MAX sort last).
+        for i in 0..16 { for j in 0..15 - i { if picks[j] > picks[j + 1] { picks.swap(j, j + 1); } } }
+        for i in 0..16 { *(sel as *mut u32).add(i) = picks[i]; }
     }
 }
 
-/// FP4 drafter screen: rows of the selected chunks scored from the MXFP8 drafter twin's
+/// FP4 drafter screen: rows of the selected tiles scored from the MXFP8 drafter twin's
 /// values (flash_next_head_mx8 layout, rows % 64 == 0, K = 2560) in FP32, into
-/// cand[slot * 1024 + j] (-inf past the vocabulary or for an unused slot). Grid 4 * 16 CTAs
+/// cand[slot * 256 + j] (-inf past the vocabulary or for an unused slot). Grid 16 * 4 CTAs
 /// x 256 threads: CTA (slot, 64-row block); thread t holds 16 columns of row
 /// (t / 32) * 8 + t % 8 per 64-column tile, reduced over lanes t ^ 8, t ^ 16.
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_next_head_fp4_rescore(twin: u64, rows: u32, x: u64, sel: u64, cand: u64) {
     const K: usize = 2560;
-    let (slot, block) = (_block_idx_x() as usize / 16, _block_idx_x() as usize % 16);
+    let (slot, block) = (_block_idx_x() as usize / 4, _block_idx_x() as usize % 4);
     let t = _thread_idx_x() as usize;
     let n = rows as usize;
-    let chunk = *(sel as *const u32).add(slot);
+    let tile = *(sel as *const u32).add(slot);
     let local = (t / 32) * 8 + t % 8;
-    let out = (cand as *mut f32).add(slot * 1024 + block * 64 + local);
-    let row0 = chunk as usize * 1024 + block * 64;
-    if chunk == u32::MAX || row0 >= n {
+    let out = (cand as *mut f32).add(slot * 256 + block * 64 + local);
+    let row0 = tile as usize * 256 + block * 64;
+    if tile == u32::MAX || row0 >= n {
         if t & 24 == 0 { *out = f32::NEG_INFINITY; }
         return;
     }
@@ -379,9 +392,9 @@ pub unsafe extern "ptx-kernel" fn flash_next_head_fp4_final(cand: u64, sel: u64,
         if d == u32::MAX {
             *r.add(2) = 0.0;
         } else {
-            let chunk = *(sel as *const u32).add(d as usize / 1024);
+            let tile = *(sel as *const u32).add(d as usize / 256);
             *r = b;
-            *r.add(1) = (chunk as usize * 1024 + d as usize % 1024) as f32;
+            *r.add(1) = (tile as usize * 256 + d as usize % 256) as f32;
             *r.add(2) = 1.0;
         }
     }
@@ -420,8 +433,8 @@ pub unsafe extern "ptx-kernel" fn flash_next_draft_conf_partial(logits: u64, row
     }
 }
 
-/// out = (value, id, valid, p): the argmax result row plus p = 1 / sum(partials), the draft
-/// token's softmax probability over the scored rows. One warp.
+/// out = (value, id, valid, p): the argmax result row plus p = 1 / sum(partials), the softmax
+/// probability of the row whose value the partial kernel read. One warp.
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_next_draft_conf_final(partials: u64, count: u32, result: u64, out: u64) {
     let t = _thread_idx_x() as usize;

@@ -6,8 +6,8 @@
 //! a cycle and never an output id. Cycles of a chat in a batch do not count here.
 use super::CostCurve;
 
-/// Bands of the drafter probability p. Its upper values are a ranking score that can pass 1.
-const BANDS: [f32; 2] = [0.6, 1.0];
+/// Bands of the drafter probability p.
+const BANDS: [f32; 2] = [0.7, 0.95];
 /// A chat starts as the width chooser's survival prior does: four trials at 0.8.
 const PRIOR_KEEP: f64 = 0.8;
 const PRIOR_TRIALS: f64 = 4.0;
@@ -104,6 +104,10 @@ mod tests {
             }
             Ok(Some(ModelProposal { proposal_ms: 1.5, tokens, catchup_ms: 0.0 }))
         }
+    }
+    #[test]
+    fn bands_split_a_softmax_in_three() {
+        assert_eq!((band(0.4), band(0.699), band(0.7), band(0.949), band(0.95), band(1.0)), (0, 0, 1, 1, 2, 2));
     }
     fn run(quality: fn(usize, usize) -> (f32, bool), verify_ms: impl Fn(usize, usize) -> f64) -> (Stats, usize) {
         let (reference, prompt): (Vec<u32>, _) = ((0..1200u32).map(|i| (i * 13 + i / 7) % 31 * 2).collect(), 24);

@@ -35,6 +35,9 @@ mod flash_next_input;
 mod flash_next_workspace;
 #[path = "flash/head_options.rs"]
 pub mod flash_head_options;
+#[cfg(any(target_os = "linux", test))]
+#[path = "flash/draft_head.rs"]
+mod flash_draft_head;
 #[path = "flash/prompt_options.rs"]
 pub mod flash_prompt_options;
 #[path = "flash/next_options.rs"]

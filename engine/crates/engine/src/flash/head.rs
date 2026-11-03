@@ -39,8 +39,8 @@ pub struct Head<'a, 'w> {
     mx8: Option<&'w DeviceVector<'a>>,
     /// Drafter-only NVFP4 image (flash_next_head_fp4_pack), VADE_FLASHNEXT_DRAFT_FP4=1|2 (unset = 2).
     fp4: Option<&'w DeviceVector<'a>>,
-    /// VADE_FLASHNEXT_DRAFT_FP4=2 (the default): rescore the FP4 screen's top four 1024-row chunks from
-    /// the MXFP8 twin's values (needs that twin).
+    /// VADE_FLASHNEXT_DRAFT_FP4=2 (the default): half the FP4 image picks sixteen 256-row tiles, and
+    /// the MXFP8 twin's values rescore them (needs that twin).
     fp4_rescore: bool,
     /// The split head over this many ranks: the last verify pass projected this rank's part (rows
     /// [0, part_start(1))) here and every other rank its part; its argmax rows are merged on
@@ -206,7 +206,7 @@ impl<'a, 'w> Head<'a, 'w> {
     }
     /// Drafter head (VADE_FLASHNEXT_DRAFT_FP4=1|2, unset = 2, =0 off; crate::flash_draft_stack):
     /// an NVFP4 image of the scored rows read by flash_next_head_fp4 for one-chat proposals
-    /// (0.36 GB per drafted token instead of the MXFP8 twin's 0.66 GB). Verification keeps
+    /// (a rescore reads half, then selected MXFP8 rows; otherwise it reads the full image). Verification keeps
     /// the full head, so output bytes never depend on it; only which tokens are proposed can
     /// change (accept rate is the measured cost). Build before Head::encode_lbf12.
     pub(super) fn load_fp4_draft(b: &Backend<'a>, weight: u64, rows: usize) -> Result<Option<DeviceVector<'a>>> {
@@ -227,7 +227,8 @@ impl<'a, 'w> Head<'a, 'w> {
     }
     pub(super) fn use_fp4_draft(&mut self, twin: Option<&'w DeviceVector<'a>>) {
         self.fp4 = twin;
-        self.fp4_rescore = twin.is_some() && crate::flash_draft_stack::draft_fp4() == Ok(2);
+        self.fp4_rescore = crate::flash_draft_head::fp4_rescore_enabled(twin.is_some(), self.mx8.is_some(),
+            crate::flash_draft_stack::draft_fp4() == Ok(2), self.range.len());
     }
     /// Bytes of the LBF12 tile flags and row base exponents for `rows` vocabulary rows.
     pub(super) fn lbf12_bytes(rows: usize) -> usize { rows / 8 * 16 + rows / 8 * (H / 32) * 8 }
@@ -348,33 +349,40 @@ impl<'a, 'w> Head<'a, 'w> {
             || heads.iter().any(|h| h.weight != weight || h.range != range) { return Err("Flash-Next head row shape".into()); }
         for head in heads.iter_mut() { head.ready = false; head.max_ready = false; head.halves = None; }
         if let (Some(twin), 1, 0) = (heads[0].fp4.map(|v| v.device_address()), count, range.start) {
-            // VADE_FLASHNEXT_DRAFT_FP4=1 (drafter only): the NVFP4 image, then main's argmax call.
             let head = &mut *heads[0];
             let rows = range.len();
             let (mut w, mut x, mut y, mut n) = (twin, hidden.device_address(), head.logits.device_address(), rows as u32);
-            unsafe {
-                b.launch_flash("flash_next_head_fp4", 192, 256, &mut [(&mut w as *mut u64).cast(),
-                    (&mut x as *mut u64).cast(), (&mut y as *mut u64).cast(), (&mut n as *mut u32).cast()])?;
-            }
-            let chunks = rows.div_ceil(1024) * 3;
-            if chunks < head.partials.len() {
-                b.enqueue_argmax_device(&head.logits.slice(0..rows)?, &mut head.partials.slice(0..chunks)?, result, 0)?;
-            } else {
-                b.enqueue_argmax_device(&head.logits.slice(0..rows)?, &mut head.partials, result, 0)?;
-            }
-            // =2: the screen's four best chunks, rescored from the MXFP8 twin's values (FP32),
-            // replace the FP4 pick; `logits` (this call's scratch) holds 4096 candidates + ids.
             if let (true, Some(mx8)) = (head.fp4_rescore, head.mx8.map(|v| v.device_address())) {
-                if rows % 64 != 0 || logits.len() < 4096 + 4 || logits.is_segmented() || result.len() < 3 {
+                // =2: half the NVFP4 image ranks the rows; the sixteen best 256-row tiles, rescored
+                // from the MXFP8 twin's values (FP32), make the pick. `logits` (this call's
+                // scratch) holds 4096 candidates, then 16 tile ids.
+                if rows > crate::flash_draft_head::MAX_SCREEN_ROWS || !rows.is_multiple_of(64)
+                    || logits.len() < 4096 + 16 || logits.is_segmented() || result.len() < 3 {
                     return Err("FP4 drafter screen shape".into());
                 }
-                let (mut p, mut c, mut sel) = (head.partials.device_address(), rows.div_ceil(1024) as u32, logits.device_address() + 4096 * 4);
-                let (mut t, mut n, mut x, mut cand, mut res) = (mx8, rows as u32, hidden.device_address(), logits.device_address(), result.device_address());
+                let (mut sums, mut sel, mut half) = (head.logits.device_address(), logits.device_address() + 4096 * 4, 0b01_0101_0101u32);
+                let (mut t, mut cand, mut res) = (mx8, logits.device_address(), result.device_address());
                 unsafe {
-                    b.launch_flash("flash_next_head_fp4_select", 1, 32, &mut [(&mut p as *mut u64).cast(), (&mut c as *mut u32).cast(), (&mut sel as *mut u64).cast()])?;
+                    b.launch_flash("flash_next_head_fp4", 192, 256, &mut [(&mut w as *mut u64).cast(), (&mut x as *mut u64).cast(),
+                        (&mut y as *mut u64).cast(), (&mut n as *mut u32).cast(), (&mut half as *mut u32).cast()])?;
+                    b.launch_flash("flash_next_head_fp4_select", 1, 32, &mut [(&mut sums as *mut u64).cast(), (&mut n as *mut u32).cast(), (&mut sel as *mut u64).cast()])?;
                     b.launch_flash("flash_next_head_fp4_rescore", 64, 256, &mut [(&mut t as *mut u64).cast(), (&mut n as *mut u32).cast(),
                         (&mut x as *mut u64).cast(), (&mut sel as *mut u64).cast(), (&mut cand as *mut u64).cast()])?;
                     b.launch_flash("flash_next_head_fp4_final", 1, 256, &mut [(&mut cand as *mut u64).cast(), (&mut sel as *mut u64).cast(), (&mut res as *mut u64).cast()])?;
+                }
+            } else {
+                // =1, or =2 without an MXFP8 twin or with an unsupported tile count:
+                // the full NVFP4 image, then the same argmax call.
+                let mut all = 0b11_1111_1111u32;
+                unsafe {
+                    b.launch_flash("flash_next_head_fp4", 192, 256, &mut [(&mut w as *mut u64).cast(), (&mut x as *mut u64).cast(),
+                        (&mut y as *mut u64).cast(), (&mut n as *mut u32).cast(), (&mut all as *mut u32).cast()])?;
+                }
+                let chunks = rows.div_ceil(1024) * 3;
+                if chunks < head.partials.len() {
+                    b.enqueue_argmax_device(&head.logits.slice(0..rows)?, &mut head.partials.slice(0..chunks)?, result, 0)?;
+                } else {
+                    b.enqueue_argmax_device(&head.logits.slice(0..rows)?, &mut head.partials, result, 0)?;
                 }
             }
             b.copy_range(result, &mut head.result, 0, 0, 3)?;
@@ -653,16 +661,18 @@ impl<'a, 'w> Head<'a, 'w> {
             else { b.argmax_device(&self.logits, &mut self.partials, &mut self.result)? };
         Ok(Some(Candidate { token: self.range.start + token, logit }))
     }
-    /// VADE_MTP_CONF (drafter policy only): this one-row draft's argmax plus its softmax
-    /// probability over the scored rows, read back in the argmax's place (one 16-byte read).
+    /// VADE_MTP_CONF (drafter policy only): this one-row draft's argmax plus the softmax
+    /// probability of the best scored row, read back in the argmax's place (one 16-byte read).
+    /// After an FP4 rescore, `scored` holds the 4096 rescored rows used for the argmax.
+    /// Otherwise read this head's logits, including the full FP4 fallback without an MXFP8 twin.
     /// `partials` holds >= CONF_CTAS floats, `out` exactly 4.
-    pub(super) fn draft_confidence(&mut self, b: &Backend<'_>, partials: &DeviceVector<'_>, out: &DeviceVector<'_>)
+    pub(super) fn draft_confidence(&mut self, b: &Backend<'_>, scored: &DeviceVector<'_>, partials: &DeviceVector<'_>, out: &DeviceVector<'_>)
         -> Result<(Candidate, f32)> {
         if !self.ready || !self.max_ready || self.range.is_empty() || partials.len() < CONF_CTAS || out.len() != 4 {
             return Err("draft confidence needs a projected one-row draft".into());
         }
-        let rows = self.range.len();
-        let (mut l, mut n, mut r) = (self.logits.device_address(), rows as u32, self.result.device_address());
+        let (logits, rows) = crate::flash_draft_head::confidence_logits(self.fp4_rescore, &self.logits, self.range.len(), scored);
+        let (mut l, mut n, mut r) = (logits.device_address(), rows as u32, self.result.device_address());
         let (mut p, mut c, mut o) = (partials.device_address(), CONF_CTAS as u32, out.device_address());
         unsafe {
             b.launch_flash("flash_next_draft_conf_partial", CONF_CTAS as u32, 256, &mut [(&mut l as *mut u64).cast(),
