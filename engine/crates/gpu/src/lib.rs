@@ -53,8 +53,9 @@ pub fn flash_dense_reserve_bytes() -> usize {
     })
 }
 
-/// Bytes of the mixed dense planes (H-wide prompt rows, both planes): 4096 rows
-/// (FLASH_BF16_MIXED_BYTES), twice that with VADE_PROMPT_TILE=8192, like the dense input tile.
+/// Bytes of the mixed dense planes (H-wide HC up output, both planes): prompt rows
+/// and decode rows at M <= 8. Reserve 4096 rows (FLASH_BF16_MIXED_BYTES), twice that
+/// with VADE_PROMPT_TILE=8192, like the dense input tile.
 pub fn flash_mixed_reserve_bytes() -> usize {
     flash_dense_reserve_bytes() / kernel_params::FLASH_BF16_INPUT_BYTES * kernel_params::FLASH_BF16_MIXED_BYTES
 }
@@ -172,17 +173,74 @@ mod split_order_tests;
 mod tests {
     use super::*;
 
-    #[test]
-    fn hc_down_group_check_holds_the_safety_list() {
-        let row = |rows2, tokens, weight| kernel_params::Bf16Rows { weight, output: 0, rows: 4, stride: 4, weight2: 32, output2: 0, rows2, stride2: rows2,
+    fn hc_down_group_fixture(tokens: u32) -> (kernel_params::Bf16Pairs, u64, usize) {
+        let row = kernel_params::Bf16Rows { weight: 16, output: 0, rows: 4, stride: 4, weight2: 32, output2: 0, rows2: 320, stride2: 320,
             input: 4096, cols: 10240, tokens, input_bf16: 1, hc_silu: 0, input_plane_words: 0 };
-        let pairs = |first| kernel_params::Bf16Pairs { pairs: [first, kernel_params::Bf16Rows { rows: 0, rows2: 0, ..row(0, 1, 0) }] };
-        let (good, input, down) = (pairs(row(320, 16, 16)), 2 * 640 * 128 * 4, 2 * 20 * 128 * 4);
-        let check = |p: &kernel_params::Bf16Pairs, planes| kernel_params::hc_down_group_check(p, planes, 4096, input + down);
-        assert!(check(&good, 4096 + input as u64).is_ok());
-        assert!(check(&good, 4096 + input as u64 - 4).is_err() && check(&good, 4096 + input as u64 + 4).is_err() && check(&good, u64::MAX).is_err());
-        assert!(check(&pairs(row(320, 17, 16)), 4096 + input as u64).is_err() && check(&pairs(row(320, 16, 17)), 4096 + input as u64).is_err());
-        assert!(check(&pairs(row(321, 16, 16)), 4096 + input as u64).is_err() && check(&kernel_params::Bf16Pairs { pairs: [good.pairs[0], good.pairs[0]] }, 4096 + input as u64).is_err());
+        let tiles = (tokens as usize).div_ceil(16);
+        let (input, down) = (2 * tiles * 640 * 128 * 4, 2 * tiles * 20 * 128 * 4);
+        (kernel_params::Bf16Pairs { pairs: [row, kernel_params::Bf16Rows { rows: 0, rows2: 0, ..row }] }, 4096 + input as u64, input + down)
+    }
+    #[test]
+    fn hc_down_group_accepts_supported_rows() {
+        for tokens in [1, 8, 16] {
+            let (p, planes, bytes) = hc_down_group_fixture(tokens);
+            assert!(kernel_params::hc_down_group_check(&p, planes, 4096, bytes).is_ok(), "M={tokens}");
+        }
+    }
+    #[test]
+    fn hc_down_group_rejects_only_the_row_bound() {
+        for tokens in [0, 17] {
+            // Size both input and output planes for M, including both M16 tiles at M=17.
+            let (p, planes, bytes) = hc_down_group_fixture(tokens);
+            assert!(kernel_params::hc_down_group_check(&p, planes, 4096, bytes).is_err(), "M={tokens}");
+        }
+    }
+    #[test]
+    fn hc_down_group_rejects_only_the_plane_bounds() {
+        let (p, planes, bytes) = hc_down_group_fixture(16);
+        assert!(kernel_params::hc_down_group_check(&p, planes - 4, 4096, bytes).is_err(), "planes overlap input");
+        assert!(kernel_params::hc_down_group_check(&p, planes + 4, 4096, bytes).is_err(), "planes exceed tile");
+        assert!(kernel_params::hc_down_group_check(&p, u64::MAX, 4096, bytes).is_err(), "plane end overflows");
+    }
+    #[test]
+    fn hc_down_group_rejects_only_unaligned_columns() {
+        let (mut p, planes, bytes) = hc_down_group_fixture(16);
+        // The original input range is larger than the range needed for these columns.
+        p.pairs[0].cols = 10_000;
+        assert!(kernel_params::hc_down_group_check(&p, planes, 4096, bytes).is_err());
+    }
+    #[test]
+    fn hc_down_group_rejects_only_input_before_tile() {
+        let (mut p, planes, bytes) = hc_down_group_fixture(16);
+        p.pairs[0].input = 4096 - 4;
+        assert!(kernel_params::hc_down_group_check(&p, planes, 4096, bytes).is_err());
+    }
+    #[test]
+    fn hc_down_group_rejects_each_flagged_weight() {
+        let (p, planes, bytes) = hc_down_group_fixture(16);
+        let mut first = p;
+        first.pairs[0].weight |= 1;
+        assert!(kernel_params::hc_down_group_check(&first, planes, 4096, bytes).is_err());
+        let mut second = p;
+        second.pairs[0].weight2 |= 1;
+        assert!(kernel_params::hc_down_group_check(&second, planes, 4096, bytes).is_err());
+    }
+    #[test]
+    fn hc_down_group_rejects_only_wrong_down_rows() {
+        let (mut p, planes, bytes) = hc_down_group_fixture(16);
+        p.pairs[0].rows2 = 321;
+        p.pairs[0].stride2 = 321;
+        assert!(kernel_params::hc_down_group_check(&p, planes, 4096, bytes).is_err());
+    }
+    #[test]
+    fn hc_down_group_rejects_each_nonempty_second_pair() {
+        let (p, planes, bytes) = hc_down_group_fixture(16);
+        let mut first = p;
+        first.pairs[1].rows = 4;
+        assert!(kernel_params::hc_down_group_check(&first, planes, 4096, bytes).is_err());
+        let mut second = p;
+        second.pairs[1].rows2 = 320;
+        assert!(kernel_params::hc_down_group_check(&second, planes, 4096, bytes).is_err());
     }
     #[test]
     fn register_decode_selection_boundaries() {

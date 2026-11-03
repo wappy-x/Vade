@@ -8,6 +8,54 @@ cargo +1.99.0 run --offline --locked --manifest-path tools/Cargo.toml -p vade-to
 cargo +1.99.0 test --offline --locked --all-targets --manifest-path tools/Cargo.toml
 ```
 
+## Release source preparation
+
+`prepare-release-source ARCHIVE_DIR NEW_DIR` copies an extracted repository
+archive into a new build directory. It rejects checkouts, symlinks and an
+existing output directory. It leaves the original archive intact, including
+license notices. It skips local build output.
+
+The copy has canonical Rust source under `engine/`. The tool removes comments,
+including doc comments. It puts each Rust token on a fixed source line. It
+keeps the bytes of string and character literals. Thus a comment can add lines
+without changing the panic locations in this copy. Release builds also strip
+static symbols through [the engine release profile](../engine/Cargo.toml).
+LLVM can change these symbol names when a doc comment changes.
+
+The copy's `engine/REVISION` contains `unknown`. Keep the original source
+archive and a separate build receipt with the commit and binary hash. Do not
+put that commit in the executable. The server reports `build.git_sha:null`
+and `build.dirty:true` for this prepared archive. The receipt supplies the
+revision. A direct checkout build still reports its embedded revision.
+
+Build the tool from the original archive, then prepare the build copy:
+
+```sh
+cargo +1.99.0 build --release --offline --locked --manifest-path archive/tools/Cargo.toml
+archive/tools/target/release/vade-tools prepare-release-source archive prepared
+cd prepared/engine
+cargo +1.99.0 kernels
+cargo +1.99.0 build --release --offline --locked --workspace --exclude spark-rust-kernels
+```
+
+Use the same toolchain, target, features, linker, build flags and path remaps
+for an artifact comparison. Remap each prepared root to the same virtual
+root. Disable linker build IDs. Keep the recipe name with the build receipt.
+Compare complete served files with `cmp`, after packaging and before use.
+Do not compare a prepared build to an older build as if both used this recipe.
+
+Diagnostics from a prepared build use its canonical source locations. Keep
+the prepared copy with the build records. Run source checks, doc tests and
+host tests on the original source. This preparation is for executable builds.
+It does not establish GPU exactness or speed. New uses of source text or
+source locations in model computation need review before this recipe can
+cover them.
+
+The [release source tests](tests/release_source.rs) cover literals, nested
+comments, tokens, archive guards and executable identity across comment-only
+commits. They include line and column macros. The full engine comparison
+also needs fresh release builds from the compared commits.
+
 ## Unsafe source check
 
 The [unsafe source test](tests/unsafe_sites.rs) runs in the existing CI test

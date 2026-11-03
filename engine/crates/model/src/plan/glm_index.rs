@@ -26,7 +26,9 @@ pub enum TensorRole {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CsfComponent { Bases, Codes, PageBases, Offsets, Exceptions }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TensorStorage { Weight, BlockScale, GlobalScale, InputScale, Csf32(CsfComponent) }
+pub enum LegacyCsfComponent { Fixed, Exceptions }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TensorStorage { Weight, BlockScale, GlobalScale, InputScale, Csf(LegacyCsfComponent), Csf32(CsfComponent) }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TensorBinding {
     pub operation: TensorRole,
@@ -41,6 +43,9 @@ fn projection(s: &str) -> Option<Proj> { match s { "gate_proj" => Some(Proj::Gat
     "down_proj" => Some(Proj::Down), _ => None } }
 fn suffix(name: &str) -> Result<(&str, TensorStorage)> {
     if let Some((module,part)) = name.rsplit_once(".weight_scale.") {
+        let legacy = match part { "nvfp4_csf_fixed" => Some(LegacyCsfComponent::Fixed),
+            "nvfp4_csf_exceptions" => Some(LegacyCsfComponent::Exceptions), _ => None };
+        if let Some(component) = legacy { return Ok((module,TensorStorage::Csf(component))); }
         let component = match part { "csf32_bases" => CsfComponent::Bases, "csf32_codes" => CsfComponent::Codes,
             "csf32_page_bases" => CsfComponent::PageBases, "csf32_offsets" => CsfComponent::Offsets,
             "csf32_exceptions" => CsfComponent::Exceptions, _ => return Err(invalid("unknown scale component")) };
@@ -88,6 +93,7 @@ impl TextDescription {
                 | WeightStorage::Nvfp4 { encoding: ScaleEncoding::Direct,.. }),
             TensorStorage::GlobalScale => matches!(storage,WeightStorage::Nvfp4 { .. }),
             TensorStorage::InputScale => matches!(storage,WeightStorage::Nvfp4 { activation_scale: true,.. }),
+            TensorStorage::Csf(_) => matches!(storage,WeightStorage::Nvfp4 { encoding: ScaleEncoding::Csf,.. }),
             TensorStorage::Csf32(_) => matches!(storage,WeightStorage::Nvfp4 { encoding: ScaleEncoding::Csf32,.. }),
         };
         require(valid,"tensor scale component differs from declared storage")?;
@@ -135,7 +141,7 @@ impl TextDescription {
         }
         if let Some(t) = tail.strip_prefix("mlp.") {
             if let Some(proj) = projection(t) {
-                require(layer.is_none_or(|l| matches!(l.ffn,Ffn::Dense { .. })),"dense tensor outside a dense layer")?;
+                require(layer.is_some_and(|l| matches!(l.ffn,Ffn::Dense { .. })),"dense tensor outside a dense layer")?;
                 return Ok(TensorRole::Dense(proj));
             }
             if let Some(t) = t.strip_prefix("shared_experts.") {

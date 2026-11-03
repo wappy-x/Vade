@@ -809,7 +809,8 @@ pub const fn latency_mx8_wide1(tokens: usize, cols: usize) -> bool {
 }
 pub const FLASH_BF16_INPUT_BYTES: usize = 4096 * 10240 * 2 * TERMS;
 pub const FLASH_BF16_MMA_SHARED: usize = 2 * (64 * 128 + TERMS * 64 * 128);
-/// Dense hi/lo planes of a prompt HC up output: up to 4,096 rows x K 2,560 (flash_mixed_planes).
+/// Dense hi/lo planes of HC up output: prompt rows and decode rows at M <= 8.
+/// Capacity: up to 4,096 rows x K 2,560 (flash_mixed_planes).
 pub const FLASH_BF16_MIXED_BYTES: usize = 4096 * 2560 * 2 * TERMS;
 /// flash_bf16_mma_prefill_tiled: three 32 KiB stages (hi/lo A planes 16 KiB + B 16 KiB) and,
 /// after them, the stages' full/empty mbarriers (6 x 8 bytes, padded to 64).

@@ -9,6 +9,7 @@ pub mod bench_docs;
 pub mod rigmark_dashboard;
 pub mod one_path;
 pub mod unsafe_sites;
+pub mod release_source;
 // Share the existing safe, streaming implementation. No Cargo dependency is needed.
 #[path = "../../engine/tools/export/src/sha256.rs"]
 pub mod sha256;

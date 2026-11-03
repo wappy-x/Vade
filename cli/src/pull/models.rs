@@ -39,10 +39,12 @@ impl Support {
             Route::Unsupported => self.reason.clone(),
         }
     }
-    /// The step that serves `folder`, and a note that explains it. `saved` is
-    /// the checkpoint `vade launch` serves first, ahead of VADE_MODELS, when one
-    /// is saved; `home` holds the new Vade home the step then suggests.
-    pub(crate) fn next(&self, folder: &Path, saved: Option<&Path>, home: &Path) -> Option<(String, Option<String>)> {
+    /// The step that serves `folder`, and a note that explains it. `root`
+    /// holds the saved defaults; `home` holds the new Vade home the step can
+    /// suggest.
+    pub(crate) fn next(&self, folder: &Path, root: &Path, home: &Path) -> Option<(String, Option<String>)> {
+        let saved = crate::launch::saved_model(root);
+        let saved = saved.as_deref();
         let quote = |path: &Path| crate::runner::quote(&path.to_string_lossy());
         let same = saved.is_some_and(|saved| fs::canonicalize(saved).is_ok_and(|saved| fs::canonicalize(folder).is_ok_and(|folder| folder == saved)));
         let new_home = || {
@@ -57,6 +59,7 @@ impl Support {
         match self.route {
             Route::Fp4Local => Some(match saved {
                 _ if same => ("vade up".into(), None),
+                None if crate::launch::default_model(root, home).is_some_and(|path| fs::canonicalize(folder).is_ok_and(|folder| folder == path)) => ("vade up".into(), None),
                 None => (format!("VADE_MODELS={shown} vade up"), None),
                 Some(saved) => (format!("VADE_HOME={} VADE_MODELS={shown} vade up", quote(&new_home())),
                     Some(format!("vade up serves its saved checkpoint {} first, so this step uses a new, unused Vade home.", quote(saved)))),

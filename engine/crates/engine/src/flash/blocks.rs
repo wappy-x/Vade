@@ -280,7 +280,8 @@ pub(super) fn next_rows_strided(
             p.weight = mx8_weight(weight, rows, cols, tokens);
         }
         // One MMA already writes both eight-row halves of the packed M16 tile.
-        // The reserved packed-input tile has ample unused tail at M<=16.
+        // The dense tile, or the mixed tile at M<=8, has ample unused tail.
+        // This assertion uses the larger dense capacity; the mixed tile also fits these rows.
         // Stream ordering protects this tail through both launches and replay.
         let mut partials = packed + p.input_plane_words * 8;
         debug_assert!(
@@ -1039,9 +1040,10 @@ impl<'w> Hc<'w> {
         }
         Ok(())
     }
-    /// `prev.combine_tiled` then `self.mix_tiled` on one residual tile: prompt tiles run the
-    /// combine, this mix's F32 norm and the projections' packed operand as one pass
-    /// (flash_next_hc_add_norm; same per-element math and square order as the pair).
+    /// `prev.combine_tiled` then `self.mix_tiled` on one residual tile. Prompt tiles and
+    /// decode rows run the combine, this mix's F32 norm and the projections' packed operand
+    /// as one pass (flash_next_hc_add_norm or flash_next_hc_add_norm_rows).
+    /// Both use the same per-element math and square order as the pair.
     /// `finish`: the MoE k16_finish that would have written `block`; it then runs inside the
     /// fused kernel (or first, on the unfused path).
     #[allow(clippy::too_many_arguments)]
@@ -1197,7 +1199,7 @@ impl<'w> Hc<'w> {
                 b.offer_dense_planes(output, H, tokens, planes);
                 return Ok(());
             }
-            // M <= 8 FP32 consumers never read the dense tile, so the second tile can serve their pack.
+            // No consumer reads planes left by an earlier pack. At M <= 8, the mixed tile can hold this output's planes.
             let mut planes = if tokens <= BF16_ROWS_TOKENS && lbf12_of(self.up, None).is_some() { let t = b.flash_mixed_planes()?; b.offer_dense_planes(output, H, tokens, t); t } else { 0 };
             return unsafe {
                 // One warp per stream (gates mixed in stream order by warp 0); at M1-16 the LBF12 twin of the up

@@ -34,15 +34,19 @@ Vade is qualified on. The file counts and sizes come from
 
 The FP4-Local command puts the model in
 `~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local`. When no checkpoint is saved
-yet, `vade up` looks in that folder first, so you can run it next with no
-other setting.
+yet and `VADE_MODELS` is not set, `vade up` looks in that folder first. Pull
+prints `Next: vade up` when the same search selects the pulled folder.
+A saved path to a missing or damaged checkpoint keeps the explicit command.
+An exported `VADE_MODELS` that selects another folder or an invalid folder
+also keeps the explicit command. If the search needs a choice, pull prints
+`Next: VADE_MODELS=<folder> vade up`.
 
 A checkpoint that an earlier `vade up` or `vade launch` saved comes before
-`VADE_MODELS` and before that folder. To serve a new folder in that case, use a new Vade
-home. The `Next:` line of the pull output gives the command with a home that
-is not in use yet, such as
-`VADE_HOME=~/.vade-<org>-<name> VADE_MODELS=<folder> vade launch`. A `Note:`
-line says why.
+`VADE_MODELS` and before that folder. Pull prints `Next: vade up` when the
+saved checkpoint matches the pulled folder. To serve a different folder, use
+a new Vade home. Pull gives a command with a home that is not in use yet, such as
+`Next: VADE_HOME=~/.vade-<org>-<name> VADE_MODELS=<folder> vade up`.
+A `Note:` line says why.
 
 The download takes a long time. Over SSH, run it inside `tmux`, or under
 `nohup` with its output in a log file:

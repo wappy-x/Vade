@@ -213,8 +213,7 @@ fn pull(request: &Request, setup: &Setup, dry: bool, say: &mut dyn FnMut(&str) -
         }
         clean(&scratch);
         say(&format!("{}: {}", support.state(), support.text()))?;
-        let saved = crate::launch::saved_model(&setup.root);
-        if let Some((next, note)) = support.next(&folder, saved.as_deref(), &setup.home) {
+        if let Some((next, note)) = support.next(&folder, &setup.root, &setup.home) {
             say(&format!("Next: {next}"))?;
             if let Some(note) = note { say(&format!("Note: {note}"))?; }
         }

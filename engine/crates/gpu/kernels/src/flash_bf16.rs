@@ -1186,8 +1186,9 @@ pub unsafe extern "ptx-kernel" fn flash_bf16_lbf12_twin(p: crate::kernel_params:
 }
 
 // HC up at M2-16: flash_next_hc_up_latency4 with its gate read from the up weight's
-// LBF12 twin (flash_bf16_lbf12_twin). Private hc16_ copies of every helper except the shared
-// dense_latency::tmadd and dense_latency::untranspose, so no existing entry's codegen changes.
+// LBF12 twin (flash_bf16_lbf12_twin). Private hc16_ copies of the gate chain's helpers
+// (canonical madd/add, hcu_decode, hc_up_gate) keep existing entries' codegen unchanged.
+// The gate chain shares dense_latency::tmadd and dense_latency::untranspose.
 #[cfg(target_arch = "nvptx64")]
 unsafe extern "llvm-intrinsic" {
     #[link_name = "llvm.nvvm.mma.m16n8k16.row.col.bf16"]

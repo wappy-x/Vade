@@ -548,7 +548,8 @@ unsafe fn hc_norm_f32(p: crate::kernel_params::FlashHcNorm) {
     squares!(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39
         40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79);
     let scale = 1.0 / sqrt(sum(squares) / group as f32 + 1e-6);
-    // Same stored values, two per lane; with packed != 0 each pair also lands in its A-fragment word.
+    // Store the same values. The early and packed paths store pairs per lane.
+    // Each packed pair also lands in its A-fragment word. The unpacked loop stores one value per lane.
     let rows = core::arch::nvptx::_grid_dim_y() as usize;
     let token = core::arch::nvptx::_block_idx_y() as usize;
     let kt = groups * group / 16;

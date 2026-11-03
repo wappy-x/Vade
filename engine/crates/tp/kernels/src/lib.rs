@@ -3,7 +3,11 @@
 #![feature(abi_ptx, stdarch_nvptx, link_llvm_intrinsics, asm_experimental_arch)]
 #![allow(internal_features, unsafe_op_in_unsafe_fn)]
 use core::arch::nvptx::{_block_idx_x, _thread_idx_x};
+#[path = "../../../gpu/kernel_params.rs"]
+#[allow(dead_code)] // TP uses only the shared canonical helpers.
+mod kernel_params;
 #[path = "../../../gpu/kernels/src/canonical.rs"]
+#[allow(dead_code)] // TP uses only the projection helpers.
 mod canonical;
 use canonical::{Acc, ZERO, madd, add, range, weight_tile};
 #[panic_handler]

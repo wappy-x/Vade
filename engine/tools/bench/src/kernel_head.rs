@@ -201,7 +201,7 @@ pub(super) fn launch_down_act(g: &Gpu, f: H, c: &Case, v: &mut Fixture, pairs: &
     let (mut x, mut e, mut p) = (pairs.pairs[0].output2, (c.m * 320) as u32, tile);
     g.launch(v.norms[0], [(c.m * 320).div_ceil(128) as u32, 1, 1], 128, 0, &mut [ptr(&mut x), ptr(&mut e), ptr(&mut p)])
 }
-/// HC up at M1-16 from the LBF12 twin: grid H/8, 128 threads, (rows, FP32 streams, twin);
+/// HC up at M1-16 from the LBF12 twin: grid H/8, 128 threads, (rows, FP32 streams, twin, planes);
 /// kind 77: hc_norm-mM = the HC norm (input, weight copy, output, packed 0); hc_norm_pack-mM =
 /// that norm + main's latency pack (A) vs the norm writing the planes (X); hc_act_pack-mM =
 /// kb_copy of low + main's activation + main's dense pack (A) vs kb_copy + the activation

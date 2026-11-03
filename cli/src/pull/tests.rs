@@ -176,6 +176,11 @@ struct Fixture { root: PathBuf, hub: Hub, _guard: std::sync::MutexGuard<'static,
 
 impl Fixture {
     fn new(behavior: Behavior) -> Self { Self::with(repository(), behavior) }
+    fn fp4() -> Self {
+        let mut files = repository();
+        files.iter_mut().find(|(name, ..)| name == "config.json").unwrap().1 = crate::launch::test_mixed_config(8192).into_bytes();
+        Self::with(files, Behavior::default())
+    }
     fn with(files: Vec<(String, Vec<u8>, bool)>, behavior: Behavior) -> Self {
         let guard = crate::runner::process_test_lock();
         let root = fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("vade-pull-test-{}", crate::text::random_hex(6).unwrap()));
@@ -187,6 +192,12 @@ impl Fixture {
             backoff: Duration::from_millis(10), live: false }
     }
     fn folder(&self) -> PathBuf { self.root.join("models").join(REPO) }
+    fn save_model(&self, model: &Path) {
+        let root = self.root.join(".vade");
+        crate::text::private_dir(&root).unwrap();
+        fs::write(root.join("config"), format!("format=vade-owner-v1\nmodel_path={}\nmodel_bytes=1\ncontext_tokens=32768\noutput_tokens=8192\nport=18080\nstage_dir={}\nstate_dir={}\n",
+            model.display(), root.join("stage").display(), root.join("state").display())).unwrap();
+    }
     fn pull(&self, args: &str, token: Option<&str>, dry: bool) -> (Result<(), String>, Vec<String>) {
         let request = parse(&args.split_whitespace().map(str::to_owned).collect::<Vec<_>>()).unwrap();
         let mut lines = Vec::new();
@@ -956,35 +967,93 @@ fn a_next_page_on_another_address_fails_the_listing() {
 
 #[test]
 fn the_next_step_names_the_checkpoint_launch_serves() {
-    let f = Fixture::new(Behavior::default());
-    f.pull(REPO, None, false).0.unwrap();
+    if std::env::var_os("VADE_TEST_PULL_NEXT").is_none() {
+        let _guard = crate::runner::process_test_lock();
+        return child("the_next_step_names_the_checkpoint_launch_serves", &[("VADE_TEST_PULL_NEXT", "1")], &["VADE_MODELS"]);
+    }
+    let f = Fixture::fp4();
+    let (result, lines) = f.pull(REPO, None, false);
+    result.unwrap();
+    assert!(lines.iter().any(|line| line == "Next: vade up"), "{lines:?}");
     let (saved, other) = (fs::canonicalize(f.folder()).unwrap(), f.root.join("models/nvidia/new"));
     fs::create_dir_all(&other).unwrap();
     let root = f.root.join(".vade");
+    let empty = f.root.join(".vade-empty");
     assert_eq!(crate::launch::saved_model(&root), None);
-    crate::text::private_dir(&root).unwrap();
-    fs::write(root.join("config"), format!("format=vade-owner-v1\nmodel_path={}\nmodel_bytes=1\ncontext_tokens=32768\noutput_tokens=8192\nport=18080\nstage_dir={}\nstate_dir={}\n",
-        saved.display(), root.join("stage").display(), root.join("state").display())).unwrap();
+    f.save_model(&saved);
     assert_eq!(crate::launch::saved_model(&root).as_deref(), Some(saved.as_path()));
     let fp4 = models::Support { route: models::Route::Fp4Local, reason: String::new() };
     let home = &f.root;
-    assert_eq!(fp4.next(&other, None, home).unwrap(), (format!("VADE_MODELS={} vade up", other.display()), None));
-    assert_eq!(fp4.next(&saved, Some(&saved), home).unwrap(), ("vade up".into(), None));
+    assert_eq!(fp4.next(&saved, &empty, home).unwrap(), ("vade up".into(), None));
+    assert_eq!(fp4.next(&other, &empty, home).unwrap(), (format!("VADE_MODELS={} vade up", other.display()), None));
+    assert_eq!(fp4.next(&saved, &root, home).unwrap(), ("vade up".into(), None));
     // A valid saved checkpoint comes before VADE_MODELS, so the step uses a new home.
     // The suggested home names the org and skips a home that is already there.
     fs::create_dir_all(home.join(".vade-nvidia-new")).unwrap();
-    let (next, note) = fp4.next(&other, Some(&saved), home).unwrap();
+    let (next, note) = fp4.next(&other, &root, home).unwrap();
     assert_eq!(next, format!("VADE_HOME={} VADE_MODELS={} vade up", home.join(".vade-nvidia-new-2").display(), other.display()));
     assert_eq!(note.unwrap(), format!("vade up serves its saved checkpoint {} first, so this step uses a new, unused Vade home.", saved.display()));
     // Each command is one valid shell line, also with a path that needs quotes.
     let spaced = f.root.join("models/nvidia/new model (2)");
     fs::create_dir_all(&spaced).unwrap();
     for folder in [&other, &spaced] {
-        for saved in [None, Some(saved.as_path())] {
-            let (command, _) = fp4.next(folder, saved, home).unwrap();
+        for root in [&empty, &root] {
+            let (command, _) = fp4.next(folder, root, home).unwrap();
             assert!(std::process::Command::new("sh").args(["-n", "-c", &command]).status().unwrap().success(), "{command}");
         }
     }
+    // A link to the default checkpoint needs no variable.
+    let linked = home.join("linked model");
+    std::os::unix::fs::symlink(&saved, &linked).unwrap();
+    assert_eq!(fp4.next(&linked, &empty, home).unwrap(), ("vade up".into(), None));
+    // More than one complete checkpoint needs an explicit folder.
+    for (name, bytes) in crate::launch::test_checkpoint() { fs::write(other.join(name), bytes).unwrap(); }
+    assert_eq!(fp4.next(&saved, &empty, home).unwrap(), (format!("VADE_MODELS={} vade up", saved.display()), None));
+}
+
+#[test]
+fn a_bad_saved_path_keeps_the_explicit_pull_command() {
+    if std::env::var_os("VADE_TEST_PULL_NEXT").is_none() {
+        let _guard = crate::runner::process_test_lock();
+        return child("a_bad_saved_path_keeps_the_explicit_pull_command", &[("VADE_TEST_PULL_NEXT", "1")], &["VADE_MODELS"]);
+    }
+    let f = Fixture::fp4();
+    let bad = f.root.join("missing-model");
+    f.save_model(&bad);
+    for damaged in [false, true] {
+        if damaged { fs::create_dir(&bad).unwrap(); fs::write(bad.join("config.json"), b"{}").unwrap(); }
+        assert_eq!(crate::launch::saved_model(&f.root.join(".vade")), None);
+        let (result, lines) = f.pull(REPO, None, false);
+        result.unwrap();
+        assert!(lines.iter().any(|line| line == &format!("Next: VADE_MODELS={} vade up", f.folder().display())), "{lines:?}");
+        assert!(!lines.iter().any(|line| line == "Next: vade up"), "{lines:?}");
+    }
+    // A config that cannot be read must not produce plain guidance either.
+    fs::write(f.root.join(".vade/config"), b"format=unknown\n").unwrap();
+    let (result, lines) = f.pull(REPO, None, false);
+    result.unwrap();
+    assert!(lines.iter().any(|line| line == &format!("Next: VADE_MODELS={} vade up", f.folder().display())), "{lines:?}");
+}
+
+#[test]
+fn an_exported_models_path_controls_the_pull_command() {
+    if std::env::var_os("VADE_TEST_PULL_NEXT").is_none() {
+        let _guard = crate::runner::process_test_lock();
+        for path in ["~/other model", "~/missing-model", "~/models/org/model", ""] {
+            child("an_exported_models_path_controls_the_pull_command", &[("VADE_TEST_PULL_NEXT", "1"), ("VADE_MODELS", path)], &[]);
+        }
+        return;
+    }
+    let f = Fixture::fp4();
+    let other = f.root.join("other model");
+    fs::create_dir(&other).unwrap();
+    for (name, bytes) in crate::launch::test_checkpoint() { fs::write(other.join(name), bytes).unwrap(); }
+    let (result, lines) = f.pull(REPO, None, false);
+    result.unwrap();
+    let explicit = matches!(std::env::var("VADE_MODELS").unwrap().as_str(), "~/other model" | "~/missing-model");
+    let expected = if explicit { format!("Next: VADE_MODELS={} vade up", f.folder().display()) } else { "Next: vade up".into() };
+    assert!(lines.iter().any(|line| line == &expected), "{lines:?}");
+    assert_eq!(lines.iter().any(|line| line == "Next: vade up"), !explicit, "{lines:?}");
 }
 
 #[test]

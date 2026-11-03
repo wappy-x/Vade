@@ -21,7 +21,7 @@ impl<'a> Backend<'a> {
             .ok_or_else(|| "Flash dense input was not reserved before capture".into())
     }
     /// Second dense tile for a producer that writes the next projections' planes while the
-    /// first tile still holds its own operand (prompt HC up -> its mixed output's planes).
+    /// first tile still holds its own operand. Holds HC up output for prompt rows and decode M <= 8.
     pub fn flash_mixed_planes(&self) -> Result<u64, String> {
         let mut planes = self.flash_mixed.borrow_mut();
         if planes.is_none() { *planes = Some(self.vector(crate::flash_mixed_reserve_bytes() / 4)?); }

@@ -74,6 +74,12 @@ pub(crate) fn saved_model(root: &Path) -> Option<PathBuf> {
     serving_format(&model).is_ok().then_some(model)
 }
 
+/// The checkpoint `vade up` selects before local defaults are saved.
+pub(crate) fn default_model(root: &Path, home: &Path) -> Option<PathBuf> {
+    if Config::load(root).ok()?.is_some() { return None; }
+    model::discover_existing(home, None).ok().map(|model| model.path)
+}
+
 /// The checkout a new controller config points at, if any: VADE_SOURCE, else
 /// the checkout that holds this vade program or the current folder. `bundle`
 /// says that this vade has a bundle, which wins unless VADE_SOURCE names a checkout.

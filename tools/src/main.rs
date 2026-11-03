@@ -4,6 +4,8 @@ use vade_tools::{Result,json};
 fn run() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("prepare-release-source") if args.len() == 3 => vade_tools::release_source::prepare(
+            std::path::Path::new(&args[1]), std::path::Path::new(&args[2])),
         Some("check-doc-links") if args.len() == 1 => vade_tools::docs::run(&vade_tools::root()),
         Some("check-one-path") if args.len() == 1 => vade_tools::one_path::run(&vade_tools::root()),
         Some("check-unsafe-sites") if args.len() <= 2 => {
@@ -35,7 +37,7 @@ fn run() -> Result<()> {
                 else { println!("{}",part.text()?); }
             } Ok(())
         },
-        _ => Err("usage: vade-tools {check-doc-links|check-one-path|check-unsafe-sites [ROOT]|refresh-unsafe-allowlist 'ruling YYYY-MM-DD HH:MM'|check-bundle DIR [FORBIDDEN ...]|ci-no-gpu|benchmarks-chart|bench-docs CARDS_DIR REPO_DIR|rigmark-dashboard TEMPLATE_HTML BUILT_HTML SETS_JSON OUTPUT_DIR|fetch-model REPO REV DIR|json-get [KEY ...]|json-print [KEY ...]|json-value [KEY ...]|json-quote|json-stream-check}".into())
+        _ => Err("usage: vade-tools {prepare-release-source ARCHIVE_DIR NEW_DIR|check-doc-links|check-one-path|check-unsafe-sites [ROOT]|refresh-unsafe-allowlist 'ruling YYYY-MM-DD HH:MM'|check-bundle DIR [FORBIDDEN ...]|ci-no-gpu|benchmarks-chart|bench-docs CARDS_DIR REPO_DIR|rigmark-dashboard TEMPLATE_HTML BUILT_HTML SETS_JSON OUTPUT_DIR|fetch-model REPO REV DIR|json-get [KEY ...]|json-print [KEY ...]|json-value [KEY ...]|json-quote|json-stream-check}".into())
     }
 }
 fn main() { if let Err(error) = run() { eprintln!("vade-tools: {error}"); std::process::exit(1); } }

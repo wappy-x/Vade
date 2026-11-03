@@ -113,18 +113,60 @@ fn sidecar_and_config_wrappers_use_the_same_recipe_reader() {
     }
 }
 #[test]
-fn all_saved_index_patterns_have_a_role() {
+fn saved_text_index_pattern_counts_match_roles() {
     let p = description(); let mut patterns = 0;
+    let experts = p.layers.iter().filter_map(|l| if let Ffn::Experts(e) = l.ffn { Some(e.count) } else { None }).max().unwrap();
     for line in include_str!("fixtures/glm/index-patterns.txt").lines() {
-        let pattern = line.split_whitespace().nth(1).unwrap();
-        let mut found = false;
-        for layer in 0..p.layers.len()+p.declared_draft_layers as usize {
-            let name = pattern.replace(".N.",&format!(".{layer}.")).replace(".E.",".0.");
-            if p.bind_tensor(&name).is_ok() { found = true; break; }
+        let mut fields = line.split_whitespace();
+        let expected = fields.next().unwrap().parse::<usize>().unwrap();
+        let pattern = fields.next().unwrap(); patterns += 1;
+        if pattern.starts_with("model.visual.") {
+            // Vision is unused. The text config does not supply its layer count.
+            assert!(p.bind_tensor(&pattern.replace(".N.",".0.")).is_ok()); continue;
         }
-        assert!(found,"unmapped pattern {pattern}"); patterns += 1;
+        let layers = if pattern.contains(".N.") { p.layers.len()+p.declared_draft_layers as usize } else { 1 };
+        let experts = if pattern.contains(".E.") { experts } else { 1 };
+        let mut count = 0;
+        for layer in 0..layers { for expert in 0..experts {
+            let name = pattern.replace(".N.",&format!(".{layer}.")).replace(".E.",&format!(".{expert}."));
+            count += usize::from(p.bind_tensor(&name).is_ok());
+        } }
+        assert_eq!(count,expected,"wrong tensor count for {pattern}");
     }
     assert_eq!(patterns,137);
+}
+#[test]
+fn draft_layers_refuse_dense_projections() {
+    let p = description();
+    for layer in p.layers.len()..p.layers.len()+p.declared_draft_layers as usize {
+        for projection in ["gate_proj","up_proj","down_proj"] {
+            let name = format!("model.language_model.layers.{layer}.mlp.{projection}.weight");
+            assert!(p.bind_tensor(&name).is_err(),"{name}");
+        }
+    }
+}
+#[test]
+fn legacy_csf_recipes_bind_only_their_scale_components() {
+    let mut p = description(); let module = "model.language_model.layers.3.mlp.experts.0.gate_proj";
+    for algo in ["NVFP4","W4A16_NVFP4"] { for encoding in ["csf","csf_32x2_v1",""] {
+        let field = if encoding.is_empty() { String::new() } else { format!(",\"weight_scale_encoding\":{encoding:?}") };
+        let source = format!(r#"{{"quant_method":"modelopt","quant_algo":"MIXED_PRECISION","quantized_layers":{{{module:?}:{{"quant_algo":{algo:?},"group_size":16{field}}}}}}}"#);
+        p.storage = StorageMap::from_json(source.as_bytes()).unwrap();
+        for suffix in ["nvfp4_csf_fixed","nvfp4_csf_exceptions"] {
+            let name = format!("{module}.weight_scale.{suffix}");
+            let result = p.bind_tensor(&name);
+            assert_eq!(result.is_ok(),encoding == "csf","{algo} {encoding} {name}");
+            if let Ok(b) = result {
+                assert_eq!((b.role.place,b.role.part,b.role.store),(Place::Layer(3),Part::Expert { id: Some(0),proj: Proj::Gate },Store::BlockScale));
+                assert_eq!(b.storage,WeightStorage::Nvfp4 { encoding: ScaleEncoding::Csf,activation_scale: algo == "NVFP4" });
+            }
+        }
+        assert_eq!(p.bind_tensor(&format!("{module}.weight_scale.csf32_offsets")).is_ok(),encoding == "csf_32x2_v1");
+        assert_eq!(p.bind_tensor(&format!("{module}.weight_scale")).is_ok(),encoding.is_empty());
+        assert!(p.bind_tensor(&format!("{module}.weight_scale_2")).is_ok());
+        assert_eq!(p.bind_tensor(&format!("{module}.input_scale")).is_ok(),algo == "NVFP4");
+        assert!(p.bind_tensor(&format!("{module}.weight_scale.nvfp4_csf_unknown")).is_err());
+    } }
 }
 #[test]
 fn roles_keep_the_new_operations_and_scale_components_distinct() {
