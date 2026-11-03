@@ -235,9 +235,33 @@ The cached run reused 32,064 tokens on both setups. The second question gave the
 - **The 32K chat.** Both setups gave the turn digests `28a6dca8...` and `b01b5a6b...`, the same as the 2026-10-31 FP8 two-Spark chat.
 - **Re-run.** `vade bench --card --receipt` can check the four-Spark files. It cannot check the 64-response two-Spark files. We have not run it against these receipts.
 
+## FP4-Local cached turn: main 2de87be, 2026-11-02 afternoon
+
+The result for the cached turn on two Sparks comes from main `2de87be`. The rates and the other setups stay in the [morning tables](#current-fp4-local-main-8976c4f-2026-11-02-morning).
+
+The private RigMark archive holds the card in this folder: `2026-11-02/2026-11-02_1639_qwen3.8-flash-next-fp4-local_local-2spark_2de87be-drafting-on-thinking-off-own-premerge-fp8b.f28.ma1`. The dashboard lists the card at 16:39 CST on 2026-11-02, with `kind=main`. Its file is `thinking-off.card.json`.
+
+The run uses FP4-Local on DGX Spark (GB10), with the tensor split, context 32768 and strict drafting at depth 3. The [checkpoint identity](benchmarks.md#models-and-builds) is the same as in the morning. Requests are greedy, with neutral penalties, seed 20260905, thinking off and an output limit of 256 tokens.
+
+The chat runs three times on the same server after both cards. Each chat has a first question and then a second question. The second question runs with the cache and with `cache` false. The table uses the first cached run of each chat. It gives the median across the three chats, with every raw time in seconds.
+
+<div align="center">
+
+| Request | Median first token (s) | Raw times (s) |
+| :---: | :---: | :---: |
+| First question, cold | 10.200566 | 10.230222, 10.200566, 10.147061 |
+| Second question, cache | 0.395172 | 0.395172, 0.435056, 0.385395 |
+| Second question, no cache | 9.998376 | 9.965697, 9.998376, 10.009841 |
+
+</div>
+
+The cold first question includes the time to save the prefix. The cached run reuses 32,064 tokens in each chat. The second question gives the same token IDs with the cache and without it in each chat (`turn2_ids_equal`). This is one server start.
+
+The card folder holds the first chat in `chat/cache.json`. The private source run, `own-premerge-fp8b/f28/ma1`, also holds `chat-2/cache.json` and `chat-3/cache.json`. The raw times above follow that order. The source fields are `turn1.ttft_s`, `turn2-cache-r1.ttft_s` and `turn2-nocache.ttft_s`. The full card and chat files are private.
+
 ## Current FP4-Local: main 8976c4f, 2026-11-02 morning
 
-These FP4-Local numbers are current. The [2026-10-31 cards](#current-fp4-local-main-dc32b7c-2026-10-31-morning) are history.
+These FP4-Local rates and the one-Spark and four-Spark chat times are current. The two-Spark cached-turn median is in the [afternoon result](#fp4-local-cached-turn-main-2de87be-2026-11-02-afternoon). The [2026-10-31 cards](#current-fp4-local-main-dc32b7c-2026-10-31-morning) are history.
 
 The receipts page is [bench/receipts/2026-11-02](../bench/receipts/2026-11-02/README.md). It gives the build and binary hashes, the checkpoint identity, the server start command of each setup and the request settings. The machines are DGX Spark, NVIDIA GB10, driver 580.178.04, with the clocks not locked. Main `8976c4f` has the engine of main `407aa46`. Between the two, only the command line tool changed.
 

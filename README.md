@@ -37,7 +37,7 @@ Then get the model with `vade pull` and run `vade up`. The engine is ready for a
 
 You need a DGX Spark with curl, a driver with CUDA 13.0 or newer, and nothing else using the GPU. Only a build from source also needs a C compiler (`cc`).
 
-Run these three commands on the Spark. Most of the time goes to the model download.
+Run these three commands on the Spark. Allow time for the download and the first full model check.
 
 ```sh
 curl -fsSL https://vade.lol/install.sh | sh
@@ -48,6 +48,10 @@ vade up
 1. **Install** checks the GPU and the driver, then installs the prebuilt Vade build. It does not need sudo, and it does not change your shell profile. If your shell cannot find `vade` afterwards, run the `export` line that the installer prints.
 2. **Pull** downloads the model (102 GB) and checks every file. The long hash after `@` pins the exact revision we tested. If the download stops, run the same command again. It continues where it stopped.
 3. **Up** starts the engine on this Spark. `vade launch` starts it and opens the coding agent in the current folder. `vade down` stops it.
+
+**First-run time.** The [download record](docs/benchmarks.md#rented-cloud-gb10-vms) gives about 80 minutes to over three hours on rented GB10 VMs. With the model on disk, the full check still takes time on each Spark. The [install record for build 5a22651](bench/receipts/2026-10-24/2026-10-24_2014_qwen3.8-flash-next-nvfp4_local-2spark_5a22651-drafting-off-thinking-off/README.txt) gives 74.2 s and 77.9 s for the checks on a pair of Sparks. After the checks and install, `vade up` took 27.0 s. Times depend on the network, disk and build.
+
+The full check runs once per Spark while its files and check cache stay the same. `vade pull` writes a model check record on that Spark. A local `vade install` also writes the record after a check, if the model folder permits writes. Keep that record so later installs can reuse it. A copy to another Spark needs its own check. See [first-run time and records](docs/INSTALL.md#first-run-time-and-records).
 
 Next steps:
 
@@ -97,6 +101,8 @@ The numbers are tokens per second (tok/s). Drafting is Vade's speculative decodi
 We measured main `acb49bc` on our own Sparks on the afternoon of 2026-11-01 for the FP8 rows, and main `8976c4f` on the morning of 2026-11-02 for the FP4-Local rows. One chat writes prose of up to 8192 tokens. Every row is one server start. Drafting on means a fixed draft depth: 3 for FP4-Local and 2 for FP8. A default FP8 server chooses the depth itself. [Results](docs/results.md#current-fp8-main-acb49bc-2026-11-01-afternoon) gives those speeds too. The raw record of every run is in the receipts: [FP8](bench/receipts/2026-11-01/README.md) and [FP4-Local](bench/receipts/2026-11-02/README.md).
 
 <!-- bench-docs:end -->
+
+The [2026-11-02 16:39 CST card run](docs/results.md#fp4-local-cached-turn-main-2de87be-2026-11-02-afternoon) measures a 32K-token chat with FP4-Local on two Sparks. Its cached second question has a median first-token time of 0.395 s. The same section gives the cold times and the raw samples.
 
 [Results](docs/results.md) has every cell of these runs, with the build, the server commands and the request settings. [Benchmark history](docs/benchmarks.md) keeps every earlier run.
 

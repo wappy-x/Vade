@@ -76,7 +76,7 @@ The next table gives the time to the first token for a long prompt. The cards se
 
 </div>
 
-[Results and receipts](results.md) gives the receipt of each row, the machines, the commands and what you can run again. With the prefix cache, the second question on a 32K-token chat gave its first token in 0.37 s on one Spark, in 0.77 s on two and in 1.06 s on four.
+[Results and receipts](results.md) gives the receipt of each row, the machines, the commands and what you can run again. With the prefix cache, the second question on a 32K-token chat gave its first token in 0.37 s on one Spark and in 1.06 s on four. On two FP4-Local Sparks, the newer [2026-11-02 16:39 CST card run](results.md#fp4-local-cached-turn-main-2de87be-2026-11-02-afternoon) gives a median of 0.395 s. That section gives the card folder, the cold times and the raw samples.
 
 ## What it is not
 

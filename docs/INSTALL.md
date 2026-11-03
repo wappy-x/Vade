@@ -92,8 +92,8 @@ newer (the `CUDA Version` in the `nvidia-smi` header). The GPU must be idle:
 `nvidia-smi` must list no compute processes. Only a build from source also
 needs a C compiler (`cc`).
 
-Run these three commands on the Spark. Most of the time goes to the model
-download.
+Run these three commands on the Spark. Allow time for the download and the
+first full model check.
 
 ```sh
 curl -fsSL https://vade.lol/install.sh | sh
@@ -132,6 +132,33 @@ When the bundle does not fit your Spark, the installer prints one
 folder in `~/.vade` and builds from source there. This needs `git` and
 `cc`. If the clone or the build fails, the installer prints a `Retry:`
 line.
+
+### First-run time and records
+
+The download, the full model check and the engine start are separate costs.
+With the model on disk, the full check can be the main cost. Each Spark must
+check its own copy.
+
+Times depend on the network, disk and build. The install record used
+FP4-Local on a pair of DGX Sparks at build `5a22651` on 2026-10-24. It used
+a source install. The download record used rented GB10 VMs.
+
+| Step | Recorded time | Source |
+| --- | --- | --- |
+| Download | About 80 minutes to over three hours | [Download record](benchmarks.md#rented-cloud-gb10-vms) |
+| Full model check on each Spark | 74.2 s and 77.9 s, one check on each Spark | [Install record](../bench/receipts/2026-10-24/2026-10-24_2014_qwen3.8-flash-next-nvfp4_local-2spark_5a22651-drafting-off-thinking-off/README.txt) |
+| `vade up` after the checks and install | 27.0 s | [Install record](../bench/receipts/2026-10-24/2026-10-24_2014_qwen3.8-flash-next-nvfp4_local-2spark_5a22651-drafting-off-thinking-off/README.txt) |
+
+The full check runs once per Spark while its files and check cache stay the
+same. `vade pull` writes a `.vade-verified` record in the model folder on that
+Spark. A local `vade install` also writes the record after a check, if the
+folder permits writes. Later installs can use that record to avoid another
+full read. Keep the record and the check cache. Vade checks changed files
+again. A copy to another Spark needs its own check.
+
+On Route B, run `vade pull` on each Spark to keep a model record there. A
+controller's `vade install` keeps the engine's check in its cache. It does
+not write the model record on a remote Spark.
 
 ### Build from source on one Spark
 
@@ -610,8 +637,10 @@ nohup vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a3
 To follow it, run `tail -f ~/vade-pull.log` (`Ctrl-C` stops only `tail`). A
 good run prints `Verified 32 files, 102.26 GB in` and the model folder. If
 it stops, run the same `vade pull` line again. It continues from where it
-stopped. It writes the `.sha256` list beside the model folder, so the first
-`vade launch`, `vade up` or `vade install` checks the files.
+stopped. It writes the `.sha256` list beside the model folder and the
+`.vade-verified` record inside it. The first `vade launch`, `vade up` or
+`vade install` can reuse that check on the same Spark. See
+[first-run time and records](#first-run-time-and-records).
 [Download models](pull-models.md) has the details.
 
 #### Or use the fetch helper
@@ -653,9 +682,10 @@ checksum list. The list is the `Qwen3.8-Flash-Next-FP4-Local.sha256` file
 that `vade pull` or the fetch helper writes beside the checkpoint folder, or a
 `manifest.sha256` file inside the folder.
 
-When a file differs, the launch stops and names the file. Vade writes nothing
-into the checkpoint. It keeps the result in its private state, so later starts
-skip the work.
+When a file differs, the launch stops and names the file. A local install
+writes a `.vade-verified` record into the model folder if the folder permits
+writes. It also keeps the result in its private state, so later starts skip
+the work. See [first-run time and records](#first-run-time-and-records).
 
 If you got the checkpoint another way, or you use Route B, check the files
 against the committed manifest once yourself. This reads all 102 GB of the
@@ -1100,6 +1130,9 @@ Both use Route B. Follow the steps below for a chain. Replicas need less of
 them.
 
 One command sets up any number of Sparks, and the six steps below show it.
+Allow time for the model download and the full check on each Spark before
+the engine starts. [First-run time and records](#first-run-time-and-records)
+gives the recorded times and explains which checks later starts can reuse.
 
 Run every step on one Spark. That Spark is the controller. The one-line
 install is enough, so you do not need a clone. `vade install` copies Vade to

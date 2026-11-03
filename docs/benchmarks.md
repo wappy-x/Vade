@@ -78,6 +78,7 @@ How to read the tables:
 - **C1, C4 and C8.** These give the total rates for one, four and eight chats at once.
 - **Cold 8K.** This is the time to the first token after an uncached 8192-token prompt. Both cards send it with drafting off.
 - **More numbers.** For FP8, [results and receipts](results.md) gives the 32K chat and the token ID checks. For FP4-Local, the [2026-11-02 section](#current-2026-11-02-morning-main-8976c4f) gives them.
+- **Cached turn on two FP4-Local Sparks.** The [2026-11-02 16:39 CST card run](results.md#fp4-local-cached-turn-main-2de87be-2026-11-02-afternoon) gives a median first-token time of 0.395 s for the second question on a 32K-token chat. That section gives the card folder, the cold times and the raw samples.
 
 We write these tables by hand, because the FP8 rows and the FP4-Local rows come from two different mains. The `bench-docs` tool cannot make these tables. It takes one card per setup, only from the newest main that has cards ([bench_docs.rs](../tools/src/bench_docs.rs)).
 
@@ -144,6 +145,7 @@ Every speed that we have published for Vade is on one of these pages or sections
 
 | Section | What it is for |
 | :---: | :---: |
+| [2026-11-02 afternoon cached turn](results.md#fp4-local-cached-turn-main-2de87be-2026-11-02-afternoon) | Two FP4-Local Sparks at main `2de87be`, with cold and cached chat medians |
 | [2026-11-02 morning FP4-Local cards](#current-2026-11-02-morning-main-8976c4f) | One, two and four Sparks at main `8976c4f`, FP4-Local, drafting on and off, with public receipts |
 | [2026-11-01 afternoon FP8 cards](results.md#current-fp8-main-acb49bc-2026-11-01-afternoon) | Two and four Sparks at main `acb49bc`, FP8, drafting on and off, with public receipts |
 | [2026-11-01 morning FP8 cards](results.md#current-fp8-main-1a07e3a-2026-11-01-morning) | Two and four Sparks at main `1a07e3a`, FP8, with the depth chosen by the server, with public receipts |
