@@ -119,9 +119,11 @@ The [2026-11-02 16:39 CST card run](docs/results.md#fp4-local-cached-turn-main-2
 
 ## Exactness
 
-By default, most inference engines give slightly different answers from one run to the next, and different answers again when you add GPUs. Vade does not.
+**The same answer every time, with the same settings.** Vade has one path, and it is the exact one.
 
-Exact means the same request with the same settings gives the same token IDs. This holds on every run and on every Spark count under "Covered today" below. It holds for a request alone or in a batch. It holds with or without the prefix cache. For requests that always pick the most likely token, it also holds with drafting on or off.
+Exact means the same request with the same settings gives the same token IDs. This holds on every run and on every Spark count under "Covered today" below. It holds for a request alone or in a batch. It holds with or without the prefix cache. It holds when Vade splits a long prompt into chunks. For requests that always pick the most likely token, it also holds with drafting on or off.
+
+Every change to engine arithmetic, scheduling, caching or transport must pass a device check before it merges. The check compares token IDs across repeated runs on real Sparks.
 
 ### Covered today
 
@@ -131,7 +133,7 @@ Exact means the same request with the same settings gives the same token IDs. Th
 
 ### Not covered yet
 
-- FP8 on six Sparks.
+- Eight Sparks.
 - The opt-in `fast` and `sampled` draft modes on FP8.
 - Seeds with drafting on, on FP8, or on four Sparks.
 - Other NVIDIA driver versions.
