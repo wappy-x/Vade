@@ -52,6 +52,13 @@ pub(super) struct Transport {
     pub backoff: Duration,
 }
 
+pub(super) enum Event {
+    /// Current file size and bytes received in this call.
+    Progress { have: u64, received: u64 },
+    /// The server refused a byte range. The next request starts at zero.
+    Restart,
+}
+
 impl Transport {
     pub(super) fn arguments(&self) -> Vec<String> {
         // Plain HTTP is accepted only for a loopback HF_ENDPOINT (see hub::endpoint).
@@ -150,36 +157,50 @@ impl Transport {
     }
 
     /// Download `url` into `part`, continuing from the bytes already there,
-    /// until the file holds `size` bytes. `watch` sees the file as it grows. A
-    /// response that grows past `size` is stopped and its file removed.
-    pub(super) fn download(&self, url: &str, part: &Path, size: u64, watch: &mut dyn FnMut(u64)) -> Result<(), Failure> {
+    /// until it holds `size` bytes. Return whether the last request used saved
+    /// bytes. The caller checks the hash. Keep failed copies for it.
+    pub(super) fn download(&self, url: &str, part: &Path, size: u64, watch: &mut dyn FnMut(Event)) -> Result<bool, Failure> {
         let length = || fs::symlink_metadata(part).map(|meta| meta.len()).unwrap_or(0);
         let mut attempt = 0;
+        let mut received = 0;
         loop {
             regular(part)?;
             let have = length();
-            if have == size && (size > 0 || part.exists()) { return Ok(()); }
-            if have > size { let _ = fs::remove_file(part); }
+            if have == size && (size > 0 || part.exists()) { return Ok(false); }
+            if have > size { return Err(Failure::TooLarge); }
             // A transfer fails after 120 s below 1 byte per second; a healthy
             // one may run for hours. curl refuses a reply that announces more
             // than `size` bytes, or [`REDIRECT_BODY`] for a smaller file; the
             // watch and the length check after curl stop any reply that writes more.
             let extra = ["--speed-limit".into(), "1".into(), "--speed-time".into(), "120".into(), "--max-filesize".into(), size.max(REDIRECT_BODY).to_string(),
-                "--continue-at".into(), "-".into(), "--output".into(), path(part), url.into()];
-            let result = self.once(&extra, None, &mut || { let have = length(); watch(have.min(size)); have > size });
+                "--continue-at".into(), have.to_string(), "--output".into(), path(part), url.into()];
+            let result = self.once(&extra, None, &mut || {
+                let now = length();
+                watch(Event::Progress { have: now.min(size), received: received + now.saturating_sub(have) });
+                now > size
+            });
+            received += length().saturating_sub(have);
+            watch(Event::Progress { have: length().min(size), received });
             if length() > size || matches!(result, Err(Failure::TooLarge | Failure::Curl(63, _))) {
-                let _ = fs::remove_file(part);
                 return Err(Failure::TooLarge);
             }
             let failure = match result {
                 Ok(()) if length() == size => {
                     // curl writes no file for an empty body; never cut one it wrote.
                     if size == 0 { fs::File::options().write(true).create(true).truncate(false).open(part).map_err(|_| Failure::Curl(-1, "Cannot write an empty file.".into()))?; }
-                    return Ok(());
+                    return Ok(have > 0);
                 }
                 Ok(()) => Failure::Curl(18, "The download ended early.".into()),
                 // The server cannot continue this file: start it again.
-                Err(Failure::Curl(33, _)) | Err(Failure::Http(416)) => { let _ = fs::remove_file(part); Failure::Curl(18, "The server could not continue the file.".into()) }
+                Err(Failure::Curl(33, _)) | Err(Failure::Http(416)) if have > 0 => {
+                    regular(part)?;
+                    fs::File::options().write(true).truncate(true).open(part)
+                        .map_err(|_| Failure::Curl(-1, "Cannot start the partial file again.".into()))?;
+                    watch(Event::Restart);
+                    if attempt + 1 >= ATTEMPTS { return Err(Failure::Curl(18, "The server could not continue the file.".into())); }
+                    attempt += 1;
+                    continue;
+                }
                 Err(failure) => failure,
             };
             if !failure.transient() || attempt + 1 >= ATTEMPTS { return Err(failure); }

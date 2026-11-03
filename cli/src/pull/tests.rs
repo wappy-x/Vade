@@ -18,6 +18,8 @@ struct Behavior {
     cut: BTreeMap<String, usize>,
     /// Serve these files with one changed byte.
     corrupt: BTreeSet<String>,
+    /// Change a byte only on the next request for each named file.
+    corrupt_once: BTreeSet<String>,
     /// Ignore Range headers and always send the whole file.
     no_range: bool,
     /// Files per tree page; 0 means one page.
@@ -37,6 +39,8 @@ struct Behavior {
     redirect: usize,
     /// Serve these files with their last byte missing, and a matching length.
     short: BTreeSet<String>,
+    /// End the next response at this byte, with a matching length.
+    short_once: BTreeMap<String, usize>,
 }
 
 /// One request the fake Hub saw.
@@ -129,9 +133,10 @@ fn serve(mut stream: TcpStream, files: &[(String, Vec<u8>, bool)], state: &Mutex
     let Some(path) = target.strip_prefix(&resolve).or_else(|| target.strip_prefix(&cache)) else { return reply(&mut stream, "404 Not Found", "", b"") };
     let Some((_, bytes, _)) = files.iter().find(|(name, ..)| name == path) else { return reply(&mut stream, "404 Not Found", "", b"") };
     let mut bytes = bytes.clone();
-    if state.behavior.corrupt.contains(path) { bytes[0] ^= 1; }
+    if state.behavior.corrupt.contains(path) || state.behavior.corrupt_once.remove(path) { bytes[0] ^= 1; }
     if let Some(extra) = state.behavior.extra.get(path) { bytes.extend(std::iter::repeat_n(b'x', *extra)); }
     if state.behavior.short.contains(path) { bytes.pop(); }
+    if let Some(size) = state.behavior.short_once.remove(path) { bytes.truncate(size); }
     let from: usize = range.as_deref().filter(|_| !state.behavior.no_range).and_then(|range| range.strip_prefix("bytes=")?.strip_suffix('-')?.parse().ok()).unwrap_or(0);
     if from >= bytes.len() && from > 0 { return reply(&mut stream, "416 Range Not Satisfiable", "", b""); }
     let (status, headers) = if from > 0 { ("206 Partial Content", format!("Content-Range: bytes {from}-{}/{}\r\n", bytes.len() - 1, bytes.len())) } else { ("200 OK", String::new()) };
@@ -189,6 +194,13 @@ impl Fixture {
         (result, lines)
     }
     fn part(&self, path: &str) -> PathBuf { self.folder().join(STATE).join(format!("{}.part", &crate::sha256::sha(path.as_bytes())[..24])) }
+    fn bad(&self, path: &str) -> Vec<PathBuf> {
+        let base = self.folder().join(STATE).join("bad").join(path);
+        let prefix = format!("{}.bad-", base.file_name().unwrap().to_string_lossy());
+        fs::read_dir(base.parent().unwrap()).into_iter().flatten().flatten().filter(|entry| entry.path() == base || entry.file_name().to_str()
+            .and_then(|name| name.strip_prefix(&prefix)).is_some_and(|time| !time.is_empty() && time.bytes().all(|byte| byte.is_ascii_digit())))
+            .map(|entry| entry.path()).collect()
+    }
 }
 
 impl Drop for Fixture {
@@ -353,16 +365,275 @@ fn interrupted_downloads_resume_from_the_partial_file() {
 }
 
 #[test]
-fn a_file_that_fails_its_hash_is_removed_and_reported() {
+fn a_file_that_fails_its_hash_is_kept_and_retried_only_once() {
     for (name, kind) in [("model.safetensors", "SHA-256"), ("config.json", "Git ID")] {
         let f = Fixture::new(Behavior { corrupt: [name.to_owned()].into(), ..Behavior::default() });
         let error = f.pull(REPO, None, false).0.unwrap_err();
-        assert!(error.starts_with(&format!("{name} has {kind} ")) && error.ends_with("The bad copy was removed. Run vade pull again."), "{error}");
+        assert!(error.starts_with(&format!("{name} has {kind} ")) && error.contains("Pull kept the latest bad copy"), "{error}");
         assert!(!f.part(name).exists() && !f.folder().join(name).exists());
+        assert_eq!(f.bad(name).len(), 1);
+        assert_eq!(f.hub.downloads().iter().filter(|seen| seen.path.ends_with(&format!("/{name}"))).count(), 2);
+        let mut bad = f.hub.content(name).to_vec();
+        bad[0] ^= 1;
+        for path in f.bad(name) { assert_eq!(fs::read(path).unwrap(), bad); }
         assert!(!f.folder().join(MANIFEST).exists());
         // vade models shows the unfinished pull.
         assert_eq!(models::tests_list(&f.root.join("models")).0[0].4.route, models::Route::Incomplete);
     }
+}
+
+/// A fixture large enough to test a transfer that stops between hash blocks.
+fn resume_repository() -> Vec<(String, Vec<u8>, bool)> {
+    vec![("model.safetensors".into(), (0..3_000_000).map(|i| (i % 251) as u8).collect(), true)]
+}
+
+#[test]
+fn a_cut_at_forty_percent_resumes_with_the_clean_sha() {
+    let f = Fixture::with(resume_repository(), Behavior { cut: [("model.safetensors".into(), 1_200_000)].into(), ..Behavior::default() });
+    let (result, lines) = f.pull(REPO, None, false);
+    result.unwrap();
+    let ranges: Vec<_> = f.hub.downloads().into_iter().map(|seen| seen.range).collect();
+    assert_eq!(ranges, [None, Some("bytes=1200000-".into())]);
+    let sha = crate::sha256::digest_reader(fs::File::open(f.folder().join("model.safetensors")).unwrap()).unwrap();
+    assert_eq!(sha, crate::sha256::sha(f.hub.content("model.safetensors")));
+    assert!(lines.last().unwrap().contains("Verified 1 files, 0.003 GiB") && lines.last().unwrap().contains("1 resumed"), "{lines:?}");
+    // A clean pull to another folder gives the same SHA-256.
+    let clean = f.root.join("clean");
+    f.pull(&format!("{REPO} --to {}", clean.display()), None, false).0.unwrap();
+    assert_eq!(crate::sha256::digest_reader(fs::File::open(clean.join("model.safetensors")).unwrap()).unwrap(), sha);
+    // The next pull starts with the bytes saved by a prior process.
+    let saved = f.part("model.safetensors");
+    fs::rename(f.folder().join("model.safetensors"), &saved).unwrap();
+    fs::OpenOptions::new().write(true).open(&saved).unwrap().set_len(1_200_000).unwrap();
+    let before = f.hub.downloads().len();
+    f.pull(REPO, None, false).0.unwrap();
+    assert_eq!(f.hub.downloads()[before].range.as_deref(), Some("bytes=1200000-"));
+    assert_eq!(crate::sha256::digest_reader(fs::File::open(f.folder().join("model.safetensors")).unwrap()).unwrap(), sha);
+}
+
+#[test]
+fn a_server_that_ignores_range_restarts_with_the_clean_sha() {
+    let f = Fixture::with(resume_repository(), Behavior { no_range: true, ..Behavior::default() });
+    crate::text::private_dir(f.part("model.safetensors").parent().unwrap()).unwrap();
+    fs::write(f.part("model.safetensors"), &f.hub.content("model.safetensors")[..1_200_000]).unwrap();
+    let (result, lines) = f.pull(REPO, None, false);
+    result.unwrap();
+    let ranges: Vec<_> = f.hub.downloads().into_iter().map(|seen| seen.range).collect();
+    assert_eq!(ranges, [Some("bytes=1200000-".into()), None]);
+    assert_eq!(crate::sha256::digest_reader(fs::File::open(f.folder().join("model.safetensors")).unwrap()).unwrap(), crate::sha256::sha(f.hub.content("model.safetensors")));
+    assert!(lines.last().unwrap().contains("0 resumed"), "{lines:?}");
+}
+
+#[test]
+fn a_range_restart_prints_one_notice() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "pull::tests::a_server_that_ignores_range_restarts_with_the_clean_sha", "--nocapture"]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.lines().filter(|line| line.contains("Pull starts the file again.")).count(), 1, "{stderr}");
+}
+
+#[test]
+fn bad_bytes_are_cleared_after_one_fresh_pull_succeeds() {
+    let f = Fixture::with(resume_repository(), Behavior { corrupt_once: ["model.safetensors".into()].into(), ..Behavior::default() });
+    f.pull(REPO, None, false).0.unwrap();
+    assert_eq!(f.hub.downloads().len(), 2);
+    assert!(f.hub.downloads().iter().all(|seen| seen.range.is_none()));
+    assert!(f.bad("model.safetensors").is_empty());
+    assert_eq!(crate::sha256::digest_reader(fs::File::open(f.folder().join("model.safetensors")).unwrap()).unwrap(), crate::sha256::sha(f.hub.content("model.safetensors")));
+    // Another pull makes no request.
+    f.pull(REPO, None, false).0.unwrap();
+    assert_eq!(f.hub.downloads().len(), 2);
+    assert!(f.bad("model.safetensors").is_empty());
+}
+
+#[test]
+fn bad_saved_files_are_cleared_after_a_fresh_pull() {
+    for size in [1_200_000, 3_000_000, 3_000_001] {
+        let f = Fixture::with(resume_repository(), Behavior::default());
+        crate::text::private_dir(f.part("model.safetensors").parent().unwrap()).unwrap();
+        let mut bad = f.hub.content("model.safetensors").to_vec();
+        bad[0] ^= 1;
+        bad.resize(size, 0);
+        fs::write(f.part("model.safetensors"), &bad).unwrap();
+        let (result, lines) = f.pull(REPO, None, false);
+        result.unwrap();
+        if size < 3_000_000 {
+            assert_eq!(f.hub.downloads().len(), 2);
+            assert_eq!(f.hub.downloads()[0].range.as_deref(), Some("bytes=1200000-"));
+        } else { assert_eq!(f.hub.downloads().len(), 1); }
+        assert!(f.hub.downloads().last().unwrap().range.is_none());
+        assert!(lines.last().unwrap().contains("0 resumed"), "{lines:?}");
+        assert!(f.bad("model.safetensors").is_empty());
+        assert_eq!(fs::read(f.folder().join("model.safetensors")).unwrap(), f.hub.content("model.safetensors"));
+    }
+}
+
+#[test]
+fn a_bad_model_file_is_removed_when_its_replacement_also_fails() {
+    let f = Fixture::with(resume_repository(), Behavior { corrupt: ["model.safetensors".into()].into(), ..Behavior::default() });
+    fs::create_dir_all(f.folder()).unwrap();
+    fs::write(f.folder().join("model.safetensors"), b"bad saved file").unwrap();
+    assert!(f.pull(REPO, None, false).0.unwrap_err().contains("Pull kept the latest bad copy"));
+    assert!(!f.folder().join("model.safetensors").exists() && !f.folder().join(MANIFEST).exists());
+    assert_eq!(f.bad("model.safetensors").len(), 1);
+    assert_ne!(fs::read(&f.bad("model.safetensors")[0]).unwrap(), b"bad saved file");
+    assert_eq!(f.hub.downloads().len(), 2);
+}
+
+#[test]
+fn file_progress_uses_gib_and_waits_five_seconds() {
+    let mut progress = Progress::new(false, 4 << 30, 1 << 30);
+    let now = Instant::now();
+    let line = |progress: &mut Progress, seconds, finish| progress.line("model.safetensors", 1 << 30, 2 << 30, 10_000_000,
+        Duration::from_secs(seconds), finish, now + Duration::from_secs(seconds));
+    assert!(line(&mut progress, 4, None).is_none());
+    assert_eq!(line(&mut progress, 5, None).unwrap(), "model.safetensors 1.000 / 2.000 GiB 2.0 MB/s total 2.000 / 4.000 GiB");
+    assert!(line(&mut progress, 6, None).is_none());
+    assert!(line(&mut progress, 9, None).is_none());
+    assert!(line(&mut progress, 10, None).is_some());
+    assert!(line(&mut progress, 10, None).is_none());
+}
+
+#[test]
+fn repeated_failures_keep_only_the_latest_bad_copy() {
+    let name = "config.json";
+    let f = Fixture::with(vec![(name.into(), b"{}".to_vec(), true)], Behavior { corrupt: [name.into()].into(), ..Behavior::default() });
+    assert!(f.pull(REPO, None, false).0.is_err());
+    assert_eq!(f.bad(name).len(), 1);
+    assert_eq!(fs::read(&f.bad(name)[0]).unwrap(), b"z}");
+    f.hub.set(|behavior| { behavior.corrupt.clear(); behavior.extra.insert(name.into(), 1); });
+    assert!(f.pull(REPO, None, false).0.is_err());
+    assert_eq!(f.bad(name).len(), 1);
+    assert_eq!(fs::read(&f.bad(name)[0]).unwrap(), b"{}x");
+    assert_eq!(f.hub.downloads().len(), 4);
+    assert!(!f.folder().join(name).exists());
+    f.hub.set(|behavior| behavior.extra.clear());
+    f.pull(REPO, None, false).0.unwrap();
+    assert!(f.bad(name).is_empty());
+    assert_eq!(fs::read(f.folder().join(name)).unwrap(), b"{}");
+}
+
+#[test]
+fn a_good_file_clears_its_bad_copy_before_a_later_file_fails() {
+    let f = Fixture::with(vec![("a.json".into(), b"{}".to_vec(), true), ("b.json".into(), b"[]".to_vec(), true)],
+        Behavior { corrupt_once: ["a.json".into()].into(), corrupt: ["b.json".into()].into(), ..Behavior::default() });
+    assert!(f.pull(REPO, None, false).0.unwrap_err().starts_with("b.json has SHA-256"));
+    assert_eq!(fs::read(f.folder().join("a.json")).unwrap(), b"{}");
+    assert!(f.bad("a.json").is_empty());
+    assert_eq!(f.bad("b.json").len(), 1);
+    assert!(!f.folder().join("b.json").exists());
+}
+
+#[test]
+fn good_files_clear_old_bad_names_without_clearing_other_files() {
+    let name = "tensors/a.json";
+    let f = Fixture::with(vec![(name.into(), b"{}".to_vec(), true)], Behavior::default());
+    let bad = f.folder().join(STATE).join("bad/tensors");
+    crate::text::private_dir(&bad).unwrap();
+    for copy in ["a.json", "a.json.bad-1", "a.json.bad-2", "a.json.bad-note", "b.json", "b.json.bad-1"] { fs::write(bad.join(copy), b"saved").unwrap(); }
+    f.pull(REPO, None, false).0.unwrap();
+    assert!(f.bad(name).is_empty());
+    for copy in ["a.json.bad-note", "b.json", "b.json.bad-1"] { assert_eq!(fs::read(bad.join(copy)).unwrap(), b"saved"); }
+    // A present file also clears its saved bad copies without a download.
+    for copy in ["a.json", "a.json.bad-3"] { fs::write(bad.join(copy), b"saved").unwrap(); }
+    f.pull(REPO, None, false).0.unwrap();
+    assert!(f.bad(name).is_empty());
+    assert_eq!(f.hub.downloads().len(), 1);
+    assert_eq!(fs::read(bad.join("b.json")).unwrap(), b"saved");
+}
+
+#[test]
+fn a_new_failure_replaces_bad_copies_from_older_pulls() {
+    let name = "tensors/a.json";
+    let f = Fixture::with(vec![(name.into(), b"{}".to_vec(), true)], Behavior { corrupt: [name.into()].into(), ..Behavior::default() });
+    let bad = f.folder().join(STATE).join("bad/tensors");
+    crate::text::private_dir(&bad).unwrap();
+    for copy in ["a.json", "a.json.bad-1", "a.json.bad-2"] { fs::write(bad.join(copy), b"old").unwrap(); }
+    assert!(f.pull(REPO, None, false).0.is_err());
+    assert_eq!(f.bad(name), [bad.join("a.json")]);
+    assert_eq!(fs::read(bad.join("a.json")).unwrap(), b"z}");
+}
+
+#[test]
+fn an_old_revision_is_replaced_without_a_saved_bad_copy() {
+    let name = "config.json";
+    let f = Fixture::with(vec![(name.into(), b"{}".to_vec(), true)], Behavior::default());
+    fs::create_dir_all(f.folder()).unwrap();
+    fs::write(f.folder().join(name), b"{\"old\":true}").unwrap();
+    fs::write(f.folder().join(MANIFEST), format!("{{\"schema\":\"vade.model.v1\",\"repo\":\"{REPO}\",\"commit\":\"{}\",\"files\":[]}}", "f".repeat(40))).unwrap();
+    f.pull(REPO, None, false).0.unwrap();
+    assert_eq!(fs::read(f.folder().join(name)).unwrap(), b"{}");
+    assert!(!f.folder().join(STATE).join("bad").exists());
+    assert_eq!(models::manifest(&f.folder()).unwrap()["commit"].as_str(), Some(COMMIT));
+}
+
+#[test]
+fn a_short_successful_response_resumes_with_range() {
+    let name = "model.safetensors";
+    let f = Fixture::with(resume_repository(), Behavior { short_once: [(name.into(), 1_200_000)].into(), ..Behavior::default() });
+    let (result, lines) = f.pull(REPO, None, false);
+    result.unwrap();
+    let ranges: Vec<_> = f.hub.downloads().into_iter().map(|seen| seen.range).collect();
+    assert_eq!(ranges, [None, Some("bytes=1200000-".into())]);
+    assert!(lines.last().unwrap().contains("1 resumed"), "{lines:?}");
+    assert_eq!(crate::sha256::digest_reader(fs::File::open(f.folder().join(name)).unwrap()).unwrap(), crate::sha256::sha(f.hub.content(name)));
+    assert!(!f.folder().join(STATE).join("bad").exists());
+}
+
+#[test]
+fn file_completion_bypasses_the_progress_timer() {
+    for live in [false, true] {
+        let mut progress = Progress::new(live, 3 << 30, 1 << 30);
+        let now = Instant::now();
+        assert!(progress.line("a", 1 << 29, 1 << 30, 1 << 29, Duration::from_secs(5), None, now).is_some());
+        let line = progress.line("a", 1 << 30, 1 << 30, 1 << 30, Duration::from_secs(5), Some("done"), now).unwrap();
+        assert!(line.contains("MB/s done total 2.000 / 3.000 GiB"), "{line}");
+        assert!(progress.render(&line, true).ends_with('\n'));
+        let line = progress.line("b", 1 << 30, 1 << 30, 0, Duration::ZERO, Some("present"), now).unwrap();
+        assert!(line.contains("present total") && !line.contains("MB/s"), "{line}");
+    }
+}
+
+#[test]
+fn terminal_progress_updates_in_place_and_keeps_the_total() {
+    let mut progress = Progress::new(true, 4 << 30, 2 << 30);
+    let now = Instant::now();
+    let line = progress.line("a", 1 << 30, 2 << 30, 1_000_000, Duration::from_secs(1), None, now).unwrap();
+    assert!(line.contains("total 3.000 / 4.000 GiB"), "{line}");
+    let rendered = progress.render(&line, false);
+    assert!(rendered.starts_with("\r\x1b[2K") && !rendered.ends_with('\n'), "{rendered:?}");
+    assert!(progress.line("a", 1 << 30, 2 << 30, 1_000_000, Duration::from_secs(1), None, now + Duration::from_millis(249)).is_none());
+    assert!(progress.line("a", 1 << 30, 2 << 30, 1_000_000, Duration::from_secs(1), None, now + Duration::from_millis(250)).is_some());
+    assert!(progress.render(&line, true).ends_with('\n'));
+}
+
+#[test]
+fn pull_progress_prints_done_and_present_for_every_file() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "pull::tests::pull_downloads_checks_and_records_a_servable_model", "--nocapture"]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines: Vec<_> = stderr.lines().filter(|line| line.starts_with('[')).collect();
+    assert_eq!(lines.len(), 21, "{stderr}");
+    assert!(lines[..7].iter().all(|line| line.contains(" done total ")), "{stderr}");
+    assert!(lines[7..14].iter().all(|line| line.contains(" present total ") && !line.contains("MB/s")), "{stderr}");
+    assert!(lines[6].starts_with("[7/7] ") && lines[13].starts_with("[7/7] "), "{stderr}");
+}
+
+#[test]
+fn bad_copy_cleanup_refuses_links() {
+    let name = "config.json";
+    let f = Fixture::with(vec![(name.into(), b"{}".to_vec(), true)], Behavior { corrupt: [name.into()].into(), ..Behavior::default() });
+    let state = f.folder().join(STATE);
+    crate::text::private_dir(&state).unwrap();
+    let outside = f.root.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join(name), b"keep").unwrap();
+    std::os::unix::fs::symlink(&outside, state.join("bad")).unwrap();
+    assert!(f.pull(REPO, None, false).0.unwrap_err().contains("is a symlink"));
+    assert_eq!(fs::read(outside.join(name)).unwrap(), b"keep");
+    assert!(!f.folder().join(name).exists());
 }
 
 #[test]
@@ -593,20 +864,22 @@ fn links_and_fifos_in_the_pull_state_are_refused() {
 }
 
 #[test]
-fn a_reply_longer_than_the_listed_size_is_stopped_and_removed() {
+fn a_reply_longer_than_the_listed_size_is_stopped_kept_and_retried() {
     // A reply that announces too many bytes, and one with no length that never ends.
     let f = Fixture::new(Behavior { extra: [("config.json".into(), 1000)].into(), endless: ["model.safetensors".into()].into(), ..Behavior::default() });
     let error = f.pull(REPO, None, false).0.unwrap_err();
-    assert!(error.starts_with("The Hub sent more bytes for the file config.json of org/model than its listing gives."), "{error}");
+    assert!(error.starts_with("config.json has ") && error.contains("Pull kept the latest bad copy"), "{error}");
     assert!(!f.part("config.json").exists() && !f.folder().join("config.json").exists());
+    assert_eq!(f.bad("config.json").len(), 1);
     f.hub.set(|behavior| behavior.extra.clear());
     // The endless reply, also when it continues a partial file.
     for partial in [0, 12_345] {
         if partial > 0 { fs::write(f.part("model.safetensors"), &f.hub.content("model.safetensors")[..partial]).unwrap(); }
         let began = Instant::now();
         let error = f.pull(REPO, None, false).0.unwrap_err();
-        assert!(error.starts_with("The Hub sent more bytes for the file model.safetensors"), "{error}");
+        assert!(error.starts_with("model.safetensors ") && error.contains("Pull kept the latest bad copy"), "{error}");
         assert!(!f.part("model.safetensors").exists() && !f.folder().join("model.safetensors").exists());
+        assert_eq!(f.bad("model.safetensors").len(), 1);
         assert!(began.elapsed() < Duration::from_secs(60));
     }
     f.hub.set(|behavior| behavior.endless.clear());
@@ -620,16 +893,18 @@ fn a_redirect_longer_than_a_small_file_still_gets_the_file() {
     let body = 1000;
     let f = Fixture::new(Behavior { redirect: body, ..Behavior::default() });
     assert!(f.hub.content("generation_config.json").len() < body && (body as u64) < fetch::REDIRECT_BODY);
-    // Behind the redirect, a reply longer than the listing is still stopped and removed.
+    // Behind the redirect, a long reply is stopped and kept.
     f.hub.set(|behavior| behavior.extra = [("config.json".into(), 1000)].into());
     let error = f.pull(REPO, None, false).0.unwrap_err();
-    assert!(error.starts_with("The Hub sent more bytes for the file config.json of org/model than its listing gives."), "{error}");
+    assert!(error.starts_with("config.json has ") && error.contains("Pull kept the latest bad copy"), "{error}");
     assert!(!f.part("config.json").exists() && !f.folder().join("config.json").exists());
+    assert_eq!(f.bad("config.json").len(), 1);
     // A reply one byte short is never taken as the whole file.
     f.hub.set(|behavior| { behavior.extra.clear(); behavior.short = ["config.json".into()].into(); });
     let error = f.pull(REPO, None, false).0.unwrap_err();
     assert!(error.contains("config.json") && !error.starts_with("The Hub sent more bytes"), "{error}");
     assert!(!f.folder().join("config.json").exists());
+    assert_eq!(f.bad("config.json").len(), 1);
     // The healthy redirect gives every file, and each download went through it.
     f.hub.set(|behavior| behavior.short.clear());
     f.pull(REPO, None, false).0.unwrap();

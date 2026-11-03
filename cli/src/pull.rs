@@ -81,7 +81,7 @@ struct Setup {
     root: PathBuf,
     program: String,
     backoff: Duration,
-    /// Redraw one progress line in place (standard error is a terminal).
+    /// Redraw one progress line in place when standard error is a terminal.
     live: bool,
 }
 
@@ -154,6 +154,7 @@ pub fn run(args: &[String], dry: bool) -> Result<(), String> {
 }
 
 fn pull(request: &Request, setup: &Setup, dry: bool, say: &mut dyn FnMut(&str) -> Result<(), String>) -> Result<(), String> {
+    let began = Instant::now();
     let folder = target(request, setup)?;
     let shown = display(&folder, &setup.home);
     // A dry run writes nothing in the model folder; its scratch is temporary.
@@ -195,7 +196,7 @@ fn pull(request: &Request, setup: &Setup, dry: bool, say: &mut dyn FnMut(&str) -
         }
         let kept = kept(&folder, request, &commit, &chosen);
         covered(&folder, &chosen, &kept, selective)?;
-        let hashes = download(&transport, request, &commit, &folder, &scratch, &chosen, setup.live)?;
+        let (hashes, resumed) = download(&transport, request, &commit, &folder, &scratch, &chosen, setup.live)?;
         stopped()?;
         let mut records: Vec<Record> = chosen.iter().map(|file| Record { path: file.path.clone(), size: file.size, sha256: hashes[&file.path].clone(),
             how: if file.sha256.is_some() { "sha256" } else { "git blob id" } }).chain(kept).collect();
@@ -211,13 +212,13 @@ fn pull(request: &Request, setup: &Setup, dry: bool, say: &mut dyn FnMut(&str) -
             _ => {}
         }
         clean(&scratch);
-        say(&format!("Verified {} files, {} in {shown}", chosen.len(), bytes(total)))?;
         say(&format!("{}: {}", support.state(), support.text()))?;
         let saved = crate::launch::saved_model(&setup.root);
         if let Some((next, note)) = support.next(&folder, saved.as_deref(), &setup.home) {
             say(&format!("Next: {next}"))?;
             if let Some(note) = note { say(&format!("Note: {note}"))?; }
         }
+        say(&format!("Verified {} files, {:.3} GiB in {:.1} s, {resumed} resumed, in {shown}", chosen.len(), gib(total), began.elapsed().as_secs_f64()))?;
         Ok(())
     })();
     if dry { let _ = fs::remove_dir_all(&scratch); }
@@ -278,7 +279,7 @@ fn refusal(failure: Failure, request: &Request, what: &str, token: bool) -> Stri
         Failure::Http(code) => format!("The Hub answered HTTP {code} for the {what} of {repo}. Run vade pull again later."),
         Failure::Missing => "vade pull needs curl on PATH. Install curl, then run vade pull again.".into(),
         Failure::Interrupted => INTERRUPTED.into(),
-        Failure::TooLarge => format!("The Hub sent more bytes for the {what} of {repo} than its listing gives. The partial file was removed. Run vade pull again; if this repeats, check HF_ENDPOINT."),
+        Failure::TooLarge => format!("The Hub sent more bytes for the {what} of {repo} than its listing gives. Run vade pull again; if this repeats, check HF_ENDPOINT."),
         Failure::NotRegular(path) => format!("{} in the pull state is not a regular file. Remove it, then run vade pull again.",
             crate::text::terminal_text(&path.to_string_lossy())),
         Failure::Curl(code, message) => format!("The {what} request for {repo} failed (curl exit {code}{}). Check the network, then run vade pull again.",
@@ -362,14 +363,14 @@ fn verify(path: &Path, file: &Remote) -> Result<String, String> {
     }
 }
 
-/// Download and check every chosen file. Returns the SHA-256 of each.
+/// Download and check every chosen file. Return the hashes and resume count.
 fn download(transport: &Transport, request: &Request, commit: &str, folder: &Path, scratch: &Path, chosen: &[Remote], live: bool)
-    -> Result<BTreeMap<String, String>, String> {
+    -> Result<(BTreeMap<String, String>, usize), String> {
     let mut checked = read_checked(scratch);
     let mut hashes = BTreeMap::new();
+    let mut resumed = 0;
     let total: u64 = chosen.iter().map(|file| file.size).sum();
-    let mut done = 0u64;
-    let mut progress = Progress::new(live, total);
+    let mut done = 0;
     let mut marked = false;
     for (index, file) in chosen.iter().enumerate() {
         stopped()?;
@@ -377,6 +378,7 @@ fn download(transport: &Transport, request: &Request, commit: &str, folder: &Pat
         no_links(folder, &path)?;
         let expected = file.sha256.clone().unwrap_or_else(|| file.git.clone());
         let label = format!("[{}/{}] {}", index + 1, chosen.len(), file.path);
+        let mut progress = Progress::new(live, total, done);
         // A file this pull already checked, unchanged since, is not hashed again.
         let known = fs::symlink_metadata(&path).ok().filter(fs::Metadata::is_file).and_then(|meta| {
             let c = checked.get(&file.path)?;
@@ -386,40 +388,106 @@ fn download(transport: &Transport, request: &Request, commit: &str, folder: &Pat
         // A check that Ctrl-C cut short is no reason to download the file.
         stopped()?;
         let sha256 = match present {
-            Ok(sha256) => { progress.finish(&label, file.size, done, "present")?; sha256 }
+            Ok(sha256) => { progress.show(&label, file.size, file.size, 0, Duration::ZERO, Some("present")); sha256 }
             Err(_) => {
+                if fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file()) {
+                    if !marked { crate::text::atomic_write(&scratch.join(UPDATING), &format!("{commit}\n"))?; marked = true; }
+                    fs::remove_file(&path).map_err(|error| crate::text::file_error("Cannot remove an old model file", &path, &error))?;
+                }
                 let part = scratch.join(format!("{}.part", &crate::sha256::sha(file.path.as_bytes())[..24]));
                 let url = hub::file_url(&transport.endpoint, &request.repo, commit, &file.path);
                 let began = Instant::now();
-                let start = fs::symlink_metadata(&part).map(|meta| meta.len().min(file.size)).unwrap_or(0);
-                transport.download(&url, &part, file.size, &mut |have| progress.show(&label, have, file.size, done + have, start, began))
-                    .map_err(|failure| refusal(failure, request, &format!("file {}", file.path), transport.token.is_some()))?;
-                let checked_part = verify(&part, file);
-                // Keep the partial file for the next run when Ctrl-C cut the check short.
-                stopped()?;
-                let sha256 = checked_part.map_err(|error| {
-                    let _ = fs::remove_file(&part);
-                    format!("{error} The bad copy was removed. Run vade pull again.")
-                })?;
+                let (sha256, continued) = pull_file(transport, request, file, &url, &part, &label, &mut progress, began)?;
+                resumed += usize::from(continued);
                 if let Some(parent) = path.parent() {
                     fs::create_dir_all(parent).map_err(|error| crate::text::file_error("Cannot create a model subfolder", parent, &error))?;
                 }
                 no_links(folder, &path)?;
                 if !marked { crate::text::atomic_write(&scratch.join(UPDATING), &format!("{commit}\n"))?; marked = true; }
                 fs::rename(&part, &path).map_err(|error| crate::text::file_error("Cannot move a downloaded file into place", &path, &error))?;
-                progress.finish(&label, file.size, done, &rate(file.size.saturating_sub(start), began.elapsed()))?;
+                progress.show(&label, file.size, file.size, progress.received, began.elapsed(), Some("done"));
                 sha256
             }
         };
+        clear_bad(scratch, file)?;
         if let Ok(meta) = fs::symlink_metadata(&path) {
             let (size, inode, modified, nanos, changed, changed_nanos) = identity(&meta);
             checked.insert(file.path.clone(), Checked { size, inode, modified, nanos, changed, changed_nanos, expected, sha256: sha256.clone() });
             write_checked(scratch, &checked)?;
         }
-        done += file.size;
         hashes.insert(file.path.clone(), sha256);
+        done += file.size;
     }
-    Ok(hashes)
+    Ok((hashes, resumed))
+}
+
+/// Remove this file's failed copies, including names from older pulls.
+fn clear_bad(scratch: &Path, file: &Remote) -> Result<(), String> {
+    let base = scratch.join("bad").join(&file.path);
+    no_links(scratch, &base)?;
+    let parent = base.parent().ok_or("Cannot name a bad file folder.")?;
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(crate::text::file_error("Cannot read the bad file folder", parent, &error)),
+    };
+    let prefix = format!("{}.bad-", base.file_name().ok_or("Cannot name a bad file.")?.to_string_lossy());
+    for entry in entries {
+        let entry = entry.map_err(|error| crate::text::file_error("Cannot read the bad file folder", parent, &error))?;
+        let name = entry.file_name();
+        let old = name.to_str().and_then(|name| name.strip_prefix(&prefix)).is_some_and(|time| !time.is_empty() && time.bytes().all(|byte| byte.is_ascii_digit()));
+        if entry.path() == base || old {
+            fs::remove_file(entry.path()).map_err(|error| crate::text::file_error("Cannot remove a bad copy", &entry.path(), &error))?;
+        }
+    }
+    Ok(())
+}
+
+/// Keep only the latest failed download for this file path.
+fn quarantine(path: &Path, scratch: &Path, file: &Remote) -> Result<(), String> {
+    let base = scratch.join("bad").join(&file.path);
+    no_links(scratch, &base)?;
+    if let Some(parent) = base.parent() {
+        fs::create_dir_all(parent).map_err(|error| crate::text::file_error("Cannot create the bad file folder", parent, &error))?;
+    }
+    clear_bad(scratch, file)?;
+    fs::rename(path, &base).map_err(|error| crate::text::file_error("Cannot keep the bad file", path, &error))
+}
+
+/// Check each completed response. Retry a bad copy once from zero.
+fn pull_file(transport: &Transport, request: &Request, file: &Remote, url: &str, part: &Path, label: &str, progress: &mut Progress, began: Instant)
+    -> Result<(String, bool), String> {
+    let mut received = 0;
+    let mut retried = false;
+    loop {
+        let fetched = transport.download(url, part, file.size, &mut |event| match event {
+            fetch::Event::Progress { have, received: now } => {
+                progress.received = received + now;
+                progress.show(label, have, file.size, progress.received, began.elapsed(), None);
+            }
+            fetch::Event::Restart => progress.notice(&format!("{}: The server did not accept Range. Pull starts the file again.", file.path)),
+        });
+        let complete = fetched.is_ok();
+        let continued = match fetched {
+            Ok(continued) => continued,
+            Err(Failure::TooLarge) if fs::symlink_metadata(part).is_ok_and(|meta| meta.is_file()) => false,
+            Err(failure) => return Err(refusal(failure, request, &format!("file {}", file.path), transport.token.is_some())),
+        };
+        let verified = verify(part, file);
+        // Keep the partial file when Ctrl-C stops the check.
+        stopped()?;
+        match verified {
+            Ok(sha256) if complete => return Ok((sha256, continued)),
+            result => {
+                let error = result.err().unwrap_or_else(|| format!("{} exceeded the Hub size limit.", file.path));
+                quarantine(part, &transport.scratch, file)?;
+                if retried { return Err(format!("{error} Pull kept the latest bad copy in {STATE}/bad. Check the source, then run vade pull again.")); }
+                progress.notice(&format!("{}: The size or hash check failed. Pull kept the bad copy in {STATE}/bad and will try again.", file.path));
+            }
+        }
+        received = progress.received;
+        retried = true;
+    }
 }
 
 /// Refuse a symlink anywhere between the model folder and `path`, so a link
@@ -565,26 +633,30 @@ fn checksums(folder: &Path, records: &[Record]) -> Result<(), String> {
     publish(&list, &records.iter().map(|record| format!("{}  ./{}\n", record.sha256, record.path)).collect::<String>())
 }
 
-/// The progress line: redrawn in place on a terminal, else one line per file
-/// and one every 30 s during a long file.
-struct Progress { live: bool, total: u64, last: Instant }
+/// Redraw terminal progress in place. Limit log updates, but always finish a file.
+struct Progress { live: bool, total: u64, done: u64, last: Option<Instant>, received: u64 }
 impl Progress {
-    fn new(live: bool, total: u64) -> Self { Self { live, total, last: Instant::now() } }
-    fn show(&mut self, label: &str, have: u64, size: u64, overall: u64, start: u64, began: Instant) {
-        if self.last.elapsed() < if self.live { Duration::from_millis(250) } else { Duration::from_secs(30) } { return; }
-        self.last = Instant::now();
-        let line = format!("{label}  {} / {}  {}  total {} / {}", bytes(have), bytes(size), rate(have.saturating_sub(start), began.elapsed()), bytes(overall), bytes(self.total));
-        if self.live { crate::output::stderr(format_args!("\r\x1b[2K{}", crate::text::terminal_text(&line))); }
-        else { crate::output::stderr_line(format_args!("{}", crate::text::terminal_text(&line))); }
+    fn new(live: bool, total: u64, done: u64) -> Self { Self { live, total, done, last: None, received: 0 } }
+    fn line(&mut self, label: &str, have: u64, size: u64, received: u64, elapsed: Duration, finish: Option<&str>, now: Instant) -> Option<String> {
+        let gap = if self.live { Duration::from_millis(250) } else { Duration::from_secs(5) };
+        if finish.is_none() && (self.last.is_some_and(|last| now.duration_since(last) < gap) || elapsed < gap) { return None; }
+        self.last = Some(now);
+        let status = if finish == Some("present") { "present".into() }
+            else { format!("{:.1} MB/s{}", received as f64 / elapsed.as_secs_f64().max(0.001) / 1e6, if finish.is_some() { " done" } else { "" }) };
+        Some(format!("{label} {:.3} / {:.3} GiB {status} total {:.3} / {:.3} GiB", gib(have), gib(size), gib(self.done + have), gib(self.total)))
     }
-    fn finish(&mut self, label: &str, size: u64, done: u64, how: &str) -> Result<(), String> {
-        self.last = Instant::now();
-        let line = format!("{label}  {}  {how}  total {} / {}", bytes(size), bytes(done + size), bytes(self.total));
-        if self.live { crate::output::stderr(format_args!("\r\x1b[2K")); }
-        crate::output::stderr_line(format_args!("{}", crate::text::terminal_text(&line)));
-        Ok(())
+    fn render(&self, line: &str, finish: bool) -> String {
+        format!("{}{}{}", if self.live { "\r\x1b[2K" } else { "" }, crate::text::terminal_text(line), if !self.live || finish { "\n" } else { "" })
     }
+    fn show(&mut self, label: &str, have: u64, size: u64, received: u64, elapsed: Duration, finish: Option<&str>) {
+        if let Some(line) = self.line(label, have, size, received, elapsed, finish, Instant::now()) {
+            crate::output::stderr(format_args!("{}", self.render(&line, finish.is_some())));
+        }
+    }
+    fn notice(&self, line: &str) { crate::output::stderr(format_args!("{}", self.render(line, true))); }
 }
+
+fn gib(value: u64) -> f64 { value as f64 / (1u64 << 30) as f64 }
 
 /// Decimal units, as the Hub shows them.
 fn bytes(value: u64) -> String {
@@ -594,12 +666,6 @@ fn bytes(value: u64) -> String {
         1_000_000..1_000_000_000 => format!("{:.1} MB", value as f64 / 1e6),
         _ => format!("{:.2} GB", value as f64 / 1e9),
     }
-}
-
-fn rate(count: u64, elapsed: Duration) -> String {
-    let seconds = elapsed.as_secs_f64();
-    if seconds < 0.01 { return "done".into(); }
-    format!("{}/s", bytes((count as f64 / seconds) as u64))
 }
 
 /// `path` with the home folder shown as `~`.

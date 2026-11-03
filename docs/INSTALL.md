@@ -635,6 +635,32 @@ and go straight to the manifest check below.
 Use `vade pull`. It shows its progress, continues after an interruption and
 checks every file.
 
+Run the same command after an interruption. Pull sends an HTTP Range request
+from the size of each partial file. If the server answers with the full file,
+pull prints a restart message and starts that file again. Keep `.vade-pull`
+in the model folder so the next pull can use its partial files.
+
+Pull checks each file against the size and hash in the Hub file list. A short
+response stays in its partial file. Pull uses Range to continue it. Pull
+checks SHA-256 for large files and the Git blob ID for small files. It moves
+a complete file with a bad hash, or a file with too many bytes, to
+`.vade-pull/bad/<file>`. It keeps only the latest bad copy for each file path.
+It then pulls that file once more. If that copy fails, it replaces the saved
+bad copy and stops. A failed download never becomes a model file. After a
+file passes its check, pull clears its saved bad copies. It also clears
+copies with the older `.bad-<time>` names. This cleanup applies when the
+model file is already present and passes its check.
+
+A model file that does not match the new file list is removed before its
+replacement downloads. This includes a file from an older revision. It does
+not go to `bad/`. If the download stops, run the same pull again.
+
+Pull prints file progress in GiB and MB/s, with a total byte counter. On a
+terminal, it updates the progress line in place. In a log, progress updates
+for the same file are at least five seconds apart. Each file ends with a
+`done` or `present` line, even if an update just printed. The final `Verified`
+line gives the file count, GiB, elapsed time and count of files that resumed.
+
 If you ran `scripts/install.sh`, your shell finds `vade` after a new login. In
 the same shell, first run the `export PATH=...` line that it printed. That
 line puts `vade` on `PATH` through `~/.vade/bin`. After a bundle install there
@@ -649,7 +675,7 @@ nohup vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a3
 ```
 
 To follow it, run `tail -f ~/vade-pull.log` (`Ctrl-C` stops only `tail`). A
-good run prints `Verified 32 files, 102.26 GB in` and the model folder. If
+good run ends with a `Verified` summary and the model folder. If
 it stops, run the same `vade pull` line again. It continues from where it
 stopped. It writes the `.sha256` list beside the model folder and the
 `.vade-verified` record inside it. The first `vade launch`, `vade up` or
