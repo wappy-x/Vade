@@ -172,7 +172,7 @@ nohup sh -c 'vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fde
 echo $! > ~/vade-step.pid
 ```
 
-- **Expected output.** `Verified 32 files, 102.26 GB in <folder>`, then `Supported: Qwen3.8 Flash-Next FP4-Local` and a `Next:` line.
+- **Expected output.** `Supported: Qwen3.8 Flash-Next FP4-Local`, then a `Next:` line. The final summary is `Verified 32 files, <size> GiB in <seconds> s, <count> resumed, in <folder>`.
 - **Exit code.** 0, so the last log line is `exit 0`.
 - **Check.** The log has the `Verified 32 files` line and the `Supported:` line.
 

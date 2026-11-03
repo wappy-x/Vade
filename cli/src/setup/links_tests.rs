@@ -12,7 +12,8 @@ fn setup_ssh_stop_fix_uses_the_destination_kind() {
         fn pause(&mut self, _: std::time::Duration) { unreachable!() }
     }
     let _host = runner::fake_host(runner::Host::default());
-    for target in ["user@192.0.2.10", "203.0.113.10", "fixture-ssh"] {
+    let ipv6 = std::net::Ipv6Addr::from(u128::MAX).to_string();
+    for target in ["user@192.0.2.10", "203.0.113.10", "fixture-ssh"].into_iter().chain(["user@fixture-ssh", "fixture.invalid", &ipv6]) {
         let names = crate::config::PublicNames::hosts(&[target.into()]);
         let error = names.run(|| probe(&mut Failed, target, "vade setup")).unwrap_err();
         assert!(error.contains("Host key verification failed."), "{error}");

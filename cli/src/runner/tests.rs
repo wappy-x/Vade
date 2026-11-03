@@ -190,9 +190,9 @@ fn parallel_jobs_both_start_before_either_can_finish() {
 
 #[test]
 fn an_ssh_failure_shows_the_last_line_and_the_fix_for_that_cause() {
-    let keyscan = "Run ssh user@host-b true and accept the key, or run ssh-keyscan -H host-b >> ~/.ssh/known_hosts if host-b is the real host name, then run vade doctor.";
-    let stop = SshStop::from_output("user@host-b", "No ED25519 host key is known for host-b and you have requested strict checking.\nHost key verification failed.\n").unwrap();
-    assert_eq!((stop.error.as_str(), stop.fix.as_str()), ("ssh user@host-b failed: Host key verification failed. Vade never edits ~/.ssh.", keyscan));
+    let keyscan = "Run ssh host-b true and accept the key, or run ssh-keyscan -H host-b >> ~/.ssh/known_hosts if host-b is the real host name, then run vade doctor.";
+    let stop = SshStop::from_output("host-b", "No ED25519 host key is known for host-b and you have requested strict checking.\nHost key verification failed.\n").unwrap();
+    assert_eq!((stop.error.as_str(), stop.fix.as_str()), ("ssh host-b failed: Host key verification failed. Vade never edits ~/.ssh.", keyscan));
     // A saved key that changed is not a key to add: the fix asks the person first.
     let stop = SshStop::from_output("host-b", "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\nHost key verification failed.\n").unwrap();
     assert!(stop.fix.starts_with("Ask who runs host-b why its key changed.") && stop.fix.contains("run the ssh-keygen -R command that it prints") && !stop.fix.contains("ssh-keyscan"), "{stop:?}");
@@ -208,8 +208,9 @@ fn an_ssh_failure_shows_the_last_line_and_the_fix_for_that_cause() {
 }
 
 #[test]
-fn address_ssh_stop_fixes_point_to_the_install_guide_for_each_cause() {
-    for target in ["192.0.2.10", "user@203.0.113.10"] {
+fn private_ssh_stop_fixes_point_to_the_install_guide_for_each_cause() {
+    let ipv6 = std::net::Ipv6Addr::from(u128::MAX).to_string();
+    for target in ["192.0.2.10", "user@203.0.113.10"].into_iter().chain(["user@fixture-ssh", "fixture.invalid", &ipv6]) {
         for printed in ["IDENTIFICATION HAS CHANGED\nHost key verification failed.", "Host key verification failed.", "Permission denied (publickey).", "Connection refused"] {
             let stop = SshStop::from_output(target, printed).unwrap();
             assert_eq!(stop.fix, "Read docs/INSTALL.md for the SSH check command. Then run the same Vade command again.");

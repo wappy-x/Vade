@@ -4,6 +4,11 @@ use super::*;
 const TARGETS: [&str; 3] = ["user@192.0.2.10", "203.0.113.10", "fixture-ssh"];
 const KEY_ERROR: &str = "Host key verification failed.\n";
 
+fn targets() -> Vec<String> {
+    TARGETS.into_iter().chain(["user@fixture-ssh", "fixture.invalid"]).map(String::from)
+        .chain([std::net::Ipv6Addr::from(u128::MAX).to_string()]).collect()
+}
+
 fn assert_fix(target: &str, printed: &str) {
     assert!(printed.contains("Host key verification failed."), "{printed}");
     assert_advice(target, printed);
@@ -24,7 +29,7 @@ fn assert_advice(target: &str, printed: &str) {
 #[test]
 fn doctor_fallback_ssh_fixes_use_the_destination_kind() {
     let _host = runner::fake_host(runner::Host::default());
-    for target in TARGETS {
+    for target in &targets() {
         for failure in ["runner", "ssh", "script"] {
             let mut f = Fixture::fp4(1, false);
             f.app.config.machines[0].ssh = target.into();
@@ -48,7 +53,7 @@ fn doctor_fallback_ssh_fixes_use_the_destination_kind() {
 #[test]
 fn staged_build_ssh_fix_uses_the_destination_kind() {
     let _host = runner::fake_host(runner::Host::default());
-    for target in TARGETS {
+    for target in &targets() {
         let mut f = Fixture::fp4(1, false);
         f.app.config.machines[0].ssh = target.into();
         f.app.runner.hashes = Some((false, ""));
@@ -63,7 +68,7 @@ fn staged_build_ssh_fix_uses_the_destination_kind() {
 #[test]
 fn doctor_file_check_ssh_fix_uses_the_destination_kind() {
     let _host = runner::fake_host(runner::Host::default());
-    for target in TARGETS {
+    for target in &targets() {
         let mut f = Fixture::fp4(1, false);
         f.app.config.machines[0].ssh = target.into();
         f.app.runner.fail = Some("a doctor files".into());
@@ -85,7 +90,7 @@ fn doctor_file_check_ssh_fix_uses_the_destination_kind() {
 #[test]
 fn doctor_ssh_stop_fix_uses_the_destination_kind() {
     let _host = runner::fake_host(runner::Host::default());
-    for target in TARGETS {
+    for target in &targets() {
         let mut f = Fixture::fp4(1, false);
         f.app.config.machines[0].ssh = target.into();
         f.app.runner.probe = Some((false, ""));
@@ -107,7 +112,7 @@ fn doctor_ssh_stop_fix_uses_the_destination_kind() {
 #[test]
 fn worker_ssh_stop_fix_uses_the_destination_kind() {
     let _host = runner::fake_host(runner::Host::default());
-    for target in TARGETS {
+    for target in &targets() {
         let mut f = Fixture::fp4(1, false);
         f.app.config.machines[0].ssh = target.into();
         f.app.runner.silent_probe = true;
@@ -122,7 +127,7 @@ fn worker_ssh_stop_fix_uses_the_destination_kind() {
 #[test]
 fn checked_ssh_stop_fix_uses_the_destination_kind() {
     let _host = runner::fake_host(runner::Host::default());
-    for target in TARGETS {
+    for target in &targets() {
         let mut f = Fixture::fp4(1, false);
         f.app.config.machines[0].ssh = target.into();
         f.app.runner.hashes = Some((false, ""));
@@ -151,7 +156,7 @@ impl Runner for CopyFailure {
 #[test]
 fn prebuilt_ssh_stop_fix_uses_the_destination_kind() {
     let _host = runner::fake_host(runner::Host::default());
-    for target in TARGETS {
+    for target in &targets() {
         let mut f = install_tests::with_bundle();
         f.app.config.machines[0].ssh = target.into();
         f.app.runner.ssh_says = Some(KEY_ERROR);

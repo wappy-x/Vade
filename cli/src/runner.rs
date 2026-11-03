@@ -613,10 +613,9 @@ pub fn ssh_check(alias: &str) -> Option<Exec> {
 
 const SSH_CHECK_FIX: &str = "Read docs/INSTALL.md for the SSH check command. Then run the same Vade command again.";
 
-/// Use the install guide when public output would replace an address with a label.
+/// Use the install guide when public output would replace the destination.
 pub(crate) fn ssh_fix(destination: &str, fix: String) -> String {
-    let host = destination.rsplit('@').next().unwrap_or(destination);
-    if host.parse::<std::net::Ipv4Addr>().is_ok() { SSH_CHECK_FIX.into() } else { fix }
+    if crate::config::public_hostname(destination) { fix } else { SSH_CHECK_FIX.into() }
 }
 
 /// Check every destination before the caller starts other remote work.

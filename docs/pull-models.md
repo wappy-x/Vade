@@ -107,18 +107,26 @@ each file it then does these steps:
 
 1. If the file is already in the folder, pull checks it. Pull does not read a
    file again when the same folder's last pull checked it and it has not
-   changed since.
+   changed since. A model file that fails the check is removed before its
+   replacement downloads. This includes a file from an older revision. It
+   does not go to `.vade-pull/bad/`.
 2. Otherwise, pull downloads it from `/<org>/<name>/resolve/<commit>/<path>`
    into a partial file in `.vade-pull/` inside the model folder. A partial
    file from an earlier attempt continues from its last byte. Pull follows
    the redirect that the Hub sends for a file, even for a small file. When a
-   reply sends more bytes than the listing gives, pull stops it and removes
-   the partial file. When a reply ends early, pull continues it. Pull never
-   takes a short reply as the whole file.
+   reply ends early, pull continues it. Pull never takes a short reply as
+   the whole file.
 3. Pull checks the size, then the hash: the SHA-256 that the Hub keeps for
-   large (LFS) files, or the Git blob ID for small files. When a file fails
-   the check, pull removes it and stops with the file name and both values.
-4. Pull moves the checked file into place.
+   large (LFS) files, or the Git blob ID for small files. Pull moves a complete
+   download with a bad hash, or a download with too many bytes, to
+   `.vade-pull/bad/<file>`. It keeps only the latest bad copy for each file
+   path. It then downloads that file once more from zero. If that copy fails,
+   it replaces the saved bad copy and stops. A failed download never becomes
+   a model file.
+4. Pull moves the checked file into place. After a file passes its check,
+   pull clears its saved bad copies. It also clears copies with the older
+   `.bad-<time>` names. This cleanup also applies when the model file is
+   already present and passes its check.
 
 A transfer that stalls (less than 1 byte per second for 120 seconds), a broken
 connection and HTTP 408, 429 and 5xx answers get up to six attempts. The wait
