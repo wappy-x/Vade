@@ -390,6 +390,8 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
   - Now the chat reads the drafter's probability of each draft in the chain, its own acceptance for that probability, and the cost of one more row and draft step.
   - Exact verification still picks every token, so the token IDs have no change. FP8 and chats in a batch have no change.
 
+- **Decode step chain (off by default).** `vade up --decode-fuse on` runs the decode steps of up to four rows on one Spark as a chain of kernels. The chain covers the dense projections and the small kernels around them: each projection reads its first weights before the kernel before it ends, then waits for that kernel's output. The token ids stay the same. More Sparks refuse `on` for now.
+
 - A cached later question starts sooner on two FP4-Local Sparks. The [main result](docs/results.md#fp4-local-cached-turn-main-2de87be-2026-11-02-afternoon) gives the cold and cached times (#290).
 
 - On four FP4-Local Sparks over RDMA, a cold prompt of 6,145 to 48,064 tokens now runs as a sequence split when no other chat decodes: each Spark reads its own part of the prompt, so its first token comes sooner. Beside a decoding chat it runs as chain tiles. The token IDs do not change. Each of the four Sparks holds about 1 GiB more for its link, and the session pool counts it.

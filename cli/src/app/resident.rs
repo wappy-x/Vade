@@ -52,6 +52,10 @@ impl<R: Runner> App<R> {
         if session.two_sparks() && !rdma {
             return Err("Two FP4-Local Sparks run the tensor split, which needs RDMA. Unset SEQPAR_RDMA, then run vade up.".into());
         }
+        // decode_fuse serves one FP4-Local Spark; refuse it here, before any remote call.
+        if session.decode_fuse && (session.group_len() > 1 || !session.fp4_local) {
+            return Err("--decode-fuse on runs on one FP4-Local Spark. Leave it off for more Sparks or FP8.".into());
+        }
         // Capture before resolving ~/ paths and fabric names: a saved session
         // contains expanded launch paths, while the next request starts with
         // the configured strings. Hash the complete request, excluding only
@@ -123,6 +127,7 @@ pub(super) fn recorded_options(session: &Session) -> UpOptions {
         fast_prompts: session.fast_prompts,
         memory_bytes: session.memory_bytes,
         cache_bytes: session.cache_bytes,
+        decode_fuse: Some(session.decode_fuse),
     }
 }
 

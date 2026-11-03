@@ -104,7 +104,7 @@ fn run() -> Result<(), String> {
     let context_explicit = raw_args.get(6).is_some_and(|arg| arg.parse::<SocketAddr>().is_err());
     let args = settings::startup_args(raw_args);
     if args.len() < 9 {
-        return Err("usage: flash-serve RANK WORLD LISTEN NEXT PTX MODEL [CONTEXT] BIND REQUESTS (0=continuous) [--allow-remote] [--api-key-file PATH] [--mtp 0..3] [--nvfp4] [--verify-full] [--fp4-local] [--indexer sparse|dense] [--tensor-map PATH]; FP4-Local defaults to context 32768, output cap 16384, up to sixteen memory-admitted chats with automatic local prompt tiles (pipeline default 2048 rows) and sparse indexing; mixed directories auto-select NextModel; world 1 strict MTP 3 plus lookup, world 2 the FP4-Local tensor split over the layer pipeline's links with the world-1 engine's MTP, the only 2-Spark path (both ranks split the routed experts, the projections and the linear-attention heads, one-sided RDMA writes carry the exchanges, and one greedy chat's verify head is split by vocabulary halves; it needs RDMA, so SEQPAR_RDMA=0 and --tensor-map are refused there; more ranks over RDMA run the split in parts when every width cuts into whole parts and the mailbox has room (world 4 for the shipped checkpoint), other worlds run the layer chain; FP8 keeps its ring), world 4 rank path plain only with --tensor-map PATH; FP8 defaults to context 131072, output cap min(65536, context), strict MTP 2 (the FP8 rank path: one chat chooses its depth each cycle up to 7; VADE_FLASH_MTP_DEPTH=1..7 sets that ceiling, VADE_MTP_ADAPT=0 or --mtp keeps the fixed depth; its drafts read an MXFP8 head copy, VADE_FP8_DRAFT_MX8=0 keeps the BF16 head); data transport uses LISTEN/NEXT ports + 1; world-1 Flash-Next defaults to C8 cohort control and healthy capture fallback (VADE_MTP_COHORT=wide, the guarded two-/four-stage pipelines' default and opt-in on world 1: 5-8 chats draft depth 3 in one 32-row verify tick, cohort control opt-in; VADE_MTP_COHORT=off restores the 16-row controller tick); all three VADE_MTP_C8/VADE_MTP_COHORT_ADAPT/VADE_POOL_GRAPH_FALLBACK=0 restore the prior automatic policy; explicit VADE_MTP_BATCH retains its table; the two- and four-stage pipelines always use guarded Auto8 and cohort control; explicit cohort=1 requires Auto8 and a supported route; other pipeline sizes and native ranks retain their prior defaults; invalid switch values fail at startup; VADE_C8_GUARD_ROBUST unset/1 stays on draft unless plain is 8% cheaper per token, 0 keeps the live 2% latch".into());
+        return Err("usage: flash-serve RANK WORLD LISTEN NEXT PTX MODEL [CONTEXT] BIND REQUESTS (0=continuous) [--allow-remote] [--api-key-file PATH] [--mtp 0..3] [--decode-fuse off|on] [--nvfp4] [--verify-full] [--fp4-local] [--indexer sparse|dense] [--tensor-map PATH]; FP4-Local defaults to context 32768, output cap 16384, up to sixteen memory-admitted chats with automatic local prompt tiles (pipeline default 2048 rows) and sparse indexing; mixed directories auto-select NextModel; world 1 strict MTP 3 plus lookup, world 2 the FP4-Local tensor split over the layer pipeline's links with the world-1 engine's MTP, the only 2-Spark path (both ranks split the routed experts, the projections and the linear-attention heads, one-sided RDMA writes carry the exchanges, and one greedy chat's verify head is split by vocabulary halves; it needs RDMA, so SEQPAR_RDMA=0 and --tensor-map are refused there; more ranks over RDMA run the split in parts when every width cuts into whole parts and the mailbox has room (world 4 for the shipped checkpoint), other worlds run the layer chain; FP8 keeps its ring), world 4 rank path plain only with --tensor-map PATH; FP8 defaults to context 131072, output cap min(65536, context), strict MTP 2 (the FP8 rank path: one chat chooses its depth each cycle up to 7; VADE_FLASH_MTP_DEPTH=1..7 sets that ceiling, VADE_MTP_ADAPT=0 or --mtp keeps the fixed depth; its drafts read an MXFP8 head copy, VADE_FP8_DRAFT_MX8=0 keeps the BF16 head); data transport uses LISTEN/NEXT ports + 1; world-1 Flash-Next defaults to C8 cohort control and healthy capture fallback (VADE_MTP_COHORT=wide, the guarded two-/four-stage pipelines' default and opt-in on world 1: 5-8 chats draft depth 3 in one 32-row verify tick, cohort control opt-in; VADE_MTP_COHORT=off restores the 16-row controller tick); all three VADE_MTP_C8/VADE_MTP_COHORT_ADAPT/VADE_POOL_GRAPH_FALLBACK=0 restore the prior automatic policy; explicit VADE_MTP_BATCH retains its table; the two- and four-stage pipelines always use guarded Auto8 and cohort control; explicit cohort=1 requires Auto8 and a supported route; other pipeline sizes and native ranks retain their prior defaults; invalid switch values fail at startup; VADE_C8_GUARD_ROBUST unset/1 stays on draft unless plain is 8% cheaper per token, 0 keeps the live 2% latch".into());
     }
     spark_engine::flash_prompt_options::load()?;
     spark_serve::intake_grace::load()?;
@@ -115,6 +115,7 @@ fn run() -> Result<(), String> {
     let mut fp4_local = false;
     let mut tensor_map = None;
     let mut sparse = None;
+    let mut decode_fuse = None;
     let mut options = args[9..].iter();
     while let Some(option) = options.next() {
         match option.as_str() {
@@ -133,12 +134,19 @@ fn run() -> Result<(), String> {
                     options.next().ok_or("--tensor-map needs a path")?,
                 ));
             }
+            "--decode-fuse" if decode_fuse.is_none() => {
+                decode_fuse = Some(spark_gpu_probe::decode_fuse::parse(options.next().ok_or("--decode-fuse needs off or on")?)?);
+            }
             "--indexer" if sparse.is_none() => {
                 sparse = Some(settings::sparse_indexer(options.next().ok_or("--indexer needs sparse or dense")?)?)
             }
             _ => return Err(format!("unknown or duplicate Flash option: {option}")),
         }
     }
+    // The chain covers the one-Spark step: the exchange of two or more ranks stays outside it.
+    if decode_fuse == Some(true) && args[1] != "1" { return Err("--decode-fuse on runs on one Spark".into()); }
+    spark_gpu_probe::decode_fuse::set(decode_fuse == Some(true));
+    if decode_fuse == Some(true) { eprintln!("flashnext decode_fuse on"); }
     let mtp_explicit = mtp.is_some() || std::env::var_os("MTP").is_some();
     let mtp = match mtp {
         Some(depth) => depth,

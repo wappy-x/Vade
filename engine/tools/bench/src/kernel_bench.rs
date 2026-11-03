@@ -420,6 +420,15 @@ fn cases() -> Vec<Case> {
     for chats in [1usize, 8] {
         out.push(Case { name: format!("gdn_cstep-c{chats}"), kernel: "flash_next_gdn_chunk_slot", m: 1, n: 1, k: chats, kind: 53, ..Default::default() });
     }
+    // One GDN attention sublayer in launch order (kernel_chain.rs): k = the mask of the
+    // launches X runs as programmatic chain entries; 7ff is the whole sublayer.
+    for mask in [0usize, 0x380, 0x603, 0xe, 0x38, 0x60, 0x7ff, 0x3f8, 0x7f9] {
+        out.push(Case { name: format!("chain_gdn-{mask:x}"), kernel: "flash_mx8_mma_latency_group", m: 1, n: 1, k: mask, kind: 56, ..Default::default() });
+    }
+    // M2-4 (kernel_chain.rs): bits 6 and 7 stay clear, the verify GDN step is not in the case.
+    for (m, mask) in [(4usize, 0usize), (4, 0xf), (4, 0x38), (4, 0x700), (4, 0x73f), (3, 0x73f)] {
+        out.push(Case { name: format!("chain_gdn-m{m}-{mask:x}"), kernel: "flash_verify_mx4_part_group", m, n: 1, k: mask, kind: 56, ..Default::default() });
+    }
     for chats in [1usize, 8] {
         out.push(Case { name: format!("gdn_cslotg-c{chats}"), kernel: "flash_next_gdn_chunk_slot", m: 1, n: 1, k: chats, kind: 52, ..Default::default() });
     }
@@ -976,6 +985,7 @@ fn run() -> Result<()> {
                 + 14 // hc_norm-m1 / -m4, hc_norm_pack-, hc_act_pack- and hc_add_norm-m1 / -m3 / -m4 / -m12 (kind 77).
                 + 9 // hc_up_planes- and hc_down_act-m1 / -m3 / -m4 / -m8, hc_down_act-m12.
                 + 5 // mxs-2560x640-m1..m4 and the solo mx-2560x640-m3.
+                + 15 // chain_gdn masks (kind 56).
                 ;
             assert_eq!(cases().len(), expect);
             // --case selects by name: every name names one case.

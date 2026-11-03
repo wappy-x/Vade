@@ -31,6 +31,7 @@ pub(super) struct Config {
     chats: Option<usize>,
     memory_bytes: Option<u64>,
     cache_bytes: Option<u64>,
+    decode_fuse: bool,
     stage: PathBuf,
     state: PathBuf,
 }
@@ -54,7 +55,7 @@ impl Config {
             .or_else(|_| std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)))
             .map_err(|_| "Cannot reserve a local chat port.")?;
         Ok(Self {
-            mtp: None, chats: None, memory_bytes: None, cache_bytes: None,
+            mtp: None, chats: None, memory_bytes: None, cache_bytes: None, decode_fuse: false,
             model: model.path.clone(),
             model_bytes: model.bytes,
             context,
@@ -110,6 +111,7 @@ impl Config {
             chats: chats.map(|n| n as usize),
             memory_bytes: optional("memory_bytes", u64::MAX)?,
             cache_bytes: optional("cache_bytes", u64::MAX)?,
+            decode_fuse: optional("decode_fuse", 1)? == Some(1),
             model,
             model_bytes: number("model_bytes")?,
             context: context as u32,
@@ -151,6 +153,7 @@ impl Config {
         if options.mtp_explicit { self.mtp = Some(options.mtp); }
         if let Some(bytes) = options.memory_bytes { self.memory_bytes = Some(bytes); }
         if let Some(bytes) = options.cache_bytes { self.cache_bytes = Some(bytes); }
+        if let Some(on) = options.decode_fuse { self.decode_fuse = on; }
     }
 
     /// This saved config with `options` applied as a start applies them, before
@@ -181,12 +184,15 @@ impl Config {
             // never captured these controls, so reuse cannot guess live values.
             ("mtp".into(), self.mtp.map(|n| n.to_string()).unwrap_or_else(|| "engine_default".into())),
             ("memory_bytes".into(), self.memory_bytes.map(|n| n.to_string()).unwrap_or_else(|| "engine_default".into())),
+            ("decode_fuse".into(), if self.decode_fuse { "on" } else { "off" }.into()),
         ])
     }
 
     /// Fail unless the owned engine's record has these exact limits.
     pub fn check_running_limits(&self, record: &Fields) -> Result<(), String> {
-        if self.launch_limits().iter().any(|(key, value)| record.get(key) != Some(value)) {
+        // Records from before decode_fuse ran with it off.
+        let recorded = |key: &str| record.get(key).map(String::as_str).or((key == "decode_fuse").then_some("off"));
+        if self.launch_limits().iter().any(|(key, value)| recorded(key) != Some(value.as_str())) {
             return Err("The owned engine has different or unrecorded launch limits; run vade down, then repeat vade up with the requested flags.".into());
         }
         Ok(())
@@ -291,7 +297,8 @@ impl Config {
             ),
         ]);
         for (key, value) in [("mtp", self.mtp.map(u64::from)), ("chats", self.chats.map(|n| n as u64)),
-            ("memory_bytes", self.memory_bytes), ("cache_bytes", self.cache_bytes)] {
+            ("memory_bytes", self.memory_bytes), ("cache_bytes", self.cache_bytes),
+            ("decode_fuse", self.decode_fuse.then_some(1))] {
             if let Some(value) = value { fields.insert(key.into(), value.to_string()); }
         }
         text::encode(&fields)
@@ -299,6 +306,8 @@ impl Config {
     /// The loopback URL of the local engine.
     /// The saved drafting depth: `None` means the engine chooses.
     pub fn mtp(&self) -> Option<u32> { self.mtp }
+    /// Whether the engine runs the decode step as a chain.
+    pub fn decode_fuse(&self) -> bool { self.decode_fuse }
     /// Whether drafting is on: off only when the saved setup says `--mtp 0`.
     pub fn drafting(&self) -> bool { self.mtp != Some(0) }
     pub fn endpoint(&self) -> String {

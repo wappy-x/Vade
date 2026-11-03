@@ -31,10 +31,27 @@ pub unsafe extern "ptx-kernel" fn flash_next_gdn_prepare_slot(mut p: GdnPrepare,
 /// prepare_slot + history_slot in one launch, the same bits (non-order):
 /// grid (sections / 4 = 20, rows) x 128 threads, one warp per qkv section.
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn flash_next_gdn_prepare_hist_slot(mut p: GdnPrepare, step: SlotStep) {
+pub unsafe extern "ptx-kernel" fn flash_next_gdn_prepare_hist_slot(p: GdnPrepare, step: SlotStep) {
     // The chunk slot (a programmatic launch) starts its state-only prologue in this
     // grid's run; it waits (griddepcontrol) before reading q/k/v/beta/g.
     core::arch::asm!("griddepcontrol.launch_dependents;", options(nostack));
+    prepare_hist(p,step);
+}
+/// flash_next_gdn_prepare_hist_slot for a chained decode step. It waits first: the chunk
+/// slot reads z (the attention group's output) before its own wait.
+/// # Safety
+/// As flash_next_gdn_prepare_hist_slot, on a plain or programmatic launch.
+// SAFETY: griddepcontrol touches no memory; after this wait the attention group is complete,
+// so the chunk slot's early reads of z see the group's output.
+#[no_mangle]
+pub unsafe extern "ptx-kernel" fn flash_next_gdn_prepare_hist_slot_chain(p: GdnPrepare, step: SlotStep) {
+    core::arch::asm!("griddepcontrol.wait;", "griddepcontrol.launch_dependents;", options(nostack));
+    prepare_hist(p,step);
+}
+// SAFETY: the body of flash_next_gdn_prepare_hist_slot and of its chain twin, moved here unchanged; each entry's
+// contract holds for it.
+#[inline(always)]
+unsafe fn prepare_hist(mut p: GdnPrepare, step: SlotStep) {
     let Some((slot,row))=selected(step) else { return; };
     let hd=p.value_heads as usize*128; let width=(2*p.key_heads+p.value_heads) as usize*128;
     let history=slot.layers[step.layer as usize][1] as *mut f32;

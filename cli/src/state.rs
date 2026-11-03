@@ -177,6 +177,8 @@ pub struct Session {
     pub fast_prompts: bool,
     pub memory_bytes: Option<u64>,
     pub cache_bytes: Option<u64>,
+    /// The engine's decode_fuse option, passed in the engine arguments.
+    pub decode_fuse: bool,
     pub local_port: u16,
     pub serve_port: u16,
     pub ranks: Vec<Rank>,
@@ -312,6 +314,7 @@ impl Session {
             fast_prompts: options.fast_prompts,
             memory_bytes,
             cache_bytes,
+            decode_fuse: options.decode_fuse == Some(true),
             local_port: config.local_port,
             serve_port: config.serve_port,
             ranks,
@@ -369,6 +372,7 @@ impl Session {
             format!("127.0.0.1:{}", self.serve_port), "0".into()];
         if self.fp4_local { args.push("--fp4-local".into()); }
         if self.mtp_explicit { args.extend(["--mtp".into(), self.mtp.to_string()]); }
+        if self.decode_fuse { args.extend(["--decode-fuse".into(), "on".into()]); }
         args
     }
     /// `TP_TOPOLOGY` for this session: "ring" for a two-Spark chain, else "path".
@@ -424,6 +428,7 @@ impl Session {
             ("context", self.context.to_string()),
             ("output", self.output.to_string()),
             ("fast_prompts", self.fast_prompts.to_string()),
+            ("decode_fuse", self.decode_fuse.to_string()),
             ("local_port", self.local_port.to_string()),
             ("serve_port", self.serve_port.to_string()),
             ("count", self.ranks.len().to_string()),
@@ -552,6 +557,7 @@ impl Session {
             fast_prompts: f.get("fast_prompts").map(|value| boolean(value)).transpose()?.unwrap_or(false),
             memory_bytes: f.get("memory_bytes").map(|_| number(&f, "memory_bytes")).transpose()?,
             cache_bytes: f.get("cache_bytes").map(|_| number(&f, "cache_bytes")).transpose()?,
+            decode_fuse: f.get("decode_fuse").map(|value| boolean(value)).transpose()?.unwrap_or(false),
             local_port: number(&f, "local_port")?,
             serve_port: number(&f, "serve_port")?,
             ranks,

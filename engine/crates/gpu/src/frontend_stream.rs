@@ -6,6 +6,24 @@ impl<'a> Backend<'a> {
     /// The next launch may start in the previous kernel's tail; that kernel must
     /// griddepcontrol.wait before reading the previous kernel's output.
     pub fn programmatic_next(&self) { self.programmatic.set(true) }
+    /// The entry of the next launch of a decode step: under decode_fuse a step of up to four
+    /// rows runs `chain` in a programmatic launch, else `plain` runs. Call it in the launch
+    /// expression. The chain twins hold for these rows; other rows keep main's launches.
+    pub fn chain_entry<'n>(&self, tokens: usize, plain: &'n str, chain: &'n str) -> &'n str {
+        if crate::decode_fuse::chain_rows(crate::decode_fuse::on(), tokens) { self.programmatic_next(); chain } else { plain }
+    }
+    /// The grouped decode entry (decode_fuse::pick_group), marked programmatic for a twin.
+    pub fn chain_group(&self, tokens: usize, mx: bool, bf16: bool, total: usize, cols: usize) -> &'static str {
+        let (name, chain) = crate::decode_fuse::pick_group(crate::decode_fuse::on(), tokens, mx, bf16, total, cols);
+        if chain { self.programmatic_next(); }
+        name
+    }
+    /// The solo MXFP8 decode entry (decode_fuse::pick_solo), marked programmatic for a twin.
+    pub fn chain_solo(&self, tokens: usize, cols: usize, threads: u32) -> &'static str {
+        let (name, chain) = crate::decode_fuse::pick_solo(crate::decode_fuse::on(), tokens, cols, threads);
+        if chain { self.programmatic_next(); }
+        name
+    }
     /// Whether the loaded PTX exports `name` (newer entries, capability markers).
     pub fn has_flash(&self, name: &str) -> bool { self.module.function(name).is_ok() }
     pub fn pageable_host_page_tables(&self) -> Result<bool, String> {

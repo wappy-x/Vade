@@ -147,6 +147,8 @@ pub struct UpOptions {
     pub fast_prompts: bool,
     pub memory_bytes: Option<u64>,
     pub cache_bytes: Option<u64>,
+    /// The engine's decode_fuse option: Some(true) runs one Spark's decode steps as a chain.
+    pub decode_fuse: Option<bool>,
 }
 
 impl Default for UpOptions {
@@ -170,6 +172,7 @@ impl Default for UpOptions {
             fast_prompts: false,
             memory_bytes: None,
             cache_bytes: None,
+            decode_fuse: None,
         }
     }
 }
@@ -498,9 +501,17 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
             "--chats" => options.chats = Some(number(value, flag, 1, 32)? as usize),
             "--memory-bytes" => options.memory_bytes = Some(bytes(value, flag)?),
             "--cache-bytes" => options.cache_bytes = Some(bytes(value, flag)?),
+            "--decode-fuse" => options.decode_fuse = Some(match value {
+                "on" => true,
+                "off" => false,
+                _ => return Err("Set --decode-fuse to off or on.".into()),
+            }),
             _ => unreachable!(),
         }
         index += 2;
+    }
+    if options.decode_fuse == Some(true) && (options.sparks.is_some_and(|n| n != 1) || !options.hosts.is_empty()) {
+        return Err("--decode-fuse on runs on one Spark. Use --sparks 1, or leave it off.".into());
     }
     if !seen.contains("--mtp") {
         match std::env::var("MTP") {
@@ -625,7 +636,7 @@ fn link(value: &str, links: &[(String, String, String)], command: &str) -> Resul
 }
 
 /// The `vade up` options that take a value.
-const UP_VALUE_OPTIONS: [&str; 9] = ["--sparks", "--hosts", "--replicas", "--mtp", "--context", "--output", "--chats", "--memory-bytes", "--cache-bytes"];
+const UP_VALUE_OPTIONS: [&str; 10] = ["--sparks", "--hosts", "--replicas", "--mtp", "--context", "--output", "--chats", "--memory-bytes", "--cache-bytes", "--decode-fuse"];
 
 /// The word after the option at `index`. A word that starts with `-` is the
 /// next option, unless a digit follows: `--context -5` then names the range.
@@ -885,6 +896,12 @@ mod tests {
         // A negative number is a bad value, not a missing one; the next option is still missing.
         assert_eq!(cli("up --context -5").unwrap_err(), "Set --context to a whole number from 4096 to 262144.");
         assert_eq!(cli("up --mtp -1").unwrap_err(), "Set --mtp to a whole number from 0 to 3.");
+        let Command::Up(fused) = cli("up --decode-fuse on").unwrap().command else { panic!() };
+        assert_eq!(fused.decode_fuse, Some(true));
+        assert_eq!(cli("up --decode-fuse 1").unwrap_err(), "Set --decode-fuse to off or on.");
+        for args in ["up --sparks 2 --decode-fuse on", "up --hosts a,b --decode-fuse on"] {
+            assert_eq!(cli(args).unwrap_err(), "--decode-fuse on runs on one Spark. Use --sparks 1, or leave it off.");
+        }
         assert_eq!(cli("run qwen3-8b --port -1").unwrap_err(), "Set --port to a whole number from 1024 to 65535.");
         assert_eq!(cli("up --context --fp4-local").unwrap_err(), "Give --context a value. Run vade up --help.");
         assert_eq!(cli("up --context -").unwrap_err(), "Give --context a value. Run vade up --help.");

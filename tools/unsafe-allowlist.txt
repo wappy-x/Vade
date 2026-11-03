@@ -802,6 +802,9 @@ engine/crates/gpu/kernels	src/dense_latency.rs	fn:tmadd	fn:1	frozen ruling 2026-
 engine/crates/gpu/kernels	src/dense_latency.rs	fn:untranspose	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/dense_latency.rs	fn:untranspose8	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/dense_latency.rs	fn:wide8	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/dense_latency_chain.rs	fn:flash_bf16_mma_latency_group_chain	fn:1
+engine/crates/gpu/kernels	src/dense_latency_chain.rs	fn:flash_mx8_mma_latency_chain	fn:1
+engine/crates/gpu/kernels	src/dense_latency_chain.rs	fn:flash_mx8_mma_latency_group_chain	fn:1
 engine/crates/gpu/kernels	src/dense_latency_fold.rs	fn:fold1	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/dense_latency_fold.rs	fn:range_b1	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/dense_latency_hc.rs	fn:flash_hc_down_latency_group	fn:1	ruling 2026-11-02 15:39
@@ -811,6 +814,7 @@ engine/crates/gpu/kernels	src/dense_latency_w16.rs	fn:wide16	fn:1	frozen ruling 
 engine/crates/gpu/kernels	src/flash_bf16.rs	extern:\"llvm-intrinsic\"	extern:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:a_fragment	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:b_fragment	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/flash_bf16.rs	fn:bf16_input	fn:1	ruling 2026-11-02 16:36
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:decode	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:decode_input	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:decode_rows	fn:1	frozen ruling 2026-11-02 11:54
@@ -818,6 +822,7 @@ engine/crates/gpu/kernels	src/flash_bf16.rs	fn:dot_hc	fn:1	frozen ruling 2026-11
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:dot_inner	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:dot_range	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:flash_bf16_input	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/flash_bf16.rs	fn:flash_bf16_input_chain	fn:1
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:flash_bf16_lbf12_twin	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:flash_bf16_mma	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:flash_bf16_mma1	fn:1	frozen ruling 2026-11-02 11:54
@@ -837,13 +842,17 @@ engine/crates/gpu/kernels	src/flash_bf16.rs	fn:flash_bf16_mma_latency_fold	fn:1	
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:flash_bf16_pack	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:flash_next_hc_up_latency	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:flash_next_hc_up_latency16_lbf12	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/flash_bf16.rs	fn:flash_next_hc_up_latency16_lbf12_chain	fn:1
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:flash_next_hc_up_latency4	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:flash_next_hc_up_latency4_lbf12	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/flash_bf16.rs	fn:flash_next_hc_up_latency4_lbf12_chain	fn:1
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:hc16_decode	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:hc16_gate	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:hc16_madd	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/flash_bf16.rs	fn:hc_up16	fn:1	ruling 2026-11-02 17:07
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:hc_up_gate	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:hc_up_gate_m1	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/flash_bf16.rs	fn:hc_up_lbf12	fn:1	ruling 2026-11-02 16:36
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:hcu_decode	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:hcu_gate_m1	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_bf16.rs	fn:hcu_shuffle	fn:1	frozen ruling 2026-11-02 11:54
@@ -950,7 +959,9 @@ engine/crates/gpu/kernels	src/flash_next.rs	fn:flash_next_compact_route_silu	fn:
 engine/crates/gpu/kernels	src/flash_next.rs	fn:flash_next_compact_route_silu_mask	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_next.rs	fn:flash_next_gdn_scan	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_next.rs	fn:flash_next_hc_activate	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/flash_next.rs	fn:flash_next_hc_activate_chain	fn:1
 engine/crates/gpu/kernels	src/flash_next.rs	fn:flash_next_hc_add	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/flash_next.rs	fn:flash_next_hc_add_chain	fn:1
 engine/crates/gpu/kernels	src/flash_next.rs	fn:flash_next_hc_add_norm_rows	fn:1	ruling 2026-11-02 15:39
 engine/crates/gpu/kernels	src/flash_next.rs	fn:flash_next_hc_finish_add	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_next.rs	fn:flash_next_k16_finish	fn:1	frozen ruling 2026-11-02 11:54
@@ -958,6 +969,8 @@ engine/crates/gpu/kernels	src/flash_next.rs	fn:flash_next_route_compact1_pack_ma
 engine/crates/gpu/kernels	src/flash_next.rs	fn:flash_next_route_compact1_silu	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_next.rs	fn:flash_next_route_compact1_silu_mask	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_next.rs	fn:gdn_scan	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/flash_next.rs	fn:hc_activate	fn:1	ruling 2026-11-02 16:36
+engine/crates/gpu/kernels	src/flash_next.rs	fn:hc_add	fn:1	ruling 2026-11-02 16:36
 engine/crates/gpu/kernels	src/flash_next.rs	fn:hc_sigmoid	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_next.rs	fn:route1_silu_mask	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_next.rs	fn:route_ids	fn:1	frozen ruling 2026-11-02 11:54
@@ -973,6 +986,7 @@ engine/crates/gpu/kernels	src/flash_next_gdn_chunk.rs	fn:chunk_inputs	fn:1	froze
 engine/crates/gpu/kernels	src/flash_next_gdn_chunk.rs	fn:chunk_rows	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_next_gdn_chunk.rs	fn:chunk_scan	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_next_gdn_chunk.rs	fn:chunk_slice	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/flash_next_gdn_chunk.rs	fn:chunk_slot	fn:1	ruling 2026-11-02 16:36
 engine/crates/gpu/kernels	src/flash_next_gdn_chunk.rs	fn:chunk_v	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_next_gdn_chunk.rs	fn:flash_next_gdn_chunk_prep	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_next_gdn_chunk.rs	fn:flash_next_gdn_chunk_rows	fn:1	frozen ruling 2026-11-02 11:54
@@ -980,6 +994,7 @@ engine/crates/gpu/kernels	src/flash_next_gdn_chunk.rs	fn:flash_next_gdn_chunk_ro
 engine/crates/gpu/kernels	src/flash_next_gdn_chunk.rs	fn:flash_next_gdn_chunk_scan	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_next_gdn_chunk.rs	fn:flash_next_gdn_chunk_scan_cv	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_next_gdn_chunk.rs	fn:flash_next_gdn_chunk_slot	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/flash_next_gdn_chunk.rs	fn:flash_next_gdn_chunk_slot_chain	fn:1
 engine/crates/gpu/kernels	src/flash_next_gdn_chunk.rs	fn:ldg4	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_next_gdn_chunk.rs	fn:lds	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_next_gdn_chunk.rs	fn:lds4	fn:1	frozen ruling 2026-11-02 11:54
@@ -999,6 +1014,7 @@ engine/crates/gpu/kernels	src/flash_ops.rs	fn:flash_hc_add	fn:1	frozen ruling 20
 engine/crates/gpu/kernels	src/flash_ops.rs	fn:flash_hc_mix	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_ops.rs	fn:flash_hc_norm	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_ops.rs	fn:flash_hc_norm_f32	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/flash_ops.rs	fn:flash_hc_norm_f32_chain	fn:1
 engine/crates/gpu/kernels	src/flash_ops.rs	fn:flash_hybrid_copy	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_ops.rs	fn:flash_next_axpy	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_ops.rs	fn:flash_next_hc_add_norm	fn:1	frozen ruling 2026-11-02 11:54
@@ -1016,6 +1032,7 @@ engine/crates/gpu/kernels	src/flash_ops.rs	fn:flash_residual_norm_bf16	fn:1	froz
 engine/crates/gpu/kernels	src/flash_ops.rs	fn:flash_silu	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_ops.rs	fn:hc_add_prompt	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_ops.rs	fn:hc_finish_add_norm	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/flash_ops.rs	fn:hc_norm_f32	fn:1	ruling 2026-11-02 16:36
 engine/crates/gpu/kernels	src/flash_ops.rs	fn:hc_norm_prompt	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_ops.rs	fn:native_square_sum	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/flash_ops.rs	fn:norm_square_add	fn:1	frozen ruling 2026-11-02 11:54
@@ -1645,12 +1662,14 @@ engine/crates/gpu/kernels	src/next_head32.rs	fn:wide_sync	fn:1	frozen ruling 202
 engine/crates/gpu/kernels	src/next_pool.rs	fn:flash_next_gdn_gate_slot	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/next_pool.rs	fn:flash_next_gdn_history_slot	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/next_pool.rs	fn:flash_next_gdn_prepare_hist_slot	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/next_pool.rs	fn:flash_next_gdn_prepare_hist_slot_chain	fn:1
 engine/crates/gpu/kernels	src/next_pool.rs	fn:flash_next_gdn_prepare_slot	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/next_pool.rs	fn:flash_next_gdn_scan_slot	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/next_pool.rs	fn:flash_next_ple_slot	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/next_pool.rs	fn:flash_next_qsa_slot	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/next_pool.rs	fn:flash_next_route_mask	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/next_pool.rs	fn:flash_next_slot_position	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/next_pool.rs	fn:prepare_hist	fn:1	ruling 2026-11-02 16:36
 engine/crates/gpu/kernels	src/next_pool.rs	fn:selected	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/next_verify.rs	fn:flash_next_gdn_verify_scan	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/ptx.rs	fn:ballot	fn:1	frozen ruling 2026-11-02 11:54
@@ -1741,6 +1760,8 @@ engine/crates/gpu/kernels	src/verify_mx4.rs	fn:flash_verify_mx4_mixed_r2	fn:1	fr
 engine/crates/gpu/kernels	src/verify_mx4_part.rs	fn:cache_part	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/verify_mx4_part.rs	fn:flash_verify_mx4_part_group	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/verify_mx4_part.rs	fn:flash_verify_mx4_part_group8	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/verify_mx4_part.rs	fn:flash_verify_mx4_part_group_chain	fn:1
+engine/crates/gpu/kernels	src/verify_mx4_part.rs	fn:part_group	fn:1	ruling 2026-11-02 17:07
 engine/crates/gpu/kernels	src/verify_solo97.rs	extern:\"llvm-intrinsic\"	extern:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/verify_solo97.rs	fn:lr_fragment	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/verify_solo97.rs	fn:lr_group	fn:1	frozen ruling 2026-11-02 11:54
@@ -1749,7 +1770,9 @@ engine/crates/gpu/kernels	src/verify_solo97.rs	fn:lr_madd	fn:1	frozen ruling 202
 engine/crates/gpu/kernels	src/verify_solo97.rs	fn:lr_untranspose8	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/verify_solo97.rs	fn:lr_write	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/verify_solo97.rs	mod:r1::fn:flash_verify_mx_solo97	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/verify_solo97.rs	mod:r1::fn:flash_verify_mx_solo97_chain	fn:1
 engine/crates/gpu/kernels	src/verify_solo97.rs	mod:r1::fn:lr_range_rows1	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/verify_solo97.rs	mod:r1::fn:solo97	fn:1	ruling 2026-11-02 17:07
 engine/crates/seqpar	src/coordinator.rs	impl:Coordinator::fn:start	block:1	frozen ruling 2026-11-02 11:54
 engine/crates/seqpar	src/prefill.rs	fn:prefill_with_finish	block:1	frozen ruling 2026-11-02 11:54
 engine/crates/seqpar	src/prefill.rs	fn:prefill_with_finish	block:2	frozen ruling 2026-11-02 11:54

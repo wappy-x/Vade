@@ -213,7 +213,7 @@ pub(super) unsafe fn untranspose(c: canonical::Acc, lane: usize) -> canonical::A
 /// Lanes >= L hold rows >= M, whose A fragments are zero; MMA rows are independent.
 #[cfg(target_arch = "nvptx64")]
 #[inline(always)]
-unsafe fn range<const L: usize, const D: usize, const W: usize, const P: usize, const F: bool>(
+unsafe fn range<const L: usize, const D: usize, const W: usize, const P: usize, const F: bool, const CHAIN: bool>(
     p: Bf16Rows,
     sh: u32,
     row: usize,
@@ -247,7 +247,9 @@ unsafe fn range<const L: usize, const D: usize, const W: usize, const P: usize, 
     // (L2-resident) input copy. Groups: E weight halves, E input halves, D-E whole
     // stages, then one per tile, so wait_group(D-1) still covers tile t's two halves.
     // M1 only (L = 4, D = 13): at M4..16 the split start measured neutral to +1.6 us.
-    let e: u32 = if L == 4 { 2 } else { 0 };
+    // CHAIN: all D weight stages come first, then griddepcontrol.wait, then the D input
+    // stages; wait_group(D-1) still covers tile t's two groups, as in the split start.
+    let e: u32 = if CHAIN { D as u32 } else if L == 4 { 2 } else { 0 };
     let mut at = sh;
     for i in 0..e {
         if start + i < end {
@@ -255,6 +257,9 @@ unsafe fn range<const L: usize, const D: usize, const W: usize, const P: usize, 
         }
         ptx::commit();
         at += size;
+    }
+    if CHAIN {
+        core::arch::asm!("griddepcontrol.wait;", options(nostack));
     }
     let mut at = sh;
     for i in 0..D as u32 {
@@ -600,15 +605,18 @@ unsafe fn untranspose8(c0: canonical::Acc, c1: canonical::Acc, lane: usize) -> c
 /// MXFP8 canonical range at M5-8 from the CTA input copy: K64 stages of fragments only
 /// (512 bytes; the range's scales in one burst after the ring), two transposed MMAs per
 /// K16 tile (tokens 0-3 and 4-7), tiles in ascending order: the sums are range()'s.
+/// ISSUE: only the weight prologue runs (a chain entry, before its wait); `primed`: that
+/// prologue already ran for this range.
 #[cfg(target_arch = "nvptx64")]
 #[inline(always)]
-unsafe fn range_w8<const D: usize, const W: usize, const H: usize>(
+unsafe fn range_w8<const D: usize, const W: usize, const H: usize, const ISSUE: bool>(
     p: Bf16Rows,
     sh: u32,
     row: usize,
     part: usize,
     lane: usize,
     cin: u32,
+    primed: bool,
 ) -> canonical::Acc {
     const SIZE: u32 = 512;
     let (k, n) = (p.cols as usize, p.rows as usize);
@@ -624,7 +632,7 @@ unsafe fn range_w8<const D: usize, const W: usize, const H: usize>(
         (w, 256u32, j / 4 * 128 + q * 64 + j % 4 * 16)
     };
     let sc = weight.add((n * k).div_ceil(256) * 256 + row / 8 * (k / 32) * 8);
-    if row + lane / 4 >= n {
+    if !primed && row + lane / 4 >= n {
         let mut dst = sh + (lane * 4) as u32;
         for _ in 0..D {
             for j in 0..4u32 {
@@ -640,19 +648,24 @@ unsafe fn range_w8<const D: usize, const W: usize, const H: usize>(
         ptx::commit();
     };
     let sb = sh + D as u32 * SIZE;
-    let mut c = lane as u32;
-    while c < end - start {
-        ptx::copy16(sb + c * 16, sc.add(((start + c) * 16) as usize).cast());
-        c += 32;
-    }
-    let mut at = sh;
-    for i in 0..D as u32 {
-        if start + i < end {
-            stage(at, start + i);
-        } else {
-            ptx::commit();
+    if !primed {
+        let mut c = lane as u32;
+        while c < end - start {
+            ptx::copy16(sb + c * 16, sc.add(((start + c) * 16) as usize).cast());
+            c += 32;
         }
-        at += SIZE;
+        let mut at = sh;
+        for i in 0..D as u32 {
+            if start + i < end {
+                stage(at, start + i);
+            } else {
+                ptx::commit();
+            }
+            at += SIZE;
+        }
+    }
+    if ISSUE {
+        return ZERO;
     }
     let (mut c0, mut c1) = (ZERO, ZERO);
     let mut current = sh;
@@ -692,17 +705,35 @@ unsafe fn range_w8<const D: usize, const W: usize, const H: usize>(
 
 /// MXFP8 at M5-8, K <= 2560, four warps (latency_mx8_wide): one CTA input copy, then the
 /// non-split task walk of fast() with range_w8 ranges and the (p0+p1)+(p2+p3) merge.
+/// CHAIN (M1): each warp issues its first range's weight ring, waits (griddepcontrol) for
+/// the previous kernel, and only then takes the CTA input copy. Same ranges, chains, merge.
 #[cfg(target_arch = "nvptx64")]
 #[inline(always)]
-unsafe fn wide8<const H: usize>(m: Mats) {
+unsafe fn wide8<const H: usize, const CHAIN: bool>(m: Mats) {
     use crate::kernel_params::LATENCY_W8_RING;
     use core::arch::nvptx::{_block_idx_x, _thread_idx_x};
     let (warp, lane) = (_thread_idx_x() as usize / 32, _thread_idx_x() as usize % 32);
     let cin = (4 * LATENCY_W8_RING) as u32;
-    if H == 2 { cta_input8(m.a, cin) } else { cta_input1(m.a, cin) }
+    if !CHAIN {
+        if H == 2 { cta_input8(m.a, cin) } else { cta_input1(m.a, cin) }
+    }
     let sh = (warp * LATENCY_W8_RING) as u32;
     let mut task = _block_idx_x() as usize * 4 + warp;
     let (mut j, mut first_task) = (0, 0);
+    let mut primed = false;
+    if CHAIN {
+        while j < m.count && task >= first_task + rows_of(&m, j).div_ceil(8) {
+            first_task += rows_of(&m, j).div_ceil(8);
+            j += 1;
+        }
+        if j < m.count {
+            let (p, row) = (pick(&m, j), (task - first_task) * 8);
+            if p.cols <= 2560 { range_w8::<9, 8, H, true>(p, sh, row, 0, lane, cin, false); } else { range_w8::<8, 7, H, true>(p, sh, row, 0, lane, cin, false); }
+            primed = true;
+        }
+        core::arch::asm!("griddepcontrol.wait;", options(nostack));
+        if H == 2 { cta_input8(m.a, cin) } else { cta_input1(m.a, cin) }
+    }
     while j < m.count {
         let tasks = rows_of(&m, j).div_ceil(8);
         if task >= first_task + tasks {
@@ -715,12 +746,13 @@ unsafe fn wide8<const H: usize>(m: Mats) {
         // The ring (D x 512 bytes) and the range's scale burst (16 bytes per K64 quad) share
         // LATENCY_W8_RING = 4864 bytes: 9 stages up to K 2560, 8 up to K 10240.
         let (z0, z1, z2, z3) = if p.cols <= 2560 {
-            (range_w8::<9, 8, H>(p, sh, row, 0, lane, cin), range_w8::<9, 8, H>(p, sh, row, 1, lane, cin),
-             range_w8::<9, 8, H>(p, sh, row, 2, lane, cin), range_w8::<9, 8, H>(p, sh, row, 3, lane, cin))
+            (range_w8::<9, 8, H, false>(p, sh, row, 0, lane, cin, primed), range_w8::<9, 8, H, false>(p, sh, row, 1, lane, cin, false),
+             range_w8::<9, 8, H, false>(p, sh, row, 2, lane, cin, false), range_w8::<9, 8, H, false>(p, sh, row, 3, lane, cin, false))
         } else {
-            (range_w8::<8, 7, H>(p, sh, row, 0, lane, cin), range_w8::<8, 7, H>(p, sh, row, 1, lane, cin),
-             range_w8::<8, 7, H>(p, sh, row, 2, lane, cin), range_w8::<8, 7, H>(p, sh, row, 3, lane, cin))
+            (range_w8::<8, 7, H, false>(p, sh, row, 0, lane, cin, primed), range_w8::<8, 7, H, false>(p, sh, row, 1, lane, cin, false),
+             range_w8::<8, 7, H, false>(p, sh, row, 2, lane, cin, false), range_w8::<8, 7, H, false>(p, sh, row, 3, lane, cin, false))
         };
+        primed = false;
         write(p, canonical::add(canonical::add(z0, z1), canonical::add(z2, z3)), lane / 4, row + lane % 4 * 2);
         task += 192 * 4;
     }
@@ -777,6 +809,7 @@ unsafe fn intra<
     const WF: usize,
     const P: usize,
     const S: u8,
+    const CHAIN: bool,
 >(
     m: Mats,
 ) {
@@ -794,7 +827,7 @@ unsafe fn intra<
         }
         let p = pick(&m, j);
         let row = (task - first_group) * 8;
-        let partial = pick_range::<L, D, W, DF, WF, P, S>(p, sh, row, warp, lane);
+        let partial = pick_range::<L, D, W, DF, WF, P, S, CHAIN>(p, sh, row, warp, lane);
         let slot = sh + (lane * 16) as u32;
         ptx::store(slot, partial.a);
         ptx::store(slot + 4, partial.b);
@@ -853,16 +886,16 @@ unsafe fn fast<
     // (p0+p1)+(p2+p3) is the unsplit association too, so the bytes do not change.
     let split = crate::kernel_params::latency_split(total, ICS);
     if S == 1 && L == 32 && !split && warps == 4 && crate::kernel_params::latency_mx8_wide(m.a.tokens as usize, m.a.cols as usize) {
-        return wide8::<2>(m);
+        return wide8::<2, false>(m);
     }
     if S == 1 && L == 32 && !split && warps == 4 && crate::kernel_params::latency_mx8_wide16(m.a.tokens as usize, m.a.cols as usize) {
         return wide16(m);
     }
     if S == 1 && L == 4 && !split && warps == 4 && crate::kernel_params::latency_mx8_wide1(m.a.tokens as usize, m.a.cols as usize) {
-        return wide8::<1>(m);
+        return wide8::<1, false>(m);
     }
     if ICS && split {
-        return intra::<L, D, W, DF, WF, P, S>(m);
+        return intra::<L, D, W, DF, WF, P, S, false>(m);
     }
     let parts = if split { 4 } else { 1 };
     let mut task = _block_idx_x() as usize * warps + warp;
@@ -882,7 +915,7 @@ unsafe fn fast<
         let (mut left, mut right) = (ZERO, ZERO);
         let first = if split { local % 4 } else { 0 };
         for part in first..if split { first + 1 } else { 4 } {
-            let partial = pick_range::<L, D, W, DF, WF, P, S>(p, sh, row, part, lane);
+            let partial = pick_range::<L, D, W, DF, WF, P, S, false>(p, sh, row, part, lane);
             if split {
                 let mut out = p;
                 out.output = partials
@@ -925,6 +958,7 @@ unsafe fn pick_range<
     const WF: usize,
     const P: usize,
     const S: u8,
+    const CHAIN: bool,
 >(
     p: Bf16Rows,
     sh: u32,
@@ -933,6 +967,9 @@ unsafe fn pick_range<
     lane: usize,
 ) -> canonical::Acc {
     if S == 1 || S == 2 && p.weight & 1 != 0 {
+        if CHAIN {
+            core::arch::asm!("griddepcontrol.wait;", options(nostack));
+        }
         // K32 stages need even range boundaries: (K / 16) % 8 == 0 (every production K).
         // M3..16 keep K16 stages (four K32 stages at M4 measured +1.8 us).
         if (p.cols as usize / 16) % 8 == 0 {
@@ -945,9 +982,9 @@ unsafe fn pick_range<
                 _ => {}
             }
         }
-        range::<L, DF, WF, P, true>(p, sh, row, part, lane)
+        range::<L, DF, WF, P, true, false>(p, sh, row, part, lane)
     } else {
-        range::<L, D, W, P, false>(p, sh, row, part, lane)
+        range::<L, D, W, P, false, CHAIN>(p, sh, row, part, lane)
     }
 }
 
@@ -1306,6 +1343,7 @@ pub unsafe extern "ptx-kernel" fn flash_next_head_lbf12_encode(p: crate::kernel_
     }
 }
 
+include!("dense_latency_chain.rs");
 include!("dense_latency_w16.rs");
 include!("dense_latency_fold.rs");
 include!("dense_latency_hc.rs");

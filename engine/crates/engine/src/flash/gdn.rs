@@ -791,7 +791,7 @@ impl<'a, 'w> Gdn<'a, 'w> {
         let step=(&mut step as *mut spark_gpu_probe::next_math::SlotStep).cast();
         unsafe {
             // prepare_slot + history_slot fused (same bits): one warp per qkv section.
-            b.launch_flash_rows("flash_next_gdn_prepare_hist_slot",20,n as u32,128,0,&mut [(&mut p as *mut GdnPrepare).cast(),step])?;
+            b.launch_flash_rows(b.chain_entry(n,"flash_next_gdn_prepare_hist_slot","flash_next_gdn_prepare_hist_slot_chain"),20,n as u32,128,0,&mut [(&mut p as *mut GdnPrepare).cast(),step])?;
             if chunk_form() {
                 // The slot applies the output gate itself (flash_next_gdn_gate_slot's
                 // words, zeros for skipped rows): one launch less per layer and step.
@@ -802,7 +802,7 @@ impl<'a, 'w> Gdn<'a, 'w> {
                 // The slot reads its state while prepare_hist_slot runs and waits
                 // (griddepcontrol) before q/k/v/beta/g: same bytes.
                 b.programmatic_next();
-                b.launch_flash_rows("flash_next_gdn_chunk_slot", 48, n as u32, 128, 0,
+                b.launch_flash_rows(b.chain_entry(n, "flash_next_gdn_chunk_slot", "flash_next_gdn_chunk_slot_chain"), 48, n as u32, 128, 0,
                     &mut [(&mut chunk as *mut spark_gpu_probe::gdn_params::GdnChunkNext).cast(), step])?;
             } else {
                 b.launch_flash_rows(

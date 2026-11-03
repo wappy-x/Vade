@@ -374,6 +374,22 @@ pub(crate) unsafe fn hc_sigmoid(x: f32) -> f32 {
 /// word, other rows past M stay unwritten (MMA rows are independent, those outputs masked).
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_next_hc_activate(x: u64,elements: u32,planes: u64) {
+    hc_activate(x,elements,planes);
+}
+/// flash_next_hc_activate for a chained decode step: the next kernel may start, this one waits.
+/// # Safety
+/// As flash_next_hc_activate, on a plain or programmatic launch.
+// SAFETY: griddepcontrol touches no memory; the next kernel waits for this one before it
+// reads this kernel's output, and this kernel waits before it reads its input.
+#[no_mangle]
+pub unsafe extern "ptx-kernel" fn flash_next_hc_activate_chain(x: u64,elements: u32,planes: u64) {
+    core::arch::asm!("griddepcontrol.launch_dependents;", "griddepcontrol.wait;", options(nostack));
+    hc_activate(x,elements,planes);
+}
+// SAFETY: the body of flash_next_hc_activate and of its chain twin, moved here unchanged; each entry's
+// contract holds for it.
+#[inline(always)]
+unsafe fn hc_activate(x: u64,elements: u32,planes: u64) {
     let i=crate::index();
     let act=|v: f32| { let value=v*0.25; value*hc_sigmoid(value) };
     if planes==0 { if i<elements as usize { let out=(x as *mut f32).add(i); *out=act(*out); } return; }
@@ -391,6 +407,22 @@ pub unsafe extern "ptx-kernel" fn flash_next_hc_activate(x: u64,elements: u32,pl
 }
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_next_hc_add(p: crate::kernel_params::FlashHcAdd) {
+    hc_add(p);
+}
+/// flash_next_hc_add for a chained decode step: the next kernel may start, this one waits.
+/// # Safety
+/// As flash_next_hc_add, on a plain or programmatic launch.
+// SAFETY: griddepcontrol touches no memory; the next kernel waits for this one before it
+// reads this kernel's output, and this kernel waits before it reads its input.
+#[no_mangle]
+pub unsafe extern "ptx-kernel" fn flash_next_hc_add_chain(p: crate::kernel_params::FlashHcAdd) {
+    core::arch::asm!("griddepcontrol.launch_dependents;", "griddepcontrol.wait;", options(nostack));
+    hc_add(p);
+}
+// SAFETY: the body of flash_next_hc_add and of its chain twin, moved here unchanged; each entry's
+// contract holds for it.
+#[inline(always)]
+unsafe fn hc_add(p: crate::kernel_params::FlashHcAdd) {
     let col=crate::index(); let row=core::arch::nvptx::_block_idx_y() as usize;
     let h=p.hidden as usize; if col>=h { return; }
     let block=*(p.block as *const f32).add(row*h+col);
@@ -471,9 +503,13 @@ pub unsafe extern "ptx-kernel" fn flash_next_hc_add_norm_rows(p: crate::kernel_p
 
 /// flash_next_hc_add whose block value is formed here exactly as flash_next_k16_finish forms
 /// it (decode rows: one launch fewer per deferred layer); the block row is still stored.
+/// It may run as a programmatic launch (decode_fuse): it waits before any read.
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_next_hc_finish_add(p: crate::kernel_params::FlashHcAdd,
     f: crate::fp8_abi::MoeFinishParams) {
+    // decode_fuse: the next norm may start now, and this kernel waits for the shared expert
+    // before it reads any partial. Both are no-ops for a plain launch.
+    core::arch::asm!("griddepcontrol.launch_dependents;", "griddepcontrol.wait;", options(nostack));
     let row=core::arch::nvptx::_block_idx_y() as usize; let tid=core::arch::nvptx::_thread_idx_x() as usize;
     let col=crate::index(); let h=p.hidden as usize;
     let error=*(f.error as *const u32).add(row)!=0; let sh=crate::ptx::shared::<40>();

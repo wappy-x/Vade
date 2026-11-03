@@ -550,10 +550,16 @@ unsafe fn bw_gate<const LEAN: bool>(p: GroupedParams) {
 #[rustfmt::skip]
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn fp4_bw_down(p: GroupedParams) { bw_down::<false>(p); }
-/// fp4_bw_down's bytes, waiting (griddepcontrol) before its first activation read.
+/// fp4_bw_down's bytes, waiting (griddepcontrol) before its first activation read. It also
+/// lets a programmatic next launch start. At one row the shared down is a plain launch (its
+/// input planes come from the route kernel), so this trigger has no effect; it acts only when
+/// the next launch is programmatic.
 #[rustfmt::skip]
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn fp4_bw_down_pdl(p: GroupedParams) { bw_down::<true>(p); }
+pub unsafe extern "ptx-kernel" fn fp4_bw_down_pdl(p: GroupedParams) {
+    asm!("griddepcontrol.launch_dependents;", options(nostack));
+    bw_down::<true>(p);
+}
 #[rustfmt::skip]
 #[inline(always)]
 unsafe fn bw_down<const PDL: bool>(p: GroupedParams) {

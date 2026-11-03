@@ -302,12 +302,12 @@ pub(super) fn next_rows_strided(
             if p.weight & 1 != 0 {
                 let r1 = threads == 128 && verify_mx_solo97(tokens, rows, cols);
                 b.launch_flash_rows(
-                    if r1 { "flash_verify_mx_solo97" } else if threads == 128 && spark_gpu_probe::kernel_params::latency_mx8_widen(tokens, cols) {
+                    if r1 { b.chain_entry(tokens, "flash_verify_mx_solo97", "flash_verify_mx_solo97_chain") } else if threads == 128 && spark_gpu_probe::kernel_params::latency_mx8_widen(tokens, cols) {
                         // Wide input staging in 16-row warp tasks (latency_rows.rs): their own
                         // entry, so C1's entry keeps main's code (N % 64 == 0 here, see the twin pick above).
                         "flash_mx8_mma_latency_r"
                     } else {
-                        "flash_mx8_mma_latency"
+                        b.chain_solo(tokens, cols, threads)
                     },
                     192,
                     1,
@@ -510,14 +510,14 @@ pub(super) fn next_rows_group_at(b: &Backend<'_>, x: u64, cols: usize, tokens: u
     let mut partials = 0u64;
     unsafe {
         b.launch_flash_rows(
-            if part && wide { "flash_verify_mx4_part_group8" } else if part { "flash_verify_mx4_part_group" }
+            if part && wide { "flash_verify_mx4_part_group8" } else if part { b.chain_entry(tokens, "flash_verify_mx4_part_group", "flash_verify_mx4_part_group_chain") }
             else if direct { "flash_verify_mx4_group" }
             else if mixed && wide { "flash_verify_mx4_mixed8" } else if mixed { "flash_verify_mx4_mixed_r2" }
             else if mx && !spark_gpu_probe::kernel_params::latency_split(rows.iter().map(|r| r.2).sum(), true)
                 && spark_gpu_probe::kernel_params::latency_mx8_widen(tokens, cols) {
                 // 16-row warp tasks for the N % 64 == 0 members (same bytes as _w_group).
                 "flash_mx8_mma_latency_r_group"
-            } else if mx { "flash_mx8_mma_latency_group" } else { "flash_bf16_mma_latency_group" },
+            } else { b.chain_group(tokens, mx, p.pairs.iter().all(|q| (q.weight | q.weight2) & 1 == 0), total, cols) },
             192,
             1,
             128,
@@ -1134,7 +1134,7 @@ impl<'w> Hc<'w> {
                 if decode_add { b.offer_dense_planes(u, W, tokens, packed); }
             } else {
                 let planes = if self.norm_f32 && prepacked.is_none() && tokens <= DECODE_ROWS { b.prepare_flash_dense()?; Some(b.flash_dense_input()?) } else { None }; // decode rows: + HC down's packed planes (its pack launch is skipped)
-                let (mut p, name) = (FlashHcNorm { input: r, weight: self.norm, output: u, packed: prepacked.or(planes).unwrap_or(0) }, if self.norm_f32 { "flash_hc_norm_f32" } else { "flash_next_hc_norm" });
+                let (mut p, name) = (FlashHcNorm { input: r, weight: self.norm, output: u, packed: prepacked.or(planes).unwrap_or(0) }, if self.norm_f32 { b.chain_entry(tokens, "flash_hc_norm_f32", "flash_hc_norm_f32_chain") } else { "flash_next_hc_norm" });
                 unsafe { b.launch_flash_rows(name, 8, tokens as u32, 128, 0, &mut [(&mut p as *mut FlashHcNorm).cast()])?; }
                 if let Some(planes) = planes { b.offer_dense_planes(u, W, tokens, planes); }
             }
@@ -1166,7 +1166,7 @@ impl<'w> Hc<'w> {
                     next_rows(b, self.down, u, low, LOW, W, tokens)?;
                 }
                 let planes = if tokens <= DECODE_ROWS { b.prepare_flash_dense()?; b.flash_dense_input()? } else { 0 }; // decode rows: + HC up's packed planes (its pack launch is skipped)
-                if !act { launch(b, "flash_next_hc_activate", (LOW * tokens).div_ceil(128), &mut [Ptr(low),U32((LOW*tokens) as u32),Ptr(planes)])?; if planes != 0 { b.offer_dense_planes(low, LOW, tokens, planes); } }
+                if !act { launch(b, b.chain_entry(tokens, "flash_next_hc_activate", "flash_next_hc_activate_chain"), (LOW * tokens).div_ceil(128), &mut [Ptr(low),U32((LOW*tokens) as u32),Ptr(planes)])?; if planes != 0 { b.offer_dense_planes(low, LOW, tokens, planes); } }
             }
             let packed = b.pack_flash_dense_input(low, LOW, tokens)?;
             let mut p = row_params(packed, LOW, tokens, (self.up, output, W, H), (0,0,0,0), true, false);
@@ -1203,7 +1203,7 @@ impl<'w> Hc<'w> {
                 // One warp per stream (gates mixed in stream order by warp 0); at M1-16 the LBF12 twin of the up
                 // weight, when built, replaces its BF16 bytes (M2-16: hc_up_gate's chains on the twin's fragments).
                 match lbf12_of(self.up, None).filter(|_| tokens <= 16) {
-                    Some(mut twin) => b.launch_flash_rows(if tokens == 1 { "flash_next_hc_up_latency4_lbf12" } else { "flash_next_hc_up_latency16_lbf12" }, H.div_ceil(8) as u32, 1, 128, 0,
+                    Some(mut twin) => b.launch_flash_rows(if tokens == 1 { b.chain_entry(tokens, "flash_next_hc_up_latency4_lbf12", "flash_next_hc_up_latency4_lbf12_chain") } else { b.chain_entry(tokens, "flash_next_hc_up_latency16_lbf12", "flash_next_hc_up_latency16_lbf12_chain") }, H.div_ceil(8) as u32, 1, 128, 0,
                         &mut [(&mut p as *mut Bf16Rows).cast(), (&mut normalized as *mut u64).cast(), (&mut twin as *mut u64).cast(), (&mut planes as *mut u64).cast()]),
                     None => b.launch_flash_rows("flash_next_hc_up_latency4", H.div_ceil(8) as u32, tokens.div_ceil(16) as u32, 128, 0, &mut [(&mut p as *mut Bf16Rows).cast(), (&mut normalized as *mut u64).cast()]),
                 }
@@ -1291,10 +1291,10 @@ impl<'w> Hc<'w> {
         let columns = if self.next || tokens > DECODE_ROWS { H } else { W };
         debug_assert!(tokens <= DECODE_ROWS || H % 128 == 0);
         if let Some(mut f) = finish {
-            return unsafe { b.launch_flash_rows("flash_next_hc_finish_add", columns.div_ceil(128) as u32, tokens as u32, 128, 0,
+            return unsafe { b.launch_flash_rows(b.chain_entry(tokens, "flash_next_hc_finish_add", "flash_next_hc_finish_add"), columns.div_ceil(128) as u32, tokens as u32, 128, 0,
                 &mut [(&mut p as *mut FlashHcAdd).cast(), (&mut f as *mut MoeFinishParams).cast()]) };
         }
-        unsafe { b.launch_flash_rows(if self.next {"flash_next_hc_add"}else{"flash_hc_add"}, columns.div_ceil(128) as u32, tokens as u32, 128, 0,
+        unsafe { b.launch_flash_rows(if self.next {b.chain_entry(tokens, "flash_next_hc_add", "flash_next_hc_add_chain")}else{"flash_hc_add"}, columns.div_ceil(128) as u32, tokens as u32, 128, 0,
             &mut [(&mut p as *mut FlashHcAdd).cast()]) }
     }
 }

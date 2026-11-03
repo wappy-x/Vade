@@ -287,3 +287,20 @@ fn parsed_bare_up_with_environment_mtp_reuses_recorded_fp4_launch() {
     assert!(f.app.execute(parsed_up(&[])).unwrap_err().contains("different launch"));
     assert!(f.app.runner.calls.is_empty());
 }
+
+#[test]
+fn decode_fuse_rides_the_controller_args_on_one_spark_and_stops_early_on_more() {
+    // The controller path passes decode_fuse to the engine and keeps it across a reload.
+    let f = Fixture::fp4(1, false);
+    let fused = Session::new(&f.app.config, &fp4_options(&["--sparks", "1", "--decode-fuse", "on"]), &f.app.manifest().unwrap(), "a".repeat(64)).unwrap();
+    assert!(fused.engine_args(0).ends_with(&["--decode-fuse".to_string(), "on".to_string()]));
+    fused.save(&f.app.config.state_dir).unwrap();
+    assert!(Session::load(&f.app.config.state_dir).unwrap().unwrap().decode_fuse);
+    // More Sparks refuse before any remote start.
+    let mut f = Fixture::fp4(2, false);
+    let mut options = fp4_options(&["--sparks", "2"]);
+    options.decode_fuse = Some(true);
+    let error = f.app.up(&options).unwrap_err();
+    assert_eq!(error, "--decode-fuse on runs on one FP4-Local Spark. Leave it off for more Sparks or FP8.");
+    assert!(!f.app.runner.calls.iter().any(|call| call.label.ends_with(" start")));
+}

@@ -8,6 +8,22 @@ use core::arch::nvptx::{_block_idx_x, _block_idx_y, _thread_idx_x};
 /// Use the dense engine's operand conversion and packed A layout.
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_bf16_input(p: FlashBf16Input) {
+    bf16_input(p);
+}
+/// flash_bf16_input for a chained decode step: the next kernel may start, this one waits.
+/// # Safety
+/// As flash_bf16_input, on a plain or programmatic launch.
+// SAFETY: griddepcontrol touches no memory; the next kernel waits for this one before it
+// reads this kernel's output, and this kernel waits before it reads its input.
+#[no_mangle]
+pub unsafe extern "ptx-kernel" fn flash_bf16_input_chain(p: FlashBf16Input) {
+    core::arch::asm!("griddepcontrol.launch_dependents;", "griddepcontrol.wait;", options(nostack));
+    bf16_input(p);
+}
+// SAFETY: the body of flash_bf16_input and of its chain twin, moved here unchanged; each entry's
+// contract holds for it.
+#[inline(always)]
+unsafe fn bf16_input(p: FlashBf16Input) {
     let lanes = if matches!(p.lanes, 4 | 8 | 16) { p.lanes as usize } else { 32 };
     if lanes == 32 && p.tokens >= 64 && p.cols % 64 == 0 && core::arch::nvptx::_block_dim_x() == 128 {
         if p.hc_silu != 0 { pack_rows::<true>(p) } else { pack_rows::<false>(p) }
@@ -1003,7 +1019,7 @@ unsafe fn hcu_decode(slot: *const u8, base: u32) -> [u32; 4] {
 /// to the two K16 fragments the BF16 loads give, a raw slot loads them from the BF16 matrix;
 /// same tiles, ranges and merges, so the same bits.
 #[inline(always)]
-unsafe fn hcu_gate_m1(p: Bf16Rows, twin: u64, stream: usize, feature: usize, lane: usize) -> Acc {
+unsafe fn hcu_gate_m1<const CHAIN: bool>(p: Bf16Rows, twin: u64, stream: usize, feature: usize, lane: usize) -> Acc {
     let (h, k) = (2560usize, 320usize);
     let row = stream * h + feature;
     let x = p.input as *const u32;
@@ -1028,6 +1044,9 @@ unsafe fn hcu_gate_m1(p: Bf16Rows, twin: u64, stream: usize, feature: usize, lan
         }
     };
     let v = [load(0), load(1), load(2), load(3), load(4), load(5), load(6), load(7), load(8), load(9)];
+    // CHAIN: this CTA's weights are in registers before the previous kernel ends; the
+    // packed input stays unread until the wait.
+    if CHAIN { core::arch::asm!("griddepcontrol.wait;", options(nostack)); }
     let frag = |t: usize| -> [u32; 2] { let w = v[t / 2]; if t % 2 == 0 { [w[0], w[1]] } else { [w[2], w[3]] } };
     let range = |s: usize| {
         let mut c = ZERO;
@@ -1072,11 +1091,27 @@ fn hc_plane_word<const K: usize>(rows: usize, t: usize, f: usize) -> (usize, usi
 /// flash_bf16_lbf12_twin image, and planes = 0 or the two dense planes of M x H.
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_next_hc_up_latency4_lbf12(p: Bf16Rows, normalized: u64, twin: u64, planes: u64) {
+    hc_up_lbf12::<false>(p, normalized, twin, planes);
+}
+/// flash_next_hc_up_latency4_lbf12 for a chained decode step: the same gate, stream mix and planes.
+/// # Safety
+/// As flash_next_hc_up_latency4_lbf12, on a plain or programmatic launch.
+// SAFETY: griddepcontrol touches no memory. Before its wait this kernel reads weights and the
+// twin's flags only, which no kernel writes during a step; it reads the input after the wait.
+#[no_mangle]
+pub unsafe extern "ptx-kernel" fn flash_next_hc_up_latency4_lbf12_chain(p: Bf16Rows, normalized: u64, twin: u64, planes: u64) {
+    core::arch::asm!("griddepcontrol.launch_dependents;", options(nostack));
+    hc_up_lbf12::<true>(p, normalized, twin, planes);
+}
+// SAFETY: main's body of flash_next_hc_up_latency4_lbf12, shared with its chain twin. The CHAIN
+// instantiation adds only griddepcontrol and the weight prologue before the wait.
+#[inline(always)]
+unsafe fn hc_up_lbf12<const CHAIN: bool>(p: Bf16Rows, normalized: u64, twin: u64, planes: u64) {
     let tid = _thread_idx_x() as usize;
     let (warp, lane) = (tid / 32, tid % 32);
     let h = 2560usize;
     let feature = _block_idx_x() as usize * 8;
-    let gate = hcu_gate_m1(p, twin, warp, feature, lane);
+    let gate = hcu_gate_m1::<CHAIN>(p, twin, warp, feature, lane);
     let sh = ptx::shared::<2048>();
     if warp > 0 {
         let at = sh + (((warp - 1) * 32 + lane) * 16) as u32;
@@ -1192,7 +1227,7 @@ unsafe fn hc16_decode(slot: *const u8, base: u32) -> [u32; 4] {
 /// merge, so the same bits as flash_next_hc_up_latency4.
 #[cfg(target_arch = "nvptx64")]
 #[inline(always)]
-unsafe fn hc16_gate(p: crate::kernel_params::Bf16Rows, twin: u64, stream: usize, feature: usize, lane: usize) -> crate::canonical::Acc {
+unsafe fn hc16_gate<const CHAIN: bool>(p: crate::kernel_params::Bf16Rows, twin: u64, stream: usize, feature: usize, lane: usize) -> crate::canonical::Acc {
     let (h, k) = (2560usize, 320usize);
     let row = stream * h + feature;
     let x = p.input as *const u32;
@@ -1212,6 +1247,7 @@ unsafe fn hc16_gate(p: crate::kernel_params::Bf16Rows, twin: u64, stream: usize,
         }
     };
     let v = [load(0), load(1), load(2), load(3), load(4), load(5), load(6), load(7), load(8), load(9)];
+    if CHAIN { core::arch::asm!("griddepcontrol.wait;", options(nostack)); }
     let frag = |t: usize| -> [u32; 2] { let w = v[t / 2]; if t % 2 == 0 { [w[0], w[1]] } else { [w[2], w[3]] } };
     if p.tokens <= 4 {
         // One transposed MMA per tile carries both chains of tokens 0-3 (dense_latency::tmadd,
@@ -1263,12 +1299,30 @@ unsafe fn hc16_gate(p: crate::kernel_params::Bf16Rows, twin: u64, stream: usize,
 #[cfg(target_arch = "nvptx64")]
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_next_hc_up_latency16_lbf12(p: crate::kernel_params::Bf16Rows, normalized: u64, twin: u64, planes: u64) {
+    hc_up16::<false>(p, normalized, twin, planes);
+}
+/// flash_next_hc_up_latency16_lbf12 for a chained decode step: the same gate, stream mix and planes.
+/// # Safety
+/// As flash_next_hc_up_latency16_lbf12, on a plain or programmatic launch.
+// SAFETY: griddepcontrol touches no memory. Before its wait this kernel reads weights and the
+// twin's flags only, which no kernel writes during a step; it reads the input after the wait.
+#[cfg(target_arch = "nvptx64")]
+#[no_mangle]
+pub unsafe extern "ptx-kernel" fn flash_next_hc_up_latency16_lbf12_chain(p: crate::kernel_params::Bf16Rows, normalized: u64, twin: u64, planes: u64) {
+    core::arch::asm!("griddepcontrol.launch_dependents;", options(nostack));
+    hc_up16::<true>(p, normalized, twin, planes);
+}
+// SAFETY: main's body of flash_next_hc_up_latency16_lbf12, shared with its chain twin. The CHAIN
+// instantiation adds only griddepcontrol and the weight prologue before the wait.
+#[cfg(target_arch = "nvptx64")]
+#[inline(always)]
+unsafe fn hc_up16<const CHAIN: bool>(p: crate::kernel_params::Bf16Rows, normalized: u64, twin: u64, planes: u64) {
     use core::arch::nvptx::{_block_idx_x, _thread_idx_x};
     let tid = _thread_idx_x() as usize;
     let (warp, lane) = (tid / 32, tid % 32);
     let h = 2560usize;
     let feature = _block_idx_x() as usize * 8;
-    let gate = hc16_gate(p, twin, warp, feature, lane);
+    let gate = hc16_gate::<CHAIN>(p, twin, warp, feature, lane);
     let sh = crate::ptx::shared::<2048>();
     if warp > 0 {
         let at = sh + (((warp - 1) * 32 + lane) * 16) as u32;

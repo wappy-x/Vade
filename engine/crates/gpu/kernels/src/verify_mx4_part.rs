@@ -31,6 +31,23 @@ unsafe fn cache_part<const H: usize>(p: Bf16Rows, at: u32, part: usize) {
 /// Other shapes return; they must never dispatch here.
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_verify_mx4_part_group(g: crate::kernel_params::Bf16Pairs, _partials: u64) {
+    part_group::<false>(g);
+}
+/// flash_verify_mx4_part_group for a chained decode step: each warp issues its first range's
+/// ring, waits (griddepcontrol) for the previous kernel, and only then the CTA reads the input.
+/// # Safety
+/// As flash_verify_mx4_part_group, on a plain or programmatic launch.
+// SAFETY: griddepcontrol touches no memory. Before its wait this kernel reads weights and
+// scales only, which no kernel writes during a step; it reads the input after the wait.
+#[no_mangle]
+pub unsafe extern "ptx-kernel" fn flash_verify_mx4_part_group_chain(g: crate::kernel_params::Bf16Pairs, _partials: u64) {
+    core::arch::asm!("griddepcontrol.launch_dependents;", options(nostack));
+    part_group::<true>(g);
+}
+// SAFETY: main's body of flash_verify_mx4_part_group, shared with its chain twin. The CHAIN
+// instantiation adds only griddepcontrol and the weight prologue before the wait.
+#[inline(always)]
+unsafe fn part_group<const CHAIN: bool>(g: crate::kernel_params::Bf16Pairs) {
     use core::arch::nvptx::{_block_idx_x, _thread_idx_x};
     let m = group(g);
     let total: usize = (0..m.count).map(|j| rows_of(&m, j)).sum();
@@ -54,11 +71,16 @@ pub unsafe extern "ptx-kernel" fn flash_verify_mx4_part_group(g: crate::kernel_p
         let p = if valid { pick(&m, j) } else { m.a };
         let row = if valid { (task - first) * 8 } else { 0 };
         let (mut left, mut right) = (ZERO, ZERO);
+        let mut primed = false;
+        if CHAIN && base < 192 * 4 {
+            if valid && p.weight & 1 != 0 { cached_range::<9, 8, true, false, 1, true>(p, sh, row, 0, lane, cin, false); primed = true; }
+            core::arch::asm!("griddepcontrol.wait;", options(nostack));
+        }
         for part in 0..4 {
             cache_part::<1>(m.a, cin, part);
             if valid {
-                let z = if p.weight & 1 != 0 { cached_range::<9, 8, true, false, 1>(p, sh, row, part, lane, cin) }
-                    else { pick_range::<16, 6, 5, 9, 8, 0, 0>(p, sh, row, part, lane) };
+                let z = if p.weight & 1 != 0 { cached_range::<9, 8, true, false, 1, false>(p, sh, row, part, lane, cin, primed && part == 0) }
+                    else { pick_range::<16, 6, 5, 9, 8, 0, 0, false>(p, sh, row, part, lane) };
                 match part { 0 => left = z, 1 => left = canonical::add(left, z),
                     2 => right = z, _ => right = canonical::add(right, z) }
             }
@@ -106,7 +128,7 @@ pub unsafe extern "ptx-kernel" fn flash_verify_mx4_part_group8(g: crate::kernel_
         for part in 0..4 {
             cache_part::<2>(m.a, cin, part);
             if valid {
-                let z = cached_range::<9, 8, true, false, 2>(p, sh, row, part, lane, cin);
+                let z = cached_range::<9, 8, true, false, 2, false>(p, sh, row, part, lane, cin, false);
                 match part { 0 => left = z, 1 => left = canonical::add(left, z),
                     2 => right = z, _ => right = canonical::add(right, z) }
             }

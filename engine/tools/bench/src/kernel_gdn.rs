@@ -7,6 +7,8 @@ use std::{ffi::c_void, ptr::null_mut, time::Instant};
 #[allow(dead_code)]
 #[path = "../../../crates/gpu/src/gdn_params.rs"]
 mod gdn;
+#[path = "kernel_chain.rs"]
+mod chain;
 const HEADS: usize = 48;
 const KEYS: usize = 16;
 const D: usize = 128;
@@ -1044,6 +1046,7 @@ fn cpipe(g: &mut Gpu, modules: [H; 2], tokens: usize, pieces: usize, packed: boo
 }
 
 fn fixture(g: &mut Gpu, modules: [H; 2], c: &Case) -> Result<Fixture> {
+    if c.kind == 23 { return chain::fixture(g, modules, c.k, c.m); }
     if c.kind == 13 { return prep(g, modules, c.k); }
     if c.kind == 17 { return cpipe(g, modules, c.m, c.n, false); }
     if c.kind == 18 { return cpipe(g, modules, c.m, c.n, true); }

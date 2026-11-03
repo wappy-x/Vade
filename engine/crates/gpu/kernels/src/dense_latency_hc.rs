@@ -12,7 +12,7 @@ macro_rules! hc_group { ($m:ident, $planes:ident, $l:literal, $d:literal, $w:lit
     let down = task >= first;
     let p = pick(&$m, down as usize);
     let row = (if down { task - first } else { task }) * 8;
-    let partial = range::<$l, $d, $w, 0, false>(p, sh, row, warp, lane);
+    let partial = range::<$l, $d, $w, 0, false, false>(p, sh, row, warp, lane);
     let slot = sh + (lane * 16) as u32;
     ptx::store(slot, partial.a);
     ptx::store(slot + 4, partial.b);

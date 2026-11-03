@@ -29,6 +29,7 @@ pub mod bf16;
 #[cfg(test)]
 #[path = "../kernels/src/dense_latency.rs"]
 mod dense_latency;
+pub mod decode_fuse;
 pub mod gdn_params;
 pub mod next_params;
 pub mod next_math;

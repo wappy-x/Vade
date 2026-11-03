@@ -11,13 +11,14 @@ use super::*;
 /// One canonical K range for H token halves: H = 1 tokens 0-3 (M3/4), H = 2 tokens
 /// 0-7 (M5-8; the second MMA reads the words 256 bytes on, range_w8's x1).
 #[inline(always)]
-unsafe fn cached_range<const D: usize, const W: usize, const RELATIVE: bool, const DIRECT: bool, const H: usize>(
+unsafe fn cached_range<const D: usize, const W: usize, const RELATIVE: bool, const DIRECT: bool, const H: usize, const ISSUE: bool>(
     p: Bf16Rows,
     sh: u32,
     row: usize,
     part: usize,
     lane: usize,
     cin: u32,
+    primed: bool,
 ) -> canonical::Acc {
     const SIZE: u32 = 512;
     let (k, n) = (p.cols as usize, p.rows as usize);
@@ -33,7 +34,7 @@ unsafe fn cached_range<const D: usize, const W: usize, const RELATIVE: bool, con
         (w, 256u32, j / 4 * 128 + q * 64 + j % 4 * 16)
     };
     let sc = weight.add((n * k).div_ceil(256) * 256 + row / 8 * (k / 32) * 8);
-    if row + lane / 4 >= n {
+    if !primed && row + lane / 4 >= n {
         let mut dst = sh + (lane * 4) as u32;
         for _ in 0..D {
             for j in 0..4u32 {
@@ -49,19 +50,24 @@ unsafe fn cached_range<const D: usize, const W: usize, const RELATIVE: bool, con
         ptx::commit();
     };
     let sb = sh + D as u32 * SIZE;
-    let mut c = lane as u32;
-    while c < end - start {
-        ptx::copy16(sb + c * 16, sc.add(((start + c) * 16) as usize).cast());
-        c += 32;
-    }
-    let mut at = sh;
-    for i in 0..D as u32 {
-        if start + i < end {
-            stage(at, start + i);
-        } else {
-            ptx::commit();
+    if !primed {
+        let mut c = lane as u32;
+        while c < end - start {
+            ptx::copy16(sb + c * 16, sc.add(((start + c) * 16) as usize).cast());
+            c += 32;
         }
-        at += SIZE;
+        let mut at = sh;
+        for i in 0..D as u32 {
+            if start + i < end {
+                stage(at, start + i);
+            } else {
+                ptx::commit();
+            }
+            at += SIZE;
+        }
+    }
+    if ISSUE {
+        return ZERO;
     }
     let (mut c0, mut c1) = (ZERO, ZERO);
     let mut current = sh;
@@ -131,8 +137,8 @@ pub unsafe extern "ptx-kernel" fn flash_verify_mx4_group(g: crate::kernel_params
         if task >= first + tasks { first += tasks; j += 1; continue; }
         let p = pick(&m, j);
         let row = (task - first) * 8;
-        let part = |i| if p.weight & 1 != 0 { cached_range::<9, 8, false, true, 1>(p, sh, row, i, lane, 0) }
-            else { pick_range::<16, 6, 5, 9, 8, 0, 0>(p, sh, row, i, lane) };
+        let part = |i| if p.weight & 1 != 0 { cached_range::<9, 8, false, true, 1, false>(p, sh, row, i, lane, 0, false) }
+            else { pick_range::<16, 6, 5, 9, 8, 0, 0, false>(p, sh, row, i, lane) };
         let (a, b, c, d) = (part(0), part(1), part(2), part(3));
         write(p, canonical::add(canonical::add(a, b), canonical::add(c, d)), lane / 4, row + lane % 4 * 2);
         task += 192 * 4;
@@ -171,8 +177,8 @@ pub unsafe extern "ptx-kernel" fn flash_verify_mx4_mixed_r2(g: crate::kernel_par
         let p = pick(&m, j);
         let row = (task - first) * 8;
         let partial = if p.weight & 1 != 0 {
-            cached_range::<9, 8, false, true, 1>(p, sh, row, warp, lane, 0)
-        } else { pick_range::<16, 6, 5, 9, 8, 0, 0>(p, sh, row, warp, lane) };
+            cached_range::<9, 8, false, true, 1, false>(p, sh, row, warp, lane, 0, false)
+        } else { pick_range::<16, 6, 5, 9, 8, 0, 0, false>(p, sh, row, warp, lane) };
         let slot = sh + (lane * 16) as u32;
         ptx::store(slot, partial.a); ptx::store(slot + 4, partial.b);
         ptx::store(slot + 8, partial.c); ptx::store(slot + 12, partial.d);
@@ -219,8 +225,8 @@ pub unsafe extern "ptx-kernel" fn flash_verify_mx4_mixed8(g: crate::kernel_param
         let p = pick(&m, j);
         let row = (task - first) * 8;
         let partial = if p.weight & 1 != 0 {
-            cached_range::<9, 8, false, true, 2>(p, sh, row, warp, lane, 0)
-        } else { pick_range::<32, 4, 3, 5, 4, 0, 0>(p, sh, row, warp, lane) };
+            cached_range::<9, 8, false, true, 2, false>(p, sh, row, warp, lane, 0, false)
+        } else { pick_range::<32, 4, 3, 5, 4, 0, 0, false>(p, sh, row, warp, lane) };
         let slot = sh + (lane * 16) as u32;
         ptx::store(slot, partial.a); ptx::store(slot + 4, partial.b);
         ptx::store(slot + 8, partial.c); ptx::store(slot + 12, partial.d);

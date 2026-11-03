@@ -1098,6 +1098,23 @@ unsafe fn chunk_rows<const STAGED: bool>(p: GdnChunkNext) {
 /// main slot kernel); keys = key heads; rows/a/p/gamma/k0/count/base unused.
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_next_gdn_chunk_slot(p: GdnChunkNext, step: crate::next_math::SlotStep) {
+    chunk_slot(p, step);
+}
+/// flash_next_gdn_chunk_slot for a chained decode step: the next kernel may start while
+/// this one runs. The same state reads, the same wait, the same arithmetic.
+/// # Safety
+/// As flash_next_gdn_chunk_slot, launched after flash_next_gdn_prepare_hist_slot_chain.
+// SAFETY: griddepcontrol touches no memory; the next kernel waits for this one before it
+// reads this kernel's output.
+#[no_mangle]
+pub unsafe extern "ptx-kernel" fn flash_next_gdn_chunk_slot_chain(p: GdnChunkNext, step: crate::next_math::SlotStep) {
+    core::arch::asm!("griddepcontrol.launch_dependents;", options(nostack));
+    chunk_slot(p, step);
+}
+// SAFETY: the body of flash_next_gdn_chunk_slot and of its chain twin, moved here unchanged; each entry's
+// contract holds for it.
+#[inline(always)]
+unsafe fn chunk_slot(p: GdnChunkNext, step: crate::next_math::SlotStep) {
     let row = _block_idx_y() as usize;
     let Some(id) = step.selected(row) else {
         // Fused output gate: flash_next_gdn_gate_slot writes zeros for the rows a step skips.

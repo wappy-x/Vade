@@ -227,6 +227,24 @@ mod r1 {
     #[cfg(target_arch = "nvptx64")]
     #[no_mangle]
     pub unsafe extern "ptx-kernel" fn flash_verify_mx_solo97(p: Bf16Rows, _scales: u64, _partials: u64) {
+        solo97::<false>(p);
+    }
+    /// flash_verify_mx_solo97 for a chained decode step: the first ring fills before the wait.
+    /// # Safety
+    /// As flash_verify_mx_solo97, on a plain or programmatic launch.
+    // SAFETY: griddepcontrol touches no memory. Before its wait this kernel reads weights and
+    // scales only, which no kernel writes during a step; it reads the input after the wait.
+    #[cfg(target_arch = "nvptx64")]
+    #[no_mangle]
+    pub unsafe extern "ptx-kernel" fn flash_verify_mx_solo97_chain(p: Bf16Rows, _scales: u64, _partials: u64) {
+        core::arch::asm!("griddepcontrol.launch_dependents;", options(nostack));
+        solo97::<true>(p);
+    }
+    // SAFETY: main's body of flash_verify_mx_solo97, shared with its chain twin. The CHAIN
+    // instantiation adds only griddepcontrol and the weight prologue before the wait.
+    #[cfg(target_arch = "nvptx64")]
+    #[inline(always)]
+    unsafe fn solo97<const CHAIN: bool>(p: Bf16Rows) {
         use crate::kernel_params::LATENCY_W8_RING;
         use core::arch::nvptx::{_block_idx_x, _thread_idx_x};
         let (warp, lane) = (_thread_idx_x() as usize / 32, _thread_idx_x() as usize % 32);
@@ -252,6 +270,7 @@ mod r1 {
                         acc = lr_range_rows1(p, sh, row, lane, cin, q, acc, true);
                     }
                     crate::ptx::sync();
+                    if CHAIN { core::arch::asm!("griddepcontrol.wait;", options(nostack)); }
                     lr_input(p, cin, t0, t1);
                     if task < total {
                         acc = lr_range_rows1(p, sh, row, lane, cin, q, acc, false);

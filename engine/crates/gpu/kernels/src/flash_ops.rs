@@ -501,6 +501,22 @@ unsafe fn hc_add_prompt(p: crate::kernel_params::FlashHcAdd) {
 /// Grid: block128, grid.y=rows, grid.x as flash_hc_norm (1 in-place or 8).
 #[no_mangle]
 pub unsafe extern "ptx-kernel" fn flash_hc_norm_f32(p: crate::kernel_params::FlashHcNorm) {
+    hc_norm_f32(p);
+}
+/// flash_hc_norm_f32 for a chained decode step: the next kernel may start, this one waits.
+/// # Safety
+/// As flash_hc_norm_f32, on a plain or programmatic launch.
+// SAFETY: griddepcontrol touches no memory; the next kernel waits for this one before it
+// reads this kernel's output, and this kernel waits before it reads its input.
+#[no_mangle]
+pub unsafe extern "ptx-kernel" fn flash_hc_norm_f32_chain(p: crate::kernel_params::FlashHcNorm) {
+    core::arch::asm!("griddepcontrol.launch_dependents;", "griddepcontrol.wait;", options(nostack));
+    hc_norm_f32(p);
+}
+// SAFETY: the body of flash_hc_norm_f32 and of its chain twin, moved here unchanged; each entry's
+// contract holds for it.
+#[inline(always)]
+unsafe fn hc_norm_f32(p: crate::kernel_params::FlashHcNorm) {
     let (group, groups) = (2560usize, 4usize);
     let t = index();
     let warps = core::arch::nvptx::_grid_dim_x() as usize * core::arch::nvptx::_block_dim_x() as usize / 32;

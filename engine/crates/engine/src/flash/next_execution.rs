@@ -529,8 +529,8 @@ impl<'a> Workspace<'a> {
             params.output = self.expert_out.device_address() + tp.map_or(0, |t| t.routed());
             // One token: down may start while the gate runs; fp4_bw_down_pdl waits
             // (griddepcontrol) before reading compact_mid, so bytes are unchanged.
-            // Off by default: VADE_BW_PDL=1 turns it on. At 8 rows the overlap
-            // costs time (DRAM-bound), so it is never used there.
+            // Off by default: decode_fuse on or VADE_BW_PDL=1 turns it on. At 8 rows the
+            // overlap costs time (DRAM-bound), so it is never used there.
             let pdl = !wide && count == 1 && bw_entries(b).0;
             if pdl {
                 b.programmatic_next();
@@ -1180,7 +1180,7 @@ fn mtp_graph() -> bool {
 fn bw_entries(b: &Backend<'_>) -> (bool, bool) {
     static ON: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        let pdl = std::env::var("VADE_BW_PDL").is_ok_and(|v| v == "1");
+        let pdl = spark_gpu_probe::decode_fuse::on() || std::env::var("VADE_BW_PDL").is_ok_and(|v| v == "1");
         let c1 = b.has_flash("fp4_bw_gate_c1");
         (pdl && c1 && b.has_flash("fp4_bw_down_pdl"), c1)
     })

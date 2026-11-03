@@ -70,7 +70,7 @@ impl<'a> Backend<'a> {
         let mut p = crate::kernel_params::FlashBf16Input { input, output,
             tokens: tokens as u32, cols: cols as u32, hc_silu: u32::from(hc_silu), lanes: lanes as u32 };
         // One thread per written fragment (words / 4 at all 32 lanes).
-        unsafe { self.launch_flash("flash_bf16_input", (words / 128 * lanes).div_ceil(128) as u32, 128,
+        unsafe { self.launch_flash(self.chain_entry(tokens, "flash_bf16_input", "flash_bf16_input_chain"), (words / 128 * lanes).div_ceil(128) as u32, 128,
             &mut [(&mut p as *mut crate::kernel_params::FlashBf16Input).cast()])?; }
         Ok(p.output)
     }

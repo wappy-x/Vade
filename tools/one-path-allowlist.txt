@@ -1,6 +1,7 @@
 # Current engine sites at 52a81040f4eaa0cb1ba5758f9c1a61decbf724eb.
 # These entries require review. They do not approve an execution path.
 # rule Cargo-package qualified-item exact-site-count
+# decode_fuse (config flag, ruling Q-FUSE-FLAG 2026-11-02): remove when the chain is the only path on every size it serves.
 env-read engine-fabric profile::enabled 1
 env-read engine-fabric profile::layers_enabled 1
 env-read engine-model flash::WeightFormat::opt_in 1
