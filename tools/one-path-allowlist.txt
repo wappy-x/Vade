@@ -220,6 +220,8 @@ topology-branch engine-model flash::shard::ShardPlan::ep2tp2 1
 topology-branch engine-model flash::shard::ShardPlan::new 2
 topology-branch engine-model flash::shard::ShardPlan::with_ep2 1
 topology-branch engine-model placement::rotating_blocks 1
+# Ownership validation only: each interval must name its position in rank order.
+topology-branch engine-model plan::tensor_split::Ownership::checked 1
 topology-branch engine-model safetensors::Header::read 1
 topology-branch engine-model split::SplitPlan::new 2
 topology-branch engine-model split::owners::partition 2
@@ -496,6 +498,24 @@ topology-branch spark-tp next_gpu::Gpu@RankKernels::moe 2
 topology-branch spark-tp next_gpu::Gpu@RankKernels::moe_rows 1
 topology-branch spark-tp rows 1
 topology-branch spark-tp runtime::verify_artifacts_with_ab 2
+# Copy-layout validation only. Refuse a different transport group, invalid
+# mailbox header capacity, or an invalid receiver. No arithmetic path is chosen.
+topology-branch spark-tp tensor_layout::GatherLayout::gather_ring 1
+topology-branch spark-tp tensor_layout::MailboxRows::check 2
+topology-branch spark-tp tensor_layout::MailboxRows::take 2
+# Validate the existing pair wire and operation boundaries. These sites reject
+# mismatched groups or layouts. They do not select another arithmetic path.
+topology-branch spark-gpu-probe tp_mailbox::TpMailbox::claim_copy_group 1
+topology-branch spark-tp layer_transport::PairPlan::new 1
+topology-branch spark-tp layer_transport::PairGroup::new 1
+topology-branch spark-tp layer_transport::PairGroup::agree 2
+topology-branch spark-tp layer_transport::DevicePair::new 1
+topology-branch spark-tp layer_transport::DeviceLayer::after_step 1
+# The synthetic station gate checks rank arguments and opens the ordinary pair
+# links. The host tests inject rank mismatches before any device launch.
+topology-branch spark-tp bin::layer_transport_check::gate::run 4
+topology-branch spark-tp layer_transport_tests::same_length_program_mismatch_fails_both_ranks_and_is_sticky 1
+topology-branch spark-tp layer_transport_tests::request_sequence_type_and_length_mismatches_stop_before_device_work 2
 topology-branch spark-tp service::Engine::new 1
 topology-branch spark-tp service::worker_with_sequence 1
 topology-branch spark-tp tests::next_tp::Cpu@RankKernels::attention 1

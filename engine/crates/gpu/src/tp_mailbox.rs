@@ -12,12 +12,12 @@
 //! (one receive channel per origin rank, and relayed slots start with a frame): `tp_mailbox_routed`.
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use crate::tp_mailbox_host::{Bell, TpMailboxHost, SEND_SEQ, SEND_LEN, ERROR, TAKE_PAUSE, WIDE, TAKE_CTAS};
+use crate::tp_mailbox_host::{Bell, TpMailboxHost, SEND_SEQ, SEND_LEN, RECV_SEQ, ERROR, TAKE_PAUSE, WIDE, TAKE_CTAS};
 use crate::tp_route::{Channels, Links};
 
 /// The mapped mailbox of one rank (device-visible host memory), `slot_bytes` per slot.
 /// `bell`: every queued put rings it, so a waiting write doorbell can park.
-pub struct TpMailbox<'a> { vector: DeviceVector<'a>, host: *mut f32, layout: Channels, host_taken: AtomicBool, bell: Bell }
+pub struct TpMailbox<'a> { vector: DeviceVector<'a>, host: *mut f32, layout: Channels, host_taken: AtomicBool, copy_group: AtomicBool, bell: Bell }
 impl<'a> TpMailbox<'a> {
     fn words(&self) -> &[AtomicU32] {
         // SAFETY: the mapping is the layout's aligned u32 words (Channels::words), zeroed by the
@@ -33,6 +33,24 @@ impl<'a> TpMailbox<'a> {
     }
     /// A take timed out or the proxy failed (sticky).
     pub fn failed(&self) -> bool { self.words()[ERROR].load(Ordering::Acquire) != 0 }
+    /// Stop queued takes and ask the existing wire to notify its peer. Sticky.
+    pub fn fail(&self) { self.words()[ERROR].store(1, Ordering::Release); }
+    /// Bind a fresh mailbox once to an ordered copy group. Counts cannot reset
+    /// while an old wire can still publish a message with the same sequence.
+    pub fn claim_copy_group(&self) -> Result<(), String> {
+        let words=self.words();
+        let receive=self.layout.world.checked_sub(1).and_then(|n| n.checked_mul(self.layout.slots))
+            .filter(|&n| n<=ERROR-RECV_SEQ).ok_or("tensor copy group has an invalid receive header")?;
+        if self.layout.slots==0 || self.layout.slots>SEND_LEN-SEND_SEQ {
+            return Err("tensor copy group has an invalid send header".into());
+        }
+        if self.failed() || words[SEND_SEQ..SEND_SEQ+self.layout.slots].iter().any(|v| v.load(Ordering::Acquire)!=0)
+            || words[RECV_SEQ..RECV_SEQ+receive].iter().any(|v| v.load(Ordering::Acquire)!=0)
+            || self.copy_group.swap(true,Ordering::AcqRel) {
+            return Err("tensor copy group needs a fresh, unclaimed mailbox".into());
+        }
+        Ok(())
+    }
     /// The rows one message holds, in bytes (a relayed slot's frame not counted).
     pub fn slot_bytes(&self) -> usize { (self.layout.slot_words - self.layout.frame) * 4 }
     pub fn layout(&self) -> Channels { self.layout }
@@ -59,7 +77,7 @@ impl<'a> Backend<'a> {
         self.zero_vector(&mut vector)?;
         self.synchronize()?;
         let host = self.mapped_exchange_host(&vector)?;
-        Ok(TpMailbox { vector, host, layout, host_taken: AtomicBool::new(false), bell: Bell::default() })
+        Ok(TpMailbox { vector, host, layout, host_taken: AtomicBool::new(false), copy_group: AtomicBool::new(false), bell: Bell::default() })
     }
     /// Queue tp_mailbox_put: words [own, own + half) of each of `rows` rows of `width` words of
     /// `source` go to the send slot of message `seq`, then its sequence word is published.

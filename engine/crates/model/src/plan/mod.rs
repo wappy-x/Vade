@@ -7,6 +7,7 @@ pub mod glm;
 pub mod glm_index;
 pub mod storage;
 pub mod layer;
+pub mod tensor_split;
 pub use description::{ConfigPlan, TextDescription};
 pub mod adapter;
 pub use adapter::{DeferredPlan, MappedTensor};

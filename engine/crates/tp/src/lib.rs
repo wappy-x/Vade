@@ -1,5 +1,10 @@
 //! Head/output-row-sharded tensor parallelism for any number of DGX Sparks.
 pub mod transport;
+pub mod tensor_layout;
+pub mod layer_transport;
+#[path = "flash/next_tp_proxy.rs"]
+#[cfg(target_os="linux")]
+pub mod tensor_wire;
 pub use engine_fabric::discovery;
 pub mod runtime;
 pub mod startup_pool;

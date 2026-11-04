@@ -67,6 +67,10 @@ The `flash-serve` server for Qwen3.8-Flash-Next is covered
 
 ## Where it fits
 
+The [ordered layer transport](LAYER-TRANSPORT.md) binds described tensor
+intervals to the existing pair mailbox. Its byte gate is separate from
+checkpoint execution and model token-ID qualification.
+
 **TP reuses the one-Spark kernels, GPU layer and server library.**
 
 <dl>

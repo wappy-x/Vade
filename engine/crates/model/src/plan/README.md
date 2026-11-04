@@ -19,6 +19,7 @@
 | [`runtime.rs`](runtime.rs) | Hybrid runtime geometry and tensor roles, including draft layers. |
 | [`storage.rs`](storage.rs) | Read mixed storage recipes without device admission. |
 | [`tensors.rs`](tensors.rs) | Expected tensor names, storage, roles and header reconciliation. |
+| [`tensor_split.rs`](tensor_split.rs) | Checked tensor intervals and original projection scale origins. See the [transport contract](../../TENSOR-SPLIT.md). |
 
 **Why a folder:** Rust keeps one module per file; this folder groups the modules that belong to `plan`.
 

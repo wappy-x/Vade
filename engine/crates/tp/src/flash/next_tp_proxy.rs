@@ -59,7 +59,7 @@ impl WriteLink {
     /// Both ranks, right after the split's TCP link is up: find the HCA port of its interface.
     pub fn new(link: &std::net::TcpStream) -> Result<Self, String> {
         let ip = link.local_addr().map_err(|e| e.to_string())?.ip();
-        let interface = spark_tp::discovery::links()?.into_iter().find(|l| std::net::IpAddr::V4(l.address) == ip)
+        let interface = engine_fabric::discovery::links()?.into_iter().find(|l| std::net::IpAddr::V4(l.address) == ip)
             .ok_or("tensor split link has no QSFP interface")?.interface;
         let net_mtu = std::fs::read_to_string(format!("/sys/class/net/{interface}/mtu")).map_err(|e| e.to_string())?.trim().parse::<u32>().map_err(|e| e.to_string())?;
         let mtu = (1..=5).rev().find(|&m| (128u32 << m) + 128 <= net_mtu).ok_or("interface MTU too small for RoCE")?;
