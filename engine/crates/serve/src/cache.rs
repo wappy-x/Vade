@@ -921,6 +921,10 @@ impl<S: crate::Session> SessionCache<S> {
 }
 
 #[cfg(test)]
+#[path = "cache_replay_history_tests.rs"]
+mod replay_history_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::{cell::Cell, rc::Rc};

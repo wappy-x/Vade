@@ -1119,6 +1119,8 @@ Merges #105 through #110 were measured on October 26, 2026, with the FP4-Local c
 
 ### Tools
 
+- The HTTP cache check separates token equality from cache coverage. It accepts automatic reuse from prior requests and keeps token-ID failures.
+
 - Dashboard previews group measurements by Spark count. They show set labels for cards that match a saved set (#292).
 - The path check no longer treats `lora_rank` or `tensor_rank` names as process ranks. It still checks conditions on the number of Sparks (#291).
 - The unsafe code check requires safety notes when a function gains an unsafe block. It rejects a change to the `frozen ruling` field (#289).

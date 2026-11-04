@@ -163,7 +163,7 @@ must work.**
    VADE_CHECK_DRAFT=strict ./target/release/serve-http-check "$BIND" 512
 
    # Automatic prefix reuse gives the same tokens as "cache": false.
-   # Start the server with --report-prefix-reuse for this one.
+   # The check reads restored rows from final usage.
    VADE_CHECK_AUTOMATIC=1 ./target/release/serve-http-check "$BIND" 32 \
      fixtures/qwen3/short.json
 
@@ -176,6 +176,24 @@ must work.**
 line breaks. The `tokenize` example in the
 [tokenizer README](../tokenizer/README.md#test-it) prints the IDs for any
 text; copy them into each file without the brackets and commas.
+
+`serve-http-check` compares emitted token IDs. It reads the restored prefix
+count from final usage. A recurrent backend can restore a checkpoint below
+the prompt end. A cache miss prints `SKIP` for cache coverage after token
+equality passes. Use a longer prompt fixture to check actual cache reuse.
+A `SKIP` line does not establish cached exactness.
+The checker prints each request's prompt IDs and each reply's token IDs.
+It omits session capability values from this output.
+Automatic reuse can select a longer prefix than the named session provides.
+For example, a prior plain request can cache a later strict request's prefix.
+Draft mode does not give each request a separate cache scope.
+The checker bounds reuse by the request length, since replies do not identify
+the selected snapshot. It reports the named parent's shared prefix separately.
+`named_parent_source=UNPROVEN` means that reuse does not prove which snapshot
+the server selected. A token-ID difference still fails at its first index.
+The last `CACHE_COVERAGE` line gives the hit and miss counts for the checked
+comparisons. A miss still passes the token comparison when the IDs match.
+Use `serve-http-check --health ADDRESS` to save the server's health JSON.
 
 **Reference check, with the server stopped.**
 `qwen-reference-check PTX MODEL FIXTURE.json...` compares chat tokenization
@@ -192,8 +210,8 @@ folder: `spark-serve KERNELS.ptx MODEL_FOLDER`.
 In the Vade checkout on this DGX Spark, with spark-serve already running on
 loopback, read the address after bind= on its ready line and use it as BIND.
 Run `./target/release/serve-http-check "$BIND" 512`, then the same with
-`VADE_CHECK_DRAFT=strict`, as listed in crates/serve/README.md. Report each
-command's final lines and any failure. Do not restart services, change
+`VADE_CHECK_DRAFT=strict`, as listed in crates/serve/README.md. Report every
+PASS, SKIP, FAIL and CACHE_COVERAGE line. Do not restart services, change
 settings, commit or push.
 ```
 
