@@ -123,6 +123,17 @@ Unset, or <code>production</code>, selects the ordinary <code>sm_121</code> PTX.
 
 ## Checks
 
+On a Spark, run `tp-mailbox-pair-check` from `engine/` after the release build:
+
+```sh
+./target/release/tp-mailbox-pair-check
+```
+
+It compares paired mailbox copies with separate copies. It also checks that
+a timeout or peer error leaves the target words unchanged.
+The separate CUDA refusal test runs with
+`cargo +1.99.0 test -p spark-gpu-probe --test tp_mailbox -- --ignored`.
+
 `load-range-check` checks row selection, and clean-up after errors, in the
 weight loader. It writes one test file to the system's temporary folder
 and deletes it. Pass a folder as a second argument to choose where.

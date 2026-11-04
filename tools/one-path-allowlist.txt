@@ -252,7 +252,9 @@ topology-branch spark-engine flash::moe::Moe::project_device 1
 topology-branch spark-engine flash::moe::Moe::project_inputs 1
 topology-branch spark-engine flash::moe::MoeScratch::exchange_small_middle 2
 topology-branch spark-engine flash::moe::MoeScratch::reserve_grouped 1
-topology-branch spark-engine flash::next_execution::Workspace::moe_at 2
+# The shared projection runs before the intermediate take on TP, and at its old position otherwise.
+# Each mode has one schedule. The projection and finish arithmetic stay the same.
+topology-branch spark-engine flash::next_execution::Workspace::moe_at 3
 topology-branch spark-engine flash::next_execution_overlap::NextSession::verify_groups_greedy 1
 topology-branch spark-engine flash::next_pool::Pooled::enqueue 1
 topology-branch spark-engine flash::next_pp::Link::connect 3
@@ -382,6 +384,8 @@ topology-branch spark-engine tests::mtp_proposal::default_depth_and_explicit_ove
 topology-branch spark-engine tests::tp_binding::owners_schedule_and_rounding 1
 topology-branch spark-gpu-probe backend::Backend::decode_profile_begin 1
 topology-branch spark-gpu-probe backend::Backend::prefill_profile_begin 1
+# Native copy proof: seed owned columns and skip the local origin in a simulated gather.
+topology-branch spark-gpu-probe bin::tp_mailbox_pair_check::check::run 2
 topology-branch spark-gpu-probe fp8::Backend::finish_fp8_middle 1
 topology-branch spark-gpu-probe fp8::Backend::pack_fp8_middle 1
 topology-branch spark-gpu-probe fp8::Backend::reserve_fp8_middle 2
@@ -396,6 +400,10 @@ topology-branch spark-gpu-probe fp8_abi::middle_packet_words 1
 topology-branch spark-gpu-probe routing::clear 1
 topology-branch spark-gpu-probe routing::forced_routing_rejection 1
 topology-branch spark-gpu-probe tp_mailbox::Backend::tp_mailbox_take_from 1
+# Validate the receive channel before a raw copy. Every valid channel uses the same kernel.
+topology-branch spark-gpu-probe tp_mailbox::Backend::tp_mailbox_take_pair_from 1
+# Host copy proof: restore remote column ranges while the local range keeps its source words.
+topology-branch spark-gpu-probe tp_payload_tests::packed_parts_match_separate_exchanges_on_each_rank 1
 topology-branch spark-gpu-probe tp_route::Channels::new 1
 topology-branch spark-gpu-probe tp_route::Links::neighbor 1
 topology-branch spark-gpu-probe tp_route::Relay::new 1

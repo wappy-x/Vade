@@ -1748,7 +1748,9 @@ engine/crates/gpu/kernels	src/tp_mailbox.rs	fn:load_acquire	fn:1	frozen ruling 2
 engine/crates/gpu/kernels	src/tp_mailbox.rs	fn:now_ns	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/tp_mailbox.rs	fn:store_release	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/tp_mailbox.rs	fn:tp_mailbox_put	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/tp_mailbox.rs	fn:tp_mailbox_put_pair	block:1
 engine/crates/gpu/kernels	src/tp_mailbox.rs	fn:tp_mailbox_take	fn:1	frozen ruling 2026-11-02 11:54
+engine/crates/gpu/kernels	src/tp_mailbox.rs	fn:tp_mailbox_take_pair	block:1
 engine/crates/gpu/kernels	src/ungated_moe.rs	fn:ungated_moe_finish	block:1
 engine/crates/gpu/kernels	src/verify_mma.rs	fn:load_acc	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/verify_mma.rs	fn:stage	fn:1	frozen ruling 2026-11-02 11:54

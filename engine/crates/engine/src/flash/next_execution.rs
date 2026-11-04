@@ -525,7 +525,13 @@ impl<'a> Workspace<'a> {
                 if wide { spark_gpu_probe::kernel_params::FP4_PREFILL_GATE_SHARED_BYTES } else { 0 },
                 &mut [(&mut params as *mut GroupedParams).cast()],
             )?;
-            if let Some(t) = tp { t.swap_mid(b, &mut self.compact_mid, count)?; } params.input = self.compact_mid.device_address();
+            if let Some(t) = tp {
+                t.post_mid(b, &self.compact_mid, count)?;
+                // Shared down can read mixed, gate, up and the offered planes. It can write gate and up.
+                // It does not read or write compact_mid or the routed output slots. Routed down follows the take.
+                self.shared_down(b, addr, count, Some(t), (fused, silu_route, pack_route, dense_planes))?;
+                t.take_mid(b, &mut self.compact_mid, count)?;
+            } params.input = self.compact_mid.device_address();
             params.output = self.expert_out.device_address() + tp.map_or(0, |t| t.routed());
             // One token: down may start while the gate runs; fp4_bw_down_pdl waits
             // (griddepcontrol) before reading compact_mid, so bytes are unchanged.
@@ -552,36 +558,7 @@ impl<'a> Workspace<'a> {
                 &mut [(&mut params as *mut GroupedParams).cast()],
             )?;
         }
-        let x = self.mixed.device_address();
-        if !fused {
-            for (w, y, rows, cols) in [
-                (addr.shared_gate, self.shared_gate.device_address(), 1, H),
-                (addr.shared[0], self.gate.device_address(), 640, H),
-                (addr.shared[1], self.up.device_address(), 640, H),
-            ] {
-                blocks::next_rows(b, w, x, y, rows, cols, count)?;
-            }
-        }
-        if !silu_route {
-            gdn::launch(
-                b,
-                if b.has_flash("flash_moe_silu_fast") { "flash_moe_silu_fast" } else { "flash_moe_silu" },
-                count * 640,
-                &mut [
-                    Ptr(self.gate.device_address()),
-                    Ptr(self.up.device_address()),
-                    U32((count * 640) as u32),
-                ],
-            )?;
-        }
-        if pack_route {
-            b.offer_dense_planes(self.gate.device_address(), 640, count, dense_planes);
-        }
-        // Shared is the eleventh row in each token's partials, after experts (the tensor split:
-        // this rank's rows, the columns its finish reads).
-        let shared = self.expert_out.device_address() + (10 * H * 4) as u64 - tp.map_or(0, |t| t.routed());
-        let (weight, shared, rows) = tp.map_or((addr.shared[2], shared, H), |t| t.shared_rows(addr.shared[2], shared, 640));
-        blocks::next_rows_strided(b, weight, self.gate.device_address(), shared, rows, 640, count, 11 * H)?;
+        if tp.is_none() { self.shared_down(b, addr, count, tp, (fused, silu_route, pack_route, dense_planes))?; }
         let mut finish = MoeFinishParams {
             error: self.status.device_address(),
             ids: self.ids.device_address(),
@@ -607,6 +584,29 @@ impl<'a> Workspace<'a> {
                 &mut [(&mut finish as *mut MoeFinishParams).cast()],
             )?;
         } tp.map_or(Ok(()), |t| t.swap_out(b, &mut self.block, count))
+    }
+    /// Shared work is independent of routed intermediate rows. Keep its full-K projection and
+    /// the finish's shared slot. Consume offered planes before another dense pack can reuse them.
+    fn shared_down(&self, b: &Backend<'a>, addr: &MoeAddr<'a>, count: usize, tp: Option<super::tp::TpMoe<'_, 'a>>,
+        (fused, silu_route, pack_route, dense_planes): (bool, bool, bool, u64)) -> Result<()> {
+        use gdn::Arg::{Ptr, U32};
+        if !fused {
+            for (w, y, rows, cols) in [
+                (addr.shared_gate, self.shared_gate.device_address(), 1, H),
+                (addr.shared[0], self.gate.device_address(), 640, H),
+                (addr.shared[1], self.up.device_address(), 640, H),
+            ] { blocks::next_rows(b, w, self.mixed.device_address(), y, rows, cols, count)?; }
+        }
+        if !silu_route {
+            gdn::launch(b, if b.has_flash("flash_moe_silu_fast") { "flash_moe_silu_fast" } else { "flash_moe_silu" }, count * 640,
+                &mut [Ptr(self.gate.device_address()), Ptr(self.up.device_address()), U32((count * 640) as u32)])?;
+        }
+        if pack_route { b.offer_dense_planes(self.gate.device_address(), 640, count, dense_planes); }
+        // Shared is the eleventh row in each token's partials, after experts. On the tensor
+        // split, each rank writes only the columns its finish reads.
+        let shared = self.expert_out.device_address() + (10 * H * 4) as u64 - tp.map_or(0, |t| t.routed());
+        let (weight, shared, rows) = tp.map_or((addr.shared[2], shared, H), |t| t.shared_rows(addr.shared[2], shared, 640));
+        blocks::next_rows_strided(b, weight, self.gate.device_address(), shared, rows, 640, count, 11 * H)
     }
     fn dump_routes(&self, b: &Backend<'_>, count: usize) -> Result<Vec<Vec<(usize, f32)>>> {
         let ids = b.read_vector_range(&self.ids, 0, count * 10)?;

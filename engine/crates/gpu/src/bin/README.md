@@ -5,6 +5,7 @@
 | File | What it does (from its own summary comment) |
 | --- | --- |
 | [`load-range-check.rs`](load-range-check.rs) | Focused staged-loader checks: exact rows, uneven TP ranks, bounds, cleanup. |
+| [`tp-mailbox-pair-check.rs`](tp-mailbox-pair-check.rs) | Compare packed and separate mailbox bytes on one CUDA device. |
 
 **Why a folder:** Cargo builds every file in a `bin/` folder as its own program.
 

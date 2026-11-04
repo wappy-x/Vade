@@ -23,6 +23,8 @@
 | [`router_abi.rs`](router_abi.rs) | Checked corrected-sigmoid routing and ungated expert-finish spans. |
 | [`segments.rs`](segments.rs) | Fixed virtual KV addresses, append-only physical pages and shared prefixes. |
 | [`teardown.rs`](teardown.rs) | Serving processes bound fatal cleanup even when the driver stops responding. |
+| [`tp_payload.rs`](tp_payload.rs) | Fixed word offsets and extent checks for a two-vector mailbox message. |
+| [`tp_payload_tests.rs`](tp_payload_tests.rs) | Compare packed and separate exchanges with fixed raw words. |
 | [`bin/`](bin/README.md) | Folder: see its README. |
 
 **Why a folder:** Cargo looks for a crate's code in `src/`.

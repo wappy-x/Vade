@@ -69,8 +69,13 @@ pub(super) fn shifted(descriptors: &mut Vec<spark_gpu_probe::driver::fp4_abi::Ex
 
 /// The mailbox's layout. The pair's token split moves state in large slots, as does the sequence
 /// split over more ranks, through relays (spark_gpu_probe::tp_route).
-fn mailbox_layout(layout: &TpLayout) -> Result<spark_gpu_probe::tp_route::Channels> {
-    let bytes = if crate::flash_tp_switch::pair() { seq::slot_bytes(layout.slot_bytes()) } else { seq::chain_slot_bytes(layout.slot_bytes()) };
+fn mailbox_layout(layout: &TpLayout, config: &engine_model::flash::Config) -> Result<spark_gpu_probe::tp_route::Channels> {
+    let pair_bytes = config.linear_key_heads.checked_mul(config.linear_key_dim)
+        .and_then(|k| config.linear_value_heads.checked_mul(config.linear_value_dim).and_then(|v| k.checked_add(v)))
+        .and_then(|n| usize::try_from(n).ok()).and_then(|n| n.checked_mul(2))
+        .and_then(|n| (n / layout.world).checked_mul(TpLayout::ROWS * 4)).ok_or("tensor split projection payload overflow")?;
+    let base = layout.slot_bytes().max(pair_bytes);
+    let bytes = if crate::flash_tp_switch::pair() { seq::slot_bytes(base) } else { seq::chain_slot_bytes(base) };
     spark_gpu_probe::tp_route::Channels::new(&spark_gpu_probe::tp_route::Links::new(layout.world, false)?, bytes / 4)
 }
 
@@ -152,8 +157,13 @@ impl<'a> TpMoe<'_, 'a> {
     /// World-one gate / down CTAs scaled to this rank's share of the output columns.
     pub(super) fn gate_ctas(self, whole: u32) -> u32 { self.layout.share(whole, self.layout.mid_cols(), self.layout.expert_width) }
     pub(super) fn down_ctas(self, whole: u32) -> u32 { self.layout.share(whole, self.layout.out_cols(), self.layout.hidden) }
-    pub(super) fn swap_mid(self, b: &Backend<'a>, mid: &mut DeviceVector<'a>, count: usize) -> Result<()> {
-        self.parts(b, mid, count * self.layout.top_k, self.layout.mid_words())
+    pub(super) fn post_mid(self, b: &Backend<'a>, mid: &DeviceVector<'a>, count: usize) -> Result<()> {
+        self.post_parts(b, mid, count * self.layout.top_k, self.layout.mid_words())
+    }
+    pub(super) fn take_mid(self, b: &Backend<'a>, mid: &mut DeviceVector<'a>, count: usize) -> Result<()> {
+        let mut guard = self.swap.borrow_mut();
+        let s = guard.as_mut().ok_or("tensor split missing")?;
+        self.take_parts(b, s, mid, count * self.layout.top_k, self.layout.mid_words())
     }
     pub(super) fn swap_out(self, b: &Backend<'a>, block: &mut DeviceVector<'a>, count: usize) -> Result<()> {
         self.parts(b, block, count, self.layout.hidden)
@@ -168,12 +178,18 @@ impl<'a> TpMoe<'_, 'a> {
     /// Publish this rank's part of each of `rows` rows of `width` words and take every other
     /// rank's, all queued in the stream (on the pair: its half, then the peer's).
     fn parts(self, b: &Backend<'a>, vector: &mut DeviceVector<'a>, rows: usize, width: usize) -> Result<()> {
+        self.post_parts(b, vector, rows, width)?;
+        let mut guard = self.swap.borrow_mut();
+        let s = guard.as_mut().ok_or("tensor split missing")?;
+        self.take_parts(b, s, vector, rows, width)
+    }
+    /// Queue independent compute before the matching take. A put or compute error ends the split without that take.
+    fn post_parts(self, b: &Backend<'a>, vector: &DeviceVector<'a>, rows: usize, width: usize) -> Result<()> {
         let mut guard = self.swap.borrow_mut();
         let s = guard.as_mut().ok_or("tensor split missing")?;
         let part = width / s.layout.world;
         s.sent += 1;
-        b.tp_mailbox_put(self.mailbox, vector, rows, width, part, s.rank * part, s.sent)?;
-        self.take_parts(b, s, vector, rows, width)
+        b.tp_mailbox_put(self.mailbox, vector, rows, width, part, s.rank * part, s.sent)
     }
     /// Take every other rank's next message into its part of `vector` (as `parts` lays it out).
     fn take_parts(self, b: &Backend<'a>, s: &mut Swap<'a>, vector: &mut DeviceVector<'a>, rows: usize, width: usize) -> Result<()> {
@@ -185,18 +201,21 @@ impl<'a> TpMoe<'_, 'a> {
         }
         Ok(())
     }
-    /// `parts` for two vectors of one launch: both puts, then both takes, so the second
-    /// message travels while the first is awaited. With the pass's residual message still
-    /// unread by the peer, three are in flight, below the mailbox's four slots.
+    /// Gather two outputs of one projection launch in one message. Fixed offsets keep all
+    /// first-vector rows before all second-vector rows. Each origin keeps its own sequence.
     fn parts_pair(self, b: &Backend<'a>, [(x, xw), (y, yw)]: [(&mut DeviceVector<'a>, usize); 2], rows: usize) -> Result<()> {
         let mut guard = self.swap.borrow_mut();
         let s = guard.as_mut().ok_or("tensor split missing")?;
-        let (sent, rank, world) = (s.sent, s.rank, s.layout.world);
-        s.sent += 2;
-        b.tp_mailbox_put(self.mailbox, x, rows, xw, xw / world, rank * xw / world, sent + 1)?;
-        b.tp_mailbox_put(self.mailbox, y, rows, yw, yw / world, rank * yw / world, sent + 2)?;
-        self.take_parts(b, s, x, rows, xw)?;
-        self.take_parts(b, s, y, rows, yw)
+        let (rank, world) = (s.rank, s.layout.world);
+        let (xc, yc) = (xw / world, yw / world);
+        s.sent += 1;
+        b.tp_mailbox_put_pair(self.mailbox, [(x, xw, xc, rank * xc), (y, yw, yc, rank * yc)], rows, s.sent)?;
+        for origin in s.origins() {
+            let seq = s.take(origin);
+            let channel = self.mailbox.layout().channel(origin, rank);
+            b.tp_mailbox_take_pair_from(self.mailbox, [(x, xw, xc, origin * xc), (y, yw, yc, origin * yc)], rows, channel, seq, s.limit_ns)?;
+        }
+        Ok(())
     }
 }
 
@@ -204,7 +223,7 @@ impl<'a> NextModel<'a> {
     /// The bytes of the mailbox that set_tp allocates; every rank takes them from its budget
     /// before it plans its session pool, as set_tp runs after that plan.
     pub fn tp_mailbox_bytes(&self) -> Result<usize> {
-        Ok(mailbox_layout(&layout(&self.checkpoint.config)?)?.words() * 4)
+        Ok(mailbox_layout(&layout(&self.checkpoint.config)?, &self.checkpoint.config)?.words() * 4)
     }
     /// Every rank, before serving: this rank's part and the mailbox. The proxy thread then takes
     /// the mailbox's one host endpoint (tp_mailbox_host). `link`: the split's TCP link to rank 0
@@ -219,7 +238,7 @@ impl<'a> NextModel<'a> {
             return Err(format!("tensor split geometry {layout:?} differs from the loaded world-one layout"));
         }
         let pair = crate::flash_tp_switch::pair();
-        let channels = mailbox_layout(&layout)?;
+        let channels = mailbox_layout(&layout, &self.checkpoint.config)?;
         if self.tp_box.set(b.tp_mailbox_routed(channels)?).is_err() {
             return Err("the tensor split mailbox is already set".into());
         }

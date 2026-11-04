@@ -1,5 +1,5 @@
 //! The tensor split's in-graph mailbox, device side (the host endpoint is crate::tp_mailbox_host): mapped host slots that kernels fill and drain inside the
-//! stream (tp_mailbox_put / tp_mailbox_take), and the one host endpoint a proxy thread uses
+//! stream (`tp_mailbox_put` / `tp_mailbox_take`, or `tp_mailbox_put_pair` / `tp_mailbox_take_pair` for two parts), and the one host endpoint a proxy thread uses
 //! to move each slot over RDMA. The host side touches the mapping only as `[AtomicU32]`:
 //! payload words with Relaxed loads/stores, each slot's sequence word with Release (publish)
 //! and Acquire (consume), so no host access is a data race. Layout in 32-bit words: one
@@ -115,16 +115,52 @@ impl<'a> Backend<'a> {
         let most = match m.words()[TAKE_CTAS].load(Ordering::Relaxed) { 0 => 96, n => n.min(96) as usize };
         self.tp_mailbox_launch("tp_mailbox_take", (rows * half).div_ceil(256).clamp(1, most) as u32, 256, &mut args)
     }
+    /// Publish two vector parts in one slot. Each tuple is (vector, width, columns, offset).
+    pub fn tp_mailbox_put_pair(&self, m: &TpMailbox<'_>, parts: [(&DeviceVector<'_>, usize, usize, usize); 2],
+        rows: usize, seq: u64) -> Result<(), String> {
+        let [(x, xw, xc, xo), (y, yw, yc, yo)] = parts;
+        self.check_mailbox_owner(m, x)?;
+        self.check_mailbox_owner(m, y)?;
+        crate::tp_payload::Pair::checked(rows, [(x.len, xw, xc, xo), (y.len, yw, yc, yo)], m.slot_bytes() / 4)
+            .ok_or("tensor split mailbox pair outside the slot or the vectors")?;
+        let slot = seq as usize % m.layout.slots;
+        let mut args = [x.buffer.address, y.buffer.address, rows as u64, xw as u64, yw as u64, xc as u64, yc as u64, xo as u64, yo as u64,
+            m.device(m.layout.send_slot(slot) + m.layout.frame), m.device(SEND_LEN + slot), m.device(SEND_SEQ + slot),
+            (seq as u32) as u64 | m.wide() << 32];
+        self.tp_mailbox_launch("tp_mailbox_put_pair", 1, 1024, &mut args)?;
+        m.bell.queued(seq);
+        Ok(())
+    }
+    /// Restore two parts from one origin message. Each tuple is (vector, width, columns, offset).
+    pub fn tp_mailbox_take_pair_from(&self, m: &TpMailbox<'_>, parts: [(&mut DeviceVector<'_>, usize, usize, usize); 2],
+        rows: usize, channel: usize, seq: u64, limit_ns: u64) -> Result<(), String> {
+        let [(x, xw, xc, xo), (y, yw, yc, yo)] = parts;
+        self.check_mailbox_owner(m, x)?;
+        self.check_mailbox_owner(m, y)?;
+        let p = crate::tp_payload::Pair::checked(rows, [(x.len, xw, xc, xo), (y.len, yw, yc, yo)], m.slot_bytes() / 4)
+            .ok_or("tensor split mailbox pair outside the slot or the vectors")?;
+        let end = |v: &DeviceVector<'_>| (v.len as u64).checked_mul(4).and_then(|bytes| v.buffer.address.checked_add(bytes));
+        let (xe, ye) = (end(x).ok_or("mailbox vector address overflow")?, end(y).ok_or("mailbox vector address overflow")?);
+        if x.buffer.address < ye && y.buffer.address < xe { return Err("tensor split mailbox pair targets overlap".into()); }
+        if channel >= m.layout.world.saturating_sub(1) { return Err("tensor split mailbox channel outside the layout".into()); }
+        let slot = seq as usize % m.layout.slots;
+        let limit = limit_ns.min((1 << 47) - 1) | m.wide() << 47 | u64::from(m.words()[TAKE_PAUSE].load(Ordering::Relaxed) & 0xffff) << 48;
+        let mut args = [x.buffer.address, y.buffer.address, rows as u64, xw as u64, yw as u64, xc as u64, yc as u64, xo as u64, yo as u64,
+            m.device(m.layout.recv_slot(channel, slot) + m.layout.frame), m.device(m.layout.recv_seq(channel, slot)),
+            (seq as u32) as u64, m.device(ERROR), limit];
+        let most = match m.words()[TAKE_CTAS].load(Ordering::Relaxed) { 0 => 96, n => n.min(96) as usize };
+        self.tp_mailbox_launch("tp_mailbox_take_pair", p.words().div_ceil(256).clamp(1, most) as u32, 256, &mut args)
+    }
     /// The mailbox and the rows' vector were allocated in this Backend's context: a launch on
     /// another context could outlive the memory it reads or writes.
     fn check_mailbox_owner(&self, m: &TpMailbox<'_>, rows: &DeviceVector<'_>) -> Result<(), String> {
         self.check_vector(&m.vector, m.vector.len).and_then(|()| self.check_vector(rows, rows.len))
             .map_err(|_| "tensor split mailbox or rows belong to another backend".into())
     }
-    /// Both mailbox kernels take only u64 parameters (pointers, counts, the sequence word).
+    /// The mailbox kernels take only u64 parameters (pointers, counts, the sequence word).
     fn tp_mailbox_launch(&self, name: &str, blocks: u32, threads: u32, args: &mut [u64]) -> Result<(), String> {
         let mut pointers: Vec<*mut core::ffi::c_void> = args.iter_mut().map(|a| (a as *mut u64).cast()).collect();
-        // SAFETY: tp_mailbox_put / tp_mailbox_take take exactly these u64 parameters in this
+        // SAFETY: the named scalar or pair mailbox kernel takes these u64 parameters in this
         // order; every address and extent was checked against its vector or the mailbox, and
         // both outlive the ordered stream (the mailbox lives with the model).
         unsafe { self.launch_flash(name, blocks, threads, &mut pointers) }

@@ -1,8 +1,8 @@
 //! The tensor split's in-graph mailbox: rows cross between two Sparks inside the CUDA stream.
-//! `tp_mailbox_put` copies one rank's rows (or row halves) into a mapped host slot and then
-//! publishes the slot's sequence word; a host proxy thread forwards the slot over RDMA and
-//! publishes it in the peer's receive slot, where `tp_mailbox_take` waits for the word and
-//! copies the rows into place. Only raw 32-bit words move: no arithmetic, no reduction.
+//! `tp_mailbox_put` copies rows into a mapped host slot and publishes its sequence word.
+//! A host proxy forwards the slot over RDMA. `tp_mailbox_take` waits for publication in
+//! the receive slot, then copies the rows. `tp_mailbox_put_pair` and `tp_mailbox_take_pair`
+//! copy two vector parts in one slot. Only raw 32-bit words move: no arithmetic, no reduction.
 use core::arch::asm;
 use core::arch::nvptx::{_block_dim_x, _block_idx_x, _grid_dim_x, _thread_idx_x};
 
@@ -117,6 +117,80 @@ pub unsafe extern "ptx-kernel" fn tp_mailbox_take(dst: *mut u32, rows: u64, widt
     } else {
         while i < rows * half {
             *dst.add(i / half * width + peer + i % half) = *src.add(i);
+            i += step;
+        }
+    }
+}
+
+/// Publish both row parts only after both copies complete. The first part precedes the second.
+#[no_mangle]
+pub extern "ptx-kernel" fn tp_mailbox_put_pair(x: *const u32, y: *const u32, rows: u64, xw: u64, yw: u64,
+    xc: u64, yc: u64, xo: u64, yo: u64, dst: *mut u32, len_word: *mut u32, seq_word: *mut u32, seq: u64) {
+    // SAFETY: Backend::tp_mailbox_put_pair checks both source extents, row parts, and the combined
+    // slot extent. It checks context ownership and launches one CTA. The ordered stream keeps
+    // the vectors and mapped slot live. Slot reuse follows the existing mailbox sequence rule.
+    unsafe {
+        if _block_idx_x() != 0 { return; }
+        let p = crate::tp_payload::Pair { rows: rows as usize, widths: [xw as usize, yw as usize],
+            columns: [xc as usize, yc as usize], offsets: [xo as usize, yo as usize] };
+        let sources = [x, y];
+        let quad = quads(seq >> 32 & 1 != 0, p.columns[0], p.widths[0], p.offsets[0], x as usize, dst as usize)
+            && quads(true, p.columns[1], p.widths[1], p.offsets[1], y as usize, dst as usize);
+        let unit = if quad { 4 } else { 1 };
+        let mut i = _thread_idx_x() as usize * unit;
+        while i < p.words() {
+            let (part, at) = p.locate(i);
+            if quad { copy4!(dst.add(i), sources[part].add(at)); } else { *dst.add(i) = *sources[part].add(at); }
+            i += _block_dim_x() as usize * unit;
+        }
+        crate::ptx::sync();
+        if _thread_idx_x() == 0 {
+            asm!("fence.sc.sys;");
+            *len_word = (p.words() * 4) as u32;
+            store_release(seq_word, seq as u32);
+        }
+    }
+}
+
+/// Wait for one origin, then restore both parts into their fixed columns without a sum.
+#[no_mangle]
+pub extern "ptx-kernel" fn tp_mailbox_take_pair(x: *mut u32, y: *mut u32, rows: u64, xw: u64, yw: u64,
+    xc: u64, yc: u64, xo: u64, yo: u64, src: *const u32, seq_word: *const u32, seq: u64, error: *mut u32, limit_ns: u64) {
+    // SAFETY: Backend::tp_mailbox_take_pair_from checks both target extents, disjoint vector
+    // ownership, row parts, channel, and combined slot extent. The vectors and mapped words
+    // stay live in the ordered stream. The acquired sequence publishes all payload words.
+    // The grid copies each word once. The shared status has one writer per CTA before sync.
+    unsafe {
+        let sh = crate::ptx::shared::<4>();
+        if _thread_idx_x() == 0 {
+            let start = now_ns();
+            let (limit, cap) = (limit_ns & ((1 << 47) - 1), (limit_ns >> 48) as u32);
+            let cap = if cap == 0 { 2048 } else { cap };
+            let (mut ok, mut pause) = (1u32, 32u32.min(cap));
+            while load_acquire(seq_word) != seq as u32 {
+                if load_acquire(error) != 0 || now_ns().wrapping_sub(start) > limit {
+                    store_release(error, 1);
+                    ok = 0;
+                    break;
+                }
+                asm!("nanosleep.u32 {t};", t = in(reg32) pause);
+                pause = (pause * 2).min(cap);
+            }
+            crate::ptx::store(sh, f32::from_bits(ok));
+        }
+        crate::ptx::sync();
+        if crate::ptx::load(sh).to_bits() == 0 { return; }
+        let p = crate::tp_payload::Pair { rows: rows as usize, widths: [xw as usize, yw as usize],
+            columns: [xc as usize, yc as usize], offsets: [xo as usize, yo as usize] };
+        let targets = [x, y];
+        let quad = quads(limit_ns >> 47 & 1 != 0, p.columns[0], p.widths[0], p.offsets[0], src as usize, x as usize)
+            && quads(true, p.columns[1], p.widths[1], p.offsets[1], src as usize, y as usize);
+        let unit = if quad { 4 } else { 1 };
+        let step = (_grid_dim_x() * _block_dim_x()) as usize * unit;
+        let mut i = (_block_idx_x() * _block_dim_x() + _thread_idx_x()) as usize * unit;
+        while i < p.words() {
+            let (part, at) = p.locate(i);
+            if quad { copy4!(targets[part].add(at), src.add(i)); } else { *targets[part].add(at) = *src.add(i); }
             i += step;
         }
     }
