@@ -24,6 +24,7 @@ pub mod frontend_math;
 pub mod router_abi;
 pub mod qsa;
 pub mod mhc_params;
+pub mod mhc_boundary;
 #[cfg(target_os = "linux")]
 mod qsa_device;
 #[path = "../kernels/src/bf16.rs"]

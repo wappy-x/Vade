@@ -15,6 +15,8 @@
 | [`lib.rs`](lib.rs) | GB10 CUDA driver ownership, packed-weight loading and kernel dispatch. |
 | [`load.rs`](load.rs) | Batched shard loading. |
 | [`mhc_params.rs`](mhc_params.rs) | Config-derived FP32 Sinkhorn stream ABI and shape checks. |
+| [`mhc_boundary.rs`](mhc_boundary.rs) | Explicit BF16 mHC boundaries in FP32 lanes and checked physical spans. |
+| [`backend/mhc.rs`](backend/mhc.rs) | Owned mHC parameters, typed BF16 lanes, and synchronized device launches. |
 | [`moe.rs`](moe.rs) | Device-resident expert selection over the model's existing weight arena. |
 | [`multi.rs`](multi.rs) | Arena row views and queued reductions for independent-session batches. |
 | [`projection_params.rs`](projection_params.rs) | Shared host/NVPTX ABI for independent BF16 decode projections. |

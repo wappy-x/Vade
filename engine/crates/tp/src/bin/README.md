@@ -5,6 +5,7 @@
 | File | What it does (from its own summary comment) |
 | --- | --- |
 | [`flash-serve.rs`](flash-serve.rs) | Flash-Next rank service: authenticated HTTP on rank zero, command workers elsewhere. |
+| [`session-state-bytes.rs`](session-state-bytes.rs) | Device allocation and opaque state-copy gate. No checkpoint or model arithmetic. |
 | [`tp-bench.rs`](tp-bench.rs) | TP throughput, strict verification and rollback using the real model. |
 | [`tp-generate.rs`](tp-generate.rs) | Greedy generation with the same device engine used by batched TP. |
 | [`tp-hf-check.rs`](tp-hf-check.rs) | TP prefill/decode qualification against saved independent HF fixtures. |

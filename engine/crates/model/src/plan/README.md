@@ -18,6 +18,8 @@
 | [`profile.rs`](profile.rs) | Count logical compulsory reads from model geometry. |
 | [`runtime.rs`](runtime.rs) | Hybrid runtime geometry and tensor roles, including draft layers. |
 | [`storage.rs`](storage.rs) | Read mixed storage recipes without device admission. |
+| [`admission.rs`](admission.rs) | Header inventory checks and device upload byte views for deferred text. |
+| [`state.rs`](state.rs) | Checked host state byte layouts, capacity, and saved boundaries. |
 | [`tensors.rs`](tensors.rs) | Expected tensor names, storage, roles and header reconciliation. |
 | [`tensor_split.rs`](tensor_split.rs) | Checked tensor intervals and original projection scale origins. See the [transport contract](../../TENSOR-SPLIT.md). |
 
@@ -169,8 +171,9 @@ It does not prove Torch dtype rounding or device behavior.
 
 This operation plan stays separate from the deferred config metadata above.
 It can be attached to that metadata in a later change.
-Actual checkpoint storage dtypes, quantization companions and codecs still
-need header evidence and a storage adapter. Layer ownership, cross-layer
+The [header admission checks](../../HEADER-ADMISSION.md) now validate storage
+dtypes, quantization companions, and codec metadata against shard headers.
+They do not qualify device projection packing. Layer ownership, cross-layer
 selection sharing, MTP sharing, sparse MLA integration and cache lifetime
 remain outside this operation plan. The local source does not define
 `index_share_for_mtp_iteration` or `indexer_rope_interleave` operations.

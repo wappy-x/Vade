@@ -42,6 +42,9 @@ mod qsa_common;
 mod mhc_params;
 mod mhc_math;
 mod mhc;
+#[path = "../../src/mhc_boundary.rs"]
+mod mhc_boundary_math;
+mod mhc_boundary;
 mod qsa_indexer;
 mod flash_moe;
 #[path = "../../src/router_abi.rs"]

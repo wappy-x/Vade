@@ -26,3 +26,21 @@ Fixture SHA256 values from the job's `shasum -a 256` output:
 
 Tests check schema translation and name binding. These fixtures cannot prove
 stored layout, model output, or device exactness.
+
+`public-header-samples.json` contains metadata copied from public safetensors
+headers at the same repository revision. Bounded HTTP range reads fetched
+only the length prefixes and header JSON. No weight payload was fetched.
+The source files are the shard names in the public index linked above.
+The samples cover a linear dense layer, a latent expert layer, the stored
+appended layer, and the model embedding, norm, and head.
+
+Dtypes, shapes, and data offsets are unchanged from those headers. Each
+sample's offsets refer to its original shard. They do not describe a single
+combined file. The admission unit test checks the complete component groups
+in this sample. It does not read scale payloads or prove device behavior.
+
+`bounded-headers.json` is a synthetic complete text inventory for
+[`header_admission.rs`](../../header_admission.rs). Its dimensions are set by
+that test's description. Its byte ranges are contiguous. The test supplies
+synthetic payload bytes. It covers plain, MXFP8, FP8 block weight-only,
+direct NVFP4, and CSF32 NVFP4 storage. It is not a saved model payload.

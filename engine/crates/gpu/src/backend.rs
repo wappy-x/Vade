@@ -20,6 +20,7 @@ pub use fp8::{Fp8GroupedScratch, Fp8RoutingFlag};
 #[path = "backend/kernels.rs"] mod kernels;
 #[path = "backend/dense_tile.rs"] mod dense_tile;
 #[path = "backend/dense.rs"] mod dense;
+#[path = "backend/mhc.rs"] mod mhc; pub use mhc::{Bf16Vector,ResidentMhc,MhcPass};
 use kernels::AbKernels;
 
 pub struct Matrix<'a> { buffer: Buffer<'a>, rows: usize, cols: usize, packed: bool, packed_blocked: bool, stride: usize, row_offset: usize, column_offset: usize, scalar_f32: bool, fp8_scales: Option<Buffer<'a>>, fp8_fragments: bool }

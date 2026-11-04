@@ -71,7 +71,7 @@ fn source_files(root: &Path) -> io::Result<Vec<PathBuf>> {
     }
     let mut files = vec![root.join("kernels/Cargo.toml"), root.join("kernel_params.rs"), root.join("src/fp8_abi.rs"), root.join("src/fp4_abi.rs"),
         root.join("src/projection_params.rs"), root.join("src/gdn_params.rs"), root.join("src/next_params.rs"), root.join("src/router_abi.rs"), root.join("src/mhc_params.rs"),
-        root.join("build-kernels/src/main.rs"), root.join("ptx_stamp.rs")];
+        root.join("src/mhc_boundary.rs"), root.join("build-kernels/src/main.rs"), root.join("ptx_stamp.rs")];
     visit(&root.join("kernels/src"), &mut files)?;
     files.sort();
     Ok(files)
@@ -142,4 +142,38 @@ pub fn verify(root: &Path, ptx: &Path, bytes: &[u8], variant: Variant) -> io::Re
         return Err(io::Error::new(io::ErrorKind::InvalidData, "stale PTX, kernel ABI or build variant"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn shared_mhc_cast_source_is_part_of_the_ptx_identity() {
+        let manifest=Path::new(env!("CARGO_MANIFEST_DIR"));
+        // This module is also included by serving build-metadata tests.
+        let candidates=[manifest.to_path_buf(),manifest.join(".."),manifest.join("../gpu")];
+        let root=candidates.iter().find(|p| p.join("ptx_stamp.rs").is_file() && p.join("src/mhc_boundary.rs").is_file())
+            .expect("GPU source root").canonicalize().unwrap();let root=root.as_path();
+        let source=root.join("src/mhc_boundary.rs");
+        assert!(source_files(root).unwrap().contains(&source));
+        let nonce=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let scratch=std::env::temp_dir().join(format!("vade-mhc-stamp-{}-{nonce}",std::process::id()));
+        for file in source_files(root).unwrap() {
+            let copy=scratch.join(file.strip_prefix(root).unwrap());
+            fs::create_dir_all(copy.parent().unwrap()).unwrap();fs::copy(file,copy).unwrap();
+        }
+        let shared=scratch.join("src/mhc_boundary.rs");let original=fs::read(&shared).unwrap();
+        // A host cast edit must invalidate either previously stamped image.
+        for variant in [Variant::Production,Variant::Fp4] {
+            fs::write(&shared,&original).unwrap();
+            let bytes=format!(".version {PTX_VERSION}\n.target {}\n",variant.target_cpu()).into_bytes();
+            let ptx=scratch.join("image.ptx");fs::write(&ptx,&bytes).unwrap();
+            let stamp=format!("{}sha256={}\n",variant.identity(),digest(&scratch,&source_files(&scratch).unwrap(),&bytes,variant).unwrap());
+            fs::write(ptx.with_extension("ptx.sha256"),stamp).unwrap();
+            verify(&scratch,&ptx,&bytes,variant).unwrap();
+            fs::write(&shared,[original.as_slice(),b"\n// changed cast\n"].concat()).unwrap();
+            assert!(verify(&scratch,&ptx,&bytes,variant).unwrap_err().to_string().contains("stale PTX"));
+        }
+        fs::remove_dir_all(scratch).unwrap();
+    }
 }

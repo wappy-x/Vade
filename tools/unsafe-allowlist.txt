@@ -2227,3 +2227,10 @@ engine/crates/gpu/kernels	src/mhc.rs	fn:mhc_collapse	block:1
 engine/crates/gpu/kernels	src/mhc.rs	fn:mhc_combine	block:1
 engine/crates/gpu/kernels	src/mhc.rs	fn:mhc_head	block:1
 engine/crates/gpu/kernels	src/mhc.rs	fn:mhc_prepare	block:1
+engine/crates/gpu	src/backend/mhc.rs	impl:Backend::fn:mhc_prepare_owned	block:1
+engine/crates/gpu	src/backend/mhc.rs	impl:Backend::fn:mhc_collapse_owned	block:1
+engine/crates/gpu	src/backend/mhc.rs	impl:Backend::fn:mhc_combine_owned	block:1
+engine/crates/gpu/kernels	src/mhc_boundary.rs	fn:mhc_bf16_collapse	block:1
+engine/crates/gpu/kernels	src/mhc_boundary.rs	fn:mhc_bf16_combine	block:1
+engine/crates/gpu	src/backend/mhc.rs	impl:Backend::fn:round_bf16_lanes	block:1
+engine/crates/gpu/kernels	src/mhc_boundary.rs	fn:bf16_lanes_round	block:1

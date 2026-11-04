@@ -44,6 +44,11 @@ Existing supported plans refuse `FP8_PB_WO` with `MissingOps` before device
 handoff. See [the mixed parser tests](src/plan/mixed_tests.rs) and
 [the Qwen plan changes](src/plan/README.md#qwen-plan-changes).
 
+[`plan::admission`](HEADER-ADMISSION.md) checks actual shard headers against
+the required operation inventory. It checks physical shapes, dtypes, scale
+components, scalar ranks, and byte extents. It supplies host byte views for
+a later device upload. It keeps execution deferred.
+
 [`csf::Csf32`](CSF.md) expands the new scale layout on the host. It uses the
 existing NVFP4 arithmetic after byte expansion. It is separate from the
 legacy CSF byte layout. The comparison test in
@@ -71,8 +76,8 @@ cargo +1.99.0 run --offline --locked -p engine-model --example glm-metadata -- \
 ```
 
 The inspector never opens a shard. Its printed byte count comes from the
-index. It is not a measurement of resident memory. Kernel work, real header
-checks, tokenizer checks, and device exactness remain open.
+index. It is not a measurement of resident memory. Kernel work,
+tokenizer checks, and device exactness remain open.
 
 The [logical layer program](LAYER-PLAN.md) binds the operation descriptions
 to revision-qualified kernel targets. It has buffer shapes, tensor splits,

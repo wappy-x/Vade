@@ -5,6 +5,8 @@ pub mod layer_transport;
 #[path = "flash/next_tp_proxy.rs"]
 #[cfg(target_os="linux")]
 pub mod tensor_wire;
+pub mod layer_driver;
+pub mod session_state;
 pub use engine_fabric::discovery;
 pub mod runtime;
 pub mod startup_pool;

@@ -141,6 +141,10 @@ fixed reduction and FMA contracts. The reference does not claim device bit
 equality. It also does not reproduce checkpoint BF16 casts, quantization,
 or framework reduction trees. These remain device and quality gates.
 
+[BF16 boundary requirements](CAST-CONTRACT.md) give a separate conditional
+dtype profile for this graph. They record explicit source casts and refused
+backend gaps. They do not change this FP32 reference or admit device use.
+
 ## Buffers and ownership
 
 Each program lists external inputs, produced buffers, step scratch, and
@@ -168,10 +172,14 @@ exclude padding. Expanded K/V scratch scales with selected capacity, not
 full context. The final output has the input's stream shape.
 
 Weights carry logical matrix shapes, storage recipes, and tensor splits.
-Header validation and packed device byte plans remain separate work. In
-particular, convolution singleton axes and stored mHC scalar ranks are not
-proved by the logical shape. Device MMA input planes, layout padding,
+The [header admission checks](HEADER-ADMISSION.md) validate physical storage,
+including convolution singleton axes and stored mHC scalar ranks.
+Logical shapes alone do not prove those properties. Device MMA input planes, layout padding,
 status buffers, and launch descriptors still need an allocation plan.
+
+The [checked host state plan](STATE-PLAN.md) now supplies local byte offsets,
+capacity checks, and separate state owners. It uses these logical lifetimes.
+Its remaining-gap list names the device ABI storage that it does not cover.
 
 ## Tensor parallelism
 

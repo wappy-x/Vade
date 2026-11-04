@@ -498,6 +498,10 @@ topology-branch spark-tp next_gpu::Gpu@RankKernels::moe 2
 topology-branch spark-tp next_gpu::Gpu@RankKernels::moe_rows 1
 topology-branch spark-tp rows 1
 topology-branch spark-tp runtime::verify_artifacts_with_ab 2
+# Deferred argument validation only. Preserve tensor intervals and refuse
+# a buffer from a different rank. These checks do not select arithmetic.
+topology-branch spark-tp layer_driver::LayerBoundary::new 1
+topology-branch spark-tp layer_driver::MhcOperands::arguments 1
 # Copy-layout validation only. Refuse a different transport group, invalid
 # mailbox header capacity, or an invalid receiver. No arithmetic path is chosen.
 topology-branch spark-tp tensor_layout::GatherLayout::gather_ring 1

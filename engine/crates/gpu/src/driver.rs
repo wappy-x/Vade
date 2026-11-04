@@ -837,6 +837,7 @@ pub use backend::{with_backend, with_backend_mode, Backend, HostRegistration, Ma
     Fp8GroupedScratch, Fp8RoutingFlag, WeightArena, ExchangeSlot, TpMailbox, TpMailboxHost, TP_MAILBOX_SLOTS};
 pub use backend::{BackendStats, Fence, FrontendStream};
 pub use backend::{DecodeGraph, PromptBuffer};
+pub use backend::{Bf16Vector,ResidentMhc,MhcPass};
 
 /// VADE_VECTOR_POOL (default on; =0 off): whether a server configures the vector pool
 /// (Backend::configure_vector_pool). Other values are refused.

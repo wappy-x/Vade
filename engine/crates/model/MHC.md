@@ -130,7 +130,9 @@ The repeat rule is in [AGENTS.md](../../../AGENTS.md).
 
 All reference inputs and outputs are logical FP32. The source's BF16
 coefficient casts, collapse cast, block multiplication, and matrix application
-still need a separate rounding contract and device proof. The primitive kit
+now have a [rounding contract](CAST-CONTRACT.md) and
+[candidate device bindings](../gpu/src/mhc_boundary.rs). Device proof remains
+separate from this FP32 reference. The primitive kit
 does not establish PyTorch bits, token IDs, model support, graph replay, TP
 ownership, or performance. It does not admit non-finite data to production.
 

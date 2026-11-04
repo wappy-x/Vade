@@ -5,6 +5,8 @@
 | File | What it does (from its own summary comment) |
 | --- | --- |
 | [`lib.rs`](lib.rs) | Head/output-row-sharded tensor parallelism for any number of DGX Sparks. |
+| [`layer_driver.rs`](layer_driver.rs) | Checked deferred layer arguments and gathers; execution remains refused. See [the boundary](../LAYER-DRIVER.md). |
+| [`session_state.rs`](session_state.rs) | Resident session byte owners, budgets, saved banks, and completion. See [session storage](../SESSION-STATE.md). |
 | [`model.rs`](model.rs) | Row-sharded Qwen using the single-Spark backend and arithmetic kernels. |
 | [`next.rs`](next.rs) | Host-tested mixed Next session skeleton with ordered rank gathers and per-session kernel state. |
 | [`rdma.rs`](rdma.rs) | RC SEND/RECV and one-sided writes into CUDA's pinned exchange slots. |

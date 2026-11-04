@@ -3,12 +3,13 @@
 This is a host layout contract. It does not admit a deferred model for
 execution. The current Flash-Next serving path does not change.
 
-The logical layer source at commit
-`1b2470df84f9c199a7fabde2e12605c427a28e6b` defines complete head and output-row
+The [logical layer program](src/plan/layer.rs) defines complete head and output-row
 intervals. It requires gathers before projections and replicated folds.
-The layer program is present in this tree. This module supplies its checked
-layout inputs. The [TP adapter](../tp/LAYER-TRANSPORT.md) binds its declared
-gather boundaries. Cast rules and session state remain separate contracts.
+The layer program is present in this tree. This contract supplies checked
+layout inputs for that program. The [host adapter](../tp/LAYER-DRIVER.md)
+binds row views and calls each declared gather at its operation boundary.
+The [pair adapter](../tp/LAYER-TRANSPORT.md) binds declared gathers to the pair wire.
+The device layer driver remains absent.
 
 ## Ownership
 
@@ -93,18 +94,22 @@ test. It compares put packets and gathered destination bytes with fixed
 source bytes. A host relay injects packets into the existing mapped receive
 channels on a single device. It does not test RDMA, a distributed service,
 projection arithmetic, a model stack, or token IDs. Run its prebuilt binary
-only after the station has booked the device.
+only after a booked device run starts.
 
-The following model bindings remain open:
+The following bindings remain absent:
 
-- A complete device operator driver that calls the pair adapter at every
-  declared boundary and uses checked row views for loaded weights.
+- A device layer driver that calls the pair adapter at each declared
+  boundary and uses the checked row views for loaded weights.
 - Header-backed device weight views that retain original scale grids and
   global multipliers. Unaligned origins need a qualified backend ABI.
 - Physical activation and cache dtypes, projection packing, and complete
   cast and fixed-reduction contracts.
-- Aggregate device allocation, session state ownership, operator completion,
-  rollback, and cache restore. Pair copy completion is already bound.
+- Device state owners and completion fences bound to the layer program.
+  The [host state owners](STATE-PLAN.md) supply rollback and cache restore.
+  The [resident state owners](../tp/SESSION-STATE.md) supply device buffers
+  and ordered state transitions. They remain unbound to the layer program.
+  Session transport staging admission and completion ownership remain open.
+  The pair adapter already binds copy completion.
 - Qualification and storage for larger-count mailbox groups. The pair has
   setup agreement, fixed message order, and sticky failure handling.
 - Embedding, final mean/norm/head, request service, and the draft wrapper.
@@ -113,6 +118,6 @@ The prebuilt `layer-transport-check` gate tests synthetic bytes across the
 actual pair wire. It does not execute the decoder. Its station result is
 separate from host checks and complete model proof.
 
-After the remaining bindings exist, compare intermediate bytes and repeated token
+After these bindings exist, compare intermediate bytes and repeated token
 IDs across supported Spark counts. Include alone, batch, cache, chunks, and
 drafting modes. Host layout tests cannot establish that device gate.
