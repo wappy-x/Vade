@@ -2,7 +2,7 @@
 
 **Installing Vade for the first time? Start with [INSTALL.md](INSTALL.md).**
 The current model, [FP4-Local](GLOSSARY.md#dg), runs on a single Spark. The
-one-line install, `curl -fsSL https://vade.lol/install.sh | sh`, then
+one-line install, `curl -fsSL https://getvade.com/install.sh | sh`, then
 `vade pull` and `vade up` start it on the Spark itself, and you need no second
 computer. [First run](../harness/docs/first-run.md) explains that
 launcher. Driving Sparks from another computer, the

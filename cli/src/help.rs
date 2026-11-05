@@ -281,7 +281,7 @@ fn page(command: &str) -> Option<Page<'static>> {
             notes: &[
                 "Locally, restage the current bundle or rebuild the current source, then report how to restart.",
                 "With VADE_CONFIG, update source, rebuild and stage binaries, then offer a restart.",
-                "For a newer Vade on this Spark, run the install command again: curl -fsSL https://vade.lol/install.sh | sh",
+                "For a newer Vade on this Spark, run the install command again: curl -fsSL https://getvade.com/install.sh | sh",
             ],
         },
         "detect" => Page {

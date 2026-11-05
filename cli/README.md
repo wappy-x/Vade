@@ -154,7 +154,7 @@ it just installed. Follow its last advice line. If it prints
 command. If it prints `Run: export PATH=...`, run that command in this shell.
 The default export command is `export PATH="$HOME/.vade/bin:$PATH"`.
 For a newer Vade on a Spark, run the install command again:
-`curl -fsSL https://vade.lol/install.sh | sh`.
+`curl -fsSL https://getvade.com/install.sh | sh`.
 
 `vade version` (also `vade --version` or `vade -V`) prints the CLI package
 version and the short commit of this build, such as `vade 0.1.0 (f7946e5)`. It

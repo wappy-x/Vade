@@ -6,7 +6,7 @@ or macOS computer that drives the Spark over SSH with the `vade` command.
 
 To work on the Spark itself, with no second computer, use the
 [quick start on one Spark](INSTALL.md#quick-start-on-one-spark):
-`curl -fsSL https://vade.lol/install.sh | sh`, `vade pull`, then `vade up`.
+`curl -fsSL https://getvade.com/install.sh | sh`, `vade pull`, then `vade up`.
 
 <a id="part-1-fp4-local-from-a-controller"></a>
 

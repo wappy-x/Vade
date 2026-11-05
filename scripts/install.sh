@@ -1,7 +1,7 @@
 #!/bin/sh
 # Setup on one Spark: the prebuilt bundle when it fits, else a source build.
 # From a checkout:  sh scripts/install.sh
-# With no checkout: curl -fsSL https://vade.lol/install.sh | sh
+# With no checkout: curl -fsSL https://getvade.com/install.sh | sh
 # No sudo, shell profile edits, or model downloads.
 # Every statement is inside main, and main runs on the last line, so a cut-off
 # download is a syntax error and runs nothing. Keep main "$@" as the last line:
@@ -18,13 +18,13 @@ fail() {
     if [ -n "${root-}" ]; then
         printf 'Retry: sh "%s/scripts/install.sh"%s\n' "$root" "${retry-}" >&2
     elif [ "${piped-false}" = true ]; then
-        printf 'Retry: curl -fsSL https://vade.lol/install.sh | sh%s\n' "${retry:+ -s --$retry}" >&2
+        printf 'Retry: curl -fsSL https://getvade.com/install.sh | sh%s\n' "${retry:+ -s --$retry}" >&2
     fi
     exit 1
 }
 if [ "${1-}" = --help ]; then
     printf '%s\n' 'Usage: sh scripts/install.sh [--launch] [--source] [--check]' \
-        '   or: curl -fsSL https://vade.lol/install.sh | sh -s -- [--launch] [--source] [--check]' \
+        '   or: curl -fsSL https://getvade.com/install.sh | sh -s -- [--launch] [--source] [--check]' \
         'Install the prebuilt bundle for this Spark, then run vade install. When the bundle does not fit' \
         'or cannot be downloaded, say why, install pinned Rust if missing, and build vade, the GPU' \
         'kernels, the engine and chat from this checkout instead. With no checkout, the source build' \

@@ -7,7 +7,7 @@ Run the steps in order. Each step gives the command, the expected output, the ex
 The path is three commands on the Spark:
 
 ```sh
-curl -fsSL https://vade.lol/install.sh | sh
+curl -fsSL https://getvade.com/install.sh | sh
 vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300
 vade up
 ```
@@ -103,7 +103,7 @@ df -h "$HOME"
 Run this on the Spark:
 
 ```sh
-curl -fsSL https://vade.lol/install.sh | sh
+curl -fsSL https://getvade.com/install.sh | sh
 ```
 
 The installer checks the GPU and the driver. Then it installs the prebuilt bundle of main from dl.vade.lol. It needs no sudo and no model.
@@ -116,7 +116,7 @@ When `~/models` does not exist, the install prints `No models yet. vade pull mak
 
 The two most likely failures:
 
-- **`curl: (6) Could not resolve host`, or any other `curl:` line.** The Spark has no route to vade.lol. Tell the person. Run the command again when the network works.
+- **`curl: (6) Could not resolve host`, or any other `curl:` line.** The Spark has no route to getvade.com. Tell the person. Run the command again when the network works.
 - **`install: the GPU is in use.`** Run `vade status --json`. If `vade` exists and `phase` is not `stopped`, Vade holds the GPU. Run `vade down` and retry. In every other case, another program holds the GPU. Tell the person and do not stop it.
 
 When the bundle does not fit this Spark, the installer prints a `Prebuilt:` line with the reason. Then it clones public main into a new folder in `~/.vade` and builds from source there. This needs `git` and `cc`, and it ends with the same `Install complete. Next steps:` line. If the clone or the build fails, follow the `install:` and `Retry:` lines. If it fails again, use [Build from source](#build-from-source).
@@ -349,7 +349,7 @@ The most likely failures:
 Run [Check C](#before-step-1) on each Spark first, and use the [background form](#run-a-long-command). The command for this step is step 1 of this page. Run it on the controller Spark in the background form as it is. For another Spark, wrap the same form in `ssh`:
 
 ```sh
-ssh -o BatchMode=yes spark-b 'nohup sh -c "curl -fsSL https://vade.lol/install.sh | sh; echo exit \$?" > ~/vade-step.log 2>&1 < /dev/null & echo $! > ~/vade-step.pid'
+ssh -o BatchMode=yes spark-b 'nohup sh -c "curl -fsSL https://getvade.com/install.sh | sh; echo exit \$?" > ~/vade-step.log 2>&1 < /dev/null & echo $! > ~/vade-step.pid'
 ```
 
 - **Expected output.** `Install complete. Next steps:`, then the next steps.
@@ -546,7 +546,7 @@ The Codex script writes a new Codex home with a read-only sandbox and never touc
 
 ```sh
 vade down
-curl -fsSL https://vade.lol/install.sh | sh
+curl -fsSL https://getvade.com/install.sh | sh
 ```
 
 Follow the last advice line as in step 2. Open a new terminal when the installer says to do so. Otherwise, run its export command in this shell. Then run `vade up`. The checks are the same as in steps 7, 1 and 4.

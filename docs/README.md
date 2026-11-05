@@ -5,7 +5,7 @@ This page is the one map of Vade's public pages. It lists every page with a one-
 Run these three commands on a DGX Spark to install Vade and start the engine:
 
 ```sh
-curl -fsSL https://vade.lol/install.sh | sh
+curl -fsSL https://getvade.com/install.sh | sh
 vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300
 vade up
 ```

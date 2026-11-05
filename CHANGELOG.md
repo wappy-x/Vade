@@ -169,7 +169,7 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 - `vade setup` says what each step does, also in `--dry-run`, and `vade install` prints `Checking SSH to <name>.` and `Copying Vade to <name>.` for each Spark.
 - `vade install` and `vade setup` now copy to and prepare every Spark at the same time instead of one after another. Vade prints the lines of each Spark in Spark order. If a Spark fails, the other Sparks finish their work, the error names the failed Spark, and the previous install stays active.
 - The installer writes one fixed folder, `~/.vade/bin`, with a small script that runs the build it just installed. When the output gives an `export` command, it uses that folder for a bundle or source build. `vade update` keeps that script on the bundle it staged. For a newer Vade, run the install command again.
-- `curl -fsSL https://vade.lol/install.sh | sh` is now safe when the download stops early, and its source build no longer runs in the wrong folder.
+- `curl -fsSL https://getvade.com/install.sh | sh` is now safe when the download stops early, and its source build no longer runs in the wrong folder.
   - Every statement of `scripts/install.sh` is now inside `main`, and the last line calls it, so a cut-off script is a syntax error and runs nothing.
   - With no checkout, the source build clones public main into a new folder in `~/.vade` and runs the installer of that clone.
   - Before, the piped script took the parent of the current folder as the checkout.
@@ -179,7 +179,7 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 - `scripts/install.sh` tries a prebuilt bundle of main first.
   - It checks Ubuntu 24.04 or newer, glibc and the NVIDIA driver, downloads `latest.json` and the bundle, checks the SHA-256 hashes, unpacks to `~/.vade/bundles` and runs `vade install` from there, with no Rust and no build.
   - When a check or the download fails, it prints one `Prebuilt:` line with the reason and builds from source as before.
-  - The bundle of main is published on dl.vade.lol, and `curl -fsSL https://vade.lol/install.sh | sh` installs it.
+  - The bundle of main is published on dl.vade.lol, and `curl -fsSL https://getvade.com/install.sh | sh` installs it.
   - `--source` always builds from source; `--check` prints the plan and writes nothing.
   - `vade install` from a bundle now replaces an earlier install whose files have other hashes than the bundle's `launcher-bundle.conf`, from a source build or another bundle; before, it kept the earlier engine.
   - `scripts/make-bundle.sh --from-payload` packages already built binaries into `vade-<version>-<sha7>-linux-aarch64-gb10.tar.gz` with a `MANIFEST`; two runs give the same bytes.

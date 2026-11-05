@@ -4,7 +4,7 @@
 > This file is for agents that change Vade's code. To install, start or use
 > Vade for a person, or to connect Claude Code or Codex to it, read the
 > [agent quickstart](docs/agents/quickstart.md) instead. On a Spark, the path
-> is `curl -fsSL https://vade.lol/install.sh | sh`, `vade pull`, then `vade up`.
+> is `curl -fsSL https://getvade.com/install.sh | sh`, `vade pull`, then `vade up`.
 
 Vade is an inference engine for the NVIDIA DGX Spark / GB10. It is written in
 Rust and uses only the standard library. This file gives the rules for a

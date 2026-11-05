@@ -657,7 +657,7 @@ sha256sum "$destination/flash-serve" "$destination/flash.ptx" "$destination/vade
 
     pub(super) fn update(&mut self) -> Result<(), String> {
         if self.config.installed_bundle {
-            return Err("This setup uses the installed Vade bundle, so it has no checkout to update. For a newer Vade, run the install command again: curl -fsSL https://vade.lol/install.sh | sh".into());
+            return Err("This setup uses the installed Vade bundle, so it has no checkout to update. For a newer Vade, run the install command again: curl -fsSL https://getvade.com/install.sh | sh".into());
         }
         let sources = [
             ("engine", self.config.engine_source.clone()),
