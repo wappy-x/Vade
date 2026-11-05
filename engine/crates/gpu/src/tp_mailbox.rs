@@ -33,6 +33,8 @@ impl<'a> TpMailbox<'a> {
     }
     /// A take timed out or the proxy failed (sticky).
     pub fn failed(&self) -> bool { self.words()[ERROR].load(Ordering::Acquire) != 0 }
+    /// Check after the ordered readback drained queued consumers. Failure rejects the request.
+    pub fn require_success(&self)->Result<(),String> {if self.failed() {Err("tensor split mailbox failed or produced nonfinite rows".into())} else {Ok(())}}
     /// Stop queued takes and ask the existing wire to notify its peer. Sticky.
     pub fn fail(&self) { self.words()[ERROR].store(1, Ordering::Release); }
     /// Bind a fresh mailbox once to an ordered copy group. Counts cannot reset
@@ -91,6 +93,16 @@ impl<'a> Backend<'a> {
         self.tp_mailbox_launch("tp_mailbox_put", 1, 1024, &mut args)?;
         m.bell.queued(seq);
         Ok(())
+    }
+    /// Floating resident rows reject nonfinite payloads through the sticky wire
+    /// error. The consumer checks that error after its completion boundary.
+    pub fn tp_mailbox_put_finite(&self,m:&TpMailbox<'_>,source:&DeviceVector<'_>,rows:usize,width:usize,half:usize,
+        own:usize,seq:u64)->Result<(),String> {
+        self.check_mailbox_owner(m,source)?;check_mailbox_shape(m,source.len,rows,width,half,own)?;
+        let slot=seq as usize%m.layout.slots;
+        let mut args=[source.buffer.address,rows as u64,width as u64,half as u64,own as u64,
+            m.device(m.layout.send_slot(slot)+m.layout.frame),m.device(SEND_LEN+slot),m.device(SEND_SEQ+slot),seq as u32 as u64,m.device(ERROR)];
+        self.tp_mailbox_launch("tp_mailbox_put_finite",1,1024,&mut args)?;m.bell.queued(seq);Ok(())
     }
     /// Queue tp_mailbox_take: wait (at most `limit_ns`, below 2^47) for message `seq` in its receive slot,
     /// then its rows go to words [peer, peer + half) of each `width`-word row of `target`.

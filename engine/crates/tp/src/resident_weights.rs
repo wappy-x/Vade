@@ -18,6 +18,32 @@ impl Rows {
         Ok(Self {start:interval.start as usize,count:(interval.end-interval.start) as usize,total,split:t.parts!=1})
     }
 }
+#[cfg(any(target_os="linux",test))]
+fn gathered_batch(values:&[f32],local_rows:usize,total_rows:usize,jobs:usize)->Result<Vec<Vec<f32>>> {
+    let chunks=total_rows.checked_div(local_rows).filter(|&chunks|chunks>0).ok_or("resident batch row geometry is empty")?;
+    let local=local_rows.checked_mul(jobs).ok_or("resident batch local extent overflow")?;
+    if jobs==0 || local_rows.checked_mul(chunks)!=Some(total_rows) || local.checked_mul(chunks)!=Some(values.len()) {
+        return Err("resident batch rank-major extent differs".into());
+    }
+    let mut output=Vec::with_capacity(jobs);
+    for job in 0..jobs {let mut matrix=Vec::with_capacity(total_rows);
+        for chunk in 0..chunks {let start=chunk*local+job*local_rows;matrix.extend_from_slice(&values[start..start+local_rows]);}
+        output.push(matrix);
+    }Ok(output)
+}
+#[cfg(any(target_os="linux",test))]
+fn gathered_mixed(values:&[f32],rows:&[Rows])->Result<Vec<Vec<f32>>> {
+    if rows.is_empty() || rows.iter().any(|row|row.count==0 || row.total==0 || row.total%row.count!=0 || !row.split && row.total!=row.count) {return Err("resident mixed batch geometry differs".into());}
+    let chunks=rows.iter().find(|row|row.split).map_or(1,|row|row.total/row.count);
+    if rows.iter().any(|row|row.split && row.total/row.count!=chunks) {return Err("resident mixed batch row groups differ".into());}
+    let stride=rows.iter().try_fold(0usize,|total,row|total.checked_add(row.count)).ok_or("resident mixed batch extent overflow")?;
+    if stride.checked_mul(chunks)!=Some(values.len()) {return Err("resident mixed batch rank-major extent differs".into());}
+    let mut offset=0;let mut output=Vec::new();
+    for row in rows {let mut matrix=Vec::with_capacity(row.total);
+        for rank in 0..if row.split {chunks} else {1} {let start=rank*stride+offset;matrix.extend_from_slice(&values[start..start+row.count]);}
+        output.push(matrix);offset+=row.count;
+    }Ok(output)
+}
 
 #[cfg(target_os="linux")]
 mod device {
@@ -30,14 +56,22 @@ mod device {
         Packed {shape:Shape,weight:DeviceVector<'d>,scales:DeviceVector<'d>}}
     struct Matrix<'b,'d> {rows:Rows,cols:usize,storage:Storage<'b,'d>}
     pub struct Weights<'b,'d> {matrices:BTreeMap<String,Matrix<'b,'d>>,embedding:Option<spark_gpu_probe::driver::Matrix<'d>>,
-        ring:Option<Ring>,topology:Topology,identity:Option<usize>,cost:crate::resident_profile::Cost,timings:[[u128;3];4]}
+        ring:Option<Ring>,mailbox:Option<&'b spark_gpu_probe::driver::TpMailbox<'d>>,sequence:u64,topology:Topology,identity:Option<usize>,cost:crate::resident_profile::Cost,timings:[[u128;3];5]}
     fn raw<'d>(b:&Backend<'d>,bytes:&[u8])->Result<DeviceVector<'d>> {
         let mut out=b.upload_vector(&vec![0.0;bytes.len().div_ceil(4)])?;b.write_vector_bytes(&mut out,bytes)?;b.synchronize()?;Ok(out)
     }
     impl<'b,'d> Weights<'b,'d> {
         pub fn new(ring:Option<Ring>,cost:bool)->Self {
             let topology=ring.as_ref().map_or(Topology {rank:0,parts:1},|r|Topology {rank:r.rank() as u32,parts:r.world() as u32});
-            Self {matrices:BTreeMap::new(),embedding:None,ring,topology,identity:None,cost:crate::resident_profile::Cost::new(cost),timings:[[0;3];4]}
+            Self {matrices:BTreeMap::new(),embedding:None,ring,mailbox:None,sequence:0,topology,identity:None,cost:crate::resident_profile::Cost::new(cost),timings:[[0;3];5]}
+        }
+        pub fn attach_mailbox(&mut self,mailbox:&'b spark_gpu_probe::driver::TpMailbox<'d>)->Result<()> {
+            let physical=Topology {rank:self.topology.rank,parts:mailbox.layout().world.try_into().map_err(|_|"mailbox topology exceeds ABI")?};
+            let compatible=self.topology.eq(&physical);
+            if !compatible || self.identity.is_some() || self.mailbox.is_some() {
+                return Err("resident device exchange requires a fresh pair owner".into());
+            }
+            mailbox.claim_copy_group()?;self.mailbox=Some(mailbox);Ok(())
         }
         pub fn prepare(&mut self,c:&CheckpointAdmission,b:&'b Backend<'d>)->Result<()> {
             let identity=std::ptr::from_ref(c) as usize;
@@ -106,18 +140,38 @@ mod device {
             if input.len()!=matrix.cols || input.is_segmented() {return Err("resident projection feature extent differs".into());}
             let class=match &matrix.storage {Storage::Mx(_)=>0,Storage::Plain {..}=>1,Storage::Packed {shape,..}=>if shape.op==Op::NvProject {2} else {3}};
             let output=match &matrix.storage {
-                Storage::Mx(p)=>{let pass=p.project_vector(input)?;let v=pass.output().vector();let mut output=b.vector(v.len())?;b.copy_prefix(v,&mut output,v.len())?;b.synchronize()?;output},
+                Storage::Mx(p)=>p.project_vector(input)?.into_output().into_vector(),
                 Storage::Plain {shape,weight}=>b.causal_operation(*shape,[Some(input),None,None,None],Some(weight))?,
                 Storage::Packed {shape,weight,scales}=>{
                     let packed=if shape.op==Op::NvProject {Some(b.expert_operation(Shape {op:Op::Quantize,..*shape},[Some(input),None,None,None],None,None)?)} else {None};
                     b.expert_operation(*shape,[Some(packed.as_ref().unwrap_or(input)),None,None,None],Some(weight),Some(scales))?
                 },
             };
-            let output=if round {let rounded=b.round_bf16_lanes(&output)?;let mut copy=b.vector(output.len())?;b.copy_prefix(rounded.vector(),&mut copy,output.len())?;b.synchronize()?;copy} else {output};
+            // Packed projection kernels and the typed MX output already store BF16
+            // lanes. A second cast is an identity for every stored BF16 pattern.
+            // Plain ordered projections still require their explicit boundary.
+            let rounded=matches!(&matrix.storage,Storage::Mx(_)|Storage::Packed {shape:Shape {op:Op::NvProject|Op::Fp8Project,..},..});
+            let output=if round && !rounded {b.round_bf16_lanes(&output)?.into_vector()} else {output};
             let bytes=match &matrix.storage {Storage::Mx(_)=>matrix.rows.count*(matrix.cols+matrix.cols/32),Storage::Plain {weight,..}=>weight.len()*4,Storage::Packed {weight,scales,..}=>(weight.len()+scales.len())*4};
             self.cost.record(||if name=="lm_head.weight" {"projection_head".into()} else {format!("projection_{class}")},stamp,b,bytes);let compute=started.elapsed().as_nanos();
             if !matrix.rows.split {self.timings[class][0]+=1;self.timings[class][1]+=compute;return Ok(output);}
-            let stamp=self.cost.start(b);let local=b.read_vector_values(&output)?;let mut bytes=vec![0;matrix.rows.total*4];
+            if let Some(mailbox)=self.mailbox {
+                let stamp=self.cost.start(b);
+                let sequence=self.sequence.checked_add(1).filter(|&n|n<=u32::MAX as u64).ok_or("resident mailbox sequence exhausted")?;
+                if mailbox.failed() {b.synchronize()?;return Err("resident device exchange failed".into());}
+                let total=matrix.rows.total;let count=matrix.rows.count;let own=matrix.rows.start;
+                // A failed take writes no peer rows. Initialize them before any queued consumer.
+                let mut gathered=b.vector(total)?;b.zero_vector(&mut gathered)?;b.copy_range(&output,&mut gathered,0,own,count)?;
+                b.tp_mailbox_put_finite(mailbox,&gathered,1,total,count,own,sequence)?;
+                let peer=total.checked_sub(own+count).ok_or("resident peer interval overflow")?;
+                b.tp_mailbox_take(mailbox,&mut gathered,1,total,count,peer,sequence,10_000_000_000)?;
+                self.sequence=sequence;
+                self.cost.record(||"exchange_device".into(),stamp,b,0);
+                self.timings[class][0]+=1;self.timings[class][1]+=compute;self.timings[class][2]+=started.elapsed().as_nanos()-compute;
+                return Ok(gathered);
+            }
+            let stamp=self.cost.start(b);let local=b.read_vector_values(&output)?;
+let mut bytes=vec![0;matrix.rows.total*4];
             for (dst,v) in bytes[matrix.rows.start*4..(matrix.rows.start+matrix.rows.count)*4].chunks_exact_mut(4).zip(local) {dst.copy_from_slice(&v.to_le_bytes());}
             self.cost.record(||"exchange_pack".into(),stamp,b,0);let stamp=self.cost.start(b);
             self.ring.as_mut().ok_or("resident row split has no group")?.all_gather(&mut bytes,4)?;
@@ -126,6 +180,75 @@ mod device {
             if values.iter().any(|v|!v.is_finite()) {return Err("resident gathered projection is not finite".into());}
             let output=b.upload_vector(&values)?;b.synchronize()?;
             self.cost.record(||"exchange_upload".into(),stamp,b,0);self.timings[class][0]+=1;self.timings[class][1]+=compute;self.timings[class][2]+=started.elapsed().as_nanos()-compute;Ok(output)
+        }
+        pub fn apply_batch(&mut self,b:&Backend<'d>,input:&[(&str,&DeviceVector<'_>)],round:bool)->Result<Option<Vec<DeviceVector<'d>>>> {
+            if input.is_empty() {return Err("resident projection batch is empty".into());}
+            let matrices=input.iter().map(|(name,_)|self.matrices.get(*name).ok_or_else(||format!("projection is not resident: {name}"))).collect::<Result<Vec<_>>>()?;
+            if input.len()<=9 && matrices.iter().all(|matrix|matches!(&matrix.storage,Storage::Mx(_)|Storage::Plain {..}) && matrix.cols%32==0) {
+                return self.apply_mixed_batch(b,input,round);
+            }
+            let first=matrices[0];
+            if matrices.iter().any(|matrix|matrix.rows!=first.rows || matrix.cols!=first.cols || !matches!(&matrix.storage,Storage::Packed {shape,..} if shape.op==Op::NvProject)) {return Ok(None);}
+            if input.iter().any(|(_,value)|value.len()!=first.cols || value.is_segmented()) {return Err("resident batch feature extent differs".into());}
+            let stamp=self.cost.start(b);let started=std::time::Instant::now();
+            let mut quantized=Vec::new();let mut indices=Vec::new();let mut weight_bytes=0usize;
+            for (matrix,(_,value)) in matrices.iter().zip(input) {
+                let Storage::Packed {shape,weight,scales}=&matrix.storage else {unreachable!()};
+                let key=(value.device_address(),matrix.cols,shape.activation.to_bits());
+                let index=if let Some(index)=quantized.iter().position(|(prior,_)|*prior==key) {index} else {
+                    let packed=b.expert_operation(Shape {op:Op::Quantize,..*shape},[Some(value),None,None,None],None,None)?;
+                    quantized.push((key,packed));quantized.len()-1
+                };indices.push(index);weight_bytes+=(weight.len()+scales.len())*4;
+            }
+            let jobs=matrices.iter().zip(&indices).map(|(matrix,index)| {let Storage::Packed {shape,weight,scales}=&matrix.storage else {unreachable!()};
+                (*shape,&quantized[*index].1,weight,scales)
+            }).collect::<Vec<_>>();
+            let output=b.expert_projection_batch(&jobs)?;
+            let output=if round {let rounded=b.round_bf16_lanes(&output)?;let mut copy=b.vector(output.len())?;b.copy_prefix(rounded.vector(),&mut copy,output.len())?;b.synchronize()?;copy} else {output};
+            self.cost.record(||"projection_2".into(),stamp,b,weight_bytes);let compute=started.elapsed().as_nanos();let stamp=self.cost.start(b);
+            let local=b.read_vector_values(&output)?;let ranks=if first.rows.split {self.topology.parts as usize} else {1};
+            let mut bytes=vec![0;local.len().checked_mul(ranks).and_then(|words|words.checked_mul(4)).ok_or("resident batch exchange overflow")?];
+            let start=if first.rows.split {self.topology.rank as usize*local.len()*4} else {0};
+            for (destination,value) in bytes[start..start+local.len()*4].chunks_exact_mut(4).zip(local) {destination.copy_from_slice(&value.to_le_bytes());}
+            self.cost.record(||"exchange_pack".into(),stamp,b,0);
+            if first.rows.split {let stamp=self.cost.start(b);self.ring.as_mut().ok_or("resident batch has no row group")?.all_gather(&mut bytes,4)?;self.cost.record(||"exchange_network".into(),stamp,b,0);}
+            let stamp=self.cost.start(b);let values=bytes.chunks_exact(4).map(|word|f32::from_le_bytes(word.try_into().unwrap())).collect::<Vec<_>>();
+            if values.iter().any(|value|!value.is_finite()) {return Err("resident batch projection is not finite".into());}
+            let result=gathered_batch(&values,first.rows.count,first.rows.total,input.len())?.iter().map(|values|b.upload_vector(values)).collect::<Result<Vec<_>>>()?;b.synchronize()?;
+            self.cost.record(||"exchange_upload".into(),stamp,b,0);self.timings[2][0]+=input.len() as u128;self.timings[2][1]+=compute;self.timings[2][2]+=started.elapsed().as_nanos()-compute;Ok(Some(result))
+        }
+        fn apply_mixed_batch(&mut self,b:&Backend<'d>,input:&[(&str,&DeviceVector<'_>)],round:bool)->Result<Option<Vec<DeviceVector<'d>>>> {
+            use spark_gpu_probe::{driver::ResidentProjection,causal_ops::{Shape as CausalShape,Op as CausalOp}};
+            let matrices=input.iter().map(|(name,_)|self.matrices.get(*name).ok_or_else(||format!("projection is not resident: {name}"))).collect::<Result<Vec<_>>>()?;
+            if input.iter().zip(&matrices).any(|((_,value),matrix)|value.len()!=matrix.cols || value.is_segmented()) {return Err("resident mixed batch feature extent differs".into());}
+            let stamp=self.cost.start(b);let started=std::time::Instant::now();let mut quantized=Vec::new();let mut indices=Vec::new();let mut weight_bytes=0usize;
+            for (matrix,(_,value)) in matrices.iter().zip(input) {
+                indices.push(if matches!(&matrix.storage,Storage::Mx(_)) {let key=(value.device_address(),matrix.cols);
+                    Some(if let Some(index)=quantized.iter().position(|(prior,_)|*prior==key) {index} else {
+                        let shape=CausalShape {op:CausalOp::Mxfp8QuantizePositiveZero,heads:0,dim:0,taps:0,rows:0,cols:matrix.cols.try_into().map_err(|_|"resident mixed batch columns exceed ABI")?,epsilon:0.0,bound:0.0};
+                        quantized.push((key,b.causal_operation(shape,[Some(value),None,None,None],None)?));quantized.len()-1
+                    })
+                } else {None});
+                weight_bytes+=match &matrix.storage {Storage::Mx(_)=>matrix.rows.count*matrix.cols+matrix.rows.count*matrix.cols/32,Storage::Plain {weight,..}=>weight.len()*4,_=>return Err("resident mixed batch storage differs".into())};
+            }
+            let jobs=matrices.iter().zip(input).zip(&indices).map(|((matrix,(_,value)),index)|match &matrix.storage {
+                Storage::Mx(projection)=>ResidentProjection::Mxfp8 {matrix:projection.resident(),input:&quantized[index.unwrap()].1},
+                Storage::Plain {weight,..}=>ResidentProjection::Plain {rows:matrix.rows.count,cols:matrix.cols,weight,input:value},_=>unreachable!(),
+            }).collect::<Vec<_>>();
+            let local_rows=matrices.iter().try_fold(0usize,|total,matrix|total.checked_add(matrix.rows.count)).ok_or("resident mixed batch rows overflow")?;
+            let mut output=b.vector(local_rows)?;b.resident_projection_batch(&jobs,&mut output,round)?;
+            self.cost.record(||"projection_mixed".into(),stamp,b,weight_bytes);let compute=started.elapsed().as_nanos();let stamp=self.cost.start(b);
+            let local=b.read_vector_values(&output)?;let split=matrices.iter().any(|matrix|matrix.rows.split);let ranks=if split {self.topology.parts as usize} else {1};
+            let mut bytes=vec![0;local.len().checked_mul(ranks).and_then(|words|words.checked_mul(4)).ok_or("resident mixed batch exchange overflow")?];
+            let start=if split {self.topology.rank as usize*local.len()*4} else {0};
+            for (destination,value) in bytes[start..start+local.len()*4].chunks_exact_mut(4).zip(local) {destination.copy_from_slice(&value.to_le_bytes());}
+            self.cost.record(||"exchange_pack".into(),stamp,b,0);
+            if split {let stamp=self.cost.start(b);self.ring.as_mut().ok_or("resident mixed batch has no row group")?.all_gather(&mut bytes,4)?;self.cost.record(||"exchange_network".into(),stamp,b,0);}
+            let stamp=self.cost.start(b);let values=bytes.chunks_exact(4).map(|word|f32::from_le_bytes(word.try_into().unwrap())).collect::<Vec<_>>();
+            if values.iter().any(|value|!value.is_finite()) {return Err("resident mixed batch projection is not finite".into());}
+            let rows=matrices.iter().map(|matrix|matrix.rows).collect::<Vec<_>>();
+            let result=gathered_mixed(&values,&rows)?.iter().map(|values|b.upload_vector(values)).collect::<Result<Vec<_>>>()?;b.synchronize()?;
+            self.cost.record(||"exchange_upload".into(),stamp,b,0);self.timings[4][0]+=input.len() as u128;self.timings[4][1]+=compute;self.timings[4][2]+=started.elapsed().as_nanos()-compute;Ok(Some(result))
         }
         /// One immutable weight pass for independent prompt rows. The packed
         /// output is [weight row, token], so row ownership still stays contiguous.
@@ -157,8 +280,11 @@ mod device {
             let mut result=Vec::new();for token in 0..m {let row=(0..matrix.rows.total).map(|column|values[column*m+token]).collect::<Vec<_>>();result.push(b.upload_vector(&row)?);}b.synchronize()?;
             self.cost.record(||"exchange_upload".into(),stamp,b,0);Ok(result)
         }
+        pub fn check_exchange(&self)->Result<()> {
+            self.mailbox.map_or(Ok(()),|m|m.require_success())
+        }
         pub fn report(&mut self) {self.cost.report();
-            for (name,timing) in ["mxfp8","plain","nvfp4","fp8_block"].into_iter().zip(&mut self.timings) {
+            for (name,timing) in ["mxfp8","plain","nvfp4","fp8_block","mixed"].into_iter().zip(&mut self.timings) {
                 eprintln!("RESIDENT COST rank={} storage={name} calls={} compute_ms={:.6} gather_ms={:.6}",self.topology.rank,timing[0],timing[1] as f64/1e6,timing[2] as f64/1e6);*timing=[0;3];
             }
         }
@@ -169,7 +295,7 @@ mod device {
             let cols=usize::try_from(w.shape[1]).map_err(|_|"resident columns exceed address space")?;
             let storage=if w.storage==WeightStorage::Mxfp8 {
                 let topology=if rows.split {t} else {Topology {rank:0,parts:1}};
-                Storage::Mx(Mxfp8Projection::matrix_rows(c,name,WeightType::F32,topology)?.load_dynamic(b)?)
+                Storage::Mx(Mxfp8Projection::matrix_rows(c,name,WeightType::F32,topology)?.load_dynamic_positive_zero(b)?)
             } else {
                 let u=c.upload(name).map_err(|e|e.to_string())?;
                 match u.storage {
@@ -204,6 +330,42 @@ pub use device::Weights;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn all_stored_bf16_patterns_are_fixed_points_of_the_projection_cast() {
+        for bits in 0..=u16::MAX {let value=f32::from_bits(u32::from(bits)<<16);
+            assert_eq!(spark_gpu_probe::expert_ops::round(value).to_bits(),value.to_bits());}
+    }
+    #[test]
+    fn mixed_rows_restore_each_matrix_and_do_not_repeat_replicated_rows() {
+        for chunks in 1..=7 {let rows=[Rows {start:0,count:3,total:3*chunks,split:chunks>1},Rows {start:0,count:1,total:1,split:false},Rows {start:0,count:5,total:5*chunks,split:chunks>1}];
+            let packed=(0..chunks).flat_map(|rank|(0..9).map(move |lane|(rank*100+lane) as f32)).collect::<Vec<_>>();
+            let output=gathered_mixed(&packed,&rows).unwrap();
+            assert_eq!(output[0],(0..chunks).flat_map(|rank|(0..3).map(move |lane|(rank*100+lane) as f32)).collect::<Vec<_>>());
+            assert_eq!(output[1],[3.0]);
+            assert_eq!(output[2],(0..chunks).flat_map(|rank|(4..9).map(move |lane|(rank*100+lane) as f32)).collect::<Vec<_>>());
+            assert!(gathered_mixed(&packed[..packed.len()-1],&rows).is_err());
+        }
+        assert!(gathered_mixed(&[],&[]).is_err());
+        assert!(gathered_mixed(&[],&[Rows {start:0,count:2,total:5,split:true}]).is_err());
+        assert!(gathered_mixed(&[],&[Rows {start:0,count:0,total:5,split:true}]).is_err());
+        assert!(gathered_mixed(&[],&[Rows {start:0,count:1,total:2,split:true},Rows {start:0,count:1,total:3,split:true}]).is_err());
+    }
+    #[test]
+    fn independent_jobs_gather_rank_major_then_matrix_rows() {
+        for parts in 1..=7 {for jobs in [1,2,8,16] {for count in [1,5,17] {
+            let rows=Rows {start:0,count,total:count*parts,split:parts>1};
+            let packed=(0..parts).flat_map(|rank|(0..jobs).flat_map(move |job|(0..count).map(move |row|(rank*10000+job*100+row) as f32))).collect::<Vec<_>>();
+            let output=gathered_batch(&packed,rows.count,rows.total,jobs).unwrap();
+            for (job,values) in output.iter().enumerate() {assert_eq!(*values,(0..parts).flat_map(|rank|(0..count).map(move |row|(rank*10000+job*100+row) as f32)).collect::<Vec<_>>());}
+            assert!(gathered_batch(&packed[..packed.len()-1],rows.count,rows.total,jobs).is_err());
+        }}}
+        let rows=Rows {start:0,count:2,total:2,split:false};
+        assert_eq!(gathered_batch(&[-0.0,1.0,2.0,-0.0],rows.count,rows.total,2).unwrap().into_iter().flatten().map(f32::to_bits).collect::<Vec<_>>(),[-0.0,1.0,2.0,-0.0].map(f32::to_bits));
+        assert!(gathered_batch(&[],rows.count,rows.total,0).is_err());
+        assert!(gathered_batch(&[],usize::MAX,usize::MAX,2).is_err());
+        assert!(gathered_batch(&[],0,rows.total,1).is_err());
+        assert!(gathered_batch(&[],2,5,1).is_err());
+    }
     #[test]
     fn row_owners_retain_complete_scale_blocks_and_replicate_small_outputs() {
         for storage in [WeightStorage::Mxfp8,WeightStorage::Nvfp4 {encoding:engine_model::plan::storage::ScaleEncoding::Csf32,activation_scale:true},WeightStorage::Fp8Block {block:[128,128]}] {

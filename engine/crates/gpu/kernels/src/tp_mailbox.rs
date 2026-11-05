@@ -195,3 +195,29 @@ pub extern "ptx-kernel" fn tp_mailbox_take_pair(x: *mut u32, y: *mut u32, rows: 
         }
     }
 }
+
+/// Resident floating rows use the same wire and preserve their raw words. Reject
+/// a nonfinite row through the existing sticky mailbox error before publication.
+#[no_mangle]
+pub extern "ptx-kernel" fn tp_mailbox_put_finite(src:*const u32,rows:u64,width:u64,half:u64,own:u64,
+    dst:*mut u32,len_word:*mut u32,seq_word:*mut u32,seq:u64,error:*mut u32) {
+    // SAFETY: The checked host adapter bounds all source row prefixes, the mapped
+    // slot, and aligned mailbox header words. One CTA owns the slot. Source and
+    // mailbox storage survive stream completion. Only each thread's disjoint
+    // payload words change. Header accesses use system release/acquire stores.
+    unsafe {
+        if _block_idx_x()!=0 {return;}
+        let (rows,width,half,own)=(rows as usize,width as usize,half as usize,own as usize);
+        let mut i=_thread_idx_x() as usize;let mut valid=true;
+        while i<rows*half {
+            let value=*src.add(i/half*width+own+i%half);
+            valid &= value&0x7f800000!=0x7f800000;*dst.add(i)=value;
+            i+=_block_dim_x() as usize;
+        }
+        if !valid {store_release(error,1);}
+        crate::ptx::sync();
+        if _thread_idx_x()==0 && load_acquire(error)==0 {
+            asm!("fence.sc.sys;");*len_word=(rows*half*4) as u32;store_release(seq_word,seq as u32);
+        }
+    }
+}

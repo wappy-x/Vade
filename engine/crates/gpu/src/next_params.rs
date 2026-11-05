@@ -95,3 +95,44 @@ impl MxLayer {
         Ok(())
     }
 }
+
+#[repr(C)]
+#[derive(Clone,Copy,Default)]
+pub struct ResidentProjectionBatch {pub layer:MxLayer,pub plain:u32,pub round:u32}
+impl ResidentProjectionBatch {
+    pub fn push(&mut self,projection:MxProjection,plain:bool)->Result<(),&'static str> {
+        if projection.tokens!=1 || projection.round!=0 || projection.input_bf16!=0 {return Err("resident projection batch requires one FP32 source row");}
+        let index=self.layer.count as usize;let start=self.layer.ends[index];
+        let blocks=if plain {projection.rows.div_ceil(128)} else {projection.rows.div_ceil(4)};
+        let end=start.checked_add(blocks).ok_or("resident projection batch grid overflow")?;
+        self.layer.push(projection)?;self.layer.ends[index+1]=end;
+        if plain {self.plain|=1<<index;}Ok(())
+    }
+}
+
+#[cfg(test)]
+mod resident_batch_tests {
+    use super::*;
+    fn projection(rows:u32)->MxProjection {MxProjection {weights:16,scales:4,input:16,output:4,rows,cols:32,tokens:1,input_bf16:0,round:0}}
+    #[test]
+    fn mixed_rows_have_original_complete_warp_and_plain_grids() {
+        use std::mem::{size_of,align_of,offset_of};
+        assert_eq!((size_of::<MxProjection>(),size_of::<MxLayer>(),size_of::<ResidentProjectionBatch>(),align_of::<ResidentProjectionBatch>()),(56,552,560,8));
+        assert_eq!((offset_of!(ResidentProjectionBatch,layer),offset_of!(ResidentProjectionBatch,plain),offset_of!(ResidentProjectionBatch,round)),(0,552,556));
+        let mut batch=ResidentProjectionBatch::default();
+        for (rows,plain) in [(17,false),(129,true),(1,false),(32,true),(33,false)] {batch.push(projection(rows),plain).unwrap();}
+        assert_eq!(batch.layer.count,5);assert_eq!(&batch.layer.ends[..6],&[0,5,7,8,9,18]);assert_eq!(batch.plain,10);
+        for job in 0..5 {let p=batch.layer.projections[job];let plain=batch.plain&(1<<job)!=0;let rows=if plain {128} else {4};
+            let mut visits=vec![0;p.rows as usize];
+            for block in batch.layer.ends[job]..batch.layer.ends[job+1] {for lane in 0..rows {let row=(block-batch.layer.ends[job])*rows+lane;if row<p.rows {visits[row as usize]+=1;}}}
+            assert!(visits.iter().all(|&count|count==1));
+        }
+    }
+    #[test]
+    fn invalid_and_overfull_batches_refuse_before_mutation() {
+        let mut batch=ResidentProjectionBatch::default();let mut invalid=projection(4);invalid.tokens=2;assert!(batch.push(invalid,false).is_err());assert_eq!(batch.layer.count,0);
+        invalid=projection(4);invalid.cols=31;assert!(batch.push(invalid,true).is_err());assert_eq!(batch.layer.count,0);
+        for _ in 0..9 {batch.push(projection(4),false).unwrap();}
+        assert!(batch.push(projection(4),false).is_err());assert_eq!(batch.layer.count,9);
+    }
+}

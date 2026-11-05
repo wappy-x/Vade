@@ -2242,7 +2242,13 @@ engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:ResidentMxfp8Projection::
 engine/crates/gpu	src/ordered_projection_kernel.rs	fn:project_f32_ordered	block:1
 # Causal site accounting: reports/own-glm-expert-path-r1.txt, RULING 14:18.
 # Output initialization fix: 2ada7f62d. Independent merge safety review stays required.
-engine/crates/gpu	src/backend/expert_ops.rs	impl:Backend::fn:expert_operation	block:1	ruling 2026-11-04 14:16
+engine/crates/gpu	src/backend/expert_ops.rs	impl:Backend::fn:launch_experts	block:1	ruling 2026-11-04 14:16
 engine/crates/gpu/kernels	src/expert_ops.rs	fn:expert_operation	block:1	ruling 2026-11-04 14:16
 engine/crates/gpu	src/backend/causal_ops.rs	impl:Backend::fn:causal_operation	block:1	ruling 2026-11-04 14:18
 engine/crates/gpu/kernels	src/causal_ops.rs	fn:causal_operation	block:1	ruling 2026-11-04 14:18
+# Resident copy boundary: existing flash_hybrid_copy kernel; SAFETY contract and views device test. Merge safety review required.
+engine/crates/gpu	src/backend/resident_views.rs	impl:Backend::fn:resident_join	block:1	ruling 2026-11-05 06:50
+
+engine/crates/gpu/kernels	src/tp_mailbox.rs	fn:tp_mailbox_put_finite	block:1	ruling 2026-11-05 06:50
+engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:Backend::fn:resident_projection_batch	block:1
+engine/crates/gpu/kernels	src/next_decode.rs	fn:flash_resident_projection_batch	block:1

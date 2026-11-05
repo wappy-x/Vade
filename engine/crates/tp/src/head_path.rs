@@ -52,7 +52,7 @@ impl<'c> Head<'c> {
         need(hidden.len()==self.shape.hidden(),"final hidden extent differs")?;spark_gpu_probe::mhc_boundary::check_bf16(hidden)?;
         let normalized=crate::causal_layer::norm(self.norm,hidden,&self.norm_weight);
         let (accumulator,logits)=match &self.projection {
-            Projection::Mx(p)=>{let (_,a,y)=p.dynamic_reference(&normalized)?;(a,y)},
+            Projection::Mx(p)=>{let (_,a,y)=p.dynamic_reference_positive_zero(&normalized)?;(a,y)},
             Projection::Bf16 {name,shape}=>{let a=causal_ops::reference(*shape,[&normalized,&[],&[],&[]],&plain(self.checkpoint,name)?)?;
                 let y=a.iter().copied().map(rounded).collect();(a,y)},
         };

@@ -1,8 +1,8 @@
 //! Bounded causal recipe interpreter. Full service admission stays separate.
 use crate::{Result,causal_layer,mxfp8_projection::Mxfp8Projection,layer_driver::LayerBoundary};
-use engine_model::{plan::{admission::CheckpointAdmission,layer::{Kind,LayerPlan,Topology},state::StatePlan,storage::WeightStorage,description::TokenMixer},safetensors::Dtype,flash::{nvfp4,activation_nvfp4::Activation}};
+use engine_model::{plan::{admission::CheckpointAdmission,layer::{Kind,LayerPlan,LayerSchedule,Topology},state::StatePlan,storage::WeightStorage,description::TokenMixer},safetensors::Dtype,flash::{nvfp4,activation_nvfp4::Activation}};
 use spark_gpu_probe::{causal_ops::{Shape,Op},norm_boundary::{NormShape,WeightType}};
-use std::collections::BTreeMap;
+use std::{cell::RefCell,collections::BTreeMap};
 pub const PROMPT_ROWS:usize=4;
 fn need(ok:bool,why:&str)->Result<()> {if ok {Ok(())} else {Err(why.into())}}
 fn shape(op:Op)->Shape {Shape {op,heads:0,dim:0,taps:0,rows:0,cols:0,epsilon:0.0,bound:0.0}}
@@ -27,6 +27,7 @@ pub trait Compute {
     fn prepare(&self,_:&CheckpointAdmission)->Result<()> {Ok(())}
     fn projection(&self,_:&CheckpointAdmission,_:&str,_:&Self::Value,_:bool)->Result<Option<Self::Value>> {Ok(None)}
     fn projection_rows(&self,_:&CheckpointAdmission,_:&str,_:&[&Self::Value],_:bool)->Result<Option<Vec<Self::Value>>> {Ok(None)}
+    fn projection_batch(&self,_:&CheckpointAdmission,_:&[(&str,&Self::Value)],_:bool)->Result<Option<Vec<Self::Value>>> {Ok(None)}
     fn repeated_projection(&self,c:&CheckpointAdmission,name:&str,x:&Self::Value,round:bool)->Result<Option<Self::Value>> {self.projection(c,name,x,round)}
     fn embedding(&self,_:u32,_:usize)->Result<Option<Self::Value>> {Ok(None)}
     fn upload(&self,v:&[f32])->Result<Self::Value>;
@@ -44,22 +45,22 @@ pub trait Compute {
 }
 pub struct State<V> {pub position:u64,pub layers:Vec<BTreeMap<String,V>>}
 pub struct Decoder<'f,C:Compute> {checkpoint:&'f CheckpointAdmission,compute:C,capacity:u64,parameters:BTreeMap<String,Vec<f32>>,
-    blocks:BTreeMap<(usize,usize),crate::layer_operands::ResidualBlockOperands>,recurrent_plans:Vec<Option<LayerPlan>>}
+    blocks:BTreeMap<(usize,usize),crate::layer_operands::ResidualBlockOperands>,schedules:RefCell<Vec<LayerSchedule>>}
 impl<'f,C:Compute> Decoder<'f,C> {
     pub fn new(checkpoint:&'f CheckpointAdmission,compute:C,capacity:u64)->Result<Self> {
         let d=checkpoint.description();need(!d.layers.is_empty() && d.hidden>0 && d.residual.streams>0 && d.vocab>0 && d.vocab<=u32::MAX as u64 && !d.tied_embeddings,"unsupported bounded text geometry")?;
         need(capacity>0 && capacity<=checkpoint.description().max_positions,"bounded decoder capacity exceeds the recipe")?;
-        let mut parameters=BTreeMap::new();let mut blocks=BTreeMap::new();let mut recurrent_plans=Vec::new();let topology=Topology {rank:0,parts:1};
+        let mut parameters=BTreeMap::new();let mut blocks=BTreeMap::new();let mut schedules=Vec::new();let topology=Topology {rank:0,parts:1};
         let storage=StatePlan::new(d,topology,capacity,isize::MAX as usize).map_err(|e|e.to_string())?;
         for layer in 0..d.layers.len() {let boundary=LayerBoundary::new(d,checkpoint.headers(),&storage,layer,1,topology,usize::MAX)?;
-            recurrent_plans.push(if matches!(d.layers[layer].mixer,TokenMixer::Kda(_)) {Some(boundary.program().clone())} else {None});
+            schedules.push(LayerSchedule::new(d,layer,topology).map_err(|e|e.to_string())?);
             for (index,step) in boundary.program().steps.iter().enumerate() {
                 if step.kind==Kind::MhcPrepare {blocks.insert((layer,index),boundary.prepare_residual_block_checkpoint(index,checkpoint)?);}
                 for w in &step.weights {if w.storage==WeightStorage::Plain && !parameters.contains_key(&w.name) {parameters.insert(w.name.clone(),plain(checkpoint,&w.name)?);}}
             }
         }
         let name="model.language_model.norm.weight";parameters.insert(name.into(),plain(checkpoint,name)?);
-        compute.prepare(checkpoint)?;Ok(Self {checkpoint,compute,capacity,parameters,blocks,recurrent_plans})
+        compute.prepare(checkpoint)?;Ok(Self {checkpoint,compute,capacity,parameters,blocks,schedules:RefCell::new(schedules)})
     }
     pub fn zero_state(&self)->Result<State<C::Value>> {
         let mut layers=Vec::new();for layer in 0..self.checkpoint.description().layers.len() {
@@ -141,11 +142,10 @@ impl<'f,C:Compute> Decoder<'f,C> {
         let count=residuals.len();let c=self.checkpoint;let d=c.description();let b=&self.compute;
         need(first_context>0 && first_context.checked_add(count as u64-1).is_some_and(|n|n<=self.capacity && n<=u32::MAX as u64),"bounded layer context exceeds capacity")?;
         let planning=std::time::Instant::now();
-        // Recurrent geometry is independent of the token position (lane A 5e3e7fccc).
-        // Reuse its validated schedule. Latent cache shapes still depend on the
-        // causal context and require a new plan for each prompt row.
-        let cached=self.recurrent_plans.get(layer).and_then(Option::as_ref);
-        let plans=(0..count).map(|row|match cached {Some(p)=>Ok(p.clone()),None=>LayerPlan::new(d,layer,first_context+row as u64,Topology {rank:0,parts:1}).map_err(|e|e.to_string())}).collect::<Result<Vec<_>>>()?;
+        // Session metadata and operation order do not depend on position (lane A 439bcd2b4).
+        // Each prompt row takes the validated schedule rebound to its own context.
+        let plans={let mut schedules=self.schedules.borrow_mut();let schedule=schedules.get_mut(layer).ok_or("bounded layer is outside recipe")?;
+            (0..count).map(|row|schedule.at(first_context+row as u64).map(Clone::clone).map_err(|e|e.to_string())).collect::<Result<Vec<_>>>()?};
         b.plan_cost(planning.elapsed().as_nanos());
         let names=match d.layers[layer].mixer {
             TokenMixer::Kda(_)=>vec![("kda.history","next_history"),("kda.state","next_state")],
@@ -153,13 +153,17 @@ impl<'f,C:Compute> Decoder<'f,C> {
         };
         let mut all_values=(0..count).map(|_|BTreeMap::new()).collect::<Vec<_>>();
         for (values,residual) in all_values.iter_mut().zip(residuals) {values.insert("residual".to_owned(),b.range(residual,0,d.hidden as usize*d.residual.streams as usize)?);}
-        let mut all_passes=(0..count).map(|_|BTreeMap::new()).collect::<Vec<_>>();let mut skip=0;
+        let mut all_passes=(0..count).map(|_|BTreeMap::new()).collect::<Vec<_>>();let mut skip=0;let mut projected=std::collections::BTreeSet::new();
         for index in 0..plans[0].steps.len() {
             if skip>0 {skip-=1;continue;}
+            if projected.remove(&index) {continue;}
             let first=&plans[0].steps[index];
             need(plans.iter().all(|p|p.steps.len()==plans[0].steps.len() && p.steps[index].kind==first.kind && p.steps[index].id==first.id),"prompt row programs differ")?;
             if first.kind==Kind::Project {
                 for row in 0..count {self.import_row_state(row,index,&plans,&names,state,&mut all_values)?;}
+                if count==1 {let done=self.independent_batch(index,&plans[0],&mut all_values[0])?;
+                    if !done.is_empty() {projected.extend(done);continue;}
+                }
                 let inputs=(0..count).map(|row|all_values[row].get(&plans[row].steps[index].inputs[0]).ok_or_else(||"prompt projection input is absent".into())).collect::<Result<Vec<_>>>()?;
                 let router=plans[0].steps.iter().any(|s|s.kind==Kind::Route && s.inputs.contains(&first.outputs[0].name));
                 let output=self.project_rows(&first.weights[0].name,&inputs,!router)?;
@@ -167,6 +171,10 @@ impl<'f,C:Compute> Decoder<'f,C> {
                 for (row,value) in output.into_iter().enumerate() {all_values[row].insert(plans[row].steps[index].outputs[0].name.clone(),value);}continue;
             }
             if matches!(first.kind,Kind::ExpertProject|Kind::ExpertDown) {
+                if count==1 {
+                    let span=if first.kind==Kind::ExpertProject && plans[0].steps.get(index+1).is_some_and(|next|next.kind==Kind::ExpertProject && next.inputs==first.inputs) {2} else {1};
+                    if self.expert_batch(index,span,&plans[0],&mut all_values[0])? {skip=span-1;continue;}
+                }
                 self.expert_rows(index,&plans,&mut all_values)?;continue;
             }
             for row in 0..count {
@@ -272,6 +280,53 @@ impl<'f,C:Compute> Decoder<'f,C> {
     fn project_rows(&self,name:&str,input:&[&C::Value],round:bool)->Result<Vec<C::Value>> {
         if let Some(values)=self.compute.projection_rows(self.checkpoint,name,input,round)? {return Ok(values);}
         input.iter().map(|row|self.project(name,row,round)).collect()
+    }
+    fn expert_batch(&self,index:usize,span:usize,plan:&LayerPlan,values:&mut BTreeMap<String,C::Value>)->Result<bool> {
+        let compute=&self.compute;let first=&plan.steps[index];let ids=compute.read(&values[&first.inputs[1]])?;
+        let mut selected=Vec::new();
+        for (slot,id) in ids.into_iter().enumerate() {
+            need(id>=0.0 && id.fract()==0.0 && (id as usize)<first.weights.len(),"bounded batch expert ID is outside recipe")?;
+            let id=id as usize;need(!selected.iter().any(|&(_,prior)|prior==id),"bounded batch route repeats an expert")?;selected.push((slot,id));
+        }
+        selected.sort_by_key(|&(_,id)|id);
+        let mut owned=Vec::new();let mut names=Vec::new();let mut slots=Vec::new();
+        for stage in index..index+span {let step=&plan.steps[stage];
+            for &(slot,id) in &selected {
+                let weight=step.weights.get(id).ok_or("bounded batch expert weight is absent")?;
+                let source=values.get(&step.inputs[0]).ok_or("bounded batch input is absent")?;
+                owned.push(if step.kind==Kind::ExpertDown {let width=usize::try_from(weight.shape[1]).map_err(|_|"bounded batch feature extent overflow")?;
+                    Some(compute.range(source,slot.checked_mul(width).ok_or("bounded batch slot overflow")?,width)?)} else {None});
+                names.push(weight.name.as_str());slots.push((stage-index,slot));
+            }
+        }
+        let input=names.iter().enumerate().map(|(job,name)|(*name,owned[job].as_ref().unwrap_or(&values[&plan.steps[index+slots[job].0].inputs[0]]))).collect::<Vec<_>>();
+        let Some(projected)=compute.projection_batch(self.checkpoint,&input,true)? else {return Ok(false);};
+        need(projected.len()==slots.len(),"bounded batch output count differs")?;
+        let mut outputs=(0..span).map(|_|(0..selected.len()).map(|_|None).collect::<Vec<_>>()).collect::<Vec<_>>();
+        for ((stage,slot),value) in slots.into_iter().zip(projected) {outputs[stage][slot]=Some(value);}
+        for (stage,output) in outputs.into_iter().enumerate() {
+            let refs=output.iter().map(|value|value.as_ref().ok_or_else(||"bounded batch expert output is absent".into())).collect::<Result<Vec<_>>>()?;
+            let output=compute.join(&refs)?;values.insert(plan.steps[index+stage].outputs[0].name.clone(),output);
+        }Ok(true)
+    }
+    fn independent_batch(&self,index:usize,plan:&LayerPlan,values:&mut BTreeMap<String,C::Value>)->Result<Vec<usize>> {
+        let first=&plan.steps[index];if first.inputs.len()!=1 {return Ok(Vec::new());}
+        let source=&first.inputs[0];let mut selected=Vec::new();
+        for (stage,step) in plan.steps.iter().enumerate().skip(index) {
+            if step.outputs.iter().any(|output|&output.name==source) {break;}
+            if step.kind!=Kind::Project || step.inputs!=first.inputs || step.weights.len()!=1 || step.outputs.len()!=1 {continue;}
+            let output=&step.outputs[0].name;
+            if plan.steps.iter().any(|candidate|candidate.kind==Kind::Route && candidate.inputs.contains(output))
+                || plan.steps.iter().filter(|candidate|candidate.outputs.iter().any(|buffer|&buffer.name==output)).count()!=1 {continue;}
+            selected.push(stage);if selected.len()==9 {break;}
+        }
+        if selected.len()<2 || selected[0]!=index {return Ok(Vec::new());}
+        let value=values.get(source).ok_or("bounded independent projection input is absent")?;
+        let input=selected.iter().map(|&stage|(plan.steps[stage].weights[0].name.as_str(),value)).collect::<Vec<_>>();
+        let Some(output)=self.compute.projection_batch(self.checkpoint,&input,true)? else {return Ok(Vec::new());};
+        need(output.len()==selected.len(),"bounded independent projection output count differs")?;
+        for (&stage,value) in selected.iter().zip(output) {values.insert(plan.steps[stage].outputs[0].name.clone(),value);}
+        Ok(selected)
     }
     fn expert_rows(&self,index:usize,plans:&[LayerPlan],values:&mut [BTreeMap<String,C::Value>])->Result<()> {
         let b=&self.compute;let mut groups:BTreeMap<usize,Vec<(usize,usize)>>=BTreeMap::new();

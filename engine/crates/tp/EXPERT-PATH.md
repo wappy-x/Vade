@@ -16,8 +16,9 @@ Each block contains 16 source values, as declared by NVFP4 `group_size`.
 The block scale uses `amax / input_scale / 6` and nearest-even E4M3 rounding.
 Each source value uses `(source / input_scale) / block_scale` and nearest-even E2M1 rounding.
 The checkpoint supplies `input_scale`. The probe does not recalibrate it.
-The quantizer preserves signed zero and saturates finite encodings.
-A zero block scale gives signed zero codes.
+The quantizer maps an exact input of either zero sign to positive zero.
+A negative nonzero input keeps its sign when rounding gives zero.
+This includes a zero block scale. Finite encodings saturate as before.
 
 The projection visits columns in ascending order with FP32 accumulation.
 It folds `(weight_block * activation_block) * (weight_global * activation_global)` once per block.
@@ -30,6 +31,27 @@ The final fold visits ascending expert IDs and rounds each contribution and addi
 It adds shared output last.
 These rules follow the orchestrator contract and the scalar cast recipe.
 The logical FP32 decoder reference retains its separate meaning.
+
+The bounded resident decoder can group independent NVFP4 matrices for one token.
+It groups adjacent expert projections only when their input bindings match.
+The device batch requires equal row ownership and matrix dimensions.
+Each output row keeps the same complete ascending feature sum.
+Activation reuse requires the same immutable input address, feature count and input-scale bits.
+The batch keeps the existing projection and caller BF16 rounding boundaries.
+Each rank stores its complete local matrix rows in job order.
+One gather collects rank-major bytes. The caller restores each matrix's rank order before upload.
+Grouped prompt rows and unsupported storage keep the separate projection path.
+
+The single-token decoder can also group independent ordinary projections.
+It selects only unique outputs that use the same immutable input binding.
+It stops at a new producer of that input and does not move a router projection.
+A mixed-storage grid keeps MXFP8's original complete warp row tree.
+Plain resident weights keep separate round-to-nearest FP32 products and ascending adds.
+MXFP8 output still rounds to BF16. Plain output follows the caller's rounding request.
+One dynamic activation quantizer can serve identical MXFP8 inputs.
+Variable row spans gather once in rank-major order, then restore each matrix's rows.
+Replicated matrix rows occur only once in each restored output.
+The checked launch accepts caller-owned output and rejects operand aliasing.
 
 Run the probe with a saved `layer-step` output directory:
 

@@ -19,9 +19,9 @@ pub use fp8::{Fp8GroupedScratch, Fp8RoutingFlag};
 #[path = "backend/weights.rs"] mod weights;
 #[path = "backend/kernels.rs"] mod kernels;
 #[path = "backend/dense_tile.rs"] mod dense_tile;
-#[path = "backend/dense.rs"] mod dense;
+#[path = "backend/dense.rs"] mod dense; #[path = "backend/resident_views.rs"] mod resident_views; #[path = "backend/resident_queue.rs"] mod resident_queue; pub use resident_queue::ResidentQueue;
 #[path = "backend/mhc.rs"] mod mhc; pub use mhc::{Bf16Vector,ResidentMhc,MhcPass}; use kernels::AbKernels;
-#[path = "backend/text_edges.rs"] mod text_edges; pub use text_edges::ResidentTextEdges; #[path = "backend/norm.rs"] mod norm; pub use norm::{ResidentNorm,NormOutput}; #[path = "backend/mxfp8_projection.rs"] mod mxfp8_projection; pub use mxfp8_projection::{ResidentMxfp8Projection,Mxfp8ProjectionPass};
+#[path = "backend/text_edges.rs"] mod text_edges; pub use text_edges::ResidentTextEdges; #[path = "backend/norm.rs"] mod norm; pub use norm::{ResidentNorm,NormOutput}; #[path = "backend/mxfp8_projection.rs"] mod mxfp8_projection; pub use mxfp8_projection::{ResidentMxfp8Projection,Mxfp8ProjectionPass,ResidentProjection};
 
 pub struct Matrix<'a> { buffer: Buffer<'a>, rows: usize, cols: usize, packed: bool, packed_blocked: bool, stride: usize, row_offset: usize, column_offset: usize, scalar_f32: bool, fp8_scales: Option<Buffer<'a>>, fp8_fragments: bool }
 /// One official-dtype allocation; views are offsets and packing only permutes bytes.

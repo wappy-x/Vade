@@ -34,9 +34,9 @@ impl<'a> ResidentNorm<'_,'a> {
         if input.vector().is_segmented() {return Err("resident norm requires a contiguous input".into());}
         let mut normalized=b.vector(h)?;let mut partials=b.vector(h.div_ceil(128))?;
         let launched=b.model_rms_device(input.vector(),None,&mut normalized,&mut partials,h,1,s.epsilon());
-        let completed=b.synchronize();launched.and(completed)?;
+        let completed=b.resident_completion();launched.and(completed)?;
         let launched=b.model_elementwise_device(&normalized,Some(&self.weight),&normalized,h,4,1.0);
-        let completed=b.synchronize();launched.and(completed)?;
+        let completed=b.resident_completion();launched.and(completed)?;
         match s.weight_type() {
             WeightType::Bf16=>Ok(NormOutput::Bf16(b.round_bf16_lanes(&normalized)?)),
             WeightType::F32=>Ok(NormOutput::F32(normalized)),

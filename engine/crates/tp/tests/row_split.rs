@@ -19,6 +19,7 @@ fn shared_chat_parser_keeps_plain_greedy_streaming_and_explicit_sampling() {
 }
 struct Prepared {
     tx:std::sync::mpsc::Sender<()>,rx:std::sync::mpsc::Receiver<()>,calls:std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    batches:std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 impl Compute for Prepared {
     type Value=Vec<f32>;type Pass=<Host as Compute>::Pass;
@@ -26,6 +27,25 @@ impl Compute for Prepared {
         self.tx.send(()).map_err(|e|e.to_string())?;
         self.rx.recv_timeout(std::time::Duration::from_secs(2)).map_err(|e|format!("session preparation is not paired: {e}"))?;
         self.calls.fetch_add(1,std::sync::atomic::Ordering::SeqCst);Ok(())
+    }
+    fn projection_batch(&self,checkpoint:&engine_model::plan::admission::CheckpointAdmission,input:&[(&str,&Vec<f32>)],round:bool)->Result<Option<Vec<Vec<f32>>>> {
+        self.batches.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+        input.iter().map(|(name,input)| {
+            let upload=checkpoint.upload(name).map_err(|error|error.to_string())?;
+            if upload.storage==engine_model::plan::storage::WeightStorage::Mxfp8 {
+                let activation=spark_gpu_probe::dynamic_mxfp8::Activation::from_f32(input)?;
+                let shape=spark_gpu_probe::mxfp8_projection::Shape::new(upload.shape[0] as usize,upload.shape[1] as usize,spark_gpu_probe::norm_boundary::WeightType::F32)?;
+                return Ok(shape.reference(&upload.weight,&upload.scales,activation.decoded())?.1);
+            }
+            assert_eq!(upload.storage,engine_model::plan::storage::WeightStorage::Plain);
+            let weight=match upload.dtype {
+                Dtype::Bf16=>upload.weight.chunks_exact(2).map(|word|f32::from_bits(u32::from(u16::from_le_bytes(word.try_into().unwrap()))<<16)).collect::<Vec<_>>(),
+                Dtype::F32=>upload.weight.chunks_exact(4).map(|word|f32::from_le_bytes(word.try_into().unwrap())).collect(),_=>return Err("batch fixture requires plain weights".into()),
+            };
+            let shape=spark_gpu_probe::causal_ops::Shape {op:spark_gpu_probe::causal_ops::Op::Project,heads:0,dim:0,taps:0,rows:upload.shape[0] as u32,cols:upload.shape[1] as u32,epsilon:0.0,bound:0.0};
+            let value=Host.operation(shape,[Some(input),None,None,None],&weight)?;
+            if round {Host.round(&value)} else {Ok(value)}
+        }).collect::<Result<Vec<_>>>().map(Some)
     }
     fn upload(&self,v:&[f32])->Result<Vec<f32>> {Host.upload(v)}
     fn read(&self,v:&Vec<f32>)->Result<Vec<f32>> {Host.read(v)}
@@ -62,14 +82,18 @@ fn scalar_service_generates_four_exact_tokens_across_row_parts_and_new_sessions(
     let (a_tx,b_rx)=sync_channel(1);let (b_tx,a_rx)=sync_channel(1);
     let (ap_tx,bp_rx)=std::sync::mpsc::channel();let (bp_tx,ap_rx)=std::sync::mpsc::channel();
     let calls=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let batches=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     std::thread::scope(|scope| {
         let checkpoint=&c.admission;
         let worker_calls=calls.clone();
+        let worker_batches=batches.clone();
         let worker=scope.spawn(move || {
-            let split=Split::new(Prepared {tx:bp_tx,rx:bp_rx,calls:worker_calls},Wire {topology:Topology {rank:1,parts:2},controller:false,tx:b_tx,rx:b_rx}).unwrap();
+            let prepared=Prepared {tx:bp_tx,rx:bp_rx,calls:worker_calls,batches:worker_batches};
+            let split=Split::new(&prepared,Wire {topology:Topology {rank:1,parts:2},controller:false,tx:b_tx,rx:b_rx}).unwrap();
             Factory::new(checkpoint,split,8,vec![0]).unwrap().worker().unwrap();
         });
-        let split=Split::new(Prepared {tx:ap_tx,rx:ap_rx,calls:calls.clone()},Wire {topology:Topology {rank:0,parts:2},controller:true,tx:a_tx,rx:a_rx}).unwrap();
+        let prepared=Prepared {tx:ap_tx,rx:ap_rx,calls:calls.clone(),batches:batches.clone()};
+        let split=Split::new(&prepared,Wire {topology:Topology {rank:0,parts:2},controller:true,tx:a_tx,rx:a_rx}).unwrap();
         let service=Factory::new(checkpoint,split,8,vec![0]).unwrap();let reference=Decoder::new(checkpoint,Host,8).unwrap();
         for repeat in 0..3 {
             let mut session=service.session().unwrap();assert!(service.session().is_err());assert!(!session.can_fork());
@@ -90,5 +114,6 @@ fn scalar_service_generates_four_exact_tokens_across_row_parts_and_new_sessions(
         }
         service.shutdown().unwrap();worker.join().unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst),8);
+        assert!(batches.load(std::sync::atomic::Ordering::SeqCst)>0);
     });
 }

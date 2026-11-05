@@ -12,7 +12,7 @@ fn root(x:f32)->f32 {
 }
 #[repr(u32)]
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
-pub enum Op {Conv,Prepare,Step,GatedNorm,SwiGlu,Project,KeyNorm,Pool,PoolScores,Select,Gather,Scores,Softmax,Values,Route,ExpertFold,Nvfp4,StreamMean,Mxfp8Quantize,UnpackKv,StepColumns,StepLayout,ConvChannels,ConvLayout,ProjectRows,PoolChannels,PoolLayout}
+pub enum Op {Conv,Prepare,Step,GatedNorm,SwiGlu,Project,KeyNorm,Pool,PoolScores,Select,Gather,Scores,Softmax,Values,Route,ExpertFold,Nvfp4,StreamMean,Mxfp8Quantize,UnpackKv,StepColumns,StepLayout,ConvChannels,ConvLayout,ProjectRows,PoolChannels,PoolLayout,Mxfp8QuantizePositiveZero}
 #[repr(C)]
 #[derive(Debug,Clone,Copy)]
 pub struct Shape {pub op:Op,pub heads:u32,pub dim:u32,pub taps:u32,pub rows:u32,pub cols:u32,pub epsilon:f32,pub bound:f32}
@@ -32,7 +32,7 @@ impl Shape {
             Op::GatedNorm if h>0 && d>0 && d<=1024 && self.epsilon>0.0 => ([width,width,0,0],d,h,d),
             Op::SwiGlu if r>0 && self.bound>0.0 => ([r,r,0,0],0,r,1),
             Op::StreamMean if h>0 && d>0 => ([width,0,0,0],0,d,1),
-            Op::Mxfp8Quantize if k>0 && k%32==0 && r<=2 => ([k,0,0,0],0,k,1),
+            Op::Mxfp8Quantize|Op::Mxfp8QuantizePositiveZero if k>0 && k%32==0 && r<=2 => ([k,0,0,0],0,k,1),
             Op::UnpackKv if r>0 && h>0 && d>0 && k>0 && t<=r =>
                 ([t.checked_mul(h)?.checked_mul(d.checked_add(k)?)?,0,0,0],0,r.checked_mul(h)?.checked_mul(d.checked_add(k)?)?,1),
             Op::Nvfp4 if r>0 && k>0 && k%16==0 => ([k,r.checked_mul(k/16)?,0,0],r.checked_mul(k)?,r,1),
@@ -123,6 +123,7 @@ pub fn unit(s:Shape,index:usize,x:[&[f32];4],w:&[f32],out:&mut[f32]) {
             out[0]=round(round(gate*sigmoid(gate))*up);},
         Op::StreamMean=>{let mut sum=0.0;for stream in 0..heads {sum+=x[0][stream*d+index];}out[0]=round(sum/heads as f32);},
         Op::Mxfp8Quantize=>{out[0]=crate::mxfp8_quantize::lane(x[0],index,s.rows);},
+        Op::Mxfp8QuantizePositiveZero=>{out[0]=crate::mxfp8_quantize::positive_zero_lane(x[0],index,s.rows);},
         Op::UnpackKv=>{let values=s.cols as usize;let keys=s.rows as usize*heads*d;
             let (row,feature)=if index<keys {(index/d,index%d)} else {let i=index-keys;(i/values,d+i%values)};
             out[0]=if row<taps*heads {x[0][row*(d+values)+feature]} else {0.0};

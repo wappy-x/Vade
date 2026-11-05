@@ -6,8 +6,14 @@ impl Mxfp8Projection<'_> {
     /// The recipe rounds source activations to BF16 before dynamic quantization.
     /// Decoded MXFP8 values reach the fixed FP32 projection without another cast.
     pub fn dynamic_reference(&self,input:&[f32])->Result<(Activation,Vec<f32>,Vec<f32>)> {
+        self.reference_with_zero_sign(input,false)
+    }
+    pub fn dynamic_reference_positive_zero(&self,input:&[f32])->Result<(Activation,Vec<f32>,Vec<f32>)> {
+        self.reference_with_zero_sign(input,true)
+    }
+    fn reference_with_zero_sign(&self,input:&[f32],positive_zero:bool)->Result<(Activation,Vec<f32>,Vec<f32>)> {
         self.shape().check_input(input)?;
-        let activation=Activation::from_f32(input)?;let (weight,scale)=self.read()?;
+        let activation=if positive_zero {Activation::from_f32_positive_zero(input)?} else {Activation::from_f32(input)?};let (weight,scale)=self.read()?;
         let (accumulator,output)=self.dynamic_shape()?.reference(&weight,&scale,activation.decoded())?;
         Ok((activation,accumulator,output))
     }
@@ -15,8 +21,16 @@ impl Mxfp8Projection<'_> {
     /// Keep the original row descriptors. Only the activation contract changes.
     #[cfg(target_os="linux")]
     pub fn load_dynamic<'b,'d>(&self,backend:&'b spark_gpu_probe::driver::Backend<'d>)->Result<ResidentDynamicProjection<'b,'d>> {
+        self.load_dynamic_with_zero_sign(backend,false)
+    }
+    #[cfg(target_os="linux")]
+    pub fn load_dynamic_positive_zero<'b,'d>(&self,backend:&'b spark_gpu_probe::driver::Backend<'d>)->Result<ResidentDynamicProjection<'b,'d>> {
+        self.load_dynamic_with_zero_sign(backend,true)
+    }
+    #[cfg(target_os="linux")]
+    fn load_dynamic_with_zero_sign<'b,'d>(&self,backend:&'b spark_gpu_probe::driver::Backend<'d>,positive_zero:bool)->Result<ResidentDynamicProjection<'b,'d>> {
         let projection=self.load_f32_input(backend)?;
-        Ok(ResidentDynamicProjection {backend,source:self.shape(),projection})
+        Ok(ResidentDynamicProjection {backend,source:self.shape(),projection,positive_zero})
     }
 }
 
@@ -24,6 +38,7 @@ impl Mxfp8Projection<'_> {
 pub struct ResidentDynamicProjection<'b,'d> {
     backend:&'b spark_gpu_probe::driver::Backend<'d>,source:Shape,
     projection:spark_gpu_probe::driver::ResidentMxfp8Projection<'b,'d>,
+    positive_zero:bool,
 }
 #[cfg(target_os="linux")]
 pub struct DynamicProjectionPass<'d> {
@@ -31,13 +46,14 @@ pub struct DynamicProjectionPass<'d> {
 }
 #[cfg(target_os="linux")]
 impl<'d> ResidentDynamicProjection<'_,'d> {
+    pub fn resident(&self)->&spark_gpu_probe::driver::ResidentMxfp8Projection<'_,'d> {&self.projection}
     /// Quantize the complete BF16-source groups on the device. The projection
     /// keeps its original feature tree. No activation crosses the host boundary.
     pub fn project_vector(&self,input:&spark_gpu_probe::driver::DeviceVector<'_>)->Result<spark_gpu_probe::driver::Mxfp8ProjectionPass<'d>> {
         use spark_gpu_probe::{causal_ops::{Shape,Op},driver::NormOutput};
         let b=self.backend;b.require_resident_stream()?;
         if input.len()!=self.source.cols() || input.is_segmented() {return Err("dynamic MXFP8 input extent differs".into());}
-        let s=Shape {op:Op::Mxfp8Quantize,heads:0,dim:0,taps:0,rows:0,cols:input.len().try_into().map_err(|_|"MXFP8 columns exceed ABI")?,epsilon:0.0,bound:0.0};
+        let s=Shape {op:if self.positive_zero {Op::Mxfp8QuantizePositiveZero} else {Op::Mxfp8Quantize},heads:0,dim:0,taps:0,rows:0,cols:input.len().try_into().map_err(|_|"MXFP8 columns exceed ABI")?,epsilon:0.0,bound:0.0};
         let decoded=b.causal_operation(s,[Some(input),None,None,None],None)?;
         self.projection.apply(&NormOutput::F32(decoded))
     }
@@ -56,7 +72,7 @@ impl<'d> ResidentDynamicProjection<'_,'d> {
         let b=self.backend;b.require_resident_stream()?;
         if input.len()!=self.source.cols() || input.is_segmented() {return Err("dynamic MXFP8 input extent differs".into());}
         let values=b.read_vector_values(input)?;self.source.check_input(&values)?;
-        let activation=Activation::from_f32(&values)?;
+        let activation=if self.positive_zero {Activation::from_f32_positive_zero(&values)?} else {Activation::from_f32(&values)?};
         let uploaded=spark_gpu_probe::driver::NormOutput::F32(b.upload_vector(activation.decoded())?);b.synchronize()?;
         let projection=self.projection.apply(&uploaded)?;
         Ok(DynamicProjectionPass {activation,projection})

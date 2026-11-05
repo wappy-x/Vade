@@ -16,7 +16,7 @@ impl<'a> Backend<'a> {
             None if weights==0=>4,_=>return Err("causal operation weight count differs".into())};
         self.require_arm_kernels(&["causal_operation","project_f32_ordered"])?;
         let mut output=self.vector(units*words)?;
-        self.zero_vector(&mut output)?;self.synchronize()?;
+        self.zero_vector(&mut output)?;self.resident_completion()?;
         let mut args=Arguments {input:addresses,weight:address,output:output.device_address(),shape};
         let (mut w,mut x,mut y)=(address,addresses[0],output.device_address());
         let (mut rows,mut cols)=(shape.rows,shape.cols);
@@ -30,6 +30,6 @@ impl<'a> Backend<'a> {
             self.launch_flash("project_f32_ordered",(units as u32).div_ceil(128),128,
                 &mut [parameter(&mut w),parameter(&mut x),parameter(&mut y),parameter(&mut rows),parameter(&mut cols)])
         } else {self.launch_flash("causal_operation",(units as u32).div_ceil(128),128,&mut [parameter(&mut args)])}};
-        let completed=self.synchronize();launched.and(completed)?;Ok(output)
+        let completed=self.resident_completion();launched.and(completed)?;Ok(output)
     }
 }

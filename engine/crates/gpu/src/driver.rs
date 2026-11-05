@@ -163,6 +163,8 @@ struct Context {
     pending: Cell<bool>,
     // A verify segment capture is open (VADE_MTP_GRAPH): frees wait in `deferred_frees`.
     capturing: Cell<bool>,
+    // A scoped resident queue retains dropped allocations until a real stream drain.
+    resident_queued: Cell<bool>,
     deferred_frees: RefCell<Vec<(DevicePtr, usize, Option<Handle>, Reuse)>>,
     deferred_total: Cell<usize>,
     kv_reserve: RefCell<segments::Reserve>,
@@ -201,7 +203,7 @@ impl Context {
             let mut raw = ptr::null_mut();
             check(cuCtxCreate_v2(&mut raw, 0, device), "cuCtxCreate_v2")?;
             drop(initialization);
-            let context = Self { raw, device, multiprocessors: multiprocessors as usize, _thread: PhantomData, cleanup_errors: RefCell::new(Vec::new()), execution_error: RefCell::new(None), allocated: Cell::new(0), peak_allocated: Cell::new(0), graph_storage: Cell::new(0), peak_graph_storage: Cell::new(0), peak_accounted: Cell::new(0), graph_budget: Cell::new(usize::MAX), pinned_staging: Cell::new(0), peak_pinned_staging: Cell::new(0), budget: Cell::new(usize::MAX), memory_baseline: Cell::new(None), pending: Cell::new(false), capturing: Cell::new(false), deferred_frees: RefCell::new(Vec::new()), deferred_total: Cell::new(0), kv_reserve: RefCell::new(segments::Reserve::default()), vector_pool: RefCell::new(segments::Reserve::vectors()), progress, decode_profile, jit_receipts };
+            let context = Self { raw, device, multiprocessors: multiprocessors as usize, _thread: PhantomData, cleanup_errors: RefCell::new(Vec::new()), execution_error: RefCell::new(None), allocated: Cell::new(0), peak_allocated: Cell::new(0), graph_storage: Cell::new(0), peak_graph_storage: Cell::new(0), peak_accounted: Cell::new(0), graph_budget: Cell::new(usize::MAX), pinned_staging: Cell::new(0), peak_pinned_staging: Cell::new(0), budget: Cell::new(usize::MAX), memory_baseline: Cell::new(None), pending: Cell::new(false), capturing: Cell::new(false), resident_queued: Cell::new(false), deferred_frees: RefCell::new(Vec::new()), deferred_total: Cell::new(0), kv_reserve: RefCell::new(segments::Reserve::default()), vector_pool: RefCell::new(segments::Reserve::vectors()), progress, decode_profile, jit_receipts };
             if report {
                 println!("device={:?} ordinal={ordinal} driver_api={version} compute={major}.{minor} multiprocessors={multiprocessors}",
                     CStr::from_ptr(name.as_ptr()).to_string_lossy());
@@ -264,7 +266,7 @@ impl Context {
     /// A drop inside a stream capture may neither drain nor free: either one invalidates the
     /// capture. The allocation is released after the next drain (release_deferred).
     fn defer_free(&self, address: DevicePtr, bytes: usize, host: Option<Handle>, reuse: Reuse) {
-        if self.deferred_total.replace(self.deferred_total.get() + 1) == 0 {
+        if self.deferred_total.replace(self.deferred_total.get() + 1) == 0 && self.capturing.get() {
             eprintln!("flash_next mtp_graph deferred_free bytes={bytes} (first; backtrace follows)\n{}", std::backtrace::Backtrace::force_capture());
         }
         self.deferred_frees.borrow_mut().push((address, bytes, host, reuse));
@@ -441,7 +443,7 @@ impl<'a> Buffer<'a> {
 impl Drop for Buffer<'_> {
     fn drop(&mut self) {
         if self.owner.is_some() { return; }
-        if self._context.capturing.get() && self.segments.is_none() {
+        if (self._context.capturing.get() || (self._context.resident_queued.get() && self._context.pending.get())) && self.segments.is_none() {
             self._context.defer_free(self.address, self.bytes, self.host.take(), self.reuse);
             return;
         }
@@ -837,8 +839,8 @@ pub use backend::{with_backend, with_backend_mode, Backend, HostRegistration, Ma
     Fp8GroupedScratch, Fp8RoutingFlag, WeightArena, ExchangeSlot, TpMailbox, TpMailboxHost, TP_MAILBOX_SLOTS};
 pub use backend::{BackendStats, Fence, FrontendStream};
 pub use backend::ResidentTextEdges;
-pub use backend::{ResidentMxfp8Projection,Mxfp8ProjectionPass};
-pub use backend::{DecodeGraph, PromptBuffer};
+pub use backend::{ResidentMxfp8Projection,Mxfp8ProjectionPass,ResidentProjection};
+pub use backend::{DecodeGraph, PromptBuffer, ResidentQueue};
 pub use backend::{Bf16Vector,ResidentMhc,MhcPass,ResidentNorm,NormOutput};
 
 /// VADE_VECTOR_POOL (default on; =0 off): whether a server configures the vector pool

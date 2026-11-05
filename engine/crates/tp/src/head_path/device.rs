@@ -12,7 +12,7 @@ impl<'c> Head<'c> {
     pub fn upload<'h,'b,'d>(&'h self,backend:&'b Backend<'d>)->Result<ResidentHead<'h,'c,'b,'d>> {
         backend.require_resident_stream()?;
         let norm=backend.resident_norm(self.norm,&self.norm_weight)?;
-        let projection=match &self.projection {Projection::Mx(p)=>ResidentProjection::Mx(p.load_dynamic(backend)?),
+        let projection=match &self.projection {Projection::Mx(p)=>ResidentProjection::Mx(p.load_dynamic_positive_zero(backend)?),
             Projection::Bf16 {name,shape}=>ResidentProjection::Bf16 {shape:*shape,weight:backend.upload_vector(&plain(self.checkpoint,name)?)?}};
         backend.synchronize()?;Ok(ResidentHead {head:self,backend,norm,projection})
     }

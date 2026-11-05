@@ -65,6 +65,26 @@ pub fn output_index(op:Op,thread:usize)->Option<usize> {
 #[repr(C)]
 #[derive(Clone,Copy)]
 pub struct Arguments {pub input:[u64;4],pub weight:u64,pub scales:u64,pub output:u64,pub shape:Shape}
+#[repr(C)]
+#[derive(Clone,Copy)]
+pub struct LaunchArguments {pub single:Arguments,pub batch:u64,pub count:u32}
+pub fn projection_batch_index(rows:u32,count:u32,thread:usize)->Option<(usize,usize)> {
+    let blocks=rows.div_ceil(8) as usize;let lane=thread%32;
+    if blocks==0 || lane>=8 {return None;}
+    let job=thread/32/blocks;let row=thread/32%blocks*8+lane;
+    if job>=count as usize || row>=rows as usize {None} else {Some((job,row))}
+}
+#[cfg(not(target_arch="nvptx64"))]
+impl Arguments {
+    pub fn descriptor_words(self)->[u32;24] {
+        let mut words=[0;24];
+        for (index,address) in self.input.into_iter().chain([self.weight,self.scales,self.output]).enumerate() {
+            words[index*2]=address as u32;words[index*2+1]=(address>>32) as u32;
+        }
+        words[14..23].copy_from_slice(&[self.shape.op as u32,self.shape.rows,self.shape.cols,self.shape.block_rows,self.shape.block_cols,
+            self.shape.tokens,self.shape.global.to_bits(),self.shape.activation.to_bits(),self.shape.bound.to_bits()]);words
+    }
+}
 #[inline(always)]
 fn nv_row(s:Shape,index:usize,x:&[f32],w:&[u8],scales:&[u8])->f32 {
     let k=s.cols as usize;
@@ -97,7 +117,7 @@ pub fn unit(s:Shape,index:usize,x:[&[f32];4],w:&[u8],scales:&[u8],out:&mut[f32])
             for &v in row {maximum=maximum.max(round(v).abs());}
             let scale=nearest_e4m3((maximum/s.activation)/6.0);let block=e4m3(scale);
             for pair in 0..8 {
-                let q=|v|if block==0.0 {if round(v).is_sign_negative() {8} else {0}} else {nearest_e2m1((round(v)/s.activation)/block)};
+                let q=|v:f32| {let code=if block==0.0 {0} else {nearest_e2m1((round(v).abs()/s.activation)/block)};code|if v<0.0 {8} else {0}};
                 out[2*pair]=e2m1(q(row[2*pair]));out[2*pair+1]=e2m1(q(row[2*pair+1]));
             }out[16]=block;
         },
@@ -167,6 +187,25 @@ pub fn reference(s:Shape,x:[&[f32];4],w:&[u8],scales:&[u8])->Result<Vec<f32>,Str
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn batch_descriptor_abi_and_complete_warp_row_owners() {
+        use std::mem::{size_of,align_of,offset_of};
+        assert_eq!((size_of::<super::Arguments>(),align_of::<super::Arguments>(),offset_of!(super::Arguments,shape)),(96,8,56));
+        assert_eq!((size_of::<super::LaunchArguments>(),offset_of!(super::LaunchArguments,batch),offset_of!(super::LaunchArguments,count)),(112,96,104));
+        let shape=super::Shape {op:super::Op::NvProject,rows:33,cols:128,block_rows:1,block_cols:16,tokens:1,global:0.75,activation:0.125,bound:0.0};
+        let arguments=super::Arguments {input:[0x1234_5678_9abc_def0,4,4,4],weight:0x2345_6789_abcd_ef01,scales:0x3456_789a_bcde_f012,output:0x4567_89ab_cdef_0123,shape};
+        let words=arguments.descriptor_words();assert_eq!(&words[..2],&[0x9abc_def0,0x1234_5678]);
+        assert_eq!(&words[8..14],&[0xabcd_ef01,0x2345_6789,0xbcde_f012,0x3456_789a,0xcdef_0123,0x4567_89ab]);
+        assert_eq!(&words[14..],&[super::Op::NvProject as u32,33,128,1,16,1,0.75f32.to_bits(),0.125f32.to_bits(),0,0]);
+        for rows in [1u32,7,8,9,17,33,1024,2048] {for count in [1u32,2,8,16] {
+            let mut seen=vec![0;rows as usize*count as usize];
+            for thread in 0..rows.div_ceil(8) as usize*count as usize*32 {
+                if let Some((job,row))=super::projection_batch_index(rows,count,thread) {assert!(thread%32<8);seen[job*rows as usize+row]+=1;}
+            }assert!(seen.iter().all(|&owners|owners==1));
+        }}
+        assert_eq!(super::projection_batch_index(0,1,0),None);assert_eq!(super::projection_batch_index(8,0,0),None);
+        assert_eq!(super::projection_batch_index(8,1,32),None);
+    }
     use super::*;
     fn s(op:Op)->Shape {Shape {op,tokens:1,rows:2,cols:16,block_rows:1,block_cols:16,global:1.0,activation:1.0,bound:10.0}}
     #[test]
@@ -199,7 +238,7 @@ mod tests {
     fn calibrated_bytes_and_global_fold() {
         let mut x=[0.0;16];x[..8].copy_from_slice(&[6.0,0.25,0.75,1.25,1.75,2.5,3.5,5.0]);x[8]=-0.0;
         let q=reference(s(Op::Quantize),[&x,&[],&[],&[]],&[],&[]).unwrap();
-        let expected=[6.0f32,0.0,1.0,1.0,2.0,2.0,4.0,4.0,-0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,1.0];
+        let expected=[6.0f32,0.0,1.0,1.0,2.0,2.0,4.0,4.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,1.0];
         assert_eq!(q.iter().map(|v|v.to_bits()).collect::<Vec<_>>(),expected.map(f32::to_bits));
         let mut shape=s(Op::NvProject);shape.global=2.0;
         let v=reference(shape,[&q,&[],&[],&[]],&[0x22;16],&[0x38;2]).unwrap();assert_eq!(v,[40.0;2]);
@@ -215,11 +254,23 @@ mod tests {
             for (row,lanes) in input.chunks_exact(16).zip(actual.chunks_exact(17)) {
                 let maximum=row.iter().fold(0.0f32,|a,&v|a.max(round(v).abs()));
                 let scale=nearest_e4m3((maximum/activation)/6.0);let block=e4m3(scale);
-                let old=|v:f32|if block==0.0 {if round(v).is_sign_negative() {8} else {0}} else {nearest_e2m1((round(v)/activation)/block)};
+                let old=|v:f32|if v==0.0 {0} else if block==0.0 {if v<0.0 {8} else {0}} else {nearest_e2m1((round(v)/activation)/block)};
                 for j in 0..16 {assert_eq!(lanes[j].to_bits(),e2m1(old(row[j])).to_bits());}
                 assert_eq!(lanes[16].to_bits(),e4m3(scale).to_bits());
             }
         }}
+    }
+    #[test]
+    fn quantizer_keeps_negative_underflow_but_not_exact_negative_zero() {
+        let mut input=[0.0;64];input[..8].copy_from_slice(&[6.0,0.0,-0.0,0.125,-0.125,f32::from_bits(1),-f32::from_bits(1),-0.25]);
+        input[16..32].fill(-0.0);input[32..48].fill(-f32::from_bits(1));input[48..64].fill(-f32::from_bits(0x0001_0000));
+        for op in [Op::Quantize,Op::QuantizeRows] {let mut shape=s(op);shape.cols=64;
+            let q=reference(shape,[&input,&[],&[],&[]],&[],&[]).unwrap();
+            let expected=[6.0f32,0.0,0.0,0.0,-0.0,0.0,-0.0,-0.0];
+            assert_eq!(q[..8].iter().map(|v|v.to_bits()).collect::<Vec<_>>(),expected.map(f32::to_bits));
+            assert!(q[17..34].iter().all(|v|v.to_bits()==0));
+            for block in q[34..].chunks_exact(17) {assert!(block[..16].iter().all(|v|v.to_bits()==(-0.0f32).to_bits()));assert_eq!(block[16].to_bits(),0);}
+        }
     }
     #[test]
     fn decoded_activations_keep_the_original_packed_ascending_feature_fold() {

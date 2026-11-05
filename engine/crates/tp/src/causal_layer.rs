@@ -84,7 +84,7 @@ impl<'f> Layer<'f> {
                     vec![(format!("{side}.normalized"),normalized),(format!("{side}.coefficients"),coeff),(format!("{side}.collapsed"),collapsed),
                         (if side=="attn" {"input_norm"} else {"post_norm"}.into(),norm)]
                 },
-                Prepared::Projection(p)=>vec![(step.outputs[0].name.clone(),p.dynamic_reference(inputs[0])?.2)],
+                Prepared::Projection(p)=>vec![(step.outputs[0].name.clone(),p.dynamic_reference_positive_zero(inputs[0])?.2)],
                 Prepared::Plain {shape,weight}=>{
                     let v=causal_ops::reference(*shape,[inputs[0],&[],&[],&[]],weight)?;
                     vec![(step.outputs[0].name.clone(),v.into_iter().map(spark_gpu_probe::bf16::rounded).collect())]

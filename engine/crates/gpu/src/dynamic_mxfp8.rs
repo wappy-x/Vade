@@ -6,8 +6,14 @@ pub struct Activation {values:Vec<u8>,scales:Vec<u8>,decoded:Vec<f32>}
 impl Activation {
     /// Round the producer's values to the recipe's BF16 source boundary first.
     /// Scale uses ceil(log2(amax/448)), clamped to the finite E8M0 range.
-    /// E4M3FN values use nearest-even rounding and preserve the sign of zero.
+    /// E4M3FN uses nearest-even rounding and retains the source sign.
     pub fn from_f32(input:&[f32])->Result<Self,String> {
+        Self::from_source(input,false)
+    }
+    pub fn from_f32_positive_zero(input:&[f32])->Result<Self,String> {
+        Self::from_source(input,true)
+    }
+    fn from_source(input:&[f32],positive_zero:bool)->Result<Self,String> {
         if input.is_empty() || input.len()%32!=0 || input.iter().any(|v|!v.is_finite()) {
             return Err("dynamic MXFP8 requires complete finite feature groups".into());
         }
@@ -15,7 +21,7 @@ impl Activation {
         if source.iter().any(|v|!v.is_finite()) {return Err("dynamic MXFP8 source overflows BF16".into());}
         let mut values=Vec::with_capacity(input.len());let mut scales=Vec::with_capacity(input.len()/32);
         let mut decoded=Vec::with_capacity(input.len());
-        for block in source.chunks_exact(32) {
+        for (block,original) in source.chunks_exact(32).zip(input.chunks_exact(32)) {
             let maximum=block.iter().fold(0.0f32,|a,&b|a.max(b.abs()));
             // BF16 maxima are exact. Compare powers of two without log library
             // rounding. This also covers zero and BF16 subnormal values.
@@ -23,9 +29,10 @@ impl Activation {
             while exponent<127 && maximum as f64>448.0*2f64.powi(exponent) {exponent+=1;}
             let encoded=(exponent+127) as u8;let descale=scale(encoded);
             scales.push(encoded);
-            for &v in block {
+            for (&v,&original) in block.iter().zip(original) {
                 let scaled=(v as f64/descale as f64) as f32;
-                let byte=nearest(scaled);let value=(e4m3(byte) as f64*descale as f64) as f32;
+                // The legacy (shared) rule is main's exact expression. Option B is GLM only.
+                let byte=if positive_zero {nearest(scaled.abs())|if original<0.0 {128} else {0}} else {nearest(scaled)};let value=(e4m3(byte) as f64*descale as f64) as f32;
                 if !value.is_finite() {return Err("dynamic MXFP8 decoded activation is not finite".into());}
                 values.push(byte);decoded.push(value);
             }
@@ -78,6 +85,17 @@ mod tests {
         let first=Activation::from_f32(&input[..32]).unwrap();let last=Activation::from_f32(&input[32..]).unwrap();
         assert_eq!(q.values(),[first.values(),last.values()].concat());
         assert_eq!(q.scales(),[first.scales(),last.scales()].concat());
+    }
+    #[test]
+    fn exact_zero_and_negative_underflow_keep_their_required_block_signs() {
+        for source in [0.0,-0.0] {let q=Activation::from_f32_positive_zero(&[source;32]).unwrap();assert_eq!(q.values(),[0;32]);assert_eq!(q.scales(),[0]);assert!(q.decoded().iter().all(|v|v.to_bits()==0));}
+        let mut input=[0.0;96];input[..8].copy_from_slice(&[448.0,0.0,-0.0,1.0/2048.0,-1.0/2048.0,f32::from_bits(1),-f32::from_bits(1),-1.0/1024.0]);
+        input[32..64].fill(-0.0);input[64..96].fill(-f32::from_bits(1));
+        let q=Activation::from_f32_positive_zero(&input).unwrap();assert_eq!(&q.values()[..8],&[0x7e,0,0,0,0x80,0,0x80,0x80]);
+        assert_eq!(&q.values()[32..64],&[0;32]);assert_eq!(&q.values()[64..],&[0x80;32]);assert_eq!(&q.scales()[1..],&[0;2]);
+        for (index,block) in input.chunks_exact(32).enumerate() {let single=Activation::from_f32_positive_zero(block).unwrap();assert_eq!(single.values(),&q.values()[index*32..index*32+32]);assert_eq!(single.scales(),&q.scales()[index..index+1]);}
+        let legacy=Activation::from_f32(&input).unwrap();assert_eq!(legacy.scales(),q.scales());
+        for (index,&source) in input.iter().enumerate() {let changed=source.to_bits()==(-0.0f32).to_bits();assert_eq!(legacy.values()[index]^q.values()[index],if changed {128} else {0});}
     }
     #[test]
     fn every_finite_encoding_rounds_back_at_unit_scale() {

@@ -7,12 +7,12 @@ pub struct Device<'b,'d> {pub backend:&'b Backend<'d>,weights:Rc<RefCell<crate::
     parameters:Rc<RefCell<BTreeMap<Vec<u32>,DeviceVector<'d>>>>,
     norms:Rc<RefCell<BTreeMap<String,spark_gpu_probe::driver::ResidentNorm<'b,'d>>>>,
     blocks:Rc<RefCell<BTreeMap<(usize,usize),crate::layer_operands::device::ResidentResidualBlock<'b,'d>>>>,
-    stages:Rc<RefCell<[[u128;2];4]>>,cost:Rc<crate::resident_profile::Cost>,memo:RefCell<Memo<'d>>}
+    stages:Rc<RefCell<[[u128;2];4]>>,cost:Rc<crate::resident_profile::Cost>,memo:RefCell<Memo<'d>>,copies:RefCell<Option<DeviceVector<'d>>>}
 #[derive(Default)]
 struct Memo<'d> {values:BTreeMap<(String,Vec<u32>,bool),DeviceVector<'d>>,bytes:usize,limit:usize,hits:u64,misses:u64}
 impl Clone for Device<'_,'_> {
     fn clone(&self)->Self {Self {backend:self.backend,weights:self.weights.clone(),parameters:self.parameters.clone(),norms:self.norms.clone(),
-        blocks:self.blocks.clone(),stages:self.stages.clone(),cost:self.cost.clone(),memo:RefCell::new(Memo::default())}}
+        blocks:self.blocks.clone(),stages:self.stages.clone(),cost:self.cost.clone(),memo:RefCell::new(Memo::default()),copies:RefCell::new(None)}}
 }
 pub struct Value<'d> {vector:DeviceVector<'d>,words:usize}
 impl<'b,'d> Device<'b,'d> {
@@ -21,12 +21,16 @@ impl<'b,'d> Device<'b,'d> {
     /// Diagnostic runner counters. Normal construction keeps them disabled.
     pub fn with_ring_profiled(backend:&'b Backend<'d>,ring:Option<crate::transport::Ring>,cost:bool)->Self {
         Self {backend,weights:Rc::new(RefCell::new(crate::resident_weights::Weights::new(ring,cost))),parameters:Rc::new(RefCell::new(BTreeMap::new())),
-            norms:Rc::new(RefCell::new(BTreeMap::new())),blocks:Rc::new(RefCell::new(BTreeMap::new())),stages:Rc::new(RefCell::new([[0;2];4])),cost:Rc::new(crate::resident_profile::Cost::new(cost)),memo:RefCell::new(Memo::default())}
+            norms:Rc::new(RefCell::new(BTreeMap::new())),blocks:Rc::new(RefCell::new(BTreeMap::new())),stages:Rc::new(RefCell::new([[0;2];4])),cost:Rc::new(crate::resident_profile::Cost::new(cost)),memo:RefCell::new(Memo::default()),copies:RefCell::new(None)}
+    }
+    /// The caller keeps the attached wire and mailbox alive through all steps.
+    pub fn with_mailbox(backend:&'b Backend<'d>,ring:crate::transport::Ring,cost:bool,mailbox:&'b spark_gpu_probe::driver::TpMailbox<'d>)->Result<Self> {
+        let device=Self::with_ring_profiled(backend,Some(ring),cost);device.weights.borrow_mut().attach_mailbox(mailbox)?;Ok(device)
     }
     // Device consumers share the backend's ordered stream. Readback waits, and
     // Buffer::drop drains pending work before a source or destination is freed.
     // Keep owners here; a value wrapper needs no separate completion barrier.
-    fn value(&self,vector:DeviceVector<'d>,words:usize)->Result<Value<'d>> {Ok(Value {vector,words})}
+    fn value(&self,vector:DeviceVector<'d>,words:usize)->Result<Value<'d>> {Ok(Value {vector:vector.into_resident_shared()?,words})}
     fn record(&self,stage:usize,started:std::time::Instant) {let mut stages=self.stages.borrow_mut();stages[stage][0]+=1;stages[stage][1]+=started.elapsed().as_nanos();}
     pub(crate) fn report(&self) {self.weights.borrow_mut().report();self.cost.report();
         for (name,timing) in ["residual_begin","residual_finish","standalone_norm","causal_operations"].into_iter().zip(self.stages.borrow_mut().iter_mut()) {
@@ -77,15 +81,20 @@ impl<'b,'d> Compute for Device<'b,'d> {
         let values=self.weights.borrow_mut().apply_rows(name,self.backend,&rows,round)?;
         values.into_iter().map(|value|{let words=value.len();self.value(value,words)}).collect::<Result<Vec<_>>>().map(Some)
     }
+    fn projection_batch(&self,_:&CheckpointAdmission,input:&[(&str,&Value<'d>)],round:bool)->Result<Option<Vec<Value<'d>>>> {
+        let rows=input.iter().map(|(name,value)|(*name,&value.vector)).collect::<Vec<_>>();
+        let Some(values)=self.weights.borrow_mut().apply_batch(self.backend,&rows,round)? else {return Ok(None);};
+        values.into_iter().map(|value|{let words=value.len();self.value(value,words)}).collect::<Result<Vec<_>>>().map(Some)
+    }
     fn upload(&self,v:&[f32])->Result<Value<'d>> {if v.is_empty() {return self.zeros(0);}let stamp=self.cost.start(self.backend);let out=self.value(self.backend.upload_vector(v)?,v.len())?;self.cost.record(||"upload".into(),stamp,self.backend,0);Ok(out)}
-    fn read(&self,v:&Value<'d>)->Result<Vec<f32>> {let stamp=self.cost.start(self.backend);let out=if v.words==0 {Vec::new()} else {self.backend.read_vector_values(&v.vector)?};self.cost.record(||"readback".into(),stamp,self.backend,0);Ok(out)}
+    fn read(&self,v:&Value<'d>)->Result<Vec<f32>> {let stamp=self.cost.start(self.backend);let out=if v.words==0 {Vec::new()} else {self.backend.read_vector_values(&v.vector)?};self.weights.borrow().check_exchange()?;self.cost.record(||"readback".into(),stamp,self.backend,0);Ok(out)}
     fn range(&self,v:&Value<'d>,start:usize,len:usize)->Result<Value<'d>> {
         let stamp=self.cost.start(self.backend);need(start.checked_add(len).is_some_and(|n|n<=v.words),"bounded device range differs")?;
-        let mut out=self.backend.vector(len.max(1))?;if len>0 {self.backend.copy_range(&v.vector,&mut out,start,0,len)?;}let value=self.value(out,len)?;self.cost.record(||"range_copy".into(),stamp,self.backend,0);Ok(value)
+        let out=if len==0 {self.backend.vector(1)?} else {v.vector.resident_range(start..start+len)?};let value=self.value(out,len)?;self.cost.record(||"range_view".into(),stamp,self.backend,0);Ok(value)
     }
     fn join(&self,parts:&[&Value<'d>])->Result<Value<'d>> {
         let stamp=self.cost.start(self.backend);let len=parts.iter().try_fold(0usize,|n,v|n.checked_add(v.words).ok_or("bounded join overflow"))?;
-        let mut out=self.backend.vector(len.max(1))?;let mut offset=0;for v in parts {if v.words>0 {self.backend.copy_range(&v.vector,&mut out,0,offset,v.words)?;offset+=v.words;}}let value=self.value(out,len)?;self.cost.record(||"join_copy".into(),stamp,self.backend,0);Ok(value)
+        let sources=parts.iter().map(|v|(&v.vector,v.words)).collect::<Vec<_>>();let out=self.backend.resident_join(&sources,&mut self.copies.borrow_mut())?;let value=self.value(out,len)?;self.cost.record(||"join_copy".into(),stamp,self.backend,0);Ok(value)
     }
     fn zeros(&self,len:usize)->Result<Value<'d>> {let stamp=self.cost.start(self.backend);let mut v=self.backend.vector(len.max(1))?;self.backend.zero_vector(&mut v)?;let value=self.value(v,len)?;self.cost.record(||"zero".into(),stamp,self.backend,0);Ok(value)}
     fn operation(&self,s:Shape,x:[Option<&Value<'d>>;4],w:&[f32])->Result<Value<'d>> {

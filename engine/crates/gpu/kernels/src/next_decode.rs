@@ -236,6 +236,35 @@ unsafe fn project<const SOLO: bool, const PAIR: bool>(layer: MxLayer) {
 pub unsafe extern "ptx-kernel" fn flash_next_mxfp8_m1(layer: MxLayer) {
     project::<true, true>(layer)
 }
+
+#[no_mangle]
+pub extern "ptx-kernel" fn flash_resident_projection_batch(batch:crate::next_params::ResidentProjectionBatch) {
+    // SAFETY: The checked host batch funds immutable same-context input and
+    // weight rows. Its prefix grid assigns each block one validated descriptor.
+    // MXFP8 warps and plain threads own disjoint initialized output rows. Owners
+    // remain live until stream completion. Plain descriptors never read scales.
+    unsafe {
+        let layer=batch.layer;let block=_block_idx_x() as u32;
+        let mut p=layer.projections[0];let mut start=0;let mut job=0;
+        eight!(I,{if I+1<layer.count as usize && block>=layer.ends[I+1] {p=layer.projections[I+1];start=layer.ends[I+1];job=I+1;}});
+        let thread=_thread_idx_x() as usize;
+        if batch.plain&(1<<job)!=0 {
+            let row=(block-start) as usize*128+thread;if row>=p.rows as usize {return;}
+            let mut sum=0.0f32;
+            for feature in 0..p.cols as usize {
+                let weight=*(p.weights as *const f32).add(row*p.cols as usize+feature);
+                let input=*(p.input as *const f32).add(feature);let product:f32;
+                asm!("mul.rn.f32 {p}, {a}, {b};",p=out(reg32)product,a=in(reg32)weight,b=in(reg32)input);
+                asm!("add.rn.f32 {s}, {s}, {p};",s=inout(reg32)sum,p=in(reg32)product);
+            }
+            *(p.output as *mut f32).add(row)=if batch.round!=0 {rb(sum)} else {sum};
+        } else {
+            let index=(block-start) as usize*4+thread/32;if index>=p.rows as usize {return;}
+            row::<1,true,true>(p,index,0);
+            if thread%32==0 {let output=(p.output as *mut f32).add(index);*output=rb(*output);}
+        }
+    }
+}
 /// M2..16 rounded GDN or M2..8 general projections: packed pair conversion.
 /// # Safety
 /// Same buffers/grid contract as flash_next_mxfp8_m1; M is 2..16.

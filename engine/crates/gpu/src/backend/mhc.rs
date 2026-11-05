@@ -1,4 +1,4 @@
-//! Owned mHC operand and output binding. Each launch completes before return.
+//! Owned mHC operand and output binding. Ordinary calls complete; an owned queue retains dropped allocations until its drain.
 //! This binds candidate primitive arithmetic. It does not admit a checkpoint.
 use super::*;
 use crate::{mhc_params::{Shape,Prepare,Collapse,Combine},mhc_boundary::{Span,check_spans,check_bf16}};
@@ -6,8 +6,10 @@ use crate::{mhc_params::{Shape,Prepare,Collapse,Combine},mhc_boundary::{Span,che
 /// Logical BF16 values in four-byte FP32 lanes. This is not packed BF16 storage.
 /// The private owner prevents an unrounded FP32 vector from claiming this type.
 pub struct Bf16Vector<'a> { vector: DeviceVector<'a> }
-impl Bf16Vector<'_> {
+impl<'a> Bf16Vector<'a> {
     pub fn vector(&self) -> &DeviceVector<'_> { &self.vector }
+    /// Transfer the completed rounded storage without a device copy.
+    pub fn into_vector(self)->DeviceVector<'a> {self.vector}
     pub fn len(&self) -> usize { self.vector.len() }
     pub fn is_empty(&self) -> bool { self.vector.is_empty() }
 }
@@ -44,9 +46,10 @@ impl<'a> Backend<'a> {
         let mut args=crate::mhc_boundary::LaneCast {input:input.device_address(),output:output.vector.device_address(),words};
         // SAFETY: Both exact FP32 spans have the backend context and do not
         // overlap. The output is private and contiguous. Both borrowed owners
-        // and the argument remain live through launch and stream completion.
+        // remain live through completion: queue drops defer allocations until
+        // the real drain, and ordinary callers wait. Arguments are copied at launch.
         let launched=unsafe {self.launch_flash("bf16_lanes_round",words.div_ceil(128),128,&mut [parameter(&mut args)])};
-        let completed=self.synchronize();launched.and(completed)?;Ok(output)
+        let completed=self.resident_completion();launched.and(completed)?;Ok(output)
     }
     /// Shape and parameter validation precede allocation. No packed weights or
     /// implicit dtype conversion enter this API. The caller widens stored bits.
@@ -92,7 +95,7 @@ impl<'a> Backend<'a> {
                     self.launch_flash("mhc_prepare",units as u32,32,&mut [parameter(&mut args)])})
                 .and_then(|_| {args.phase=2;self.launch_flash("mhc_prepare",shape.rows.div_ceil(128),128,&mut [parameter(&mut args)])})
         };
-        let completed=self.synchronize();launched.and(completed)
+        let completed=self.resident_completion();launched.and(completed)
     }
     fn mhc_collapse_owned(&self, shape: Shape, vectors: [&DeviceVector<'_>;3]) -> Result<(),String> {
         shape.validate()?;let t=shape.rows as usize;let h=shape.hidden as usize;
@@ -103,7 +106,7 @@ impl<'a> Backend<'a> {
         // and the by-value launch argument remain live through stream completion.
         // The output uses private contiguous storage with the exact kernel extent.
         let launched=unsafe {self.launch_flash("mhc_bf16_collapse",(t*h).div_ceil(128) as u32,128,&mut [parameter(&mut args)])};
-        let completed=self.synchronize();launched.and(completed)
+        let completed=self.resident_completion();launched.and(completed)
     }
     fn mhc_combine_owned(&self, shape: Shape, vectors: [&DeviceVector<'_>;4]) -> Result<(),String> {
         shape.validate()?;let t=shape.rows as usize;let w=shape.wide();let h=shape.hidden as usize;
@@ -114,7 +117,7 @@ impl<'a> Backend<'a> {
         // and the by-value launch argument remain live through stream completion.
         // The output uses private contiguous storage with the exact kernel extent.
         let launched=unsafe {self.launch_flash("mhc_bf16_combine",(t*w).div_ceil(128) as u32,128,&mut [parameter(&mut args)])};
-        let completed=self.synchronize();launched.and(completed)
+        let completed=self.resident_completion();launched.and(completed)
     }
 }
 impl<'b,'a> ResidentMhc<'b,'a> {

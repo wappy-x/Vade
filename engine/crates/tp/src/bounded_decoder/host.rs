@@ -19,7 +19,7 @@ impl Compute for Host {
         Ok((Pass {input:x.clone(),coefficients,streams:s.streams as usize,hidden:s.hidden as usize},norm))
     }
     fn finish(&self,p:Pass,x:&Vec<f32>)->Result<Vec<f32>> {Ok((0..p.streams*p.hidden).map(|j|mhc_boundary::combine(&p.input,&p.coefficients,x[j%p.hidden],p.streams,p.hidden,j/p.hidden,j%p.hidden)).collect())}
-    fn mx(&self,p:&Mxfp8Projection<'_>,x:&Vec<f32>)->Result<Vec<f32>> {Ok(p.dynamic_reference(x)?.2)}
+    fn mx(&self,p:&Mxfp8Projection<'_>,x:&Vec<f32>)->Result<Vec<f32>> {Ok(p.dynamic_reference_positive_zero(x)?.2)}
     fn round(&self,x:&Vec<f32>)->Result<Vec<f32>> {Ok(x.iter().copied().map(spark_gpu_probe::bf16::rounded).collect())}
     fn mean(&self,x:&Vec<f32>,streams:u32,hidden:u32)->Result<Vec<f32>> {let mut s=shape(Op::StreamMean);s.heads=streams;s.dim=hidden;self.operation(s,[Some(x),None,None,None],&[])}
 }

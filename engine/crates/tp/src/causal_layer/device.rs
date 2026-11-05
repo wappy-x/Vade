@@ -18,7 +18,7 @@ impl Layer<'_> {
         let mut operations=Vec::new();
         for p in &self.operations {operations.push(match p {
             Prepared::Residual(p)=>Resident::Residual(p.upload(backend)?),
-            Prepared::Projection(p)=>Resident::Projection(p.load_dynamic(backend)?),
+            Prepared::Projection(p)=>Resident::Projection(p.load_dynamic_positive_zero(backend)?),
             Prepared::Plain {shape,weight}|Prepared::Operation {shape,weight}=>Resident::Operation {shape:*shape,
                 weight:if weight.is_empty() {None} else {Some(backend.upload_vector(weight)?)},round:matches!(p,Prepared::Plain {..})},
             Prepared::Combine=>Resident::Combine,Prepared::Skip=>Resident::Skip,

@@ -1,10 +1,56 @@
-//! Owned complete MXFP8 rows. Calls complete before borrowed operands can leave.
+//! Owned complete MXFP8 rows. Calls use ordered queue retention or complete before borrowed operands can leave.
 use super::*;
 use crate::{mxfp8_projection::Shape,norm_boundary::WeightType};
 
 pub struct ResidentMxfp8Projection<'b,'a> {backend:&'b Backend<'a>,shape:Shape,weights:Buffer<'a>,scales:Buffer<'a>}
 pub struct Mxfp8ProjectionPass<'a> {accumulator:DeviceVector<'a>,output:Bf16Vector<'a>}
+pub enum ResidentProjection<'v,'b,'a> {
+    Mxfp8 {matrix:&'v ResidentMxfp8Projection<'b,'a>,input:&'v DeviceVector<'v>},
+    Plain {rows:usize,cols:usize,weight:&'v DeviceVector<'v>,input:&'v DeviceVector<'v>},
+}
 impl<'a> Backend<'a> {
+    pub fn resident_projection_batch(&self,jobs:&[ResidentProjection<'_,'_,'a>],output:&mut DeviceVector<'_>,round:bool)->Result<(),String> {
+        use crate::next_params::{MxProjection,ResidentProjectionBatch};
+        self.require_resident_stream()?;
+        if jobs.is_empty() || jobs.len()>9 {return Err("resident projection batch count differs".into());}
+        let mut batch=ResidentProjectionBatch {round:u32::from(round),..Default::default()};let mut offset=0usize;let mut borrowed=Vec::new();
+        for job in jobs {
+            let (rows,cols,weight,scales,input,plain)=match job {
+                ResidentProjection::Mxfp8 {matrix,input}=>{
+                    if !ptr::eq(matrix.backend.context,self.context) || matrix.shape.input()!=WeightType::F32 {return Err("resident MXFP8 batch context or input precision differs".into());}
+                    borrowed.push((matrix.weights.address,matrix.weights.bytes));borrowed.push((matrix.scales.address,matrix.scales.bytes));
+                    (matrix.shape.rows(),matrix.shape.cols(),matrix.weights.address,matrix.scales.address,*input,false)
+                },
+                ResidentProjection::Plain {rows,cols,weight,input}=>{
+                    let words=rows.checked_mul(*cols).ok_or("resident plain batch weight overflow")?;self.check_vector(weight,words)?;
+                    if weight.is_segmented() {return Err("resident plain batch weights must be contiguous".into());}
+                    borrowed.push((weight.device_address(),weight.len()*4));
+                    (*rows,*cols,weight.device_address(),4,*input,true)
+                },
+            };
+            self.check_vector(input,cols)?;if input.is_segmented() {return Err("resident projection batch input must be contiguous".into());}
+            borrowed.push((input.device_address(),input.len()*4));
+            let end=offset.checked_add(rows).ok_or("resident projection batch output overflow")?;
+            if end>output.len() {return Err("resident projection batch output is short".into());}
+            batch.push(MxProjection {weights:weight,scales,input:input.device_address(),output:output.device_address().checked_add((offset*4) as u64).ok_or("resident projection batch address overflow")?,
+                rows:rows.try_into().map_err(|_|"resident projection batch rows exceed ABI")?,cols:cols.try_into().map_err(|_|"resident projection batch columns exceed ABI")?,tokens:1,input_bf16:0,round:0},plain)?;
+            offset=end;
+        }
+        self.check_vector(output,offset)?;if output.is_segmented() {return Err("resident projection batch output must be contiguous".into());}
+        let end=output.device_address().checked_add((offset*4) as u64).ok_or("resident projection batch output address overflow")?;
+        for (start,bytes) in borrowed {let borrowed_end=start.checked_add(bytes as u64).ok_or("resident projection batch operand address overflow")?;
+            if output.device_address()<borrowed_end && start<end {return Err("resident projection batch output aliases an operand".into());}
+        }
+        self.require_arm_kernels(&["flash_resident_projection_batch"])?;
+        self.zero_vector(output)?;self.synchronize()?;
+        // SAFETY: Every descriptor comes from checked immutable resident MXFP8
+        // views or exact same-context contiguous FP32 owners. Prefix blocks keep
+        // each original row schedule. Exact output length, checked address sums,
+        // and initialized private storage fund disjoint output spans. All borrowed
+        // owners and the by-value descriptor batch live through stream completion.
+        let launched=unsafe {self.launch_flash("flash_resident_projection_batch",batch.layer.ends[batch.layer.count as usize],128,&mut [parameter(&mut batch)])};
+        let completed=self.synchronize();launched.and(completed)
+    }
     /// The arena holds E4M3 rows followed by their original UE8M0 scale rows.
     pub fn resident_mxfp8_projection(&self,arena:&WeightArena<'a>,shape:Shape)->Result<ResidentMxfp8Projection<'_,'a>,String> {
         self.require_resident_stream()?;
@@ -33,9 +79,10 @@ impl<'a> ResidentMxfp8Projection<'_,'a> {
             cols:s.cols() as u32,tokens:1,input_bf16:0,round:0})?;
         // SAFETY: Shape bounds complete E4M3 rows and UE8M0 groups in the retained arena views.
         // check_vector checks the input context and full feature extent. MxLayer checks alignment and ABI limits.
-        // The accumulator is a new disjoint allocation. All owners and arguments live through stream completion.
+        // The accumulator is a new disjoint allocation. By-value arguments are copied at submission. Dropped owners are retained
+        // by the active queue until its real drain; ordinary calls complete here.
         let launched=unsafe {b.launch_flash("flash_next_mxfp8_m1",args.ends[1],128,&mut [parameter(&mut args)])};
-        let completed=b.synchronize();launched.and(completed)?;
+        let completed=b.resident_completion();launched.and(completed)?;
         let output=b.round_bf16_lanes(&accumulator)?;
         Ok(Mxfp8ProjectionPass {accumulator,output})
     }
@@ -43,4 +90,6 @@ impl<'a> ResidentMxfp8Projection<'_,'a> {
 impl<'a> Mxfp8ProjectionPass<'a> {
     pub fn accumulator(&self)->&DeviceVector<'a> {&self.accumulator}
     pub fn output(&self)->&Bf16Vector<'a> {&self.output}
+    /// Keep the already-rounded output and release the completed accumulator.
+    pub fn into_output(self)->Bf16Vector<'a> {self.output}
 }
