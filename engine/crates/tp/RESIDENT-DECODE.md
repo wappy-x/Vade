@@ -20,6 +20,12 @@ finished output rows into global order. It does not add partial dot products.
 Routing, expert selection, recurrent state, and residual operations consume
 complete gathered values on each rank.
 
+The resident mHC prepare kernel uses one block per token. Its barriers order
+the unchanged scalar RMS fold, independent normalized stores, complete
+coefficient dots, and the original activation and Sinkhorn folds. Coefficient
+warps do not split a dot. The following collapse completes the same ordered
+stream before the public pass returns. Prepare has no separate host wait.
+
 The MXFP8 activation operation uses the same BF16 source boundary, E8M0 scale,
 and E4M3 nearest-even codes as the independent host quantizer. The existing
 checked causal kernel supplies its device entry. The dot-product feature tree

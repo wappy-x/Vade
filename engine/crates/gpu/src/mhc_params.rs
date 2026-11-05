@@ -26,16 +26,32 @@ impl Shape {
     }
     pub fn wide(self) -> usize { self.streams as usize * self.hidden as usize }
     pub fn coefficients(self) -> usize { self.streams as usize * (self.streams as usize + 2) }
+    pub fn prepare_threads(self) -> u32 {(self.coefficients().min(32)*32) as u32}
 }
 /// Input `[T,N,D]`, weights `[P,N*D]`, base `[P]`, scale `[3]`.
-/// Scratch normalized `[T,N*D]`; output `[T,P]` = pre, post, `comb[src,dst]`.
-/// Launch phases 0 (normalize), 1 (independent coefficient rows), and 2
-/// (activation and Sinkhorn) in order on one stream before reading the output.
+/// Scratch normalized `[T,N*D]`; coefficients `[T,P]` = pre, post, `comb[src,dst]`.
+/// Collapsed `[T,D]` contains BF16 values in FP32 lanes.
+/// One block owns each token. Block barriers order normalization, complete
+/// coefficient dots, and activation with Sinkhorn before output consumption.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Prepare {
     pub input: u64, pub weights: u64, pub base: u64, pub scale: u64,
-    pub normalized: u64, pub coefficients: u64, pub shape: Shape, pub phase:u32,
+    pub normalized: u64, pub coefficients: u64, pub collapsed: u64, pub shape: Shape,
+}
+/// Two ordered launches share these disjoint FP32 planes. With previous_input
+/// zero, input is `[T,N*D]`. Otherwise input is the previous block `[T,D]` and
+/// previous_input/previous_coefficients supply its deferred post operation.
+/// Each post result and collapse keeps its original BF16 boundary. The norm
+/// retains 128-feature partials and the original warp butterfly fold.
+#[repr(C)]
+#[derive(Clone,Copy)]
+pub struct Boundary {
+    pub input:u64,pub previous_input:u64,pub previous_coefficients:u64,
+    pub residual:u64,pub weights:u64,pub base:u64,pub scale:u64,
+    pub mixing_normalized:u64,pub coefficients:u64,pub collapsed:u64,
+    pub norm_weight:u64,pub norm_partials:u64,pub output:u64,
+    pub shape:Shape,pub norm_epsilon:f32,pub norm_bf16:u32,
 }
 /// Input `[T,N,D]`, coefficients `[T,P]`, output `[T,D]`.
 #[repr(C)]

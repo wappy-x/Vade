@@ -3,6 +3,12 @@ use super::*;
 use crate::causal_ops::{Shape,Arguments};
 impl<'a> Backend<'a> {
     pub fn causal_operation(&self,shape:Shape,input:[Option<&DeviceVector<'_>>;4],weight:Option<&DeviceVector<'_>>)->Result<DeviceVector<'a>,String> {
+        let (_,_,units,words)=shape.lengths().ok_or("invalid causal operation shape")?;
+        let mut output=self.vector(units*words)?;self.resident_causal_into(shape,input,weight,&mut output)?;Ok(output)
+    }
+    /// Caller-owned stable storage for an ordered graph piece. Inputs and
+    /// weights may alias each other, but the private output cannot alias either.
+    pub fn resident_causal_into(&self,shape:Shape,input:[Option<&DeviceVector<'_>>;4],weight:Option<&DeviceVector<'_>>,output:&mut DeviceVector<'_>)->Result<(),String> {
         self.require_resident_stream()?;
         let (lengths,weights,units,words)=shape.lengths().ok_or("invalid causal operation shape")?;
         let mut addresses=[4u64;4];
@@ -15,8 +21,12 @@ impl<'a> Backend<'a> {
             if w.is_segmented() {return Err("causal operation weight must be contiguous".into());}w.device_address()},
             None if weights==0=>4,_=>return Err("causal operation weight count differs".into())};
         self.require_arm_kernels(&["causal_operation","project_f32_ordered"])?;
-        let mut output=self.vector(units*words)?;
-        self.zero_vector(&mut output)?;self.resident_completion()?;
+        self.check_vector(output,units*words)?;
+        if output.is_segmented() || !output.writable_from(0) {return Err("resident output requires private contiguous storage".into());}
+        let start=output.device_address();let end=start+output.len() as u64*4;
+        for source in input.into_iter().flatten().chain(weight) {let at=source.device_address();let last=at+source.len() as u64*4;
+            if start<last && at<end {return Err("resident output overlaps an input".into());}}
+        self.zero_vector(output)?;self.resident_completion()?;
         let mut args=Arguments {input:addresses,weight:address,output:output.device_address(),shape};
         let (mut w,mut x,mut y)=(address,addresses[0],output.device_address());
         let (mut rows,mut cols)=(shape.rows,shape.cols);
@@ -30,6 +40,6 @@ impl<'a> Backend<'a> {
             self.launch_flash("project_f32_ordered",(units as u32).div_ceil(128),128,
                 &mut [parameter(&mut w),parameter(&mut x),parameter(&mut y),parameter(&mut rows),parameter(&mut cols)])
         } else {self.launch_flash("causal_operation",(units as u32).div_ceil(128),128,&mut [parameter(&mut args)])}};
-        let completed=self.resident_completion();launched.and(completed)?;Ok(output)
+        let completed=self.resident_completion();launched.and(completed)
     }
 }

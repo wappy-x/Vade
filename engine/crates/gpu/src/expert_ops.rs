@@ -40,7 +40,7 @@ impl Shape {
         if r==0 || k==0 || !self.global.is_finite() || self.global<=0.0 || !self.activation.is_finite()
             || self.activation<=0.0 || !self.bound.is_finite() {return None;}
         let rk=r.checked_mul(k)?;
-        let m=self.tokens as usize;if m==0 || m>4 {return None;}
+        let m=self.tokens as usize;if m==0 || m>crate::prompt_ops::MAX_ROWS {return None;}
         let result=match self.op {
             Op::Quantize if k%16==0=>([k,0,0,0],0,0,k/16,17),
             Op::NvProject if k%16==0=>([k/16*17,0,0,0],rk/2,rk/16,r,1),
@@ -83,6 +83,82 @@ impl Arguments {
         }
         words[14..23].copy_from_slice(&[self.shape.op as u32,self.shape.rows,self.shape.cols,self.shape.block_rows,self.shape.block_cols,
             self.shape.tokens,self.shape.global.to_bits(),self.shape.activation.to_bits(),self.shape.bound.to_bits()]);words
+    }
+}
+/// One expert's token group inside a whole-layer launch. Units are contiguous
+/// and ascending by `first`. Each unit runs the ordinary `unit` arithmetic.
+#[repr(C)]
+#[derive(Clone,Copy)]
+pub struct GroupEntry {pub shape:Shape,pub weight:u64,pub scales:u64,pub first:u32,pub first_row:u32,pub input_words:u32,pub weight_bytes:u32,pub scale_bytes:u32,pub pad:u32}
+#[repr(C)]
+#[derive(Clone,Copy)]
+pub struct GroupArguments {pub table:u64,pub input:u64,pub output:u64,pub lut:u64,pub count:u32,pub units:u32,pub words:u32,pub stride:u32}
+/// The entry that owns one thread's unit. The host keeps `first` ascending from zero.
+#[inline(always)]
+pub fn group_entry(table:&[GroupEntry],unit:u32)->&GroupEntry {
+    let (mut low,mut high)=(0,table.len());
+    while high-low>1 {let middle=low+(high-low)/2;if table[middle].first<=unit {low=middle;} else {high=middle;}}
+    &table[low]
+}
+/// Token tiles keep a tile's activations inside the first-level cache while every
+/// weight row sweeps them. Measured peaks: NVFP4 at 8 tokens, FP8 at 16.
+#[inline(always)]
+fn token_tile(op:Op)->usize {if op==Op::NvRows {8} else {16}}
+/// Order threads by token tile. This moves threads only. Each output keeps its fold.
+#[inline(always)]
+pub fn group_unit(s:Shape,local:usize)->usize {
+    if !matches!(s.op,Op::NvRows|Op::Fp8Rows) {return local;}
+    let (m,r,t)=(s.tokens as usize,s.rows as usize,token_tile(s.op));
+    if m<=t {return local;}
+    let full=m/t;let body=full*r*t;
+    let (row,token)=if local<body {((local/t)%r,local/(r*t)*t+local%t)} else {let rest=local-body;let tail=m%t;(rest/tail,full*t+rest%tail)};
+    row*m+token
+}
+/// Words in the decode table: one (low nibble, high nibble) pair per weight byte,
+/// then one E4M3 value per byte.
+pub const LUT_WORDS:usize=768;
+/// The same bits as e2m1 and e4m3, one lookup per byte and no decode branch.
+#[cfg(not(target_arch="nvptx64"))]
+pub fn decode_lut()->Vec<f32> {
+    let mut v=Vec::with_capacity(LUT_WORDS);
+    for b in 0..=255u8 {v.push(e2m1(b&15));v.push(e2m1(b>>4));}
+    for b in 0..=255u8 {v.push(e4m3(b));}v
+}
+/// One weight row for one token through the table. Each add keeps its feature
+/// order and each product keeps its grouping, so the bits equal `nv_row`.
+#[inline(always)]
+fn nv_row_table(s:Shape,row:usize,x:&[f32],w:&[u8],scales:&[u8],lut:&[f32;LUT_WORDS])->f32 {
+    let k=s.cols as usize;let blocks=k/16;let global=s.global*s.activation;let mut sum=0.0f32;
+    let bytes=&w[row*(k/2)..(row+1)*(k/2)];let scale=&scales[row*blocks..(row+1)*blocks];
+    for ((a,weights),&code) in x.chunks_exact(17).zip(bytes.chunks_exact(8)).zip(scale) {
+        let fold=(lut[512+code as usize]*a[16])*global;
+        for pair in 0..8 {
+            let at=weights[pair] as usize*2;
+            sum+=(lut[at]*a[2*pair])*fold;
+            sum+=(lut[at+1]*a[2*pair+1])*fold;
+        }
+    }round(sum)
+}
+/// One weight row for one token. `x` holds BF16-rounded lanes, so this skips
+/// the round that `fp8_row` applies. Rounding a rounded value changes no bit.
+#[inline(always)]
+fn fp8_row_table(s:Shape,row:usize,x:&[f32],w:&[u8],scales:&[u8],lut:&[f32;LUT_WORDS])->f32 {
+    let k=s.cols as usize;let mut sum=0.0f32;let br=s.block_rows as usize;let bc=s.block_cols as usize;let blocks=k.div_ceil(bc);
+    let bytes=&w[row*k..(row+1)*k];
+    for (block,(input,weights)) in x.chunks(bc).zip(bytes.chunks(bc)).enumerate() {let at=((row/br)*blocks+block)*4;
+        let scale=f32::from_le_bytes(scales[at..at+4].try_into().unwrap());
+        for (&value,&code) in input.iter().zip(weights) {sum+=(lut[512+code as usize]*scale)*value;}
+    }round(sum)
+}
+/// One unit of a whole-layer launch.
+#[inline(always)]
+pub fn group_run(s:Shape,index:usize,x:&[f32],w:&[u8],scales:&[u8],lut:&[f32;LUT_WORDS],out:&mut[f32]) {
+    match s.op {
+        Op::NvRows=>{let m=s.tokens as usize;let k=s.cols as usize;let token=index%m;let stride=k/16*17;
+            out[0]=nv_row_table(s,index/m,&x[token*stride..(token+1)*stride],w,scales,lut);},
+        Op::Fp8Rows=>{let m=s.tokens as usize;let k=s.cols as usize;let token=index%m;
+            out[0]=fp8_row_table(s,index/m,&x[token*k..(token+1)*k],w,scales,lut);},
+        _=>unit(s,index,[x,&[],&[],&[]],w,scales,out),
     }
 }
 #[inline(always)]
@@ -209,6 +285,45 @@ mod tests {
     use super::*;
     fn s(op:Op)->Shape {Shape {op,tokens:1,rows:2,cols:16,block_rows:1,block_cols:16,global:1.0,activation:1.0,bound:10.0}}
     #[test]
+    fn group_entries_cover_each_unit_once() {
+        let entry=|first|GroupEntry {shape:s(Op::NvRows),weight:0,scales:0,first,first_row:0,input_words:0,weight_bytes:0,scale_bytes:0,pad:0};
+        for firsts in [vec![0],vec![0,3],vec![0,1,2],vec![0,5,6,100,101,4096]] {
+            let table=firsts.iter().map(|&f|entry(f)).collect::<Vec<_>>();
+            for unit in 0..4200u32 {let want=firsts.iter().rposition(|&f|f<=unit).unwrap();assert_eq!(group_entry(&table,unit).first,firsts[want]);}
+        }
+    }
+    #[test]
+    fn table_rows_keep_the_scalar_bits() {
+        let lut:[f32;LUT_WORDS]=decode_lut().try_into().unwrap();
+        for b in 0..=255u8 {assert_eq!(lut[2*b as usize].to_bits(),e2m1(b&15).to_bits());assert_eq!(lut[2*b as usize+1].to_bits(),e2m1(b>>4).to_bits());assert_eq!(lut[512+b as usize].to_bits(),e4m3(b).to_bits());}
+        for tokens in [1u32,2,5,33] {for cols in [16u32,32,96] {
+            let base=Shape {rows:17,cols,tokens,..s(Op::NvRows)};let (k,r,m)=(cols as usize,17usize,tokens as usize);
+            let x=(0..m*k).map(|i|if i%19==0 {-0.0} else {(i as i32%37-18) as f32/8.0}).collect::<Vec<_>>();
+            let q=reference(Shape {op:Op::QuantizeRows,..base},[&x,&[],&[],&[]],&[],&[]).unwrap();
+            let w=(0..r*k/2).map(|i|(i*53+17) as u8).collect::<Vec<_>>();let scales=(0..r*k/16).map(|i|0x10+(i%64) as u8).collect::<Vec<_>>();
+            let expected=reference(base,[&q,&[],&[],&[]],&w,&scales).unwrap();
+            for index in 0..r*m {let mut out=[f32::NAN];group_run(base,index,&q,&w,&scales,&lut,&mut out);assert_eq!(out[0].to_bits(),expected[index].to_bits());}
+        }}
+        for tokens in [1u32,2,5,33] {for (cols,bc) in [(33u32,16u32),(128,128),(515,128),(7,1024)] {for br in [1u32,2] {
+            let base=Shape {op:Op::Fp8Rows,rows:5,cols,block_rows:br,block_cols:bc,tokens,global:1.0,activation:1.0,bound:0.0};let (k,r,m)=(cols as usize,5usize,tokens as usize);
+            let x=(0..m*k).map(|i|if i%9==0 {-0.0} else {(i as i32%23-11) as f32*0.037}).collect::<Vec<_>>();
+            let rounded=x.iter().copied().map(round).collect::<Vec<_>>();
+            let w=(0..r*k).map(|i|((i*53+17)%127) as u8|(((i/7)%2) as u8*128)).collect::<Vec<_>>();
+            let grid=k.div_ceil(bc as usize);let scales=(0..r.div_ceil(br as usize)*grid).flat_map(|i|(0.125+(i%17) as f32*0.03125).to_le_bytes()).collect::<Vec<_>>();
+            let expected=reference(base,[&x,&[],&[],&[]],&w,&scales).unwrap();
+            for index in 0..r*m {let mut out=[f32::NAN];group_run(base,index,&rounded,&w,&scales,&lut,&mut out);assert_eq!(out[0].to_bits(),expected[index].to_bits());}
+        }}}
+    }
+    #[test]
+    fn token_tiles_visit_each_output_once() {
+        for m in [1u32,2,31,32,33,63,64,65,96,130,1024] {for r in [1u32,3,16,1024] {
+            let shape=Shape {tokens:m,rows:r,..s(Op::NvRows)};let total=(m*r) as usize;let mut seen=vec![false;total];
+            for local in 0..total {let at=group_unit(shape,local);assert!(!seen[at]);seen[at]=true;}
+            let mut seen=vec![false;total];for local in 0..total {let at=group_unit(Shape {op:Op::Fp8Rows,..shape},local);assert!(!seen[at]);seen[at]=true;}
+            if m>=16 && r>1 {for lane in 0..8 {assert_eq!(group_unit(shape,lane+8),m as usize+lane);}}
+        }}
+    }
+    #[test]
     fn e2m1_bits_match_all_codes_and_signs() {
         let values=[0.0f32,0.5,1.0,1.5,2.0,3.0,4.0,6.0];
         for n in 0..=255u8 {let v=values[(n&7) as usize];let old=if n&8==0 {v} else {-v};
@@ -329,7 +444,7 @@ mod tests {
     #[test]
     fn grouped_rows_keep_scalar_quantization_folds_and_scale_tails() {
         let bits=|v:&[f32]|v.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
-        for tokens in 1..=4 {for cols in [16,32,96] {
+        for tokens in [1,2,3,4,5,8,33] {for cols in [16,32,96] {
             let base=Shape {rows:33,cols,tokens:1,..s(Op::NvProject)};let k=cols as usize;let r=base.rows as usize;
             let x=(0..tokens as usize*k).map(|i|if i%19==0 {-0.0} else {(i as i32%37-18) as f32/8.0}).collect::<Vec<_>>();
             let q=reference(Shape {op:Op::QuantizeRows,tokens,..base},[&x,&[],&[],&[]],&[],&[]).unwrap();
@@ -342,13 +457,13 @@ mod tests {
                 for row in 0..r {assert_eq!(got[row*tokens as usize+token].to_bits(),expected[row].to_bits());}
             }
         }}
-        for tokens in 1..=4 {let base=Shape {op:Op::Fp8Project,rows:5,cols:33,block_rows:2,block_cols:16,tokens:1,..s(Op::Fp8Project)};
+        for tokens in [1,2,3,4,5,8,33] {let base=Shape {op:Op::Fp8Project,rows:5,cols:33,block_rows:2,block_cols:16,tokens:1,..s(Op::Fp8Project)};
             let k=base.cols as usize;let r=base.rows as usize;let x=(0..tokens as usize*k).map(|i|if i%9==0 {-0.0} else {(i as i32%23-11) as f32/16.0}).collect::<Vec<_>>();
             let w=(0..r*k).map(|i|(i%120+1) as u8).collect::<Vec<_>>();let scales=(0..9).flat_map(|i|(0.25+(i as f32)/16.0).to_le_bytes()).collect::<Vec<_>>();
             let got=reference(Shape {op:Op::Fp8Rows,tokens,..base},[&x,&[],&[],&[]],&w,&scales).unwrap();
             for token in 0..tokens as usize {let expected=reference(base,[&x[token*k..(token+1)*k],&[],&[],&[]],&w,&scales).unwrap();for row in 0..r {assert_eq!(got[row*tokens as usize+token].to_bits(),expected[row].to_bits());}}
         }
-        assert!(Shape {tokens:5,..s(Op::NvRows)}.lengths().is_none());
+        assert!(Shape {tokens:(crate::prompt_ops::MAX_ROWS+1) as u32,..s(Op::NvRows)}.lengths().is_none());
     }
 
 }

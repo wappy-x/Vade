@@ -20,6 +20,8 @@ pub fn lengths(s:Shape)->Option<([usize;4],usize,usize,usize)> {
         Op::Select if d>0 && t>0 && t%d==0 && k<=1=>{let slots=t.checked_add(if k!=0 {d-1} else {0})?;Some(([r/d,0,0,0],0,1,slots+1))},
         Op::Gather if r>0 && d>0 && k>0=>Some(([r.checked_mul(d)?,k,1,0],0,k,d)),
         Op::Scores if h>0 && d>0 && r>0=>Some(([h.checked_mul(d)?,r.checked_mul(h)?.checked_mul(d)?,1,0],0,h,r)),
+        Op::ScoresSlots if h>0 && d>0 && r>0=>Some(([h.checked_mul(d)?,r.checked_mul(h)?.checked_mul(d)?,1,0],0,h.checked_mul(r)?,1)),
+        Op::ValuesChannels if h>0 && d>0 && r>0=>Some(([h.checked_mul(r)?,r.checked_mul(h)?.checked_mul(d)?,1,0],0,h.checked_mul(d)?,1)),
         Op::Softmax if h>0 && r>0=>Some(([h.checked_mul(r)?,1,0,0],0,h,r)),
         Op::Values if h>0 && d>0 && r>0=>Some(([h.checked_mul(r)?,r.checked_mul(h)?.checked_mul(d)?,1,0],0,h,d)),
         Op::Route if h>0 && d>0 && d<=h && r>0 && r%h==0 && r/h>=2 && k>0 && k<=d*(r/h) && t<=1 && s.bound>0.0=>Some(([r,0,0,0],r,1,2*k+2*r+2*h)),
@@ -89,6 +91,15 @@ pub fn unit(s:Shape,index:usize,x:[&[f32];4],w:&[f32],out:&mut[f32]) {
             for slot in 0..count {let mut sum=0.0;for j in 0..d {sum+=x[0][index*d+j]*x[1][(slot*h+index)*d+j];}
                 out[slot]=round(round(sum)*(1.0/root(d as f32)));}
         },
+        Op::ScoresSlots=>{
+            let head=index/r;let slot=index%r;let count=x[2][0] as usize;out[0]=0.0;
+            if slot<count {let mut sum=0.0;for j in 0..d {sum+=x[0][head*d+j]*x[1][(slot*h+head)*d+j];}
+                out[0]=round(round(sum)*(1.0/root(d as f32)));}
+        },
+        Op::ValuesChannels=>{
+            let head=index/d;let j=index%d;let count=x[2][0] as usize;let mut sum=0.0;
+            for slot in 0..count {sum+=x[0][head*r+slot]*x[1][(slot*h+head)*d+j];}out[0]=round(sum);
+        },
         Op::Softmax=>{
             let count=x[1][0] as usize;out.fill(0.0);if count==0 {return;}let row=&x[0][index*r..(index+1)*r];
             let mut maximum=f32::NEG_INFINITY;for &v in &row[..count] {maximum=maximum.max(v);}
@@ -127,6 +138,19 @@ mod tests {
     use super::*;
     use crate::causal_ops::reference;
     fn shape(op:Op)->Shape {Shape {op,heads:2,dim:2,taps:2,rows:3,cols:1,epsilon:1e-6,bound:1.0}}
+    #[test]
+    fn independent_attention_outputs_keep_every_original_fold_bit() {
+        for (heads,dim,rows) in [(1,2,1),(3,5,7),(2,256,79),(64,256,3),(1,2,2051)] {
+            for (old,new) in [(Op::Scores,Op::ScoresSlots),(Op::Values,Op::ValuesChannels)] {
+                let s=Shape {op:old,heads,dim,rows,..shape(old)};let (lengths,_,_,_)=s.lengths().unwrap();
+                let mut input=lengths.map(|n|(0..n).map(|i|if i%17==0 {-0.0} else {(i as i32%29-14) as f32/32.0}).collect::<Vec<_>>());
+                for live in [0,1,rows] {input[2][0]=live as f32;let args=input.each_ref().map(Vec::as_slice);
+                    let expected=reference(s,args,&[]).unwrap();let got=reference(Shape {op:new,..s},args,&[]).unwrap();
+                    assert!(expected.iter().map(|v|v.to_bits()).eq(got.iter().map(|v|v.to_bits())),"{old:?} heads={heads} dim={dim} rows={rows} live={live}");
+                }
+            }
+        }
+    }
     #[test]
     fn learned_pool_retains_causal_tail_and_selects_lower_pool_ids_on_ties() {
         let s=shape(Op::Pool);let v=reference(s,[&[1.0,2.0,3.0,4.0],&[0.0;4],&[5.0,6.0],&[0.0;2]],&[0.0;4]).unwrap();

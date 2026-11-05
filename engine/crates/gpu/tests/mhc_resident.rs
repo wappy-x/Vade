@@ -1,6 +1,69 @@
 use spark_gpu_probe::mhc_boundary::{self as boundary,Span};
 
 #[test]
+fn fused_boundary_abi_and_norm_chunks_cover_all_features_once() {
+    use spark_gpu_probe::mhc_params::{Boundary,Shape};
+    assert_eq!(std::mem::size_of::<Boundary>(),136);assert_eq!(std::mem::align_of::<Boundary>(),8);
+    for streams in [1,3,4,7,33] {for hidden in [1usize,3,31,32,129,4096,4103] {
+        let shape=Shape {rows:3,streams,hidden:hidden as u32,iterations:20,rms_eps:1e-6,eps:1e-6};shape.validate().unwrap();
+        let warps=shape.prepare_threads() as usize/32;let chunks=hidden.div_ceil(128);let mut visits=vec![0;hidden];let mut partials=vec![0;chunks];
+        for warp in 0..warps {for chunk in (warp..chunks).step_by(warps) {
+            partials[chunk]+=1;
+            for lane in 0..32 {for feature in (chunk*128+lane..((chunk+1)*128).min(hidden)).step_by(32) {visits[feature]+=1;}}
+        }}
+        assert!(visits.iter().all(|&count|count==1));assert!(partials.iter().all(|&count|count==1));
+    }}
+}
+
+#[test]
+fn boundary_warps_cover_each_complete_coefficient_in_row_major_storage() {
+    use spark_gpu_probe::mhc_params::Shape;
+    for rows in [1,3] {for streams in [1,4,7,33] {
+        let shape=Shape {rows,streams,hidden:7,iterations:20,rms_eps:1e-6,eps:1e-6};shape.validate().unwrap();
+        let count=shape.coefficients();let mut coefficients=vec![0;rows as usize*count];let warps=shape.prepare_threads() as usize/32;
+        for token in 0..rows as usize {for warp in 0..warps {for coefficient in (warp..count).step_by(warps) {
+            coefficients[token*count+coefficient]+=1;
+        }
+        }}
+        assert!(coefficients.iter().all(|&count|count==1));
+    }}
+}
+
+#[test]
+fn prepare_blocks_cover_every_independent_coefficient_with_complete_warps() {
+    use spark_gpu_probe::mhc_params::{Shape,Prepare};
+    assert_eq!(std::mem::size_of::<Prepare>(),80);
+    for streams in 1..=65 {
+        let shape=Shape {rows:3,streams,hidden:7,iterations:20,rms_eps:1e-6,eps:1e-6};shape.validate().unwrap();
+        let threads=shape.prepare_threads() as usize;assert!(threads>0 && threads<=1024 && threads%32==0);
+        let warps=threads/32;let mut visits=vec![0;shape.coefficients()];
+        for warp in 0..warps {for coefficient in (warp..visits.len()).step_by(warps) {visits[coefficient]+=1;}}
+        assert!(visits.iter().all(|&count|count==1));
+        for hidden in [1,7,31,32,129,4096] {
+            let mut collapsed=vec![0;hidden];
+            for thread in 32..threads {for feature in ((thread-32)..hidden).step_by(threads-32) {collapsed[feature]+=1;}}
+            assert!(collapsed.iter().all(|&count|count==1));
+        }
+    }
+}
+
+#[test]
+fn complete_warp_broadcasts_visit_each_feature_in_order_without_tail_terms() {
+    for length in [1,3,31,32,33,97] {
+        let values=(0..length).map(|index| [16777216.0,1.0,-16777216.0,-0.0][index%4]).collect::<Vec<f32>>();
+        let expected=values.iter().fold(0.0f32,|sum,value|sum+value);
+        for lane in 0..32 {
+            let mut actual=0.0f32;
+            for first in (0..length).step_by(32) {for source in 0..32 {
+                let from=lane^(lane^source);assert_eq!(from,source);
+                if first+source<length {actual+=values[first+from];}
+            }}
+            assert_eq!(actual.to_bits(),expected.to_bits());
+        }
+    }
+}
+
+#[test]
 fn collapse_rounds_the_completed_fp32_sum() {
     // A premature BF16 coefficient cast would produce 1.0 here.
     assert_eq!(boundary::collapse(&[1.0,1.0],&[1.00390625,0.00390625],2,1,0).to_bits(),1.0078125f32.to_bits());

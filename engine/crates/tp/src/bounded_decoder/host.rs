@@ -2,6 +2,11 @@ use super::*;
 use spark_gpu_probe::{mhc_reference,mhc_boundary};
 pub struct Host;
 pub struct Pass {input:Vec<f32>,coefficients:Vec<f32>,streams:usize,hidden:usize}
+fn finish_rows(p:Pass,x:&[f32],m:usize)->Vec<f32> {
+    let wide=p.streams*p.hidden;let count=p.streams*(p.streams+2);let mut out=Vec::with_capacity(m*wide);
+    for token in 0..m {let input=&p.input[token*wide..(token+1)*wide];let coefficients=&p.coefficients[token*count..(token+1)*count];let block=&x[token*p.hidden..(token+1)*p.hidden];
+        out.extend((0..wide).map(|j|mhc_boundary::combine(input,coefficients,block[j%p.hidden],p.streams,p.hidden,j/p.hidden,j%p.hidden)));}out
+}
 impl Compute for Host {
     type Value=Vec<f32>;type Pass=Pass;
     fn upload(&self,v:&[f32])->Result<Vec<f32>> {need(v.iter().all(|v|v.is_finite()),"bounded host value is not finite")?;Ok(v.to_vec())}
@@ -22,4 +27,15 @@ impl Compute for Host {
     fn mx(&self,p:&Mxfp8Projection<'_>,x:&Vec<f32>)->Result<Vec<f32>> {Ok(p.dynamic_reference_positive_zero(x)?.2)}
     fn round(&self,x:&Vec<f32>)->Result<Vec<f32>> {Ok(x.iter().copied().map(spark_gpu_probe::bf16::rounded).collect())}
     fn mean(&self,x:&Vec<f32>,streams:u32,hidden:u32)->Result<Vec<f32>> {let mut s=shape(Op::StreamMean);s.heads=streams;s.dim=hidden;self.operation(s,[Some(x),None,None,None],&[])}
+    fn prompt(&self,s:spark_gpu_probe::prompt_ops::Shape,x:[Option<&Vec<f32>>;5],w:&[f32])->Result<Vec<f32>> {spark_gpu_probe::prompt_ops::reference(s,x.map(|v|v.map_or(&[][..],Vec::as_slice)),w)}
+    fn rows_norm(&self,_:&str,s:NormShape,x:&Vec<f32>,m:usize,w:&[f32])->Result<Vec<f32>> {
+        let width=x.len()/m;Ok(x.chunks_exact(width).flat_map(|row|causal_layer::norm(s,row,w)).collect())
+    }
+    fn rows_begin(&self,_:(usize,usize),p:&crate::layer_operands::ResidualBlockOperands,x:&Vec<f32>,m:usize)->Result<(Pass,Vec<f32>)> {
+        let h=p.mhc().shape();let wide=h.wide();let mut coefficients=Vec::new();let mut norm=Vec::new();
+        for row in x.chunks_exact(wide) {let (pass,value)=self.begin((0,0),p,&row.to_vec())?;coefficients.extend_from_slice(&pass.coefficients);norm.extend_from_slice(&value);}
+        need(coefficients.len()==m*h.coefficients(),"prompt residual row count differs")?;
+        Ok((Pass {input:x.clone(),coefficients,streams:h.streams as usize,hidden:h.hidden as usize},norm))
+    }
+    fn rows_finish(&self,p:Pass,x:&Vec<f32>,m:usize)->Result<Vec<f32>> {Ok(finish_rows(p,x,m))}
 }

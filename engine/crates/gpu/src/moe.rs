@@ -297,7 +297,7 @@ impl<'a> Backend<'a> {
     pub fn moe_batch_rejected(&self, scratch: &MoeBatchScratch<'_>, rows: usize) -> Result<Vec<usize>, String> {
         self.moe_rejected_rows(&scratch.status, rows)
     }
-    fn moe_rejected_rows(&self, status: &DeviceVector<'_>, rows: usize) -> Result<Vec<usize>, String> {
+    fn moe_rejected_rows(&self, status: &DeviceVector<'_>, rows: usize) -> Result<Vec<usize>, String> { self.flush_resident_launches()?;
         self.check_vector(status, status.len)?;
         if rows == 0 { return Ok(Vec::new()); }
         if self.context.pending.get() { self.synchronize()?; }

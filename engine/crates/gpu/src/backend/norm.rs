@@ -42,4 +42,16 @@ impl<'a> ResidentNorm<'_,'a> {
             WeightType::F32=>Ok(NormOutput::F32(normalized)),
         }
     }
+    /// Many independent token rows. Each row keeps the one-row RMS reduction
+    /// tree, normalized BF16 boundary, weight product and output boundary.
+    pub fn apply_rows(&self,input: &Bf16Vector<'_>,rows: usize) -> Result<DeviceVector<'a>,String> {
+        let b=self.backend;let s=self.shape;let h=s.width();b.require_resident_stream()?;
+        b.check_vector(input.vector(),h.checked_mul(rows).ok_or("norm rows overflow")?)?;
+        if input.vector().is_segmented() {return Err("resident norm requires a contiguous input".into());}
+        let mut normalized=b.vector(h*rows)?;let mut partials=b.vector(h.div_ceil(128)*rows)?;
+        b.model_rms_device(input.vector(),None,&mut normalized,&mut partials,h,rows,s.epsilon())?;
+        let mut shape=crate::prompt_ops::Shape::new(crate::prompt_ops::Op::NormApply,rows).ok_or("norm rows overflow")?;
+        shape.dim=u32::try_from(h).map_err(|_|"norm width exceeds ABI")?;shape.cols=u32::from(s.weight_type()==WeightType::Bf16);
+        b.prompt_operation(shape,[Some(&normalized),None,None,None,None],Some(&self.weight))
+    }
 }

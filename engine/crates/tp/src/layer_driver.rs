@@ -167,9 +167,10 @@ impl MhcOperands {
     /// Check the full argument layout before a future resident-buffer adapter.
     /// Addresses describe storage only. This does not prove allocation ownership,
     /// uploaded contents, readiness, or completion. It cannot launch a kernel.
-    pub fn arguments(&self, spans: [PhysicalSpan;6]) -> Result<Prepare> {
+    /// The seventh span is the fused BF16 collapse output in FP32 lanes.
+    pub fn arguments(&self, spans: [PhysicalSpan;7]) -> Result<Prepare> {
         let s=self.shape; let t=s.rows as usize;
-        let lengths=[t*s.wide(),self.weights.len(),self.base.len(),self.scale.len(),t*s.wide(),t*s.coefficients()];
+        let lengths=[t*s.wide(),self.weights.len(),self.base.len(),self.scale.len(),t*s.wide(),t*s.coefficients(),t*s.hidden as usize];
         let mut ends=Vec::new();
         for (i,(span,count)) in spans.iter().zip(lengths).enumerate() {
             need(span.dtype==Dtype::F32 && span.packing==Packing::RowMajor,
@@ -185,7 +186,7 @@ impl MhcOperands {
             ends.push(end);
         }
         Ok(Prepare {input:spans[0].address,weights:spans[1].address,base:spans[2].address,scale:spans[3].address,
-            normalized:spans[4].address,coefficients:spans[5].address,shape:s,phase:0})
+            normalized:spans[4].address,coefficients:spans[5].address,collapsed:spans[6].address,shape:s})
     }
 }
 /// Physical metadata supplied by the caller. The future backend must verify

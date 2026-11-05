@@ -5,6 +5,7 @@ use super::*;
 /// This guard cannot leave capture active or release storage before completion.
 pub struct ResidentQueue<'b,'a> {backend:&'b Backend<'a>}
 impl<'a> Backend<'a> {
+    pub fn resident_queue_active(&self)->bool {self.context.resident_queued.get()}
     pub fn resident_queue(&self)->Result<ResidentQueue<'_,'a>,String> {
         self.require_resident_stream()?;
         if self.context.resident_queued.get() {return Err("a resident queue is already active".into());}
@@ -21,6 +22,7 @@ impl<'a> Backend<'a> {
 impl Drop for ResidentQueue<'_,'_> {
     fn drop(&mut self) {
         let b=self.backend;
+        if let Err(error)=b.disable_resident_launches() {b.context.cleanup_errors.borrow_mut().push(error);}
         if let Err(error)=b.synchronize() {b.context.cleanup_errors.borrow_mut().push(error);}
         b.context.resident_queued.set(false);
     }

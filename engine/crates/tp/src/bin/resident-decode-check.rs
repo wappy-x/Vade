@@ -5,6 +5,12 @@ use spark_tp::Result;
 #[cfg(target_os="linux")]
 #[path="resident-decode-check/recurrence.rs"] mod recurrence;
 #[cfg(target_os="linux")]
+#[path="resident-decode-check/program.rs"] mod program;
+#[cfg(target_os="linux")]
+#[path="resident-decode-check/recorder.rs"] mod recorder;
+#[cfg(target_os="linux")]
+#[path="resident-decode-check/attention.rs"] mod attention;
+#[cfg(target_os="linux")]
 #[path="resident-decode-check/convolution.rs"] mod convolution;
 #[cfg(target_os="linux")]
 #[path="resident-decode-check/nvfp4.rs"] mod nvfp4;
@@ -14,6 +20,9 @@ use spark_tp::Result;
 #[path="resident-decode-check/projection_batch.rs"] mod projection_batch;
 #[cfg(target_os="linux")]
 #[path="../../../../tools/export/src/sha256.rs"] mod sha256;
+/// Diagnostic prompt bound. Long-prompt evidence needs more than the old 512 rows.
+#[cfg(target_os="linux")]
+const PROMPT_BOUND:usize=33000;
 fn read(path:&Path)->Result<Vec<u8>> {fs::read(path).map_err(|e|e.to_string())}
 #[cfg(target_os="linux")]
 fn write(path:&Path,bytes:&[u8])->Result<()> {use std::io::Write;
@@ -53,6 +62,7 @@ fn plan_time(root:&Path,repeats:usize)->Result<()> {
     use spark_tp::layer_driver::LayerBoundary;
     if repeats==0 || repeats>10 {return Err("plan timing repeat bound exceeded".into());}
     let c=open_checkpoint(root)?;let d=c.description();let topology=Topology {rank:0,parts:1};
+    for context in [4096usize,8192,32768] {println!("RESIDENT PROMPT LEDGER context={context} group_rows={} group_workspace_bytes={} expanded_bytes={} gpu=false",spark_tp::bounded_decoder::PROMPT_GROUP,spark_tp::bounded_decoder::group_workspace_bytes(&c,context)?,spark_tp::bounded_decoder::expanded_bytes(&c,context));}
     for repeat in 1..=repeats {
         let started=std::time::Instant::now();
         for layer in 0..d.layers.len() {let state=StatePlan::new(d,topology,64,isize::MAX as usize).map_err(|e|e.to_string())?;
@@ -66,7 +76,7 @@ fn plan_time(root:&Path,repeats:usize)->Result<()> {
 #[cfg(target_os="linux")]
 fn prepare(root:&Path,request:&Path,out:&Path)->Result<()> {
     use spark_serve::{Tokenizer,protocol::{self,Prompt}};
-    let limits=spark_serve::Limits {input_tokens:256,output_tokens:256,context_tokens:320,default_thinking:false,next_mtp_depth:Some(0),..Default::default()};
+    let limits=spark_serve::Limits {input_tokens:PROMPT_BOUND,output_tokens:256,context_tokens:PROMPT_BOUND+256,default_thinking:false,next_mtp_depth:Some(0),..Default::default()};
     let request=protocol::parse(&read(request)?,true,&limits)?;let Prompt::Chat(chat)=&request.prompt else {return Err("resident probe requires chat".into());};
     let tokenizer=spark_serve::tokenizer::ModelTokenizer::from_directory(root)?;let input=tokenizer.encode_chat(chat,limits.body_bytes)?;
     if input.is_empty() || input.len()>limits.input_tokens || input.len()+request.max_tokens>limits.context_tokens {return Err("prepared resident prompt exceeds bounds".into());}
@@ -74,44 +84,70 @@ fn prepare(root:&Path,request:&Path,out:&Path)->Result<()> {
     println!("RESIDENT PREPARE PASS input_tokens={} output_tokens={} gpu=false",input.len(),request.max_tokens);Ok(())
 }
 #[cfg(any(target_os="linux",test))]
-fn profile_options(args:&[String])->Result<(bool,bool,bool)> {
-    let (mut cost,mut gpu,mut wire)=(false,false,false);
+type Options=(bool,bool,Vec<usize>,Option<(Vec<usize>,usize)>,Vec<usize>,bool,Option<usize>);
+#[cfg(any(target_os="linux",test))]
+fn profile_options(args:&[String])->Result<Options> {
+    let (mut cost,mut gpu,mut rows)=(false,false,None);let mut groups=None;let mut last=0usize;let mut windows=Vec::new();let mut wire=false;let mut limit=None;
     for arg in args {match arg.as_str() {
         "--cost" if !cost=>cost=true,
         "--gpu-cost" if !gpu=>gpu=true,
+        value if value.starts_with("--prompt-rows=") && rows.is_none()=>{
+            let parsed=value.trim_start_matches("--prompt-rows=").split(',').map(|value|value.parse::<usize>().ok().filter(|&n|n>0 && n<=spark_tp::bounded_decoder::PROMPT_ROWS).ok_or_else(||"diagnostic prompt row bound exceeded".to_string())).collect::<Result<Vec<_>>>()?;
+            if parsed.len()>spark_tp::bounded_decoder::PROMPT_ROWS {return Err("diagnostic prompt schedule bound exceeded".into());}rows=Some(parsed);
+        },
+        value if value.starts_with("--row-groups=") && groups.is_none()=>{
+            groups=Some(value.trim_start_matches("--row-groups=").split(',').map(|value|value.parse::<usize>().ok().filter(|&n|n>0 && n<=spark_tp::bounded_decoder::PROMPT_GROUP).ok_or_else(||"diagnostic row group bound exceeded".to_string())).collect::<Result<Vec<_>>>()?);
+        },
         "--device-wire" if !wire=>wire=true,
+        // Bits must not depend on where expanded rows stop persisting.
+        value if value.starts_with("--expanded-limit=") && limit.is_none()=>{limit=Some(value.trim_start_matches("--expanded-limit=").parse::<usize>().map_err(|_|"invalid expanded limit")?);},
+        "--head-last" if last==0=>last=1,
+        // Sessions from K on run the head only on each group's last row, as a server does.
+        value if value.starts_with("--head-last-from=") && last==0=>{last=value.trim_start_matches("--head-last-from=").parse::<usize>().ok().filter(|&k|k>0).ok_or("invalid head session")?;},
+        // Scalar-path cost rows at chosen positions. Row groups carry the prompt between them.
+        value if value.starts_with("--cost-windows=") && windows.is_empty()=>{
+            windows=value.trim_start_matches("--cost-windows=").split(',').map(|value|value.parse::<usize>().map_err(|_|"invalid cost window".to_string())).collect::<Result<Vec<_>>>()?;
+            if windows.is_empty() || windows.windows(2).any(|w|w[1]<w[0]+8) {return Err("cost windows must ascend by at least 8 rows".into());}
+        },
         _=>return Err("unknown or duplicate resident profiling option".into()),
-    }}Ok((cost,gpu,wire))
+    }}if last>0 && groups.is_none() {return Err("--head-last requires --row-groups".into());}
+    if !windows.is_empty() && (groups.is_none() || last==1) {return Err("--cost-windows requires --row-groups with all head rows".into());}
+    Ok((cost,gpu,rows.unwrap_or_else(||vec![spark_tp::bounded_decoder::PROMPT_ROWS]),groups.map(|g|(g,last)),windows,wire,limit))
 }
 #[cfg(test)]
 mod profile_tests {
     use super::profile_options;
     #[test]
     fn diagnostics_are_explicit_default_off_and_reject_duplicates() {
-        assert_eq!(profile_options(&[]).unwrap(),(false,false,false));
-        for flags in [vec!["--cost"],vec!["--gpu-cost"],vec!["--gpu-cost","--cost"],vec!["--device-wire"],vec!["--cost","--device-wire"]] {
+        assert_eq!(profile_options(&[]).unwrap(),(false,false,vec![spark_tp::bounded_decoder::PROMPT_ROWS],None,vec![],false,None));
+        for flags in [vec!["--cost"],vec!["--gpu-cost"],vec!["--gpu-cost","--cost"]] {
             let args=flags.iter().map(|v|(*v).to_owned()).collect::<Vec<_>>();
-            assert_eq!(profile_options(&args).unwrap(),(flags.contains(&"--cost"),flags.contains(&"--gpu-cost"),flags.contains(&"--device-wire")));
+            assert_eq!(profile_options(&args).unwrap(),(flags.contains(&"--cost"),flags.contains(&"--gpu-cost"),vec![spark_tp::bounded_decoder::PROMPT_ROWS],None,vec![],false,None));
         }
-        for flags in [vec!["--cost","--cost"],vec!["--gpu-cost","--gpu-cost"],vec!["unknown"],vec!["--device-wire","--device-wire"]] {
+        for rows in 1..=spark_tp::bounded_decoder::PROMPT_ROWS {assert_eq!(profile_options(&[format!("--prompt-rows={rows}")]).unwrap(),(false,false,vec![rows],None,vec![],false,None));}
+        assert_eq!(profile_options(&["--prompt-rows=4,1".to_string()]).unwrap(),(false,false,vec![4,1],None,vec![],false,None));
+        assert_eq!(profile_options(&["--row-groups=64,1024".to_string(),"--head-last".to_string()]).unwrap().3,Some((vec![64,1024],1)));
+        assert!(profile_options(&["--head-last".to_string()]).is_err());assert!(profile_options(&["--row-groups=1025".to_string()]).is_err());
+        for args in [vec!["--prompt-rows="],vec!["--prompt-rows=1,2,3,4,1"],vec!["--prompt-rows=0"],vec!["--prompt-rows=5"],vec!["--prompt-rows=1","--prompt-rows=4"]] {assert!(profile_options(&args.iter().map(|s|s.to_string()).collect::<Vec<_>>()).is_err());}
+        for flags in [vec!["--cost","--cost"],vec!["--gpu-cost","--gpu-cost"],vec!["unknown"]] {
             assert!(profile_options(&flags.iter().map(|v|(*v).to_owned()).collect::<Vec<_>>()).is_err());
         }
     }
 }
 #[cfg(target_os="linux")]
 fn run_pair(args:&[String])->Result<()> {
-    use spark_serve::{Engine,Session,Tokenizer,protocol::{self,DraftMode,Prompt}};
+    use spark_serve::{Tokenizer,protocol::{self,DraftMode,Prompt}};
     use spark_gpu_probe::driver::with_backend;
-    use spark_tp::{bounded_decoder::{Device,ResidentFactory},transport::Ring};
-    if args.len()<10 {return Err("usage: resident-decode-check RANK 2 LISTEN NEXT pair MODEL INPUT_IDS REQUEST_JSON NEW_OUT REPEATS [--cost] [--gpu-cost] [--device-wire]".into());}
-    let (cost,gpu_cost,device_wire)=profile_options(&args[10..])?;
+    use spark_tp::{bounded_decoder::{Device,Decoder,Compute,HeadRows},transport::Ring};
+    if args.len()<10 {return Err("usage: resident-decode-check RANK 2 LISTEN NEXT pair MODEL INPUT_IDS REQUEST_JSON NEW_OUT REPEATS".into());}
+    let (cost,gpu_cost,prompt_groups,row_groups,windows,device_wire,expanded_limit)=profile_options(&args[10..])?;
     let root=Path::new(&args[5]);let input=ids(Path::new(&args[6]))?;let request=read(Path::new(&args[7]))?;let out=Path::new(&args[8]);
     let rank=args[0].parse::<usize>().map_err(|e|e.to_string())?;let listen=args[2].parse::<std::net::SocketAddr>().map_err(|_|"invalid listen")?;let next=args[3].parse::<std::net::SocketAddr>().map_err(|_|"invalid next")?;
     if args[1].parse::<usize>().map_err(|e|e.to_string())?!=spark_tp::layer_transport::PAIR_RANKS {return Err("resident pair probe requires its declared pair size".into());}
     let repeats=args[9].parse::<usize>().map_err(|e|e.to_string())?;
-    if input.len()>256 || repeats==0 || repeats>10 {return Err("resident probe bounds exceeded".into());}
+    if input.len()>PROMPT_BOUND || repeats==0 || repeats>10 {return Err("resident probe bounds exceeded".into());}
     let tokenizer=spark_serve::tokenizer::ModelTokenizer::from_directory(root)?;
-    let limits=spark_serve::Limits {input_tokens:256,output_tokens:256,context_tokens:320,default_thinking:false,next_mtp_depth:Some(0),..Default::default()};
+    let limits=spark_serve::Limits {input_tokens:PROMPT_BOUND,output_tokens:256,context_tokens:PROMPT_BOUND+256,default_thinking:false,next_mtp_depth:Some(0),..Default::default()};
     let r=protocol::parse(&request,true,&limits)?;
     if input.len()+r.max_tokens>limits.context_tokens {return Err("resident prompt and output exceed context bound".into());}
     if !r.ignore_eos || r.cache || r.draft!=Some(DraftMode::Plain) || r.mtp_depth!=Some(0)
@@ -121,7 +157,7 @@ fn run_pair(args:&[String])->Result<()> {
     if tokenizer.encode_chat(chat,limits.body_bytes)?!=input {return Err("prepared input differs from the checkpoint chat template".into());}
     let checkpoint=open_checkpoint(root)?;
     fs::create_dir(out).map_err(|e|e.to_string())?;
-    let mut identity=format!("request={}\ninput_ids={input:?}\nkernels={}\n",sha256::digest(&request),sha256::digest(spark_gpu_probe::layer_ptx()?.to_bytes()));
+    let mut identity=format!("prompt_groups={prompt_groups:?}\nrow_groups={row_groups:?}\nwindows={windows:?}\nrequest={}\ninput_ids={input:?}\nkernels={}\n",sha256::digest(&request),sha256::digest(spark_gpu_probe::layer_ptx()?.to_bytes()));
     for name in ["config.json","model.safetensors.index.json","tokenizer.json","tokenizer_config.json"] {identity.push_str(&format!("{name}={}\n",sha256::digest_reader(fs::File::open(root.join(name)).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?));}
     write(&out.join("IDENTITY"),identity.as_bytes())?;
     let mut ring=Ring::connect(rank,2,listen,next)?;let digest=sha256::digest(identity.as_bytes());let mut agreement=vec![0;digest.len()*ring.world()];
@@ -154,20 +190,33 @@ fn run_pair(args:&[String])->Result<()> {
                 let compute=if let Some(m)=&mailbox {Device::with_mailbox(backend,ring,cost,m)?}
                     else {Device::with_ring_profiled(backend,Some(ring),cost)};
 
-        let engine=spark_serve::text_program::TextEngine::from_checkpoint(ResidentFactory {checkpoint:&checkpoint,compute},&checkpoint,&tokenizer,input.len()+r.max_tokens)?;
-        for repeat in 1..=repeats {backend.set_profiling(gpu_cost && repeat>1);let saved=out.join(format!("run{repeat}"));fs::create_dir(&saved).map_err(|e|e.to_string())?;
+        for repeat in 1..=repeats {let prompt_rows=prompt_groups[(repeat-1)%prompt_groups.len()];backend.set_profiling(gpu_cost && repeat>1);let saved=out.join(format!("run{repeat}"));fs::create_dir(&saved).map_err(|e|e.to_string())?;
             write(&saved.join("INPUT_IDS"),input.iter().map(|v|format!("{v}\n")).collect::<String>().as_bytes())?;
-            let setup=std::time::Instant::now();let mut session=engine.session()?;
-            eprintln!("RESIDENT SESSION rank={rank} repeat={repeat} seconds={:.9}",setup.elapsed().as_secs_f64());
-            session.configure_request(&r)?;let mut last=None;let mut hashes=String::new();
-            for (at,&id) in input.iter().enumerate() {let started=std::time::Instant::now();let logits=session.step(id)?;
-                hashes.push_str(&format!("prompt-{at}={}\n",sha256::digest(&floats(&logits)?)));last=Some(logits);
-                eprintln!("RESIDENT PROMPT rank={rank} repeat={repeat} at={at} seconds={:.6}",started.elapsed().as_secs_f64());}
+            let decoder=Decoder::new(&checkpoint,&compute,(input.len()+r.max_tokens) as u64)?;if let Some(rows)=expanded_limit {decoder.set_expanded_limit(rows);}let mut state=decoder.zero_state()?;let mut last=None;let mut hashes=String::new();compute.cost_report("setup");let prompt_started=std::time::Instant::now();
+            let head_last=row_groups.as_ref().is_some_and(|(_,from)|*from>0 && repeat>=*from);
+            let row_group=row_groups.as_ref().map(|(g,_)|(g[(repeat-1)%g.len()],if head_last {HeadRows::Last} else {HeadRows::All}));
+            // Each group: its end, whether it runs the row path, and its report label.
+            let mut plan=Vec::new();let mut start=0;let size=row_group.map_or(prompt_rows,|g|g.0);
+            for &window in windows.iter().filter(|&&w|w+8<=input.len()) {
+                while start<window {let end=(start+size).min(window);plan.push((end,true,None));start=end;}
+                // The first scalar group warms the projection memo. The second one is the sample.
+                plan.push((window+4,false,Some(format!("warm{window}"))));plan.push((window+8,false,Some(format!("window{window}"))));start=window+8;
+            }
+            while start<input.len() {let end=(start+size).min(input.len());plan.push((end,row_group.is_some(),None));start=end;}
+            let mut at=0;let mut begin=0;for (end,rows_path,label) in plan {let tokens=&input[begin..end];begin=end;let started=std::time::Instant::now();
+                let (rows,next)=if let (true,Some((_,head)))=(rows_path,row_group) {decoder.prefill_rows(tokens,&state,head)?} else {decoder.prefill(tokens,&state)?};state=next;
+                if rows.len()<tokens.len() {at+=tokens.len()-rows.len();}
+                for logits in rows {hashes.push_str(&format!("prompt-{at}={}\n",sha256::digest(&floats(&logits)?)));last=Some(logits);at+=1;}
+                eprintln!("RESIDENT PROMPT GROUP rank={rank} repeat={repeat} rows={} end={at} seconds={:.9} allocated_bytes={}",tokens.len(),started.elapsed().as_secs_f64(),backend.allocated_bytes());
+                if let Some(label)=label {compute.cost_report(&label);}
+                else if !windows.is_empty() {compute.cost_report("carry");}}
+            let prompt_seconds=prompt_started.elapsed().as_secs_f64();write(&saved.join("PREFILL_TIMING"),format!("prompt_rows={} prompt_tokens={} prompt_seconds={prompt_seconds:.9} seconds_per_prompt_token={:.9}\n",row_group.map_or(prompt_rows,|g|g.0),input.len(),prompt_seconds/input.len() as f64).as_bytes())?;
+            compute.cost_report("prefill");
             let mut logits=last.ok_or("empty prompt")?;let mut output=Vec::new();let started=std::time::Instant::now();
             for at in 0..r.max_tokens {let bytes=floats(&logits)?;let mut best=0;for i in 1..logits.len() {if logits[i]>logits[best] {best=i;}}
                 output.push(best as u32);write(&saved.join(format!("{at}-logits.f32")),&bytes)?;
                 eprintln!("RESIDENT TOKEN rank={rank} repeat={repeat} at={at} id={best} elapsed_seconds={:.6}",started.elapsed().as_secs_f64());
-                if at+1<r.max_tokens {logits=session.step(best as u32)?;}
+                if at+1<r.max_tokens {let (next,_,updated)=decoder.step(best as u32,&state,|_,_|Ok(()))?;logits=next;state=updated;}
             }
             backend.synchronize()?;let seconds=started.elapsed().as_secs_f64();let steps=r.max_tokens-1;
             let timing=format!("decode_steps={steps} decode_seconds={seconds:.9} decode_tokens_per_second={:.9}\n",steps as f64/seconds);
@@ -176,7 +225,7 @@ fn run_pair(args:&[String])->Result<()> {
             let mut decoder=tokenizer.decoder();let mut text=String::new();for &id in &output {text.push_str(&decoder.push(id).map_err(|e|e.to_string())?);}text.push_str(&decoder.finish());write(&saved.join("TEXT"),text.as_bytes())?;
             write(&saved.join("COMPLETE"),b"RESIDENT DECODE RUN PASS\n")?;
             println!("RESIDENT DECODE PASS rank={rank} repeat={repeat} tokens={} {timing}ids={output:?} text={text:?}",output.len());
-            if repeat>1 {compare(&out.join("run1"),&saved)?;}
+            if repeat>1 && !head_last {compare(&out.join("run1"),&saved)?;}
         }Ok(())
             })();
             if result.is_err() {if let Some(m)=&mailbox {m.fail();}}
@@ -271,18 +320,18 @@ fn queued(out:&Path)->Result<()> {
         b.configure_vector_pool(16<<20);
         let expected=[1.0f32,-0.0,3.0,-4.0].repeat(32);
         for _ in 0..3 {
-            let queue=b.resident_queue()?;
+            let queue=b.resident_queue()?;b.enable_resident_launches()?;
             if b.resident_queue().is_ok() {return Err("resident queue accepted nested ownership".into());}
             let before=b.stats();let mut current=b.upload_vector(&expected)?;
             for _ in 0..20 {let next=b.round_bf16_lanes(&current)?.into_vector();drop(current);current=next;}
             if b.stats().since(before).stream_wait_calls!=0 {return Err("queued temporary owners drained the stream".into());}
-            let got=b.read_vector_values(&current)?;
+            let got=b.read_vector_values(&current)?;if b.stats().since(before).graph_launches==0 {return Err("queued chain did not replay a captured piece".into());}
             if got.iter().zip(&expected).any(|(a,b)|a.to_bits()!=b.to_bits()) {return Err("queued owner lifetime changed bits".into());}
             drop(current);drop(queue);
             let before=b.stats();let input=b.upload_vector(&expected)?;let _out=b.round_bf16_lanes(&input)?;
             if b.stats().since(before).stream_wait_calls==0 {return Err("resident queue changed ordinary completion".into());}
         }
-        let expected_error=(||->Result<()> {let _queue=b.resident_queue()?;
+        let expected_error=(||->Result<()> {let _queue=b.resident_queue()?;b.enable_resident_launches()?;
             let input=b.upload_vector(&expected)?;let _out=b.round_bf16_lanes(&input)?;
             Err("deliberate queued consumer error".into())})();
         if expected_error.is_ok() {return Err("queued error fixture did not fail".into());}
@@ -306,7 +355,7 @@ fn queued(out:&Path)->Result<()> {
             if b.tp_mailbox_put_finite(&mailbox,&source,1,4,5,0,3).is_ok() {return Err("resident mailbox accepted an invalid span".into());}
         }
         {
-            let _queue=b.resident_queue()?;let mut table=None;let mut outputs=Vec::new();
+            let _queue=b.resident_queue()?;b.enable_resident_launches()?;let mut table=None;let mut outputs=Vec::new();
             let before=b.stats();
             for parts in [2usize,5,1,7,3] {
                 let data=(0..parts).map(|n|(0..n+3).map(|i|if i%3==0 {-0.0} else {(i+n) as f32}).collect::<Vec<_>>()).collect::<Vec<_>>();
@@ -315,13 +364,13 @@ fn queued(out:&Path)->Result<()> {
                 let output=b.resident_join(&sources,&mut table)?;outputs.push((output,data.concat()));
                 drop(inputs);
             }
-            if b.stats().since(before).stream_wait_calls!=0 {return Err("queued descriptor reuse drained the stream".into());}
+            let changed=b.stats().since(before);if changed.stream_wait_calls!=changed.graph_captures {return Err("queued descriptor reuse waited outside cold capture".into());}
             drop(table);
             for (output,expected) in outputs {if b.read_vector_values(&output)?.iter().map(|v|v.to_bits()).ne(expected.iter().map(|v|v.to_bits())) {return Err("queued descriptor reuse or growth changed output bits".into());}}
         }
         for already_failed in [false,true] {
             let mailbox=b.tp_mailbox(4096)?;if already_failed {mailbox.fail();}
-            let _queue=b.resident_queue()?;let local=[1.0f32,-0.0,-7.5,3.0];
+            let _queue=b.resident_queue()?;b.enable_resident_launches()?;let local=[1.0f32,-0.0,-7.5,3.0];
             let input=b.upload_vector(&local)?;let mut gathered=b.vector(8)?;
             b.zero_vector(&mut gathered)?;b.copy_range(&input,&mut gathered,0,0,4)?;
             // No peer ever publishes sequence 1. Queue an actual consumer before checking failure.
@@ -333,7 +382,7 @@ fn queued(out:&Path)->Result<()> {
         }
         let _reopened=b.resident_queue()?;Ok(())
     })?;
-    let text="RESIDENT QUEUE PASS repeats=3 early_owner_drop=true nested_refusal=true ordinary_completion=true error_cleanup=true queued_join_reuse=true queued_join_growth=true missing_peer_consumer=true failed_mailbox_consumer=true failed_request=true exact_bits=true\n";
+    let text="RESIDENT QUEUE PASS repeats=3 early_owner_drop=true nested_refusal=true ordinary_completion=true error_cleanup=true queued_join_reuse=true queued_join_growth=true missing_peer_consumer=true failed_mailbox_consumer=true failed_request=true indirect_graphs=true dynamic_arguments=true exact_bits=true\n";
     write(&out.join("RECEIPT"),text.as_bytes())?;print!("{text}");Ok(())
 }
 #[cfg(target_os="linux")]
@@ -374,6 +423,12 @@ fn main() {
         [mode,out] if mode=="views"=>views(Path::new(out)),
         #[cfg(target_os="linux")]
         [mode,out] if mode=="queued"=>queued(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,out] if mode=="program"=>program::check(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,out] if mode=="recorder"=>recorder::check(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,root,out] if mode=="attention-time"=>attention::measure(Path::new(root),Path::new(out)),
         #[cfg(target_os="linux")]
         [mode,out] if mode=="recurrence"=>recurrence::run(Path::new(out)),
         #[cfg(target_os="linux")]

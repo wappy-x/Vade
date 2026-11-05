@@ -1,7 +1,7 @@
-//! Owned mHC operand and output binding. Ordinary calls complete; an owned queue retains dropped allocations until its drain.
+//! Owned mHC binding. Preparation stays queued on the backend's ordered stream.
 //! This binds candidate primitive arithmetic. It does not admit a checkpoint.
 use super::*;
-use crate::{mhc_params::{Shape,Prepare,Collapse,Combine},mhc_boundary::{Span,check_spans,check_bf16}};
+use crate::{mhc_params::{Shape,Prepare,Combine},mhc_boundary::{Span,check_spans,check_bf16}};
 
 /// Logical BF16 values in four-byte FP32 lanes. This is not packed BF16 storage.
 /// The private owner prevents an unrounded FP32 vector from claiming this type.
@@ -17,16 +17,19 @@ impl<'a> Bf16Vector<'a> {
 /// be changed between preparation and consumption by another safe caller.
 pub struct ResidentMhc<'b,'a> {
     backend: &'b Backend<'a>, shape: Shape,
-    weights: DeviceVector<'a>, base: DeviceVector<'a>, scale: DeviceVector<'a>,
+    weights: Rc<DeviceVector<'a>>, base: Rc<DeviceVector<'a>>, scale: Rc<DeviceVector<'a>>,
 }
 /// The input, normalized scratch, coefficients and collapsed output stay owned
-/// through the block. Coefficients cannot be paired with another residual row.
+/// through the block. Immutable parameter owners also survive queued work.
+/// Coefficients cannot be paired with another residual row. Accessors return
+/// device storage, not host-ready data; consumers use the same ordered stream.
 pub struct MhcPass<'b,'a> {
     backend: &'b Backend<'a>, shape: Shape, input: Bf16Vector<'a>,
     normalized: DeviceVector<'a>, coefficients: DeviceVector<'a>, collapsed: Bf16Vector<'a>,
+    _parameters: [Rc<DeviceVector<'a>>;3],
 }
 impl<'a> Backend<'a> {
-    fn mhc_ready(&self) -> Result<(),String> {
+    pub(super) fn mhc_ready(&self) -> Result<(),String> {
         if self.context.capturing.get() {return Err("resident mHC requires an uncaptured stream".into());}
         if let Some(error)=self.fatal_error() {return Err(error);}
         Ok(())
@@ -60,12 +63,12 @@ impl<'a> Backend<'a> {
             return Err("resident mHC parameter extents differ".into());
         }
         if weights.iter().chain(base).chain(scale).any(|v| !v.is_finite()) {return Err("resident mHC parameter is not finite".into());}
-        self.require_arm_kernels(&["mhc_prepare","mhc_bf16_collapse","mhc_bf16_combine"])?;
-        let weights=self.upload_vector(weights)?;let base=self.upload_vector(base)?;let scale=self.upload_vector(scale)?;
+        self.require_arm_kernels(&["mhc_prepare","mhc_bf16_combine"])?;
+        let weights=Rc::new(self.upload_vector(weights)?);let base=Rc::new(self.upload_vector(base)?);let scale=Rc::new(self.upload_vector(scale)?);
         self.synchronize()?;
         Ok(ResidentMhc {backend:self,shape,weights,base,scale})
     }
-    fn mhc_planes(&self, vectors: &[&DeviceVector<'_>], lengths: &[usize], writable: usize) -> Result<(),String> {
+    pub(super) fn mhc_planes(&self, vectors: &[&DeviceVector<'_>], lengths: &[usize], writable: usize) -> Result<(),String> {
         self.mhc_ready()?;
         if vectors.len()!=lengths.len() || writable>vectors.len() {return Err("resident mHC plane count differs".into());}
         let mut spans=Vec::new();
@@ -76,39 +79,23 @@ impl<'a> Backend<'a> {
         }
         check_spans(&spans,lengths).map_err(str::to_string)
     }
-    fn mhc_prepare_owned(&self, shape: Shape, vectors: [&DeviceVector<'_>;6]) -> Result<(),String> {
+    fn mhc_prepare_owned(&self, shape: Shape, vectors: [&DeviceVector<'_>;7]) -> Result<(),String> {
         shape.validate()?;let t=shape.rows as usize;let w=shape.wide();let p=shape.coefficients();
-        self.mhc_planes(&vectors,&[t*w,p*w,p,3,t*w,t*p],4)?;
+        self.mhc_planes(&vectors,&[t*w,p*w,p,3,t*w,t*p,t*shape.hidden as usize],4)?;
         let mut args=Prepare {input:vectors[0].device_address(),weights:vectors[1].device_address(),
             base:vectors[2].device_address(),scale:vectors[3].device_address(),normalized:vectors[4].device_address(),
-            coefficients:vectors[5].device_address(),shape,phase:0};
-        // SAFETY: Shape and every FP32 extent, context, alignment, and alias were
-        // checked above. The borrowed owners remain live through synchronization.
-        // The argument struct remains live until each launch copies its value.
-        // One ordered stream completes normalization before coefficient reads,
-        // and completes all disjoint coefficient writes before activation.
-        // Each independent coefficient gets its own block. Every dot retains
-        // its original complete ascending feature order.
-        let launched=unsafe {
-            self.launch_flash("mhc_prepare",shape.rows.div_ceil(128),128,&mut [parameter(&mut args)])
-                .and_then(|_| {args.phase=1;let units=u64::from(shape.rows)*shape.coefficients() as u64;
-                    self.launch_flash("mhc_prepare",units as u32,32,&mut [parameter(&mut args)])})
-                .and_then(|_| {args.phase=2;self.launch_flash("mhc_prepare",shape.rows.div_ceil(128),128,&mut [parameter(&mut args)])})
-        };
-        let completed=self.resident_completion();launched.and(completed)
+            coefficients:vectors[5].device_address(),collapsed:vectors[6].device_address(),shape};
+        self.mhc_launch("mhc_prepare",shape,&mut args)
     }
-    fn mhc_collapse_owned(&self, shape: Shape, vectors: [&DeviceVector<'_>;3]) -> Result<(),String> {
-        shape.validate()?;let t=shape.rows as usize;let h=shape.hidden as usize;
-        self.mhc_planes(&vectors,&[t*shape.wide(),t*shape.coefficients(),t*h],2)?;
-        let mut args=Collapse {input:vectors[0].device_address(),coefficients:vectors[1].device_address(),
-            output:vectors[2].device_address(),rows:shape.rows,streams:shape.streams,hidden:shape.hidden};
-        // SAFETY: Shape and all FP32 spans are checked and disjoint. Each owner
-        // and the by-value launch argument remain live through stream completion.
-        // The output uses private contiguous storage with the exact kernel extent.
-        let launched=unsafe {self.launch_flash("mhc_bf16_collapse",(t*h).div_ceil(128) as u32,128,&mut [parameter(&mut args)])};
-        let completed=self.resident_completion();launched.and(completed)
+    pub(super) fn mhc_launch<T>(&self,name:&str,shape:Shape,args:&mut T) -> Result<(),String> {
+        // SAFETY: Only the checked mHC binders call this private helper. They
+        // select the matching by-value ABI, validate every extent/context/alias,
+        // and retain all owners through the ordered consumer. Each block owns
+        // one token, with complete warps and uniform block barriers. Launch
+        // copies the live argument; error/drop cleanup drains referenced work.
+        unsafe {self.launch_flash(name,shape.rows,shape.prepare_threads(),&mut [parameter(args)])}
     }
-    fn mhc_combine_owned(&self, shape: Shape, vectors: [&DeviceVector<'_>;4]) -> Result<(),String> {
+    pub(super) fn mhc_combine_owned(&self, shape: Shape, vectors: [&DeviceVector<'_>;4]) -> Result<(),String> {
         shape.validate()?;let t=shape.rows as usize;let w=shape.wide();let h=shape.hidden as usize;
         self.mhc_planes(&vectors,&[t*w,t*shape.coefficients(),t*h,t*w],3)?;
         let mut args=Combine {input:vectors[0].device_address(),coefficients:vectors[1].device_address(),
@@ -129,9 +116,23 @@ impl<'b,'a> ResidentMhc<'b,'a> {
         b.check_vector(&input.vector,t*s.wide())?;
         let normalized=b.vector(t*s.wide())?;let coefficients=b.vector(t*s.coefficients())?;
         let collapsed=Bf16Vector {vector:b.vector(t*s.hidden as usize)?};
-        b.mhc_prepare_owned(s,[&input.vector,&self.weights,&self.base,&self.scale,&normalized,&coefficients])?;
-        b.mhc_collapse_owned(s,[&input.vector,&coefficients,&collapsed.vector])?;
-        Ok(MhcPass {backend:b,shape:s,input,normalized,coefficients,collapsed})
+        let parameters=[self.weights.clone(),self.base.clone(),self.scale.clone()];
+        b.mhc_prepare_owned(s,[&input.vector,&self.weights,&self.base,&self.scale,&normalized,&coefficients,&collapsed.vector])?;
+        Ok(MhcPass {backend:b,shape:s,input,normalized,coefficients,collapsed,_parameters:parameters})
+    }
+}
+impl<'b,'a> ResidentMhc<'b,'a> {
+    /// Independent token rows `[rows,N,D]`. Each token keeps its own RMS fold,
+    /// coefficient dots and Sinkhorn iterations. Only the launch shape changes.
+    pub fn begin_rows(&self, input: Bf16Vector<'a>, rows: usize) -> Result<MhcPass<'b,'a>,String> {
+        let b=self.backend;let s=Shape {rows:u32::try_from(rows).map_err(|_|"mHC rows exceed the ABI")?,..self.shape};
+        b.mhc_ready()?;s.validate()?;
+        b.check_vector(&input.vector,rows*s.wide())?;
+        let normalized=b.vector(rows*s.wide())?;let coefficients=b.vector(rows*s.coefficients())?;
+        let collapsed=Bf16Vector {vector:b.vector(rows*s.hidden as usize)?};
+        let parameters=[self.weights.clone(),self.base.clone(),self.scale.clone()];
+        b.mhc_prepare_owned(s,[&input.vector,&self.weights,&self.base,&self.scale,&normalized,&coefficients,&collapsed.vector])?;
+        Ok(MhcPass {backend:b,shape:s,input,normalized,coefficients,collapsed,_parameters:parameters})
     }
 }
 impl<'a> MhcPass<'_,'a> {

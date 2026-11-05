@@ -1,7 +1,9 @@
 //! Checked single-token operations. Each thread owns one complete output unit.
 use crate::causal_ops::{Arguments,unit};
 #[no_mangle]
-pub extern "ptx-kernel" fn causal_operation(p:Arguments) {
+pub extern "ptx-kernel" fn causal_operation(p:Arguments) {resident_causal_operation(p)}
+#[inline(always)]
+pub(crate) fn resident_causal_operation(p:Arguments) {
     // SAFETY: The host validates Shape::lengths and the exact same-context
     // allocation extents. Every input and weight is immutable through completion.
     // The host zeroes and completes the private output before this launch.

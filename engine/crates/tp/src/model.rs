@@ -430,7 +430,7 @@ fn own_block(b:&Backend<'_>,input:&DeviceVector<'_>,exchange:&mut DeviceVector<'
 }
 /// The link step of gather_device: the rank blocks are complete in `exchange`
 /// once the queued GPU writes before it have finished.
-fn exchange_blocks(b:&Backend<'_>,ring:&mut Ring,exchange:&mut DeviceVector<'_>,units:usize,width:usize,tokens:usize)->Result<()> {
+pub(crate) fn exchange_blocks(b:&Backend<'_>,ring:&mut Ring,exchange:&mut DeviceVector<'_>,units:usize,width:usize,tokens:usize)->Result<()> {
     let total=units.checked_mul(width).and_then(|n|n.checked_mul(tokens)).ok_or("device gather overflow")?;
     exchange.resize_within_capacity(total)?;
     let host=b.mapped_exchange_host(exchange)?;

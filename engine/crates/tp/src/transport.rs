@@ -435,6 +435,11 @@ impl Ring {
     }
 
     /// `buffer` already contains this rank's rows. Byte offsets are deterministic.
+    /// Drop wire registrations before a registered device allocation is freed.
+    pub fn release_transfer_regions(&mut self) {
+        #[cfg(target_os="linux")]
+        for endpoint in self.rdma.iter_mut().chain(self.aux.iter_mut().flat_map(|r|r.rdma.iter_mut())).flatten() {endpoint.retain_regions(false);}
+    }
     pub fn all_gather(&mut self, buffer: &mut [u8], row_bytes: usize) -> Result<()> {
         if row_bytes == 0 || buffer.len() % row_bytes != 0 { return Err("invalid all-gather row width".into()); }
         let total = buffer.len() / row_bytes;

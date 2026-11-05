@@ -12,7 +12,7 @@ fn root(x:f32)->f32 {
 }
 #[repr(u32)]
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
-pub enum Op {Conv,Prepare,Step,GatedNorm,SwiGlu,Project,KeyNorm,Pool,PoolScores,Select,Gather,Scores,Softmax,Values,Route,ExpertFold,Nvfp4,StreamMean,Mxfp8Quantize,UnpackKv,StepColumns,StepLayout,ConvChannels,ConvLayout,ProjectRows,PoolChannels,PoolLayout,Mxfp8QuantizePositiveZero}
+pub enum Op {Conv,Prepare,Step,GatedNorm,SwiGlu,Project,KeyNorm,Pool,PoolScores,Select,Gather,Scores,Softmax,Values,Route,ExpertFold,Nvfp4,StreamMean,Mxfp8Quantize,UnpackKv,StepColumns,StepLayout,ConvChannels,ConvLayout,ProjectRows,PoolChannels,PoolLayout,Mxfp8QuantizePositiveZero,ScoresSlots,ValuesChannels}
 #[repr(C)]
 #[derive(Debug,Clone,Copy)]
 pub struct Shape {pub op:Op,pub heads:u32,pub dim:u32,pub taps:u32,pub rows:u32,pub cols:u32,pub epsilon:f32,pub bound:f32}

@@ -82,8 +82,14 @@ pub unsafe extern "ptx-kernel" fn tp_mailbox_put(src: *const u32, rows: u64, wid
 /// `src` is mapped host memory covering `rows * half` words, `dst` covers `rows * width`
 /// words, `seq_word`/`error` are mapped words; `peer + half <= width`. Any 1D grid.
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn tp_mailbox_take(dst: *mut u32, rows: u64, width: u64, half: u64, peer: u64,
-    src: *const u32, seq_word: *const u32, seq: u64, error: *mut u32, limit_ns: u64) {
+pub extern "ptx-kernel" fn tp_mailbox_take(dst: *mut u32, rows: u64, width: u64, half: u64, peer: u64,
+    src: *const u32, seq_word: *const u32, seq: u64, error: *mut u32, limit_ns: u64) {resident_tp_mailbox_take(dst,rows,width,half,peer,src,seq_word,seq,error,limit_ns)}
+#[inline(always)]
+pub(crate) fn resident_tp_mailbox_take(dst:*mut u32,rows:u64,width:u64,half:u64,peer:u64,src:*const u32,seq_word:*const u32,seq:u64,error:*mut u32,limit_ns:u64) {
+    // SAFETY: Preserve the original kernel contract and launch geometry. The
+    // direct entry and checked indirect command adapter retain the same operands
+    // through ordered completion. This is the original kernel body verbatim.
+    unsafe {
     let sh = crate::ptx::shared::<4>();
     if _thread_idx_x() == 0 {
         let start = now_ns();
@@ -119,6 +125,8 @@ pub unsafe extern "ptx-kernel" fn tp_mailbox_take(dst: *mut u32, rows: u64, widt
             *dst.add(i / half * width + peer + i % half) = *src.add(i);
             i += step;
         }
+    }
+
     }
 }
 
@@ -200,7 +208,9 @@ pub extern "ptx-kernel" fn tp_mailbox_take_pair(x: *mut u32, y: *mut u32, rows: 
 /// a nonfinite row through the existing sticky mailbox error before publication.
 #[no_mangle]
 pub extern "ptx-kernel" fn tp_mailbox_put_finite(src:*const u32,rows:u64,width:u64,half:u64,own:u64,
-    dst:*mut u32,len_word:*mut u32,seq_word:*mut u32,seq:u64,error:*mut u32) {
+    dst:*mut u32,len_word:*mut u32,seq_word:*mut u32,seq:u64,error:*mut u32) {resident_tp_mailbox_put_finite(src,rows,width,half,own,dst,len_word,seq_word,seq,error)}
+#[inline(always)]
+pub(crate) fn resident_tp_mailbox_put_finite(src:*const u32,rows:u64,width:u64,half:u64,own:u64,dst:*mut u32,len_word:*mut u32,seq_word:*mut u32,seq:u64,error:*mut u32) {
     // SAFETY: The checked host adapter bounds all source row prefixes, the mapped
     // slot, and aligned mailbox header words. One CTA owns the slot. Source and
     // mailbox storage survive stream completion. Only each thread's disjoint

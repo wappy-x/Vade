@@ -39,9 +39,9 @@ fn payload(c: &ComponentView) -> engine_model::Result<Vec<u8>> {
     let pattern=match c.dtype {StoredDtype::Bf16=>0x8000u16.to_le_bytes().to_vec(),StoredDtype::F32=>0x3f800001u32.to_le_bytes().to_vec(),_=>panic!()};
     Ok(pattern.into_iter().cycle().take(c.bytes as usize).collect())
 }
-fn spans(p: &MhcOperands,rank: u32) -> [PhysicalSpan;6] {
+fn spans(p: &MhcOperands,rank: u32) -> [PhysicalSpan;7] {
     let s=p.shape(); let mut address=4096;
-    [s.wide(),p.weights().len(),p.base().len(),p.scale().len(),s.wide(),s.coefficients()].map(|words| {
+    [s.wide(),p.weights().len(),p.base().len(),p.scale().len(),s.wide(),s.coefficients(),s.hidden as usize].map(|words| {
         let out=PhysicalSpan {address,words,context:7,rank,dtype:Dtype::F32,packing:Packing::RowMajor}; address+=words as u64*4+64; out
     })
 }
@@ -57,7 +57,7 @@ fn physical_headers_and_every_mhc_argument_are_bound() {
         assert!(p.weights().iter().all(|v| v.to_bits()==0x80000000));
         assert!(p.base().iter().chain(p.scale()).all(|v| v.to_bits()==0x3f800001));
         let regions=spans(&p,rank); let args=p.arguments(regions).unwrap();
-        assert_eq!([args.input,args.weights,args.base,args.scale,args.normalized,args.coefficients],regions.map(|r| r.address));
+        assert_eq!([args.input,args.weights,args.base,args.scale,args.normalized,args.coefficients,args.collapsed],regions.map(|r| r.address));
         assert_eq!((args.shape.rows,args.shape.streams,args.shape.hidden,args.shape.iterations),(1,2,8,4));
         assert_eq!(args.shape.rms_eps.to_bits(),(d.epsilon as f32).to_bits());
         assert_eq!(args.shape.eps.to_bits(),(d.residual.epsilon as f32).to_bits());

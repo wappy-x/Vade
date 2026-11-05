@@ -213,7 +213,7 @@ impl<'a> Backend<'a> {
     }
     /// Queue selections and sticky routing status before one completion wait.
     pub fn read_argmax_status(&self, result: &DeviceVector<'_>, status: &DeviceVector<'_>, rows: usize)
-        -> Result<(Vec<Result<(u32,f32),String>>, Vec<usize>),String> {
+        -> Result<(Vec<Result<(u32,f32),String>>, Vec<usize>),String> { self.flush_resident_launches()?;
         self.check_vector(result, rows.checked_mul(3).ok_or("selection extent")?)?;
         self.check_vector(status, rows)?;
         let bytes = rows.checked_mul(16).filter(|&n| n>0 && n<=self.uploads.borrow().capacity).ok_or("selection read extent")?;
@@ -246,7 +246,7 @@ impl<'a> Backend<'a> {
     /// Preserve row validity words for callers that gather per-request verdicts.
     /// The callback runs after GPU completion and must inspect every row's status.
     pub fn read_argmax_raw<T>(&self, result: &DeviceVector<'_>, rows: usize,
-        consume: impl FnOnce(&[f32]) -> Result<T, String>) -> Result<T, String> {
+        consume: impl FnOnce(&[f32]) -> Result<T, String>) -> Result<T, String> { self.flush_resident_launches()?;
         self.check_vector(result, result.len)?;
         let bytes = rows.checked_mul(12).ok_or("argmax read size overflow")?;
         if rows == 0 || bytes > result.len * 4 || bytes > self.uploads.borrow().capacity {

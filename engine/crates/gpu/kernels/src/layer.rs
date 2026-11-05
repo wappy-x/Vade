@@ -634,16 +634,38 @@ unsafe fn tanh(x: f32) -> f32 {
     result
 }
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn model_rms_partials(a: crate::kernel_params::ModelRms) {
+pub extern "ptx-kernel" fn model_rms_partials(a: crate::kernel_params::ModelRms) {resident_model_rms_partials(a)}
+#[inline(always)]
+pub(crate) fn resident_model_rms_partials(a:crate::kernel_params::ModelRms) {
+    // SAFETY: Preserve the original kernel contract and launch geometry. The
+    // direct entry and checked indirect command adapter retain the same operands
+    // through ordered completion. This is the original kernel body verbatim.
+    unsafe {
     rms_partials(a.input as *const f32, a.partials as *mut f32, a.width);
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn model_rms_apply(a: crate::kernel_params::ModelRms) {
+pub extern "ptx-kernel" fn model_rms_apply(a: crate::kernel_params::ModelRms) {resident_model_rms_apply(a)}
+#[inline(always)]
+pub(crate) fn resident_model_rms_apply(a:crate::kernel_params::ModelRms) {
+    // SAFETY: Preserve the original kernel contract and launch geometry. The
+    // direct entry and checked indirect command adapter retain the same operands
+    // through ordered completion. This is the original kernel body verbatim.
+    unsafe {
     rms_apply(a.input as *const f32, a.weight as *const f32, a.partials as *const f32,
         a.output as *mut f32, a.width, a.epsilon, true);
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn model_elementwise(a: crate::kernel_params::ModelElementwise) {
+pub extern "ptx-kernel" fn model_elementwise(a: crate::kernel_params::ModelElementwise) {resident_model_elementwise(a)}
+#[inline(always)]
+pub(crate) fn resident_model_elementwise(a:crate::kernel_params::ModelElementwise) {
+    // SAFETY: Preserve the original kernel contract and launch geometry. The
+    // direct entry and checked indirect command adapter retain the same operands
+    // through ordered completion. This is the original kernel body verbatim.
+    unsafe {
     let i = index();
     if i >= a.elements as usize { return; }
     let x = *(a.input as *const f32).add(i);
@@ -659,4 +681,6 @@ pub unsafe extern "ptx-kernel" fn model_elementwise(a: crate::kernel_params::Mod
         _ => round_bf16(x * a.scalar),
     };
     *(a.output as *mut f32).add(i) = y;
+
+    }
 }

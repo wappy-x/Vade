@@ -233,8 +233,16 @@ unsafe fn project<const SOLO: bool, const PAIR: bool>(layer: MxLayer) {
 /// Descriptors must pass MxLayer::push; buffers cover their declared shapes,
 /// remain live on the stream, and outputs alias no inputs or other outputs.
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn flash_next_mxfp8_m1(layer: MxLayer) {
+pub extern "ptx-kernel" fn flash_next_mxfp8_m1(layer: MxLayer) {resident_flash_next_mxfp8_m1(layer)}
+#[inline(always)]
+pub(crate) fn resident_flash_next_mxfp8_m1(layer:MxLayer) {
+    // SAFETY: Preserve the original kernel contract and launch geometry. The
+    // direct entry and checked indirect command adapter retain the same operands
+    // through ordered completion. This is the original kernel body verbatim.
+    unsafe {
     project::<true, true>(layer)
+
+    }
 }
 
 #[no_mangle]

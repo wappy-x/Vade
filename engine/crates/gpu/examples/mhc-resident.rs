@@ -16,7 +16,7 @@ fn data(n: usize, salt: usize) -> Vec<f32> {
 }
 fn cases() -> Vec<Shape> {
     // Small odd widths and the saved mHC dimensions. These are fixture shapes.
-    [(1,1,1,1),(2,3,3,2),(3,7,5,3),(4,129,3,5),(4,4096,20,2)]
+    [(1,1,1,1),(2,3,3,2),(3,7,5,3),(4,129,3,5),(4,4096,20,2),(5,7,20,3),(8,3,4,2),(4,4096,20,1)]
         .map(|(streams,hidden,iterations,rows)| Shape {rows,streams,hidden,iterations,rms_eps:1e-6,eps:1e-6}).to_vec()
 }
 struct Fixture {shape:Shape,input:Vec<f32>,weights:Vec<f32>,base:Vec<f32>,scale:Vec<f32>,block:Vec<f32>}
@@ -81,6 +81,7 @@ fn device(expected: &Path, out: &Path) -> Result<()> {
                 let resident=b.resident_mhc(shape,&f.weights,&f.base,&f.scale)?;
                 let input=b.upload_bf16_lanes(&f.input[first*s.wide()..(first+rows)*s.wide()])?;
                 let pass=resident.begin(input)?;
+                drop(resident);
                 let normalized=b.read_vector_values(pass.normalized())?;let coefficients=b.read_vector_values(pass.coefficients())?;
                 let collapsed=b.read_vector_values(pass.collapsed().vector())?;
                 let block=b.upload_bf16_lanes(&f.block[first*s.hidden as usize..(first+rows)*s.hidden as usize])?;
@@ -118,6 +119,114 @@ fn device(expected: &Path, out: &Path) -> Result<()> {
 }
 #[cfg(not(target_os = "linux"))]
 fn device(_: &Path,_: &Path) -> Result<()> {Err("device probe requires Linux and CUDA".into())}
+#[cfg(target_os="linux")]
+fn boundary_device(out:&Path)->Result<()> {
+    use spark_gpu_probe::{driver::with_backend,layer_ptx,norm_boundary::{NormShape,WeightType}};
+    use std::rc::Rc;
+    with_backend(0,layer_ptx()?,usize::MAX,|backend| {
+        backend.configure_vector_pool(64<<20);
+        for (index,shape) in cases().into_iter().enumerate() {for precision in [WeightType::Bf16,WeightType::F32] {
+            let fixture=Fixture::new(shape);let hidden=shape.hidden as usize;let wide=shape.wide();let rows=shape.rows as usize;
+            let norm=NormShape::new(hidden,1e-6,precision)?;
+            let weight=data(hidden,17).into_iter().map(|value|match precision {WeightType::Bf16=>value,WeightType::F32=>value+0.00013}).collect::<Vec<_>>();
+            let ordinary_norm=backend.resident_norm(norm,&weight)?;let solo=Shape {rows:1,..shape};
+            let ordinary=backend.resident_mhc(solo,&fixture.weights,&fixture.base,&fixture.scale)?;
+            let resident=backend.resident_mhc_boundary(solo,norm,&fixture.weights,&fixture.base,&fixture.scale,&weight)?;
+            if resident.begin_rows(Rc::new(backend.vector(rows*wide)?),0).is_ok() {return Err("boundary accepted zero rows".into());}
+            if index==0 && precision==WeightType::Bf16 {
+                let wrong=Rc::new(backend.vector(rows*wide+1)?);
+                if resident.begin(wrong).is_ok() {return Err("boundary accepted a wrong input extent".into());}
+                let source=Rc::new(backend.upload_vector(&fixture.input)?);let pass=resident.begin(source)?;
+                let aliased=Rc::new(backend.upload_vector(&fixture.block)?);
+                if resident.begin_after(pass,aliased.clone(),aliased).is_ok() {return Err("boundary accepted aliased block and residual".into());}
+                let source=Rc::new(backend.upload_vector(&fixture.input)?);let pass=resident.begin(source)?;
+                let block=Rc::new(backend.upload_vector(&fixture.block)?);let wrong=Rc::new(backend.vector(rows*wide+1)?);
+                if resident.begin_after(pass,block,wrong).is_ok() {return Err("boundary accepted a wrong residual extent".into());}
+                let mut invalid_weights=fixture.weights.clone();invalid_weights[0]=f32::NAN;
+                if backend.resident_mhc_boundary(shape,norm,&invalid_weights,&fixture.base,&fixture.scale,&weight).is_ok() {return Err("boundary accepted a nonfinite parameter".into());}
+                let mut invalid_weight=weight.clone();invalid_weight[0]=1.00390625;
+                if backend.resident_mhc_boundary(shape,norm,&fixture.weights,&fixture.base,&fixture.scale,&invalid_weight).is_ok() {return Err("boundary silently narrowed a norm parameter".into());}
+                let source=Rc::new(backend.upload_vector(&fixture.input)?);let pass=resident.begin(source)?;let output=backend.vector(rows*wide)?;
+                with_backend(0,layer_ptx()?,usize::MAX,|other| {
+                    let foreign=other.upload_vector(&fixture.block)?;
+                    if pass.materialize(&foreign,&output).is_ok() {return Err("boundary accepted a foreign block context".into());}Ok(())
+                })?;
+                println!("MHC-BOUNDARY REJECTIONS PASS extent=true alias=true context=true precision=true finite=true");
+            }
+            let mut reference=fixture.input.clone();let mut expected=Vec::new();let mut blocks=Vec::new();
+            for site in 0..3 {
+                let block=data(rows*hidden,23+site).into_iter().enumerate().map(|(i,value)|value+if i%3==0 {0.00390625} else {0.001}).collect::<Vec<_>>();
+                let mut planes=vec![Vec::new();6];let mut next=Vec::new();
+                for row in 0..rows {
+                    let source=backend.upload_vector(&reference[row*wide..(row+1)*wide])?;
+                    let pass=ordinary.begin(backend.round_bf16_lanes(&source)?)?;
+                    planes[0].extend(backend.read_vector_values(pass.normalized())?);
+                    planes[1].extend(backend.read_vector_values(pass.coefficients())?);
+                    planes[2].extend(backend.read_vector_values(pass.collapsed().vector())?);
+                    planes[3].extend(backend.read_vector_values(ordinary_norm.apply(pass.collapsed())?.vector())?);
+                    let source=backend.upload_vector(&block[row*hidden..(row+1)*hidden])?;
+                    let combined=pass.finish(backend.round_bf16_lanes(&source)?)?;
+                    next.extend(backend.read_vector_values(combined.vector())?);
+                }
+                planes[4]=reference.iter().copied().map(spark_gpu_probe::bf16::rounded).collect();planes[5]=next.clone();
+                reference=next;expected.push(planes);blocks.push(Rc::new(backend.upload_vector(&block)?));
+            }
+            backend.synchronize()?;
+            let source=Rc::new(backend.upload_vector(&fixture.input)?);backend.synchronize()?;backend.set_profiling(true);let before=backend.stats();
+            let started=std::time::Instant::now();let mut pass=resident.begin_rows(source,rows)?;
+            for site in 0..3 {
+                let submitted=backend.stats().since(before);
+                if submitted.queued_calls!=2*(site as u128+1) || submitted.stream_wait_calls!=0 {return Err(format!("boundary submit calls or waits differ at site {site}: calls={} waits={}",submitted.queued_calls,submitted.stream_wait_calls));}
+                if site<2 {let residual=Rc::new(backend.vector(rows*wide)?);pass=resident.begin_after_rows(pass,blocks[site].clone(),residual,rows)?;}
+            }
+            drop(resident);backend.synchronize()?;
+            let submitted=backend.stats().since(before);backend.set_profiling(false);
+            println!("MHC-BOUNDARY COMPLETE case={index} precision={precision:?} sites=3 elapsed_ns={} kernel_ns={} launches={} stream_waits={}",started.elapsed().as_nanos(),submitted.device_kernel_ns.iter().sum::<u128>(),submitted.queued_calls,submitted.stream_wait_calls);
+            let mut saved=Vec::new();let mut current=Some(&pass);
+            while let Some(value)=current {saved.push(value);current=value.previous();}
+            for (site,value) in saved.into_iter().rev().enumerate() {
+                let normalized=value.normalized();
+                let planes=[value.mixing_normalized(),value.coefficients(),value.collapsed(),&*normalized,value.residual()];
+                for (plane,vector) in planes.into_iter().enumerate() {
+                    let got=bytes(&backend.read_vector_values(vector)?);let want=bytes(&expected[site][plane]);
+                    let label=format!("case={index} precision={precision:?} site={site} plane={plane}");equal(&label,&got,&want)?;
+                    write(&out.join(format!("{index}-{precision:?}-{site}-{plane}.f32")),&got)?;
+                }
+            }
+            let output=backend.vector(rows*wide)?;pass.materialize(&blocks[2],&output)?;
+            equal("final deferred post",&bytes(&backend.read_vector_values(&output)?),&bytes(&expected[2][5]))?;
+            println!("MHC-BOUNDARY BYTES PASS case={index} precision={precision:?} sites=3 submit_launches=6 submit_waits=0");
+        }}
+        if let Some(error)=backend.fatal_error() {return Err(error);}Ok(())
+    })?;
+    write(&out.join("COMPLETE"),b"MHC-BOUNDARY DEVICE PASS\n")?;Ok(())
+}
+#[cfg(not(target_os="linux"))]
+fn boundary_device(_:&Path)->Result<()> {Err("boundary probe requires Linux and CUDA".into())}
+#[cfg(target_os="linux")]
+fn measure(repeats:usize)->Result<()> {
+    use spark_gpu_probe::{driver::with_backend,layer_ptx};
+    if repeats==0 || repeats>100 {return Err("mHC measurement repeat bound exceeded".into());}
+    with_backend(0,layer_ptx()?,usize::MAX,|backend| {
+        backend.configure_vector_pool(16<<20);
+        for profiled in [false,true] {backend.set_profiling(profiled);
+            for (index,shape) in cases().into_iter().enumerate() {
+                let fixture=Fixture::new(shape);let resident=backend.resident_mhc(shape,&fixture.weights,&fixture.base,&fixture.scale)?;
+                for repeat in 0..=repeats {
+                    let input=backend.upload_bf16_lanes(&fixture.input)?;backend.synchronize()?;
+                    let before=backend.stats();let started=std::time::Instant::now();let pass=resident.begin(input)?;
+                    backend.synchronize()?;
+                    let nanoseconds=started.elapsed().as_nanos();let stats=backend.stats().since(before);
+                    if repeat>0 {println!("MHC-RESIDENT MEASURE case={index} repeat={repeat} profiled={profiled} rows={} streams={} hidden={} iterations={} begin_ns={nanoseconds} kernel_ns={} launches={} stream_waits={}",
+                        shape.rows,shape.streams,shape.hidden,shape.iterations,stats.device_kernel_ns.iter().sum::<u128>(),stats.queued_calls,stats.stream_wait_calls);}
+                    drop(pass);
+                }
+            }
+        }Ok(())
+    })
+}
+#[cfg(not(target_os="linux"))]
+fn measure(_:usize)->Result<()> {Err("device measurement requires Linux and CUDA".into())}
 fn compare(a: &Path,b: &Path) -> Result<()> {
     for path in [a,b] {
         let mark=fs::read(path.join("COMPLETE")).map_err(|e| e.to_string())?;
@@ -141,7 +250,9 @@ fn main() {
             ["host",out]=>{fs::create_dir(out).map_err(|e| e.to_string())?;host(Path::new(out))},
             ["device",expected,out]=>{fs::create_dir(out).map_err(|e| e.to_string())?;device(Path::new(expected),Path::new(out))},
             ["compare",a,b]=>compare(Path::new(a),Path::new(b)),
-            _=>Err("usage: mhc-resident host NEW_OUT | device EXPECTED NEW_OUT | compare RUN_A RUN_B".into()),
+            ["measure",repeats]=>measure(repeats.parse().map_err(|_|"invalid mHC measurement repeat count")?),
+            ["boundary",out]=>{fs::create_dir(out).map_err(|e|e.to_string())?;boundary_device(Path::new(out))},
+            _=>Err("usage: mhc-resident host NEW_OUT | device EXPECTED NEW_OUT | compare RUN_A RUN_B | measure REPEATS".into()),
         }
     })();
     if let Err(error)=result {eprintln!("mhc-resident: {error}");std::process::exit(1);}

@@ -34,6 +34,9 @@ impl<'d> ResidentProjection<'_,'d> {
 pub struct ResidentResidualBlock<'b,'d> {mhc: ResidentMhc<'b,'d>,norm: ResidentNorm<'b,'d>}
 pub struct ResidualBlockPass<'b,'d> {mhc: MhcPass<'b,'d>,normalized: NormOutput<'d>}
 impl ResidualBlockOperands {
+    pub fn upload_boundary<'b,'d>(&self,backend:&'b Backend<'d>)->Result<spark_gpu_probe::driver::ResidentMhcBoundary<'b,'d>> {
+        backend.resident_mhc_boundary(self.mhc.shape(),self.norm.shape(),self.mhc.weights(),self.mhc.base(),self.mhc.scale(),self.norm.weight())
+    }
     pub fn upload<'b,'d>(&self,backend: &'b Backend<'d>) -> Result<ResidentResidualBlock<'b,'d>> {
         // Both immutable owners use the same backend and checkpoint operands.
         let mhc=self.mhc.upload(backend)?;let norm=self.norm.upload(backend)?;
@@ -43,6 +46,13 @@ impl ResidualBlockOperands {
 impl<'b,'d> ResidentResidualBlock<'b,'d> {
     pub fn begin(&self,residual: Bf16Vector<'d>) -> Result<ResidualBlockPass<'b,'d>> {
         let mhc=self.mhc.begin(residual)?;let normalized=self.norm.apply(mhc.collapsed())?;
+        Ok(ResidualBlockPass {mhc,normalized})
+    }
+}
+impl<'b,'d> ResidentResidualBlock<'b,'d> {
+    /// Independent token rows `[rows,N,D]`. Each row keeps the one-row order.
+    pub fn begin_rows(&self,residual: Bf16Vector<'d>,rows: usize) -> Result<ResidualBlockPass<'b,'d>> {
+        let mhc=self.mhc.begin_rows(residual,rows)?;let normalized=NormOutput::F32(self.norm.apply_rows(mhc.collapsed(),rows)?);
         Ok(ResidualBlockPass {mhc,normalized})
     }
 }

@@ -35,7 +35,7 @@ impl<'a> Backend<'a> {
         Ok(FrontendStream { stream: Stream::new(self.context)?, ready: Event::ready(&self.stream)?, done: Event::ready(&self.stream)? })
     }
     /// All raw kernel operands must outlive both streams; join before reuse.
-    pub unsafe fn frontend_launch(&self, side: &FrontendStream<'a>, name: &str, args: &mut [*mut c_void]) -> Result<(), String> {
+    pub unsafe fn frontend_launch(&self, side: &FrontendStream<'a>, name: &str, args: &mut [*mut c_void]) -> Result<(), String> { self.flush_resident_launches()?;
         if !ptr::eq(self.context, side.stream.context) { return Err("frontend stream context mismatch".into()); }
         self.context.activate()?; side.ready.record_again(&self.stream)?;
         check(cuStreamWaitEvent(side.stream.raw, side.ready.raw, 0), "frontend producer wait")?;
@@ -45,7 +45,7 @@ impl<'a> Backend<'a> {
         check(cuLaunchKernel(f, 20, 1, 1, 128, 1, 1, 0, side.stream.raw, args.as_mut_ptr(), ptr::null_mut()), "frontend gather")?;
         side.done.record_again(&side.stream)
     }
-    pub fn frontend_join(&self, side: &FrontendStream<'a>) -> Result<(), String> {
+    pub fn frontend_join(&self, side: &FrontendStream<'a>) -> Result<(), String> { self.flush_resident_launches()?;
         self.context.activate()?;
         unsafe { check(cuStreamWaitEvent(self.stream.raw, side.done.raw, 0), "frontend consumer wait") }
     }

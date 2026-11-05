@@ -57,6 +57,17 @@ impl<'d> ResidentDynamicProjection<'_,'d> {
         let decoded=b.causal_operation(s,[Some(input),None,None,None],None)?;
         self.projection.apply(&NormOutput::F32(decoded))
     }
+    /// Decoded BF16 lanes of many token rows. Output `[tokens,rows]`, rounded.
+    pub fn project_rows(&self,input:&spark_gpu_probe::driver::DeviceVector<'_>,tokens:usize)->Result<spark_gpu_probe::driver::Bf16Vector<'d>> {
+        use spark_gpu_probe::causal_ops::{Shape,Op};
+        let b=self.backend;b.require_resident_stream()?;
+        if input.len()!=self.source.cols().checked_mul(tokens).ok_or("dynamic MXFP8 rows overflow")? || input.is_segmented() {return Err("dynamic MXFP8 input extent differs".into());}
+        // The quantizer owns complete 32-lane groups, so concatenated rows quantize independently.
+        let s=Shape {op:Op::Mxfp8Quantize,heads:0,dim:0,taps:0,rows:0,cols:input.len().try_into().map_err(|_|"MXFP8 columns exceed ABI")?,epsilon:0.0,bound:0.0};
+        let decoded=b.causal_operation(s,[Some(input),None,None,None],None)?;
+        let accumulator=self.projection.apply_rows(&decoded,tokens)?;
+        Ok(b.round_bf16_lanes(&accumulator)?)
+    }
     /// The bounded binding stages activations through the host quantizer.
     /// Readback and upload complete on the same backend. This is no speed claim.
     pub fn apply(&self,input:&spark_gpu_probe::driver::NormOutput<'_>)->Result<DynamicProjectionPass<'d>> {

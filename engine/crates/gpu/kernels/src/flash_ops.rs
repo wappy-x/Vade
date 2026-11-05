@@ -8,7 +8,13 @@ use crate::flash_gdn::rounded;
 mod bf16_mma;
 
 #[no_mangle]
-pub unsafe extern "ptx-kernel" fn flash_hybrid_copy(p: crate::kernel_params::HybridCopy) {
+pub extern "ptx-kernel" fn flash_hybrid_copy(p: crate::kernel_params::HybridCopy) {resident_flash_hybrid_copy(p)}
+#[inline(always)]
+pub(crate) fn resident_flash_hybrid_copy(p:crate::kernel_params::HybridCopy) {
+    // SAFETY: Preserve the original kernel contract and launch geometry. The
+    // direct entry and checked indirect command adapter retain the same operands
+    // through ordered completion. This is the original kernel body verbatim.
+    unsafe {
     let p = if p.rows == 0 { p } else {
         let row = &*(p.rows as *const crate::kernel_params::HybridCopyRow).add(core::arch::nvptx::_block_idx_y() as usize);
         crate::kernel_params::HybridCopy { source: row.source as _, destination: row.destination as _,
@@ -16,6 +22,8 @@ pub unsafe extern "ptx-kernel" fn flash_hybrid_copy(p: crate::kernel_params::Hyb
     };
     let i = core::arch::nvptx::_block_idx_x() as usize * 128 + core::arch::nvptx::_thread_idx_x() as usize;
     if i < p.words as usize { *p.destination.add(i) = *p.source.add(i); }
+
+    }
 }
 
 #[inline(always)]

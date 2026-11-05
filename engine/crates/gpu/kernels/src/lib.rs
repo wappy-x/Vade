@@ -16,9 +16,13 @@ mod causal_ops;
 #[path = "../../src/mxfp8_quantize.rs"] mod mxfp8_quantize;
 #[path = "../../src/latent_ops.rs"]
 mod latent_ops;
+#[path = "../../src/resident_launch.rs"] mod resident_launch_abi;
+mod resident_launch;
 #[path = "causal_ops.rs"]
 mod causal_operation;
 #[path = "../../src/expert_ops.rs"] mod expert_ops;
+#[path = "../../src/prompt_ops.rs"] mod prompt_ops;
+#[path = "prompt_ops.rs"] mod prompt_operation;
 #[path = "expert_ops.rs"] mod expert_operation;
 
 #[path = "../../src/next_math.rs"]
@@ -57,6 +61,7 @@ mod mhc;
 #[path = "../../src/mhc_boundary.rs"]
 mod mhc_boundary_math;
 mod mhc_boundary;
+mod mhc_boundary_fused;
 mod qsa_indexer;
 mod flash_moe;
 #[path = "../../src/router_abi.rs"]

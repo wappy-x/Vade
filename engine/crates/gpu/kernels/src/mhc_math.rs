@@ -16,6 +16,10 @@ pub fn prepare(s: Shape, x: &[f32], weights: &[f32], base: &[f32], scale: &[f32]
 }
 /// Keep the original ascending feature sum for each token's RMS boundary.
 pub fn normalize(s:Shape,x:&[f32],normalized:&mut[f32]) {
+    let inv=inverse(s,x);
+    for i in 0..s.wide() { normalized[i] = x[i] * inv; }
+}
+pub fn inverse(s:Shape,x:&[f32])->f32 {
     let wide=s.wide();
     let mut squares = 0.0f32;
     // Load independent products together. Keep every addition in the original
@@ -27,8 +31,7 @@ pub fn normalize(s:Shape,x:&[f32],normalized:&mut[f32]) {
         squares+=a;squares+=c;squares+=d;squares+=e;squares+=f;squares+=g;squares+=h;squares+=i;
     }
     for &v in blocks.remainder() {squares+=v*v;}
-    let inv = 1.0 / root(squares / wide as f32 + s.rms_eps);
-    for i in 0..wide { normalized[i] = x[i] * inv; }
+    1.0 / root(squares / wide as f32 + s.rms_eps)
 }
 /// Coefficient rows are independent. Each dot keeps its full ascending fold.
 pub fn project(s:Shape,i:usize,weights:&[f32],base:&[f32],scale:&[f32],normalized:&[f32])->f32 {
@@ -39,11 +42,18 @@ pub fn project(s:Shape,i:usize,weights:&[f32],base:&[f32],scale:&[f32],normalize
 /// Run only after all independent coefficient rows have completed.
 pub fn activate(s:Shape,coefficients:&mut[f32]) {
     let n=s.streams as usize;
+    gates(s,&mut coefficients[..2*n]);
+    sinkhorn(s,&mut coefficients[2*n..]);
+}
+pub fn gates(s:Shape,coefficients:&mut[f32]) {
+    let n=s.streams as usize;
     for i in 0..n {
         coefficients[i] = sigmoid(coefficients[i]) + s.eps;
         coefficients[n + i] = 2.0 * sigmoid(coefficients[n + i]);
     }
-    let comb = &mut coefficients[2 * n..];
+}
+pub fn sinkhorn(s:Shape,comb:&mut[f32]) {
+    let n=s.streams as usize;
     for row in comb.chunks_exact_mut(n) {
         let mut max = f32::NEG_INFINITY;
         for &v in row.iter() { max = max.max(v); }

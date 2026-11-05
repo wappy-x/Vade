@@ -3,7 +3,9 @@ use crate::{mhc_params::{Collapse,Combine},mhc_boundary_math as math};
 use core::slice;
 
 #[no_mangle]
-pub extern "ptx-kernel" fn bf16_lanes_round(p: math::LaneCast) {
+pub extern "ptx-kernel" fn bf16_lanes_round(p: math::LaneCast) {resident_bf16_lanes_round(p)}
+#[inline(always)]
+pub(crate) fn resident_bf16_lanes_round(p:math::LaneCast) {
     // SAFETY: The resident caller checks exact, disjoint FP32 spans and a
     // positive ABI-sized word count. The guard bounds both accesses. The caller
     // keeps the allocation owners live until the ordered stream completes.
@@ -14,7 +16,9 @@ pub extern "ptx-kernel" fn bf16_lanes_round(p: math::LaneCast) {
 }
 
 #[no_mangle]
-pub extern "ptx-kernel" fn mhc_bf16_collapse(p: Collapse) {
+pub extern "ptx-kernel" fn mhc_bf16_collapse(p: Collapse) {resident_mhc_bf16_collapse(p)}
+#[inline(always)]
+pub(crate) fn resident_mhc_bf16_collapse(p:Collapse) {
     // SAFETY: The resident caller checks positive dimensions and exact disjoint
     // FP32 extents. Each guarded thread writes one output. All token and feature
     // offsets below stay within those extents. Owners survive stream completion.
@@ -28,7 +32,9 @@ pub extern "ptx-kernel" fn mhc_bf16_collapse(p: Collapse) {
     }
 }
 #[no_mangle]
-pub extern "ptx-kernel" fn mhc_bf16_combine(p: Combine) {
+pub extern "ptx-kernel" fn mhc_bf16_combine(p: Combine) {resident_mhc_bf16_combine(p)}
+#[inline(always)]
+pub(crate) fn resident_mhc_bf16_combine(p:Combine) {
     // SAFETY: The resident caller checks positive dimensions and exact disjoint
     // FP32 extents. Each guarded thread writes one output. Its raw input,
     // coefficients and block reads stay in that token. Owners survive completion.

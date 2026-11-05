@@ -87,6 +87,32 @@ impl<'a> ResidentMxfp8Projection<'_,'a> {
         Ok(Mxfp8ProjectionPass {accumulator,output})
     }
 }
+impl<'a> ResidentMxfp8Projection<'_,'a> {
+    /// Decoded FP32 token rows `[tokens,cols]`. Output accumulators are
+    /// `[tokens,rows]`. Each (row,token) keeps the same element set, ascending
+    /// FMA chain and shuffle tree as M=1. Groups use the existing M kernels.
+    pub fn apply_rows(&self,input:&DeviceVector<'_>,tokens:usize)->Result<DeviceVector<'a>,String> {
+        let b=self.backend;let s=self.shape;b.require_resident_stream()?;
+        if s.input()!=WeightType::F32 {return Err("MXFP8 prompt rows require FP32 decoded activations".into());}
+        let cols=s.cols();let rows=s.rows();b.check_vector(input,tokens.checked_mul(cols).ok_or("MXFP8 token rows overflow")?)?;
+        if input.is_segmented() || tokens==0 {return Err("MXFP8 projection requires complete contiguous input features".into());}
+        let output=b.vector(tokens*rows)?;let mut token=0;
+        while token<tokens {let count=(tokens-token).min(16);
+            let mut args=crate::next_params::MxLayer::default();
+            let p=crate::next_params::MxProjection {weights:self.weights.address,scales:self.scales.address,
+                input:input.device_address()+(token*cols*4) as u64,output:output.device_address()+(token*rows*4) as u64,rows:rows as u32,
+                cols:cols as u32,tokens:count as u32,input_bf16:0,round:0};
+            let kernel=p.kernel();args.push(p)?;
+            b.require_arm_kernels(&[kernel])?;
+            // SAFETY: Shape bounds complete E4M3 rows and UE8M0 groups in the retained arena views.
+            // check_vector checks the context and all token rows, and the offsets stay inside them.
+            // The output is a new disjoint allocation. Buffer::drop drains the stream, so all
+            // owners outlive the launch. The argument is copied at launch.
+            unsafe {b.launch_flash(kernel,args.ends[1],128,&mut [parameter(&mut args)])}?;
+            token+=count;
+        }Ok(output)
+    }
+}
 impl<'a> Mxfp8ProjectionPass<'a> {
     pub fn accumulator(&self)->&DeviceVector<'a> {&self.accumulator}
     pub fn output(&self)->&Bf16Vector<'a> {&self.output}

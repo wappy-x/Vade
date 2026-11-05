@@ -18,6 +18,8 @@ fn norm_shape(c:&CheckpointAdmission,name:&str,width:usize)->Result<NormShape> {
     let dtype=match w.components()[0].dtype {Dtype::Bf16=>WeightType::Bf16,Dtype::F32=>WeightType::F32,_=>return Err("unsupported norm precision".into())};
     NormShape::new(width,c.description().epsilon as f32,dtype)
 }
+#[cfg(any(target_os="linux",test))]
+mod lineage;
 pub trait Compute {
     fn plan_cost(&self,_ns:u128) {}
     fn trace_start(&self) {}
@@ -29,6 +31,7 @@ pub trait Compute {
     fn projection_rows(&self,_:&CheckpointAdmission,_:&str,_:&[&Self::Value],_:bool)->Result<Option<Vec<Self::Value>>> {Ok(None)}
     fn projection_batch(&self,_:&CheckpointAdmission,_:&[(&str,&Self::Value)],_:bool)->Result<Option<Vec<Self::Value>>> {Ok(None)}
     fn repeated_projection(&self,c:&CheckpointAdmission,name:&str,x:&Self::Value,round:bool)->Result<Option<Self::Value>> {self.projection(c,name,x,round)}
+    fn attention(&self,_heads:u32,_key_dim:u32,_value_dim:u32,_slots:usize,_capacity:usize,_x:[&Self::Value;4])->Result<Option<Self::Value>> {Ok(None)}
     fn embedding(&self,_:u32,_:usize)->Result<Option<Self::Value>> {Ok(None)}
     fn upload(&self,v:&[f32])->Result<Self::Value>;
     fn read(&self,v:&Self::Value)->Result<Vec<f32>>;
@@ -42,10 +45,25 @@ pub trait Compute {
     fn mx(&self,p:&Mxfp8Projection<'_>,x:&Self::Value)->Result<Self::Value>;
     fn round(&self,x:&Self::Value)->Result<Self::Value>;
     fn mean(&self,x:&Self::Value,streams:u32,hidden:u32)->Result<Self::Value>;
+    /// One operation over token-major prompt rows.
+    fn prompt(&self,s:spark_gpu_probe::prompt_ops::Shape,x:[Option<&Self::Value>;5],w:&[f32])->Result<Self::Value>;
+    fn rows_embedding(&self,_:&[u32],_:usize)->Result<Option<Self::Value>> {Ok(None)}
+    /// Token-major `[m,rows]`, complete on every rank. None runs one row at a time.
+    fn rows_project(&self,_:&CheckpointAdmission,_:&str,_:&Self::Value,_:usize,_:bool)->Result<Option<Self::Value>> {Ok(None)}
+    /// One layer's selected experts in one pass. `first` and `second` list
+    /// (matrix, token rows) over contiguous `source` rows. With `second`, the
+    /// two local outputs meet in SwiGLU before the gather. `places` has three
+    /// numbers for each output row. None runs each expert separately.
+    fn rows_experts(&self,_:&[(&str,usize)],_:Option<(&[(&str,usize)],f32)>,_:&Self::Value,_:&[f32])->Result<Option<Self::Value>> {Ok(None)}
+    fn rows_norm(&self,name:&str,s:NormShape,x:&Self::Value,m:usize,w:&[f32])->Result<Self::Value>;
+    fn rows_begin(&self,key:(usize,usize),p:&crate::layer_operands::ResidualBlockOperands,x:&Self::Value,m:usize)->Result<(Self::Pass,Self::Value)>;
+    fn rows_finish(&self,p:Self::Pass,x:&Self::Value,m:usize)->Result<Self::Value>;
 }
-pub struct State<V> {pub position:u64,pub layers:Vec<BTreeMap<String,V>>}
+/// `expanded` keeps each prompt layer's expanded latent rows. Only prompt groups
+/// use it, and it holds only pure projections of `latent_cache` rows.
+pub struct State<V> {pub position:u64,pub layers:Vec<BTreeMap<String,V>>,pub expanded:BTreeMap<usize,(std::rc::Rc<V>,usize)>}
 pub struct Decoder<'f,C:Compute> {checkpoint:&'f CheckpointAdmission,compute:C,capacity:u64,parameters:BTreeMap<String,Vec<f32>>,
-    blocks:BTreeMap<(usize,usize),crate::layer_operands::ResidualBlockOperands>,schedules:RefCell<Vec<LayerSchedule>>}
+    blocks:BTreeMap<(usize,usize),crate::layer_operands::ResidualBlockOperands>,schedules:RefCell<Vec<LayerSchedule>>,expanded_limit:std::cell::Cell<usize>}
 impl<'f,C:Compute> Decoder<'f,C> {
     pub fn new(checkpoint:&'f CheckpointAdmission,compute:C,capacity:u64)->Result<Self> {
         let d=checkpoint.description();need(!d.layers.is_empty() && d.hidden>0 && d.residual.streams>0 && d.vocab>0 && d.vocab<=u32::MAX as u64 && !d.tied_embeddings,"unsupported bounded text geometry")?;
@@ -60,26 +78,26 @@ impl<'f,C:Compute> Decoder<'f,C> {
             }
         }
         let name="model.language_model.norm.weight";parameters.insert(name.into(),plain(checkpoint,name)?);
-        compute.prepare(checkpoint)?;Ok(Self {checkpoint,compute,capacity,parameters,blocks,schedules:RefCell::new(schedules)})
+        compute.prepare(checkpoint)?;Ok(Self {checkpoint,compute,capacity,parameters,blocks,schedules:RefCell::new(schedules),expanded_limit:std::cell::Cell::new(rows::EXPANDED_ROWS)})
     }
     pub fn zero_state(&self)->Result<State<C::Value>> {
         let mut layers=Vec::new();for layer in 0..self.checkpoint.description().layers.len() {
             let p=LayerPlan::new(self.checkpoint.description(),layer,1,Topology {rank:0,parts:1}).map_err(|e|e.to_string())?;let mut inputs=BTreeMap::new();
             for b in p.inputs.iter().filter(|b|b.name!="residual" && b.name!="local_slots") {inputs.insert(b.name.clone(),self.compute.zeros(b.elements().map_err(|e|e.to_string())?)?);}layers.push(inputs);
-        }Ok(State {position:0,layers})
+        }Ok(State {position:0,layers,expanded:BTreeMap::new()})
     }
     /// No committed state changes until every decoder layer and the head succeed.
     pub fn step(&self,token:u32,state:&State<C::Value>,mut observe:impl FnMut(usize,&C::Value)->Result<()>)->Result<(Vec<f32>,u32,State<C::Value>)> {
         let c=self.checkpoint;let d=c.description();need(state.position<self.capacity && state.layers.len()==d.layers.len(),"bounded state context differs")?;
         need(u64::from(token)<d.vocab,"bounded input token exceeds vocabulary")?;
         let mut residual=self.embedding(token)?;let mut layers=Vec::new();
-        for layer in 0..d.layers.len() {let (output,next)=self.layer(layer,state.position+1,&residual,&state.layers[layer])?;observe(layer,&output)?;residual=output;layers.push(next);}
+        for layer in 0..d.layers.len() {let (mut values,next)=self.layer_group(layer,state.position+1,&[&residual],&state.layers[layer],state.expanded.get(&layer))?;let output=values.remove(0);observe(layer,&output)?;residual=output;layers.push(next);}
         let h=d.hidden as usize;let mean=self.compute.mean(&residual,number(d.residual.streams)?,number(d.hidden)?)?;
         let norm_name="model.language_model.norm.weight";let normalized=self.compute.norm(norm_name,norm_shape(c,norm_name,h)?,&mean,&self.parameters[norm_name])?;
         let head=Mxfp8Projection::matrix(c,"lm_head.weight",WeightType::F32)?;let logits=self.compute.read(&self.compute.mx(&head,&normalized)?)?;
         need(logits.len()==d.vocab as usize && logits.iter().all(|v|v.is_finite()),"bounded logits extent or value differs")?;
         let mut best=0;for i in 1..logits.len() {if logits[i]>logits[best] {best=i;}}
-        Ok((logits,best as u32,State {position:state.position+1,layers}))
+        Ok((logits,best as u32,State {position:state.position+1,layers,expanded:state.expanded.clone()}))
     }
     /// Layer-major prompt rows. State producers run in ascending token order;
     /// each matrix row retains the scalar feature fold and rounding boundaries.
@@ -88,7 +106,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
         need(state.position.checked_add(tokens.len() as u64).is_some_and(|n|n<=self.capacity),"bounded prompt exceeds capacity")?;
         let mut residuals=tokens.iter().map(|&token|self.embedding(token)).collect::<Result<Vec<_>>>()?;let mut layers=Vec::new();
         for layer in 0..self.checkpoint.description().layers.len() {
-            let (next,state)=self.layer_group(layer,state.position+1,&residuals.iter().collect::<Vec<_>>(),&state.layers[layer])?;
+            let (next,state)=self.layer_group(layer,state.position+1,&residuals.iter().collect::<Vec<_>>(),&state.layers[layer],None)?;
             residuals=next;layers.push(state);
         }
         let c=self.checkpoint;let d=c.description();let name="model.language_model.norm.weight";let mut logits=Vec::new();
@@ -98,7 +116,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
             let head=Mxfp8Projection::matrix(c,"lm_head.weight",WeightType::F32)?;
             let row=self.compute.read(&self.compute.mx(&head,&norm)?)?;
             need(row.len()==d.vocab as usize && row.iter().all(|v|v.is_finite()),"bounded prompt logits differ")?;logits.push(row);
-        }Ok((logits,State {position:state.position+tokens.len() as u64,layers}))
+        }Ok((logits,State {position:state.position+tokens.len() as u64,layers,expanded:BTreeMap::new()}))
     }
     fn embedding(&self,token:u32)->Result<C::Value> {
         let c=self.checkpoint;let d=c.description();need(u64::from(token)<d.vocab,"bounded embedding token exceeds vocabulary")?;
@@ -134,10 +152,10 @@ impl<'f,C:Compute> Decoder<'f,C> {
         if round {self.compute.round(&value)} else {Ok(value)}
     }
     pub fn layer(&self,layer:usize,context:u64,residual:&C::Value,state:&BTreeMap<String,C::Value>)->Result<(C::Value,BTreeMap<String,C::Value>)> {
-        let (mut values,state)=self.layer_group(layer,context,&[residual],state)?;
+        let (mut values,state)=self.layer_group(layer,context,&[residual],state,None)?;
         Ok((values.remove(0),state))
     }
-    fn layer_group(&self,layer:usize,first_context:u64,residuals:&[&C::Value],state:&BTreeMap<String,C::Value>)->Result<(Vec<C::Value>,BTreeMap<String,C::Value>)> {
+    fn layer_group(&self,layer:usize,first_context:u64,residuals:&[&C::Value],state:&BTreeMap<String,C::Value>,expanded:Option<&(std::rc::Rc<C::Value>,usize)>)->Result<(Vec<C::Value>,BTreeMap<String,C::Value>)> {
         need(!residuals.is_empty() && residuals.len()<=PROMPT_ROWS,"bounded prompt row count differs")?;
         let count=residuals.len();let c=self.checkpoint;let d=c.description();let b=&self.compute;
         need(first_context>0 && first_context.checked_add(count as u64-1).is_some_and(|n|n<=self.capacity && n<=u32::MAX as u64),"bounded layer context exceeds capacity")?;
@@ -187,6 +205,21 @@ impl<'f,C:Compute> Decoder<'f,C> {
                 }
                 if step.kind==Kind::Combine {let side=step.id.split('.').next().unwrap();let pass=passes.remove(side).ok_or("bounded residual pass is absent")?;
                     let value=b.finish(pass,&values[&step.inputs[2]])?;values.insert(step.outputs[0].name.clone(),value);continue;}
+            if count==1 && step.kind==Kind::Scores {
+                if let (Some(softmax),Some(value))=(plan.steps.get(index+1),plan.steps.get(index+2)) {
+                    let private=plan.returns.iter().all(|name|name!=&step.outputs[0].name && name!=&softmax.outputs[0].name) && plan.steps[index+3..].iter().all(|later|later.inputs.iter().all(|name|name!=&step.outputs[0].name && name!=&softmax.outputs[0].name));
+                    if softmax.kind==Kind::Softmax && value.kind==Kind::Values && private && softmax.inputs[0]==step.outputs[0].name && value.inputs[0]==softmax.outputs[0].name && softmax.inputs[1]==step.inputs[2] && value.inputs[2]==step.inputs[2] {
+                        if let TokenMixer::LatentAttention(a)=d.layers[layer].mixer {
+                            let slots=(a.indexer.token_budget+if a.indexer.select_tail {a.indexer.pool-1} else {0}).min(context) as usize;
+                            let capacity=(a.indexer.token_budget+if a.indexer.select_tail {a.indexer.pool-1} else {0}).min(self.capacity) as usize;
+                            let args=[&values[&step.inputs[0]],&values[&step.inputs[1]],&values[&value.inputs[1]],&values[&step.inputs[2]]];
+                            if let Some(output)=b.attention(number(a.heads)?,number(a.key_dim)?,number(a.value_dim)?,slots,capacity,args)? {
+                                values.insert(value.outputs[0].name.clone(),output);skip=2;continue;
+                            }
+                        }
+                    }
+                }
+            }
             let input=step.inputs.iter().filter(|n|n.as_str()!="local_slots").map(|n|values.get(n).ok_or_else(||format!("missing bounded input {n}"))).collect::<Result<Vec<_>>>()?;
             let output:Vec<C::Value>=match step.kind {
                 Kind::Norm=>{let name=&step.weights[0].name;let width=step.outputs[0].elements().map_err(|e|e.to_string())?;
@@ -198,9 +231,16 @@ impl<'f,C:Compute> Decoder<'f,C> {
                     need(count<=slots,"bounded KV count exceeds slots")?;let (h,kd,vd,lc)=(a.heads as usize,a.key_dim as usize,a.value_dim as usize,a.kv_rank as usize);
                     if slots==0 {vec![b.zeros(0)?,b.zeros(0)?]} else {
                     let mut projected=Vec::new();
-                    for slot in 0..count {let latent=b.range(input[0],slot*lc,lc)?;let name=&step.weights[0].name;
-                        let expanded=if let Some(value)=b.repeated_projection(c,name,&latent,true)? {value} else {self.project(name,&latent,true)?};
-                        projected.push(expanded);}
+                    // Prompt groups already hold pure expansions of their rows. A run of
+                    // consecutive selected rows needs one copy and no latent lookup.
+                    let row=h*(kd+vd);let ids=if expanded.is_some() {b.read(values.get("selected").ok_or("bounded selection is absent")?)?} else {Vec::new()};
+                    let mut slot=0;while slot<count {
+                        if let Some((rows,held))=expanded {let id=ids[slot] as usize;if id<*held {
+                            let mut end=slot+1;while end<count && ids[end] as usize==id+(end-slot) && (ids[end] as usize)<*held {end+=1;}
+                            projected.push(b.range(rows,id*row,(end-slot)*row)?);slot=end;continue;}}
+                        let latent=b.range(input[0],slot*lc,lc)?;let name=&step.weights[0].name;
+                        let value=if let Some(value)=b.repeated_projection(c,name,&latent,true)? {value} else {self.project(name,&latent,true)?};
+                        projected.push(value);slot+=1;}
                     let packed=b.join(&projected.iter().collect::<Vec<_>>())?;
                     let mut s=shape(Op::UnpackKv);s.rows=number(slots as u64)?;s.heads=number(h as u64)?;s.dim=number(kd as u64)?;
                     s.cols=number(vd as u64)?;s.taps=number(count as u64)?;
@@ -241,7 +281,15 @@ impl<'f,C:Compute> Decoder<'f,C> {
                     let selected=if kind==Kind::Gather {Some(b.range(input[1],0,s.cols as usize)?)} else {None};
                     let args=if let Some(v)=selected.as_ref() {[Some(input[0]),Some(v),Some(input[2]),None]}
                         else if let Some(v)=packed.as_ref() {[Some(v),Some(input[3]),None,None]} else {std::array::from_fn(|i|input.get(i).copied())};
-                    let result=b.operation(s,args,&weight)?;
+                    // The same total order and output layout without the repeated scans.
+                    let result=if kind==Kind::Select {
+                        let groups=context/s.dim as u64;let mut row=spark_gpu_probe::prompt_ops::Shape::new(spark_gpu_probe::prompt_ops::Op::SelectRows,1).ok_or("selection row count")?;
+                        row.dim=s.dim;row.taps=s.taps;row.rows=number(groups)?;row.cols=s.cols;row.first=number(context)?;
+                        let TokenMixer::LatentAttention(a)=d.layers[layer].mixer else {return Err("selection requires a latent recipe".into());};
+                        row.slots=number(a.indexer.token_budget+if a.indexer.select_tail {a.indexer.pool-1} else {0})?;
+                        let out=b.prompt(row,[args[0],None,None,None,None],&[])?;
+                        need(b.read(&out)?[row.slots as usize]>=0.0,"selection score is not a number")?;out
+                    } else {b.operation(s,args,&weight)?};
                     let (_,_,units,words)=s.lengths().ok_or("invalid bounded operation shape")?;
                     match kind {
                         Kind::Conv|Kind::KdaStep=>{
@@ -357,6 +405,8 @@ impl<'f,C:Compute> Decoder<'f,C> {
     }
 
 }
+#[path="bounded_decoder/rows.rs"] mod rows;
+pub use rows::{HeadRows,PROMPT_GROUP,EXPANDED_ROWS,expanded_bytes,group_workspace_bytes};
 #[path="bounded_decoder/host.rs"] mod host;
 pub use host::Host;
 #[cfg(target_os="linux")]

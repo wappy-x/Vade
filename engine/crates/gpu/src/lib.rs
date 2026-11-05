@@ -33,6 +33,7 @@ pub mod dynamic_mxfp8;
 pub mod mxfp8_quantize;
 pub mod causal_ops;
 pub mod latent_ops;
+pub mod prompt_ops;
 pub mod expert_ops;
 #[allow(dead_code)]
 #[path = "../kernels/src/qsa_common.rs"] mod qsa_common;
@@ -409,3 +410,8 @@ mod ab_tests;
 
 /// Conservative envelope shared with the optional target-head kernel.
 pub mod head_bound;
+
+pub mod resident_program;
+pub mod resident_launch;
+#[cfg_attr(not(target_os="linux"),allow(dead_code))]
+mod resident_launch_encode;

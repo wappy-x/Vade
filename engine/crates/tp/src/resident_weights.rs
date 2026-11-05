@@ -56,14 +56,14 @@ mod device {
         Packed {shape:Shape,weight:DeviceVector<'d>,scales:DeviceVector<'d>}}
     struct Matrix<'b,'d> {rows:Rows,cols:usize,storage:Storage<'b,'d>}
     pub struct Weights<'b,'d> {matrices:BTreeMap<String,Matrix<'b,'d>>,embedding:Option<spark_gpu_probe::driver::Matrix<'d>>,
-        ring:Option<Ring>,mailbox:Option<&'b spark_gpu_probe::driver::TpMailbox<'d>>,sequence:u64,topology:Topology,identity:Option<usize>,cost:crate::resident_profile::Cost,timings:[[u128;3];5]}
+        ring:Option<Ring>,mailbox:Option<&'b spark_gpu_probe::driver::TpMailbox<'d>>,sequence:u64,topology:Topology,identity:Option<usize>,cost:crate::resident_profile::Cost,timings:[[u128;3];5],lut:Option<DeviceVector<'d>>,exchange:Option<DeviceVector<'d>>}
     fn raw<'d>(b:&Backend<'d>,bytes:&[u8])->Result<DeviceVector<'d>> {
         let mut out=b.upload_vector(&vec![0.0;bytes.len().div_ceil(4)])?;b.write_vector_bytes(&mut out,bytes)?;b.synchronize()?;Ok(out)
     }
     impl<'b,'d> Weights<'b,'d> {
         pub fn new(ring:Option<Ring>,cost:bool)->Self {
             let topology=ring.as_ref().map_or(Topology {rank:0,parts:1},|r|Topology {rank:r.rank() as u32,parts:r.world() as u32});
-            Self {matrices:BTreeMap::new(),embedding:None,ring,mailbox:None,sequence:0,topology,identity:None,cost:crate::resident_profile::Cost::new(cost),timings:[[0;3];5]}
+            Self {matrices:BTreeMap::new(),embedding:None,ring,mailbox:None,sequence:0,topology,identity:None,cost:crate::resident_profile::Cost::new(cost),timings:[[0;3];5],lut:None,exchange:None}
         }
         pub fn attach_mailbox(&mut self,mailbox:&'b spark_gpu_probe::driver::TpMailbox<'d>)->Result<()> {
             let physical=Topology {rank:self.topology.rank,parts:mailbox.layout().world.try_into().map_err(|_|"mailbox topology exceeds ABI")?};
@@ -125,6 +125,13 @@ mod device {
             let table=self.embedding.as_ref().ok_or("embedding is not resident")?;
             if token as usize>=table.rows() || streams==0 {return Err("resident embedding ID or stream count differs".into());}
             let ids=b.upload_vector(&vec![token as f32;streams])?;let mut out=b.vector(streams.checked_mul(table.cols()).ok_or("resident embedding output overflow")?)?;
+            let launched=b.batch_embedding_device(table,&ids,&mut out);let completed=b.synchronize();launched.and(completed)?;Ok(out)
+        }
+        pub fn embedding_rows(&self,b:&Backend<'d>,tokens:&[u32],streams:usize)->Result<DeviceVector<'d>> {
+            let table=self.embedding.as_ref().ok_or("embedding is not resident")?;
+            if tokens.iter().any(|&t|t as usize>=table.rows()) || streams==0 {return Err("resident embedding ID or stream count differs".into());}
+            let ids=tokens.iter().flat_map(|&t|std::iter::repeat_n(t as f32,streams)).collect::<Vec<_>>();
+            let ids=b.upload_vector(&ids)?;let mut out=b.vector(ids.len().checked_mul(table.cols()).ok_or("resident embedding output overflow")?)?;
             let launched=b.batch_embedding_device(table,&ids,&mut out);let completed=b.synchronize();launched.and(completed)?;Ok(out)
         }
         /// Every rank must make the same eviction and collective-skip decisions.
@@ -279,6 +286,122 @@ let mut bytes=vec![0;matrix.rows.total*4];
             if values.iter().any(|v|!v.is_finite()) {return Err("resident prompt projection is not finite".into());}
             let mut result=Vec::new();for token in 0..m {let row=(0..matrix.rows.total).map(|column|values[column*m+token]).collect::<Vec<_>>();result.push(b.upload_vector(&row)?);}b.synchronize()?;
             self.cost.record(||"exchange_upload".into(),stamp,b,0);Ok(result)
+        }
+        /// All ranks' equal local vectors, rank-major, in one mapped allocation. GB10 has
+        /// one DRAM pool, so the wire writes it and later kernels read it, with no host
+        /// copy. The allocation grows rarely and stays registered between transfers.
+        fn gather_mapped(&mut self,b:&Backend<'d>,local:&DeviceVector<'_>)->Result<()> {
+            let stamp=self.cost.start(b);
+            let parts=self.topology.parts as usize;let words=local.len();let total=words.checked_mul(parts).ok_or("prompt exchange overflow")?;
+            if self.exchange.as_mut().is_none_or(|v|v.resize_within_capacity(total).is_err()) {
+                // The wire keeps a device allocation's registration until told to drop it.
+                b.synchronize()?;if let Some(ring)=self.ring.as_mut() {ring.release_transfer_regions();}self.exchange=None;
+                self.exchange=Some(b.mapped_vector(total.checked_mul(3).ok_or("prompt exchange overflow")?/2)?);
+            }
+            let exchange=self.exchange.as_mut().ok_or("prompt exchange is absent")?;
+            b.copy_range(local,exchange,0,self.topology.rank as usize*words,words)?;
+            // The link step's contract: every queued write to the blocks has finished.
+            b.synchronize()?;
+            self.cost.record(||"exchange_pack".into(),stamp,b,0);let stamp=self.cost.start(b);
+            crate::model::exchange_blocks(b,self.ring.as_mut().ok_or("resident row split has no group")?,exchange,parts,1,words)?;
+            self.cost.record(||"exchange_network".into(),stamp,b,0);let stamp=self.cost.start(b);
+            // A driver copy, so no host view of this allocation exists outside the link step.
+            if b.read_vector_values(exchange)?.iter().any(|v|!v.is_finite()) {return Err("resident prompt projection is not finite".into());}
+            self.cost.record(||"exchange_check".into(),stamp,b,0);Ok(())
+        }
+        /// Token-major `[m,cols]` to token-major `[m,rows]`, complete on every rank.
+        /// One weight pass serves all rows. Each element keeps its feature fold.
+        pub fn apply_matrix(&mut self,name:&str,b:&Backend<'d>,input:&DeviceVector<'_>,m:usize,round:bool)->Result<DeviceVector<'d>> {
+            use spark_gpu_probe::prompt_ops::{Op as Row,Shape as RowShape};
+            let stamp=self.cost.start(b);
+            if self.lut.is_none() {self.lut=Some(b.upload_vector(&spark_gpu_probe::expert_ops::decode_lut())?);}
+            let matrix=self.matrices.get(name).ok_or_else(||format!("projection is not resident: {name}"))?;
+            let cols=matrix.cols;if m==0 || input.len()!=m.checked_mul(cols).ok_or("prompt input overflow")? || input.is_segmented() {return Err("resident prompt feature extent differs".into());}
+            let local=matrix.rows.count;
+            let transpose=|x:&DeviceVector<'_>,rows:usize,columns:usize|->Result<DeviceVector<'d>> {let mut s=RowShape::new(Row::Transpose,1).ok_or("prompt transpose shape")?;
+                s.rows=u32::try_from(rows).map_err(|_|"prompt transpose exceeds ABI")?;s.cols=u32::try_from(columns).map_err(|_|"prompt transpose exceeds ABI")?;
+                Ok(b.prompt_operation(s,[Some(x),None,None,None,None],None)?)};
+            // Output in [local rows,m] when row-major, else [m,local rows].
+            let (output,row_major,class)=match &matrix.storage {
+                Storage::Mx(p)=>{let v=p.project_rows(input,m)?;let mut out=b.vector(m*local)?;b.copy_prefix(v.vector(),&mut out,m*local)?;(out,false,0)},
+                Storage::Plain {shape,weight}=>{let mut s=RowShape::new(Row::ProjectRows,m).ok_or("prompt rows exceed ABI")?;s.rows=shape.rows;s.cols=shape.cols;
+                    let out=b.prompt_operation(s,[Some(input),None,None,None,None],Some(weight))?;
+                    (if round {let rounded=b.round_bf16_lanes(&out)?;let mut copy=b.vector(out.len())?;b.copy_prefix(rounded.vector(),&mut copy,out.len())?;copy} else {out},true,1)},
+                Storage::Packed {shape,weight,scales}=>{
+                    let nv=shape.op==Op::NvProject;
+                    let s=Shape {op:if nv {Op::NvRows} else {Op::Fp8Rows},tokens:m as u32,..*shape};
+                    let lut=self.lut.as_ref().ok_or("expert decode table is absent")?;
+                    // FP8 reads BF16-rounded lanes. Round once for all weight rows.
+                    let source=if nv {b.expert_group(&[(Shape {op:Op::QuantizeRows,..s},None,0)],input,cols,lut)?} else {let r=b.round_bf16_lanes(input)?;let mut copy=b.vector(r.len())?;b.copy_prefix(r.vector(),&mut copy,r.len())?;copy};
+                    (b.expert_group(&[(s,Some((weight,scales)),0)],&source,if nv {cols/16*17} else {cols},lut)?,true,if nv {2} else {3})
+                },
+            };
+            let bytes=match &matrix.storage {Storage::Mx(_)=>matrix.rows.count*(matrix.cols+matrix.cols/32),Storage::Plain {weight,..}=>weight.len()*4,Storage::Packed {weight,scales,..}=>(weight.len()+scales.len())*4};
+            self.cost.settle(b)?;self.cost.record(||if name=="lm_head.weight" {"projection_head".into()} else {format!("projection_{class}")},stamp,b,bytes);
+            if !matrix.rows.split {
+                if !row_major || m==1 {return Ok(output);}
+                let stamp=self.cost.start(b);let out=transpose(&output,local,m)?;self.cost.record(||"rows_transpose".into(),stamp,b,0);return Ok(out);
+            }
+            let rows=matrix.rows;let source=if row_major || m==1 {output} else {transpose(&output,m,local)?};
+            self.gather_mapped(b,&source)?;drop(source);let stamp=self.cost.start(b);
+            let exchange=self.exchange.as_ref().ok_or("prompt exchange is absent")?;
+            let mut s=RowShape::new(Row::Transpose,1).ok_or("prompt transpose shape")?;
+            s.rows=u32::try_from(rows.total).map_err(|_|"prompt transpose exceeds ABI")?;s.cols=u32::try_from(m).map_err(|_|"prompt transpose exceeds ABI")?;
+            // One token still copies out: the exchange buffer is reused by the next gather.
+            let out=b.prompt_operation(s,[Some(exchange),None,None,None,None],None)?;
+            self.cost.record(||"exchange_upload".into(),stamp,b,0);Ok(out)
+        }
+        /// One layer's selected experts in whole-layer launches, one gather, one placement.
+        /// None when a matrix is not rank-split NVFP4. Each element keeps its fold.
+        pub fn apply_experts(&mut self,b:&Backend<'d>,first:&[(&str,usize)],second:Option<(&[(&str,usize)],f32)>,input:&DeviceVector<'_>,places:&[f32])->Result<Option<DeviceVector<'d>>> {
+            use spark_gpu_probe::prompt_ops::{Op as Row,Shape as RowShape};
+            if first.is_empty() || places.len()%3!=0 {return Err("prompt expert group is empty".into());}
+            let info=|list:&[(&str,usize)],this:&Self|->Result<Option<(usize,usize,usize)>> {
+                let (mut local,mut cols,mut total)=(0,0,0);
+                for (index,(name,_)) in list.iter().enumerate() {
+                    let matrix=this.matrices.get(*name).ok_or_else(||format!("projection is not resident: {name}"))?;
+                    let Storage::Packed {shape,..}=&matrix.storage else {return Ok(None);};
+                    if shape.op!=Op::NvProject || !matrix.rows.split {return Ok(None);}
+                    if index>0 && (matrix.rows.count!=local || matrix.cols!=cols || matrix.rows.total!=total) {return Ok(None);}
+                    local=matrix.rows.count;cols=matrix.cols;total=matrix.rows.total;
+                }Ok(Some((local,cols,total)))};
+            let Some((local,cols,total))=info(first,self)? else {return Ok(None);};
+            if let Some((list,_))=second {if info(list,self)?!=Some((local,cols,total)) {return Ok(None);}}
+            if self.lut.is_none() {self.lut=Some(b.upload_vector(&spark_gpu_probe::expert_ops::decode_lut())?);}
+            let stamp=self.cost.start(b);
+            let n=first.iter().map(|v|v.1).sum::<usize>();
+            if input.len()!=n.checked_mul(cols).ok_or("prompt expert input overflow")? || input.is_segmented() {return Err("prompt expert input extent differs".into());}
+            let stride=cols/16*17;
+            let packed_shape=|name:&str,this:&Self|->Result<Shape> {match &this.matrices.get(name).ok_or("expert matrix is absent")?.storage {Storage::Packed {shape,..}=>Ok(*shape),_=>Err("expert storage differs".to_string())}};
+            let lut=self.lut.as_ref().ok_or("expert decode table is absent")?;
+            // Quantize each expert's rows at its own calibrated input scale.
+            let quantize=|list:&[(&str,usize)],this:&Self|->Result<DeviceVector<'d>> {
+                let mut q=Vec::with_capacity(list.len());let mut row=0;
+                for (name,count) in list {q.push((Shape {op:Op::QuantizeRows,tokens:*count as u32,..packed_shape(name,this)?},None,row));row+=count;}
+                Ok(b.expert_group(&q,input,cols,lut)?)};
+            let project=|list:&[(&str,usize)],packed:&DeviceVector<'d>,this:&Self|->Result<DeviceVector<'d>> {
+                let mut p=Vec::with_capacity(list.len());let mut row=0;
+                for (name,count) in list {let Storage::Packed {shape,weight,scales}=&this.matrices[*name].storage else {return Err("expert storage differs".into());};
+                    p.push((Shape {op:Op::NvRows,tokens:*count as u32,..*shape},Some((weight,scales)),row));row+=count;}
+                Ok(b.expert_group(&p,packed,stride,lut)?)};
+            let packed=quantize(first,self)?;let a=project(first,&packed,self)?;
+            let output=if let Some((list,bound))=second {
+                // Equal input scale bits give equal quantized rows, so gate and up share them.
+                let mut same=list.len()==first.len();
+                if same {for (x,y) in first.iter().zip(list) {same&=packed_shape(x.0,self)?.activation.to_bits()==packed_shape(y.0,self)?.activation.to_bits() && x.1==y.1;}}
+                let c=if same {project(list,&packed,self)?} else {let other=quantize(list,self)?;project(list,&other,self)?};
+                let s=spark_gpu_probe::causal_ops::Shape {op:spark_gpu_probe::causal_ops::Op::SwiGlu,heads:0,dim:0,taps:0,rows:a.len() as u32,cols:0,epsilon:0.0,bound};
+                b.causal_operation(s,[Some(&a),Some(&c),None,None],None)?
+            } else {a};drop(packed);
+            self.cost.settle(b)?;self.cost.record(||"projection_2".into(),stamp,b,0);
+            let parts=total/local;let words=output.len();
+            self.gather_mapped(b,&output)?;drop(output);let stamp=self.cost.start(b);
+            let exchange=self.exchange.as_ref().ok_or("prompt exchange is absent")?;let table=b.upload_vector(places)?;
+            let mut s=RowShape::new(Row::ExpertPlace,1).ok_or("prompt expert place shape")?;
+            s.rows=u32::try_from(places.len()/3).map_err(|_|"prompt expert rows exceed ABI")?;s.cols=u32::try_from(total).map_err(|_|"prompt expert rows exceed ABI")?;
+            s.dim=u32::try_from(local).map_err(|_|"prompt expert rows exceed ABI")?;s.taps=parts as u32;s.slots=u32::try_from(words).map_err(|_|"prompt expert rows exceed ABI")?;
+            let out=b.prompt_operation(s,[Some(exchange),Some(&table),None,None,None],None)?;
+            self.cost.settle(b)?;self.cost.record(||"exchange_upload".into(),stamp,b,0);Ok(Some(out))
         }
         pub fn check_exchange(&self)->Result<()> {
             self.mailbox.map_or(Ok(()),|m|m.require_success())

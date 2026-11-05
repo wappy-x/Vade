@@ -56,6 +56,32 @@ fn prompt_groups_keep_every_logit_and_recurrent_cache_bit_across_tile_tails() {
     }
 }
 #[test]
+fn layer_major_prompt_groups_keep_every_logit_and_state_bit() {
+    use spark_tp::bounded_decoder::HeadRows;
+    let c=fixture::Checkpoint::new_with_head(Dtype::Bf16,true);
+    let decoder=Decoder::new(&c.admission,Host,8).unwrap();let tokens=[1,7,2,5,3,6,4];
+    let bits=|v:&[f32]|v.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
+    for (width,limit) in [(1,8),(2,8),(3,8),(4,8),(5,8),(7,8),(1,2),(2,3),(3,4),(7,1),(4,0)] {
+        decoder.set_expanded_limit(limit);
+        let mut scalar=decoder.zero_state().unwrap();let mut grouped=decoder.zero_state().unwrap();
+        for chunk in tokens.chunks(width) {
+            let mut expected=Vec::new();for &token in chunk {let (logits,_,next)=decoder.step(token,&scalar,|_,_|Ok(())).unwrap();scalar=next;expected.push(logits);}
+            let (actual,next)=decoder.prefill_rows(chunk,&grouped,HeadRows::All).unwrap();grouped=next;
+            assert_eq!(actual.iter().map(|v|bits(v)).collect::<Vec<_>>(),expected.iter().map(|v|bits(v)).collect::<Vec<_>>(),"width={width}");
+            assert_eq!(grouped.position,scalar.position);
+            for (a,b) in grouped.layers.iter().zip(&scalar.layers) {assert_eq!(a.keys().collect::<Vec<_>>(),b.keys().collect::<Vec<_>>());for (name,value) in a {assert_eq!(bits(value),bits(&b[name]),"{name} width={width}");}}
+        }
+        decoder.set_expanded_limit(8);
+        // Decode continues from the group's state, including its expanded rows.
+        let (a,_,next)=decoder.step(9,&grouped,|_,_|Ok(())).unwrap();let (b,_,_)=decoder.step(9,&scalar,|_,_|Ok(())).unwrap();assert_eq!(bits(&a),bits(&b),"decode after width={width}");assert_eq!(next.position,8);
+        // A prompt group can follow a decoded token, and only the last head row is optional.
+        let (mixed,_,after)=decoder.step(2,&decoder.zero_state().unwrap(),|_,_|Ok(())).unwrap();
+        let (last,next)=decoder.prefill_rows(&[1,7],&after,HeadRows::Last).unwrap();assert_eq!(last.len(),1);assert_eq!(next.position,3);
+        let (_,_,one)=decoder.step(1,&after,|_,_|Ok(())).unwrap();let (expected,_,_)=decoder.step(7,&one,|_,_|Ok(())).unwrap();
+        assert_eq!(bits(&last[0]),bits(&expected));assert_eq!(mixed.len(),expected.len());
+    }
+}
+#[test]
 fn causal_attention_prefix_keeps_each_live_fold_and_removes_only_unused_padding() {
     use spark_gpu_probe::causal_ops::{reference,Op,Shape};
     let bits=|v:&[f32]|v.iter().map(|v|v.to_bits()).collect::<Vec<_>>();

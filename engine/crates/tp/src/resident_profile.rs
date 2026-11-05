@@ -10,6 +10,9 @@ mod device {
         pub(crate) fn new(enabled:bool)->Self {Self {enabled,rows:RefCell::new(BTreeMap::new())}}
         pub(crate) fn enabled(&self)->bool {self.enabled}
         pub(crate) fn start(&self,b:&Backend<'_>)->Option<Stamp> {self.enabled.then(||Stamp {time:Instant::now(),before:b.stats()})}
+        /// Attribute grouped GPU work to its own row in diagnostic runs only.
+        /// Normal runs keep the ordered stream and wait at the next readback.
+        pub(crate) fn settle(&self,b:&Backend<'_>)->Result<(),String> {if self.enabled {b.synchronize()?;}Ok(())}
         pub(crate) fn record(&self,name:impl FnOnce()->String,stamp:Option<Stamp>,b:&Backend<'_>,bytes:usize) {
             let Some(stamp)=stamp else {return;};let wall=stamp.time.elapsed().as_nanos();let s=b.stats().since(stamp.before);
             let values=[1,wall,s.device_kernel_ns[..12].iter().sum::<u128>()+s.device_kernel_ns[13],s.device_kernel_ns[12],

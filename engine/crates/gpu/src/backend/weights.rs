@@ -149,7 +149,7 @@ impl<'a> Backend<'a> {
         Ok(Matrix { buffer, rows, cols, packed: true, packed_blocked: !packed8 && cols % 64 == 0, stride: cols, row_offset: 0, column_offset: 0, scalar_f32: false, fp8_scales: None, fp8_fragments: false })
     }
     /// Read back one embedding row without a second resident table.
-    pub fn shared_bf16_row(&self, matrix: &Matrix<'_>, row: usize) -> Result<Vec<f32>, String> {
+    pub fn shared_bf16_row(&self, matrix: &Matrix<'_>, row: usize) -> Result<Vec<f32>, String> { self.flush_resident_launches()?;
         if row >= matrix.rows || !std::ptr::eq(matrix.buffer._context, self.context) {
             return Err("invalid shared BF16 row".into());
         }

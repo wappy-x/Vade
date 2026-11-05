@@ -82,6 +82,13 @@ impl<C:Compute,E:Exchange> Compute for Split<C,E> {
     fn mx(&self,p:&Mxfp8Projection<'_>,x:&C::Value)->Result<C::Value> {if self.compute.projects_complete_rows() {return self.compute.mx(p,x);}self.gathered(&self.compute.mx(&p.split(self.topology)?,x)?,p.shape().rows())}
     fn round(&self,x:&C::Value)->Result<C::Value> {self.compute.round(x)}
     fn mean(&self,x:&C::Value,s:u32,h:u32)->Result<C::Value> {self.compute.mean(x,s,h)}
+    fn prompt(&self,s:spark_gpu_probe::prompt_ops::Shape,x:[Option<&C::Value>;5],w:&[f32])->Result<C::Value> {self.compute.prompt(s,x,w)}
+    fn rows_embedding(&self,t:&[u32],n:usize)->Result<Option<C::Value>> {self.compute.rows_embedding(t,n)}
+    fn rows_project(&self,c:&CheckpointAdmission,name:&str,x:&C::Value,m:usize,round:bool)->Result<Option<C::Value>> {self.compute.rows_project(c,name,x,m,round)}
+    fn rows_experts(&self,a:&[(&str,usize)],b:Option<(&[(&str,usize)],f32)>,x:&C::Value,p:&[f32])->Result<Option<C::Value>> {self.compute.rows_experts(a,b,x,p)}
+    fn rows_norm(&self,name:&str,s:NormShape,x:&C::Value,m:usize,w:&[f32])->Result<C::Value> {self.compute.rows_norm(name,s,x,m,w)}
+    fn rows_begin(&self,key:(usize,usize),p:&crate::layer_operands::ResidualBlockOperands,x:&C::Value,m:usize)->Result<(C::Pass,C::Value)> {self.compute.rows_begin(key,p,x,m)}
+    fn rows_finish(&self,p:C::Pass,x:&C::Value,m:usize)->Result<C::Value> {self.compute.rows_finish(p,x,m)}
 }
 impl<C:Compute> Compute for &C {
     type Value=C::Value;type Pass=C::Pass;
@@ -107,6 +114,17 @@ impl<C:Compute> Compute for &C {
     fn mx(&self,p:&Mxfp8Projection<'_>,x:&C::Value)->Result<C::Value> {(**self).mx(p,x)}
     fn round(&self,x:&C::Value)->Result<C::Value> {(**self).round(x)}
     fn mean(&self,x:&C::Value,s:u32,h:u32)->Result<C::Value> {(**self).mean(x,s,h)}
+    fn prompt(&self,s:spark_gpu_probe::prompt_ops::Shape,x:[Option<&C::Value>;5],w:&[f32])->Result<C::Value> {(**self).prompt(s,x,w)}
+    fn rows_embedding(&self,t:&[u32],n:usize)->Result<Option<C::Value>> {(**self).rows_embedding(t,n)}
+    fn rows_project(&self,c:&CheckpointAdmission,name:&str,x:&C::Value,m:usize,round:bool)->Result<Option<C::Value>> {(**self).rows_project(c,name,x,m,round)}
+    fn rows_experts(&self,a:&[(&str,usize)],b:Option<(&[(&str,usize)],f32)>,x:&C::Value,p:&[f32])->Result<Option<C::Value>> {(**self).rows_experts(a,b,x,p)}
+    fn rows_norm(&self,name:&str,s:NormShape,x:&C::Value,m:usize,w:&[f32])->Result<C::Value> {(**self).rows_norm(name,s,x,m,w)}
+    fn rows_begin(&self,key:(usize,usize),p:&crate::layer_operands::ResidualBlockOperands,x:&C::Value,m:usize)->Result<(C::Pass,C::Value)> {(**self).rows_begin(key,p,x,m)}
+    fn rows_finish(&self,p:C::Pass,x:&C::Value,m:usize)->Result<C::Value> {(**self).rows_finish(p,x,m)}
+}
+/// The server needs only each group's last row through the head.
+fn prompt_group<C:Compute>(decoder:&Decoder<'_,C>,tokens:&[u32],old:&State<C::Value>)->Result<(Vec<Vec<f32>>,State<C::Value>)> {
+    decoder.prefill_rows(tokens,old,crate::bounded_decoder::HeadRows::Last)
 }
 /// One active request. The checkpoint and projection owners outlive all sessions.
 pub struct Factory<'f,C,E> {checkpoint:&'f CheckpointAdmission,split:Split<C,E>,context:usize,eos:Vec<u32>,reservation:usize,active:Cell<bool>,failed:Cell<bool>}
@@ -116,14 +134,8 @@ impl<'f,C:Compute,E:Exchange> Factory<'f,C,E> {
         Decoder::new(checkpoint,&split,context as u64)?;
         let state=engine_model::plan::state::StatePlan::new(checkpoint.description(),Topology {rank:0,parts:1},context as u64,isize::MAX as usize).map_err(|e|e.to_string())?;
         let largest=checkpoint.headers().weights().values().filter(|w|w.logical().shape.len()==2).map(|w|w.logical().shape.iter().try_fold(4usize,|n,&v|n.checked_mul(v as usize)).ok_or_else(||"service weight size overflow".to_string())).collect::<Result<Vec<_>>>()?.into_iter().max().unwrap_or(0);
-        let mut row_scratch=0usize;
-        for layer in 0..checkpoint.description().layers.len() {
-            let plan=engine_model::plan::layer::LayerPlan::new(checkpoint.description(),layer,context as u64,Topology {rank:0,parts:1}).map_err(|e|e.to_string())?;
-            let bytes=plan.inputs.iter().chain(plan.steps.iter().flat_map(|step|&step.outputs)).try_fold(0usize,|n,spec| {
-                spec.elements().map_err(|e|e.to_string())?.checked_mul(4).and_then(|v|n.checked_add(v)).ok_or_else(||"prompt row scratch overflow".to_string())
-            })?;row_scratch=row_scratch.max(bytes);
-        }
-        let extra=row_scratch.checked_mul(crate::bounded_decoder::PROMPT_ROWS-1).ok_or("prompt tile reservation overflow")?;
+        // One group's workspace plus this session's persistent expanded rows.
+        let extra=crate::bounded_decoder::group_workspace_bytes(checkpoint,context)?.checked_add(crate::bounded_decoder::expanded_bytes(checkpoint,context)).ok_or("prompt tile reservation overflow")?;
         let reservation=state.working_bytes().checked_mul(2).and_then(|v|largest.checked_mul(2).and_then(|w|v.checked_add(w))).and_then(|v|v.checked_add(extra))
             .and_then(|v|v.checked_add(checkpoint.description().vocab as usize*16)).ok_or("service session size overflow")?;
         if eos.is_empty() || eos.iter().any(|&id|u64::from(id)>=checkpoint.description().vocab) {return Err("service EOS set is invalid".into());}
@@ -141,10 +153,10 @@ impl<'f,C:Compute,E:Exchange> Factory<'f,C,E> {
                 0=>{if state.is_some() {return Err("worker stopped with a live session".into());}return Ok(());},
                 1=>{if state.is_some() {return Err("worker session already exists".into());}let started=std::time::Instant::now();let next=Decoder::new(self.checkpoint,&self.split,self.context as u64)?;state=Some(next.zero_state()?);decoder=Some(next);self.split.exchange.borrow_mut().complete()?;eprintln!("SERVED SESSION rank={} setup_seconds={:.9}",self.split.topology.rank,started.elapsed().as_secs_f64());self.split.cost_report("setup");self.split.trace_start();},
                 2|4=>{let started=std::time::Instant::now();let old=state.as_ref().ok_or("worker has no session")?;let position=old.position;let (_,_,next)=decoder.as_ref().ok_or("worker has no decoder")?.step(token,old,|_,_|Ok(()))?;self.split.exchange.borrow_mut().complete()?;state=Some(next);let phase=if code==4 {"prefill"} else {"decode"};eprintln!("SERVED STEP rank={} phase={phase} position={position} seconds={:.9}",self.split.topology.rank,started.elapsed().as_secs_f64());self.split.cost_report(phase);},
-                5=>{let started=std::time::Instant::now();let rows=token as usize;if rows==0 || rows>crate::bounded_decoder::PROMPT_ROWS {return Err("worker prompt group exceeds its bound".into());}
+                5=>{let started=std::time::Instant::now();let rows=token as usize;if rows==0 || rows>crate::bounded_decoder::PROMPT_GROUP {return Err("worker prompt group exceeds its bound".into());}
                     let mut bytes=vec![0;rows*4];self.split.exchange.borrow_mut().command(&mut bytes)?;let tokens=bytes.chunks_exact(4).map(|b|u32::from_le_bytes(b.try_into().unwrap())).collect::<Vec<_>>();
                     let old=state.as_ref().ok_or("worker has no prompt session")?;let position=old.position;
-                    let (_,next)=decoder.as_ref().ok_or("worker has no prompt decoder")?.prefill(&tokens,old)?;self.split.exchange.borrow_mut().complete()?;state=Some(next);
+                    let (_,next)=prompt_group(decoder.as_ref().ok_or("worker has no prompt decoder")?,&tokens,old)?;self.split.exchange.borrow_mut().complete()?;state=Some(next);
                     eprintln!("SERVED GROUP rank={} phase=prefill position={position} rows={rows} seconds={:.9}",self.split.topology.rank,started.elapsed().as_secs_f64());self.split.cost_report("prefill");},
                 3=>{state=None;decoder=None;self.split.exchange.borrow_mut().complete()?;},
                 _=>return Err("unknown row split service command".into()),
@@ -170,14 +182,14 @@ impl<C:Compute,E:Exchange> spark_serve::Engine for Factory<'_,C,E> {
 impl<C:Compute,E:Exchange> Session<'_,C,E> {
     fn prompt(&mut self,tokens:&[u32])->Result<Vec<f32>> {
         if tokens.is_empty() {return Err("empty row split prompt".into());}let mut logits=Vec::new();
-        for tokens in tokens.chunks(crate::bounded_decoder::PROMPT_ROWS) {
+        for tokens in tokens.chunks(crate::bounded_decoder::PROMPT_GROUP) {
             if self.factory.failed.get() {return Err("row split service previously failed".into());}
             let old=self.state.as_ref().ok_or("row split prompt has no state")?;
             if old.position.checked_add(tokens.len() as u64).is_none_or(|n|n>self.factory.context as u64)
                 || tokens.iter().any(|&token|u64::from(token)>=self.factory.checkpoint.description().vocab) {return Err("row split prompt exceeds vocabulary or context".into());}
             let started=std::time::Instant::now();let position=old.position;self.factory.failed.set(true);self.factory.split.command(5,tokens.len() as u32)?;
             let mut bytes=tokens.iter().flat_map(|t|t.to_le_bytes()).collect::<Vec<_>>();self.factory.split.exchange.borrow_mut().command(&mut bytes)?;
-            let (mut rows,next)=self.decoder.prefill(tokens,old)?;self.factory.split.exchange.borrow_mut().complete()?;
+            let (mut rows,next)=prompt_group(&self.decoder,tokens,old)?;self.factory.split.exchange.borrow_mut().complete()?;
             self.state=Some(next);self.factory.failed.set(false);logits=rows.pop().ok_or("prompt group has no final logits")?;
             eprintln!("SERVED GROUP rank={} phase=prefill position={position} rows={} seconds={:.9}",self.factory.split.topology.rank,tokens.len(),started.elapsed().as_secs_f64());self.factory.split.cost_report("prefill");
         }Ok(logits)
@@ -199,6 +211,7 @@ impl<C:Compute,E:Exchange> spark_serve::Session for Session<'_,C,E> {
     fn step(&mut self,token:u32)->Result<Vec<f32>> {self.token(token,false)}
     fn prefill(&mut self,tokens:&[u32])->Result<Vec<f32>> {self.prompt(tokens)}
     fn prefill_advance(&mut self,tokens:&[u32])->Result<()> {self.prompt(tokens).map(|_|())}
+    fn prefill_chunk_size(&self,_:usize)->usize {crate::bounded_decoder::PROMPT_GROUP}
     fn prefill_chunk_min(&self)->usize {crate::bounded_decoder::PROMPT_ROWS}
     fn prefill_slice(&mut self,tokens:&[u32],_final_chunk:bool,_budget:Option<std::time::Duration>,_prompt_end:usize)->Result<Option<Vec<f32>>> {
         self.prompt(tokens).map(Some)

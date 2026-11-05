@@ -1,5 +1,5 @@
 //! Scoped GB10 backend. Persistent buffers and one ordered decode stream.
-use super::*; #[path = "backend/causal_ops.rs"] mod causal_ops; #[path = "backend/expert_ops.rs"] mod expert_ops;
+use super::*; #[path = "backend/causal_ops.rs"] mod causal_ops; #[path = "backend/expert_ops.rs"] mod expert_ops; #[path = "backend/prompt_ops.rs"] mod prompt_ops;
 #[path = "next_profile.rs"] mod next_profile;
 #[path = "frontend_stream.rs"] mod frontend_stream;
 #[path = "verify_segment.rs"] mod verify_segment;
@@ -19,8 +19,8 @@ pub use fp8::{Fp8GroupedScratch, Fp8RoutingFlag};
 #[path = "backend/weights.rs"] mod weights;
 #[path = "backend/kernels.rs"] mod kernels;
 #[path = "backend/dense_tile.rs"] mod dense_tile;
-#[path = "backend/dense.rs"] mod dense; #[path = "backend/resident_views.rs"] mod resident_views; #[path = "backend/resident_queue.rs"] mod resident_queue; pub use resident_queue::ResidentQueue;
-#[path = "backend/mhc.rs"] mod mhc; pub use mhc::{Bf16Vector,ResidentMhc,MhcPass}; use kernels::AbKernels;
+#[path = "backend/dense.rs"] mod dense; #[path = "backend/resident_program.rs"] mod resident_program; pub use resident_program::ResidentProgram; #[path = "backend/resident_views.rs"] mod resident_views; #[path = "backend/resident_launch.rs"] mod resident_launch; #[path = "backend/resident_queue.rs"] mod resident_queue; pub use resident_queue::ResidentQueue;
+#[path = "backend/mhc.rs"] mod mhc; pub use mhc::{Bf16Vector,ResidentMhc,MhcPass}; use kernels::AbKernels; #[path = "backend/mhc_boundary.rs"] mod mhc_boundary; pub use mhc_boundary::{ResidentMhcBoundary,MhcBoundaryPass};
 #[path = "backend/text_edges.rs"] mod text_edges; pub use text_edges::ResidentTextEdges; #[path = "backend/norm.rs"] mod norm; pub use norm::{ResidentNorm,NormOutput}; #[path = "backend/mxfp8_projection.rs"] mod mxfp8_projection; pub use mxfp8_projection::{ResidentMxfp8Projection,Mxfp8ProjectionPass,ResidentProjection};
 
 pub struct Matrix<'a> { buffer: Buffer<'a>, rows: usize, cols: usize, packed: bool, packed_blocked: bool, stride: usize, row_offset: usize, column_offset: usize, scalar_f32: bool, fp8_scales: Option<Buffer<'a>>, fp8_fragments: bool }
@@ -356,7 +356,7 @@ pub struct Backend<'a> {
     fp4: RefCell<Option<fp4::Kernels>>,
     uploads: RefCell<UploadStaging<'a>>,
     capture_position: Cell<DevicePtr>, capture_base: Cell<usize>, prompt_order: Cell<bool>,
-    spin_waits: Cell<bool>, programmatic: Cell<bool>,
+    spin_waits: Cell<bool>, programmatic: Cell<bool>, recorder: RefCell<resident_launch::Recorder<'a>>,
 }
 fn elapsed(timer: Option<Instant>) -> u128 { timer.map_or(0, |start| start.elapsed().as_nanos()) }
 
@@ -388,7 +388,7 @@ pub fn with_backend_mode<R>(ordinal: i32, ptx: &CStr, budget: usize, mode: Matve
             flash_input: RefCell::new(None), flash_mixed: RefCell::new(None), dense_offer: Cell::new(None),
             uploads: RefCell::new(UploadStaging { buffer: Pinned::new(&context, crate::staging::UPLOAD_BYTES)?, capacity: crate::staging::UPLOAD_BYTES, used: 0 }),
             segment: Cell::new(None), capture_position: Cell::new(0), capture_base: Cell::new(0), prompt_order: Cell::new(false), programmatic: Cell::new(false),
-            spin_waits: Cell::new(false), profiling: Cell::new(false), profile_kind: Cell::new(None), stats: RefCell::new(BackendStats::default()),
+            recorder: RefCell::new(resident_launch::Recorder::default()), spin_waits: Cell::new(false), profiling: Cell::new(false), profile_kind: Cell::new(None), stats: RefCell::new(BackendStats::default()),
             stream: Stream::new(&context)?, matvec_function: Cell::new(matvec_function), layers: LayerKernels::load(&context), timings: RefCell::new(Vec::new()) };
         eprintln!("gpu_backend startup context_ms={context_ms:.3} ptx_load_ms={ptx_load_ms:.3} kernel_setup_ms={:.3} device_bytes={} pinned_staging_bytes={}",
             start.elapsed().as_secs_f64() * 1000.0, backend.allocated_bytes(), backend.pinned_staging_bytes());
@@ -541,7 +541,7 @@ impl<'a> Backend<'a> {
         if code == 0 { self.context.graph_storage.set(self.context.graph_storage.get() - bytes); }
     }
     /// Safety: captured buffers and their mapped extents must still be valid.
-    pub unsafe fn replay_decode(&self, graph: &DecodeGraph<'_>) -> Result<(), String> {
+    pub unsafe fn replay_decode(&self, graph: &DecodeGraph<'_>) -> Result<(), String> { if let Some(error)=self.fatal_error() {return Err(error);}
         if !ptr::eq(graph.context, self.context) { return Err("graph belongs to another context".into()); }
         self.context.activate()?;
         let start = Instant::now();
@@ -650,7 +650,7 @@ impl<'a> Backend<'a> {
     /// Copy exactly the selected immutable weight bytes on the existing stream.
     /// (arena offset, prompt offset, bytes); validate the whole batch first.
     pub fn stage_prompt_rows(&self, arena: &WeightArena<'_>, slot: &mut PromptBuffer<'_>,
-        rows: &[(usize, usize, usize)]) -> Result<(), String> {
+        rows: &[(usize, usize, usize)]) -> Result<(), String> { self.flush_resident_launches()?;
         if !ptr::eq(arena.buffer._context, self.context) || !ptr::eq(slot.buffer.context, self.context)
             || rows.iter().any(|&(source, destination, bytes)| source.checked_add(bytes).is_none_or(|n| n > arena.bytes())
                 || destination.checked_add(bytes).is_none_or(|n| n > slot.buffer.bytes)) {
@@ -693,7 +693,7 @@ impl<'a> Backend<'a> {
     /// GPU-visible transport slots avoid host staging copies. Work synchronizes
     /// each slot before NIC access, joins transport, and clears registrations.
     pub fn with_exchange_slots<T>(&self, elements: usize, count: usize,
-        work: impl FnOnce(&mut [DeviceVector<'a>], *mut f32) -> Result<T, String>) -> Result<T, String> {
+        work: impl FnOnce(&mut [DeviceVector<'a>], *mut f32) -> Result<T, String>) -> Result<T, String> { self.flush_resident_launches()?;
         if count < 2 || count % 2 != 0 { return Err("mapped exchange requires an even slot count".into()); }
         let total = elements.checked_mul(count).ok_or("mapped exchange size overflow")?;
         let timer=Instant::now();
@@ -819,7 +819,7 @@ impl<'a> Backend<'a> {
         }
         Ok(())
     }
-    fn decode_words(&self, address: u64, words: usize) -> Result<Vec<u32>, String> {
+    fn decode_words(&self, address: u64, words: usize) -> Result<Vec<u32>, String> { self.flush_resident_launches()?;
         let mut out = vec![0u32; words];
         unsafe { self.context.check_execution(cuMemcpyDtoH_v2(out.as_mut_ptr().cast(), address, words * 4), "decode byte probe readback")?; }
         Ok(out)
@@ -838,7 +838,7 @@ impl<'a> Backend<'a> {
             Ok(bytes)
         })
     }
-    pub fn synchronize(&self) -> Result<(), String> {
+    pub fn synchronize(&self) -> Result<(), String> { self.flush_resident_launches()?;
         let start = Some(Instant::now());
         self.stream.sync(self.spin_waits.get())?;
         self.context.release_deferred();
@@ -856,7 +856,7 @@ impl<'a> Backend<'a> {
         Ok(())
     }
     pub fn fatal_error(&self) -> Option<String> {
-        self.context.execution_error.borrow().clone()
+        self.recorder.borrow().failure.clone().or_else(||self.context.execution_error.borrow().clone())
             .or_else(|| self.context.cleanup_errors.borrow().first().cloned())
     }
     pub fn vector(&self, len: usize) -> Result<DeviceVector<'a>, String> {
@@ -881,7 +881,7 @@ impl<'a> Backend<'a> {
     /// host bytes (a HostRegistration), returning their producer completion.
     /// Safety: retain the source and registered bytes, without CPU/NIC access, until the
     /// returned fence completes; drain it even if the collective fails.
-    pub unsafe fn download_range(&self, vector: &DeviceVector<'_>, start: usize, out: &mut [u8]) -> Result<Fence<'a>, String> {
+    pub unsafe fn download_range(&self, vector: &DeviceVector<'_>, start: usize, out: &mut [u8]) -> Result<Fence<'a>, String> { self.flush_resident_launches()?;
         self.check_vector(vector, vector.len)?;
         if out.len() % 4 != 0 || start.checked_add(out.len() / 4).is_none_or(|end| end > vector.len) {
             return Err("download range exceeds vector".into());
@@ -904,26 +904,26 @@ impl<'a> Backend<'a> {
     }
     /// Only transport setup uses this pointer; the caller orders GPU/host access
     /// while the allocation remains owned by these vectors.
-    pub fn mapped_exchange_host(&self, vector: &DeviceVector<'_>) -> Result<*mut f32, String> {
+    pub fn mapped_exchange_host(&self, vector: &DeviceVector<'_>) -> Result<*mut f32, String> { self.flush_resident_launches()?;
         let owner=vector.buffer.owner.as_ref().ok_or("missing mapped exchange owner")?;
         owner.host.map(|host|host.cast()).ok_or_else(||"exchange is not mapped".into())
     }
     /// Mark the queued stream so the host can wait for the work before this
     /// point while later kernels keep running (a host collective overlaps them).
-    pub fn fence(&self) -> Result<Fence<'a>, String> {
+    pub fn fence(&self) -> Result<Fence<'a>, String> { self.flush_resident_launches()?;
         match Event::ready(&self.stream) {
             Ok(event) => Ok(Fence(event)),
             Err(error) => { self.synchronize()?; Err(error) }
         }
     }
-    pub fn wait_moe_readiness(&self) -> Result<(), String> {
+    pub fn wait_moe_readiness(&self) -> Result<(), String> { self.flush_resident_launches()?;
         match Event::ready_kind(&self.stream, 0) {
             Ok(event) => self.wait_fence(Fence(event)),
             Err(error) => { self.synchronize()?; Err(error) }
         }
     }
     /// Wait for a producer or consumer, leaving later stream work running.
-    pub fn wait_fence(&self, fence: Fence<'_>) -> Result<(), String> {
+    pub fn wait_fence(&self, fence: Fence<'_>) -> Result<(), String> { self.flush_resident_launches()?;
         let start = Some(Instant::now());
         fence.0.wait(self.spin_waits.get())?;
         let mut stats = self.stats.borrow_mut();
@@ -1033,7 +1033,7 @@ impl<'a> Backend<'a> {
     fn allocate_vector(&self, len: usize, managed: bool) -> Result<DeviceVector<'a>, String> {
         if len == 0 || len > u32::MAX as usize { return Err("vector outside kernel ABI".into()); }
         let timer = Some(Instant::now());
-        let bytes = byte_count(len, 4)?;
+        let bytes = byte_count(len, 4)?; if self.context.accounted_bytes().saturating_add(bytes)>self.context.budget.get() {self.flush_resident_launches()?;}
         let buffer = if managed { Buffer::allocate(self.context, bytes, true)? } else { Buffer::pooled(self.context, bytes)? };
         self.stats.borrow_mut().allocation_ns += elapsed(timer);
         Ok(DeviceVector { buffer, len, managed,
@@ -1044,12 +1044,12 @@ impl<'a> Backend<'a> {
         self.write_vector(&mut vector, values)?;
         Ok(vector)
     }
-    fn check_vector(&self, vector: &DeviceVector<'_>, len: usize) -> Result<(), String> {
+    fn check_vector(&self, vector: &DeviceVector<'_>, len: usize) -> Result<(), String> { if let Some(error)=self.fatal_error() {return Err(error);}
         let same_context = ptr::eq(vector.buffer._context, self.context);
         crate::check_vector_shape(vector.len, vector.buffer.bytes, same_context, len)
     }
     /// Validate a working prefix without changing a reusable buffer's shape.
-    fn check_vector_prefix(&self, vector: &DeviceVector<'_>, len: usize) -> Result<(), String> {
+    fn check_vector_prefix(&self, vector: &DeviceVector<'_>, len: usize) -> Result<(), String> { if let Some(error)=self.fatal_error() {return Err(error);}
         if !std::ptr::eq(vector.buffer._context, self.context) || vector.len < len {
             return Err(format!("device vector prefix requires {len} elements, has {}", vector.len));
         }
@@ -1101,7 +1101,7 @@ impl<'a> Backend<'a> {
         shared: u32,
         args: &mut [*mut c_void],
     ) -> Result<(), String> {
-        let function = if shared == 0 {
+        if self.record_resident_launch(name,[blocks,rows,planes,threads,shared],args)? {return Ok(());} let function = if shared == 0 {
             self.module.function(name)?
         } else {
             self.module.function_with_shared(name, shared)?
@@ -1146,7 +1146,7 @@ impl<'a> Backend<'a> {
     }
     // Staging ranges stay immutable until the compute stream completes. A token's
     // uploads are ordered with its kernels and need no additional stream wait.
-    fn write_buffer<T: DeviceElement>(&self, buffer: &Buffer<'_>, offset: usize, values: &[T]) -> Result<(), String> {
+    fn write_buffer<T: DeviceElement>(&self, buffer: &Buffer<'_>, offset: usize, values: &[T]) -> Result<(), String> { self.flush_resident_launches()?;
         let bytes = std::mem::size_of_val(values);
         if offset.checked_add(bytes).is_none_or(|end| end > buffer.bytes) { return Err("upload exceeds buffer".into()); }
         if bytes == 0 { return Ok(()); }
@@ -1171,7 +1171,7 @@ impl<'a> Backend<'a> {
     /// Clear state on the compute stream without a host zero buffer or upload.
     pub fn zero_vector(&self, vector: &mut DeviceVector<'_>) -> Result<(), String> {
         self.check_vector(vector, vector.len)?;
-        self.context.activate()?;
+        if self.record_resident_copy(0,vector.device_address(),vector.len)? {return Ok(());} self.context.activate()?;
         unsafe { check(cuMemsetD8Async(vector.buffer.address, 0, byte_count(vector.len, 4)?, self.stream.raw), "state clear")?; }
         self.context.pending.set(true);
         Ok(())
@@ -1182,7 +1182,7 @@ impl<'a> Backend<'a> {
         self.check_vector(vector, vector.len)?;
         let bytes = crate::vector_byte_range(vector.len, range)?;
         if bytes.is_empty() { return Ok(()); }
-        if !vector.writable_from(bytes.start / 4) { return Err("device clear range is shared".into()); }
+        if !vector.writable_from(bytes.start / 4) { return Err("device clear range is shared".into()); } if self.record_resident_copy(0,vector.device_address()+bytes.start as u64,bytes.len()/4)? {return Ok(());}
         self.context.activate()?;
         unsafe { check(cuMemsetD8Async(vector.buffer.address + bytes.start as u64, 0, bytes.len(),
             self.stream.raw), "state range clear")?; }
@@ -1191,7 +1191,7 @@ impl<'a> Backend<'a> {
     }
     /// Exchange activations in reusable pinned memory at a compute-stream boundary.
     /// The callback can gather/reduce in place; its result is queued back to the GPU.
-    pub fn exchange_vector(&self, vector: &mut DeviceVector<'_>, exchange: impl FnOnce(&mut [f32]) -> Result<(), String>) -> Result<(), String> {
+    pub fn exchange_vector(&self, vector: &mut DeviceVector<'_>, exchange: impl FnOnce(&mut [f32]) -> Result<(), String>) -> Result<(), String> { self.flush_resident_launches()?;
         self.check_vector(vector, vector.len)?;
         let bytes = byte_count(vector.len, 4)?;
         self.reserve_upload(bytes)?;
@@ -1215,7 +1215,7 @@ impl<'a> Backend<'a> {
     pub fn read_vectors_values(&self, vectors: &[DeviceVector<'_>]) -> Result<Vec<Vec<f32>>, String> {
         self.read_vector_refs(&vectors.iter().collect::<Vec<_>>())
     }
-    fn read_vector_refs(&self, vectors: &[&DeviceVector<'_>]) -> Result<Vec<Vec<f32>>, String> {
+    fn read_vector_refs(&self, vectors: &[&DeviceVector<'_>]) -> Result<Vec<Vec<f32>>, String> { self.flush_resident_launches()?;
         let bytes=vectors.iter().try_fold(0usize,|total,v| {
             self.check_vector(v,v.len)?;
             total.checked_add(byte_count(v.len,4)?).ok_or_else(||"read cohort extent overflow".to_owned())
@@ -1251,7 +1251,7 @@ impl<'a> Backend<'a> {
         Ok(output)
     }
     /// Caller validates each row so a bad result can be attributed to its request.
-    pub fn read_vector_values(&self, vector: &DeviceVector<'_>) -> Result<Vec<f32>, String> {
+    pub fn read_vector_values(&self, vector: &DeviceVector<'_>) -> Result<Vec<f32>, String> { self.flush_resident_launches()?;
         self.check_vector(vector, vector.len)?;
         // A copy on the producer stream already follows every writer. Keep its
         // pinned destination disjoint from pending uploads and wait only after
@@ -1292,7 +1292,7 @@ impl<'a> Backend<'a> {
         self.check_vector(destination, destination.len)?;
         if source_offset.checked_add(len).is_none_or(|n| n > source.len) || destination_offset.checked_add(len).is_none_or(|n| n > destination.len) { return Err("device copy exceeds vector".into()); }
         if len == 0 { return Ok(()); }
-        self.context.activate()?;
+        if self.record_resident_copy(source.device_address()+(source_offset*4) as u64,destination.device_address()+(destination_offset*4) as u64,len)? {return Ok(());} self.context.activate()?;
         let timer = if self.profiling.get() { Some(Event::record(&self.stream)?) } else { None };
         self.context.decode_enqueue();
         unsafe { check(cuMemcpyDtoDAsync_v2(destination.buffer.address + (destination_offset * 4) as u64, source.buffer.address + (source_offset * 4) as u64, byte_count(len, 4)?, self.stream.raw), "cuMemcpyDtoDAsync_v2")?; }
@@ -1320,7 +1320,7 @@ impl<'a> Backend<'a> {
         PromptOrder { backend: self, previous: self.prompt_order.replace(on) }
     }
     pub(crate) fn decode_rows(&self, tokens: usize) -> bool { tokens <= 64 && !self.prompt_order.get() }
-    unsafe fn enqueue_dims_shared(&self, function: Handle, blocks: u32, rows: u32, planes: u32, threads: u32, shared: u32, args: &mut [*mut c_void]) -> Result<(), String> {
+    unsafe fn enqueue_dims_shared(&self, function: Handle, blocks: u32, rows: u32, planes: u32, threads: u32, shared: u32, args: &mut [*mut c_void]) -> Result<(), String> { self.flush_resident_launches()?;
         if blocks == 0 { return Ok(()); }
         if threads == 0 || threads > 1024 || threads % 32 != 0 { return Err("kernel launch requires complete warps".into()); }
         if rows == 0 || rows > 65535 || planes == 0 || planes > 65535 { return Err("grid dimension exceeds driver limit".into()); }
@@ -1463,7 +1463,7 @@ impl<'a> Backend<'a> {
     }
     /// Queue the download on the compute stream and mark its completion. A
     /// download left unread by a failed forward is simply superseded.
-    pub fn exchange_begin(&self, slot: &mut ExchangeSlot<'a>, vector: &DeviceVector<'_>) -> Result<(), String> {
+    pub fn exchange_begin(&self, slot: &mut ExchangeSlot<'a>, vector: &DeviceVector<'_>) -> Result<(), String> { self.flush_resident_launches()?;
         self.prefill_read_bytes(9, || vector.len * 4);
         self.check_vector(vector, vector.len)?;
         if vector.len > slot.capacity { return Err("exchange slot is too small".into()); }
@@ -1476,7 +1476,7 @@ impl<'a> Backend<'a> {
         Ok(())
     }
     /// Wait for the queued download alone and expose it to the collective.
-    pub fn exchange_wait<'s>(&self, slot: &'s mut ExchangeSlot<'a>) -> Result<&'s mut [f32], String> {
+    pub fn exchange_wait<'s>(&self, slot: &'s mut ExchangeSlot<'a>) -> Result<&'s mut [f32], String> { self.flush_resident_launches()?;
         if !slot.queued { return Err("exchange slot has no queued download".into()); }
         let start = Some(Instant::now());
         slot.event.wait(self.spin_waits.get())?;
