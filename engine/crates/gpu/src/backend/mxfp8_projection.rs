@@ -42,14 +42,14 @@ impl<'a> Backend<'a> {
             if output.device_address()<borrowed_end && start<end {return Err("resident projection batch output aliases an operand".into());}
         }
         self.require_arm_kernels(&["flash_resident_projection_batch"])?;
-        self.zero_vector(output)?;self.synchronize()?;
+        self.zero_vector(output)?;self.resident_completion()?;
         // SAFETY: Every descriptor comes from checked immutable resident MXFP8
         // views or exact same-context contiguous FP32 owners. Prefix blocks keep
         // each original row schedule. Exact output length, checked address sums,
         // and initialized private storage fund disjoint output spans. All borrowed
-        // owners and the by-value descriptor batch live through stream completion.
+        // owners and the by-value descriptor batch live through stream completion.\n        // An owned queue defers dropped allocations through submission and its\n        // real drain. Ordinary callers retain the same completion guarantee.
         let launched=unsafe {self.launch_flash("flash_resident_projection_batch",batch.layer.ends[batch.layer.count as usize],128,&mut [parameter(&mut batch)])};
-        let completed=self.synchronize();launched.and(completed)
+        let completed=self.resident_completion();launched.and(completed)
     }
     /// The arena holds E4M3 rows followed by their original UE8M0 scale rows.
     pub fn resident_mxfp8_projection(&self,arena:&WeightArena<'a>,shape:Shape)->Result<ResidentMxfp8Projection<'_,'a>,String> {

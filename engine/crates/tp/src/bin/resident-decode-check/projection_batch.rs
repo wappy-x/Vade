@@ -32,11 +32,15 @@ pub fn run(out:&Path)->Result<()> {
                         else {let job=job-3;ResidentProjection::Plain {rows:plain_rows[job],cols,weight:&plain[job],input:&source}}).collect::<Vec<_>>();
                     let expected=order.iter().flat_map(|&job|expected[job].iter().copied()).collect::<Vec<_>>();
                     let mut output=backend.vector(expected.len())?;
-                    for repeat in 1..=3 {backend.resident_projection_batch(&jobs,&mut output,round)?;let values=backend.read_vector_values(&output)?;
+                    for queued in [false,true] {let queue=if queued {let queue=backend.resident_queue()?;backend.enable_resident_launches()?;Some(queue)} else {None};
+                    for repeat in 1..=3 {let before=backend.stats();backend.resident_projection_batch(&jobs,&mut output,round)?;
+                        if queued && backend.stats().since(before).stream_wait_calls!=0 {return Err("queued mixed projection waited before its consumer".into());}
+                        let values=backend.read_vector_values(&output)?;
                         if bits(&values)!=bits(&expected) {return Err(format!("mixed projection bits differ case={case} round={round} jobs={} repeat={repeat}",jobs.len()));}
-                        super::write(&out.join(format!("case{case}-round{round}-n{}-{repeat}.f32",jobs.len())),&super::floats(&values)?)?;
-                        receipt.push_str(&format!("MIXED PROJECTION DEVICE PASS case={case} cols={cols} round={round} jobs={} repeat={repeat} complete_logits=true repeated_jobs=true\n",jobs.len()));
+                        super::write(&out.join(format!("case{case}-round{round}-queue{queued}-n{}-{repeat}.f32",jobs.len())),&super::floats(&values)?)?;
+                        receipt.push_str(&format!("MIXED PROJECTION DEVICE PASS case={case} cols={cols} round={round} jobs={} repeat={repeat} complete_logits=true repeated_jobs=true queued={queued}\n",jobs.len()));
                     }
+                    drop(queue);}
                     let mut short=backend.vector(expected.len()-1)?;if backend.resident_projection_batch(&jobs,&mut short,round).is_ok() {return Err("short mixed output admitted".into());}
                 }
             }
@@ -44,6 +48,18 @@ pub fn run(out:&Path)->Result<()> {
             let short=backend.upload_vector(&[0.0])?;
             if backend.resident_projection_batch(&[ResidentProjection::Mxfp8 {matrix:&matrices[0],input:&short}],&mut output,true).is_ok() {return Err("short mixed input admitted".into());}
             if backend.resident_projection_batch(&[ResidentProjection::Plain {rows:1,cols,weight:&short,input:&source}],&mut output,true).is_ok() {return Err("short mixed weight admitted".into());}
+        }
+        for repeat in 0..3 {
+            let queue=backend.resident_queue()?;backend.enable_resident_launches()?;let before=backend.stats();
+            let mut output=backend.vector(3)?;
+            {
+                let source=backend.upload_vector(&vec![1.0;32])?;let weight=backend.upload_vector(&(0..96).map(|i|if i/32==1 {-0.0} else {1.0}).collect::<Vec<_>>())?;
+                backend.resident_projection_batch(&[ResidentProjection::Plain {rows:3,cols:32,weight:&weight,input:&source}],&mut output,true)?;
+            }
+            if backend.stats().since(before).stream_wait_calls!=0 {return Err("mixed operand drop drained the owned queue".into());}
+            let got=backend.read_vector_values(&output)?;if bits(&got)!=bits(&[32.0,0.0,32.0]) {return Err("queued mixed early owner drop changed bits".into());}
+            if backend.stats().since(before).graph_launches==0 {return Err("queued mixed batch did not replay".into());}
+            receipt.push_str(&format!("MIXED PROJECTION QUEUED PASS repeat={repeat} early_owner_drop=true graph_replay=true no_early_wait=true\n"));drop(queue);
         }
         Ok(())
     })?;

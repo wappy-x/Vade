@@ -90,9 +90,29 @@ fn recorder_replay_after_poison_is_rejected()->Result<()> {
     if !checked {return result.and(Err("poison replay checks did not finish".into()));}
     if result.is_ok() {return Err("poisoned replay backend retired without an error".into());}Ok(())
 }
+fn recorder_mailbox_preserves_mixed_capture_failure()->Result<()> {
+    let mut checked=false;
+    let result=with_backend(0,spark_gpu_probe::layer_ptx()?,1<<30,|b| {
+        let mailbox=b.tp_mailbox(8)?;let input=b.upload_vector(&[1.0;32])?;let weight=b.upload_vector(&[1.0;64])?;let mut output=b.vector(2)?;
+        b.synchronize()?;b.set_graph_storage_budget(0)?;let queue=b.resident_queue()?;b.enable_resident_launches()?;
+        b.resident_projection_batch(&[spark_gpu_probe::driver::ResidentProjection::Plain {rows:2,cols:32,weight:&weight,input:&input}],&mut output,false)?;
+        let error=b.read_vector_values(&output).err().ok_or("graph budget accepted mixed mailbox producer")?;
+        if !error.contains("graph storage") {return Err(format!("unexpected mixed recorder failure: {error}"));}
+        for _ in 0..2 {
+            same_error(b.tp_mailbox_take(&mailbox,&mut output,1,2,1,1,1,1),&error)?;
+            same_error(b.tp_mailbox_take_from(&mailbox,&mut output,1,2,1,1,0,1,1),&error)?;
+            same_error(b.tp_mailbox_put_finite(&mailbox,&output,1,2,1,0,1),&error)?;
+            same_error(b.tp_mailbox_put(&mailbox,&output,1,2,1,0,1),&error)?;
+        }
+        drop(queue);checked=true;Ok(())
+    });
+    if !checked {return result.and(Err("mixed mailbox failure checks did not finish".into()));}
+    if result.is_ok() {return Err("failed mixed mailbox backend retired without an error".into());}Ok(())
+}
 pub fn check(out:&Path)->Result<()> {
+
     fs::create_dir(out).map_err(|e|e.to_string())?;
-    recorder_budget_failure_is_permanent()?;recorder_chain_exceeds_graph_limit()?;standalone_program_rejects_active_recording()?;recorder_exchange_failure_rejects_readout()?;recorder_replay_after_poison_is_rejected()?;
-    let receipt="RESIDENT RECORDER PASS recorder_budget_failure_is_permanent=true later_read=true later_consumer=true later_flush=true later_queue=true recorder_chain_exceeds_graph_limit=true standalone_program_rejects_active_recording=true recorder_exchange_failure_rejects_readout=true recorder_replay_after_poison_is_rejected=true exact_bits=true\n";
+    recorder_mailbox_preserves_mixed_capture_failure()?;recorder_budget_failure_is_permanent()?;recorder_chain_exceeds_graph_limit()?;standalone_program_rejects_active_recording()?;recorder_exchange_failure_rejects_readout()?;recorder_replay_after_poison_is_rejected()?;
+    let receipt="RESIDENT RECORDER PASS recorder_mailbox_preserves_mixed_capture_failure=true mailbox_take=true mailbox_put_finite=true recorder_budget_failure_is_permanent=true later_read=true later_consumer=true later_flush=true later_queue=true recorder_chain_exceeds_graph_limit=true standalone_program_rejects_active_recording=true recorder_exchange_failure_rejects_readout=true recorder_replay_after_poison_is_rejected=true exact_bits=true\n";
     super::write(&out.join("COMPLETE"),receipt.as_bytes())?;print!("{receipt}");Ok(())
 }

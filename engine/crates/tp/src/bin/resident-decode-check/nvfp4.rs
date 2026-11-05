@@ -41,11 +41,16 @@ pub fn run(out:&Path)->Result<()> {
                 expected.extend(b.read_vector_values(&scalar)?);shapes.push(shape);
             }
             let jobs=shapes.iter().enumerate().map(|(job,shape)|(*shape,&packed[job%3],&weights[job],&scales[job])).collect::<Vec<_>>();
-            for repeat in 1..=3 {let output=b.expert_projection_batch(&jobs)?;let values=b.read_vector_values(&output)?;
+            for queued in [false,true] {let queue=if queued {let queue=b.resident_queue()?;b.enable_resident_launches()?;Some(queue)} else {None};
+            for repeat in 1..=3 {let before=b.stats();let output=b.expert_projection_batch(&jobs)?;
+                if queued && b.stats().since(before).stream_wait_calls!=0 {return Err("queued expert descriptor drop drained the stream".into());}
+                let values=b.read_vector_values(&output)?;
+                if queued && b.stats().since(before).graph_launches==0 {return Err("queued expert descriptor batch did not replay".into());}
                 if bits(&values)!=bits(&expected) {return Err(format!("NVFP4 batch bits differ rows={rows} cols={cols} jobs={count} repeat={repeat}"));}
-                super::write(&out.join(format!("batch-r{rows}-k{cols}-n{count}-{repeat}.f32")),&super::floats(&values)?)?;
+                super::write(&out.join(format!("batch-r{rows}-k{cols}-n{count}-queue{queued}-{repeat}.f32")),&super::floats(&values)?)?;
                 receipt.push_str(&format!("NVFP4 BATCH DEVICE PASS rows={rows} cols={cols} jobs={count} repeat={repeat} different_scales=true shared_inputs=true partial_rows=true output_bits=true\n"));
             }
+            drop(queue);}
             if b.expert_projection_batch(&[]).is_ok() {return Err("empty NVFP4 batch admitted".into());}
             let duplicate=b.expert_projection_batch(&[jobs[0];3])?;let duplicate=b.read_vector_values(&duplicate)?;
             if bits(&duplicate)!=bits(&expected[..rows as usize].repeat(3)) {return Err("repeated NVFP4 batch job differs".into());}

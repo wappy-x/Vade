@@ -45,6 +45,9 @@ fn gathered_mixed(values:&[f32],rows:&[Rows])->Result<Vec<Vec<f32>>> {
     }Ok(output)
 }
 
+#[cfg(any(target_os="linux",test))]
+#[path="resident_weights/batch_layout.rs"] mod batch_layout;
+
 #[cfg(target_os="linux")]
 mod device {
     use super::*;
@@ -59,6 +62,30 @@ mod device {
         ring:Option<Ring>,mailbox:Option<&'b spark_gpu_probe::driver::TpMailbox<'d>>,sequence:u64,topology:Topology,identity:Option<usize>,cost:crate::resident_profile::Cost,timings:[[u128;3];5],lut:Option<DeviceVector<'d>>,exchange:Option<DeviceVector<'d>>}
     fn raw<'d>(b:&Backend<'d>,bytes:&[u8])->Result<DeviceVector<'d>> {
         let mut out=b.upload_vector(&vec![0.0;bytes.len().div_ceil(4)])?;b.write_vector_bytes(&mut out,bytes)?;b.synchronize()?;Ok(out)
+    }
+    /// The owned queue retains each dropped packed/output allocation. Both
+    /// copies and mailbox operations keep their original ordered-stream order.
+    fn gather_device<'d>(b:&Backend<'d>,mailbox:&spark_gpu_probe::driver::TpMailbox<'d>,sequence:&mut u64,topology:Topology,local:&DeviceVector<'d>,rows:&[Rows])->Result<Vec<DeviceVector<'d>>> {
+        let layout=super::batch_layout::Layout::new(rows)?;
+        // Rows are immutable admission metadata from Rows::new on this owner.
+        // The layout copies equal contiguous chunks; it selects no box-count path.
+        topology.validate().map_err(|error|error.to_string())?;
+        if local.len()!=layout.stride {return Err("resident device batch local extent differs".into());}
+        let next=sequence.checked_add(1).filter(|&n|n<=u32::MAX as u64).ok_or("resident mailbox sequence exhausted")?;
+        if mailbox.failed() {b.synchronize()?;return Err("resident device exchange failed".into());}
+        let total=layout.stride.checked_mul(layout.chunks).ok_or("resident device batch extent overflow")?;
+        mailbox.layout().world.eq(&(topology.parts as usize)).then_some(()).ok_or("resident device batch mailbox topology differs")?;
+        let (own,remote)=layout.placement(topology.rank as usize,topology.parts as usize)?;
+        let mut packed=b.vector(total)?;b.zero_vector(&mut packed)?;b.copy_range(local,&mut packed,0,own,layout.stride)?;
+        b.tp_mailbox_put_finite(mailbox,&packed,1,total,layout.stride,own,next)?;
+        for (origin,offset) in remote {let channel=mailbox.layout().channel(origin,topology.rank as usize);
+            b.tp_mailbox_take_from(mailbox,&mut packed,1,total,layout.stride,offset,channel,next,10_000_000_000)?;
+        }*sequence=next;
+        let mut output=Vec::with_capacity(rows.len());
+        for (row,ranges) in rows.iter().zip(layout.ranges) {let mut value=b.vector(row.total)?;let mut offset=0;
+            for range in ranges {let words=range.len();b.copy_range(&packed,&mut value,range.start,offset,words)?;offset+=words;}
+            if offset!=row.total {return Err("resident device batch output extent differs".into());}output.push(value);
+        }Ok(output)
     }
     impl<'b,'d> Weights<'b,'d> {
         pub fn new(ring:Option<Ring>,cost:bool)->Self {
@@ -211,8 +238,13 @@ let mut bytes=vec![0;matrix.rows.total*4];
                 (*shape,&quantized[*index].1,weight,scales)
             }).collect::<Vec<_>>();
             let output=b.expert_projection_batch(&jobs)?;
-            let output=if round {let rounded=b.round_bf16_lanes(&output)?;let mut copy=b.vector(output.len())?;b.copy_prefix(rounded.vector(),&mut copy,output.len())?;b.synchronize()?;copy} else {output};
+            let output=if round {let rounded=b.round_bf16_lanes(&output)?;let mut copy=b.vector(output.len())?;b.copy_prefix(rounded.vector(),&mut copy,output.len())?;if !b.resident_queue_active() {b.synchronize()?;}copy} else {output};
             self.cost.record(||"projection_2".into(),stamp,b,weight_bytes);let compute=started.elapsed().as_nanos();let stamp=self.cost.start(b);
+            if let Some(mailbox)=self.mailbox.filter(|_|first.rows.split) {
+                let rows=vec![first.rows;input.len()];let result=gather_device(b,mailbox,&mut self.sequence,self.topology,&output,&rows)?;
+                self.cost.record(||"exchange_device".into(),stamp,b,0);self.timings[2][0]+=input.len() as u128;self.timings[2][1]+=compute;self.timings[2][2]+=started.elapsed().as_nanos()-compute;return Ok(Some(result));
+            }
+
             let local=b.read_vector_values(&output)?;let ranks=if first.rows.split {self.topology.parts as usize} else {1};
             let mut bytes=vec![0;local.len().checked_mul(ranks).and_then(|words|words.checked_mul(4)).ok_or("resident batch exchange overflow")?];
             let start=if first.rows.split {self.topology.rank as usize*local.len()*4} else {0};
@@ -245,6 +277,11 @@ let mut bytes=vec![0;matrix.rows.total*4];
             let local_rows=matrices.iter().try_fold(0usize,|total,matrix|total.checked_add(matrix.rows.count)).ok_or("resident mixed batch rows overflow")?;
             let mut output=b.vector(local_rows)?;b.resident_projection_batch(&jobs,&mut output,round)?;
             self.cost.record(||"projection_mixed".into(),stamp,b,weight_bytes);let compute=started.elapsed().as_nanos();let stamp=self.cost.start(b);
+            if let Some(mailbox)=self.mailbox.filter(|_|matrices.iter().any(|matrix|matrix.rows.split)) {
+                let rows=matrices.iter().map(|matrix|matrix.rows).collect::<Vec<_>>();let result=gather_device(b,mailbox,&mut self.sequence,self.topology,&output,&rows)?;
+                self.cost.record(||"exchange_device".into(),stamp,b,0);self.timings[4][0]+=input.len() as u128;self.timings[4][1]+=compute;self.timings[4][2]+=started.elapsed().as_nanos()-compute;return Ok(Some(result));
+            }
+
             let local=b.read_vector_values(&output)?;let split=matrices.iter().any(|matrix|matrix.rows.split);let ranks=if split {self.topology.parts as usize} else {1};
             let mut bytes=vec![0;local.len().checked_mul(ranks).and_then(|words|words.checked_mul(4)).ok_or("resident mixed batch exchange overflow")?];
             let start=if split {self.topology.rank as usize*local.len()*4} else {0};

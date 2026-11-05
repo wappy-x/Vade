@@ -246,7 +246,8 @@ pub(crate) fn resident_flash_next_mxfp8_m1(layer:MxLayer) {
 }
 
 #[no_mangle]
-pub extern "ptx-kernel" fn flash_resident_projection_batch(batch:crate::next_params::ResidentProjectionBatch) {
+pub extern "ptx-kernel" fn flash_resident_projection_batch(batch:crate::next_params::ResidentProjectionBatch) {resident_flash_resident_projection_batch(batch)}
+pub(crate) fn resident_flash_resident_projection_batch(batch:crate::next_params::ResidentProjectionBatch) {
     // SAFETY: The checked host batch funds immutable same-context input and
     // weight rows. Its prefix grid assigns each block one validated descriptor.
     // MXFP8 warps and plain threads own disjoint initialized output rows. Owners

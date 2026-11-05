@@ -1615,12 +1615,12 @@ engine/crates/gpu/kernels	src/multi.rs	fn:values_group	fn:1	frozen ruling 2026-1
 engine/crates/gpu/kernels	src/next_decode.rs	fn:flash_next_mxfp8_bits	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/next_decode.rs	fn:flash_next_mxfp8_bits_r4	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/next_decode.rs	fn:flash_next_mxfp8_pair	fn:1	frozen ruling 2026-11-02 11:54
-engine/crates/gpu/kernels	src/next_decode.rs	fn:flash_resident_projection_batch	block:1	ruling 2026-11-05 07:35
 engine/crates/gpu/kernels	src/next_decode.rs	fn:input8	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/next_decode.rs	fn:load16	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/next_decode.rs	fn:pair	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/next_decode.rs	fn:project	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/next_decode.rs	fn:resident_flash_next_mxfp8_m1	block:1	ruling 2026-11-05 07:35
+engine/crates/gpu/kernels	src/next_decode.rs	fn:resident_flash_resident_projection_batch	block:1	ruling 2026-11-05 07:35
 engine/crates/gpu/kernels	src/next_decode.rs	fn:row	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/next_decode.rs	fn:rows4	fn:1	frozen ruling 2026-11-02 11:54
 engine/crates/gpu/kernels	src/next_decode.rs	mod:moe_hc::fn:bf	fn:1	frozen ruling 2026-11-02 11:54

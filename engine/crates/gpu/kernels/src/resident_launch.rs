@@ -16,6 +16,7 @@ fn run<const KIND:u32>(table:*const Command,index:u64) {
             k if k==Kind::Expert as u32=>crate::expert_operation::resident_expert_operation(p.cast::<crate::expert_ops::LaunchArguments>().read()),
             k if k==Kind::Plain as u32=>crate::ordered_projection::resident_project_f32_ordered(*words as _,*words.add(1) as _,*words.add(2) as _,*words.add(3) as u32,*words.add(4) as u32),
             k if k==Kind::Mx as u32=>crate::next_decode::resident_flash_next_mxfp8_m1(p.cast::<crate::next_params::MxLayer>().read()),
+            k if k==Kind::Mixed as u32=>crate::next_decode::resident_flash_resident_projection_batch(p.cast::<crate::next_params::ResidentProjectionBatch>().read()),
             k if k==Kind::Round as u32=>crate::mhc_boundary::resident_bf16_lanes_round(p.cast::<crate::mhc_boundary_math::LaneCast>().read()),
             k if k==Kind::Copy as u32=>crate::flash_ops::resident_flash_hybrid_copy(p.cast::<crate::kernel_params::HybridCopy>().read()),
             k if k==Kind::Prepare as u32=>crate::mhc::resident_mhc_prepare(p.cast::<crate::mhc_params::Prepare>().read()),
@@ -39,3 +40,5 @@ entry!(resident_launch_round,5);entry!(resident_launch_copy,6);entry!(resident_l
 entry!(resident_launch_prepare,9);entry!(resident_launch_collapse,10);entry!(resident_launch_combine,11);
 entry!(resident_launch_rms_partials,12);entry!(resident_launch_rms_apply,13);entry!(resident_launch_elementwise,14);
 entry!(resident_launch_copy_words,15);entry!(resident_launch_zero_words,16);
+
+entry!(resident_launch_mixed,17);

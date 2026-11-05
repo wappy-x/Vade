@@ -1,7 +1,7 @@
 //! Stable indirect launch ABI. Padding is initialized and never copied from Rust structs.
 #[repr(u32)]
 #[derive(Clone,Copy,Debug,PartialEq,Eq,PartialOrd,Ord)]
-pub enum Kind {Causal=1,Expert,Plain,Mx,Round,Copy,Put,Take,Prepare,Collapse,Combine,RmsPartials,RmsApply,Elementwise,CopyWords,ZeroWords}
+pub enum Kind {Causal=1,Expert,Plain,Mx,Round,Copy,Put,Take,Prepare,Collapse,Combine,RmsPartials,RmsApply,Elementwise,CopyWords,ZeroWords,Mixed}
 #[cfg(not(target_arch="nvptx64"))]
 impl Kind {
     pub fn kernel(self)->&'static str {match self {
@@ -9,7 +9,7 @@ impl Kind {
         Self::Round=>"resident_launch_round",Self::Copy=>"resident_launch_copy",Self::Put=>"resident_launch_put",Self::Take=>"resident_launch_take",
         Self::Prepare=>"resident_launch_prepare",Self::Collapse=>"resident_launch_collapse",Self::Combine=>"resident_launch_combine",
         Self::RmsPartials=>"resident_launch_rms_partials",Self::RmsApply=>"resident_launch_rms_apply",Self::Elementwise=>"resident_launch_elementwise",
-        Self::CopyWords=>"resident_launch_copy_words",Self::ZeroWords=>"resident_launch_zero_words",
+        Self::CopyWords=>"resident_launch_copy_words",Self::ZeroWords=>"resident_launch_zero_words",Self::Mixed=>"resident_launch_mixed",
     }}
 }
 #[repr(C,align(16))]
@@ -33,7 +33,7 @@ const _:()={assert!(core::mem::size_of::<Command>()==1040);assert!(core::mem::of
     #[test] fn every_original_struct_fits_the_aligned_payload() {
         use core::mem::{size_of,align_of};
         macro_rules! fits {($($t:ty),*)=>{$(assert!(size_of::<$t>()<=1024);assert!(align_of::<$t>()<=16);)*}}
-        fits!(crate::causal_ops::Arguments,crate::expert_ops::Arguments,crate::expert_ops::LaunchArguments,crate::next_params::MxLayer,
+        fits!(crate::causal_ops::Arguments,crate::expert_ops::Arguments,crate::expert_ops::LaunchArguments,crate::next_params::MxLayer,crate::next_params::ResidentProjectionBatch,
             crate::mhc_boundary::LaneCast,crate::kernel_params::HybridCopy,crate::mhc_params::Prepare,
             crate::mhc_params::Collapse,crate::mhc_params::Combine,crate::kernel_params::ModelRms,crate::kernel_params::ModelElementwise);
     }

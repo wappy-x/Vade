@@ -20,6 +20,7 @@ fn norm_shape(c:&CheckpointAdmission,name:&str,width:usize)->Result<NormShape> {
 }
 #[cfg(any(target_os="linux",test))]
 mod lineage;
+mod residual_plan;
 pub trait Compute {
     fn plan_cost(&self,_ns:u128) {}
     fn trace_start(&self) {}
@@ -71,6 +72,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
         let mut parameters=BTreeMap::new();let mut blocks=BTreeMap::new();let mut schedules=Vec::new();let topology=Topology {rank:0,parts:1};
         let storage=StatePlan::new(d,topology,capacity,isize::MAX as usize).map_err(|e|e.to_string())?;
         for layer in 0..d.layers.len() {let boundary=LayerBoundary::new(d,checkpoint.headers(),&storage,layer,1,topology,usize::MAX)?;
+            residual_plan::check(boundary.program())?;
             schedules.push(LayerSchedule::new(d,layer,topology).map_err(|e|e.to_string())?);
             for (index,step) in boundary.program().steps.iter().enumerate() {
                 if step.kind==Kind::MhcPrepare {blocks.insert((layer,index),boundary.prepare_residual_block_checkpoint(index,checkpoint)?);}

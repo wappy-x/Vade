@@ -47,10 +47,10 @@ impl<'a> Backend<'a> {
         // storage. By-value arguments are copied at submission. Equal row extents and the
         // checked grid give each batch job a disjoint initialized output span. A single
         // launch keeps lane A's queued completion: queued owner drops defer allocations
-        // through the real drain. A batch keeps lane S's full completion, because its
-        // descriptor table is a local owner; ordinary calls complete before return.
+        // through the real drain, including a batch's local descriptor table.
+        // Ordinary calls complete before return.
         let launched=unsafe {self.launch_flash("expert_operation",grid,32,&mut [parameter(&mut arguments)])};
-        let completed=if arguments.batch==0 {self.resident_completion()} else {self.synchronize()};launched.and(completed)
+        let completed=self.resident_completion();launched.and(completed)
     }
     /// One launch for one layer's experts. Each part is (shape, raw weight and
     /// scale owners, first input row). Parts own contiguous output units.

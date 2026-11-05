@@ -39,6 +39,7 @@ impl<'a> Backend<'a> {
             "causal_operation"=>Some((Kind::Causal,encode::causal(args[0].cast::<crate::causal_ops::Arguments>().read_unaligned()))),
             "expert_operation"=>Some((Kind::Expert,encode::expert(args[0].cast::<crate::expert_ops::LaunchArguments>().read_unaligned()))),
             "flash_next_mxfp8_m1"=>Some((Kind::Mx,encode::mx(args[0].cast::<crate::next_params::MxLayer>().read_unaligned()))),
+            "flash_resident_projection_batch"=>Some((Kind::Mixed,encode::mixed(args[0].cast::<crate::next_params::ResidentProjectionBatch>().read_unaligned()))),
             "bf16_lanes_round"=>Some((Kind::Round,encode::round(args[0].cast::<crate::mhc_boundary::LaneCast>().read_unaligned()))),
             "flash_hybrid_copy"=>Some((Kind::Copy,encode::copy(args[0].cast::<crate::kernel_params::HybridCopy>().read_unaligned()))),
             "mhc_prepare"=>Some((Kind::Prepare,encode::prepare(args[0].cast::<crate::mhc_params::Prepare>().read_unaligned()))),

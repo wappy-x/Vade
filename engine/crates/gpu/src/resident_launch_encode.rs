@@ -22,6 +22,9 @@ pub(super) fn mx(p:crate::next_params::MxLayer)->Command {
     for (i,v) in p.ends.into_iter().enumerate(){c.put(core::mem::offset_of!(MxLayer,ends)+i*4,&v.to_ne_bytes());}
     fields!(c,MxLayer,p,count);c
 }
+pub(super) fn mixed(p:crate::next_params::ResidentProjectionBatch)->Command {
+    let mut c=mx(p.layer);c.kind=Kind::Mixed as u32;fields!(c,crate::next_params::ResidentProjectionBatch,p,plain,round);c
+}
 pub(super) fn prepare(p:crate::mhc_params::Prepare)->Command {
     use crate::mhc_params::{Prepare,Shape};let mut c=Command::new(Kind::Prepare);fields!(c,Prepare,p,input,weights,base,scale,normalized,coefficients,collapsed);
     let mut s=Command::new(Kind::Prepare);fields!(s,Shape,p.shape,rows,streams,hidden,iterations,rms_eps,eps);
@@ -37,6 +40,16 @@ pub(super) fn copy(p:crate::kernel_params::HybridCopy)->Command {let mut c=Comma
     use super::*;
     fn u64_at(c:&Command,at:usize)->u64 {u64::from_ne_bytes(c.payload[at..at+8].try_into().unwrap())}
     fn u32_at(c:&Command,at:usize)->u32 {u32::from_ne_bytes(c.payload[at..at+4].try_into().unwrap())}
+    #[test] fn mixed_projection_abi_keeps_all_descriptors_and_flags() {
+        use crate::next_params::{MxProjection,MxLayer,ResidentProjectionBatch};use core::mem::{offset_of,size_of};
+        let mut p=ResidentProjectionBatch {round:1,..Default::default()};
+        for i in 0..9 {p.push(MxProjection {weights:16*(i+1),scales:32,input:48,output:64,rows:(i+1) as u32,cols:32,tokens:1,input_bf16:0,round:0},i%2==0).unwrap();}
+        let c=mixed(p);assert_eq!(c.kind,Kind::Mixed as u32);assert_eq!(offset_of!(ResidentProjectionBatch,layer),0);
+        for (i,v) in p.layer.projections.iter().enumerate() {let at=i*size_of::<MxProjection>();assert_eq!(u64_at(&c,at),v.weights);assert_eq!(u64_at(&c,at+24),v.output);assert_eq!(u32_at(&c,at+40),v.tokens);assert_eq!(u32_at(&c,at+52),0);}
+        for (i,v) in p.layer.ends.iter().enumerate() {assert_eq!(u32_at(&c,offset_of!(MxLayer,ends)+i*4),*v);}
+        assert_eq!(u32_at(&c,offset_of!(MxLayer,count)),9);assert_eq!(u32_at(&c,offset_of!(ResidentProjectionBatch,plain)),p.plain);assert_eq!(u32_at(&c,offset_of!(ResidentProjectionBatch,round)),1);
+        assert!(c.payload[size_of::<ResidentProjectionBatch>()..].iter().all(|&v|v==0));
+    }
     #[test] fn original_numeric_abis_and_zero_padding_are_serialized_explicitly() {
         use core::mem::{offset_of,size_of};
         let shape=crate::causal_ops::Shape {op:crate::causal_ops::Op::Step,heads:3,dim:7,taps:4,rows:2,cols:6,epsilon:-0.0,bound:-1.0};

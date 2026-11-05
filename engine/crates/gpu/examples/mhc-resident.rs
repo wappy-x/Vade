@@ -10,6 +10,7 @@ use std::{fs,path::Path};
 #[path = "../kernels/src/mhc_math.rs"] mod mhc_math;
 
 type Result<T>=std::result::Result<T,String>;
+#[path="mhc-resident/specials.rs"] mod specials;
 const LABELS: [&str;4]=["normalized","coefficients","collapsed","combined"];
 fn data(n: usize, salt: usize) -> Vec<f32> {
     (0..n).map(|i| ((i*13+i/7+salt)%31) as f32/16.0-0.9375).collect()
@@ -173,15 +174,19 @@ fn boundary_device(out:&Path)->Result<()> {
             }
             backend.synchronize()?;
             let source=Rc::new(backend.upload_vector(&fixture.input)?);backend.synchronize()?;backend.set_profiling(true);let before=backend.stats();
-            let started=std::time::Instant::now();let mut pass=resident.begin_rows(source,rows)?;
+            let started=std::time::Instant::now();let mut pass=resident.begin_rows(source,rows)?;let mut aliases=Vec::new();
             for site in 0..3 {
                 let submitted=backend.stats().since(before);
                 if submitted.queued_calls!=2*(site as u128+1) || submitted.stream_wait_calls!=0 {return Err(format!("boundary submit calls or waits differ at site {site}: calls={} waits={}",submitted.queued_calls,submitted.stream_wait_calls));}
-                if site<2 {let residual=Rc::new(backend.vector(rows*wide)?);pass=resident.begin_after_rows(pass,blocks[site].clone(),residual,rows)?;}
+                if site<2 {let residual=Rc::new(backend.vector(rows*wide)?);aliases.push((site+1,residual.clone()));pass=resident.begin_after_rows(pass,blocks[site].clone(),residual,rows)?;}
             }
             drop(resident);backend.synchronize()?;
             let submitted=backend.stats().since(before);backend.set_profiling(false);
             println!("MHC-BOUNDARY COMPLETE case={index} precision={precision:?} sites=3 elapsed_ns={} kernel_ns={} launches={} stream_waits={}",started.elapsed().as_nanos(),submitted.device_kernel_ns.iter().sum::<u128>(),submitted.queued_calls,submitted.stream_wait_calls);
+            for (site,alias) in aliases {for _ in 0..2 {
+                equal("retained residual alias after fused pre",&bytes(&backend.read_vector_values(&alias)?),&bytes(&expected[site][4]))?;
+            }}
+            println!("MHC-BOUNDARY RETAINED ALIAS PASS case={index} precision={precision:?} aliases=2 repeated_reads=2");
             let mut saved=Vec::new();let mut current=Some(&pass);
             while let Some(value)=current {saved.push(value);current=value.previous();}
             for (site,value) in saved.into_iter().rev().enumerate() {
@@ -252,6 +257,7 @@ fn main() {
             ["compare",a,b]=>compare(Path::new(a),Path::new(b)),
             ["measure",repeats]=>measure(repeats.parse().map_err(|_|"invalid mHC measurement repeat count")?),
             ["boundary",out]=>{fs::create_dir(out).map_err(|e|e.to_string())?;boundary_device(Path::new(out))},
+            ["boundary-special",out]=>{fs::create_dir(out).map_err(|e|e.to_string())?;specials::run(Path::new(out))},
             _=>Err("usage: mhc-resident host NEW_OUT | device EXPECTED NEW_OUT | compare RUN_A RUN_B | measure REPEATS".into()),
         }
     })();

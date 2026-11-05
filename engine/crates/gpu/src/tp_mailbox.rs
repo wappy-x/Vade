@@ -166,6 +166,7 @@ impl<'a> Backend<'a> {
     /// The mailbox and the rows' vector were allocated in this Backend's context: a launch on
     /// another context could outlive the memory it reads or writes.
     fn check_mailbox_owner(&self, m: &TpMailbox<'_>, rows: &DeviceVector<'_>) -> Result<(), String> {
+        if let Some(error)=self.fatal_error() {return Err(error);}
         self.check_vector(&m.vector, m.vector.len).and_then(|()| self.check_vector(rows, rows.len))
             .map_err(|_| "tensor split mailbox or rows belong to another backend".into())
     }

@@ -118,7 +118,7 @@ pub extern "ptx-kernel" fn mhc_boundary_finish(p:Boundary) {
         let inverse=1.0/crate::layer::sqrt(squares/hidden as f32+p.norm_epsilon.abs());
         let mut feature=thread;
         while feature<hidden {
-            let normalized=crate::bf16::rounded(*(p.collapsed as *const f32).add(token*hidden+feature)*inverse*1.0);
+            let normalized=crate::layer::round_bf16(*(p.collapsed as *const f32).add(token*hidden+feature)*inverse*1.0);
             let value=normalized * *(p.norm_weight as *const f32).add(feature);
             *(p.output as *mut f32).add(token*hidden+feature)=if p.norm_bf16==0 {value} else {crate::bf16::rounded(value)};
             feature+=threads;
