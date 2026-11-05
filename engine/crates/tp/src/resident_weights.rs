@@ -184,7 +184,7 @@ mod device {
             // Packed projection kernels and the typed MX output already store BF16
             // lanes. A second cast is an identity for every stored BF16 pattern.
             // Plain ordered projections still require their explicit boundary.
-            let rounded=matches!(&matrix.storage,Storage::Mx(_)|Storage::Packed {shape:Shape {op:Op::NvProject|Op::Fp8Project,..},..});
+            let rounded=matches!(&matrix.storage,Storage::Mx(_)|Storage::Packed {shape:Shape {op:Op::NvProject|Op::Fp8Project|Op::Fp8Serial,..},..});
             let output=if round && !rounded {b.round_bf16_lanes(&output)?.into_vector()} else {output};
             let bytes=match &matrix.storage {Storage::Mx(_)=>matrix.rows.count*(matrix.cols+matrix.cols/32),Storage::Plain {weight,..}=>weight.len()*4,Storage::Packed {weight,scales,..}=>(weight.len()+scales.len())*4};
             self.cost.record(||if name=="lm_head.weight" {"projection_head".into()} else {format!("projection_{class}")},stamp,b,bytes);let compute=started.elapsed().as_nanos();
@@ -474,7 +474,7 @@ let mut bytes=vec![0;matrix.rows.total*4];
                         let (stride,scale_start,scale_len)=match u.storage {WeightStorage::Nvfp4 {..}=>{
                             if u.global_scale.is_none() || u.input_scale.is_none() {return Err("resident calibrated scales are absent".into());}
                             (cols/2,rows.start*(cols/16),rows.count*(cols/16))},
-                            WeightStorage::Fp8Block {block}=>{s.op=Op::Fp8Project;s.block_rows=block[0].try_into().map_err(|_|"scale row block exceeds ABI")?;s.block_cols=block[1].try_into().map_err(|_|"scale column block exceeds ABI")?;
+                            WeightStorage::Fp8Block {block}=>{s.op=Op::Fp8Serial;s.block_rows=block[0].try_into().map_err(|_|"scale row block exceeds ABI")?;s.block_cols=block[1].try_into().map_err(|_|"scale column block exceeds ABI")?;
                                 let grid=cols.div_ceil(block[1] as usize);(cols,rows.start/(block[0] as usize)*grid*4,rows.count.div_ceil(block[0] as usize)*grid*4)},_=>unreachable!()};
                         s.lengths().ok_or("resident packed shape exceeds ABI")?;
                         Storage::Packed {shape:s,weight:raw(b,&u.weight[rows.start*stride..(rows.start+rows.count)*stride])?,scales:raw(b,&u.scales[scale_start..scale_start+scale_len])?}

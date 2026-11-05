@@ -24,6 +24,7 @@ mod causal_operation;
 #[path = "../../src/prompt_ops.rs"] mod prompt_ops;
 #[path = "prompt_ops.rs"] mod prompt_operation;
 #[path = "expert_ops.rs"] mod expert_operation;
+mod serial_projection;
 
 #[path = "../../src/next_math.rs"]
 mod next_math;

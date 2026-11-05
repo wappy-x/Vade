@@ -10,13 +10,7 @@ pub(crate) fn resident_project_f32_ordered(weights:*const f32,input:*const f32,o
     unsafe {
         let row=crate::index();
         if row<rows as usize {
-            let mut sum=0.0f32;
-            for j in 0..cols as usize {
-                let a=*weights.add(row*cols as usize+j);let b=*input.add(j);let product: f32;
-                core::arch::asm!("mul.rn.f32 {p}, {a}, {b};",p=out(reg32)product,a=in(reg32)a,b=in(reg32)b);
-                core::arch::asm!("add.rn.f32 {s}, {s}, {p};",s=inout(reg32)sum,p=in(reg32)product);
-            }
-            *output.add(row)=sum;
+            *output.add(row)=crate::serial_projection::plain_row!(weights.add(row*cols as usize),input,cols as usize);
         }
     }
 }

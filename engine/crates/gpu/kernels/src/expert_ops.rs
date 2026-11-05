@@ -12,8 +12,11 @@ pub(crate) fn resident_expert_operation(launch:LaunchArguments) {
     // table with count entries. Each complete warp selects one checked job;
     // its nested operands and disjoint output span have the same contract.
     // All owners live until the host completes the launch stream.
+    // Serial vector loads require naturally aligned complete tiles; their
+    // guarded scalar fallback retains the same checked row and feature bounds.
     unsafe {
         let thread=crate::index();
+        if matches!(launch.single.shape.op,crate::expert_ops::Op::Fp8Serial|crate::expert_ops::Op::PlainSerial) {crate::serial_projection::project!(launch,thread);return;}
         let (p,index)=if launch.batch==0 {let Some(index)=crate::expert_ops::output_index(launch.single.shape.op,thread) else {return;};(launch.single,index)} else {
             let Some((job,row))=crate::expert_ops::projection_batch_index(launch.single.shape.rows,launch.count,thread) else {return;};
             ((launch.batch as *const Arguments).add(job).read(),row)

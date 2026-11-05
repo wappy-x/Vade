@@ -29,7 +29,7 @@ pub fn nearest_e2m1(x:f32)->u8 {
 }
 #[repr(u32)]
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
-pub enum Op {Quantize,NvProject,Fp8Project,SwiGlu,Fold,QuantizeRows,NvRows,Fp8Rows}
+pub enum Op {Quantize,NvProject,Fp8Project,SwiGlu,Fold,QuantizeRows,NvRows,Fp8Rows,Fp8Serial,PlainSerial}
 #[repr(C)]
 #[derive(Debug,Clone,Copy)]
 pub struct Shape {pub op:Op,pub rows:u32,pub cols:u32,pub block_rows:u32,pub block_cols:u32,pub tokens:u32,
@@ -44,7 +44,8 @@ impl Shape {
         let result=match self.op {
             Op::Quantize if k%16==0=>([k,0,0,0],0,0,k/16,17),
             Op::NvProject if k%16==0=>([k/16*17,0,0,0],rk/2,rk/16,r,1),
-            Op::Fp8Project if br>0 && bc>0=>([k,0,0,0],rk,r.div_ceil(br).checked_mul(k.div_ceil(bc))?.checked_mul(4)?,r,1),
+            Op::Fp8Project|Op::Fp8Serial if br>0 && bc>0=>([k,0,0,0],rk,r.div_ceil(br).checked_mul(k.div_ceil(bc))?.checked_mul(4)?,r,1),
+            Op::PlainSerial=>([k,0,0,0],rk.checked_mul(4)?,0,r,1),
             Op::SwiGlu if self.bound>0.0=>([r,r,0,0],0,0,r,1),
             Op::Fold if k<=1024=>([rk,k,k,r],0,0,r,1),
             Op::QuantizeRows if k%16==0=>([m.checked_mul(k)?,0,0,0],0,0,m.checked_mul(k/16)?,17),
@@ -72,6 +73,11 @@ pub fn projection_batch_index(rows:u32,count:u32,thread:usize)->Option<(usize,us
     let blocks=rows.div_ceil(8) as usize;let lane=thread%32;
     if blocks==0 || lane>=8 {return None;}
     let job=thread/32/blocks;let row=thread/32%blocks*8+lane;
+    if job>=count as usize || row>=rows as usize {None} else {Some((job,row))}
+}
+pub fn serial_projection_index(rows:u32,count:u32,thread:usize)->Option<(usize,usize)> {
+    let blocks=rows.div_ceil(32) as usize;if blocks==0 {return None;}
+    let job=thread/32/blocks;let row=thread/32%blocks*32+thread%32;
     if job>=count as usize || row>=rows as usize {None} else {Some((job,row))}
 }
 #[cfg(not(target_arch="nvptx64"))]
@@ -208,7 +214,13 @@ pub fn unit(s:Shape,index:usize,x:[&[f32];4],w:&[u8],scales:&[u8],out:&mut[f32])
                 }
             }out[0]=round(sum);
         },
-        Op::Fp8Project=>{
+        Op::PlainSerial=>{
+            let mut sum=0.0f32;
+            for (column,bytes) in w[index*k*4..(index+1)*k*4].chunks_exact(4).enumerate() {
+                sum+=f32::from_le_bytes([bytes[0],bytes[1],bytes[2],bytes[3]])*x[0][column];
+            }out[0]=sum;
+        },
+        Op::Fp8Project|Op::Fp8Serial=>{
             let mut sum=0.0f32;let br=s.block_rows as usize;let bc=s.block_cols as usize;let blocks=k.div_ceil(bc);
             for block in 0..blocks {let at=((index/br)*blocks+block)*4;
                 let scale=f32::from_le_bytes(scales[at..at+4].try_into().unwrap());
@@ -241,7 +253,7 @@ pub fn reference(s:Shape,x:[&[f32];4],w:&[u8],scales:&[u8])->Result<Vec<f32>,Str
     let (lengths,wb,sb,units,words)=s.lengths().ok_or("invalid expert operation shape")?;
     if x.iter().zip(lengths).any(|(a,n)|a.len()!=n) || w.len()!=wb || scales.len()!=sb
         || x.iter().flat_map(|v|v.iter()).any(|v|!v.is_finite()) {return Err("expert operation operand extent or value differs".into());}
-    if matches!(s.op,Op::Quantize|Op::QuantizeRows) || matches!(s.op,Op::Fp8Project|Op::Fp8Rows) {
+    if matches!(s.op,Op::Quantize|Op::QuantizeRows) || matches!(s.op,Op::Fp8Project|Op::Fp8Rows|Op::Fp8Serial) {
         if x[0].iter().any(|&v|!round(v).is_finite()) {return Err("expert source overflows BF16".into());}
     }
     if matches!(s.op,Op::Quantize|Op::QuantizeRows) && x[0].chunks_exact(16).any(|b|
@@ -254,7 +266,8 @@ pub fn reference(s:Shape,x:[&[f32];4],w:&[u8],scales:&[u8])->Result<Vec<f32>,Str
         || b[16].is_sign_negative() || e4m3(nearest_e4m3(b[16])).to_bits()!=b[16].to_bits())) {
         return Err("invalid NVFP4 decoded activation or weight scale".into());
     }
-    if matches!(s.op,Op::Fp8Project|Op::Fp8Rows) && (w.iter().any(|b|b&127==127) || scales.chunks_exact(4).any(|b|
+    if s.op==Op::PlainSerial && w.chunks_exact(4).any(|bytes|!f32::from_le_bytes(bytes.try_into().unwrap()).is_finite()) {return Err("invalid plain weight".into());}
+    if matches!(s.op,Op::Fp8Project|Op::Fp8Rows|Op::Fp8Serial) && (w.iter().any(|b|b&127==127) || scales.chunks_exact(4).any(|b|
         {let v=f32::from_le_bytes(b.try_into().unwrap());!v.is_finite() || v<=0.0})) {return Err("invalid FP8 block weight or scale".into());}
     if s.op==Op::Fold && (x[1].iter().any(|&v|v<0.0 || v>=16_777_216.0 || v.fract()!=0.0)
         || (0..x[1].len()).any(|i|x[1][i+1..].contains(&x[1][i]))) {return Err("invalid or duplicate expert fold IDs".into());}
@@ -284,6 +297,19 @@ mod tests {
     }
     use super::*;
     fn s(op:Op)->Shape {Shape {op,tokens:1,rows:2,cols:16,block_rows:1,block_cols:16,global:1.0,activation:1.0,bound:10.0}}
+    #[test]
+    fn serial_projection_grid_and_reference_keep_complete_rows() {
+        for rows in [1u32,7,8,9,17,31,32,33,1024] {for count in [1u32,2,8] {
+            let mut seen=vec![0;rows as usize*count as usize];
+            for thread in 0..rows.div_ceil(32) as usize*count as usize*32 {if let Some((job,row))=serial_projection_index(rows,count,thread) {seen[job*rows as usize+row]+=1;}}
+            assert!(seen.iter().all(|&owners|owners==1));
+        }}
+        assert_eq!(serial_projection_index(0,1,0),None);assert_eq!(serial_projection_index(7,0,0),None);
+        let shape=s(Op::Fp8Project);let source=[-0.0,0.0,f32::MIN_POSITIVE,1.0,-1.0,0.5,-0.5,2.0,0.25,3.0,4.0,5.0,6.0,7.0,8.0,9.0];
+        let weights=vec![0x38;32];let scales=1.0f32.to_le_bytes().repeat(2);
+        assert_eq!(reference(shape,[&source,&[],&[],&[]],&weights,&scales).unwrap().iter().map(|value|value.to_bits()).collect::<Vec<_>>(),
+            reference(Shape {op:Op::Fp8Serial,..shape},[&source,&[],&[],&[]],&weights,&scales).unwrap().iter().map(|value|value.to_bits()).collect::<Vec<_>>());
+    }
     #[test]
     fn group_entries_cover_each_unit_once() {
         let entry=|first|GroupEntry {shape:s(Op::NvRows),weight:0,scales:0,first,first_row:0,input_words:0,weight_bytes:0,scale_bytes:0,pad:0};

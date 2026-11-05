@@ -259,13 +259,7 @@ pub(crate) fn resident_flash_resident_projection_batch(batch:crate::next_params:
         let thread=_thread_idx_x() as usize;
         if batch.plain&(1<<job)!=0 {
             let row=(block-start) as usize*128+thread;if row>=p.rows as usize {return;}
-            let mut sum=0.0f32;
-            for feature in 0..p.cols as usize {
-                let weight=*(p.weights as *const f32).add(row*p.cols as usize+feature);
-                let input=*(p.input as *const f32).add(feature);let product:f32;
-                asm!("mul.rn.f32 {p}, {a}, {b};",p=out(reg32)product,a=in(reg32)weight,b=in(reg32)input);
-                asm!("add.rn.f32 {s}, {s}, {p};",s=inout(reg32)sum,p=in(reg32)product);
-            }
+            let sum=crate::serial_projection::plain_row!((p.weights as *const f32).add(row*p.cols as usize),p.input as *const f32,p.cols as usize);
             *(p.output as *mut f32).add(row)=if batch.round!=0 {rb(sum)} else {sum};
         } else {
             let index=(block-start) as usize*4+thread/32;if index>=p.rows as usize {return;}

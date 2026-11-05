@@ -13,13 +13,14 @@ impl<'a> Backend<'a> {
     pub fn expert_projection_batch(&self,jobs:&[(Shape,&DeviceVector<'_>,&DeviceVector<'_>,&DeviceVector<'_>)])->Result<DeviceVector<'a>,String> {
         self.require_resident_stream()?;
         let first=jobs.first().ok_or("expert projection batch is empty")?.0;
-        if jobs.iter().any(|(shape,_,_,_)|shape.op!=Op::NvProject || shape.rows!=first.rows || shape.cols!=first.cols) {
-            return Err("expert projection batch requires equal complete NVFP4 rows".into());
+        if !matches!(first.op,Op::NvProject|Op::Fp8Project|Op::Fp8Serial|Op::PlainSerial) || jobs.iter().any(|(shape,_,_,_)|shape.op!=first.op || shape.rows!=first.rows || shape.cols!=first.cols) {
+            return Err("expert projection batch requires equal complete projection rows".into());
         }
         let count=u32::try_from(jobs.len()).map_err(|_|"expert projection batch exceeds ABI")?;
-        let grid=first.rows.div_ceil(8).checked_mul(count).ok_or("expert projection batch grid overflow")?;
+        let rows=if matches!(first.op,Op::Fp8Serial|Op::PlainSerial) {32} else {8};
+        let grid=first.rows.div_ceil(rows).checked_mul(count).ok_or("expert projection batch grid overflow")?;
         let words=(first.rows as usize).checked_mul(jobs.len()).filter(|&words|words<=u32::MAX as usize && words<=isize::MAX as usize/4).ok_or("expert projection batch output overflow")?;
-        let mut descriptors=jobs.iter().map(|(shape,input,weight,scales)|self.expert_arguments(*shape,[Some(input),None,None,None],Some(weight),Some(scales))).collect::<Result<Vec<_>,_>>()?;
+        let mut descriptors=jobs.iter().map(|(shape,input,weight,scales)|self.expert_arguments(*shape,[Some(input),None,None,None],Some(weight),if shape.op==Op::PlainSerial {None} else {Some(scales)})).collect::<Result<Vec<_>,_>>()?;
         let output=self.upload_vector(&vec![0.0;words])?;
         for (index,arguments) in descriptors.iter_mut().enumerate() {arguments.output=output.device_address()+(index*first.rows as usize*4) as u64;}
         let table=self.upload_vector(&descriptors.iter().flat_map(|arguments|arguments.descriptor_words().map(f32::from_bits)).collect::<Vec<_>>())?;

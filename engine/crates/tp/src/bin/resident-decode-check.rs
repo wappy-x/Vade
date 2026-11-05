@@ -1,5 +1,9 @@
 //! Bounded resident row-split decoder evidence. Public service admission stays separate.
 #![forbid(unsafe_code)]
+#[cfg(target_os="linux")]
+#[path="resident-decode-check/fp8_warp.rs"] mod fp8_warp;
+#[cfg(target_os="linux")]
+#[path="resident-decode-check/fp8_all_codes.rs"] mod fp8_all_codes;
 use std::{fs,path::{Path,PathBuf}};
 use spark_tp::Result;
 #[cfg(target_os="linux")]
@@ -118,6 +122,13 @@ fn profile_options(args:&[String])->Result<Options> {
 mod profile_tests {
     use super::profile_options;
     #[test]
+    fn job_list_is_bounded_and_has_four_explicit_fields() {
+        assert!(super::job_rows("# comment\n\n").unwrap().is_empty());
+        assert_eq!(super::job_rows("a.ids a.json a-out 3\nb.ids b.json b-out 1\n").unwrap(),[["a.ids","a.json","a-out","3"].map(str::to_owned),["b.ids","b.json","b-out","1"].map(str::to_owned)]);
+        for bad in ["a b c","a b c d e"] {assert!(super::job_rows(bad).is_err());}
+        assert!(super::job_rows(&"a b c 1\n".repeat(16)).is_err());
+    }
+    #[test]
     fn diagnostics_are_explicit_default_off_and_reject_duplicates() {
         assert_eq!(profile_options(&[]).unwrap(),(false,false,vec![spark_tp::bounded_decoder::PROMPT_ROWS],None,vec![],false,None));
         for flags in [vec!["--cost"],vec!["--gpu-cost"],vec!["--gpu-cost","--cost"]] {
@@ -134,20 +145,36 @@ mod profile_tests {
         }
     }
 }
+#[cfg(any(target_os="linux",test))]
+fn job_rows(text:&str)->Result<Vec<[String;4]>> {
+    let mut rows=Vec::new();
+    for line in text.lines().map(str::trim).filter(|line|!line.is_empty() && !line.starts_with('#')) {
+        let fields=line.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+        rows.push(fields.try_into().map_err(|_|"resident job needs INPUT_IDS REQUEST_JSON NEW_OUT REPEATS")?);
+        if rows.len()>15 {return Err("resident job list exceeds bound".into());}
+    }Ok(rows)
+}
 #[cfg(target_os="linux")]
 fn run_pair(args:&[String])->Result<()> {
     use spark_serve::{Tokenizer,protocol::{self,DraftMode,Prompt}};
     use spark_gpu_probe::driver::with_backend;
     use spark_tp::{bounded_decoder::{Device,Decoder,Compute,HeadRows},transport::Ring};
     if args.len()<10 {return Err("usage: resident-decode-check RANK 2 LISTEN NEXT pair MODEL INPUT_IDS REQUEST_JSON NEW_OUT REPEATS".into());}
-    let (cost,gpu_cost,prompt_groups,row_groups,windows,device_wire,expanded_limit)=profile_options(&args[10..])?;
-    let root=Path::new(&args[5]);let input=ids(Path::new(&args[6]))?;let request=read(Path::new(&args[7]))?;let out=Path::new(&args[8]);
+    let lists=args[10..].iter().filter_map(|argument|argument.strip_prefix("--jobs=")).collect::<Vec<_>>();
+    if lists.len()>1 {return Err("duplicate resident job list".into());}
+    let flags=args[10..].iter().filter(|argument|!argument.starts_with("--jobs=")).cloned().collect::<Vec<_>>();
+    let (cost,gpu_cost,prompt_groups,row_groups,windows,device_wire,expanded_limit)=profile_options(&flags)?;
+    let root=Path::new(&args[5]);
     let rank=args[0].parse::<usize>().map_err(|e|e.to_string())?;let listen=args[2].parse::<std::net::SocketAddr>().map_err(|_|"invalid listen")?;let next=args[3].parse::<std::net::SocketAddr>().map_err(|_|"invalid next")?;
     if args[1].parse::<usize>().map_err(|e|e.to_string())?!=spark_tp::layer_transport::PAIR_RANKS {return Err("resident pair probe requires its declared pair size".into());}
-    let repeats=args[9].parse::<usize>().map_err(|e|e.to_string())?;
-    if input.len()>PROMPT_BOUND || repeats==0 || repeats>10 {return Err("resident probe bounds exceeded".into());}
     let tokenizer=spark_serve::tokenizer::ModelTokenizer::from_directory(root)?;
     let limits=spark_serve::Limits {input_tokens:PROMPT_BOUND,output_tokens:256,context_tokens:PROMPT_BOUND+256,default_thinking:false,next_mtp_depth:Some(0),..Default::default()};
+    let mut specs=vec![[args[6].clone(),args[7].clone(),args[8].clone(),args[9].clone()]];
+    if let Some(list)=lists.first() {specs.extend(job_rows(&fs::read_to_string(list).map_err(|error|error.to_string())?)?);}
+    let mut jobs=Vec::new();let mut identity=format!("prompt_groups={prompt_groups:?}\nrow_groups={row_groups:?}\nwindows={windows:?}\nkernels={}\n",sha256::digest(spark_gpu_probe::layer_ptx()?.to_bytes()));
+    for [input,request,out,repeats] in specs {
+    let input=ids(Path::new(&input))?;let request=read(Path::new(&request))?;let out=PathBuf::from(out);let repeats=repeats.parse::<usize>().map_err(|error|error.to_string())?;
+    if input.len()>PROMPT_BOUND || repeats==0 || repeats>10 {return Err("resident probe bounds exceeded".into());}
     let r=protocol::parse(&request,true,&limits)?;
     if input.len()+r.max_tokens>limits.context_tokens {return Err("resident prompt and output exceed context bound".into());}
     if !r.ignore_eos || r.cache || r.draft!=Some(DraftMode::Plain) || r.mtp_depth!=Some(0)
@@ -155,11 +182,12 @@ fn run_pair(args:&[String])->Result<()> {
         || r.sampling.repetition_penalty!=1.0 || r.sampling.presence_penalty!=0.0 || r.sampling.frequency_penalty!=0.0 {return Err("resident probe requires the baseline plain greedy request".into());}
     let Prompt::Chat(chat)=&r.prompt else {return Err("resident probe requires chat".into());};
     if tokenizer.encode_chat(chat,limits.body_bytes)?!=input {return Err("prepared input differs from the checkpoint chat template".into());}
+    identity.push_str(&format!("request={}\ninput_ids={input:?}\nrepeats={repeats}\n",sha256::digest(&request)));
+    jobs.push((input,r.max_tokens,out,repeats));
+    }
     let checkpoint=open_checkpoint(root)?;
-    fs::create_dir(out).map_err(|e|e.to_string())?;
-    let mut identity=format!("prompt_groups={prompt_groups:?}\nrow_groups={row_groups:?}\nwindows={windows:?}\nrequest={}\ninput_ids={input:?}\nkernels={}\n",sha256::digest(&request),sha256::digest(spark_gpu_probe::layer_ptx()?.to_bytes()));
     for name in ["config.json","model.safetensors.index.json","tokenizer.json","tokenizer_config.json"] {identity.push_str(&format!("{name}={}\n",sha256::digest_reader(fs::File::open(root.join(name)).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?));}
-    write(&out.join("IDENTITY"),identity.as_bytes())?;
+    for (_,_,out,_) in &jobs {fs::create_dir(out).map_err(|error|error.to_string())?;write(&out.join("IDENTITY"),identity.as_bytes())?;}
     let mut ring=Ring::connect(rank,2,listen,next)?;let digest=sha256::digest(identity.as_bytes());let mut agreement=vec![0;digest.len()*ring.world()];
     let start=rank*digest.len();agreement[start..start+digest.len()].copy_from_slice(digest.as_bytes());ring.all_gather(&mut agreement,digest.len())?;
     if !agreement.chunks_exact(digest.len()).all(|v|v==digest.as_bytes()) {return Err("pair request, checkpoint metadata, or GPU program differs".into());}
@@ -190,9 +218,10 @@ fn run_pair(args:&[String])->Result<()> {
                 let compute=if let Some(m)=&mailbox {Device::with_mailbox(backend,ring,cost,m)?}
                     else {Device::with_ring_profiled(backend,Some(ring),cost)};
 
-        for repeat in 1..=repeats {let prompt_rows=prompt_groups[(repeat-1)%prompt_groups.len()];backend.set_profiling(gpu_cost && repeat>1);let saved=out.join(format!("run{repeat}"));fs::create_dir(&saved).map_err(|e|e.to_string())?;
+        for (input,max_tokens,out,repeats) in &jobs {
+        for repeat in 1..=*repeats {let prompt_rows=prompt_groups[(repeat-1)%prompt_groups.len()];backend.set_profiling(gpu_cost && repeat>1);let saved=out.join(format!("run{repeat}"));fs::create_dir(&saved).map_err(|e|e.to_string())?;
             write(&saved.join("INPUT_IDS"),input.iter().map(|v|format!("{v}\n")).collect::<String>().as_bytes())?;
-            let decoder=Decoder::new(&checkpoint,&compute,(input.len()+r.max_tokens) as u64)?;if let Some(rows)=expanded_limit {decoder.set_expanded_limit(rows);}let mut state=decoder.zero_state()?;let mut last=None;let mut hashes=String::new();compute.cost_report("setup");let prompt_started=std::time::Instant::now();
+            let decoder=Decoder::new(&checkpoint,&compute,(input.len()+max_tokens) as u64)?;if let Some(rows)=expanded_limit {decoder.set_expanded_limit(rows);}let mut state=decoder.zero_state()?;let mut last=None;let mut hashes=String::new();compute.cost_report("setup");let prompt_started=std::time::Instant::now();
             let head_last=row_groups.as_ref().is_some_and(|(_,from)|*from>0 && repeat>=*from);
             let row_group=row_groups.as_ref().map(|(g,_)|(g[(repeat-1)%g.len()],if head_last {HeadRows::Last} else {HeadRows::All}));
             // Each group: its end, whether it runs the row path, and its report label.
@@ -213,12 +242,12 @@ fn run_pair(args:&[String])->Result<()> {
             let prompt_seconds=prompt_started.elapsed().as_secs_f64();write(&saved.join("PREFILL_TIMING"),format!("prompt_rows={} prompt_tokens={} prompt_seconds={prompt_seconds:.9} seconds_per_prompt_token={:.9}\n",row_group.map_or(prompt_rows,|g|g.0),input.len(),prompt_seconds/input.len() as f64).as_bytes())?;
             compute.cost_report("prefill");
             let mut logits=last.ok_or("empty prompt")?;let mut output=Vec::new();let started=std::time::Instant::now();
-            for at in 0..r.max_tokens {let bytes=floats(&logits)?;let mut best=0;for i in 1..logits.len() {if logits[i]>logits[best] {best=i;}}
+            for at in 0..*max_tokens {let bytes=floats(&logits)?;let mut best=0;for i in 1..logits.len() {if logits[i]>logits[best] {best=i;}}
                 output.push(best as u32);write(&saved.join(format!("{at}-logits.f32")),&bytes)?;
                 eprintln!("RESIDENT TOKEN rank={rank} repeat={repeat} at={at} id={best} elapsed_seconds={:.6}",started.elapsed().as_secs_f64());
-                if at+1<r.max_tokens {let (next,_,updated)=decoder.step(best as u32,&state,|_,_|Ok(()))?;logits=next;state=updated;}
+                if at+1<*max_tokens {let (next,_,updated)=decoder.step(best as u32,&state,|_,_|Ok(()))?;logits=next;state=updated;}
             }
-            backend.synchronize()?;let seconds=started.elapsed().as_secs_f64();let steps=r.max_tokens-1;
+            backend.synchronize()?;let seconds=started.elapsed().as_secs_f64();let steps=max_tokens-1;
             let timing=format!("decode_steps={steps} decode_seconds={seconds:.9} decode_tokens_per_second={:.9}\n",steps as f64/seconds);
             write(&saved.join("TIMING"),timing.as_bytes())?;write(&saved.join("PROMPT_LOGITS"),hashes.as_bytes())?;
             write(&saved.join("OUTPUT_IDS"),output.iter().map(|v|format!("{v}\n")).collect::<String>().as_bytes())?;
@@ -226,14 +255,14 @@ fn run_pair(args:&[String])->Result<()> {
             write(&saved.join("COMPLETE"),b"RESIDENT DECODE RUN PASS\n")?;
             println!("RESIDENT DECODE PASS rank={rank} repeat={repeat} tokens={} {timing}ids={output:?} text={text:?}",output.len());
             if repeat>1 && !head_last {compare(&out.join("run1"),&saved)?;}
-        }Ok(())
+        }}Ok(())
             })();
             if result.is_err() {if let Some(m)=&mailbox {m.fail();}}
             stop.store(true,Ordering::Release);
             let joined=handle.map(|h|h.join().map_err(|_|"resident device wire panicked".to_owned()).and_then(|v|v)).unwrap_or(Ok(()));
             result.and(joined)
         })
-    })?;write(&out.join("COMPLETE"),b"RESIDENT DECODE SUITE PASS\n")
+    })?;for (_,_,out,_) in &jobs {write(&out.join("COMPLETE"),b"RESIDENT DECODE SUITE PASS\n")?;}Ok(())
 }
 #[cfg(target_os="linux")]
 fn layout(out:&Path)->Result<()> {
@@ -439,6 +468,10 @@ fn main() {
         [mode,out] if mode=="prompt-rows"=>prompt_rows::run(Path::new(out)),
         #[cfg(target_os="linux")]
         [mode,out] if mode=="projection-batch"=>projection_batch::run(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,out] if mode=="fp8-serial"=>fp8_warp::run(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,out] if mode=="fp8-all-codes"=>fp8_all_codes::run(Path::new(out)),
         _=>Err("usage: resident-decode-check RANK 2 LISTEN NEXT pair MODEL INPUT_IDS REQUEST_JSON NEW_OUT REPEATS | prepare MODEL REQUEST_JSON NEW_IDS | quantizer NEW_OUT | layout NEW_OUT | compare LEFT RIGHT | plan-time MODEL REPEATS".into()),
     };if let Err(error)=result {eprintln!("RESIDENT CHECK FAIL {error}");std::process::exit(1);}
 }
