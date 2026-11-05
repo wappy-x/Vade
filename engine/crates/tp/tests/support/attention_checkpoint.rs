@@ -6,10 +6,11 @@ use std::{collections::BTreeMap,fs,path::PathBuf,sync::atomic::{AtomicU64,Orderi
 pub struct Checkpoint {pub root:PathBuf,pub admission:CheckpointAdmission,pub operands:BTreeMap<String,(Vec<u8>,Vec<u8>)>}
 impl Checkpoint {
     pub fn new(norm:Dtype)->Self {Self::new_with_head(norm,false)}
-    pub fn new_with_head(norm:Dtype,head:bool)->Self {
+    pub fn new_with_head(norm:Dtype,head:bool)->Self {Self::new_with_capacity(norm,head,8)}
+    pub fn new_with_capacity(norm:Dtype,head:bool,capacity:u64)->Self {
         static NEXT:AtomicU64=AtomicU64::new(0);
         let root=std::env::temp_dir().join(format!("vade-attention-projections-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
-        fs::create_dir(&root).unwrap();let mut d=fixture::description();d.hidden=256;let mut selected=Vec::new();
+        fs::create_dir(&root).unwrap();let mut d=fixture::description();d.max_positions=capacity;d.hidden=256;let mut selected=Vec::new();
         if let engine_model::plan::description::TokenMixer::Kda(k)=&mut d.layers[0].mixer {k.head_dim=32;}
         for layer in 0..d.layers.len() {
             let p=LayerPlan::new(&d,layer,1,Topology {rank:0,parts:1}).unwrap();

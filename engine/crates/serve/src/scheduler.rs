@@ -150,12 +150,12 @@ fn model_listing_reports_effective_limits() {
 /// Keep health and explicit rejection responses available while CUDA loads on
 /// its owning thread. This thread never borrows the model or backend.
 pub fn serve_loading(listener: &TcpListener, limits: &Limits, model: &str, stop: &AtomicBool, admin: &ModelAdmin) -> Result<(), String> {
-    unavailable(listener, limits, model, stop, Some(admin), "loading", None).map(|_| ())
+    unavailable(listener, limits, model, stop, Some(admin), "loading", None, None).map(|_| ())
 }
 pub fn wait_for_model(listener: &TcpListener, limits: &Limits, admin: &ModelAdmin, stop: &AtomicBool) -> Result<Option<Swap>, String> {
-    unavailable(listener, limits, &admin.model, stop, Some(admin), "failed", None)
+    unavailable(listener, limits, &admin.model, stop, Some(admin), "failed", None, None)
 }
-fn unavailable(listener: &TcpListener, limits: &Limits, model: &str, stop: &AtomicBool, admin: Option<&ModelAdmin>, state: &str, deadline: Option<Instant>) -> Result<Option<Swap>, String> {
+fn unavailable(listener: &TcpListener, limits: &Limits, model: &str, stop: &AtomicBool, admin: Option<&ModelAdmin>, state: &str, deadline: Option<Instant>, failure: Option<&str>) -> Result<Option<Swap>, String> {
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let access = http::AccessPolicy::new(listener.local_addr().map_err(|e| e.to_string())?, limits)?;
     let mut reading: Vec<Reading> = Vec::new();
@@ -191,7 +191,7 @@ fn unavailable(listener: &TcpListener, limits: &Limits, model: &str, stop: &Atom
             let result = reading[i].read(limits, &access);
             if matches!(result, Ok(None)) { i += 1; continue; }
             let mut input = reading.swap_remove(i);
-            let (code, body) = match result {
+            let (code, mut body) = match result {
                 Ok(Some(http)) => {
                     if http.path == "/v1/admin/swap" && requested.is_none() && state == "failed" {
                         if let Some(admin) = admin {
@@ -207,11 +207,12 @@ fn unavailable(listener: &TcpListener, limits: &Limits, model: &str, stop: &Atom
                         }
                     }
                     (if http.path == "/cors" { 204 } else { 503 }, model_response(&http.path, state, model, 0, 0, None, limits, limits.context_tokens, None, None)
-                        .unwrap_or_else(|| protocol::error_json("model_unavailable", "retry when ready")))
+                        .unwrap_or_else(|| protocol::error_json("model_unavailable", failure.unwrap_or("retry when ready"))))
                 }
                 Err(error) => crate::auth::request_error(&error),
                 Ok(None) => unreachable!(),
             };
+            if let Some(reason) = failure { if body.starts_with('{') { body.insert_str(1, &format!("\"reason\":{},", protocol::quote(reason))); } }
             if input.wire.response(code, &body, limits).is_ok() { input.responding = true; reading.push(input); }
         }
         std::thread::sleep(Duration::from_millis(1));
@@ -732,8 +733,8 @@ struct Ready {
     affinity_scope: Option<String>,
 }
 impl Ready {
-    fn reservation_tokens(&self, output: usize) -> usize {
-        let output = if self.request.max_tokens_explicit { self.request.max_tokens }
+    fn reservation_tokens(&self, output: usize, full: bool) -> usize {
+        let output = if full || self.request.max_tokens_explicit { self.request.max_tokens }
             else { output.max(1).div_ceil(256).saturating_mul(256).min(self.request.max_tokens) };
         self.prompt.len() + output
     }
@@ -1282,6 +1283,7 @@ impl<'e, 't, E: Engine, T: Tokenizer> Active<'e, 't, E, T> {
         cache: &mut SessionCache<E::Session<'e>>,
         events: Vec<Event>,
     ) -> Result<(), String> {
+        let observed = engine.profile_serving().then(Instant::now); let result = (|| {
         // A model step can expire while CUDA/peers are completing. Check again
         // before publishing its events, including a final length completion.
         if Instant::now() >= self.ready.deadline {
@@ -1356,6 +1358,8 @@ impl<'e, 't, E: Engine, T: Tokenizer> Active<'e, 't, E, T> {
         }
         if self.ready.request.stream { self.ready.wire.push(": prefill\n\n", limits, false)?; }
         self.ready.wire.flush().inspect_err(|_| self.cancelled("write_failed"))
+        })();
+        if let Some(started) = observed { engine.profile_stream_output(self.id, self.generation.usage.completion_tokens, started.elapsed().as_nanos()); } result
     }
 }
 

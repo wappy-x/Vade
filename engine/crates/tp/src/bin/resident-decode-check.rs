@@ -451,13 +451,13 @@ fn main() {
         #[cfg(target_os="linux")]
         [mode,out] if mode=="views"=>views(Path::new(out)),
         #[cfg(target_os="linux")]
-        [mode,out] if mode=="queued"=>queued(Path::new(out)),
-        #[cfg(target_os="linux")]
         [mode,out] if mode=="program"=>program::check(Path::new(out)),
         #[cfg(target_os="linux")]
-        [mode,out] if mode=="recorder"=>recorder::check(Path::new(out)),
-        #[cfg(target_os="linux")]
         [mode,root,out] if mode=="attention-time"=>attention::measure(Path::new(root),Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,out] if mode=="queued"=>queued(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,out] if mode=="recorder"=>recorder::check(Path::new(out)),
         #[cfg(target_os="linux")]
         [mode,out] if mode=="recurrence"=>recurrence::run(Path::new(out)),
         #[cfg(target_os="linux")]

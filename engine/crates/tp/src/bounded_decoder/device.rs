@@ -1,20 +1,21 @@
 //! Device values retain logical empty shapes with one private unused lane.
 use super::*;
-use spark_gpu_probe::driver::{Backend,DeviceVector,MhcBoundaryPass,ResidentMhcBoundary};
+use spark_gpu_probe::driver::{Backend,BackendStats,DeviceVector,MhcBoundaryPass,ResidentMhcBoundary};
 use std::{cell::{Cell,RefCell},rc::Rc};
 use super::lineage::Lineage;
 pub struct Device<'b,'d> {pub backend:&'b Backend<'d>,weights:Rc<RefCell<crate::resident_weights::Weights<'b,'d>>>,
     parameters:Rc<RefCell<BTreeMap<Vec<u32>,DeviceVector<'d>>>>,
     norms:Rc<RefCell<BTreeMap<String,spark_gpu_probe::driver::ResidentNorm<'b,'d>>>>,
     blocks:Rc<RefCell<BTreeMap<(usize,usize),ResidentMhcBoundary<'b,'d>>>>,
-    stages:Rc<RefCell<[[u128;2];4]>>,cost:Rc<crate::resident_profile::Cost>,memo:RefCell<Memo<'d>>,copies:RefCell<Option<DeviceVector<'d>>>,source:Rc<Cell<u64>>,programs:RefCell<BTreeMap<(Vec<u32>,u64),spark_gpu_probe::driver::ResidentProgram<'b,'d>>>}
+    stages:Rc<RefCell<[[u128;2];4]>>,cost:Rc<crate::resident_profile::Cost>,memo:RefCell<Memo<'d>>,copies:RefCell<Option<DeviceVector<'d>>>,source:Rc<Cell<u64>>,programs:RefCell<BTreeMap<(Vec<u32>,u64),spark_gpu_probe::driver::ResidentProgram<'b,'d>>>,
+    serving:Option<RefCell<Option<(u64,std::time::Instant,BackendStats)>> >}
 type BitsKey=(String,Vec<u32>,bool);
 type OriginKey=(String,Lineage,bool);
 #[derive(Default)]
 struct Memo<'d> {values:BTreeMap<BitsKey,Rc<DeviceVector<'d>>>,origins:BTreeMap<OriginKey,Rc<DeviceVector<'d>>>,bytes:usize,limit:usize,hits:u64,misses:u64}
 impl Clone for Device<'_,'_> {
     fn clone(&self)->Self {Self {backend:self.backend,weights:self.weights.clone(),parameters:self.parameters.clone(),norms:self.norms.clone(),
-        blocks:self.blocks.clone(),stages:self.stages.clone(),cost:self.cost.clone(),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),source:self.source.clone(),programs:RefCell::new(BTreeMap::new())}}
+        blocks:self.blocks.clone(),stages:self.stages.clone(),cost:self.cost.clone(),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),source:self.source.clone(),programs:RefCell::new(BTreeMap::new()),serving:self.serving.as_ref().map(|_|RefCell::new(None))}}
 }
 struct Pending<'b,'d> {post:Option<(MhcBoundaryPass<'b,'d>,Rc<DeviceVector<'d>>)>,error:Option<String>}
 pub struct Value<'b,'d> {vector:Rc<DeviceVector<'d>>,words:usize,lineage:Lineage,known:RefCell<Option<Vec<f32>>>,pending:Option<Rc<RefCell<Pending<'b,'d>>>>}
@@ -24,8 +25,10 @@ impl<'b,'d> Device<'b,'d> {
     /// Diagnostic runner counters. Normal construction keeps them disabled.
     pub fn with_ring_profiled(backend:&'b Backend<'d>,ring:Option<crate::transport::Ring>,cost:bool)->Self {
         Self {backend,weights:Rc::new(RefCell::new(crate::resident_weights::Weights::new(ring,cost))),parameters:Rc::new(RefCell::new(BTreeMap::new())),
-            norms:Rc::new(RefCell::new(BTreeMap::new())),blocks:Rc::new(RefCell::new(BTreeMap::new())),stages:Rc::new(RefCell::new([[0;2];4])),cost:Rc::new(crate::resident_profile::Cost::new(cost)),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),source:Rc::new(Cell::new(0)),programs:RefCell::new(BTreeMap::new())}
+            norms:Rc::new(RefCell::new(BTreeMap::new())),blocks:Rc::new(RefCell::new(BTreeMap::new())),stages:Rc::new(RefCell::new([[0;2];4])),cost:Rc::new(crate::resident_profile::Cost::new(cost)),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),source:Rc::new(Cell::new(0)),programs:RefCell::new(BTreeMap::new()),serving:None}
     }
+    /// Wall counters only. This does not enable CUDA event profiling.
+    pub fn with_serving_trace(mut self,enabled:bool)->Self {self.serving=enabled.then(||RefCell::new(None));self}
     /// The caller keeps the attached wire and mailbox alive through all steps.
     pub fn with_mailbox(backend:&'b Backend<'d>,ring:crate::transport::Ring,cost:bool,mailbox:&'b spark_gpu_probe::driver::TpMailbox<'d>)->Result<Self> {
         let device=Self::with_ring_profiled(backend,Some(ring),cost);device.weights.borrow_mut().attach_mailbox(mailbox)?;Ok(device)
@@ -56,6 +59,22 @@ impl<'b,'d> Device<'b,'d> {
     }
 }
 impl<'b,'d> Compute for Device<'b,'d> {
+    fn work<T>(&self,run:impl FnOnce()->Result<T>)->Result<T> {
+        let queue=self.backend.resident_queue()?;self.backend.enable_resident_launches()?;
+        let result=run();drop(queue);
+        if let Some(error)=self.backend.fatal_error() {return Err(error);}
+        self.weights.borrow().check_exchange()?;result
+    }
+    fn resident_weights_ready(&self)->bool {self.weights.borrow().prepared()}
+    fn fatal_error(&self)->Option<String> {self.backend.fatal_error().or_else(||self.weights.borrow().check_exchange().err())}
+    fn memory_bytes(&self)->Option<(usize,usize,usize)> {Some((self.backend.accounted_bytes(),self.backend.peak_accounted_bytes(),self.backend.pinned_host_bytes()))}
+    fn serving_trace(&self)->bool {self.serving.is_some()}
+    fn profile_tick_begin(&self,tick:u64) {if let Some(trace)=&self.serving {*trace.borrow_mut()=Some((tick,std::time::Instant::now(),self.backend.stats()));}}
+    fn profile_tick_end(&self) {if let Some(trace)=&self.serving {if let Some((tick,started,before))=trace.borrow_mut().take() {
+        let elapsed=started.elapsed().as_nanos();let s=self.backend.stats().since(before);
+        eprintln!("SERVED TICK tick={tick} wall_ns={elapsed} allocation_ns={} wait_ns={} wait_calls={} launch_ns={} launch_calls={} download_ns={} upload_ns={} pack_ns={} graph_calls={}",
+            s.allocation_ns,s.stream_wait_ns,s.stream_wait_calls,s.host_launch_ns,s.queued_calls,s.output_download_ns,s.weight_read_upload_ns,s.host_pack_ns,s.graph_launches);
+    }}}
     fn plan_cost(&self,ns:u128) {self.cost.host("planning",ns);}
     fn trace_start(&self) {if self.cost.enabled() {self.backend.set_profiling(true);}}
     fn cost_report(&self,phase:&str) {if self.cost.enabled() {eprintln!("SERVED COST phase={phase}");self.report();}}
@@ -63,7 +82,7 @@ impl<'b,'d> Compute for Device<'b,'d> {
     fn projects_complete_rows(&self)->bool {true}
     fn prepare(&self,c:&CheckpointAdmission)->Result<()> {
         // A service can retain this owner while replacing a decoder session.
-        // Previous steps synchronize before publishing; no old cache may cross sessions.
+        // Pure memo entries are shared across live sessions; preparation clears them.
         *self.memo.borrow_mut()=Memo::default();self.weights.borrow_mut().prepare(c,self.backend)?;
         // Reuse completed private vectors under the backend's existing pressure
         // and size limits. A service's earlier memory admission owns its margin.

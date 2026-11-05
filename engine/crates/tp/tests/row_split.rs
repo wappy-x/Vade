@@ -16,19 +16,28 @@ fn shared_chat_parser_keeps_plain_greedy_streaming_and_explicit_sampling() {
     let request=spark_serve::protocol::parse(br#"{"messages":[{"role":"user","content":"Say hello."}],"temperature":0.25,"seed":7}"#,true,&limits).unwrap();
     assert_eq!(request.sampling.temperature,0.25);assert_eq!(request.sampling.seed,7);
     assert!(spark_tp::row_split::limits(0,4).is_err());assert!(spark_tp::row_split::limits(8,0).is_err());
+    let card=spark_tp::row_split::limits(32768,8192).unwrap();
+    let request=spark_serve::protocol::parse(br#"{"messages":[{"role":"user","content":"Say hello."}],"max_tokens":8192}"#,true,&card).unwrap();
+    assert_eq!(request.max_tokens,8192);assert!(!request.ignore_eos);assert_eq!(card.context_tokens,32768);
+    assert_eq!(card.generation_timeout,std::time::Duration::from_secs(86400));
 }
 struct Prepared {
     tx:std::sync::mpsc::Sender<()>,rx:std::sync::mpsc::Receiver<()>,calls:std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    batches:std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    batches:std::sync::Arc<std::sync::atomic::AtomicUsize>,working:std::cell::Cell<bool>,
 }
 impl Compute for Prepared {
     type Value=Vec<f32>;type Pass=<Host as Compute>::Pass;
+    fn work<T>(&self,run:impl FnOnce()->Result<T>)->Result<T> {
+        assert!(!self.working.replace(true),"execution owners must not nest");
+        let result=run();assert!(self.working.replace(false));result
+    }
     fn prepare(&self,_:&engine_model::plan::admission::CheckpointAdmission)->Result<()> {
         self.tx.send(()).map_err(|e|e.to_string())?;
         self.rx.recv_timeout(std::time::Duration::from_secs(2)).map_err(|e|format!("session preparation is not paired: {e}"))?;
         self.calls.fetch_add(1,std::sync::atomic::Ordering::SeqCst);Ok(())
     }
     fn projection_batch(&self,checkpoint:&engine_model::plan::admission::CheckpointAdmission,input:&[(&str,&Vec<f32>)],round:bool)->Result<Option<Vec<Vec<f32>>>> {
+        assert!(self.working.get(),"projection consumes buffers inside its execution owner");
         self.batches.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
         input.iter().map(|(name,input)| {
             let upload=checkpoint.upload(name).map_err(|error|error.to_string())?;
@@ -92,15 +101,18 @@ fn scalar_service_generates_four_exact_tokens_across_row_parts_and_new_sessions(
         let worker_calls=calls.clone();
         let worker_batches=batches.clone();
         let worker=scope.spawn(move || {
-            let prepared=Prepared {tx:bp_tx,rx:bp_rx,calls:worker_calls,batches:worker_batches};
+            let prepared=Prepared {tx:bp_tx,rx:bp_rx,calls:worker_calls,batches:worker_batches,working:std::cell::Cell::new(false)};
             let split=Split::new(&prepared,Wire {topology:Topology {rank:1,parts:2},controller:false,tx:b_tx,rx:b_rx}).unwrap();
-            Factory::new(checkpoint,split,8,vec![0]).unwrap().worker().unwrap();
+            let factory=Factory::new(checkpoint,split,8,vec![0]).unwrap();
+            assert_eq!(factory.negotiate_available_bytes((1usize<<40)+123).unwrap(),(1usize<<40)+122);factory.worker().unwrap();
         });
-        let prepared=Prepared {tx:ap_tx,rx:ap_rx,calls:calls.clone(),batches:batches.clone()};
+        let prepared=Prepared {tx:ap_tx,rx:ap_rx,calls:calls.clone(),batches:batches.clone(),working:std::cell::Cell::new(false)};
         let split=Split::new(&prepared,Wire {topology:Topology {rank:0,parts:2},controller:true,tx:a_tx,rx:a_rx}).unwrap();
         let service=Factory::new(checkpoint,split,8,vec![0]).unwrap();let reference=Decoder::new(checkpoint,Host,8).unwrap();
+        assert_eq!(service.negotiate_available_bytes((1usize<<40)+122).unwrap(),(1usize<<40)+122);
+        assert!(service.request_reservation_bytes(8).unwrap()>=service.request_reservation_bytes(1).unwrap());assert!(service.request_reservation_bytes(9).is_none());
         for repeat in 0..3 {
-            let mut session=service.session().unwrap();assert!(service.session().is_err());assert!(!session.can_fork());
+            let mut session=service.session().unwrap();let extra=service.session().unwrap();drop(extra);assert!(!session.can_fork());
             let mut state=reference.zero_state().unwrap();let mut token=1;
             if repeat%2==0 {
                 let prompt=[1,3,2];let mut expected=Vec::new();
@@ -117,7 +129,78 @@ fn scalar_service_generates_four_exact_tokens_across_row_parts_and_new_sessions(
             assert!(session.step(u32::MAX).is_err());
         }
         service.shutdown().unwrap();worker.join().unwrap();
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst),8);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst),14);
         assert!(batches.load(std::sync::atomic::Ordering::SeqCst)>0);
     });
+}
+#[test]
+fn interleaved_two_four_eight_sessions_match_alone_full_logits_and_ids() {
+    let c=fixture::Checkpoint::new_with_capacity(Dtype::Bf16,true,80);
+    let (a_tx,b_rx)=sync_channel(1);let (b_tx,a_rx)=sync_channel(1);
+    std::thread::scope(|scope| {
+        let checkpoint=&c.admission;
+        let worker=scope.spawn(move || {let split=Split::new(Host,Wire {topology:Topology {rank:1,parts:2},controller:false,tx:b_tx,rx:b_rx}).unwrap();Factory::new(checkpoint,split,80,vec![0]).unwrap().worker().unwrap();});
+        let split=Split::new(Host,Wire {topology:Topology {rank:0,parts:2},controller:true,tx:a_tx,rx:a_rx}).unwrap();
+        let engine=Factory::new(checkpoint,split,80,vec![0]).unwrap();
+        // Generated rows grow ordinary state, but retain no new prompt-only cache.
+        let reserve=|prompt,tokens|engine.request_reservation_bytes_for_prompt(prompt,tokens,true,None,false).unwrap();
+        let d=checkpoint.description();let plan=|tokens|engine_model::plan::state::StatePlan::new(d,Topology {rank:0,parts:1},tokens,isize::MAX as usize).unwrap();
+        assert_eq!(reserve(2,80)-reserve(2,66),2*(plan(80).state_layout().bytes()-plan(66).state_layout().bytes()));
+        assert!(reserve(20,80)>reserve(2,80));
+        assert!(engine.request_reservation_bytes_for_prompt(81,80,true,None,false).is_none());
+        let best=|v:&[f32]|(0..v.len()).reduce(|a,b|if v[b]>v[a] {b} else {a}).unwrap() as u32;
+        let bits=|v:&[f32]|v.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
+        let prompts=(0..8).map(|n|vec![1+n as u32,(n as u32*3+2)%16]).collect::<Vec<_>>();
+        let mut alone=Vec::new();
+        for prompt in &prompts {let mut session=engine.session().unwrap();let mut logits=session.prefill(prompt).unwrap();let mut rows=Vec::new();for at in 0..64 {let id=best(&logits);rows.push((id,bits(&logits)));if at<63 {logits=session.step(id).unwrap();}}alone.push(rows);}
+        for count in [2,4,8] {
+            let mut sessions=(0..count).map(|_|engine.session().unwrap()).collect::<Vec<_>>();
+            if count==8 {assert!(engine.session().is_err());}
+            let mut logits=sessions.iter_mut().zip(&prompts).map(|(s,p)|s.prefill(p).unwrap()).collect::<Vec<_>>();
+            for at in 0..64 {let order=if at%2==0 {(0..count).collect::<Vec<_>>()} else {(0..count).rev().collect()};
+                for i in order {let id=best(&logits[i]);assert_eq!((id,bits(&logits[i])),alone[i][at],"cohort={count} chat={i} token={at}");if at<63 {logits[i]=sessions[i].step(id).unwrap();}}
+            }
+            while let Some(session)=sessions.pop() {drop(session);}
+        }
+        engine.shutdown().unwrap();worker.join().unwrap();
+    });
+}
+
+struct FaultWire {fault:std::rc::Rc<std::cell::Cell<bool>>,aborted:std::rc::Rc<std::cell::Cell<bool>>}
+impl Exchange for FaultWire {
+    fn topology(&self)->Topology {Topology {rank:0,parts:1}}
+    fn gather(&mut self,local:&[f32],rows:usize)->Result<Vec<f32>> {assert_eq!(local.len(),rows);Ok(local.to_vec())}
+    fn command(&mut self,_:&mut [u8])->Result<()> {if self.fault.get() {Err("injected peer failure".into())} else {Ok(())}}
+    fn complete(&mut self)->Result<()> {Ok(())}
+    fn abort(&mut self) {self.aborted.set(true);}
+}
+#[test]
+fn permanent_exchange_failure_is_sticky_for_live_and_future_chats() {
+    let c=fixture::Checkpoint::new_with_head(Dtype::Bf16,true);
+    let fault=std::rc::Rc::new(std::cell::Cell::new(false));let aborted=std::rc::Rc::new(std::cell::Cell::new(false));
+    let split=Split::new(Host,FaultWire {fault:fault.clone(),aborted:aborted.clone()}).unwrap();
+    let engine=Factory::new(&c.admission,split,8,vec![0]).unwrap();
+    let mut a=engine.session().unwrap();let mut b=engine.session().unwrap();a.step(1).unwrap();b.step(1).unwrap();
+    fault.set(true);let first=a.step(1).unwrap_err();assert_eq!(first,"injected peer failure");assert!(aborted.get());
+    fault.set(false);assert_eq!(b.step(1).unwrap_err(),first);assert_eq!(engine.fatal_error(),Some(first.clone()));
+    assert_eq!(engine.session().err(),Some(first.clone()));assert_eq!(engine.shutdown().unwrap_err(),first);
+    assert!(engine.reserve_full_output());
+}
+#[test]
+fn row_split_deadline_retires_the_session_without_poisoning_the_factory() {
+    use std::{io::{Read,Write},net::{TcpListener,TcpStream},sync::atomic::AtomicBool,time::Duration};
+    let listener=TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();
+    let worker=std::thread::spawn(move|| {
+        let c=fixture::Checkpoint::new_with_head(Dtype::Bf16,true);
+        let split=Split::new(Host,FaultWire {fault:std::rc::Rc::new(std::cell::Cell::new(false)),aborted:std::rc::Rc::new(std::cell::Cell::new(false))}).unwrap();
+        let engine=Factory::new(&c.admission,split,8,vec![0]).unwrap();let mut limits=spark_tp::row_split::limits(8,4).unwrap();limits.generation_timeout=Duration::from_millis(1);
+        let cache=spark_serve::cache::CacheLimits {entries:1,retained_bytes:0,tokens_per_entry:8,logits_per_entry:16,idle_ttl:Duration::from_secs(1)};
+        let config=spark_serve::scheduler::Config {active:8,connections:32,prefill_chunk:4,foreground_rows:1,background_rows:1,active_bytes:1<<24,session_budget_bytes:1<<24,draft:spark_serve::protocol::DraftMode::Plain,mtp_depth:0,draft_global_bank:false,prefix_cache:false,sharing:Default::default()};
+        spark_serve::scheduler::serve_requests(listener,&engine,None::<&spark_serve::tokenizer::ModelTokenizer>,&limits,&cache,&config,&AtomicBool::new(false),"deadline",1).unwrap();
+        assert_eq!(engine.fatal_error(),None);let next=engine.session().unwrap();drop(next);engine.shutdown().unwrap();
+    });
+    let body=r#"{"prompt_token_ids":[1],"stream":true,"max_tokens":4,"ignore_eos":true,"cache":false}"#;
+    let mut stream=TcpStream::connect(address).unwrap();stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(stream,"POST /v1/completions HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).unwrap();let mut reply=String::new();stream.read_to_string(&mut reply).unwrap();
+    assert!(reply.contains("generation_deadline"),"{reply}");worker.join().unwrap();
 }

@@ -66,7 +66,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
     };
     let reservation_for = |j: &Ready, tokens, plain, cached| {
         engine
-            .request_reservation_bytes_with_retention(tokens, plain, cached, retain_prefix(j))?
+            .request_reservation_bytes_for_prompt(j.prompt.len(), tokens, plain, cached, retain_prefix(j))?
             .checked_add(engine.request_option_bytes(&j.request))
     };
     // Unfunded retention leaves free what live requests may hold beyond their bound.
@@ -250,7 +250,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 } else if let Err(error) = engine.validate_request(&job.prompt, &job.request) {
                     Err((job.wire, error))
                 } else if job.request.prompt_lookup
-                    && reservation_for(&job, job.reservation_tokens(output_window), false, None)
+                    && reservation_for(&job, job.reservation_tokens(output_window, engine.reserve_full_output()), false, None)
                         .is_none_or(|bytes| bytes > config.active_bytes)
                 {
                     Err((
@@ -359,7 +359,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
         while i < active.len() {
             let job = &active[i];
             let tokens = job.ready.reservation_tokens(job.generation.usage.completion_tokens
-                .saturating_add(output_window));
+                .saturating_add(output_window), engine.reserve_full_output());
             if tokens <= job.reserved_tokens { i += 1; continue; }
             let mut bytes = reservation_for(&job.ready,tokens,job.reservation_plain,None).ok_or("missing request reservation")?;
             let mut delta = bytes.saturating_sub(job.generation.state.reserved_session_bytes);
@@ -449,7 +449,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 running.max(cache.reusable_tokens(j.scope.as_deref(), &j.prompt))
             };
             let incremental = |j: &Ready| {
-                let tokens = j.reservation_tokens(output_window);
+                let tokens = j.reservation_tokens(output_window, engine.reserve_full_output());
                 let full = reservation_for(j,tokens,shared_plain(j, config, active.iter().map(|a| &a.ready).chain(queued.iter())),Some(cached_prefix(j)))?;
                 let shared = if let Some((state, retain)) = checkpoint(j) {
                     shared_charge(state.session.prefix_allocations(retain).unwrap_or_default())
@@ -469,7 +469,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
             // reservations, so temporary contention does not become a refusal.
             if active.is_empty() && retain_prefix(oldest)
                 && incremental(oldest).is_none_or(|bytes| bytes > config.active_bytes)
-                && reservation_for(oldest,oldest.reservation_tokens(output_window),true,None)
+                && reservation_for(oldest,oldest.reservation_tokens(output_window, engine.reserve_full_output()),true,None)
                     .is_none_or(|bytes| bytes > config.active_bytes) {
                 let mut job = queued.remove(0);
                 let error = "request and prefix snapshot reservation exceed the active session pool";
@@ -479,7 +479,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 }
                 continue;
             }
-            let waiting_bytes = reservation_for(oldest,oldest.reservation_tokens(output_window),shared_plain(oldest, config, active.iter().map(|a| &a.ready).chain(queued.iter())),None)
+            let waiting_bytes = reservation_for(oldest,oldest.reservation_tokens(output_window, engine.reserve_full_output()),shared_plain(oldest, config, active.iter().map(|a| &a.ready).chain(queued.iter())),None)
                 .or_else(|| retain_prefix(oldest).then_some(usize::MAX))
                 .ok_or("missing request reservation")?;
             let (younger_count, younger_bytes, younger_backgrounds, younger_foreground) = active.iter()
@@ -516,7 +516,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 .filter(|(i, j)| *i == 0 || (younger_count + 2 <= config.active
                     && younger_backgrounds + usize::from(j.request.priority != 255)
                         + usize::from(oldest.request.priority != 255) <= public_slots
-                    && reservation_for(j,j.reservation_tokens(output_window),false,None)
+                    && reservation_for(j,j.reservation_tokens(output_window, engine.reserve_full_output()),false,None)
                         .and_then(|bytes| younger_bytes.checked_add(bytes))
                         .and_then(|bytes| bytes.checked_add(waiting_bytes))
                         .is_some_and(|bytes| bytes <= if j.request.priority == 255 { config.active_bytes } else { backfill_limit })))
@@ -533,7 +533,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 let ceiling = if oldest.request.priority == 255 { config.active_bytes } else { background_limit };
                 if incremental(oldest).and_then(|bytes| reserved.checked_add(bytes))
                     .is_some_and(|n| n <= ceiling) { break; }
-                let bytes = match reservation_for(oldest,oldest.reservation_tokens(output_window),true,None) {
+                let bytes = match reservation_for(oldest,oldest.reservation_tokens(output_window, engine.reserve_full_output()),true,None) {
                     Some(bytes) => bytes,
                     None if retain_prefix(oldest) => break,
                     None => return Err("missing plain reservation".into()),
@@ -550,7 +550,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
             // incoming full reservation. Preserve only a verified candidate's
             // identities, without deducting their bytes from that reservation.
             let next_reserved = (if pressure_plain {
-                reservation_for(&queued[index],queued[index].reservation_tokens(output_window),true,None)
+                reservation_for(&queued[index],queued[index].reservation_tokens(output_window, engine.reserve_full_output()),true,None)
             } else { incremental(&queued[index]) })
                 .and_then(|bytes| reserved.checked_add(bytes)).ok_or("request reservation overflow")?;
             let mut funded = pages.clone();
@@ -570,7 +570,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 || engine.discard_contended_draft() && active.iter().any(|job| !job.done)
                 || shared_plain(&queued[index], config, active.iter().map(|a| &a.ready).chain(queued.iter()));
             let mut ready = queued.remove(index);
-            let tokens = ready.reservation_tokens(output_window);
+            let tokens = ready.reservation_tokens(output_window, engine.reserve_full_output());
             let mut request_bytes = reservation_for(&ready,tokens,plain,None)
                 .ok_or("missing request reservation")?;
             let cache_started = Instant::now();
@@ -1434,7 +1434,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
     if shutdown.load(Ordering::Relaxed) || fatal.is_some() {
         // Fatal engine errors may set shutdown while their SSE error is still
         // buffered. Release sessions first, then drain terminal responses.
-        let error = protocol::error_json("server_shutdown", "server is shutting down; request cancelled");
+        let reason = fatal.as_deref().unwrap_or("server is shutting down; request cancelled");let error = protocol::error_json("server_shutdown", reason);
         for input in &mut reading {
             if !input.responding { let _ = input.wire.response(503, &error, limits); }
         }
@@ -1444,7 +1444,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
                 deadline: Instant::now(), responding: true });
         }
         for mut job in active {
-            let _ = job.error(RequestError::Shutdown, "server is shutting down; request cancelled", limits);
+            let _ = job.error(RequestError::Shutdown, reason, limits);
             reading.push(Reading { wire: job.ready.wire, data: Vec::new(), head: None,
                 deadline: Instant::now(), responding: true });
         }
@@ -1460,7 +1460,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
         let stop = AtomicBool::new(false);
         // Briefly publish failed health while rejecting all new generation.
         let _ = unavailable(listener, limits, model, &stop, None, "poisoned",
-            Some(Instant::now() + Duration::from_secs(1)));
+            Some(Instant::now() + Duration::from_secs(1)), Some(&error));
         return Err(error);
     }
     Ok(None)

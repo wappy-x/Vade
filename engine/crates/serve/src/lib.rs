@@ -204,6 +204,9 @@ pub trait Engine {
     /// Observation only; these hooks must not change scheduling or session state.
     fn profile_tick_begin(&self, _tick: u64) {}
     fn profile_tick_end(&self) {}
+    /// Diagnostic observation only. Normal engines do not take these timestamps.
+    fn profile_serving(&self) -> bool { false }
+    fn profile_stream_output(&self, _request: u64, _tokens: usize, _ns: u128) {}
     fn greedy_draft_only(&self) -> bool { false }
     /// A greedy-draft-only engine that still drafts sampled requests in strict mode
     /// (seed- and position-keyed verification; Flash-Next VADE_MTP_SAMPLED).
@@ -250,6 +253,8 @@ pub trait Engine {
     fn shared_prefill_chunk_rows(&self) -> usize { 0 }
     /// Keep one admission slot free of background requests for interactive work.
     fn reserve_foreground_slot(&self) -> bool { true }
+    /// Fund the complete output allowance before admitting a chat.
+    fn reserve_full_output(&self) -> bool { false }
     /// Current device allocation, lifetime peak, and retained pinned host staging.
     fn memory_bytes(&self) -> Option<(usize, usize, usize)> { None }
     /// A sticky device fault requires a failed health response and process exit.
@@ -303,6 +308,11 @@ pub trait Engine {
     fn request_reservation_bytes_with_retention(&self, tokens: usize, plain: bool, cached: Option<usize>, _retain: bool) -> Option<usize> {
         if plain { match cached { Some(n) => self.request_reservation_bytes_plain_cached(tokens,n), None => self.request_reservation_bytes_plain(tokens) } }
         else { self.request_reservation_bytes(tokens) }
+    }
+    /// Engines that retain prompt-only intermediates can separate them from the suffix.
+    /// The default preserves the existing reservation for every other engine.
+    fn request_reservation_bytes_for_prompt(&self, _prompt: usize, tokens: usize, plain: bool, cached: Option<usize>, retain: bool) -> Option<usize> {
+        self.request_reservation_bytes_with_retention(tokens, plain, cached, retain)
     }
     /// Conservative session allocation bound, including spare KV capacity and transient work.
     /// None disables reusable sessions for backends without an audited bound.
@@ -397,7 +407,7 @@ pub struct Limits {
     pub output_bytes: usize,
     pub read_timeout: Duration,
     pub write_timeout: Duration,
-    /// Fatal request deadline: default and maximum 3,600 seconds. Queue wait
+    /// Fatal request deadline: default 3,600 seconds, maximum 86,400 seconds. Queue wait
     /// has the same bound; admission starts a fresh generation deadline.
     pub generation_timeout: Duration,
     /// Thinking for chat and Responses requests that do not choose it themselves.
@@ -441,6 +451,8 @@ impl Default for Limits {
     }
 }
 impl Limits {
+    /// Long diagnostic runs can use this bound. Ordinary services keep the default.
+    pub const MAX_GENERATION_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
     /// Preserve endpoint-specific admission errors while raising byte intake.
     /// The tokenizer's decode allowance is four times its input byte limit.
     pub fn tokenizer_limits(&self) -> engine_tokenizer::Limits {
@@ -471,10 +483,11 @@ impl Limits {
             || [
                 self.read_timeout,
                 self.write_timeout,
-                self.generation_timeout,
             ]
             .iter()
             .any(|d| d.is_zero() || *d > Duration::from_secs(3600))
+            || self.generation_timeout.is_zero()
+            || self.generation_timeout > Self::MAX_GENERATION_TIMEOUT
             || self.intake_burst > intake_burst::MAX_WINDOW
         {
             return Err("invalid service limits".into());

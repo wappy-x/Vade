@@ -100,6 +100,7 @@ mod device {
             }
             mailbox.claim_copy_group()?;self.mailbox=Some(mailbox);Ok(())
         }
+        pub fn prepared(&self)->bool {self.identity.is_some()}
         pub fn prepare(&mut self,c:&CheckpointAdmission,b:&'b Backend<'d>)->Result<()> {
             let identity=std::ptr::from_ref(c) as usize;
             if let Some(prior)=self.identity {return if prior==identity {Ok(())} else {Err("resident checkpoint owner changed".into())};}

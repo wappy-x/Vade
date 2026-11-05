@@ -22,6 +22,14 @@ fn norm_shape(c:&CheckpointAdmission,name:&str,width:usize)->Result<NormShape> {
 mod lineage;
 mod residual_plan;
 pub trait Compute {
+    /// One ordered execution owns temporary buffers through state publication.
+    fn work<T>(&self,run:impl FnOnce()->Result<T>)->Result<T> {run()}
+    fn resident_weights_ready(&self)->bool {false}
+    fn fatal_error(&self)->Option<String> {None}
+    fn memory_bytes(&self)->Option<(usize,usize,usize)> {None}
+    fn serving_trace(&self)->bool {false}
+    fn profile_tick_begin(&self,_tick:u64) {}
+    fn profile_tick_end(&self) {}
     fn plan_cost(&self,_ns:u128) {}
     fn trace_start(&self) {}
     fn cost_report(&self,_phase:&str) {}
@@ -162,10 +170,8 @@ impl<'f,C:Compute> Decoder<'f,C> {
         let count=residuals.len();let c=self.checkpoint;let d=c.description();let b=&self.compute;
         need(first_context>0 && first_context.checked_add(count as u64-1).is_some_and(|n|n<=self.capacity && n<=u32::MAX as u64),"bounded layer context exceeds capacity")?;
         let planning=std::time::Instant::now();
-        // Session metadata and operation order do not depend on position (lane A 439bcd2b4).
-        // Each prompt row takes the validated schedule rebound to its own context.
-        let plans={let mut schedules=self.schedules.borrow_mut();let schedule=schedules.get_mut(layer).ok_or("bounded layer is outside recipe")?;
-            (0..count).map(|row|schedule.at(first_context+row as u64).map(Clone::clone).map_err(|e|e.to_string())).collect::<Result<Vec<_>>>()?};
+        let mut schedules=self.schedules.borrow_mut();let schedule=schedules.get_mut(layer).ok_or("bounded layer is outside recipe")?;
+        let plans=(0..count).map(|row|schedule.at(first_context+row as u64).cloned().map_err(|e|e.to_string())).collect::<Result<Vec<_>>>()?;drop(schedules);
         b.plan_cost(planning.elapsed().as_nanos());
         let names=match d.layers[layer].mixer {
             TokenMixer::Kda(_)=>vec![("kda.history","next_history"),("kda.state","next_state")],

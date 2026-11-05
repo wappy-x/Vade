@@ -66,7 +66,7 @@ impl Tokenizer for Codec {
 
 /// Serve `bodies` on a scheduler with `active` slots and an `active_bytes` pool; send all of
 /// them at once and return each response.
-fn serve(engine: Paged, limits: Limits, active: usize, active_bytes: usize, bodies: &[String]) -> Vec<String> {
+fn serve<E: Engine + Send + 'static>(engine: E, limits: Limits, active: usize, active_bytes: usize, bodies: &[String]) -> Vec<String> {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let stop = Arc::new(AtomicBool::new(false));
@@ -139,4 +139,63 @@ fn growth_past_the_pool_refuses_one_chat_and_the_others_get_their_pages() {
     let mut funded = ledger.funded.lock().unwrap().clone();
     funded.sort();
     assert_eq!(funded, [257, 401, 401, 401, 401, 401, 401, 401, 401]);
+}
+
+struct Funded(Paged);
+impl Engine for Funded {
+    type Session<'a> = Chat;
+    fn session(&self)->Result<Chat,String> {self.0.session()}
+    fn session_for_admission(&self,r:&protocol::Request,tokens:usize)->Result<Chat,String> {self.0.session_for_admission(r,tokens)}
+    fn vocab_size(&self)->usize {8}
+    fn context_limit(&self)->usize {600}
+    fn eos_token_ids(&self)->&[u32] {&[7]}
+    fn session_reservation_bytes(&self)->Option<usize> {Some(1)}
+    fn request_reservation_bytes(&self,tokens:usize)->Option<usize> {Some(tokens)}
+    fn reserve_full_output(&self)->bool {true}
+    fn automatic_draft_allowed(&self,_:usize)->bool {false}
+}
+#[test]
+fn eight_implicit_output_chats_finish_like_solo_when_full_budget_queues_the_eighth() {
+    let run=|count| {
+        let ledger=Arc::new(Ledger::default());
+        let engine=Funded(Paged {geometry:Geometry::new(1024,vec![256],0,4096).unwrap(),ahead:0,full:None,context:600,step_sleep:Duration::ZERO,ledger:ledger.clone()});
+        // The old 256-token window admitted all eight, then killed one at growth.
+        let body=r#"{"stream":true,"temperature":0,"cache":false,"prompt_token_ids":[1]}"#.to_owned();
+        let replies=serve(engine,Limits {output_tokens:257,..Limits::default()},8,8*257,&vec![body;count]);
+        assert!(ledger.admitted.lock().unwrap().iter().all(|&n|n==258));
+        assert_eq!(ledger.peak.load(Ordering::SeqCst),count.min(7));replies
+    };
+    let ids=|reply:&str|reply.split("\"token_id\":").skip(1).map(|s|s.split(|c:char|!c.is_ascii_digit()).next().unwrap().parse::<u32>().unwrap()).collect::<Vec<_>>();
+    let solo=run(1);let expected=ids(&solo[0]);assert_eq!(expected.len(),257);
+    for reply in run(8) {assert!(complete(&reply),"{reply}");assert!(!reply.contains("capacity_exhausted"));assert_eq!(ids(&reply),expected);}
+}
+
+struct Poisoned {engine:Funded,failure:Arc<Mutex<Option<String>>>}
+impl Engine for Poisoned {
+    type Session<'a> = Chat;
+    fn session(&self)->Result<Chat,String> {if let Some(error)=self.fatal_error() {Err(error)} else {self.engine.session()}}
+    fn vocab_size(&self)->usize {8}
+    fn context_limit(&self)->usize {600}
+    fn eos_token_ids(&self)->&[u32] {&[7]}
+    fn session_reservation_bytes(&self)->Option<usize> {Some(1)}
+    fn request_reservation_bytes(&self,n:usize)->Option<usize> {Some(n)}
+    fn fatal_error(&self)->Option<String> {self.failure.lock().unwrap().clone()}
+}
+#[test]
+fn permanent_failure_reports_poisoned_health_and_the_same_refusal_reason() {
+    let failure=Arc::new(Mutex::new(None));let injected=failure.clone();
+    let engine=Poisoned {engine:Funded(Paged {geometry:Geometry::new(1024,vec![256],0,4096).unwrap(),ahead:0,full:None,context:600,step_sleep:Duration::ZERO,ledger:Arc::new(Ledger::default())}),failure};
+    let listener=TcpListener::bind("127.0.0.1:0").unwrap();let address=listener.local_addr().unwrap();
+    let worker=std::thread::spawn(move||scheduler::serve_requests(listener,&engine,Some(&Codec),&Limits::default(),&CacheLimits {entries:1,retained_bytes:0,tokens_per_entry:600,logits_per_entry:8,idle_ttl:Duration::from_secs(60)},
+        &scheduler::Config {active:8,connections:32,prefill_chunk:4,foreground_rows:1,background_rows:1,active_bytes:1<<20,session_budget_bytes:1<<20,draft:protocol::DraftMode::Plain,mtp_depth:0,draft_global_bank:false,prefix_cache:false,sharing:Default::default()},&AtomicBool::new(false),"fault",0));
+    let read=|method:&str,path:&str,body:&str| {
+        let mut stream=TcpStream::connect(address).unwrap();stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(stream,"{method} {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",body.len()).unwrap();let mut reply=String::new();stream.read_to_string(&mut reply).unwrap();reply
+    };
+    assert!(read("GET","/health","").contains("\"status\":\"ready\""));
+    *injected.lock().unwrap()=Some("injected permanent backend failure".into());
+    let mut reply=String::new();for _ in 0..20 {reply=read("GET","/health","");if reply.contains("\"status\":\"poisoned\"") {break;}std::thread::sleep(Duration::from_millis(1));}
+    assert!(reply.starts_with("HTTP/1.1 503"),"{reply}");assert!(reply.contains("\"status\":\"poisoned\""),"{reply}");assert!(reply.contains("\"reason\":\"injected permanent backend failure\""),"{reply}");
+    for _ in 0..2 {let reply=read("POST","/v1/completions","{}");assert!(reply.starts_with("HTTP/1.1 503"),"{reply}");assert!(reply.contains("injected permanent backend failure"),"{reply}");assert!(!reply.contains("retry when ready"),"{reply}");}
+    assert_eq!(worker.join().unwrap().unwrap_err(),"injected permanent backend failure");
 }
