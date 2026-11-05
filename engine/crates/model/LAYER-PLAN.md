@@ -13,6 +13,10 @@ compare actual operation events, weight shapes, input shapes, output shapes,
 types, settings, and host results. A reordered or missing operation fails.
 The comparison does not run a CUDA kernel.
 
+The [causal stack reference](DECODER-REFERENCE.md) connects these layer calls
+to the final stream mean, norm, and full-vocabulary head. It retains each
+layer's causal state. Its scalar results do not open device admission.
+
 `LayerPlan::validate` checks input, weight, and output counts for each
 operation kind. Expert weight counts and the shared input follow the layer
 config. Replay rejects invalid counts before it dispatches an operation.

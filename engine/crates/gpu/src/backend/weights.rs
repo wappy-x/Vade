@@ -100,9 +100,16 @@ impl<'a> Backend<'a> {
     pub fn upload_packed_bf16(&self, rows: usize, cols: usize, chunk_bytes: usize,
         read: impl FnMut(usize, &mut [u8]) -> Result<(), String>) -> Result<Matrix<'a>, String> {
         self.require_batch_kernels()?;
+        self.upload_matrix(rows, cols, chunk_bytes, false, read)
+    }
+    /// Native BF16 decode reads eight-row fragments, without blocked K tiles.
+    /// Retain that layout for every width and pad only the final row tile.
+    pub fn upload_native_bf16(&self, rows: usize, cols: usize, chunk_bytes: usize,
+        read: impl FnMut(usize, &mut [u8]) -> Result<(), String>) -> Result<Matrix<'a>, String> {
+        self.require_batch_kernels()?;
         self.upload_matrix(rows, cols, chunk_bytes, true, read)
     }
-    fn upload_matrix(&self, rows: usize, cols: usize, chunk_bytes: usize, packed: bool,
+    fn upload_matrix(&self, rows: usize, cols: usize, chunk_bytes: usize, packed8: bool,
         mut read: impl FnMut(usize, &mut [u8]) -> Result<(), String>) -> Result<Matrix<'a>, String> {
         let timer = self.profiling.get().then(Instant::now);
         if !cfg!(target_endian = "little") { return Err("little-endian host required".into()); }
@@ -113,12 +120,12 @@ impl<'a> Backend<'a> {
             return Err("upload chunk must be even and in 2..=16777216".into());
         }
         let row_bytes = cols.checked_mul(2).ok_or("row byte overflow")?;
-        let tile = if packed { row_bytes.checked_mul(if cols % 64 == 0 {64} else {8}).ok_or("tile byte overflow")? } else { 2 };
-        if packed && (cols % 16 != 0 || tile > 16 * 1024 * 1024) {
+        let tile_rows = if !packed8 && cols % 64 == 0 {64} else {8};
+        let tile = row_bytes.checked_mul(tile_rows).ok_or("tile byte overflow")?;
+        if cols % 16 != 0 || tile > 16 * 1024 * 1024 {
             return Err("packed weights require K divisible by 16 and a bounded row tile".into());
         }
-        let tile_rows = if cols % 64 == 0 {64} else {8};
-        let stored_rows = if packed { rows.div_ceil(tile_rows) * tile_rows } else { rows };
+        let stored_rows = rows.div_ceil(tile_rows) * tile_rows;
         let bytes = stored_rows.checked_mul(row_bytes).ok_or("matrix byte overflow")?;
         let payload = rows * row_bytes;
         let chunk_bytes = (chunk_bytes / tile).max(1) * tile;
@@ -130,7 +137,7 @@ impl<'a> Backend<'a> {
             let valid = count.min(payload.saturating_sub(offset));
             read(offset, &mut chunk[..valid])?;
             chunk[valid..count].fill(0);
-            if packed { crate::load::pack_rows(&mut chunk[..count], cols); }
+            crate::load::pack_rows_layout(&mut chunk[..count], cols, packed8);
             self.write_buffer(&buffer, offset, &chunk[..count])?;
             offset += count;
         }
@@ -139,7 +146,7 @@ impl<'a> Backend<'a> {
             stats.weight_bytes += bytes as u128;
             stats.weight_read_upload_ns += elapsed(timer);
         }
-        Ok(Matrix { buffer, rows, cols, packed, packed_blocked: cols % 64 == 0, stride: cols, row_offset: 0, column_offset: 0, scalar_f32: false, fp8_scales: None, fp8_fragments: false })
+        Ok(Matrix { buffer, rows, cols, packed: true, packed_blocked: !packed8 && cols % 64 == 0, stride: cols, row_offset: 0, column_offset: 0, scalar_f32: false, fp8_scales: None, fp8_fragments: false })
     }
     /// Read back one embedding row without a second resident table.
     pub fn shared_bf16_row(&self, matrix: &Matrix<'_>, row: usize) -> Result<Vec<f32>, String> {

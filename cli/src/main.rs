@@ -89,6 +89,14 @@ fn run_main(mut args: Vec<String>) {
     if args.first().is_some_and(|arg| arg == "bench") && args.get(1).is_some_and(|arg| arg == "verdict") {
         std::process::exit(output::exit_code(verdict::run(&args[2..])));
     }
+    // The proof client owns its positional inputs and local output files.
+    if args.first().is_some_and(|arg| arg == "bench") && args.get(1).is_some_and(|arg| arg == "--first-tokens") {
+        let _interruptions = runner::Interruptions::install();
+        match vade_bench::run(&args[1..], runner::interrupted) {
+            Ok(code) => std::process::exit(if runner::interrupted() { 130 } else { code }),
+            Err(error) => fail(&error),
+        }
+    }
     // `vade test`, `vade bench` and their help pages share the CLI's layout;
     // `vade bench --help-all` lists every benchmark option.
     let topic = |name: &str| (args.len() == 2 && matches!(args[0].as_str(), "help" | "--help" | "-h") && args[1] == name)

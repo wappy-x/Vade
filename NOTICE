@@ -121,3 +121,52 @@ The same inventory is maintained in engine/NOTICE.
              No model weights are included.
    Record:   crates/model/tests/fixtures/glm/README.md
    These model data files are not covered by Vade's Apache-2.0 license.
+
+11. GLM-5.3-Flash chat template
+   By:       Z.AI Co., Ltd
+   Files:    crates/serve/templates/glm.jinja
+             crates/tokenizer/templates/glm.jinja
+   Source:   https://huggingface.co/zai-org/GLM-5.3-Flash/blob/91b69215804f2d2036a8867f6ce44848e278dcda/chat_template.jinja
+   SHA256:   0c4099f3382d6c92700dfb99725025360966fd73032f0ecf32377c0d9e6309c5
+   Changes:  None. The pinned checkpoint template has the same bytes.
+   License:  MIT License, Copyright (c) 2026 Z.AI Co., Ltd
+   Text:     licenses/GLM-5.3-Flash-MIT.txt
+   License source: https://huggingface.co/zai-org/GLM-5.3-Flash/blob/91b69215804f2d2036a8867f6ce44848e278dcda/LICENSE
+
+
+12. vLLM GLM prompt fixture
+   By:       The vLLM contributors
+   Files:    crates/serve/tests/fixtures/glm-upstream/vllm-test-cases.json
+   Source:   https://github.com/vllm-project/vllm/blob/d14f72c7fe1316ae9d186f1eed554e8099dba705/rust/src/chat/src/renderer/glm5_next/fixtures/test_cases.json
+   License:  Apache License 2.0
+   Changes:  None.
+   Record:   crates/serve/tests/fixtures/glm-upstream/README.md
+
+13. NVIDIA GLM frontend test expectations and metadata
+   By:       NVIDIA CORPORATION & AFFILIATES and Flare community contributors
+   Files:    crates/serve/tests/fixtures/glm-tokenizer/nvidia-glm-frontend.rs.txt
+             crates/serve/tests/fixtures/glm-tokenizer/nvidia-glm53.json
+             crates/serve/tests/fixtures/glm-tokenizer/publisher-values.json
+   Source:   https://github.com/NVIDIA/spark-local-inference/tree/18b16e170bb9eab03e2b1800107c72966c56594f
+   License:  Apache License 2.0
+   Text:     licenses/NVIDIA-spark-local-inference-APACHE-2.0.txt
+   Changes:  The source files are unchanged. publisher-values.json selects fixed expectations.
+   Record:   crates/serve/tests/fixtures/glm-tokenizer/README.md
+
+14. GLM text tensor header metadata
+   By:       Z.ai and NVIDIA
+   Files:    crates/serve/tests/fixtures/glm-tokenizer/row-headers.json
+   Source:   nvidia/GLM-5.3-Flash-FP4-Local at 76348ddb2be2e35e39ecfc00e75dc07703f4f3d5
+   License:  The checkpoint card names the NVIDIA Open Model Agreement.
+   Changes:  Select target embedding, head, and scale metadata from retained public headers.
+             No tensor payload is included.
+   Record:   crates/serve/tests/fixtures/glm-tokenizer/README.md
+   These model data files are not covered by Vade's Apache-2.0 license.
+
+15. GLM tokenizer test slice
+   Files:    crates/tokenizer/tests/glm-tokenizer-slice.json
+   Source:   nvidia/GLM-5.3-Flash-FP4-Local at 76348ddb2be2e35e39ecfc00e75dc07703f4f3d5
+   Changes:  Retain byte tokens and merge candidates for the fixed plain prompt.
+             Token IDs, added tokens, and tokenizer settings are unchanged.
+             The source tokenizer SHA256 is 19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d.
+   License:  The checkpoint card names the NVIDIA Open Model Agreement.

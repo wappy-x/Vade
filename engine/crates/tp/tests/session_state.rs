@@ -328,3 +328,43 @@ fn resident_producer_keeps_buffers_disjoint_and_clears_stream_scratch() {
         assert!(contents(&s).iter().flatten().all(|&v| v==token));
     }
 }
+
+#[path="../src/bin/session-plan-check/fixture.rs"]
+mod plan_fixture;
+const CACHE_TYPES: &str="kda_state f32\nkda_history bf16\nlatent bf16\nindex_keys bf16\nindex_gates bf16\npools bf16\nabi_scratch_bytes 258\n";
+#[test]
+fn physical_plan_continuation_matches_independent_bytes_at_pool_boundaries() {
+    let saved=include_bytes!("../../model/tests/fixtures/glm/config.json");
+    let ConfigPlan::Deferred(mut d)=ConfigPlan::from_config(saved).unwrap() else {panic!()};
+    d.hidden=8;d.vocab=16;d.max_positions=7;d.residual=SinkhornDescription {streams:2,iterations:4,epsilon:1e-5};
+    d.layers=vec![DecoderDescription {mixer:TokenMixer::Kda(KdaDescription {heads:2,head_dim:4,conv:4,gate_lower_bound:-5.0}),ffn:Ffn::Dense {width:6}},
+        DecoderDescription {mixer:TokenMixer::LatentAttention(LatentDescription {heads:2,query_rank:4,kv_rank:4,key_dim:3,value_dim:2,rotary_dim:0,
+            indexer:PoolIndexerDescription {heads:2,dim:3,token_budget:4,pool:2,learned_pool:true,select_tail:true,share_for_draft_iteration:false}}),ffn:Ffn::Dense {width:6}}];
+    d.storage.layers.clear();d.storage.excluded.clear();
+    for parts in [1,2] {for rank in 0..parts {
+        let p=StatePlan::new(&d,Topology {parts,rank},7,isize::MAX as usize).unwrap();
+        let types=p.planes().iter().map(|p|CacheType {layer:p.layer,kind:p.kind,dtype:if p.kind==PlaneKind::KdaState {Dtype::F32} else {Dtype::Bf16}}).collect::<Vec<_>>();
+        let l=Layout::physical_storage(&p,&types,258).unwrap();
+        let m=Memory::default();let b=Budget {weights:0,runtime:0,reserve:0,lanes:3,saved:1,limit:isize::MAX as usize};
+        let pool=Pool::new(m.clone(),l.clone(),b).unwrap();
+        for boundary in [1,2,3] {
+            assert_eq!(plan_fixture::exercise(&pool,boundary).unwrap(),plan_fixture::oracle(&l,boundary).unwrap());
+            assert_eq!(m.fake.live.get(),0);
+        }
+    }}
+}
+#[test]
+fn saved_checkpoint_dimensions_require_explicit_cache_types_before_allocation() {
+    let config=include_bytes!("../../model/tests/fixtures/glm/config.json");
+    for parts in [1,2,4] {for rank in 0..parts {
+        let t=Topology {parts,rank};let l=plan_fixture::layout(config,CACHE_TYPES,9,t).unwrap();
+        let id=plan_fixture::identity(config,CACHE_TYPES,&l,t,3);
+        assert!(id.contains("producer_types_qualified=false") && id.contains(&format!("parts={parts} rank={rank}")));
+        assert!(l.planes().iter().any(|p|p.kind==PlaneKind::Pools && p.used_bytes(3).unwrap()==0 && p.used_bytes(4).unwrap()>0));
+        for bad in [CACHE_TYPES.replace("kda_history bf16\n",""),CACHE_TYPES.replace("kda_state f32","kda_state bf16"),
+            CACHE_TYPES.replace("latent bf16","latent unresolved"),format!("{CACHE_TYPES}pools bf16\n"),
+            CACHE_TYPES.replace("abi_scratch_bytes 258\n",""),format!("{CACHE_TYPES}abi_scratch_bytes 258\n")] {
+            assert!(plan_fixture::layout(config,&bad,9,t).is_err());
+        }
+    }}
+}

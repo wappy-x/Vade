@@ -19,6 +19,12 @@ struct Work { plan: ReceiptPlan, fixed: String, directory: String, started: Inst
 #[derive(Clone, Debug)]
 pub struct Metadata(Arc<State>);
 impl Metadata {
+    /// The bounded row service has no full-payload receipt. Report that limit.
+    pub fn resident_text(identity:&crate::contract::Identity,world:usize,topology:&str)->Self {
+        let pending=format!("{{\"build\":{{\"git_sha\":{},\"dirty\":{},\"source\":{}}},\"qualification\":\"unqualified\",\"diagnostic_option\":\"--diagnostic-unqualified-text\",\"checkpoint_sha256\":null,\"checkpoint_fingerprint\":{},\"fingerprint_kind\":\"safetensors_header_metadata\",\"numerics\":{{\"mtp_depth\":0,\"world_size\":{world},\"topology\":{},\"path\":\"tensor_split\",\"projection\":\"complete_output_rows\",\"state\":\"replicated\",\"arithmetic\":\"bounded_causal_recipe\",\"device_exactness\":\"unproved\"}}}}",
+            quote(env!("VADE_BUILD_GIT_SHA")),env!("VADE_BUILD_DIRTY"),quote(env!("VADE_BUILD_SOURCE")),quote(&identity.fingerprint()),quote(topology));
+        Self(Arc::new(State {pending,mtp_field:"\"mtp_depth\":0,".into(),stale:OnceLock::new(),complete:OnceLock::new(),work:Mutex::new(None)}))
+    }
     /// PTX excludes its C terminator, matching sha256sum of the loaded file.
     /// Files must remain immutable for the loaded model's lifetime.
     pub fn load(root: &Path, ptx: &CStr, mtp_depth: usize, world_size: usize,

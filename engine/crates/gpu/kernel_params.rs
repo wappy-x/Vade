@@ -302,7 +302,7 @@ pub struct ModelQkv {
     pub heads: u32, pub kv_heads: u32, pub dim: u32, pub position: u32,
     pub rows: u32, pub cache_capacity: u32, pub epsilon: f32,
 }
-/// BF16 model boundaries: 0 round/scale, 1 residual, 2 gated GELU, 3 logits cap.
+/// Operations: 0 BF16 scale, 1 BF16 add, 2 gated GELU, 3 logits cap, 4 FP32 multiply.
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct ModelElementwise {

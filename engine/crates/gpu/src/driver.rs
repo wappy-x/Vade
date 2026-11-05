@@ -492,7 +492,7 @@ impl<'a> FileUploader<'a> {
         Self::with_buffers(context, 1)
     }
     fn double_buffered(context: &'a Context) -> Result<Self, String> {
-        Self::with_buffers(context, 2)
+        Self::with_buffers(context, crate::staging::FILE_BUFFERS)
     }
     fn with_buffers(context: &'a Context, buffers: usize) -> Result<Self, String> {
         let mut slots = Vec::new();
@@ -836,8 +836,10 @@ mod backend;
 pub use backend::{with_backend, with_backend_mode, Backend, HostRegistration, Matrix, MatvecMode, DeviceVector, CacheRows, TopKScratch, ExpertTable, MoeScratch, MoeBatchScratch, MOE_ROUTING_ERROR,
     Fp8GroupedScratch, Fp8RoutingFlag, WeightArena, ExchangeSlot, TpMailbox, TpMailboxHost, TP_MAILBOX_SLOTS};
 pub use backend::{BackendStats, Fence, FrontendStream};
+pub use backend::ResidentTextEdges;
+pub use backend::{ResidentMxfp8Projection,Mxfp8ProjectionPass};
 pub use backend::{DecodeGraph, PromptBuffer};
-pub use backend::{Bf16Vector,ResidentMhc,MhcPass};
+pub use backend::{Bf16Vector,ResidentMhc,MhcPass,ResidentNorm,NormOutput};
 
 /// VADE_VECTOR_POOL (default on; =0 off): whether a server configures the vector pool
 /// (Backend::configure_vector_pool). Other values are refused.

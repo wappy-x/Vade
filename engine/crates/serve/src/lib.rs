@@ -22,6 +22,8 @@ pub mod qwen;
 pub mod hybrid;
 pub mod scheduler;
 pub mod tokenizer;
+pub mod text_program;
+pub mod text_checkpoint;
 
 pub mod mtp_batch;
 mod cohort_cost;
@@ -359,8 +361,12 @@ pub trait Tokenizer: Sync {
     fn decoder(&self) -> Self::Decoder<'_>;
     fn chat_decoder(&self) -> Self::Decoder<'_> { self.decoder() }
     fn gemma_chat(&self) -> bool { false }
+    fn glm_chat(&self) -> bool { false }
     fn chat_thinking_open(&self, _prompt: &[u32]) -> bool { false }
     fn has_token(&self, token: u32) -> bool;
+    /// A checkpoint stop set that the backend must match before generation.
+    /// None keeps the backend's existing stop contract.
+    fn checkpoint_eos_token_ids(&self) -> Result<Option<&[u32]>, String> { Ok(None) }
     fn encode_chat(&self, input: &protocol::ChatInput, max_bytes: usize) -> Result<Vec<u32>, String>;
     /// Qwen3.5-family chat: XML tool calls and a prompt that opens the think block.
     fn hybrid_chat(&self) -> bool { false }

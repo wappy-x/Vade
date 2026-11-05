@@ -16,6 +16,6 @@ Notes:
   - With VADE_CONFIG, update source, rebuild and stage binaries, then offer a
     restart.
   - For a newer Vade on this Spark, run the install command again: curl -fsSL
-    https://vade.lol/install.sh | sh
+    https://getvade.com/install.sh | sh
 --- stderr
 --- exit 0

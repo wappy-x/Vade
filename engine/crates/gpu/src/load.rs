@@ -24,8 +24,7 @@ impl WeightRows {
     }
 }
 pub struct WeightShard<'a> { pub file: &'a File, pub matrices: &'a [WeightRows] }
-pub(crate) const CHUNK: usize = 8 * 1024 * 1024;
-pub(crate) const READERS: usize = 4;
+pub(crate) use crate::staging::{FILE_CHUNK as CHUNK, FILE_READERS as READERS};
 /// Official bytes copied to a single arena, without packing or conversion.
 /// For a column slice, `row_bytes` is the selected width and `row_stride`
 /// is the original file width; `bytes` counts only selected bytes.
@@ -193,10 +192,7 @@ impl ReadJob {
 }
 // Packing permutes bounded 64x64 blocks. Readers transform their own
 // pinned slot before publishing it; one row tile is the entire host scratch.
-pub(crate) fn pack_rows(bytes: &mut [u8], columns: usize) {
-    pack_rows_layout(bytes, columns, false);
-}
-fn pack_rows_layout(bytes: &mut [u8], columns: usize, packed8: bool) {
+pub(crate) fn pack_rows_layout(bytes: &mut [u8], columns: usize, packed8: bool) {
     let rows = if !packed8 && columns % 64 == 0 {64} else {8};
     let mut tile = vec![0u8; columns * rows * 2];
     for block in bytes.chunks_exact_mut(tile.len()) {

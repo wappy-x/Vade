@@ -46,6 +46,50 @@ fn random_layer_forward_matches_plan_order_shapes_and_replay() {
     } } } }
 }
 #[test]
+fn checkpoint_weight_source_loads_only_selected_experts_without_byte_changes() {
+    use std::cell::RefCell;
+    struct Source<'a> { tensors: &'a Tensors, loaded: RefCell<Vec<String>> }
+    impl WeightSource for Source<'_> {
+        fn profile(&self) -> engine_model::plan::layer::profile::Profile { self.tensors.profile() }
+        fn shape(&self,name: &str) -> engine_model::Result<Vec<u64>> { self.tensors.shape(name) }
+        fn load(&self,name: &str) -> engine_model::Result<Tensor> { self.loaded.borrow_mut().push(name.into()); self.tensors.load(name) }
+    }
+    for latent in [false,true] {
+        let d=description(latent,true); let p=plan(&d,3); let (mut w,x)=fixture(&p,19);
+        let prefix="model.language_model.layers.0.mlp";
+        w.get_mut(&format!("{prefix}.gate.weight")).unwrap().data=Data::F32(vec![0.0;32]);
+        w.get_mut(&format!("{prefix}.gate.e_score_correction_bias")).unwrap().data=Data::F32(vec![0.0,0.0,4.0,8.0]);
+        for expert in 0..4 { for part in ["gate","up","down"] {
+            let tensor=w.get_mut(&format!("{prefix}.experts.{expert}.{part}_proj.weight")).unwrap();
+            let count=tensor.floats().unwrap().len();
+            tensor.data=Data::F32((0..count).map(|j| (expert+1) as f32*0.03125+j as f32*0.0009765625).collect());
+        } }
+        let expected=forward(&d,0,3,&w,&x).unwrap();
+        let source=Source {tensors:&w,loaded:RefCell::new(Vec::new())};
+        let actual=forward_from(&d,0,3,&source,&x).unwrap();
+        actual.check_plan(&p).unwrap(); assert_eq!(actual.trace,expected.trace); assert_eq!(actual.tensors,expected.tensors);
+        let Data::U32(ids)=&actual.tensors["expert_ids"].data else { panic!() };
+        assert_eq!(ids,&[3,2]);
+        // Hand matrix products use original expert IDs, not the compact lookup.
+        for (slot,&expert) in ids.iter().enumerate() { for part in ["gate","up","down"] {
+            let weight=&w[&format!("{prefix}.experts.{expert}.{part}_proj.weight")]; let cols=weight.shape[1] as usize;
+            let input=if part=="down" { &actual.tensors["expert_middle"].floats().unwrap()[slot*cols..(slot+1)*cols] }
+                else { actual.tensors["post_norm"].floats().unwrap() };
+            let values=weight.floats().unwrap().chunks_exact(cols).map(|row| {
+                let mut sum=0.0f32; for (&a,&b) in row.iter().zip(input) { sum+=a*b; } sum.to_bits()
+            }).collect::<Vec<_>>();
+            let output=actual.tensors[&format!("expert_{part}")].floats().unwrap(); let width=values.len();
+            assert_eq!(output[slot*width..(slot+1)*width].iter().map(|v| v.to_bits()).collect::<Vec<_>>(),values);
+        } }
+        let loaded=source.loaded.borrow(); let mut expert_reads=0;
+        for name in loaded.iter().filter(|n| n.contains(".experts.")) {
+            let id=name.split(".experts.").nth(1).unwrap().split('.').next().unwrap().parse::<u32>().unwrap();
+            assert!(ids.contains(&id)); expert_reads+=1;
+        }
+        assert_eq!(expert_reads,ids.len()*3);
+    }
+}
+#[test]
 fn independent_trace_rejects_reordered_missing_and_reshaped_ops() {
     let d=description(true,true); let p=plan(&d,7); let (w,x)=fixture(&p,77); let f=forward(&d,0,7,&w,&x).unwrap();
     let mut bad=p.clone(); bad.steps.swap(0,1); assert!(f.check_plan(&bad).is_err());

@@ -11,6 +11,16 @@ mod kernel_params;
 #[path = "../../src/projection_params.rs"]
 mod projection_params;
 mod math;
+#[path = "../../src/causal_ops.rs"]
+mod causal_ops;
+#[path = "../../src/mxfp8_quantize.rs"] mod mxfp8_quantize;
+#[path = "../../src/latent_ops.rs"]
+mod latent_ops;
+#[path = "causal_ops.rs"]
+mod causal_operation;
+#[path = "../../src/expert_ops.rs"] mod expert_ops;
+#[path = "expert_ops.rs"] mod expert_operation;
+
 #[path = "../../src/next_math.rs"]
 mod next_math;
 #[path = "../../src/compact.rs"]
@@ -18,6 +28,8 @@ mod compact;
 mod bf16;
 mod canonical;
 mod matvec;
+#[path = "../../src/ordered_projection_kernel.rs"]
+mod ordered_projection;
 mod moe;
 mod ptx;
 #[path = "../../src/fp8_abi.rs"]

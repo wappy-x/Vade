@@ -20,6 +20,8 @@
 | [`moe.rs`](moe.rs) | Device-resident expert selection over the model's existing weight arena. |
 | [`multi.rs`](multi.rs) | Arena row views and queued reductions for independent-session batches. |
 | [`projection_params.rs`](projection_params.rs) | Shared host/NVPTX ABI for independent BF16 decode projections. |
+| [`ordered_projection.rs`](ordered_projection.rs) | Plain FP32 shape, layout, bounds, and scalar-order host reference. |
+| [`ordered_projection_kernel.rs`](ordered_projection_kernel.rs) | Native plain FP32 projection with separate products and ascending adds. |
 | [`router_abi.rs`](router_abi.rs) | Checked corrected-sigmoid routing and ungated expert-finish spans. |
 | [`segments.rs`](segments.rs) | Fixed virtual KV addresses, append-only physical pages and shared prefixes. |
 | [`teardown.rs`](teardown.rs) | Serving processes bound fatal cleanup even when the driver stops responding. |
@@ -28,6 +30,13 @@
 | [`bin/`](bin/README.md) | Folder: see its README. |
 
 **Why a folder:** Cargo looks for a crate's code in `src/`.
+
+## Text edges
+
+`text_edges.rs` checks replicated embedding and stored MXFP8 head spans.
+`text_reference.rs` checks stored BF16 rows and candidate head arithmetic on the host.
+`backend/text_edges.rs` owns their device views and the stream mean launch.
+See [the request contract](../../serve/TEXT-PROGRAM.md) for the proof limits.
 
 **How it fits:** see the [`spark-gpu-probe` README](../README.md) for what the crate does and how it connects to the rest.
 

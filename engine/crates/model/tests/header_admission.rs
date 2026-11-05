@@ -37,6 +37,7 @@ fn complete_literal_inventory_is_admitted_without_execution() {
     assert_eq!(a.weights().len(),d.required_weights().unwrap().len());
     assert_eq!(a.stored_bytes,t.values().map(Tensor::byte_len).sum::<u64>());
     for view in a.weights().values() {let u=view.upload(payload).unwrap();assert_eq!(u.shape,view.logical().shape);}
+    assert!(d.require_resident_service().unwrap_err().to_string().contains("complete resident decoder is absent"));
     assert!(ConfigPlan::Deferred(d).into_model_plan().is_err());
 }
 #[test]

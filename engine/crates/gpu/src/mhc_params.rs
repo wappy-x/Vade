@@ -29,11 +29,13 @@ impl Shape {
 }
 /// Input `[T,N,D]`, weights `[P,N*D]`, base `[P]`, scale `[3]`.
 /// Scratch normalized `[T,N*D]`; output `[T,P]` = pre, post, `comb[src,dst]`.
+/// Launch phases 0 (normalize), 1 (independent coefficient rows), and 2
+/// (activation and Sinkhorn) in order on one stream before reading the output.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Prepare {
     pub input: u64, pub weights: u64, pub base: u64, pub scale: u64,
-    pub normalized: u64, pub coefficients: u64, pub shape: Shape,
+    pub normalized: u64, pub coefficients: u64, pub shape: Shape, pub phase:u32,
 }
 /// Input `[T,N,D]`, coefficients `[T,P]`, output `[T,D]`.
 #[repr(C)]

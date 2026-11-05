@@ -20,3 +20,7 @@ unsafe_code = "deny"
 [[bin]]
 name = "kernel-bench"
 path = "src/kernel_bench.rs"
+
+[[bin]]
+name = "first-tokens"
+path = "src/first_tokens_main.rs"

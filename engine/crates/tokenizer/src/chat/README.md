@@ -6,6 +6,7 @@
 | --- | --- |
 | [`gemma4.rs`](gemma4.rs) | Text branch of Google's canonical Gemma 4 template, authored in Rust. |
 | [`llama.rs`](llama.rs) | Text rendering of the official Llama 3.1/3.2 templates. |
+| [`glm.rs`](glm.rs) | Checked GLM template for system and user text turns. |
 | [`gemma4/`](gemma4/README.md) | Folder: see its README. |
 
 **Why a folder:** Rust keeps one module per file; this folder groups the modules that belong to `chat`.

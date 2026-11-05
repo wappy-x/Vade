@@ -11,6 +11,10 @@ pub(crate) fn output_parser(
     limits: &Limits,
     hybrid: bool,
 ) -> Result<Option<chat_output::Parser>, String> {
+    output_parser_profile(request, limits, hybrid, None)
+}
+fn output_parser_profile(request: &protocol::Request, limits: &Limits, hybrid: bool,
+    glm_thinking: Option<bool>) -> Result<Option<chat_output::Parser>, String> {
     use engine_model::json::{self, Value};
     let Prompt::Chat(input) = &request.prompt else {
         return Ok(None);
@@ -44,6 +48,10 @@ pub(crate) fn output_parser(
         ..chat_output::Limits::default()
     };
     let parser = chat_output::Parser::new(bounds, names)?;
+    if let Some(thinking) = glm_thinking {
+        if input.forced_tool_choice() {return Err("forced tool_choice is not supported by the GLM output parser".into());}
+        return Ok(Some(parser.glm(thinking, json_parameters).tool_policy("", false, !input.parallel_tool_calls)?));
+    }
     let parser = if hybrid { parser.hybrid(input.enable_thinking, json_parameters) } else { parser };
     Ok(Some(parser.tool_policy(&input.generation_prefix(hybrid),
         input.forced_tool_choice(), !input.parallel_tool_calls)?))
@@ -341,7 +349,16 @@ pub(crate) fn prepare_request<T: Tokenizer>(
     generation::validate_bounds(context, vocab, eos, &result.1, result.0.max_tokens, limits)
         .map_err(|detail| match ceiling { Some(kind) => kind.message(&http.path, detail), None => detail })?;
     validate_token_mapping(&result.1, tokenizer)?;
+    validate_stop_mapping(eos, tokenizer)?;
     Ok(result)
+}
+pub(crate) fn validate_stop_mapping<T: Tokenizer>(eos: &[u32], tokenizer: Option<&T>) -> Result<(), String> {
+    if let Some(expected) = tokenizer.map(Tokenizer::checkpoint_eos_token_ids).transpose()?.flatten() {
+        if expected.is_empty() || expected.iter().any(|id| !eos.contains(id)) || eos.iter().any(|id| !expected.contains(id)) {
+            return Err("backend stop tokens do not match the checkpoint EOS set".into());
+        }
+    }
+    Ok(())
 }
 pub(crate) fn validate_token_mapping<T: Tokenizer>(prompt: &[u32], tokenizer: Option<&T>) -> Result<(), String> {
     if tokenizer.is_some_and(|t| prompt.iter().any(|&id| !t.has_token(id))) {
@@ -381,7 +398,10 @@ pub(crate) fn render_request<T: Tokenizer>(http: &HttpRequest, context: usize, t
         request.max_tokens = request.max_tokens.min(limits.context_tokens.min(context)
             .saturating_sub(prompt.len()));
     }
-    let mut parser = output_parser(&request, limits, tokenizer.is_some_and(|t| t.hybrid_chat()))?;
+    let glm_thinking = tokenizer.filter(|t| t.glm_chat()).map(|t| t.chat_thinking_open(&prompt));
+    let mut parser = if glm_thinking.is_some() {
+        output_parser_profile(&request, limits, false, glm_thinking)?
+    } else { output_parser(&request, limits, tokenizer.is_some_and(|t| t.hybrid_chat()))? };
     if let Some(codec) = tokenizer.filter(|t| t.gemma_chat()) {
         parser = parser.map(|p| p.gemma4(codec.chat_thinking_open(&prompt)));
     }
@@ -719,6 +739,16 @@ pub(crate) fn sse_chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn glm_output_uses_template_thinking_and_typed_tags() {
+        let limits = Limits::default();
+        let request = protocol::parse(br#"{"messages":[{"role":"user","content":"go"}],"enable_thinking":false,"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object","properties":{"n":{"type":"integer"},"s":{"type":"string"}}}}}]}"#,true,&limits).unwrap();
+        let mut parser = output_parser_profile(&request,&limits,false,Some(true)).unwrap().unwrap();
+        let mut events = parser.push(b"thought</think><tool_call>f<arg_key>n</arg_key><arg_value>2</arg_value><arg_key>s</arg_key><arg_value>2</arg_value></tool_call>").unwrap();
+        events.extend(parser.finish().unwrap());
+        assert_eq!(events[0],chat_output::Event::Reasoning("thought".into()));
+        assert_eq!(events.last(),Some(&chat_output::Event::ToolCall {name:"f".into(),arguments:r#"{"n":2,"s":"2"}"#.into()}));
+    }
     #[test]
     fn tool_call_mock_repeats_identical_bytes_for_each_api() {
         assert_eq!(request_hash(b""), 0xcbf29ce484222325);

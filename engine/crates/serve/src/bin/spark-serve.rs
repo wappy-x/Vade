@@ -706,11 +706,11 @@ fn validate_draft_tokenizer(target: &std::path::Path, draft: &std::path::Path) -
     Ok(())
 }
 #[cfg(target_os = "linux")]
-fn load_tokenizer(path: &std::path::Path) -> Result<engine_tokenizer::Tokenizer, String> {
+fn load_tokenizer(path: &std::path::Path) -> Result<spark_serve::tokenizer::ModelTokenizer, String> {
     // Keep long-lived vocabulary allocations out of the model loader's heap.
     std::thread::scope(|scope| {
         scope.spawn(|| {
-            let tokenizer = engine_tokenizer::Tokenizer::from_directory(path).map_err(|e| e.to_string())?;
+            let tokenizer = spark_serve::tokenizer::ModelTokenizer::from_directory(path)?;
             if engine_model::cartridge::Kind::detect(path).map_err(|e| e.to_string())? == engine_model::cartridge::Kind::Qwen3 {
                 let config = engine_model::qwen3::Config::open(&path.join("config.json")).map_err(|e| e.to_string())?;
                 if tokenizer.eos_token_id() as u64 != config.eos_token || !tokenizer.contains_id(config.bos_token as u32) {

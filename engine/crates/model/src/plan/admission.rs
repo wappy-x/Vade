@@ -20,7 +20,7 @@ pub struct WeightView { logical: LogicalWeight, binding: TensorBinding, componen
 #[derive(Debug)]
 pub struct HeaderAdmission { weights: BTreeMap<String, WeightView>, pub stored_bytes: u64 }
 /// Retain the descriptors that supplied the admitted headers. Files must stay immutable.
-pub struct CheckpointAdmission { headers: HeaderAdmission, files: BTreeMap<String,TensorFile>, locations: BTreeMap<String,String> }
+pub struct CheckpointAdmission { description: TextDescription, headers: HeaderAdmission, files: BTreeMap<String,TensorFile>, locations: BTreeMap<String,String> }
 
 impl TextDescription {
     /// Required text weights include stored draft data. This does not define a draft forward pass.
@@ -183,7 +183,7 @@ impl TextDescription {
         need(tensors.len()==mapped.index.weight_map.len(),"index tensor is absent from shard")?;
         let headers=self.admit_headers(&tensors)?;
         need(!mapped.index.size_declared || mapped.index.total_size==headers.stored_bytes,"index total_size differs from stored bytes")?;
-        Ok(CheckpointAdmission {headers,files,locations:mapped.index.weight_map})
+        Ok(CheckpointAdmission {description:self.clone(),headers,files,locations:mapped.index.weight_map})
     }
 }
 
@@ -261,7 +261,15 @@ impl UploadWeight {
     }
 }
 impl CheckpointAdmission {
+    /// The operation data used for header admission. This does not grant execution.
+    pub fn description(&self) -> &TextDescription { &self.description }
     pub fn headers(&self) -> &HeaderAdmission { &self.headers }
+    /// Resolve an admitted text component to the file that supplied its header.
+    /// The caller must keep that file immutable. This is not a content hash.
+    pub fn component_file(&self,name: &str) -> Result<&TensorFile> {
+        need(self.headers.weights.values().any(|w| w.components.iter().any(|c| c.name==name)),"component is not admitted text storage")?;
+        self.locations.get(name).and_then(|s| self.files.get(s)).ok_or_else(||invalid("missing retained tensor file"))
+    }
     pub fn upload(&self,name: &str) -> Result<UploadWeight> {
         let view=self.headers.weights.get(name).ok_or_else(||invalid("weight is not admitted"))?;
         view.upload(|c| {

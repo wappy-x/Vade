@@ -185,7 +185,7 @@ impl MhcOperands {
             ends.push(end);
         }
         Ok(Prepare {input:spans[0].address,weights:spans[1].address,base:spans[2].address,scale:spans[3].address,
-            normalized:spans[4].address,coefficients:spans[5].address,shape:s})
+            normalized:spans[4].address,coefficients:spans[5].address,shape:s,phase:0})
     }
 }
 /// Physical metadata supplied by the caller. The future backend must verify

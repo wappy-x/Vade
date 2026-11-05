@@ -4,6 +4,9 @@
 
 | File | What it does (from its own summary comment) |
 | --- | --- |
+| [`first_tokens.rs`](first_tokens.rs) | Prepares chat IDs and checks greedy repeat receipts with the shared client. |
+| [`first_tokens/`](first_tokens/) | Local mock checks for the chat proof client. |
+| [`first_tokens_main.rs`](first_tokens_main.rs) | Prebuilt entry point for the chat proof client. |
 | [`http.rs`](http.rs) | No summary comment yet; read the file. |
 | [`lib.rs`](lib.rs) | Dispatches the timing protocol or retained development suite. |
 | [`main.rs`](main.rs) | The earlier Rust development workloads, imported as the `suite` module. |

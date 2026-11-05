@@ -78,11 +78,20 @@ impl<'a> Backend<'a> {
         self.mhc_planes(&vectors,&[t*w,p*w,p,3,t*w,t*p],4)?;
         let mut args=Prepare {input:vectors[0].device_address(),weights:vectors[1].device_address(),
             base:vectors[2].device_address(),scale:vectors[3].device_address(),normalized:vectors[4].device_address(),
-            coefficients:vectors[5].device_address(),shape};
+            coefficients:vectors[5].device_address(),shape,phase:0};
         // SAFETY: Shape and every FP32 extent, context, alignment, and alias were
         // checked above. The borrowed owners remain live through synchronization.
-        // The argument struct remains live until launch copies its value.
-        let launched=unsafe {self.launch_flash("mhc_prepare",shape.rows.div_ceil(128),128,&mut [parameter(&mut args)])};
+        // The argument struct remains live until each launch copies its value.
+        // One ordered stream completes normalization before coefficient reads,
+        // and completes all disjoint coefficient writes before activation.
+        // Each independent coefficient gets its own block. Every dot retains
+        // its original complete ascending feature order.
+        let launched=unsafe {
+            self.launch_flash("mhc_prepare",shape.rows.div_ceil(128),128,&mut [parameter(&mut args)])
+                .and_then(|_| {args.phase=1;let units=u64::from(shape.rows)*shape.coefficients() as u64;
+                    self.launch_flash("mhc_prepare",units as u32,32,&mut [parameter(&mut args)])})
+                .and_then(|_| {args.phase=2;self.launch_flash("mhc_prepare",shape.rows.div_ceil(128),128,&mut [parameter(&mut args)])})
+        };
         let completed=self.synchronize();launched.and(completed)
     }
     fn mhc_collapse_owned(&self, shape: Shape, vectors: [&DeviceVector<'_>;3]) -> Result<(),String> {

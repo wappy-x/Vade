@@ -132,6 +132,7 @@ fn page(command: &str) -> Option<Page<'static>> {
                 ("--memory-bytes N", "Memory budget per rank, in bytes"),
                 ("--cache-bytes N", "FP8 retained prompt cache, in bytes; 0 disables it. Local FP4 accepts only 0"),
                 ("--decode-fuse MODE", "on for one Spark by default; off disables the decode kernel chain"),
+                ("--diagnostic-unqualified-text", "Unqualified text diagnostics on loopback only; default off"),
                 ("--fast-prompts", "Older option, kept for scripts; it has no effect"),
                 DRY_RUN,
             ],

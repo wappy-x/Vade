@@ -12,6 +12,7 @@
 | [`glm.rs`](glm.rs) | Translate the GLM text schema into operation data for host inspection. |
 | [`glm_index.rs`](glm_index.rs) | Bind index names to tensor roles and scale components. |
 | [`layer.rs`](layer.rs) | Logical decoder order, kernel targets, buffers, and tensor splits. |
+| [`decoder_reference.rs`](decoder_reference.rs) | Causal scalar stack, text logits, saved state, and failure rollback. See the [reference contract](../../DECODER-REFERENCE.md). |
 | [`layer/`](layer/README.md) | Independent scalar forward and program replay. |
 | [`ffn_tests.rs`](ffn_tests.rs) | Deferred FFN tests for the shared host schedule builder. |
 | [`mod.rs`](mod.rs) | A checkpoint-derived, typed model plan, independent of loading and serving. |
@@ -85,6 +86,11 @@ executable schemas reject that storage until a binding is available.
 The appended draft count is metadata. The local public source does not define
 the full `eh_proj`, `enorm`, `hnorm` and `shared_head.norm` semantics. Those
 tensors stay unmapped. No `mtp.*` alias is inferred from their names.
+
+## Text edges
+
+`text_edges.rs` binds embedding, final norm, head and scale headers.
+It retains stored dtypes and does not open executable model admission.
 
 **How it fits:** see the [`engine-model` README](../../README.md) for what the crate does and how it connects to the rest.
 

@@ -277,3 +277,23 @@ fn up_status_and_doctor_hide_address_destinations_and_old_machine_names() {
     for prefix in ["192.0.2.", "192-0-2-", "user@"] { assert!(!printed.contains(prefix), "{printed}"); }
     crate::evals::json::parse(&printed).unwrap();
 }
+
+#[test]
+fn diagnostic_text_opt_in_persists_but_bare_up_does_not_reuse_it() {
+    let f=Fixture::fp4(2,false);
+    let options=fp4_options(&["--context","4096","--output","64","--diagnostic-unqualified-text"]);
+    let diagnostic=f.app.requested_session(&options,None,true).unwrap();
+    assert!(diagnostic.diagnostic_unqualified_text);
+    for at in 0..diagnostic.ranks.len() {
+        let args=diagnostic.engine_args(at);
+        assert_eq!(args.iter().filter(|s|s.as_str()=="--diagnostic-unqualified-text").count(),1);
+        assert!(!args.iter().any(|s|s=="--fp4-local" || s=="--decode-fuse"));
+        let depth=args.iter().position(|s|s=="--mtp").unwrap();assert_eq!(args[depth+1],"0");
+    }
+    diagnostic.save(&f.app.config.state_dir).unwrap();
+    let saved=Session::load(&f.app.config.state_dir).unwrap().unwrap();assert!(saved.diagnostic_unqualified_text);
+    assert!(f.app.requested_session(&UpOptions::default(),Some(&saved),true).unwrap_err().contains("--diagnostic-unqualified-text"));
+    let plain=f.app.requested_session(&UpOptions::default(),None,true).unwrap();
+    assert!(!plain.diagnostic_unqualified_text);assert!(!resident::same_launch(&saved,&plain));
+    assert!(!plain.encode().contains("diagnostic_unqualified_text"));
+}

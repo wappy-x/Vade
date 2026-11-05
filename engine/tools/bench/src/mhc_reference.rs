@@ -106,7 +106,7 @@ mod tests {
     #[test]
     fn abi_sizes_and_invalid_shapes() {
         use crate::mhc_params::*; use std::mem::size_of;
-        assert_eq!([size_of::<Shape>(), size_of::<Prepare>(), size_of::<Collapse>(), size_of::<Combine>(), size_of::<Head>()], [24, 72, 40, 48, 32]);
+        assert_eq!([size_of::<Shape>(), size_of::<Prepare>(), size_of::<Collapse>(), size_of::<Combine>(), size_of::<Head>()], [24, 80, 40, 48, 32]);
         let good = shapes()[0];
         for shape in [Shape { rows: 0, ..good }, Shape { streams: 0, ..good }, Shape { hidden: 0, ..good },
             Shape { iterations: 0, ..good }, Shape { iterations: 1_048_577, ..good },

@@ -149,6 +149,7 @@ pub struct UpOptions {
     pub cache_bytes: Option<u64>,
     /// The engine's decode_fuse option: Some(true) runs one Spark's decode steps as a chain.
     pub decode_fuse: Option<bool>,
+    pub diagnostic_unqualified_text: bool,
 }
 
 impl Default for UpOptions {
@@ -173,6 +174,7 @@ impl Default for UpOptions {
             memory_bytes: None,
             cache_bytes: None,
             decode_fuse: None,
+            diagnostic_unqualified_text: false,
         }
     }
 }
@@ -451,6 +453,11 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
             index += 1;
             continue;
         }
+        if flag == "--diagnostic-unqualified-text" {
+            options.diagnostic_unqualified_text = true;
+            index += 1;
+            continue;
+        }
         if flag == "--fast-prompts" {
             options.fast_prompts = true;
             index += 1;
@@ -495,7 +502,7 @@ fn parse_up(args: &[&str]) -> Result<UpOptions, String> {
             },
             "--context" => options.context = number(value, flag, 4096, 262144)?,
             "--output" => {
-                options.output = number(value, flag, 1024, 262144)?;
+                options.output = number(value, flag, if args.contains(&"--diagnostic-unqualified-text") {1} else {1024}, 262144)?;
                 options.output_explicit = true;
             }
             "--chats" => options.chats = Some(number(value, flag, 1, 32)? as usize),

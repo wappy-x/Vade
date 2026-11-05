@@ -10,9 +10,12 @@ impl<R: Runner> App<R> {
         existing: Option<&Session>,
         rdma: bool,
     ) -> Result<Session, String> {
+        if existing.is_some_and(|s|s.diagnostic_unqualified_text) && !options.diagnostic_unqualified_text {
+            return Err("This engine is unqualified diagnostics. Repeat --diagnostic-unqualified-text explicitly, or run vade down before a normal start.".into());
+        }
         // Bare up keeps the recorded launch options, but always rebuilds the
         // request from today's configuration and activated build manifest.
-        let mut options = match existing.filter(|_| options.supplied_options.is_empty()) {
+        let mut options = match existing.filter(|session| options.supplied_options.is_empty() && !session.diagnostic_unqualified_text) {
             Some(session) => {
                 let mut recorded = recorded_options(session);
                 if options.mtp_explicit { recorded.mtp = options.mtp; recorded.mtp_explicit = true; }
@@ -128,6 +131,7 @@ pub(super) fn recorded_options(session: &Session) -> UpOptions {
         memory_bytes: session.memory_bytes,
         cache_bytes: session.cache_bytes,
         decode_fuse: Some(session.decode_fuse),
+        diagnostic_unqualified_text: session.diagnostic_unqualified_text,
     }
 }
 

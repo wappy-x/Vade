@@ -43,14 +43,22 @@ impl Cell {
         shape.rows = rows as u32; shape.validate().map_err(str::to_string)?;
         let (w, c, h) = (shape.wide(), shape.coefficients(), shape.hidden as usize);
         let mut prepare = Prepare { input: self.input.offset(first, w), weights: self.weights.address, base: self.base.address,
-            scale: self.scale.address, normalized: self.normalized.offset(first, w), coefficients: self.coefficients.offset(first, c), shape };
+            scale: self.scale.address, normalized: self.normalized.offset(first, w), coefficients: self.coefficients.offset(first, c), shape, phase: 0 };
         let mut collapse = Collapse { input: prepare.input, coefficients: prepare.coefficients, output: self.collapsed.offset(first, h),
             rows: shape.rows, streams: shape.streams, hidden: shape.hidden };
         let mut combine = Combine { input: prepare.input, coefficients: prepare.coefficients, block: self.block.offset(first, h),
             output: self.combined.offset(first, w), rows: shape.rows, streams: shape.streams, hidden: shape.hidden };
         let mut head = Head { input: combine.output, output: self.head.offset(first, h), rows: shape.rows, streams: shape.streams, hidden: shape.hidden };
         // Overlaunch by one block. Each kernel must retain both guards.
-        for (function, words, argument) in [(functions[0], rows, ptr(&mut prepare)), (functions[1], rows * h, ptr(&mut collapse)),
+        // mhc_prepare runs three ordered phases on this stream: rows, then one complete
+        // 32-thread warp per coefficient (lane zero writes it), then rows.
+        // The driver copies the argument at each launch, so the phase field can change between launches.
+        for phase in 0..3u32 {
+            prepare.phase = phase;
+            let words = prepare_threads(phase, rows, c).ok_or("mHC prepare launch size overflow")?;
+            g.launch(functions[0], [words.div_ceil(threads as usize) as u32 + 1, 1, 1], threads, 0, &mut [ptr(&mut prepare)])?;
+        }
+        for (function, words, argument) in [(functions[1], rows * h, ptr(&mut collapse)),
             (functions[2], rows * w, ptr(&mut combine)), (functions[3], rows * h, ptr(&mut head))] {
             g.launch(function, [words.div_ceil(threads as usize) as u32 + 1, 1, 1], threads, 0, &mut [argument])?;
         }
@@ -96,4 +104,27 @@ pub(crate) fn run(path: &str) -> Result<()> {
     }
     println!("MHC KIT PASS; logical FP32 primitives only; no token-ID or BF16-boundary gate");
     Ok(())
+}
+
+/// Threads that mhc_prepare needs in each phase. Phase 1 uses lane zero of one
+/// complete warp per coefficient, as the engine launcher does.
+fn prepare_threads(phase: u32, rows: usize, coefficients: usize) -> Option<usize> {
+    if phase == 1 { rows.checked_mul(coefficients)?.checked_mul(32) } else { Some(rows) }
+}
+#[cfg(test)]
+mod launch_tests {
+    #[test]
+    fn every_prepare_coefficient_has_a_complete_warp_at_each_block_size() {
+        for (rows, coefficients) in [(1usize, 8usize), (3, 8), (3, 24), (7, 48)] {
+            for threads in [32usize, 128, 256] {
+                let words = super::prepare_threads(1, rows, coefficients).unwrap();
+                let launched = (words.div_ceil(threads) + 1) * threads;
+                let written = (0..launched).filter(|i| i % 32 == 0 && i / 32 < rows * coefficients).count();
+                assert_eq!(written, rows * coefficients, "rows={rows} coefficients={coefficients} threads={threads}");
+            }
+        }
+        assert_eq!(super::prepare_threads(0, 5, 8), Some(5));
+        assert_eq!(super::prepare_threads(2, 5, 8), Some(5));
+        assert_eq!(super::prepare_threads(1, usize::MAX, 2), None);
+    }
 }

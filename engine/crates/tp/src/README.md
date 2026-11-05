@@ -39,3 +39,7 @@ remains setup-specific.
 **How it fits:** see the [`spark-tp` README](../README.md) for what the crate does and how it connects to the rest.
 
 **Back:** [Up one folder](../README.md) · **Docs:** [index](../../../../docs/README.md)
+# Plain FP32 operand
+
+[`ordered_projection.rs`](ordered_projection.rs) binds retained plain FP32 file rows to the generic native backend.
+The [contract](../ORDERED-PROJECTION.md) keeps runtime profiles and complete layer execution refused.

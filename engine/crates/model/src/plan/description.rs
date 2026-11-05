@@ -12,18 +12,25 @@ impl ConfigPlan {
     pub fn from_config(bytes: &[u8]) -> super::Result<Self> {
         let doc = json::parse(bytes, json::Limits { bytes: CONFIG_BYTES, ..Default::default() })
             .map_err(|e| super::read_error("config.json", e))?;
-        let root = doc.object().map_err(|_| PlanError::WrongType { field: "config", expected: "object" })?;
-        match root.get("model_type").map(Value::string).transpose().map_err(|e| super::read_error("model_type", e))? {
-            Some("glm5_next" | "glm5_next_text") => super::glm::parse(&doc).map(Self::Deferred),
-            _ => ModelPlan::from_config(bytes).map(Self::Supported),
+        match deferred_description(&doc)? {
+            Some(description) => Ok(Self::Deferred(description)),
+            None => ModelPlan::from_config(bytes).map(Self::Supported),
         }
     }
     pub fn into_model_plan(self) -> super::Result<ModelPlan> {
         match self {
             Self::Supported(plan) => Ok(plan),
-            Self::Deferred(_) => Err(PlanError::Unsupported { field: "execution",
-                value: "deferred operation description; kernel and header checks are incomplete".into() }),
+            Self::Deferred(description) => description.require_resident_service().map(|never| match never {}),
         }
+    }
+}
+
+/// Share metadata schema detection with cartridge admission. No execution kind is added.
+pub(crate) fn deferred_description(doc: &Value) -> super::Result<Option<TextDescription>> {
+    let root = doc.object().map_err(|_| PlanError::WrongType { field: "config", expected: "object" })?;
+    match root.get("model_type").map(Value::string).transpose().map_err(|e| super::read_error("model_type", e))? {
+        Some("glm5_next" | "glm5_next_text") => super::glm::parse(doc).map(Some),
+        _ => Ok(None),
     }
 }
 
@@ -46,6 +53,18 @@ pub struct TextDescription {
     pub storage: StorageMap,
 }
 impl TextDescription {
+    /// Complete resident producers must precede a service Factory or executable kind.
+    /// Metadata, headers, scalar references, and individual primitives grant no admission.
+    /// Success stays uninhabited until the complete owner and its proofs exist.
+    pub fn require_resident_service(&self) -> super::Result<std::convert::Infallible> {
+        Err(PlanError::Unsupported { field: "execution", value: concat!(
+            "complete resident decoder is absent. ",
+            "Complete layer, text, causal state, and ordered transport producers are unbound. ",
+            "Checkpoint service Factory is absent. ",
+            "Source precision, casts, quantizers, and reductions remain unqualified. ",
+            "Tokenizer, chat template, stop set, appended prediction semantics, and token-ID proof remain open."
+        ).into() })
+    }
     /// Activation data for a future execution binding. This does not make
     /// the deferred model executable.
     pub fn swiglu(&self) -> crate::Result<crate::swiglu::SwiGlu> {

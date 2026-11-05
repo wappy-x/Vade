@@ -7,7 +7,8 @@ use std::{
     cmp::Reverse,
     collections::{BinaryHeap, HashMap, HashSet},
     io::Read,
-    path::Path,
+    path::{Path, PathBuf},
+    sync::OnceLock,
 };
 #[derive(Debug)]
 pub struct Error(pub String);
@@ -52,8 +53,14 @@ struct Added {
 }
 pub struct Tokenizer {
     phi: bool,
+    glm: bool,
     llama: bool,
     llama_current_date: bool,
+    nfc: bool,
+    digits: usize,
+    chat_eos: Option<u32>,
+    generation_config: Option<PathBuf>,
+    eos: OnceLock<Result<Vec<u32>>>,
     direct_tokens: HashMap<Vec<u8>, u32>,
     byte_ids: [u32; 256],
     gemma_chars: Option<HashMap<char, u32>>,
@@ -78,11 +85,20 @@ impl Tokenizer {
         self.limits = limits;
         Ok(())
     }
-    /// Load tokenizer and validate its companion chat-template configuration.
+    /// Load the tokenizer. Read optional generation EOS settings on list access.
+    /// Validate known chat templates. Other byte-level artifacts support text only.
     pub fn from_directory(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let mut tokenizer = Self::from_file(path.join("tokenizer.json"))?;
-        if tokenizer.llama {
+        tokenizer.generation_config = Some(path.join("generation_config.json"));
+        if chat::glm::has_controls(&tokenizer) {
+            chat::glm::validate_directory(path)?;
+            tokenizer.glm = true;
+        }
+        if !tokenizer.supports_chat() { return Ok(tokenizer); }
+        if tokenizer.glm {
+            // The GLM template was checked before chat support was enabled.
+        } else if tokenizer.llama {
             tokenizer.llama_current_date = chat::llama::validate(&path.join("tokenizer_config.json"))?;
         } else if tokenizer.is_gemma4() {
             chat::gemma4::validate_directory(path)?;
@@ -93,12 +109,33 @@ impl Tokenizer {
         }
         Ok(tokenizer)
     }
+    fn load_eos(&self) -> Result<Vec<u32>> {
+        let defaults = || self.chat_eos.into_iter().collect();
+        let Some(path) = &self.generation_config else { return Ok(defaults()) };
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(defaults()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut bytes = Vec::new();
+        file.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
+        let root = json::parse(&bytes, json::Limits { bytes: 1024 * 1024, ..Default::default() })?;
+        let Some(value) = root.object()?.get("eos_token_id") else { return Ok(defaults()) };
+        let values = match value { Value::Array(values) => values.as_slice(), _ => std::slice::from_ref(value) };
+        if values.is_empty() { return Err(err("empty generation EOS list")); }
+        values.iter().map(|value| {
+            let id = u32::try_from(value.u64()?).map_err(|_| err("generation EOS ID overflow"))?;
+            if !self.contains_id(id) { return Err(err("generation EOS ID is outside the vocabulary")); }
+            Ok(id)
+        }).collect()
+    }
     /// Drafts consume the target's IDs and template. Special-token display
     /// flags and reserved special-token sets may differ. Ordinary tokens and
     /// all shared special IDs must agree; the target verifies every proposal.
     pub fn shares_token_ids(&self, draft: &Self) -> bool {
         self.byte_ids == draft.byte_ids && self.pairs == draft.pairs && self.hybrid_text == draft.hybrid_text
             && self.phi == draft.phi && self.llama == draft.llama
+            && self.nfc == draft.nfc && self.digits == draft.digits && self.direct_tokens == draft.direct_tokens
             && (0..self.tokens.len().max(draft.tokens.len())).all(|id| {
                 match (self.tokens.get(id).and_then(Option::as_ref), draft.tokens.get(id).and_then(Option::as_ref)) {
                     (Some(a), Some(b)) => a == b,
@@ -138,9 +175,15 @@ impl Tokenizer {
                 return Err(err("tokenizer truncation/padding is unsupported"));
             }
         }
-        let llama = field(o, "normalizer")? == &Value::Null && field(o, "post_processor")? != &Value::Null;
-        let phi = field(o, "normalizer")? == &Value::Null && !llama;
-        let gemma = !phi && !llama && field(o, "normalizer")?.object()?.get("type") == Some(&Value::String("Replace".into()));
+        let no_normalizer = field(o, "normalizer")? == &Value::Null;
+        let post = field(o, "post_processor")?;
+        let byte_level = no_normalizer && post != &Value::Null && field(post.object()?, "type")?.string()? == "ByteLevel";
+        let phi = no_normalizer && post == &Value::Null;
+        let llama = no_normalizer && !phi && !byte_level;
+        let gemma = !no_normalizer && field(o, "normalizer")?.object()?.get("type") == Some(&Value::String("Replace".into()));
+        let nfc = !no_normalizer && !gemma;
+        // Keep the digit groups used by artifacts that loaded before this codec.
+        let mut digits = if phi || llama { 3 } else { 1 };
         let mut hybrid_text = false;
         if gemma {
             for (key, expected) in [
@@ -166,7 +209,7 @@ impl Tokenizer {
                 }
             }
         } else {
-            if !phi && !llama && field(field(o, "normalizer")?.object()?, "type")?.string()? != "NFC" {
+            if nfc && field(field(o, "normalizer")?.object()?, "type")?.string()? != "NFC" {
                 return Err(err("only NFC normalization is supported"));
             }
             let pre = field(o, "pre_tokenizer")?.object()?;
@@ -180,15 +223,16 @@ impl Tokenizer {
             let split = seq[0].object()?;
             let pattern = field(field(split, "pattern")?.object()?, "Regex")?.string()?;
             hybrid_text = pattern == HYBRID_PATTERN;
-            let phi_pattern = PATTERN.replace(r"\p{N}|", r"\p{N}{1,3}|");
+            let grouped_pattern = PATTERN.replace(r"\p{N}|", r"\p{N}{1,3}|");
+            if pattern == grouped_pattern { digits = 3; }
             if field(split, "type")?.string()? != "Split"
-                || (pattern != PATTERN && !hybrid_text && !((phi || llama) && pattern == phi_pattern))
+                || (pattern != PATTERN && !hybrid_text && pattern != grouped_pattern)
                 || field(split, "behavior")?.string()? != if phi { "Removed" } else { "Isolated" }
                 || field(split, "invert")?.boolean()? != phi
             {
                 return Err(err("unsupported split pattern"));
             }
-            if phi || llama {
+            if no_normalizer {
                 let pre = seq[1].object()?;
                 let decoder = field(o, "decoder")?.object()?;
                 if field(pre, "type")?.string()? != "ByteLevel" || field(pre, "add_prefix_space")?.boolean()?
@@ -197,7 +241,11 @@ impl Tokenizer {
                     || field(decoder, "type")?.string()? != "ByteLevel"
                     || !field(decoder, "add_prefix_space")?.boolean()?
                     || !field(decoder, "trim_offsets")?.boolean()? || !field(decoder, "use_regex")?.boolean()? {
-                    return Err(err("unsupported Phi byte-level configuration"));
+                    return Err(err("unsupported byte-level configuration"));
+                }
+                if byte_level {
+                    // These post-processor flags affect offsets, not token bytes.
+                    for key in ["add_prefix_space", "trim_offsets", "use_regex"] { field(post.object()?, key)?.boolean()?; }
                 }
                 if llama {
                     let post = field(o, "post_processor")?.object()?;
@@ -233,11 +281,13 @@ impl Tokenizer {
                 return Err(err(format!("unsupported BPE {key}")));
             }
         }
-        for key in ["fuse_unk", "byte_fallback", "ignore_merges"] {
-            if model.get(key).map(Value::boolean).transpose()?.unwrap_or(false) != ((gemma && key != "ignore_merges") || (llama && key == "ignore_merges")) {
+        for key in ["fuse_unk", "byte_fallback"] {
+            if model.get(key).map(Value::boolean).transpose()?.unwrap_or(false) != gemma {
                 return Err(err(format!("unsupported BPE {key}")));
             }
         }
+        let ignore_merges = model.get("ignore_merges").map(Value::boolean).transpose()?.unwrap_or(false);
+        if gemma && ignore_merges { return Err(err("unsupported BPE ignore_merges")); }
         let vocab = field(model, "vocab")?.object()?;
         if vocab.len() > 1_000_000 {
             return Err(err("vocabulary limit exceeded"));
@@ -333,6 +383,8 @@ impl Tokenizer {
             }
         }
         let mut added = Vec::new();
+        // Direct lookup uses only model vocabulary entries, including sparse IDs.
+        let direct_tokens = if ignore_merges { ids.values().map(|&id| (tokens[id as usize].as_ref().unwrap().clone(), id)).collect() } else { HashMap::new() };
         let mut special = HashSet::new();
         let mut added_texts = HashSet::new();
         let mut added_ids = HashSet::new();
@@ -355,7 +407,7 @@ impl Tokenizer {
                 .map_err(|_| err("added token ID overflow"))?;
             if id >= 1_000_000
                 || !added_ids.insert(id)
-                || (!used.insert(id) && !((gemma || phi) && ids.get(text.as_str()) == Some(&id)))
+                || (!used.insert(id) && !((gemma || phi || byte_level) && ids.get(text.as_str()) == Some(&id)))
             {
                 return Err(err("duplicate or oversized added token ID"));
             }
@@ -383,7 +435,7 @@ impl Tokenizer {
                 ("<|turn>", 105),
                 ("<turn|>", 106),
             ]
-        } else if llama { &[("<|begin_of_text|>",128000), ("<|end_of_text|>",128001), ("<|start_header_id|>",128006), ("<|end_header_id|>",128007), ("<|eom_id|>",128008), ("<|eot_id|>",128009)] } else if phi { &[("<|endoftext|>",100257), ("<|im_start|>",100264), ("<|im_end|>",100265), ("<|im_sep|>",100266)] } else {
+        } else if byte_level { &[] } else if llama { &[("<|begin_of_text|>",128000), ("<|end_of_text|>",128001), ("<|start_header_id|>",128006), ("<|end_header_id|>",128007), ("<|eom_id|>",128008), ("<|eot_id|>",128009)] } else if phi { &[("<|endoftext|>",100257), ("<|im_start|>",100264), ("<|im_end|>",100265), ("<|im_sep|>",100266)] } else {
             &[
                 ("<|endoftext|>", base),
                 ("<|im_start|>", base + 1),
@@ -398,9 +450,9 @@ impl Tokenizer {
                 return Err(err("control token mismatch"));
             }
         }
-        let direct_tokens = if llama { tokens.iter().enumerate().take(vocab.len()).filter_map(|(id,t)| t.as_ref().map(|t|(t.clone(),id as u32))).collect() } else { HashMap::new() };
+        let chat_eos = if byte_level { None } else { Some(if llama { 128009 } else if phi { 100265 } else if gemma { 1 } else { base + 2 }) };
         Ok(Self {
-            phi, llama, llama_current_date: false, direct_tokens, byte_ids,
+            phi, glm: false, llama, llama_current_date: false, nfc, digits, chat_eos, generation_config: None, eos: OnceLock::new(), direct_tokens, byte_ids,
             gemma_chars,
             tokens,
             pairs,
@@ -429,8 +481,18 @@ impl Tokenizer {
     pub fn is_gemma4(&self) -> bool {
         self.gemma_chars.is_some()
     }
-    pub fn eos_token_id(&self) -> u32 {
-        if self.llama { 128009 } else if self.phi { self.added.iter().find(|a| a.text == "<|im_end|>").map_or(100265, |a| a.id) } else if self.is_gemma4() { 1 } else if self.hybrid_text { 248046 } else { 151645 }
+    /// Legacy chat EOS ID, or the first generation EOS ID for text-only artifacts.
+    /// Return `u32::MAX` when neither is valid or available.
+    /// Use `eos_token_ids` to test the complete stop set.
+    pub fn eos_token_id(&self) -> u32 { self.chat_eos.or_else(|| self.eos_token_ids().ok().and_then(|ids| ids.first().copied())).unwrap_or(u32::MAX) }
+    /// Generation EOS IDs in file order. Empty when this artifact has no default.
+    /// Read and validate the optional file on first access. Cache its result.
+    /// Invalid settings return an error without preventing tokenizer discovery.
+    pub fn eos_token_ids(&self) -> Result<&[u32]> { self.eos.get_or_init(|| self.load_eos()).as_deref().map_err(|error| err(error.0.clone())) }
+    fn supports_chat(&self) -> bool { self.glm || self.nfc || self.phi || self.llama || self.is_gemma4() }
+    fn check_chat_template(&self) -> Result<()> {
+        if !self.supports_chat() { return Err(err("chat template is unsupported for this tokenizer")); }
+        Ok(())
     }
     /// Template defaults differ: Gemma 4 and some hybrid templates disable thinking unless requested.
     pub fn chat_options(&self) -> chat::Options {
@@ -444,7 +506,8 @@ impl Tokenizer {
         messages: &[chat::Message],
         options: &chat::Options,
     ) -> Result<String> {
-        if self.llama { chat::llama::format(messages, options, self.llama_current_date) } else if self.phi { chat::format_phi(messages, options) } else if self.is_gemma4() {
+        self.check_chat_template()?;
+        if self.glm { chat::glm::format(messages, options) } else if self.llama { chat::llama::format(messages, options, self.llama_current_date) } else if self.phi { chat::format_phi(messages, options) } else if self.is_gemma4() {
             chat::gemma4::format(messages, options)
         } else {
             if self.hybrid_text { chat::format_hybrid(messages, options, self.hybrid_template) } else { chat::format(messages, options) }
@@ -542,7 +605,7 @@ impl Tokenizer {
             if text.chars().count() > work { return Err(err("BPE work limit exceeded")); }
             return self.bpe_chars(&text.replace(' ', "▁"), out, work);
         }
-        let normalized = if self.phi || self.llama { text.to_owned() } else { unicode::nfc(text, self.limits.max_input_bytes.saturating_mul(4).min(4 * 1024 * 1024))? };
+        let normalized = if self.nfc { unicode::nfc(text, self.limits.max_input_bytes.saturating_mul(4).min(4 * 1024 * 1024))? } else { text.to_owned() };
         if normalized.len() > self.limits.max_input_bytes.saturating_mul(4) {
             return Err(err("normalized byte limit exceeded"));
         }
@@ -550,7 +613,7 @@ impl Tokenizer {
         // Repeated words in long prompts need one merge pass each. Borrow
         // keys from this span and reuse output ranges; retain no caller text.
         let mut pieces = HashMap::<&str, std::ops::Range<usize>>::new();
-        for piece in split_pattern(&normalized, self.hybrid_text, if self.phi || self.llama {3} else {1}) {
+        for piece in split_pattern(&normalized, self.hybrid_text, self.digits) {
             if let Some(range) = pieces.get(piece) {
                 if out
                     .len()
@@ -574,7 +637,10 @@ impl Tokenizer {
         if bytes.is_empty() {
             return Ok(());
         }
-        if let Some(&id) = self.direct_tokens.get(bytes) { out.push(id); return Ok(()); }
+        if let Some(&id) = self.direct_tokens.get(bytes) {
+            if out.len() >= self.limits.max_tokens { return Err(err("token count limit exceeded")); }
+            out.push(id); return Ok(());
+        }
         if bytes.len() > work { return Err(err("BPE work limit exceeded")); }
         self.merge(
             bytes.iter().map(|&b| self.byte_ids[b as usize]).collect(),
@@ -907,7 +973,8 @@ mod tests {
     use super::*;
     fn byte_fixture() -> Tokenizer {
         Tokenizer {
-            phi: false, llama: false, llama_current_date: false, direct_tokens: HashMap::new(), byte_ids: std::array::from_fn(|i| i as u32),
+            glm: false,
+            phi: false, llama: false, llama_current_date: false, nfc: true, digits: 1, chat_eos: Some(151645), generation_config: None, eos: OnceLock::new(), direct_tokens: HashMap::new(), byte_ids: std::array::from_fn(|i| i as u32),
             gemma_chars: None,
             tokens: (0..256).map(|i| Some(vec![i as u8])).collect(),
             pairs: HashMap::new(),

@@ -11,6 +11,11 @@ hold them ([glossary](docs/GLOSSARY.md#ho), "Main `abc1234`").
 
 Version v0.2.0 is not released yet.
 
+- The bounded decoder probe adds a causal text Factory and exact generated-ID receipts. Public GLM service admission remains closed.
+- The causal layer probe checks a complete dense KDA layer against fixed recipe bytes. Full GLM decode remains unavailable.
+- The stored checkpoint prefix probe joins embedding, attention mHC, and input norm. Complete GLM decode remains unavailable.
+- `vade bench --first-tokens` prepares chat IDs and checks greedy repeat receipts through the shared client.
+
 v0.2.0 makes two Sparks much faster than v0.1.0. Two Sparks also admit more chats at once, and both one and two Sparks serve larger context windows. The answers do not change: FP4-Local gives the same token IDs on one, two and four Sparks. The [v0.2.0 release notes](docs/release-notes/0.2.0.md) explain each change in plain words and list the known limits. The detailed list of changes follows the highlights.
 
 Each number below names its source. "The end-of-day cards" are the RigMark cards of 2026-10-28 at main `76977df` ([benchmarks](docs/benchmarks.md#current-2026-10-28-end-of-day-main-76977df-home-dgx-sparks)). "The v0.1.0 cards" are the release cards of 2026-10-24 ([receipts](bench/receipts/2026-10-24/README.md)). Rates are completion tokens per second, with drafting ON (the default) unless a line says otherwise. Each card sends its cold 8K prompt with drafting OFF (`"draft": "plain"`), so the cold 8K times below are drafting OFF.
@@ -383,6 +388,7 @@ The prefix cache on by default, `vade sessions`, MCP tool servers, shell safety 
 
 ### Engine
 
+- Deferred GLM cartridges now name the missing complete resident decoder and service bindings before weight or tokenizer admission.
 - Decode fusion is on by default for one Spark; `--decode-fuse off` disables it, and more Sparks keep it off.
 
 - During decode, small direct reads keep the checkpoint drive awake. The server logs each read burst. Token IDs do not change.

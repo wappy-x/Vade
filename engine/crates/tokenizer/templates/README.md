@@ -8,6 +8,7 @@
 | [`gemma4.jinja`](gemma4.jinja) | Gemma 4 |
 | [`llama3.jinja`](llama3.jinja), [`llama31.jinja`](llama31.jinja) | Llama 3 and 3.1 |
 | [`phi4.jinja`](phi4.jinja) | Phi-4 |
+| [`glm.jinja`](glm.jinja) | GLM plain text turns; exact checkpoint template |
 
 **Why:** a model answers best when its prompt is laid out exactly as it was trained.
 

@@ -91,7 +91,7 @@ match the official distribution at revision
 <details>
 <summary><b>Chat templates</b>: Qwen3 and Gemma 4, with hashes</summary>
 
-All templates are in `crates/tokenizer/templates/`. Llama 3.1/3.2 and Phi-4 sources, hashes and terms are listed in [NOTICE](../NOTICE); their bundled bytes match the retained official tokenizer metadata.
+Tokenizer templates are in `crates/tokenizer/templates/`. The GLM service template is in `crates/serve/templates/glm.jinja`. Llama 3.1/3.2 and Phi-4 sources, hashes and terms are listed in [NOTICE](../NOTICE); their bundled bytes match the retained official tokenizer metadata.
 
 <dl>
 <dt><code>qwen3.jinja</code></dt>

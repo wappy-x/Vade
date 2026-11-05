@@ -45,6 +45,8 @@ fn direct_text_schema_and_ignored_vision_config() {
     let mut text = o["text_config"].clone();
     let Value::Object(t) = &mut text else { panic!() }; t.insert("quantization_config".into(),q);
     assert_eq!(ConfigPlan::from_config(encode(&text).as_bytes()).unwrap(),ConfigPlan::Deferred(description()));
+    assert_eq!(ConfigPlan::from_config(encode(&text).as_bytes()).unwrap().into_model_plan().unwrap_err(),
+        description().require_resident_service().unwrap_err());
     o.insert("vision_config".into(),Value::String("ignored".into()));
     assert_eq!(ConfigPlan::from_config(encode(&root).as_bytes()).unwrap(),ConfigPlan::Deferred(description()));
 }

@@ -144,7 +144,8 @@ let ids = chat::encode(&tokenizer, &[Message::new(Role::User, "Hello")], &option
 
 <dl>
 <dt><code>Tokenizer::from_directory</code></dt>
-<dd>Loads <code>tokenizer.json</code> and checks the chat template.</dd>
+<dd>Loads <code>tokenizer.json</code> and checks supported chat templates.
+Other byte-level artifacts support text only.</dd>
 <dt><code>Tokenizer::from_file</code></dt>
 <dd>Loads <code>tokenizer.json</code> only, with no chat checks.</dd>
 <dt><code>encode</code></dt>
@@ -163,6 +164,30 @@ in the official tokenizer.</dd>
 </dl>
 
 </details>
+
+## Text-only byte-level artifacts
+
+The loader reads normalization, digit splitting and `ignore_merges` from the
+artifact fields. Existing Phi and Llama artifacts keep their prior digit group
+size, including artifacts with a single-digit pattern.
+A null normalizer keeps the input bytes. A ByteLevel
+post-processor changes offsets only. It does not add a space to the text.
+Direct vocabulary lookup stays inside each piece from the pre-tokenizer.
+
+`from_directory` records the path to `generation_config.json`.
+`eos_token_ids()` reads its `eos_token_id` field on first access and caches the
+result. The value can be an ID or a nonempty list. Each ID must exist in the
+tokenizer vocabulary. The method returns the full list in file order or an
+error for invalid settings. These errors do not prevent tokenizer discovery.
+Missing settings keep the default for supported chat families.
+Other artifacts have an empty list until settings are loaded.
+`eos_token_id()` keeps the legacy chat EOS ID for supported chat families.
+For text-only artifacts, it returns the first configured ID, or `u32::MAX`
+for an empty or invalid list.
+The file and JSON loaders do not read companion settings.
+
+Text-only artifacts can use `encode`, `encode_ordinary`, `decode` and streaming
+decode. Their chat calls return an error until a renderer supports the template.
 
 ## Safety of chat prompts
 

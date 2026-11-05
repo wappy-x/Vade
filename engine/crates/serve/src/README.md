@@ -20,11 +20,19 @@
 | [`responses.rs`](responses.rs) | Stateless Responses wire translation. |
 | [`scheduler.rs`](scheduler.rs) | One CUDA thread, bounded nonblocking sockets, priority between model steps. |
 | [`tokenizer.rs`](tokenizer.rs) | Bridge to the authored tokenizer and exact checkpoint chat template. |
+| [`tokenizer/`](tokenizer/README.md) | GLM text chat renderer and hand-derived golden tests. |
 | [`usage.rs`](usage.rs) | Shared Chat/Responses accounting. |
 | [`bin/`](bin/README.md) | Folder: see its README. |
 | [`chat_output/`](chat_output/README.md) | Folder: see its README. |
 
 **Why a folder:** Cargo looks for a crate's code in `src/`.
+
+## Text program
+
+`text_program.rs` binds checked text metadata to ordered request transactions.
+[`text_checkpoint.rs`](text_checkpoint.rs) binds the retained checkpoint files
+to the resident text edge layout and the existing file uploader.
+See [the contract and remaining gates](../TEXT-PROGRAM.md).
 
 **How it fits:** see the [`spark-serve` README](../README.md) for what the crate does and how it connects to the rest.
 

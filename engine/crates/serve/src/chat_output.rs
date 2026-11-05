@@ -5,6 +5,7 @@
 //! the call, including malformed or truncated arguments.
 #[path = "chat_output/gemma4.rs"]
 mod gemma4;
+mod glm;
 use engine_model::json;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -84,6 +85,7 @@ pub struct Parser {
     /// Qwen3.5-family XML calls: per tool, the parameters whose values are JSON, not strings.
     xml: Option<BTreeMap<String, BTreeSet<String>>>,
     gemma: Option<gemma4::Parser>,
+    glm: Option<glm::Parser>,
     mode: Mode,
     marker: String,
     initial: bool,
@@ -120,6 +122,7 @@ impl Parser {
             declared,
             xml: None,
             gemma: None,
+            glm: None,
             mode: Mode::Content,
             marker: String::new(),
             initial: true,
@@ -145,6 +148,12 @@ impl Parser {
     /// Gemma's prompt opens a thought channel only after a tool response.
     pub fn gemma4(mut self, thinking_open: bool) -> Self {
         self.gemma = Some(gemma4::Parser::new(thinking_open));
+        self
+    }
+    /// The pinned GLM template opens reasoning and uses named argument tags.
+    /// Calls are emitted only after the complete tagged object is valid.
+    pub fn glm(mut self, thinking_open: bool, json_parameters: BTreeMap<String, BTreeSet<String>>) -> Self {
+        self.glm = Some(glm::Parser::new(thinking_open, json_parameters));
         self
     }
     pub fn tool_policy(mut self, prefix: &str, forced: bool, single_call: bool) -> Result<Self, String> {
@@ -225,6 +234,9 @@ impl Parser {
         Ok(())
     }
     fn character(&mut self, ch: char, events: &mut Vec<Event>) -> Result<(), String> {
+        if let Some(parser) = &mut self.glm {
+            return parser.push(ch, &self.limits, &mut self.declared, events);
+        }
         if let Some(parser) = &mut self.gemma {
             return parser.push(ch, &self.limits, &mut self.declared, events);
         }
@@ -356,6 +368,10 @@ impl Parser {
             return Err("incomplete UTF-8 in chat output".into());
         }
         let mut events = std::mem::take(&mut self.pending);
+        if let Some(parser) = &mut self.glm {
+            parser.finish(&mut events);
+            return Ok(events);
+        }
         if let Some(parser) = &mut self.gemma {
             parser.finish(&mut events);
             return Ok(events);

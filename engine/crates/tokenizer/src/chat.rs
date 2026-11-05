@@ -2,6 +2,7 @@
 //! Strings are text-only; multimodal content is not silently discarded.
 pub mod gemma4;
 pub(crate) mod llama;
+pub(crate) mod glm;
 use crate::{Result, err};
 use engine_model::json;
 #[path = "../../../tools/export/src/sha256.rs"]
@@ -239,8 +240,13 @@ pub fn encode(
     messages: &[Message],
     options: &Options,
 ) -> Result<Vec<u32>> {
-    if !options.generation_prefix.is_empty() && (tokenizer.llama || tokenizer.phi || tokenizer.is_gemma4()) {
+    tokenizer.check_chat_template()?;
+    if !options.generation_prefix.is_empty() && (tokenizer.glm || tokenizer.llama || tokenizer.phi || tokenizer.is_gemma4()) {
         return Err(err("forced tool_choice requires a Qwen tool template"));
+    }
+    if tokenizer.glm {
+        let output = glm::render(messages, options)?;
+        return tokenizer.encode_protected(&output.text, &output.ordinary);
     }
     if tokenizer.llama {
         let output = llama::render(messages, options, tokenizer.llama_current_date)?;

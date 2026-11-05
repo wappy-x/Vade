@@ -5,11 +5,14 @@ app sees it.** It times the first token, the answer speed, many concurrent
 requests, long prompts and follow-up turns.
 
 The `vade-bench` crate is our own library, written against the Rust standard
-library alone. It is linked into the CLI and builds no separate program. By
+library alone. It is linked into the CLI. By
 default, `vade bench` times several capped chats at once, and it can also run
 cold (uncached) 8k prompt probes. It keeps the same metrics and JSON receipt
 fields as before (a receipt is the saved record of a run). See the
 [current command guide and the full table of old and new options](../../../docs/benchmarks.md#run-vade-bench).
+
+The [greedy chat proof client](FIRST-TOKENS.md) prepares prompt IDs and checks repeat receipts.
+Use `vade bench --first-tokens` or the prebuilt `first-tokens` program.
 
 The separate `kernel-bench --mhc-bytes X.ptx` command checks logical FP32
 [Sinkhorn stream primitives](../../crates/model/MHC.md) on a CUDA host.

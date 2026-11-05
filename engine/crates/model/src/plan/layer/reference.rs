@@ -17,6 +17,28 @@ impl Tensor {
     fn spec(&self, name: &str) -> Buffer { Buffer { name: name.into(),shape: self.shape.clone(),element: match self.data { Data::F32(_) => Element::F32,Data::U32(_) => Element::U32 } } }
 }
 pub type Tensors = BTreeMap<String,Tensor>;
+/// Supply decoded host weights on demand. This does not define device casts.
+pub trait WeightSource {
+    /// Declare value semantics explicitly. A stored dtype is not a runtime profile.
+    fn profile(&self) -> profile::Profile;
+    fn shape(&self, name: &str) -> Result<Vec<u64>>;
+    fn load(&self, name: &str) -> Result<Tensor>;
+    /// Read one complete logical matrix row. A checkpoint reader can override
+    /// this method to avoid decoding an entire embedding table.
+    fn row(&self, name: &str, index: u32) -> Result<Tensor> {
+        let t=self.load(name)?;
+        need(t.shape.len()==2 && u64::from(index)<t.shape[0],"host weight row is outside matrix")?;
+        let width=usize::try_from(t.shape[1]).map_err(|_| invalid("host weight row width overflow"))?;
+        let start=(index as usize).checked_mul(width).ok_or_else(|| invalid("host weight row offset overflow"))?;
+        let end=start.checked_add(width).ok_or_else(|| invalid("host weight row end overflow"))?;
+        Tensor::f32(&[t.shape[1]],t.floats()?.get(start..end).ok_or_else(|| invalid("host weight row extent differs"))?.to_vec())
+    }
+}
+impl WeightSource for Tensors {
+    fn profile(&self) -> profile::Profile { profile::Profile::LogicalF32V1 }
+    fn shape(&self, name: &str) -> Result<Vec<u64>> { self.get(name).map(|t| t.shape.clone()).ok_or_else(|| invalid(format!("missing host weight {name}"))) }
+    fn load(&self, name: &str) -> Result<Tensor> { self.get(name).cloned().ok_or_else(|| invalid(format!("missing host weight {name}"))) }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event { pub id: String, pub kind: Kind, pub inputs: Vec<Buffer>, pub outputs: Vec<Buffer>, pub weights: Vec<Buffer> }
 #[derive(Debug)]
@@ -60,6 +82,12 @@ pub fn replay(d: &TextDescription, plan: &LayerPlan, weights: &Tensors, inputs: 
 /// Inputs use LayerPlan's public buffer names. The schedule does not read a plan.
 /// Cached state is returned in next_* outputs. Errors leave caller data unchanged.
 pub fn forward(d: &TextDescription, layer: usize, context: u64, weights: &Tensors, inputs: &Tensors) -> Result<Forward> {
+    forward_from(d,layer,context,weights,inputs)
+}
+/// Run the same scalar schedule with on-demand weight loading.
+/// Expert IDs keep their original values in the returned tensors and trace.
+pub fn forward_from(d: &TextDescription, layer: usize, context: u64, weights: &dyn WeightSource, inputs: &Tensors) -> Result<Forward> {
+    weights.profile().require_scalar().map_err(|e| invalid(e.to_string()))?;
     // Validate operation data without constructing or reading a plan.
     validate_data(d,layer,context)?;
     let mut c=Cpu { d,layer,context,weights,tensors: inputs.clone(),trace: Vec::new() };
@@ -127,7 +155,7 @@ pub fn forward(d: &TextDescription, layer: usize, context: u64, weights: &Tensor
     Ok(Forward { tensors: c.tensors,trace: c.trace,settings:Settings::from_description(d,layer)?,layer,context })
 }
 
-struct Cpu<'a> { d: &'a TextDescription, layer: usize, context: u64, weights: &'a Tensors, tensors: Tensors, trace: Vec<Event> }
+struct Cpu<'a> { d: &'a TextDescription, layer: usize, context: u64, weights: &'a dyn WeightSource, tensors: Tensors, trace: Vec<Event> }
 impl Cpu<'_> {
     fn proj(&mut self,id: &str,input: &str,weight: &str) -> Result<()> { self.call(id,Kind::Project,&[input],&[weight]) }
     fn hc(&mut self,side: &str,input: &str) -> Result<()> {
@@ -145,15 +173,22 @@ impl Cpu<'_> {
         need(inputs.len()==input_count && weights.len()==weight_count,"host operation arity differs")?;
         let input=inputs.iter().map(|&n| self.tensors.get(n).cloned().ok_or_else(|| invalid(format!("missing host input {n}")))).collect::<Result<Vec<_>>>()?;
         let names=weights.iter().map(|n| format!("model.language_model.layers.{}.{n}",self.layer)).collect::<Vec<_>>();
-        let w=names.iter().map(|n| self.weights.get(n).cloned().ok_or_else(|| invalid(format!("missing host weight {n}")))).collect::<Result<Vec<_>>>()?;
+        let shapes=names.iter().map(|n| self.weights.shape(n)).collect::<Result<Vec<_>>>()?;
+        let selected=if matches!(kind,Kind::ExpertProject | Kind::ExpertDown) { Some(input[1].ids()?.to_vec()) } else { None };
+        let loaded=if let Some(ids)=&selected { ids.iter().map(|&j| names.get(j as usize).ok_or_else(|| invalid("host expert ID is outside weights")))
+            .collect::<Result<Vec<_>>>()? } else { names.iter().collect() };
+        let w=loaded.iter().map(|n| self.weights.load(n)).collect::<Result<Vec<_>>>()?;
+        for (name,tensor) in loaded.iter().zip(&w) { need(tensor.shape==self.weights.shape(name)?,"host weight source shape differs")?; }
         for tensor in input.iter().chain(&w) {
             let size=Buffer::new("host",&tensor.shape).elements()?;
             match &tensor.data { Data::F32(v) => need(v.len()==size && v.iter().all(|x| x.is_finite()),"invalid host FP32 extent")?,
                 Data::U32(v) => need(v.len()==size,"invalid host integer extent")? }
         }
-        let output=self.compute(id,kind,&input,&w)?;
+        let output=if let Some(ids)=selected { let mut local=input.clone();
+            local[1].data=Data::U32((0..ids.len() as u32).collect()); self.compute(id,kind,&local,&w)?
+        } else { self.compute(id,kind,&input,&w)? };
         self.trace.push(Event { id:id.into(),kind,inputs: input.iter().zip(inputs).map(|(t,n)| t.spec(n)).collect(),
-            outputs: output.iter().map(|(n,t)| t.spec(n)).collect(),weights:w.iter().zip(&names).map(|(t,n)| t.spec(n)).collect() });
+            outputs: output.iter().map(|(n,t)| t.spec(n)).collect(),weights:names.iter().zip(shapes).map(|(n,shape)| Buffer::new(n,&shape)).collect() });
         for (name,tensor) in output { self.tensors.insert(name,tensor); } Ok(())
     }
     fn compute(&self,id: &str,kind: Kind,x: &[Tensor],w: &[Tensor]) -> Result<Vec<(String,Tensor)>> {
@@ -375,7 +410,7 @@ impl Cpu<'_> {
         }
     }
 }
-fn project(x: &Tensor,w: &Tensor) -> Result<Tensor> {
+pub(crate) fn project(x: &Tensor,w: &Tensor) -> Result<Tensor> {
     let input=x.floats()?; let weight=w.floats()?;
     need(w.shape.len()==2 && w.shape[1] as usize==input.len() && !input.is_empty(),"invalid host projection shape")?;
     Tensor::f32(&[w.shape[0]],weight.chunks_exact(input.len()).map(|row| dot(row,input)).collect())
@@ -386,7 +421,7 @@ fn check_local_slots(t: &Tensor,slots: usize,used: usize) -> Result<()> {
 fn dot(a: &[f32],b: &[f32]) -> f32 { let mut sum=0.0; for j in 0..a.len() { sum+=a[j]*b[j]; } sum }
 fn fold(a: &[f32]) -> f32 { a.iter().fold(0.0,|sum,&v| sum+v) }
 fn sigmoid(v: f32) -> f32 { 1.0/(1.0+(-v).exp()) }
-fn rms(x: &[f32],w: &[f32],eps: f32) -> Result<Vec<f32>> {
+pub(crate) fn rms(x: &[f32],w: &[f32],eps: f32) -> Result<Vec<f32>> {
     need(!x.is_empty() && x.len()==w.len(),"invalid host RMS norm")?;
     let inv=1.0/(dot(x,x)/x.len() as f32+eps).sqrt(); Ok(x.iter().zip(w).map(|(&v,&w)| (v*inv)*w).collect())
 }

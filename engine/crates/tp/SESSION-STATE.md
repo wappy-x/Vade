@@ -117,3 +117,53 @@ identical IDs for all required request modes. A storage kit pass does not
 close that gate.
 
 Back: [TP crate](README.md).
+
+## Conditional physical allocation gate
+
+[`session-plan-check`](src/bin/session-plan-check.rs) reads a deferred config
+and explicit cache types. It derives each rank's physical plane extents with
+`Layout::physical_storage`. It keeps the full KDA history slot and all raw
+index rows. The type file supplies `abi_scratch_bytes` and one type for each
+used plane kind. The kinds are `kda_state`, `kda_history`, `latent`,
+`index_keys`, `index_gates`, and `pools`. Types are `bf16` or `f32`.
+The recurrent KDA plane requires `f32`. These inputs are conditional storage
+descriptors. They do not qualify a checkpoint producer or its packing.
+
+Run this form to write the independent host trace:
+
+```sh
+session-plan-check expected CONFIG TYPES CAPACITY PARTS RANK BOUNDARY NEW_DIR
+```
+
+Use `device` in place of `expected` for the CUDA gate. That command requires
+an embedded prebuilt CUDA image. Each invocation opens a fresh context.
+The station must run fresh processes and compare their receipts across
+ranks and devices. Use each rank's matching host trace. Different local
+shapes need separate references.
+
+The device gate derives its allocation ceiling from the rounded plane and
+scratch extents. It fills all lane and saved-bank credits at the same time.
+It checks the actual device peak and final allocation count. It also records
+peak pinned staging bytes. The gate allocates no weights or transport state.
+Its budget cannot admit a complete decoder.
+
+The producer changes opaque bytes with a causal recurrence. An independent
+closed-form host reference checks all used bytes. Readback also checks full
+staged buffers and zero capacity padding. Trace rows retain SHA256 values
+and byte counts. The gate checks interleaved lanes, chunk boundaries, saved
+continuation after lane release, rollback, rejected replacement, partial
+producer failure, scratch reset, and credit limits. Select a saved boundary
+before a pool completion to test its retained raw tail.
+
+A pass proves conditional device storage and copy behavior at the given
+plan dimensions. It does not prove checkpoint arithmetic, real state
+producer types, transport, batch kernels, drafting, or token IDs. The
+checkpoint execution refusal remains in force.
+
+For a station kit, `suite CONFIG TYPES CAPACITY PARTS BOUNDARY NEW_DIR`
+runs each rank in fresh child processes. It keeps each process log and stops
+at the first failure. It requires the prebuilt image load notice. It compares
+fresh-run receipts for the same rank. `compare LEFT_DIR RIGHT_DIR` compares
+complete suites from separate devices. It requires matching source, rank
+sets, layout identities, host references, and actual traces. A missing rank,
+incomplete suite, or stale child source fails comparison.

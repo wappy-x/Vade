@@ -1,5 +1,5 @@
 //! Scoped GB10 backend. Persistent buffers and one ordered decode stream.
-use super::*;
+use super::*; #[path = "backend/causal_ops.rs"] mod causal_ops; #[path = "backend/expert_ops.rs"] mod expert_ops;
 #[path = "next_profile.rs"] mod next_profile;
 #[path = "frontend_stream.rs"] mod frontend_stream;
 #[path = "verify_segment.rs"] mod verify_segment;
@@ -15,13 +15,13 @@ pub use tp_mailbox::TpMailbox;
 pub use crate::tp_mailbox_host::{TpMailboxHost, TP_MAILBOX_SLOTS};
 pub use fp8::{Fp8GroupedScratch, Fp8RoutingFlag};
 #[path = "fp4.rs"] mod fp4;
-#[path = "backend/device.rs"] mod device;
+#[path = "backend/device.rs"] mod device; #[path = "backend/ordered_projection.rs"] mod ordered_projection;
 #[path = "backend/weights.rs"] mod weights;
 #[path = "backend/kernels.rs"] mod kernels;
 #[path = "backend/dense_tile.rs"] mod dense_tile;
 #[path = "backend/dense.rs"] mod dense;
-#[path = "backend/mhc.rs"] mod mhc; pub use mhc::{Bf16Vector,ResidentMhc,MhcPass};
-use kernels::AbKernels;
+#[path = "backend/mhc.rs"] mod mhc; pub use mhc::{Bf16Vector,ResidentMhc,MhcPass}; use kernels::AbKernels;
+#[path = "backend/text_edges.rs"] mod text_edges; pub use text_edges::ResidentTextEdges; #[path = "backend/norm.rs"] mod norm; pub use norm::{ResidentNorm,NormOutput}; #[path = "backend/mxfp8_projection.rs"] mod mxfp8_projection; pub use mxfp8_projection::{ResidentMxfp8Projection,Mxfp8ProjectionPass};
 
 pub struct Matrix<'a> { buffer: Buffer<'a>, rows: usize, cols: usize, packed: bool, packed_blocked: bool, stride: usize, row_offset: usize, column_offset: usize, scalar_f32: bool, fp8_scales: Option<Buffer<'a>>, fp8_fragments: bool }
 /// One official-dtype allocation; views are offsets and packing only permutes bytes.
@@ -386,7 +386,7 @@ pub fn with_backend_mode<R>(ordinal: i32, ptx: &CStr, budget: usize, mode: Matve
         let backend = Backend { context: &context, module, mode, vec8: Cell::new(vec8), ab: RefCell::new(None), arm_x: Cell::new(false), use_vec8: Cell::new(requested_vec8), batch: RefCell::new(None), multi: RefCell::new(None),
             moe: RefCell::new(None), fp8: RefCell::new(None), fp4: RefCell::new(None), decode_partials: RefCell::new(None),
             flash_input: RefCell::new(None), flash_mixed: RefCell::new(None), dense_offer: Cell::new(None),
-            uploads: RefCell::new(UploadStaging { buffer: Pinned::new(&context, 4 * 1024 * 1024)?, capacity: 4 * 1024 * 1024, used: 0 }),
+            uploads: RefCell::new(UploadStaging { buffer: Pinned::new(&context, crate::staging::UPLOAD_BYTES)?, capacity: crate::staging::UPLOAD_BYTES, used: 0 }),
             segment: Cell::new(None), capture_position: Cell::new(0), capture_base: Cell::new(0), prompt_order: Cell::new(false), programmatic: Cell::new(false),
             spin_waits: Cell::new(false), profiling: Cell::new(false), profile_kind: Cell::new(None), stats: RefCell::new(BackendStats::default()),
             stream: Stream::new(&context)?, matvec_function: Cell::new(matvec_function), layers: LayerKernels::load(&context), timings: RefCell::new(Vec::new()) };

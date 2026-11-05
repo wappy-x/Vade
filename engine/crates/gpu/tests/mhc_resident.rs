@@ -46,3 +46,17 @@ fn resident_spans_reject_aliases_overflow_and_wrong_extents() {
         let mut bad=spans;bad[i].address=bad[j].address;assert!(boundary::check_spans(&bad,&[2,3,1]).is_err());
     }}
 }
+
+#[test]
+fn grouped_square_loads_keep_the_full_ascending_rms_fold_at_width_tails() {
+    use spark_gpu_probe::{mhc_params::Shape,mhc_reference};
+    for streams in [1u32,2,4] {for hidden in [1u32,2,7,8,9,17,128,515] {
+        let shape=Shape {rows:1,streams,hidden,iterations:4,rms_eps:1e-5,eps:1e-5};shape.validate().unwrap();
+        let x=(0..shape.wide()).map(|i|if i%13==0 {-0.0} else {(i as i32%31-15) as f32*0.037}).collect::<Vec<_>>();
+        let mut squares=0.0f32;for &v in &x {squares+=v*v;}
+        let inv=1.0/(squares/shape.wide() as f32+shape.rms_eps).sqrt();
+        let expected=x.iter().map(|&v|(v*inv).to_bits()).collect::<Vec<_>>();let mut got=vec![f32::NAN;x.len()];
+        mhc_reference::normalize(shape,&x,&mut got);
+        assert_eq!(got.iter().map(|v|v.to_bits()).collect::<Vec<_>>(),expected,"streams={streams} hidden={hidden}");
+    }}
+}

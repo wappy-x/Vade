@@ -3,13 +3,16 @@ pub mod fp8_reference;
 pub mod norm_reference;
 pub mod attention_reference;
 pub mod gdn_reference;
+pub mod first_tokens;
 #[path = "main.rs"]
 mod suite;
 pub(crate) use suite::{Config, Result, http};
 mod timed;
 
 pub fn run(arguments: &[String], interrupted: fn() -> bool) -> Result<i32> {
-    if arguments.first().is_some_and(|arg| arg == "--suite") {
+    if arguments.first().is_some_and(|arg| arg == "--first-tokens") {
+        first_tokens::run(&arguments[1..], interrupted)
+    } else if arguments.first().is_some_and(|arg| arg == "--suite") {
         if arguments[1..]
             .iter()
             .any(|arg| matches!(arg.as_str(), "--help" | "-h"))

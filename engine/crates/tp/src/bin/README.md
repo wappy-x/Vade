@@ -6,6 +6,7 @@
 | --- | --- |
 | [`flash-serve.rs`](flash-serve.rs) | Flash-Next rank service: authenticated HTTP on rank zero, command workers elsewhere. |
 | [`session-state-bytes.rs`](session-state-bytes.rs) | Device allocation and opaque state-copy gate. No checkpoint or model arithmetic. |
+| [`session-plan-check.rs`](session-plan-check.rs) | Conditional physical allocation and continuation gate at deferred plan dimensions. |
 | [`tp-bench.rs`](tp-bench.rs) | TP throughput, strict verification and rollback using the real model. |
 | [`tp-generate.rs`](tp-generate.rs) | Greedy generation with the same device engine used by batched TP. |
 | [`tp-hf-check.rs`](tp-hf-check.rs) | TP prefill/decode qualification against saved independent HF fixtures. |
@@ -91,3 +92,9 @@ qualification remain a separate gate. See [rows admission](../../../../docs/flas
 **How it fits:** see the [`spark-tp` README](../../README.md) for what the crate does and how it connects to the rest.
 
 **Back:** [Up one folder](../README.md) · **Docs:** [index](../../../../../docs/README.md)
+# Plain FP32 probe
+
+[`ordered-projection-check.rs`](ordered-projection-check.rs) checks isolated logical FP32 projection bytes through retained checkpoint files.
+The [contract](../../ORDERED-PROJECTION.md) states its proof limits.
+`checkpoint-prefix-check.rs` joins real stored embedding rows to attention mHC and input norm.
+See [the prefix cell](../../CHECKPOINT-PREFIX.md) for its primitive scope and remaining decoder cells.

@@ -20,12 +20,26 @@ pub mod load;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // CUDA wait registrations are Linux-only.
 pub mod teardown;
 pub mod host_prep;
+pub mod ordered_projection;
 pub mod routing;
 pub mod frontend_math;
 pub mod router_abi;
 pub mod qsa;
 pub mod mhc_params;
 pub mod mhc_boundary;
+pub mod text_edges;
+pub mod text_reference;
+pub mod dynamic_mxfp8;
+pub mod mxfp8_quantize;
+pub mod causal_ops;
+pub mod latent_ops;
+pub mod expert_ops;
+#[allow(dead_code)]
+#[path = "../kernels/src/qsa_common.rs"] mod qsa_common;
+#[path = "../kernels/src/mhc_math.rs"] pub mod mhc_reference;
+pub mod mxfp8_projection;
+pub mod staging;
+pub mod norm_boundary;
 #[cfg(target_os = "linux")]
 mod qsa_device;
 #[path = "../kernels/src/bf16.rs"]

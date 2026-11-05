@@ -731,3 +731,30 @@ fn the_split_accepts_only_worlds_that_cut_every_matrix() {
     assert_eq!(tensor_split(true, 5, false, true, || split_accepts(&config, 5)), Ok(false));
     assert_eq!(tensor_split(true, 4, false, true, || split_accepts(&config, 4)), Ok(true));
 }
+
+/// Admission only. This option never selects arithmetic or a precision policy.
+pub fn diagnostic_text(options:&[String])->Result<bool,String> {
+    let mut seen=false;let mut options=options.iter();
+    while let Some(option)=options.next() {match option.as_str() {
+        "--diagnostic-unqualified-text"=>{if seen {return Err("duplicate --diagnostic-unqualified-text".into());}seen=true;},
+        "--mtp"|"--api-key-file"=>{options.next();},
+        _=>{},
+    }}Ok(seen)
+}
+#[test]
+fn diagnostic_text_is_explicit_and_cannot_be_an_option_value() {
+    let values=|v:&[&str]|v.iter().map(|s|s.to_string()).collect::<Vec<_>>();
+    assert!(!diagnostic_text(&[]).unwrap());
+    assert!(diagnostic_text(&values(&["--mtp","0","--diagnostic-unqualified-text"])).unwrap());
+    assert!(!diagnostic_text(&values(&["--api-key-file","--diagnostic-unqualified-text"])).unwrap());
+    assert!(diagnostic_text(&values(&["--diagnostic-unqualified-text","--diagnostic-unqualified-text"])).is_err());
+}
+
+pub fn diagnostic_text_bind(bind:std::net::SocketAddr)->Result<(),String> {
+    if bind.ip().is_loopback() {Ok(())} else {Err("--diagnostic-unqualified-text requires a loopback HTTP bind".into())}
+}
+#[test]
+fn unqualified_text_never_binds_a_remote_http_listener() {
+    for value in ["127.0.0.1:18080","[::1]:18080"] {assert!(diagnostic_text_bind(value.parse().unwrap()).is_ok());}
+    for value in ["0.0.0.0:18080","[::]:18080","192.0.2.1:18080"] {assert!(diagnostic_text_bind(value.parse().unwrap()).is_err());}
+}

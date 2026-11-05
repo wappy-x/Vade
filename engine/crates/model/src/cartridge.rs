@@ -17,6 +17,19 @@ pub struct Cartridge {
 }
 
 impl Cartridge {
+    /// Header admission for the complete-row text service. The caller must bind
+    /// its decoder, row transport, tokenizer and session memory before listening.
+    pub fn resident_text(root:&Path)->Result<Option<crate::plan::admission::CheckpointAdmission>> {
+        let bytes=safetensors::read_bounded(&root.join("config.json"),crate::shapes::CONFIG_BYTES)?;
+        let doc=json::parse(&bytes,json::Limits {bytes:crate::shapes::CONFIG_BYTES,..Default::default()})?;
+        let Some(d)=crate::plan::description::deferred_description(&doc).map_err(|e|invalid(e.to_string()))? else {return Ok(None);};
+        let sidecar=root.join("hf_quant_config.json");
+        if sidecar.try_exists()? && crate::plan::storage::StorageMap::from_json(&safetensors::read_bounded(&sidecar,crate::shapes::CONFIG_BYTES)?)?!=d.storage {
+            return Err(invalid("text storage config and quantization sidecar differ"));
+        }
+        let index=safetensors::read_bounded(&root.join("model.safetensors.index.json"),crate::shapes::HEADER_BYTES)?;
+        d.open_headers(root,&index).map(Some)
+    }
     /// Includes bounded execution/staging reserve; driver and OS stay outside this budget.
     pub fn fit(&self, context_tokens: u64, budget_bytes: u64) -> Result<Fit> {
         if context_tokens == 0 || context_tokens > self.max_positions { return Err(invalid(engine_base::admission::token_refusal(context_tokens as u128, self.max_positions as usize, &format!("CONTEXT={context_tokens}; OUTPUT included in CONTEXT; context must be positive"), "the cartridge position ceiling", engine_base::admission::SERVE))); }
@@ -36,6 +49,9 @@ impl Cartridge {
         let string = |o: &std::collections::BTreeMap<String, json::Value>, key: &str|
             o.get(key).and_then(|v| v.string().ok()).unwrap_or("").to_owned();
         let model_type = string(object, "model_type");
+        let deferred_reason = crate::plan::description::deferred_description(&doc)
+            .map_err(|e| invalid(e.to_string()))?
+            .and_then(|d| d.require_resident_service().err()).map(|e| e.to_string());
         let classes = object.get("architectures").map(|v| v.array()).transpose()?
             .unwrap_or(&[]).iter().map(|v| v.string()).collect::<Result<Vec<_>>>()?;
         let dense = model_type == "qwen3" && classes.as_slice() == ["Qwen3ForCausalLM"];
@@ -71,7 +87,7 @@ impl Cartridge {
                 },
                 Err(e) => (None, Some(e.to_string())),
             }
-        } else { (None, Some("architecture has no spark-serve backend".into())) };
+        } else { (None, Some(deferred_reason.unwrap_or_else(|| "architecture has no spark-serve backend".into()))) };
         let (gemma4, reason) = if model_type == "gemma4" {
             match gemma4::Config::parse(&bytes) {
                 Ok(c) => (Some(c), None),
@@ -220,7 +236,10 @@ impl Kind {
             "qwen4_exp" => Ok(Self::FlashNext),
             "qwen3_5" | "qwen3_5_moe" => Ok(Self::Qwen3_5),
             "gemma4" => Ok(Self::Gemma4),
-            other => Err(invalid(format!("unsupported cartridge model_type {other}"))),
+            other => match crate::plan::description::deferred_description(&doc).map_err(|e| invalid(e.to_string()))? {
+                Some(description) => description.require_resident_service().map(|never| match never {}).map_err(|e| invalid(e.to_string())),
+                None => Err(invalid(format!("unsupported cartridge model_type {other}"))),
+            },
         }
     }
 }

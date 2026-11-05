@@ -286,8 +286,8 @@ impl<'a> Backend<'a> {
     pub fn model_elementwise_device(&self, input: &DeviceVector<'_>, peer: Option<&DeviceVector<'_>>,
         output: &DeviceVector<'_>, elements: usize, operation: u32, scalar: f32) -> Result<(), String> {
         self.check_vector_prefix(input, elements)?; self.check_vector_prefix(output, elements)?;
-        if operation > 3 || !scalar.is_finite() || operation == 3 && scalar <= 0.0 { return Err("invalid model elementwise operation".into()); }
-        if operation == 1 || operation == 2 { self.check_vector_prefix(peer.ok_or("missing model peer")?, elements)?; }
+        if operation > 4 || !scalar.is_finite() || operation == 3 && scalar <= 0.0 { return Err("invalid model elementwise operation".into()); }
+        if matches!(operation,1|2|4) { self.check_vector_prefix(peer.ok_or("missing model peer")?, elements)?; }
         let mut a = crate::kernel_params::ModelElementwise { input: input.buffer.address,
             peer: peer.map_or(0, |p| p.buffer.address), output: output.buffer.address,
             elements: u32::try_from(elements).map_err(|_| "elementwise size overflow")?, operation, scalar };

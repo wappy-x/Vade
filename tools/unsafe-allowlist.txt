@@ -2,6 +2,8 @@
 # Crate path, source path in crate, item name, kind and ordinal, optional ruling. Fields use tabs.
 # Frozen rows record legacy sites. A new ordinary unsafe fn needs its own ruling.
 # Keys do not bind signatures, source tokens or safety contracts.
+engine/crates/gpu	src/backend/text_edges.rs	impl:Backend::fn:text_mean	block:1
+engine/crates/gpu	src/backend/text_edges.rs	impl:ResidentTextEdges::fn:project_fp32	block:1
 cli	src/app/tests/owner_dispatch.rs	fn:alternate_start_and_every_lifecycle_command_keep_the_explicit_controller	block:1	frozen ruling 2026-11-02 11:54
 cli	src/app/tests/owner_dispatch.rs	fn:alternate_start_and_every_lifecycle_command_keep_the_explicit_controller	block:2	frozen ruling 2026-11-02 11:54
 cli	src/app/tests/owner_dispatch.rs	impl:Drop for SupervisedChild::fn:drop	block:1	frozen ruling 2026-11-02 11:54
@@ -2236,3 +2238,11 @@ engine/crates/gpu/kernels	src/mhc_boundary.rs	fn:mhc_bf16_collapse	block:1
 engine/crates/gpu/kernels	src/mhc_boundary.rs	fn:mhc_bf16_combine	block:1
 engine/crates/gpu	src/backend/mhc.rs	impl:Backend::fn:round_bf16_lanes	block:1
 engine/crates/gpu/kernels	src/mhc_boundary.rs	fn:bf16_lanes_round	block:1
+engine/crates/gpu	src/backend/mxfp8_projection.rs	impl:ResidentMxfp8Projection::fn:apply	block:1
+engine/crates/gpu	src/ordered_projection_kernel.rs	fn:project_f32_ordered	block:1
+# Causal site accounting: reports/own-glm-expert-path-r1.txt, RULING 14:18.
+# Output initialization fix: 2ada7f62d. Independent merge safety review stays required.
+engine/crates/gpu	src/backend/expert_ops.rs	impl:Backend::fn:expert_operation	block:1	ruling 2026-11-04 14:16
+engine/crates/gpu/kernels	src/expert_ops.rs	fn:expert_operation	block:1	ruling 2026-11-04 14:16
+engine/crates/gpu	src/backend/causal_ops.rs	impl:Backend::fn:causal_operation	block:1	ruling 2026-11-04 14:18
+engine/crates/gpu/kernels	src/causal_ops.rs	fn:causal_operation	block:1	ruling 2026-11-04 14:18

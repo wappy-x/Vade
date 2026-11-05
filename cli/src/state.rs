@@ -179,6 +179,7 @@ pub struct Session {
     pub cache_bytes: Option<u64>,
     /// The engine's decode_fuse option, passed in the engine arguments.
     pub decode_fuse: bool,
+    pub diagnostic_unqualified_text: bool,
     pub local_port: u16,
     pub serve_port: u16,
     pub ranks: Vec<Rank>,
@@ -304,8 +305,8 @@ impl Session {
             build: manifest.engine_sha.clone(),
             cli_build: manifest.cli_sha.clone(),
             supports_output: manifest.supports_output,
-            mtp: options.mtp,
-            mtp_explicit: options.mtp_explicit || !options.fp4_local,
+            mtp: if options.diagnostic_unqualified_text && !options.mtp_explicit {0} else {options.mtp},
+            mtp_explicit: options.mtp_explicit || !options.fp4_local || options.diagnostic_unqualified_text,
             fp4_local: options.fp4_local,
             context: options.context,
             output: options.output,
@@ -314,7 +315,8 @@ impl Session {
             fast_prompts: options.fast_prompts,
             memory_bytes,
             cache_bytes,
-            decode_fuse: options.decode_fuse.unwrap_or(options.fp4_local && group == 1),
+            decode_fuse: options.decode_fuse.unwrap_or(options.fp4_local && group == 1 && !options.diagnostic_unqualified_text),
+            diagnostic_unqualified_text: options.diagnostic_unqualified_text,
             local_port: config.local_port,
             serve_port: config.serve_port,
             ranks,
@@ -370,9 +372,10 @@ impl Session {
             rank.listen.clone(), rank.next.clone(), rank.artifact.ptx.clone(),
             rank.machine.model_path.clone(), self.context.to_string(),
             format!("127.0.0.1:{}", self.serve_port), "0".into()];
-        if self.fp4_local { args.push("--fp4-local".into()); }
+        if self.fp4_local && !self.diagnostic_unqualified_text { args.push("--fp4-local".into()); }
+        if self.diagnostic_unqualified_text {args.push("--diagnostic-unqualified-text".into());}
         if self.mtp_explicit { args.extend(["--mtp".into(), self.mtp.to_string()]); }
-        if self.decode_fuse || size == 1 { args.extend(["--decode-fuse".into(), if self.decode_fuse { "on" } else { "off" }.into()]); }
+        if !self.diagnostic_unqualified_text && (self.decode_fuse || size == 1) { args.extend(["--decode-fuse".into(), if self.decode_fuse { "on" } else { "off" }.into()]); }
         args
     }
     /// `TP_TOPOLOGY` for this session: "ring" for a two-Spark chain, else "path".
@@ -435,6 +438,7 @@ impl Session {
         ] {
             fields.insert(key.into(), value);
         }
+        if self.diagnostic_unqualified_text {fields.insert("diagnostic_unqualified_text".into(),"true".into());}
         if let Some(fingerprint) = &self.launch_fingerprint {
             fields.insert("launch_fingerprint".into(), fingerprint.clone());
         }
@@ -558,6 +562,7 @@ impl Session {
             memory_bytes: f.get("memory_bytes").map(|_| number(&f, "memory_bytes")).transpose()?,
             cache_bytes: f.get("cache_bytes").map(|_| number(&f, "cache_bytes")).transpose()?,
             decode_fuse: f.get("decode_fuse").map(|value| boolean(value)).transpose()?.unwrap_or(false),
+            diagnostic_unqualified_text: f.get("diagnostic_unqualified_text").map(|value| boolean(value)).transpose()?.unwrap_or(false),
             local_port: number(&f, "local_port")?,
             serve_port: number(&f, "serve_port")?,
             ranks,
@@ -578,7 +583,7 @@ impl Session {
             || (session.replica_sparks > 1 && (!session.replicas || session.ranks.len() % session.replica_sparks != 0))
             || session.mtp > 3
             || !(4096..=262144).contains(&session.context)
-            || !(1024..=session.context).contains(&session.output)
+            || !((if session.diagnostic_unqualified_text {1} else {1024})..=session.context).contains(&session.output)
             || [session.chats, session.admitted_chats].into_iter().flatten().any(|chats| !(1..=32).contains(&chats))
             || (!session.supports_output && session.output != session.context.min(8192))
             || session.memory_bytes == Some(0)

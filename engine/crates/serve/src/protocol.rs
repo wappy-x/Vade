@@ -7,12 +7,26 @@ pub struct ChatInput {
     pub messages: Vec<String>,
     pub tools: Vec<String>,
     pub enable_thinking: bool,
-    pub reasoning_effort: engine_tokenizer::chat::ReasoningEffort,
+    pub reasoning_effort: ReasoningEffort,
     pub tool_choice: ToolChoice,
     pub parallel_tool_calls: bool,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum ToolChoice { #[default] Auto, None, Required, Named(String) }
+/// Keep the requested high effort for templates that distinguish high from max.
+/// Qwen retains its existing high-to-xhigh alias.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReasoningEffort { Low, Medium, High, #[default] XHigh }
+impl ReasoningEffort {
+    pub fn qwen(self) -> engine_tokenizer::chat::ReasoningEffort {
+        use engine_tokenizer::chat::ReasoningEffort as Qwen;
+        match self { Self::Low => Qwen::Low, Self::Medium => Qwen::Medium, Self::High | Self::XHigh => Qwen::XHigh }
+    }
+    pub fn name(&self) -> &'static str { self.qwen().name() }
+    pub(crate) fn glm(self) -> &'static str {
+        match self { Self::Low => "low", Self::High => "high", Self::Medium | Self::XHigh => "max" }
+    }
+}
 impl ChatInput {
     /// Only forced choices open a call or suppress the normal thought channel.
     pub fn forced_tool_choice(&self) -> bool {
@@ -563,15 +577,16 @@ fn cancel_key(value: &Value) -> Result<crate::cache::SessionKey, String> {
 /// Qwen3.8's official effort names are low, medium and xhigh. OpenAI high
 /// aliases xhigh; none/minimal preserve the existing explicit thinking disable.
 /// Validate effort even when enable_thinking decides the thought channel.
-fn reasoning_effort(object: &std::collections::BTreeMap<String, Value>) -> Result<Option<(bool, engine_tokenizer::chat::ReasoningEffort)>, String> {
-    use engine_tokenizer::chat::ReasoningEffort::{Low, Medium, XHigh};
+fn reasoning_effort(object: &std::collections::BTreeMap<String, Value>) -> Result<Option<(bool, ReasoningEffort)>, String> {
+    use ReasoningEffort::{Low, Medium, High, XHigh};
     let Some(effort) = present(object, "reasoning_effort") else { return Ok(None);
     };
     match effort.string() {
         Ok("none" | "minimal") => Ok(Some((false, XHigh))),
         Ok("low") => Ok(Some((true, Low))),
         Ok("medium") => Ok(Some((true, Medium))),
-        Ok("high" | "xhigh" | "max" | "ultra") => Ok(Some((true, XHigh))),
+        Ok("high") => Ok(Some((true, High))),
+        Ok("xhigh" | "max" | "ultra") => Ok(Some((true, XHigh))),
         _ => Err("reasoning effort must be none, minimal, low, medium, high, xhigh, max or ultra".into()),
     }
 }
@@ -789,6 +804,30 @@ pub(crate) fn raw_array(source: &str) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod sampling_tests {
     use super::*;
+    #[test]
+    fn explicit_stops_match_at_each_unicode_chunk_boundary() {
+        for stops in [vec!["雪🚀".to_owned(), "END".to_owned()], vec!["END".to_owned(), "雪🚀".to_owned()]] {
+            let text = "é start 雪🚀 tail END";
+            let boundaries = text.char_indices().map(|(i,_)| i).chain(std::iter::once(text.len())).collect::<Vec<_>>();
+            for &first in &boundaries { for &second in boundaries.iter().filter(|&&i| i >= first) {
+                let mut buffer = StopBuffer::default();
+                let mut out = String::new();
+                for part in [&text[..first], &text[first..second], &text[second..]] { out.push_str(&buffer.push(part, &stops)); }
+                assert_eq!(out, "é start ");
+                assert!(buffer.matched && buffer.pending.is_empty());
+                assert_eq!(buffer.matched_sequence.as_deref(), Some("雪🚀"));
+                assert!(buffer.push("later", &stops).is_empty());
+            } }
+        }
+        let mut buffer = StopBuffer::default();
+        assert_eq!(buffer.push("keep 雪", &["雪🚀".into()]), "keep ");
+        assert!(!buffer.matched);
+        assert_eq!(buffer.pending, "雪", "a length or EOS stop must flush this unmatched suffix");
+        for raw in [r#""""#, r#"[""]"#] {
+            let body = format!(r#"{{"prompt":"go","stop":{raw}}}"#);
+            assert!(parse(body.as_bytes(), false, &Limits::default()).is_err());
+        }
+    }
     #[test]
     fn an_echo_prints_the_event_snapshot_it_owns() {
         let request = parse(br#"{"prompt_token_ids":[1]}"#, false, &Limits::default()).unwrap();

@@ -12,6 +12,21 @@ validate different fields. The description ignores the root vision config.
 The adapter records a vision gap when that config is present. It does not
 validate the vision fields. Neither deferred result can enable execution.
 
+`TextDescription::require_resident_service` keeps service admission closed.
+Its success type is `Infallible`. No metadata flag can supply that value.
+The description's `into_model_plan`, cartridge preflight, and executable-kind
+detection use this refusal. Cartridge inspection keeps the same refusal reason.
+Preflight rejects the description before it reads a weight index or tokenizer.
+The supported cartridge paths keep their existing config and weight checks.
+
+The refusal names the absent complete resident decoder and service Factory.
+Individual primitives and complete headers do not supply complete producers.
+Layer, text, causal state, and ordered transport bindings remain open.
+Source precision, casts, quantizers, and reductions still need qualification.
+Tokenizer, chat template, stop set, appended prediction semantics, and token-ID
+proof remain open. This boundary adds no request policy or execution kind.
+The [host refusal tests](tests/service_admission.rs) cover this distinction.
+
 `ModelPlan::from_config` now calls `plan::adapter::ConfigPlan::from_config`
 and then `into_model_plan`. GLM returns `MissingOps` at that boundary.
 Qwen continues to use `plan::config` through the supported adapter branch.

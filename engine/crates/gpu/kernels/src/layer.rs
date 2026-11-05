@@ -648,6 +648,7 @@ pub unsafe extern "ptx-kernel" fn model_elementwise(a: crate::kernel_params::Mod
     if i >= a.elements as usize { return; }
     let x = *(a.input as *const f32).add(i);
     let y = match a.operation {
+        4 => x * *(a.peer as *const f32).add(i),
         1 => round_bf16(x + *(a.peer as *const f32).add(i)),
         2 => {
             let z = 0.7978845608028654 * (x + 0.044715 * x * x * x);

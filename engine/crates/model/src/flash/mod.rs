@@ -4,6 +4,7 @@ pub mod manifest;
 pub mod mixed;
 pub mod mxfp8;
 pub mod nvfp4;
+pub mod activation_nvfp4;
 pub mod plan;
 pub mod refcpu;
 pub mod shard;

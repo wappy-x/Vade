@@ -103,3 +103,15 @@ It saves actual buffers before comparison and rejects a reused output directory.
 It also compares reversed single-row execution with batched execution.
 Its fixtures check primitive arithmetic and the explicit BF16 boundaries.
 They do not supply a checkpoint layer oracle or a complete GLM gate.
+
+The [resident operand adapters](RESIDENT-OPERANDS.md) bind stored-precision norms,
+plain BF16 projections, and an owned mHC residual prefix.
+They retain the full layer refusal. They do not supply a complete decoder.
+
+The [causal layer probe](CAUSAL-LAYER.md) connects the complete KDA and dense
+producer sequence. It checks candidate recipe bytes. It does not open the
+service, distributed transport, full stack, or drafting gates.
+
+The [bounded decoder probe](BOUNDED-DECODER.md) connects the other layer
+recipes and a text Factory. Its explicit command retains the public
+cartridge refusal and the open transport, long-context, and drafting gates.

@@ -39,6 +39,15 @@ fn nested_weight_identity() {
     )
     .unwrap();
     assert_eq!(Identity::load(&root).unwrap().weight_bytes, 10);
+    let embedded=Identity::load(&root).unwrap().fingerprint();
+    std::fs::write(root.join("chat_template.jinja"),b"template").unwrap();
+    std::fs::write(root.join("tokenizer_config.json"),b"{}").unwrap();
+    assert_eq!(Identity::load(&root).unwrap().fingerprint(),embedded);
+    std::fs::write(root.join("tokenizer_config.json"),br#"{"chat_template":"template"}"#).unwrap();
+    let metadata=crate::metadata::Metadata::resident_text(&Identity::load(&root).unwrap(),2,"ring");
+    let diagnostic=json::parse(metadata.json().as_bytes(),json::Limits::default()).unwrap();
+    assert_eq!(diagnostic.object().unwrap().get("qualification").unwrap().string().unwrap(),"unqualified");
+    assert_eq!(diagnostic.object().unwrap().get("diagnostic_option").unwrap().string().unwrap(),"--diagnostic-unqualified-text");
     std::fs::write(
         root.join("config.json"),
         r#"{"model_type":"qwen4_exp","quantization_config":{"quant_method":"fp8"}}"#,
@@ -72,23 +81,18 @@ impl Identity {
             .map_err(|e| e.to_string())?;
         let kind = value.object().map_err(|e| e.to_string())?.get("model_type")
             .and_then(|v| v.string().ok()).unwrap_or("");
-        let thinking = matches!(kind, "qwen3" | "qwen3_moe" | "qwen3_5" | "qwen3_5_moe" | "qwen4_exp" | "gemma4");
+        let thinking = matches!(kind, "qwen3" | "qwen3_moe" | "qwen3_5" | "qwen3_5_moe" | "qwen4_exp" | "gemma4" | "glm5_next" | "glm5_next_text");
         let tools = thinking || kind == "llama";
         let mut names = std::fs::read_dir(root).map_err(|_| "cannot list checkpoint artifacts")?
             .map(|entry| entry.map(|e| e.path()).map_err(|_| "cannot list checkpoint artifact"))
             .collect::<Result<Vec<_>, _>>()?;
         names.retain(|p| p.extension().is_some_and(|s| s == "safetensors"));
-        // Mixed ModelOpt checkpoints keep their indexed shards in subdirectories.
-        // Use the loader's validated names and still reject symlink escapes.
+        // Indexed checkpoints can keep shards in subdirectories. Use the
+        // validated index names and still reject symlink escapes.
         if names.is_empty()
-            && value
-                .object()
-                .map_err(|e| e.to_string())?
-                .get("quantization_config")
-                .is_some_and(|q| {
-                    q.object()
-                        .is_ok_and(|q| engine_model::flash::mixed::Mixed::parse(q).is_ok())
-                })
+            && (matches!(engine_model::plan::ConfigPlan::from_config(&config),Ok(engine_model::plan::ConfigPlan::Deferred(_)))
+                || value.object().map_err(|e|e.to_string())?.get("quantization_config")
+                    .is_some_and(|q|q.object().is_ok_and(|q|engine_model::flash::mixed::Mixed::parse(q).is_ok())))
             && root
                 .join("model.safetensors.index.json")
                 .try_exists()
@@ -157,7 +161,7 @@ impl Identity {
         let Value::Object(ref mut fields) = config else { return Err("invalid tokenizer configuration".into()); };
         // Gemma renders the separate canonical artifact; other families use the
         // embedded text. Optional copies are validated by the Flash loader.
-        let template = if kind == "gemma4" {
+        let template = if kind == "gemma4" || !fields.contains_key("chat_template") {
             String::from_utf8(read("chat_template.jinja")?).map_err(|_| "invalid template UTF-8")?
         } else {
             json::field(fields, "chat_template").and_then(Value::string)
@@ -170,7 +174,9 @@ impl Identity {
             include_bytes!("../../tokenizer/src/chat/llama.rs").as_slice(),
             include_bytes!("../../tokenizer/src/chat/gemma4.rs").as_slice(),
             include_bytes!("../../tokenizer/src/lib.rs").as_slice(),
+            include_bytes!("tokenizer/glm.rs").as_slice(),
             include_bytes!("tokenizer.rs").as_slice(), include_bytes!("protocol.rs").as_slice(),
+            include_bytes!("chat_output.rs").as_slice(), include_bytes!("chat_output/glm.rs").as_slice(),
             include_bytes!("responses.rs").as_slice(), include_bytes!("anthropic.rs").as_slice()] {
             renderer.extend_from_slice(&(source.len() as u64).to_le_bytes());
             renderer.extend_from_slice(source);
@@ -182,6 +188,8 @@ impl Identity {
         format!("{{\"weights\":{{\"fingerprint\":\"sha256:{}\",\"fingerprint_kind\":\"safetensors_header_metadata\",\"artifact_bytes\":{}}},\"tokenizer_fingerprint\":\"sha256:{}\",\"template_fingerprint\":\"sha256:{}\"}}",
             self.weights, self.weight_bytes, self.tokenizer, self.template)
     }
+    /// Metadata identity only. This does not hash weight payload bytes.
+    pub fn fingerprint(&self)->String {sha256::digest(self.json().as_bytes())}
 }
 
 /// A fresh load epoch. Reporting identifiers confer no rights and never select KV.
@@ -238,6 +246,7 @@ pub(crate) fn admission<T: Tokenizer>(body: &[u8], context: usize, vocab: usize,
     let http = http::HttpRequest { path: endpoint.into(), body: raw.as_bytes().to_vec(), authorization: None };
     let (request, prompt, _, _) = http::render_request(&http, context, tokenizer, limits, model, Some(reservation))?;
     http::validate_token_mapping(&prompt, tokenizer)?;
+    http::validate_stop_mapping(eos, tokenizer)?;
     let error = if endpoint == "/v1/messages/count_tokens" {
         http::validate_count_prompt(&prompt, context, vocab, tokenizer, limits).err()
     } else { generation::validate_bounds(context, vocab, eos, &prompt, request.max_tokens, limits).err() };

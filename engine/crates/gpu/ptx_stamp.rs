@@ -71,7 +71,8 @@ fn source_files(root: &Path) -> io::Result<Vec<PathBuf>> {
     }
     let mut files = vec![root.join("kernels/Cargo.toml"), root.join("kernel_params.rs"), root.join("src/fp8_abi.rs"), root.join("src/fp4_abi.rs"),
         root.join("src/projection_params.rs"), root.join("src/gdn_params.rs"), root.join("src/next_params.rs"), root.join("src/router_abi.rs"), root.join("src/mhc_params.rs"),
-        root.join("src/mhc_boundary.rs"), root.join("src/tp_payload.rs"),
+        root.join("src/mhc_boundary.rs"), root.join("src/tp_payload.rs"), root.join("src/expert_ops.rs"), root.join("src/next_math.rs"),
+        root.join("src/causal_ops.rs"), root.join("src/latent_ops.rs"), root.join("src/mxfp8_quantize.rs"),
         root.join("build-kernels/src/main.rs"), root.join("ptx_stamp.rs")];
     visit(&root.join("kernels/src"), &mut files)?;
     files.sort();
@@ -149,7 +150,7 @@ pub fn verify(root: &Path, ptx: &Path, bytes: &[u8], variant: Variant) -> io::Re
 mod tests {
     use super::*;
     #[test]
-    fn shared_mhc_cast_source_is_part_of_the_ptx_identity() {
+    fn shared_cast_and_expert_sources_are_part_of_the_ptx_identity() {
         let manifest=Path::new(env!("CARGO_MANIFEST_DIR"));
         // This module is also included by serving build-metadata tests.
         let candidates=[manifest.to_path_buf(),manifest.join(".."),manifest.join("../gpu")];
@@ -163,7 +164,8 @@ mod tests {
             let copy=scratch.join(file.strip_prefix(root).unwrap());
             fs::create_dir_all(copy.parent().unwrap()).unwrap();fs::copy(file,copy).unwrap();
         }
-        let shared=scratch.join("src/mhc_boundary.rs");let original=fs::read(&shared).unwrap();
+        for path in ["src/mhc_boundary.rs","src/expert_ops.rs","src/next_math.rs"] {
+        let shared=scratch.join(path);let original=fs::read(&shared).unwrap();
         // A host cast edit must invalidate either previously stamped image.
         for variant in [Variant::Production,Variant::Fp4] {
             fs::write(&shared,&original).unwrap();
@@ -174,6 +176,8 @@ mod tests {
             verify(&scratch,&ptx,&bytes,variant).unwrap();
             fs::write(&shared,[original.as_slice(),b"\n// changed cast\n"].concat()).unwrap();
             assert!(verify(&scratch,&ptx,&bytes,variant).unwrap_err().to_string().contains("stale PTX"));
+        }
+        fs::write(&shared,&original).unwrap();
         }
         fs::remove_dir_all(scratch).unwrap();
     }

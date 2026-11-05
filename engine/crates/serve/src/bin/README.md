@@ -8,6 +8,7 @@
 | [`serve-draft-check.rs`](serve-draft-check.rs) | Compare streamed IDs and text over HTTP, with cold prefill for every mode. |
 | [`serve-http-check.rs`](serve-http-check.rs) | Focused actual-server check: branch equality, foreground latency, cancellation. |
 | [`spark-serve.rs`](spark-serve.rs) | The `spark-serve` program. |
+| [`text-check.rs`](text-check.rs) | Check pinned text vectors and original checkpoint embedding and head bytes. See the [probe contract](../../TEXT-CHECK.md). |
 | [`spark-serve/`](spark-serve/README.md) | Folder: see its README. |
 
 **Why a folder:** Cargo builds every file in a `bin/` folder as its own program.

@@ -3,7 +3,7 @@ use spark_serve::{Engine, Limits, budget::Sizing, cache::CacheLimits, scheduler}
 use spark_gpu_probe::driver::Backend;
 use spark_gpu_probe::admission::{refusal, CUDA, SERVE};
 use std::{net::TcpListener, path::Path, sync::atomic::{AtomicBool, Ordering}};
-pub fn serve(b: &Backend<'_>, checkpoint: &Path, listener: &TcpListener, tokenizer: &mut engine_tokenizer::Tokenizer,
+pub fn serve(b: &Backend<'_>, checkpoint: &Path, listener: &TcpListener, tokenizer: &mut spark_serve::tokenizer::ModelTokenizer,
     limits: &mut Limits, sizing: &Sizing, output_bytes_explicit: bool, sharing: scheduler::Sharing, prefix_cache: bool,
     assistant: Option<&Path>, draft_mode: spark_serve::protocol::DraftMode, draft_k: Option<usize>, shutdown: &AtomicBool, admin: &mut scheduler::ModelAdmin) -> Result<(), String> {
     let c = engine_model::cartridge::Cartridge::preflight(checkpoint).map_err(|e| e.to_string())?.gemma4.ok_or("expected Gemma text")?;

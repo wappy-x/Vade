@@ -2,6 +2,8 @@
 # These entries require review. They do not approve an execution path.
 # rule Cargo-package qualified-item exact-site-count
 # decode_fuse (config flag, ruling Q-FUSE-FLAG 2026-11-02): remove when the chain is the only path on every size it serves.
+# The resident diagnostic validates its declared pair size. It does not choose an arithmetic path.
+topology-branch spark-tp bin::resident_decode_check::run_pair 1
 env-read engine-fabric profile::enabled 1
 env-read engine-fabric profile::layers_enabled 1
 env-read engine-model flash::WeightFormat::opt_in 1
@@ -457,6 +459,11 @@ topology-branch spark-serve mtp_batch::Experiments::resolve 2
 topology-branch spark-serve mtp_batch::cohort_cost_world_value 1
 topology-branch spark-tp bin::flash_serve::run 11
 topology-branch spark-tp bin::next_tp::run 2
+# Offline projection proof validation checks saved topology and a complete rank set. It selects no arithmetic path.
+topology-branch spark-tp bin::ordered_projection_check::compare_split 2
+topology-branch spark-tp bin::ordered_projection_check::validate 1
+# Operand probe admission rejects missing or repeated ranks. It selects no arithmetic path.
+topology-branch spark-tp bin::resident_layer_check::compare_split 1
 topology-branch spark-tp bin::tp_generate::run 10
 topology-branch spark-tp bin::tp_launch::run 9
 topology-branch spark-tp bin::tp_serve::run 3
