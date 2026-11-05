@@ -2,7 +2,7 @@
 
 <picture>
   <source media="(prefers-reduced-motion: reduce)" srcset="docs/assets/vade-banner-static.png">
-  <img src="docs/assets/vade-banner.webp" width="100%" alt="VADE drawn in lit monospace characters over a slow field of dots and dashes, as on getvade.com, above one line of text: Pure-Rust inference engine for the DGX Spark.">
+  <img src="docs/assets/vade-banner.webp" width="100%" alt="VADE drawn in lit monospace characters over a slow field of dots and dashes, as on vade.lol, above one line of text: Pure-Rust inference engine for the DGX Spark.">
 </picture>
 
 Vade is an inference engine for the NVIDIA DGX Spark. It is written in Rust from the GPU kernels up, and it has zero third-party crates. Its one rule is exactness: the same request, with the same settings, gives the same answer every time, and linking Sparks together does not change that.
@@ -12,7 +12,7 @@ The kernels compile to PTX, NVIDIA's portable GPU assembly, and use short inline
 One command installs it. One more pulls the model, 102 GB. One more starts it.
 
 ```sh
-curl -fsSL https://getvade.com/install.sh | sh
+curl -fsSL https://vade.lol/install.sh | sh
 ```
 
 If you want to check the script before you run it, its SHA-256 is at https://dl.vade.lol/install.sh.sha256.
@@ -40,7 +40,7 @@ You need a DGX Spark with curl, a driver with CUDA 13.0 or newer, and nothing el
 Run these three commands on the Spark. Allow time for the download and the first full model check.
 
 ```sh
-curl -fsSL https://getvade.com/install.sh | sh
+curl -fsSL https://vade.lol/install.sh | sh
 vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300
 vade up
 ```

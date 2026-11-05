@@ -4,7 +4,7 @@ This page covers starting `nvidia/Qwen3.8-Flash-Next-FP4-Local` from a
 controller, on one Spark or on a chain of up to 24. Start with
 [INSTALL.md](../../docs/INSTALL.md). On the Spark itself, without a controller, use
 the [quick start](../../docs/INSTALL.md#quick-start-on-one-spark) instead:
-`curl -fsSL https://getvade.com/install.sh | sh`, `vade pull`, then `vade up`.
+`curl -fsSL https://vade.lol/install.sh | sh`, `vade pull`, then `vade up`.
 
 ## Defaults
 

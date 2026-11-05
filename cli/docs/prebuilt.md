@@ -1,7 +1,7 @@
 # Prebuilt installation
 
 Vade can run from ready-made binaries instead of compiling them. The one-line
-install, `curl -fsSL https://getvade.com/install.sh | sh`, uses them. There are
+install, `curl -fsSL https://vade.lol/install.sh | sh`, uses them. There are
 three packages, and they serve different setups:
 
 | Package | Use it when | Where it is |
@@ -24,7 +24,7 @@ v0.1.0 bundle.
 
 The installer, `scripts/install.sh`, downloads, checks and installs this
 bundle. The bundle of main is published on dl.vade.lol. The one-line install
-fetches the same script from getvade.com.
+fetches the same script from vade.lol.
 [INSTALL: Prebuilt bundle](../../docs/INSTALL.md#prebuilt-bundle) lists its checks
 in order.
 

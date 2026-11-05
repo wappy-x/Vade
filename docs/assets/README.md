@@ -17,7 +17,7 @@ The README uses a `<picture>` element: the browser shows the still frame when yo
 
 ## Where it comes from
 
-**The banner is a recording of [getvade.com](https://getvade.com), the project site, rendered by the site's own code.** Nothing is redrawn by hand, so the two match.
+**The banner is a recording of [vade.lol](https://vade.lol), the project site, rendered by the site's own code.** Nothing is redrawn by hand, so the two match.
 
 - The site draws VADE on a canvas as a grid of monospace characters over a slow current of dots and dashes. A soft light drifts across the letters, which are lit and beveled; cells under the light change quickly through random characters and settle; small dots far back blink softly. Under the letters is one line of the site's own text, "Pure-Rust inference engine for the DGX Spark", in the site's monospace style. The banner leaves out the site's GitHub link and footer.
 - To make the banner, the page is opened in headless Chrome at 1280 x 400 pixels, with the site's nebula palette, the letters sized and placed for a wide banner and the intro skipped. The animation clock is stepped by hand, one thirtieth of a second per frame, and every frame is captured.

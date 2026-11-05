@@ -503,7 +503,7 @@ fn check_writes_nothing_and_source_skips_the_bundle() {
 // A piped install: `curl ... | sh`. $0 is "sh", the script is standard input,
 // and the current folder says nothing about a checkout.
 const CLONE_URL: &str = "https://github.com/wappy-x/vade.git";
-const CURL_LINE: &str = "curl -fsSL https://getvade.com/install.sh | sh";
+const CURL_LINE: &str = "curl -fsSL https://vade.lol/install.sh | sh";
 fn script() -> Vec<u8> { fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/install.sh")).unwrap() }
 fn shells() -> Vec<&'static str> { ["/bin/sh", "/bin/dash"].into_iter().filter(|shell| Path::new(shell).is_file()).collect() }
 impl Fixture {
@@ -1016,7 +1016,7 @@ fn the_readme_the_installer_and_the_help_teach_the_same_three_commands() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let pull = "vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300";
     let readme = fs::read_to_string(root.join("README.md")).unwrap();
-    assert!(readme.contains(&format!("curl -fsSL https://getvade.com/install.sh | sh\n{pull}\nvade up\n")));
+    assert!(readme.contains(&format!("curl -fsSL https://vade.lol/install.sh | sh\n{pull}\nvade up\n")));
     let script = fs::read_to_string(root.join("scripts/install.sh")).unwrap();
     assert!(script.contains(&format!("'   {pull}'")) && script.contains("'   vade up'"));
     let guide = fs::read_to_string(root.join("docs/INSTALL.md")).unwrap();
@@ -1088,6 +1088,6 @@ fn a_source_build_with_no_c_compiler_stops_before_any_download_or_clone() {
     let (stdout, stderr) = (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     assert_eq!(output.status.code(), Some(1), "{stdout}{stderr}");
     assert!(stdout.contains("Prebuilt: the bundle needs NVIDIA driver 580 or newer and this Spark has 575.51.03; building from source.\n"), "{stdout}");
-    assert!(stderr.starts_with(&format!("install: {STOP}\nRetry: curl -fsSL https://getvade.com/install.sh | sh\n")), "{stderr}");
+    assert!(stderr.starts_with(&format!("install: {STOP}\nRetry: curl -fsSL https://vade.lol/install.sh | sh\n")), "{stderr}");
     assert!(f.clones().is_empty() && f.calls().is_empty(), "{}", f.calls());
 }

@@ -325,7 +325,7 @@ fn an_installed_bundle_fault_stops_the_install_and_never_builds_from_source() {
 fn an_installed_bundle_has_no_checkout_to_update_and_the_plan_says_so() {
     let mut f = with_installed_bundle();
     let error = f.app.execute(Command::Update).unwrap_err();
-    assert!(error.contains("no checkout to update") && error.contains("curl -fsSL https://getvade.com/install.sh | sh"), "{error}");
+    assert!(error.contains("no checkout to update") && error.contains("curl -fsSL https://vade.lol/install.sh | sh"), "{error}");
     assert!(!f.app.runner.calls.iter().any(|e| e.program == "git"));
     let plan = f.app.install_plan();
     assert!(plan.contains("the installed Vade bundle in") && plan.contains("none; the bundle holds every program") && plan.contains("none; the bundle is prebuilt"), "{plan}");
