@@ -201,6 +201,37 @@ impl WeightView {
     pub fn upload(&self,mut read: impl FnMut(&ComponentView)->Result<Vec<u8>>) -> Result<UploadWeight> {
         let mut bytes=BTreeMap::new();
         for c in &self.components { let b=read(c)?; need(b.len() as u64==c.bytes,"component payload byte extent differs from header")?; bytes.insert(c.name.clone(),b); }
+        self.finish_upload(bytes,None)
+    }
+    pub fn upload_rows(&self,rows: std::ops::Range<u64>,read: impl FnMut(&ComponentView,u64,u64)->Result<Vec<u8>>) -> Result<UploadWeight> {
+        self.upload_rows_timed(rows,read).map(|(weight,_)|weight)
+    }
+    fn upload_rows_timed(&self,rows: std::ops::Range<u64>,mut read: impl FnMut(&ComponentView,u64,u64)->Result<Vec<u8>>) -> Result<(UploadWeight,u128)> {
+        need(self.logical.shape.len()==2,"row upload requires a matrix")?;
+        let total=self.logical.shape[0];
+        need(rows.start<rows.end && rows.end<=total,"upload row range exceeds matrix")?;
+        let block=match self.logical.storage {WeightStorage::Fp8Block {block}=>block[0],_=>1};
+        need(block>0 && rows.start%block==0 && (rows.end%block==0 || rows.end==total),"upload rows must cover complete scale blocks")?;
+        let module=self.logical.name.strip_suffix(".weight").unwrap_or(&self.logical.name);
+        let scale_name=format!("{module}.weight_scale");
+        let mut bytes=BTreeMap::new();
+        for component in &self.components {
+            let range=if component.name==self.logical.name {Some((rows.start,rows.end,total))}
+                else if component.name==scale_name {Some((rows.start/block,rows.end.div_ceil(block),total.div_ceil(block)))} else {None};
+            let (offset,count)=if let Some((first,end,all))=range {
+                need(all>0 && component.bytes%all==0,"component row extent differs from matrix")?;
+                let stride=component.bytes/all;(mul(first,stride)?,mul(end-first,stride)?)
+            } else {(0,component.bytes)};
+            let data=read(component,offset,count)?;
+            need(data.len() as u64==count,"component row payload byte extent differs from header")?;
+            bytes.insert(component.name.clone(),data);
+        }
+        self.finish_upload_timed(bytes,Some(rows))
+    }
+    fn finish_upload(&self,bytes:BTreeMap<String,Vec<u8>>,rows:Option<std::ops::Range<u64>>) -> Result<UploadWeight> {
+        self.finish_upload_timed(bytes,rows).map(|(weight,_)|weight)
+    }
+    fn finish_upload_timed(&self,mut bytes:BTreeMap<String,Vec<u8>>,rows:Option<std::ops::Range<u64>>) -> Result<(UploadWeight,u128)> {
         let name=&self.logical.name; let module=name.strip_suffix(".weight").unwrap_or(name);
         let weight=bytes.remove(name).ok_or_else(||invalid("missing admitted weight bytes"))?;
         let scalar=|suffix: &str| -> Result<Option<f32>> {
@@ -210,11 +241,15 @@ impl WeightView {
             }).transpose()
         };
         let global_scale=scalar("weight_scale_2")?; let input_scale=scalar("input_scale")?;
+        let mut unpack_ns=0;
         let scales=if matches!(self.logical.storage,WeightStorage::Nvfp4 {encoding:ScaleEncoding::Csf32,..}) {
+            let started=std::time::Instant::now();
             let get=|suffix: &str| -> Result<&[u8]> { bytes.get(&format!("{module}.weight_scale.csf32_{suffix}")).map(Vec::as_slice).ok_or_else(||invalid("missing CSF32 bytes")) };
-            crate::csf::Csf32 { rows:usize::try_from(self.logical.shape[0]).map_err(|_|invalid("row count overflow"))?,
+            let csf=crate::csf::Csf32 { rows:usize::try_from(self.logical.shape[0]).map_err(|_|invalid("row count overflow"))?,
                 columns:usize::try_from(self.logical.shape[1]/16).map_err(|_|invalid("column count overflow"))?,quantization:crate::csf::Quantization::Nvfp4,
-                bases:get("bases")?,codes:get("codes")?,page_bases:get("page_bases")?,offsets:get("offsets")?,exceptions:get("exceptions")? }.expand()?
+                bases:get("bases")?,codes:get("codes")?,page_bases:get("page_bases")?,offsets:get("offsets")?,exceptions:get("exceptions")? };
+            let scales=if let Some(range)=&rows {csf.expand_rows(usize::try_from(range.start).map_err(|_|invalid("row count overflow"))?..usize::try_from(range.end).map_err(|_|invalid("row count overflow"))?)?} else {csf.expand()?};
+            unpack_ns=started.elapsed().as_nanos();scales
         } else { bytes.remove(&format!("{module}.weight_scale")).unwrap_or_default() };
         if matches!(self.logical.storage,WeightStorage::Fp8Block {..}) {
             need(scales.chunks_exact(4).all(|b| { let v=f32::from_le_bytes(b.try_into().unwrap()); v.is_finite() && v>0.0 }),"FP8 block scale must be positive and finite")?;
@@ -223,7 +258,8 @@ impl WeightView {
         if matches!(self.logical.storage,WeightStorage::Nvfp4 {..}) {
             need(scales.iter().all(|&b| {let v=crate::flash::nvfp4::e4m3(b); v.is_finite() && v>=0.0}),"invalid NVFP4 scale byte")?;
         }
-        Ok(UploadWeight {shape:self.logical.shape.clone(),dtype:self.components[0].dtype,weight,scales,global_scale,input_scale,storage:self.logical.storage})
+        let mut shape=self.logical.shape.clone();if let Some(range)=rows {shape[0]=range.end-range.start;}
+        Ok((UploadWeight {shape,dtype:self.components[0].dtype,weight,scales,global_scale,input_scale,storage:self.logical.storage},unpack_ns))
     }
 }
 
@@ -260,6 +296,8 @@ impl UploadWeight {
             global_scale:self.global_scale,input_scale:self.input_scale})
     }
 }
+#[derive(Debug,Default,Clone,Copy)]
+pub struct UploadTimings {pub allocate_ns:u128,pub read_ns:u128,pub unpack_ns:u128,pub validation_ns:u128,pub bytes:u128}
 impl CheckpointAdmission {
     /// The operation data used for header admission. This does not grant execution.
     pub fn description(&self) -> &TextDescription { &self.description }
@@ -279,7 +317,28 @@ impl CheckpointAdmission {
             file.read_range(&c.name,0,&mut b)?; Ok(b)
         })
     }
+    pub fn upload_rows(&self,name: &str,rows: std::ops::Range<u64>) -> Result<UploadWeight> {
+        self.upload_rows_timed(name,rows).map(|(weight,_)|weight)
+    }
+    pub fn upload_rows_timed(&self,name: &str,rows: std::ops::Range<u64>) -> Result<(UploadWeight,UploadTimings)> {
+        let view=self.headers.weights.get(name).ok_or_else(||invalid("weight is not admitted"))?;
+        let started=std::time::Instant::now();let mut timings=UploadTimings::default();
+        let (weight,unpack_ns)=view.upload_rows_timed(rows,|component,offset,count| {
+            let allocated=std::time::Instant::now();
+            let count=usize::try_from(count).map_err(|_|invalid("component exceeds address space"))?;
+            let mut bytes=Vec::new();bytes.try_reserve_exact(count).map_err(|_|invalid("component allocation failed"))?;bytes.resize(count,0);
+            timings.allocate_ns+=allocated.elapsed().as_nanos();
+            let file=self.locations.get(&component.name).and_then(|shard|self.files.get(shard)).ok_or_else(||invalid("missing retained tensor file"))?;
+            let read=std::time::Instant::now();file.read_range(&component.name,offset,&mut bytes)?;
+            timings.read_ns+=read.elapsed().as_nanos();timings.bytes+=count as u128;Ok(bytes)
+        })?;
+        timings.unpack_ns=unpack_ns;timings.validation_ns=started.elapsed().as_nanos()-timings.allocate_ns-timings.read_ns-timings.unpack_ns;
+        Ok((weight,timings))
+    }
 }
+
+#[cfg(test)]
+#[path="admission/rows_tests.rs"] mod rows_tests;
 
 #[cfg(test)]
 mod tests {

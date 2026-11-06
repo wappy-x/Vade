@@ -48,6 +48,9 @@ fn gathered_mixed(values:&[f32],rows:&[Rows])->Result<Vec<Vec<f32>>> {
 #[cfg(any(target_os="linux",test))]
 #[path="resident_weights/batch_layout.rs"] mod batch_layout;
 
+#[cfg(any(target_os="linux",test))]
+#[path="resident_weights/load_rows.rs"] mod load_rows;
+
 #[cfg(target_os="linux")]
 mod device {
     use super::*;
@@ -58,10 +61,14 @@ mod device {
     enum Storage<'b,'d> {Mx(ResidentDynamicProjection<'b,'d>),Plain {shape:spark_gpu_probe::causal_ops::Shape,weight:DeviceVector<'d>},
         Packed {shape:Shape,weight:DeviceVector<'d>,scales:DeviceVector<'d>}}
     struct Matrix<'b,'d> {rows:Rows,cols:usize,storage:Storage<'b,'d>}
+    struct Prepared {rows:Rows,cols:usize,upload:Option<engine_model::plan::admission::UploadWeight>,timings:engine_model::plan::admission::UploadTimings}
+    #[derive(Default)]
+    struct LoadTimings {payload:engine_model::plan::admission::UploadTimings,prepare_ns:u128,convert_ns:u128,upload_ns:u128,mxfp8_ns:u128}
     pub struct Weights<'b,'d> {matrices:BTreeMap<String,Matrix<'b,'d>>,embedding:Option<spark_gpu_probe::driver::Matrix<'d>>,
         ring:Option<Ring>,mailbox:Option<&'b spark_gpu_probe::driver::TpMailbox<'d>>,sequence:u64,topology:Topology,identity:Option<usize>,cost:crate::resident_profile::Cost,timings:[[u128;3];5],lut:Option<DeviceVector<'d>>,exchange:Option<DeviceVector<'d>>}
     fn raw<'d>(b:&Backend<'d>,bytes:&[u8])->Result<DeviceVector<'d>> {
-        let mut out=b.upload_vector(&vec![0.0;bytes.len().div_ceil(4)])?;b.write_vector_bytes(&mut out,bytes)?;b.synchronize()?;Ok(out)
+        let payload=load_rows::padded_bytes(bytes);
+        let mut out=b.vector(payload.len()/4)?;b.write_vector_bytes(&mut out,&payload)?;b.synchronize()?;Ok(out)
     }
     /// The owned queue retains each dropped packed/output allocation. Both
     /// copies and mailbox operations keep their original ordered-stream order.
@@ -131,23 +138,72 @@ mod device {
             let available=b.available_memory_bytes()?;
             if bytes.checked_add(1<<30).is_none_or(|need|need>available) {return Err(format!("resident matrices need {bytes} bytes plus 1073741824 bytes scratch; available={available}; parts={}",self.topology.parts));}
             eprintln!("RESIDENT LOAD rank={} parts={} matrices={} planned_bytes={bytes} available_bytes={available}",self.topology.rank,self.topology.parts,names.len());
-            let started=std::time::Instant::now();
-            for (index,name) in names.into_iter().enumerate() {
-                let matrix=Matrix::load(c,&name,self.topology,b).map_err(|e|format!("{name}: {e}"))?;self.matrices.insert(name,matrix);
+            let started=std::time::Instant::now();let mut load=LoadTimings::default();let mut barrier_ns=0;
+            let names=names.into_iter().collect::<Vec<_>>();
+            let workers=std::thread::available_parallelism().map_or(1,usize::from).min(8);
+            let sizes=names.iter().map(|name|c.headers().weights()[name].components().iter().try_fold(0u64,|bytes,component|bytes.checked_add(component.bytes).ok_or("resident host payload extent overflow"))).collect::<std::result::Result<Vec<_>,_>>()?;
+            let mut begin=0;
+            while begin<names.len() {
+                let end=load_rows::batch_end(&sizes,begin,workers,256<<20);let batch=&names[begin..end];
+                let topology=self.topology;
+                let prepare=std::time::Instant::now();
+                let prepared=load_rows::ordered(batch,|name|Matrix::read(c,name,topology).map_err(|error|format!("{name}: {error}")))?;
+                load.prepare_ns+=prepare.elapsed().as_nanos();
+                for (offset,(name,payload)) in batch.iter().zip(prepared).enumerate() {
+                let index=begin+offset;
+                let matrix=Matrix::load(c,name,self.topology,b,payload,&mut load).map_err(|e|format!("{name}: {e}"))?;self.matrices.insert(name.clone(),matrix);
                 if index%256==0 {eprintln!("RESIDENT LOAD rank={} matrices={} allocated_bytes={}",self.topology.rank,index+1,b.allocated_bytes());
                     // Loading can exceed the normal exchange deadline. Keep peers
                     // together at bounded batches before any token transaction.
-                    if let Some(ring)=self.ring.as_mut() {ring.barrier()?;}
+                    if let Some(ring)=self.ring.as_mut() {let wait=std::time::Instant::now();ring.barrier()?;barrier_ns+=wait.elapsed().as_nanos();}
                 }
+                }
+                begin=end;
             }
-            let file=c.component_file(embedding_name).map_err(|e|e.to_string())?;let tensor=&file.header().tensors[embedding_name];
+            let embedding_started=std::time::Instant::now();let file=c.component_file(embedding_name).map_err(|e|e.to_string())?;let tensor=&file.header().tensors[embedding_name];
             let offset=file.header().data_start.checked_add(tensor.start).ok_or("resident embedding file offset overflow")?;
             let ranges=[spark_gpu_probe::load::WeightRange {file_offset:offset,destination:0,bytes:embedding_bytes,row_bytes:0,row_stride:0}];
             let arena=b.load_weight_arena(embedding_bytes,&[spark_gpu_probe::load::WeightFile {file:file.file(),ranges:&ranges}])?;
             self.embedding=Some(b.weight_matrix(&arena,0,d.vocab as usize,d.hidden as usize,spark_gpu_probe::load::WeightDtype::Bf16)?);
-            b.synchronize()?;if let Some(r)=self.ring.as_mut() {r.barrier()?;}
+            b.synchronize()?;let embedding_ns=embedding_started.elapsed().as_nanos();if let Some(r)=self.ring.as_mut() {let wait=std::time::Instant::now();r.barrier()?;barrier_ns+=wait.elapsed().as_nanos();}
             self.identity=Some(identity);
+            let total_ns=started.elapsed().as_nanos();let p=&load.payload;
+            let measured=load.prepare_ns+load.convert_ns+load.upload_ns+load.mxfp8_ns+embedding_ns+barrier_ns;
+            for (phase,ns) in [("payload_prepare_wall",load.prepare_ns),("plain_convert",load.convert_ns),("device_upload",load.upload_ns),("mxfp8_read_pack_upload",load.mxfp8_ns),("embedding_read_upload",embedding_ns),("barrier",barrier_ns),("other",total_ns.saturating_sub(measured))] {
+                eprintln!("RESIDENT LOAD PHASE rank={} name={phase} nanoseconds={ns}",self.topology.rank);
+            }
+            for (phase,ns) in [("host_allocate_zero",p.allocate_ns),("payload_read",p.read_ns),("csf_unpack",p.unpack_ns),("payload_validation",p.validation_ns)] {
+                eprintln!("RESIDENT LOAD WORK rank={} name={phase} nanoseconds={ns} aggregation=worker_sum_not_exclusive_wall",self.topology.rank);
+            }
+            eprintln!("RESIDENT LOAD PAYLOAD rank={} bytes={} content_hashing_ns=0 total_ns={total_ns} workers={workers}",self.topology.rank,p.bytes);
             eprintln!("RESIDENT READY rank={} parts={} matrices={} matrix_bytes={bytes} allocated_bytes={} load_seconds={:.6}",self.topology.rank,self.topology.parts,self.matrices.len(),b.allocated_bytes(),started.elapsed().as_secs_f64());Ok(())
+        }
+        pub fn load_for_proof(c:&CheckpointAdmission,b:&'b Backend<'d>,topology:Topology)->Result<Self> {
+            topology.validate().map_err(|error|error.to_string())?;let mut weights=Self::new(None,false);
+            weights.topology=topology;weights.prepare(c,b)?;Ok(weights)
+        }
+        pub fn visit_device_bytes(self,b:&Backend<'d>,mut visit:impl FnMut(&str,&str,usize,usize,Vec<u8>)->Result<()>)->Result<()> {
+            let mut storage=|name:&str,part:&str,total:usize,read:&mut dyn FnMut(usize,usize)->Result<Vec<u8>>|->Result<()> {
+                if total%4!=0 {return Err("resident proof storage is not word aligned".into());}
+                for offset in (0..total).step_by(8<<20) {let count=(8<<20).min(total-offset);visit(name,part,offset,total,read(offset,count)?)?;}Ok(())
+            };
+            let read_vector=|vector:&DeviceVector<'d>,offset,count|->Result<Vec<u8>> {
+                Ok(b.read_vector_values(&vector.resident_range(offset/4..(offset+count)/4)?)?.into_iter().flat_map(|value|value.to_bits().to_le_bytes()).collect())
+            };
+            for (name,matrix) in self.matrices {match matrix.storage {
+                Storage::Plain {weight,..}=>{let weight=weight.into_resident_shared()?;storage(&name,"weight",weight.len()*4,&mut |offset,count|read_vector(&weight,offset,count))?;},
+                Storage::Packed {weight,scales,..}=>{
+                    let weight=weight.into_resident_shared()?;let scales=scales.into_resident_shared()?;
+                    storage(&name,"weight",weight.len()*4,&mut |offset,count|read_vector(&weight,offset,count))?;
+                    storage(&name,"scales",scales.len()*4,&mut |offset,count|read_vector(&scales,offset,count))?;
+                },
+                Storage::Mx(matrix)=>{let resident=matrix.resident();let sizes=resident.storage_bytes();
+                    storage(&name,"weight",sizes[0],&mut |offset,count|resident.read_storage(false,offset,count))?;
+                    storage(&name,"scales",sizes[1],&mut |offset,count|resident.read_storage(true,offset,count))?;
+                },
+            }}
+            let embedding=self.embedding.as_ref().ok_or("resident proof embedding is absent")?;
+            storage("model.language_model.embed_tokens.weight","weight",b.matrix_storage_bytes(embedding),&mut |offset,count|b.read_matrix_storage(embedding,offset,count))
         }
         pub fn embedding(&self,b:&Backend<'d>,token:u32,streams:usize)->Result<DeviceVector<'d>> {
             let table=self.embedding.as_ref().ok_or("embedding is not resident")?;
@@ -451,37 +507,54 @@ let mut bytes=vec![0;matrix.rows.total*4];
         }
     }
     impl<'b,'d> Matrix<'b,'d> {
-        fn load(c:&CheckpointAdmission,name:&str,t:Topology,b:&'b Backend<'d>)->Result<Self> {
+        fn read(c:&CheckpointAdmission,name:&str,t:Topology)->Result<Prepared> {
             let view=c.headers().weights().get(name).ok_or("missing resident weight")?;let w=view.logical();let rows=Rows::new(&w.shape,w.storage,t)?;
             let cols=usize::try_from(w.shape[1]).map_err(|_|"resident columns exceed address space")?;
-            let storage=if w.storage==WeightStorage::Mxfp8 {
-                let topology=if rows.split {t} else {Topology {rank:0,parts:1}};
-                Storage::Mx(Mxfp8Projection::matrix_rows(c,name,WeightType::F32,topology)?.load_dynamic_positive_zero(b)?)
-            } else {
-                let u=c.upload(name).map_err(|e|e.to_string())?;
+            let (upload,timings)=if w.storage==WeightStorage::Mxfp8 {(None,Default::default())} else {
+                let (upload,timings)=c.upload_rows_timed(name,rows.start as u64..(rows.start+rows.count) as u64).map_err(|error|error.to_string())?;(Some(upload),timings)
+            };
+            Ok(Prepared {rows,cols,upload,timings})
+        }
+        fn load(c:&CheckpointAdmission,name:&str,t:Topology,b:&'b Backend<'d>,prepared:Prepared,load:&mut LoadTimings)->Result<Self> {
+            let Prepared {rows,cols,upload,timings}=prepared;
+            load.payload.allocate_ns+=timings.allocate_ns;load.payload.read_ns+=timings.read_ns;load.payload.unpack_ns+=timings.unpack_ns;
+            load.payload.validation_ns+=timings.validation_ns;load.payload.bytes+=timings.bytes;
+            let storage=if let Some(u)=upload {
                 match u.storage {
+                    WeightStorage::Mxfp8=>return Err("resident MXFP8 payload uses its existing arena loader".into()),
+                    _=>Self::upload(rows,cols,u,b,load)?,
+                }
+            } else {
+                let started=std::time::Instant::now();let topology=if rows.split {t} else {Topology {rank:0,parts:1}};
+                let storage=Storage::Mx(Mxfp8Projection::matrix_rows(c,name,WeightType::F32,topology)?.load_dynamic_positive_zero(b)?);
+                load.mxfp8_ns+=started.elapsed().as_nanos();storage
+            };Ok(Self {rows,cols,storage})
+        }
+        fn upload(rows:Rows,cols:usize,u:engine_model::plan::admission::UploadWeight,b:&'b Backend<'d>,load:&mut LoadTimings)->Result<Storage<'b,'d>> {
+            Ok(match u.storage {
                     WeightStorage::Plain=>{
                         let mut s=spark_gpu_probe::causal_ops::Shape {op:spark_gpu_probe::causal_ops::Op::Project,heads:0,dim:0,taps:0,rows:0,cols:0,epsilon:0.0,bound:0.0};
                         s.rows=rows.count.try_into().map_err(|_|"resident rows exceed ABI")?;s.cols=cols.try_into().map_err(|_|"resident columns exceed ABI")?;
-                        let width=u.dtype.bytes() as usize;let start=rows.start*cols*width;let end=start+rows.count*cols*width;
-                        let values=match u.dtype {Dtype::Bf16=>u.weight[start..end].chunks_exact(2).map(|v|f32::from_bits(u32::from(u16::from_le_bytes(v.try_into().unwrap()))<<16)).collect::<Vec<_>>(),
+                        let width=u.dtype.bytes() as usize;let start=0;let end=rows.count*cols*width;
+                        let convert=std::time::Instant::now();let values=match u.dtype {Dtype::Bf16=>u.weight[start..end].chunks_exact(2).map(|v|f32::from_bits(u32::from(u16::from_le_bytes(v.try_into().unwrap()))<<16)).collect::<Vec<_>>(),
                             Dtype::F32=>u.weight[start..end].chunks_exact(4).map(|v|f32::from_le_bytes(v.try_into().unwrap())).collect(),_=>return Err("resident plain precision is unsupported".into())};
                         if values.iter().any(|v|!v.is_finite()) {return Err("resident plain weight is not finite".into());}
-                        Storage::Plain {shape:s,weight:b.upload_vector(&values)?}
+                        load.convert_ns+=convert.elapsed().as_nanos();let upload=std::time::Instant::now();let weight=b.upload_vector(&values)?;
+                        load.upload_ns+=upload.elapsed().as_nanos();Storage::Plain {shape:s,weight}
                     },
                     WeightStorage::Nvfp4 {..}|WeightStorage::Fp8Block {..}=>{
                         let mut s=Shape {op:Op::NvProject,tokens:1,rows:rows.count.try_into().map_err(|_|"resident rows exceed ABI")?,cols:cols.try_into().map_err(|_|"resident columns exceed ABI")?,block_rows:1,block_cols:16,
                             global:u.global_scale.unwrap_or(1.0),activation:u.input_scale.unwrap_or(1.0),bound:0.0};
                         let (stride,scale_start,scale_len)=match u.storage {WeightStorage::Nvfp4 {..}=>{
                             if u.global_scale.is_none() || u.input_scale.is_none() {return Err("resident calibrated scales are absent".into());}
-                            (cols/2,rows.start*(cols/16),rows.count*(cols/16))},
+                            (cols/2,0,rows.count*(cols/16))},
                             WeightStorage::Fp8Block {block}=>{s.op=Op::Fp8Serial;s.block_rows=block[0].try_into().map_err(|_|"scale row block exceeds ABI")?;s.block_cols=block[1].try_into().map_err(|_|"scale column block exceeds ABI")?;
-                                let grid=cols.div_ceil(block[1] as usize);(cols,rows.start/(block[0] as usize)*grid*4,rows.count.div_ceil(block[0] as usize)*grid*4)},_=>unreachable!()};
+                                let grid=cols.div_ceil(block[1] as usize);(cols,0,rows.count.div_ceil(block[0] as usize)*grid*4)},_=>unreachable!()};
                         s.lengths().ok_or("resident packed shape exceeds ABI")?;
-                        Storage::Packed {shape:s,weight:raw(b,&u.weight[rows.start*stride..(rows.start+rows.count)*stride])?,scales:raw(b,&u.scales[scale_start..scale_start+scale_len])?}
+                        let upload=std::time::Instant::now();let storage=Storage::Packed {shape:s,weight:raw(b,&u.weight[..rows.count*stride])?,scales:raw(b,&u.scales[scale_start..scale_start+scale_len])?};
+                        load.upload_ns+=upload.elapsed().as_nanos();storage
                     },_=>return Err("resident storage is unsupported".into()),
-                }
-            };Ok(Self {rows,cols,storage})
+            })
         }
     }
 }

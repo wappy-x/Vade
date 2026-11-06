@@ -64,6 +64,10 @@ impl<'a> Backend<'a> {
     }
 }
 impl<'a> ResidentMxfp8Projection<'_,'a> {
+    pub fn storage_bytes(&self)->[usize;2] {[self.weights.bytes,self.scales.bytes]}
+    pub fn read_storage(&self,scale:bool,offset:usize,bytes:usize)->Result<Vec<u8>,String> {
+        self.backend.read_storage_bytes(if scale {&self.scales} else {&self.weights},offset,bytes)
+    }
     /// Preserve the completed norm's actual dtype. Do not round FP32 input lanes.
     /// Output rows stay local until the layer's declared gather is complete.
     pub fn apply(&self,input:&NormOutput<'_>)->Result<Mxfp8ProjectionPass<'a>,String> {

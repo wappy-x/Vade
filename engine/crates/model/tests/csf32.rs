@@ -138,6 +138,23 @@ fn both_quantizations_round_trip_all_byte_patterns_and_clipped_tiles() {
 }
 
 #[test]
+fn selected_rows_equal_full_expansion_across_tiles_and_exceptions() {
+    for quantization in [Quantization::Nvfp4,Quantization::Mxfp4] {
+        for (rows,columns) in [(32,1),(64,3),(160,5),(256,129)] {
+            let bases=(0..rows).map(|row|(row%200) as u8).collect();
+            let values=(0..rows*columns).map(|index|((index*73+19)%256) as u8).collect::<Vec<_>>();
+            let fixture=encode(rows,columns,quantization,bases,&values);
+            for selected in [0..rows,0..1,rows-1..rows,1..rows-1,rows/2..rows] {
+                assert_eq!(fixture.view().expand_rows(selected.clone()).unwrap(),values[selected.start*columns..selected.end*columns]);
+            }
+            for selected in [0..0,rows..rows+1,rows..rows-1] {assert!(fixture.view().expand_rows(selected).is_err());}
+            let mut corrupt=fixture.clone();corrupt.offsets.pop();
+            assert!(corrupt.view().expand_rows(0..1).is_err());
+        }
+    }
+}
+
+#[test]
 fn clipped_tile_order_has_an_independent_hand_vector() {
     // block_order(160, 5) from the public source. Each logical block has a
     // distinct code. The last column stores one field per row, with no pad.

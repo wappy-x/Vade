@@ -142,15 +142,18 @@ impl Csf32<'_> {
     /// must check whether those patterns are valid for their scale format.
     pub fn validate(&self) -> Result<()> { self.validate_geometry(self.geometry()?) }
 
-    fn decode_validated(&self, geometry: Geometry, output: &mut [u8]) -> Result<()> {
+    fn decode_validated(&self, geometry: Geometry, rows: std::ops::Range<usize>, output: &mut [u8]) -> Result<()> {
         geometry.visit(|block| {
+            if block.row >= rows.end || block.row + 32 <= rows.start { return Ok(()); }
             for local_row in 0..32 {
+                let row = block.row + local_row;
+                if !rows.contains(&row) { continue; }
                 for local_column in 0..block.width {
                     let field = local_row * block.width + local_column;
                     let bit = field * geometry.bits;
                     let code = (self.codes[block.code + bit / 8] >> (bit % 8))
                         & ((1u8 << geometry.bits) - 1);
-                    output[(block.row + local_row) * self.columns + block.column + local_column]
+                    output[(row - rows.start) * self.columns + block.column + local_column]
                         = self.bases[block.row + local_row] + code;
                 }
             }
@@ -159,7 +162,9 @@ impl Csf32<'_> {
             for record in origin + u16_at(self.offsets, at)..origin + u16_at(self.offsets, at + 1) {
                 let word = u16_at(self.exceptions, record);
                 let position = word & 255;
-                output[(block.row + position / 2) * self.columns + block.column + position % 2]
+                let row = block.row + position / 2;
+                if !rows.contains(&row) { continue; }
+                output[(row - rows.start) * self.columns + block.column + position % 2]
                     = (word >> 8) as u8;
             }
             Ok(())
@@ -172,7 +177,7 @@ impl Csf32<'_> {
         let geometry = self.geometry()?;
         length("scale output", output.len(), geometry.count)?;
         self.validate_geometry(geometry)?;
-        self.decode_validated(geometry, output)
+        self.decode_validated(geometry, 0..self.rows, output)
     }
 
     /// Return logical scale bytes. For NVFP4, this is the existing E4M3 block
@@ -184,7 +189,19 @@ impl Csf32<'_> {
         output.try_reserve_exact(geometry.count)
             .map_err(|_| invalid("csf_32x2_v1 scale output allocation failed"))?;
         output.resize(geometry.count, 0);
-        self.decode_validated(geometry, &mut output)?;
+        self.decode_validated(geometry, 0..self.rows, &mut output)?;
+        Ok(output)
+    }
+
+    pub fn expand_rows(&self, rows: std::ops::Range<usize>) -> Result<Vec<u8>> {
+        require(rows.start < rows.end && rows.end <= self.rows, "scale row range is outside the plane")?;
+        let geometry = self.geometry()?;
+        self.validate_geometry(geometry)?;
+        let count = product(rows.end - rows.start, self.columns)?;
+        let mut output = Vec::new();
+        output.try_reserve_exact(count).map_err(|_| invalid("csf_32x2_v1 scale output allocation failed"))?;
+        output.resize(count, 0);
+        self.decode_validated(geometry, rows, &mut output)?;
         Ok(output)
     }
 

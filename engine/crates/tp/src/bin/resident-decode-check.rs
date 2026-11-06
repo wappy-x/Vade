@@ -23,6 +23,8 @@ use spark_tp::Result;
 #[cfg(target_os="linux")]
 #[path="resident-decode-check/projection_batch.rs"] mod projection_batch;
 #[cfg(target_os="linux")]
+#[path="resident-decode-check/load_weights.rs"] mod load_weights;
+#[cfg(target_os="linux")]
 #[path="../../../../tools/export/src/sha256.rs"] mod sha256;
 /// Diagnostic prompt bound. Long-prompt evidence needs more than the old 512 rows.
 #[cfg(target_os="linux")]
@@ -444,6 +446,8 @@ fn main() {
         [_,_,_,_,mode,..] if mode=="pair"=>run_pair(&args),
         #[cfg(target_os="linux")]
         [mode,out] if mode=="quantizer"=>quantizer(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,root,rank,parts,out] if mode=="load-hash"=>load_weights::check(Path::new(root),rank,parts,Path::new(out)),
         #[cfg(target_os="linux")]
         [mode,out] if mode=="layout"=>layout(Path::new(out)),
         #[cfg(target_os="linux")]

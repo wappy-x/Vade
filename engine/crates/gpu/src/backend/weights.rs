@@ -2,6 +2,21 @@
 use super::*;
 
 impl<'a> Backend<'a> {
+    pub fn matrix_storage_bytes(&self,matrix:&Matrix<'_>)->usize {matrix.buffer.bytes}
+    pub fn read_matrix_storage(&self,matrix:&Matrix<'_>,offset:usize,bytes:usize)->Result<Vec<u8>,String> {
+        self.read_storage_bytes(&matrix.buffer,offset,bytes)
+    }
+    pub(super) fn read_storage_bytes(&self,buffer:&Buffer<'_>,offset:usize,bytes:usize)->Result<Vec<u8>,String> {
+        if !ptr::eq(buffer._context,self.context) || offset%4!=0 || bytes%4!=0 || offset.checked_add(bytes).is_none_or(|end|end>buffer.bytes) {
+            return Err("weight storage read context, alignment or extent differs".into());
+        }
+        let owner=buffer.owner.as_ref().ok_or("weight storage proof requires a retained arena")?;
+        let base=usize::try_from(buffer.address.checked_sub(owner.address).ok_or("weight arena base differs")?).map_err(|_|"weight arena offset exceeds address space")?;
+        let offset=base.checked_add(offset).ok_or("weight storage read offset overflow")?;
+        let vector=DeviceVector {buffer:Buffer::view(owner,offset,bytes)?,len:bytes/4,managed:false,
+            #[cfg(debug_assertions)] projection_scratch:Default::default()};
+        Ok(self.read_vector_values(&vector)?.into_iter().flat_map(|value|value.to_bits().to_le_bytes()).collect())
+    }
     /// Row-major views retain the arena after its handle drops; no tensor allocation.
     pub fn weight_matrix(&self, arena: &WeightArena<'a>, offset: usize, rows: usize,
         cols: usize, dtype: crate::load::WeightDtype) -> Result<Matrix<'a>, String> {
