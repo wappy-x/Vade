@@ -525,6 +525,11 @@ topology-branch spark-tp tensor_layout::MailboxRows::take 2
 # Validate the existing pair wire and operation boundaries. These sites reject
 # mismatched groups or layouts. They do not select another arithmetic path.
 topology-branch spark-gpu-probe tp_mailbox::TpMailbox::claim_copy_group 1
+# OVERLAP copies (DIRECT-GATHER 615394d37, scatter take f991fb643/15cf49b97; merged with R5 c64390a56): the scatter take checks its
+# receive channel against the world size, and the scatter check binary simulates every rank of its fixture. They validate; they do not choose a path.
+topology-branch spark-gpu-probe bin::tp_mailbox_scatter_check::check::case 8
+topology-branch spark-gpu-probe scatter_copy::channel_inside 1
+topology-branch spark-gpu-probe tp_mailbox::Backend::tp_mailbox_take_scatter 1
 topology-branch spark-tp layer_transport::PairPlan::new 1
 topology-branch spark-tp layer_transport::PairGroup::new 1
 topology-branch spark-tp layer_transport::PairGroup::agree 2
