@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 use super::{Gpu, H, Result, ptr, sha256};
 use std::time::Instant;
-#[path = "../../../crates/gpu/src/swept.rs"] mod swept;
+#[allow(dead_code)] #[path = "../../../crates/gpu/src/swept.rs"] mod swept;
 const GUARD: [u8; 16] = [0x5a; 16];
 struct Rng(u64);
 impl Rng {
@@ -419,13 +419,13 @@ fn mhc_time(g: &mut Gpu, base: H, mb: H) -> Result<()> {
     Ok(())
 }
 
-/// The sweeps of the standing rule: they iterate `swept.rs` and nothing else, so the host test that compares the predicates of
-/// prompt_admission with those lists is a test of what these modes run. Every token count 1..=256 of the model's shape.
+// The sweeps of the standing rule: they iterate `swept.rs` and nothing else, so the host test that compares the predicates of
+// prompt_admission with those lists is a test of what these modes run. Every token count 1..=256 of the model's shape.
 thread_local! { static MODULE_A: std::cell::Cell<H> = std::cell::Cell::new(std::ptr::null_mut()); }
 fn g_module_a(_g: &Gpu) -> H { MODULE_A.with(|c| c.get()) }
 fn list_bytes(g: &mut Gpu, base: H, mb: H, which: &str, started: Instant) -> Result<()> {
     let (mut cases, mut total) = (0u64, 0u64);
-    let mut tick = |cases: u64, total: u64, label: &str| { if cases % 64 == 0 { println!("READP list {label} cases={cases} comparisons={total} elapsed_s={:.1}", started.elapsed().as_secs_f64()); } };
+    let tick = |cases: u64, total: u64, label: &str| { if cases % 64 == 0 { println!("READP list {label} cases={cases} comparisons={total} elapsed_s={:.1}", started.elapsed().as_secs_f64()); } };
     match which {
         "move" => {
             let (cp, cl) = (g.function(mb, "prompt_permute")?, g.function(mb, "prompt_place")?);

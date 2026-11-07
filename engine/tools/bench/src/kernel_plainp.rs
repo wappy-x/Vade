@@ -243,7 +243,7 @@ struct MxLayer { projections: [MxProjection; 9], ends: [u32; 10], count: u32 }
 struct Batch { layer: MxLayer, plain: u32, round: u32 }
 #[derive(Clone, Copy)]
 struct Job { plain: bool, rows: usize, cols: usize }
-struct Built { batch: Batch, outputs: Vec<(u64, usize)>, base: u64 }
+#[allow(dead_code)] struct Built { batch: Batch, outputs: Vec<(u64, usize)>, base: u64 }
 /// Quantized-weight bytes: random E4M3 codes without NaN; scale bytes in a safe exponent range.
 fn mx_bytes(n: usize, seed: u64, scales: bool) -> Vec<u8> {
     let mut r = Rng(seed | 1);

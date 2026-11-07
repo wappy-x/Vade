@@ -50,7 +50,7 @@ fn entry(g: Geometry, weight: u64, scales: u64) -> Vec<u8> {
     for x in [0u32, 0, (g.tokens * g.cols) as u32, (g.rows * g.cols) as u32, (scale_words * 4) as u32, 0] { v.extend(x.to_le_bytes()); }
     v
 }
-fn args(table: u64, input: u64, output: u64, lutp: u64, units: usize, stride: usize) -> Vec<u8> {
+#[allow(dead_code)] fn args(table: u64, input: u64, output: u64, lutp: u64, units: usize, stride: usize) -> Vec<u8> {
     let mut v = vec![]; for x in [table, input, output, lutp] { v.extend(x.to_le_bytes()); }
     for x in [1u32, units as u32, 1, stride as u32] { v.extend(x.to_le_bytes()); } v
 }
@@ -59,9 +59,9 @@ fn scale_of(k: usize, normal: f32, x: u64) -> f32 {
     match k % 13 { 4 => 0.0, 7 => f32::from_bits((x >> 20) as u32 & 0x7f_ffff), 9 => 3.0e38, 11 => f32::INFINITY, _ => normal }
 }
 fn median(mut v: Vec<f64>) -> f64 { v.sort_by(|a, b| a.partial_cmp(b).unwrap()); v[v.len() / 2] }
-struct Fixture { geo: Geometry, table: u64, input: u64, lutp: u64, units: usize }
+#[allow(dead_code)] struct Fixture { geo: Geometry, table: u64, input: u64, lutp: u64, units: usize }
 /// mode 1: code (row + column) % 256 (every code, the two NaN codes too), scale from a fixed table with special values.
-fn build(g: &mut Gpu, geo: Geometry, mode: u32, kind: u32, seed: u64) -> Result<Fixture> {
+#[allow(dead_code)] fn build(g: &mut Gpu, geo: Geometry, mode: u32, kind: u32, seed: u64) -> Result<Fixture> {
     let mut r = Rng(seed | 1);
     let w: Vec<u8> = (0..geo.rows * geo.cols).map(|i| { let code = if mode == 1 { ((i / geo.cols + i % geo.cols) % 256) as u8 } else { (r.next() >> 8) as u8 } ; code }).collect();
     let scales: Vec<f32> = (0..geo.rows.div_ceil(geo.br) * geo.cols.div_ceil(geo.bc)).enumerate().map(|(k, _)| { let x = r.next(); let e = (x % 24) as i32 - 14; scale_of(k, (1.0 + ((x >> 8) % 1000) as f32 / 1000.0) * 2f32.powi(e), x) }).collect();
@@ -69,11 +69,11 @@ fn build(g: &mut Gpu, geo: Geometry, mode: u32, kind: u32, seed: u64) -> Result<
     let table = Buf::new(g, &entry(geo, wb.address, sb.address))?; let l = Buf::new(g, &le(&lut()))?;
     Ok(Fixture { geo, table: table.address, input: xb.address, lutp: l.address, units: geo.rows * geo.tokens })
 }
-fn launch_reference(g: &Gpu, f: H, fx: &Fixture, out: u64) -> Result<()> {
+#[allow(dead_code)] fn launch_reference(g: &Gpu, f: H, fx: &Fixture, out: u64) -> Result<()> {
     let mut a = args(fx.table, fx.input, out, fx.lutp, fx.units, fx.geo.cols);
     g.launch(f, [fx.units.div_ceil(32) as u32, 1, 1], 32, 0, &mut [a.as_mut_ptr().cast()])
 }
-fn launch_tile(g: &Gpu, f: H, fx: &Fixture, out: u64) -> Result<()> {
+#[allow(dead_code)] fn launch_tile(g: &Gpu, f: H, fx: &Fixture, out: u64) -> Result<()> {
     let mut a = args(fx.table, fx.input, out, fx.lutp, fx.units, fx.geo.cols);
     g.launch(f, [fx.geo.tokens.div_ceil(64) as u32, fx.geo.rows.div_ceil(64) as u32, 1], 256, 0, &mut [a.as_mut_ptr().cast()])
 }

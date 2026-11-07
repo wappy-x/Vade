@@ -1,7 +1,7 @@
 //! Small-count NVFP4 expert rows (a draft verify pass; the host sends 1-row decode calls elsewhere): timing and same-bytes sweep of the new
 //! kernel against the production `expert_group` NvRows path and lane K`s `nv_rows_tile`. Safe code only. Fixture code copied from kernel_nvrows.rs.
 #![forbid(unsafe_code)]
-use super::super::{Gpu, H, Result, ptr, sha256};
+use super::super::{Gpu, H, Result, sha256};
 use std::time::Instant;
 use super::envelope as e;
 const GUARD: [u8; 16] = [0x5a; 16];
@@ -61,7 +61,7 @@ fn median(mut v: Vec<f64>) -> f64 { v.sort_by(|a, b| a.partial_cmp(b).unwrap());
 struct Fixture { rows: usize, cols: usize, parts: Vec<Part>, table: u64, input: u64, lutp: u64, units: usize, params: (f32, f32) }
 /// Build parts with the given token counts. `mode` 1: row r has weight byte r%256 and scale byte r/256 everywhere.
 fn build(g: &mut Gpu, rows: usize, cols: usize, counts: &[usize], mode: u32, kind: u32, params: (f32, f32), seed: u64, shared_weights: Option<&[(u64, u64)]>) -> Result<Fixture> {
-    let mut r = Rng(seed | 1); let mut parts = vec![]; let stride = cols / 16 * 17; let mut input = vec![];
+    let mut r = Rng(seed | 1); let mut parts = vec![]; let _stride = cols / 16 * 17; let mut input = vec![];
     let l = Buf::new(g, &le(&lut()))?;
     for (e, &m) in counts.iter().enumerate() {
         let (w, s) = if let Some(sw) = shared_weights { sw[e % sw.len()] } else {

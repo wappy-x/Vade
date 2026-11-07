@@ -37,7 +37,7 @@ fn activations(kind: u32, cols: usize, seed: u64) -> Vec<u8> {
     }
     v
 }
-struct Job { weight: u64, scales: u64, input: u64, output: u64 }
+#[allow(dead_code)] struct Job { weight: u64, scales: u64, input: u64, output: u64 }
 struct Buf { base: u64, address: u64, bytes: usize }
 impl Buf {
     fn new(g: &mut Gpu, data: &[u8]) -> Result<Self> {
@@ -47,7 +47,7 @@ impl Buf {
     fn poison(&self, g: &Gpu) -> Result<()> { g.upload_at(self.address, &vec![0xff; self.bytes]) }
 }
 fn median(mut v: Vec<f64>) -> f64 { v.sort_by(|a, b| a.partial_cmp(b).unwrap()); v[v.len() / 2] }
-struct Run<'a> { reference: H, stream: H, g: &'a mut Gpu }
+#[allow(dead_code)] struct Run<'a> { reference: H, stream: H, g: &'a mut Gpu }
 /// Launch one batch. `table` holds the job descriptors; returns nothing; the caller syncs.
 fn launch(g: &Gpu, f: H, v: Geo, shape: Shape, jobs: &[Job], table: u64, out: u64) -> Result<()> {
     let args = Arguments { input: [jobs[0].input, 4, 4, 4], weight: jobs[0].weight, scales: jobs[0].scales, output: out, shape };
