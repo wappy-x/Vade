@@ -12,7 +12,9 @@ use crate::expert_ops::{Arguments,LaunchArguments,Op};
 pub const THREADS:usize=128;
 
 #[inline(always)]
-pub(crate) fn lanes(launch:LaunchArguments) {
+pub(crate) fn lanes_owned(launch:LaunchArguments) {lanes(&launch)}
+#[inline(always)]
+pub(crate) fn lanes(launch:&LaunchArguments) {
     // SAFETY: The host checks the descriptor (`quantize_lanes_admitted`: Quantize, cols a multiple of 16 up to the swept
     // limit), that the input owner holds cols words and the output owner cols/16*17 words, both contiguous and live
     // through stream completion, and that the output is private (raw stores before any read; the host skips its fill, fill_free). Input is
@@ -22,7 +24,7 @@ pub(crate) fn lanes(launch:LaunchArguments) {
     // equal-width Quantize jobs with disjoint private outputs; block b belongs to job b / ceil(cols/128) and the
     // whole block returns when that job does not exist. The body traps unless every job is a Quantize job of the
     // launch's width at 128 threads. All 32 lanes of every warp execute each shuffle (inactive half-warps use 0.0
-    // and skip the stores).
+    // and skip the stores). The caller owns the borrowed launch for this synchronous inline call. No reference escapes.
     unsafe {
         use core::arch::asm;
         use core::arch::nvptx::{_block_dim_x,_block_idx_x,_thread_idx_x};

@@ -17,7 +17,7 @@ pub(crate) fn resident_expert_operation(launch:LaunchArguments) {
     // NV loads read exactly eight bytes within a checked sixteen-feature
     // block. Its row stride is a multiple of eight; misalignment uses bytes.
     unsafe {
-        if launch.single.shape.op==crate::expert_ops::Op::Quantize && core::arch::nvptx::_block_dim_x() as usize==crate::nv_quantize::THREADS {crate::nv_quantize::lanes(launch);return;}
+        if launch.single.shape.op==crate::expert_ops::Op::Quantize && core::arch::nvptx::_block_dim_x() as usize==crate::nv_quantize::THREADS {crate::nv_quantize::lanes_owned(launch);return;}
         let thread=crate::index();
         // A tile launch (block of FP8_TILE_THREADS) is made by the host only for admitted Fp8Serial shapes.
         if launch.single.shape.op==crate::expert_ops::Op::Fp8Serial && core::arch::nvptx::_block_dim_x()==crate::expert_ops::FP8_TILE_THREADS {crate::fp8_tile::tile(launch);return;}
