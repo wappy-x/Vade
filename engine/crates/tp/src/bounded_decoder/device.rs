@@ -6,17 +6,17 @@ use super::lineage::Lineage;
 pub struct Device<'b,'d> {pub backend:&'b Backend<'d>,weights:Rc<RefCell<crate::resident_weights::Weights<'b,'d>>>,
     #[cfg(feature="kernel-bench")] pub(super) probe:Rc<RefCell<Option<super::projection_probe::Probe>>>,
     #[cfg(feature="kernel-bench")] attention_calls:Rc<Cell<u64>>,
-    parameters:Rc<RefCell<BTreeMap<Vec<u32>,DeviceVector<'d>>>>,
+    parameters:Rc<RefCell<parameters::ParameterCache<DeviceVector<'d>>>>,
     norms:Rc<RefCell<BTreeMap<String,spark_gpu_probe::driver::ResidentNorm<'b,'d>>>>,
     blocks:Rc<RefCell<BTreeMap<(usize,usize),ResidentMhcBoundary<'b,'d>>>>,
-    stages:Rc<RefCell<[[u128;2];4]>>,cost:Rc<crate::resident_profile::Cost>,memo:RefCell<Memo<'d>>,copies:RefCell<Option<DeviceVector<'d>>>,source:Rc<Cell<u64>>,programs:RefCell<BTreeMap<(Vec<u32>,u64),spark_gpu_probe::driver::ResidentProgram<'b,'d>>>,
+    stages:Rc<RefCell<[[u128;2];4]>>,cost:Rc<crate::resident_profile::Cost>,memo:RefCell<Memo<'d>>,copies:RefCell<Option<DeviceVector<'d>>>,selection_checks:RefCell<Vec<(Rc<DeviceVector<'d>>,f32)>>,selection_counts:Cell<[u64;2]>,selection_shortcut:Cell<bool>,screen_nan:Cell<Option<u32>>,screen_keep:Cell<bool>,source:Rc<Cell<u64>>,programs:RefCell<BTreeMap<(Vec<u32>,u64),spark_gpu_probe::driver::ResidentProgram<'b,'d>>>,
     row_workspace:RefCell<Option<DeviceVector<'d>>>,small_rows:Cell<bool>,
     serving:Option<RefCell<Option<(u64,std::time::Instant,BackendStats)>> >,state_copies:Cell<usize>}
 type OriginKey=(String,Lineage,bool);
 /// The rows of one projection share one allocation, so they leave the memo together.
-struct Batch {keys:Vec<OriginKey>,bytes:usize,used:u64}
+use super::memo_batches::{self,Batch};
 #[derive(Default)]
-struct Memo<'d> {origins:BTreeMap<OriginKey,(Rc<HeldStorage<'d>>,u64)>,batches:BTreeMap<u64,Batch>,next:u64,clock:u64,bytes:usize,limit:usize,hits:u64,misses:u64,slab:Slab<'d>}
+struct Memo<'d> {origins:BTreeMap<OriginKey,(Rc<HeldStorage<'d>>,u64)>,batches:BTreeMap<u64,Batch<OriginKey>>,unverified:Vec<u64>,next:u64,clock:u64,bytes:usize,limit:usize,hits:u64,misses:u64,slab:Slab<'d>}
 /// Rows of one slab chunk: one allocation, 8 MiB at GLM's 131,072-byte expanded row.
 pub const SLAB_ROWS:usize=64;
 /// The memo's own storage for kept rows: chunks of SLAB_ROWS rows, one slot a row. Every
@@ -52,7 +52,7 @@ impl Clone for Device<'_,'_> {
     fn clone(&self)->Self {Self {backend:self.backend,weights:self.weights.clone(),parameters:self.parameters.clone(),norms:self.norms.clone(),
         #[cfg(feature="kernel-bench")] probe:self.probe.clone(),
         #[cfg(feature="kernel-bench")] attention_calls:self.attention_calls.clone(),
-        blocks:self.blocks.clone(),stages:self.stages.clone(),cost:self.cost.clone(),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:self.source.clone(),programs:RefCell::new(BTreeMap::new()),serving:self.serving.as_ref().map(|_|RefCell::new(None)),state_copies:Cell::new(0)}}
+        blocks:self.blocks.clone(),stages:self.stages.clone(),cost:self.cost.clone(),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),selection_checks:RefCell::new(Vec::new()),selection_counts:Cell::new([0;2]),selection_shortcut:Cell::new(true),screen_nan:Cell::new(None),screen_keep:Cell::new(false),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:self.source.clone(),programs:RefCell::new(BTreeMap::new()),serving:self.serving.as_ref().map(|_|RefCell::new(None)),state_copies:Cell::new(0)}}
 }
 struct Pending<'b,'d> {post:Option<(MhcBoundaryPass<'b,'d>,Rc<DeviceVector<'d>>)>,error:Option<String>,state_prefix:Option<usize>}
 /// Held rows of one chat and layer: one allocation with room. Every view of it, whatever its
@@ -61,7 +61,7 @@ struct Pending<'b,'d> {post:Option<(MhcBoundaryPass<'b,'d>,Rc<DeviceVector<'d>>)
 struct HeldStorage<'d> {whole:DeviceVector<'d>,capacity:usize,views:super::held::Ends<DeviceVector<'d>>,
     /// Cache rows may grow in place; a memo slot is immutable while any handle lives.
     appendable:bool}
-pub struct Value<'b,'d> {vector:Rc<DeviceVector<'d>>,words:usize,lineage:Lineage,known:RefCell<Option<Vec<f32>>>,pending:Option<Rc<RefCell<Pending<'b,'d>>>>,
+pub struct Value<'b,'d> {vector:Rc<DeviceVector<'d>>,words:usize,lineage:Lineage,known:RefCell<Option<Vec<f32>>>,assumed:Cell<bool>,pending:Option<Rc<RefCell<Pending<'b,'d>>>>,
     /// For a view of held rows: the storage and the storage word where the view starts.
     held:Option<(Rc<HeldStorage<'d>>,usize)>}
 impl Value<'_,'_> {
@@ -85,10 +85,10 @@ impl<'b,'d> Device<'b,'d> {
     pub fn with_ring(backend:&'b Backend<'d>,ring:Option<crate::transport::Ring>)->Self {Self::with_ring_profiled(backend,ring,false)}
     /// Diagnostic runner counters. Normal construction keeps them disabled.
     pub fn with_ring_profiled(backend:&'b Backend<'d>,ring:Option<crate::transport::Ring>,cost:bool)->Self {
-        Self {backend,weights:Rc::new(RefCell::new(crate::resident_weights::Weights::new(ring,cost))),parameters:Rc::new(RefCell::new(BTreeMap::new())),
+        Self {backend,weights:Rc::new(RefCell::new(crate::resident_weights::Weights::new(ring,cost))),parameters:Rc::new(RefCell::new(parameters::ParameterCache::default())),
             #[cfg(feature="kernel-bench")] probe:Rc::new(RefCell::new(None)),
             #[cfg(feature="kernel-bench")] attention_calls:Rc::new(Cell::new(0)),
-            norms:Rc::new(RefCell::new(BTreeMap::new())),blocks:Rc::new(RefCell::new(BTreeMap::new())),stages:Rc::new(RefCell::new([[0;2];4])),cost:Rc::new(crate::resident_profile::Cost::new(cost)),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:Rc::new(Cell::new(0)),programs:RefCell::new(BTreeMap::new()),serving:None,state_copies:Cell::new(0)}
+            norms:Rc::new(RefCell::new(BTreeMap::new())),blocks:Rc::new(RefCell::new(BTreeMap::new())),stages:Rc::new(RefCell::new([[0;2];4])),cost:Rc::new(crate::resident_profile::Cost::new(cost)),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),selection_checks:RefCell::new(Vec::new()),selection_counts:Cell::new([0;2]),selection_shortcut:Cell::new(true),screen_nan:Cell::new(None),screen_keep:Cell::new(false),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:Rc::new(Cell::new(0)),programs:RefCell::new(BTreeMap::new()),serving:None,state_copies:Cell::new(0)}
     }
     /// Wall counters only. This does not enable CUDA event profiling.
     pub fn with_serving_trace(mut self,enabled:bool)->Self {self.serving=enabled.then(||RefCell::new(None));self}
@@ -101,7 +101,7 @@ impl<'b,'d> Device<'b,'d> {
     // Keep owners here; a value wrapper needs no separate completion barrier.
     fn value(&self,vector:DeviceVector<'d>,words:usize)->Result<Value<'b,'d>> {self.shared_value(Rc::new(vector.into_resident_shared()?),words)}
     fn shared_value(&self,vector:Rc<DeviceVector<'d>>,words:usize)->Result<Value<'b,'d>> {let source=self.source.get().checked_add(1).ok_or("immutable source identity exhausted")?;self.source.set(source);
-        Ok(Value {vector,words,lineage:Lineage::fresh(source,words),known:RefCell::new(None),pending:None,held:None})}
+        Ok(Value {vector,words,lineage:Lineage::fresh(source,words),known:RefCell::new(None),assumed:Cell::new(false),pending:None,held:None})}
     fn take_post(&self,value:&Value<'b,'d>)->Result<Option<(MhcBoundaryPass<'b,'d>,Rc<DeviceVector<'d>>)>> {
         let Some(pending)=&value.pending else {return Ok(None);};let mut pending=pending.borrow_mut();
         if let Some(error)=&pending.error {return Err(error.clone());}
@@ -116,13 +116,54 @@ impl<'b,'d> Device<'b,'d> {
     /// The selection and its count are complete together: one wait reads both.
     fn read_pair(&self,first:&Value<'b,'d>,second:&Value<'b,'d>)->Result<(Vec<f32>,Vec<f32>)> {
         self.ready(first)?;self.ready(second)?;
+        if first.assumed.get() && second.assumed.get() {
+            self.weights.borrow().check_exchange()?;if let Some(error)=self.backend.fatal_error() {return Err(error);}
+            // No wait and no bytes. This point still submits, so pieces stay as they were.
+            self.backend.feed_resident_launches()?;let [waits,known]=self.selection_counts.get();self.selection_counts.set([waits,known+1]);
+            let copy=|v:&Value<'b,'d>|v.known.borrow().clone().ok_or_else(||"known selection lost its row".to_string());return Ok((copy(first)?,copy(second)?));
+        }
+        let [waits,known]=self.selection_counts.get();self.selection_counts.set([waits+1,known]);
         if first.words==0 || second.words==0 || first.known.borrow().is_some() || second.known.borrow().is_some() || first.vector.len()!=first.words || second.vector.len()!=second.words {
             return Ok((Compute::read(self,first)?,Compute::read(self,second)?));}
         self.weights.borrow().check_exchange()?;if let Some(error)=self.backend.fatal_error() {return Err(error);}
+        self.check_selection(None)?;
         let stamp=self.cost.start(self.backend);let (a,b)=self.backend.read_resident_pair(&first.vector,&second.vector)?;
         self.weights.borrow().check_exchange()?;*first.known.borrow_mut()=Some(a.clone());*second.known.borrow_mut()=Some(b.clone());
         self.cost.record(||"readback".into(),stamp,self.backend,0);Ok((a,b))
     }
+    /// Compare each known selection's count word with the host's value at this real read, so a
+    /// NaN score still refuses the request before a result leaves. One join and one wait, shared
+    /// with `with` when it can be read in the same wait. Returns `with`'s words if they were read.
+    fn check_selection(&self,with:Option<&Value<'b,'d>>)->Result<Option<Vec<f32>>> {
+        let checks=std::mem::take(&mut *self.selection_checks.borrow_mut());if checks.is_empty() {return Ok(None);}
+        let verified=(|| {
+            let parts=checks.iter().map(|(count,_)|(&**count,1usize)).collect::<Vec<_>>();
+            let joined=self.backend.resident_join(&parts,&mut self.copies.borrow_mut(),0)?;
+            let (out,counts)=match with.filter(|v|v.words>0 && v.vector.len()==v.words) {
+                Some(v)=>{let (a,b)=self.backend.read_resident_pair(&v.vector,&joined)?;(Some(a),b)},
+                None=>(None,self.backend.read_vector_values(&joined)?),
+            };
+            need(counts.len()==checks.len(),"known selection check extent differs")?;
+            for (got,(_,want)) in counts.iter().zip(&checks) {need(got.to_bits()==want.to_bits(),"selection score is not a number")?;}
+            Ok(out)
+        })();
+        if verified.is_ok() {self.memo.borrow_mut().unverified.clear();} else {self.discard_unverified();}verified
+    }
+    /// A refused selection's Gather wrote zero rows under the source's lineage. The projections of
+    /// those rows are wrong for a clean retry, so every batch kept since the last check goes.
+    fn discard_unverified(&self) {
+        let mut memo=self.memo.borrow_mut();let memo=&mut *memo;let ids=std::mem::take(&mut memo.unverified);
+        if self.screen_keep.get() {return;}
+        let freed=memo_batches::discard(&mut memo.origins,&mut memo.batches,&ids);memo.bytes-=freed;
+    }
+    /// Screens only: make the selection after `after` more selections see NaN scores.
+    pub fn screen_nan_selection(&self,after:u32) {self.screen_nan.set(Some(after));}
+    /// Screens only: keep unverified memo rows after a refusal, to prove the retry test can fail.
+    pub fn screen_keep_unverified(&self,keep:bool) {self.screen_keep.set(keep);}
+    /// Screens only: false runs the readback path, so one process can compare both.
+    pub fn set_selection_shortcut(&self,on:bool) {self.selection_shortcut.set(on);}
+    /// Diagnostic: selection reads that waited, and those known on the host without a wait.
+    pub fn selection_counts(&self)->[u64;2] {self.selection_counts.get()}
     /// Diagnostic: kept projection bytes, their bound, and rows found and added since the last report.
     pub fn memo_counts(&self)->(usize,usize,u64,u64) {let memo=self.memo.borrow();(memo.bytes,memo.limit,memo.hits,memo.misses)}
     pub fn prompt_state_copies(&self)->usize {self.state_copies.get()}
@@ -145,9 +186,12 @@ impl<'b,'d> Device<'b,'d> {
 impl<'b,'d> Compute for Device<'b,'d> {
     fn work<T>(&self,run:impl FnOnce()->Result<T>)->Result<T> {
         let queue=self.backend.resident_queue()?;self.backend.enable_resident_launches()?;
-        let result=run();drop(queue);
+        let result=run();
+        // A scope may end with no real read. Its known selections are still checked.
+        let checked=if result.is_ok() {self.check_selection(None).map(|_|())} else {self.selection_checks.borrow_mut().clear();self.discard_unverified();Ok(())};
+        drop(queue);
         if let Some(error)=self.backend.fatal_error() {return Err(error);}
-        self.weights.borrow().check_exchange()?;result
+        checked?;self.weights.borrow().check_exchange()?;result
     }
     fn resident_weights_ready(&self)->bool {self.weights.borrow().prepared()}
     fn fatal_error(&self)->Option<String> {self.backend.fatal_error().or_else(||self.weights.borrow().check_exchange().err())}
@@ -218,6 +262,8 @@ impl<'b,'d> Compute for Device<'b,'d> {
         self.backend.resident_scatter(&sources,&mut targets,&mut self.copies.borrow_mut())?;drop(targets);
         let id=memo.next;memo.next+=1;let now=memo.clock;let mut keys=Vec::with_capacity(kept.len());
         for ((x,_),slot) in kept.iter().zip(slots) {let key=(name.to_owned(),x.lineage.clone(),round);memo.origins.insert(key.clone(),(slot,id));keys.push(key);}
+        // A known selection's count is compared later. Until then, these rows may come from a refused selection.
+        if !self.selection_checks.borrow().is_empty() {memo.unverified.push(id);}
         memo.batches.insert(id,Batch {keys,bytes:total,used:now});memo.bytes+=total;memo.misses+=kept.len() as u64;Ok(())
     }
     fn planar_kda(&self,shape:Shape)->bool {matches!(shape.op,Op::StepPlanar|Op::ConvParts) && spark_gpu_probe::causal_ops::fast_admitted(shape,spark_gpu_probe::causal_ops::FAST_THREADS)}
@@ -295,13 +341,19 @@ impl<'b,'d> Compute for Device<'b,'d> {
         self.ready(v)?;
         self.weights.borrow().check_exchange()?;if let Some(error)=self.backend.fatal_error() {return Err(error);}
         if let Some(out)=v.known.borrow().as_ref() {return Ok(out.clone());}
-        let stamp=self.cost.start(self.backend);let out=if v.words==0 {Vec::new()} else {self.backend.read_vector_values(&v.vector)?};
+        let stamp=self.cost.start(self.backend);let checked=self.check_selection(Some(v))?;let out=if v.words==0 {Vec::new()} else if let Some(out)=checked {out} else {self.backend.read_vector_values(&v.vector)?};
         self.weights.borrow().check_exchange()?;*v.known.borrow_mut()=Some(out.clone());self.cost.record(||"readback".into(),stamp,self.backend,0);Ok(out)
     }
     fn read_pair(&self,first:&Value<'b,'d>,second:&Value<'b,'d>)->Result<(Vec<f32>,Vec<f32>)> {Device::read_pair(self,first,second)}
+    fn select_known(&self,ids:&Value<'b,'d>,count:&Value<'b,'d>,row:&[f32])->Result<()> {
+        if !self.selection_shortcut.get() {return Ok(());}
+        need(count.words==1 && ids.words+1==row.len(),"known selection extent differs")?;
+        *ids.known.borrow_mut()=Some(row[..ids.words].to_vec());*count.known.borrow_mut()=Some(vec![row[ids.words]]);
+        ids.assumed.set(true);count.assumed.set(true);self.selection_checks.borrow_mut().push((count.vector.clone(),row[ids.words]));Ok(())
+    }
     fn range(&self,v:&Value<'b,'d>,start:usize,len:usize)->Result<Value<'b,'d>> {
         let stamp=self.cost.start(self.backend);need(start.checked_add(len).is_some_and(|n|n<=v.words),"bounded device range differs")?;
-        if start==0 && len==v.words {return Ok(Value {vector:v.vector.clone(),words:len,lineage:v.lineage.clone(),known:RefCell::new(v.known.borrow().clone()),pending:v.pending.clone(),held:v.held.clone()});}self.ready(v)?;
+        if start==0 && len==v.words {return Ok(Value {vector:v.vector.clone(),words:len,lineage:v.lineage.clone(),known:RefCell::new(v.known.borrow().clone()),assumed:v.assumed.clone(),pending:v.pending.clone(),held:v.held.clone()});}self.ready(v)?;
 if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len) {
     // A recurrent state must not keep all token outputs in its parent.
     // Copy raw words; the ordered stream and deferred owners preserve them.
@@ -309,6 +361,8 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
     self.backend.copy_prefix(&source,&mut out,len)?;self.state_copies.set(self.state_copies.get().checked_add(1).ok_or("state copy counter overflow")?);let value=self.value(out,len)?;self.cost.record(||"state_prefix_copy".into(),stamp,self.backend,0);return Ok(value);
 }
         let out=if len==0 {self.backend.vector(1)?} else {v.vector.resident_range(start..start+len)?};let mut value=self.value(out,len)?;value.lineage=v.lineage.range(start,len)?;
+        // A view of a selection known on the host is known too. Other read values keep their read.
+        if v.assumed.get() {value.assumed.set(true);*value.known.borrow_mut()=v.known.borrow().as_ref().map(|row|row[start..start+len].to_vec());}
         // A view of held rows, with any start, is listed in its storage: no append writes the words it reads.
         if let Some((storage,first))=v.held.as_ref().filter(|_|len>0) {storage.views.add(&value.vector,first+start+len);value.held=Some((storage.clone(),first+start));}
         self.cost.record(||"range_view".into(),stamp,self.backend,0);Ok(value)
@@ -340,46 +394,8 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         let mut value=self.value(out.resident_range(0..len)?,len)?;value.lineage=Lineage::join(parts.iter().map(|v|&v.lineage))?;self.cost.record(||"join_copy".into(),stamp,self.backend,0);Ok(value)
     }
     fn zeros(&self,len:usize)->Result<Value<'b,'d>> {let stamp=self.cost.start(self.backend);let mut v=self.backend.vector(len.max(1))?;self.backend.zero_vector(&mut v)?;let value=self.value(v,len)?;self.cost.record(||"zero".into(),stamp,self.backend,0);Ok(value)}
-    fn operation(&self,s:Shape,x:[Option<&Value<'b,'d>>;4],w:&[f32])->Result<Value<'b,'d>> {
-        for value in x.iter().flatten() {self.ready(value)?;}
-        let s=match s.op {Op::Scores=>Shape {op:Op::ScoresSlots,..s},Op::Values=>Shape {op:Op::ValuesChannels,..s},_=>s};
-        let started=std::time::Instant::now();let stamp=self.cost.start(self.backend);
-        let (lengths,_,units,words)=s.lengths().ok_or("invalid bounded device operation")?;
-        for (v,count) in x.iter().zip(lengths) {need(v.map_or(0,|v|v.words)==count,"bounded device operation input extent differs")?;}
-        let key=w.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
-        if !w.is_empty() && !self.parameters.borrow().contains_key(&key) {self.parameters.borrow_mut().insert(key.clone(),self.backend.upload_vector(w)?.into_resident_shared()?);}
-        let owners=self.parameters.borrow();
-        let input=x.map(|v|v.filter(|v|v.words>0).map(|v|&*v.vector));
-        let graphable=self.backend.resident_queue_active() && !self.backend.resident_launches_active() && matches!(s.op,Op::Conv|Op::ConvParts|Op::StepPlanar|Op::Prepare|Op::Step|Op::GatedNorm|Op::SwiGlu|Op::KeyNorm|Op::Route|Op::ExpertFold|Op::StreamMean|Op::Mxfp8Quantize);
-        let v=if graphable {
-            let key=(vec![s.op as u32,s.heads,s.dim,s.taps,s.rows,s.cols,s.epsilon.to_bits(),s.bound.to_bits()],owners.get(&key).map_or(0,DeviceVector::device_address));
-            let mut programs=self.programs.borrow_mut();
-            if !programs.contains_key(&key) {
-                let plan=spark_gpu_probe::resident_program::Program::operation(s)?;
-                let weights=plan.nodes.iter().map(|n|if n.shape.lengths().unwrap().1>0 {owners.get(&w.iter().map(|v|v.to_bits()).collect::<Vec<_>>())} else {None}).collect::<Vec<_>>();
-                programs.insert(key.clone(),self.backend.resident_program(&plan,&weights)?);
-            }
-            programs.get_mut(&key).unwrap().run(&input.into_iter().flatten().collect::<Vec<_>>())?
-        } else if s.op==Op::Step && !spark_gpu_probe::causal_ops::fast_admitted(s,spark_gpu_probe::causal_ops::FAST_THREADS) {
-            let columns=self.backend.causal_operation(Shape {op:Op::StepColumns,..s},input,None)?;
-            self.backend.causal_operation(Shape {op:Op::StepLayout,..s},[Some(&columns),None,None,None],None)?
-        } else if s.op==Op::Pool {
-            let channels=self.backend.causal_operation(Shape {op:Op::PoolChannels,..s},input,owners.get(&key))?;
-            self.backend.causal_operation(Shape {op:Op::PoolLayout,..s},[Some(&channels),None,None,None],None)?
-        } else if s.op==Op::Conv && !spark_gpu_probe::causal_ops::fast_admitted(s,spark_gpu_probe::causal_ops::FAST_THREADS) {
-            let channels=self.backend.causal_operation(Shape {op:Op::ConvChannels,..s},input,owners.get(&key))?;
-            self.backend.causal_operation(Shape {op:Op::ConvLayout,..s},[Some(&channels),None,None,None],None)?
-        } else {self.backend.causal_operation(s,input,owners.get(&key))?};
-        let mut value=self.value(v,units*words)?;
-        if s.op==Op::Gather {
-            let source=x[0].ok_or("gather source is absent")?;
-            let (selected,count)=self.read_pair(x[1].ok_or("gather selection is absent")?,x[2].ok_or("gather count is absent")?)?;let count=count[0] as usize;
-            if count>s.cols as usize {return Err("gather count exceeds live slots".into());}
-            let ids=selected[..count].iter().map(|v|*v as usize).collect::<Vec<_>>();
-            value.lineage=source.lineage.gather(s.dim as usize,&ids,s.cols as usize,self.source.get())?;
-        }
-        self.cost.record(||format!("operation_{:?}",s.op),stamp,self.backend,w.len()*4);self.record(3,started);Ok(value)
-    }
+    fn operation(&self,s:Shape,x:[Option<&Value<'b,'d>>;4],w:&[f32])->Result<Value<'b,'d>> {self.operation_bound(s,x,w,None)}
+    fn operation_prepared(&self,s:Shape,x:[Option<&Value<'b,'d>>;4],w:&Rc<StaticParameters>)->Result<Value<'b,'d>> {self.operation_bound(s,x,w.values(),Some(w))}
     fn norm(&self,name:&str,s:NormShape,x:&Value<'b,'d>,w:&[f32])->Result<Value<'b,'d>> {
         self.ready(x)?;
         let started=std::time::Instant::now();let stamp=self.cost.start(self.backend);
@@ -420,13 +436,18 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
         self.backend.copy_prefix(rounded.vector(),&mut out,x.words)?;let value=self.value(out,x.words)?;self.cost.record(||"round".into(),stamp,self.backend,0);Ok(value)}
     fn mean(&self,x:&Value<'b,'d>,streams:u32,hidden:u32)->Result<Value<'b,'d>> {let mut s=shape(Op::StreamMean);s.heads=streams;s.dim=hidden;self.operation(s,[Some(x),None,None,None],&[])}
     fn prompt(&self,s:spark_gpu_probe::prompt_ops::Shape,x:[Option<&Value<'b,'d>>;5],w:&[f32])->Result<Value<'b,'d>> {
+        let mut x=x;let poisoned;
+        if s.op==spark_gpu_probe::prompt_ops::Op::SelectRows {if let Some(left)=self.screen_nan.get() {
+            if left>0 {self.screen_nan.set(Some(left-1));} else if let Some(words)=x[0].map(|v|v.words).filter(|&n|n>0) {
+                self.screen_nan.set(None);poisoned=self.upload(&vec![f32::NAN;words])?;x[0]=Some(&poisoned);
+            }
+        }}
         for value in x.iter().flatten() {self.ready(value)?;}
         let stamp=self.cost.start(self.backend);let (lengths,_,units,words)=s.lengths().ok_or("invalid prompt row shape")?;
         for (v,count) in x.iter().zip(lengths) {need(v.map_or(0,|v|v.words)==count,"prompt row input extent differs")?;}
-        let key=w.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
-        if !w.is_empty() && !self.parameters.borrow().contains_key(&key) {self.parameters.borrow_mut().insert(key.clone(),self.backend.upload_vector(w)?);}
-        let owners=self.parameters.borrow();let input=x.map(|v|v.filter(|v|v.words>0).map(|v|&*v.vector));
-        let mut value=self.value(self.backend.prompt_operation(s,input,owners.get(&key))?,units*words)?;
+        let weight=self.parameters.borrow_mut().resolve(w,None,|values|self.backend.upload_vector(values))?;
+        let input=x.map(|v|v.filter(|v|v.words>0).map(|v|&*v.vector));
+        let mut value=self.value(self.backend.prompt_operation(s,input,weight.as_deref())?,units*words)?;
         if s.op==spark_gpu_probe::prompt_ops::Op::StepRows && s.tokens>256 {let prefix=(s.heads as usize).checked_mul(s.dim as usize).and_then(|n|n.checked_mul(s.dim as usize)).ok_or("state prefix overflow")?;value.pending=Some(Rc::new(RefCell::new(Pending {post:None,error:None,state_prefix:Some(prefix)})));}self.cost.settle(self.backend)?;
         self.cost.record(||if s.op==spark_gpu_probe::prompt_ops::Op::Wrapped {format!("rows_{:?}",s.inner.op)} else {format!("rows_{:?}",s.op)},stamp,self.backend,w.len()*4);Ok(value)
     }
@@ -510,5 +531,47 @@ if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len
     }
     fn rows_finish(&self,p:Self::Pass,x:&Value<'b,'d>,m:usize)->Result<Value<'b,'d>> {
         need(p.shape().rows as usize==m,"deferred mHC row count differs")?;self.finish(p,x)
+    }
+}
+
+impl<'b,'d> Device<'b,'d> {
+    pub fn parameter_counts(&self)->ParameterCounts {self.parameters.borrow().counts()}
+    fn operation_bound(&self,s:Shape,x:[Option<&Value<'b,'d>>;4],w:&[f32],prepared:Option<&Rc<StaticParameters>>)->Result<Value<'b,'d>> {
+        for value in x.iter().flatten() {self.ready(value)?;}
+        let s=match s.op {Op::Scores=>Shape {op:Op::ScoresSlots,..s},Op::Values=>Shape {op:Op::ValuesChannels,..s},_=>s};
+        let started=std::time::Instant::now();let stamp=self.cost.start(self.backend);
+        let (lengths,_,units,words)=s.lengths().ok_or("invalid bounded device operation")?;
+        for (v,count) in x.iter().zip(lengths) {need(v.map_or(0,|v|v.words)==count,"bounded device operation input extent differs")?;}
+        let weight=self.parameters.borrow_mut().resolve(w,prepared,|values|self.backend.upload_vector(values)?.into_resident_shared())?;
+        let input=x.map(|v|v.filter(|v|v.words>0).map(|v|&*v.vector));
+        let graphable=self.backend.resident_queue_active() && !self.backend.resident_launches_active() && matches!(s.op,Op::Conv|Op::ConvParts|Op::StepPlanar|Op::Prepare|Op::Step|Op::GatedNorm|Op::SwiGlu|Op::KeyNorm|Op::Route|Op::ExpertFold|Op::StreamMean|Op::Mxfp8Quantize);
+        let v=if graphable {
+            let key=(vec![s.op as u32,s.heads,s.dim,s.taps,s.rows,s.cols,s.epsilon.to_bits(),s.bound.to_bits()],weight.as_deref().map_or(0,DeviceVector::device_address));
+            let mut programs=self.programs.borrow_mut();
+            if !programs.contains_key(&key) {
+                let plan=spark_gpu_probe::resident_program::Program::operation(s)?;
+                let weights=plan.nodes.iter().map(|n|if n.shape.lengths().unwrap().1>0 {weight.as_deref()} else {None}).collect::<Vec<_>>();
+                programs.insert(key.clone(),self.backend.resident_program(&plan,&weights)?);
+            }
+            programs.get_mut(&key).unwrap().run(&input.into_iter().flatten().collect::<Vec<_>>())?
+        } else if s.op==Op::Step && !spark_gpu_probe::causal_ops::fast_admitted(s,spark_gpu_probe::causal_ops::FAST_THREADS) {
+            let columns=self.backend.causal_operation(Shape {op:Op::StepColumns,..s},input,None)?;
+            self.backend.causal_operation(Shape {op:Op::StepLayout,..s},[Some(&columns),None,None,None],None)?
+        } else if s.op==Op::Pool {
+            let channels=self.backend.causal_operation(Shape {op:Op::PoolChannels,..s},input,weight.as_deref())?;
+            self.backend.causal_operation(Shape {op:Op::PoolLayout,..s},[Some(&channels),None,None,None],None)?
+        } else if s.op==Op::Conv && !spark_gpu_probe::causal_ops::fast_admitted(s,spark_gpu_probe::causal_ops::FAST_THREADS) {
+            let channels=self.backend.causal_operation(Shape {op:Op::ConvChannels,..s},input,weight.as_deref())?;
+            self.backend.causal_operation(Shape {op:Op::ConvLayout,..s},[Some(&channels),None,None,None],None)?
+        } else {self.backend.causal_operation(s,input,weight.as_deref())?};
+        let mut value=self.value(v,units*words)?;
+        if s.op==Op::Gather {
+            let source=x[0].ok_or("gather source is absent")?;
+            let (selected,count)=self.read_pair(x[1].ok_or("gather selection is absent")?,x[2].ok_or("gather count is absent")?)?;let count=count[0] as usize;
+            if count>s.cols as usize {return Err("gather count exceeds live slots".into());}
+            let ids=selected[..count].iter().map(|v|*v as usize).collect::<Vec<_>>();
+            value.lineage=source.lineage.gather(s.dim as usize,&ids,s.cols as usize,self.source.get())?;
+        }
+        self.cost.record(||format!("operation_{:?}",s.op),stamp,self.backend,w.len()*4);self.record(3,started);Ok(value)
     }
 }

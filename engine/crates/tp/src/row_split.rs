@@ -83,11 +83,15 @@ impl<C:Compute,E:Exchange> Compute for Split<C,E> {
     fn upload(&self,v:&[f32])->Result<C::Value> {self.compute.upload(v)}
     fn read(&self,v:&C::Value)->Result<Vec<f32>> {self.compute.read(v)}
     fn read_pair(&self,first:&C::Value,second:&C::Value)->Result<(Vec<f32>,Vec<f32>)> {self.compute.read_pair(first,second)}
+    fn select_known(&self,ids:&C::Value,count:&C::Value,row:&[f32])->Result<()> {self.compute.select_known(ids,count,row)}
     fn range(&self,v:&C::Value,start:usize,len:usize)->Result<C::Value> {self.compute.range(v,start,len)}
     fn join(&self,v:&[&C::Value])->Result<C::Value> {self.compute.join(v)}
     fn cache_append(&self,old:&C::Value,new:&C::Value,rows:usize,width:usize,room:usize)->Result<C::Value> {self.compute.cache_append(old,new,rows,width,room)}
     fn join_reserved(&self,v:&[&C::Value],reserve:usize)->Result<C::Value> {self.compute.join_reserved(v,reserve)}
     fn zeros(&self,n:usize)->Result<C::Value> {self.compute.zeros(n)}
+    fn operation_prepared(&self,s:Shape,x:[Option<&C::Value>;4],w:&std::rc::Rc<crate::bounded_decoder::StaticParameters>)->Result<C::Value> {
+        if matches!(s.op,Op::Project|Op::Nvfp4) {self.operation(s,x,w.values())} else {self.compute.operation_prepared(s,x,w)}
+    }
     fn operation(&self,mut s:Shape,x:[Option<&C::Value>;4],w:&[f32])->Result<C::Value> {
         if !matches!(s.op,Op::Project|Op::Nvfp4) {return self.compute.operation(s,x,w);}
         let rows=s.rows as usize;let cols=s.cols as usize;let r=crate::rows(rows,self.topology.rank as usize,self.topology.parts as usize);
@@ -150,12 +154,14 @@ impl<C:Compute> Compute for &C {
     fn upload(&self,v:&[f32])->Result<C::Value> {(**self).upload(v)}
     fn read(&self,v:&C::Value)->Result<Vec<f32>> {(**self).read(v)}
     fn read_pair(&self,first:&C::Value,second:&C::Value)->Result<(Vec<f32>,Vec<f32>)> {(**self).read_pair(first,second)}
+    fn select_known(&self,ids:&C::Value,count:&C::Value,row:&[f32])->Result<()> {(**self).select_known(ids,count,row)}
     fn range(&self,v:&C::Value,s:usize,n:usize)->Result<C::Value> {(**self).range(v,s,n)}
     fn join(&self,v:&[&C::Value])->Result<C::Value> {(**self).join(v)}
     fn cache_append(&self,old:&C::Value,new:&C::Value,rows:usize,width:usize,room:usize)->Result<C::Value> {(**self).cache_append(old,new,rows,width,room)}
     fn join_reserved(&self,v:&[&C::Value],reserve:usize)->Result<C::Value> {(**self).join_reserved(v,reserve)}
     fn zeros(&self,n:usize)->Result<C::Value> {(**self).zeros(n)}
     fn operation(&self,s:Shape,x:[Option<&C::Value>;4],w:&[f32])->Result<C::Value> {(**self).operation(s,x,w)}
+    fn operation_prepared(&self,s:Shape,x:[Option<&C::Value>;4],w:&std::rc::Rc<crate::bounded_decoder::StaticParameters>)->Result<C::Value> {(**self).operation_prepared(s,x,w)}
     fn norm(&self,name:&str,s:NormShape,x:&C::Value,w:&[f32])->Result<C::Value> {(**self).norm(name,s,x,w)}
     fn begin(&self,key:(usize,usize),p:&crate::layer_operands::ResidualBlockOperands,x:&C::Value)->Result<(C::Pass,C::Value)> {(**self).begin(key,p,x)}
     fn finish(&self,p:C::Pass,x:&C::Value)->Result<C::Value> {(**self).finish(p,x)}

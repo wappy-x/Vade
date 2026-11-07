@@ -5,6 +5,15 @@ use super::*;
 /// This guard cannot leave capture active or release storage before completion.
 pub struct ResidentQueue<'b,'a> {backend:&'b Backend<'a>}
 impl<'a> Backend<'a> {
+    /// A vector's buffer. With fewer stream waits a step, more freed buffers stay charged until a
+    /// drain, so the budget must not refuse what a drain would free. A refused try leaves no state.
+    pub(super) fn funded_buffer(&self,bytes:usize,managed:bool)->Result<Buffer<'a>,String> {
+        let context=self.context;
+        crate::allocation_budget::drain_and_retry(
+            ||if managed {Buffer::allocate(context,bytes,true)} else {Buffer::pooled(context,bytes)},
+            ||context.has_deferred() && context.accounted_bytes().saturating_add(bytes)>context.budget.get(),
+            ||{self.stats.borrow_mut().budget_drains+=1;self.synchronize()})
+    }
     pub fn resident_queue_active(&self)->bool {self.context.resident_queued.get()}
     pub fn resident_queue(&self)->Result<ResidentQueue<'_,'a>,String> {
         self.require_resident_stream()?;

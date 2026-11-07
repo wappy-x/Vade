@@ -45,6 +45,8 @@ use spark_tp::Result;
 #[cfg(target_os="linux")]
 #[path="resident-decode-check/put_wide.rs"] mod put_wide;
 #[cfg(target_os="linux")]
+#[path="resident-decode-check/select_known.rs"] mod select_known;
+#[cfg(target_os="linux")]
 #[path="resident-decode-check/nv_group_rows.rs"] mod nv_group_rows;
 #[cfg(target_os="linux")]
 #[path="resident-decode-check/nv_b.rs"] mod nv_b;
@@ -337,7 +339,7 @@ fn run_pair(args:&[String])->Result<()> {
             let prompt_seconds=prompt_started.elapsed().as_secs_f64();write(&saved.join("PREFILL_TIMING"),format!("prompt_rows={} prompt_tokens={} prompt_seconds={prompt_seconds:.9} seconds_per_prompt_token={:.9}\n",row_group.map_or(prompt_rows,|g|g.0),input.len(),prompt_seconds/input.len() as f64).as_bytes())?;
             compute.cost_report("prefill");println!("PROMPT KERNEL COUNTS rank={rank} repeat={repeat} tokens={} {}",input.len(),spark_gpu_probe::prompt_launches::line());
             #[cfg(feature="kernel-bench")] let indirect_before=compute.fixture_attention_calls();
-            let bell_counted=mailbox.as_ref().map(|m|m.doorbell_stats());let mut logits=last.ok_or("empty prompt")?;let mut output=Vec::new();let counted=backend.stats();let copy_counted=backend.resident_copy_counts();let route_counted=spark_gpu_probe::device_route::counts();let stage_counted=spark_tp::projection_stage::counts();let prompt_peak=backend.peak_accounted_bytes();let prompt_live=backend.accounted_bytes();let started=std::time::Instant::now();
+            let bell_counted=mailbox.as_ref().map(|m|m.doorbell_stats());let mut logits=last.ok_or("empty prompt")?;let mut output=Vec::new();let parameter_counted=compute.parameter_counts();let counted=backend.stats();let copy_counted=backend.resident_copy_counts();let selection_counted=compute.selection_counts();let route_counted=spark_gpu_probe::device_route::counts();let stage_counted=spark_tp::projection_stage::counts();let prompt_peak=backend.peak_accounted_bytes();let prompt_live=backend.accounted_bytes();let started=std::time::Instant::now();
             if let Some(&(width,miss))=repeat.checked_sub(2).and_then(|i|verify.get(i)) {
                 let wanted=reference.as_ref().ok_or("verify passes need the plain session first")?;let vocab=logits.len() as u32;
                 let keep=|logits:&[f32],output:&mut Vec<u32>|->Result<u32> {let at=output.len();let mut best=0;for i in 1..logits.len() {if logits[i]>logits[best] {best=i;}}
@@ -355,11 +357,11 @@ fn run_pair(args:&[String])->Result<()> {
             } else {
             let stepwise=queue_per_step && repeat>1 && device_wire;if stepwise {drop(queued.take());}
             // Device vectors allocated since the previous token line: at>0 counts the step that made these logits.
-            let pool_count=||{let s=backend.vector_pool_stats();(s.allocated_count,s.allocated_bytes)};let mut allocations=pool_count();
+            let pool_count=||{let s=backend.vector_pool_stats();(s.allocated_count,s.allocated_bytes)};let mut allocations=pool_count();let mut captures=backend.stats().graph_captures;
             for at in 0..max_tokens {let bytes=floats(&logits)?;let mut best=0;for i in 1..logits.len() {if logits[i]>logits[best] {best=i;}}
                 output.push(best as u32);write(&saved.join(format!("{at}-logits.f32")),&bytes)?;
                 let now=pool_count();
-                eprintln!("RESIDENT TOKEN rank={rank} repeat={repeat} at={at} id={best} elapsed_seconds={:.6} {}",started.elapsed().as_secs_f64(),spark_tp::bounded_decoder::allocation_fields(Some(allocations),Some(now)));allocations=now;
+                let captured=backend.stats().graph_captures;eprintln!("RESIDENT TOKEN rank={rank} repeat={repeat} at={at} id={best} elapsed_seconds={:.6} {} captures={}",started.elapsed().as_secs_f64(),spark_tp::bounded_decoder::allocation_fields(Some(allocations),Some(now)),captured-captures);allocations=now;captures=captured;
                 if at+1<max_tokens {
                     if decode_rows>0 && repeat>=decode_rows {let (mut rows,updated)=decoder.prefill_rows(&[best as u32],&state,HeadRows::Last)?;logits=rows.pop().ok_or("decode row has no logits")?;state=updated;}
                     else if propose>0 {
@@ -399,7 +401,8 @@ fn run_pair(args:&[String])->Result<()> {
             #[cfg(feature="kernel-bench")] write(&saved.join("INDIRECT"),format!("decode_steps={steps} accepted_calls={}\n",compute.fixture_attention_calls()-indirect_before).as_bytes())?;
             let timing=format!("decode_steps={steps} decode_seconds={seconds:.9} decode_tokens_per_second={:.9}\n",steps as f64/seconds);
             // Host submissions and forced waits of the decode steps, for the structure of one token.
-            let counts=backend.stats().since(counted);write(&saved.join("COUNTS"),format!("decode_steps={steps} graph_replays={} graph_captures={} stream_waits={} host_launches={} peak_bytes_after_prompt={prompt_peak} live_bytes_after_prompt={prompt_live} peak_bytes_after_decode={} live_bytes_after_decode={} memo_bytes={} memo_limit={} memo_rows_found={} memo_rows_added={} {}\n",counts.graph_launches,counts.graph_captures,counts.stream_wait_calls,counts.queued_calls,backend.peak_accounted_bytes(),backend.accounted_bytes(),compute.memo_counts().0,compute.memo_counts().1,compute.memo_counts().2,compute.memo_counts().3,backend.resident_copy_counts().since(copy_counted).line()).as_bytes())?;
+            let parameters=compute.parameter_counts();write(&saved.join("PARAMETER_KEYS"),format!("decode_steps={steps} key_builds={} static_binds={} static_hits={} scope=decode_nonempty_parameter_content_keys_load_keys_excluded\n",parameters.key_builds-parameter_counted.key_builds,parameters.static_binds-parameter_counted.static_binds,parameters.static_hits-parameter_counted.static_hits).as_bytes())?;
+            let counts=backend.stats().since(counted);write(&saved.join("COUNTS"),format!("decode_steps={steps} graph_replays={} graph_captures={} stream_waits={} host_launches={} peak_bytes_after_prompt={prompt_peak} live_bytes_after_prompt={prompt_live} peak_bytes_after_decode={} live_bytes_after_decode={} memo_bytes={} memo_limit={} memo_rows_found={} memo_rows_added={} {} dtoh_calls={} budget_drains={} selection_waits={} selection_known={}\n",counts.graph_launches,counts.graph_captures,counts.stream_wait_calls,counts.queued_calls,backend.peak_accounted_bytes(),backend.accounted_bytes(),compute.memo_counts().0,compute.memo_counts().1,compute.memo_counts().2,compute.memo_counts().3,backend.resident_copy_counts().since(copy_counted).line(),counts.dtoh_calls,counts.budget_drains,compute.selection_counts()[0]-selection_counted[0],compute.selection_counts()[1]-selection_counted[1]).as_bytes())?;
             #[cfg(feature="kernel-bench")] write(&saved.join("ATTENTION_DISPATCH"),format!("decode_steps={steps} scores_table={} values_table={} scope=accepted_commands_completed_by_final_sync\n",counts.attention_dispatches[0],counts.attention_dispatches[1]).as_bytes())?;
             let route=spark_gpu_probe::device_route::counts().into_iter().zip(route_counted).map(|(after,before)|after.saturating_sub(before)).collect::<Vec<_>>();
             let stage=spark_tp::projection_stage::counts();write(&saved.join("EXCHANGE_STAGE"),format!("decode_steps={steps} accepted={} original_messages={} local_words={} scope=accepted_commands_completed_by_final_sync\n",stage.accepted-stage_counted.accepted,stage.original_messages-stage_counted.original_messages,stage.words-stage_counted.words).as_bytes())?;
@@ -651,6 +654,8 @@ fn main() {
         [mode,out] if mode=="fill-free"=>fill_free::run(Path::new(out)),
         #[cfg(target_os="linux")]
         [mode,out] if mode=="put-wide"=>put_wide::run(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,out] if mode=="select-known"=>select_known::run(Path::new(out)),
         #[cfg(target_os="linux")]
         [mode,out] if mode=="device-route-smoke"=>device_route::run(Path::new(out),false),
         #[cfg(target_os="linux")]

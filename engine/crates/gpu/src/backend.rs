@@ -204,7 +204,7 @@ pub struct BackendStats {
     /// Flash uses 14..18 for K=10240, K=320, N<=1024 and remaining dense
     /// projections; these are included in slot 0, with the output head in 13.
     pub device_kernel_ns: [u128; 30], pub device_launches: [u128; 30],
-    pub queued_calls: u128, pub stream_wait_ns: u128, pub stream_wait_calls: u128,
+    pub queued_calls: u128, pub stream_wait_ns: u128, pub stream_wait_calls: u128, pub dtoh_calls: u128, pub budget_drains: u128, // dtoh_calls: asynchronous copies only; blocking ones (load, bench) are not counted.
     /// Host wall time in launch and event APIs; GPU backlog may block them.
     pub host_launch_ns: u128, pub host_profile_ns: u128,
     /// Staging wall envelopes, including CPU work overlapping GPU execution.
@@ -224,7 +224,7 @@ impl BackendStats {
             device_launches: std::array::from_fn(|i| self.device_launches[i].saturating_sub(before.device_launches[i])),
             queued_calls: self.queued_calls.saturating_sub(before.queued_calls),
             stream_wait_ns: self.stream_wait_ns.saturating_sub(before.stream_wait_ns),
-            stream_wait_calls: self.stream_wait_calls.saturating_sub(before.stream_wait_calls),
+            stream_wait_calls: self.stream_wait_calls.saturating_sub(before.stream_wait_calls), dtoh_calls: self.dtoh_calls.saturating_sub(before.dtoh_calls), budget_drains: self.budget_drains.saturating_sub(before.budget_drains),
             host_launch_ns: self.host_launch_ns.saturating_sub(before.host_launch_ns),
             host_profile_ns: self.host_profile_ns.saturating_sub(before.host_profile_ns),
             host_pack_ns: self.host_pack_ns.saturating_sub(before.host_pack_ns),
@@ -662,7 +662,7 @@ impl<'a> Backend<'a> {
             for &(source, destination, bytes) in rows {
                 unsafe { check(cuMemcpyDtoHAsync_v2(slot.buffer.address.cast::<u8>().add(destination).cast(),
                     arena.buffer.address + source as u64, bytes, self.stream.raw), "prompt row read")?; }
-                self.context.pending.set(true);
+                self.context.pending.set(true);self.stats.borrow_mut().dtoh_calls+=1;
             }
             Ok(())
         })();
@@ -889,7 +889,7 @@ impl<'a> Backend<'a> {
         self.context.activate()?;
         unsafe { check(cuMemcpyDtoHAsync_v2(out.as_mut_ptr().cast(), vector.buffer.address + (start * 4) as u64,
             out.len(), self.stream.raw), "registered range read")?; }
-        self.context.pending.set(true);
+        self.context.pending.set(true);self.stats.borrow_mut().dtoh_calls+=1;
         self.fence()
     }
     /// GPU-visible host storage for a complete rank-major collective. The
@@ -1034,7 +1034,7 @@ impl<'a> Backend<'a> {
         if len == 0 || len > u32::MAX as usize { return Err("vector outside kernel ABI".into()); }
         let timer = Some(Instant::now());
         let bytes = byte_count(len, 4)?; if self.context.accounted_bytes().saturating_add(bytes)>self.context.budget.get() {self.flush_resident_launches()?;}
-        let buffer = if managed { Buffer::allocate(self.context, bytes, true)? } else { Buffer::pooled(self.context, bytes)? };self.note_fresh_allocation(buffer.address,bytes);
+        let buffer = self.funded_buffer(bytes, managed)?;self.note_fresh_allocation(buffer.address,bytes);
         self.stats.borrow_mut().allocation_ns += elapsed(timer);
         Ok(DeviceVector { buffer, len, managed,
             #[cfg(debug_assertions)] projection_scratch: Default::default() })
@@ -1199,7 +1199,7 @@ impl<'a> Backend<'a> {
             unsafe { staging.buffer.address.cast::<u8>().add(staging.used) } };
         self.context.activate()?;
         unsafe { check(cuMemcpyDtoHAsync_v2(host.cast(), vector.buffer.address, bytes, self.stream.raw), "pinned activation read")?; }
-        self.context.pending.set(true);
+        self.context.pending.set(true);self.stats.borrow_mut().dtoh_calls+=1;
         self.synchronize()?;
         let mut staging = self.uploads.borrow_mut();
         // Synchronization reset the cursor; the download can occupy a later range.
@@ -1229,7 +1229,7 @@ impl<'a> Backend<'a> {
             let mut offset=0;
             for v in vectors {
                 if v.len!=0 { unsafe { check(cuMemcpyDtoHAsync_v2(host.add(offset).cast(),v.buffer.address,v.len*4,self.stream.raw),"pinned cohort read")?; }
-                    self.context.pending.set(true); }
+                    self.context.pending.set(true);self.stats.borrow_mut().dtoh_calls+=1; }
                 offset+=v.len*4;
             }
             Ok(())
@@ -1274,7 +1274,7 @@ impl<'a> Backend<'a> {
             for (chunk, values) in output.chunks_mut(capacity).enumerate() {
                 unsafe { check(cuMemcpyDtoHAsync_v2(host, vector.buffer.address + (chunk * capacity * 4) as u64,
                     std::mem::size_of_val(values), self.stream.raw), "pinned vector read")?; }
-                self.context.pending.set(true);
+                self.context.pending.set(true);self.stats.borrow_mut().dtoh_calls+=1;
                 self.synchronize()?;
                 unsafe { values.copy_from_slice(std::slice::from_raw_parts(host.cast::<f32>(), values.len())); }
             }
@@ -1469,7 +1469,7 @@ impl<'a> Backend<'a> {
         if vector.len > slot.capacity { return Err("exchange slot is too small".into()); }
         self.context.activate()?;
         unsafe { check(cuMemcpyDtoHAsync_v2(slot.buffer.address, vector.buffer.address, byte_count(vector.len, 4)?, self.stream.raw), "pinned exchange read")?; }
-        slot.event.record_again(&self.stream)?;
+        self.stats.borrow_mut().dtoh_calls+=1;slot.event.record_again(&self.stream)?;
         self.context.pending.set(true);
         slot.len = vector.len;
         slot.queued = true;

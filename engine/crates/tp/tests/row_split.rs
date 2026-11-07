@@ -8,7 +8,7 @@ struct Wire {topology:Topology,controller:bool,tx:SyncSender<Vec<u8>>,rx:Receive
 #[test]
 fn vector_allocation_counts_survive_reference_and_split_wrappers() {
     let (tx,rx)=std::sync::mpsc::channel();let calls=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let prepared=Prepared {tx,rx,calls:calls.clone(),batches:Default::default(),working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(4)};
+    let prepared=Prepared {tx,rx,calls:calls.clone(),batches:Default::default(),working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(4),known:Default::default()};
     let (tx,rx)=sync_channel(1);let split=Split::new(&prepared,Wire {topology:Topology {rank:0,parts:1},controller:true,tx,rx}).unwrap();
     for counts in [prepared.vector_allocations(),<&Prepared as Compute>::vector_allocations(&&prepared),split.vector_allocations(),<&Split<&Prepared,Wire> as Compute>::vector_allocations(&&split)] {
         assert_eq!(counts,Some((33,156_237_824)));
@@ -21,7 +21,7 @@ fn vector_allocation_counts_survive_reference_and_split_wrappers() {
 #[test]
 fn cache_append_survives_reference_and_split_wrappers() {
     let (tx,rx)=std::sync::mpsc::channel();let calls=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let prepared=Prepared {tx,rx,calls:calls.clone(),batches:Default::default(),working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(3)};
+    let prepared=Prepared {tx,rx,calls:calls.clone(),batches:Default::default(),working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(3),known:Default::default()};
     let (tx,rx)=sync_channel(1);let split=Split::new(&prepared,Wire {topology:Topology {rank:0,parts:1},controller:true,tx,rx}).unwrap();
     let (old,new)=(vec![-0.0,17.0],vec![f32::from_bits(1)]);
     for result in [prepared.cache_append(&old,&new,2,1,128),<&Prepared as Compute>::cache_append(&&prepared,&old,&new,2,1,128),split.cache_append(&old,&new,2,1,128),<&Split<&Prepared,Wire> as Compute>::cache_append(&&split,&old,&new,2,1,128)] {
@@ -33,7 +33,7 @@ fn cache_append_survives_reference_and_split_wrappers() {
 fn projection_stage_survives_reference_and_split_wrappers_without_fallback() {
     use spark_tp::projection_stage::Job;
     let checkpoint=fixture::Checkpoint::new_with_head(Dtype::Bf16,true);let (tx,rx)=std::sync::mpsc::channel();let calls=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let prepared=Prepared {tx,rx,calls:calls.clone(),batches:Default::default(),working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(1)};
+    let prepared=Prepared {tx,rx,calls:calls.clone(),batches:Default::default(),working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(1),known:Default::default()};
     let (tx,rx)=sync_channel(1);let split=Split::new(&prepared,Wire {topology:Topology {rank:0,parts:1},controller:true,tx,rx}).unwrap();
     let input=vec![0.0,-0.0,f32::from_bits(1),17.0];let jobs=[Job::Project {input:vec![("weight",&input)],round:true}];
     for result in [prepared.projection_stage(&checkpoint.admission,&jobs),<&Prepared as Compute>::projection_stage(&&prepared,&checkpoint.admission,&jobs),split.projection_stage(&checkpoint.admission,&jobs),<&Split<&Prepared,Wire> as Compute>::projection_stage(&&split,&checkpoint.admission,&jobs)] {
@@ -47,7 +47,7 @@ fn projection_stage_survives_reference_and_split_wrappers_without_fallback() {
 #[test]
 fn device_route_survives_reference_and_split_wrappers_without_fallback() {
     let (tx,rx)=std::sync::mpsc::channel();let calls=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let prepared=Prepared {tx,rx,calls:calls.clone(),batches:Default::default(),working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(1)};
+    let prepared=Prepared {tx,rx,calls:calls.clone(),batches:Default::default(),working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(1),known:Default::default()};
     let (tx,rx)=sync_channel(1);let split=Split::new(&prepared,Wire {topology:Topology {rank:0,parts:1},controller:true,tx,rx}).unwrap();
     let ids=vec![7.0,0.0];let input=vec![-0.0,17.0];
     for result in [prepared.routed_experts(&[],&ids,&input),<&Prepared as Compute>::routed_experts(&&prepared,&[],&ids,&input),
@@ -64,7 +64,7 @@ fn device_route_survives_reference_and_split_wrappers_without_fallback() {
 #[test]
 fn paired_reads_survive_reference_and_split_wrappers_once() {
     let (sender,receiver)=std::sync::mpsc::channel();let calls=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let prepared=Prepared {tx:sender,rx:receiver,calls:calls.clone(),batches:Default::default(),working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(1)};
+    let prepared=Prepared {tx:sender,rx:receiver,calls:calls.clone(),batches:Default::default(),working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(1),known:Default::default()};
     let (wire_tx,wire_rx)=sync_channel(1);let split=Split::new(&prepared,Wire {topology:Topology {rank:0,parts:1},controller:true,tx:wire_tx,rx:wire_rx}).unwrap();
     let first=vec![0.0,-0.0,f32::from_bits(1),f32::MIN_POSITIVE,1.0];let second=vec![17.0];
     let results=[prepared.read_pair(&first,&second),<&Prepared as Compute>::read_pair(&&prepared,&first,&second),
@@ -79,9 +79,57 @@ fn paired_reads_survive_reference_and_split_wrappers_once() {
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst),6);
 }
 #[test]
+fn known_selection_survives_reference_and_split_wrappers_once() {
+    let (tx,rx)=std::sync::mpsc::channel();let calls=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let prepared=Prepared {tx,rx,calls,batches:Default::default(),working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(0),known:Default::default()};
+    let (tx,rx)=sync_channel(1);let split=Split::new(&prepared,Wire {topology:Topology {rank:0,parts:1},controller:true,tx,rx}).unwrap();
+    let (ids,count)=(vec![0.0,1.0,-1.0],vec![2.0]);let row=[0.0,1.0,-1.0,2.0];
+    prepared.select_known(&ids,&count,&row).unwrap();assert_eq!(prepared.known.load(std::sync::atomic::Ordering::SeqCst),1);
+    <&Prepared as Compute>::select_known(&&prepared,&ids,&count,&row).unwrap();assert_eq!(prepared.known.load(std::sync::atomic::Ordering::SeqCst),2);
+    split.select_known(&ids,&count,&row).unwrap();assert_eq!(prepared.known.load(std::sync::atomic::Ordering::SeqCst),3);
+    <&Split<&Prepared,Wire> as Compute>::select_known(&&split,&ids,&count,&row).unwrap();assert_eq!(prepared.known.load(std::sync::atomic::Ordering::SeqCst),4);
+    prepared.attention_probe.set(2);
+    assert_eq!(<&Prepared as Compute>::select_known(&&prepared,&ids,&count,&row).unwrap_err(),"known selection probe failure");
+    assert_eq!(split.select_known(&ids,&count,&row).unwrap_err(),"known selection probe failure");
+    assert_eq!(<&Split<&Prepared,Wire> as Compute>::select_known(&&split,&ids,&count,&row).unwrap_err(),"known selection probe failure");
+    assert_eq!(prepared.known.load(std::sync::atomic::Ordering::SeqCst),4);
+}
+/// The service's own decoder, on two ranks: Decoder over &Split over the backend, as flash-serve builds it.
+/// Every plain step up to the boundary reaches the backend, with the row the selection really computed.
+#[test]
+fn served_two_rank_steps_take_the_known_selection_up_to_the_boundary_only() {
+    let c=fixture::Checkpoint::new_with_head(Dtype::Bf16,true);
+    let (a_tx,b_rx)=sync_channel(1);let (b_tx,a_rx)=sync_channel(1);
+    let (ap_tx,bp_rx)=std::sync::mpsc::channel();let (bp_tx,ap_rx)=std::sync::mpsc::channel();
+    let (rank0,rank1)=(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+    std::thread::scope(|scope| {
+        let checkpoint=&c.admission;let worker_known=rank1.clone();
+        let worker=scope.spawn(move || {
+            let prepared=Prepared {tx:bp_tx,rx:bp_rx,calls:Default::default(),batches:Default::default(),working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(0),known:worker_known};
+            let split=Split::new(&prepared,Wire {topology:Topology {rank:1,parts:2},controller:false,tx:b_tx,rx:b_rx}).unwrap();
+            let factory=Factory::new(checkpoint,split,8,vec![0]).unwrap();
+            factory.negotiate_available_bytes(1usize<<40).unwrap();factory.worker().unwrap();
+        });
+        let prepared=Prepared {tx:ap_tx,rx:ap_rx,calls:Default::default(),batches:Default::default(),working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(0),known:rank0.clone()};
+        let split=Split::new(&prepared,Wire {topology:Topology {rank:0,parts:2},controller:true,tx:a_tx,rx:a_rx}).unwrap();
+        let service=Factory::new(checkpoint,split,8,vec![0]).unwrap();let reference=Decoder::new(checkpoint,Host,8).unwrap();
+        service.negotiate_available_bytes(1usize<<40).unwrap();
+        let mut session=service.session().unwrap();let mut state=reference.zero_state().unwrap();let mut token=1;
+        // Budget 4, pool 2, tail on: contexts 1 to 5 keep every pool, 6 to 8 select for real.
+        for context in 1..=8usize {
+            let (expected,id,next)=reference.step(token,&state,|_,_|Ok(())).unwrap();let logits=session.step(token).unwrap();
+            assert_eq!(logits.iter().map(|v|v.to_bits()).collect::<Vec<_>>(),expected.iter().map(|v|v.to_bits()).collect::<Vec<_>>(),"context {context}");
+            assert_eq!(rank0.load(std::sync::atomic::Ordering::SeqCst),context.min(5),"known selections at context {context}");
+            state=next;token=id;
+        }
+        drop(session);service.shutdown().unwrap();worker.join().unwrap();
+        assert_eq!(rank1.load(std::sync::atomic::Ordering::SeqCst),5);
+    });
+}
+#[test]
 fn indirect_attention_survives_reference_and_split_wrappers() {
     let (tx,rx)=std::sync::mpsc::channel();let calls=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let prepared=Prepared {tx,rx,calls:calls.clone(),batches:Default::default(),working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(1)};
+    let prepared=Prepared {tx,rx,calls:calls.clone(),batches:Default::default(),working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(1),known:Default::default()};
     let (tx,rx)=sync_channel(1);let split=Split::new(&prepared,Wire {topology:Topology {rank:0,parts:1},controller:true,tx,rx}).unwrap();
     let shape=spark_gpu_probe::causal_ops::Shape {op:spark_gpu_probe::causal_ops::Op::ScoresIndirect,heads:64,dim:256,taps:2,rows:2,cols:256,epsilon:0.0,bound:0.0};
     let (first,second,query)=(vec![1.0],vec![2.0],vec![3.0]);let parts=[&first,&second];
@@ -113,6 +161,7 @@ fn shared_chat_parser_keeps_plain_greedy_streaming_and_explicit_sampling() {
 struct Prepared {
     tx:std::sync::mpsc::Sender<()>,rx:std::sync::mpsc::Receiver<()>,calls:std::sync::Arc<std::sync::atomic::AtomicUsize>,
     batches:std::sync::Arc<std::sync::atomic::AtomicUsize>,working:std::cell::Cell<bool>,attention_probe:std::cell::Cell<u32>,
+    known:std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 impl Compute for Prepared {
     type Value=Vec<f32>;type Pass=<Host as Compute>::Pass;
@@ -165,6 +214,13 @@ impl Compute for Prepared {
     }
     fn upload(&self,v:&[f32])->Result<Vec<f32>> {Host.upload(v)}
     fn read(&self,v:&Vec<f32>)->Result<Vec<f32>> {Host.read(v)}
+    /// The row the host would assume must be the bits the selection really computed.
+    fn select_known(&self,ids:&Vec<f32>,count:&Vec<f32>,row:&[f32])->Result<()> {
+        if self.attention_probe.get()==2 {return Err("known selection probe failure".into());}
+        let real=ids.iter().chain(count).map(|v|v.to_bits()).collect::<Vec<_>>();
+        assert_eq!(real,row.iter().map(|v|v.to_bits()).collect::<Vec<_>>(),"assumed row differs from the computed selection");
+        self.known.fetch_add(1,std::sync::atomic::Ordering::SeqCst);Ok(())
+    }
     fn read_pair(&self,first:&Vec<f32>,second:&Vec<f32>)->Result<(Vec<f32>,Vec<f32>)> {
         if self.attention_probe.get()!=0 {self.calls.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
             if self.attention_probe.get()==2 {return Err("paired read probe failure".into());}}
@@ -219,12 +275,12 @@ fn scalar_service_generates_four_exact_tokens_across_row_parts_and_new_sessions(
         let worker_calls=calls.clone();
         let worker_batches=batches.clone();
         let worker=scope.spawn(move || {
-            let prepared=Prepared {tx:bp_tx,rx:bp_rx,calls:worker_calls,batches:worker_batches,working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(0)};
+            let prepared=Prepared {tx:bp_tx,rx:bp_rx,calls:worker_calls,batches:worker_batches,working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(0),known:Default::default()};
             let split=Split::new(&prepared,Wire {topology:Topology {rank:1,parts:2},controller:false,tx:b_tx,rx:b_rx}).unwrap();
             let factory=Factory::new(checkpoint,split,8,vec![0]).unwrap();
             assert_eq!(factory.negotiate_available_bytes((1usize<<40)+123).unwrap(),(1usize<<40)+122);factory.worker().unwrap();
         });
-        let prepared=Prepared {tx:ap_tx,rx:ap_rx,calls:calls.clone(),batches:batches.clone(),working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(0)};
+        let prepared=Prepared {tx:ap_tx,rx:ap_rx,calls:calls.clone(),batches:batches.clone(),working:std::cell::Cell::new(false),attention_probe:std::cell::Cell::new(0),known:Default::default()};
         let split=Split::new(&prepared,Wire {topology:Topology {rank:0,parts:2},controller:true,tx:a_tx,rx:a_rx}).unwrap();
         let service=Factory::new(checkpoint,split,8,vec![0]).unwrap();let reference=Decoder::new(checkpoint,Host,8).unwrap();
         assert_eq!(service.negotiate_available_bytes((1usize<<40)+122).unwrap(),(1usize<<40)+122);

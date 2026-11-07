@@ -46,13 +46,13 @@ const _:()={assert!(core::mem::size_of::<Command>()==1040);assert!(core::mem::of
 /// Bytes are logical destination bytes; copy traffic also reads that many bytes.
 #[cfg(not(target_arch="nvptx64"))]
 #[derive(Clone,Copy,Default,Debug,PartialEq,Eq)]
-pub struct CopyCounts {pub launches:[u64;3],pub bytes:[u64;3],pub merged_zero_launches:u64,pub merged_zero_bytes:u64,pub stage_full_flushes:u64,pub piece_evictions:u64}
+pub struct CopyCounts {pub launches:[u64;3],pub bytes:[u64;3],pub merged_zero_launches:u64,pub merged_zero_bytes:u64,pub stage_full_flushes:u64,pub piece_evictions:u64,pub captures_new_key:u64,pub captures_seen_key:u64}
 #[cfg(not(target_arch="nvptx64"))]
 impl CopyCounts {
     pub fn since(self,before:Self)->Self {Self {launches:std::array::from_fn(|i|self.launches[i].saturating_sub(before.launches[i])),
-        bytes:std::array::from_fn(|i|self.bytes[i].saturating_sub(before.bytes[i])),merged_zero_launches:self.merged_zero_launches.saturating_sub(before.merged_zero_launches),merged_zero_bytes:self.merged_zero_bytes.saturating_sub(before.merged_zero_bytes),stage_full_flushes:self.stage_full_flushes.saturating_sub(before.stage_full_flushes),piece_evictions:self.piece_evictions.saturating_sub(before.piece_evictions)}}
-    pub fn line(self)->String {format!("resident_launch_copy={} resident_launch_copy_bytes={} resident_launch_copy_words={} resident_launch_copy_words_bytes={} resident_launch_zero_words={} resident_launch_zero_words_bytes={} resident_merged_zero_launches={} resident_merged_zero_bytes={} stage_full_flushes={} piece_evictions={}",
-        self.launches[0],self.bytes[0],self.launches[1],self.bytes[1],self.launches[2],self.bytes[2],self.merged_zero_launches,self.merged_zero_bytes,self.stage_full_flushes,self.piece_evictions)}
+        bytes:std::array::from_fn(|i|self.bytes[i].saturating_sub(before.bytes[i])),merged_zero_launches:self.merged_zero_launches.saturating_sub(before.merged_zero_launches),merged_zero_bytes:self.merged_zero_bytes.saturating_sub(before.merged_zero_bytes),stage_full_flushes:self.stage_full_flushes.saturating_sub(before.stage_full_flushes),piece_evictions:self.piece_evictions.saturating_sub(before.piece_evictions),captures_new_key:self.captures_new_key.saturating_sub(before.captures_new_key),captures_seen_key:self.captures_seen_key.saturating_sub(before.captures_seen_key)}}
+    pub fn line(self)->String {format!("resident_launch_copy={} resident_launch_copy_bytes={} resident_launch_copy_words={} resident_launch_copy_words_bytes={} resident_launch_zero_words={} resident_launch_zero_words_bytes={} resident_merged_zero_launches={} resident_merged_zero_bytes={} stage_full_flushes={} piece_evictions={} captures_new_key={} captures_seen_key={}",
+        self.launches[0],self.bytes[0],self.launches[1],self.bytes[1],self.launches[2],self.bytes[2],self.merged_zero_launches,self.merged_zero_bytes,self.stage_full_flushes,self.piece_evictions,self.captures_new_key,self.captures_seen_key)}
 }
 
 /// The recorder's table area. Zero rows are the first bytes, and every flush's tables follow them.
@@ -117,6 +117,67 @@ pub mod stage {
         }
         #[test] fn only_a_table_too_big_for_this_flush_forces_a_cut() {
             assert!(!full(0,BYTES-BASE));assert!(full(0,BYTES-BASE+1));assert!(!full(BYTES-BASE-16,16));assert!(full(BYTES-BASE-16,17));
+        }
+    }
+}
+
+/// Whether a captured piece's key was captured before. Print only: nothing reads this to decide.
+#[cfg(not(target_arch="nvptx64"))]
+pub mod capture_keys {
+    use std::collections::BTreeSet;
+    /// At most this many hashes, about 2 MiB. A long service must not grow without limit for a print.
+    pub const MOST:usize=1<<16;
+    #[derive(Default)]
+    pub struct Seen {hashes:BTreeSet<u64>}
+    /// A fixed-seed hash of the grid words (FNV-1a), the same in every process and on both ranks.
+    pub fn hash(grids:impl Iterator<Item=[u32;6]>)->u64 {
+        let mut h=0xcbf29ce484222325u64;
+        for grid in grids {for word in grid {for byte in word.to_le_bytes() {h^=u64::from(byte);h=h.wrapping_mul(0x100000001b3);}}}h
+    }
+    impl Seen {
+        /// True when this key is new. Past MOST, an unseen key reports new and is not kept, so a
+        /// later repeat of it also reports new: captures_new_key can read high after MOST keys.
+        pub fn note(&mut self,key:u64)->bool {
+            if self.hashes.contains(&key) {return false;}
+            if self.hashes.len()<MOST {self.hashes.insert(key);}true
+        }
+        pub fn len(&self)->usize {self.hashes.len()}
+        pub fn is_empty(&self)->bool {self.hashes.is_empty()}
+    }
+    #[cfg(test)] mod tests {
+        use super::*;
+        use std::collections::VecDeque;
+        /// The recorder's capture path in small: a limited table, oldest out, one count per capture.
+        struct Table {live:VecDeque<u64>,limit:usize,seen:Seen,new:u64,again:u64,captures:u64,evictions:u64}
+        impl Table {
+            fn new(limit:usize)->Self {Self {live:VecDeque::new(),limit,seen:Seen::default(),new:0,again:0,captures:0,evictions:0}}
+            fn replay(&mut self,key:u64) {
+                if let Some(at)=self.live.iter().position(|k|*k==key) {let k=self.live.remove(at).unwrap();self.live.push_back(k);return;}
+                if self.live.len()>=self.limit {self.live.pop_front();self.evictions+=1;}
+                self.live.push_back(key);self.captures+=1;
+                if self.seen.note(key) {self.new+=1;} else {self.again+=1;}
+            }
+        }
+        #[test] fn the_counts_sum_to_the_captures_and_separate_new_keys_from_evicted_ones() {
+            // A cycle larger than the table: the first pass is all new, later passes are all seen again.
+            let mut t=Table::new(4);for _ in 0..3 {for key in 0..6 {t.replay(key);}}
+            assert_eq!((t.captures,t.new,t.again),(18,6,12));assert_eq!(t.new+t.again,t.captures);
+            // Keys that never repeat: all new, and the evictions alone could not tell these cases apart.
+            let mut u=Table::new(4);for key in 0..18 {u.replay(key);}
+            assert_eq!((u.captures,u.new,u.again),(18,18,0));assert_eq!(u.new+u.again,u.captures);assert_eq!(u.evictions,t.evictions);
+            // Everything fits: only the first pass captures.
+            let mut v=Table::new(8);for _ in 0..3 {for key in 0..6 {v.replay(key);}}assert_eq!((v.captures,v.new,v.again),(6,6,0));
+        }
+        #[test] fn the_set_stops_growing_at_its_bound_and_the_counts_still_sum() {
+            let mut t=Table::new(4);for key in 0..(MOST as u64+10) {t.replay(key);}
+            assert_eq!(t.seen.len(),MOST);assert_eq!(t.new+t.again,t.captures);assert_eq!(t.again,0);
+        }
+        #[test] fn the_hash_is_fixed_and_sees_every_field_and_the_order() {
+            let a=[[1,2,3,4,5,6],[7,8,9,10,11,12]];
+            assert_eq!(hash(a.into_iter()),hash(a.into_iter()));
+            assert_ne!(hash(a.into_iter()),hash(a.into_iter().rev()));
+            for field in 0..6 {let mut b=a;b[1][field]+=1;assert_ne!(hash(a.into_iter()),hash(b.into_iter()));}
+            assert_ne!(hash(a.into_iter()),hash(a[..1].iter().copied()));
         }
     }
 }

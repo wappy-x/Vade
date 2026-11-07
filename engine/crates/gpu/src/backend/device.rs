@@ -224,6 +224,7 @@ impl<'a> Backend<'a> {
             self.context.pending.set(true);
             check(cuMemcpyDtoHAsync_v2(host.cast::<u8>().add(rows*12).cast(), status.buffer.address, rows*4, self.stream.raw), "routing read")?;
         }
+        self.stats.borrow_mut().dtoh_calls+=2;
         self.synchronize()?;
         let values = unsafe { std::slice::from_raw_parts(host.cast::<f32>(), bytes/4) };
         let ids = values[..rows*3].chunks_exact(3).map(|r| {
@@ -256,7 +257,7 @@ impl<'a> Backend<'a> {
         let host = self.uploads.borrow().buffer.address;
         self.context.activate()?;
         unsafe { check(cuMemcpyDtoHAsync_v2(host, result.buffer.address, bytes, self.stream.raw), "pinned argmax read")?; }
-        self.context.pending.set(true);
+        self.context.pending.set(true);self.stats.borrow_mut().dtoh_calls+=1;
         self.synchronize()?;
         let download = self.profiling.get().then(Instant::now);
         let values = unsafe { std::slice::from_raw_parts(host.cast::<f32>(), rows * 3) };

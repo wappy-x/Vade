@@ -25,7 +25,7 @@ const ZERO_ROWS:usize=crate::resident_launch::stage::ZERO_ROWS;const ZERO_WORDS:
 pub(super) struct Recorder<'a> {enabled:bool,paused:bool,pub(super) failure:Option<String>,calls:Vec<Call>,pieces:BTreeMap<Vec<Grid>,Piece<'a>>,
     stage:Option<DeviceVector<'a>>,staged:Vec<u8>,
     zero_source:Option<DeviceVector<'a>>,zeros:Vec<(usize,u64,u32)>,fresh:Vec<(u64,u64)>,fresh_at:u64,recorded:u64,
-    heavy:usize,fed:usize,clock:u64,copies:crate::resident_launch::CopyCounts}
+    heavy:usize,fed:usize,clock:u64,copies:crate::resident_launch::CopyCounts,seen_keys:crate::resident_launch::capture_keys::Seen}
 impl Recorder<'_> {
     /// A real stream wait has ended: nothing is queued on the device.
     pub(super) fn drained(&mut self) {self.fed=0;}
@@ -38,6 +38,9 @@ impl<'a> Backend<'a> {
         self.require_arm_kernels(&["resident_launch_causal","resident_launch_copy_words","resident_launch_zero_words"])?;
         self.recorder.borrow_mut().enabled=true;Ok(())
     }
+    /// Submit what is recorded and restart the feed count, as a real wait does, with no
+    /// wait. Pieces keep the boundaries they had when the host read a value at this point.
+    pub fn feed_resident_launches(&self)->Result<(),String> {self.flush_resident_launches()?;self.recorder.borrow_mut().drained();Ok(())}
     pub fn resident_launches_active(&self)->bool {let r=self.recorder.borrow();r.enabled && !r.paused}
     pub(super) fn disable_resident_launches(&self)->Result<(),String> {let result=self.flush_resident_launches();self.recorder.borrow_mut().enabled=false;result}
     pub fn resident_copy_counts(&self)->crate::resident_launch::CopyCounts {self.recorder.borrow().copies}
@@ -214,7 +217,10 @@ impl<'a> Backend<'a> {
                         self.launch_flash_grid(g.kind.kernel(),g.blocks,g.rows,g.planes,g.threads,g.shared,&mut [parameter(&mut address),parameter(&mut index)])?;
                     }Ok(())
                 })?;
-                self.recorder.borrow_mut().pieces.insert(key.clone(),Piece {graph,table,used:0});
+                let mut r=self.recorder.borrow_mut();r.pieces.insert(key.clone(),Piece {graph,table,used:0});
+                // Print only: was this key captured before, and evicted since?
+                let hash=crate::resident_launch::capture_keys::hash(key.iter().map(|g|[g.kind as u32,g.blocks,g.rows,g.planes,g.threads,g.shared]));
+                if r.seen_keys.note(hash) {r.copies.captures_new_key+=1;} else {r.copies.captures_seen_key+=1;}drop(r);
             }
             let mut piece=self.recorder.borrow_mut().pieces.remove(&key).ok_or("resident piece disappeared")?;
             {let mut r=self.recorder.borrow_mut();r.clock+=1;piece.used=r.clock;}

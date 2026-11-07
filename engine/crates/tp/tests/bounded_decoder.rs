@@ -185,6 +185,7 @@ fn recurrent_schedule_geometry_is_position_invariant_for_dense_and_expert_layers
 #[derive(Default)]
 struct Kept {released:std::cell::Cell<usize>,keeps:std::cell::Cell<usize>,rows:std::cell::RefCell<std::collections::BTreeMap<(String,Vec<u32>,bool),Vec<f32>>>,found:std::cell::Cell<usize>,largest:std::cell::Cell<usize>,projected:std::cell::Cell<usize>,indirect:std::cell::Cell<usize>,reserved:std::cell::RefCell<Vec<(usize,usize)>>}
 impl spark_tp::bounded_decoder::Compute for Kept {
+    fn select_known(&self,ids:&Vec<f32>,count:&Vec<f32>,row:&[f32])->spark_tp::Result<()> {Host.select_known(ids,count,row)}
     type Value=Vec<f32>;type Pass=<Host as spark_tp::bounded_decoder::Compute>::Pass;
     fn rows_project(&self,_:&engine_model::plan::admission::CheckpointAdmission,name:&str,_:&Vec<f32>,m:usize,_:bool)->spark_tp::Result<Option<Vec<f32>>> {
         if name.ends_with("self_attn.kv_b_proj.weight") {self.projected.set(self.projected.get()+m);}Ok(None)

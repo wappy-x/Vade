@@ -272,6 +272,7 @@ impl Context {
         }
         self.deferred_frees.borrow_mut().push((address, bytes, host, reuse));
     }
+    fn has_deferred(&self)->bool {!self.capturing.get() && !self.deferred_frees.borrow().is_empty()}
     fn release_deferred(&self) {
         if self.capturing.get() || self.resident_unsubmitted.get() || self.deferred_frees.borrow().is_empty() { return; }
         if self.pending.get() {

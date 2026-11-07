@@ -115,6 +115,6 @@ impl Plan {
         assert_eq!(c.kind,Kind::Copy as u32);assert_eq!(u32::from_ne_bytes(c.payload[16..20].try_into().unwrap()),7);
         let after=CopyCounts {launches:[3,2,1],bytes:[30,20,10],merged_zero_launches:1,merged_zero_bytes:8,..Default::default()};
         let before=CopyCounts {launches:[1,1,1],bytes:[10,10,10],merged_zero_launches:1,merged_zero_bytes:8,..Default::default()};
-        assert_eq!(after.since(before).line(),"resident_launch_copy=2 resident_launch_copy_bytes=20 resident_launch_copy_words=1 resident_launch_copy_words_bytes=10 resident_launch_zero_words=0 resident_launch_zero_words_bytes=0 resident_merged_zero_launches=0 resident_merged_zero_bytes=0 stage_full_flushes=0 piece_evictions=0");
+        assert_eq!(after.since(before).line(),"resident_launch_copy=2 resident_launch_copy_bytes=20 resident_launch_copy_words=1 resident_launch_copy_words_bytes=10 resident_launch_zero_words=0 resident_launch_zero_words_bytes=0 resident_merged_zero_launches=0 resident_merged_zero_bytes=0 stage_full_flushes=0 piece_evictions=0 captures_new_key=0 captures_seen_key=0");
     }
 }

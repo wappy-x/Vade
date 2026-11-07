@@ -3,6 +3,9 @@ use crate::{Result,causal_layer,mxfp8_projection::Mxfp8Projection,layer_driver::
 use engine_model::{plan::{admission::CheckpointAdmission,layer::{Kind,LayerPlan,LayerSchedule,Topology},state::StatePlan,storage::WeightStorage,description::TokenMixer},safetensors::Dtype,flash::{nvfp4,activation_nvfp4::Activation}};
 use spark_gpu_probe::{causal_ops::{Shape,Op},norm_boundary::{NormShape,WeightType}};
 use std::{cell::RefCell,collections::BTreeMap,rc::Rc};
+#[path="bounded_decoder/parameters.rs"] mod parameters;
+pub use parameters::{StaticParameters,ParameterCounts};
+use parameters::StaticParameterPlan;
 pub const PROMPT_ROWS:usize=4;
 fn need(ok:bool,why:&str)->Result<()> {if ok {Ok(())} else {Err(why.into())}}
 /// CHAIN-SHADOW target: the first static projection that reads the normalized output of the
@@ -28,6 +31,8 @@ fn norm_shape(c:&CheckpointAdmission,name:&str,width:usize)->Result<NormShape> {
 }
 #[cfg(any(target_os="linux",test))]
 mod lineage;
+#[cfg_attr(not(target_os="linux"),allow(dead_code))]
+mod memo_batches;
 mod residual_plan;
 /// Per-step allocation fields, with the names RESIDENT VERIFY prints: device vectors
 /// newly allocated between two cumulative counts (count, bytes). Print only.
@@ -86,6 +91,10 @@ pub trait Compute {
     fn upload(&self,v:&[f32])->Result<Self::Value>;
     fn read(&self,v:&Self::Value)->Result<Vec<f32>>;
     fn read_pair(&self,first:&Self::Value,second:&Self::Value)->Result<(Vec<f32>,Vec<f32>)> {Ok((self.read(first)?,self.read(second)?))}
+    /// `row` is the whole selection output, known without its bytes (select_admission::known_selection).
+    /// A backend may skip reading these values, if it still compares the count word before any result leaves.
+    /// No default: a wrapper that drops this call would silently lose the saving.
+    fn select_known(&self,ids:&Self::Value,count:&Self::Value,row:&[f32])->Result<()>;
     fn range(&self,v:&Self::Value,start:usize,len:usize)->Result<Self::Value>;
     /// A join whose storage has one size for every call of its kind (`reserve` words, the
     /// most the join can hold), so the storage of an earlier call can serve again.
@@ -96,6 +105,8 @@ pub trait Compute {
 
     fn zeros(&self,len:usize)->Result<Self::Value>;
     fn operation(&self,s:Shape,x:[Option<&Self::Value>;4],w:&[f32])->Result<Self::Value>;
+    /// Static weights retain their original upload owner; inputs and shape remain per call.
+    fn operation_prepared(&self,s:Shape,x:[Option<&Self::Value>;4],w:&Rc<StaticParameters>)->Result<Self::Value> {self.operation(s,x,w.values())}
     fn norm(&self,name:&str,s:NormShape,x:&Self::Value,w:&[f32])->Result<Self::Value>;
     fn begin(&self,key:(usize,usize),p:&crate::layer_operands::ResidualBlockOperands,x:&Self::Value)->Result<(Self::Pass,Self::Value)>;
     /// `begin` for one decode row. `next` names the first static projection that reads this
@@ -149,34 +160,36 @@ pub struct State<V> {pub position:u64,pub layers:Vec<BTreeMap<String,V>>,pub exp
 #[derive(Clone)]
 /// Immutable parameters of one checkpoint. They stay bound to it: a decoder built
 /// from them reads that checkpoint's weights and can read no other.
-pub struct Prepared<'f> {checkpoint:&'f CheckpointAdmission,parameters:Rc<BTreeMap<String,Vec<f32>>>,blocks:Rc<BTreeMap<(usize,usize),crate::layer_operands::ResidualBlockOperands>>,schedules:Vec<LayerSchedule>,draft:Option<(Rc<proposer::Draft>,LayerSchedule)>}
-pub struct Decoder<'f,C:Compute> {checkpoint:&'f CheckpointAdmission,compute:C,capacity:u64,parameters:Rc<BTreeMap<String,Vec<f32>>>,
+pub struct Prepared<'f> {checkpoint:&'f CheckpointAdmission,parameters:Rc<BTreeMap<String,Vec<f32>>>,static_parameters:Rc<StaticParameterPlan>,blocks:Rc<BTreeMap<(usize,usize),crate::layer_operands::ResidualBlockOperands>>,schedules:Vec<LayerSchedule>,draft:Option<(Rc<proposer::Draft>,LayerSchedule)>}
+pub struct Decoder<'f,C:Compute> {checkpoint:&'f CheckpointAdmission,compute:C,capacity:u64,parameters:Rc<BTreeMap<String,Vec<f32>>>,static_parameters:Rc<StaticParameterPlan>,
     blocks:Rc<BTreeMap<(usize,usize),crate::layer_operands::ResidualBlockOperands>>,schedules:RefCell<Vec<LayerSchedule>>,expanded_limit:std::cell::Cell<usize>,forced_union:std::cell::Cell<Option<usize>>,
     draft:Option<Rc<proposer::Draft>>,draft_schedule:RefCell<Option<LayerSchedule>>}
 impl<'f,C:Compute> Decoder<'f,C> {
     pub fn new(checkpoint:&'f CheckpointAdmission,compute:C,capacity:u64)->Result<Self> {
         let d=checkpoint.description();need(!d.layers.is_empty() && d.hidden>0 && d.residual.streams>0 && d.vocab>0 && d.vocab<=u32::MAX as u64 && !d.tied_embeddings,"unsupported bounded text geometry")?;
         need(capacity>0 && capacity<=checkpoint.description().max_positions,"bounded decoder capacity exceeds the recipe")?;
-        let mut parameters=BTreeMap::new();let mut blocks=BTreeMap::new();let mut schedules=Vec::new();let topology=Topology {rank:0,parts:1};
+        let mut parameter_jobs=Vec::new();let mut parameters=BTreeMap::new();let mut blocks=BTreeMap::new();let mut schedules=Vec::new();let topology=Topology {rank:0,parts:1};
         let storage=StatePlan::new(d,topology,capacity,isize::MAX as usize).map_err(|e|e.to_string())?;
         for layer in 0..d.layers.len() {let boundary=LayerBoundary::new(d,checkpoint.headers(),&storage,layer,1,topology,usize::MAX)?;
             residual_plan::check(boundary.program())?;
             schedules.push(LayerSchedule::new(d,layer,topology).map_err(|e|e.to_string())?);
             for (index,step) in boundary.program().steps.iter().enumerate() {
+                if StaticParameterPlan::admits(step) {parameter_jobs.push((layer,step.id.clone(),step.weights.iter().map(|w|w.name.clone()).collect()));}
                 if step.kind==Kind::MhcPrepare {blocks.insert((layer,index),boundary.prepare_residual_block_checkpoint(index,checkpoint)?);}
                 for w in &step.weights {if w.storage==WeightStorage::Plain && !parameters.contains_key(&w.name) {parameters.insert(w.name.clone(),plain(checkpoint,&w.name)?);}}
             }
         }
         let name="model.language_model.norm.weight";parameters.insert(name.into(),plain(checkpoint,name)?);
-        compute.prepare(checkpoint)?;Ok(Self {checkpoint,compute,capacity,parameters:Rc::new(parameters),blocks:Rc::new(blocks),schedules:RefCell::new(schedules),expanded_limit:std::cell::Cell::new(rows::RESERVED_ROWS),forced_union:std::cell::Cell::new(None),draft:None,draft_schedule:RefCell::new(None)})
+        let parameters=Rc::new(parameters);let static_parameters=Rc::new(StaticParameterPlan::new(parameters.clone(),parameter_jobs)?);
+        compute.prepare(checkpoint)?;Ok(Self {checkpoint,compute,capacity,parameters,static_parameters,blocks:Rc::new(blocks),schedules:RefCell::new(schedules),expanded_limit:std::cell::Cell::new(rows::RESERVED_ROWS),forced_union:std::cell::Cell::new(None),draft:None,draft_schedule:RefCell::new(None)})
     }
-    pub fn prepared(&self)->Prepared<'f> {Prepared {checkpoint:self.checkpoint,parameters:self.parameters.clone(),blocks:self.blocks.clone(),schedules:self.schedules.borrow().clone(),draft:self.draft.clone().zip(self.draft_schedule.borrow().clone())}}
+    pub fn prepared(&self)->Prepared<'f> {Prepared {checkpoint:self.checkpoint,parameters:self.parameters.clone(),static_parameters:self.static_parameters.clone(),blocks:self.blocks.clone(),schedules:self.schedules.borrow().clone(),draft:self.draft.clone().zip(self.draft_schedule.borrow().clone())}}
     /// A new session without rereading immutable parameters.
     pub fn from_prepared(prepared:&Prepared<'f>,compute:C,capacity:u64)->Result<Self> {
         let checkpoint=prepared.checkpoint;
         need(capacity>0 && capacity<=checkpoint.description().max_positions,"bounded decoder capacity exceeds the recipe")?;
         compute.prepare(checkpoint)?;
-        Ok(Self {checkpoint,compute,capacity,parameters:prepared.parameters.clone(),blocks:prepared.blocks.clone(),schedules:RefCell::new(prepared.schedules.clone()),expanded_limit:std::cell::Cell::new(rows::RESERVED_ROWS),forced_union:std::cell::Cell::new(None),draft:prepared.draft.as_ref().map(|d|d.0.clone()),draft_schedule:RefCell::new(prepared.draft.as_ref().map(|d|d.1.clone()))})
+        Ok(Self {checkpoint,compute,capacity,parameters:prepared.parameters.clone(),static_parameters:prepared.static_parameters.clone(),blocks:prepared.blocks.clone(),schedules:RefCell::new(prepared.schedules.clone()),expanded_limit:std::cell::Cell::new(rows::RESERVED_ROWS),forced_union:std::cell::Cell::new(None),draft:prepared.draft.as_ref().map(|d|d.0.clone()),draft_schedule:RefCell::new(prepared.draft.as_ref().map(|d|d.1.clone()))})
     }
     pub fn zero_state(&self)->Result<State<C::Value>> {self.zero_state_at(0)}
     /// Zero state of the shape a chat has at this position. Position zero is a new chat; any
@@ -446,7 +459,10 @@ impl<'f,C:Compute> Decoder<'f,C> {
                         s.cols=number(step.outputs[0].shape[0])?;s.taps=u32::from(d.routing.normalize_selected);s.bound=d.routing.scale as f32;}
                     if kind==Kind::ExpertSum {s.rows=number(plan.steps.iter().find(|s|s.kind==Kind::Route).ok_or("bounded expert fold has no route")?.outputs[0].shape[0])?;
                         s.cols=number(d.hidden)?;s.taps=u32::from(input.len()==4);}
-                    let mut weight=Vec::new();for w in &step.weights {weight.extend_from_slice(self.parameter(&w.name)?);}
+                    let prepared=self.static_parameters.get(layer,&self.parameters,step);
+                    let mut weight=Vec::new();if prepared.is_none() {for w in &step.weights {weight.extend_from_slice(self.parameter(&w.name)?);}}
+                    let weight=prepared.map_or(weight.as_slice(),|p|p.values());
+                    let operation=|s,x|match prepared {Some(p)=>b.operation_prepared(s,x,p),None=>b.operation(s,x,weight)};
                     // A complete pool never changes: it folds only its own rows. The state
                     // keeps the complete pools of the earlier rows, so one token appends its
                     // key and gate and folds at most the one pool that it completes.
@@ -460,7 +476,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
                         let pools=if rows%pool!=0 {earlier} else {
                             let mut last=s;last.rows=number(pool as u64)?;
                             let old_keys=b.range(input[0],(rows-pool)*dim,(pool-1)*dim)?;let old_gates=b.range(input[1],(rows-pool)*dim,(pool-1)*dim)?;
-                            let folded=b.operation(last,[Some(&old_keys),Some(&old_gates),Some(input[2]),Some(input[3])],&weight)?;
+                            let folded=operation(last,[Some(&old_keys),Some(&old_gates),Some(input[2]),Some(input[3])])?;
                             b.join(&[&earlier,&b.range(&folded,2*pool*dim,dim)?])?
                         };
                         need(step.outputs.len()==3,"bounded pool output count differs")?;
@@ -476,7 +492,7 @@ impl<'f,C:Compute> Decoder<'f,C> {
                     let args=if let Some(v)=selected.as_ref() {[Some(input[0]),Some(v),Some(input[2]),None]}
                         else if let Some(v)=packed.as_ref() {[Some(v),Some(input[3]),None,None]} else {std::array::from_fn(|i|input.get(i).copied())};
                     if let Some(p) = planar {
-                        let result=b.operation(p,args,&weight)?;
+                        let result=operation(p,args)?;
                         let (hd,width)=(p.heads as usize*p.dim as usize,p.heads as usize*p.dim as usize);
                         let pair=if kind==Kind::Conv {
                             let history=3*(p.taps as usize-1)*width;
@@ -490,14 +506,16 @@ impl<'f,C:Compute> Decoder<'f,C> {
                         continue;
                     }
                     // The same total order and output layout without the repeated scans.
+                    let mut known_row=None;
                     let result=if kind==Kind::Select {
                         let groups=context/s.dim as u64;let mut row=spark_gpu_probe::prompt_ops::Shape::new(spark_gpu_probe::prompt_ops::Op::SelectRows,1).ok_or("selection row count")?;
                         row.dim=s.dim;row.taps=s.taps;row.rows=number(groups)?;row.cols=s.cols;row.first=number(context)?;
                         let TokenMixer::LatentAttention(a)=mixer else {return Err("selection requires a latent recipe".into());};
                         row.slots=number(a.indexer.token_budget+if a.indexer.select_tail {a.indexer.pool-1} else {0})?;
                         // The count read below refuses a NaN score, with no extra wait here.
+                        known_row=spark_gpu_probe::select_admission::known_selection(row);
                         b.prompt(row,[args[0],None,None,None,None],&[])?
-                    } else {b.operation(s,args,&weight)?};
+                    } else {operation(s,args)?};
                     let (_,_,units,words)=s.lengths().ok_or("invalid bounded operation shape")?;
                     match kind {
                         Kind::Conv|Kind::KdaStep=>{
@@ -507,7 +525,8 @@ impl<'f,C:Compute> Decoder<'f,C> {
                             if kind==Kind::KdaStep {vec![c,a]} else {vec![a,c]}
                         },
                         Kind::Pool=>{let len=context as usize*s.dim as usize;vec![b.range(&result,0,len)?,b.range(&result,len,len)?,b.range(&result,2*len,(context as usize/s.taps as usize)*s.dim as usize)?]},
-                        Kind::Select=>{let slots=words-1;vec![b.range(&result,0,slots)?,b.range(&result,slots,1)?]},
+                        Kind::Select=>{let slots=words-1;let ids=b.range(&result,0,slots)?;let count=b.range(&result,slots,1)?;
+                            if let Some(row)=known_row.as_ref() {b.select_known(&ids,&count,row)?;}vec![ids,count]},
                         Kind::Route=>vec![b.range(&result,0,s.cols as usize)?,b.range(&result,s.cols as usize,s.cols as usize)?],
                         Kind::ScorePools if s.rows==0=>vec![b.zeros(0)?],
                         _=>vec![result],

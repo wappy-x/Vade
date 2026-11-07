@@ -17,6 +17,8 @@ impl Compute for Host {
     type Value=Vec<f32>;type Pass=Pass;
     fn upload(&self,v:&[f32])->Result<Vec<f32>> {need(v.iter().all(|v|v.is_finite()),"bounded host value is not finite")?;Ok(v.to_vec())}
     fn read(&self,v:&Vec<f32>)->Result<Vec<f32>> {self.upload(v)}
+    /// Host reads cost nothing and are always the computed bits.
+    fn select_known(&self,_:&Vec<f32>,_:&Vec<f32>,_:&[f32])->Result<()> {Ok(())}
     fn range(&self,v:&Vec<f32>,start:usize,len:usize)->Result<Vec<f32>> {Ok(v.get(start..start.checked_add(len).ok_or("bounded range overflow")?).ok_or("bounded host range differs")?.to_vec())}
     fn join(&self,parts:&[&Vec<f32>])->Result<Vec<f32>> {Ok(parts.iter().flat_map(|p|p.iter().copied()).collect())}
     fn zeros(&self,len:usize)->Result<Vec<f32>> {Ok(vec![0.0;len])}
@@ -51,7 +53,7 @@ impl Compute for Host {
 }
 #[cfg(test)]
 #[allow(dead_code)]
-#[path="../../tests/support/attention_checkpoint.rs"] mod shadow_fixture;
+#[path="../../tests/support/attention_checkpoint.rs"] pub(super) mod shadow_fixture;
 #[cfg(test)]
 mod shadow_tests {
     use super::{Host,take_shadow_targets,shadow_fixture as fixture};
