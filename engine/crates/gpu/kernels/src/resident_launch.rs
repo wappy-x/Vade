@@ -9,12 +9,14 @@ fn run<const KIND:u32>(table:*const Command,index:u64) {
     // owned queue through submission and the real drain. No host padding is
     // read or serialized. Graph replays precede the next table upload. Thus each
     // body has exactly its direct entry's extents, aliases and initialization.
+    // The causal-fast payload is an aligned, fully initialized Arguments value.
+    // Its shared borrow cannot escape the call, and no replay writes the table.
     unsafe {
         let c=&*table.add(index as usize);if c.kind!=KIND {core::arch::nvptx::trap();}let p=c.payload.as_ptr();let words=p.cast::<u64>();
         match KIND {
             k if k==Kind::Causal as u32=>crate::causal_operation::resident_causal_operation(p.cast::<crate::causal_ops::Arguments>().read()),
             k if k==Kind::Expert as u32=>crate::expert_operation::resident_expert_operation(p.cast::<crate::expert_ops::LaunchArguments>().read()),
-            k if k==Kind::CausalFast as u32=>crate::causal_operation::resident_causal_fast(p.cast::<crate::causal_ops::Arguments>().read()),
+            k if k==Kind::CausalFast as u32=>crate::causal_operation::resident_causal_fast(&*p.cast::<crate::causal_ops::Arguments>()),
             k if k==Kind::NvStream as u32=>crate::nv_rows_stream::body::<64,256>(p.cast::<crate::expert_ops::LaunchArguments>().read()),
             k if k==Kind::NvTile as u32=>crate::nv_tile::project::<16,8,4,2>(p.cast::<crate::expert_ops::LaunchArguments>().read()),
             k if k==Kind::DeviceRoute as u32=>crate::device_route::build(p.cast::<crate::device_route_abi::Build>().read()),

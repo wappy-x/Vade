@@ -67,6 +67,14 @@ pub(super) fn copy(p:crate::kernel_params::HybridCopy)->Command {let mut c=Comma
         let old=causal(p);let new=causal_fast(p);
         assert_eq!(new.kind,Kind::CausalFast as u32);assert_eq!(new.payload,old.payload);assert_eq!(new.reserved,[0;3]);
         assert_eq!(Kind::CausalFast.kernel(),"resident_launch_causal_fast");
+        assert_eq!(core::mem::size_of::<Arguments>(),80);
+        let alignment=core::mem::align_of::<Arguments>();
+        assert_eq!(core::mem::offset_of!(Command,payload)%alignment,0);
+        assert_eq!(core::mem::size_of::<Command>()%alignment,0);
+        assert_eq!(new.payload.as_ptr() as usize%alignment,0);
+        for (index,value) in [16u64,32,0,0,4,64].into_iter().enumerate() {assert_eq!(u64_at(&new,index*8),value);}
+        for (index,value) in [Op::Softmax as u32,32,128,0,2051,0,0,0].into_iter().enumerate() {assert_eq!(u32_at(&new,48+index*4),value);}
+        assert!(new.payload[80..].iter().all(|&byte|byte==0));
     }
     #[test] fn nv_tile_replay_keeps_the_original_expert_payload() {
         use crate::expert_ops::{Arguments,LaunchArguments,Shape,Op};

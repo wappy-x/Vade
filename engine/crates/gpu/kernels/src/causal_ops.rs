@@ -109,29 +109,30 @@ pub(crate) fn resident_causal_operation(p:Arguments) {
 /// set the occupancy of the generic kernel above, which also runs large copies of other lanes. The host launches it only for
 /// shapes `causal_ops::fast_admitted` accepts, with `causal_ops::geometry`; any other op traps.
 #[no_mangle]
-pub extern "ptx-kernel" fn causal_fast(p:Arguments) {resident_causal_fast(p)}
+pub extern "ptx-kernel" fn causal_fast(p:Arguments) {resident_causal_fast(&p)}
 #[inline(always)]
-pub(crate) fn resident_causal_fast(p:Arguments) {
+pub(crate) fn resident_causal_fast(p:&Arguments) {
     // SAFETY: The host validated Shape::lengths and the exact same-context extents before this launch, and chose this
     // entry only for an operation and block size that fast_admitted accepts; anything else traps here. Each version
-    // states its own extents and barrier discipline.
+    // states its own extents and barrier discipline. The caller retains the immutable
+    // arguments through this call. No reference escapes.
     unsafe {
         if !crate::causal_ops::fast_admitted(p.shape,core::arch::nvptx::_block_dim_x()) {core::arch::nvptx::trap();}
         match p.shape.op {
-            crate::causal_ops::Op::Prepare=>crate::causal_fast::prepare(p),
-            crate::causal_ops::Op::GatedNorm=>crate::causal_fast::gated_norm(p),
-            crate::causal_ops::Op::PoolScores=>crate::causal_fast::pool_scores(p),
+            crate::causal_ops::Op::Prepare=>crate::causal_fast::prepare(*p),
+            crate::causal_ops::Op::GatedNorm=>crate::causal_fast::gated_norm(*p),
+            crate::causal_ops::Op::PoolScores=>crate::causal_fast::pool_scores(*p),
             crate::causal_ops::Op::Step|crate::causal_ops::Op::StepColumns=>crate::causal_fast::step_columns_128(p),
             crate::causal_ops::Op::StepPlanar=>crate::causal_fast::step_columns_128(p),
-            crate::causal_ops::Op::ConvParts=>crate::causal_small::conv_parts(p),
-            crate::causal_ops::Op::Conv=>crate::causal_small::conv(p),
-            crate::causal_ops::Op::KeyNorm=>crate::causal_small::key_norm(p),
-            crate::causal_ops::Op::Mxfp8Quantize=>crate::causal_small::mxfp8_quantize(p,false),
-            crate::causal_ops::Op::Mxfp8QuantizePositiveZero=>crate::causal_small::mxfp8_quantize(p,true),
-            crate::causal_ops::Op::Softmax=>crate::causal_fast::softmax::<false>(p,0,0),
-            crate::causal_ops::Op::Gather=>crate::causal_fast::gather(p),
-            crate::causal_ops::Op::PoolChannels=>crate::causal_fast::pool_channels(p),
-            _=>crate::causal_fast::step_layout_128(p),
+            crate::causal_ops::Op::ConvParts=>crate::causal_small::conv_parts(*p),
+            crate::causal_ops::Op::Conv=>crate::causal_small::conv(*p),
+            crate::causal_ops::Op::KeyNorm=>crate::causal_small::key_norm(*p),
+            crate::causal_ops::Op::Mxfp8Quantize=>crate::causal_small::mxfp8_quantize(*p,false),
+            crate::causal_ops::Op::Mxfp8QuantizePositiveZero=>crate::causal_small::mxfp8_quantize(*p,true),
+            crate::causal_ops::Op::Softmax=>crate::causal_fast::softmax::<false>(*p,0,0),
+            crate::causal_ops::Op::Gather=>crate::causal_fast::gather(*p),
+            crate::causal_ops::Op::PoolChannels=>crate::causal_fast::pool_channels(*p),
+            _=>crate::causal_fast::step_layout_128(*p),
         }
     }
 }

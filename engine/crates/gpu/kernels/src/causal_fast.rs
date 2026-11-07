@@ -115,7 +115,7 @@ pub(crate) fn pool_scores(p:Arguments) {
 
 /// Op::Step and Op::StepColumns with dim 128: one block per head, thread = value column. The three per-key vectors of the head
 /// are staged once in shared memory; the working column is recomputed from the state in each pass instead of living in the output buffer.
-pub(crate) fn step_columns_128(p:Arguments) {
+pub(crate) fn step_columns_128(p:&Arguments) {
     // SAFETY: Shape::lengths was checked by the host: x0 holds heads*513 values, x1 heads*16384, the output
     // heads*128*129 output words. Step writes key-major state then the output vector per head; StepPlanar writes the same
     // words with every head's state first and every head's output vector after all states (state at head*16384 + key*128 + value,
@@ -128,6 +128,7 @@ pub(crate) fn step_columns_128(p:Arguments) {
     // Every shared read follows a write: the three per-key vectors are written by all 128 threads (the predicate demands exactly
     // 128) before the first barrier; a stage row is written by its own thread before the barrier that precedes every read of it.
     // There is no partial block: dim == 128 and the block has 128 threads.
+    // The caller retains the immutable arguments through this call. No reference escapes.
     unsafe {
         const D:usize=128;
         let planar=p.shape.op==crate::causal_ops::Op::StepPlanar;let direct=planar || p.shape.op==crate::causal_ops::Op::Step;
