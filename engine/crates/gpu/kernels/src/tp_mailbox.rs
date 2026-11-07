@@ -206,6 +206,49 @@ pub extern "ptx-kernel" fn tp_mailbox_take_pair(x: *mut u32, y: *mut u32, rows: 
 
 /// Resident floating rows use the same wire and preserve their raw words. Reject
 /// a nonfinite row through the existing sticky mailbox error before publication.
+/// A long one-row message: all blocks copy, and the block that finishes last publishes. Same words as the one-block put.
+#[no_mangle]
+pub extern "ptx-kernel" fn tp_mailbox_put_wide(src:*const u32,words:u64,dst:*mut u32,len_word:*mut u32,seq_word:*mut u32,seq:u64,error:*mut u32,done:*mut u32) {
+    resident_tp_mailbox_put_wide(src,words,dst,len_word,seq_word,seq,error,done)
+}
+#[inline(always)]
+pub(crate) fn resident_tp_mailbox_put_wide(src:*const u32,words:u64,dst:*mut u32,len_word:*mut u32,seq_word:*mut u32,seq:u64,error:*mut u32,done:*mut u32) {
+    // SAFETY: Backend::tp_mailbox_put_finite admits this body (tp_put_wide::admitted). `src` is the message's first word
+    // in the retained source and covers `words` words; `dst` is the send slot, mapped host memory covering `words` words;
+    // `len_word`, `seq_word` and `error` are aligned mapped header words; `done` is the mailbox's private device word.
+    // All live through ordered completion. tp_put_wide::first and stride give each thread disjoint units, so each slot
+    // word has one writer (host test at every census size and block limit), and four-word copies run only with the 16-byte
+    // alignment checked here. Launches on the one stream do not overlap, so `done` counts this launch's blocks alone; it
+    // is zero at creation and the last block returns it to zero. Each thread's stores are released before its block's
+    // barrier, and each block's count is a system-scope release, so the block that reads a count of the whole grid
+    // acquires every block's slot stores and error store. Only that block publishes, sequence word last, as the one-block put.
+    unsafe {
+        let (threads,grid)=(_block_dim_x(),_grid_dim_x());let words=words as usize;let step=crate::tp_put_wide::stride(grid,threads);
+        let mut i=crate::tp_put_wide::first(_block_idx_x(),_thread_idx_x(),threads);let mut valid=true;
+        if seq>>32&1!=0 && words%4==0 && (src as usize|dst as usize)%16==0 {
+            while i<words/4 {
+                let (a,b,c,d):(u32,u32,u32,u32);
+                asm!("ld.global.v4.u32 {{{a},{b},{c},{d}}}, [{p}];",a=out(reg32)a,b=out(reg32)b,c=out(reg32)c,d=out(reg32)d,p=in(reg64)src.add(4*i));
+                valid&=(a&0x7f800000!=0x7f800000)&(b&0x7f800000!=0x7f800000)&(c&0x7f800000!=0x7f800000)&(d&0x7f800000!=0x7f800000);
+                asm!("st.global.v4.u32 [{p}], {{{a},{b},{c},{d}}};",p=in(reg64)dst.add(4*i),a=in(reg32)a,b=in(reg32)b,c=in(reg32)c,d=in(reg32)d);
+                i+=step;
+            }
+        } else {
+            while i<words {let value=*src.add(i);valid&=value&0x7f800000!=0x7f800000;*dst.add(i)=value;i+=step;}
+        }
+        if !valid {store_release(error,1);}
+        asm!("fence.acq_rel.sys;");
+        crate::ptx::sync();
+        if _thread_idx_x()==0 {
+            let previous:u32;
+            asm!("atom.acq_rel.sys.global.add.u32 {old}, [{counter}], 1;",old=out(reg32)previous,counter=in(reg64)done);
+            if previous+1==grid {
+                store_release(done,0);
+                if load_acquire(error)==0 {asm!("fence.sc.sys;");*len_word=(words*4) as u32;store_release(seq_word,seq as u32);}
+            }
+        }
+    }
+}
 #[no_mangle]
 pub extern "ptx-kernel" fn tp_mailbox_put_finite(src:*const u32,rows:u64,width:u64,half:u64,own:u64,
     dst:*mut u32,len_word:*mut u32,seq_word:*mut u32,seq:u64,error:*mut u32) {resident_tp_mailbox_put_finite(src,rows,width,half,own,dst,len_word,seq_word,seq,error)}

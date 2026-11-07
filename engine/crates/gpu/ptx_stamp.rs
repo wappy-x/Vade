@@ -73,7 +73,7 @@ fn source_files(root: &Path) -> io::Result<Vec<PathBuf>> {
         root.join("src/projection_params.rs"), root.join("src/gdn_params.rs"), root.join("src/next_params.rs"), root.join("src/router_abi.rs"), root.join("src/mhc_params.rs"),
         root.join("src/mhc_boundary.rs"), root.join("src/tp_payload.rs"), root.join("src/expert_ops.rs"), root.join("src/next_math.rs"),
         root.join("src/causal_ops.rs"), root.join("src/latent_ops.rs"), root.join("src/prompt_ops.rs"), root.join("src/mxfp8_quantize.rs"),
-        root.join("src/resident_launch.rs"), root.join("src/device_route.rs"), root.join("src/plain_admission.rs"), root.join("src/prompt_admission.rs"), root.join("src/compact.rs"),
+        root.join("src/resident_launch.rs"), root.join("src/device_route.rs"), root.join("src/tp_put_wide.rs"), root.join("src/plain_admission.rs"), root.join("src/prompt_admission.rs"), root.join("src/compact.rs"),
         root.join("src/ordered_projection_kernel.rs"), root.join("src/frontend_math.rs"), root.join("src/quantize_sweep.rs"),
         root.join("build-kernels/src/main.rs"), root.join("ptx_stamp.rs")];
     visit(&root.join("kernels/src"), &mut files)?;
@@ -182,7 +182,7 @@ mod tests {
             let copy=scratch.join(file.strip_prefix(root).unwrap());
             fs::create_dir_all(copy.parent().unwrap()).unwrap();fs::copy(file,copy).unwrap();
         }
-        for path in ["src/mhc_boundary.rs","src/expert_ops.rs","src/next_math.rs","src/resident_launch.rs","src/device_route.rs","src/plain_admission.rs","src/prompt_admission.rs",
+        for path in ["src/mhc_boundary.rs","src/expert_ops.rs","src/next_math.rs","src/resident_launch.rs","src/device_route.rs","src/tp_put_wide.rs","src/plain_admission.rs","src/prompt_admission.rs",
             "src/compact.rs","src/ordered_projection_kernel.rs","src/frontend_math.rs"] {
         let shared=scratch.join(path);let original=fs::read(&shared).unwrap();
         // A host cast edit must invalidate either previously stamped image.

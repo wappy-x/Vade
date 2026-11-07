@@ -277,18 +277,27 @@ const DOORBELL_SPIN: Duration = Duration::from_micros(1000);
 /// after setting stop).
 #[cfg(target_os = "linux")]
 const REST: Duration = Duration::from_millis(50);
+/// The doorbell does not park within this time of its last message: messages inside a step are closer than this, and a wake
+/// exposed after a host readback delays that message by more than 100 us on the peer's take (lane QUANT ticket 5, 2026-11-06).
+/// It still parks between requests.
+#[cfg(target_os = "linux")]
+const LINGER: Duration = Duration::from_millis(1);
+/// At most this much idle polling since the last park: steady traffic cannot keep the doorbell from parking.
+#[cfg(target_os = "linux")]
+const LINGER_CAP: Duration = Duration::from_millis(100);
 
 /// The write doorbell (TpMailboxHost::ring); after an error the peer's ERROR word is written too.
 #[cfg(target_os = "linux")]
 fn run_write(mut host: TpMailboxHost<'_>, mut rdma: spark_gpu_probe::tp_rdma::TpRdma<'_>, stop: &AtomicBool) -> Result<(), String> {
-    let timing = Ring { active: ACTIVE, spin: DOORBELL_SPIN, idle_max: IDLE_MAX, rest: Some(REST), ..Ring::default() };
+    let timing = Ring { active: ACTIVE, spin: DOORBELL_SPIN, idle_max: IDLE_MAX, rest: Some(REST), linger: LINGER, linger_cap: LINGER_CAP, ..Ring::default() };
     let result = host.ring(&mut rdma, stop, timing);
     if let Err(error) = &result {
         host.fail_peer(&mut rdma);
         eprintln!("flashnext tp doorbell: {error}");
     }
     if let Some((parks, ns)) = host.bell().map(|b| b.stats()) {
-        eprintln!("flashnext tp doorbell waits={parks} parked_ms={:.0}", ns as f64 / 1e6);
+        let (served, polled) = host.bell().map_or((0, 0), |b| b.linger_stats());
+        eprintln!("flashnext tp doorbell waits={parks} parked_ms={:.0} lingered={served} linger_ms={:.0}", ns as f64 / 1e6, polled as f64 / 1e6);
     }
     result
 }

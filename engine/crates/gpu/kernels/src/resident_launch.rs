@@ -31,6 +31,7 @@ fn run<const KIND:u32>(table:*const Command,index:u64) {
             k if k==Kind::RmsApply as u32=>crate::layer::resident_model_rms_apply(p.cast::<crate::kernel_params::ModelRms>().read()),
             k if k==Kind::Elementwise as u32=>crate::layer::resident_model_elementwise(p.cast::<crate::kernel_params::ModelElementwise>().read()),
             k if k==Kind::Put as u32=>crate::tp_mailbox::resident_tp_mailbox_put_finite(*words as _,*words.add(1),*words.add(2),*words.add(3),*words.add(4),*words.add(5) as _,*words.add(6) as _,*words.add(7) as _,*words.add(8),*words.add(9) as _),
+            k if k==Kind::PutWide as u32=>crate::tp_mailbox::resident_tp_mailbox_put_wide(*words as _,*words.add(1),*words.add(2) as _,*words.add(3) as _,*words.add(4) as _,*words.add(5),*words.add(6) as _,*words.add(7) as _),
             k if k==Kind::Take as u32=>crate::tp_mailbox::resident_tp_mailbox_take(*words as _,*words.add(1),*words.add(2),*words.add(3),*words.add(4),*words.add(5) as _,*words.add(6) as _,*words.add(7),*words.add(8) as _,*words.add(9)),
             k if k==Kind::CopyWords as u32 || k==Kind::ZeroWords as u32=>{
                 let i=crate::index();if i<*words.add(2) as usize {let out=*words.add(1) as *mut u32;*out.add(i)=if k==Kind::CopyWords as u32 {*(*words as *const u32).add(i)} else {0};}
@@ -51,4 +52,5 @@ entry!(resident_launch_nv_stream,18);
 entry!(resident_launch_causal_fast,19);
 entry!(resident_launch_nv_tile,20);
 entry!(resident_launch_device_route,21);
+entry!(resident_launch_put_wide,23);
 entry!(resident_launch_plain_bf16,26);

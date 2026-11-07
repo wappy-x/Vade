@@ -11,7 +11,7 @@ pub use multi::{CacheRows, TopKScratch};
 pub use moe::{ExpertTable, MoeScratch, MoeBatchScratch, MOE_ROUTING_ERROR};
 #[path = "fp8.rs"] mod fp8;
 #[path = "tp_mailbox.rs"] mod tp_mailbox;
-pub use tp_mailbox::TpMailbox;
+pub use tp_mailbox::{TpMailbox,set_put_narrow};
 pub use crate::tp_mailbox_host::{TpMailboxHost, TP_MAILBOX_SLOTS};
 pub use fp8::{Fp8GroupedScratch, Fp8RoutingFlag};
 #[path = "fp4.rs"] mod fp4;

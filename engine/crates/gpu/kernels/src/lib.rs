@@ -60,6 +60,7 @@ mod fp8_rows_tile;
 mod nv_quantize;
 mod nv_tile;
 #[path="../../src/device_route.rs"] mod device_route_abi;
+#[path="../../src/tp_put_wide.rs"] mod tp_put_wide;
 mod device_route;
 
 #[path = "../../src/next_math.rs"]

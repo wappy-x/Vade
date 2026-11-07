@@ -41,6 +41,7 @@ pub mod mhc_boundary;
 pub mod nv_stream;
 pub mod prompt_writes;
 pub mod fill_free;
+pub mod tp_put_wide;
 pub mod quantize_sweep;
 pub mod nv_rows;
 pub mod mx_rows;

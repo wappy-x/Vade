@@ -1,10 +1,10 @@
 //! Stable indirect launch ABI. Padding is initialized and never copied from Rust structs.
 #[repr(u32)]
 #[derive(Clone,Copy,Debug,PartialEq,Eq,PartialOrd,Ord)]
-pub enum Kind {Causal=1,Expert,Plain,Mx,Round,Copy,Put,Take,Prepare,Collapse,Combine,RmsPartials,RmsApply,Elementwise,CopyWords,ZeroWords,Mixed,NvStream,CausalFast=19,NvTile=20,DeviceRoute=21,TakeScatter=22,PlainBf16=26}
+pub enum Kind {Causal=1,Expert,Plain,Mx,Round,Copy,Put,Take,Prepare,Collapse,Combine,RmsPartials,RmsApply,Elementwise,CopyWords,ZeroWords,Mixed,NvStream,CausalFast=19,NvTile=20,DeviceRoute=21,TakeScatter=22,PutWide=23,PlainBf16=26}
 #[cfg(not(target_arch="nvptx64"))]
 impl Kind {
-    pub const ALL:[Self;23]=[Self::Causal,Self::Expert,Self::Plain,Self::Mx,Self::Round,Self::Copy,Self::Put,Self::Take,Self::Prepare,Self::Collapse,Self::Combine,Self::RmsPartials,Self::RmsApply,Self::Elementwise,Self::CopyWords,Self::ZeroWords,Self::Mixed,Self::NvStream,Self::CausalFast,Self::NvTile,Self::DeviceRoute,Self::TakeScatter,Self::PlainBf16];
+    pub const ALL:[Self;24]=[Self::PutWide,Self::Causal,Self::Expert,Self::Plain,Self::Mx,Self::Round,Self::Copy,Self::Put,Self::Take,Self::Prepare,Self::Collapse,Self::Combine,Self::RmsPartials,Self::RmsApply,Self::Elementwise,Self::CopyWords,Self::ZeroWords,Self::Mixed,Self::NvStream,Self::CausalFast,Self::NvTile,Self::DeviceRoute,Self::TakeScatter,Self::PlainBf16];
     pub fn kernel(self)->&'static str {match self {
         Self::Causal=>"resident_launch_causal",Self::Expert=>"resident_launch_expert",Self::Plain=>"resident_launch_plain",Self::Mx=>"resident_launch_mx",
         Self::Round=>"resident_launch_round",Self::Copy=>"resident_launch_copy",Self::Put=>"resident_launch_put",Self::Take=>"resident_launch_take",
@@ -12,7 +12,7 @@ impl Kind {
         Self::RmsPartials=>"resident_launch_rms_partials",Self::RmsApply=>"resident_launch_rms_apply",Self::Elementwise=>"resident_launch_elementwise",
         Self::CopyWords=>"resident_launch_copy_words",Self::ZeroWords=>"resident_launch_zero_words",Self::Mixed=>"resident_launch_mixed",
         Self::NvStream=>"resident_launch_nv_stream",Self::CausalFast=>"resident_launch_causal_fast",Self::NvTile=>"resident_launch_nv_tile",
-        Self::DeviceRoute=>"resident_launch_device_route",Self::TakeScatter=>"resident_launch_take_scatter",Self::PlainBf16=>"resident_launch_plain_bf16",
+        Self::DeviceRoute=>"resident_launch_device_route",Self::TakeScatter=>"resident_launch_take_scatter",Self::PutWide=>"resident_launch_put_wide",Self::PlainBf16=>"resident_launch_plain_bf16",
     }}
 }
 #[repr(C,align(16))]

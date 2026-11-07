@@ -43,6 +43,8 @@ use spark_tp::Result;
 #[cfg(target_os="linux")]
 #[path="resident-decode-check/fill_free.rs"] mod fill_free;
 #[cfg(target_os="linux")]
+#[path="resident-decode-check/put_wide.rs"] mod put_wide;
+#[cfg(target_os="linux")]
 #[path="resident-decode-check/nv_group_rows.rs"] mod nv_group_rows;
 #[cfg(target_os="linux")]
 #[path="resident-decode-check/nv_b.rs"] mod nv_b;
@@ -335,7 +337,7 @@ fn run_pair(args:&[String])->Result<()> {
             let prompt_seconds=prompt_started.elapsed().as_secs_f64();write(&saved.join("PREFILL_TIMING"),format!("prompt_rows={} prompt_tokens={} prompt_seconds={prompt_seconds:.9} seconds_per_prompt_token={:.9}\n",row_group.map_or(prompt_rows,|g|g.0),input.len(),prompt_seconds/input.len() as f64).as_bytes())?;
             compute.cost_report("prefill");println!("PROMPT KERNEL COUNTS rank={rank} repeat={repeat} tokens={} {}",input.len(),spark_gpu_probe::prompt_launches::line());
             #[cfg(feature="kernel-bench")] let indirect_before=compute.fixture_attention_calls();
-            let mut logits=last.ok_or("empty prompt")?;let mut output=Vec::new();let counted=backend.stats();let copy_counted=backend.resident_copy_counts();let route_counted=spark_gpu_probe::device_route::counts();let stage_counted=spark_tp::projection_stage::counts();let prompt_peak=backend.peak_accounted_bytes();let prompt_live=backend.accounted_bytes();let started=std::time::Instant::now();
+            let bell_counted=mailbox.as_ref().map(|m|m.doorbell_stats());let mut logits=last.ok_or("empty prompt")?;let mut output=Vec::new();let counted=backend.stats();let copy_counted=backend.resident_copy_counts();let route_counted=spark_gpu_probe::device_route::counts();let stage_counted=spark_tp::projection_stage::counts();let prompt_peak=backend.peak_accounted_bytes();let prompt_live=backend.accounted_bytes();let started=std::time::Instant::now();
             if let Some(&(width,miss))=repeat.checked_sub(2).and_then(|i|verify.get(i)) {
                 let wanted=reference.as_ref().ok_or("verify passes need the plain session first")?;let vocab=logits.len() as u32;
                 let keep=|logits:&[f32],output:&mut Vec<u32>|->Result<u32> {let at=output.len();let mut best=0;for i in 1..logits.len() {if logits[i]>logits[best] {best=i;}}
@@ -403,6 +405,7 @@ fn run_pair(args:&[String])->Result<()> {
             let stage=spark_tp::projection_stage::counts();write(&saved.join("EXCHANGE_STAGE"),format!("decode_steps={steps} accepted={} original_messages={} local_words={} scope=accepted_commands_completed_by_final_sync\n",stage.accepted-stage_counted.accepted,stage.original_messages-stage_counted.original_messages,stage.words-stage_counted.words).as_bytes())?;
             write(&saved.join("PROJECTION_DISPATCH"),format!("decode_steps={steps} nv_rows_stream={} fp8_tile={} project_f32_ordered={} mixed_projection={} causal_fast={} prompt_select_rows={} nv_tile={} nv_quantize={} nv_quantize_batch={} nv_quantize_legacy={} route_device={} route_device_gate_up={} route_device_down={} route_host_fallback={} project_bf16_ordered={} scope=accepted_commands_completed_by_final_sync\n",counts.projection_dispatches[0],counts.projection_dispatches[1],counts.projection_dispatches[2],counts.projection_dispatches[3],counts.projection_dispatches[4],counts.projection_dispatches[5],counts.projection_dispatches[6],counts.projection_dispatches[7],counts.projection_dispatches[8],counts.projection_dispatches[9],route[0]+route[1],route[0],route[1],route[2],counts.projection_dispatches[10]).as_bytes())?;
             write(&saved.join("RECORDED_KINDS"),format!("decode_steps={steps} zero_fill_launches={} zero_fill_rows={} zero_fill_words={} {} scope=decode_steps_recorded_calls_merged_clears_counted_only_in_zero_fill_launches\n",counts.zero_fill_launches,counts.zero_fill_rows,counts.zero_fill_words,spark_gpu_probe::resident_launch::Kind::ALL.iter().map(|kind|format!("{}={}",kind.kernel(),counts.recorded_kinds[*kind as usize])).collect::<Vec<_>>().join(" ")).as_bytes())?;
+            if let (Some(m),Some(before))=(&mailbox,bell_counted) {let now=m.doorbell_stats();write(&saved.join("DOORBELL"),format!("decode_steps={steps} parks={} parked_ms={:.3} lingered={} linger_ms={:.3} scope=this_rank_decode_steps\n",now[0]-before[0],(now[1]-before[1]) as f64/1e6,now[2]-before[2],(now[3]-before[3]) as f64/1e6).as_bytes())?;}
             write(&saved.join("TIMING"),timing.as_bytes())?;write(&saved.join("PROMPT_LOGITS"),hashes.as_bytes())?;
             write(&saved.join("OUTPUT_IDS"),output.iter().map(|v|format!("{v}\n")).collect::<String>().as_bytes())?;
             let mut decoder=tokenizer.decoder();let mut text=String::new();for &id in &output {text.push_str(&decoder.push(id).map_err(|e|e.to_string())?);}text.push_str(&decoder.finish());write(&saved.join("TEXT"),text.as_bytes())?;
@@ -646,6 +649,8 @@ fn main() {
         [mode,out] if mode=="exchange-stage"=>exchange_stage::run(Path::new(out)),
         #[cfg(target_os="linux")]
         [mode,out] if mode=="fill-free"=>fill_free::run(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,out] if mode=="put-wide"=>put_wide::run(Path::new(out)),
         #[cfg(target_os="linux")]
         [mode,out] if mode=="device-route-smoke"=>device_route::run(Path::new(out),false),
         #[cfg(target_os="linux")]

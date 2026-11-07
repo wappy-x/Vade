@@ -97,6 +97,7 @@ impl<'a> Backend<'a> {
             "model_elementwise"=>Some((Kind::Elementwise,encode::elementwise(args[0].cast::<crate::kernel_params::ModelElementwise>().read_unaligned()))),
             "project_f32_ordered"=>{if args.len()!=5 {return Err("ordered projection argument count differs".into());}let mut c=Command::new(Kind::Plain);for i in 0..3 {c.word(i,args[i].cast::<u64>().read_unaligned());}for i in 3..5 {c.word(i,args[i].cast::<u32>().read_unaligned() as u64);}Some((Kind::Plain,c))},
             "project_bf16_ordered"=>{if args.len()!=5 {return Err("ordered BF16 projection argument count differs".into());}let mut c=Command::new(Kind::PlainBf16);for i in 0..3 {c.word(i,args[i].cast::<u64>().read_unaligned());}for i in 3..5 {c.word(i,args[i].cast::<u32>().read_unaligned() as u64);}Some((Kind::PlainBf16,c))},
+            "tp_mailbox_put_wide"=>{if args.len()!=8 {return Err("resident mailbox argument count differs".into());}let mut c=Command::new(Kind::PutWide);for (i,p) in args.iter().enumerate() {c.word(i,p.cast::<u64>().read_unaligned());}Some((Kind::PutWide,c))},
             "tp_mailbox_put_finite"|"tp_mailbox_take"=>{if args.len()!=10 {return Err("resident mailbox argument count differs".into());}let kind=if name=="tp_mailbox_take" {Kind::Take} else {Kind::Put};let mut c=Command::new(kind);for (i,p) in args.iter().enumerate() {c.word(i,p.cast::<u64>().read_unaligned());}Some((kind,c))},
             _=>None,
         }};

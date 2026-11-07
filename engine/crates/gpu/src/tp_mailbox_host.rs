@@ -40,7 +40,7 @@ pub const TAKE_CTAS: usize = 130;
 /// (thread park, a futex on Linux) while every queued message is posted, instead of polling. The
 /// GPU cannot wake a host thread, but the host queues each put before the GPU publishes it.
 #[derive(Default)]
-pub struct Bell { queued: AtomicU64, parked: AtomicBool, thread: OnceLock<Thread>, parks: AtomicU64, parked_ns: AtomicU64 }
+pub struct Bell { queued: AtomicU64, parked: AtomicBool, thread: OnceLock<Thread>, parks: AtomicU64, parked_ns: AtomicU64, lingered: AtomicU64, linger_ns: AtomicU64 }
 impl Bell {
     /// The host queued the put of message `seq`; a parked doorbell wakes. A no-op until a waiting
     /// doorbell registered (the spin doorbell and the proxy never park).
@@ -68,6 +68,8 @@ impl Bell {
     }
     /// How often the doorbell parked and for how long in all (ns).
     pub fn stats(&self) -> (u64, u64) { (self.parks.load(Ordering::Relaxed), self.parked_ns.load(Ordering::Relaxed)) }
+    /// Messages posted after an idle linger, and the idle time it polled instead of parking (ns). Waiting for a queued put is not idle.
+    pub fn linger_stats(&self) -> (u64, u64) { (self.lingered.load(Ordering::Relaxed), self.linger_ns.load(Ordering::Relaxed)) }
     fn in_flight(&self, next: u64) -> bool { self.queued.load(Ordering::SeqCst) >= next }
 }
 
@@ -153,10 +155,10 @@ pub trait TpDoorbell {
 /// instead; the `active` window and the backoff then cover only queued messages the GPU has not
 /// published yet.
 #[derive(Clone, Copy)]
-pub struct Ring { pub active: Duration, pub spin: Duration, pub idle_max: Duration, pub reuse: Duration, pub notify: Duration, pub rest: Option<Duration> }
+pub struct Ring { pub active: Duration, pub spin: Duration, pub idle_max: Duration, pub reuse: Duration, pub notify: Duration, pub rest: Option<Duration>, pub linger: Duration, pub linger_cap: Duration }
 impl Default for Ring {
     fn default() -> Self {
-        Self { active: Duration::from_millis(20), spin: Duration::from_micros(1000), idle_max: Duration::from_micros(100), reuse: Duration::from_secs(2), notify: Duration::from_millis(100), rest: None }
+        Self { active: Duration::from_millis(20), spin: Duration::from_micros(1000), idle_max: Duration::from_micros(100), reuse: Duration::from_secs(2), notify: Duration::from_millis(100), rest: None, linger: Duration::ZERO, linger_cap: Duration::ZERO }
     }
 }
 /// Spin until `spin` has passed since `since`, then yield the core once and restart the count.
@@ -169,18 +171,24 @@ impl TpMailboxHost<'_> {
     /// staged sequence word into the peer's RECV_SEQ. The slot's previous message (s - SLOTS) must
     /// have completed first; the lockstep already implies the peer placed it, so this waits only
     /// for its acknowledgement. Completions arrive once each, in order.
+    /// `Ring::linger`: within this time of its last post it polls instead of parking. A park's wake can outlast the time from the
+    /// host's queue to the GPU's publish, and that delay lands on the peer's take. Timing only; no word or order changes.
+    /// `Ring::linger_cap` bounds the idle time polled since the last park. A post does not reset it, so steady traffic still parks.
     /// With `Ring::rest` it parks on the mailbox's Bell while nothing is in flight (every queued
     /// message posted and completed); a put launch or the caller's unpark (after `stop`) wakes it.
     pub fn ring(&mut self, link: &mut dyn TpDoorbell, stop: &AtomicBool, timing: Ring) -> Result<(), String> {
         let (mut next, mut done, slots) = (1u64, 0u64, TP_MAILBOX_SLOTS as u64);
         let (mut active, mut pause, mut paced) = (Instant::now(), Duration::from_micros(1), Instant::now());
+        let mut posted = Instant::now();
         let bell = match timing.rest {
             Some(_) => { let bell = self.bell.ok_or("the waiting tensor split doorbell needs the mailbox's bell")?; bell.register()?; Some(bell) }
             None => None,
         };
+        let mut idle = IdleLinger { bell, open: None, spent: Duration::ZERO, served: false };
         while !stop.load(Ordering::Relaxed) {
             reap(link, &mut done)?;
             if self.sent(next) == next as u32 {
+                idle.close();
                 if self.error() {
                     return Err(format!("mailbox failed before message {next}"));
                 }
@@ -201,6 +209,8 @@ impl TpMailboxHost<'_> {
                 link.post(from..from + len / 4, self.recv_slot(slot), FLAG_OUT + slot, RECV_SEQ + slot, next)?;
                 next += 1;
                 (active, pause) = (Instant::now(), Duration::from_micros(1));
+                posted = Instant::now();
+                idle.posted();
                 continue;
             }
             if self.error() {
@@ -208,9 +218,15 @@ impl TpMailboxHost<'_> {
             }
             if let (Some(bell), Some(most)) = (bell, timing.rest) {
                 if done + 1 >= next && !bell.in_flight(next) {
-                    bell.rest(next, most);
-                    (active, pause) = (Instant::now(), Duration::from_micros(1));
-                    continue;
+                    if posted.elapsed() >= timing.linger || idle.spent_now() >= timing.linger_cap {
+                        idle.parking();
+                        bell.rest(next, most);
+                        (active, pause) = (Instant::now(), Duration::from_micros(1));
+                        continue;
+                    }
+                    idle.open();
+                } else {
+                    idle.close();
                 }
             }
             if active.elapsed() < timing.active {
@@ -233,6 +249,27 @@ impl TpMailboxHost<'_> {
         }
     }
 }
+/// One doorbell's idle linger: open only while nothing is queued, so waiting for a queued put is not charged. Every exit charges the open interval.
+struct IdleLinger<'m> { bell: Option<&'m Bell>, open: Option<Instant>, spent: Duration, served: bool }
+impl IdleLinger<'_> {
+    fn open(&mut self) { self.open.get_or_insert_with(Instant::now); }
+    fn close(&mut self) {
+        if let Some(since) = self.open.take() {
+            let polled = since.elapsed();
+            self.spent += polled;
+            self.served = true;
+            if let Some(bell) = self.bell { bell.linger_ns.fetch_add(polled.as_nanos() as u64, Ordering::Relaxed); }
+        }
+    }
+    fn spent_now(&self) -> Duration { self.spent + self.open.map_or(Duration::ZERO, |since| since.elapsed()) }
+    /// A post succeeded: it is the message this linger served, if one came before it.
+    fn posted(&mut self) {
+        if std::mem::take(&mut self.served) { if let Some(bell) = self.bell { bell.lingered.fetch_add(1, Ordering::Relaxed); } }
+    }
+    /// The doorbell parks: the budget restarts, and the next message is not served by this linger.
+    fn parking(&mut self) { self.close(); self.spent = Duration::ZERO; self.served = false; }
+}
+impl Drop for IdleLinger<'_> { fn drop(&mut self) { self.close(); } }
 /// Reap completions into `done`, the last completed message (each completes once, in order).
 fn reap(link: &mut dyn TpDoorbell, done: &mut u64) -> Result<(), String> {
     let mut order = true;
@@ -436,6 +473,110 @@ mod tests {
         assert!(!torn.load(Ordering::Relaxed), "a NIC read a slot while its GPU rewrote it");
         assert!(!TpMailboxHost::new(&m0, slot_words).error() && !TpMailboxHost::new(&m1, slot_words).error());
     }
+    /// Within `linger` of its last post the doorbell polls: a close message finds it awake and is counted, and no park happens.
+    /// After `linger` it parks as before and a queued put wakes it. Every message arrives either way.
+    #[test]
+    fn lingering_doorbell_serves_a_close_message_without_parking_then_parks() {
+        let slot_words = 4;
+        let (m0, m1, bell, stop, torn) = (mailbox(slot_words), mailbox(slot_words), Bell::default(), AtomicBool::new(false), AtomicBool::new(false));
+        let nic = Nic { local: &m0, peer: &m1, tag: tag0, queue: Default::default(), flying: Default::default(), seed: 9, posts: Vec::new(), torn: &torn, fail_post: false };
+        let timing = Ring { rest: Some(Duration::from_secs(60)), linger: Duration::from_millis(500), linger_cap: Duration::from_secs(30), ..Ring::default() };
+        std::thread::scope(|scope| {
+            struct Stop<'s>(&'s AtomicBool, &'s Bell);
+            impl Drop for Stop<'_> { fn drop(&mut self) { self.0.store(true, Ordering::Relaxed); if let Some(t) = self.1.thread.get() { t.unpark(); } } }
+            let guard = Stop(&stop, &bell);
+            let doorbell = scope.spawn(|| run_write_with(TpMailboxHost::with_bell(&m0, slot_words, &bell), nic, &stop, timing));
+            until(|| bell.thread.get().is_some());
+            std::thread::sleep(Duration::from_millis(20));
+            let mut g = Gpu { m: &m0, slot_words, sent: 0, taken: 0, tag: tag0, peer_tag: tag1, bell: Some(&bell) };
+            for seq in 1..=3u64 {
+                g.put(slot_words);
+                until(|| m1[RECV_SEQ + seq as usize % TP_MAILBOX_SLOTS].load(Ordering::Acquire) == seq as u32);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let (served, polled) = bell.linger_stats();
+            assert!(served >= 1 && polled > 0, "the close messages found it lingering: {served} {polled}");
+            // Past the linger it parks, the polling time stops growing, and a queued put still wakes it.
+            until(|| bell.parked.load(Ordering::SeqCst));
+            assert!(bell.linger_stats().1 >= polled);
+            g.put(slot_words);
+            until(|| m1[RECV_SEQ + 4 % TP_MAILBOX_SLOTS].load(Ordering::Acquire) == 4);
+            until(|| bell.stats().0 >= 1);
+            drop(guard);
+            doorbell.join().unwrap().unwrap();
+        });
+        assert!(!torn.load(Ordering::Relaxed));
+    }
+    /// Messages closer than `linger` forever: the capped budget still parks the doorbell, and nothing is lost.
+    #[test]
+    fn a_steady_trickle_still_parks_at_the_cap() {
+        let slot_words = 4;
+        let (m0, m1, bell, stop, torn) = (mailbox(slot_words), mailbox(slot_words), Bell::default(), AtomicBool::new(false), AtomicBool::new(false));
+        let nic = Nic { local: &m0, peer: &m1, tag: tag0, queue: Default::default(), flying: Default::default(), seed: 9, posts: Vec::new(), torn: &torn, fail_post: false };
+        let timing = Ring { rest: Some(Duration::from_secs(60)), linger: Duration::from_secs(30), linger_cap: Duration::from_millis(50), ..Ring::default() };
+        std::thread::scope(|scope| {
+            let doorbell = scope.spawn(|| run_write_with(TpMailboxHost::with_bell(&m0, slot_words, &bell), nic, &stop, timing));
+            until(|| bell.thread.get().is_some());
+            let mut g = Gpu { m: &m0, slot_words, sent: 0, taken: 0, tag: tag0, peer_tag: tag1, bell: Some(&bell) };
+            let (mut seq, deadline) = (0u64, Instant::now() + Duration::from_secs(10));
+            while bell.stats().0 == 0 {
+                assert!(Instant::now() < deadline, "a steady trickle never parked: {:?}", bell.linger_stats());
+                seq += 1;
+                g.put(slot_words);
+                until(|| m1[RECV_SEQ + seq as usize % TP_MAILBOX_SLOTS].load(Ordering::Acquire) == seq as u32);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            stop.store(true, Ordering::Relaxed);
+            if let Some(t) = bell.thread.get() { t.unpark(); }
+            doorbell.join().unwrap().unwrap();
+        });
+        assert!(!torn.load(Ordering::Relaxed));
+    }
+    /// A queued put the GPU has not published yet is not idle: that wait is not charged, and the message counts once, after its post.
+    #[test]
+    fn waiting_for_a_queued_put_is_not_linger_time() {
+        let slot_words = 4;
+        let (m0, m1, bell, stop, torn) = (mailbox(slot_words), mailbox(slot_words), Bell::default(), AtomicBool::new(false), AtomicBool::new(false));
+        let nic = Nic { local: &m0, peer: &m1, tag: tag0, queue: Default::default(), flying: Default::default(), seed: 9, posts: Vec::new(), torn: &torn, fail_post: false };
+        let timing = Ring { rest: Some(Duration::from_secs(60)), linger: Duration::from_secs(30), linger_cap: Duration::from_secs(30), ..Ring::default() };
+        std::thread::scope(|scope| {
+            let doorbell = scope.spawn(|| run_write_with(TpMailboxHost::with_bell(&m0, slot_words, &bell), nic, &stop, timing));
+            until(|| bell.thread.get().is_some());
+            std::thread::sleep(Duration::from_millis(20));
+            bell.queued(1);
+            std::thread::sleep(Duration::from_millis(500));
+            assert_eq!(bell.linger_stats().0, 0, "counted before its post");
+            let mut g = Gpu { m: &m0, slot_words, sent: 0, taken: 0, tag: tag0, peer_tag: tag1, bell: Some(&bell) };
+            g.put(slot_words);
+            until(|| m1[RECV_SEQ + 1].load(Ordering::Acquire) == 1);
+            until(|| bell.linger_stats().0 == 1);
+            let polled = Duration::from_nanos(bell.linger_stats().1);
+            assert!(polled > Duration::ZERO && polled < Duration::from_millis(400), "the wait for the queued put was charged: {polled:?}");
+            stop.store(true, Ordering::Relaxed);
+            doorbell.join().unwrap().unwrap();
+        });
+    }
+    /// Stop during an idle linger charges the open interval and counts no message.
+    #[test]
+    fn stopping_during_a_linger_charges_the_open_interval() {
+        let slot_words = 4;
+        let (m0, m1, bell, stop, torn) = (mailbox(slot_words), mailbox(slot_words), Bell::default(), AtomicBool::new(false), AtomicBool::new(false));
+        let nic = Nic { local: &m0, peer: &m1, tag: tag0, queue: Default::default(), flying: Default::default(), seed: 9, posts: Vec::new(), torn: &torn, fail_post: false };
+        let timing = Ring { rest: Some(Duration::from_secs(60)), linger: Duration::from_secs(30), linger_cap: Duration::from_secs(30), ..Ring::default() };
+        std::thread::scope(|scope| {
+            let doorbell = scope.spawn(|| run_write_with(TpMailboxHost::with_bell(&m0, slot_words, &bell), nic, &stop, timing));
+            until(|| bell.thread.get().is_some());
+            std::thread::sleep(Duration::from_millis(50));
+            assert_eq!(bell.linger_stats().1, 0, "the interval is still open");
+            stop.store(true, Ordering::Relaxed);
+            doorbell.join().unwrap().unwrap();
+        });
+        let (served, polled) = bell.linger_stats();
+        assert_eq!(served, 0);
+        assert!(polled >= 40_000_000, "the open interval was dropped: {polled}");
+    }
+    #[test]
+    fn the_default_ring_does_not_linger() { assert_eq!(Ring::default().linger, Duration::ZERO); }
     /// With nothing queued the doorbell parks (no polling), a queued put
     /// wakes it and its message is posted, it parks again once that write completed, and after stop
     /// an unpark ends it at once (its own recheck is 60 s away here).

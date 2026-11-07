@@ -15,9 +15,12 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use crate::tp_mailbox_host::{Bell, TpMailboxHost, SEND_SEQ, SEND_LEN, RECV_SEQ, ERROR, TAKE_PAUSE, WIDE, TAKE_CTAS};
 use crate::tp_route::{Channels, Links};
 
+/// A proof fixture sets this to time and compare the one-block put at every size. Production never sets it.
+static PUT_NARROW:AtomicBool=AtomicBool::new(false);
+pub fn set_put_narrow(narrow:bool) {PUT_NARROW.store(narrow,Ordering::Relaxed);}
 /// The mapped mailbox of one rank (device-visible host memory), `slot_bytes` per slot.
 /// `bell`: every queued put rings it, so a waiting write doorbell can park.
-pub struct TpMailbox<'a> { vector: DeviceVector<'a>, host: *mut f32, layout: Channels, host_taken: AtomicBool, copy_group: AtomicBool, bell: Bell }
+pub struct TpMailbox<'a> { vector: DeviceVector<'a>, done: DeviceVector<'a>, host: *mut f32, layout: Channels, host_taken: AtomicBool, copy_group: AtomicBool, bell: Bell }
 impl<'a> TpMailbox<'a> {
     fn words(&self) -> &[AtomicU32] {
         // SAFETY: the mapping is the layout's aligned u32 words (Channels::words), zeroed by the
@@ -31,6 +34,8 @@ impl<'a> TpMailbox<'a> {
     pub fn take_host(&self) -> Option<TpMailboxHost<'_>> {
         (!self.host_taken.swap(true, Ordering::AcqRel)).then(|| TpMailboxHost::with_bell(self.words(), self.layout.slot_words, &self.bell))
     }
+    /// The doorbell's parks and parked ns, and the messages it served lingering and the ns it polled instead of parking.
+    pub fn doorbell_stats(&self) -> [u64; 4] { let (a, b) = self.bell.stats(); let (c, d) = self.bell.linger_stats(); [a, b, c, d] }
     /// A take timed out or the proxy failed (sticky).
     pub fn failed(&self) -> bool { self.words()[ERROR].load(Ordering::Acquire) != 0 }
     /// Check after the ordered readback drained queued consumers. Failure rejects the request.
@@ -76,10 +81,12 @@ impl<'a> Backend<'a> {
         // Every word (header and payload) is zeroed by the driver, and the stream drained, before
         // the host view exists or any mailbox kernel runs.
         let mut vector = self.mapped_vector(words)?;
+        // The wide put counts finished blocks here, in device memory. Zero between launches.
+        let mut done = self.vector(1)?; self.zero_vector(&mut done)?;
         self.zero_vector(&mut vector)?;
         self.synchronize()?;
         let host = self.mapped_exchange_host(&vector)?;
-        Ok(TpMailbox { vector, host, layout, host_taken: AtomicBool::new(false), copy_group: AtomicBool::new(false), bell: Bell::default() })
+        Ok(TpMailbox { vector, done, host, layout, host_taken: AtomicBool::new(false), copy_group: AtomicBool::new(false), bell: Bell::default() })
     }
     /// Queue tp_mailbox_put: words [own, own + half) of each of `rows` rows of `width` words of
     /// `source` go to the send slot of message `seq`, then its sequence word is published.
@@ -100,6 +107,14 @@ impl<'a> Backend<'a> {
         own:usize,seq:u64)->Result<(),String> {
         self.check_mailbox_owner(m,source)?;check_mailbox_shape(m,source.len,rows,width,half,own)?;
         let slot=seq as usize%m.layout.slots;
+        if crate::tp_put_wide::admitted(rows,half) && !PUT_NARROW.load(Ordering::Relaxed) {
+            let most=match m.words()[TAKE_CTAS].load(Ordering::Relaxed) {0=>96,n=>n.min(96)};
+            let mut args=[source.buffer.address+(own*4) as u64,half as u64,m.device(m.layout.send_slot(slot)+m.layout.frame),m.device(SEND_LEN+slot),m.device(SEND_SEQ+slot),
+                (seq as u32) as u64|m.wide()<<32,m.device(ERROR),m.done.device_address()];
+            self.tp_mailbox_launch("tp_mailbox_put_wide",crate::tp_put_wide::blocks(half,most),1,crate::tp_put_wide::THREADS,&mut args)?;
+            crate::prompt_launches::record("tp_put_wide");m.bell.queued(seq);return Ok(());
+        }
+        crate::prompt_launches::record("tp_put_narrow");
         let mut args=[source.buffer.address,rows as u64,width as u64,half as u64,own as u64,
             m.device(m.layout.send_slot(slot)+m.layout.frame),m.device(SEND_LEN+slot),m.device(SEND_SEQ+slot),seq as u32 as u64,m.device(ERROR)];
         self.tp_mailbox_launch("tp_mailbox_put_finite",1,1,1024,&mut args)?;m.bell.queued(seq);Ok(())
