@@ -60,6 +60,19 @@ impl Shape {
 }
 /// A complete warp can schedule fewer independent long NVFP4 rows per block.
 /// The inactive upper lanes never obtain an output slice.
+pub const NV_ROWS_PER_WARP:u32=16;
+/// Shape-only device-proof envelope. Other valid shapes keep the original
+/// arithmetic and eight active rows. Calibration and ignored metadata fields
+/// do not select the layout. All batch jobs have equal rows and columns.
+pub const NV_PACKED_COLS:[u32;11]=[16,32,48,64,128,256,512,1024,2048,4096,4112];
+#[inline(always)]
+pub fn nv_packed_shape(rows:u32,cols:u32,count:u32)->bool {
+    matches!(count,1|2|8|16) && (matches!((rows,cols),(1024,4096)|(2048,2048))
+        || rows>0 && rows<=257 && NV_PACKED_COLS.contains(&cols)
+        || rows==65536 && cols==16 && count==1)
+}
+#[inline(always)]
+pub fn nv_rows_per_warp(rows:u32,cols:u32,count:u32)->u32 {if nv_packed_shape(rows,cols,count) {NV_ROWS_PER_WARP} else {8}}
 pub fn output_index(op:Op,thread:usize)->Option<usize> {
     if op==Op::NvProject {let lane=thread%32;if lane>=8 {None} else {Some(thread/32*8+lane)}} else {Some(thread)}
 }
@@ -70,9 +83,15 @@ pub struct Arguments {pub input:[u64;4],pub weight:u64,pub scales:u64,pub output
 #[derive(Clone,Copy)]
 pub struct LaunchArguments {pub single:Arguments,pub batch:u64,pub count:u32}
 pub fn projection_batch_index(rows:u32,count:u32,thread:usize)->Option<(usize,usize)> {
-    let blocks=rows.div_ceil(8) as usize;let lane=thread%32;
-    if blocks==0 || lane>=8 {return None;}
-    let job=thread/32/blocks;let row=thread/32%blocks*8+lane;
+    projection_row_index(rows,count,thread,8)
+}
+pub fn nv_projection_batch_index(rows:u32,cols:u32,count:u32,thread:usize)->Option<(usize,usize)> {
+    projection_row_index(rows,count,thread,nv_rows_per_warp(rows,cols,count))
+}
+fn projection_row_index(rows:u32,count:u32,thread:usize,active:u32)->Option<(usize,usize)> {
+    let blocks=rows.div_ceil(active) as usize;let lane=thread%32;
+    if blocks==0 || lane>=active as usize {return None;}
+    let job=thread/32/blocks;let row=thread/32%blocks*active as usize+lane;
     if job>=count as usize || row>=rows as usize {None} else {Some((job,row))}
 }
 pub fn serial_projection_index(rows:u32,count:u32,thread:usize)->Option<(usize,usize)> {
@@ -80,6 +99,63 @@ pub fn serial_projection_index(rows:u32,count:u32,thread:usize)->Option<(usize,u
     let job=thread/32/blocks;let row=thread/32%blocks*32+thread%32;
     if job>=count as usize || row>=rows as usize {None} else {Some((job,row))}
 }
+/// Decode-time block-FP8 rows may run in the shared-memory tile kernel (`fp8_tile`): the same one
+/// ascending FP32 chain per output row, with the products made by many threads and staged in
+/// shared memory. The tile launch is TILE_THREADS threads per block and TILE_SHARED dynamic shared
+/// bytes; one block owns TILE_ROWS consecutive rows of one job.
+pub const FP8_TILE_ROWS:u32=16;
+pub const FP8_TILE_COLS:u32=128;
+pub const FP8_TILE_DEPTH:u32=4;
+/// Chunks ahead of the copies at which each row's next line is named to the L2 cache (0 = none).
+pub const FP8_TILE_PREFETCH:u32=2;
+pub const FP8_TILE_THREADS:u32=32+FP8_TILE_ROWS*FP8_TILE_COLS/16;
+pub const FP8_TILE_SHARED:u32=fp8_tile_shared(FP8_TILE_ROWS,FP8_TILE_COLS,FP8_TILE_DEPTH);
+/// Dynamic shared bytes of one tile block: raw weight stages, scale stages, raw input stages, three rounded
+/// input buffers and two product buffers (row pitch cols+4 words).
+pub const fn fp8_tile_shared(rows:u32,cols:u32,depth:u32)->u32 {
+    depth*rows*cols+depth*(rows*cols/16)*4+depth*cols*4+3*cols*4+2*rows*(cols+4)*4
+}
+/// The shape-only launch predicate of the tile kernel. Every other Fp8Serial shape keeps the
+/// one-thread-per-row kernel. The device byte sweep covers this envelope; it reads nothing but the shape.
+pub const FP8_TILE_MAX_ROWS:u32=16384;
+pub const FP8_TILE_MAX_COLS:u32=32768;
+/// Jobs in one batch the tile launch is proven for (the device sweep runs batches of 1 to 8 jobs and single launches).
+pub const FP8_TILE_MAX_JOBS:u32=8;
+pub fn fp8_tile_admits(shape:&Shape)->bool {
+    shape.op==Op::Fp8Serial && (1..=FP8_TILE_MAX_ROWS).contains(&shape.rows) && (16..=FP8_TILE_MAX_COLS).contains(&shape.cols) && shape.cols%16==0
+        && (1..=1024).contains(&shape.block_rows) && shape.block_cols.is_power_of_two() && (16..=4096).contains(&shape.block_cols)
+}
+/// The launch shape (blocks, threads, dynamic shared bytes) of these jobs: the shared-memory tile kernel when every
+/// job is an admitted block-FP8 decode shape with 16-byte aligned weight and input owners (a property of shape and
+/// owners, never of the model), otherwise `grid` blocks of one warp.
+#[cfg(not(target_arch="nvptx64"))]
+pub fn launch_geometry(jobs:&[Arguments],grid:u32,count:u32)->Result<(u32,u32,u32),String> {
+    if (1..=FP8_TILE_MAX_JOBS).contains(&count) && jobs.len()==count as usize
+        && jobs.iter().all(|job|fp8_tile_admits(&job.shape) && (job.weight|job.input[0])&15==0) {
+        let blocks=fp8_tile_blocks(jobs[0].shape.rows).checked_mul(count).ok_or("expert projection tile grid overflow")?;
+        Ok((blocks,FP8_TILE_THREADS,FP8_TILE_SHARED))
+    } else {Ok((grid,32,0))}
+}
+/// Keep the NV stream geometry separate from the block-FP8 geometry and its fallback.
+#[cfg(not(target_arch="nvptx64"))]
+pub fn batch_launch_geometry(jobs:&[Arguments],grid:u32,count:u32)->Result<(bool,u32,u32,u32),String> {
+    let owners=jobs.iter().map(|job|(job.weight,job.scales)).collect::<Vec<_>>();
+    if jobs.first().is_some_and(|job|crate::nv_stream::projection_admitted(job.shape,count,&owners)) {
+        if nv_tile_shape_proven(jobs[0].shape.rows,jobs[0].shape.cols,count) {
+            let blocks=crate::nv_stream::tile_blocks(jobs[0].shape.rows as usize,count as usize).ok_or("NV tile grid overflow")?;
+            return Ok((true,blocks,crate::nv_stream::TILE_THREADS,crate::nv_stream::TILE_SHARED));
+        }
+        let blocks=crate::nv_stream::blocks(jobs[0].shape.rows as usize,count as usize).ok_or("NV stream grid overflow")?;
+        Ok((true,blocks,64,0))
+    } else {let (blocks,threads,shared)=launch_geometry(jobs,grid,count)?;Ok((false,blocks,threads,shared))}
+}
+/// New-body shape cases in the retained NV batch sweep; other proven NV shapes keep the stream kernel.
+pub fn nv_tile_shape_proven(rows:u32,cols:u32,jobs:u32)->bool {
+    nv_packed_shape(rows,cols,jobs) && matches!(rows,1|2|31|32|33|63|64|65|127|128|129|191|255|1024|2048)
+        && ((u64::from(rows)*u64::from(cols)*u64::from(jobs)<=40_000_000) || (rows==1024 && cols==4096 && jobs==16))
+}
+/// Blocks per job of a tile launch.
+pub const fn fp8_tile_blocks(rows:u32)->u32 {rows.div_ceil(FP8_TILE_ROWS)}
 #[cfg(not(target_arch="nvptx64"))]
 impl Arguments {
     pub fn descriptor_words(self)->[u32;24] {
@@ -189,6 +265,13 @@ fn fp8_row(s:Shape,index:usize,x:&[f32],w:&[u8],scales:&[u8])->f32 {
         for j in block*bc..((block+1)*bc).min(k) {sum+=(e4m3(w[index*k+j])*scale)*round(x[j]);}
     }round(sum)
 }
+/// A single decode-time `Op::Quantize` may run one lane per element (`nv_quantize`, 128-thread blocks of eight 16-value
+/// blocks); the retained sweep covers 16..1024 by 16 and eight larger widths. Every other shape keeps the original launch.
+pub const QUANTIZE_LANES_THREADS:u32=128;
+pub const QUANTIZE_LANES_MAX_COLS:u32=16384;
+pub fn quantize_lanes_admitted(shape:&Shape)->bool {
+    shape.op==Op::Quantize && shape.tokens==1 && crate::quantize_sweep::single_admitted(shape.cols)
+}
 /// Quantized blocks contain sixteen exact decoded E2M1 values and an E4M3 scale.
 /// Fold follows ascending expert IDs. It rounds each contribution and addition.
 pub fn unit(s:Shape,index:usize,x:[&[f32];4],w:&[u8],scales:&[u8],out:&mut[f32]) {
@@ -297,6 +380,78 @@ mod tests {
     }
     use super::*;
     fn s(op:Op)->Shape {Shape {op,tokens:1,rows:2,cols:16,block_rows:1,block_cols:16,global:1.0,activation:1.0,bound:10.0}}
+    fn job(op:Op,rows:u32,cols:u32,br:u32,bc:u32)->Arguments {
+        Arguments {input:[0x1000,4,4,4],weight:0x2000,scales:0x3000,output:0x4000,shape:Shape {op,rows,cols,block_rows:br,block_cols:bc,tokens:1,global:1.0,activation:1.0,bound:0.0}}
+    }
+    fn geometry(jobs:&[Arguments])->(u32,u32,u32) {launch_geometry(jobs,77,jobs.len() as u32).unwrap()}
+    #[test]
+    fn batch_geometry_preserves_nv_stream_fp8_tile_and_original_fallback() {
+        let mut nv=job(Op::NvProject,1024,4096,0,0);nv.scales=512;
+        assert_eq!(batch_launch_geometry(&[nv;16],77,16).unwrap(),(true,1024,160,24064));
+        for rows in [3,17,256,257] {let other=Arguments {shape:Shape {rows,..nv.shape},..nv};
+            assert_eq!(batch_launch_geometry(&[other;2],77,2).unwrap(),(true,rows.div_ceil(64)*2,64,0));}
+        let down=Arguments {shape:Shape {rows:2048,cols:2048,..nv.shape},..nv};
+        assert_eq!(batch_launch_geometry(&[down;8],77,8).unwrap(),(true,1024,160,24064));
+        assert_eq!(batch_launch_geometry(&[down;16],77,16).unwrap(),(true,512,64,0));
+        let fp8=job(Op::Fp8Serial,1024,4096,128,128);
+        assert_eq!(batch_launch_geometry(&[fp8;2],77,2).unwrap(),(false,128,160,30720));
+        // The job count is part of the admission: 8 jobs take the tile, 9 and more keep the original launch.
+        assert_eq!(batch_launch_geometry(&[fp8;8],77,8).unwrap(),(false,64*8,160,30720));
+        for jobs in [9usize,12,16] {
+            let list=vec![fp8;jobs];
+            assert_eq!(batch_launch_geometry(&list,77,jobs as u32).unwrap(),(false,77,32,0),"{jobs} jobs");
+            assert_eq!(launch_geometry(&list,77,jobs as u32).unwrap(),(77,32,0),"{jobs} jobs");
+        }
+        assert_eq!(launch_geometry(&[fp8;8],77,8).unwrap(),(64*8,FP8_TILE_THREADS,FP8_TILE_SHARED));
+        assert_eq!(FP8_TILE_MAX_JOBS,8);
+        let mut outside=nv;outside.shape.rows=258;
+        assert_eq!(batch_launch_geometry(&[outside],77,1).unwrap(),(false,77,32,0));
+        let mut unaligned=fp8;unaligned.weight+=4;
+        assert_eq!(batch_launch_geometry(&[fp8,unaligned],77,2).unwrap(),(false,77,32,0));
+    }
+    #[test]
+    fn fp8_tile_batch_count_keeps_unproven_jobs_on_the_original_launch() {
+        let fp8=job(Op::Fp8Serial,17,256,128,128);
+        for count in [1,8,9] {
+            let jobs=vec![fp8;count as usize];let legacy=count;
+            let expected=if count<=FP8_TILE_MAX_JOBS {(2*count,FP8_TILE_THREADS,FP8_TILE_SHARED)} else {(legacy,32,0)};
+            assert_eq!(launch_geometry(&jobs,legacy,count).unwrap(),expected);
+            // Both the eager and recorded batch paths use this shared decision.
+            let (stream,blocks,threads,shared)=batch_launch_geometry(&jobs,legacy,count).unwrap();
+            assert!(!stream);assert_eq!((blocks,threads,shared),expected);
+        }
+        for (jobs,count) in [(1,0),(8,9),(9,8),(2,1)] {
+            assert_eq!(launch_geometry(&vec![fp8;jobs],77,count).unwrap(),(77,32,0));
+            assert_eq!(batch_launch_geometry(&vec![fp8;jobs],77,count).unwrap(),(false,77,32,0));
+        }
+    }
+    #[test]
+    fn tile_geometry_is_chosen_by_shape_and_alignment_only() {
+        let old=(77,32,0);
+        for (rows,cols,br,bc) in [(1024,4096,128,128),(2048,2048,128,128),(2048,16384,128,128),(8192,1536,128,128),(768,4096,128,128),(1,16,1,16),(17,48,3,16),(16384,32768,1024,4096)] {
+            assert_eq!(geometry(&[job(Op::Fp8Serial,rows,cols,br,bc)]),(rows.div_ceil(16),FP8_TILE_THREADS,FP8_TILE_SHARED),"{rows}x{cols}");
+            assert_eq!(launch_geometry(&[job(Op::Fp8Serial,rows,cols,br,bc);3],77,3).unwrap(),(rows.div_ceil(16)*3,FP8_TILE_THREADS,FP8_TILE_SHARED));
+        }
+        for shape in [(Op::Fp8Project,1024,4096,128,128),(Op::PlainSerial,1024,4096,128,128),(Op::NvProject,1024,4096,1,16),(Op::Fp8Rows,1024,4096,128,128),
+            (Op::Fp8Serial,1024,4100,128,128),(Op::Fp8Serial,1024,8,128,128),(Op::Fp8Serial,1024,0,128,128),(Op::Fp8Serial,0,4096,128,128),
+            (Op::Fp8Serial,1024,4096,128,100),(Op::Fp8Serial,1024,4096,128,8),(Op::Fp8Serial,1024,4096,128,8192),(Op::Fp8Serial,1024,4096,0,128),
+            (Op::Fp8Serial,1024,4096,1025,128),(Op::Fp8Serial,16385,4096,128,128),(Op::Fp8Serial,1024,32784,128,128)] {
+            assert_eq!(geometry(&[job(shape.0,shape.1,shape.2,shape.3,shape.4)]),old,"{shape:?}");
+        }
+        let mut weight=job(Op::Fp8Serial,1024,4096,128,128);weight.weight|=8;
+        let mut input=job(Op::Fp8Serial,1024,4096,128,128);input.input[0]|=4;
+        assert_eq!(geometry(&[weight]),old);assert_eq!(geometry(&[input]),old);
+        let good=job(Op::Fp8Serial,1024,4096,128,128);
+        assert_eq!(launch_geometry(&[good,weight],77,2).unwrap(),(77,32,0));
+        assert_eq!(launch_geometry(&[good,job(Op::Fp8Serial,1024,4100,128,128)],77,2).unwrap(),(77,32,0));
+        assert_eq!(launch_geometry(&[],77,0).unwrap(),old);
+    }
+    #[test]
+    fn tile_launch_constants_fit_the_default_shared_limit() {
+        assert_eq!(FP8_TILE_THREADS,160);assert_eq!(FP8_TILE_SHARED,30720);
+        assert_eq!(fp8_tile_shared(16,128,4),4*16*128+4*128*4+4*128*4+3*128*4+2*16*132*4);
+        assert!(FP8_TILE_SHARED<=48*1024 && FP8_TILE_THREADS%32==0);
+    }
     #[test]
     fn serial_projection_grid_and_reference_keep_complete_rows() {
         for rows in [1u32,7,8,9,17,31,32,33,1024] {for count in [1u32,2,8] {
@@ -350,6 +505,18 @@ mod tests {
         }}
     }
     #[test]
+    fn quantize_lanes_are_chosen_by_shape_only() {
+        let q=|op,cols|Shape {op,rows:1,cols,block_rows:0,block_cols:0,tokens:1,global:1.0,activation:0.5,bound:0.0};
+        for cols in [16,32,1024,2048,4096,16384] {assert!(quantize_lanes_admitted(&q(Op::Quantize,cols)),"{cols}");}
+        for cols in [0,8,17,1040,1088,4100,5120,16400,32768] {assert!(!quantize_lanes_admitted(&q(Op::Quantize,cols)),"{cols}");}
+        let retained:Vec<u32>=(1..=64).map(|n|n*16).chain([1536,2048,3072,4096,7168,8192,12288,16384]).collect();
+        let admitted:Vec<u32>=(1..=QUANTIZE_LANES_MAX_COLS).filter(|&cols|quantize_lanes_admitted(&q(Op::Quantize,cols))).collect();
+        assert_eq!(admitted,retained);assert_eq!(admitted.len(),72);
+        assert!(!quantize_lanes_admitted(&Shape {tokens:2,..q(Op::Quantize,4096)}));
+        for op in [Op::QuantizeRows,Op::NvProject,Op::Fp8Serial,Op::SwiGlu] {assert!(!quantize_lanes_admitted(&q(op,4096)),"{op:?}");}
+        assert_eq!(QUANTIZE_LANES_THREADS%16,0);assert_eq!(QUANTIZE_LANES_THREADS%32,0);
+    }
+    #[test]
     fn e2m1_bits_match_all_codes_and_signs() {
         let values=[0.0f32,0.5,1.0,1.5,2.0,3.0,4.0,6.0];
         for n in 0..=255u8 {let v=values[(n&7) as usize];let old=if n&8==0 {v} else {-v};
@@ -365,6 +532,37 @@ mod tests {
                 assert_eq!(rows,(0..units).collect::<Vec<_>>());
             }
         }
+    }
+    #[test]
+    fn nv_batch_owns_each_row_once_with_full_physical_warps() {
+        assert!([8,16,32].contains(&NV_ROWS_PER_WARP));
+        for rows in [0u32,1,7,8,9,15,16,17,31,32,33,65,255,256,257,258,1024,2048] {for cols in [16u32,80,2048,4096] {for count in [0u32,1,2,3,8,16,17] {
+            let active=nv_rows_per_warp(rows,cols,count);let grid=rows.div_ceil(active) as usize*count as usize;
+            let mut seen=vec![0;rows as usize*count as usize];
+            for thread in 0..(grid+1)*32 {if let Some((job,row))=nv_projection_batch_index(rows,cols,count,thread) {
+                assert!(thread<grid*32);assert!(thread%32<active as usize);seen[job*rows as usize+row]+=1;
+            }}assert!(seen.iter().all(|&owners|owners==1));
+        }}}
+    }
+    #[test]
+    fn nv_packed_envelope_is_the_device_swept_family() {
+        for rows in 1..=257 {for cols in NV_PACKED_COLS {for count in [1,2,8,16] {assert!(nv_packed_shape(rows,cols,count));}}}
+        for (rows,cols) in [(1024,4096),(2048,2048)] {for count in [1,2,8,16] {assert!(nv_packed_shape(rows,cols,count));}}
+        assert!(nv_packed_shape(65536,16,1));assert!(!nv_packed_shape(65536,16,2));
+        for rows in [0,258,1023,1025,2047,2049,65535,65537,u32::MAX/8] {assert!(!nv_packed_shape(rows,16,1));}
+        for count in [0,3,4,7,15,17,u32::MAX] {assert!(!nv_packed_shape(16,16,count));}
+    }
+    #[test]
+    fn nv_unproven_shape_keeps_original_arithmetic_and_geometry() {
+        let shape=Shape {op:Op::NvProject,rows:2,cols:80,block_rows:1,block_cols:16,tokens:1,global:1.0,activation:1.0,bound:0.0};
+        for count in [1u32,3] {
+            assert!(!nv_packed_shape(shape.rows,shape.cols,count));assert_eq!(nv_rows_per_warp(shape.rows,shape.cols,count),8);
+            for thread in 0..(count+1) as usize*32 {assert_eq!(nv_projection_batch_index(2,80,count,thread),projection_batch_index(2,count,thread));}
+        }
+        assert_eq!(reference(shape,[&[1.0;85],&[],&[],&[]],&[0x22;80],&[0x38;10]).unwrap(),[80.0;2]);
+        let largest=Shape {rows:u32::MAX/8,cols:16,..shape};assert!(largest.lengths().is_some());
+        assert_eq!(nv_rows_per_warp(largest.rows,16,1),8);
+        let last=u32::MAX as usize-1;assert_eq!(nv_projection_batch_index(1,16,u32::MAX,last*32),Some((last,0)));
     }
     #[test]
     fn exact_encodings_ties_and_signed_zero() {

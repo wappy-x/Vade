@@ -16,17 +16,23 @@ pub fn positive_zero_lane(input:&[f32],index:usize,plane:u32)->f32 {
 fn quantize(input:&[f32],index:usize,plane:u32,positive_zero:bool)->f32 {
     let start=index/32*32;let mut maximum=0.0f32;
     for &v in &input[start..start+32] {let v=source(v);if !v.is_finite() {return f32::NAN;}maximum=maximum.max(v.abs());}
+    finish(maximum,input[index],plane,positive_zero)
+}
+/// Everything after the group maximum: the scale search, the lane's code and the requested plane. `maximum` is the largest
+/// absolute BF16-rounded value of the lane's group (all finite), `raw` the lane's own input word. The device version that
+/// shares one maximum between the 32 lanes of a warp calls this with the same arguments, so it writes the same bytes.
+pub fn finish(maximum:f32,raw:f32,plane:u32,positive_zero:bool)->f32 {
     let (mut low,mut high)=(0u8,254u8);
     while low<high {let middle=low+(high-low)/2;
         if maximum as f64>448.0*scale(middle) as f64 {low=middle+1;} else {high=middle;}}
-    let encoded_scale=low;let descale=scale(encoded_scale);let source=source(input[index]);
+    let encoded_scale=low;let descale=scale(encoded_scale);let source=source(raw);
     let scaled=(source as f64/descale as f64) as f32;let magnitude=scaled.abs();
     let (mut low,mut high)=(0u8,126u8);
     while low<high {let middle=low+(high-low)/2;if value(middle)<magnitude {low=middle+1;} else {high=middle;}}
     if low>0 {let lower=low-1;let down=magnitude as f64-value(lower) as f64;let up=value(low) as f64-magnitude as f64;
         if down<up || down==up && lower%2==0 {low=lower;}}
     // The legacy (shared) rule is main's exact expression. Option B is GLM only.
-    let negative=if positive_zero {input[index]<0.0} else {source.is_sign_negative()};
+    let negative=if positive_zero {raw<0.0} else {source.is_sign_negative()};
     let code=low|if negative {128} else {0};
     match plane {1=>code as f32,2=>encoded_scale as f32,_=>{
         let v=if code&128==0 {value(code&127)} else {-value(code&127)};

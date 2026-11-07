@@ -7,5 +7,12 @@ publish = false
 repository = "https://github.com/wappy-x/vade"
 rust-version = "1.99"
 
+[features]
+kernel-bench = []
+
 [dependencies]
 engine-fabric = { path = "../fabric" }
+
+[[example]]
+name = "latent-rows"
+required-features = ["kernel-bench"]

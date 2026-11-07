@@ -16,6 +16,12 @@ fn expert_arguments(p:crate::expert_ops::Arguments)->Command {
     c.put(base,&s.payload[..core::mem::size_of::<Shape>()]);c
 }
 pub(super) fn expert(p:crate::expert_ops::LaunchArguments)->Command {let mut c=expert_arguments(p.single);fields!(c,crate::expert_ops::LaunchArguments,p,batch,count);c}
+pub(super) fn causal_fast(p:crate::causal_ops::Arguments)->Command {let mut c=causal(p);c.kind=Kind::CausalFast as u32;c}
+pub(super) fn nv_stream(p:crate::expert_ops::LaunchArguments)->Command {let mut c=expert(p);c.kind=Kind::NvStream as u32;c}
+pub(super) fn nv_tile(p:crate::expert_ops::LaunchArguments)->Command {let mut c=expert(p);c.kind=Kind::NvTile as u32;c}
+pub(super) fn device_route(p:crate::device_route::Build)->Command {
+    let mut c=Command::new(Kind::DeviceRoute);fields!(c,crate::device_route::Build,p,table,ids,input,quantized,quantizers,projects,output,experts,picks,phases,down,shared);c
+}
 pub(super) fn mx(p:crate::next_params::MxLayer)->Command {
     use crate::next_params::{MxLayer,MxProjection};let mut c=Command::new(Kind::Mx);
     for (i,p) in p.projections.into_iter().enumerate(){let mut s=Command::new(Kind::Mx);fields!(s,MxProjection,p,weights,scales,input,output,rows,cols,tokens,input_bf16,round);c.put(i*core::mem::size_of::<MxProjection>(),&s.payload[..core::mem::size_of::<MxProjection>()]);}
@@ -38,6 +44,39 @@ pub(super) fn elementwise(p:crate::kernel_params::ModelElementwise)->Command {le
 pub(super) fn copy(p:crate::kernel_params::HybridCopy)->Command {let mut c=Command::new(Kind::Copy);c.word(0,p.source as u64);c.word(1,p.destination as u64);fields!(c,crate::kernel_params::HybridCopy,p,words,padding,rows);c}
 #[cfg(test)] mod tests {
     use super::*;
+    #[test] fn device_route_replay_preserves_addresses_bounds_and_zero_padding() {
+        use crate::device_route::Build;
+        let p=Build {table:16,ids:32,input:48,quantized:64,quantizers:80,projects:96,output:112,experts:1024,picks:8,phases:2,down:0,shared:1};
+        let command=device_route(p);assert_eq!(command.kind,21);assert_eq!(Kind::DeviceRoute.kernel(),"resident_launch_device_route");
+        for (word,address) in [16u64,32,48,64,80,96,112].into_iter().enumerate() {assert_eq!(&command.payload[word*8..word*8+8],&address.to_ne_bytes());}
+        for (word,value) in [1024u32,8,2,0,1].into_iter().enumerate() {assert_eq!(&command.payload[56+word*4..60+word*4],&value.to_ne_bytes());}
+        assert!(command.payload[76..].iter().all(|&byte|byte==0));assert_eq!(command.reserved,[0;3]);
+    }
+    #[test] fn nv_stream_replay_keeps_the_original_expert_payload() {
+        use crate::expert_ops::{Arguments,LaunchArguments,Shape,Op};
+        let shape=Shape {op:Op::NvProject,rows:1024,cols:4096,block_rows:0,block_cols:0,tokens:1,global:1.0,activation:2.0,bound:0.0};
+        let p=LaunchArguments {single:Arguments {input:[16,32,48,64],weight:80,scales:96,output:112,shape},batch:128,count:16};
+        let old=expert(p);let new=nv_stream(p);
+        assert_eq!(new.kind,Kind::NvStream as u32);assert_eq!(new.payload,old.payload);assert_eq!(new.reserved,[0;3]);
+        assert_eq!(Kind::NvStream.kernel(),"resident_launch_nv_stream");
+    }
+    #[test] fn causal_fast_replay_keeps_the_causal_payload() {
+        use crate::causal_ops::{Arguments,Shape,Op};
+        let shape=Shape {op:Op::Softmax,heads:32,dim:128,taps:0,rows:2051,cols:0,epsilon:0.0,bound:0.0};
+        let p=Arguments {input:[16,32,0,0],weight:4,output:64,shape};
+        let old=causal(p);let new=causal_fast(p);
+        assert_eq!(new.kind,Kind::CausalFast as u32);assert_eq!(new.payload,old.payload);assert_eq!(new.reserved,[0;3]);
+        assert_eq!(Kind::CausalFast.kernel(),"resident_launch_causal_fast");
+    }
+    #[test] fn nv_tile_replay_keeps_the_original_expert_payload() {
+        use crate::expert_ops::{Arguments,LaunchArguments,Shape,Op};
+        let shape=Shape {op:Op::NvProject,rows:1024,cols:4096,block_rows:0,block_cols:0,tokens:1,global:1.0,activation:2.0,bound:0.0};
+        let p=LaunchArguments {single:Arguments {input:[16,32,48,64],weight:80,scales:96,output:112,shape},batch:128,count:16};
+        let old=expert(p);let new=nv_tile(p);
+        assert_eq!(Kind::NvStream as u32,18);assert_eq!(Kind::CausalFast as u32,19);assert_eq!(Kind::NvTile as u32,20);
+        assert_eq!(new.kind,Kind::NvTile as u32);assert_eq!(new.payload,old.payload);assert_eq!(new.reserved,[0;3]);
+        assert_eq!(Kind::NvTile.kernel(),"resident_launch_nv_tile");
+    }
     fn u64_at(c:&Command,at:usize)->u64 {u64::from_ne_bytes(c.payload[at..at+8].try_into().unwrap())}
     fn u32_at(c:&Command,at:usize)->u32 {u32::from_ne_bytes(c.payload[at..at+4].try_into().unwrap())}
     #[test] fn mixed_projection_abi_keeps_all_descriptors_and_flags() {

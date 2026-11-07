@@ -45,5 +45,11 @@ pub mod bounded_decoder;
 pub mod row_split;
 pub mod head_path;
 pub mod resident_weights;
+pub mod projection_stage;
 mod resident_profile;
 pub mod expert_path;
+
+pub mod service_memory;
+
+pub mod group_admission;
+pub mod admission_plan;

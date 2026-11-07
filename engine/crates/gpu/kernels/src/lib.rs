@@ -20,11 +20,47 @@ mod latent_ops;
 mod resident_launch;
 #[path = "causal_ops.rs"]
 mod causal_operation;
+mod causal_fast;
+mod causal_small;
+mod select_fast;
+#[path = "../../src/prompt_admission.rs"] mod prompt_admission;
+mod prompt_move;
+mod prompt_fast;
+mod prompt_softmax;
 #[path = "../../src/expert_ops.rs"] mod expert_ops;
+#[path = "../../src/quantize_sweep.rs"] mod quantize_sweep;
+mod fp8_rows;
 #[path = "../../src/prompt_ops.rs"] mod prompt_ops;
 #[path = "prompt_ops.rs"] mod prompt_operation;
+mod plain_rows_tile;
+mod scores_rows_tile;
+mod step_rows_block;
+mod transpose_tiles;
+mod small_math;
+mod plain_rows_small;
+mod plain_rows_few;
+mod nv_rows_small;
+mod fp8_rows_small;
+mod fp8_rows_multi;
+mod fp8_rows_few;
+mod mx_rows_small;
+mod rows_small;
 #[path = "expert_ops.rs"] mod expert_operation;
 mod serial_projection;
+#[path = "../../src/plain_admission.rs"] mod plain_admission;
+mod plain_warp;
+mod plain_bf16;
+mod fp8_tile;
+mod attention_table;
+mod nv_projection;
+mod nv_rows_stream;
+mod nv_rows_tile;
+mod mx_rows_tile;
+mod fp8_rows_tile;
+mod nv_quantize;
+mod nv_tile;
+#[path="../../src/device_route.rs"] mod device_route_abi;
+mod device_route;
 
 #[path = "../../src/next_math.rs"]
 mod next_math;
@@ -62,7 +98,10 @@ mod mhc;
 #[path = "../../src/mhc_boundary.rs"]
 mod mhc_boundary_math;
 mod mhc_boundary;
+mod chain_shadow;
 mod mhc_boundary_fused;
+mod mhc_project_tile;
+mod mhc_boundary_chain;
 mod qsa_indexer;
 mod flash_moe;
 #[path = "../../src/router_abi.rs"]

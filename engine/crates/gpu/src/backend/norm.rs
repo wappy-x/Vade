@@ -33,10 +33,18 @@ impl<'a> ResidentNorm<'_,'a> {
         b.check_vector(input.vector(),h)?;
         if input.vector().is_segmented() {return Err("resident norm requires a contiguous input".into());}
         let mut normalized=b.vector(h)?;let mut partials=b.vector(h.div_ceil(128))?;
+        // An owned queue records the same three kernels with the same arguments
+        // and grids, so a standalone norm does not end the recorded piece.
+        b.check_vector(&self.weight,h)?;
+        let rms=crate::kernel_params::ModelRms {input:input.vector().buffer.address,weight:0,partials:partials.buffer.address,output:normalized.buffer.address,
+            width:u32::try_from(h).map_err(|_|"norm width exceeds ABI")?,rows:1,epsilon:s.epsilon()};
+        let scale=crate::kernel_params::ModelElementwise {input:normalized.buffer.address,peer:self.weight.buffer.address,output:normalized.buffer.address,elements:rms.width,operation:4,scalar:1.0};
+        if b.record_resident_norm(rms,scale)? {b.resident_completion()?;} else {
         let launched=b.model_rms_device(input.vector(),None,&mut normalized,&mut partials,h,1,s.epsilon());
         let completed=b.resident_completion();launched.and(completed)?;
         let launched=b.model_elementwise_device(&normalized,Some(&self.weight),&normalized,h,4,1.0);
         let completed=b.resident_completion();launched.and(completed)?;
+        }
         match s.weight_type() {
             WeightType::Bf16=>Ok(NormOutput::Bf16(b.round_bf16_lanes(&normalized)?)),
             WeightType::F32=>Ok(NormOutput::F32(normalized)),

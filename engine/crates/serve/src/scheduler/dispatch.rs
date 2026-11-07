@@ -838,7 +838,7 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
         let foreground = jobs.iter().filter(|j| j.ready.request.priority > 0)
             .max_by_key(|j| (j.ready.request.priority, std::cmp::Reverse(j.last_tick))).map(|j| j.id);
         let mut budget = if foreground.is_some() { config.foreground_rows } else { config.background_rows };
-        if !engine.shared_batch() { budget = 1; }
+        if !engine.shared_batch() { budget = if concurrent_jobs == 1 { engine.lone_chat_rows() } else { 1 }; }
         if engine.native_draft_policy() {
             let decoders = jobs.iter().filter(|j| !j.done && j.ready.wire.bytes.is_empty() && j.generation.state.tokens.len() >= j.ready.prompt.len()).count();
             if decoders > 0 { budget = budget.min(engine.decode_row_limit(decoders)); }
@@ -1268,7 +1268,8 @@ pub(super) fn serve_loop<'e, E: Engine, T: Tokenizer>(
             let context = job.generation.state.tokens.len();
             // Keep in-flight shapes fixed. Engines with canonical tiles retain
             // their minimum row count under contention and yield between layers.
-            let rows = if decoding || config.prefill_chunk < 512 { config.prefill_chunk }
+            let owns = job.generation.state.session.prefill_owns_chunks();
+            let rows = if decoding || (owns && other_runnable) || (!owns && config.prefill_chunk < 512) { config.prefill_chunk }
                 else { job.generation.state.session.prefill_chunk_size(job.ready.prompt.len()) };
             let rows = rows.max(job.generation.state.session.prefill_chunk_min());
             let chunk = if job.prefill_rows != 0 { job.prefill_rows }

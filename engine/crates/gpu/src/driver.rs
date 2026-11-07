@@ -217,7 +217,8 @@ impl Context {
             self.cleanup_errors.borrow_mut().push(error);
         }
     }
-    fn accounted_bytes(&self) -> usize { self.allocated.get().saturating_add(self.graph_storage.get()) }
+    fn accounted_bytes(&self) -> usize { self.allocated.get().saturating_add(self.graph_storage.get()).saturating_add(self.pinned_staging.get()) }
+    fn allocation_required(&self,extra:usize)->Result<usize,String> {crate::allocation_budget::required(self.allocated.get(),self.graph_storage.get(),self.pinned_staging.get(),extra)}
     /// A container's MemAvailable may not charge CUDA allocations, so also
     /// subtract this context's allocations since the first query. Bare metal
     /// already counts them; the smaller value is then MemAvailable itself.
@@ -300,6 +301,9 @@ impl Context {
         self.vector_pool.borrow_mut().make_room(self, bytes)?;
         self.kv_reserve.borrow_mut().make_room(self, bytes)
     }
+    fn clear_vector_pool(&self) { self.vector_pool.borrow_mut().clear(self); }
+    fn trim_vector_pool(&self, room: usize) { self.vector_pool.borrow_mut().trim(self, room); }
+    fn vector_pool_stats(&self) -> crate::KvArenaStats { self.vector_pool.borrow().stats() }
     fn clear_reserves(&self) {
         self.vector_pool.borrow_mut().clear(self);
         self.kv_reserve.borrow_mut().clear(self);
@@ -390,14 +394,19 @@ impl<'a> Buffer<'a> {
     /// Pure memory reuse: its old bytes stay (cuMemAlloc's bytes are unspecified too), so
     /// every vector is written before it is read, as without the pool.
     fn pooled(context: &'a Context, bytes: usize) -> Result<Self, String> {
+        let bucketed=context.resident_queued.get() && context.vector_pool.borrow().configured();
+        let capacity=if bucketed {crate::reserve_policy::vector_capacity(bytes,usize::MAX)} else {bytes};
         if bytes != 0 && context.cleanup_errors.borrow().is_empty() {
-            if let Some(address) = context.vector_pool.borrow_mut().take(bytes, false) {
-                return Ok(Self { address, bytes, _context: context, owner: None, segments: None, host: None, reuse: Reuse::Vector });
+            let spare={let mut pool=context.vector_pool.borrow_mut();pool.take(capacity,false).map(|address|(address,capacity))
+                .or_else(||if capacity!=bytes {pool.take(bytes,false).map(|address|(address,bytes))} else {None})};
+            if let Some((address,capacity)) = spare {
+                return Ok(Self { address, bytes:capacity, _context: context, owner: None, segments: None, host: None, reuse: Reuse::Vector });
             }
         }
-        let mut buffer = Self::new(context, bytes)?;
+        let capacity=if bucketed {crate::reserve_policy::vector_capacity(bytes,context.budget.get().saturating_sub(context.accounted_bytes()))} else {bytes};
+        let mut buffer = Self::new(context, capacity)?;
         buffer.reuse = Reuse::Vector;
-        context.vector_pool.borrow_mut().allocated(bytes);
+        context.vector_pool.borrow_mut().allocated(capacity);
         Ok(buffer)
     }
     fn allocate(context: &'a Context, bytes: usize, managed: bool) -> Result<Self, String> {
@@ -406,7 +415,7 @@ impl<'a> Buffer<'a> {
         context.activate()?;
         context.make_room(bytes)?;
         let total = context.allocated.get().checked_add(bytes).ok_or("allocation accounting overflow")?;
-        if total.checked_add(context.graph_storage.get()).is_none_or(|n| n > context.budget.get()) { return Err(crate::admission::allocation(total as u128 + context.graph_storage.get() as u128, context.budget.get(), &format!("allocation {bytes} bytes; live {} bytes; graphs {} bytes; weights/rank, sessions, CONTEXT and OUTPUT not supplied to allocator", context.allocated.get(), context.graph_storage.get()))); }
+        if context.allocation_required(bytes)? > context.budget.get() { return Err(crate::admission::allocation(context.allocation_required(bytes)? as u128, context.budget.get(), &format!("allocation {bytes} bytes; live {} bytes; graphs {} bytes; weights/rank, sessions, CONTEXT and OUTPUT not supplied to allocator", context.allocated.get(), context.graph_storage.get()))); }
         let mut address = 0;
         unsafe {
             if managed { check(cuMemAllocManaged(&mut address, bytes, 1), "cuMemAllocManaged")?; }
@@ -419,7 +428,7 @@ impl<'a> Buffer<'a> {
         context.activate()?;
         context.make_room(bytes)?;
         let total = context.allocated.get().checked_add(bytes).ok_or("allocation accounting overflow")?;
-        if bytes == 0 || total.checked_add(context.graph_storage.get()).is_none_or(|n| n > context.budget.get()) { return Err(crate::admission::allocation(total as u128 + context.graph_storage.get() as u128, context.budget.get(), &format!("mapped allocation {bytes} bytes; live {} bytes; graphs {} bytes; weights/rank, sessions, CONTEXT and OUTPUT not supplied to allocator", context.allocated.get(), context.graph_storage.get()))); }
+        if bytes == 0 || context.allocation_required(bytes)? > context.budget.get() { return Err(crate::admission::allocation(context.allocation_required(bytes)? as u128, context.budget.get(), &format!("mapped allocation {bytes} bytes; live {} bytes; graphs {} bytes; weights/rank, sessions, CONTEXT and OUTPUT not supplied to allocator", context.allocated.get(), context.graph_storage.get()))); }
         if !context.cleanup_errors.borrow().is_empty() { return Err("context poisoned by cleanup error".into()); }
         let (mut host, mut address) = (ptr::null_mut(), 0);
         unsafe {
@@ -467,10 +476,15 @@ impl<'a> Pinned<'a> {
     fn new(context: &'a Context, bytes: usize) -> Result<Self, String> {
         context.activate()?;
         let mut address = ptr::null_mut();
+// Staging shares physical memory with device buffers on unified-memory
+// devices. Reserve its bytes before allocation, just like a device buffer.
+let required=context.allocation_required(bytes)?;
+if required>context.budget.get() {return Err(crate::admission::allocation(required as u128,context.budget.get(),"pinned staging and live buffers exceed funded bytes"));}
         unsafe { check(cuMemHostAlloc(&mut address, bytes, 0), "pinned staging allocation")?; }
         let total = context.pinned_staging.get() + bytes;
         context.pinned_staging.set(total);
         context.peak_pinned_staging.set(context.peak_pinned_staging.get().max(total));
+        context.peak_accounted.set(context.peak_accounted.get().max(context.accounted_bytes()));
         Ok(Self { address, bytes, context })
     }
 }
@@ -598,7 +612,7 @@ struct PendingBuffer<'a> { worker: Option<std::thread::JoinHandle<Result<DeviceP
 impl<'a> PendingBuffer<'a> {
     fn new(context: &'a Context, bytes: usize) -> Result<Self, String> {
         let total = context.allocated.get().checked_add(bytes).ok_or("allocation accounting overflow")?;
-        if bytes == 0 || total.checked_add(context.graph_storage.get()).is_none_or(|n| n > context.budget.get()) { return Err(crate::admission::allocation(total as u128 + context.graph_storage.get() as u128, context.budget.get(), &format!("weight allocation {bytes} bytes; live {} bytes; graphs {} bytes; weights/rank, sessions, CONTEXT and OUTPUT not supplied to allocator", context.allocated.get(), context.graph_storage.get()))); }
+        if bytes == 0 || context.allocation_required(bytes)? > context.budget.get() { return Err(crate::admission::allocation(context.allocation_required(bytes)? as u128, context.budget.get(), &format!("weight allocation {bytes} bytes; live {} bytes; graphs {} bytes; weights/rank, sessions, CONTEXT and OUTPUT not supplied to allocator", context.allocated.get(), context.graph_storage.get()))); }
         if !context.cleanup_errors.borrow().is_empty() { return Err("context poisoned by cleanup error".into()); }
         let raw = context.raw as usize;
         let worker = std::thread::Builder::new().name("weight-allocate".into()).spawn(move || {
@@ -843,7 +857,10 @@ pub use backend::ResidentTextEdges;
 pub use backend::{ResidentMxfp8Projection,Mxfp8ProjectionPass,ResidentProjection};
 pub use backend::{DecodeGraph, PromptBuffer, ResidentQueue, ResidentProgram};
 pub use backend::{Bf16Vector,ResidentMhc,MhcPass,ResidentNorm,NormOutput};
-pub use backend::{ResidentMhcBoundary,MhcBoundaryPass};
+pub use backend::{ResidentMhcBoundary,MhcBoundaryPass,Shadow,ShadowRange,GpuMark};
+pub use backend::DeviceRouteTable;
+#[cfg(feature="kernel-bench")]
+pub use backend::{RefereePlan,RefereeShape};
 
 /// VADE_VECTOR_POOL (default on; =0 off): whether a server configures the vector pool
 /// (Backend::configure_vector_pool). Other values are refused.

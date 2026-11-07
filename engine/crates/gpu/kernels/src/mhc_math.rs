@@ -2,7 +2,7 @@
 use super::qsa_common::{dot, exponential, root};
 use crate::mhc_params::Shape;
 
-fn sigmoid(x: f32) -> f32 {
+pub(crate) fn sigmoid(x: f32) -> f32 {
     // Reuse the QSA nonpositive exponential, including its fixed polynomial.
     let e = exponential(-x.abs());
     if x >= 0.0 { 1.0 / (1.0 + e) } else { e / (1.0 + e) }

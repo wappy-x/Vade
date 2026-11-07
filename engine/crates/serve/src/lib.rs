@@ -83,6 +83,9 @@ pub trait Session {
     fn prefill_chunk_size(&self, _prompt_end: usize) -> usize { 512 }
     /// Smallest scheduling chunk that avoids replaying an unfinished canonical tile.
     fn prefill_chunk_min(&self) -> usize { 1 }
+    /// The session's own group size applies whenever no other chat waits on it,
+    /// whatever the server's small default is. Sessions opt in.
+    fn prefill_owns_chunks(&self) -> bool { false }
     /// Resume the same prompt chunk until committed. None retains partial work;
     /// backends without layer-level yielding complete their ordinary chunk.
     /// No budget completes the chunk without synchronization between layers.
@@ -238,6 +241,9 @@ pub trait Engine {
     fn automatic_draft_limit(&self) -> usize { 4 }
     fn automatic_draft_min_output(&self) -> usize { 0 }
     fn decode_row_limit(&self, chats: usize) -> usize { chats.div_ceil(16) * 16 }
+    /// Rows one tick gives a chat that runs alone on an engine without shared batches. More
+    /// than one lets its draft target verify proposals. A plain chat still uses one row.
+    fn lone_chat_rows(&self) -> usize { 1 }
     /// Rows one tick may verify across all chats; None keeps the configured budget.
     fn tick_row_limit(&self) -> Option<usize> { None }
     /// Give a drafting cohort's decoders equal row caps (the tick remainder stays spare);

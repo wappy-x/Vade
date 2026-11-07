@@ -141,7 +141,8 @@ mod tests {
     use std::{path::PathBuf,sync::atomic::{AtomicU64,Ordering}};
     static NEXT: AtomicU64=AtomicU64::new(0);
     fn root() -> PathBuf {
-        let p=std::env::temp_dir().join(format!("vade-projection-compare-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
+        let stamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let p=std::env::temp_dir().join(format!("vade-projection-compare-{}-{stamp}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
         fs::create_dir(&p).unwrap();p
     }
     // These markers are synthetic test fixtures. They are never device evidence.

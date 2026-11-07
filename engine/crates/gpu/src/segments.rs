@@ -117,6 +117,20 @@ impl Reserve {
         }
         true
     }
+    /// Release plain spares from the front of the list until `room` bytes fit under the cap.
+    /// A returned spare goes to the back, so a size that is not asked for again drifts to
+    /// the front and leaves; `take` moves the last spare into the taken place, so the front
+    /// is not always the oldest, and a size still in use can leave too. That costs one new
+    /// allocation, never a value. A spare is free storage: no work reads it.
+    pub(super) fn trim(&mut self, context: &Context, room: usize) {
+        let mut index = 0;
+        while self.policy.limit != 0 && self.bytes.saturating_add(room) > self.policy.limit && index < self.pages.len() {
+            if self.pages[index].segment { index += 1; continue; }
+            let page = self.pages.remove(index);
+            self.bytes -= page.bytes;
+            self.release(context, page);
+        }
+    }
     fn release(&mut self, context: &Context, page: Spare) {
         let _wait = context.progress.wait(WaitKind::Cleanup);
         let code = unsafe { if page.segment { cuMemRelease(page.handle) } else { cuMemFree_v2(page.handle) } };
@@ -390,8 +404,7 @@ impl<'a> Buffer<'a> {
             return self.map_segment(Rc::new(Physical { handle, bytes: extra, context }), extra, false);
         }
         context.make_room(extra)?;
-        let total = context.allocated.get().checked_add(extra).ok_or("allocation accounting overflow")?;
-        if total.checked_add(context.graph_storage.get()).is_none_or(|n| n > context.budget.get()) { return Err(crate::admission::allocation(total as u128 + context.graph_storage.get() as u128, context.budget.get(), &format!("KV segment growth {extra} bytes; live {} bytes; graphs {} bytes; weights/rank, sessions, CONTEXT and OUTPUT not supplied to KV allocator", context.allocated.get(), context.graph_storage.get()))); }
+        if context.allocation_required(extra)? > context.budget.get() { return Err(crate::admission::allocation(context.allocation_required(extra)? as u128, context.budget.get(), &format!("KV segment growth {extra} bytes; live {} bytes; graphs {} bytes; weights/rank, sessions, CONTEXT and OUTPUT not supplied to KV allocator", context.allocated.get(), context.graph_storage.get()))); }
         let mut handle = 0;
         let mut code = unsafe { cuMemCreate(&mut handle, extra, &properties(context), 0) };
         if code == 2 {
@@ -399,7 +412,7 @@ impl<'a> Buffer<'a> {
             code = unsafe { cuMemCreate(&mut handle, extra, &properties(context), 0) };
         }
         check(code, "KV physical segment")?;
-        let total = context.allocated.get() + extra;
+        let total = context.allocated.get().checked_add(extra).ok_or("allocation accounting overflow")?;
         context.record_allocation(total);
         let mut reserve = context.kv_reserve.borrow_mut();
         reserve.pages_held = reserve.pages_held.saturating_add(extra);

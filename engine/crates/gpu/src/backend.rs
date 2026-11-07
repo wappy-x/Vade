@@ -1,5 +1,5 @@
 //! Scoped GB10 backend. Persistent buffers and one ordered decode stream.
-use super::*; #[path = "backend/causal_ops.rs"] mod causal_ops; #[path = "backend/expert_ops.rs"] mod expert_ops; #[path = "backend/prompt_ops.rs"] mod prompt_ops;
+use super::*; #[path = "backend/causal_ops.rs"] mod causal_ops; #[path = "backend/expert_ops.rs"] mod expert_ops; #[path = "backend/prompt_ops.rs"] mod prompt_ops; #[path="backend/device_route.rs"] mod device_route; pub use device_route::DeviceRouteTable;
 #[path = "next_profile.rs"] mod next_profile;
 #[path = "frontend_stream.rs"] mod frontend_stream;
 #[path = "verify_segment.rs"] mod verify_segment;
@@ -17,10 +17,10 @@ pub use fp8::{Fp8GroupedScratch, Fp8RoutingFlag};
 #[path = "fp4.rs"] mod fp4;
 #[path = "backend/device.rs"] mod device; #[path = "backend/ordered_projection.rs"] mod ordered_projection;
 #[path = "backend/weights.rs"] mod weights;
-#[path = "backend/kernels.rs"] mod kernels;
+#[path = "backend/kernels.rs"] mod kernels; #[cfg(feature="kernel-bench")] #[path = "backend/referee.rs"] mod referee; #[cfg(feature="kernel-bench")] pub use referee::{RefereePlan,RefereeShape};
 #[path = "backend/dense_tile.rs"] mod dense_tile;
 #[path = "backend/dense.rs"] mod dense; #[path = "backend/resident_program.rs"] mod resident_program; pub use resident_program::ResidentProgram; #[path = "backend/resident_views.rs"] mod resident_views; #[path = "backend/resident_launch.rs"] mod resident_launch; #[path = "backend/resident_queue.rs"] mod resident_queue; pub use resident_queue::ResidentQueue;
-#[path = "backend/mhc.rs"] mod mhc; pub use mhc::{Bf16Vector,ResidentMhc,MhcPass}; use kernels::AbKernels; #[path = "backend/mhc_boundary.rs"] mod mhc_boundary; pub use mhc_boundary::{ResidentMhcBoundary,MhcBoundaryPass};
+#[path = "backend/mhc.rs"] mod mhc; pub use mhc::{Bf16Vector,ResidentMhc,MhcPass}; use kernels::AbKernels; #[path = "backend/mhc_boundary.rs"] mod mhc_boundary; pub use mhc_boundary::{ResidentMhcBoundary,MhcBoundaryPass,Shadow,ShadowRange,GpuMark};
 #[path = "backend/text_edges.rs"] mod text_edges; pub use text_edges::ResidentTextEdges; #[path = "backend/norm.rs"] mod norm; pub use norm::{ResidentNorm,NormOutput}; #[path = "backend/mxfp8_projection.rs"] mod mxfp8_projection; pub use mxfp8_projection::{ResidentMxfp8Projection,Mxfp8ProjectionPass,ResidentProjection};
 
 pub struct Matrix<'a> { buffer: Buffer<'a>, rows: usize, cols: usize, packed: bool, packed_blocked: bool, stride: usize, row_offset: usize, column_offset: usize, scalar_f32: bool, fp8_scales: Option<Buffer<'a>>, fp8_fragments: bool }
@@ -209,7 +209,7 @@ pub struct BackendStats {
     pub host_launch_ns: u128, pub host_profile_ns: u128,
     /// Staging wall envelopes, including CPU work overlapping GPU execution.
     pub host_pack_ns: u128,
-    pub graph_launches: u128, pub graph_captures: u128, pub host_graph_launch_ns: u128,
+    pub graph_launches: u128, pub graph_captures: u128, pub host_graph_launch_ns: u128, pub projection_dispatches: [u128; 11], pub attention_dispatches: [u128; 2],
 }
 impl BackendStats {
     pub fn since(self, before: Self) -> Self {
@@ -230,7 +230,7 @@ impl BackendStats {
             host_pack_ns: self.host_pack_ns.saturating_sub(before.host_pack_ns),
             graph_launches: self.graph_launches.saturating_sub(before.graph_launches),
             graph_captures: self.graph_captures.saturating_sub(before.graph_captures),
-            host_graph_launch_ns: self.host_graph_launch_ns.saturating_sub(before.host_graph_launch_ns),
+            host_graph_launch_ns: self.host_graph_launch_ns.saturating_sub(before.host_graph_launch_ns), projection_dispatches: std::array::from_fn(|i|self.projection_dispatches[i].saturating_sub(before.projection_dispatches[i])), attention_dispatches: std::array::from_fn(|index|self.attention_dispatches[index].saturating_sub(before.attention_dispatches[index])),
         }
     }
 }
@@ -484,8 +484,8 @@ impl<'a> Backend<'a> {
         self.context.make_room(maximum)?;
         let storage = self.context.graph_storage.get().checked_add(maximum).ok_or("graph storage accounting overflow")?;
         if storage > self.context.graph_budget.get()
-            || self.allocated_bytes().checked_add(storage).is_none_or(|n| n > self.context.budget.get()) {
-            return Err(crate::admission::allocation(if storage > self.context.graph_budget.get() { storage as u128 } else { storage as u128 + self.allocated_bytes() as u128 }, if storage > self.context.graph_budget.get() { self.context.graph_budget.get() } else { self.context.budget.get() }, &format!("graph storage {storage} bytes (graph ceiling {} bytes); live {} bytes; weights/rank, sessions, CONTEXT and OUTPUT not supplied to graph allocator", self.context.graph_budget.get(), self.allocated_bytes())));
+            || crate::allocation_budget::required(self.allocated_bytes(),storage,self.context.pinned_staging.get(),0)? > self.context.budget.get() {
+            return Err(crate::admission::allocation(if storage > self.context.graph_budget.get() { storage as u128 } else { crate::allocation_budget::required(self.allocated_bytes(),storage,self.context.pinned_staging.get(),0)? as u128 }, if storage > self.context.graph_budget.get() { self.context.graph_budget.get() } else { self.context.budget.get() }, &format!("graph storage {storage} bytes (graph ceiling {} bytes); live {} bytes; weights/rank, sessions, CONTEXT and OUTPUT not supplied to graph allocator", self.context.graph_budget.get(), self.allocated_bytes())));
         }
         self.context.graph_storage.set(storage);
         self.context.peak_graph_storage.set(self.context.peak_graph_storage.get().max(storage));
@@ -842,7 +842,7 @@ impl<'a> Backend<'a> {
         let start = Some(Instant::now());
         self.stream.sync(self.spin_waits.get())?;
         self.context.release_deferred();
-        self.uploads.borrow_mut().used = 0;
+        self.uploads.borrow_mut().used = 0; if let Ok(mut recorder) = self.recorder.try_borrow_mut() { recorder.drained(); }
         let mut stats = self.stats.borrow_mut();
         stats.stream_wait_ns += elapsed(start);
         stats.stream_wait_calls += 1;
@@ -1034,7 +1034,7 @@ impl<'a> Backend<'a> {
         if len == 0 || len > u32::MAX as usize { return Err("vector outside kernel ABI".into()); }
         let timer = Some(Instant::now());
         let bytes = byte_count(len, 4)?; if self.context.accounted_bytes().saturating_add(bytes)>self.context.budget.get() {self.flush_resident_launches()?;}
-        let buffer = if managed { Buffer::allocate(self.context, bytes, true)? } else { Buffer::pooled(self.context, bytes)? };
+        let buffer = if managed { Buffer::allocate(self.context, bytes, true)? } else { Buffer::pooled(self.context, bytes)? };self.note_fresh_allocation(buffer.address,bytes);
         self.stats.borrow_mut().allocation_ns += elapsed(timer);
         Ok(DeviceVector { buffer, len, managed,
             #[cfg(debug_assertions)] projection_scratch: Default::default() })
@@ -1101,7 +1101,7 @@ impl<'a> Backend<'a> {
         shared: u32,
         args: &mut [*mut c_void],
     ) -> Result<(), String> {
-        if self.record_resident_launch(name,[blocks,rows,planes,threads,shared],args)? {return Ok(());} let function = if shared == 0 {
+        #[cfg(feature="kernel-bench")] let (blocks,threads)=self.fixture_launch_dimensions(name,blocks,threads)?; if self.record_resident_launch(name,[blocks,rows,planes,threads,shared],args)? {self.count_projection_entry(name);return Ok(());} let function = if shared == 0 {
             self.module.function(name)?
         } else {
             self.module.function_with_shared(name, shared)?
@@ -1112,8 +1112,8 @@ impl<'a> Backend<'a> {
             .unwrap_or_else(|| next_profile::flash_kind(name));
         self.profile_phase(kind, || unsafe {
             self.enqueue_dims_shared(function, blocks, rows, planes, threads, shared, args)
-        })
-    }
+        })?;self.count_projection_entry(name);Ok(())
+    } fn count_projection_entry(&self,name:&str) {let slot=match name {"project_f32_ordered"=>2,"flash_resident_projection_batch"=>3,"causal_fast"=>4,"prompt_select_rows"=>5,"project_bf16_ordered"=>10,_=>return};self.stats.borrow_mut().projection_dispatches[slot]+=1;}
     fn reserve_upload(&self, bytes: usize) -> Result<(), String> {
         let bytes = bytes.div_ceil(64) * 64;
         let full = { let staging = self.uploads.try_borrow().map_err(|_| "pinned transfer already in use")?;

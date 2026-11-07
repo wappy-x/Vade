@@ -1,9 +1,43 @@
 use spark_gpu_probe::mhc_boundary::{self as boundary,Span};
+use spark_gpu_probe::mhc_params;
+#[allow(dead_code)]
+#[path="../kernels/src/qsa_common.rs"] mod qsa_common;
+#[allow(dead_code)]
+#[path="../kernels/src/mhc_math.rs"] mod mhc_math;
+
+#[test]
+fn shared_sinkhorn_phase_order_matches_every_serial_row_and_column_fold() {
+    for streams in [1usize,2,3,4,5,8,31] {for iterations in [1,2,20] {
+        let shape=mhc_params::Shape {rows:1,streams:streams as u32,hidden:7,iterations,rms_eps:1e-6,eps:1e-6};
+        let mut reference=(0..shape.coefficients()).map(|index|match index%7 {0=>-0.0,1=>0.0,2=>100.0,3=>-100.0,_=>(index as i32%19-9) as f32/7.0}).collect::<Vec<_>>();
+        let mut actual=reference.clone();mhc_math::activate(shape,&mut reference);
+        for stream in 0..streams {actual[stream]=mhc_math::sigmoid(actual[stream])+shape.eps;actual[streams+stream]=2.0*mhc_math::sigmoid(actual[streams+stream]);}
+        let matrix=&mut actual[2*streams..];
+        let maxima=(0..streams).map(|row|matrix[row*streams..(row+1)*streams].iter().copied().fold(f32::NEG_INFINITY,f32::max)).collect::<Vec<_>>();
+        for cell in 0..matrix.len() {matrix[cell]=qsa_common::exponential(matrix[cell]-maxima[cell/streams]);}
+        let sums=(0..streams).map(|row|matrix[row*streams..(row+1)*streams].iter().copied().fold(0.0f32,|sum,value|sum+value)).collect::<Vec<_>>();
+        for cell in 0..matrix.len() {matrix[cell]=matrix[cell]/sums[cell/streams]+shape.eps;}
+        for iteration in 0..iterations {
+            if iteration>0 {
+                let sums=(0..streams).map(|row|matrix[row*streams..(row+1)*streams].iter().copied().fold(0.0f32,|sum,value|sum+value)+shape.eps).collect::<Vec<_>>();
+                for cell in 0..matrix.len() {matrix[cell]/=sums[cell/streams];}
+            }
+            let sums=(0..streams).map(|column|(0..streams).fold(0.0f32,|sum,row|sum+matrix[row*streams+column])+shape.eps).collect::<Vec<_>>();
+            for cell in 0..matrix.len() {matrix[cell]/=sums[cell%streams];}
+        }
+        assert_eq!(actual.iter().map(|value|value.to_bits()).collect::<Vec<_>>(),reference.iter().map(|value|value.to_bits()).collect::<Vec<_>>());
+        for threads in [32usize,64,128,768,1024] {
+            let mut visits=vec![0;streams*streams];
+            for thread in 0..threads {for cell in (thread..visits.len()).step_by(threads) {visits[cell]+=1;}}
+            assert!(visits.iter().all(|&count|count==1));
+        }
+    }}
+}
 
 #[test]
 fn fused_boundary_abi_and_norm_chunks_cover_all_features_once() {
     use spark_gpu_probe::mhc_params::{Boundary,Shape};
-    assert_eq!(std::mem::size_of::<Boundary>(),136);assert_eq!(std::mem::align_of::<Boundary>(),8);
+    assert_eq!(std::mem::size_of::<Boundary>(),160);assert_eq!(std::mem::align_of::<Boundary>(),8);
     for streams in [1,3,4,7,33] {for hidden in [1usize,3,31,32,129,4096,4103] {
         let shape=Shape {rows:3,streams,hidden:hidden as u32,iterations:20,rms_eps:1e-6,eps:1e-6};shape.validate().unwrap();
         let warps=shape.prepare_threads() as usize/32;let chunks=hidden.div_ceil(128);let mut visits=vec![0;hidden];let mut partials=vec![0;chunks];
@@ -122,4 +156,55 @@ fn grouped_square_loads_keep_the_full_ascending_rms_fold_at_width_tails() {
         mhc_reference::normalize(shape,&x,&mut got);
         assert_eq!(got.iter().map(|v|v.to_bits()).collect::<Vec<_>>(),expected,"streams={streams} hidden={hidden}");
     }}
+}
+
+#[test]
+fn chain_shadow_fields_follow_the_original_boundary_abi() {
+    use spark_gpu_probe::mhc_params::{AddLatency,Boundary};use std::mem::{offset_of,size_of};
+    // The first 136 bytes keep their old offsets; the CHAIN-SHADOW fields follow them.
+    assert_eq!((offset_of!(Boundary,norm_epsilon),offset_of!(Boundary,norm_bf16)),(128,132));
+    assert_eq!((offset_of!(Boundary,prefetch),offset_of!(Boundary,prefetch_bytes),offset_of!(Boundary,prefetch_policy),offset_of!(Boundary,prefetch_reserved)),(136,144,152,156));
+    assert_eq!((size_of::<AddLatency>(),offset_of!(AddLatency,start),offset_of!(AddLatency,step),offset_of!(AddLatency,adds)),(24,8,12,16));
+}
+
+#[test]
+fn chain_shadow_tail_issues_each_line_once_inside_the_span() {
+    use spark_gpu_probe::mhc_params::{SHADOW_LINE,SHADOW_MAX_BLOCKS,shadow_lines};
+    // Mirrors chain_shadow::shadow_tail: tail block b of `blocks`, thread t of `threads`.
+    let base=0x7f00_0000_0040u64;
+    for bytes in [1u64,127,128,129,4096,1_000_003,8_650_752] {for blocks in [1u32,3,24,SHADOW_MAX_BLOCKS] {for threads in [256u64,768] {
+        let lines=shadow_lines(bytes);let mut seen=vec![0u8;lines as usize];let stride=u64::from(blocks)*threads;
+        for b in 0..u64::from(blocks) {for t in 0..threads {
+            let mut line=b*threads+t;
+            while line<lines {let address=base+line*SHADOW_LINE;assert!(address<base+bytes);seen[line as usize]+=1;line+=stride;}
+        }}
+        assert!(seen.iter().all(|&count|count==1),"bytes={bytes} blocks={blocks} threads={threads}");
+        assert!(base+(lines-1)*SHADOW_LINE+SHADOW_LINE>=base+bytes);
+    }}}
+}
+
+#[test]
+fn chain_add_probe_replay_matches_the_measured_device_bits() {
+    use spark_gpu_probe::mhc_params::{SHADOW_DECODE_BLOCKS,SHADOW_DECODE_BYTES,SHADOW_MAX_BLOCKS,serial_add_bits};
+    // Device results printed by `kernel-bench addlat` on one Spark, screen de9aa38ef (session-shadow.log).
+    assert_eq!(serial_add_bits(1.0,1.0/1024.0,16384),0x41880000);
+    assert_eq!(serial_add_bits(1.0,1.0/1024.0,262144),0x43808000);
+    assert_eq!(serial_add_bits(1.0,1.0/1024.0,0),1.0f32.to_bits());
+    // The serial order matters: 2^24 + 1 + 1 stays 2^24 one add at a time.
+    assert_eq!(serial_add_bits(16_777_216.0,1.0,2),16_777_216.0f32.to_bits());
+    assert!(SHADOW_DECODE_BYTES>0 && (1..=SHADOW_MAX_BLOCKS).contains(&SHADOW_DECODE_BLOCKS));
+}
+
+#[test]
+fn chain_add_probe_counts_cannot_wrap_at_any_u32() {
+    use spark_gpu_probe::mhc_params::{PROBE_MAX_ADDS,probe_chunks};
+    // The review's case: 4,294,967,280 and above made `done + 16` wrap in the old loop.
+    for adds in [0u32,1,15,16,17,16384,262144,PROBE_MAX_ADDS,4_294_967_279,4_294_967_280,u32::MAX-1,u32::MAX] {
+        let (groups,tail)=probe_chunks(adds);
+        assert!(tail<16);assert_eq!(u64::from(groups)*16+u64::from(tail),u64::from(adds),"adds={adds}");
+        // The kernel counter runs 0..groups, then the tail counts down: neither exceeds its bound.
+        assert!(groups<=u32::MAX/16);
+    }
+    // The bench binder bound stays far below any wrap and covers the bench's longest chain.
+    assert!(PROBE_MAX_ADDS>=262144 && u64::from(PROBE_MAX_ADDS)<u64::from(u32::MAX));
 }

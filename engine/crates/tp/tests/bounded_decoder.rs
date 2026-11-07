@@ -2,6 +2,29 @@ use spark_tp::{bounded_decoder::{Decoder,Host},causal_layer::Layer};
 use engine_model::safetensors::Dtype;
 #[path="support/attention_checkpoint.rs"] mod fixture;
 #[test]
+fn step_allocation_fields_keep_the_verify_line_names() {
+    use spark_tp::bounded_decoder::{allocation_fields,Compute};
+    // RESIDENT TOKEN and SERVED STEP print these two fields under the names RESIDENT VERIFY uses.
+    assert_eq!(allocation_fields(Some((30,1<<20)),Some((33,(1<<20)+156_237_824))),"new_buffers=3 new_bytes=156237824");
+    assert_eq!(allocation_fields(Some((5,4096)),Some((5,4096))),"new_buffers=0 new_bytes=0");
+    assert_eq!(allocation_fields(None,Some((1,1))),"new_buffers=none new_bytes=none");
+    assert_eq!(allocation_fields(Some((1,1)),None),"new_buffers=none new_bytes=none");
+    assert_eq!(Compute::vector_allocations(&Host),None,"the host reference has no device vectors");
+    // Prompt groups add the pool's reused spares under the name RESIDENT VERIFY's line uses.
+    use spark_tp::bounded_decoder::group_allocation_fields;
+    assert_eq!(group_allocation_fields(Some((10,4096,7)),Some((12,12288,30))),"new_buffers=2 new_bytes=8192 reused_buffers=23");
+    assert_eq!(group_allocation_fields(Some((1,1,1)),None),"new_buffers=none new_bytes=none reused_buffers=none");
+    assert_eq!(Compute::vector_pool_counts(&Host),None);
+}
+#[test]
+fn read_pair_default_keeps_both_logical_vectors_and_signed_zero_bits() {
+    use spark_tp::bounded_decoder::Compute;
+    let first=vec![0.0,-0.0,1.0];let second=vec![7.0,-3.0];
+    let (a,b)=Compute::read_pair(&Host,&first,&second).unwrap();
+    assert_eq!(a.iter().map(|value|value.to_bits()).collect::<Vec<_>>(),first.iter().map(|value|value.to_bits()).collect::<Vec<_>>());
+    assert_eq!(b.iter().map(|value|value.to_bits()).collect::<Vec<_>>(),second.iter().map(|value|value.to_bits()).collect::<Vec<_>>());
+}
+#[test]
 fn bounded_stack_keeps_the_proved_dense_layer_bytes_and_commits_all_layers() {
     let old=fixture::Checkpoint::new(Dtype::Bf16);assert!(!old.operands.is_empty());
     let c=fixture::Checkpoint::new_with_head(Dtype::Bf16,true);assert!(!c.operands.is_empty());
@@ -56,6 +79,18 @@ fn prompt_groups_keep_every_logit_and_recurrent_cache_bit_across_tile_tails() {
     }
 }
 #[test]
+fn prepared_parameters_stay_bound_to_their_checkpoint() {
+    // `from_prepared` takes no second checkpoint, so a mixed pair cannot be written.
+    let (a,b)=(fixture::Checkpoint::new_with_head(Dtype::Bf16,true),fixture::Checkpoint::new_with_head(Dtype::F32,true));
+    let bits=|v:&[f32]|v.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
+    let first=|d:&Decoder<'_,Host>|bits(&d.step(1,&d.zero_state().unwrap(),|_,_|Ok(())).unwrap().0);
+    let (fresh_a,fresh_b)=(Decoder::new(&a.admission,Host,8).unwrap(),Decoder::new(&b.admission,Host,8).unwrap());
+    let reused=Decoder::from_prepared(&fresh_a.prepared(),Host,8).unwrap();
+    assert_eq!(first(&reused),first(&fresh_a));
+    assert_ne!(first(&reused),first(&fresh_b),"the two checkpoints must differ for this test to mean anything");
+    assert!(Decoder::from_prepared(&fresh_a.prepared(),Host,9).is_err());
+}
+#[test]
 fn layer_major_prompt_groups_keep_every_logit_and_state_bit() {
     use spark_tp::bounded_decoder::HeadRows;
     let c=fixture::Checkpoint::new_with_head(Dtype::Bf16,true);
@@ -66,14 +101,23 @@ fn layer_major_prompt_groups_keep_every_logit_and_state_bit() {
         let mut scalar=decoder.zero_state().unwrap();let mut grouped=decoder.zero_state().unwrap();
         for chunk in tokens.chunks(width) {
             let mut expected=Vec::new();for &token in chunk {let (logits,_,next)=decoder.step(token,&scalar,|_,_|Ok(())).unwrap();scalar=next;expected.push(logits);}
-            let (actual,next)=decoder.prefill_rows(chunk,&grouped,HeadRows::All).unwrap();grouped=next;
+            let (actual,next)=decoder.prefill_rows(chunk,&grouped,HeadRows::All).unwrap();
+            for (layer,(value,rows)) in &next.expanded {
+                let expected=if next.position as usize<=limit {next.position as usize} else {grouped.expanded.get(layer).map_or(0,|v|v.1)};
+                assert_eq!(*rows,expected,"retained prefix changed layer={layer} width={width} limit={limit}");
+                if let Some((old,_))=grouped.expanded.get(layer) {assert_eq!(bits(old),bits(&value[..old.len()]),"retained prefix bits changed");}
+            }
+            grouped=next;
             assert_eq!(actual.iter().map(|v|bits(v)).collect::<Vec<_>>(),expected.iter().map(|v|bits(v)).collect::<Vec<_>>(),"width={width}");
             assert_eq!(grouped.position,scalar.position);
             for (a,b) in grouped.layers.iter().zip(&scalar.layers) {assert_eq!(a.keys().collect::<Vec<_>>(),b.keys().collect::<Vec<_>>());for (name,value) in a {assert_eq!(bits(value),bits(&b[name]),"{name} width={width}");}}
         }
+        // A decode row after a group gives the same bits on either side of the limit.
+        let (mut row,row_state)=decoder.prefill_rows(&[9],&grouped,HeadRows::Last).unwrap();let row=row.pop().unwrap();let (step,_,_)=decoder.step(9,&scalar,|_,_|Ok(())).unwrap();assert_eq!(bits(&row),bits(&step),"decode row width={width} limit={limit}");assert_eq!(row_state.position,8);
         decoder.set_expanded_limit(8);
         // Decode continues from the group's state, including its expanded rows.
         let (a,_,next)=decoder.step(9,&grouped,|_,_|Ok(())).unwrap();let (b,_,_)=decoder.step(9,&scalar,|_,_|Ok(())).unwrap();assert_eq!(bits(&a),bits(&b),"decode after width={width}");assert_eq!(next.position,8);
+        // The fixed row-count rule gives the same bits on both sides of its limit.
         // A prompt group can follow a decoded token, and only the last head row is optional.
         let (mixed,_,after)=decoder.step(2,&decoder.zero_state().unwrap(),|_,_|Ok(())).unwrap();
         let (last,next)=decoder.prefill_rows(&[1,7],&after,HeadRows::Last).unwrap();assert_eq!(last.len(),1);assert_eq!(next.position,3);
@@ -135,4 +179,182 @@ fn recurrent_schedule_geometry_is_position_invariant_for_dense_and_expert_layers
     let first=LayerPlan::new(&d,1,1,Topology {rank:0,parts:1}).unwrap();
     let mut later=LayerPlan::new(&d,1,2,Topology {rank:0,parts:1}).unwrap();later.context=1;
     assert_ne!(later,first,"latent cache geometry must remain position dependent");
+}
+/// A host compute that keeps expansions by the bits of their latent row, as the
+/// device keeps them by origin. It records what decode found and what it added.
+#[derive(Default)]
+struct Kept {released:std::cell::Cell<usize>,keeps:std::cell::Cell<usize>,rows:std::cell::RefCell<std::collections::BTreeMap<(String,Vec<u32>,bool),Vec<f32>>>,found:std::cell::Cell<usize>,largest:std::cell::Cell<usize>,projected:std::cell::Cell<usize>,indirect:std::cell::Cell<usize>,reserved:std::cell::RefCell<Vec<(usize,usize)>>}
+impl spark_tp::bounded_decoder::Compute for Kept {
+    type Value=Vec<f32>;type Pass=<Host as spark_tp::bounded_decoder::Compute>::Pass;
+    fn rows_project(&self,_:&engine_model::plan::admission::CheckpointAdmission,name:&str,_:&Vec<f32>,m:usize,_:bool)->spark_tp::Result<Option<Vec<f32>>> {
+        if name.ends_with("self_attn.kv_b_proj.weight") {self.projected.set(self.projected.get()+m);}Ok(None)
+    }
+    fn projection_origin(&self,name:&str,x:&Vec<f32>,round:bool)->spark_tp::Result<Option<Vec<f32>>> {
+        let found=self.rows.borrow().get(&(name.to_owned(),x.iter().map(|v|v.to_bits()).collect(),round)).cloned();
+        if found.is_some() {self.found.set(self.found.get()+1);}Ok(found)
+    }
+    fn remember_projections(&self,name:&str,round:bool,kept:&[(&Vec<f32>,&Vec<f32>)])->spark_tp::Result<()> {
+        self.largest.set(self.largest.get().max(kept.len()));
+        for (x,output) in kept {self.rows.borrow_mut().insert((name.to_owned(),x.iter().map(|v|v.to_bits()).collect(),round),(*output).clone());}Ok(())
+    }
+    fn rows_release(&self)->spark_tp::Result<()> {self.released.set(self.released.get()+1);Ok(())}
+    fn rows_keep(&self)->spark_tp::Result<()> {self.keeps.set(self.keeps.get()+1);Ok(())}
+    fn upload(&self,v:&[f32])->spark_tp::Result<Vec<f32>> {Host.upload(v)}
+    fn read(&self,v:&Vec<f32>)->spark_tp::Result<Vec<f32>> {Host.read(v)}
+    fn range(&self,v:&Vec<f32>,start:usize,len:usize)->spark_tp::Result<Vec<f32>> {Host.range(v,start,len)}
+    fn join(&self,v:&[&Vec<f32>])->spark_tp::Result<Vec<f32>> {Host.join(v)}
+    fn join_reserved(&self,v:&[&Vec<f32>],reserve:usize)->spark_tp::Result<Vec<f32>> {self.reserved.borrow_mut().push((v.iter().map(|part|part.len()).sum(),reserve));Host.join(v)}
+    fn indirect_attention(&self,_:spark_gpu_probe::causal_ops::Shape,_:&[&Vec<f32>],_:&Vec<f32>)->spark_tp::Result<Option<Vec<f32>>> {self.indirect.set(self.indirect.get()+1);Ok(None)}
+    fn zeros(&self,n:usize)->spark_tp::Result<Vec<f32>> {Host.zeros(n)}
+    fn operation(&self,s:spark_gpu_probe::causal_ops::Shape,x:[Option<&Vec<f32>>;4],w:&[f32])->spark_tp::Result<Vec<f32>> {Host.operation(s,x,w)}
+    fn norm(&self,name:&str,s:spark_gpu_probe::norm_boundary::NormShape,x:&Vec<f32>,w:&[f32])->spark_tp::Result<Vec<f32>> {Host.norm(name,s,x,w)}
+    fn begin(&self,key:(usize,usize),p:&spark_tp::layer_operands::ResidualBlockOperands,x:&Vec<f32>)->spark_tp::Result<(Self::Pass,Vec<f32>)> {Host.begin(key,p,x)}
+    fn finish(&self,p:Self::Pass,x:&Vec<f32>)->spark_tp::Result<Vec<f32>> {Host.finish(p,x)}
+    fn mx(&self,p:&spark_tp::mxfp8_projection::Mxfp8Projection<'_>,x:&Vec<f32>)->spark_tp::Result<Vec<f32>> {Host.mx(p,x)}
+    fn round(&self,x:&Vec<f32>)->spark_tp::Result<Vec<f32>> {Host.round(x)}
+    fn mean(&self,x:&Vec<f32>,s:u32,h:u32)->spark_tp::Result<Vec<f32>> {Host.mean(x,s,h)}
+    fn prompt(&self,s:spark_gpu_probe::prompt_ops::Shape,x:[Option<&Vec<f32>>;5],w:&[f32])->spark_tp::Result<Vec<f32>> {Host.prompt(s,x,w)}
+    fn rows_norm(&self,name:&str,s:spark_gpu_probe::norm_boundary::NormShape,x:&Vec<f32>,m:usize,w:&[f32])->spark_tp::Result<Vec<f32>> {Host.rows_norm(name,s,x,m,w)}
+    fn rows_begin(&self,key:(usize,usize),p:&spark_tp::layer_operands::ResidualBlockOperands,x:&Vec<f32>,m:usize)->spark_tp::Result<(Self::Pass,Vec<f32>)> {Host.rows_begin(key,p,x,m)}
+    fn rows_finish(&self,p:Self::Pass,x:&Vec<f32>,m:usize)->spark_tp::Result<Vec<f32>> {Host.rows_finish(p,x,m)}
+}
+#[test]
+fn decode_expansion_mixes_held_kept_and_new_rows_and_keeps_every_bit() {
+    use spark_tp::bounded_decoder::HeadRows;
+    let c=fixture::Checkpoint::new_with_head(Dtype::Bf16,true);let bits=|v:&[f32]|v.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
+    let plain=Decoder::new(&c.admission,Host,8).unwrap();let tokens=[1,7,2,5,3];let (mut found,mut together)=(0,0);
+    // Held rows stop at `limit`; the groups after it add none, and the held ones must stay.
+    for (width,limit) in [(2,2),(3,3),(1,1),(5,8),(4,0)] {
+        let compute=Kept::default();let kept=Decoder::new(&c.admission,&compute,8).unwrap();kept.set_expanded_limit(limit);
+        let mut scalar=plain.zero_state().unwrap();for &token in &tokens {scalar=plain.step(token,&scalar,|_,_|Ok(())).unwrap().2;}
+        let mut grouped=kept.zero_state().unwrap();for chunk in tokens.chunks(width) {grouped=kept.prefill_rows(chunk,&grouped,HeadRows::Last).unwrap().1;}
+        let held=grouped.expanded.values().map(|rows|rows.1).max().unwrap_or(0);
+        assert_eq!(held,if limit>=width {(limit/width*width).min(tokens.len())} else {0},"held rows width={width} limit={limit}");
+        // The first decode token expands several rows together; later tokens find them kept.
+        for (step,token) in [6,4,9].into_iter().enumerate() {
+            let (a,_,next)=kept.step(token,&grouped,|_,_|Ok(())).unwrap();let (b,_,after)=plain.step(token,&scalar,|_,_|Ok(())).unwrap();
+            assert_eq!(bits(&a),bits(&b),"decode step {step} width={width} limit={limit}");grouped=next;scalar=after;
+        }
+        found+=compute.found.get();together=together.max(compute.largest.get());
+        assert!(compute.indirect.get()>0,"decode never tried the optional direct consumer");
+        assert!(!compute.reserved.borrow().is_empty(),"rejected direct attention never used the reserved join");
+        assert!(compute.reserved.borrow().iter().all(|(used,reserve)|used<=reserve && *reserve>0),"fallback join lost its slot reservation");
+    }
+    // The fixture selects few rows, so the counts are checked over all cases.
+    assert!(found>0,"decode never found a kept row");assert!(together>=2,"decode never expanded rows together");
+}
+#[test]
+fn prompt_reuses_held_expansions_without_changing_retention_or_forked_state() {
+    use spark_tp::bounded_decoder::HeadRows;
+    let c=fixture::Checkpoint::new_with_head(Dtype::Bf16,true);let tokens=[1,7,2,5,3,6,4];
+    let bits=|v:&[f32]|v.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
+    let cached=Kept::default();let plain=Kept::default();
+    let a=Decoder::new(&c.admission,&cached,8).unwrap();a.set_expanded_limit(2);
+    let b=Decoder::new(&c.admission,&plain,8).unwrap();b.set_expanded_limit(0);
+    let mut held=a.zero_state().unwrap();let mut scalar=b.zero_state().unwrap();
+    for chunk in tokens.chunks(2) {
+        let (x,next)=a.prefill_rows(chunk,&held,HeadRows::All).unwrap();let (y,after)=b.prefill_rows(chunk,&scalar,HeadRows::All).unwrap();
+        assert_eq!(x.iter().map(|v|bits(v)).collect::<Vec<_>>(),y.iter().map(|v|bits(v)).collect::<Vec<_>>());
+        let old=held.expanded.iter().map(|(l,(v,n))|(*l,(*n,bits(v)))).collect::<std::collections::BTreeMap<_,_>>();
+        if held.position>0 {let reversed=chunk.iter().rev().copied().collect::<Vec<_>>();let _=a.prefill_rows(&reversed,&held,HeadRows::Last).unwrap();
+            assert_eq!(old,held.expanded.iter().map(|(l,(v,n))|(*l,(*n,bits(v)))).collect());}
+        held=next;scalar=after;
+    }
+    // The fork work above is also counted, so use an independent unforked run for cost.
+    let counted=Kept::default();let d=Decoder::new(&c.admission,&counted,8).unwrap();d.set_expanded_limit(2);let mut s=d.zero_state().unwrap();
+    for chunk in tokens.chunks(2) {s=d.prefill_rows(chunk,&s,HeadRows::Last).unwrap().1;}
+    assert!(counted.projected.get()<plain.projected.get(),"retained rows were projected again: {} / {}",counted.projected.get(),plain.projected.get());
+    assert!(held.expanded.values().all(|v|v.1==2),"prompt extended the retained count");
+}
+#[test]
+fn verify_passes_keep_only_exact_rows_and_end_in_the_plain_state() {
+    use spark_tp::bounded_decoder::Verify;
+    let c=fixture::Checkpoint::new_with_head(Dtype::Bf16,true);
+    let decoder=Decoder::new(&c.admission,Host,8).unwrap();let tokens=[1,7,2,5,3,6,4];
+    let bits=|v:&[f32]|v.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
+    let mut plain=Vec::new();let mut scalar=decoder.zero_state().unwrap();
+    for &token in &tokens {let (logits,_,next)=decoder.step(token,&scalar,|_,_|Ok(())).unwrap();scalar=next;plain.push(bits(&logits));}
+    // Each pass: its rows, and how many of them hold the tokens plain decoding chose.
+    for passes in [vec![(vec![1,7,2,5,3,6,4],7)],vec![(vec![1,9,9],1),(vec![7,2,9],2),(vec![5,9],1),(vec![3,6,4],3)],vec![(vec![1,7,9],2),(vec![2,9,9],1),(vec![5,9],1),(vec![3,9],1),(vec![6,4],2)],vec![(vec![1],1),(vec![7,2],2),(vec![5,3,9],2),(vec![6],1),(vec![4],1)]] {
+        let mut open=Verify::new(decoder.zero_state().unwrap());let mut at=0;
+        for (rows,kept) in passes {
+            let entry=open.position();assert_eq!(entry,at as u64);let logits=open.rows(&decoder,&rows).unwrap();assert_eq!(logits.len(),rows.len());
+            assert_eq!(open.position(),entry+rows.len() as u64);open.truncate(&decoder,entry+kept as u64).unwrap();assert_eq!(open.carried(),0,"kept rows are not computed again");
+            for row in &logits[..kept] {assert_eq!(bits(row),plain[at],"row {at}");at+=1;}
+            assert!(open.truncate(&decoder,entry+kept as u64+1).is_err(),"a dropped row cannot come back");
+        }
+        assert_eq!(at,tokens.len());let state=open.settle(&decoder).unwrap();assert_eq!(state.position,scalar.position);
+        for (a,b) in state.layers.iter().zip(&scalar.layers) {for (name,value) in a {assert_eq!(bits(value),bits(&b[name]),"{name}");}}
+    }
+    let mut open=Verify::new(decoder.zero_state().unwrap());assert!(open.rows(&decoder,&[]).is_err());assert!(open.truncate(&decoder,1).is_err());
+}
+#[test]
+fn predictor_layer_proposes_without_touching_plain_decoding() {
+    let c=fixture::Checkpoint::new_with_predictor(16);
+    let plain=Decoder::new(&c.admission,Host,16).unwrap();let mut decoder=Decoder::new(&c.admission,Host,16).unwrap();
+    assert!(!decoder.predictor_enabled());decoder.enable_predictor().unwrap();assert!(decoder.predictor_enabled());
+    let bits=|v:&[f32]|v.iter().map(|v|v.to_bits()).collect::<Vec<_>>();let vocab=c.admission.description().vocab as u32;
+    let (mut a,mut b)=(plain.zero_state().unwrap(),decoder.zero_state().unwrap());let mut seen=None;let mut state_only=None;
+    for token in [1u32,7,2,5,3,6] {
+        let (expected,_,next)=plain.step(token,&a,|_,_|Ok(())).unwrap();a=next;
+        let (logits,chosen,next,hidden)=decoder.step_hidden(token,&b,|_,_|Ok(())).unwrap();b=next;
+        assert_eq!(bits(&logits),bits(&expected),"a decoder with the predictor loaded steps the same bits");
+        // Proposals are tokens of the vocabulary, the same on every call, with and without the cache.
+        for depth in 1..=3 {let first=decoder.propose(&hidden[1],chosen,depth).unwrap();assert_eq!(first.len(),depth);assert!(first.iter().all(|&t|t<vocab));
+            assert_eq!(decoder.propose(&hidden[1],chosen,depth).unwrap(),first);}
+        let (cached,after)=decoder.propose_after(&hidden[1],chosen,2,seen.as_ref()).unwrap();assert_eq!(cached.len(),2);
+        assert_eq!(decoder.propose_after(&hidden[1],chosen,2,seen.as_ref()).unwrap().0,cached,"the cache is not changed by a proposal");
+        assert!(decoder.propose_after(&hidden[1],chosen,0,seen.as_ref()).unwrap().0.is_empty());
+        // A row that only brings the cache up (depth 0, the cache half of the layer) leaves the cache a proposal leaves.
+        assert_eq!(decoder.propose_after(&hidden[1],chosen,3,state_only.as_ref()).unwrap().0,decoder.propose_after(&hidden[1],chosen,3,seen.as_ref()).unwrap().0);
+        state_only=Some(decoder.propose_after(&hidden[1],chosen,0,state_only.as_ref()).unwrap().1);seen=Some(after);
+    }
+    assert!(decoder.propose(&decoder.zero_state().unwrap().layers[0].values().next().unwrap().clone(),vocab,1).is_err(),"a token outside the vocabulary is refused");
+    use spark_tp::bounded_decoder::HeadRows;
+    // A pass after steps: with a proposer the held rows follow the decoded rows; the bits stay the plain ones.
+    let run=|d:&Decoder<Host>| {let (_,mut state)=d.prefill_rows(&[1,7],&d.zero_state().unwrap(),HeadRows::Last).unwrap();let mut all=Vec::new();
+        for token in [2u32,5,3] {let (logits,_,next)=d.step(token,&state,|_,_|Ok(())).unwrap();state=next;all.push(bits(&logits));}
+        let (rows,next)=d.prefill_rows(&[6,4],&state,HeadRows::All).unwrap();all.extend(rows.iter().map(|r|bits(r)));
+        let (rows,after)=d.prefill_rows(&[2,1],&next,HeadRows::All).unwrap();all.extend(rows.iter().map(|r|bits(r)));
+        let (logits,_,_)=d.step(3,&after,|_,_|Ok(())).unwrap();all.push(bits(&logits));
+        (all,next.expanded.values().map(|v|v.1).collect::<Vec<_>>(),after.expanded.values().map(|v|v.1).collect::<Vec<_>>())};
+    let (expected,held,_)=run(&plain);let (rows,first,second)=run(&decoder);
+    assert_eq!(rows,expected,"held decoded rows keep every bit");
+    assert!(!held.is_empty() && held.iter().all(|&n|n==2),"without a proposer only the prompt rows are held");
+    assert!(first.iter().all(|&n|n==7) && second.iter().all(|&n|n==9),"with a proposer a pass holds every row before its end");
+}
+#[test]
+fn pass_prices_come_only_from_the_requests_own_timed_passes() {
+    use spark_tp::bounded_decoder::learned_pass_ms;
+    let mut timed=[None;17];
+    // Nothing timed: every pass is priced as one step, so the first pass is tried.
+    for rows in 1..=16 {assert_eq!(learned_pass_ms(85.0,&timed,rows),85.0);}
+    // One count timed: a line from one row to it, on both sides.
+    timed[4]=Some(175.0);
+    assert_eq!(learned_pass_ms(85.0,&timed,4),175.0);assert_eq!(learned_pass_ms(85.0,&timed,2),115.0);assert_eq!(learned_pass_ms(85.0,&timed,3),145.0);
+    assert_eq!(learned_pass_ms(85.0,&timed,6),235.0);assert_eq!(learned_pass_ms(85.0,&timed,40),learned_pass_ms(85.0,&timed,16));
+    // Two counts timed: lines between neighbors; a timed count is its own price.
+    timed[2]=Some(150.0);
+    assert_eq!(learned_pass_ms(85.0,&timed,2),150.0);assert_eq!(learned_pass_ms(85.0,&timed,3),162.5);assert_eq!(learned_pass_ms(85.0,&timed,1),85.0);
+    // A pass timed under a step never makes later rows cheaper than it.
+    let mut odd=[None;17];odd[3]=Some(60.0);assert_eq!(learned_pass_ms(85.0,&odd,8),60.0);
+}
+#[test]
+fn a_session_first_prompt_group_releases_the_pool_and_later_groups_keep_it() {
+    use spark_tp::bounded_decoder::{HeadRows,releases_spares_first,PROMPT_SHARED};
+    // The rule: only a group of PROMPT_SHARED (64) rows or more at position 0 releases first.
+    assert_eq!(PROMPT_SHARED,64);
+    assert!(releases_spares_first(64,0));assert!(releases_spares_first(256,0));
+    assert!(!releases_spares_first(63,0),"small groups keep their existing trim");
+    assert!(!releases_spares_first(256,256),"later groups keep the previous group's spares");
+    // Through the decoder: one release before the first 64-row group, a keep after each group.
+    let c=fixture::Checkpoint::new_with_capacity(Dtype::Bf16,true,160);let _=&c.operands;
+    let compute=Kept::default();let decoder=Decoder::new(&c.admission,&compute,160).unwrap();
+    let tokens=(0..128u32).map(|t|t%7+1).collect::<Vec<_>>();
+    let first=decoder.prefill_rows(&tokens[..64],&decoder.zero_state().unwrap(),HeadRows::Last).unwrap().1;
+    assert_eq!((compute.released.get(),compute.keeps.get()),(1,1));
+    let _=decoder.prefill_rows(&tokens[64..],&first,HeadRows::Last).unwrap();
+    assert_eq!((compute.released.get(),compute.keeps.get()),(1,2),"a later group does not release");
+    let _=decoder.prefill_rows(&tokens[..2],&decoder.zero_state().unwrap(),HeadRows::Last).unwrap();
+    assert_eq!((compute.released.get(),compute.keeps.get()),(1,2),"a small first group neither releases nor keeps");
 }

@@ -3,6 +3,7 @@ use super::*;
 
 /// The private program is validated once. A position change only adjusts cache
 /// extents. Callers cannot change its operations, weights, settings, or topology.
+#[derive(Clone)]
 pub struct LayerSchedule {plan:LayerPlan,maximum:u64}
 impl LayerSchedule {
     pub fn new(d:&TextDescription,layer:usize,topology:Topology)->Result<Self> {

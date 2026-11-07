@@ -1,6 +1,10 @@
 //! GB10 CUDA driver ownership, packed-weight loading and kernel dispatch.
+#[cfg(any(target_os="linux",test))]
+mod allocation_budget;
 #[path = "../../base/src/admission.rs"]
 pub mod admission;
+#[cfg(feature="kernel-bench")]
+pub mod fixture_image;
 #[path = "../kernel_params.rs"]
 pub mod kernel_params;
 #[cfg(target_os = "linux")]
@@ -21,12 +25,33 @@ pub mod load;
 pub mod teardown;
 pub mod host_prep;
 pub mod ordered_projection;
+pub mod plain_admission;
+pub mod select_admission;
+pub mod prompt_admission;
+pub mod softmax_rows;
+pub mod swept;
 pub mod routing;
 pub mod frontend_math;
 pub mod router_abi;
 pub mod qsa;
 pub mod mhc_params;
+pub mod fp8_rows;
 pub mod mhc_boundary;
+pub mod nv_stream;
+pub mod prompt_writes;
+pub mod quantize_sweep;
+pub mod nv_rows;
+pub mod mx_rows;
+pub mod plain_tile;
+pub mod prompt_launches;
+pub mod scores_tile;
+pub mod small_sweep;
+pub mod small_choice;
+pub mod plain_small;
+pub mod nv_small;
+pub mod fp8_small;
+pub mod mx_small;
+pub mod rows_small;
 pub mod text_edges;
 pub mod text_reference;
 pub mod dynamic_mxfp8;
@@ -35,6 +60,7 @@ pub mod causal_ops;
 pub mod latent_ops;
 pub mod prompt_ops;
 pub mod expert_ops;
+pub mod device_route;
 #[allow(dead_code)]
 #[path = "../kernels/src/qsa_common.rs"] mod qsa_common;
 #[path = "../kernels/src/mhc_math.rs"] pub mod mhc_reference;
@@ -59,6 +85,18 @@ pub mod compact;
 mod reserve_policy;
 #[cfg(any(target_os = "linux", test))]
 pub use reserve_policy::KvArenaStats;
+/// The vector pool's least cap: the cap every resident decoder configures (only
+/// kv_conversation_ended raises it, on the flash next service).
+pub const VECTOR_POOL_LEAST_CAP: usize = 2_000_000_000;
+/// The most bytes of plain spares the vector pool keeps after a trim that leaves `room`
+/// under its least cap.
+pub fn spares_after_trim(room: usize) -> usize { VECTOR_POOL_LEAST_CAP.saturating_sub(room) }
+#[cfg(test)]
+#[test]
+fn the_least_vector_pool_cap_is_the_reserve_policy_minimum() {
+    assert_eq!(VECTOR_POOL_LEAST_CAP, reserve_policy::ReservePolicy::MINIMUM);
+    assert_eq!(spares_after_trim(1 << 30), 926_258_176);
+}
 #[path = "fp8_abi.rs"]
 pub mod fp8_abi;
 

@@ -28,6 +28,8 @@ pub trait Target {
     fn forward_batch(&mut self, tokens: &[u32]) -> Result<Vec<Vec<f32>>> { self.verify_batch(tokens) }
     fn kv_bf16(&self) -> bool { false }
     fn max_verify_rows(&self) -> usize { 16 }
+    /// This target's own ms for passes of 1, 2, 4, 8, 16 rows at this context. None keeps the caller's prior.
+    fn verify_costs(&self, _context: usize) -> Option<CostCurve> { None }
     fn model_draft_width(&self) -> usize { 0 }
     /// Explicit target capability for sampled model proposals. Strict verification
     /// still samples canonical target rows with the request's seed and position.

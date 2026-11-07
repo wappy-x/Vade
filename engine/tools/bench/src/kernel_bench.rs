@@ -18,6 +18,12 @@ mod sha256;
 #[path = "../../../crates/gpu/src/mhc_params.rs"]
 mod mhc_params;
 #[allow(dead_code)]
+#[path = "../../../crates/gpu/src/quantize_sweep.rs"]
+mod quantize_sweep;
+#[allow(dead_code)]
+#[path = "../../../crates/gpu/src/prompt_writes.rs"]
+mod prompt_writes;
+#[allow(dead_code)]
 #[path = "../../../crates/gpu/kernels/src/qsa_common.rs"]
 mod qsa_common;
 #[allow(dead_code)]
@@ -904,6 +910,171 @@ fn run() -> Result<()> {
             return cuda::mhc_bytes(&path);
             #[cfg(not(target_os = "linux"))]
             return Err(format!("mHC device byte checks need Linux with CUDA: {path}"));
+        }
+        if flag == "--mhc-project" {
+            let base = args.next().ok_or("--mhc-project needs a baseline PTX and a candidate PTX")?;
+            let candidate = args.next().ok_or("--mhc-project needs a candidate PTX")?;
+            let extra: Vec<String> = args.by_ref().collect();
+            #[cfg(target_os = "linux")]
+            return cuda::mhc_project(&base, &candidate, &extra);
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("mHC project checks need Linux with CUDA: {base} {candidate} {extra:?}"));
+        }
+        if flag == "--mx-wave" {
+            let base = args.next().ok_or("--mx-wave needs a baseline and a candidate image")?;
+            let candidate = args.next().ok_or("--mx-wave needs a candidate image")?;
+            #[cfg(target_os = "linux")]
+            return cuda::mx_wave(&base, &candidate);
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("mx wave screen needs Linux with CUDA: {base} {candidate}"));
+        }
+        if flag == "--mhc-sweep" {
+            let base = args.next().ok_or("--mhc-sweep needs a baseline and a candidate image")?;
+            let candidate = args.next().ok_or("--mhc-sweep needs a candidate image")?;
+            #[cfg(target_os = "linux")]
+            return cuda::mhc_sweep(&base, &candidate);
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("mHC sweep needs Linux with CUDA: {base} {candidate}"));
+        }
+        if flag == "--nv-batch" {
+            let base = args.next().ok_or("--nv-batch needs a baseline and a candidate image")?;
+            let candidate = args.next().ok_or("--nv-batch needs a candidate image")?;
+            #[cfg(target_os = "linux")]
+            return cuda::nv_batch(&base, &candidate);
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("nv batch check needs Linux with CUDA: {base} {candidate}"));
+        }
+        if flag == "--scores-tile" {
+            let image = args.next().ok_or("--scores-tile needs an image")?;
+            #[cfg(target_os = "linux")]
+            return cuda::scores_tile(&image);
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("scores tile check needs Linux with CUDA: {image}"));
+        }
+        if flag == "--transpose-smem" {
+            let base = args.next().ok_or("--transpose-smem needs a baseline and a candidate image")?;
+            let candidate = args.next().ok_or("--transpose-smem needs a candidate image")?;
+            #[cfg(target_os = "linux")]
+            return cuda::transpose_smem(&base, &candidate);
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("transpose check needs Linux with CUDA: {base} {candidate}"));
+        }
+        if flag == "--rows-tile" {
+            let base = args.next().ok_or("--rows-tile needs a baseline and a candidate image")?;
+            let candidate = args.next().ok_or("--rows-tile needs a candidate image")?;
+            // Optional third word `narrow`: only the plain_rows_narrow screen.
+            #[cfg(target_os = "linux")]
+            return cuda::rows_tile(&base, &candidate, args.next().as_deref() == Some("narrow"));
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("rows tile check needs Linux with CUDA: {base} {candidate}"));
+        }
+        if flag == "--plain-probe" {
+            let base = args.next().ok_or("--plain-probe needs a baseline image")?;
+            let candidate = args.next().ok_or("--plain-probe needs a candidate image")?;
+            let names = args.next().ok_or("--plain-probe needs candidate entry names (comma separated)")?;
+            let mode = args.next().ok_or("--plain-probe needs a mode: bytes, time or both")?;
+            #[cfg(target_os = "linux")]
+            return cuda::plainp::run(&base, &candidate, &names, &mode);
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("plain probe needs Linux with CUDA: {base} {candidate} {names} {mode}"));
+        }
+        if flag == "--mx-small" {
+            let base = args.next().ok_or("--mx-small needs a baseline and a candidate image")?;
+            let candidate = args.next().ok_or("--mx-small needs a candidate image")?;
+            #[cfg(target_os = "linux")]
+            return cuda::mx_small(&base, &candidate, args.next().as_deref() == Some("time"));
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("mx small check needs Linux with CUDA: {base} {candidate}"));
+        }
+        if flag == "--fp8-small" {
+            let base = args.next().ok_or("--fp8-small needs a baseline and a candidate image")?;
+            let candidate = args.next().ok_or("--fp8-small needs a candidate image")?;
+            #[cfg(target_os = "linux")]
+            return cuda::fp8_small(&base, &candidate, args.next().as_deref().unwrap_or(""));
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("fp8 small check needs Linux with CUDA: {base} {candidate}"));
+        }
+        if flag == "--nv-small" {
+            let base = args.next().ok_or("--nv-small needs a baseline and a candidate image")?;
+            let candidate = args.next().ok_or("--nv-small needs a candidate image")?;
+            #[cfg(target_os = "linux")]
+            return cuda::nv_small(&base, &candidate, args.next().as_deref() == Some("time"));
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("nv small check needs Linux with CUDA: {base} {candidate}"));
+        }
+        if flag == "--no-fill" {
+            let base = args.next().ok_or("--no-fill needs a baseline and a candidate image")?;
+            let candidate = args.next().ok_or("--no-fill needs a candidate image")?;
+            #[cfg(target_os = "linux")]
+            return cuda::no_fill(&base, &candidate);
+            #[cfg(not(target_os = "linux"))]
+            { let _ = (base, candidate); return Err("--no-fill needs a CUDA device".into()); }
+        }
+        if flag == "--rows-small" {
+            let base = args.next().ok_or("--rows-small needs a baseline and a candidate image")?;
+            let candidate = args.next().ok_or("--rows-small needs a candidate image")?;
+            #[cfg(target_os = "linux")]
+            return cuda::rows_small(&base, &candidate, args.next().as_deref().unwrap_or(""));
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("rows small check needs Linux with CUDA: {base} {candidate}"));
+        }
+        if flag == "--fp8-tile" {
+            let base = args.next().ok_or("--fp8-tile needs a baseline and a candidate image")?;
+            let candidate = args.next().ok_or("--fp8-tile needs a candidate image")?;
+            #[cfg(target_os = "linux")]
+            return cuda::fp8_tile(&base, &candidate, args.next().as_deref() == Some("time"));
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("fp8 tile check needs Linux with CUDA: {base} {candidate}"));
+        }
+        if flag == "--nv-rows" {
+            let base = args.next().ok_or("--nv-rows needs a baseline and a candidate image")?;
+            let candidate = args.next().ok_or("--nv-rows needs a candidate image")?;
+            #[cfg(target_os = "linux")]
+            return cuda::nv_rows(&base, &candidate);
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("nv rows check needs Linux with CUDA: {base} {candidate}"));
+        }
+        if flag == "--mx-rows" {
+            let base = args.next().ok_or("--mx-rows needs a baseline and a candidate image")?;
+            let candidate = args.next().ok_or("--mx-rows needs a candidate image")?;
+            #[cfg(target_os = "linux")]
+            return cuda::mx_rows(&base, &candidate);
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("mx rows check needs Linux with CUDA: {base} {candidate}"));
+        }
+        if flag == "--fp8-rows" {
+            let base = args.next().ok_or("--fp8-rows needs a baseline and a candidate image")?;
+            let candidate = args.next().ok_or("--fp8-rows needs a candidate image")?;
+            #[cfg(target_os = "linux")]
+            return cuda::fp8_rows(&base, &candidate);
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("fp8 rows check needs Linux with CUDA: {base} {candidate}"));
+        }
+        if flag == "--causal-probe" {
+            let base = args.next().ok_or("--causal-probe needs a baseline image")?;
+            let candidate = args.next().ok_or("--causal-probe needs a candidate image")?;
+            let mode = args.next().ok_or("--causal-probe needs a mode: bytes or time")?;
+            #[cfg(target_os = "linux")]
+            return cuda::causalp::run(&base, &candidate, &mode);
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("causal probe needs Linux with CUDA: {base} {candidate} {mode}"));
+        }
+        if flag == "--attn-table" {
+            let base = args.next().ok_or("--attn-table needs a baseline and a candidate image")?;
+            let candidate = args.next().ok_or("--attn-table needs a candidate image")?;
+            #[cfg(target_os = "linux")]
+            return cuda::attn_table(&base, &candidate, args.next().as_deref() == Some("time"));
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("attention table check needs Linux with CUDA: {base} {candidate}"));
+        }
+        if flag == "--reading-probe" {
+            let base = args.next().ok_or("--reading-probe needs a baseline image")?;
+            let candidate = args.next().ok_or("--reading-probe needs a candidate image")?;
+            let mode = args.next().ok_or("--reading-probe needs a mode: move-bytes or move-time")?;
+            #[cfg(target_os = "linux")]
+            return cuda::readp::run(&base, &candidate, &mode);
+            #[cfg(not(target_os = "linux"))]
+            return Err(format!("reading probe needs Linux with CUDA: {base} {candidate} {mode}"));
         }
         if flag == "--list" {
             for c in cases() {

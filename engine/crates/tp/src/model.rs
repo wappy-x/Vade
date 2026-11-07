@@ -413,7 +413,7 @@ fn gather_device(b:&Backend<'_>,ring:&mut Ring,input:&DeviceVector<'_>,output:&m
     exchange:&mut DeviceVector<'_>,units:usize,width:usize,tokens:usize)->Result<()> {
     own_block(b,input,exchange,ring.rank(),ring.world(),units,width,tokens)?;
     b.synchronize()?;
-    exchange_blocks(b,ring,exchange,units,width,tokens)?;
+    exchange_blocks(b,ring,exchange,units,width,tokens,false)?;
     spread_blocks(b,ring.world(),exchange,output,units,width,tokens)
 }
 /// Place this rank's block at its rank-major offset in `exchange`; producers
@@ -430,11 +430,14 @@ fn own_block(b:&Backend<'_>,input:&DeviceVector<'_>,exchange:&mut DeviceVector<'
 }
 /// The link step of gather_device: the rank blocks are complete in `exchange`
 /// once the queued GPU writes before it have finished.
-pub(crate) fn exchange_blocks(b:&Backend<'_>,ring:&mut Ring,exchange:&mut DeviceVector<'_>,units:usize,width:usize,tokens:usize)->Result<()> {
+pub(crate) fn exchange_blocks(b:&Backend<'_>,ring:&mut Ring,exchange:&mut DeviceVector<'_>,units:usize,width:usize,tokens:usize,finite:bool)->Result<()> {
     let total=units.checked_mul(width).and_then(|n|n.checked_mul(tokens)).ok_or("device gather overflow")?;
     exchange.resize_within_capacity(total)?;
     let host=b.mapped_exchange_host(exchange)?;
-    ring.gather_rank_blocks(unsafe{std::slice::from_raw_parts_mut(host,total)},units,width,tokens)
+    let blocks=unsafe{std::slice::from_raw_parts_mut(host,total)};
+    ring.gather_rank_blocks(blocks,units,width,tokens)?;
+    if finite && blocks.iter().fold(0u32,|any,v|any|u32::from(v.to_bits()&0x7f80_0000==0x7f80_0000))!=0 {return Err("exchanged blocks are not finite".into());}
+    Ok(())
 }
 fn spread_blocks(b:&Backend<'_>,world:usize,exchange:&DeviceVector<'_>,output:&mut DeviceVector<'_>,units:usize,width:usize,tokens:usize)->Result<()> {
     output.resize_within_capacity(units*width*tokens)?;
@@ -463,7 +466,7 @@ fn prefill_halves<'a>(m: &Model<'a, '_>, ring: &mut Ring, kv: &mut [Kv<'_>], mut
         for (x,s) in halves.iter_mut().enumerate() {
             fences[x].wait()?;
             let (units,width,rows)=m.prefill_gather_shape(s.tokens,step%4);
-            exchange_blocks(b,ring,s.exchange.as_mut().ok_or("missing exchange")?,units,width,rows)?;
+            exchange_blocks(b,ring,s.exchange.as_mut().ok_or("missing exchange")?,units,width,rows,false)?;
             prefill_stage(m,s,kv,positions[x],step+1)?;
             if step+1<steps { fences[x]=b.fence()?; }
         }

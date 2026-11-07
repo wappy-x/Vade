@@ -214,7 +214,7 @@ impl<S: Session> Generation<S> {
                     }
                     config.mode = mode;
                     config.automatic = self.automatic_draft;
-                    config.costs = spark_engine::draft::CostCurve::at_context(spark_engine::draft::Mode::Strict, prompt.len());
+                    config.costs = target.verify_costs(prompt.len()).unwrap_or_else(|| spark_engine::draft::CostCurve::at_context(spark_engine::draft::Mode::Strict, prompt.len()));
                     self.draft = Some(spark_engine::draft::Speculator::from_selected(&self.state.tokens,
                         prompt.len(), self.pending.take().ok_or("missing draft input")?, engine.vocab_size(), config, sampling)?);
                     self.draft.as_mut().unwrap().seed(std::mem::take(&mut self.draft_seed));

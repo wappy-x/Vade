@@ -23,6 +23,22 @@ pub struct HeaderAdmission { weights: BTreeMap<String, WeightView>, pub stored_b
 pub struct CheckpointAdmission { description: TextDescription, headers: HeaderAdmission, files: BTreeMap<String,TensorFile>, locations: BTreeMap<String,String> }
 
 impl TextDescription {
+    /// This description with the declared appended layer as one more layer of the common latent
+    /// and expert geometry and a single residual stream, as `required_weights` admits its
+    /// tensors. None without a declared layer. The source does not define its forward pass.
+    pub fn with_draft_layer(&self) -> Result<Option<Self>> {
+        if self.declared_draft_layers==0 { return Ok(None); }
+        need(self.declared_draft_layers==1,"more than one appended layer is unsupported")?;
+        let mut latent=None; let mut experts=None;
+        for l in &self.layers {
+            if let TokenMixer::LatentAttention(a)=l.mixer { need(latent.is_none_or(|v|v==a),"ambiguous stored draft attention geometry")?; latent=Some(a); }
+            if let Ffn::Experts(e)=l.ffn { need(experts.is_none_or(|v|v==e),"ambiguous stored draft expert geometry")?; experts=Some(e); }
+        }
+        let mut d=self.clone();
+        d.layers.push(DecoderDescription { mixer:TokenMixer::LatentAttention(latent.ok_or_else(||invalid("missing draft attention geometry"))?),
+            ffn:Ffn::Experts(experts.ok_or_else(||invalid("missing draft expert geometry"))?) });
+        d.residual.streams=1; Ok(Some(d))
+    }
     /// Required text weights include stored draft data. This does not define a draft forward pass.
     pub fn required_weights(&self) -> Result<BTreeMap<String,LogicalWeight>> {
         need(!self.layers.is_empty() && self.layers.len()<=MAX_LAYERS as usize

@@ -85,15 +85,38 @@ impl<'a> Backend<'a> {
         let mut args=Prepare {input:vectors[0].device_address(),weights:vectors[1].device_address(),
             base:vectors[2].device_address(),scale:vectors[3].device_address(),normalized:vectors[4].device_address(),
             coefficients:vectors[5].device_address(),collapsed:vectors[6].device_address(),shape};
-        self.mhc_launch("mhc_prepare",shape,&mut args)
+        self.mhc_launch("mhc_prepare",shape,0,&mut args)
     }
-    pub(super) fn mhc_launch<T>(&self,name:&str,shape:Shape,args:&mut T) -> Result<(),String> {
+    /// `tail` extra blocks follow the arithmetic grid of the two CHAIN-SHADOW
+    /// entries; every other entry refuses a tail.
+    pub(super) fn mhc_launch<T>(&self,name:&str,shape:Shape,tail:u32,args:&mut T) -> Result<(),String> {
+        if tail>crate::mhc_params::SHADOW_MAX_BLOCKS || (tail!=0 && !["mhc_boundary_dots","mhc_boundary_finish"].contains(&name)) {
+            return Err("mHC launch tail is not admitted for this entry".into());
+        }
+        let (blocks,threads)=match name {
+            "mhc_boundary_rms"=>(shape.rows,256),
+            #[cfg(feature="kernel-bench")]
+            "chain_add_latency"=>(1,32),
+            "mhc_residual_rows"=>((shape.rows as usize*shape.wide()).div_ceil(256) as u32,256),
+            "mhc_project_tile"=>(crate::prompt_admission::mhc_tile_blocks(shape.rows),((crate::prompt_admission::MHC_TOKENS+crate::prompt_admission::MHC_PRODUCER_WARPS)*32) as u32),
+            "mhc_boundary_dots"=>(shape.rows.checked_mul(u32::try_from(shape.coefficients()).map_err(|_|"mHC coefficient grid exceeds u32")?).ok_or("mHC coefficient grid exceeds u32")?,256),
+            _=>(shape.rows,shape.prepare_threads()),
+        };
+        let blocks=blocks.checked_add(tail).ok_or("mHC grid with tail exceeds u32")?;
+        crate::prompt_launches::record(name);
         // SAFETY: Only the checked mHC binders call this private helper. They
         // select the matching by-value ABI, validate every extent/context/alias,
-        // and retain all owners through the ordered consumer. Each block owns
-        // one token, with complete warps and uniform block barriers. Launch
+        // and retain all owners through the ordered consumer. In the one-block
+        // launches each block owns one token. In the split launches an RMS block
+        // owns one token; a dots block owns one (token, coefficient) word and a
+        // disjoint interval of the normalized plane. Warps are complete and
+        // block barriers are uniform. CHAIN-SHADOW tail blocks (dots and finish
+        // only) write nothing, reach no barrier, and prefetch only a span that a
+        // ShadowRange built from a live resident owner of this context. The
+        // `chain_add_latency` probe is one warp whose binder passes a private,
+        // checked 6-word plane and synchronizes before reading it. Launch
         // copies the live argument; error/drop cleanup drains referenced work.
-        unsafe {self.launch_flash(name,shape.rows,shape.prepare_threads(),&mut [parameter(args)])}
+        unsafe {self.launch_flash(name,blocks,threads,&mut [parameter(args)])}
     }
     pub(super) fn mhc_combine_owned(&self, shape: Shape, vectors: [&DeviceVector<'_>;4]) -> Result<(),String> {
         shape.validate()?;let t=shape.rows as usize;let w=shape.wide();let h=shape.hidden as usize;

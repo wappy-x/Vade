@@ -17,7 +17,7 @@ pub fn run(args:&[String],checkpoint:CheckpointAdmission,root:&Path,output_setti
         "--diagnostic-unqualified-text"=>{},
         "--diagnostic-serving-trace" if !trace=>trace=true,
         "--api-key-file" if key.is_none()=>key=Some(PathBuf::from(options.next().ok_or("--api-key-file needs a path")?)),
-        "--mtp" if mtp.is_none()=>{let value=options.next().ok_or("--mtp needs a depth")?;if value!="0" {return Err("text service supports --mtp 0 only".into());}mtp=Some(0);},
+        "--mtp" if mtp.is_none()=>{let value=options.next().ok_or("--mtp needs a depth")?;mtp=Some(value.parse::<usize>().ok().filter(|depth|*depth<=3).ok_or("text service --mtp takes a depth of 0 to 3")?);},
         _=>return Err(format!("unsupported text service option: {option}")),
     }}
     super::settings::diagnostic_text_bind(bind)?;
@@ -65,16 +65,18 @@ pub fn run(args:&[String],checkpoint:CheckpointAdmission,root:&Path,output_setti
                 spark_tp::tensor_wire::wait_attached(&attached,&handle)?;
         let compute=Device::with_mailbox(backend,data,false,&mailbox)?.with_serving_trace(trace);
         let split=Split::new(compute,ring)?;let engine=Factory::new(&checkpoint,split,context,eos.to_vec())?;
-        let resident=backend.allocated_bytes();let workspace=engine.workspace_reservation_bytes();
+        // The predictor layer is loaded only for --mtp 1..3, before admission counts the resident bytes.
+        let engine=match mtp {Some(depth) if depth>0=>engine.with_predictor(depth)?,_=>engine};
+        let resident=backend.accounted_bytes();let workspace=engine.workspace_reservation_bytes();
         let local=budget.saturating_sub(resident).saturating_sub(workspace);
         let pool=engine.negotiate_available_bytes(local)?;let reservation=engine.full_state_reservation_bytes();
-        eprintln!("TEXT ADMISSION rank={rank} context={context} budget_bytes={budget} resident_bytes={resident} shared_workspace_bytes={workspace} session_pool_bytes={pool} full_session_bytes={reservation}");
+        eprintln!("TEXT ADMISSION rank={rank} context={context} budget_bytes={budget} resident_bytes={resident} shared_workspace_bytes={workspace} session_pool_bytes={pool} full_session_bytes={reservation} cache_append_reservation_bytes={} index_append_reservation_bytes={} bf16_copy_bytes={} bf16_copy_matrices={}",engine.cache_append_reservation_bytes(),engine.index_append_reservation_bytes(),spark_tp::resident_weights::BF16_COPY_BYTES.load(std::sync::atomic::Ordering::Relaxed),spark_tp::resident_weights::BF16_COPY_MATRICES.load(std::sync::atomic::Ordering::Relaxed));
         if spark_tp::row_split::admit_service_memory(resident,workspace,budget).is_err() || reservation>pool {
             return Err(format!("text service memory refusal: CONTEXT={context}; budget={budget}; resident={resident}; shared_workspace={workspace}; session_pool={pool}; full_session={reservation}; reduce CONTEXT"));
         }
         if !engine.controller() {return engine.worker();}
         let mut limits=spark_tp::row_split::limits(context,setting("FLASH_SERVE_OUTPUT_TOKENS",output_setting)?.unwrap_or(context.min(8192)))?;
-        limits.api_key=auth;
+        limits.next_mtp_depth=Some(engine.predictor_depth());limits.api_key=auth;
         limits.metadata=Some(spark_serve::metadata::Metadata::resident_text(&identity,world,wire_topology));
         limits.identity=Some(identity);
         limits.validate()?;

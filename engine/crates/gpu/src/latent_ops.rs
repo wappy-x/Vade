@@ -3,7 +3,13 @@
 use crate::causal_ops::{Op,Shape};
 use crate::next_math::{exp,bf16};
 fn round(x:f32)->f32 {f32::from_bits(bf16(x)<<16)}
-fn sigmoid(x:f32)->f32 {1.0/(1.0+exp(-x))}
+pub(crate) fn sigmoid(x:f32)->f32 {1.0/(1.0+exp(-x))}
+/// One bounded shared tile. This changes storage, not routing admission or math.
+pub const ROUTE_SHARED_BYTES:usize=4096;
+pub fn route_shared_words(s:Shape)->Option<usize> {
+    if s.op!=Op::Route {return None;}
+    (s.rows as usize).checked_add(s.heads as usize)?.checked_mul(2).filter(|&words|words<=ROUTE_SHARED_BYTES/4)
+}
 fn root(x:f32)->f32 {
     #[cfg(target_arch="nvptx64")] {crate::qsa_common::root(x)}
     #[cfg(not(target_arch="nvptx64"))] {x.sqrt()}
@@ -178,5 +184,32 @@ mod tests {
         let mut s=shape(Op::Route);s.rows=4;s.cols=2;s.dim=1;s.taps=1;
         let out=reference(s,[&[0.0;4],&[],&[],&[]],&[0.0;4]).unwrap();assert_eq!(&out[..4],&[0.0,1.0,0.5,0.5]);
         let out=reference(s,[&[0.0;4],&[],&[],&[]],&[0.0,0.0,2.0,0.0]).unwrap();assert_eq!(&out[..4],&[2.0,3.0,0.5,0.5]);
+    }
+    #[test]
+    fn routing_shared_planes_fit_the_tile_or_keep_the_original_schedule() {
+        for rows in 2..1025u32 {for groups in [1u32,2,4,8] {
+            if rows%groups!=0 || rows/groups<2 {continue;}
+            let s=Shape {op:Op::Route,heads:groups,dim:1,taps:1,rows,cols:1,epsilon:0.0,bound:2.5};
+            assert!(s.lengths().is_some());
+            let ends=[rows as usize,2*rows as usize,2*rows as usize+groups as usize,2*(rows+groups) as usize];
+            match route_shared_words(s) {
+                Some(words)=>{assert_eq!(words,*ends.last().unwrap());assert!(ends.windows(2).all(|p|p[0]<p[1]));assert!(words*4<=ROUTE_SHARED_BYTES);},
+                None=>assert!(ends[3]*4>ROUTE_SHARED_BYTES),
+            }
+        }}
+        assert_eq!(route_shared_words(Shape {op:Op::Route,rows:511,heads:1,..shape(Op::Route)}),Some(1024));
+        assert_eq!(route_shared_words(Shape {op:Op::Route,rows:512,heads:1,..shape(Op::Route)}),None);
+        assert_eq!(route_shared_words(shape(Op::Pool)),None);
+    }
+    #[test]
+    fn routing_ties_keep_ascending_ids_and_zero_the_scratch() {
+        for normalize in [0,1] {for groups in [1,2,4] {
+            let s=Shape {op:Op::Route,heads:groups,dim:groups,taps:normalize,rows:16,cols:8,epsilon:0.0,bound:2.5};
+            let source=(0..16).map(|i|if i%2==0 {-0.0} else {0.0}).collect::<Vec<_>>();
+            let output=reference(s,[&source,&[],&[],&[]],&[0.0;16]).unwrap();
+            assert_eq!(&output[..8],&[0.0,1.0,2.0,3.0,4.0,5.0,6.0,7.0]);
+            assert!(output[16..].iter().all(|v|v.to_bits()==0));
+            assert!(output[8..16].iter().all(|&v|v==if normalize==0 {1.25} else {0.3125}));
+        }}
     }
 }

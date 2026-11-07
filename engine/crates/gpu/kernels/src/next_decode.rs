@@ -43,6 +43,15 @@ macro_rules! eight {
         $b
     }};
 }
+macro_rules! nine {
+    ($i:ident, $b:block) => {
+        eight!($i, $b);
+        {
+            const $i: usize = 8;
+            $b
+        }
+    };
+}
 macro_rules! sixteen {
     ($i:ident, $b:block) => {
         eight!($i, $b);
@@ -252,17 +261,29 @@ pub(crate) fn resident_flash_resident_projection_batch(batch:crate::next_params:
     // weight rows. Its prefix grid assigns each block one validated descriptor.
     // MXFP8 warps and plain threads own disjoint initialized output rows. Owners
     // remain live until stream completion. Plain descriptors never read scales.
+    // The blocks of plain descriptors run first: the block index is mapped to
+    // (descriptor, block within it) with all plain descriptors before all others,
+    // each group in descriptor order. That is a bijection on the same grid, so
+    // every row is still computed once by the same arithmetic; the long serial
+    // chains of the plain rows now overlap the MXFP8 blocks instead of trailing them.
     unsafe {
         let layer=batch.layer;let block=_block_idx_x() as u32;
-        let mut p=layer.projections[0];let mut start=0;let mut job=0;
-        eight!(I,{if I+1<layer.count as usize && block>=layer.ends[I+1] {p=layer.projections[I+1];start=layer.ends[I+1];job=I+1;}});
+        let (job,rest)=crate::plain_admission::batch_block(layer.ends,batch.plain,layer.count as usize,block);
+        let plain_first=batch.plain&(1<<job)!=0;
+        let mut p=layer.projections[0];
+        nine!(I,{if job==I {p=layer.projections[I];}});
         let thread=_thread_idx_x() as usize;
-        if batch.plain&(1<<job)!=0 {
-            let row=(block-start) as usize*128+thread;if row>=p.rows as usize {return;}
-            let sum=crate::serial_projection::plain_row!((p.weights as *const f32).add(row*p.cols as usize),p.input as *const f32,p.cols as usize);
+        if plain_first {
+            let row=rest as usize*128+thread;if row>=p.rows as usize {return;}
+            let cols=p.cols as usize;let weights=(p.weights as *const f32).add(row*cols);
+            let sum=if crate::plain_admission::deep_admitted(p.rows as usize,cols,p.weights as usize,p.input as usize) {
+                crate::plain_warp::row_deep(weights,p.input as *const f32,cols)
+            } else {
+                crate::serial_projection::plain_row!(weights,p.input as *const f32,cols)
+            };
             *(p.output as *mut f32).add(row)=if batch.round!=0 {rb(sum)} else {sum};
         } else {
-            let index=(block-start) as usize*4+thread/32;if index>=p.rows as usize {return;}
+            let index=rest as usize*4+thread/32;if index>=p.rows as usize {return;}
             row::<1,true,true>(p,index,0);
             if thread%32==0 {let output=(p.output as *mut f32).add(index);*output=rb(*output);}
         }

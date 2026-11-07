@@ -4,28 +4,91 @@ use spark_gpu_probe::driver::{Backend,BackendStats,DeviceVector,MhcBoundaryPass,
 use std::{cell::{Cell,RefCell},rc::Rc};
 use super::lineage::Lineage;
 pub struct Device<'b,'d> {pub backend:&'b Backend<'d>,weights:Rc<RefCell<crate::resident_weights::Weights<'b,'d>>>,
+    #[cfg(feature="kernel-bench")] pub(super) probe:Rc<RefCell<Option<super::projection_probe::Probe>>>,
+    #[cfg(feature="kernel-bench")] attention_calls:Rc<Cell<u64>>,
     parameters:Rc<RefCell<BTreeMap<Vec<u32>,DeviceVector<'d>>>>,
     norms:Rc<RefCell<BTreeMap<String,spark_gpu_probe::driver::ResidentNorm<'b,'d>>>>,
     blocks:Rc<RefCell<BTreeMap<(usize,usize),ResidentMhcBoundary<'b,'d>>>>,
     stages:Rc<RefCell<[[u128;2];4]>>,cost:Rc<crate::resident_profile::Cost>,memo:RefCell<Memo<'d>>,copies:RefCell<Option<DeviceVector<'d>>>,source:Rc<Cell<u64>>,programs:RefCell<BTreeMap<(Vec<u32>,u64),spark_gpu_probe::driver::ResidentProgram<'b,'d>>>,
-    serving:Option<RefCell<Option<(u64,std::time::Instant,BackendStats)>> >}
-type BitsKey=(String,Vec<u32>,bool);
+    row_workspace:RefCell<Option<DeviceVector<'d>>>,small_rows:Cell<bool>,
+    serving:Option<RefCell<Option<(u64,std::time::Instant,BackendStats)>> >,state_copies:Cell<usize>}
 type OriginKey=(String,Lineage,bool);
+/// The rows of one projection share one allocation, so they leave the memo together.
+struct Batch {keys:Vec<OriginKey>,bytes:usize,used:u64}
 #[derive(Default)]
-struct Memo<'d> {values:BTreeMap<BitsKey,Rc<DeviceVector<'d>>>,origins:BTreeMap<OriginKey,Rc<DeviceVector<'d>>>,bytes:usize,limit:usize,hits:u64,misses:u64}
+struct Memo<'d> {origins:BTreeMap<OriginKey,(Rc<HeldStorage<'d>>,u64)>,batches:BTreeMap<u64,Batch>,next:u64,clock:u64,bytes:usize,limit:usize,hits:u64,misses:u64,slab:Slab<'d>}
+/// Rows of one slab chunk: one allocation, 8 MiB at GLM's 131,072-byte expanded row.
+pub const SLAB_ROWS:usize=64;
+/// The memo's own storage for kept rows: chunks of SLAB_ROWS rows, one slot a row. Every
+/// memo entry and every live value of a kept row holds its slot's handle (a range of such
+/// a value clones it too), so a slot whose only handle is this list is read by nobody and
+/// may be written again. All chunks together stay within the memo's charged limit.
+#[derive(Default)]
+struct Slab<'d> {slots:Vec<Rc<HeldStorage<'d>>>,next:usize,bytes:usize}
+impl<'d> Slab<'d> {
+    /// Up to `count` slots of `width` words that nobody reads. A new chunk is allocated only
+    /// while every chunk fits `limit`; past it fewer slots come back and those rows are not kept.
+    fn take(&mut self,backend:&Backend<'d>,width:usize,count:usize,limit:usize)->Result<Vec<Rc<HeldStorage<'d>>>> {
+        let mut found=Vec::with_capacity(count);let total=self.slots.len();let mut looked=0;
+        while found.len()<count && looked<total {
+            let at=(self.next+looked)%total;looked+=1;let slot=&self.slots[at];
+            if slot.capacity==width && Rc::strong_count(slot)==1 {found.push(slot.clone());}
+        }
+        if total>0 {self.next=(self.next+looked)%total;}
+        // A chunk is allocated in whole allocator pages and charged at that size, so the
+        // allocator never holds more than the slab counts against the limit.
+        let bytes=super::held::slab_chunk_bytes(SLAB_ROWS,width).ok_or("projection slab size overflow")?;let words=bytes/4;
+        while found.len()<count && width>0 && self.bytes.checked_add(bytes).is_some_and(|n|n<=limit) {
+            let chunk=backend.vector(words)?.into_resident_shared()?;self.bytes+=bytes;
+            for row in 0..SLAB_ROWS {
+                let slot=Rc::new(HeldStorage {whole:chunk.resident_range(row*width..(row+1)*width)?,capacity:width,views:Default::default(),appendable:false});
+                if found.len()<count {found.push(slot.clone());}self.slots.push(slot);
+            }
+        }
+        Ok(found)
+    }
+}
 impl Clone for Device<'_,'_> {
     fn clone(&self)->Self {Self {backend:self.backend,weights:self.weights.clone(),parameters:self.parameters.clone(),norms:self.norms.clone(),
-        blocks:self.blocks.clone(),stages:self.stages.clone(),cost:self.cost.clone(),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),source:self.source.clone(),programs:RefCell::new(BTreeMap::new()),serving:self.serving.as_ref().map(|_|RefCell::new(None))}}
+        #[cfg(feature="kernel-bench")] probe:self.probe.clone(),
+        #[cfg(feature="kernel-bench")] attention_calls:self.attention_calls.clone(),
+        blocks:self.blocks.clone(),stages:self.stages.clone(),cost:self.cost.clone(),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:self.source.clone(),programs:RefCell::new(BTreeMap::new()),serving:self.serving.as_ref().map(|_|RefCell::new(None)),state_copies:Cell::new(0)}}
 }
-struct Pending<'b,'d> {post:Option<(MhcBoundaryPass<'b,'d>,Rc<DeviceVector<'d>>)>,error:Option<String>}
-pub struct Value<'b,'d> {vector:Rc<DeviceVector<'d>>,words:usize,lineage:Lineage,known:RefCell<Option<Vec<f32>>>,pending:Option<Rc<RefCell<Pending<'b,'d>>>>}
+struct Pending<'b,'d> {post:Option<(MhcBoundaryPass<'b,'d>,Rc<DeviceVector<'d>>)>,error:Option<String>,state_prefix:Option<usize>}
+/// Held rows of one chat and layer: one allocation with room. Every view of it, whatever its
+/// start, is listed with the storage word where it ends, and is live as long as its device
+/// vector has a handle. An append may write only past the last live end; else it copies.
+struct HeldStorage<'d> {whole:DeviceVector<'d>,capacity:usize,views:super::held::Ends<DeviceVector<'d>>,
+    /// Cache rows may grow in place; a memo slot is immutable while any handle lives.
+    appendable:bool}
+pub struct Value<'b,'d> {vector:Rc<DeviceVector<'d>>,words:usize,lineage:Lineage,known:RefCell<Option<Vec<f32>>>,pending:Option<Rc<RefCell<Pending<'b,'d>>>>,
+    /// For a view of held rows: the storage and the storage word where the view starts.
+    held:Option<(Rc<HeldStorage<'d>>,usize)>}
+impl Value<'_,'_> {
+    /// The device address of the first word. A check tells a view of held rows from a copy by it.
+    pub fn device_address(&self)->u64 {self.vector.device_address()}
+}
 impl<'b,'d> Device<'b,'d> {
+    #[cfg(feature="kernel-bench")]
+    pub fn fixture_attention_calls(&self)->u64 {self.attention_calls.get()}
+    #[cfg(feature="kernel-bench")]
+    pub fn fixture_reset(&self)->Result<()> {
+        self.backend.synchronize()?;
+        self.probe.borrow_mut().take();self.row_workspace.borrow_mut().take();self.small_rows.set(false);
+        self.programs.borrow_mut().clear();*self.memo.borrow_mut()=Memo::default();self.copies.borrow_mut().take();
+        self.norms.borrow_mut().clear();self.blocks.borrow_mut().clear();self.parameters.borrow_mut().clear();
+        self.backend.fixture_reset_resident()
+    }
+    #[cfg(feature="kernel-bench")]
+    pub fn fixture_vote(&self,ok:bool)->Result<bool> {self.weights.borrow_mut().fixture_vote(ok)}
     pub fn new(backend:&'b Backend<'d>)->Self {Self::with_ring(backend,None)}
     pub fn with_ring(backend:&'b Backend<'d>,ring:Option<crate::transport::Ring>)->Self {Self::with_ring_profiled(backend,ring,false)}
     /// Diagnostic runner counters. Normal construction keeps them disabled.
     pub fn with_ring_profiled(backend:&'b Backend<'d>,ring:Option<crate::transport::Ring>,cost:bool)->Self {
         Self {backend,weights:Rc::new(RefCell::new(crate::resident_weights::Weights::new(ring,cost))),parameters:Rc::new(RefCell::new(BTreeMap::new())),
-            norms:Rc::new(RefCell::new(BTreeMap::new())),blocks:Rc::new(RefCell::new(BTreeMap::new())),stages:Rc::new(RefCell::new([[0;2];4])),cost:Rc::new(crate::resident_profile::Cost::new(cost)),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),source:Rc::new(Cell::new(0)),programs:RefCell::new(BTreeMap::new()),serving:None}
+            #[cfg(feature="kernel-bench")] probe:Rc::new(RefCell::new(None)),
+            #[cfg(feature="kernel-bench")] attention_calls:Rc::new(Cell::new(0)),
+            norms:Rc::new(RefCell::new(BTreeMap::new())),blocks:Rc::new(RefCell::new(BTreeMap::new())),stages:Rc::new(RefCell::new([[0;2];4])),cost:Rc::new(crate::resident_profile::Cost::new(cost)),memo:RefCell::new(Memo::default()),copies:RefCell::new(None),row_workspace:RefCell::new(None),small_rows:Cell::new(false),source:Rc::new(Cell::new(0)),programs:RefCell::new(BTreeMap::new()),serving:None,state_copies:Cell::new(0)}
     }
     /// Wall counters only. This does not enable CUDA event profiling.
     pub fn with_serving_trace(mut self,enabled:bool)->Self {self.serving=enabled.then(||RefCell::new(None));self}
@@ -38,7 +101,7 @@ impl<'b,'d> Device<'b,'d> {
     // Keep owners here; a value wrapper needs no separate completion barrier.
     fn value(&self,vector:DeviceVector<'d>,words:usize)->Result<Value<'b,'d>> {self.shared_value(Rc::new(vector.into_resident_shared()?),words)}
     fn shared_value(&self,vector:Rc<DeviceVector<'d>>,words:usize)->Result<Value<'b,'d>> {let source=self.source.get().checked_add(1).ok_or("immutable source identity exhausted")?;self.source.set(source);
-        Ok(Value {vector,words,lineage:Lineage::fresh(source,words),known:RefCell::new(None),pending:None})}
+        Ok(Value {vector,words,lineage:Lineage::fresh(source,words),known:RefCell::new(None),pending:None,held:None})}
     fn take_post(&self,value:&Value<'b,'d>)->Result<Option<(MhcBoundaryPass<'b,'d>,Rc<DeviceVector<'d>>)>> {
         let Some(pending)=&value.pending else {return Ok(None);};let mut pending=pending.borrow_mut();
         if let Some(error)=&pending.error {return Err(error.clone());}
@@ -50,8 +113,29 @@ impl<'b,'d> Device<'b,'d> {
             value.pending.as_ref().unwrap().borrow_mut().error=result.as_ref().err().cloned();result?;
         }Ok(())
     }
+    /// The selection and its count are complete together: one wait reads both.
+    fn read_pair(&self,first:&Value<'b,'d>,second:&Value<'b,'d>)->Result<(Vec<f32>,Vec<f32>)> {
+        self.ready(first)?;self.ready(second)?;
+        if first.words==0 || second.words==0 || first.known.borrow().is_some() || second.known.borrow().is_some() || first.vector.len()!=first.words || second.vector.len()!=second.words {
+            return Ok((Compute::read(self,first)?,Compute::read(self,second)?));}
+        self.weights.borrow().check_exchange()?;if let Some(error)=self.backend.fatal_error() {return Err(error);}
+        let stamp=self.cost.start(self.backend);let (a,b)=self.backend.read_resident_pair(&first.vector,&second.vector)?;
+        self.weights.borrow().check_exchange()?;*first.known.borrow_mut()=Some(a.clone());*second.known.borrow_mut()=Some(b.clone());
+        self.cost.record(||"readback".into(),stamp,self.backend,0);Ok((a,b))
+    }
+    /// Diagnostic: kept projection bytes, their bound, and rows found and added since the last report.
+    pub fn memo_counts(&self)->(usize,usize,u64,u64) {let memo=self.memo.borrow();(memo.bytes,memo.limit,memo.hits,memo.misses)}
+    pub fn prompt_state_copies(&self)->usize {self.state_copies.get()}
+    /// Fixture and diagnostic use: a memo byte limit without a checkpoint, at most the charged bound.
+    pub fn set_projection_memo_limit(&self,limit:usize)->Result<()> {
+        let mut memo=self.memo.borrow_mut();need(limit<=super::PROJECTION_MEMO_BYTES,"memo limit exceeds its charged bound")?;
+        need(limit>=memo.slab.bytes && limit>=memo.bytes,"memo limit is below the bytes it already holds")?;memo.limit=limit;Ok(())}
+    /// Diagnostic: bytes of the memo's own row chunks (never above its limit).
+    pub fn projection_slab_bytes(&self)->usize {self.memo.borrow().slab.bytes}
+    pub fn clear_projection_memo(&self)->Result<()> {self.backend.synchronize()?;let mut memo=self.memo.borrow_mut();memo.origins.clear();memo.batches.clear();memo.bytes=0;memo.limit=0;memo.slab=Slab::default();Ok(())}
     fn record(&self,stage:usize,started:std::time::Instant) {let mut stages=self.stages.borrow_mut();stages[stage][0]+=1;stages[stage][1]+=started.elapsed().as_nanos();}
     pub(crate) fn report(&self) {self.weights.borrow_mut().report();self.cost.report();
+        let route=spark_gpu_probe::device_route::counts();eprintln!("RESIDENT DEVICE ROUTE gate_up={} down={} host_fallback={}",route[0],route[1],route[2]);
         for (name,timing) in ["residual_begin","residual_finish","standalone_norm","causal_operations"].into_iter().zip(self.stages.borrow_mut().iter_mut()) {
             eprintln!("RESIDENT STAGE name={name} calls={} milliseconds={:.6}",timing[0],timing[1] as f64/1e6);*timing=[0;2];
         }
@@ -68,6 +152,8 @@ impl<'b,'d> Compute for Device<'b,'d> {
     fn resident_weights_ready(&self)->bool {self.weights.borrow().prepared()}
     fn fatal_error(&self)->Option<String> {self.backend.fatal_error().or_else(||self.weights.borrow().check_exchange().err())}
     fn memory_bytes(&self)->Option<(usize,usize,usize)> {Some((self.backend.accounted_bytes(),self.backend.peak_accounted_bytes(),self.backend.pinned_host_bytes()))}
+    fn vector_allocations(&self)->Option<(usize,usize)> {let s=self.backend.vector_pool_stats();Some((s.allocated_count,s.allocated_bytes))}
+    fn vector_pool_counts(&self)->Option<(usize,usize,usize)> {let s=self.backend.vector_pool_stats();Some((s.allocated_count,s.allocated_bytes,s.reused_count))}
     fn serving_trace(&self)->bool {self.serving.is_some()}
     fn profile_tick_begin(&self,tick:u64) {if let Some(trace)=&self.serving {*trace.borrow_mut()=Some((tick,std::time::Instant::now(),self.backend.stats()));}}
     fn profile_tick_end(&self) {if let Some(trace)=&self.serving {if let Some((tick,started,before))=trace.borrow_mut().take() {
@@ -83,36 +169,65 @@ impl<'b,'d> Compute for Device<'b,'d> {
     fn prepare(&self,c:&CheckpointAdmission)->Result<()> {
         // A service can retain this owner while replacing a decoder session.
         // Pure memo entries are shared across live sessions; preparation clears them.
+        self.row_workspace.borrow_mut().take();self.small_rows.set(false);
         *self.memo.borrow_mut()=Memo::default();self.weights.borrow_mut().prepare(c,self.backend)?;
         // Reuse completed private vectors under the backend's existing pressure
         // and size limits. A service's earlier memory admission owns its margin.
         if spark_gpu_probe::driver::vector_pool_from_env()? && !self.backend.vector_pool_configured() {self.backend.configure_vector_pool(1<<30);}
-        let local=self.backend.available_memory_bytes()?.saturating_sub(1<<30).min(1<<30);
+        let local=self.backend.available_memory_bytes()?.saturating_sub(1<<30).min(super::PROJECTION_MEMO_BYTES);
         self.memo.borrow_mut().limit=self.weights.borrow_mut().shared_budget(local)?;if self.backend.resident_queue_active() {self.backend.enable_resident_launches()?;}Ok(())}
-    fn repeated_projection(&self,c:&CheckpointAdmission,name:&str,x:&Value<'b,'d>,round:bool)->Result<Option<Value<'b,'d>>> {
-        self.ready(x)?;
-        if self.memo.borrow().limit==0 {return self.projection(c,name,x,round);}
-        // Unchanged immutable rows retain their original identity through view,
-        // append and gather. A new origin still uses the full original bit key.
-        let origin=(name.to_owned(),x.lineage.clone(),round);let stamp=self.cost.start(self.backend);
-        let found=self.memo.borrow().origins.get(&origin).cloned();
-        if let Some(output)=found {self.memo.borrow_mut().hits+=1;let words=output.len();let value=self.value(output.resident_range(0..words)?,words)?;
-            self.cost.record(||"memo_origin".into(),stamp,self.backend,0);return Ok(Some(value));}
-        let bits=self.read(x)?.iter().map(|v|v.to_bits()).collect::<Vec<_>>();let key=(name.to_owned(),bits,round);
-        self.cost.record(||"memo_lookup".into(),stamp,self.backend,0);
-        let prior=self.memo.borrow().values.get(&key).cloned();
-        let output=if let Some(output)=prior {self.memo.borrow_mut().hits+=1;output} else {
-            self.memo.borrow_mut().misses+=1;Rc::new(self.weights.borrow_mut().apply(name,self.backend,&x.vector,round)?.into_resident_shared()?)
-        };
-        let words=output.len();let value=self.value(output.resident_range(0..words)?,words)?;
-        let mut memo=self.memo.borrow_mut();
-        let bytes=origin.1.bytes().checked_add(name.len()).and_then(|n|n.checked_add(std::mem::size_of::<OriginKey>()+std::mem::size_of::<Rc<DeviceVector<'d>>>())).ok_or("projection origin byte count overflow")?;
-        let bytes=words.checked_add(x.words).and_then(|n|n.checked_mul(4)).and_then(|n|n.checked_add(name.len()+bytes+std::mem::size_of::<BitsKey>())).ok_or("projection memo byte count overflow")?;
-        if bytes<=memo.limit {
-            if memo.bytes.checked_add(bytes).is_none_or(|n|n>memo.limit) {memo.values.clear();memo.origins.clear();memo.bytes=0;}
-            memo.bytes+=bytes;memo.values.entry(key).or_insert_with(||output.clone());memo.origins.insert(origin,output);
+    fn prepare_names(&self,c:&CheckpointAdmission,names:&[String])->Result<()> {self.weights.borrow_mut().prepare_names(c,self.backend,names)}
+    fn projection_origin(&self,name:&str,x:&Value<'b,'d>,round:bool)->Result<Option<Value<'b,'d>>> {
+        if self.memo.borrow().limit==0 || x.pending.is_some() {return Ok(None);}
+        let Some((slot,batch))=self.memo.borrow().origins.get(&(name.to_owned(),x.lineage.clone(),round)).cloned() else {return Ok(None);};
+        // A kept row that cannot be viewed is a fault on this rank, not a miss. The value
+        // holds its slot's handle, so the slab does not write the slot while it lives.
+        let words=slot.capacity;let mut value=self.shared_value(Rc::new(slot.whole.resident_range(0..words)?),words)?;
+        slot.views.add(&value.vector,words);value.held=Some((slot,0));
+        let mut memo=self.memo.borrow_mut();memo.hits+=1;let now=memo.clock;if let Some(batch)=memo.batches.get_mut(&batch) {batch.used=now;}Ok(Some(value))
+    }
+    fn remember_projections(&self,name:&str,round:bool,kept:&[(&Value<'b,'d>,&Value<'b,'d>)])->Result<()> {
+        let mut memo=self.memo.borrow_mut();if memo.limit==0 || kept.is_empty() {return Ok(());}
+        // Each row is charged its input and output words and its key. All rows of
+        // one call enter together, so a kept row never holds an uncounted batch.
+        let row_bytes=|x:&Value<'b,'d>,output:&Value<'b,'d>|->Result<usize> {
+            let key=x.lineage.bytes().checked_add(2*name.len()).and_then(|n|n.checked_add(2*std::mem::size_of::<OriginKey>()+std::mem::size_of::<Rc<DeviceVector<'d>>>())).ok_or("projection origin byte count overflow")?;
+            Ok(output.words.checked_add(x.words).and_then(|n|n.checked_mul(4)).and_then(|n|n.checked_add(key)).ok_or("projection memo byte count overflow")?)};
+        let rows=kept.len();let mut total=0usize;
+        for (x,output) in kept {total=total.checked_add(row_bytes(x,output)?).ok_or("projection memo byte count overflow")?;}
+        if total>memo.limit {return Ok(());}
+        // Make room by dropping whole batches, the one used longest ago first.
+        // Rows used by the present token stay; a dropped row is expanded again.
+        memo.clock+=1;
+        while memo.bytes.checked_add(total).is_none_or(|n|n>memo.limit) {
+            let Some(oldest)=memo.batches.iter().min_by_key(|(id,batch)|(batch.used,**id)).map(|(id,_)|*id) else {break;};
+            let batch=memo.batches.remove(&oldest).ok_or("projection memo batch disappeared")?;
+            for key in &batch.keys {if memo.origins.get(key).is_some_and(|entry|entry.1==oldest) {memo.origins.remove(key);}}
+            memo.bytes-=batch.bytes;
         }
-        Ok(Some(value))
+        // Kept rows are copied, raw words, into the memo's own slots with one ordered launch;
+        // the projection output is then scratch again. Rows without a free funded slot
+        // are not kept (expanded again when next selected), never kept outside the limit.
+        let width=kept[0].1.words;if kept.iter().any(|(_,output)|output.words!=width) {return Ok(());}
+        let limit=memo.limit;let slots=memo.slab.take(self.backend,width,kept.len(),limit)?;
+        let kept=&kept[..slots.len()];if kept.is_empty() {return Ok(());}
+        let total=if kept.len()==rows {total} else {kept.iter().map(|(x,output)|row_bytes(x,output)).sum::<Result<usize>>()?};
+        for (_,output) in kept {self.ready(output)?;}
+        let sources=kept.iter().map(|(_,output)|(&*output.vector,0)).collect::<Vec<_>>();
+        let mut targets=slots.iter().map(|slot|slot.whole.resident_range(0..width)).collect::<std::result::Result<Vec<_>,_>>()?;
+        self.backend.resident_scatter(&sources,&mut targets,&mut self.copies.borrow_mut())?;drop(targets);
+        let id=memo.next;memo.next+=1;let now=memo.clock;let mut keys=Vec::with_capacity(kept.len());
+        for ((x,_),slot) in kept.iter().zip(slots) {let key=(name.to_owned(),x.lineage.clone(),round);memo.origins.insert(key.clone(),(slot,id));keys.push(key);}
+        memo.batches.insert(id,Batch {keys,bytes:total,used:now});memo.bytes+=total;memo.misses+=kept.len() as u64;Ok(())
+    }
+    fn planar_kda(&self,shape:Shape)->bool {matches!(shape.op,Op::StepPlanar|Op::ConvParts) && spark_gpu_probe::causal_ops::fast_admitted(shape,spark_gpu_probe::causal_ops::FAST_THREADS)}
+    fn indirect_attention(&self,shape:Shape,parts:&[&Value<'b,'d>],query:&Value<'b,'d>)->Result<Option<Value<'b,'d>>> {
+        if !spark_gpu_probe::causal_ops::indirect_attention_proven(shape) {return Ok(None);}
+        self.ready(query)?;for value in parts {self.ready(value)?;}
+        let stamp=self.cost.start(self.backend);let rows=parts.iter().map(|value|&*value.vector).collect::<Vec<_>>();
+        let [_,_,output]=self.backend.resident_row_attention(shape,&rows,&query.vector)?;
+        #[cfg(feature="kernel-bench")] self.attention_calls.set(self.attention_calls.get()+1);
+        let words=output.len();let value=self.value(output,words)?;self.cost.record(||"indirect_attention".into(),stamp,self.backend,0);Ok(Some(value))
     }
     fn attention(&self,heads:u32,key_dim:u32,value_dim:u32,slots:usize,capacity:usize,x:[&Value<'b,'d>;4])->Result<Option<Value<'b,'d>>> {
         for value in x {self.ready(value)?;}
@@ -138,7 +253,9 @@ impl<'b,'d> Compute for Device<'b,'d> {
     }
     fn projection(&self,_:&CheckpointAdmission,name:&str,x:&Value<'b,'d>,round:bool)->Result<Option<Value<'b,'d>>> {
         self.ready(x)?;
-        let out=self.weights.borrow_mut().apply(name,self.backend,&x.vector,round)?;let words=out.len();Ok(Some(self.value(out,words)?))
+        let out=self.weights.borrow_mut().apply(name,self.backend,&x.vector,round)?;
+        #[cfg(feature="kernel-bench")] self.observe_projection(name,&out)?;
+        let words=out.len();Ok(Some(self.value(out,words)?))
     }
     fn projection_rows(&self,_:&CheckpointAdmission,name:&str,input:&[&Value<'b,'d>],round:bool)->Result<Option<Vec<Value<'b,'d>>>> {
         for value in input {self.ready(value)?;}let rows=input.iter().map(|value|&*value.vector).collect::<Vec<_>>();
@@ -150,6 +267,29 @@ impl<'b,'d> Compute for Device<'b,'d> {
         let Some(values)=self.weights.borrow_mut().apply_batch(self.backend,&rows,round)? else {return Ok(None);};
         values.into_iter().map(|value|{let words=value.len();self.value(value,words)}).collect::<Result<Vec<_>>>().map(Some)
     }
+    fn routed_experts(&self,steps:&[engine_model::plan::layer::Step],ids:&Value<'b,'d>,input:&Value<'b,'d>)->Result<Option<Vec<Value<'b,'d>>>> {
+        self.ready(ids)?;self.ready(input)?;
+        let Some(projected)=self.weights.borrow_mut().apply_routed(self.backend,steps,&ids.vector,&input.vector)? else {return Ok(None);};
+        let picks=ids.words;need(projected.len()==steps.len()*picks,"device routed projection count differs")?;
+        let values=projected.into_iter().map(|value|{let words=value.len();self.value(value,words)}).collect::<Result<Vec<_>>>()?;
+        values.chunks(picks).map(|stage|self.join(&stage.iter().collect::<Vec<_>>())).collect::<Result<Vec<_>>>().map(Some)
+    }
+    fn projection_stage(&self,_:&CheckpointAdmission,jobs:&[crate::projection_stage::Job<'_,Value<'b,'d>>])->Result<Option<Vec<Value<'b,'d>>>> {
+        use crate::projection_stage::Job;
+        let mut mapped=Vec::new();
+        for job in jobs {
+            mapped.push(match job {
+                Job::Project {input,round}=>{for (_,value) in input {self.ready(value)?;}Job::Project {input:input.iter().map(|(name,value)|(*name,&*value.vector)).collect(),round:*round}},
+                Job::Routed {steps,ids,input}=>{self.ready(ids)?;self.ready(input)?;Job::Routed {steps,ids:&*ids.vector,input:&*input.vector}},
+                Job::Gated {name,gate,up,shape}=>{self.ready(gate)?;self.ready(up)?;Job::Gated {name,gate:&*gate.vector,up:&*up.vector,shape:*shape}},
+            });
+        }
+        let Some(output)=self.weights.borrow_mut().apply_stage(self.backend,&mapped)? else {return Ok(None);};
+        output.into_iter().map(|parts| {
+            let mut values=parts.into_iter().map(|part|{let words=part.len();self.value(part,words)}).collect::<Result<Vec<_>>>()?;
+            if values.len()==1 {Ok(values.remove(0))} else {self.join(&values.iter().collect::<Vec<_>>())}
+        }).collect::<Result<Vec<_>>>().map(Some)
+    }
     fn upload(&self,v:&[f32])->Result<Value<'b,'d>> {if v.is_empty() {return self.zeros(0);}let stamp=self.cost.start(self.backend);let out=self.value(self.backend.upload_vector(v)?,v.len())?;self.cost.record(||"upload".into(),stamp,self.backend,0);Ok(out)}
     fn read(&self,v:&Value<'b,'d>)->Result<Vec<f32>> {
         self.ready(v)?;
@@ -158,15 +298,46 @@ impl<'b,'d> Compute for Device<'b,'d> {
         let stamp=self.cost.start(self.backend);let out=if v.words==0 {Vec::new()} else {self.backend.read_vector_values(&v.vector)?};
         self.weights.borrow().check_exchange()?;*v.known.borrow_mut()=Some(out.clone());self.cost.record(||"readback".into(),stamp,self.backend,0);Ok(out)
     }
+    fn read_pair(&self,first:&Value<'b,'d>,second:&Value<'b,'d>)->Result<(Vec<f32>,Vec<f32>)> {Device::read_pair(self,first,second)}
     fn range(&self,v:&Value<'b,'d>,start:usize,len:usize)->Result<Value<'b,'d>> {
         let stamp=self.cost.start(self.backend);need(start.checked_add(len).is_some_and(|n|n<=v.words),"bounded device range differs")?;
-        if start==0 && len==v.words {return Ok(Value {vector:v.vector.clone(),words:len,lineage:v.lineage.clone(),known:RefCell::new(v.known.borrow().clone()),pending:v.pending.clone()});}self.ready(v)?;
-        let out=if len==0 {self.backend.vector(1)?} else {v.vector.resident_range(start..start+len)?};let mut value=self.value(out,len)?;value.lineage=v.lineage.range(start,len)?;self.cost.record(||"range_view".into(),stamp,self.backend,0);Ok(value)
+        if start==0 && len==v.words {return Ok(Value {vector:v.vector.clone(),words:len,lineage:v.lineage.clone(),known:RefCell::new(v.known.borrow().clone()),pending:v.pending.clone(),held:v.held.clone()});}self.ready(v)?;
+if start==0 && v.pending.as_ref().and_then(|p|p.borrow().state_prefix)==Some(len) {
+    // A recurrent state must not keep all token outputs in its parent.
+    // Copy raw words; the ordered stream and deferred owners preserve them.
+    let source=v.vector.resident_range(0..len)?;let mut out=self.backend.vector(len)?;
+    self.backend.copy_prefix(&source,&mut out,len)?;self.state_copies.set(self.state_copies.get().checked_add(1).ok_or("state copy counter overflow")?);let value=self.value(out,len)?;self.cost.record(||"state_prefix_copy".into(),stamp,self.backend,0);return Ok(value);
+}
+        let out=if len==0 {self.backend.vector(1)?} else {v.vector.resident_range(start..start+len)?};let mut value=self.value(out,len)?;value.lineage=v.lineage.range(start,len)?;
+        // A view of held rows, with any start, is listed in its storage: no append writes the words it reads.
+        if let Some((storage,first))=v.held.as_ref().filter(|_|len>0) {storage.views.add(&value.vector,first+start+len);value.held=Some((storage.clone(),first+start));}
+        self.cost.record(||"range_view".into(),stamp,self.backend,0);Ok(value)
     }
     fn join(&self,parts:&[&Value<'b,'d>])->Result<Value<'b,'d>> {
         for value in parts {self.ready(value)?;}
         let stamp=self.cost.start(self.backend);let len=parts.iter().try_fold(0usize,|n,v|n.checked_add(v.words).ok_or("bounded join overflow"))?;
-        let sources=parts.iter().map(|v|(&*v.vector,v.words)).collect::<Vec<_>>();let out=self.backend.resident_join(&sources,&mut self.copies.borrow_mut())?;let mut value=self.value(out,len)?;value.lineage=Lineage::join(parts.iter().map(|v|&v.lineage))?;self.cost.record(||"join_copy".into(),stamp,self.backend,0);Ok(value)
+        let sources=parts.iter().map(|v|(&*v.vector,v.words)).collect::<Vec<_>>();let out=self.backend.resident_join(&sources,&mut self.copies.borrow_mut(),0)?;let mut value=self.value(out,len)?;value.lineage=Lineage::join(parts.iter().map(|v|&v.lineage))?;self.cost.record(||"join_copy".into(),stamp,self.backend,0);Ok(value)
+    }
+    fn cache_append(&self,old:&Value<'b,'d>,new:&Value<'b,'d>,rows:usize,width:usize,room:usize)->Result<Value<'b,'d>> {
+        if room==0 {return self.join(&[old,new]);}self.ready(old)?;self.ready(new)?;
+        need(rows.checked_mul(width)==Some(old.words) && new.words==width,"latent cache append extent differs")?;
+        // Only a tail beyond every live view can be written. A retained future
+        // view or an exhausted arena copies to a new owner through rows_extend.
+        let stamp=self.cost.start(self.backend);
+        let mut value=self.rows_extend((rows>0).then_some(old),rows,new,width,room)?;
+        // Reusing physical storage must not change immutable row identities:
+        // projection memo keys keep the old prefix and the new row's origin.
+        value.lineage=Lineage::join([&old.lineage,&new.lineage])?;
+        self.cost.record(||"cache_append".into(),stamp,self.backend,0);Ok(value)
+    }
+    fn join_reserved(&self,parts:&[&Value<'b,'d>],reserve:usize)->Result<Value<'b,'d>> {
+        let len=parts.iter().try_fold(0usize,|n,v|n.checked_add(v.words).ok_or("bounded join overflow"))?;
+        if len==0 || reserve<=len {return self.join(parts);}
+        for value in parts {self.ready(value)?;}
+        // The joined words are the published value. The rest of the storage is never read.
+        let stamp=self.cost.start(self.backend);let sources=parts.iter().map(|v|(&*v.vector,v.words)).collect::<Vec<_>>();
+        let out=self.backend.resident_join(&sources,&mut self.copies.borrow_mut(),reserve)?.into_resident_shared()?;
+        let mut value=self.value(out.resident_range(0..len)?,len)?;value.lineage=Lineage::join(parts.iter().map(|v|&v.lineage))?;self.cost.record(||"join_copy".into(),stamp,self.backend,0);Ok(value)
     }
     fn zeros(&self,len:usize)->Result<Value<'b,'d>> {let stamp=self.cost.start(self.backend);let mut v=self.backend.vector(len.max(1))?;self.backend.zero_vector(&mut v)?;let value=self.value(v,len)?;self.cost.record(||"zero".into(),stamp,self.backend,0);Ok(value)}
     fn operation(&self,s:Shape,x:[Option<&Value<'b,'d>>;4],w:&[f32])->Result<Value<'b,'d>> {
@@ -179,7 +350,7 @@ impl<'b,'d> Compute for Device<'b,'d> {
         if !w.is_empty() && !self.parameters.borrow().contains_key(&key) {self.parameters.borrow_mut().insert(key.clone(),self.backend.upload_vector(w)?.into_resident_shared()?);}
         let owners=self.parameters.borrow();
         let input=x.map(|v|v.filter(|v|v.words>0).map(|v|&*v.vector));
-        let graphable=self.backend.resident_queue_active() && !self.backend.resident_launches_active() && matches!(s.op,Op::Conv|Op::Prepare|Op::Step|Op::GatedNorm|Op::SwiGlu|Op::KeyNorm|Op::Route|Op::ExpertFold|Op::StreamMean|Op::Mxfp8Quantize);
+        let graphable=self.backend.resident_queue_active() && !self.backend.resident_launches_active() && matches!(s.op,Op::Conv|Op::ConvParts|Op::StepPlanar|Op::Prepare|Op::Step|Op::GatedNorm|Op::SwiGlu|Op::KeyNorm|Op::Route|Op::ExpertFold|Op::StreamMean|Op::Mxfp8Quantize);
         let v=if graphable {
             let key=(vec![s.op as u32,s.heads,s.dim,s.taps,s.rows,s.cols,s.epsilon.to_bits(),s.bound.to_bits()],owners.get(&key).map_or(0,DeviceVector::device_address));
             let mut programs=self.programs.borrow_mut();
@@ -189,20 +360,20 @@ impl<'b,'d> Compute for Device<'b,'d> {
                 programs.insert(key.clone(),self.backend.resident_program(&plan,&weights)?);
             }
             programs.get_mut(&key).unwrap().run(&input.into_iter().flatten().collect::<Vec<_>>())?
-        } else if s.op==Op::Step {
+        } else if s.op==Op::Step && !spark_gpu_probe::causal_ops::fast_admitted(s,spark_gpu_probe::causal_ops::FAST_THREADS) {
             let columns=self.backend.causal_operation(Shape {op:Op::StepColumns,..s},input,None)?;
             self.backend.causal_operation(Shape {op:Op::StepLayout,..s},[Some(&columns),None,None,None],None)?
         } else if s.op==Op::Pool {
             let channels=self.backend.causal_operation(Shape {op:Op::PoolChannels,..s},input,owners.get(&key))?;
             self.backend.causal_operation(Shape {op:Op::PoolLayout,..s},[Some(&channels),None,None,None],None)?
-        } else if s.op==Op::Conv {
+        } else if s.op==Op::Conv && !spark_gpu_probe::causal_ops::fast_admitted(s,spark_gpu_probe::causal_ops::FAST_THREADS) {
             let channels=self.backend.causal_operation(Shape {op:Op::ConvChannels,..s},input,owners.get(&key))?;
             self.backend.causal_operation(Shape {op:Op::ConvLayout,..s},[Some(&channels),None,None,None],None)?
         } else {self.backend.causal_operation(s,input,owners.get(&key))?};
         let mut value=self.value(v,units*words)?;
         if s.op==Op::Gather {
-            let source=x[0].ok_or("gather source is absent")?;let selected=self.read(x[1].ok_or("gather selection is absent")?)?;
-            let count=self.read(x[2].ok_or("gather count is absent")?)?[0] as usize;
+            let source=x[0].ok_or("gather source is absent")?;
+            let (selected,count)=self.read_pair(x[1].ok_or("gather selection is absent")?,x[2].ok_or("gather count is absent")?)?;let count=count[0] as usize;
             if count>s.cols as usize {return Err("gather count exceeds live slots".into());}
             let ids=selected[..count].iter().map(|v|*v as usize).collect::<Vec<_>>();
             value.lineage=source.lineage.gather(s.dim as usize,&ids,s.cols as usize,self.source.get())?;
@@ -218,11 +389,20 @@ impl<'b,'d> Compute for Device<'b,'d> {
         let mut out=self.backend.vector(x.words)?;self.backend.copy_prefix(norm.vector(),&mut out,x.words)?;
         let value=self.value(out,x.words)?;self.cost.record(||"norm".into(),stamp,self.backend,w.len()*4);self.record(2,started);Ok(value)
     }
-    fn begin(&self,key:(usize,usize),p:&crate::layer_operands::ResidualBlockOperands,x:&Value<'b,'d>)->Result<(Self::Pass,Value<'b,'d>)> {
+    fn begin(&self,key:(usize,usize),p:&crate::layer_operands::ResidualBlockOperands,x:&Value<'b,'d>)->Result<(Self::Pass,Value<'b,'d>)> {self.begin_next(key,p,x,None)}
+    fn begin_next(&self,key:(usize,usize),p:&crate::layer_operands::ResidualBlockOperands,x:&Value<'b,'d>,next:Option<&str>)->Result<(Self::Pass,Value<'b,'d>)> {
         let started=std::time::Instant::now();let stamp=self.cost.start(self.backend);
         if !self.blocks.borrow().contains_key(&key) {self.blocks.borrow_mut().insert(key,p.upload_boundary(self.backend)?);}
-        let result=if let Some((pass,block))=self.take_post(x)? {self.blocks.borrow()[&key].begin_after(pass,block,x.vector.clone())}
-            else {self.blocks.borrow()[&key].begin(x.vector.clone())};
+        let post=self.take_post(x)?;
+        // CHAIN-SHADOW: the first SHADOW_DECODE_BYTES of the next stage's resident weights, pulled
+        // toward L2 by SHADOW_DECODE_BLOCKS tail blocks of the dots launch. A matrix that is not
+        // resident yet gets no shadow. The arithmetic launches and every value are unchanged.
+        let weights=self.weights.borrow();
+        let range=match next {Some(name)=>weights.shadow_range(self.backend,name,spark_gpu_probe::mhc_params::SHADOW_DECODE_BYTES)?,None=>None};
+        let shadow=range.map(|range|spark_gpu_probe::driver::Shadow {dots:Some(range),finish:None,blocks:spark_gpu_probe::mhc_params::SHADOW_DECODE_BLOCKS,evict_last:false});
+        let result=if let Some((pass,block))=post {self.blocks.borrow()[&key].begin_after_shadowed(pass,block,x.vector.clone(),shadow.as_ref())}
+            else {self.blocks.borrow()[&key].begin_shadowed(x.vector.clone(),shadow.as_ref())};
+        drop(weights);
         let pass=match result {Ok(pass)=>pass,Err(error)=>{if let Some(pending)=&x.pending {pending.borrow_mut().error=Some(error.clone());}return Err(error);}};
         if let Some(pending)=&x.pending {pending.borrow_mut().error=None;}
         let vector=pass.normalized();let words=vector.len();let value=self.shared_value(vector,words)?;
@@ -230,7 +410,7 @@ impl<'b,'d> Compute for Device<'b,'d> {
     }
     fn finish(&self,p:Self::Pass,x:&Value<'b,'d>)->Result<Value<'b,'d>> {self.ready(x)?;let started=std::time::Instant::now();let stamp=self.cost.start(self.backend);let shape=p.shape();
         need(x.words==shape.rows as usize*shape.hidden as usize,"deferred mHC block extent differs")?;let words=shape.rows as usize*shape.wide();
-        let mut value=self.value(self.backend.vector(words)?,words)?;value.pending=Some(Rc::new(RefCell::new(Pending {post:Some((p,x.vector.clone())),error:None})));
+        let mut value=self.value(self.backend.vector(words)?,words)?;value.pending=Some(Rc::new(RefCell::new(Pending {post:Some((p,x.vector.clone())),error:None,state_prefix:None})));
         self.cost.record(||"residual_finish".into(),stamp,self.backend,0);self.record(1,started);Ok(value)}
     fn mx(&self,p:&Mxfp8Projection<'_>,x:&Value<'b,'d>)->Result<Value<'b,'d>> {
         self.ready(x)?;
@@ -246,10 +426,18 @@ impl<'b,'d> Compute for Device<'b,'d> {
         let key=w.iter().map(|v|v.to_bits()).collect::<Vec<_>>();
         if !w.is_empty() && !self.parameters.borrow().contains_key(&key) {self.parameters.borrow_mut().insert(key.clone(),self.backend.upload_vector(w)?);}
         let owners=self.parameters.borrow();let input=x.map(|v|v.filter(|v|v.words>0).map(|v|&*v.vector));
-        let value=self.value(self.backend.prompt_operation(s,input,owners.get(&key))?,units*words)?;self.cost.settle(self.backend)?;
+        let mut value=self.value(self.backend.prompt_operation(s,input,owners.get(&key))?,units*words)?;
+        if s.op==spark_gpu_probe::prompt_ops::Op::StepRows && s.tokens>256 {let prefix=(s.heads as usize).checked_mul(s.dim as usize).and_then(|n|n.checked_mul(s.dim as usize)).ok_or("state prefix overflow")?;value.pending=Some(Rc::new(RefCell::new(Pending {post:None,error:None,state_prefix:Some(prefix)})));}self.cost.settle(self.backend)?;
         self.cost.record(||if s.op==spark_gpu_probe::prompt_ops::Op::Wrapped {format!("rows_{:?}",s.inner.op)} else {format!("rows_{:?}",s.op)},stamp,self.backend,w.len()*4);Ok(value)
     }
     fn rows_embedding(&self,tokens:&[u32],streams:usize)->Result<Option<Value<'b,'d>>> {
+        self.small_rows.set(tokens.len()<=super::VERIFY_ROWS);
+        if !self.small_rows.get() {self.row_workspace.borrow_mut().take();}
+        // A small group is a verify pass or a prompt tail. Like a decode token it leaves 1 GiB
+        // under the vector pool's cap first: its selected-row buffers change size with each
+        // pass, and a full pool refuses them (measured at 1,040 tokens: 1.87 GB of new buffers a
+        // pass without this, 0.2 GB after a step had trimmed). Large groups clear the pool at their end.
+        if tokens.len()<super::PROMPT_SHARED {self.backend.trim_vector_spares(1<<30);}
         let stamp=self.cost.start(self.backend);let out=self.weights.borrow().embedding_rows(self.backend,tokens,streams)?;let words=out.len();let value=self.value(out,words)?;self.cost.record(||"rows_embedding".into(),stamp,self.backend,0);Ok(Some(value))
     }
     fn rows_project(&self,_:&CheckpointAdmission,name:&str,x:&Value<'b,'d>,m:usize,round:bool)->Result<Option<Value<'b,'d>>> {
@@ -259,6 +447,48 @@ impl<'b,'d> Compute for Device<'b,'d> {
     fn rows_experts(&self,first:&[(&str,usize)],second:Option<(&[(&str,usize)],f32)>,x:&Value<'b,'d>,places:&[f32])->Result<Option<Value<'b,'d>>> {
         self.ready(x)?;
         let Some(out)=self.weights.borrow_mut().apply_experts(self.backend,first,second,&x.vector,places)? else {return Ok(None);};let words=out.len();Ok(Some(self.value(out,words)?))
+    }
+    fn rows_release(&self)->Result<()> {Ok(self.backend.release_group_spares()?)}
+    fn rows_keep(&self)->Result<()> {Ok(self.backend.keep_group_spares(super::POOL_ROOM)?)}
+    fn rows_peak_begin(&self)->usize {self.backend.begin_group_peak()}
+    fn rows_peak_end(&self,whole:usize)->usize {self.backend.end_group_peak(whole)}
+    fn rows_reserve(&self,words:usize)->Result<Value<'b,'d>> {
+        let vector=if self.small_rows.get() {self.backend.resident_workspace(words.max(1),&mut self.row_workspace.borrow_mut())?}
+            else {self.backend.vector(words.max(1))?};self.value(vector,words)
+    }
+    fn rows_fill(&self,target:&mut Value<'b,'d>,offset:usize,part:&Value<'b,'d>,expected:usize)->Result<()> {
+        // A dropped chunk stays on the deferred list until a drain. This one makes "chunk
+        // by chunk" true for a matrix that takes no gather, on any topology.
+        self.backend.synchronize()?;self.ready(part)?;
+        need(part.words==expected && offset.checked_add(expected).is_some_and(|end|end<=target.words),"prompt fill extent differs")?;
+        let vector=Rc::get_mut(&mut target.vector).ok_or("prompt fill target is shared")?;
+        Ok(self.backend.copy_range(&part.vector,vector,0,offset,part.words)?)
+    }
+    fn rows_append(&self,held:Option<&Value<'b,'d>>,rows:usize,new:&Value<'b,'d>,width:usize)->Result<Value<'b,'d>> {
+        self.ready(new)?;let have=rows.checked_mul(width).ok_or("prompt expanded rows overflow")?;let needed=have.checked_add(new.words).ok_or("prompt expanded rows overflow")?;
+        // Exactly the rows held, so old plus new stays within twice the prompt's charge
+        // while the state that holds the old rows is still live.
+        let mut out=self.backend.vector(needed)?;
+        if let Some(old)=held {need(old.words>=have,"prompt expanded rows differ")?;self.backend.copy_range(&old.vector,&mut out,0,0,have)?;}
+        self.backend.copy_range(&new.vector,&mut out,0,have,new.words)?;
+        self.value(out,needed)
+    }
+    fn rows_extend(&self,held:Option<&Value<'b,'d>>,rows:usize,new:&Value<'b,'d>,width:usize,room:usize)->Result<Value<'b,'d>> {
+        if room==0 {return self.rows_append(held,rows,new,width);}
+        self.ready(new)?;let have=rows.checked_mul(width).ok_or("prompt expanded rows overflow")?;let needed=have.checked_add(new.words).ok_or("prompt expanded rows overflow")?;
+        let publish=|storage:&Rc<HeldStorage<'d>>|->Result<Value<'b,'d>> {
+            let mut value=self.shared_value(Rc::new(storage.whole.resident_range(0..needed)?),needed)?;storage.views.add(&value.vector,needed);value.held=Some((storage.clone(),0));Ok(value)};
+        if let Some((v,(storage,start)))=held.and_then(|v|v.held.as_ref().map(|h|(v,h))) {
+            // Appendable cache storage whose held rows start it and past which no live view ends:
+            // nobody reads the words after them. A memo slot is never appendable. In every other
+            // case the rows are copied below.
+            if super::held::append_in_place(storage.appendable,*start,v.words,have,needed,storage.capacity,storage.views.last()) {
+                let mut tail=storage.whole.resident_range(have..needed)?;self.backend.copy_range(&new.vector,&mut tail,0,0,new.words)?;return publish(storage);}
+        }
+        let capacity=needed.checked_add(room).ok_or("prompt expanded rows overflow")?;let mut out=self.backend.vector(capacity)?;
+        if let Some(old)=held {need(old.words>=have,"prompt expanded rows differ")?;self.backend.copy_range(&old.vector,&mut out,0,0,have)?;}
+        self.backend.copy_range(&new.vector,&mut out,0,have,new.words)?;
+        publish(&Rc::new(HeldStorage {whole:out.into_resident_shared()?,capacity,views:Default::default(),appendable:true}))
     }
     fn rows_norm(&self,name:&str,s:NormShape,x:&Value<'b,'d>,m:usize,w:&[f32])->Result<Value<'b,'d>> {
         self.ready(x)?;

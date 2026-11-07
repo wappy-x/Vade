@@ -4,11 +4,11 @@
 use crate::causal_ops::{self,Op as Causal,Shape as CausalShape};
 use crate::next_math::{exp,bf16};
 #[inline(always)]
-fn round(x:f32)->f32 {f32::from_bits(bf16(x)<<16)}
+pub(crate) fn round(x:f32)->f32 {f32::from_bits(bf16(x)<<16)}
 #[inline(always)]
 fn sigmoid(x:f32)->f32 {1.0/(1.0+exp(-x))}
 #[inline(always)]
-fn root(x:f32)->f32 {
+pub(crate) fn root(x:f32)->f32 {
     #[cfg(target_arch="nvptx64")] {crate::qsa_common::root(x)}
     #[cfg(not(target_arch="nvptx64"))] {x.sqrt()}
 }
@@ -54,6 +54,13 @@ pub enum Op {
     /// `taps` ranks, `dim` local weight rows. Table `[rows,3]`: earlier token rows,
     /// this expert's tokens, this row's token index in the expert.
     ExpertPlace,
+    /// Output as `ScoresRows`. Fourth input `[rows,tokens]`: the token's slot for that row, or -1.
+    /// Each token selects a row at most once. The bits equal `ScoresRows`.
+    ScoresMap,
+    /// The same output as `ExpertPlace`. The table holds `[rows,3]` as there, then `[rows]` slots in
+    /// expert order: word `earlier+at` names the output row of that slot (`place_table`). A device
+    /// tile moves the units through shared memory with it.
+    ExpertPlaceTile,
 }
 #[repr(C)]
 #[derive(Debug,Clone,Copy)]
@@ -68,6 +75,24 @@ impl Shape {
         Some(Self {op,tokens:u32::try_from(tokens).ok()?,heads:0,dim:0,taps:0,rows:0,cols:0,first:0,slots:0,inner:empty()})
     }
     pub fn wrapped(inner:CausalShape,tokens:usize)->Option<Self> {let mut s=Self::new(Op::Wrapped,tokens)?;s.inner=inner;Some(s)}
+    /// ValuesRows threads for each output unit, when its value rows allow line reads.
+    /// Each thread holds eight channels in registers. Every channel keeps its slot order.
+    pub fn value_blocks(self)->Option<usize> {(self.op==Op::ValuesRows && self.taps%8==0 && self.dim%4==0 && self.taps>0).then_some(self.taps as usize/8)}
+    /// ScoresRows threads for each output word when keys allow line reads: one thread for
+    /// each token, head and slot, each its own chain, so a warp shares one key's cache lines.
+    pub fn score_lines(self)->bool {self.op==Op::ScoresRows && self.dim%4==0 && self.dim>0 && self.taps%4==0 && self.cols>0}
+    /// Threads one launch needs for this many output units. `lines`: the kernel's line path
+    /// runs, because query and key bases are 16-byte aligned. A score table then takes one
+    /// thread for each entry and head: the kernel sets `head=thread/entries`, and a thread
+    /// past that traps, so a table shorter than its tokens must not launch one per token.
+    /// Without line reads the kernel computes one unit a thread, which needs every unit.
+    pub fn threads(self,units:usize,lines:bool)->Option<usize> {
+        if self.score_lines() && self.first>0 {
+            let entries=self.first as usize;
+            return (if lines {entries} else {entries.max(units/self.heads.max(1) as usize)}).checked_mul(self.heads as usize);
+        }
+        units.checked_mul(if self.score_lines() {self.cols as usize} else {self.value_blocks().unwrap_or(1)})
+    }
     /// Complete input extents, weight extent, thread units and words for each unit.
     pub fn lengths(self)->Option<([usize;5],usize,usize,usize)> {
         let (m,h,d,t,r,k)=(self.tokens as usize,self.heads as usize,self.dim as usize,self.taps as usize,self.rows as usize,self.cols as usize);
@@ -88,12 +113,16 @@ impl Shape {
             Op::PoolScoresRows if width>0 && r>0 && t>0=>([m.checked_mul(width)?,r.checked_mul(d)?,m.checked_mul(h)?,0,0],0,m.checked_mul(r)?,1),
             Op::SelectRows if d>0 && t>0 && t%d==0 && k<=1 && slots>0=>([m.checked_mul(r)?,0,0,0,0],0,m,slots.checked_add(1)?),
             Op::ScoresRows if h>0 && d>0 && t>0 && k>0 && slots>0=>{let row=h.checked_mul(d.checked_add(t)?)?;
-                ([m.checked_mul(width)?,r.checked_mul(row)?,m.checked_mul(slots.checked_add(1)?)?,0,0],0,m.checked_mul(h)?,k)},
+                // `first` counts entries of an optional (row, token, slot) table sorted by row.
+                ([m.checked_mul(width)?,r.checked_mul(row)?,m.checked_mul(slots.checked_add(1)?)?,(self.first as usize).checked_mul(3)?,0],0,m.checked_mul(h)?,k)},
+            Op::ScoresMap if h>0 && d>0 && t>0 && k>0 && slots>0 && r>0=>{let row=h.checked_mul(d.checked_add(t)?)?;
+                ([m.checked_mul(width)?,r.checked_mul(row)?,m.checked_mul(slots.checked_add(1)?)?,r.checked_mul(m)?,0],0,m.checked_mul(h)?,k)},
             Op::SoftmaxRows if h>0 && k>0 && slots>0=>([m.checked_mul(h)?.checked_mul(k)?,m.checked_mul(slots.checked_add(1)?)?,0,0,0],0,m.checked_mul(h)?,k),
             Op::ValuesRows if h>0 && d>0 && t>0 && k>0 && slots>0=>{let row=h.checked_mul(d.checked_add(t)?)?;
                 ([m.checked_mul(h)?.checked_mul(k)?,r.checked_mul(row)?,m.checked_mul(slots.checked_add(1)?)?,0,0],0,m.checked_mul(h)?,t)},
             Op::PermuteRows if r>0 && k>0=>(([(self.first as usize).checked_mul(k)?,r,0,0,0]),0,r.checked_mul(k)?,1),
             Op::ExpertPlace if r>0 && k>0 && d>0 && t>0 && k==d.checked_mul(t)? && slots>0=>([slots.checked_mul(t)?,r.checked_mul(3)?,0,0,0],0,r.checked_mul(k)?,1),
+            Op::ExpertPlaceTile if r>0 && k>0 && d>0 && t>0 && k==d.checked_mul(t)? && slots>0=>([slots.checked_mul(t)?,r.checked_mul(4)?,0,0,0],0,r.checked_mul(k)?,1),
             _=>return None,
         };
         if result.0.into_iter().chain([result.1,result.2.checked_mul(result.3)?]).any(|n|n>u32::MAX as usize || n>isize::MAX as usize/4) {return None;}
@@ -110,7 +139,7 @@ fn history_value(plane:&[f32],old:&[f32],position:usize,keep:usize,width:usize,c
     if position<keep {old[position*width+ch]} else {plane[(position-keep)*width+ch]}
 }
 #[inline(always)]
-fn select_all(s:Shape,token:usize,scores:&[f32],out:&mut[f32])->bool {
+pub(crate) fn select_all(s:Shape,token:usize,scores:&[f32],out:&mut[f32])->bool {
     // Every complete pool is kept, so the selected IDs are ascending and
     // independent of score values. A NaN score has no defined order: refuse it.
     let d=s.dim as usize;let context=s.first as usize+token;let groups=context/d;let slots=s.slots as usize;
@@ -123,7 +152,7 @@ fn select_all(s:Shape,token:usize,scores:&[f32],out:&mut[f32])->bool {
 /// Top pools by descending score, then ascending pool ID. This is the scalar
 /// selection's total order without its repeated scans. Sorted IDs then expand
 /// backward as before. A NaN score has no defined order: refuse it.
-fn select_top(s:Shape,token:usize,scores:&[f32],out:&mut[f32]) {
+pub(crate) fn select_top(s:Shape,token:usize,scores:&[f32],out:&mut[f32]) {
     let d=s.dim as usize;let context=s.first as usize+token;let groups=context/d;let take=s.taps as usize/d;let slots=s.slots as usize;
     let worse=|a:usize,b:usize|scores[a]<scores[b] || scores[a]==scores[b] && a>b;
     let mut valid=true;for &score in &scores[..groups] {valid&=score==score;}
@@ -169,8 +198,12 @@ pub fn step_column<S:StepStore>(s:Shape,index:usize,x:[&[f32];5],store:&mut S) {
 /// orders threads only. Each output keeps its own fold.
 #[inline(always)]
 pub fn thread_unit(s:Shape,thread:usize)->usize {
-    if matches!(s.op,Op::ScoresRows|Op::ValuesRows) {let m=s.tokens as usize;(thread%m)*s.heads as usize+thread/m} else {thread}
+    if matches!(s.op,Op::ScoresRows|Op::ScoresMap|Op::ValuesRows) {let m=s.tokens as usize;(thread%m)*s.heads as usize+thread/m} else {thread}
 }
+/// Transpose and ExpertPlace read an exchange buffer whole. With `first` set they refuse a
+/// non-finite word there, so the host need not scan the mapped buffer. A refusal traps.
+#[inline(always)]
+fn refuse_non_finite(s:Shape,value:f32) {if s.first!=0 && value.to_bits()&0x7f80_0000==0x7f80_0000 {panic!("exchanged value is not finite");}}
 /// Write one complete disjoint output unit. The host validates all extents.
 pub fn unit(s:Shape,index:usize,x:[&[f32];5],w:&[f32],out:&mut[f32]) {
     let (m,h,d,t,r,k)=(s.tokens as usize,s.heads as usize,s.dim as usize,s.taps as usize,s.rows as usize,s.cols as usize);let width=h*d;
@@ -184,7 +217,7 @@ pub fn unit(s:Shape,index:usize,x:[&[f32];5],w:&[f32],out:&mut[f32]) {
         Op::ProjectRows=>{let row=index/m;let token=index%m;let mut sum=0.0;
             let input=&x[0][token*k..(token+1)*k];let weight=&w[row*k..(row+1)*k];
             for j in 0..k {sum+=input[j]*weight[j];}out[0]=sum;},
-        Op::Transpose=>{out[0]=x[0][(index%r)*k+index/r];},
+        Op::Transpose=>{out[0]=x[0][(index%r)*k+index/r];refuse_non_finite(s,out[0]);},
         Op::NormApply=>{let v=x[0][index]*w[index%d];out[0]=if k!=0 {round(v)} else {v};},
         Op::ConvRows=>{
             let plane=(index/width)%3;let token=index/(3*width);let ch=index%width;let history=(t-1)*width;
@@ -211,7 +244,7 @@ pub fn unit(s:Shape,index:usize,x:[&[f32];5],w:&[f32],out:&mut[f32]) {
             let token=index;let context=s.first as usize+token;let groups=context/d;let row=&x[0][token*r..(token+1)*r];
             if t/d>=groups {select_all(s,token,row,out);} else {select_top(s,token,row,out);}
         },
-        Op::ScoresRows=>{
+        Op::ScoresRows|Op::ScoresMap=>{
             let token=index/h;let head=index%h;let query=&x[0][index*d..(index+1)*d];let row=h*(d+t);
             let selected=&x[2][token*(s.slots as usize+1)..(token+1)*(s.slots as usize+1)];let count=selected[s.slots as usize] as usize;
             let scale=1.0/root(d as f32);for v in out.iter_mut() {*v=0.0;}
@@ -237,9 +270,9 @@ pub fn unit(s:Shape,index:usize,x:[&[f32];5],w:&[f32],out:&mut[f32]) {
             for v in out.iter_mut() {*v=round(*v);}
         },
         Op::PermuteRows=>{let row=index/k;let lane=index%k;out[0]=x[0][x[1][row] as usize*k+lane];},
-        Op::ExpertPlace=>{let row=index/k;let lane=index%k;let entry=&x[1][row*3..row*3+3];
+        Op::ExpertPlace|Op::ExpertPlaceTile=>{let row=index/k;let lane=index%k;let entry=&x[1][row*3..row*3+3];
             let earlier=entry[0] as usize;let tokens=entry[1] as usize;let at=entry[2] as usize;
-            out[0]=x[0][(lane/d)*s.slots as usize+earlier*d+(lane%d)*tokens+at];},
+            out[0]=x[0][(lane/d)*s.slots as usize+earlier*d+(lane%d)*tokens+at];refuse_non_finite(s,out[0]);},
     }
 }
 #[inline(always)]
@@ -261,6 +294,22 @@ pub fn reference(s:Shape,x:[&[f32];5],w:&[f32])->Result<Vec<f32>,String> {
         return Ok(out);
     }
     for (i,row) in out.chunks_exact_mut(words).enumerate() {unit(s,i,x,w,row);}Ok(out)
+}
+/// The table of `ExpertPlaceTile`: the `[rows,3]` table of `ExpertPlace`, then for every slot (`earlier+at`) its output
+/// row. `None` unless every entry is an exact small integer, `at < tokens`, and the slots are a permutation of
+/// `0..rows` (the place table of a real expert grouping always is); the caller then keeps `ExpertPlace`.
+#[cfg(not(target_arch="nvptx64"))]
+pub fn place_table(places:&[f32])->Option<Vec<f32>> {
+    if places.is_empty() || places.len()%3!=0 {return None;}
+    let rows=places.len()/3;if rows>=(1<<24) {return None;}
+    let whole=|v:f32|(v>=0.0 && v<16777216.0 && v==v.trunc()).then_some(v as usize);
+    let mut slot_row=vec![u32::MAX;rows];
+    for (row,e) in places.chunks_exact(3).enumerate() {
+        let (earlier,tokens,at)=(whole(e[0])?,whole(e[1])?,whole(e[2])?);
+        if at>=tokens {return None;}
+        let slot=earlier+at;if slot>=rows || slot_row[slot]!=u32::MAX {return None;}slot_row[slot]=row as u32;
+    }
+    let mut table=places.to_vec();table.extend(slot_row.into_iter().map(|row| row as f32));Some(table)
 }
 #[cfg(test)]
 mod tests {
@@ -375,6 +424,44 @@ mod tests {
         }
     }
     #[test]
+    fn a_score_table_launches_one_thread_per_entry_and_head_and_every_word_matches() {
+        // (tokens, heads, live slots of each token), 0 < entries < tokens first.
+        for (m,h,counts) in [(2usize,1usize,vec![1usize,0]),(5,2,vec![2,0,1,0,0]),(4,3,vec![0,0,0,1]),(3,3,vec![1,1,1]),(2,2,vec![2,2])] {
+            let (d,t,slots,total)=(4usize,4usize,2usize,6usize);let row=h*(d+t);
+            let e=(0..total*row).map(|i|value(i,0.0625)).collect::<Vec<_>>();let q=(0..m*h*d).map(|i|value(i+3,0.125)).collect::<Vec<_>>();
+            let mut selected=vec![-1.0f32;m*(slots+1)];let mut order=Vec::new();
+            for (token,&count) in counts.iter().enumerate() {
+                for slot in 0..count {let id=(token*2+slot)%total;selected[token*(slots+1)+slot]=id as f32;order.push((id,token,slot));}
+                selected[token*(slots+1)+slots]=count as f32;
+            }
+            order.sort_unstable();let entries=order.len();
+            let table=order.iter().flat_map(|o|[o.0 as f32,o.1 as f32,o.2 as f32]).collect::<Vec<_>>();
+            let s=Shape {op:Op::ScoresRows,heads:h as u32,dim:d as u32,taps:t as u32,rows:total as u32,cols:slots as u32,slots:slots as u32,first:entries as u32,..rows(m)};
+            assert!(s.score_lines());let units=m*h;
+            // The old grid. It stays for tables at least as long as the tokens, so those launches do not change.
+            let old=entries.max(m)*h;let lines=s.threads(units,true).unwrap();
+            assert_eq!(lines,entries*h);assert_eq!(s.threads(units,false),Some(old));
+            if entries>=m {assert_eq!(lines,old);} else {assert!((old-1)/entries>=h,"the old grid reaches the trap for m={m}");}
+            // The kernel's line path, thread by thread. Output starts zeroed, and any trap is a failure.
+            let mut out=vec![0.0f32;units*slots];
+            for thread in 0..lines {
+                let entry=&table[(thread%entries)*3..(thread%entries)*3+3];let (id,token,slot,head)=(entry[0] as usize,entry[1] as usize,entry[2] as usize,thread/entries);
+                assert!(token<m && head<h,"trap at thread {thread} of m={m}");let live=&selected[token*(slots+1)..(token+1)*(slots+1)];
+                assert!(slot<live[slots] as usize && live[slot] as usize==id,"trap at thread {thread} of m={m}");
+                let index=token*h+head;let query=&q[index*d..(index+1)*d];let key=&e[id*row+head*(d+t)..id*row+head*(d+t)+d];
+                let mut sum=0.0f32;for j in 0..d {sum+=query[j]*key[j];}
+                out[index*slots+slot]=round(round(sum)*(1.0/root(d as f32)));
+            }
+            let want=reference(s,[&q,&e,&selected,&table,&[]],&[]).unwrap();assert_eq!(bits(&out),bits(&want),"m={m} h={h}");
+            // Without line reads the kernel runs one unit for each thread below tokens*heads: all of them.
+            let mut seen=vec![false;units];for thread in 0..s.threads(units,false).unwrap() {if thread/units==0 {seen[thread_unit(s,thread)]=true;}}
+            assert!(seen.iter().all(|&v|v),"fallback misses a unit of m={m}");
+        }
+        // No table: one thread for each output word, as before.
+        let plain=Shape {op:Op::ScoresRows,heads:2,dim:4,taps:4,rows:6,cols:2,slots:2,..rows(3)};
+        assert_eq!(plain.threads(6,true),Some(12));assert_eq!(plain.threads(6,false),Some(12));
+    }
+    #[test]
     fn pool_scores_rows_match_each_scalar_prefix() {
         let (h,d,t)=(2usize,3usize,4usize);let (first,m)=(3usize,6usize);let r=(first+m-1)/t;
         let q=(0..m*h*d).map(|i|value(i,0.125)).collect::<Vec<_>>();let k=(0..r*d).map(|i|value(i+1,0.0625)).collect::<Vec<_>>();let w=(0..m*h).map(|i|value(i+2,0.25)).collect::<Vec<_>>();
@@ -408,6 +495,30 @@ mod tests {
         let s=Shape {op:Op::ExpertPlace,rows:3,cols:4,dim:2,taps:2,slots:slots as u32,..rows(1)};
         let got=reference(s,[&big,&table,&[],&[],&[]],&[]).unwrap();
         for lane in 0..4 {assert_eq!(got[lane],(100*lane+1) as f32);assert_eq!(got[4+lane],(1000+100*lane) as f32);assert_eq!(got[8+lane],(100*lane) as f32);}
+    }
+    #[test]
+    fn expert_place_tile_has_the_same_bytes_and_a_checked_table() {
+        // Experts of sizes 3, 1, 4, 2 in expert order; rows come in token order, so groups interleave.
+        let sizes=[3usize,1,4,2];let rows_n:usize=sizes.iter().sum();let (d,parts)=(4usize,2usize);let slots=d*rows_n;
+        let mut owner=Vec::new();for (e,&n) in sizes.iter().enumerate() {for _ in 0..n {owner.push(e);}}
+        // Row r takes the owner at position (r*7)%rows_n: a permutation, since 7 and 10 are coprime.
+        let mut places=vec![0.0f32;3*rows_n];let mut starts=vec![0usize;sizes.len()];let mut sum=0;for (e,&n) in sizes.iter().enumerate() {starts[e]=sum;sum+=n;}
+        let mut seen=vec![0usize;sizes.len()];
+        for row in 0..rows_n {let e=owner[(row*7)%rows_n];places[3*row]=starts[e] as f32;places[3*row+1]=sizes[e] as f32;places[3*row+2]=seen[e] as f32;seen[e]+=1;}
+        let big=(0..slots*parts).map(|i|value(i+5,0.0625)).collect::<Vec<_>>();
+        let old=Shape {op:Op::ExpertPlace,rows:rows_n as u32,cols:(d*parts) as u32,dim:d as u32,taps:parts as u32,slots:slots as u32,..rows(1)};
+        let tile=Shape {op:Op::ExpertPlaceTile,..old};
+        let table=place_table(&places).unwrap();assert_eq!(table.len(),4*rows_n);assert_eq!(&table[..3*rows_n],&places[..]);
+        for slot in 0..rows_n {let row=table[3*rows_n+slot] as usize;assert_eq!(places[3*row] as usize+places[3*row+2] as usize,slot);}
+        let a=reference(old,[&big,&places,&[],&[],&[]],&[]).unwrap();let b=reference(tile,[&big,&table,&[],&[],&[]],&[]).unwrap();
+        assert_eq!(bits(&a),bits(&b));
+        // A table that is not a grouping keeps the original operation.
+        let mut dup=places.clone();dup[2]=dup[5];dup[0]=dup[3];dup[1]=dup[4];assert!(place_table(&dup).is_none());
+        let mut late=places.clone();late[2]=late[1];assert!(place_table(&late).is_none());
+        let mut half=places.clone();half[0]=0.5;assert!(place_table(&half).is_none());
+        let mut nan=places.clone();nan[1]=f32::NAN;assert!(place_table(&nan).is_none());
+        assert!(place_table(&[]).is_none() && place_table(&[0.0,1.0]).is_none());
+        let mut high=places.clone();high[0]=rows_n as f32;assert!(place_table(&high).is_none());
     }
     #[test]
     fn invalid_shapes_refuse() {

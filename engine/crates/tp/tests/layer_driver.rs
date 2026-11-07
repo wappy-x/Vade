@@ -221,3 +221,34 @@ fn every_declared_gather_uses_global_rank_order_and_exact_bf16_bytes() {
         }
     }}
 }
+
+#[test]
+fn chain_shadow_targets_the_first_static_reader_of_each_boundary() {
+    use engine_model::shapes::{ExpertShape,ExpertStorage};
+    for latent in [false,true] {for experts in [false,true] {
+        let mut d=description();d.routing.groups=2;d.routing.selected_groups=1;
+        if latent {d.layers[0].mixer=TokenMixer::LatentAttention(LatentDescription {
+            heads:2,query_rank:4,kv_rank:4,key_dim:3,value_dim:2,rotary_dim:0,
+            indexer:PoolIndexerDescription {heads:2,dim:3,token_budget:4,pool:2,learned_pool:true,
+                select_tail:true,share_for_draft_iteration:false} });}
+        if experts {d.layers[0].ffn=Ffn::Experts(ExpertShape {count:4,selected:2,width:6,shared_width:4,storage:ExpertStorage::PerExpert});}
+        let a=d.admit_headers(&headers(&d)).unwrap();let t=Topology {parts:2,rank:0};let s=state(&d,t);
+        let b=LayerBoundary::new(&d,&a,&s,0,3,t,1024).unwrap();let steps=&b.program().steps;let mut found=0;
+        for (i,step) in steps.iter().enumerate() {
+            if step.kind!=Kind::MhcPrepare {continue;}
+            let name=spark_tp::bounded_decoder::shadow_target(steps,i).unwrap_or_else(||panic!("no target latent={latent} experts={experts} step={i}"));
+            let norm=&steps[i+2].outputs[0].name;
+            let target=steps.iter().position(|s|s.kind==Kind::Project && s.weights.len()==1 && s.weights[0].name==name).unwrap();
+            assert!(target>i+2 && steps[target].inputs[0]==*norm,"target reads the boundary output");
+            assert!(steps[i+3..target].iter().all(|s|s.kind!=Kind::MhcPrepare),"target precedes the next boundary");
+            assert!(!name.contains(".experts."),"routed expert rows are never a target: {name}");
+            found+=1;
+        }
+        assert_eq!(found,2,"both boundaries of the layer have a target");
+    }}
+    // A boundary at the end of a program, or one without a norm, has no target.
+    let d=description();let a=d.admit_headers(&headers(&d)).unwrap();let t=Topology {parts:2,rank:0};let s=state(&d,t);
+    let b=LayerBoundary::new(&d,&a,&s,0,3,t,1024).unwrap();let steps=&b.program().steps;
+    assert!(spark_tp::bounded_decoder::shadow_target(steps,steps.len()).is_none());
+    assert!(spark_tp::bounded_decoder::shadow_target(&steps[..2],0).is_none());
+}

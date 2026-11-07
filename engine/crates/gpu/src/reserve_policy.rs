@@ -3,6 +3,10 @@ use std::time::{Duration, Instant};
 
 /// Idle time after which a reserve releases its spares (a funded one only under pressure).
 pub(crate) const IDLE_RELEASE: Duration = Duration::from_secs(30);
+pub(crate) fn vector_capacity(bytes:usize,available:usize)->usize {
+    let rounded=bytes.checked_add(4095).map_or(bytes,|rounded|rounded/4096*4096);
+    if rounded<=available {rounded} else {bytes}
+}
 
 /// Cumulative ordinary KV arena events. Segmented virtual allocations are excluded.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -36,7 +40,7 @@ impl Default for ReservePolicy {
     }
 }
 impl ReservePolicy {
-    const MINIMUM: usize = 2_000_000_000;
+    pub(crate) const MINIMUM: usize = 2_000_000_000;
     pub(crate) fn configure(&mut self, margin: usize) { self.limit = Self::MINIMUM; self.margin = margin; }
     pub(crate) fn cohort(&mut self, chats: usize) {
         self.cohort = self.cohort.max(chats);
@@ -97,6 +101,16 @@ impl ReservePolicy {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vector_capacity_preserves_extents_without_overflow() {
+        for bytes in [0,1,4,32,255,256,4095,4096,4097,16383,16384,619520,usize::MAX-4096,usize::MAX] {
+            let capacity=super::vector_capacity(bytes,usize::MAX);assert!(capacity>=bytes && capacity-bytes<4096);
+            if bytes<=usize::MAX-4095 {assert_eq!(capacity%4096,0);}
+            assert_eq!(super::vector_capacity(bytes,bytes),bytes);
+            assert_eq!(super::vector_capacity(bytes,0),bytes);
+        }
+        for bytes in 1..=4096 {assert_eq!(super::vector_capacity(bytes,4096),4096);}
+    }
     use super::*;
 
     #[test]

@@ -73,6 +73,8 @@ fn source_files(root: &Path) -> io::Result<Vec<PathBuf>> {
         root.join("src/projection_params.rs"), root.join("src/gdn_params.rs"), root.join("src/next_params.rs"), root.join("src/router_abi.rs"), root.join("src/mhc_params.rs"),
         root.join("src/mhc_boundary.rs"), root.join("src/tp_payload.rs"), root.join("src/expert_ops.rs"), root.join("src/next_math.rs"),
         root.join("src/causal_ops.rs"), root.join("src/latent_ops.rs"), root.join("src/prompt_ops.rs"), root.join("src/mxfp8_quantize.rs"),
+        root.join("src/resident_launch.rs"), root.join("src/device_route.rs"), root.join("src/plain_admission.rs"), root.join("src/prompt_admission.rs"), root.join("src/compact.rs"),
+        root.join("src/ordered_projection_kernel.rs"), root.join("src/frontend_math.rs"), root.join("src/quantize_sweep.rs"),
         root.join("build-kernels/src/main.rs"), root.join("ptx_stamp.rs")];
     visit(&root.join("kernels/src"), &mut files)?;
     files.sort();
@@ -108,8 +110,10 @@ pub fn stamp(root: &Path, ptx: &Path, variant: Variant) -> io::Result<()> {
 /// flash_bf16_mma_latency: 128 threads x 128 registers = four CTAs (16 warps) per SM, so the
 /// 192-CTA persistent grid is one wave (unbounded ptxas takes 134-136 -> three per SM).
 /// fp4_prefill_tc_down (256 threads): 128 keeps two CTAs (16 warps) per SM.
+/// mx_rows_tile (384 threads): 160 registers fit one 12-warp block per SM (unbounded ptxas takes 200: no 384-thread block would launch).
 #[allow(dead_code)]
-const REGISTER_CAPS: [(&str, u32); 18] = [("flash_bf16_mma_latency", 128), ("flash_bf16_mma_latency_group", 128), ("gemm_fp8_block128", 128), ("fp8_routed_gate", 128), ("fp8_routed_up", 128),
+// The project block can have 1024 threads; 64 registers allow that block to launch.
+const REGISTER_CAPS: [(&str, u32); 21] = [("mx_rows_tile", 160), ("resident_launch_mx", 40), ("mhc_boundary_project", 64), ("flash_bf16_mma_latency", 128), ("flash_bf16_mma_latency_group", 128), ("gemm_fp8_block128", 128), ("fp8_routed_gate", 128), ("fp8_routed_up", 128),
     ("fp8_routed_down", 128), ("fp4_prefill_tc_down", 128), ("prefill_attention_swizzled_packed_bf16", 168),
     ("prefill_attention_swizzled_bf16", 168), ("prefill_attention_gqa4_fragments", 168), ("prefill_attention_gqa4_bf16", 168),
     // Chunk scan: one 512-thread CTA per value head needs <= 128 registers.
@@ -150,6 +154,20 @@ pub fn verify(root: &Path, ptx: &Path, bytes: &[u8], variant: Variant) -> io::Re
 mod tests {
     use super::*;
     #[test]
+    fn kernel_external_modules_are_part_of_the_ptx_identity() {
+        let manifest=Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root=[manifest.to_path_buf(),manifest.join(".."),manifest.join("../gpu")].into_iter()
+            .find(|p|p.join("ptx_stamp.rs").is_file() && p.join("kernels/src/lib.rs").is_file()).unwrap().canonicalize().unwrap();
+        let bound=source_files(&root).unwrap().into_iter().map(|p|p.canonicalize().unwrap()).collect::<Vec<_>>();
+        let kernel=root.join("kernels/src/lib.rs");let source=fs::read_to_string(&kernel).unwrap();let mut missing=Vec::new();
+        for declaration in source.split("#[path").skip(1) {
+            let Some(relative)=declaration.split('"').nth(1) else {continue;};
+            let file=kernel.parent().unwrap().join(relative).canonicalize().unwrap();
+            if file.starts_with(root.join("src")) && !bound.contains(&file) {missing.push(file.strip_prefix(&root).unwrap().to_owned());}
+        }
+        assert!(missing.is_empty(),"kernel source files absent from PTX identity: {missing:?}");
+    }
+    #[test]
     fn shared_cast_and_expert_sources_are_part_of_the_ptx_identity() {
         let manifest=Path::new(env!("CARGO_MANIFEST_DIR"));
         // This module is also included by serving build-metadata tests.
@@ -164,7 +182,8 @@ mod tests {
             let copy=scratch.join(file.strip_prefix(root).unwrap());
             fs::create_dir_all(copy.parent().unwrap()).unwrap();fs::copy(file,copy).unwrap();
         }
-        for path in ["src/mhc_boundary.rs","src/expert_ops.rs","src/next_math.rs"] {
+        for path in ["src/mhc_boundary.rs","src/expert_ops.rs","src/next_math.rs","src/resident_launch.rs","src/device_route.rs","src/plain_admission.rs","src/prompt_admission.rs",
+            "src/compact.rs","src/ordered_projection_kernel.rs","src/frontend_math.rs"] {
         let shared=scratch.join(path);let original=fs::read(&shared).unwrap();
         // A host cast edit must invalidate either previously stamped image.
         for variant in [Variant::Production,Variant::Fp4] {

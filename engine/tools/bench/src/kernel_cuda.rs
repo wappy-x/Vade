@@ -5,39 +5,7 @@ use std::{
     ptr::null_mut,
     time::Instant,
 };
-#[allow(dead_code)]
-#[path = "../../../crates/gpu/src/fp4_abi.rs"]
-mod fp4;
-#[allow(dead_code, unsafe_op_in_unsafe_fn)]
-#[path = "../../../crates/gpu/src/fp8_abi.rs"]
-mod fp8;
-#[allow(dead_code)]
-#[path = "../../../crates/gpu/kernel_params.rs"]
-mod params;
-#[path = "kernel_qsa.rs"]
-mod qsa;
-#[path = "kernel_head.rs"] mod head;
-pub(super) fn gather_ptx() -> String { qsa::gather_ptx() }
-#[path = "kernel_gdn.rs"]
-mod gdn;
-#[path = "kernel_routed.rs"]
-mod bw_routed;
-use bw_routed::{flush_init, flush_on, icflush, launch_finish, launch_layer, launch_moe_route, launch_route, routed_fixture};
-#[path = "kernel_prompt.rs"]
-mod prompt;
-#[path = "kernel_frontend.rs"]
-mod frontend;
-#[path = "kernel_fp4_prompt.rs"]
-mod fp4_prompt;
-#[path = "kernel_fp8.rs"] pub(super) mod fp8group;
-#[path = "kernel_rows.rs"] pub(super) mod rows;
-#[path = "kernel_mxgroup.rs"]
-mod mxgroup;
-#[path = "kernel_fp8moe.rs"] mod fp8moe;
-#[path = "kernel_mhc.rs"] mod mhc;
-pub(super) use mhc::run as mhc_bytes;
-pub(super) use fp8moe::run as fp8_moe;
-use mxgroup::{all_mx, group_mx, mx_range_warps, mxgroup_fixture, mxgroup_weight, mxrows_a, mxrows_entries, mxrows_shared, mxrows_x};
+include!("kernel_cuda_registry.rs");
 /// Latency-kernel shared bytes per warp, as the engine launches them.
 const RING: u32 = params::LATENCY_RING as u32;
 type H = *mut c_void;
@@ -184,7 +152,7 @@ impl Gpu {
         Ok(())
     }
     fn module(&mut self, data: &[u8]) -> Result<H> {
-        let text = CString::new(data).map_err(|_| "PTX contains NUL")?;
+        let text = if data.starts_with(b"\x7fELF") { data.to_vec() } else { CString::new(data).map_err(|_| "PTX contains NUL")?.into_bytes_with_nul() };
         let mut m = null_mut();
         unsafe {
             check((self.d.module)(&mut m, text.as_ptr().cast()))?;

@@ -17,7 +17,7 @@ fn data(n: usize, salt: usize) -> Vec<f32> {
 }
 fn cases() -> Vec<Shape> {
     // Small odd widths and the saved mHC dimensions. These are fixture shapes.
-    [(1,1,1,1),(2,3,3,2),(3,7,5,3),(4,129,3,5),(4,4096,20,2),(5,7,20,3),(8,3,4,2),(4,4096,20,1)]
+    [(1,1,1,1),(2,3,3,2),(3,7,5,3),(4,129,3,5),(4,4096,20,2),(5,7,20,3),(8,3,4,2),(4,4096,20,1),(4,129,20,8),(4,129,20,9)]
         .map(|(streams,hidden,iterations,rows)| Shape {rows,streams,hidden,iterations,rms_eps:1e-6,eps:1e-6}).to_vec()
 }
 struct Fixture {shape:Shape,input:Vec<f32>,weights:Vec<f32>,base:Vec<f32>,scale:Vec<f32>,block:Vec<f32>}
@@ -126,7 +126,7 @@ fn boundary_device(out:&Path)->Result<()> {
     use std::rc::Rc;
     with_backend(0,layer_ptx()?,usize::MAX,|backend| {
         backend.configure_vector_pool(64<<20);
-        for (index,shape) in cases().into_iter().enumerate() {for precision in [WeightType::Bf16,WeightType::F32] {
+        for (index,shape) in cases().into_iter().enumerate() {for (precision,queued) in [(WeightType::Bf16,false),(WeightType::Bf16,true),(WeightType::F32,false),(WeightType::F32,true)] {
             let fixture=Fixture::new(shape);let hidden=shape.hidden as usize;let wide=shape.wide();let rows=shape.rows as usize;
             let norm=NormShape::new(hidden,1e-6,precision)?;
             let weight=data(hidden,17).into_iter().map(|value|match precision {WeightType::Bf16=>value,WeightType::F32=>value+0.00013}).collect::<Vec<_>>();
@@ -173,34 +173,41 @@ fn boundary_device(out:&Path)->Result<()> {
                 reference=next;expected.push(planes);blocks.push(Rc::new(backend.upload_vector(&block)?));
             }
             backend.synchronize()?;
-            let source=Rc::new(backend.upload_vector(&fixture.input)?);backend.synchronize()?;backend.set_profiling(true);let before=backend.stats();
+            let source=Rc::new(backend.upload_vector(&fixture.input)?);backend.synchronize()?;
+            // Production runs in a resident queue, where a dropped older pass waits for no stream.
+            // Without one, ordinary buffer destruction may wait once a pass is dropped.
+            let queue=if queued {Some(backend.resident_queue()?)} else {None};
+            backend.set_profiling(true);let before=backend.stats();
             let started=std::time::Instant::now();let mut pass=resident.begin_rows(source,rows)?;let mut aliases=Vec::new();
             for site in 0..3 {
                 let submitted=backend.stats().since(before);
-                if submitted.queued_calls!=2*(site as u128+1) || submitted.stream_wait_calls!=0 {return Err(format!("boundary submit calls or waits differ at site {site}: calls={} waits={}",submitted.queued_calls,submitted.stream_wait_calls));}
+                let calls=if rows<=8 {3}else{2};
+                if submitted.queued_calls!=calls*(site as u128+1) || (queued && submitted.stream_wait_calls!=0) {return Err(format!("boundary submit calls or waits differ at site {site}: calls={} waits={}",submitted.queued_calls,submitted.stream_wait_calls));}
                 if site<2 {let residual=Rc::new(backend.vector(rows*wide)?);aliases.push((site+1,residual.clone()));pass=resident.begin_after_rows(pass,blocks[site].clone(),residual,rows)?;}
             }
-            drop(resident);backend.synchronize()?;
+            drop(resident);backend.synchronize()?;drop(queue);backend.synchronize()?;
             let submitted=backend.stats().since(before);backend.set_profiling(false);
-            println!("MHC-BOUNDARY COMPLETE case={index} precision={precision:?} sites=3 elapsed_ns={} kernel_ns={} launches={} stream_waits={}",started.elapsed().as_nanos(),submitted.device_kernel_ns.iter().sum::<u128>(),submitted.queued_calls,submitted.stream_wait_calls);
+            println!("MHC-BOUNDARY COMPLETE case={index} precision={precision:?} queued={queued} sites=3 elapsed_ns={} kernel_ns={} launches={} stream_waits={}",started.elapsed().as_nanos(),submitted.device_kernel_ns.iter().sum::<u128>(),submitted.queued_calls,submitted.stream_wait_calls);
             for (site,alias) in aliases {for _ in 0..2 {
                 equal("retained residual alias after fused pre",&bytes(&backend.read_vector_values(&alias)?),&bytes(&expected[site][4]))?;
             }}
             println!("MHC-BOUNDARY RETAINED ALIAS PASS case={index} precision={precision:?} aliases=2 repeated_reads=2");
             let mut saved=Vec::new();let mut current=Some(&pass);
             while let Some(value)=current {saved.push(value);current=value.previous();}
-            for (site,value) in saved.into_iter().rev().enumerate() {
+            // A pass keeps one earlier generation, and the launch reads no older one.
+            let oldest=3-saved.len();
+            for (at,value) in saved.into_iter().rev().enumerate() {let site=oldest+at;
                 let normalized=value.normalized();
                 let planes=[value.mixing_normalized(),value.coefficients(),value.collapsed(),&*normalized,value.residual()];
                 for (plane,vector) in planes.into_iter().enumerate() {
                     let got=bytes(&backend.read_vector_values(vector)?);let want=bytes(&expected[site][plane]);
                     let label=format!("case={index} precision={precision:?} site={site} plane={plane}");equal(&label,&got,&want)?;
-                    write(&out.join(format!("{index}-{precision:?}-{site}-{plane}.f32")),&got)?;
+                    write(&out.join(format!("{index}-{precision:?}-{queued}-{site}-{plane}.f32")),&got)?;
                 }
             }
             let output=backend.vector(rows*wide)?;pass.materialize(&blocks[2],&output)?;
             equal("final deferred post",&bytes(&backend.read_vector_values(&output)?),&bytes(&expected[2][5]))?;
-            println!("MHC-BOUNDARY BYTES PASS case={index} precision={precision:?} sites=3 submit_launches=6 submit_waits=0");
+            println!("MHC-BOUNDARY BYTES PASS case={index} precision={precision:?} queued={queued} sites=3 submit_launches={} submit_waits=0",if rows<=8 {9}else{6});
         }}
         if let Some(error)=backend.fatal_error() {return Err(error);}Ok(())
     })?;

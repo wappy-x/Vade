@@ -14,7 +14,12 @@ fn run<const KIND:u32>(table:*const Command,index:u64) {
         match KIND {
             k if k==Kind::Causal as u32=>crate::causal_operation::resident_causal_operation(p.cast::<crate::causal_ops::Arguments>().read()),
             k if k==Kind::Expert as u32=>crate::expert_operation::resident_expert_operation(p.cast::<crate::expert_ops::LaunchArguments>().read()),
+            k if k==Kind::CausalFast as u32=>crate::causal_operation::resident_causal_fast(p.cast::<crate::causal_ops::Arguments>().read()),
+            k if k==Kind::NvStream as u32=>crate::nv_rows_stream::body::<64,256>(p.cast::<crate::expert_ops::LaunchArguments>().read()),
+            k if k==Kind::NvTile as u32=>crate::nv_tile::project::<16,8,4,2>(p.cast::<crate::expert_ops::LaunchArguments>().read()),
+            k if k==Kind::DeviceRoute as u32=>crate::device_route::build(p.cast::<crate::device_route_abi::Build>().read()),
             k if k==Kind::Plain as u32=>crate::ordered_projection::resident_project_f32_ordered(*words as _,*words.add(1) as _,*words.add(2) as _,*words.add(3) as u32,*words.add(4) as u32),
+            k if k==Kind::PlainBf16 as u32=>crate::plain_bf16::resident_project_bf16_ordered(*words as _,*words.add(1) as _,*words.add(2) as _,*words.add(3) as u32,*words.add(4) as u32),
             k if k==Kind::Mx as u32=>crate::next_decode::resident_flash_next_mxfp8_m1(p.cast::<crate::next_params::MxLayer>().read()),
             k if k==Kind::Mixed as u32=>crate::next_decode::resident_flash_resident_projection_batch(p.cast::<crate::next_params::ResidentProjectionBatch>().read()),
             k if k==Kind::Round as u32=>crate::mhc_boundary::resident_bf16_lanes_round(p.cast::<crate::mhc_boundary_math::LaneCast>().read()),
@@ -42,3 +47,8 @@ entry!(resident_launch_rms_partials,12);entry!(resident_launch_rms_apply,13);ent
 entry!(resident_launch_copy_words,15);entry!(resident_launch_zero_words,16);
 
 entry!(resident_launch_mixed,17);
+entry!(resident_launch_nv_stream,18);
+entry!(resident_launch_causal_fast,19);
+entry!(resident_launch_nv_tile,20);
+entry!(resident_launch_device_route,21);
+entry!(resident_launch_plain_bf16,26);

@@ -8,6 +8,16 @@ pub enum ResidentProjection<'v,'b,'a> {
     Mxfp8 {matrix:&'v ResidentMxfp8Projection<'b,'a>,input:&'v DeviceVector<'v>},
     Plain {rows:usize,cols:usize,weight:&'v DeviceVector<'v>,input:&'v DeviceVector<'v>},
 }
+impl ResidentMxfp8Projection<'_,'_> {
+    /// Output rows of this rank's matrix.
+    pub fn rows(&self)->usize {self.shape.rows()}
+    /// Bytes of the E4M3 rows, without scales.
+    pub fn weight_bytes(&self)->usize {self.weights.bytes}
+    /// CHAIN-SHADOW: the byte span `[offset, offset+bytes)` of the E4M3 rows.
+    pub fn shadow_range(&self,offset:usize,bytes:usize)->Result<super::ShadowRange<'_>,String> {
+        super::ShadowRange::checked(self.weights.address,self.weights.bytes,offset,bytes,self.backend.context)
+    }
+}
 impl<'a> Backend<'a> {
     pub fn resident_projection_batch(&self,jobs:&[ResidentProjection<'_,'_,'a>],output:&mut DeviceVector<'_>,round:bool)->Result<(),String> {
         use crate::next_params::{MxProjection,ResidentProjectionBatch};
@@ -101,6 +111,37 @@ impl<'a> ResidentMxfp8Projection<'_,'a> {
         let cols=s.cols();let rows=s.rows();b.check_vector(input,tokens.checked_mul(cols).ok_or("MXFP8 token rows overflow")?)?;
         if input.is_segmented() || tokens==0 {return Err("MXFP8 projection requires complete contiguous input features".into());}
         let output=b.vector(tokens*rows)?;let mut token=0;
+        // Which kernel runs is decided by small_choice::mx (its order is tested on the host): the small entries for 2 to 4 tokens of the listed shapes (the
+        // tile with only that many tokens of work, lane F's mx_rows_small entries, same bytes), else lane K's tile when its predicate admits a piece, else
+        // the old kernels. One token keeps the old M1 kernel (97 against 126 us at 4096 x 4096). Output rows are by token, so tile pieces of the largest
+        // proven size simply follow each other.
+        let piece=crate::mx_rows::MAX_TOKENS;
+        let choice=crate::small_choice::mx(rows,cols,tokens,self.weights.address,input.device_address(),output.device_address());
+        let small=if let crate::small_choice::Mx::Small(entry,per)=choice {Some((entry,per))} else {None};
+        let tiled=choice==crate::small_choice::Mx::Tile;
+        if let Some((entry,_))=small {b.require_arm_kernels(&[entry])?;} else if tiled {b.require_arm_kernels(&["mx_rows_tile"])?;}
+        // SAFETY: Shape bounds complete E4M3 rows and UE8M0 groups in the retained arena views.
+        // check_vector checks the context and all token rows, and the offsets stay inside them.
+        // The output is a new disjoint allocation. Buffer::drop drains the stream, so all
+        // owners outlive the launch. The argument is copied at launch. The small and the tile kernels take one
+        // projection of all tokens (the small ones 2 to 4), and each traps unless the alignment its predicate checked holds.
+        unsafe {
+        if let Some((entry,_))=small {
+            let [row_tiles,token_tiles]=crate::mx_small::grid(rows,tokens).ok_or("MXFP8 small grid overflow")?;
+            let mut p=crate::next_params::MxProjection {weights:self.weights.address,scales:self.scales.address,input:input.device_address(),output:output.device_address(),rows:rows as u32,
+                cols:cols as u32,tokens:tokens as u32,input_bf16:0,round:0};
+            crate::prompt_launches::record("mx_rows_small");
+            b.launch_flash_grid(entry,row_tiles,token_tiles,1,crate::mx_small::THREADS,0,&mut [parameter(&mut p)])?;
+        } else if tiled {
+            while token<tokens {let count=(tokens-token).min(piece);
+                let [row_tiles,token_tiles]=crate::mx_rows::grid(rows,count).ok_or("MXFP8 tile grid overflow")?;
+                let mut p=crate::next_params::MxProjection {weights:self.weights.address,scales:self.scales.address,input:input.device_address()+(token*cols*4) as u64,output:output.device_address()+(token*rows*4) as u64,rows:rows as u32,
+                    cols:cols as u32,tokens:count as u32,input_bf16:0,round:0};
+                crate::prompt_launches::record("mx_rows_tile");
+                b.launch_flash_grid("mx_rows_tile",row_tiles,token_tiles,1,crate::mx_rows::THREADS,0,&mut [parameter(&mut p)])?;
+                token+=count;
+            }
+        } else {
         while token<tokens {let count=(tokens-token).min(16);
             let mut args=crate::next_params::MxLayer::default();
             let p=crate::next_params::MxProjection {weights:self.weights.address,scales:self.scales.address,
@@ -108,13 +149,13 @@ impl<'a> ResidentMxfp8Projection<'_,'a> {
                 cols:cols as u32,tokens:count as u32,input_bf16:0,round:0};
             let kernel=p.kernel();args.push(p)?;
             b.require_arm_kernels(&[kernel])?;
-            // SAFETY: Shape bounds complete E4M3 rows and UE8M0 groups in the retained arena views.
-            // check_vector checks the context and all token rows, and the offsets stay inside them.
-            // The output is a new disjoint allocation. Buffer::drop drains the stream, so all
-            // owners outlive the launch. The argument is copied at launch.
-            unsafe {b.launch_flash(kernel,args.ends[1],128,&mut [parameter(&mut args)])}?;
+            crate::prompt_launches::record("mx_rows_groups");
+            b.launch_flash(kernel,args.ends[1],128,&mut [parameter(&mut args)])?;
             token+=count;
-        }Ok(output)
+        }
+        }
+        }
+        Ok(output)
     }
 }
 impl<'a> Mxfp8ProjectionPass<'a> {

@@ -16,9 +16,7 @@ impl<'a> Backend<'a> {
         if self.uploads.try_borrow().map_or(true, |s| s.capacity - s.used < SEGMENT_UPLOADS) { return Ok(false); }
         let maximum = crate::GraphAllowance::whole_model(layers, rows)?.maximum_bytes();
         self.context.make_room(maximum)?;
-        let storage = self.context.graph_storage.get().checked_add(maximum).ok_or("graph storage accounting overflow")?;
-        if storage > self.context.graph_budget.get()
-            || self.allocated_bytes().checked_add(storage).is_none_or(|n| n > self.context.budget.get()) { return Ok(false); }
+        let Some(storage)=crate::allocation_budget::graph_storage(self.allocated_bytes(),self.context.graph_storage.get(),self.context.pinned_staging.get(),maximum,self.context.graph_budget.get(),self.context.budget.get())? else {return Ok(false);};
         self.context.activate()?;
         self.context.graph_storage.set(storage);
         self.context.peak_graph_storage.set(self.context.peak_graph_storage.get().max(storage));

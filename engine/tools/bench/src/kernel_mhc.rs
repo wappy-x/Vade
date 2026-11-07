@@ -1,7 +1,24 @@
 //! Device byte checks through the existing safe benchmark CUDA wrapper.
 #![forbid(unsafe_code)]
 use super::{Gpu, H, Result, ptr, sha256};
+#[path = "kernel_nvbatch.rs"] pub(super) mod nvbatch;
+#[path = "kernel_rowstile.rs"] pub(super) mod rowstile;
+#[path = "kernel_scorestile.rs"] pub(super) mod scorestile;
+#[path = "kernel_transp.rs"] pub(super) mod transp;
+#[allow(dead_code)] #[path = "../../../crates/gpu/src/small_sweep.rs"] pub(super) mod envelope;
+#[path = "kernel_rowsmall.rs"] pub(super) mod rowsmall;
+#[path = "kernel_nofill.rs"] pub(super) mod nofill;
+#[path = "kernel_nvsmall.rs"] pub(super) mod nvsmall;
+#[path = "kernel_fp8small.rs"] pub(super) mod fp8small;
+#[path = "kernel_mxsmall.rs"] pub(super) mod mxsmall;
+#[path = "kernel_fp8tile.rs"] pub(super) mod fp8tile;
+#[path = "kernel_mxrows.rs"] pub(super) mod mxrows;
+#[path = "kernel_fp8rows.rs"] pub(super) mod fp8rows;
+#[path = "kernel_attnsweep.rs"] pub(super) mod attnsweep;
 use crate::{mhc_params::*, mhc_reference::{Fixture, Output, bytes, shapes}};
+#[path = "kernel_mhcproj.rs"] pub(super) mod project;
+#[path = "kernel_mxwave.rs"] pub(super) mod mxwave;
+#[path = "kernel_nvrows.rs"] pub(super) mod nvrows;
 const GUARD: [u8; 16] = [0x5a; 16];
 struct Buffer { base: u64, address: u64, words: usize }
 impl Buffer {
