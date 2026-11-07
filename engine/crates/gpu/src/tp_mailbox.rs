@@ -90,7 +90,7 @@ impl<'a> Backend<'a> {
         let slot = seq as usize % m.layout.slots;
         let mut args = [source.buffer.address, rows as u64, width as u64, half as u64, own as u64, m.device(m.layout.send_slot(slot) + m.layout.frame),
             m.device(SEND_LEN + slot), m.device(SEND_SEQ + slot), (seq as u32) as u64 | m.wide() << 32];
-        self.tp_mailbox_launch("tp_mailbox_put", 1, 1024, &mut args)?;
+        self.tp_mailbox_launch("tp_mailbox_put", 1, 1, 1024, &mut args)?;
         m.bell.queued(seq);
         Ok(())
     }
@@ -102,7 +102,7 @@ impl<'a> Backend<'a> {
         let slot=seq as usize%m.layout.slots;
         let mut args=[source.buffer.address,rows as u64,width as u64,half as u64,own as u64,
             m.device(m.layout.send_slot(slot)+m.layout.frame),m.device(SEND_LEN+slot),m.device(SEND_SEQ+slot),seq as u32 as u64,m.device(ERROR)];
-        self.tp_mailbox_launch("tp_mailbox_put_finite",1,1024,&mut args)?;m.bell.queued(seq);Ok(())
+        self.tp_mailbox_launch("tp_mailbox_put_finite",1,1,1024,&mut args)?;m.bell.queued(seq);Ok(())
     }
     /// Queue tp_mailbox_take: wait (at most `limit_ns`, below 2^47) for message `seq` in its receive slot,
     /// then its rows go to words [peer, peer + half) of each `width`-word row of `target`.
@@ -125,7 +125,27 @@ impl<'a> Backend<'a> {
         let mut args = [target.buffer.address, rows as u64, width as u64, half as u64, peer as u64, m.device(m.layout.recv_slot(channel, slot) + m.layout.frame),
             m.device(m.layout.recv_seq(channel, slot)), (seq as u32) as u64, m.device(ERROR), limit];
         let most = match m.words()[TAKE_CTAS].load(Ordering::Relaxed) { 0 => 96, n => n.min(96) as usize };
-        self.tp_mailbox_launch("tp_mailbox_take", (rows * half).div_ceil(256).clamp(1, most) as u32, 256, &mut args)
+        self.tp_mailbox_launch("tp_mailbox_take", (rows * half).div_ceil(256).clamp(1, most) as u32, 1, 256, &mut args)
+    }
+    /// Receive unchanged wire words directly into disjoint final job ranges.
+    /// Same wait, timeout and sticky error as tp_mailbox_take: a failed take writes no target word.
+    pub fn tp_mailbox_take_scatter(&self,m:&TpMailbox<'_>,target:&mut DeviceVector<'_>,rows:&[[usize;3]],channel:usize,seq:u64,limit_ns:u64)->Result<(),String> {
+        self.check_mailbox_owner(m,target)?;
+        if target.is_segmented() || !crate::scatter_copy::channel_inside(channel,m.layout.world) {return Err("scatter mailbox owner or channel differs".into());}
+        let plan=crate::scatter_copy::Plan::checked(m.slot_bytes()/4,target.len(),rows)?;
+        let slot=seq as usize%m.layout.slots;
+        let bytes=plan.encode(m.device(m.layout.recv_slot(channel,slot)+m.layout.frame),target.device_address())?;
+        let limit=limit_ns.min((1<<47)-1)|m.wide()<<47|u64::from(m.words()[TAKE_PAUSE].load(Ordering::Relaxed)&0xffff)<<48;
+        let most=match m.words()[TAKE_CTAS].load(Ordering::Relaxed) {0=>96,n=>n.min(96) as usize};
+        let grid=[crate::scatter_copy::take_blocks(plan.longest,plan.rows.len(),most),plan.rows.len() as u32,1,256,0];
+        let mut args=[0,m.device(m.layout.recv_seq(channel,slot)),seq as u32 as u64,m.device(ERROR),limit];
+        if self.record_resident_tabled(crate::resident_launch::Kind::TakeScatter,grid,&bytes,|address| {
+            let mut c=crate::resident_launch::Command::new(crate::resident_launch::Kind::TakeScatter);args[0]=address;
+            for (i,&value) in args.iter().enumerate() {c.word(i,value);}c
+        })? {return self.resident_completion();}
+        let mut table=self.vector(bytes.len()/4)?;self.write_vector_bytes(&mut table,&bytes)?;args[0]=table.device_address();
+        let launched=self.tp_mailbox_launch("tp_mailbox_take_scatter",grid[0],grid[1],256,&mut args);
+        let completed=self.resident_completion();launched.and(completed)
     }
     /// Publish two vector parts in one slot. Each tuple is (vector, width, columns, offset).
     pub fn tp_mailbox_put_pair(&self, m: &TpMailbox<'_>, parts: [(&DeviceVector<'_>, usize, usize, usize); 2],
@@ -139,7 +159,7 @@ impl<'a> Backend<'a> {
         let mut args = [x.buffer.address, y.buffer.address, rows as u64, xw as u64, yw as u64, xc as u64, yc as u64, xo as u64, yo as u64,
             m.device(m.layout.send_slot(slot) + m.layout.frame), m.device(SEND_LEN + slot), m.device(SEND_SEQ + slot),
             (seq as u32) as u64 | m.wide() << 32];
-        self.tp_mailbox_launch("tp_mailbox_put_pair", 1, 1024, &mut args)?;
+        self.tp_mailbox_launch("tp_mailbox_put_pair", 1, 1, 1024, &mut args)?;
         m.bell.queued(seq);
         Ok(())
     }
@@ -161,7 +181,7 @@ impl<'a> Backend<'a> {
             m.device(m.layout.recv_slot(channel, slot) + m.layout.frame), m.device(m.layout.recv_seq(channel, slot)),
             (seq as u32) as u64, m.device(ERROR), limit];
         let most = match m.words()[TAKE_CTAS].load(Ordering::Relaxed) { 0 => 96, n => n.min(96) as usize };
-        self.tp_mailbox_launch("tp_mailbox_take_pair", p.words().div_ceil(256).clamp(1, most) as u32, 256, &mut args)
+        self.tp_mailbox_launch("tp_mailbox_take_pair", p.words().div_ceil(256).clamp(1, most) as u32, 1, 256, &mut args)
     }
     /// The mailbox and the rows' vector were allocated in this Backend's context: a launch on
     /// another context could outlive the memory it reads or writes.
@@ -171,12 +191,14 @@ impl<'a> Backend<'a> {
             .map_err(|_| "tensor split mailbox or rows belong to another backend".into())
     }
     /// The mailbox kernels take only u64 parameters (pointers, counts, the sequence word).
-    fn tp_mailbox_launch(&self, name: &str, blocks: u32, threads: u32, args: &mut [u64]) -> Result<(), String> {
+    fn tp_mailbox_launch(&self, name: &str, blocks: u32, rows: u32, threads: u32, args: &mut [u64]) -> Result<(), String> {
         let mut pointers: Vec<*mut core::ffi::c_void> = args.iter_mut().map(|a| (a as *mut u64).cast()).collect();
         // SAFETY: the named scalar or pair mailbox kernel takes these u64 parameters in this
         // order; every address and extent was checked against its vector or the mailbox, and
-        // both outlive the ordered stream (the mailbox lives with the model).
-        unsafe { self.launch_flash(name, blocks, threads, &mut pointers) }
+        // both outlive the ordered stream (the mailbox lives with the model). `rows` is 1 for every
+        // kernel except tp_mailbox_take_scatter, whose grid-y indexes its table of exactly `rows`
+        // checked HybridCopyRow entries; that table is retained through ordered completion.
+        unsafe { self.launch_flash_rows(name, blocks, rows, threads, 0, &mut pointers) }
     }
 }
 

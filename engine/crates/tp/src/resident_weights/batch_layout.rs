@@ -11,6 +11,16 @@ impl Layout {
             .map(|offset|(origin,offset)).ok_or_else(||"resident device batch rank offset overflow".into())).collect::<Result<Vec<_>>>()?;
         Ok((own,remote))
     }
+    /// Map one wire chunk to final job-major ranges. Replicated rows use origin zero.
+    pub fn scatter(&self,origin:usize)->Result<Vec<[usize;3]>> {
+        if origin>=self.chunks {return Err("resident scatter origin differs".into());}
+        let mut output=0usize;let mut rows=Vec::new();
+        for ranges in &self.ranges {for range in ranges {
+            let words=range.len();if range.start/self.stride==origin {rows.push([range.start%self.stride,output,words]);}
+            output=output.checked_add(words).ok_or("resident scatter output overflow")?;
+        }}Ok(rows)
+    }
+    pub fn output_words(&self)->Result<usize> {self.ranges.iter().flatten().try_fold(0usize,|n,r|n.checked_add(r.len()).ok_or("resident scatter output overflow".into()))}
     pub fn new(rows:&[Rows])->Result<Self> {
         if rows.is_empty() || rows.iter().any(|r|r.count==0 || r.total==0 || r.total%r.count!=0 || !r.split && r.total!=r.count) {return Err("resident device batch geometry differs".into());}
         let chunks=rows.iter().find(|r|r.split).map_or(1,|r|r.total/r.count);
@@ -51,6 +61,16 @@ impl Layout {
             }
             assert!(layout.placement(parts,parts).is_err());assert!(layout.placement(0,parts+1).is_err());
         }
+    }
+    #[test] fn scatter_matches_gathered_rows_for_every_origin_and_replication() {
+        for chunks in 1..=5 {for jobs in 1..=19 {
+            let rows=(0..jobs).map(|i|Rows {start:0,count:i+1,total:if i%3==0 {i+1} else {(i+1)*chunks},split:chunks>1 && i%3!=0}).collect::<Vec<_>>();
+            let layout=Layout::new(&rows).unwrap();let source=(0..layout.stride*layout.chunks).map(|i|[0,0x80000000,0x7fc01234,i as u32][i%4]).collect::<Vec<_>>();
+            let expected=layout.ranges.iter().flatten().flat_map(|r|source[r.clone()].iter().copied()).collect::<Vec<_>>();
+            let mut actual=vec![0xdeadbeef;layout.output_words().unwrap()];let mut writes=vec![0;actual.len()];
+            for origin in (0..layout.chunks).rev() {for [s,d,n] in layout.scatter(origin).unwrap() {actual[d..d+n].copy_from_slice(&source[origin*layout.stride+s..origin*layout.stride+s+n]);for count in &mut writes[d..d+n] {*count+=1;}}}
+            assert_eq!(actual,expected);assert!(writes.iter().all(|&n|n==1));assert!(layout.scatter(layout.chunks).is_err());
+        }}
     }
     #[test] fn empty_zero_mismatched_groups_and_overflow_are_refused() {
 

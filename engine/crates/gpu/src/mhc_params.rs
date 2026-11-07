@@ -125,7 +125,7 @@ pub const SHADOW_MAX_BLOCKS: u32 = 64;
 /// Decode CHAIN-SHADOW: bytes of the next stage's weights a boundary pulls toward L2, and the
 /// dots-launch tail blocks that issue them. Screen de9aa38ef on one Spark (BENCH-1): 8 MiB with 2
 /// tail blocks saved 18.7 us a boundary; 24 tail blocks slowed the chain and saved 3.0 us.
-pub const SHADOW_DECODE_BYTES: usize = 8 << 20;
+pub const SHADOW_DECODE_BYTES: usize = 16 << 20;
 pub const SHADOW_DECODE_BLOCKS: u32 = 2;
 /// The largest add count the probe binder accepts (about 0.12 s of adds at 1.8 ns).
 pub const PROBE_MAX_ADDS: u32 = 1 << 26;

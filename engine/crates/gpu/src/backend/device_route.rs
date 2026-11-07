@@ -31,7 +31,8 @@ impl<'a> Backend<'a> {
         self.check_vector(input,table.first.shape.cols as usize*if table.down {table.picks as usize} else {1})?;
         if ids.is_segmented() || input.is_segmented() || table.owners.len()!=table.experts as usize*table.phases as usize*2 {return Err("device route owner layout differs".into());}
         let count=table.picks*table.phases;let quantized=&table.quantized;let quantizers=&table.quantizers;let projects=&table.projects;
-        let mut output=self.vector(table.first.shape.rows as usize*count as usize)?;self.zero_vector(&mut output)?;
+        // No fill: the region is fully written by nv_tile before any read (job * rows offsets, one raw store a word; a bad route traps).
+        let mut output=self.vector(table.first.shape.rows as usize*count as usize)?;self.skip_fill(&mut output)?;
         let mut build=route::Build {table:table.table.device_address(),ids:ids.device_address(),input:input.device_address(),quantized:quantized.device_address(),
             quantizers:quantizers.device_address(),projects:projects.device_address(),output:output.device_address(),experts:table.experts,picks:table.picks,phases:table.phases,
             down:u32::from(table.down),shared:u32::from(table.shared)};

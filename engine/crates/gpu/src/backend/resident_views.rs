@@ -170,3 +170,24 @@ impl<'a> Backend<'a> {
         let completed=self.resident_completion();launched.and(completed)?;Ok(output)
     }
 }
+
+impl<'a> Backend<'a> {
+    /// Copy immutable local chunks directly into disjoint final output ranges.
+    /// Both storage owners stay retained by the ordered queue through completion.
+    pub fn resident_scatter_copy(&self,source:&DeviceVector<'_>,target:&mut DeviceVector<'_>,rows:&[[usize;3]])->Result<(),String> {
+        self.require_resident_stream()?;self.check_vector(source,source.len())?;self.check_vector(target,target.len())?;
+        if source.is_segmented() || target.is_segmented() {return Err("scatter requires contiguous storage".into());}
+        let plan=crate::scatter_copy::Plan::checked(source.len(),target.len(),rows)?.cut()?;
+        let source_end=source.device_address().checked_add(byte_count(source.len(),4)? as u64).ok_or("scatter source address overflow")?;
+        let target_end=target.device_address().checked_add(byte_count(target.len(),4)? as u64).ok_or("scatter target address overflow")?;
+        if source.device_address()<target_end && target.device_address()<source_end {return Err("scatter source and target overlap".into());}
+        let bytes=plan.encode(source.device_address(),target.device_address())?;
+        let grid=[(plan.longest as u32).div_ceil(128),plan.rows.len() as u32,1,128,0];
+        self.require_arm_kernels(&["flash_hybrid_copy"])?;
+        if self.record_resident_tabled(crate::resident_launch::Kind::Copy,grid,&bytes,|address|crate::resident_launch_encode::copy(
+            crate::kernel_params::HybridCopy {source:ptr::null(),destination:ptr::null_mut(),words:0,padding:0,rows:address}))? {return self.resident_completion();}
+        // Not recorded: the same words reach the same places through the checked ordered copy.
+        for &[from,to,words] in &plan.rows {self.copy_range(source,target,from,to,words)?;}
+        self.resident_completion()
+    }
+}

@@ -77,8 +77,9 @@ mod device {
         let payload=load_rows::padded_bytes(bytes);
         let mut out=b.vector(payload.len()/4)?;b.write_vector_bytes(&mut out,&payload)?;b.synchronize()?;out.into_resident_shared()
     }
-    /// The owned queue retains each dropped packed/output allocation. Both
-    /// copies and mailbox operations keep their original ordered-stream order.
+    /// Local rows and each peer's rows go straight to their final job ranges. The
+    /// owned queue retains the dropped local and output allocations. Both the copy
+    /// and the mailbox operations keep their original ordered-stream order.
     fn gather_device<'d>(b:&Backend<'d>,mailbox:&spark_gpu_probe::driver::TpMailbox<'d>,sequence:&mut u64,topology:Topology,local:&DeviceVector<'d>,rows:&[Rows])->Result<Vec<DeviceVector<'d>>> {
         let layout=super::batch_layout::Layout::new(rows)?;
         // Rows are immutable admission metadata from Rows::new on this owner.
@@ -87,23 +88,25 @@ mod device {
         if local.len()!=layout.stride {return Err("resident device batch local extent differs".into());}
         let next=sequence.checked_add(1).filter(|&n|n<=u32::MAX as u64).ok_or("resident mailbox sequence exhausted")?;
         if mailbox.failed() {b.synchronize()?;return Err("resident device exchange failed".into());}
-        let total=layout.stride.checked_mul(layout.chunks).ok_or("resident device batch extent overflow")?;
+        layout.stride.checked_mul(layout.chunks).ok_or("resident device batch extent overflow")?;
         mailbox.layout().world.eq(&(topology.parts as usize)).then_some(()).ok_or("resident device batch mailbox topology differs")?;
-        let (own,remote)=layout.placement(topology.rank as usize,topology.parts as usize)?;
-        let mut packed=b.vector(total)?;b.zero_vector(&mut packed)?;b.copy_range(local,&mut packed,0,own,layout.stride)?;
-        b.tp_mailbox_put_finite(mailbox,&packed,1,total,layout.stride,own,next)?;
-        for (origin,offset) in remote {let channel=mailbox.layout().channel(origin,topology.rank as usize);
-            b.tp_mailbox_take_from(mailbox,&mut packed,1,total,layout.stride,offset,channel,next,10_000_000_000)?;
+        let (_,remote)=layout.placement(topology.rank as usize,topology.parts as usize)?;
+        for (row,ranges) in rows.iter().zip(&layout.ranges) {let words=ranges.iter().map(|range|range.len()).sum::<usize>();
+            if words!=row.total || words==0 {return Err("resident device batch output extent differs".into());}}
+        let mut joined=b.vector(layout.output_words()?)?;
+        // A failed take leaves its ranges unchanged while queued consumers may
+        // execute before the sticky error is checked. Keep them initialized.
+        b.zero_vector(&mut joined)?;
+        let local_rows=layout.scatter(topology.rank as usize)?;
+        if !local_rows.is_empty() {b.resident_scatter_copy(local,&mut joined,&local_rows)?;}
+        // Publish the identical contiguous local payload, without rank-major staging.
+        b.tp_mailbox_put_finite(mailbox,local,1,layout.stride,layout.stride,0,next)?;
+        for (origin,_) in remote {let channel=mailbox.layout().channel(origin,topology.rank as usize);
+            let placements=layout.scatter(origin)?;
+            if placements.is_empty() {return Err("resident scatter origin has no split rows".into());}
+            b.tp_mailbox_take_scatter(mailbox,&mut joined,&placements,channel,next,10_000_000_000)?;
         }*sequence=next;
-        // One copy kernel places every row's chunks in row order. Each output is a
-        // read-only view of that one allocation: the same words as one copy kernel
-        // for each chunk into one vector for each row.
-        let packed=packed.into_resident_shared()?;let mut parts=Vec::new();let mut extents=Vec::with_capacity(rows.len());
-        for (row,ranges) in rows.iter().zip(layout.ranges) {let mut words=0;
-            for range in ranges {if range.is_empty() {continue;}words+=range.len();parts.push(packed.resident_range(range)?);}
-            if words!=row.total || words==0 {return Err("resident device batch output extent differs".into());}extents.push(words);
-        }
-        let joined=b.resident_join(&parts.iter().map(|part|(part,part.len())).collect::<Vec<_>>(),&mut None,0)?.into_resident_shared()?;
+        let joined=joined.into_resident_shared()?;let extents=rows.iter().map(|row|row.total).collect::<Vec<_>>();
         let mut output=Vec::with_capacity(rows.len());let mut start=0;
         for words in extents {output.push(joined.resident_range(start..start+words)?);start+=words;}Ok(output)
     }
@@ -311,7 +314,7 @@ mod device {
                 let sequence=self.sequence.checked_add(1).filter(|&n|n<=u32::MAX as u64).ok_or("resident mailbox sequence exhausted")?;
                 if mailbox.failed() {b.synchronize()?;return Err("resident device exchange failed".into());}
                 let total=matrix.rows.total;let count=matrix.rows.count;let own=matrix.rows.start;
-                // A failed take writes no peer rows. Initialize them before any queued consumer.
+                // A failed take can leave some or all peer words unwritten. Initialize the full output before queued consumers.
                 let mut gathered=b.vector(total)?;b.zero_vector(&mut gathered)?;b.copy_range(&output,&mut gathered,0,own,count)?;
                 b.tp_mailbox_put_finite(mailbox,&gathered,1,total,count,own,sequence)?;
                 let peer=total.checked_sub(own+count).ok_or("resident peer interval overflow")?;
@@ -476,7 +479,7 @@ let mut bytes=vec![0;matrix.rows.total*4];
             let Some(mailbox)=self.mailbox.filter(|m|self.small.get() && words>0 && words<=m.slot_bytes()/4) else {return Ok(None);};
             let stamp=self.cost.start(b);
             // One block for each rank, already in rank order: the packed vector is the result,
-            // and the copy that `gather_device` makes to order several matrices is not needed.
+            // and the job-major placement that `gather_device` makes for several matrices is not needed.
             self.topology.validate().map_err(|error|error.to_string())?;
             mailbox.layout().world.eq(&parts).then_some(()).ok_or("prompt mailbox topology differs")?;
             let next=self.sequence.checked_add(1).filter(|&n|n<=u32::MAX as u64).ok_or("resident mailbox sequence exhausted")?;

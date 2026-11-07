@@ -12,6 +12,7 @@ pub mod driver;
 pub mod tp_mailbox_host;
 pub mod tp_route;
 pub mod tp_payload;
+pub mod scatter_copy;
 #[cfg(target_os = "linux")]
 pub mod tp_rdma;
 #[cfg(all(test, not(target_os = "linux")))]
@@ -39,6 +40,7 @@ pub mod fp8_rows;
 pub mod mhc_boundary;
 pub mod nv_stream;
 pub mod prompt_writes;
+pub mod fill_free;
 pub mod quantize_sweep;
 pub mod nv_rows;
 pub mod mx_rows;

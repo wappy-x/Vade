@@ -15,7 +15,7 @@ pub const THREADS:usize=128;
 pub(crate) fn lanes(launch:LaunchArguments) {
     // SAFETY: The host checks the descriptor (`quantize_lanes_admitted`: Quantize, cols a multiple of 16 up to the swept
     // limit), that the input owner holds cols words and the output owner cols/16*17 words, both contiguous and live
-    // through stream completion, and that the output is private and initialized earlier on the stream. Input is
+    // through stream completion, and that the output is private (raw stores before any read; the host skips its fill, fill_free). Input is
     // immutable. Thread t of block b owns element t%16 of quantization block b*8+t/16: it reads that one input word and
     // writes that one output word (and word 16 for element 0) only when the block index is below cols/16, so every
     // output word has exactly one writing thread. A batch (`launch.batch` nonzero) is a host-checked table of `count`

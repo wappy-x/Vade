@@ -231,3 +231,53 @@ pub(crate) fn resident_tp_mailbox_put_finite(src:*const u32,rows:u64,width:u64,h
         }
     }
 }
+
+/// tp_mailbox_take for rows that are not adjacent in the target: the same wait, timeout and
+/// sticky error, then each row of a host-checked HybridCopyRow table (one per grid-y) is copied
+/// from the receive slot to its own target range, split over grid-x.
+#[inline(always)]
+pub(crate) fn resident_tp_mailbox_take_scatter(table:*const crate::kernel_params::HybridCopyRow,seq_word:*const u32,seq:u64,error:*mut u32,limit_ns:u64) {
+    // SAFETY: Backend::tp_mailbox_take_scatter launches grid-y equal to the table's
+    // row count, so block_idx_y stays inside the table. scatter_copy::Plan checks that
+    // each source range lies in the acquired receive slot and that target ranges are
+    // disjoint inside one retained output. Table, output and mailbox outlive ordered
+    // completion. Each word index has one thread (the step is grid-x times the block
+    // size). The row is read after the acquire: a timed-out CTA reads and writes nothing.
+    unsafe {
+    let sh = crate::ptx::shared::<4>();
+    if _thread_idx_x() == 0 {
+        let start = now_ns();
+        let (limit, cap) = (limit_ns & ((1 << 47) - 1), (limit_ns >> 48) as u32);
+        let cap = if cap == 0 { 2048 } else { cap };
+        let (mut ok, mut pause) = (1u32, 32u32.min(cap));
+        while load_acquire(seq_word) != seq as u32 {
+            if load_acquire(error) != 0 || now_ns().wrapping_sub(start) > limit {
+                store_release(error, 1);
+                ok = 0;
+                break;
+            }
+            asm!("nanosleep.u32 {t};", t = in(reg32) pause);
+            pause = (pause * 2).min(cap);
+        }
+        crate::ptx::store(sh, f32::from_bits(ok));
+    }
+    crate::ptx::sync();
+    if crate::ptx::load(sh).to_bits() == 0 { return; }
+    let row = &*table.add(core::arch::nvptx::_block_idx_y() as usize);
+    let (dst, src, words) = (row.destination as *mut u32, row.source as *const u32, row.words as usize);
+    let step = (_grid_dim_x() * _block_dim_x()) as usize;
+    let mut i = (_block_idx_x() * _block_dim_x() + _thread_idx_x()) as usize;
+    if quads(limit_ns >> 47 & 1 != 0, words, words, 0, src as usize, dst as usize) {
+        let q = words / 4;
+        while i < q {
+            copy4!(dst.add(4 * i), src.add(4 * i));
+            i += step;
+        }
+    } else {
+        while i < words {
+            *dst.add(i) = *src.add(i);
+            i += step;
+        }
+    }
+    }
+}

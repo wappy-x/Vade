@@ -19,7 +19,7 @@ pub use fp8::{Fp8GroupedScratch, Fp8RoutingFlag};
 #[path = "backend/weights.rs"] mod weights;
 #[path = "backend/kernels.rs"] mod kernels; #[cfg(feature="kernel-bench")] #[path = "backend/referee.rs"] mod referee; #[cfg(feature="kernel-bench")] pub use referee::{RefereePlan,RefereeShape};
 #[path = "backend/dense_tile.rs"] mod dense_tile;
-#[path = "backend/dense.rs"] mod dense; #[path = "backend/resident_program.rs"] mod resident_program; pub use resident_program::ResidentProgram; #[path = "backend/resident_views.rs"] mod resident_views; #[path = "backend/resident_launch.rs"] mod resident_launch; #[path = "backend/resident_queue.rs"] mod resident_queue; pub use resident_queue::ResidentQueue;
+#[path = "backend/fill_skip.rs"] mod fill_skip; #[path = "backend/dense.rs"] mod dense; #[path = "backend/resident_program.rs"] mod resident_program; pub use resident_program::ResidentProgram; #[path = "backend/resident_views.rs"] mod resident_views; #[path = "backend/resident_launch.rs"] mod resident_launch; #[path = "backend/resident_queue.rs"] mod resident_queue; pub use resident_queue::ResidentQueue;
 #[path = "backend/mhc.rs"] mod mhc; pub use mhc::{Bf16Vector,ResidentMhc,MhcPass}; use kernels::AbKernels; #[path = "backend/mhc_boundary.rs"] mod mhc_boundary; pub use mhc_boundary::{ResidentMhcBoundary,MhcBoundaryPass,Shadow,ShadowRange,GpuMark};
 #[path = "backend/text_edges.rs"] mod text_edges; pub use text_edges::ResidentTextEdges; #[path = "backend/norm.rs"] mod norm; pub use norm::{ResidentNorm,NormOutput}; #[path = "backend/mxfp8_projection.rs"] mod mxfp8_projection; pub use mxfp8_projection::{ResidentMxfp8Projection,Mxfp8ProjectionPass,ResidentProjection};
 
@@ -209,7 +209,7 @@ pub struct BackendStats {
     pub host_launch_ns: u128, pub host_profile_ns: u128,
     /// Staging wall envelopes, including CPU work overlapping GPU execution.
     pub host_pack_ns: u128,
-    pub graph_launches: u128, pub graph_captures: u128, pub host_graph_launch_ns: u128, pub projection_dispatches: [u128; 11], pub attention_dispatches: [u128; 2],
+    pub graph_launches: u128, pub graph_captures: u128, pub host_graph_launch_ns: u128, pub projection_dispatches: [u128; 11], pub attention_dispatches: [u128; 2], pub zero_fill_launches: u128, pub zero_fill_rows: u128, pub zero_fill_words: u128, pub recorded_kinds: [u128; 27],
 }
 impl BackendStats {
     pub fn since(self, before: Self) -> Self {
@@ -229,7 +229,7 @@ impl BackendStats {
             host_profile_ns: self.host_profile_ns.saturating_sub(before.host_profile_ns),
             host_pack_ns: self.host_pack_ns.saturating_sub(before.host_pack_ns),
             graph_launches: self.graph_launches.saturating_sub(before.graph_launches),
-            graph_captures: self.graph_captures.saturating_sub(before.graph_captures),
+            graph_captures: self.graph_captures.saturating_sub(before.graph_captures), zero_fill_launches: self.zero_fill_launches.saturating_sub(before.zero_fill_launches), zero_fill_rows: self.zero_fill_rows.saturating_sub(before.zero_fill_rows), zero_fill_words: self.zero_fill_words.saturating_sub(before.zero_fill_words), recorded_kinds: std::array::from_fn(|i|self.recorded_kinds[i].saturating_sub(before.recorded_kinds[i])),
             host_graph_launch_ns: self.host_graph_launch_ns.saturating_sub(before.host_graph_launch_ns), projection_dispatches: std::array::from_fn(|i|self.projection_dispatches[i].saturating_sub(before.projection_dispatches[i])), attention_dispatches: std::array::from_fn(|index|self.attention_dispatches[index].saturating_sub(before.attention_dispatches[index])),
         }
     }
@@ -1173,7 +1173,7 @@ impl<'a> Backend<'a> {
         self.check_vector(vector, vector.len)?;
         if self.record_resident_copy(0,vector.device_address(),vector.len)? {return Ok(());} self.context.activate()?;
         unsafe { check(cuMemsetD8Async(vector.buffer.address, 0, byte_count(vector.len, 4)?, self.stream.raw), "state clear")?; }
-        self.context.pending.set(true);
+        self.context.pending.set(true);self.note_zero_fill(1,1,vector.len);
         Ok(())
     }
     /// Clear a contiguous activation range without creating an arena view.
@@ -1186,7 +1186,7 @@ impl<'a> Backend<'a> {
         self.context.activate()?;
         unsafe { check(cuMemsetD8Async(vector.buffer.address + bytes.start as u64, 0, bytes.len(),
             self.stream.raw), "state range clear")?; }
-        self.context.pending.set(true);
+        self.context.pending.set(true);self.note_zero_fill(1,1,bytes.len()/4);
         Ok(())
     }
     /// Exchange activations in reusable pinned memory at a compute-stream boundary.

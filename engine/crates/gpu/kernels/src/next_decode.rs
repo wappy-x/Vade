@@ -259,7 +259,7 @@ pub extern "ptx-kernel" fn flash_resident_projection_batch(batch:crate::next_par
 pub(crate) fn resident_flash_resident_projection_batch(batch:crate::next_params::ResidentProjectionBatch) {
     // SAFETY: The checked host batch funds immutable same-context input and
     // weight rows. Its prefix grid assigns each block one validated descriptor.
-    // MXFP8 warps and plain threads own disjoint initialized output rows. Owners
+    // MXFP8 warps and plain threads own disjoint output rows, raw stores (the host skips the fill). Owners
     // remain live until stream completion. Plain descriptors never read scales.
     // The blocks of plain descriptors run first: the block index is mapped to
     // (descriptor, block within it) with all plain descriptors before all others,

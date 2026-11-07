@@ -4,7 +4,7 @@ use crate::{resident_launch::{Command,Kind},resident_launch_encode as encode};
 use std::collections::BTreeMap;
 #[derive(Clone,Copy,PartialEq,Eq,PartialOrd,Ord)]
 struct Grid {kind:Kind,blocks:u32,rows:u32,planes:u32,threads:u32,shared:u32}
-struct Call {grid:Grid,command:Command}
+struct Call {grid:Grid,command:Command,copy_bytes:u64}
 // The executable drops before the table. Queued table drops retain its storage.
 struct Piece<'a> {graph:DecodeGraph<'a>,table:DeviceVector<'a>,used:u64}
 /// After a real wait the GPU is idle. The recorder then submits a short first
@@ -17,15 +17,15 @@ fn zero_grid(zeros:&[(usize,u64,u32)])->Option<Grid> {
 }
 /// Operand tables of recorded commands share one private device area. One upload
 /// per piece carries them, so a join or a batch does not end the piece.
-const STAGE_BYTES:usize=1<<20;
+use crate::resident_launch::stage::{BYTES as STAGE_BYTES,BASE as STAGE_BASE,full as stage_full};
 /// Zero fills of fresh private outputs share one copy kernel at the start of a
 /// piece. Its rows read one zero source. The row table starts the stage area.
-const ZERO_ROWS:usize=256;const ZERO_TABLE_BYTES:usize=ZERO_ROWS*24;const ZERO_WORDS:usize=1<<15;
+const ZERO_ROWS:usize=crate::resident_launch::stage::ZERO_ROWS;const ZERO_WORDS:usize=1<<15;
 #[derive(Default)]
 pub(super) struct Recorder<'a> {enabled:bool,paused:bool,pub(super) failure:Option<String>,calls:Vec<Call>,pieces:BTreeMap<Vec<Grid>,Piece<'a>>,
-    stage:Option<DeviceVector<'a>>,staged:Vec<u8>,staged_base:usize,
+    stage:Option<DeviceVector<'a>>,staged:Vec<u8>,
     zero_source:Option<DeviceVector<'a>>,zeros:Vec<(usize,u64,u32)>,fresh:Vec<(u64,u64)>,fresh_at:u64,recorded:u64,
-    heavy:usize,fed:usize,clock:u64}
+    heavy:usize,fed:usize,clock:u64,copies:crate::resident_launch::CopyCounts}
 impl Recorder<'_> {
     /// A real stream wait has ended: nothing is queued on the device.
     pub(super) fn drained(&mut self) {self.fed=0;}
@@ -40,13 +40,19 @@ impl<'a> Backend<'a> {
     }
     pub fn resident_launches_active(&self)->bool {let r=self.recorder.borrow();r.enabled && !r.paused}
     pub(super) fn disable_resident_launches(&self)->Result<(),String> {let result=self.flush_resident_launches();self.recorder.borrow_mut().enabled=false;result}
+    pub fn resident_copy_counts(&self)->crate::resident_launch::CopyCounts {self.recorder.borrow().copies}
     fn append_resident(&self,kind:Kind,command:Command,grid:[u32;5])->Result<(),String> {
+        let words=match kind {Kind::CopyWords|Kind::ZeroWords=>u64::from_ne_bytes(command.payload[16..24].try_into().unwrap()),
+            Kind::Copy=>u32::from_ne_bytes(command.payload[16..20].try_into().unwrap()) as u64,_=>0};
+        self.append_resident_bytes(kind,command,grid,words.saturating_mul(4))
+    }
+    fn append_resident_bytes(&self,kind:Kind,command:Command,grid:[u32;5],copy_bytes:u64)->Result<(),String> {
         if grid[0]==0 {return Ok(());}
         if grid[1]==0 || grid[1]>65535 || grid[2]==0 || grid[2]>65535 || grid[3]==0 || grid[3]>1024 || grid[3]%32!=0 {return Err("resident recorded grid exceeds driver limits".into());}
         if self.recorder.borrow().calls.len()>=crate::GraphAllowance::FLASH_MAX_NODES-1 {self.flush_resident_launches()?;}
-        self.context.resident_unsubmitted.set(true);self.context.pending.set(true);
+        self.context.resident_unsubmitted.set(true);self.context.pending.set(true);self.stats.borrow_mut().recorded_kinds[kind as usize]+=1;
         let mut r=self.recorder.borrow_mut();r.recorded=r.recorded.wrapping_add(1);
-        r.calls.push(Call {grid:Grid {kind,blocks:grid[0],rows:grid[1],planes:grid[2],threads:grid[3],shared:grid[4]},command});
+        r.calls.push(Call {grid:Grid {kind,blocks:grid[0],rows:grid[1],planes:grid[2],threads:grid[3],shared:grid[4]},command,copy_bytes});
         if arithmetic(kind) {r.heavy+=1;
             // Submit this part now only when its executable exists: a capture
             // must first drain the stream, and that would stop the device.
@@ -104,16 +110,15 @@ impl<'a> Backend<'a> {
         let bytes=table.len().div_ceil(16)*16;
         if !self.resident_launches_active() || grid[0]==0 || bytes==0 || bytes>STAGE_BYTES/4 {return Ok(false);}
         if self.recorder.borrow().stage.is_none() {let stage=self.vector(STAGE_BYTES/4)?;self.recorder.borrow_mut().stage=Some(stage);}
-        {let mut r=self.recorder.borrow_mut();if r.staged_base<ZERO_TABLE_BYTES {r.staged_base=ZERO_TABLE_BYTES;}}
-        let full={let r=self.recorder.borrow();r.calls.len()>=crate::GraphAllowance::FLASH_MAX_NODES-1 || r.staged_base+r.staged.len()+bytes>STAGE_BYTES};
-        if full {
-            // Every earlier reader of the area is submitted before the next upload
-            // on the one ordered stream, so the area can start again at its base.
-            self.flush_resident_launches()?;let mut r=self.recorder.borrow_mut();if r.staged_base+bytes>STAGE_BYTES {r.staged_base=ZERO_TABLE_BYTES;}
+        let (nodes,full)={let r=self.recorder.borrow();(r.calls.len()>=crate::GraphAllowance::FLASH_MAX_NODES-1,stage_full(r.staged.len(),bytes))};
+        if nodes || full {
+            if full {self.recorder.borrow_mut().copies.stage_full_flushes+=1;}
+            self.flush_resident_launches()?;
         }
         let address={let mut r=self.recorder.borrow_mut();let at=r.staged.len();r.staged.extend_from_slice(table);r.staged.resize(at+bytes,0);
-            r.stage.as_ref().ok_or("resident stage area is absent")?.device_address()+(r.staged_base+at) as u64};
-        self.append_resident(kind,build(address),grid)?;Ok(true)
+            r.stage.as_ref().ok_or("resident stage area is absent")?.device_address()+(STAGE_BASE+at) as u64};
+        let copy_bytes=if kind==Kind::Copy {table.chunks_exact(24).map(|row|u32::from_ne_bytes(row[16..20].try_into().unwrap()) as u64*4).sum()} else {0};
+        self.append_resident_bytes(kind,build(address),grid,copy_bytes)?;Ok(true)
     }
     /// The standalone norm's three kernels with their original arguments and
     /// grids. Only ResidentNorm::apply calls this, after its extent checks.
@@ -142,6 +147,7 @@ impl<'a> Backend<'a> {
                 let mut r=self.recorder.borrow_mut();let at=r.calls.len();r.zeros.push((at,target,words as u32));return Ok(true);
             }
         }
+        if source==0 {self.note_zero_fill(1,1,words);}
         let kind=if source==0 {Kind::ZeroWords} else {Kind::CopyWords};let mut c=Command::new(kind);c.word(0,source);c.word(1,target);c.word(2,words as u64);
         self.append_resident(kind,c,[(words as u32).div_ceil(128),1,1,128,0])?;Ok(true)
     }
@@ -153,8 +159,11 @@ impl<'a> Backend<'a> {
     }
     pub(super) fn flush_resident_launches(&self)->Result<(),String> {
         if let Some(error)=self.fatal_error() {return Err(error);}
-        let (calls,staged,staged_base,zeros,mut fed)={let mut r=self.recorder.borrow_mut();if r.paused || r.calls.is_empty() && r.zeros.is_empty() {return Ok(());}r.paused=true;r.heavy=0;
-            let staged=std::mem::take(&mut r.staged);let base=r.staged_base;r.staged_base+=staged.len();(std::mem::take(&mut r.calls),staged,base,std::mem::take(&mut r.zeros),r.fed)};
+        // Every flush's tables start at one offset. Each upload is ordered after every earlier
+        // reader on the one stream, as the zero rows at offset 0 are, so nothing is overwritten
+        // early. An offset carried across flushes made the cut of a full area depend on history.
+        let (calls,staged,zeros,mut fed)={let mut r=self.recorder.borrow_mut();if r.paused || r.calls.is_empty() && r.zeros.is_empty() {return Ok(());}r.paused=true;r.heavy=0;
+            let staged=std::mem::take(&mut r.staged);(std::mem::take(&mut r.calls),staged,std::mem::take(&mut r.zeros),r.fed)};
         // SAFETY: Each captured node uses its original validated ABI and grid.
         // The private table stays aligned and owned with its executable; uploads
         // and replay share one stream. Queue retention covers every indirect
@@ -172,6 +181,7 @@ impl<'a> Backend<'a> {
             let submit=|calls:&[Call],zeros:&[(usize,u64,u32)]|->Result<(),String> {
             let mut first=None;
             if let Some(grid)=zero_grid(zeros) {
+                self.note_zero_fill(1,zeros.len() as u128,zeros.iter().map(|z|z.2 as usize).sum());
                 // One copy kernel, first in the part, fills every fresh output from
                 // the zero source. Its rows are the first bytes of the stage area.
                 if self.recorder.borrow().zero_source.is_none() {let source=self.upload_vector(&vec![0.0;ZERO_WORDS])?;self.recorder.borrow_mut().zero_source=Some(source);}
@@ -182,7 +192,7 @@ impl<'a> Backend<'a> {
                     rows.extend_from_slice(&words.to_ne_bytes());rows.extend_from_slice(&0u32.to_ne_bytes());}
                 let stage=self.recorder.borrow_mut().stage.take().ok_or("resident stage area is absent")?;
                 let uploaded=self.write_buffer(&stage.buffer,0,&rows);let address=stage.device_address();self.recorder.borrow_mut().stage=Some(stage);uploaded?;
-                first=Some(Call {grid,command:encode::copy(crate::kernel_params::HybridCopy {source:ptr::null(),destination:ptr::null_mut(),words:0,padding:0,rows:address})});
+                first=Some(Call {grid,copy_bytes:zeros.iter().map(|z|z.2 as u64*4).sum(),command:encode::copy(crate::kernel_params::HybridCopy {source:ptr::null(),destination:ptr::null_mut(),words:0,padding:0,rows:address})});
             }
             let count=calls.len()+usize::from(first.is_some());
             let key=first.iter().chain(calls).map(|c|c.grid).collect::<Vec<_>>();
@@ -190,7 +200,7 @@ impl<'a> Backend<'a> {
                 if self.recorder.borrow().pieces.len()>=128 {
                     // Retire the executable used longest ago, after its replays have ended.
                     self.synchronize()?;let mut r=self.recorder.borrow_mut();
-                    if let Some(old)=r.pieces.iter().min_by_key(|(_,piece)|piece.used).map(|(key,_)|key.clone()) {r.pieces.remove(&old);}
+                    if let Some(old)=r.pieces.iter().min_by_key(|(_,piece)|piece.used).map(|(key,_)|key.clone()) {r.pieces.remove(&old);r.copies.piece_evictions+=1;}
                 }
                 let table=self.vector(count*core::mem::size_of::<Command>()/4)?;
                 // SAFETY: The table is private aligned persistent storage. Each
@@ -218,11 +228,16 @@ impl<'a> Backend<'a> {
             // until this replay has actually completed. Table replacement is
             // ordered after prior replay. Captured grids and ABI are unchanged.
             let result=uploaded.and_then(|_|self.replay_decode(&piece.graph));
-            self.recorder.borrow_mut().pieces.insert(key,piece);result
+            self.recorder.borrow_mut().pieces.insert(key,piece);
+            if result.is_ok() {let mut r=self.recorder.borrow_mut();
+                for call in first.iter().chain(calls) {let index=match call.grid.kind {Kind::Copy=>0,Kind::CopyWords=>1,Kind::ZeroWords=>2,_=>continue};
+                    r.copies.launches[index]+=1;r.copies.bytes[index]+=call.copy_bytes;}
+                if let Some(call)=first {r.copies.merged_zero_launches+=1;r.copies.merged_zero_bytes+=call.copy_bytes;}
+            }result
             };
             if !staged.is_empty() {
                 let stage=self.recorder.borrow_mut().stage.take().ok_or("resident stage area is absent")?;
-                let uploaded=self.write_buffer(&stage.buffer,staged_base,&staged);self.recorder.borrow_mut().stage=Some(stage);uploaded?;
+                let uploaded=self.write_buffer(&stage.buffer,STAGE_BASE,&staged);self.recorder.borrow_mut().stage=Some(stage);uploaded?;
             }
             let (mut start,mut zero_at)=(0usize,0usize);
             while start<calls.len() || zero_at<zeros.len() {

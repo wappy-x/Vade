@@ -41,6 +41,8 @@ use spark_tp::Result;
 #[cfg(target_os="linux")]
 #[path="resident-decode-check/exchange_stage.rs"] mod exchange_stage;
 #[cfg(target_os="linux")]
+#[path="resident-decode-check/fill_free.rs"] mod fill_free;
+#[cfg(target_os="linux")]
 #[path="resident-decode-check/nv_group_rows.rs"] mod nv_group_rows;
 #[cfg(target_os="linux")]
 #[path="resident-decode-check/nv_b.rs"] mod nv_b;
@@ -236,7 +238,9 @@ fn run_pair(args:&[String])->Result<()> {
     // --queue-per-step: sessions after the first open and close the resident queue around each
     // plain decode step, as the served session does. Same bits; for timing.
     let queue_per_step=args[10..].iter().any(|a|a=="--queue-per-step");
-    let is_harness=|a:&&String|*a!="--fork-check" && *a!="--queue-per-step" && !a.starts_with("--jobs=");
+    // Proof run: each skipped fill stores all ones, so a read of a word no writer stored changes the logits.
+    if args[10..].iter().any(|a|a=="--poison-skipped-fills") {spark_gpu_probe::fill_free::set_mode(spark_gpu_probe::fill_free::Mode::Poison);}
+    let is_harness=|a:&&String|*a!="--fork-check" && *a!="--queue-per-step" && *a!="--poison-skipped-fills" && !a.starts_with("--jobs=");
     let options=profile_options(&args[10..].iter().filter(is_harness).cloned().collect::<Vec<_>>())?;let (cost,gpu_cost,device_wire)=(options.0,options.1,options.5);
     let root=Path::new(&args[5]);
     let rank=args[0].parse::<usize>().map_err(|e|e.to_string())?;let listen=args[2].parse::<std::net::SocketAddr>().map_err(|_|"invalid listen")?;let next=args[3].parse::<std::net::SocketAddr>().map_err(|_|"invalid next")?;
@@ -331,7 +335,7 @@ fn run_pair(args:&[String])->Result<()> {
             let prompt_seconds=prompt_started.elapsed().as_secs_f64();write(&saved.join("PREFILL_TIMING"),format!("prompt_rows={} prompt_tokens={} prompt_seconds={prompt_seconds:.9} seconds_per_prompt_token={:.9}\n",row_group.map_or(prompt_rows,|g|g.0),input.len(),prompt_seconds/input.len() as f64).as_bytes())?;
             compute.cost_report("prefill");println!("PROMPT KERNEL COUNTS rank={rank} repeat={repeat} tokens={} {}",input.len(),spark_gpu_probe::prompt_launches::line());
             #[cfg(feature="kernel-bench")] let indirect_before=compute.fixture_attention_calls();
-            let mut logits=last.ok_or("empty prompt")?;let mut output=Vec::new();let counted=backend.stats();let route_counted=spark_gpu_probe::device_route::counts();let stage_counted=spark_tp::projection_stage::counts();let prompt_peak=backend.peak_accounted_bytes();let prompt_live=backend.accounted_bytes();let started=std::time::Instant::now();
+            let mut logits=last.ok_or("empty prompt")?;let mut output=Vec::new();let counted=backend.stats();let copy_counted=backend.resident_copy_counts();let route_counted=spark_gpu_probe::device_route::counts();let stage_counted=spark_tp::projection_stage::counts();let prompt_peak=backend.peak_accounted_bytes();let prompt_live=backend.accounted_bytes();let started=std::time::Instant::now();
             if let Some(&(width,miss))=repeat.checked_sub(2).and_then(|i|verify.get(i)) {
                 let wanted=reference.as_ref().ok_or("verify passes need the plain session first")?;let vocab=logits.len() as u32;
                 let keep=|logits:&[f32],output:&mut Vec<u32>|->Result<u32> {let at=output.len();let mut best=0;for i in 1..logits.len() {if logits[i]>logits[best] {best=i;}}
@@ -393,11 +397,12 @@ fn run_pair(args:&[String])->Result<()> {
             #[cfg(feature="kernel-bench")] write(&saved.join("INDIRECT"),format!("decode_steps={steps} accepted_calls={}\n",compute.fixture_attention_calls()-indirect_before).as_bytes())?;
             let timing=format!("decode_steps={steps} decode_seconds={seconds:.9} decode_tokens_per_second={:.9}\n",steps as f64/seconds);
             // Host submissions and forced waits of the decode steps, for the structure of one token.
-            let counts=backend.stats().since(counted);write(&saved.join("COUNTS"),format!("decode_steps={steps} graph_replays={} graph_captures={} stream_waits={} host_launches={} peak_bytes_after_prompt={prompt_peak} live_bytes_after_prompt={prompt_live} peak_bytes_after_decode={} live_bytes_after_decode={} memo_bytes={} memo_limit={} memo_rows_found={} memo_rows_added={}\n",counts.graph_launches,counts.graph_captures,counts.stream_wait_calls,counts.queued_calls,backend.peak_accounted_bytes(),backend.accounted_bytes(),compute.memo_counts().0,compute.memo_counts().1,compute.memo_counts().2,compute.memo_counts().3).as_bytes())?;
+            let counts=backend.stats().since(counted);write(&saved.join("COUNTS"),format!("decode_steps={steps} graph_replays={} graph_captures={} stream_waits={} host_launches={} peak_bytes_after_prompt={prompt_peak} live_bytes_after_prompt={prompt_live} peak_bytes_after_decode={} live_bytes_after_decode={} memo_bytes={} memo_limit={} memo_rows_found={} memo_rows_added={} {}\n",counts.graph_launches,counts.graph_captures,counts.stream_wait_calls,counts.queued_calls,backend.peak_accounted_bytes(),backend.accounted_bytes(),compute.memo_counts().0,compute.memo_counts().1,compute.memo_counts().2,compute.memo_counts().3,backend.resident_copy_counts().since(copy_counted).line()).as_bytes())?;
             #[cfg(feature="kernel-bench")] write(&saved.join("ATTENTION_DISPATCH"),format!("decode_steps={steps} scores_table={} values_table={} scope=accepted_commands_completed_by_final_sync\n",counts.attention_dispatches[0],counts.attention_dispatches[1]).as_bytes())?;
             let route=spark_gpu_probe::device_route::counts().into_iter().zip(route_counted).map(|(after,before)|after.saturating_sub(before)).collect::<Vec<_>>();
             let stage=spark_tp::projection_stage::counts();write(&saved.join("EXCHANGE_STAGE"),format!("decode_steps={steps} accepted={} original_messages={} local_words={} scope=accepted_commands_completed_by_final_sync\n",stage.accepted-stage_counted.accepted,stage.original_messages-stage_counted.original_messages,stage.words-stage_counted.words).as_bytes())?;
             write(&saved.join("PROJECTION_DISPATCH"),format!("decode_steps={steps} nv_rows_stream={} fp8_tile={} project_f32_ordered={} mixed_projection={} causal_fast={} prompt_select_rows={} nv_tile={} nv_quantize={} nv_quantize_batch={} nv_quantize_legacy={} route_device={} route_device_gate_up={} route_device_down={} route_host_fallback={} project_bf16_ordered={} scope=accepted_commands_completed_by_final_sync\n",counts.projection_dispatches[0],counts.projection_dispatches[1],counts.projection_dispatches[2],counts.projection_dispatches[3],counts.projection_dispatches[4],counts.projection_dispatches[5],counts.projection_dispatches[6],counts.projection_dispatches[7],counts.projection_dispatches[8],counts.projection_dispatches[9],route[0]+route[1],route[0],route[1],route[2],counts.projection_dispatches[10]).as_bytes())?;
+            write(&saved.join("RECORDED_KINDS"),format!("decode_steps={steps} zero_fill_launches={} zero_fill_rows={} zero_fill_words={} {} scope=decode_steps_recorded_calls_merged_clears_counted_only_in_zero_fill_launches\n",counts.zero_fill_launches,counts.zero_fill_rows,counts.zero_fill_words,spark_gpu_probe::resident_launch::Kind::ALL.iter().map(|kind|format!("{}={}",kind.kernel(),counts.recorded_kinds[*kind as usize])).collect::<Vec<_>>().join(" ")).as_bytes())?;
             write(&saved.join("TIMING"),timing.as_bytes())?;write(&saved.join("PROMPT_LOGITS"),hashes.as_bytes())?;
             write(&saved.join("OUTPUT_IDS"),output.iter().map(|v|format!("{v}\n")).collect::<String>().as_bytes())?;
             let mut decoder=tokenizer.decoder();let mut text=String::new();for &id in &output {text.push_str(&decoder.push(id).map_err(|e|e.to_string())?);}text.push_str(&decoder.finish());write(&saved.join("TEXT"),text.as_bytes())?;
@@ -630,6 +635,8 @@ fn main() {
         #[cfg(target_os="linux")]
         [mode,out] if mode=="softmax-rows"=>softmax_rows::run(Path::new(out)),
         #[cfg(target_os="linux")]
+        [mode,out] if mode=="softmax-prompt"=>softmax_rows::prompt(Path::new(out)),
+        #[cfg(target_os="linux")]
         [mode,kind] if mode=="prompt-rows-bad"=>prompt_rows::bad_selection(kind),
         #[cfg(target_os="linux")]
         [mode,out] if mode=="projection-batch"=>projection_batch::run(Path::new(out)),
@@ -637,6 +644,8 @@ fn main() {
         [mode,out] if mode=="device-route"=>device_route::run(Path::new(out),true),
         #[cfg(target_os="linux")]
         [mode,out] if mode=="exchange-stage"=>exchange_stage::run(Path::new(out)),
+        #[cfg(target_os="linux")]
+        [mode,out] if mode=="fill-free"=>fill_free::run(Path::new(out)),
         #[cfg(target_os="linux")]
         [mode,out] if mode=="device-route-smoke"=>device_route::run(Path::new(out),false),
         #[cfg(target_os="linux")]

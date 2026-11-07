@@ -28,7 +28,7 @@ pub(crate) fn project<const R:usize,const QN:usize,const D:usize,const PF:usize>
     // SAFETY: The host checks every job descriptor (shape, weight, scale and input owners and extents), keeps all
     // owners alive through stream completion and fills the job table (count entries). Weights, scales and inputs
     // are immutable; each (job, row) output word has exactly one writing thread (chain lane l of the block that owns
-    // the row) and the output is private and initialized earlier on the stream. The body traps unless the block has
+    // the row, a raw store before any read of it) and the output is private; the host skips its fill (fill_free). The body traps unless the block has
     // 32 + R*QN threads, the dynamic shared region holds the layout below, the descriptor is an NvProject job with the
     // launch's row count, cols is a multiple of QN*16 and of 128, and the weight and scale owners are 16-byte
     // aligned and the input owner 4-byte aligned. Every copy is guarded by row < rows and reads inside the checked extents: 8 weight bytes inside the

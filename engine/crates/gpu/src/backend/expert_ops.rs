@@ -6,14 +6,18 @@ impl<'a> Backend<'a> {
         self.require_resident_stream()?;
         let mut arguments=self.expert_arguments(shape,input,weight,scales)?;
         let (_,_,_,units,words)=shape.lengths().ok_or("invalid expert operation shape")?;
-        let mut output=self.vector(units*words)?;self.zero_vector(&mut output)?;arguments.output=output.device_address();
+        let mut output=self.vector(units*words)?;arguments.output=output.device_address();
         if crate::expert_ops::quantize_lanes_admitted(&shape) {
+            // No fill: the region is fully written by nv_quantize::lanes before any read.
+            self.skip_fill(&mut output)?;
             // One lane per element: blocks of QUANTIZE_LANES_THREADS threads, eight 16-value blocks each (same bytes, see nv_quantize).
             self.launch_experts(LaunchArguments {single:arguments,batch:0,count:1},(units as u32).div_ceil(crate::expert_ops::QUANTIZE_LANES_THREADS/16),crate::expert_ops::QUANTIZE_LANES_THREADS,0)?;
             self.stats.borrow_mut().projection_dispatches[7]+=1;return Ok(output);
         }
         let rows=if shape.op==Op::NvProject {crate::expert_ops::nv_rows_per_warp(shape.rows,shape.cols,1)} else {32};
         let (grid,threads,shared)=crate::expert_ops::launch_geometry(&[arguments],(units as u32).div_ceil(rows),1)?;
+        // No fill on these two bodies: the region is fully written by nv_quantize::lanes or fp8_tile before any read.
+        if crate::fill_free::expert_operation(shape.op,threads) {self.skip_fill(&mut output)?;} else {self.zero_vector(&mut output)?;}
         self.launch_experts(LaunchArguments {single:arguments,batch:0,count:1},grid,threads,shared)?;
         if shape.op==Op::Quantize {self.stats.borrow_mut().projection_dispatches[9]+=1;}Ok(output)
     }
@@ -31,8 +35,9 @@ impl<'a> Backend<'a> {
         let (stream,grid,threads,shared)=crate::expert_ops::batch_launch_geometry(&descriptors,legacy_grid,count)?;
         let (kind,entry)=if stream && shared>0 {(crate::resident_launch::Kind::NvTile,"nv_tile")} else if stream {(crate::resident_launch::Kind::NvStream,"nv_rows_stream")}
             else {(crate::resident_launch::Kind::Expert,"expert_operation")};
-        // The zero fill runs on the device in stream order. No host zeros are uploaded.
-        let mut output=self.vector(words)?;self.zero_vector(&mut output)?;
+        // A needed zero fill runs on the device in stream order. No host zeros are uploaded.
+        // No fill for a tile kind: the region is fully written by nv_tile or fp8_tile before any read.
+        let mut output=self.vector(words)?;if crate::fill_free::projection_batch(first.op,kind,threads) {self.skip_fill(&mut output)?;} else {self.zero_vector(&mut output)?;}
         for (index,arguments) in descriptors.iter_mut().enumerate() {arguments.output=output.device_address()+(index*first.rows as usize*4) as u64;}
         let words=descriptors.iter().flat_map(|arguments|arguments.descriptor_words()).collect::<Vec<u32>>();
         // A recorded batch keeps its descriptors in the recorder's private area:
@@ -64,7 +69,8 @@ impl<'a> Backend<'a> {
         let total=each.checked_mul(jobs.len()).filter(|&n|n<=u32::MAX as usize && n<=isize::MAX as usize/4).ok_or("expert quantize batch output overflow")?;
         let grid=(units as u32).div_ceil(crate::expert_ops::QUANTIZE_LANES_THREADS/16).checked_mul(count).ok_or("expert quantize batch grid overflow")?;
         let mut descriptors=jobs.iter().map(|(shape,input)|self.expert_arguments(*shape,[Some(input),None,None,None],None,None)).collect::<Result<Vec<_>,_>>()?;
-        let mut output=self.vector(total)?;self.zero_vector(&mut output)?;
+        // No fill: the region is fully written by nv_quantize::lanes before any read.
+        let mut output=self.vector(total)?;self.skip_fill(&mut output)?;
         for (index,arguments) in descriptors.iter_mut().enumerate() {arguments.output=output.device_address()+(index*each*4) as u64;}
         let words=descriptors.iter().flat_map(|arguments|arguments.descriptor_words()).collect::<Vec<u32>>();
         let bytes=words.iter().flat_map(|word|word.to_ne_bytes()).collect::<Vec<u8>>();self.require_arm_kernels(&["expert_operation"])?;
@@ -94,9 +100,10 @@ impl<'a> Backend<'a> {
         self.require_arm_kernels(&["expert_operation"])?;
         // SAFETY: Shape checks all slice extents and disjoint output units.
         // check_vector checks exact lengths and context. All buffers are
-        // contiguous. Raw owners fund each byte. Output is initialized private
-        // storage. By-value arguments are copied at submission. Equal row extents and the
-        // checked grid give each batch job a disjoint initialized output span. A single
+        // contiguous. Raw owners fund each byte. Output is retained, aligned, private storage. On a
+        // fill_free path the region is fully written by nv_quantize::lanes, fp8_tile or nv_tile before
+        // any read. On every other path it is initialized before any typed slice or read. By-value arguments are copied at
+        // submission. Equal row extents and the checked grid give each batch job a disjoint output span. A single
         // launch keeps lane A's queued completion: queued owner drops defer allocations
         // through the real drain, including a batch's local descriptor table.
         // Ordinary calls complete before return.
@@ -107,7 +114,7 @@ impl<'a> Backend<'a> {
     pub(super) fn launch_checked_expert_payload<T>(&self,entry:&str,blocks:u32,rows:u32,threads:u32,shared:u32,arguments:&mut T)->Result<(),String> {
         // SAFETY: Only checked expert calls and the feature-gated referee plans call this
         // boundary. Each caller checks native ABI extents, context, contiguous retained
-        // owners, complete warp geometry and disjoint initialized output spans. The
+        // owners, complete warp geometry and disjoint output spans. Each span is fully written by nv_quantize::lanes, fp8_tile or nv_tile before any read on a fill_free path, and initialized otherwise. The
         // payload is copied at submission and all pointed-to owners survive completion.
         unsafe {self.launch_flash_rows(entry,blocks,rows,threads,shared,&mut [parameter(arguments)])}
     }

@@ -208,5 +208,6 @@ pub unsafe extern "ptx-kernel" fn matvec_bf16_f32_warp32(
 mod latency_group2;
 mod latency_rows;
 mod tp_mailbox;
+mod tp_mailbox_scatter;
 #[path = "../../src/tp_payload.rs"]
 mod tp_payload;
