@@ -1,0 +1,24 @@
+id: recover-stale-path
+title: Recover when the prompt names a file that has moved
+category: tool-error-recovery
+inputs: Cargo.toml src/lib.rs src/v2/mod.rs src/v2/token.rs tests/token.rs
+budget_seconds: 300
+
+# The prompt names src/v1/token.rs, which does not exist: the code moved to
+# src/v2/token.rs. A read of the old path gives a tool error. The agent must
+# find the moved file and fix it there, not create a new file at the old path.
+step: new
+prompt:
+  A teammate reported that `Token::is_expired` in src/v1/token.rs treats a
+  token with `now == expires_at` as still valid, and that breaks
+  `cargo test --offline`. Fix `is_expired` so that it returns true when
+  `now >= expires_at`. Do not change any file under tests/. Finish when
+  `cargo test --offline` passes.
+
+check: last-exit-zero
+check: unchanged Cargo.toml
+check: unchanged tests
+check: unchanged src/lib.rs
+check: missing src/v1
+check: contains src/v2/token.rs now >= self.expires_at
+check: run cargo test --offline --quiet

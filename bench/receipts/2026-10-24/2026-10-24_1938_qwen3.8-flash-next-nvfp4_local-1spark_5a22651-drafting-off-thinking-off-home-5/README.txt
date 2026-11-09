@@ -1,0 +1,13 @@
+Engine 5a226519a2a44a0ff7ea9be43118b8b9ec0d8f9e (v0.1.0 public release, tag tree 5a22651) NEW FOLDER
+Box: LOCAL home-5; 1xGB10 (DGX Spark, driver 580.178.04). Fresh install from public GitHub wappy-x/vade, INSTALL.md route 'bundle' (release bundle vade-launch-bundle-v1-5a22651-aarch64.tar.zst, sha256sum -c OK).
+Install timing (wall, first paste line to 'Launch ready', model check excluded): 102.0 s = clone 1.3 s + bundle download/sha256sum -c/extract 1.0 s + ./vade launch to 'Launch ready' 99.6 s. Model manifest check (33/33 OK): 85.3 s.
+Server: vade launch defaults (context 32768, output 8192, drafting engine-selected ON = resident MTP depth 3, cache off); requests carry draft plain (drafting OFF card).
+vade verify: IDENTICAL: 20/20 runs, 1 machine, 128 tokens (receipt vade-verify.json).
+vade bench (public, no flags, drafting as served; receipt vade-bench.json): C1 45.259 tok/s ; C2 79.457 tok/s ; C4 143.134 tok/s ; C8 126.130 tok/s ; C16 141.182 tok/s.
+RigMark52c29c3 pinned copy (card-tools: full-card-api.py + rigmark/, stdlib) run on the box against 127.0.0.1:18080: 5 runs x3 decode workloads cap 8192; 3 cold 8K/replay pairs; C1/C2/C4/C8 x3 rounds x256 tokens; seed 20260905; thinking off.
+Token IDs: 66/66 identical (token_ids) vs today's 1-Spark 1444 card (73f7a9d), the 1-Spark 6032c30 and the 2-Spark bc85082 cards (compare-exactness.py).
+Tooling (measurement only, sha256): full-card-api.py 37b24f0b4ac1f3d1; full-card-api-served.py 38dade92300a9f1d; rigmark/bench.py 7ef9389626d3317a; finalize-1spark.py 5d824a298e4efc38 (copies of <path> = <path> bench-patched.py; served variant drops draft; bench accepts mtp_depth 0/2/3 only when CARD_DRAFT=served (patched 19:40; the OFF cards ran the unpatched bench.py b4e26a4c1225d9e0); finalizer = finalize-cloud-a4.py with FIN_WORLD/FIN_DRAFT/FIN_OUTPUT/FIN_SUFFIX).
+Folder suffix -<box>: another lane's card ended the same minute (name clash), so this lane's folders carry the box name.
+Status PASS; complete=True; audit 66 responses, 0 with provenance errors; health OK.
+Deviations: v0.1.0 public-release fresh-install test card (one Spark, vade launch defaults); informative, no gate. | No rank logs supplied (rank0.log..rank3.log absent); provenance rests on the per-response vade blocks and /health only. | Drafting OFF card: every request carries draft plain against the default drafting-ON server. | Output limit is the v0.1.0 vade launch default 8192 (today's 1438 card ran 16384); decode cap 8192 fits it.
+started 19:26, ended 19:38 CDT

@@ -1,0 +1,3 @@
+#!/bin/sh
+# This account owns the path, and only it can write there.
+printf '%s 700\n' "$(id -u)"

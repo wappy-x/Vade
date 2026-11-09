@@ -1,0 +1,5 @@
+<!-- vade read: note.yaml | YAML | pages 1 | chars 27 | skipped: none -->
+```yaml
+key:
+  - value
+```

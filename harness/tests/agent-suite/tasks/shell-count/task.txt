@@ -1,0 +1,19 @@
+id: shell-count
+title: A shell task on macOS: list, search and count
+category: shell-build
+inputs: logs/api/2026-10-01.log.txt logs/api/2026-10-02.log.txt logs/worker/2026-10-01.log.txt logs/worker/old/2026-09-30.log.txt logs/README.txt logs/api/2026-10-02.log.gz.txt
+budget_seconds: 600
+needs: workspace_shell (macOS only)
+
+step: new
+prompt:
+  Use shell commands for this task. Find every file under logs/, at any
+  depth, whose name ends in `.log.txt`. For each one, count the lines that
+  contain the text `ERROR` (upper case only). Write report.txt with one line
+  per file, sorted by path in byte order, in the form `<path> <count>`, where
+  the path starts with `logs/`. Include files with a count of 0. End the file
+  with the line `total <sum of all counts>`. Write nothing else in the file.
+
+check: last-exit-zero
+check: file-equals report.txt expected/report.txt
+check: unchanged logs

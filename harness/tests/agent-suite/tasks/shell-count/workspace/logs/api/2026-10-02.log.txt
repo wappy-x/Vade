@@ -1,0 +1,6 @@
+2026-10-02T08:00:01Z INFO api started on port 8080
+2026-10-02T09:12:44Z ERROR GET /invoices/3 404 not found
+2026-10-02T09:13:01Z INFO GET /invoices 200
+2026-10-02T10:00:00Z WARN certificate expires in 20 days
+2026-10-02T11:31:09Z ERROR PUT /orders/9 409 conflict
+2026-10-02T11:31:10Z ERROR PUT /orders/9 409 conflict

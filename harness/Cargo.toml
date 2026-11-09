@@ -1,0 +1,24 @@
+[package]
+name = "vade-harness"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/wappy-x/vade"
+rust-version = "1.99"
+description = "A Rust agent harness and gateway for Vade Engine"
+default-run = "vade-harness"
+
+[dependencies]
+
+[[test]]
+name = "mcp"
+harness = false
+
+[[test]]
+name = "tool_rerun"
+harness = false
+
+[[bench]]
+name = "gateway_passthrough"
+harness = false

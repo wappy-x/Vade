@@ -1,0 +1,4 @@
+<!-- vade read: note.xml | XML | pages 1 | chars 52 | skipped: none -->
+```xml
+<note key="value">text &amp; more</note>
+```
