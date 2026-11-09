@@ -1,0 +1,2 @@
+This file is not a log: its name does not end in .log.txt.
+2026-10-02T12:00:00Z ERROR this line must not be counted

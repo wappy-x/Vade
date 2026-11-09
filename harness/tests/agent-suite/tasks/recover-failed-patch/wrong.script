@@ -1,0 +1,11 @@
+# A near miss for the dry run: the patch does not apply, and the agent
+# reports success anyway. `run cargo test` must fail.
+>>> patch
+*** Begin Patch
+*** Update File: src/lib.rs
+@@
+-        "warn" => Level::Info,
++        "warn" | "warning" => Some(Level::Warn),
+*** End Patch
+>>> answer
+"warn" and "warning" now map to `Level::Warn`.

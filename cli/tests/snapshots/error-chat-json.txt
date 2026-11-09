@@ -1,0 +1,5 @@
+$ vade chat --json
+--- stderr
+error: vade chat has no --json output; it is an interactive chat.
+ hint: Run vade status --json for the engine state as JSON.
+--- exit 1

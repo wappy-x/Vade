@@ -1,0 +1,16 @@
+use std::env;
+use std::{env as process, env::{var as read, var_os, vars}};
+fn run() {
+    // Each read is a candidate path switch. The fixture does not execute.
+    std::env::var("MODE");
+    std::env::var_os("MODE");
+    std::env::vars();
+    std::env::vars_os();
+    env::var("MODE");
+    process::var_os("MODE");
+    read("MODE");
+    var_os("MODE");
+    vars();
+    let reader = std::env::var::<&str>;
+    ::std::env::var_os("MODE");
+}
