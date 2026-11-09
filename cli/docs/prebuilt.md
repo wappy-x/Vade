@@ -1,0 +1,439 @@
+# Prebuilt installation
+
+Vade can run from ready-made binaries instead of compiling them. The one-line
+install, `curl -fsSL https://vade.lol/install.sh | sh`, uses them. There are
+three packages, and they serve different setups:
+
+| Package | Use it when | Where it is |
+| --- | --- | --- |
+| Main bundle (`vade-<version>-<sha7>-linux-aarch64-gb10.tar.gz`) | The one-line install installs it for you on one Spark | dl.vade.lol |
+| Launcher bundle archive (`vade-launch-bundle-v1-<sha7>-aarch64.tar.zst`) | You install the older v0.1.0 release by hand | The v0.1.0 release page on GitHub |
+| Controller bundle (`vade-prebuilt-v1`) | You install with `vade install` from a controller | You assemble it yourself |
+
+The main bundle and the launcher bundle archive hold the same files and the
+same `launcher-bundle.conf` (format `vade-launch-bundle-v1`). The
+[main bundle](#the-main-bundle) section covers the main bundle. Most of the
+rest of this page covers the launcher bundle archive. The
+[last section](#prebuilt-binaries-for-a-controller-install) covers the
+controller format. For other terms, see the [glossary](../../docs/GLOSSARY.md).
+
+Builds of main come from dl.vade.lol. GitHub Releases holds only the older
+v0.1.0 bundle.
+
+## The main bundle
+
+The installer, `scripts/install.sh`, downloads, checks and installs this
+bundle. The bundle of main is published on dl.vade.lol. The one-line install
+fetches the same script from vade.lol.
+[INSTALL: Prebuilt bundle](../../docs/INSTALL.md#prebuilt-bundle) lists its checks
+in order.
+
+The file `vade-<version>-<sha7>-linux-aarch64-gb10.tar.gz` unpacks to one
+folder with the same name, so it never writes into the current folder. It is
+gzip, not zstd: Ubuntu marks `tar` and `gzip` as essential packages. The
+folder holds `vade`, `flash-serve`, `flash.ptx`, `vade-harness`,
+`launcher-bundle.conf`, `README-BUNDLE`, the license and notice files, and
+`MANIFEST`.
+
+`MANIFEST` is one `key=value` per line:
+
+```ini
+format=vade-release-v1
+name=vade-<version>-<sha7>-linux-aarch64-gb10
+version=<cli version>
+sha=<full-source-sha40>
+date=<commit date, UTC>
+target=gb10
+arch=aarch64-unknown-linux-gnu
+gpu=sm_121
+ptx_isa=8.8
+ptx_cuda=12.9
+ptx_min_driver=575.51.03
+min_cuda=13.0
+min_driver=580
+glibc=<newest GLIBC_ version the programs need>
+file=<SHA-256>  <path>
+```
+
+There is one `file=` line for every other file in the folder, in the format
+of `sha256sum -c`. The installer checks them all after it unpacks the folder.
+Then `vade install` checks `launcher-bundle.conf` again, as below.
+
+### Produce the main bundle
+
+`sh scripts/make-bundle.sh --from-payload PAYLOAD_DIR --cli-dir CLI_DIR [--cubin-dir CUBIN_DIR] [OUTPUT_DIR]`
+packages binaries that are already built and builds nothing. `PAYLOAD_DIR`
+holds `build.json`, `source.tar` (a `git archive` of the commit) and
+`artifacts/engine/target`, with `flash-serve` and the PTX. `CLI_DIR` holds
+`vade`, `vade-harness` and `REVISION`. The script needs Git with that commit
+in the checkout, `tar`, `gzip`, `od` and `sha256sum` or `shasum`. It runs on
+Linux or macOS.
+
+Before it packs anything, it checks that `source.tar`, `build.json` and
+`REVISION` name the same commit, that the engine and PTX match the hashes in
+`build.json`, that the three programs are Linux aarch64 ELF files without
+build-machine paths, and that the PTX targets `sm_121` with a PTX ISA it knows
+the oldest driver for. With `--cubin-dir`, the folder that `scripts/make-cubin.sh`
+wrote, it also checks that the compiled PTX is byte for byte the bundled PTX and
+that `flash-serve` holds that image, then adds `flash.cubin.conf` and three
+`cubin_` lines to `MANIFEST`. It refuses an engine that holds an image when
+that folder is missing. It sets fixed file modes, the commit time on every
+file, owner 0 and a sorted member order, so two runs on the same input give
+the same bytes. It writes the archive and `SHA256SUMS` to `OUTPUT_DIR`
+(default `.local/bundles`), which must not exist yet.
+
+## One Spark: download and launch
+
+This section installs the older v0.1.0 release by hand. For the current build,
+use the one-line install instead.
+
+The launcher bundle has everything Vade needs to install its engine and its
+chat program (the harness) on Linux aarch64.
+
+### What you need
+
+Your Spark needs:
+
+- a working NVIDIA driver (`nvidia-smi` and `libcuda.so.1`)
+- `curl`, `sha256sum`, `tar` and `zstd`
+
+You don't need Rust or the CUDA toolkit to run the bundle.
+
+The bundle doesn't include model weights, and it doesn't download them. Vade
+finds weights you already have, so keep your existing checkpoint at
+`~/models/nvidia/Qwen3.8-Flash-Next-FP4-Local`. The
+[first-run guide](../../harness/docs/first-run.md) explains how to choose a
+model and how the local launcher behaves.
+
+The bundle and its `SHA256SUMS` file are on the
+[v0.1.0 release page](https://github.com/wappy-x/Vade/releases/tag/v0.1.0).
+To build from source, follow [INSTALL.md](../../docs/INSTALL.md), or make the bundle
+yourself as described in
+[Produce the launcher bundle](#produce-the-launcher-bundle).
+
+### Download, check and unpack
+
+Start in a new, empty directory, so that unpacking can't replace any existing
+files. Then set two values. The bundle filename is the one listed in that
+release's `SHA256SUMS`:
+
+```sh
+mkdir vade-launch
+cd vade-launch
+RELEASE_URL='https://github.com/wappy-x/Vade/releases/download/v0.1.0'
+BUNDLE='vade-launch-bundle-v1-5a22651-aarch64.tar.zst'
+```
+
+Now run three commands. The first downloads both files, the second checks the
+archive and unpacks it, and the third starts Vade:
+
+```sh
+curl --fail --location --output "$BUNDLE" "$RELEASE_URL/$BUNDLE" && curl --fail --location --output SHA256SUMS "$RELEASE_URL/SHA256SUMS"
+sha256sum -c SHA256SUMS && tar --zstd -xf "$BUNDLE"
+./vade launch
+```
+
+The checksum covers the whole compressed archive, including the CLI and the
+manifest inside it. It catches changed bytes, but it isn't a publisher
+signature, so always get the archive and the checksum from the same release.
+
+### What `./vade launch` does
+
+The launcher reads `launcher-bundle.conf`, the manifest next to `vade`. It
+verifies the hashes of the engine, the PTX file (the GPU kernels) and the
+harness. It then installs them under `~/.vade`, or under `VADE_HOME` if you set
+it to an absolute path.
+
+If you run a different copy of `vade`, set `VADE_BUNDLE` to the absolute path
+of the unpacked bundle directory instead. `VADE_BUNDLE` names a directory, not
+the compressed archive.
+
+### Check the running engine
+
+When the launcher says it's ready, leave chat with `/exit` and verify the
+running engine:
+
+```sh
+./vade verify
+```
+
+The verifier finds the endpoint from the launcher's saved state, even on a
+non-default port. You can override it with `--url http://127.0.0.1:18080`.
+
+If you need to recover, run `./vade status`. It prints a
+`Vade is ready at ...` line; pass that endpoint to `./vade verify --url`.
+
+To stop the engine that Vade owns, run `./vade down`.
+
+### Run a benchmark
+
+Run `./vade bench` with no flags. Use the same `VADE_HOME` and `VADE_CONFIG`
+as the running engine. The benchmark finds the endpoint by itself.
+
+It writes its results (receipts) to `./vade-bench.json` and `./vade-bench.txt`
+in the current folder, and replaces any older ones. To write them somewhere
+else, use `--output FILE` (`--out FILE` is the same flag). It doesn't create any install or
+build folders to hold them.
+
+By default the benchmark uses whatever drafting the server is set to. In
+drafting, the model's multi-token-prediction (MTP) head proposes tokens and
+the full model checks them. To measure plain decoding instead, run
+`./vade bench --draft plain`. It asks for plain decoding on every request, so
+you don't need to restart the server.
+
+Each receipt records:
+
+- the draft mode you asked for
+- the build SHA from `/health`
+- the drafting depth the server reports
+
+The health report records the server's drafting setting. To check what each
+response used, read the receipt's `draft_observations` fields. See
+[benchmark options](../README.md#measure-a-running-server).
+
+## What's in the launcher bundle
+
+Without options, the producer script (see the next section) writes two files:
+the archive, `vade-launch-bundle-v1-<sha7>-aarch64.tar.zst`, and `SHA256SUMS`.
+The archive unpacks these files straight into the current directory:
+
+| File | What it is |
+| --- | --- |
+| `vade` | Linux aarch64 launcher CLI |
+| `flash-serve` | Linux aarch64 inference engine |
+| `flash.ptx` | The production GPU kernels as PTX, stamped with the build they came from |
+| `flash.cubin.conf` | The compiler, command and hashes of the compiled kernels that `flash-serve` holds |
+| `vade-harness` | Linux aarch64 chat program |
+| `launcher-bundle.conf` | Launcher format, target, revisions and file hashes |
+| `LICENSE`, `NOTICE`, `engine/` notices and licenses | The license and notice files that ship with the source |
+
+The manifest, `launcher-bundle.conf`, matches the local launcher's
+`vade-launch-bundle-v1` format:
+
+```ini
+format=vade-launch-bundle-v1
+target=aarch64-unknown-linux-gnu
+engine_sha=<full-source-sha40>
+cli_sha=<full-source-sha40>
+harness_sha=<full-source-sha40>
+engine_sha256=<flash-serve-SHA256>
+ptx_sha256=<flash.ptx-SHA256>
+harness_sha256=<vade-harness-SHA256>
+vade_sha256=<vade-SHA256>
+```
+
+All three revision fields (`engine_sha`, `cli_sha` and `harness_sha`) name the
+same archived repository commit. They record provenance: where the build came
+from.
+
+Today the local launcher checks the format, the target, and the engine, PTX
+and harness hashes. It doesn't compare the revision fields with the CLI. When
+the installed files have other hashes than `launcher-bundle.conf`, from a
+source build or an earlier bundle, `vade install` copies the bundle's files
+over them.
+
+## Produce the launcher bundle
+
+### Install the toolchains
+
+Build from a clean, committed checkout on Linux aarch64. Install the same
+pinned toolchains that CI uses, then run the script:
+
+```sh
+rustup toolchain install 1.99.0 --profile minimal
+rustup target add --toolchain 1.99.0 aarch64-unknown-linux-gnu
+rustup toolchain install nightly-2026-10-01 --profile minimal --component rust-src,llvm-tools,llvm-bitcode-linker --target nvptx64-nvidia-cuda
+sh scripts/make-bundle.sh
+```
+
+The producer script also needs:
+
+- Git
+- a C compiler (`cc`)
+- binutils
+- GNU `tar`
+- `zstd`
+- GNU `sha256sum`
+
+It uses system build tools and the repository's own Rust crates. Those crates
+use only the standard library, so the build adds no third-party crate
+dependencies. The first nightly `build-std` run may fetch the compiler's own
+dependencies.
+
+You don't need a GPU or the CUDA toolkit to emit PTX or build the bundle. The
+script downloads one compiler file from NVIDIA and checks its hash, so it also
+needs `curl` and `xz`. To build offline, set `VADE_PTXAS_ARCHIVE` to the absolute
+path of a saved copy. See [Precompile kernels for a release](../../engine/crates/gpu/README.md#precompile-kernels-for-a-release).
+
+### Choose where the output goes
+
+`sh scripts/make-bundle.sh [OUTPUT_DIR]` writes to `.local/bundles` unless you
+name another folder. That folder must not exist yet, not even as an empty
+folder. To keep bundles from several builds, give each build its own folder.
+
+While it runs:
+
+- It takes a lock next to the output folder.
+- It builds the archive and checksum in a temporary folder, then renames that
+  folder into place, so both files appear together.
+- If the build fails, it removes its temporary files and the lock.
+- Two builds running at once can't overwrite a finished pair.
+
+### What the script builds
+
+The script snapshots the recorded commit with `git archive` and runs
+`cargo kernels`. It then builds release versions of `flash-serve`, `vade` and
+`vade-harness`.
+
+Linking needs `libcuda.so.1`, so the script uses a temporary stand-in with that
+name that only provides symbols. The stand-in isn't shipped, and the binaries
+don't look for it. On the Spark, the NVIDIA driver supplies the real library.
+
+The script also strips build-machine paths from the binaries. It refuses any
+binary, PTX or manifest that still contains one.
+
+### How releases are built and tested
+
+The [release workflow](../../.github/workflows/release.yml) runs only when a
+maintainer starts it by hand on a tag with the `v` prefix, on
+`ubuntu-24.04-arm`. It installs the same pinned toolchains,
+runs the same script unchanged, and checks `SHA256SUMS`. It then attaches the
+bundle and checksum to the tag's GitHub release. The tag workflow does the
+full native build, and it checks both the archive checksum and the extracted
+manifest hashes before it publishes.
+
+The repository-tool CI step runs
+`cargo +1.99.0 test --offline --locked --all-targets --manifest-path tools/Cargo.toml`.
+Its bundle tests check that the producer:
+
+- lays out the files and writes the manifest hashes correctly
+- refuses the cases it should refuse, and cleans up after a failure
+- can't overwrite a finished bundle when two builds collide
+- leaves no build-machine paths in its output
+
+The v0.1.0 bundle was validated by CI and by fresh installs on home and cloud
+Sparks.
+
+## Prebuilt binaries for a controller install
+
+The controller is the computer that runs `vade install`. It uses a separate
+format, `vade-prebuilt-v1`. The `make-bundle.sh` script above builds only the
+launcher bundle (`vade-launch-bundle-v1`). It doesn't build a controller
+bundle.
+
+A launcher bundle can also serve a controller. The v0.1.0 release bundle
+cannot: the v0.1.0 CLI does not read launcher bundles, and a newer checkout is
+a different commit. To use a launcher bundle from the same commit, unpack it on
+the controller and set `prebuilt_dir` to that folder (or unpack it into
+`<prebuilt_dir>/<engine-sha40>-<cli-sha40>`). `vade install` then reads its
+`launcher-bundle.conf`, checks the same three Spark files against their
+SHA-256 hashes and copies them, when the bundle's `engine_sha` and `cli_sha`
+equal the controller checkout's commit. A bundle from another commit is
+ignored and the Sparks build from source. The launcher bundle has no host pair,
+so the controller builds its own CLI and chat program. Otherwise, assemble a
+`vade-prebuilt-v1` bundle as described below.
+
+A controller that is a Spark needs no checkout. After the one-line install,
+`vade setup --hosts` writes `source = installed-bundle` in place of the three
+source folders. `vade install` then reads the engine, harness and CLI revisions
+from the `launcher-bundle.conf` next to the `vade` that runs, checks the bundle's
+hashes, and stages its `vade` and `vade-harness` for this Spark. A fault in that
+bundle stops the install, because there is no source to build from. A `vade`
+from a bundle uses that bundle also in the folder of a clone. `VADE_SOURCE`
+selects a checkout.
+
+Before the copy, `vade install` reads the machine type, the NVIDIA driver and
+glibc of each Spark, and compares them with `min_driver` and `glibc` in the
+bundle's `MANIFEST`. A bundle with no `MANIFEST` has no such floor. A Spark that
+does not fit stops the install with one line, or, with a `prebuilt_dir` config,
+makes every Spark build from source, because all Sparks must run the same files.
+
+### What a controller bundle contains
+
+With a controller bundle, `vade install` can copy its binaries instead of
+compiling them. Point it at them with the existing `prebuilt_dir` setting.
+
+Each bundle is a folder named after one engine revision and one CLI revision,
+`<prebuilt_dir>/<engine-sha40>-<cli-sha40>`. It contains:
+
+| File | Where it runs |
+| --- | --- |
+| `flash-serve` | The Spark (Linux aarch64) |
+| `flash.ptx` | The Spark, loaded by its CUDA driver |
+| `vade` | The Spark, as the helper: the copy of the CLI that install runs there (Linux aarch64) |
+| `host-vade` (optional pair) | The computer that runs `vade install` |
+| `host-vade-harness` (optional pair) | The computer that runs `vade chat` |
+
+The bundle's `manifest.conf` records its source revisions and hashes:
+
+```ini
+format=vade-prebuilt-v1
+target=aarch64-unknown-linux-gnu
+engine_sha=<full-engine-source-sha>
+cli_sha=<full-cli-source-sha>
+flash-serve.sha256=<SHA256>
+flash.ptx.sha256=<SHA256>
+vade.sha256=<SHA256>
+host_target=aarch64-apple-darwin
+harness_sha=<full-harness-source-sha>
+host-vade.sha256=<SHA256>
+host-vade-harness.sha256=<SHA256>
+```
+
+Build every binary from the recorded source revision. Vade trusts the
+directory and manifest you supply, so get them from a trusted build or
+release. Vade still takes the revisions to install, and what the engine
+supports, from your local source checkouts. Installation doesn't fetch
+a release or download a model.
+
+### The optional host pair
+
+The host pair is `host-vade` and `host-vade-harness`. Use the host target that
+matches the computer you install from: `aarch64-apple-darwin`,
+`x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`, or
+`x86_64-unknown-linux-gnu`.
+
+If both host files are present and pass their checks, install needs no Rust
+compiler on your computer. It copies the chat program and CLI into the new
+installed build.
+
+If you leave out all the host fields, those two are built from source. The
+engine and helper can still come from the bundle.
+
+### Checks and fallback
+
+Before copying, Vade checks the source revisions, the host target, each
+binary's architecture and the SHA256 values. It checks the copies again before
+switching to them.
+
+If the bundle fails a check, Vade prints one line saying why and builds from
+source instead, with the usual prerequisites. If that build fails, your
+previous install stays active.
+
+Vade reuses binaries already on a Spark only when the Spark's SSH target and
+install folder are unchanged and the binaries' hashes still match.
+
+### Model files and install-time checks
+
+Install leaves model files where they are. It checks that the checkpoint's
+shards are present, and when nothing has changed it reuses a saved list of the
+files instead of scanning the folder again. That saved list is only a
+speed-up: it doesn't replace trusted publisher checksums or the engine's own
+model checks.
+
+During install, current engines also do two jobs side by side:
+
+- They fill the CUDA module cache.
+- They check the checkpoint against the engine's usual checksums.
+
+Neither job runs the model or opens a port. Later starts reuse the results
+while the files and checksums are unchanged. Install prints how long this took
+and how many bytes it checked.
+
+Install skips these jobs on a Spark that is already running an engine Vade
+started. If they fail, install keeps the previous install.
+
+They also need an engine and a helper on the Spark that both support them. The
+helper reports whether it does when Vade queries it. With an older engine or
+helper, install skips the jobs and carries on as usual. With an older helper,
+it also prints one line saying it is continuing without this step.

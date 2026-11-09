@@ -1,0 +1,5 @@
+<!-- vade read: note.csv | CSV | pages 1 | chars 64 | skipped: none -->
+| Key | Value |
+| --- | --- |
+| A | B\|C |
+| Z | two<br>lines |

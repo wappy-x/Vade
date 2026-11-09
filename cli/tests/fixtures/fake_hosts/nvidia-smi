@@ -1,0 +1,9 @@
+#!/bin/sh
+# A GB10 with no job on it, at the driver in the home folder of the host.
+case ${1-} in
+    --query-compute-apps=pid) ;;
+    --query-gpu=power.draw*) echo 5.00 ;;
+    --query-gpu=utilization.gpu*) echo 0 ;;
+    --query-gpu=driver_version*) if [ -f "$HOME/driver" ]; then cat "$HOME/driver"; else echo 580.178.04; fi ;;
+    *) echo 'NVIDIA GB10' ;;
+esac

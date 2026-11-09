@@ -1,0 +1,73 @@
+$ vade --help
+Vade runs Qwen3.8 Flash-Next on your DGX Spark, as FP4-Local or FP8.
+
+Examples:
+  vade pull nvidia/Qwen3.8-Flash-Next-FP4-Local@b9ce18a6887e18c089fdea8509a33e63429a3300
+               Download the model and check every file
+  vade up      Start the engine on this Spark
+  vade chat    Chat with the running engine
+  vade status  See what is running
+  vade down    Stop what vade started
+
+Usage: vade <COMMAND> [OPTIONS]
+
+Start and stop:
+  setup     Ask which Sparks, checkpoint and model; install, start, check
+  launch    Install if needed, start on this Spark, then open chat
+  up        Start without chat (this Spark, or Sparks from a controller)
+  down      Stop what vade started
+
+Use:
+  chat      Chat with the running engine
+  sessions  List, export or delete saved chat sessions
+  read      Print a file as Markdown (text, HTML, CSV, PDF, office, data, code)
+  tools     List the tools chat offers: native and MCP
+  mcp       Add, list, test, trust or remove MCP tool servers
+
+Models:
+  pull      Download a model from Hugging Face, with resume and checks
+  models    List the models on this machine and what can serve them
+
+Look:
+  status    Show what is running and whether it is healthy
+  config    Show which setup is selected and what it holds
+  doctor    Check the setup, one line per check, then PASS or FAIL
+  detect    Show this Spark's machine, memory, disk, driver and model
+  logs      Show recent engine logs
+
+Prove:
+  verify    Check exact token IDs across runs, drafting ON and OFF
+  bench     Measure a running server from this client
+  test      Run the build, determinism and long-context gate checks
+
+Maintain:
+  install   Save local defaults and install the engine and chat
+  update    Refresh the installed engine and chat
+  run       Run the separate legacy Qwen3-8B BF16 workflow
+  version   Print the CLI version and the commit of this build
+
+Options:
+  --json               JSON for status, doctor, config, detect, models, version
+  --dry-run            Preview a lifecycle command; others run as usual
+  --api-key-file PATH  Credential for chat, doctor, verify, bench and local run
+  -h, --help           Show help
+  -V, --version        Print the CLI version and the commit of this build
+
+Environment:
+  VADE_HOME          Local install root and saved defaults (default ~/.vade)
+  VADE_CONFIG        Controller config file; selects the controller (see Notes)
+  VADE_GROUP         A [group] in the controller config: machines, state, port
+  VADE_API_KEY_FILE  Credential file when --api-key-file is not given
+  NO_COLOR           Plain output without color
+
+Notes:
+  - Explicit VADE_CONFIG selects the controller for up, install, chat, status,
+    logs, down and doctor, even after local setup; keep it set to the same file
+    throughout that lifecycle. Without VADE_CONFIG, saved local setup wins over
+    the user config directory.
+  - Put options after the command name. bench, verify and test do not take
+    --dry-run or --json.
+
+Learn more: vade <command> --help
+--- stderr
+--- exit 0

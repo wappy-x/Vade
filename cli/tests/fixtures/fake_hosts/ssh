@@ -1,0 +1,42 @@
+#!/bin/sh
+# A fake ssh: see README.txt. It runs ordinary commands in the home of the host.
+# It answers the Vade helper and the check script, which need a real Spark.
+[ "${1-}" != -V ] || { echo 'OpenSSH_fake'; exit 0; }
+# No alias overrides. A local config lookup does not open an SSH connection.
+[ "${1-}" != -G ] || exit 0
+while [ "${1-}" = -o ]; do shift 2; done
+host=$1
+shift
+command=$*
+home=$FAKE_HOSTS/$host
+printf 'ssh %s %s\n' "$host" "$command" >> "$FAKE_HOSTS/calls.log"
+[ -f "$home/known" ] || { echo 'Host key verification failed.' >&2; exit 255; }
+[ ! -f "$home/denied" ] || { echo "fake@$host: Permission denied (publickey)." >&2; exit 255; }
+[ "$command" != true ] || exit 0
+case $command in
+    *vade-cables-end*)
+        if [ -f "$home/hostname" ]; then
+            printf 'hostname %s\n' "$(cat "$home/hostname")"
+        else
+            printf 'hostname %s\n' "$host"
+        fi
+        cat "$home/interfaces"
+        echo vade-cables-end
+        exit 0 ;;
+    *__worker*)
+        cat > /dev/null
+        printf 'install_prepare=warm-ptx-v1\nptx_cache=warm\nmodel_hashed_bytes=0\nmodel_reused_files=132\n'
+        exit 0 ;;
+    *"for tool in cargo rustc"*)
+        printf 'reached=1\nmissing=cargo\n'
+        exit 1 ;;
+    *"printf 'reached=1"*)
+        printf 'reached=1\ngpu=NVIDIA GB10, 580.178.04\ncuda=13.0\ndisk_kb=99999999\n'
+        printf 'mem_total_kb=127608480\nmem_available_kb=115343360\nweights=present\nrust=ok\ndriver=ok\n'
+        exit 0 ;;
+esac
+# The real storage guard runs. Only its stat call differs between Linux and macOS.
+tools=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+command=$(printf '%s\n' "$command" | sed "s#/usr/bin/stat -c '%u %a' --#$tools/fake-stat#")
+cd "$home"
+FAKE_HOST=$host HOME=$home exec sh -c "$command"
