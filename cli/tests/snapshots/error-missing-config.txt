@@ -1,0 +1,5 @@
+$ vade status
+--- stderr
+error: VADE_CONFIG names a missing file: "/nonexistent-vade-snapshot/config".
+ hint: Check the path, or run vade setup to write a controller config there. See docs/INSTALL.md.
+--- exit 1

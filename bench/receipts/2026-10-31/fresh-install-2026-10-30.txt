@@ -1,0 +1,24 @@
+Fresh clone and one-command install on one DGX Spark, 2026-10-30 21:13 to 21:23 (UTC-5).
+Sanitized copy of the run's steps file. Home folder paths and the machine name are removed.
+
+Repository: the public repository wappy-x/vade at commit 82ec816ca1375f1e7bc5fc5b72bb97c61a559197
+(its tree is the tree of private main 0213a822d467ccfce2f6af69710fd1f93ca654d9).
+Machine: one DGX Spark (NVIDIA GB10), driver 580.178.04 (CUDA 13.0). No Rust and no Vade files
+before the run; a fresh VADE_HOME. The FP4-Local checkpoint was already in ~/models.
+The clone came from a git bundle of that commit on the Spark, so it has no network fetch.
+
+Steps, in order:
+  git clone <bundle> vade
+  sh scripts/install.sh
+  export PATH="$HOME/.cargo/bin:$PWD/cli/target/release:$PATH"
+  vade up
+  (one RigMark-format card with drafting ON, private card client)
+  vade down
+
+Results (seconds of wall time for each step):
+CLONE   rc=0    0.693408954 s
+INSTALL rc=0  176.807247835 s
+UP      rc=0   67.353668012 s
+CARD    rc=0  350.224008085 s
+
+The card reported git_sha 82ec816ca1375f1e7bc5fc5b72bb97c61a559197, world 1, prose 42.597 tok/s and C8 179.337 tok/s.

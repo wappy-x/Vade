@@ -1,0 +1,17 @@
+id: fix-utf8-slice-boundary
+title: Fix a byte slice that panics inside a multi-byte character
+category: bug-fix
+inputs: Cargo.toml src/lib.rs tests/preview.rs
+budget_seconds: 300
+
+step: new
+prompt:
+  `cargo test --offline` fails with a panic in src/lib.rs. Fix
+  `truncate_utf8_prefix` so that it returns the longest prefix of at most
+  `max_bytes` bytes that ends on a character boundary, and never panics. Do
+  not change any file under tests/. Finish when `cargo test --offline` passes.
+
+check: last-exit-zero
+check: unchanged Cargo.toml
+check: unchanged tests
+check: run cargo test --offline --quiet

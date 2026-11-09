@@ -1,0 +1,19 @@
+# A correct transcript for the dry run: the old path fails, a search finds
+# the moved file, and the fix goes there.
+>>> call workspace_read
+{"path":"src/v1/token.rs"}
+>>> call workspace_search
+{"path":".","literal":"fn is_expired"}
+>>> call workspace_read
+{"path":"src/v2/token.rs"}
+>>> patch
+*** Begin Patch
+*** Update File: src/v2/token.rs
+@@
+     pub fn is_expired(&self, now: u64) -> bool {
+-        now > self.expires_at
++        now >= self.expires_at
+     }
+*** End Patch
+>>> answer
+`Token::is_expired` lives in src/v2/token.rs now (src/v1/token.rs does not exist). It now returns true when `now >= expires_at`.

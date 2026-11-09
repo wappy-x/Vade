@@ -1,0 +1,15 @@
+# A correct transcript for the dry run.
+>>> call workspace_read
+{"path":"endpoints.html"}
+>>> patch
+*** Begin Patch
+*** Add File: quotas.json
++[
++  {"route": "/v2/accounts", "per_minute": 600, "burst": 50},
++  {"route": "/v2/audit", "per_minute": 60, "burst": 10},
++  {"route": "/v2/statements", "per_minute": 30, "burst": 5},
++  {"route": "/v2/transfers", "per_minute": 120, "burst": 20}
++]
+*** End Patch
+>>> answer
+quotas.json holds the four live routes, sorted by route.

@@ -1,0 +1,12 @@
+# A near miss for the dry run: question 1 takes the version 2 port from the History section.
+>>> patch
+*** Begin Patch
+*** Add File: ANSWERS.txt
++1: 7400
++2: 65536
++3: AUTH
++4: 8
++5: E117
+*** End Patch
+>>> answer
+Done.

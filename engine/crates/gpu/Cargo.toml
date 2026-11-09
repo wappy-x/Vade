@@ -1,0 +1,18 @@
+[package]
+name = "spark-gpu-probe"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/wappy-x/vade"
+rust-version = "1.99"
+
+[features]
+kernel-bench = []
+
+[dependencies]
+engine-fabric = { path = "../fabric" }
+
+[[example]]
+name = "latent-rows"
+required-features = ["kernel-bench"]
