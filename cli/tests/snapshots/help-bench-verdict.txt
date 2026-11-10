@@ -1,0 +1,56 @@
+$ vade bench verdict --help
+Judge saved A/X cells on this host. Send no requests.
+
+Usage: vade bench verdict FILE... [OPTIONS]
+
+Rule 2026-11-01 (screen-verdict):
+  Base band: 0.8 %. Cell band: max(base, own A/A).
+  Own A/A: absolute percent change of the even A mean from the odd A mean.
+  Cached seconds cells with A < 1 s also pass at up to +10 ms (FLOOR).
+  Cached names contain warm_replay, warm replay or cache (case ignored).
+  Names with nocache, no-cache or uncached do not use the floor.
+  One X outside the base band needs a second X only within 2 x cell band.
+  A second X outside the band fails. No third X is requested.
+  With two starts per arm, a loss inside own A/A reads NOISE.
+  One FAIL within 2 x own A/A requests RERUN unless --final is set.
+  Token IDs must match. A present ids_equal must be JSON true.
+
+Options:
+  --rule 2026-11-01  Name the rule explicitly (also the default)
+  --band PCT         Override each base band, except band_on_clean_pct
+  --ids-ok yes|no    Result of the token ID check (default yes)
+  --sha SHA40        Put the revision in the verdict line
+  --advisory CELL    Exclude a full name or suffix; repeatable
+  --only CELL        Judge only this full cell name
+  --final            Judge a completed rerun; do not request another
+  --no-record        Accepted for script callers; this command writes no files
+  --                 Treat all remaining arguments as file names
+  -h, --help         Show this page
+
+--band, --only and --sha each accept one value. Do not repeat these flags.
+An advisory suffix must start after a space or "/".
+
+Input: a JSON object with screen, optional band_pct and ids_equal, and cells.
+Each cell needs cell, unit (s or tok/s), a and x. Each arm is a list of
+per-start values, or a pooled number with a_starts or x_starts.
+A pooled A with at least two starts can give aa_pct. Each cell can set band_pct.
+Optional band_pct, aa_pct and band_on_clean_pct can be null (absent).
+Screen band_pct must be finite and nonnegative.
+Selected cell band_pct and band_on_clean_pct must be finite and nonnegative.
+These checks also apply with --band.
+A selected cell aa_pct must be a finite number for every arm form.
+A pooled A uses aa_pct only with at least two starts. It uses the absolute value.
+Lists use their own A/A.
+Cell band_on_clean_pct replaces the base when at least one cell without it
+is judged and all such cells read INSIDE or INSIDE (X faster).
+A null or zero value does not widen.
+Example: {"screen":"check","ids_equal":true,"cells":[{"cell":"rate","unit":"tok/s","a":[100],"x":[99.3]}]}
+Several files form one screen. Each file keeps its base band.
+At least one selected cell must be gating (without --advisory).
+The command refuses a verdict if no gating cells remain, including with --only.
+This command uses no saved station history or environment rule switches.
+
+Exit: 0 SCREEN PASS; 1 SCREEN FAIL; 2 bad input, no gating cells, or output error;
+3 SECOND-START; 4 RERUN.
+--- stderr
+--- exit 0

@@ -1,0 +1,27 @@
+$ vade test --help
+Run the build, determinism and long-context gate checks.
+
+Examples:
+  vade test build --help
+  vade test determinism --help
+  vade test longctx --help
+
+Usage: vade test build [OPTIONS]
+       vade test determinism [OPTIONS] -- MODEL FIXTURES ADDR0 ADDR1 RANK
+       [--world 1|2|4]
+       vade test longctx prepare|run|compare [OPTIONS]
+       vade test gdn-state REFERENCE CANDIDATE [SPLIT] [--identity]
+       [--legacy-prefill-group N]
+       vade test unix-flags-abi [--target TARGET]
+
+Notes:
+  - build checks the current engine checkout and a private release snapshot;
+    determinism drives the flash-bench byte comparisons and receipts.
+  - longctx freezes long-context prompts and compares teacher-forced logits and
+    retrieval; gdn-state compares recurrent states; unix-flags-abi compiles Unix
+    flag ABI assertions.
+  - Native Spark qualification remains separate from host checks. See
+    cli/docs/test.md and cli/evals.md for every option, default, bound and
+    receipt.
+--- stderr
+--- exit 0

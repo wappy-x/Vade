@@ -1,0 +1,16 @@
+# A correct transcript for the dry run.
+>>> call workspace_read
+{"path":"retention_policy.docx"}
+>>> call workspace_read
+{"path":"QUESTIONS.md"}
+>>> patch
+*** Begin Patch
+*** Add File: ANSWERS.txt
++Q1: 90 days
++Q2: zstd-3
++Q3: 512 MiB
++Q4: us-central-spark
++Q5: sec-ops-lead
+*** End Patch
+>>> answer
+ANSWERS.txt holds the five answers.

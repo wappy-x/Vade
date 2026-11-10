@@ -1,0 +1,21 @@
+id: cancel-resume
+title: Cancel in the middle of a task, then continue
+category: session-resume
+inputs: notes/a.txt notes/b.txt notes/c.txt
+budget_seconds: 900
+
+step: cancel
+cancel_at_call: 3
+prompt:
+  For each of notes/a.txt, notes/b.txt and notes/c.txt, write out/<name>.upper.txt (for example out/a.upper.txt) with the same lines in upper case. Do one file at a time: read it, then write its output, then go to the next file.
+
+step: resume
+prompt:
+  continue
+
+check: held-closed
+check: last-exit-zero
+check: file-equals out/a.upper.txt expected/a.upper.txt
+check: file-equals out/b.upper.txt expected/b.upper.txt
+check: file-equals out/c.upper.txt expected/c.upper.txt
+check: unchanged notes
