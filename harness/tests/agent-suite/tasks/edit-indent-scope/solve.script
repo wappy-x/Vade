@@ -1,0 +1,16 @@
+# A correct transcript for the dry run: read, patch the nested copy with
+# context that only it has, run the tests.
+>>> call workspace_read
+{"path":"src/lib.rs"}
+>>> patch
+*** Begin Patch
+*** Update File: src/lib.rs
+@@ impl Inner {
+         pub fn burst_limit(scale: u32) -> u32 {
+             let base = 2;
+-            let limit = 10;
++            let limit = 25;
+             base + limit * scale
+*** End Patch
+>>> answer
+`Inner::burst_limit` now uses `let limit = 25;`, and `outer_limit` is unchanged.

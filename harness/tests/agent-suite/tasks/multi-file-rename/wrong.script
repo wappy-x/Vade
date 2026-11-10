@@ -1,0 +1,5 @@
+# A near miss for the dry run: the rename skips README.md. `absent . Widget` must fail.
+>>> call workspace_shell
+{"argv":["/bin/sh","-c","grep -rl -e Widget -e widget --include='*.rs' . | xargs perl -pi -e 's/Widget/Gadget/g; s/widget/gadget/g'"],"timeout_ms":60000}
+>>> answer
+Renamed in all Rust files.

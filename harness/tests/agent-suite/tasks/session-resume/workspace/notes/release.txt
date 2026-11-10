@@ -1,0 +1,4 @@
+Release planning note.
+
+The code name of the next release is TERRACOTTA-41.
+Keep it private until the release files are ready.

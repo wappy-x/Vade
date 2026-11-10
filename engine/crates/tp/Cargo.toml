@@ -1,0 +1,32 @@
+[package]
+name = "spark-tp"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/wappy-x/vade"
+rust-version = "1.99"
+
+[features]
+kernel-bench = ["spark-gpu-probe/kernel-bench"]
+default = ["flash-routing-per-row"]
+flash-routing-per-row = ["spark-engine/flash-routing-per-row", "spark-serve/flash-routing-per-row", "spark-seqpar/flash-routing-per-row"]
+
+[dependencies]
+engine-fabric = { path = "../fabric" }
+engine-model = { path = "../model" }
+spark-gpu-probe = { path = "../gpu" }
+spark-engine = { path = "../engine", default-features = false }
+spark-serve = { path = "../serve", default-features = false }
+engine-tokenizer = { path = "../tokenizer" }
+spark-seqpar = { path = "../seqpar", default-features = false }
+
+[[bin]]
+name = "kernel-bench"
+path = "src/bin/kernel-bench.rs"
+required-features = ["kernel-bench"]
+
+[[bin]]
+name = "kernel-referee"
+path = "src/bin/kernel-referee.rs"
+required-features = ["kernel-bench"]
