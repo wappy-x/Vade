@@ -1,0 +1,11 @@
+use std::env::{args, current_dir};
+use std::env::var as unused;
+fn run() {
+    let text = r###"std::env::var("MODE");"###;
+    let bytes = b"std::env::vars()";
+    // std::env::var_os("MODE");
+    /* std::env::vars(); /* std::env::vars_os(); */ */
+    other::env::var("value");
+    settings.var();
+    args(); current_dir();
+}
