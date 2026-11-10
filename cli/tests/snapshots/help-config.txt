@@ -1,0 +1,21 @@
+$ vade config --help
+Show which setup is selected and what it holds.
+
+Examples:
+  vade config
+  vade config --json
+  VADE_CONFIG=cluster.conf vade config
+
+Usage: vade config [--json]
+
+Options:
+  --json  Print one vade.config.v1 object
+
+Notes:
+  - The setup is local (saved defaults in VADE_HOME), controller (VADE_CONFIG or
+    the user config file), legacy (vade run qwen3-8b) or none yet.
+  - Reads only. To change local limits, run vade down, then vade launch with the
+    new flags. To change controller settings, stop the engine with its current
+    config, then edit the file shown here.
+--- stderr
+--- exit 0

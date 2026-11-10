@@ -1,0 +1,25 @@
+Harness measurements, 2026-10-08; contract/relay stream implementation.
+Samples precede additive fingerprint_kind metadata retention; stream path is unchanged.
+Release profile, macOS ARM64, first-party loopback mock only; no Engine/Spark/GPU.
+Command: target/release/examples/perf_mock target/release/vade-harness 3
+Mock answers discovery with 404; samples exercise ordinary-chat fallback.
+n=3 per mode/output; each token is a synthetic x character.
+First output and stream timing start at the first mock SSE write, excluding discovery/admission.
+See performance.md for CPU/RSS methodology and uncontrolled scheduling/cold-start limitations.
+
+cpu_clock_ns_per_tick=41.666666667
+startup ready_ms=90.467 peak_rss_bytes=2457600
+startup ready_ms=10.713 peak_rss_bytes=2457600
+startup ready_ms=7.670 peak_rss_bytes=2457600
+stream mode=direct raw_tui=false tokens=100000 tokens_per_event=1 first_byte_to_output_ms=0.079 wall_s=0.108045 stream_cpu_user_s=0.149223 stream_cpu_system_s=0.041077 stream_cpu_percent=176.13 resident_start_bytes=2637824 resident_end_bytes=3145728 process_cpu_user_s=0.151411 process_cpu_system_s=0.043293 peak_rss_bytes=3162112
+stream mode=direct raw_tui=false tokens=100000 tokens_per_event=1 first_byte_to_output_ms=0.081 wall_s=0.096153 stream_cpu_user_s=0.132187 stream_cpu_system_s=0.037169 stream_cpu_percent=176.13 resident_start_bytes=2637824 resident_end_bytes=3244032 process_cpu_user_s=0.133073 process_cpu_system_s=0.038092 peak_rss_bytes=3293184
+stream mode=direct raw_tui=false tokens=100000 tokens_per_event=1 first_byte_to_output_ms=0.034 wall_s=0.094053 stream_cpu_user_s=0.130359 stream_cpu_system_s=0.035858 stream_cpu_percent=176.73 resident_start_bytes=2637824 resident_end_bytes=3211264 process_cpu_user_s=0.131260 process_cpu_system_s=0.036683 peak_rss_bytes=3244032
+stream mode=agent raw_tui=false tokens=100000 tokens_per_event=8 first_byte_to_output_ms=0.031 wall_s=0.012840 stream_cpu_user_s=0.018162 stream_cpu_system_s=0.004711 stream_cpu_percent=178.14 resident_start_bytes=2703360 resident_end_bytes=3227648 process_cpu_user_s=0.019405 process_cpu_system_s=0.005491 peak_rss_bytes=3293184
+stream mode=agent raw_tui=false tokens=100000 tokens_per_event=8 first_byte_to_output_ms=0.042 wall_s=0.013025 stream_cpu_user_s=0.018288 stream_cpu_system_s=0.004799 stream_cpu_percent=177.24 resident_start_bytes=2703360 resident_end_bytes=3162112 process_cpu_user_s=0.019498 process_cpu_system_s=0.005566 peak_rss_bytes=3293184
+stream mode=agent raw_tui=false tokens=100000 tokens_per_event=8 first_byte_to_output_ms=0.040 wall_s=0.012679 stream_cpu_user_s=0.017874 stream_cpu_system_s=0.004688 stream_cpu_percent=177.94 resident_start_bytes=2703360 resident_end_bytes=3178496 process_cpu_user_s=0.019069 process_cpu_system_s=0.005455 peak_rss_bytes=3293184
+stream mode=direct raw_tui=true tokens=100000 tokens_per_event=1 first_byte_to_output_ms=0.047 wall_s=0.085006 stream_cpu_user_s=0.118744 stream_cpu_system_s=0.050947 stream_cpu_percent=199.62 resident_start_bytes=2654208 resident_end_bytes=3194880 process_cpu_user_s=0.119588 process_cpu_system_s=0.051721 peak_rss_bytes=3211264
+stream mode=direct raw_tui=true tokens=100000 tokens_per_event=1 first_byte_to_output_ms=0.041 wall_s=0.085210 stream_cpu_user_s=0.119001 stream_cpu_system_s=0.051165 stream_cpu_percent=199.70 resident_start_bytes=2654208 resident_end_bytes=3178496 process_cpu_user_s=0.119834 process_cpu_system_s=0.051943 peak_rss_bytes=3178496
+stream mode=direct raw_tui=true tokens=100000 tokens_per_event=1 first_byte_to_output_ms=0.053 wall_s=0.084732 stream_cpu_user_s=0.117543 stream_cpu_system_s=0.051010 stream_cpu_percent=198.93 resident_start_bytes=2654208 resident_end_bytes=3276800 process_cpu_user_s=0.118364 process_cpu_system_s=0.052048 peak_rss_bytes=3293184
+stream mode=agent raw_tui=true tokens=100000 tokens_per_event=8 first_byte_to_output_ms=0.042 wall_s=0.012031 stream_cpu_user_s=0.017191 stream_cpu_system_s=0.006708 stream_cpu_percent=198.65 resident_start_bytes=2719744 resident_end_bytes=3194880 process_cpu_user_s=0.018551 process_cpu_system_s=0.007655 peak_rss_bytes=3342336
+stream mode=agent raw_tui=true tokens=100000 tokens_per_event=8 first_byte_to_output_ms=0.034 wall_s=0.012413 stream_cpu_user_s=0.017560 stream_cpu_system_s=0.006928 stream_cpu_percent=197.28 resident_start_bytes=2719744 resident_end_bytes=3227648 process_cpu_user_s=0.018844 process_cpu_system_s=0.007701 peak_rss_bytes=3375104
+stream mode=agent raw_tui=true tokens=100000 tokens_per_event=8 first_byte_to_output_ms=0.041 wall_s=0.011934 stream_cpu_user_s=0.017177 stream_cpu_system_s=0.006579 stream_cpu_percent=199.06 resident_start_bytes=2719744 resident_end_bytes=3227648 process_cpu_user_s=0.018364 process_cpu_system_s=0.007345 peak_rss_bytes=3325952

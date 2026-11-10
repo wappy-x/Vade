@@ -1,0 +1,34 @@
+# A correct transcript for the dry run. The harness sends AGENTS.md as project rules.
+>>> call workspace_read
+{"path":"CHANGELOG.md"}
+>>> patch
+*** Begin Patch
+*** Add File: src/order.rs
++// Part of the tally crate. License: Apache-2.0.
++//! Order statistics over integer samples.
++
++/// The median of the values: the lower middle value for an even count.
++/// `None` for an empty slice.
++pub fn median(values: &[i64]) -> Option<i64> {
++    if values.is_empty() {
++        return None;
++    }
++    let mut sorted = values.to_vec();
++    sorted.sort_unstable();
++    Some(sorted[(sorted.len() - 1) / 2])
++}
+*** Update File: src/lib.rs
+@@
+ pub mod stats;
++pub mod order;
+*** Update File: CHANGELOG.md
+@@
+ ## Unreleased
+ 
++- added: order::median
+ - added: stats::mean
+*** End Patch
+>>> call workspace_shell
+{"argv":["cargo","test","--offline"],"timeout_ms":120000}
+>>> answer
+Added `order::median` in src/order.rs with the license header and a doc comment, declared the module, and recorded it in CHANGELOG.md. `cargo test --offline` passes.
