@@ -1,0 +1,46 @@
+GPU PROOF DEPENDENCY MANIFEST — 2026-10-02
+
+Authored implementation:
+- Cargo packages spark-gpu-probe 0.1.0 and spark-rust-kernels 0.1.0.
+- Runtime, driver declarations, kernel source, numerical references authored in Rust.
+- Cargo dependencies: zero third-party crates. Cargo.lock contains only these two packages.
+- No vLLM, SGLang, PyTorch, Rust-CUDA, cudarc, CubeCL, CUTLASS or cuBLAS.
+- No borrowed GitHub implementation; official API/specification documentation only.
+
+Trusted build base used:
+- Rust stable 1.99.0 b940084d7 (existing Linux host compiler), LLVM 23.1.1.
+- Official Rust nightly-2026-10-01: rustc 1.101.0-nightly 21b707e3f, LLVM 23.1.1.
+- Official nightly rustc/cargo/host rust-std; official nvptx64-nvidia-cuda rust-std/core.
+- Official llvm-tools + llvm-bitcode-linker distributed as rustup toolchain components.
+- Official rust-src installed, not used in the successful build.
+- rustup 1.29.1 (existing) downloaded pinned official distribution components.
+- System linker and platform libraries; see provenance/host-dynamic-libraries.txt.
+- Shell/SSH/tar/sha256sum only for build orchestration and retained evidence.
+
+Trusted execution base used:
+- Existing NVIDIA DGX Linux installation and kernel 7.0.0-1019-nvidia.
+- Existing NVIDIA driver 580.178.04, CUDA Driver API version 13000 (libcuda).
+- NVIDIA GB10 GPU, compute capability 12.1; driver PTX JIT.
+- CUDA Toolkit 13.0 present but nvcc/NVRTC/libNVVM not used for this proof.
+- Linux userspace loader, standard library, libc and system linker runtime components.
+
+Installation and boundary:
+- Pinned official nightly plus named components and NVPTX target installed user-locally
+  with explicit parent authorization. Global default remains existing stable.
+- No system package install, driver update, reboot, GPU setting change or service.
+- No use of RUSTC_BOOTSTRAP; no manual patching of rustc, LLVM IR or generated PTX.
+- Emitted PTX7.0 / sm70 uses default compatible prebuilt core, then driver JIT.
+- Genuine Rust device computation is proven. This does not claim a self-authored
+  general Rust compiler: rustc, its bundled LLVM, and NVIDIA's JIT remain trusted.
+- Library ABI correctness is independently reviewed but not exhaustively verified.
+- This is a proof backend, not finished Qwen execution or a qualified inference engine.
+
+Private provenance artifacts:
+- rustup-install.log, rustup-target.log: installation output.
+- kernel-build.log: successful offline kernel compilation.
+- kernel-rustc.txt, host-rustc.txt, toolchains-after.txt: toolchain identity/default.
+- source-and-artifacts.sha256: source/PTX/host binary identity at GPU test.
+- gpu-smoke.log: exact 15-case result and checked cleanup.
+- host-dynamic-libraries.txt: execution linkage.
+
+Do not publish private provenance, host paths, names, routing or operational logs.

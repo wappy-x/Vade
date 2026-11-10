@@ -1,0 +1,79 @@
+{
+  "scope": "Historical source hashes for the retained research summaries; not hashes of the edited destination documents",
+  "source_locator": "Private original source artifacts are identified by SHA256",
+  "entries": [
+    {
+      "source_sha256": "73994d982689500132010e31188e55519e57b932e2f7a698d0cbc98c9b61c339",
+      "source_bytes": 8503,
+      "source_modified_utc": "2026-09-24T19:14:25.538787+00:00",
+      "selection": "cached mature-chat workload; critical-path profile; task acceptance",
+      "destination": "docs/history/sglang/earlier-optimization-research.md",
+      "source_locator": "sha256:73994d982689500132010e31188e55519e57b932e2f7a698d0cbc98c9b61c339"
+    },
+    {
+      "source_sha256": "f0da9b83d643916c29a9b95722c59d9377648f55447e48824b1a698f35d608cf",
+      "source_bytes": 9281,
+      "source_modified_utc": "2026-09-24T23:46:08.440603+00:00",
+      "selection": "physical I/O vs preparation; exact prepared caches",
+      "destination": "docs/history/sglang/earlier-optimization-research.md",
+      "source_locator": "sha256:f0da9b83d643916c29a9b95722c59d9377648f55447e48824b1a698f35d608cf"
+    },
+    {
+      "source_sha256": "aaf4906e722b90827e4d24275e08a8586ff5acc1b0c82141bb5a7a894c1c3930",
+      "source_bytes": 6050,
+      "source_modified_utc": "2026-09-25T05:14:03.533365+00:00",
+      "selection": "external protocol/precision caveats; speculation and host-work hypotheses",
+      "destination": "docs/history/sglang/earlier-optimization-research.md",
+      "source_locator": "sha256:aaf4906e722b90827e4d24275e08a8586ff5acc1b0c82141bb5a7a894c1c3930"
+    },
+    {
+      "source_sha256": "dd31b0dc6510194ee7e6a171e9158bfffc449a71968433d5a4567d26dc220d44",
+      "source_bytes": 6381,
+      "source_modified_utc": "2026-09-25T05:36:51.544800+00:00",
+      "selection": "later startup qualification; candidate screens and interaction caveats",
+      "destination": "docs/history/sglang/earlier-optimization-research.md",
+      "source_locator": "sha256:dd31b0dc6510194ee7e6a171e9158bfffc449a71968433d5a4567d26dc220d44"
+    },
+    {
+      "source_sha256": "b3b6206deebf83254f17e59872b09ab5941911fc211cc5870970685b0331bba0",
+      "source_bytes": 10382,
+      "source_modified_utc": "2026-09-24T23:46:08.460605+00:00",
+      "selection": "full capabilities, client workload and controlled acceptance",
+      "destination": "docs/history/sglang/earlier-optimization-research.md",
+      "source_locator": "sha256:b3b6206deebf83254f17e59872b09ab5941911fc211cc5870970685b0331bba0"
+    },
+    {
+      "source_sha256": "4a793f8f14ec64c63950a63b5847be5d5f04c5ef705fbde54974382a37a8bd0c",
+      "source_bytes": 3944,
+      "source_modified_utc": "2026-09-28T16:51:37.838376+00:00",
+      "selection": "research completion does not establish achieved throughput",
+      "destination": "docs/history/sglang/earlier-optimization-research.md",
+      "source_locator": "sha256:4a793f8f14ec64c63950a63b5847be5d5f04c5ef705fbde54974382a37a8bd0c"
+    },
+    {
+      "source_sha256": "c705fb4efd8703835edc6ebcb59aa1fa58852d67c4d5003a9d995aef5fc12503",
+      "source_bytes": 19564,
+      "source_modified_utc": "2026-09-28T16:51:37.822012+00:00",
+      "selection": "committed-round arithmetic, actual verification routes, ranked mechanisms and stop criteria",
+      "destination": "docs/history/sglang/earlier-optimization-research.md",
+      "source_locator": "sha256:c705fb4efd8703835edc6ebcb59aa1fa58852d67c4d5003a9d995aef5fc12503"
+    },
+    {
+      "source_sha256": "4e08ae166882fec8d19e8cb93a7ab341b873a97f8d412d3aa70bfb46c6947702",
+      "source_bytes": 20169,
+      "source_modified_utc": "2026-09-28T16:51:37.801965+00:00",
+      "selection": "workload-dependent feasibility, memory geometry and rejected-state correctness",
+      "destination": "docs/history/sglang/earlier-optimization-research.md",
+      "source_locator": "sha256:4e08ae166882fec8d19e8cb93a7ab341b873a97f8d412d3aa70bfb46c6947702"
+    },
+    {
+      "source_sha256": "8b5d176ac4ae6d17fc5c2e6ab763be7fb9cc02ab7903bc8c3767e78aab07522d",
+      "source_bytes": 2028,
+      "source_modified_utc": "2026-09-28T16:44:38.090390+00:00",
+      "selection": "standalone conditional arithmetic; source retained privately, no executable imported into this repository",
+      "historical_destination": "tools/research/speculation_feasibility.py",
+      "retention": "Original source retained privately",
+      "source_locator": "sha256:8b5d176ac4ae6d17fc5c2e6ab763be7fb9cc02ab7903bc8c3767e78aab07522d"
+    }
+  ]
+}

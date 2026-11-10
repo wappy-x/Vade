@@ -1,0 +1,32 @@
+$ vade run --help
+Run the separate legacy Qwen3-8B BF16 workflow on one Spark.
+
+Examples:
+  vade run qwen3-8b
+  vade run qwen3-8b --dry-run
+
+Usage: vade run qwen3-8b [OPTIONS]
+
+Options:
+  --port N              Local server port, 1024..65535 (default 8080)
+  --weights-source DIR  Verify an existing official BF16 directory read-only,
+                        without weight downloads
+  --release DIR         Run a release folder
+  --engine-source DIR   Engine source checkout (with --harness-source, instead
+                        of --release)
+  --harness-source DIR  Harness source checkout
+  --api-key-file PATH   Bearer credential file (or VADE_API_KEY_FILE)
+  --dry-run             Show what would happen; change nothing
+
+Notes:
+  - Runs on one Linux aarch64 NVIDIA GB10. It checks prerequisites before any
+    download, downloads the official pinned weights (resumable, hash-checked),
+    starts a server, answers one prompt and runs doctor.
+  - Other --weights-source directory names are imported as Qwen3-8B inside
+    VADE_HOME.
+  - VADE_HOME selects a private data folder for this workflow. Unset
+    VADE_CONFIG. Use a fresh VADE_HOME if vade launch already saved defaults.
+    Keep the same VADE_HOME for chat, status, logs and down. No system tools are
+    installed.
+--- stderr
+--- exit 0

@@ -1,0 +1,5 @@
+Q1: 90 days
+Q2: zstd-3
+Q3: 512 MiB
+Q4: us-central-spark
+Q5: sec-ops-lead

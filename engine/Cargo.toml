@@ -1,0 +1,16 @@
+[workspace]
+members = ["crates/base", "crates/fabric", "crates/hash", "crates/model", "crates/gpu", "crates/gpu/kernels", "crates/gpu/build-kernels", "crates/engine", "crates/tokenizer", "crates/serve", "crates/tp", "crates/seqpar", "tools/export"]
+default-members = ["crates/base", "crates/fabric", "crates/model", "crates/gpu", "crates/engine", "crates/tokenizer", "crates/serve", "crates/tp"]
+resolver = "2"
+
+[workspace.package]
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/wappy-x/vade"
+rust-version = "1.99"
+
+[profile.release]
+strip = "symbols"
+panic = "abort"
+opt-level = 3
+overflow-checks = true

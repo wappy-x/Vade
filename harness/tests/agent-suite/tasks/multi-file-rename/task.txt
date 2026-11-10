@@ -1,0 +1,21 @@
+id: multi-file-rename
+title: Rename a type across every file of a crate
+category: multi-file-refactor
+inputs: Cargo.toml README.md src/lib.rs src/catalog.rs src/price.rs tests/catalog.rs
+budget_seconds: 900
+
+step: new
+prompt:
+  Rename the type `Widget` to `Gadget` and the type `WidgetId` to `GadgetId`
+  in every file of this crate: source, tests, comments and README.md. Rename
+  every lower-case `widget` the same way: `add_widget` becomes `add_gadget`,
+  `widget_total` becomes `gadget_total` and the variable `widget` becomes
+  `gadget`. Do not leave the old names anywhere. Finish when
+  `cargo test --offline` passes.
+
+check: last-exit-zero
+check: absent . Widget
+check: absent . widget
+check: count . 35 Gadget
+check: count . 17 gadget
+check: run cargo test --offline --quiet
