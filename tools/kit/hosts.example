@@ -1,0 +1,21 @@
+# Private settings for tools/kit. Copy this file outside the repository and
+# put the real values in the copy. Set VADE_KIT_HOSTS to the path of the copy.
+# Do not commit the copy. It holds box names, network prefixes and local paths.
+# Format: one "KEY value..." line each. A "#" starts a comment.
+
+# Flywheel screen driver (flywheel/)
+VAULT /path/to/vault                          # private notes and benchmarks root
+WORK /path/to/native-worktree                 # Git worktree with the screen's native commits
+KIT /path/to/verdict-kit                      # payload-*, evidence/, box/, headref-*.txt, tools/ptx-check.sh, build-window.sh
+DRIVER /path/to/checkout/tools/kit/flywheel   # driver sources and the binaries built next to them
+SSH /path/to/ssh-wrapper.sh                   # called as: SSH <box> <command>
+LOG /path/to/vault/notes/history/DAY.md       # run log; the driver appends one line per event
+RUN2 /path/to/vault/benchmarks/DAY/flywheel/EARLIER-TAG   # earlier receipt that the counter declarations cite
+RECEIPTS /path/to/vault/benchmarks/DAY/flywheel           # the only root that flywheel-retain may change
+BUILD_BOX spark-b                             # a claim on this box first checks that no build window is open
+PAIR spark-a spark-b 192.0.2                  # rank 0 box, rank 1 box, ring network prefix; one line per pair
+
+# Verdict kit (gatecheck/). The environment variables of the same names take precedence.
+GOLDEN /path/to/evidence/golden               # golden head runs: <job>/run1..3
+LONGREF /path/to/long-reference               # base-long17/run1 and logits.sha256
+REPO /path/to/checkout                        # Git checkout for the ancestry checks

@@ -1,0 +1,5 @@
+$ vade up --bogus
+--- stderr
+[1;31merror:[0m Unknown option "--bogus" for vade up.
+[1;36m hint:[0m Run vade up --help.
+--- exit 1

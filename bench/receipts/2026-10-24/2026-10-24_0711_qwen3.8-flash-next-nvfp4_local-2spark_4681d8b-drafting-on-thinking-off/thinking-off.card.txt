@@ -1,0 +1,23 @@
+{
+  "smoke_equal": true,
+  "prose": 39.054,
+  "cold8k": 2.796,
+  "concurrency": {
+    "8": 134.421,
+    "16": 134.241
+  },
+  "exact": 201,
+  "responses": 201,
+  "cold8k_n": 6,
+  "prose_n": 3,
+  "concurrency_n": {
+    "8": 8,
+    "16": 8
+  },
+  "median_sm_mhz": {
+    "spark-a": 2463.0,
+    "spark-b": 2463.0
+  },
+  "status": "PASS",
+  "complete": true
+}

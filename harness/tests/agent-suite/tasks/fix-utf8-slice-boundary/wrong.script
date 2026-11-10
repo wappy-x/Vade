@@ -1,0 +1,17 @@
+# A near miss for the dry run: the fix stops the panic but steps forward,
+# so the prefix can be longer than max_bytes. `run cargo test` must fail.
+>>> call workspace_read
+{"path":"src/lib.rs"}
+>>> patch
+*** Begin Patch
+*** Update File: src/lib.rs
+@@
+-    &input[..max_bytes]
++    let mut end = max_bytes;
++    while !input.is_char_boundary(end) {
++        end += 1;
++    }
++    &input[..end]
+*** End Patch
+>>> answer
+The slice no longer panics.

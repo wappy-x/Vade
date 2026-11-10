@@ -1,0 +1,19 @@
+[package]
+name = "spark-seqpar"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/wappy-x/vade"
+rust-version = "1.99"
+
+[features]
+default = ["flash-routing-per-row"]
+flash-routing-per-row = ["spark-engine/flash-routing-per-row"]
+
+[dependencies]
+engine-fabric = { path = "../fabric" }
+spark-engine = { path = "../engine", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+spark-gpu-probe = { path = "../gpu" }

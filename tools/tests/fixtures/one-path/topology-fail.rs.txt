@@ -1,0 +1,15 @@
+fn run(world: usize, rank: usize) {
+    if world == 2 { first(); } else { second(); }
+    if 4 == state.world_size() { first(); }
+    if (state.rank() + 1) < state.world() { first(); }
+    match world { 1 => first(), 2 | 4 => second(), _ => third() }
+    if matches!(world, 2 | 4) { first(); }
+    while rank < world { step(); }
+    let alternate = world > LIMIT;
+    let alternate = LIMIT <= state.ranks;
+    if settings.topology == Topology::Ring { first(); }
+    if rank_path { first(); } else { second(); }
+    if state.world().is_power_of_two() { first(); }
+    match choice { Topology::Ring => first(), Topology::Path => second() }
+    match entry { Some(value) if state.world() == 2 => first(), _ => second() }
+}
