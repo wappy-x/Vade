@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 578" width="880" height="578" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title id="t">Vade v0.1.0 on one DGX Spark and on two, drafting ON, RigMark cards of 2026-10-24</title>
+<desc id="d">A second Spark answers a long prompt faster. One chat does not write faster. With drafting ON (the default), one chat writes slower on two Sparks. Eight chats vary from run to run. Drafting ON, 1 Spark then 2 Sparks: code 76.7 and 65.1 tok/s, prose 41.7 and 38.3, 8 chats together 173.9 and 168.6; first reply after an 8K-token prompt 3.86 s and 2.79 s. Across all our runs, 8 chats gave 130.6 to 173.9 tok/s on six single Sparks and 167.6 to 168.7 on three pairs.</desc>
+<rect x="0.5" y="0.5" width="879" height="577" rx="8" fill="#1a1a19" stroke="rgba(255,255,255,0.10)"/>
+<text x="24.0" y="40.0" font-size="19" fill="#f0efec" text-anchor="start" font-weight="650">A second Spark answers a long prompt faster. One chat does not write faster.</text>
+<text x="24.0" y="63.0" font-size="13" fill="#c3c2b7" text-anchor="start">With drafting ON (the default), one chat writes slower on two Sparks. Eight chats vary from run to run.</text>
+<rect x="24" y="80" width="12" height="12" rx="2" fill="#3987e5"/>
+<text x="42.0" y="90.5" font-size="12.5" fill="#f0efec" text-anchor="start" font-weight="600">1 Spark</text>
+<rect x="107.25" y="80" width="12" height="12" rx="2" fill="#d95926"/>
+<text x="125.2" y="90.5" font-size="12.5" fill="#f0efec" text-anchor="start" font-weight="600">2 Sparks</text>
+<text x="205.5" y="90.5" font-size="12" fill="#c3c2b7" text-anchor="start">Vade v0.1.0 on our own DGX Sparks, drafting ON</text>
+<text x="24.0" y="128.0" font-size="14" fill="#f0efec" text-anchor="start" font-weight="600">Writing speed</text>
+<text x="24.0" y="146.0" font-size="12" fill="#c3c2b7" text-anchor="start">tokens per second, higher is better</text>
+<text x="572.0" y="128.0" font-size="14" fill="#f0efec" text-anchor="start" font-weight="600">First reply after an 8K-token prompt</text>
+<text x="572.0" y="146.0" font-size="12" fill="#c3c2b7" text-anchor="start">seconds, lower is better</text>
+<text x="24.0" y="174.0" font-size="12.5" fill="#f0efec" text-anchor="start" font-weight="600">Code, 1 chat</text>
+<rect x="89.0" y="180.0" width="1" height="48" fill="#383835"/>
+<path d="M90.0 183.0H246.2Q250.2 183.0 250.2 187.0V199.0Q250.2 203.0 246.2 203.0H90.0Z" fill="#3987e5"/>
+<text x="24.0" y="197.5" font-size="12" fill="#f0efec" text-anchor="start">1 Spark</text>
+<text x="256.2" y="197.5" font-size="12" fill="#f0efec" text-anchor="start" font-variant-numeric="tabular-nums">76.7</text>
+<path d="M90.0 205.0H222.0Q226.0 205.0 226.0 209.0V221.0Q226.0 225.0 222.0 225.0H90.0Z" fill="#d95926"/>
+<text x="24.0" y="219.5" font-size="12" fill="#f0efec" text-anchor="start">2 Sparks</text>
+<text x="232.0" y="219.5" font-size="12" fill="#f0efec" text-anchor="start" font-variant-numeric="tabular-nums">65.1</text>
+<text x="24.0" y="255.0" font-size="12.5" fill="#f0efec" text-anchor="start" font-weight="600">Prose, 1 chat</text>
+<rect x="89.0" y="261.0" width="1" height="48" fill="#383835"/>
+<path d="M90.0 264.0H173.1Q177.1 264.0 177.1 268.0V280.0Q177.1 284.0 173.1 284.0H90.0Z" fill="#3987e5"/>
+<text x="24.0" y="278.5" font-size="12" fill="#f0efec" text-anchor="start">1 Spark</text>
+<text x="183.1" y="278.5" font-size="12" fill="#f0efec" text-anchor="start" font-variant-numeric="tabular-nums">41.7</text>
+<path d="M90.0 286.0H166.0Q170.0 286.0 170.0 290.0V302.0Q170.0 306.0 166.0 306.0H90.0Z" fill="#d95926"/>
+<text x="24.0" y="300.5" font-size="12" fill="#f0efec" text-anchor="start">2 Sparks</text>
+<text x="176.0" y="300.5" font-size="12" fill="#f0efec" text-anchor="start" font-variant-numeric="tabular-nums">38.3</text>
+<text x="24.0" y="336.0" font-size="12.5" fill="#f0efec" text-anchor="start" font-weight="600">8 chats together</text>
+<rect x="89.0" y="342.0" width="1" height="48" fill="#383835"/>
+<path d="M90.0 345.0H449.3Q453.3 345.0 453.3 349.0V361.0Q453.3 365.0 449.3 365.0H90.0Z" fill="#3987e5"/>
+<text x="24.0" y="359.5" font-size="12" fill="#f0efec" text-anchor="start">1 Spark</text>
+<text x="459.3" y="359.5" font-size="12" fill="#f0efec" text-anchor="start" font-variant-numeric="tabular-nums">173.9</text>
+<path d="M90.0 367.0H438.2Q442.2 367.0 442.2 371.0V383.0Q442.2 387.0 438.2 387.0H90.0Z" fill="#d95926"/>
+<text x="24.0" y="381.5" font-size="12" fill="#f0efec" text-anchor="start">2 Sparks</text>
+<text x="448.2" y="381.5" font-size="12" fill="#f0efec" text-anchor="start" font-variant-numeric="tabular-nums">168.6</text>
+<text x="24.0" y="407.0" font-size="11.5" fill="#c3c2b7" text-anchor="start">Across all our runs, 8 chats gave 130.6 to 173.9 tok/s</text>
+<text x="24.0" y="423.0" font-size="11.5" fill="#c3c2b7" text-anchor="start">on six single Sparks and 167.6 to 168.7 on three pairs.</text>
+<rect x="637.0" y="167.5" width="1" height="48" fill="#383835"/>
+<path d="M638.0 170.5H797.0Q801.0 170.5 801.0 174.5V186.5Q801.0 190.5 797.0 190.5H638.0Z" fill="#3987e5"/>
+<text x="572.0" y="185.0" font-size="12" fill="#f0efec" text-anchor="start">1 Spark</text>
+<text x="807.0" y="185.0" font-size="12" fill="#f0efec" text-anchor="start" font-variant-numeric="tabular-nums">3.86 s</text>
+<path d="M638.0 192.5H751.8Q755.8 192.5 755.8 196.5V208.5Q755.8 212.5 751.8 212.5H638.0Z" fill="#d95926"/>
+<text x="572.0" y="207.0" font-size="12" fill="#f0efec" text-anchor="start">2 Sparks</text>
+<text x="761.8" y="207.0" font-size="12" fill="#f0efec" text-anchor="start" font-variant-numeric="tabular-nums">2.79 s</text>
+<text x="24.0" y="455.0" font-size="11" fill="#c3c2b7" text-anchor="start">Each bar is one RigMark card for Vade v0.1.0 (5a22651), thinking OFF, context 32768, greedy decoding.</text>
+<text x="24.0" y="472.0" font-size="11" fill="#c3c2b7" text-anchor="start">Two Sparks run as a pipeline: each holds part of the model's layers and passes its work to the next.</text>
+<text x="24.0" y="489.0" font-size="11" fill="#c3c2b7" text-anchor="start">The headline holds on all six single Sparks and all three pairs we measured with these settings.</text>
+<text x="24.0" y="506.0" font-size="11" fill="#c3c2b7" text-anchor="start">Drafting OFF and the cloud VM runs are in the tables on the benchmarks page.</text>
+<text x="24.0" y="523.0" font-size="11" fill="#c3c2b7" text-anchor="start">Sources, bench/receipts/2026-10-24/:</text>
+<text x="36.0" y="540.0" font-size="10.5" fill="#c3c2b7" text-anchor="start">2026-10-24_1943_qwen3.8-flash-next-nvfp4_local-1spark_5a22651-drafting-on-thinking-off</text>
+<text x="36.0" y="555.0" font-size="10.5" fill="#c3c2b7" text-anchor="start">2026-10-24_2019_qwen3.8-flash-next-nvfp4_local-2spark_5a22651-drafting-on-thinking-off</text>
+</svg>

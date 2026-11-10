@@ -1,0 +1,28 @@
+[1;36m▌[0m [1mFix the parser[0m
+[2m[file: src/parser.rs, 2 lines][0m
+
+[2;3m▾ thinking hh:mm:ss–hh:mm:ss · 1.2k tokens · 14.0s · Ctrl+T collapse[0m[0m
+[2m┆[0m [2;3mThe parser drops the last token.[0m
+
+I'll read the parser first.
+[2m╰ hh:mm:ss[0m
+
+[1;36m●[0m Read src/parser.rs
+  [2m⎿[0m [2m120 lines · 0.1s[0m
+
+The test failed because the [1mlast token[0m was dropped.
+[2m╰ hh:mm:ss · 29.6s · 412 tokens out · 23 tok/s · prefill ≈884 tok/s · first token 3.2s · 3 model calls · ctx 44.1k/131k[0m
+
+[1;33m▲ Warning[0m
+The next reply would not fit in the model's context.
+Vade stopped and kept the history.
+Use /compact to shrink older turns, or /new to start over.
+
+
+
+
+
+
+
+[2mqwen3-8b · harness · approval: ask · ctx 44.1k/131k · session-1[0m
+[1;36m› [0m
