@@ -1,0 +1,14 @@
+# A correct transcript for the dry run: run the tests, fix the sign, rerun.
+>>> call workspace_shell
+{"argv":["cargo","test","--offline"],"timeout_ms":120000}
+>>> patch
+*** Begin Patch
+*** Update File: src/lib.rs
+@@
+-            Kind::Debit => e.cents as i64,
++            Kind::Debit => -(e.cents as i64),
+*** End Patch
+>>> call workspace_shell
+{"argv":["cargo","test","--offline"],"timeout_ms":120000}
+>>> answer
+Fixed: `balance` now subtracts debits. `cargo test --offline` passes.

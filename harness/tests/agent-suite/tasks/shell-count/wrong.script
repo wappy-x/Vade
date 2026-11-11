@@ -1,0 +1,5 @@
+# A near miss for the dry run: the count ignores case, so a lower-case "error" line counts.
+>>> call workspace_shell
+{"argv":["/bin/sh","-c","t=0; for f in $(find logs -type f -name '*.log.txt' | LC_ALL=C sort); do n=$(grep -ci ERROR \"$f\"); echo \"$f $n\"; t=$((t+n)); done > report.txt; echo \"total $t\" >> report.txt"],"timeout_ms":30000}
+>>> answer
+Done.

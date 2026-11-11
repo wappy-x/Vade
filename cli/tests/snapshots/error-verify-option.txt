@@ -1,0 +1,5 @@
+$ vade verify --bogus
+--- stderr
+error: Unknown option "--bogus".
+ hint: Run vade verify --help.
+--- exit 1
