@@ -1,0 +1,9 @@
+# A correct transcript for the dry run: find the names, replace them, run the tests.
+>>> call workspace_search
+{"path":".","literal":"idget"}
+>>> call workspace_shell
+{"argv":["/bin/sh","-c","grep -rl -e Widget -e widget --include='*.rs' --include='*.md' . | xargs perl -pi -e 's/Widget/Gadget/g; s/widget/gadget/g'"],"timeout_ms":60000}
+>>> call workspace_shell
+{"argv":["cargo","test","--offline"],"timeout_ms":120000}
+>>> answer
+Renamed `Widget` to `Gadget`, `WidgetId` to `GadgetId` and every lower-case `widget` to `gadget` in all files. `cargo test --offline` passes.

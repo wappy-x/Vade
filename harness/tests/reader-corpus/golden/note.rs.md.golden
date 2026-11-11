@@ -1,0 +1,4 @@
+<!-- vade read: note.rs | rust | pages 1 | chars 45 | skipped: none -->
+```rust
+fn main() { println!("hello"); }
+```

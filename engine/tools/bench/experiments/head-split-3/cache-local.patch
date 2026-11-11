@@ -1,0 +1,45 @@
+diff --git a/engine/crates/gpu/kernels/src/causal_fast.rs b/engine/crates/gpu/kernels/src/causal_fast.rs
+index fe70e651f..6c2939133 100644
+--- a/engine/crates/gpu/kernels/src/causal_fast.rs
++++ b/engine/crates/gpu/kernels/src/causal_fast.rs
+@@ -114,7 +114,7 @@ pub(crate) fn pool_scores(p:Arguments) {
+ }
+
+ /// Op::Step and Op::StepColumns with dim 128: one block per head, thread = value column. The three per-key vectors of the head
+-/// are staged once in shared memory; the working column is recomputed from the state in each pass instead of living in the output buffer.
++/// are staged once in shared memory; the decayed column stays private between the prediction and output sums.
+ pub(crate) fn step_columns_128(p:&Arguments) {
+     // SAFETY: Shape::lengths was checked by the host: x0 holds heads*513 values, x1 heads*16384, the output
+     // heads*128*129 output words. Step writes key-major state then the output vector per head; StepPlanar writes the same
+@@ -143,16 +143,15 @@ pub(crate) fn step_columns_128(p:&Arguments) {
+             crate::ptx::store(smem+((D+value)*4) as u32,*pp.add(D+value));
+             crate::ptx::store(smem+((2*D+value)*4) as u32,*pp.add(value));
+             asm!("bar.sync 0;");
+-            // The column is recomputed from the immutable state in each pass (same product, same bits), so no
+-            // per-thread array is needed and every load of a pass is independent.
++            // Keep the same rounded products for the second pass. Both sums still visit keys in ascending order.
+             // Keys go in groups of 16 for the loads of the first pass, and in groups of 8 for the second pass, whose results
+             // are parked in shared memory (9-word rows, conflict free) and written out by the whole block, so a warp stores
+             // runs of 8 words (32 bytes) instead of 32 scattered words. The shared array is small on purpose: this kernel's
+             // static shared memory sets the occupancy of every causal operation, including the large copies of other lanes.
+-            let mut prediction=0.0f32;
++            let mut prediction=0.0f32;let mut decayed=[0.0f32;D];
+             let mut group=0;while group<D/16 {
+                 let mut v=[0.0f32;16];let mut i=0;while i<16 {v[i]=*state.add((group*16+i)*D+value);i+=1;}
+-                i=0;while i<16 {let key=group*16+i;let c=v[i]*crate::ptx::load(smem+(key*4) as u32);prediction+=c*crate::ptx::load(smem+((D+key)*4) as u32);i+=1;}
++                i=0;while i<16 {let key=group*16+i;let c=v[i]*crate::ptx::load(smem+(key*4) as u32);decayed[key]=c;prediction+=c*crate::ptx::load(smem+((D+key)*4) as u32);i+=1;}
+                 group+=1;
+             }
+             let delta=(*pp.add(2*D+value)-prediction)**pp.add(4*D);
+@@ -162,9 +161,8 @@ pub(crate) fn step_columns_128(p:&Arguments) {
+             let (state_out,vector_out)=if planar {((p.output as *mut f32).add(head*D*D),(p.output as *mut f32).add(heads*D*D+head*D))} else {(head_out,head_out.add(D*D))};
+             let mut sum=0.0f32;
+             group=0;while group<D/8 {
+-                let mut v=[0.0f32;8];let mut i=0;while i<8 {v[i]=*state.add((group*8+i)*D+value);i+=1;}
+-                i=0;while i<8 {
+-                    let key=group*8+i;let mut c=v[i]*crate::ptx::load(smem+(key*4) as u32);
++                let mut i=0;while i<8 {
++                    let key=group*8+i;let mut c=decayed[key];
+                     c+=crate::ptx::load(smem+((D+key)*4) as u32)*delta;
+                     if direct {*state_out.add(key*D+value)=c;} else {crate::ptx::store(stage+((value*9+i)*4) as u32,c);}
+                     sum+=c*crate::ptx::load(smem+((2*D+key)*4) as u32);i+=1;

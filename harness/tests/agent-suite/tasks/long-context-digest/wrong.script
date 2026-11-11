@@ -1,0 +1,12 @@
+# A near miss for the dry run: the deprecated count is off by one.
+>>> patch
+*** Begin Patch
+*** Add File: ANSWERS.txt
++1: crates/net/src/listener.rs 47113
++2: settle_batch_v2
++3: 19
++4: 22
++5: 87
+*** End Patch
+>>> answer
+Done.

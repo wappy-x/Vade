@@ -1,0 +1,26 @@
+{
+  "object": "engine.capabilities",
+  "contract_version": "vade.engine.v1",
+  "model": "mock",
+  "identity": {
+    "weights": {"fingerprint": "sha256:mock-weights", "fingerprint_kind": "safetensors_header_metadata", "artifact_bytes": 4096},
+    "tokenizer_fingerprint": "sha256:mock-tokenizer",
+    "template_fingerprint": "sha256:mock-template"
+  },
+  "context_limit": 4096,
+  "input_limit": 4000,
+  "output_limit": 32,
+  "tools": true,
+  "thinking": true,
+  "default_thinking": false,
+  "cache_domain": "mock-load-epoch",
+  "cache_scope": "authorization",
+  "prefix_cache": true,
+  "prompt_cache_key": "scheduling_hint",
+  "admission": "/v1/admission",
+  "admission_kind": "context_fit",
+  "usage_timing": "admitted_wall",
+  "kv_branch_handles": false,
+  "endpoints": ["/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages/count_tokens", "/v1/completions"],
+  "unknown_future_feature": {"preserve_compatibility": true}
+}
