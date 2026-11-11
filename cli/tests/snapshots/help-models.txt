@@ -1,0 +1,21 @@
+$ vade models --help
+List the models on this machine and what can serve them.
+
+Examples:
+  vade models
+  vade models /data/models --json
+
+Usage: vade models [DIR] [--json]
+
+Options:
+  --json  Print one vade.models.v1 object
+
+Notes:
+  - Looks three folders deep under DIR (default ~/models). Each row shows the
+    size on disk, the repository and commit from .vade-model.json and the
+    support state.
+  - The support state comes from the same metadata checks vade launch runs; no
+    weights are read. A folder with partial files from vade pull shows as
+    incomplete.
+--- stderr
+--- exit 0

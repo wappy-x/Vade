@@ -1,0 +1,59 @@
+# A correct transcript for the dry run: read the spec, implement, add tests, run them.
+>>> call workspace_read
+{"path":"SPEC.md"}
+>>> patch
+*** Begin Patch
+*** Update File: src/lib.rs
+@@
+ pub fn parse_duration(text: &str) -> Result<u64, DurationError> {
+-    let _ = text;
+-    todo!("implement parse_duration as SPEC.md describes")
++    if text.is_empty() {
++        return Err(DurationError::Empty);
++    }
++    const UNITS: [(u8, u64); 4] = [(b'd', 86_400), (b'h', 3_600), (b'm', 60), (b's', 1)];
++    let bytes = text.as_bytes();
++    let (mut i, mut next, mut total, mut overflow) = (0, 0, 0u64, false);
++    while i < bytes.len() {
++        let start = i;
++        while i < bytes.len() && bytes[i].is_ascii_digit() {
++            i += 1;
++        }
++        if i == start || i == bytes.len() {
++            return Err(DurationError::Invalid);
++        }
++        let found = UNITS[next..].iter().position(|(c, _)| *c == bytes[i]).ok_or(DurationError::Invalid)?;
++        let seconds = UNITS[next + found].1;
++        next += found + 1;
++        let value = text[start..i].parse::<u64>().ok();
++        i += 1;
++        match value.and_then(|v| v.checked_mul(seconds)).and_then(|v| total.checked_add(v)) {
++            Some(sum) => total = sum,
++            None => overflow = true,
++        }
++    }
++    if overflow {
++        Err(DurationError::Overflow)
++    } else {
++        Ok(total)
++    }
+ }
+*** Add File: tests/examples.rs
++use duration::{parse_duration, DurationError};
++
++#[test]
++fn spec_examples() {
++    assert_eq!(parse_duration("45s"), Ok(45));
++    assert_eq!(parse_duration("1h30m"), Ok(5400));
++    assert_eq!(parse_duration("2d3s"), Ok(172_803));
++    assert_eq!(parse_duration("90m"), Ok(5400));
++    assert_eq!(parse_duration("1m1h"), Err(DurationError::Invalid));
++    assert_eq!(parse_duration("5"), Err(DurationError::Invalid));
++    assert_eq!(parse_duration(" 5s"), Err(DurationError::Invalid));
++    assert_eq!(parse_duration(""), Err(DurationError::Empty));
++}
+*** End Patch
+>>> call workspace_shell
+{"argv":["cargo","test","--offline"],"timeout_ms":120000}
+>>> answer
+`parse_duration` follows SPEC.md, and tests/examples.rs covers the spec examples. `cargo test --offline` passes.

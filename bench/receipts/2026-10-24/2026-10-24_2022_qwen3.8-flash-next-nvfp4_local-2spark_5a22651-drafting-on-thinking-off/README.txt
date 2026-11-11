@@ -1,0 +1,18 @@
+Complete RigMark 1.3.0 card — v0.1.0 RELEASE TEST (informative, no gate), 2 x GB10 layer pipeline, DRAFTING ON, thinking OFF; Vade 5a226519a2a44a0ff7ea9be43118b8b9ec0d8f9e.
+Boxes: home-3 + home-4 (DGX Spark pair, QSFP RDMA) (2 x NVIDIA DGX Spark GB10, driver 580.178.04); home-3 rank0 (HTTP 127.0.0.1:18080 on home-3 (controller tunnel localhost:18182)) <fabric-a>; home-4 rank1 <fabric-b>; 200G QSFP point-to-point, RDMA (vade default); NVFP4 FP4-Local checkpoint nvidia/Qwen3.8-Flash-Next-FP4-Local @ d99ccbed3a9db8a2f099eca98e17c0bc3a2ebe84df95852f3b07c87c20a32716; engine topology tag 'pipeline'.
+Server: public v0.1.0 controller `vade up --sparks 2` defaults, rank0 HTTP 127.0.0.1:18080 on home-3 (controller tunnel localhost:18182); context 32768 / output 8192; drafting ON as served (requests omit draft; server default drafting); thinking OFF.
+Test-start: health ready + vade verify IDENTICAL at 19:58; ON card start 20:15 after the OFF card on the same server
+Pinned RigMark corpus and request functions; decode 5 x 8192 cap; prefill 3 cold/replay 8192 pairs (standard); C1/C2/C4/C8 x3 x256; seed 20260905.
+Completed.
+Compare (descriptive only): 1-Spark 2026-10-24_1945_qwen3.8-flash-next-nvfp4_local-1spark_5a22651-drafting-on-thinking-off (home-3, H2-J1) (same engine 5a22651, same recipe).
+Status PASS; gates 15/15; audit: 66 responses, 0 with provenance errors; health OK.
+Install (Route B, both Sparks from the Mac controller): wall 303.4 s from the first paste line to vade up --sparks 2 ready (vade install 243.0 s, vade up 27.0 s, rest = config edit + dry runs); model checksum excluded: sha256sum -c committed manifest, 33 files OK, home-3 74.2 s, home-4 77.9 s.
+Route note: INSTALL.md Route B has no per-Spark bundle choice (prebuilt_dir needs vade-prebuilt-v1; v0.1.0 ships only vade-launch-bundle-v1), so both Sparks were source-built by vade install.
+vade status: running, 2 machines, 9 concurrent chats engine-admitted; vade doctor passed; vade verify: IDENTICAL: 20/20 runs, 1 machine, 128 tokens.
+Public vade bench (controller, zero flags, drafting server-default): C1 42.628 tok/s TTFT p50/p95 203.547/203.547 ms ; C2 73.750 tok/s TTFT p50/p95 378.111/378.440 ms ; C4 130.837 tok/s TTFT p50/p95 595.301/596.167 ms ; C8 174.940 tok/s TTFT p50/p95 1062.738/1063.373 ms ; C16 169.750 tok/s TTFT p50/p95 974.748/13915.137 ms; receipt vade-bench.json in this folder.
+Server = public v0.1.0 controller vade up --sparks 2 defaults: output limit 8192 (min(context, 8192)); the 73f7a9d reference cards ran output 16384. Decode cap 8192 unchanged.
+Measurement client: our full-card-api.py + CARD_DRAFT switch (plain = draft plain per request, served = draft omitted), run on home-3 against 127.0.0.1:18080, with the world-aware rigmark copy from lab own-pair-cold8k card-tools (FLASHNEXT_WORLD=2, FLASHNEXT_TOPOLOGY=pipeline); finalizer = finalize-cloud-a4.py adapted for world 2 pipeline and the drafting variant. Rank logs not collected.
+Recipe differs from the 2026-10-24 1444/1452 2-Spark reference cards (those used measure_rigmark2x.py cold n6/prose n3/C8/C16 cells); this is the 66-request full RigMark card, so its comparison reference is the H2-J1 1-Spark 5a22651 cards.
+started 20:15, ended 20:22 (CDT)
+Token IDs (draft-agnostic request match, 66 rows): pair OFF vs pair ON 66/66 identical; pair OFF vs H2-J1 1-Spark OFF home-3 66/66 and home-4 66/66 identical; pair ON vs H2-J1 1-Spark ON home-3 66/66 and home-4 66/66 identical.
+ON card serving: decode 15/15 strict MTP3; C1/C2/C4 all strict MTP3; C8 12/24 streams engine-selected plain (mtp_depth 0), 12/24 strict MTP3; prefill rows are the pinned draft-plain prefill requests.

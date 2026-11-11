@@ -1,0 +1,5 @@
+$ vade down --force
+--- stderr
+error: Unexpected argument "--force" for vade down. This command takes no options except --dry-run.
+ hint: Run vade down --help.
+--- exit 1

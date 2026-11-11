@@ -1,0 +1,5 @@
+2026-09-30T22:00:00Z INFO worker started with 4 threads
+2026-09-30T22:15:00Z ERROR job 99 failed: disk full
+2026-09-30T22:15:01Z ERROR job 100 failed: disk full
+2026-09-30T22:15:02Z ERROR job 101 failed: disk full
+2026-09-30T23:59:59Z INFO worker stopped
