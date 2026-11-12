@@ -1,0 +1,195 @@
+{
+  "schema": "vade-hf-top20-v1",
+  "checkpoint": "Qwen/Qwen3-8B",
+  "documented_revision": "b968826d9c46dd6066d109eabc6255188de91218",
+  "documented_revision_source": "docs/models.md pinned download recipe",
+  "checkpoint_revision": null,
+  "revision_status": "not retained in local checkpoint",
+  "checkpoint_files": {
+    "config.json": {
+      "bytes": 728,
+      "sha256": "f7c4eadfbbf522470667b797a3c89be2524832d2d599797248dc304fff447c30"
+    },
+    "generation_config.json": {
+      "bytes": 239,
+      "sha256": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2"
+    },
+    "tokenizer.json": {
+      "bytes": 11422654,
+      "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+    },
+    "tokenizer_config.json": {
+      "bytes": 9732,
+      "sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+    },
+    "model.safetensors.index.json": {
+      "bytes": 32878,
+      "sha256": "f9fdbcb91c23971c13ec5d5f2573d2349e8f61f2f049371ec699281748fdb1bc"
+    },
+    "model-00001-of-00005.safetensors": {
+      "bytes": 3996250744,
+      "header_sha256": "979bbeed365485ddaa67a1ed41d0289e15e2f3ba0b3388cb93e42d31f346d1df",
+      "sha256": "31d6a825ae35f11fb85b195b4c42c146c051e446433125a215336abdf95cbf5f"
+    },
+    "model-00002-of-00005.safetensors": {
+      "bytes": 3993160032,
+      "header_sha256": "347ca6985eefe87273139b97dde9c547da3ab59c782a73beac1d498556ac0b45",
+      "sha256": "5991236cea6fe21f3d43cab0f0e84448734fbbe0789816202989f2ddc9d18282"
+    },
+    "model-00003-of-00005.safetensors": {
+      "bytes": 3959604768,
+      "header_sha256": "2c34e283f27490d335b129053f9c50504a357ba8b67a2e89fcf5d39cdd85f6f4",
+      "sha256": "c5185c4794be2d8a9784d5753c9922db38df478ce11f9ed0b415b7304d896836"
+    },
+    "model-00004-of-00005.safetensors": {
+      "bytes": 3187841392,
+      "header_sha256": "3f2742edfb110486c05a06b091280eefb7d2bc05252d1b78f1233c1a813a48e7",
+      "sha256": "b5ee7de71fbf17db3d5704e0c8f2bc7d005ca9e1d7ca2aeb19827b0cfcaa917a"
+    },
+    "model-00005-of-00005.safetensors": {
+      "bytes": 1244659840,
+      "header_sha256": "205a19ce27198b75abaeedc42f7a64387e19628b7804aff215887b255f1b8dd7",
+      "sha256": "20c2d6366ab85c90786ccdd829cd2b9e7d30ef3b2ebbb998280e7e4014b542ff"
+    }
+  },
+  "torch": "2.14.1+cu130",
+  "transformers": "5.18.0",
+  "cuda": "13.0",
+  "dtype": "bfloat16",
+  "batch_size": 1,
+  "greedy": true,
+  "attention": "sdpa",
+  "cuda_sdpa_backend": "FLASH_ATTENTION",
+  "cpu_sdpa_backend": "MATH",
+  "experts": "eager",
+  "seed": 42,
+  "python_native_overrides": "disabled for CPU and CUDA",
+  "enable_thinking": false,
+  "positions_per_case": 64,
+  "cpu_positions_per_short_case": 8,
+  "cases": [
+    {
+      "file": "case-00-prose-32.json",
+      "kind": "prose",
+      "prompt_tokens": 32
+    },
+    {
+      "file": "case-01-code-64.json",
+      "kind": "code",
+      "prompt_tokens": 64
+    },
+    {
+      "file": "case-02-math-128.json",
+      "kind": "math",
+      "prompt_tokens": 128
+    },
+    {
+      "file": "case-03-chat-256.json",
+      "kind": "chat",
+      "prompt_tokens": 256
+    },
+    {
+      "file": "case-04-multi-turn-512.json",
+      "kind": "multi-turn",
+      "prompt_tokens": 512
+    },
+    {
+      "file": "case-05-reasoning-1024.json",
+      "kind": "reasoning",
+      "prompt_tokens": 1024
+    },
+    {
+      "file": "case-06-prose-2048.json",
+      "kind": "prose",
+      "prompt_tokens": 2048
+    },
+    {
+      "file": "case-07-code-4090.json",
+      "kind": "code",
+      "prompt_tokens": 4090
+    },
+    {
+      "file": "case-08-math-4096.json",
+      "kind": "math",
+      "prompt_tokens": 4096
+    },
+    {
+      "file": "case-09-chat-6144.json",
+      "kind": "chat",
+      "prompt_tokens": 6144
+    },
+    {
+      "file": "case-10-multi-turn-8192.json",
+      "kind": "multi-turn",
+      "prompt_tokens": 8192
+    },
+    {
+      "file": "case-11-reasoning-12288.json",
+      "kind": "reasoning",
+      "prompt_tokens": 12288
+    },
+    {
+      "file": "case-12-prose-16380.json",
+      "kind": "prose",
+      "prompt_tokens": 16380
+    },
+    {
+      "file": "case-13-code-16384.json",
+      "kind": "code",
+      "prompt_tokens": 16384
+    },
+    {
+      "file": "case-14-math-20000.json",
+      "kind": "math",
+      "prompt_tokens": 20000
+    },
+    {
+      "file": "case-15-chat-24576.json",
+      "kind": "chat",
+      "prompt_tokens": 24576
+    },
+    {
+      "file": "case-16-multi-turn-28672.json",
+      "kind": "multi-turn",
+      "prompt_tokens": 28672
+    },
+    {
+      "file": "case-17-prose-32.json",
+      "kind": "prose",
+      "prompt_tokens": 32
+    },
+    {
+      "file": "case-18-prose-128.json",
+      "kind": "prose",
+      "prompt_tokens": 128
+    },
+    {
+      "file": "case-19-code-1024.json",
+      "kind": "code",
+      "prompt_tokens": 1024
+    },
+    {
+      "file": "case-20-math-4096.json",
+      "kind": "math",
+      "prompt_tokens": 4096
+    },
+    {
+      "file": "case-21-chat-8192.json",
+      "kind": "chat",
+      "prompt_tokens": 8192
+    },
+    {
+      "file": "case-22-multi-turn-16384.json",
+      "kind": "multi-turn",
+      "prompt_tokens": 16384
+    },
+    {
+      "file": "case-23-reasoning-28672.json",
+      "kind": "reasoning",
+      "prompt_tokens": 28672
+    }
+  ],
+  "model_parameter_bytes": 16381470720,
+  "complete": true,
+  "cpu_weight_loading": "move CUDA weights to CPU by leaf, releasing CUDA storage between leaves"
+}

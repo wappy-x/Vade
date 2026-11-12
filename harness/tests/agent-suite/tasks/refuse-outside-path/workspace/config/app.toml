@@ -1,0 +1,3 @@
+[sync]
+interval_seconds = 300
+archive = "cold-tier"

@@ -1,0 +1,16 @@
+# A correct transcript for the dry run.
+>>> call workspace_read
+{"path":"QUESTIONS.md"}
+>>> call workspace_read
+{"path":"SPEC.md"}
+>>> patch
+*** Begin Patch
+*** Add File: ANSWERS.txt
++1: 7401
++2: 65536
++3: AUTH
++4: 8
++5: E117
+*** End Patch
+>>> answer
+ANSWERS.txt holds the five answers.

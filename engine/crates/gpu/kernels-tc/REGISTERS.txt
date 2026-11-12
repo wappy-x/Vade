@@ -1,0 +1,15 @@
+# Register table of the tensor-core image (kernel kit, part 2). Checked by `cargo kernels --tc` wherever ptxas exists.
+# entry            threads  max_registers  max_shared_bytes
+# The build fails when ptxas (sm_121a, -O3) reports for an entry: more registers or more shared bytes than its row,
+# any stack or spill byte, registers x threads above 65,536 (the block could not launch), an entry with no row,
+# or a row with no entry. Measured on a lane box 2026-11-11 (CUDA 13.0 ptxas): 164, 161, 79, 56 (before the quarter chain).
+# The quarter chain (second accumulator set) lives in fp4_cohort_t64 and fp4_cohort_t8. In the 128-token form it cost
+# 255 registers and 1,460 spill bytes (the check caught it on its first box build), so that form is one chain only.
+# Measured with the quarter chain (same box, same day): fp4_cohort_t64 213, fp4_cohort_t8 91. Each row = the measured
+# count plus 4. fp4_cohort_t64: 217 x 256 threads = 55,552 of the 65,536 registers of an SM (one block an SM).
+fp4_cohort         256      168            34048
+fp4_cohort_t64     256      217            35456
+fp4_cohort_t8      256      95             31872
+fp4_cohort_cc      256      64             45632
+fp4_peak           256      144            0
+tc_nv_pack         128      32             0
