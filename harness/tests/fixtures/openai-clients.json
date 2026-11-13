@@ -1,0 +1,792 @@
+{
+ "schema": "vade.openai-clients.v1",
+ "replies": "Engine replies are hand-assembled in the engine's wire format (engine/crates/serve/src/http.rs sse_chunk, chat_delta and Completion::json; scheduler.rs /v1/models) at main 250fb4981. They are not recorded from a live engine.",
+ "cases": [
+  {
+   "name": "openai-python-chat",
+   "client": "openai Python client 3.41.0",
+   "provenance": "verified: request bytes and headers captured from openai-python 3.41.0 on 2026-10-29; that SDK parsed the reply",
+   "method": "POST",
+   "path": "/v1/chat/completions",
+   "headers": [
+    [
+     "authorization",
+     "Bearer sk-local"
+    ],
+    [
+     "accept",
+     "application/json"
+    ],
+    [
+     "content-type",
+     "application/json"
+    ],
+    [
+     "user-agent",
+     "OpenAI/Python 3.41.0"
+    ],
+    [
+     "x-stainless-lang",
+     "python"
+    ],
+    [
+     "x-stainless-package-version",
+     "3.41.0"
+    ],
+    [
+     "x-stainless-runtime",
+     "CPython"
+    ],
+    [
+     "x-stainless-async",
+     "false"
+    ],
+    [
+     "x-stainless-retry-count",
+     "0"
+    ],
+    [
+     "x-stainless-read-timeout",
+     "600"
+    ]
+   ],
+   "request": "{\"model\":\"qwen3.8-flash-next-fp4-local\",\"messages\":[{\"role\":\"system\",\"content\":\"You are concise.\"},{\"role\":\"user\",\"content\":\"Say hello.\"}]}",
+   "upstream": "defaults",
+   "reply_status": 200,
+   "reply_type": "application/json",
+   "reply": "{\"id\":\"completion-7\",\"object\":\"chat.completion\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Hello there.\",\"refusal\":null},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":24,\"completion_tokens\":3,\"total_tokens\":27,\"prompt_tokens_details\":{\"cached_tokens\":16}},\"vade\":{\"sampling\":{\"temperature\":0,\"top_k\":0,\"top_p\":1,\"repetition_penalty\":1,\"presence_penalty\":0,\"frequency_penalty\":0,\"seed\":20260905},\"draft\":\"strict\",\"mtp_depth\":3,\"thinking\":false,\"reasoning_effort\":\"none\",\"draft_used\":true,\"model_draft_used\":true}}",
+   "expect": {
+    "status": 200,
+    "content": "Hello there.",
+    "finish_reason": "stop",
+    "usage": [
+     24,
+     3,
+     27,
+     16
+    ]
+   }
+  },
+  {
+   "name": "openai-python-chat-stream-usage",
+   "client": "openai Python client 3.41.0",
+   "provenance": "verified: request bytes and headers captured from openai-python 3.41.0 on 2026-10-29; that SDK parsed the reply",
+   "method": "POST",
+   "path": "/v1/chat/completions",
+   "headers": [
+    [
+     "authorization",
+     "Bearer sk-local"
+    ],
+    [
+     "accept",
+     "application/json"
+    ],
+    [
+     "content-type",
+     "application/json"
+    ],
+    [
+     "user-agent",
+     "OpenAI/Python 3.41.0"
+    ],
+    [
+     "x-stainless-lang",
+     "python"
+    ],
+    [
+     "x-stainless-package-version",
+     "3.41.0"
+    ],
+    [
+     "x-stainless-runtime",
+     "CPython"
+    ],
+    [
+     "x-stainless-async",
+     "false"
+    ],
+    [
+     "x-stainless-retry-count",
+     "0"
+    ],
+    [
+     "x-stainless-read-timeout",
+     "600"
+    ]
+   ],
+   "request": "{\"model\":\"qwen3.8-flash-next-fp4-local\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"Say hello.\"}],\"max_completion_tokens\":64,\"stream_options\":{\"include_usage\":true}}",
+   "upstream": "defaults",
+   "reply_status": 200,
+   "reply_type": "text/event-stream",
+   "reply": "data: {\"id\":\"completion-7\",\"object\":\"chat.completion.chunk\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null,\"token_id\":9707}]}\n\ndata: {\"id\":\"completion-7\",\"object\":\"chat.completion.chunk\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" there.\"},\"finish_reason\":null,\"token_id\":1052}]}\n\ndata: {\"id\":\"completion-7\",\"object\":\"chat.completion.chunk\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":24,\"completion_tokens\":3,\"total_tokens\":27,\"prompt_tokens_details\":{\"cached_tokens\":16}},\"vade\":{\"sampling\":{\"temperature\":0,\"top_k\":0,\"top_p\":1,\"repetition_penalty\":1,\"presence_penalty\":0,\"frequency_penalty\":0,\"seed\":20260905},\"draft\":\"strict\",\"mtp_depth\":3,\"thinking\":false,\"reasoning_effort\":\"none\",\"draft_used\":true,\"model_draft_used\":true}}\n\ndata: [DONE]\n\n",
+   "expect": {
+    "status": 200,
+    "stream": true,
+    "content": "Hello there.",
+    "finish_reason": "stop",
+    "usage": [
+     24,
+     3,
+     27,
+     16
+    ]
+   }
+  },
+  {
+   "name": "openai-python-tool-stream",
+   "client": "openai Python client 3.41.0",
+   "provenance": "verified: request bytes and headers captured from openai-python 3.41.0 on 2026-10-29; that SDK parsed the reply",
+   "method": "POST",
+   "path": "/v1/chat/completions",
+   "headers": [
+    [
+     "authorization",
+     "Bearer sk-local"
+    ],
+    [
+     "accept",
+     "application/json"
+    ],
+    [
+     "content-type",
+     "application/json"
+    ],
+    [
+     "user-agent",
+     "OpenAI/Python 3.41.0"
+    ],
+    [
+     "x-stainless-lang",
+     "python"
+    ],
+    [
+     "x-stainless-package-version",
+     "3.41.0"
+    ],
+    [
+     "x-stainless-runtime",
+     "CPython"
+    ],
+    [
+     "x-stainless-async",
+     "false"
+    ],
+    [
+     "x-stainless-helper-method",
+     "chat.completions.stream"
+    ],
+    [
+     "x-stainless-retry-count",
+     "0"
+    ],
+    [
+     "x-stainless-read-timeout",
+     "600"
+    ]
+   ],
+   "request": "{\"model\":\"qwen3.8-flash-next-fp4-local\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"Weather in Paris?\"}],\"temperature\":0,\"tool_choice\":\"auto\",\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Current weather for a city.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}}]}",
+   "upstream": "same",
+   "reply_status": 200,
+   "reply_type": "text/event-stream",
+   "reply": "data: {\"id\":\"completion-7\",\"object\":\"chat.completion.chunk\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1234567-0\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]},\"finish_reason\":null,\"token_id\":151657}]}\n\ndata: {\"id\":\"completion-7\",\"object\":\"chat.completion.chunk\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\": \"}}]},\"finish_reason\":null,\"token_id\":4913}]}\n\ndata: {\"id\":\"completion-7\",\"object\":\"chat.completion.chunk\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"Paris\\\"}\"}}]},\"finish_reason\":null,\"token_id\":59604}]}\n\ndata: {\"id\":\"completion-7\",\"object\":\"chat.completion.chunk\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":null,\"token_id\":151658}]}\n\ndata: {\"id\":\"completion-7\",\"object\":\"chat.completion.chunk\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":24,\"completion_tokens\":3,\"total_tokens\":27,\"prompt_tokens_details\":{\"cached_tokens\":16}},\"vade\":{\"sampling\":{\"temperature\":0,\"top_k\":0,\"top_p\":1,\"repetition_penalty\":1,\"presence_penalty\":0,\"frequency_penalty\":0,\"seed\":20260905},\"draft\":\"strict\",\"mtp_depth\":3,\"thinking\":false,\"reasoning_effort\":\"none\",\"draft_used\":true,\"model_draft_used\":true}}\n\ndata: [DONE]\n\n",
+   "expect": {
+    "status": 200,
+    "stream": true,
+    "content": "",
+    "finish_reason": "tool_calls",
+    "usage": [
+     24,
+     3,
+     27,
+     16
+    ],
+    "tool_calls": [
+     [
+      "call-1234567-0",
+      "get_weather",
+      "{\"city\": \"Paris\"}"
+     ]
+    ]
+   }
+  },
+  {
+   "name": "openai-python-tool-result-turn",
+   "client": "openai Python client 3.41.0",
+   "provenance": "verified: request bytes and headers captured from openai-python 3.41.0 on 2026-10-29; that SDK parsed the reply",
+   "method": "POST",
+   "path": "/v1/chat/completions",
+   "headers": [
+    [
+     "authorization",
+     "Bearer sk-local"
+    ],
+    [
+     "accept",
+     "application/json"
+    ],
+    [
+     "content-type",
+     "application/json"
+    ],
+    [
+     "user-agent",
+     "OpenAI/Python 3.41.0"
+    ],
+    [
+     "x-stainless-lang",
+     "python"
+    ],
+    [
+     "x-stainless-package-version",
+     "3.41.0"
+    ],
+    [
+     "x-stainless-runtime",
+     "CPython"
+    ],
+    [
+     "x-stainless-async",
+     "false"
+    ],
+    [
+     "x-stainless-retry-count",
+     "0"
+    ],
+    [
+     "x-stainless-read-timeout",
+     "600"
+    ]
+   ],
+   "request": "{\"model\":\"qwen3.8-flash-next-fp4-local\",\"messages\":[{\"role\":\"user\",\"content\":\"Weather in Paris?\"},{\"content\":null,\"refusal\":null,\"role\":null,\"annotations\":null,\"audio\":null,\"function_call\":null,\"tool_calls\":[{\"id\":\"call-1234567-0\",\"function\":{\"arguments\":\"{\\\"city\\\": \\\"Paris\\\"}\",\"name\":\"get_weather\",\"parsed_arguments\":null},\"type\":\"function\",\"index\":0}],\"parsed\":null},{\"role\":\"tool\",\"tool_call_id\":\"call-1234567-0\",\"content\":\"{\\\"temp_c\\\": 18}\"}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Current weather for a city.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"]}}}]}",
+   "upstream": "defaults",
+   "fold": [
+    "\"role\":null",
+    "\"role\":\"assistant\""
+   ],
+   "reply_status": 200,
+   "reply_type": "application/json",
+   "reply": "{\"id\":\"completion-7\",\"object\":\"chat.completion\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Hello there.\",\"refusal\":null},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":24,\"completion_tokens\":3,\"total_tokens\":27,\"prompt_tokens_details\":{\"cached_tokens\":16}},\"vade\":{\"sampling\":{\"temperature\":0,\"top_k\":0,\"top_p\":1,\"repetition_penalty\":1,\"presence_penalty\":0,\"frequency_penalty\":0,\"seed\":20260905},\"draft\":\"strict\",\"mtp_depth\":3,\"thinking\":false,\"reasoning_effort\":\"none\",\"draft_used\":true,\"model_draft_used\":true}}",
+   "expect": {
+    "status": 200,
+    "content": "Hello there.",
+    "finish_reason": "stop",
+    "usage": [
+     24,
+     3,
+     27,
+     16
+    ]
+   }
+  },
+  {
+   "name": "openai-python-completions",
+   "client": "openai Python client 3.41.0",
+   "provenance": "verified: request bytes and headers captured from openai-python 3.41.0 on 2026-10-29; that SDK parsed the reply",
+   "method": "POST",
+   "path": "/v1/completions",
+   "headers": [
+    [
+     "authorization",
+     "Bearer sk-local"
+    ],
+    [
+     "accept",
+     "application/json"
+    ],
+    [
+     "content-type",
+     "application/json"
+    ],
+    [
+     "user-agent",
+     "OpenAI/Python 3.41.0"
+    ],
+    [
+     "x-stainless-lang",
+     "python"
+    ],
+    [
+     "x-stainless-package-version",
+     "3.41.0"
+    ],
+    [
+     "x-stainless-runtime",
+     "CPython"
+    ],
+    [
+     "x-stainless-async",
+     "false"
+    ],
+    [
+     "x-stainless-retry-count",
+     "0"
+    ],
+    [
+     "x-stainless-read-timeout",
+     "600"
+    ]
+   ],
+   "request": "{\"model\":\"qwen3.8-flash-next-fp4-local\",\"prompt\":\"The answer is\",\"max_tokens\":8,\"stop\":[\"\\n\",\".\"]}",
+   "upstream": "defaults",
+   "reply_status": 200,
+   "reply_type": "application/json",
+   "reply": "{\"id\":\"completion-9\",\"object\":\"text_completion\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"text\":\" 42\",\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":24,\"completion_tokens\":3,\"total_tokens\":27,\"prompt_tokens_details\":{\"cached_tokens\":16}},\"vade\":{\"sampling\":{\"temperature\":0,\"top_k\":0,\"top_p\":1,\"repetition_penalty\":1,\"presence_penalty\":0,\"frequency_penalty\":0,\"seed\":20260905},\"draft\":\"strict\",\"mtp_depth\":3,\"thinking\":false,\"reasoning_effort\":\"none\",\"draft_used\":true,\"model_draft_used\":true}}",
+   "expect": {
+    "status": 200,
+    "text": " 42",
+    "finish_reason": "stop",
+    "usage": [
+     24,
+     3,
+     27,
+     16
+    ]
+   }
+  },
+  {
+   "name": "openai-python-models",
+   "client": "openai Python client 3.41.0",
+   "provenance": "verified: request bytes and headers captured from openai-python 3.41.0 on 2026-10-29; that SDK parsed the reply",
+   "method": "GET",
+   "path": "/v1/models",
+   "headers": [
+    [
+     "authorization",
+     "Bearer sk-local"
+    ],
+    [
+     "accept",
+     "application/json"
+    ],
+    [
+     "user-agent",
+     "OpenAI/Python 3.41.0"
+    ],
+    [
+     "x-stainless-lang",
+     "python"
+    ],
+    [
+     "x-stainless-package-version",
+     "3.41.0"
+    ],
+    [
+     "x-stainless-runtime",
+     "CPython"
+    ],
+    [
+     "x-stainless-async",
+     "false"
+    ],
+    [
+     "x-stainless-retry-count",
+     "0"
+    ],
+    [
+     "x-stainless-read-timeout",
+     "600"
+    ]
+   ],
+   "request": "",
+   "upstream": "same",
+   "reply_status": 200,
+   "reply_type": "application/json",
+   "reply": "{\"object\":\"list\",\"status\":\"ready\",\"data\":[{\"id\":\"qwen3.8-flash-next-fp4-local\",\"object\":\"model\",\"owned_by\":\"vade\",\"context_length\":32768,\"max_model_len\":32768,\"max_output_tokens\":8192,\"input_modalities\":[\"text\"]}]}",
+   "expect": {
+    "status": 200,
+    "models": [
+     "qwen3.8-flash-next-fp4-local"
+    ]
+   }
+  },
+  {
+   "name": "openai-python-json-mode",
+   "client": "openai Python client 3.41.0",
+   "provenance": "verified: request bytes and headers captured from openai-python 3.41.0 on 2026-10-29; that SDK parsed the reply",
+   "method": "POST",
+   "path": "/v1/chat/completions",
+   "headers": [
+    [
+     "authorization",
+     "Bearer sk-local"
+    ],
+    [
+     "accept",
+     "application/json"
+    ],
+    [
+     "content-type",
+     "application/json"
+    ],
+    [
+     "user-agent",
+     "OpenAI/Python 3.41.0"
+    ],
+    [
+     "x-stainless-lang",
+     "python"
+    ],
+    [
+     "x-stainless-package-version",
+     "3.41.0"
+    ],
+    [
+     "x-stainless-runtime",
+     "CPython"
+    ],
+    [
+     "x-stainless-async",
+     "false"
+    ],
+    [
+     "x-stainless-retry-count",
+     "0"
+    ],
+    [
+     "x-stainless-read-timeout",
+     "600"
+    ]
+   ],
+   "request": "{\"model\":\"qwen3.8-flash-next-fp4-local\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply in JSON.\"}],\"max_tokens\":32,\"response_format\":{\"type\":\"json_object\"}}",
+   "upstream": "defaults",
+   "reply_status": 200,
+   "reply_type": "application/json",
+   "reply": "{\"id\":\"completion-7\",\"object\":\"chat.completion\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Hello there.\",\"refusal\":null},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":24,\"completion_tokens\":3,\"total_tokens\":27,\"prompt_tokens_details\":{\"cached_tokens\":16}},\"vade\":{\"sampling\":{\"temperature\":0,\"top_k\":0,\"top_p\":1,\"repetition_penalty\":1,\"presence_penalty\":0,\"frequency_penalty\":0,\"seed\":20260905},\"draft\":\"strict\",\"mtp_depth\":3,\"thinking\":false,\"reasoning_effort\":\"none\",\"draft_used\":true,\"model_draft_used\":true}}",
+   "expect": {
+    "status": 200,
+    "content": "Hello there.",
+    "finish_reason": "stop",
+    "usage": [
+     24,
+     3,
+     27,
+     16
+    ]
+   }
+  },
+  {
+   "name": "openai-python-embeddings",
+   "client": "openai Python client 3.41.0",
+   "provenance": "verified: request bytes and headers captured from openai-python 3.41.0 on 2026-10-29; that SDK parsed the reply",
+   "method": "POST",
+   "path": "/v1/embeddings",
+   "headers": [
+    [
+     "authorization",
+     "Bearer sk-local"
+    ],
+    [
+     "accept",
+     "application/json"
+    ],
+    [
+     "content-type",
+     "application/json"
+    ],
+    [
+     "user-agent",
+     "OpenAI/Python 3.41.0"
+    ],
+    [
+     "x-stainless-lang",
+     "python"
+    ],
+    [
+     "x-stainless-package-version",
+     "3.41.0"
+    ],
+    [
+     "x-stainless-runtime",
+     "CPython"
+    ],
+    [
+     "x-stainless-async",
+     "false"
+    ],
+    [
+     "x-stainless-retry-count",
+     "0"
+    ],
+    [
+     "x-stainless-read-timeout",
+     "600"
+    ]
+   ],
+   "request": "{\"model\":\"qwen3.8-flash-next-fp4-local\",\"input\":\"hi\",\"encoding_format\":\"base64\"}",
+   "upstream": "none",
+   "reply_status": 501,
+   "expect": {
+    "status": 501,
+    "error_type": "invalid_request_error",
+    "error_message": "embeddings are not implemented: Vade serves text generation only; use a separate embedding server",
+    "error_code": "unsupported_endpoint"
+   }
+  },
+  {
+   "name": "openai-python-unknown-model",
+   "client": "openai Python client 3.41.0",
+   "provenance": "verified: request bytes and headers captured from openai-python 3.41.0 on 2026-10-29; that SDK parsed the reply",
+   "method": "POST",
+   "path": "/v1/chat/completions",
+   "headers": [
+    [
+     "authorization",
+     "Bearer sk-local"
+    ],
+    [
+     "accept",
+     "application/json"
+    ],
+    [
+     "content-type",
+     "application/json"
+    ],
+    [
+     "user-agent",
+     "OpenAI/Python 3.41.0"
+    ],
+    [
+     "x-stainless-lang",
+     "python"
+    ],
+    [
+     "x-stainless-package-version",
+     "3.41.0"
+    ],
+    [
+     "x-stainless-runtime",
+     "CPython"
+    ],
+    [
+     "x-stainless-async",
+     "false"
+    ],
+    [
+     "x-stainless-retry-count",
+     "0"
+    ],
+    [
+     "x-stainless-read-timeout",
+     "600"
+    ]
+   ],
+   "request": "{\"model\":\"gpt-4o\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+   "upstream": "defaults",
+   "reply_status": 400,
+   "reply_type": "application/json",
+   "reply": "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"unknown model\"}}",
+   "expect": {
+    "status": 400,
+    "error_type": "invalid_request_error",
+    "error_message": "unknown model"
+   }
+  },
+  {
+   "name": "continue-chat-stream",
+   "client": "Continue (VS Code extension, openai provider with apiBase)",
+   "provenance": "from memory: written from knowledge of the client, not captured",
+   "method": "POST",
+   "path": "/v1/chat/completions",
+   "headers": [
+    [
+     "authorization",
+     "Bearer sk-local"
+    ],
+    [
+     "accept",
+     "application/json"
+    ],
+    [
+     "content-type",
+     "application/json"
+    ],
+    [
+     "user-agent",
+     "node"
+    ]
+   ],
+   "request": "{\"model\":\"qwen3.8-flash-next-fp4-local\",\"max_tokens\":4096,\"temperature\":0.5,\"stream\":true,\"messages\":[{\"role\":\"system\",\"content\":\"You are a helpful coding assistant.\"},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"```main.rs\\nfn main() {}\\n```\"},{\"type\":\"text\",\"text\":\"Explain this file.\"}]}],\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"description\":\"Read a file in the workspace.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"filepath\":{\"type\":\"string\"}},\"required\":[\"filepath\"]}}}]}",
+   "upstream": "same",
+   "reply_status": 200,
+   "reply_type": "text/event-stream",
+   "reply": "data: {\"id\":\"completion-7\",\"object\":\"chat.completion.chunk\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null,\"token_id\":9707}]}\n\ndata: {\"id\":\"completion-7\",\"object\":\"chat.completion.chunk\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" there.\"},\"finish_reason\":null,\"token_id\":1052}]}\n\ndata: {\"id\":\"completion-7\",\"object\":\"chat.completion.chunk\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":24,\"completion_tokens\":3,\"total_tokens\":27,\"prompt_tokens_details\":{\"cached_tokens\":16}},\"vade\":{\"sampling\":{\"temperature\":0,\"top_k\":0,\"top_p\":1,\"repetition_penalty\":1,\"presence_penalty\":0,\"frequency_penalty\":0,\"seed\":20260905},\"draft\":\"strict\",\"mtp_depth\":3,\"thinking\":false,\"reasoning_effort\":\"none\",\"draft_used\":true,\"model_draft_used\":true}}\n\ndata: [DONE]\n\n",
+   "expect": {
+    "status": 200,
+    "stream": true,
+    "content": "Hello there.",
+    "finish_reason": "stop",
+    "usage": [
+     24,
+     3,
+     27,
+     16
+    ]
+   }
+  },
+  {
+   "name": "continue-autocomplete",
+   "client": "Continue (VS Code extension, openai provider with apiBase)",
+   "provenance": "from memory: written from knowledge of the client, not captured",
+   "method": "POST",
+   "path": "/v1/completions",
+   "headers": [
+    [
+     "authorization",
+     "Bearer sk-local"
+    ],
+    [
+     "content-type",
+     "application/json"
+    ],
+    [
+     "user-agent",
+     "node"
+    ]
+   ],
+   "request": "{\"model\":\"qwen3.8-flash-next-fp4-local\",\"prompt\":\"fn add(a: i32, b: i32) -> i32 {\\n    \",\"suffix\":\"\\n}\\n\",\"max_tokens\":64,\"temperature\":0.01,\"stop\":[\"\\n\\n\",\"```\",\"fn \"],\"stream\":true}",
+   "upstream": "same",
+   "reply_status": 200,
+   "reply_type": "text/event-stream",
+   "reply": "data: {\"id\":\"completion-9\",\"object\":\"text_completion\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"text\":\"a + b\",\"finish_reason\":null,\"token_id\":64}]}\n\ndata: {\"id\":\"completion-9\",\"object\":\"text_completion\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"text\":\"\",\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":24,\"completion_tokens\":3,\"total_tokens\":27,\"prompt_tokens_details\":{\"cached_tokens\":16}},\"vade\":{\"sampling\":{\"temperature\":0,\"top_k\":0,\"top_p\":1,\"repetition_penalty\":1,\"presence_penalty\":0,\"frequency_penalty\":0,\"seed\":20260905},\"draft\":\"strict\",\"mtp_depth\":3,\"thinking\":false,\"reasoning_effort\":\"none\",\"draft_used\":true,\"model_draft_used\":true}}\n\ndata: [DONE]\n\n",
+   "expect": {
+    "status": 200,
+    "stream": true,
+    "text": "a + b",
+    "finish_reason": "stop",
+    "usage": [
+     24,
+     3,
+     27,
+     16
+    ]
+   }
+  },
+  {
+   "name": "open-webui-models",
+   "client": "Open WebUI (OpenAI connection, server side)",
+   "provenance": "from memory: written from knowledge of the client, not captured",
+   "method": "GET",
+   "path": "/v1/models",
+   "headers": [
+    [
+     "authorization",
+     "Bearer sk-none"
+    ],
+    [
+     "content-type",
+     "application/json"
+    ]
+   ],
+   "request": "",
+   "upstream": "same",
+   "reply_status": 200,
+   "reply_type": "application/json",
+   "reply": "{\"object\":\"list\",\"status\":\"ready\",\"data\":[{\"id\":\"qwen3.8-flash-next-fp4-local\",\"object\":\"model\",\"owned_by\":\"vade\",\"context_length\":32768,\"max_model_len\":32768,\"max_output_tokens\":8192,\"input_modalities\":[\"text\"]}]}",
+   "expect": {
+    "status": 200,
+    "models": [
+     "qwen3.8-flash-next-fp4-local"
+    ]
+   }
+  },
+  {
+   "name": "open-webui-chat-stream",
+   "client": "Open WebUI (OpenAI connection, server side)",
+   "provenance": "from memory: written from knowledge of the client, not captured",
+   "method": "POST",
+   "path": "/v1/chat/completions",
+   "headers": [
+    [
+     "authorization",
+     "Bearer sk-none"
+    ],
+    [
+     "content-type",
+     "application/json"
+    ]
+   ],
+   "request": "{\"stream\": true, \"model\": \"qwen3.8-flash-next-fp4-local\", \"messages\": [{\"role\": \"user\", \"content\": \"Why is the sky blue?\"}], \"stream_options\": {\"include_usage\": true}}",
+   "upstream": "defaults",
+   "reply_status": 200,
+   "reply_type": "text/event-stream",
+   "reply": "data: {\"id\":\"completion-7\",\"object\":\"chat.completion.chunk\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Rayleigh scattering.\"},\"finish_reason\":null,\"token_id\":49}]}\n\ndata: {\"id\":\"completion-7\",\"object\":\"chat.completion.chunk\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Short waves scatter more.\"},\"finish_reason\":null,\"token_id\":50}]}\n\ndata: {\"id\":\"completion-7\",\"object\":\"chat.completion.chunk\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":24,\"completion_tokens\":3,\"total_tokens\":27,\"prompt_tokens_details\":{\"cached_tokens\":16}},\"vade\":{\"sampling\":{\"temperature\":0,\"top_k\":0,\"top_p\":1,\"repetition_penalty\":1,\"presence_penalty\":0,\"frequency_penalty\":0,\"seed\":20260905},\"draft\":\"strict\",\"mtp_depth\":3,\"thinking\":false,\"reasoning_effort\":\"none\",\"draft_used\":true,\"model_draft_used\":true}}\n\ndata: [DONE]\n\n",
+   "expect": {
+    "status": 200,
+    "stream": true,
+    "reasoning": "Rayleigh scattering.",
+    "content": "Short waves scatter more.",
+    "finish_reason": "stop",
+    "usage": [
+     24,
+     3,
+     27,
+     16
+    ]
+   }
+  },
+  {
+   "name": "open-webui-title",
+   "client": "Open WebUI (OpenAI connection, server side)",
+   "provenance": "from memory: written from knowledge of the client, not captured",
+   "method": "POST",
+   "path": "/v1/chat/completions",
+   "headers": [
+    [
+     "authorization",
+     "Bearer sk-none"
+    ],
+    [
+     "content-type",
+     "application/json"
+    ]
+   ],
+   "request": "{\"model\": \"qwen3.8-flash-next-fp4-local\", \"messages\": [{\"role\": \"user\", \"content\": \"### Task:\\nGenerate a concise, 3-5 word title for the chat history.\\n### Chat History:\\n<chat_history>\\nUSER: Why is the sky blue?\\n</chat_history>\"}], \"stream\": false, \"max_tokens\": 1000}",
+   "upstream": "defaults",
+   "reply_status": 200,
+   "reply_type": "application/json",
+   "reply": "{\"id\":\"completion-7\",\"object\":\"chat.completion\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Hello there.\",\"refusal\":null},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":24,\"completion_tokens\":3,\"total_tokens\":27,\"prompt_tokens_details\":{\"cached_tokens\":16}},\"vade\":{\"sampling\":{\"temperature\":0,\"top_k\":0,\"top_p\":1,\"repetition_penalty\":1,\"presence_penalty\":0,\"frequency_penalty\":0,\"seed\":20260905},\"draft\":\"strict\",\"mtp_depth\":3,\"thinking\":false,\"reasoning_effort\":\"none\",\"draft_used\":true,\"model_draft_used\":true}}",
+   "expect": {
+    "status": 200,
+    "content": "Hello there.",
+    "finish_reason": "stop",
+    "usage": [
+     24,
+     3,
+     27,
+     16
+    ]
+   }
+  },
+  {
+   "name": "curl-docs-stream",
+   "client": "curl",
+   "provenance": "from docs: the curl example in docs/openai-api.md",
+   "method": "POST",
+   "path": "/v1/chat/completions",
+   "headers": [
+    [
+     "content-type",
+     "application/json"
+    ]
+   ],
+   "request": "{\"model\":\"qwen3.8-flash-next-fp4-local\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello.\"}],\"stream\":true,\"max_tokens\":64}",
+   "upstream": "defaults",
+   "reply_status": 200,
+   "reply_type": "text/event-stream",
+   "reply": "data: {\"id\":\"completion-7\",\"object\":\"chat.completion.chunk\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null,\"token_id\":9707}]}\n\ndata: {\"id\":\"completion-7\",\"object\":\"chat.completion.chunk\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" there.\"},\"finish_reason\":null,\"token_id\":1052}]}\n\ndata: {\"id\":\"completion-7\",\"object\":\"chat.completion.chunk\",\"created\":1793000000,\"model\":\"qwen3.8-flash-next-fp4-local\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":24,\"completion_tokens\":3,\"total_tokens\":27,\"prompt_tokens_details\":{\"cached_tokens\":16}},\"vade\":{\"sampling\":{\"temperature\":0,\"top_k\":0,\"top_p\":1,\"repetition_penalty\":1,\"presence_penalty\":0,\"frequency_penalty\":0,\"seed\":20260905},\"draft\":\"strict\",\"mtp_depth\":3,\"thinking\":false,\"reasoning_effort\":\"none\",\"draft_used\":true,\"model_draft_used\":true}}\n\ndata: [DONE]\n\n",
+   "expect": {
+    "status": 200,
+    "stream": true,
+    "content": "Hello there.",
+    "finish_reason": "stop",
+    "usage": [
+     24,
+     3,
+     27,
+     16
+    ]
+   }
+  }
+ ]
+}
