@@ -1,0 +1,13 @@
+# A correct transcript for the dry run: the first run reads the note and
+# answers OK; the resumed run writes the name from its history.
+>>> call workspace_read
+{"path":"notes/release.txt"}
+>>> answer
+OK
+>>> patch
+*** Begin Patch
+*** Add File: RELEASE.txt
++TERRACOTTA-41
+*** End Patch
+>>> answer
+RELEASE.txt holds the code name.

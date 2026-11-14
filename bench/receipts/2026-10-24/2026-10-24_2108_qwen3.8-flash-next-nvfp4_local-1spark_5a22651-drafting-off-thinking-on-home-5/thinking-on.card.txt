@@ -1,0 +1,77 @@
+╭────────────────────────────────────────────────────────────────────────╮
+│                                                                        │
+│  R I G M A R K   //   AGENT WORKLOAD RECEIPT                           │
+│  BENCHMARKS LOCAL AI HOW CODING AGENTS ACTUALLY USE IT                 │
+│  ●  15/15 BASIC OUTPUT GATES PASSED                                    │
+│                                                                        │
+├─ MODEL ────────────────────────────────────────────────────────────────┤
+│                                                                        │
+│  qwen3.8-flash-next-fp4-local                                          │
+│                                                                        │
+├─ SINGLE STREAM ────────────────────────────────────────────────────────┤
+│                                                                        │
+│  WORKLOAD         tok/s       Range tok/s   Last (s)    Checks         │
+│  PROSE             27.9         27.9–27.9       43.0     ✓ 5/5         │
+│  CODE              27.8         27.7–27.8       69.3     ✓ 5/5         │
+│  STRUCTURED*       28.0         28.0–28.0       21.9     ✓ 5/5         │
+│                                                                        │
+│  * Predictable JSON ceiling; not general agent performance.            │
+│  Decode medians are estimates; rates include streamed reasoning.       │
+│                                                                        │
+├─ PREFILL ──────────────────────────────────────────────────────────────┤
+│                                                                        │
+│  DEPTH       Cold tok/s      Cold TTFT (s)    Replay TTFT (s)          │
+│  8K               2,169               3.78               3.77          │
+│  Medians; replay is an immediate repeat, not a proven hit.             │
+│                                                                        │
+├─ CAPPED CONCURRENT GENERATION ─────────────────────────────────────────┤
+│                                                                        │
+│  Aggregate tok/s: C1 26.9 | C2 46.3 | C4 82.2 | C8 127.4               │
+│  C8: 0/24 normal stops; 24/24 with visible output.                     │
+│  Capped throughput includes reasoning; not completed agent tasks.      │
+│                                                                        │
+├─ APPLIANCE ────────────────────────────────────────────────────────────┤
+│                                                                        │
+│  Hardware: 1 x NVIDIA GB10 (one DGX Spark (home-5): 1 x DGX Spark, one│
+│    NVIDIA GB10, 121 GiB RAM, driver 580.178.04, Ubuntu 24.04.5 LTS     │
+│    aarch64); home-5 rank0 (HTTP 127.0.0.1:18080) loopback; no fabric  │
+│    (single machine)                                                    │
+│  Topology: world1 single GB10 (no fabric (single machine)); engine     │
+│    topology tag 'local'; HTTP 127.0.0.1:18080                          │
+│  Checkpoint: nvidia/Qwen3.8-Flash-Next-FP4-Local @                     │
+│    d99ccbed3a9db8a2f099eca98e17c0bc3a2ebe84df95852f3b07c87c20a32716    │
+│  Quantisation: NVFP4 FP4-Local checkpoint                              │
+│  KV cache: FP32 K/V; FP32 index and recurrent history                  │
+│  Engine: Vade 5a226519a2a44a0ff7ea9be43118b8b9ec0d8f9e world-1 public  │
+│    v0.1.0 bundle, vade launch defaults (greedy); LOCAL home-5 DGX     │
+│    Spark; drafting OFF (requests draft plain, mtp_depth 0);            │
+│    informative, no gate                                                │
+│  Recipe: World1: 1 x GB10 LOCAL home-5 DGX Spark; NVFP4 FP4-Local     │
+│    --fp4-local; context32768; server launched by public ./vade launch  │
+│    (default drafting ON); drafting OFF (requests draft plain, mtp_depth│
+│    0); thinking ON; standard prefill 3 cold/replay 8192 pairs; HTTP    │
+│    127.0.0.1:18080.                                                    │
+│                                                                        │
+├─ SETTINGS ─────────────────────────────────────────────────────────────┤
+│                                                                        │
+│  SUITE: CUSTOM SETTINGS                                                │
+│  Changed: --prefill-depths=8192                                        │
+│  Changed: --concurrency=1,2,4,8                                        │
+│  REQUEST: {"cache": false, "chat_template_kwargs": {"enable_thinking": │
+│    true, "reasoning_effort": "low"}, "draft": "plain",                 │
+│    "frequency_penalty": 0, "presence_penalty": 0, "repetition_penalty":│
+│    1, "top_k": 0}                                                      │
+│  Temperature 0.0 | top_p 1.0 | seed 20260905 | protocol 1.3.0          │
+│  Decode: 5 runs, 8192-token cap | Prefill: 8K, 3 pairs                 │
+│  Concurrency: C1/C2/C4/C8, 3 rounds, 256-token cap; workload code      │
+│  Cache isolation: random-salt-per-pair                                 │
+│  Comparison ID: 2026-10-11-vade-rigmark-compat-thinking-on             │
+│                                                                        │
+├─ RECEIPT ──────────────────────────────────────────────────────────────┤
+│                                                                        │
+│  SOURCE     git:52c29c3fc1d7  •  state unknown                         │
+│  JSON sha256:c5efd7940c221e8a…                                         │
+│  SHARE THE CARD • LINK THE JSON RECEIPT • #RIGMARK                     │
+│  github.com/alexellis/rigmark                                          │
+│                                                                        │
+╰────────────────────────────────────────────────────────────────────────╯

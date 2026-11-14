@@ -1,0 +1,13 @@
+{
+  "source_repository": "NVIDIA/spark-local-inference",
+  "source_revision": "18b16e170bb9eab03e2b1800107c72966c56594f",
+  "source_file": "helios/tests/glm_frontend.rs",
+  "source_sha256": "e71c9bdf028b9fbd454dc3aae7ab3d399eee6e57acfff15136498f8fd75f856e",
+  "checkpoint_revision": "76348ddb2be2e35e39ecfc00e75dc07703f4f3d5",
+  "tokenizer_sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+  "eos_ids": [154820, 154827, 154829],
+  "delimiters": [
+    {"id": 154841, "decoded": "<think>"},
+    {"id": 154842, "decoded": "</think>"}
+  ]
+}

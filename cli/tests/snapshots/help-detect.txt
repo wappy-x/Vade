@@ -1,0 +1,17 @@
+$ vade detect --help
+Show this Spark's machine, memory, disk, driver and model.
+
+Examples:
+  vade detect
+  vade detect --json
+
+Usage: vade detect [--json] [--dry-run]
+
+Options:
+  --json     Print one vade.detect.v1 object
+  --dry-run  Print the plan; read nothing
+
+Notes:
+  - Reads only; no files are changed and nothing is started.
+--- stderr
+--- exit 0

@@ -1,0 +1,428 @@
+# OpenAI-compatible API
+
+Vade serves the OpenAI Chat Completions API, so most OpenAI clients work
+without code changes. Set the client's base URL to Vade, and set the model to
+the ID that `GET /v1/models` returns. This page tells you which routes and
+fields work, what the replies contain, and where Vade differs from OpenAI.
+
+Vade also serves the Responses and Anthropic Messages APIs. The [engine server
+reference](../engine/docs/server.md) covers them.
+
+## Base URLs
+
+Use one of these base URLs. Each one listens on loopback only.
+
+| Base URL | What answers | Start it with |
+| --- | --- | --- |
+| `http://127.0.0.1:18080/v1` | The engine | `vade up`, on the Spark or from a controller ([INSTALL.md](INSTALL.md)) |
+| `http://127.0.0.1:8787/v1` | The core gateway, in front of the engine | `vade-harness gateway --upstream http://127.0.0.1:18080` |
+| `http://127.0.0.1:8787/v1` | The standalone gateway, in front of the engine | `vade-gateway --upstream http://127.0.0.1:18080/v1` |
+
+The two gateways are described in the [harness README](../harness/README.md)
+and in [Standalone gateway](../harness/docs/invisible-gateway.md). Run only
+one gateway on port 8787 at a time.
+
+The FP4-Local server serves the model ID `qwen3.8-flash-next-fp4-local`. Read
+the ID from your own server, because another checkpoint has another ID.
+
+## Try it with curl
+
+These commands use the engine address. To go through a gateway, change the
+port to 8787.
+
+```sh
+BASE=http://127.0.0.1:18080/v1
+curl -sS "$BASE/models"
+curl -sS "$BASE/chat/completions" -H 'Content-Type: application/json' -d '{
+  "model": "qwen3.8-flash-next-fp4-local",
+  "messages": [{"role": "user", "content": "Say hello."}],
+  "max_tokens": 64,
+  "enable_thinking": false
+}'
+curl -sSN "$BASE/chat/completions" -H 'Content-Type: application/json' -d '{
+  "model": "qwen3.8-flash-next-fp4-local",
+  "messages": [{"role": "user", "content": "Say hello."}],
+  "max_tokens": 64,
+  "stream": true
+}'
+```
+
+FP4-Local thinks by default. Without `"enable_thinking": false`, the reply
+gives the thinking in `reasoning_content` first, then the answer in `content`.
+[examples/curl-openai.sh](../examples/curl-openai.sh) runs the same requests,
+and [examples/README.md](../examples/README.md) shows the output of a real run.
+
+## Use the openai Python client
+
+This example is documentation only. The repository contains no Python code.
+Install the client in your own environment with `pip install openai`.
+
+```python
+from openai import OpenAI
+
+# Vade needs no key on loopback. The client needs a value, so any text works.
+client = OpenAI(base_url="http://127.0.0.1:18080/v1", api_key="unused")
+model = client.models.list().data[0].id
+
+# One answer.
+reply = client.chat.completions.create(
+    model=model,
+    messages=[{"role": "user", "content": "Say hello."}],
+    max_completion_tokens=64,
+    extra_body={"enable_thinking": False},
+)
+print(reply.choices[0].message.content, reply.usage.total_tokens)
+
+# A streamed answer. Usage arrives on the last chunk.
+for chunk in client.chat.completions.create(
+    model=model,
+    messages=[{"role": "user", "content": "Count to five."}],
+    stream=True,
+    extra_body={"enable_thinking": False},
+):
+    if chunk.choices and chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="")
+print()
+
+# Function calling. Vade never runs a tool; your code runs it.
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Current weather for a city.",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+    },
+}]
+messages = [{"role": "user", "content": "What is the weather in Paris?"}]
+reply = client.chat.completions.create(model=model, messages=messages, tools=tools)
+message = reply.choices[0].message
+if message.tool_calls:
+    messages.append(message)
+    for call in message.tool_calls:
+        messages.append({"role": "tool", "tool_call_id": call.id, "content": '{"temp_c": 18}'})
+    reply = client.chat.completions.create(model=model, messages=messages, tools=tools)
+print(reply.choices[0].message.content)
+```
+
+`extra_body` sends Vade's own fields, such as `enable_thinking`, which the
+client does not know.
+
+## Routes
+
+<div align="center">
+
+| Route | Engine | Core gateway | Standalone gateway |
+| :---: | :---: | :---: | :---: |
+| `POST /v1/chat/completions` | Served | Forwarded | Forwarded |
+| `POST /v1/completions` (legacy) | Served | Forwarded | Forwarded |
+| `GET /v1/models` | Served | Forwarded | Forwarded |
+| `POST /v1/embeddings` | 400 | 501 with a reason | Forwarded, so 400 |
+| `GET /v1/models/{id}` | 400 | 404 | Forwarded, so 400 |
+| Audio, images, files, batches, moderations | 400 | 404 | Forwarded, so 400 |
+
+</div>
+
+Vade is a text generation server. It has no embedding model, so it cannot
+serve `/v1/embeddings`. The core gateway answers that route with HTTP 501 and
+this error:
+
+```json
+{"error":{"type":"invalid_request_error","message":"embeddings are not implemented: Vade serves text generation only; use a separate embedding server","param":null,"code":"unsupported_endpoint"}}
+```
+
+`GET /v1/models` lists one model. Its `id` is the served model ID. It also
+gives `created` (the Unix second at which the server first listed the model),
+`context_length`, `max_model_len`, `max_output_tokens` and `input_modalities`.
+
+## Chat request fields
+
+- **`model`.** The field is optional. If you send it, it must equal the served model ID, or the engine returns 400 `unknown model`.
+- **`messages`.** Send 1 to 4,096 messages. The roles are `system`, `developer` (read as `system` on every model; GLM's own template would drop it), `user`, `assistant` and `tool`.
+- **`content`.** Send a string, or an array of `{"type": "text"}` parts, which Vade joins in order. Image parts return 400. An assistant message can send `null` or no `content`.
+- **`name` on a message.** The FP4-Local and GLM chat templates do not use it. On Gemma 4 it must be a string.
+- **`stream`.** `true` sends server-sent events. The default is `false`.
+- **`stream_options`.** On successful chat streams, `include_usage: true` sends a separate final usage chunk with empty choices. `false` omits usage. Without the option, usage stays on the finish chunk.
+- **`max_tokens`, `max_completion_tokens`.** Send positive integers. `max_completion_tokens` wins when you send both. Vade clamps the value to the server's output limit and to the room left after the prompt.
+- **`stop`.** Send a string, or up to 4 strings. Each string must have 1 to 1,024 bytes.
+- **`n`.** Only 1 is allowed. It counts as a sampling field, even as 1. See [Sampling and exactness](#sampling-and-exactness).
+- **`tools`.** Send up to 64 function tools.
+- **`tool_choice`.** Send `auto` (the default) or `none`. Supported Qwen templates also accept `required` or `{"type": "function", "function": {"name": ...}}`. These choices need `tools`, and a named function must be one of them. Both turn thinking off. GLM, Gemma and Phi refuse forced choices.
+- **`parallel_tool_calls`.** `false` allows one call per reply. The default is `true`.
+- **`temperature`, `top_p`, `top_k`, `min_p`, `seed`, `presence_penalty`, `frequency_penalty`, `repetition_penalty`.** Vade uses them as sent. See [Sampling and exactness](#sampling-and-exactness) and [Sampling](sampling.md).
+- **`response_format`.** Vade ignores it. See [Structured output](#structured-output).
+- **`typical_p`, `logit_bias`, `best_of`.** The engine ignores them. They still count as sampling fields.
+- **`logprobs`, `top_logprobs`, `user`, `metadata`, `store`.** Vade ignores them.
+- **`enable_thinking`, `reasoning_effort`, `chat_template_kwargs`.** These fields control thinking where the template supports it. GLM refuses `enable_thinking: false` and `reasoning_effort: "none"` or `"minimal"`. On GLM, omit those fields or use `low`, `high` or `max`. The thinking-off examples on this page use Qwen. See the [engine server reference](../engine/docs/server.md).
+
+`POST /v1/completions` also accepts `prompt: ["text"]` for a single text
+prompt. More than one string returns HTTP 400. Integer token arrays keep
+their existing meaning.
+
+The engine ignores fields that it does not know. A field that is ignored
+changes nothing in the reply.
+
+## Replies
+
+A non-streamed reply is one `chat.completion` object. Its message has
+`role: "assistant"`, `content` and `"refusal": null`. It also has
+`reasoning_content` when the model thought, and `tool_calls` when the model
+called a tool.
+
+A streamed reply is a series of `data:` lines. Each line holds one
+`chat.completion.chunk`. Each chunk's `delta` holds `content`,
+`reasoning_content` or `tool_calls`. The first delta also holds
+`"role": "assistant"`, as OpenAI's does. Some deltas are empty. Without an
+explicit usage option, the last chunk has `finish_reason` and `usage`.
+Then `data: [DONE]` ends the stream. This is the
+end of a real stream, from [examples/README.md](../examples/README.md):
+
+```text
+data: {"id":"completion-2","object":"chat.completion.chunk","created":1792935961,"model":"qwen3.8-flash-next-fp4-local","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":24,"completion_tokens":10,"total_tokens":34,"prompt_tokens_details":{"cached_tokens":0}},"vade":{…}}
+data: [DONE]
+```
+
+Vade's chunks differ from OpenAI's in three ways. Clients that follow the
+OpenAI schema read them correctly.
+
+- On chat requests, `stream_options.include_usage: true` puts usage in a
+  separate final chunk with empty `choices` and the same chunk identity.
+  `false` omits usage on a successful stream. If the option is absent, usage
+  stays on the finish chunk. `/v1/completions` keeps that legacy format.
+  Error streams keep their existing terminal usage format.
+- Each choice can carry `token_id`, the ID of the token that produced it.
+- Every reply carries a `vade` object with the sampling settings, drafting and
+  build identity that served it. Clients can ignore it.
+
+### Usage
+
+`usage` has `prompt_tokens`, `completion_tokens` and `total_tokens`.
+`prompt_tokens_details.cached_tokens` counts the prompt tokens that Vade read
+from its prefix cache instead of computing them again.
+
+### Finish reasons
+
+<div align="center">
+
+| `finish_reason` | Meaning |
+| :---: | :---: |
+| `stop` | The model ended its answer, or the reply reached a `stop` string. |
+| `length` | The reply reached its token limit. |
+| `tool_calls` | The reply ends with one or more tool calls. |
+
+</div>
+
+Vade does not send `content_filter` or `function_call`.
+
+## Tool calling
+
+Send function tools in the OpenAI shape. The model decides when to call one,
+and Vade returns each call to your client. Vade never runs a tool.
+
+In a stream, a call starts with its index, ID, type and name. Its arguments
+then arrive in parts on templates that support incremental arguments. GLM
+buffers each call and sends its arguments when the call closes. Empty deltas
+can arrive while the parser waits for a complete call:
+
+```text
+data: {…"delta":{"tool_calls":[{"index":0,"id":"call-1234567-0","type":"function","function":{"name":"get_weather","arguments":""}}]}…}
+data: {…"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\": "}}]}…}
+data: {…"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Paris\"}"}}]}…}
+data: {…"delta":{},"finish_reason":"tool_calls"…}
+data: [DONE]
+```
+
+- The tool schema guides the model through the prompt. Vade does not force
+  the arguments to match the schema, so check them before you run the tool.
+- A malformed or incomplete call comes back as ordinary `content`, with HTTP
+  200.
+- To send the result, add the assistant message with its `tool_calls`, then a
+  `tool` message with the same `tool_call_id`.
+
+### Streamed tool calls in history
+
+The openai Python client can build a message from a stream, for example with
+`client.chat.completions.stream(...)` and `get_final_completion()`. That
+message takes its role from the deltas. The first delta carries
+`"role": "assistant"`, so the message can go back into `messages` unchanged.
+
+Engines older than this change sent no role, so that message had
+`role: null` and the engine refused it with HTTP 400. Both gateways still
+repair this: on the chat routes, they change a message role of `null` to
+`"assistant"` before they forward the request.
+
+## Structured output
+
+Vade has no constrained decoding mode. The engine ignores `response_format`,
+so `{"type": "json_object"}` and `{"type": "json_schema", ...}` do not force
+JSON. The request still succeeds, and the reply is ordinary text.
+
+To get JSON, ask for it in the prompt, then parse and check the reply in your
+code. Turn thinking off with `"enable_thinking": false` so the answer starts
+at once. On GLM that request returns 400, so omit the field there.
+
+## Sampling and exactness
+
+On FP4-Local, when a request sends no sampling field, Vade decodes greedily:
+it always picks the most likely token. Greedy is the default, and it is exact:
+the same request with the same settings gives the same token IDs on every run. Vade's exactness
+checks use greedy requests.
+
+FP8 is different. A request to the FP8 engine that leaves out a sampling
+field takes that field from the checkpoint, even when it sends no sampling
+field at all. The checkpoint's values sample, and a request without `seed`
+gets a new seed. For greedy replies on FP8, do one of these three things
+([FP8 install](install-fp8.md#defaults-and-drafting)):
+
+- Send `"temperature": 0` with neutral penalties (`repetition_penalty` 1,
+  `presence_penalty` 0, `frequency_penalty` 0).
+- Send the full greedy set.
+- Send the request through a gateway.
+
+The gateways make that default explicit. When a request has none of the
+fields `temperature`, `top_p`, `top_k`, `min_p`, `typical_p`, `seed`,
+`frequency_penalty`, `presence_penalty`, `repetition_penalty`, `logit_bias`,
+`n`, `best_of`, `sampling` or `generation_config`, a gateway adds
+`{"temperature":0,"seed":20260905,"top_p":1.0,"top_k":0,"repetition_penalty":1.0,"presence_penalty":0.0,"frequency_penalty":0.0}`
+before it forwards the request. It changes no other byte.
+
+When a request sends any one of those fields, the gateways forward it
+unchanged. The engine then takes each missing field from the checkpoint's
+`generation_config.json`. For FP4-Local that means temperature 1, top-k 20 and
+top-p 0.95 (see [the recorded completions
+fixture](../harness/tests/fixtures/completions-engine-2026-10-23.md)). So a
+client that sends only `top_p` gets a sampled reply.
+
+- To keep replies exact on FP4-Local, send no sampling field, or send
+  `"temperature": 0`. FP4-Local's own penalties are neutral, so that stays
+  greedy. On FP8, send `"temperature": 0` with the three neutral penalties.
+- With `temperature` above 0, the engine draws a random seed for each request
+  unless you send `seed`. A streamed reply reports the seed in the
+  `X-Sampling-Seed` header. Every reply reports it in `vade.sampling.seed`.
+- Many chat apps send `temperature`, and some send `"n": 1`, by default. Set
+  `temperature` to 0 in the app if you want exact replies.
+- A sampled reply is also repeatable: send the same request with the same
+  `seed`. [Sampling](sampling.md) gives the order of the filters, where
+  sampling runs on two or more Sparks, and what is exact.
+
+For a failed `/v1/responses` stream, the open output item ends with
+`status: "incomplete"` in `response.output_item.done`. A `response.failed`
+event follows with the partial output and error. Earlier finished items keep
+their status. Successful streams keep their existing format.
+
+## Errors
+
+Errors use the OpenAI shape, `{"error": {"type": ..., "message": ...}}`.
+Engine errors also carry `param` and `code`. Each is `null` when unset.
+
+Tokenizer input byte, template byte and token-count limit errors carry
+`code: "context_length_exceeded"`. Body and output byte limits do not.
+
+| Status | `type` | When |
+| --- | --- | --- |
+| 400 | `invalid_request_error` | A field breaks the rules above, or `model` is not the served model ID. The message says what is wrong. |
+| 401 | `authentication_error` | A key is required and the request has no key or the wrong key. The `code` is `invalid_api_key`. |
+| 403 | `permission_error` | A gateway refused a browser `Origin` that is not on its allow list. |
+| 404 | `not_found_error` | The core gateway does not have the route. The engine returns 400 for a route it does not have. |
+| 409 | `client_cancelled` | The client cancelled the request. |
+| 413 | `request_too_large` | The request body is larger than 8 MiB (gateway limit). |
+| 415 | `invalid_request_error` | The core gateway got a body that is not `application/json`, or that is compressed. The engine returns 400 for such a body. |
+| 421 | `invalid_request_error` | A gateway refused a `Host` header that is not loopback. |
+| 500 | `generation_error` | Generation failed. |
+| 501 | `invalid_request_error` | The core gateway does not serve this route (`/v1/embeddings`). The `code` is `unsupported_endpoint`. |
+| 502 | `server_error` | A gateway could not reach the engine. |
+| 503 | `overloaded` | The engine is loading, or all its connections are busy. Try again. Through a gateway, the reply has `Retry-After`. |
+| 504 | `generation_deadline` | The request reached its time limit. |
+
+## API keys
+
+Keys are off by default, and every listener binds to loopback only.
+
+- **Engine.** `--api-key-file PATH` makes the engine require
+  `Authorization: Bearer KEY` or `X-Api-Key: KEY` on every route except
+  `GET /health`. The file must be a regular file of at most 4096 bytes with
+  no group or other read or write permission (`chmod 600`). It holds one key of at least 16 visible ASCII
+  characters. The engine requires a key file when you start it with
+  `--allow-remote`.
+- **Gateways.** `--token TOKEN`, or the `VADE_GATEWAY_TOKEN` environment
+  variable, makes a gateway require `Authorization: Bearer TOKEN`. The token
+  must have 16 to 1024 visible ASCII characters. The gateway
+  does not forward that header. Use the environment variable, so the token
+  does not show in the process list.
+- **No key set.** Clients can send any key, or none. A gateway then forwards
+  the client's `Authorization` header unchanged, and an engine without a key
+  file ignores it.
+
+The openai Python client always sends `Authorization: Bearer <api_key>`. Set
+`api_key` to the gateway token when the gateway requires one.
+
+## Client notes
+
+The conformance test replays requests from these clients (see [How this page
+is tested](#how-this-page-is-tested)). It marks each request as captured from
+the real client or written from memory.
+
+**openai Python client.** Request bytes were captured from version 3.41.0.
+That version read every reply shape on this page, including streamed tool
+calls with `client.chat.completions.stream`. It turns the 501 embeddings
+error into an `InternalServerError` with the message above.
+
+**Continue and Open WebUI.** Their requests in the fixture are written from
+memory, not captured, and neither client has been run against Vade.
+`vade-harness setup continue` and `vade-harness setup open-webui` print their
+settings; [Other clients through the
+gateway](../harness/docs/passthrough-matrix.md#aider-continue-and-open-webui)
+explains them.
+
+- Continue can send content as text parts, which Vade accepts. Leave tab
+  autocomplete off: the engine ignores the fill-in-the-middle `suffix`, so
+  autocomplete would only continue the text before the cursor.
+- Open WebUI reads the model list, then streams chats. The gateways accept
+  connections from loopback only. On Linux, a container on a bridge network
+  reaches the host through the bridge address, which is not loopback. So on
+  Linux, run Open WebUI with host networking, or outside a container. This Linux note
+  is not tested.
+
+**Cursor.** Not tested. Cursor sends requests for a custom base URL from its
+own servers, so it cannot reach a loopback address.
+
+## Known gaps
+
+- `response_format` is not enforced. There is no constrained decoding mode.
+- `/v1/embeddings` is not served.
+- An unknown `model` returns 400 `unknown model`. OpenAI returns 404
+  `model_not_found`.
+- `GET /v1/models/{id}` is not served.
+- `/v1/completions` takes one string prompt, an array with one string, or one
+  array of token IDs. Multiple string prompts return 400. `suffix`, `echo`
+  and `logprobs` are ignored.
+- `logprobs` is not returned.
+
+## How this page is tested
+
+[`harness/src/gateway_conformance.rs`](../harness/src/gateway_conformance.rs)
+replays the requests in
+[`openai-clients.json`](../harness/tests/fixtures/openai-clients.json)
+through the core gateway and the standalone gateway, to a mock engine. For
+each request, it checks three things:
+
+1. The engine receives the expected bytes.
+2. The client receives the engine's reply byte for byte.
+3. The reply gives the client its text, tool calls, finish reason, usage,
+   model IDs or error.
+
+- Each case is marked `verified`, `from memory` or `from docs`. In this
+  version, 9 cases come from openai-python 3.41.0, 5 from memory (Continue and
+  Open WebUI), and 1 from the curl example on this page.
+- The engine replies in the fixture are written by hand in the engine's wire
+  format. They were not recorded from a live engine. The test runs on the host
+  and does not run the model.
+
+Run it from `harness/`:
+
+```sh
+cargo +1.99.0 test --locked --offline --lib gateway::conformance
+```

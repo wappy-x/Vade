@@ -1,0 +1,7 @@
+HTTP/1.1 400 Bad Request
+Content-Type: application/json
+Content-Length: 134
+Connection: close
+Cache-Control: no-store
+
+{"reason":"GPU fault in /private/models/m","error":{"type":"invalid_request_error","message":"Content-Type must be application/json"}}

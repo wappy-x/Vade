@@ -1,0 +1,11 @@
+[package]
+name = "engine-base"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/wappy-x/vade"
+rust-version = "1.99"
+
+[lints.rust]
+unsafe_code = "forbid"
