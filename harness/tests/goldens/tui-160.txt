@@ -1,0 +1,150 @@
+=== answer + status (160 columns) ===
+The change is ready. Run cargo test to check it.
+
+first token 1.5s · 23 tok/s · ctx 4.4k/32k · cached 4k/4.2k
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+qwen3-8b · harness · ask · 4.4k/32k ctx · session-1791581595875-6512-0
+› Enter sends · Shift+Enter or Ctrl+J newline · / commands
+=== slash menu (160 columns) ===
+Vade
+
+How can I help?
+
+
+
+
+
+
+
+
+
+
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│  /help              Show commands and keyboard shortcuts.                                                                                                   │
+│› /status            Show session details.                                                                                                                   │
+│  /model             Show the active model.                                                                                                                  │
+│  /new               Start a fresh session.                                                                                                                  │
+│  /context           Show context use.                                                                                                                       │
+│  /compact           Compact older messages.                                                                                                                 │
+│  /resume            Resume a saved session.                                                                                                                 │
+│  /retry             Regenerate the last answer.                                                                                                             │
+└ ↑↓ · Enter run · Tab complete · Esc close  2/9 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+› /
+=== slash menu scrolled (160 columns) ===
+Vade
+
+How can I help?
+
+
+
+
+
+
+
+
+
+
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│  /status            Show session details.                                                                                                                   │
+│  /model             Show the active model.                                                                                                                  │
+│  /new               Start a fresh session.                                                                                                                  │
+│  /context           Show context use.                                                                                                                       │
+│  /compact           Compact older messages.                                                                                                                 │
+│  /resume            Resume a saved session.                                                                                                                 │
+│  /retry             Regenerate the last answer.                                                                                                             │
+│› /quit              Exit the chat.                                                                                                                          │
+└ ↑↓ · Enter run · Tab complete · Esc close  9/9 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+› Enter sends · Shift+Enter or Ctrl+J newline · / commands
+=== markdown (160 columns) ===
+A cleaner terminal
+
+Readable answers with src/main.rs.
+• Short status
+• Clear commands
+1. Read the file
+2. Run the tests
+
+```rust
+fn main() {
+    println!("hello");
+}
+```
+
+first token 1.5s · 23 tok/s · ctx 4.4k/32k · cached 4k/4.2k
+
+
+
+
+
+
+
+
+› Enter sends · Shift+Enter or Ctrl+J newline · / commands
+=== tool approval (160 columns) ===
+Read src/main.rs
+Run: cargo test
+Approval required  y approve · n deny · or /approve /deny
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+› Enter sends · Shift+Enter or Ctrl+J newline · / commands
+=== wrapped input (160 columns) ===
+Vade
+
+How can I help?
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+› Explain the changes to the terminal and keep this draft intact during resize. Include a short summary, the tests you ran, and any remaining issues. 🦀
+  Then show the next step.

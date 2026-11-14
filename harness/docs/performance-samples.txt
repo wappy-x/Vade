@@ -1,0 +1,69 @@
+Local mock measurements, 2026-10-08
+Host: Apple M4 Pro, 14 logical CPUs, 68,719,476,736 bytes RAM; macOS 27.0.1 (26A434), ARM64.
+Toolchain: rustc 1.98.1 (48a229cea 2026-09-01), cargo 1.98.1; release profile, no dependencies.
+Baseline executable built from 9da57c0 before source edits, saved under target/perf-baseline.
+Final source: this performance round; exact committed revision is in the coordinator report.
+Each streaming configuration has n=3; each stream contains 100,000 synthetic x tokens.
+Direct: 100,000 SSE events. Native: 12,500 SSE events, eight synthetic tokens/event.
+Fixture CPU is excluded. All endpoints are freshly bound local mocks.
+Latency is mock first socket write -> first rendered byte at pipe/PTY, not physical screen paint.
+Wall time ends at last synthetic token. Resident sizes and peak RSS are bytes.
+Baseline stream_cpu fields are omitted: that run preceded Mach-timebase calibration.
+Baseline process_cpu fields are valid wait4 seconds including startup/teardown.
+Final stream_cpu seconds use mach_timebase_info (125/3 ns/tick), checked against wait4.
+CPU percent uses 100% per core; process_cpu includes startup/teardown, stream_cpu does not.
+Final startup: n=3 consecutive launches of the existing release binary. Demo ready prompt only.
+Additional observation: first app launch after rebuild was 76.705 ms (n=1), uncontrolled caches.
+Memory: n=3 sessions, 100 user turns/session; timing_n=1,000 iterations/session.
+Heap counts exclude allocator metadata, fragmentation, OS buffers and stacks.
+
+Commands:
+cargo build --release --offline
+cargo run --release --offline --example perf_mock -- target/perf-baseline 3
+cargo run --release --offline --example perf_mock -- target/release/vade-harness 3
+cargo run --release --offline --example prompt_memory
+
+BASELINE
+startup ready_ms=8.990 peak_rss_bytes=2424832
+startup ready_ms=13.138 peak_rss_bytes=2424832
+startup ready_ms=13.082 peak_rss_bytes=2424832
+stream mode=direct raw_tui=false tokens=100000 tokens_per_event=1 first_byte_to_output_ms=22.561 wall_s=80.368373 resident_start_bytes=2457600 resident_end_bytes=2981888 process_cpu_user_s=0.466470 process_cpu_system_s=0.648758 peak_rss_bytes=2981888
+stream mode=direct raw_tui=false tokens=100000 tokens_per_event=1 first_byte_to_output_ms=27.326 wall_s=80.784015 resident_start_bytes=2457600 resident_end_bytes=3080192 process_cpu_user_s=0.469719 process_cpu_system_s=0.619469 peak_rss_bytes=3112960
+stream mode=direct raw_tui=false tokens=100000 tokens_per_event=1 first_byte_to_output_ms=22.095 wall_s=81.860223 resident_start_bytes=2457600 resident_end_bytes=3096576 process_cpu_user_s=0.451970 process_cpu_system_s=0.556484 peak_rss_bytes=3112960
+stream mode=agent raw_tui=false tokens=100000 tokens_per_event=8 first_byte_to_output_ms=23.604 wall_s=10.233990 resident_start_bytes=2555904 resident_end_bytes=3129344 process_cpu_user_s=0.067891 process_cpu_system_s=0.082172 peak_rss_bytes=3178496
+stream mode=agent raw_tui=false tokens=100000 tokens_per_event=8 first_byte_to_output_ms=20.320 wall_s=10.105036 resident_start_bytes=2555904 resident_end_bytes=3096576 process_cpu_user_s=0.077943 process_cpu_system_s=0.083945 peak_rss_bytes=3129344
+stream mode=agent raw_tui=false tokens=100000 tokens_per_event=8 first_byte_to_output_ms=23.241 wall_s=10.260291 resident_start_bytes=2555904 resident_end_bytes=3129344 process_cpu_user_s=0.072203 process_cpu_system_s=0.086853 peak_rss_bytes=3162112
+stream mode=direct raw_tui=true tokens=100000 tokens_per_event=1 first_byte_to_output_ms=27.871 wall_s=83.253351 resident_start_bytes=2490368 resident_end_bytes=3129344 process_cpu_user_s=0.492672 process_cpu_system_s=1.127541 peak_rss_bytes=3129344
+stream mode=direct raw_tui=true tokens=100000 tokens_per_event=1 first_byte_to_output_ms=29.678 wall_s=83.233605 resident_start_bytes=2506752 resident_end_bytes=3063808 process_cpu_user_s=0.522887 process_cpu_system_s=1.241160 peak_rss_bytes=3080192
+stream mode=direct raw_tui=true tokens=100000 tokens_per_event=1 first_byte_to_output_ms=28.207 wall_s=82.781129 resident_start_bytes=2490368 resident_end_bytes=3063808 process_cpu_user_s=0.493164 process_cpu_system_s=1.156664 peak_rss_bytes=3080192
+stream mode=agent raw_tui=true tokens=100000 tokens_per_event=8 first_byte_to_output_ms=10.651 wall_s=10.329336 resident_start_bytes=2588672 resident_end_bytes=3112960 process_cpu_user_s=0.069967 process_cpu_system_s=0.154549 peak_rss_bytes=3129344
+stream mode=agent raw_tui=true tokens=100000 tokens_per_event=8 first_byte_to_output_ms=23.719 wall_s=10.361180 resident_start_bytes=2588672 resident_end_bytes=3162112 process_cpu_user_s=0.060356 process_cpu_system_s=0.118743 peak_rss_bytes=3178496
+stream mode=agent raw_tui=true tokens=100000 tokens_per_event=8 first_byte_to_output_ms=29.611 wall_s=10.537828 resident_start_bytes=2588672 resident_end_bytes=3096576 process_cpu_user_s=0.076128 process_cpu_system_s=0.171387 peak_rss_bytes=3112960
+
+FINAL
+cpu_clock_ns_per_tick=41.666666667
+startup ready_ms=2.791 peak_rss_bytes=2392064
+startup ready_ms=11.969 peak_rss_bytes=2392064
+startup ready_ms=12.772 peak_rss_bytes=2375680
+stream mode=direct raw_tui=false tokens=100000 tokens_per_event=1 first_byte_to_output_ms=0.332 wall_s=0.121610 stream_cpu_user_s=0.151967 stream_cpu_system_s=0.054389 stream_cpu_percent=169.69 resident_start_bytes=2506752 resident_end_bytes=3194880 process_cpu_user_s=0.156893 process_cpu_system_s=0.062099 peak_rss_bytes=3276800
+stream mode=direct raw_tui=false tokens=100000 tokens_per_event=1 first_byte_to_output_ms=0.097 wall_s=0.090138 stream_cpu_user_s=0.117418 stream_cpu_system_s=0.038823 stream_cpu_percent=173.34 resident_start_bytes=2506752 resident_end_bytes=2998272 process_cpu_user_s=0.118356 process_cpu_system_s=0.039705 peak_rss_bytes=3031040
+stream mode=direct raw_tui=false tokens=100000 tokens_per_event=1 first_byte_to_output_ms=0.103 wall_s=0.090922 stream_cpu_user_s=0.118332 stream_cpu_system_s=0.039234 stream_cpu_percent=173.30 resident_start_bytes=2506752 resident_end_bytes=3031040 process_cpu_user_s=0.119280 process_cpu_system_s=0.040368 peak_rss_bytes=3031040
+stream mode=agent raw_tui=false tokens=100000 tokens_per_event=8 first_byte_to_output_ms=0.056 wall_s=0.012416 stream_cpu_user_s=0.016555 stream_cpu_system_s=0.005028 stream_cpu_percent=173.83 resident_start_bytes=2588672 resident_end_bytes=3063808 process_cpu_user_s=0.017806 process_cpu_system_s=0.005863 peak_rss_bytes=3194880
+stream mode=agent raw_tui=false tokens=100000 tokens_per_event=8 first_byte_to_output_ms=0.106 wall_s=0.012582 stream_cpu_user_s=0.016540 stream_cpu_system_s=0.005170 stream_cpu_percent=172.55 resident_start_bytes=2588672 resident_end_bytes=3063808 process_cpu_user_s=0.017853 process_cpu_system_s=0.005962 peak_rss_bytes=3194880
+stream mode=agent raw_tui=false tokens=100000 tokens_per_event=8 first_byte_to_output_ms=0.059 wall_s=0.013022 stream_cpu_user_s=0.017162 stream_cpu_system_s=0.005415 stream_cpu_percent=173.37 resident_start_bytes=2588672 resident_end_bytes=3047424 process_cpu_user_s=0.018444 process_cpu_system_s=0.006237 peak_rss_bytes=3178496
+stream mode=direct raw_tui=true tokens=100000 tokens_per_event=1 first_byte_to_output_ms=0.078 wall_s=0.075459 stream_cpu_user_s=0.096820 stream_cpu_system_s=0.052210 stream_cpu_percent=197.50 resident_start_bytes=2506752 resident_end_bytes=2965504 process_cpu_user_s=0.097695 process_cpu_system_s=0.053062 peak_rss_bytes=2998272
+stream mode=direct raw_tui=true tokens=100000 tokens_per_event=1 first_byte_to_output_ms=0.098 wall_s=0.078024 stream_cpu_user_s=0.098634 stream_cpu_system_s=0.053890 stream_cpu_percent=195.48 resident_start_bytes=2506752 resident_end_bytes=2998272 process_cpu_user_s=0.099590 process_cpu_system_s=0.054890 peak_rss_bytes=3014656
+stream mode=direct raw_tui=true tokens=100000 tokens_per_event=1 first_byte_to_output_ms=0.093 wall_s=0.075079 stream_cpu_user_s=0.096193 stream_cpu_system_s=0.052044 stream_cpu_percent=197.44 resident_start_bytes=2473984 resident_end_bytes=2949120 process_cpu_user_s=0.097135 process_cpu_system_s=0.052962 peak_rss_bytes=2981888
+stream mode=agent raw_tui=true tokens=100000 tokens_per_event=8 first_byte_to_output_ms=0.091 wall_s=0.010939 stream_cpu_user_s=0.014311 stream_cpu_system_s=0.006980 stream_cpu_percent=194.64 resident_start_bytes=2588672 resident_end_bytes=3080192 process_cpu_user_s=0.015786 process_cpu_system_s=0.008008 peak_rss_bytes=3227648
+stream mode=agent raw_tui=true tokens=100000 tokens_per_event=8 first_byte_to_output_ms=0.092 wall_s=0.011299 stream_cpu_user_s=0.014865 stream_cpu_system_s=0.007119 stream_cpu_percent=194.57 resident_start_bytes=2588672 resident_end_bytes=3129344 process_cpu_user_s=0.016292 process_cpu_system_s=0.008065 peak_rss_bytes=3276800
+stream mode=agent raw_tui=true tokens=100000 tokens_per_event=8 first_byte_to_output_ms=0.096 wall_s=0.010783 stream_cpu_user_s=0.014318 stream_cpu_system_s=0.006635 stream_cpu_percent=194.31 resident_start_bytes=2588672 resident_end_bytes=3112960 process_cpu_user_s=0.015744 process_cpu_system_s=0.007570 peak_rss_bytes=3260416
+
+EARLIER STARTUP SERIES (FIRST LAUNCH AFTER REBUILD + TWO REPEATS)
+startup ready_ms=76.705 peak_rss_bytes=2392064
+startup ready_ms=14.984 peak_rss_bytes=2408448
+startup ready_ms=13.518 peak_rss_bytes=2408448
+
+RETAINED SESSION HEAP / REQUEST PREPARATION
+session turns=100 tool_results=100 tool_result_bytes_each=1024 user_bytes_each=256 empty_live_heap_bytes=2106 populated_live_heap_bytes=685662 serialized_history_bytes=152160 prefix_capacity_bytes=215808 prepare_us=5.976 cached_record_serialize_us=6.729 reserialize_owned_us=319.102 timing_n=1000
+session turns=100 tool_results=100 tool_result_bytes_each=1024 user_bytes_each=256 empty_live_heap_bytes=2106 populated_live_heap_bytes=685662 serialized_history_bytes=152160 prefix_capacity_bytes=215808 prepare_us=4.643 cached_record_serialize_us=5.681 reserialize_owned_us=318.712 timing_n=1000
+session turns=100 tool_results=100 tool_result_bytes_each=1024 user_bytes_each=256 empty_live_heap_bytes=2106 populated_live_heap_bytes=685662 serialized_history_bytes=152160 prefix_capacity_bytes=215808 prepare_us=4.642 cached_record_serialize_us=5.757 reserialize_owned_us=318.183 timing_n=1000

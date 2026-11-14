@@ -1,0 +1,14 @@
+# A near miss for the dry run: the first run saves the code name to a file at
+# once, so the resumed run would not need its history. The check after step 1
+# (`unchanged .`) must fail.
+>>> call workspace_read
+{"path":"notes/release.txt"}
+>>> patch
+*** Begin Patch
+*** Add File: RELEASE.txt
++TERRACOTTA-41
+*** End Patch
+>>> answer
+OK
+>>> answer
+RELEASE.txt already holds the code name.

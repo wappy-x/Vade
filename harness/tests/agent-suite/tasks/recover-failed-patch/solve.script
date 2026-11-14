@@ -1,0 +1,21 @@
+# A correct transcript for the dry run: the first patch follows the prompt
+# and does not apply; the agent reads the file and patches the real arm.
+>>> patch
+*** Begin Patch
+*** Update File: src/lib.rs
+@@
+-        "warn" => Level::Info,
++        "warn" | "warning" => Some(Level::Warn),
+*** End Patch
+>>> call workspace_read
+{"path":"src/lib.rs"}
+>>> patch
+*** Begin Patch
+*** Update File: src/lib.rs
+@@
+-        "info" | "warn" | "warning" => Some(Level::Info),
++        "info" => Some(Level::Info),
++        "warn" | "warning" => Some(Level::Warn),
+*** End Patch
+>>> answer
+The prompt's arm was not in the file; the real arm was `"info" | "warn" | "warning"`. "warn" and "warning" now map to `Level::Warn`.

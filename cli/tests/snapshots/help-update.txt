@@ -1,0 +1,21 @@
+$ vade update --help
+Refresh the installed engine and chat.
+
+Examples:
+  vade update
+  vade update --dry-run
+
+Usage: vade update [--dry-run]
+
+Options:
+  --dry-run  Show what would happen; change nothing
+
+Notes:
+  - Locally, restage the current bundle or rebuild the current source, then
+    report how to restart.
+  - With VADE_CONFIG, update source, rebuild and stage binaries, then offer a
+    restart.
+  - For a newer Vade on this Spark, run the install command again: curl -fsSL
+    https://vade.lol/install.sh | sh
+--- stderr
+--- exit 0

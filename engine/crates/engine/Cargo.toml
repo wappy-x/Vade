@@ -1,0 +1,20 @@
+[package]
+name = "spark-engine"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+repository = "https://github.com/wappy-x/vade"
+rust-version = "1.99"
+
+[features]
+default = ["flash-routing-per-row"]
+# Bind the gate to the per-row survivor API; an API rename fails compilation.
+# --no-default-features disables the gate capability, not runtime isolation.
+flash-routing-per-row = []
+
+[dependencies]
+engine-fabric = { path = "../fabric" }
+engine-model = { path = "../model" }
+engine-tokenizer = { path = "../tokenizer" }
+spark-gpu-probe = { path = "../gpu" }

@@ -1,0 +1,18 @@
+id: pdf-table
+title: Read a PDF and extract its table as CSV
+category: document-reading
+inputs: invoice.pdf
+budget_seconds: 600
+needs: PDF text in workspace_read (own-pdf); the raw PDF source also works
+
+step: new
+prompt:
+  invoice.pdf is an invoice with a table of line items. Write items.csv with
+  the header line `item,quantity,unit_price,total`, then one line for each
+  line item, in the order of the table. Copy every value exactly as the
+  invoice prints it, with two decimal places for prices. Do not add the
+  subtotal or any other line.
+
+check: last-exit-zero
+check: file-equals items.csv expected/items.csv
+check: unchanged invoice.pdf

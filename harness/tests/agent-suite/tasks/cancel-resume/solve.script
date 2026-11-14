@@ -1,0 +1,34 @@
+# A correct transcript for the dry run. The runner holds model call 3 of the
+# first run and sends /cancel; that call takes no reply from this script. The
+# resumed run gets the replies after the second one.
+>>> call workspace_read
+{"path":"notes/a.txt"}
+>>> patch
+*** Begin Patch
+*** Add File: out/a.upper.txt
++HARBOR
++LANTERN
++QUIET TIDE
+*** End Patch
+>>> call workspace_list
+{"path":"out"}
+>>> call workspace_read
+{"path":"notes/b.txt"}
+>>> patch
+*** Begin Patch
+*** Add File: out/b.upper.txt
++COPPER
++NORTH WIND
+*** End Patch
+>>> call workspace_read
+{"path":"notes/c.txt"}
+>>> patch
+*** Begin Patch
+*** Add File: out/c.upper.txt
++GRANITE
++SALT
++LOW BRIDGE
++HERON
+*** End Patch
+>>> answer
+out/a.upper.txt, out/b.upper.txt and out/c.upper.txt are written.

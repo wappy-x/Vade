@@ -1,0 +1,5 @@
+$ vade chat explain main.rs
+--- stderr
+error: vade chat takes no prompt on the command line ("explain main.rs").
+ hint: Run vade chat, then type the message and press Enter.
+--- exit 1

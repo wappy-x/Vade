@@ -1,0 +1,14 @@
+[Unit]
+Description=Vade inference server
+
+[Service]
+Type=simple
+ExecStart=%h/vade/target/release/spark-serve %h/models/Qwen/Qwen3-8B
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

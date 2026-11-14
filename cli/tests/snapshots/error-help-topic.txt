@@ -1,0 +1,5 @@
+$ vade help nonsense
+--- stderr
+error: No help topic is named "nonsense".
+ hint: Run vade --help to see the commands.
+--- exit 1

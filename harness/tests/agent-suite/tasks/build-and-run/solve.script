@@ -1,0 +1,17 @@
+# A correct transcript for the dry run: build, read the error, fix the type,
+# run the tool into SUMMARY.txt.
+>>> call workspace_shell
+{"argv":["cargo","build","--offline"],"timeout_ms":120000}
+>>> call workspace_read
+{"path":"src/main.rs"}
+>>> patch
+*** Begin Patch
+*** Update File: src/main.rs
+@@
+-    let total: u32 = rows.iter().map(|r| r.amount).sum();
++    let total: u64 = rows.iter().map(|r| r.amount).sum();
+*** End Patch
+>>> call workspace_shell
+{"argv":["/bin/sh","-c","cargo run --offline -q -- data/sales.csv > SUMMARY.txt"],"timeout_ms":120000}
+>>> answer
+The total now sums as u64, so the tool builds. SUMMARY.txt holds its output for data/sales.csv.

@@ -1,0 +1,15 @@
+# A near miss for the dry run: the prices lose their second decimal place.
+# `file-equals items.csv` must fail.
+>>> call workspace_read
+{"path":"invoice.pdf"}
+>>> patch
+*** Begin Patch
+*** Add File: items.csv
++item,quantity,unit_price,total
++Copper wire,12,3.5,42
++Brass hinge,4,7.25,29
++Steel bracket,30,1.1,33
++Rubber gasket,150,0.08,12
+*** End Patch
+>>> answer
+items.csv holds the four line items.

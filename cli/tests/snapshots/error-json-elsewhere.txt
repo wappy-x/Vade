@@ -1,0 +1,5 @@
+$ vade down --json
+--- stderr
+error: Unexpected argument "--json" for vade down. This command takes no options except --dry-run.
+ hint: Run vade down --help.
+--- exit 1

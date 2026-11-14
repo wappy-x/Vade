@@ -1,0 +1,12 @@
+null
+{}
+{"role":1}
+{"role":""}
+{"role":"user","tool_call_id":"a"}
+{"role":"tool","content":"result"}
+{"role":"tool","tool_call_id":""}
+{"role":"tool","tool_call_id":"bad\u0000id"}
+{"role":"assistant","function_call":{"name":"legacy"}}
+{"role":"assistant","tool_calls":{}}
+{"role":"user","tool_calls":[{"id":"a","type":"function","function":{"name":"read","arguments":"{}"}}]}
+{"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"read","arguments":{}}}]}

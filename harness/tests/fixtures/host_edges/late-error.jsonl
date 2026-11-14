@@ -1,0 +1,4 @@
+{"choices":[{"delta":{"content":"preview"},"finish_reason":"stop"}]}
+{"choices":[],"usage":{"completion_tokens":1}}
+{"error":{"message":"PRIVATE_FIXTURE_DETAIL","code":"generation_deadline"}}
+[DONE]

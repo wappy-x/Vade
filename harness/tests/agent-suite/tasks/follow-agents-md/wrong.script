@@ -1,0 +1,27 @@
+# A near miss for the dry run: correct code, but no license line and the
+# changelog line below the older one. The rule checks must fail.
+>>> patch
+*** Begin Patch
+*** Add File: src/order.rs
++//! Order statistics over integer samples.
++
++/// The median of the values: the lower middle value for an even count.
++pub fn median(values: &[i64]) -> Option<i64> {
++    if values.is_empty() {
++        return None;
++    }
++    let mut sorted = values.to_vec();
++    sorted.sort_unstable();
++    Some(sorted[(sorted.len() - 1) / 2])
++}
+*** Update File: src/lib.rs
+@@
+ pub mod stats;
++pub mod order;
+*** Update File: CHANGELOG.md
+@@
+ - added: stats::mean
++- added: order::median
+*** End Patch
+>>> answer
+Done.

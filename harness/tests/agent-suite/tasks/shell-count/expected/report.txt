@@ -1,0 +1,5 @@
+logs/api/2026-10-01.log.txt 2
+logs/api/2026-10-02.log.txt 3
+logs/worker/2026-10-01.log.txt 0
+logs/worker/old/2026-09-30.log.txt 3
+total 8

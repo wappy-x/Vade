@@ -1,0 +1,16 @@
+# A near miss for the dry run: the agent writes the summary by hand without
+# fixing the build, and gets the last line's form wrong. `file-equals
+# SUMMARY.txt` and `run cargo build` must fail.
+>>> call workspace_read
+{"path":"data/sales.csv"}
+>>> patch
+*** Begin Patch
+*** Add File: SUMMARY.txt
++east 2000
++north 17350
++south 10100
++west 4400
++total 33850
+*** End Patch
+>>> answer
+SUMMARY.txt holds the totals.

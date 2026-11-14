@@ -1,0 +1,150 @@
+=== answer + status (160 columns) ===
+The change is [1mready[0m. Run [36mcargo test[0m to check it.
+
+[2mfirst token 1.5s · 23 tok/s · ctx 4.4k/32k · cached 4k/4.2k[0m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[2mqwen3-8b · harness · ask · 4.4k/32k ctx · session-1791581595875-6512-0[0m
+[1;36m› [0m[2mEnter sends · Shift+Enter or Ctrl+J newline · / commands[0m
+=== slash menu (160 columns) ===
+Vade
+
+How can I help?
+
+
+
+
+
+
+
+
+
+
+[2m┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐[0m[0m
+│[1;36m  /help[0m              Show commands and keyboard shortcuts.                                                                                                   │[0m
+│[7m› /status            Show session details.                                                                                                                   [0m│[0m
+│[1;36m  /model[0m             Show the active model.                                                                                                                  │[0m
+│[1;36m  /new[0m               Start a fresh session.                                                                                                                  │[0m
+│[1;36m  /context[0m           Show context use.                                                                                                                       │[0m
+│[1;36m  /compact[0m           Compact older messages.                                                                                                                 │[0m
+│[1;36m  /resume[0m            Resume a saved session.                                                                                                                 │[0m
+│[1;36m  /retry[0m             Regenerate the last answer.                                                                                                             │[0m
+[2m└ ↑↓ · Enter run · Tab complete · Esc close  2/9 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m[0m
+[1;36m› [0m/
+=== slash menu scrolled (160 columns) ===
+Vade
+
+How can I help?
+
+
+
+
+
+
+
+
+
+
+[2m┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐[0m[0m
+│[1;36m  /status[0m            Show session details.                                                                                                                   │[0m
+│[1;36m  /model[0m             Show the active model.                                                                                                                  │[0m
+│[1;36m  /new[0m               Start a fresh session.                                                                                                                  │[0m
+│[1;36m  /context[0m           Show context use.                                                                                                                       │[0m
+│[1;36m  /compact[0m           Compact older messages.                                                                                                                 │[0m
+│[1;36m  /resume[0m            Resume a saved session.                                                                                                                 │[0m
+│[1;36m  /retry[0m             Regenerate the last answer.                                                                                                             │[0m
+│[7m› /quit              Exit the chat.                                                                                                                          [0m│[0m
+[2m└ ↑↓ · Enter run · Tab complete · Esc close  9/9 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────┘[0m[0m
+[1;36m› [0m[2mEnter sends · Shift+Enter or Ctrl+J newline · / commands[0m
+=== markdown (160 columns) ===
+[1;4mA cleaner terminal[0m
+
+[1mReadable answers[0m with [36msrc/main.rs[0m.
+• Short status
+• Clear commands
+1. Read the file
+2. Run the tests
+
+[2m```rust[0m
+[2mfn main() {[0m
+[2m    println!("hello");[0m
+[2m}[0m
+[2m```[0m
+
+[2mfirst token 1.5s · 23 tok/s · ctx 4.4k/32k · cached 4k/4.2k[0m
+
+
+
+
+
+
+
+
+[1;36m› [0m[2mEnter sends · Shift+Enter or Ctrl+J newline · / commands[0m
+=== tool approval (160 columns) ===
+Read src/main.rs
+Run: cargo test
+[7mApproval required[0m  [1;32my[0m approve · [1;31mn[0m deny · or /approve /deny
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[1;36m› [0m[2mEnter sends · Shift+Enter or Ctrl+J newline · / commands[0m
+=== wrapped input (160 columns) ===
+Vade
+
+How can I help?
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[1;36m› [0mExplain the changes to the terminal and keep this draft intact during resize. Include a short summary, the tests you ran, and any remaining issues. 🦀
+[1;36m  [0mThen show the next step.

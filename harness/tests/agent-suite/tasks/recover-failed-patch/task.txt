@@ -1,0 +1,20 @@
+id: recover-failed-patch
+title: Recover when a patch does not match the file
+category: tool-error-recovery
+inputs: Cargo.toml src/lib.rs tests/levels.rs
+budget_seconds: 300
+
+# The prompt quotes the bug as one match arm, but the file has a two-name arm.
+# A patch written from the prompt alone does not apply; the agent must read
+# the file and patch what is there.
+step: new
+prompt:
+  In src/lib.rs, `parse_level` maps "warn" to `Level::Info` with the arm
+  `"warn" => Level::Info,`. It must map "warn" and "warning" to
+  `Level::Warn`. Do not change any file under tests/. Finish when
+  `cargo test --offline` passes.
+
+check: last-exit-zero
+check: unchanged Cargo.toml
+check: unchanged tests
+check: run cargo test --offline --quiet

@@ -1,0 +1,26 @@
+# A near miss for the dry run: the agent adds the module but keeps the old
+# functions in src/lib.rs. Everything builds, but `absent src/lib.rs` must fail.
+>>> patch
+*** Begin Patch
+*** Add File: src/temperature.rs
++//! Temperature conversions.
++
++pub fn celsius_to_fahrenheit(c: f64) -> f64 {
++    c * 9.0 / 5.0 + 32.0
++}
++
++pub fn fahrenheit_to_celsius(f: f64) -> f64 {
++    (f - 32.0) * 5.0 / 9.0
++}
++
++pub fn celsius_to_kelvin(c: f64) -> f64 {
++    c + 273.15
++}
+*** Update File: src/lib.rs
+@@
+ //! Unit conversions for the weather station.
++
++pub mod temperature;
+*** End Patch
+>>> answer
+The temperature functions are in src/temperature.rs.

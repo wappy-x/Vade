@@ -1,0 +1,4 @@
+<!-- vade read: note.toml | TOML | pages 1 | chars 26 | skipped: none -->
+```toml
+key = "value"
+```
